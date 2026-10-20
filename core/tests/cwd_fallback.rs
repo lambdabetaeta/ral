@@ -1,7 +1,8 @@
 #![allow(clippy::disallowed_methods)]
 
-//! Regression: an unseeded [`Shell::cwd`] reads the process cwd, and a
-//! failed `getcwd(3)` answers `"."`, which fails closed downstream.
+//! A shell is constructed at a working directory, and the process cwd is one
+//! only while the OS can name it: a removed directory gives none, so a front
+//! end fails to boot rather than read relative paths against nothing.
 
 use ral_core::sync::LockExt as _;
 use std::sync::Mutex;
@@ -9,7 +10,7 @@ use std::sync::Mutex;
 static CWD_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
-fn unseeded_shell_falls_back_to_the_process_cwd() {
+fn a_shell_rooted_at_the_process_cwd_stands_there() {
     let _guard = CWD_LOCK.lock_ignore_poison();
     let shell = ral_core::test_helper::core_shell();
     assert_eq!(shell.cwd(), std::env::current_dir().unwrap());
@@ -17,16 +18,15 @@ fn unseeded_shell_falls_back_to_the_process_cwd() {
 
 #[cfg(unix)]
 #[test]
-fn deleted_process_cwd_falls_back_to_dot() {
+fn a_removed_process_cwd_is_no_working_directory() {
     let _guard = CWD_LOCK.lock_ignore_poison();
     let orig = std::env::current_dir().unwrap();
     let dir = tempfile::tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
     drop(dir);
 
-    let shell = ral_core::test_helper::core_shell();
-    let cwd = shell.cwd();
+    let cwd = ral_core::host::cwd();
 
     std::env::set_current_dir(&orig).unwrap();
-    assert_eq!(cwd, std::path::PathBuf::from("."));
+    assert_eq!(cwd, None);
 }

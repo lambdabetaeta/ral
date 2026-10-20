@@ -155,6 +155,7 @@ mod tests {
             ral_core::terminal::TerminalState::default(),
             &crate::PRELUDE,
             &ral_core::HostSurface::default(),
+            ral_core::test_helper::process_cwd(),
         )
     }
 

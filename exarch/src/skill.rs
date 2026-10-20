@@ -60,15 +60,15 @@ pub fn discover_all(cwd: &Path, config_dir: &Path) -> Vec<(String, PathBuf)> {
     reason = "[silent:skill-metadata] reads SKILL.md frontmatter at prompt assembly to build the Skills section; pre-run, gated by GrantStack::admits_fs"
 )]
 pub fn discover_metadata(
-    cwd: &Path,
+    cwd: &ral_core::path::CwdPath,
     config_dir: &Path,
     grants: &ral_core::capability::GrantStack,
 ) -> Vec<Skill> {
-    // Shell-less: every candidate is `cwd`/`config_dir`
-    // joined absolute, so the resolver's home and cwd are never consulted.
-    let resolver = ral_core::path::Resolver::shell_less();
+    // No shell: every candidate is `cwd`/`config_dir` joined, and so the
+    // resolver's home is never consulted.
+    let resolver = ral_core::path::Resolver::at(None, cwd);
     let mut skills = Vec::new();
-    for (name, dir) in discover_all(cwd, config_dir) {
+    for (name, dir) in discover_all(cwd.as_path(), config_dir) {
         let sk_md = dir.join("SKILL.md");
         let rp = resolver.anchor(&sk_md);
         if !grants.admits_fs(&ral_core::capability::FsOp::Read, &rp) {

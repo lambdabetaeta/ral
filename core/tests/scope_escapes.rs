@@ -68,6 +68,7 @@ fn handler_self_mask_survives_panic_mid_body() {
             statics: vec![PANIC_BUILTIN],
             ..HostSurface::default()
         },
+        ral_core::test_helper::process_cwd(),
     );
     let _ = top_level(&mut shell, "alias boom { |args| __test-panic }")
         .expect("installing the alias must succeed");
@@ -105,6 +106,7 @@ fn test_shell() -> Shell {
         TerminalState::default(),
         common::prelude(),
         &HostSurface::default(),
+        ral_core::test_helper::process_cwd(),
     )
 }
 

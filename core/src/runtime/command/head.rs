@@ -196,9 +196,7 @@ mod tests {
             exec: Some(exec),
             ..Capabilities::root()
         });
-        let mut ctx = Context::default();
-        ctx.grants = grants;
-        ctx
+        Context::under_grants(grants)
     }
 
     fn path_head(file: &Path) -> CommandName {
@@ -223,7 +221,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let name = plant(tmp.path(), "configure");
         let mut shell = crate::test_helper::core_shell();
-        shell.seed_cwd(tmp.path().to_path_buf());
+        shell.seed_cwd(
+            crate::path::CwdPath::new(tmp.path().to_path_buf())
+                .expect("a tempdir is a working directory"),
+        );
 
         let head = Head::resolve(&CommandName::Path(format!("./{name}")), &shell.context);
         let (path, real) = file_of(&head);
@@ -244,7 +245,10 @@ mod tests {
         plant(&real, "tool");
         std::os::unix::fs::symlink(real.join("sub"), tmp.path().join("link")).unwrap();
         let mut shell = crate::test_helper::core_shell();
-        shell.seed_cwd(tmp.path().to_path_buf());
+        shell.seed_cwd(
+            crate::path::CwdPath::new(tmp.path().to_path_buf())
+                .expect("a tempdir is a working directory"),
+        );
 
         let head = Head::resolve(&CommandName::Path("link/../tool".into()), &shell.context);
         let (path, judged) = file_of(&head);
@@ -311,7 +315,10 @@ mod tests {
         let name = plant(here.path(), "zzcwdfile");
 
         let mut shell = crate::test_helper::core_shell();
-        shell.seed_cwd(here.path().to_path_buf());
+        shell.seed_cwd(
+            crate::path::CwdPath::new(here.path().to_path_buf())
+                .expect("a tempdir is a working directory"),
+        );
         shell
             .context
             .set_env_var("PATH", elsewhere.path().to_string_lossy().into_owned());
@@ -537,7 +544,10 @@ mod tests {
         let name = plant(&bin, "zzwalk");
 
         let mut shell = crate::test_helper::core_shell();
-        shell.seed_cwd(tmp.path().to_path_buf());
+        shell.seed_cwd(
+            crate::path::CwdPath::new(tmp.path().to_path_buf())
+                .expect("a tempdir is a working directory"),
+        );
         shell.context.set_env_var("PATH", "./bin");
 
         let head = Head::resolve(&CommandName::Bare(name.as_str().into()), &shell.context);

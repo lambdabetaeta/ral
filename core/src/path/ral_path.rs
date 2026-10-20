@@ -21,16 +21,18 @@ pub fn entries(env_overrides: &EnvVars) -> Vec<PathBuf> {
 
 /// First `$dir/$name` that is a regular file, canonicalised, scanning
 /// [`entries`] in order; `None` when nothing matches, an unset `RAL_PATH`
-/// included.
+/// included, or when a relative entry has no process cwd to be read against.
 ///
 /// A directory of that name is not a module, so it does not end the walk —
 /// otherwise it would shadow a real file further down the list.
 pub(crate) fn find_file(name: &str, env_overrides: &EnvVars) -> Option<PathBuf> {
+    let cwd = crate::host::cwd()?;
+    let resolver = Resolver::at(None, &cwd);
     entries(env_overrides)
         .into_iter()
         .map(|dir| dir.join(name))
         .find_map(|cand| {
-            Resolver::shell_less()
+            resolver
                 .anchor(&cand)
                 .canonicalise_strict()
                 .ok()

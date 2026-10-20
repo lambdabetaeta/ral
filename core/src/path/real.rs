@@ -73,7 +73,7 @@ impl RealPath {
 
     /// The entry `name` of this directory: real by construction, since a
     /// directory entry of a real directory opened without following is.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows, test))]
     pub(crate) fn entry(&self, name: &std::ffi::OsStr) -> Self {
         Self(self.0.join(name))
     }

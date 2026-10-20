@@ -594,7 +594,7 @@ mod tests {
     fn installed_library_docs_surface_in_help_and_explain() {
         let mut runtime = crate::test_helper::core_runtime();
         runtime.install_library_docs(vec![("frob".to_string(), "frob the widget".to_string())]);
-        let mut shell = crate::Shell::root(runtime.into());
+        let mut shell = crate::Shell::root(runtime.into(), crate::test_helper::process_cwd());
 
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
@@ -623,7 +623,7 @@ mod tests {
             "frob".to_string(),
             "frob the widget.\n\nHandle with care: it is load-bearing.".to_string(),
         )]);
-        let mut shell = crate::Shell::root(runtime.into());
+        let mut shell = crate::Shell::root(runtime.into(), crate::test_helper::process_cwd());
 
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);

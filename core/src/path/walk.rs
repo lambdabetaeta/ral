@@ -836,11 +836,9 @@ mod tests {
     }
 
     fn located_with(dir: &Path, rel: &str, leaf: Leaf) -> io::Result<Located> {
-        let resolver = Resolver {
-            home: None,
-            cwd: Some(dir),
-        };
-        walk(&resolver.resolve(rel), leaf)
+        let dir =
+            crate::path::CwdPath::new(dir.to_path_buf()).expect("a tempdir is a working directory");
+        walk(&Resolver::at(None, &dir).resolve(rel), leaf)
     }
 
     /// The two leaf modes are the whole difference: `Resolve` walks through a
@@ -1005,7 +1003,8 @@ mod windows_tests {
         let dir = tmp.path().join("StoredCase");
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(dir.join("File"), "x").unwrap();
-        let resolver = Resolver::shell_less();
+        let cwd = crate::test_helper::process_cwd();
+        let resolver = Resolver::at(None, &cwd);
         for (spelled, stored) in [("file", "File"), ("new", "new")] {
             let path = tmp.path().join("storedcase").join(spelled);
             let located = walk(&resolver.anchor(&path), Leaf::Resolve).unwrap();
@@ -1060,11 +1059,8 @@ mod windows_tests {
             eprintln!("skip: this volume keeps no 8.3 names, so there is no alias to walk");
             return;
         };
-        let resolver = Resolver {
-            home: None,
-            cwd: None,
-        };
-        let located = walk(&resolver.anchor(&short), Leaf::Resolve).unwrap();
+        let cwd = crate::test_helper::process_cwd();
+        let located = walk(&Resolver::at(None, &cwd).anchor(&short), Leaf::Resolve).unwrap();
         assert_eq!(
             located.real().file_name(),
             long.file_name(),

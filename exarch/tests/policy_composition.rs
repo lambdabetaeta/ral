@@ -58,7 +58,8 @@ fn on_path(name: &str) -> String {
     let hit = locate(name, Some(&path), SearchCwd::nowhere()).unwrap_or_else(|| {
         panic!("no executable '{name}' on this host's PATH, so the fixture has no real path for it:\n{path}")
     });
-    let object = Resolver::shell_less().anchor(&hit).canonicalise_strict();
+    let cwd = ral_core::test_helper::process_cwd();
+    let object = Resolver::at(None, &cwd).anchor(&hit).canonicalise_strict();
     ral_core::path::shown(object.expect("a PATH hit exists"))
 }
 

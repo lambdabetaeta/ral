@@ -69,8 +69,10 @@ pub fn load_declared(path: &std::path::Path, label: &str) -> Result<Vec<Service>
     };
     let source = ral_core::source::normalize_source_text(source);
     let origin = SourceOrigin::File(SourceFile::new(path).map_err(|e| format!("{label} {e}"))?);
+    let cwd = ral_core::host::cwd()
+        .ok_or_else(|| format!("{label} cannot load: the working directory is unavailable"))?;
     let mut shell =
-        ral_core::HostSurface::default().shell(ral_core::terminal::TerminalState::default());
+        ral_core::HostSurface::default().shell(ral_core::terminal::TerminalState::default(), cwd);
     decode(
         evaluate_no_authority(&mut shell, &source, &origin, label)?,
         &origin.to_string(),

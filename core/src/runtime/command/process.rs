@@ -286,7 +286,10 @@ mod judged_program {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join("tools")).unwrap();
         let mut shell = crate::test_helper::core_shell();
-        shell.seed_cwd(tmp.path().to_path_buf());
+        shell.seed_cwd(
+            crate::path::CwdPath::new(tmp.path().to_path_buf())
+                .expect("a tempdir is a working directory"),
+        );
         (tmp, shell)
     }
 

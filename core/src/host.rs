@@ -14,7 +14,7 @@
 
 use std::path::PathBuf;
 
-use crate::path::{XdgKind, is_absolute, resolve_xdg_in};
+use crate::path::{CwdPath, XdgKind, is_absolute, resolve_xdg_in};
 
 pub(crate) const HOME_VARS: [&str; 2] = ["HOME", "USERPROFILE"];
 pub(crate) const USER_VARS: [&str; 2] = ["USER", "USERNAME"];
@@ -38,14 +38,18 @@ pub(crate) fn resolve_xdg(kind: XdgKind, home: Option<&str>) -> Option<PathBuf> 
     resolve_xdg_in(host_var, kind, home)
 }
 
-/// Process working directory, for callers with no shell to ask; shells go
-/// through `Shell::cwd`, which honours a `within` override or a prior `cd`.
+/// Process working directory, for callers with no shell to ask and for the
+/// shell a front end boots.
+///
+/// Shells go through `Shell::cwd`, which honours a `within` override or a
+/// prior `cd`.  `None` when the OS has none to give, a removed directory say,
+/// or gives one no relative path can be read against ([`CwdPath`]).
 #[allow(
     clippy::disallowed_methods,
     reason = "host-env: the process cwd, for a caller with no shell to ask"
 )]
-pub fn cwd() -> Option<PathBuf> {
-    std::env::current_dir().ok()
+pub fn cwd() -> Option<CwdPath> {
+    CwdPath::new(std::env::current_dir().ok()?).ok()
 }
 
 /// `HOME` (then `USERPROFILE`) from the host process env alone.

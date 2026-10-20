@@ -201,7 +201,7 @@ pub fn run() -> Result<(), String> {
     }
 
     let launch_cwd = ral_core::host::cwd().ok_or("launch cwd: unavailable")?;
-    let state_dir = app::EXARCH.project_dir(&launch_cwd);
+    let state_dir = app::EXARCH.project_dir(launch_cwd.as_path());
 
     let holdings = Holdings::new(store, app::EXARCH);
     let saved = provider::state::load(&state_dir);
@@ -225,14 +225,18 @@ pub fn run() -> Result<(), String> {
         |account| provider::models::listing_of(&holdings.catalog, &account.id),
     )?;
 
-    let invocation =
-        policy::for_invocation(&launch_cwd, &c.base, c.extend.as_deref(), &c.restrict)?;
+    let invocation = policy::for_invocation(
+        launch_cwd.as_path(),
+        &c.base,
+        c.extend.as_deref(),
+        &c.restrict,
+    )?;
     let scratch =
         Arc::new(app::Scratch::new(app::EXARCH).map_err(|e| format!("scratch dir: {e}"))?);
     let (_mode, terminal, _warn) = ral_core::terminal::TerminalState::probe_from_env();
     boot::face_process_signals(&terminal);
     // Held for the whole run: the lock is the launcher's, not the node's.
-    let (run_dir, _run_lock, resumes) = resolve_run(&launch_cwd, c.resume)?;
+    let (run_dir, _run_lock, resumes) = resolve_run(launch_cwd.as_path(), c.resume)?;
     if headless && resumes {
         let open = record::AgentLog::live_roots(&run_dir.join("sessions"))
             .map_err(|e| format!("could not inspect {}: {e}", ral_core::path::shown(&run_dir)))?
@@ -303,7 +307,7 @@ pub fn run() -> Result<(), String> {
     };
     let seat = agent::RootSeat::Identity {
         scratch,
-        cwd: launch_cwd.clone(),
+        cwd: launch_cwd.as_path().to_path_buf(),
         terminal,
     };
     let roots: Vec<_> = if resumes {
@@ -324,7 +328,7 @@ pub fn run() -> Result<(), String> {
         base: &c.base,
         extend: c.extend.as_deref(),
         restrict_files: &invocation.restricts,
-        cwd: &launch_cwd,
+        cwd: launch_cwd.as_path(),
     };
     if headless {
         let [(mut session, _)] =

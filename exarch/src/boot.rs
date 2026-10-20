@@ -89,7 +89,10 @@ pub(crate) fn test_attach() -> (EngineSpec, Root) {
 #[cfg(test)]
 pub(crate) fn test_shell() -> Shell {
     let (spec, root) = test_attach();
-    let mut shell = Shell::root(engine_runtime(&spec).into());
+    let mut shell = Shell::root(
+        engine_runtime(&spec).into(),
+        ral_core::test_helper::process_cwd(),
+    );
     ral_core::boot::seed_host_env(&mut shell);
     engine_root(&root, &mut shell).expect("test_attach names the scratch");
     shell
@@ -143,7 +146,10 @@ mod tests {
             crate::shell_eval::builtins::INSTALLER_TAG,
             EnginePath::Host(temp.clone()),
         );
-        let mut shell = Shell::root(engine_runtime(&spec).into());
+        let mut shell = Shell::root(
+            engine_runtime(&spec).into(),
+            ral_core::test_helper::process_cwd(),
+        );
         let Err(why) = engine_root(&Root::new(EnginePath::Host(temp)), &mut shell) else {
             panic!("an unnamed scratch must refuse the attach");
         };

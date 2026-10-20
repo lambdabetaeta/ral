@@ -595,6 +595,7 @@ mod tests {
             crate::terminal::TerminalState::default(),
             crate::boot::BakedPrelude::runtime(),
             &crate::boot::HostSurface::default(),
+            crate::test_helper::process_cwd(),
         );
         shell.env.bind(
             "only_mine".into(),

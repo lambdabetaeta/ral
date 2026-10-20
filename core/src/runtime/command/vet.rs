@@ -115,7 +115,10 @@ mod tests {
         let name = plant(here.path(), "zzcwdonly");
 
         let mut shell = crate::test_helper::core_shell();
-        shell.seed_cwd(here.path().to_path_buf());
+        shell.seed_cwd(
+            crate::path::CwdPath::new(here.path().to_path_buf())
+                .expect("a tempdir is a working directory"),
+        );
         shell
             .context
             .set_env_var("PATH", format!("{};", elsewhere.path().to_string_lossy()));
@@ -137,7 +140,10 @@ mod tests {
         let here = tempfile::tempdir().unwrap();
         plant(here.path(), "zztool");
         let mut shell = crate::test_helper::core_shell();
-        shell.seed_cwd(here.path().to_path_buf());
+        shell.seed_cwd(
+            crate::path::CwdPath::new(here.path().to_path_buf())
+                .expect("a tempdir is a working directory"),
+        );
 
         let head = Head::resolve(&CommandName::Path(r".\zztool".into()), &shell.context);
         let e = refused(&head, &mut shell);
@@ -159,14 +165,20 @@ mod tests {
 
         let mut shell = crate::test_helper::core_shell();
         shell.context.set_env_var("PATH", "./bin");
-        shell.seed_cwd(tmp.path().to_path_buf());
+        shell.seed_cwd(
+            crate::path::CwdPath::new(tmp.path().to_path_buf())
+                .expect("a tempdir is a working directory"),
+        );
         let head = Head::resolve(&CommandName::Bare(name.as_str().into()), &shell.context);
         assert!(
             matches!(&head.program, Ok(Program::File { path, .. }) if *path == bin.join(&name))
         );
         vet(&head, &[], &mut shell).expect("a resolved name must vet");
 
-        shell.seed_cwd(elsewhere.path().to_path_buf());
+        shell.seed_cwd(
+            crate::path::CwdPath::new(elsewhere.path().to_path_buf())
+                .expect("a tempdir is a working directory"),
+        );
         let head = Head::resolve(&CommandName::Bare(name.into()), &shell.context);
         assert_eq!(refused(&head, &mut shell).code(), 127);
     }

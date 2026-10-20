@@ -1,18 +1,11 @@
 use super::{
-    FsRules, FsScope, GrantKind, ProjectionKey, existing_paths, filter_out_granted, profile_name,
-    refuse_universal_prefix,
+    FsRules, FsScope, GrantKind, ProjectionKey, filter_out_granted, profile_name,
+    refuse_deny_meeting_grant, refuse_universal_prefix,
 };
 use crate::path::{FrozenPath, RealPath};
+use crate::sandbox::Refusal;
 use std::collections::HashSet;
-use std::path::PathBuf;
-
-#[test]
-fn existing_paths_drops_a_path_that_is_not_there() {
-    let td = tempfile::tempdir().unwrap();
-    let present = td.path().to_path_buf();
-    let absent = td.path().join("does-not-exist-xyzzy");
-    assert_eq!(existing_paths(vec![present.clone(), absent]), vec![present]);
-}
+use std::path::{Path, PathBuf};
 
 #[test]
 fn memo_drops_a_path_already_granted_at_the_same_kind() {
@@ -120,6 +113,44 @@ fn the_root_is_refused_as_a_place_and_as_an_exclusion() {
 #[test]
 fn a_drive_root_is_not_the_universal_prefix() {
     assert!(refuse_universal_prefix(&rules(&[r"C:"], &[r"C:\work"], &[])).is_ok());
+}
+
+fn assumed(paths: &[&str]) -> Vec<RealPath> {
+    paths.iter().map(|p| RealPath::assumed(*p)).collect()
+}
+
+/// What carving leaves — an allowance on or inside an exclusion, the program
+/// image among them — is refused, under every spelling a filesystem could take
+/// for the same name; the invariant is stated both ways.
+#[test]
+fn an_exclusion_meeting_a_whole_grant_is_refused() {
+    for (granted, denied) in [
+        (r"C:\work", r"C:\work"),
+        (r"C:\secret\run", r"C:\secret"),
+        (r"C:\secret\tool.exe", r"C:\Secret"),
+        (r"C:\work", r"c:\WORK\secret"),
+    ] {
+        let granted = assumed(&[granted]);
+        let refused =
+            refuse_deny_meeting_grant(&granted.iter().collect::<Vec<_>>(), &assumed(&[denied]));
+        match refused {
+            Err(Refusal::Unavailable(why)) => {
+                assert!(why.contains("cannot enforce together"), "{why}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+}
+
+/// An exclusion apart from every whole grant is the shape Windows can keep. A
+/// sibling sharing a name prefix is apart.
+#[test]
+fn an_exclusion_apart_from_every_whole_grant_is_kept() {
+    let granted = assumed(&[r"C:\work", r"C:\out", r"C:\tools\tool.exe"]);
+    let granted: Vec<&RealPath> = granted.iter().collect();
+    for denied in [r"C:\secret", r"C:\work-secret"] {
+        assert!(refuse_deny_meeting_grant(&granted, &assumed(&[denied])).is_ok());
+    }
 }
 
 #[test]
@@ -265,92 +296,314 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
     );
 }
 
-#[test]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] LowBox deny enforcement through real file reads"
-)]
-fn confined_child_denies_protected_and_explicit_descendants() {
-    use super::super::dacl::deny_tests::{DenyTree, READABLE, with_state};
+/// Run `f` with the stamp store under its own `XDG_STATE_HOME`, so these
+/// stamps never land in the user's state or in another test's.
+#[allow(clippy::disallowed_methods, reason = "[test] env fixture")]
+fn with_scoped_state(f: impl FnOnce()) {
+    let state = tempfile::tempdir().unwrap();
+    crate::test_env::with_var("XDG_STATE_HOME", Some(state.path().to_str().unwrap()), f);
+}
+
+/// The paths beneath `A` that a read grant on `A` reaches, each holding
+/// `secret`: one by inheritance alone, two behind a protected DACL that copied
+/// the grant down, one with an explicit ACE of its own.
+const READABLE: &[&str] = &[
+    "ok.txt",
+    r"D\open.txt",
+    r"D\protected\key.txt",
+    r"D\protected\nested\key.txt",
+    r"D\protected-file.txt",
+    r"D\explicit\key.txt",
+];
+
+/// `D\dark`, whose inheritance is cut off, so no grant above it reaches it.
+const DARK: &str = r"D\dark\key.txt";
+
+/// The `ALL APPLICATION PACKAGES` SID: an ACE naming it admits every sandbox.
+const ALL_APPLICATION_PACKAGES: &str = "S-1-15-2-1";
+
+#[allow(clippy::disallowed_methods, reason = "[test] icacls fixture")]
+fn icacls(path: &Path, args: &[&str]) {
+    let output = std::process::Command::new(r"C:\Windows\System32\icacls.exe")
+        .arg(path)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "icacls {path:?} {args:?}: {output:?}"
+    );
+}
+
+/// A temporary root holding the granted `A` and the shapes beneath it.
+struct Tree {
+    root: tempfile::TempDir,
+}
+
+impl Tree {
+    #[allow(clippy::disallowed_methods, reason = "[test] fs fixture")]
+    fn new() -> Self {
+        let tree = Self {
+            root: tempfile::tempdir().unwrap(),
+        };
+        for relative in READABLE.iter().copied().chain([DARK]) {
+            tree.write(&format!(r"A\{relative}"));
+        }
+        tree
+    }
+
+    /// `relative` under the root, created holding `secret`.
+    #[allow(clippy::disallowed_methods, reason = "[test] fs fixture")]
+    fn write(&self, relative: &str) -> PathBuf {
+        let file = self.at(relative);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"secret\r\n").unwrap();
+        file
+    }
+
+    /// `relative` under the root, in the ordinary drive spelling `cmd.exe`
+    /// needs.
+    fn at(&self, relative: &str) -> PathBuf {
+        self.root.path().join(relative)
+    }
+
+    /// The real path the grants key on.
+    fn real(&self, relative: &str) -> String {
+        crate::path::shown(crate::path::canon::canonicalise_strict(&self.at(relative)).unwrap())
+    }
+
+    /// Cut `D`'s descendants off from inheritance in each way a DACL can.
+    fn shape(&self) {
+        for relative in [
+            r"A\D\protected",
+            r"A\D\protected\nested",
+            r"A\D\protected-file.txt",
+        ] {
+            icacls(&self.at(relative), &["/inheritance:d"]);
+        }
+        let dark = self.at(r"A\D\dark");
+        // OWNER RIGHTS keeps the owner's access once inherited entries go.
+        icacls(&dark, &["/grant", "*S-1-3-4:(OI)(CI)F"]);
+        icacls(&dark, &["/inheritance:r"]);
+        icacls(
+            &self.at(r"A\D\explicit\key.txt"),
+            &["/grant", &format!("*{ALL_APPLICATION_PACKAGES}:(RX)")],
+        );
+    }
+}
+
+fn projection(read: &[&str], deny: &[&str]) -> crate::sandbox::SandboxProjection {
+    crate::sandbox::SandboxProjection {
+        fs: crate::sandbox::FsProjection::Restricted(rules(read, &[], deny)),
+        net: false,
+        exec: crate::sandbox::ExecProjection::default(),
+    }
+}
+
+#[allow(clippy::disallowed_methods, reason = "[test] the fixed system image")]
+fn cmd() -> &'static Path {
+    Path::new(r"C:\Windows\System32\cmd.exe")
+}
+
+/// `confine` a `cmd.exe` launch under `projection`, from `cwd`.
+fn confined(
+    projection: &crate::sandbox::SandboxProjection,
+    cwd: &Path,
+    line: &str,
+) -> Result<crate::process::Launch, Refusal> {
     use crate::process::cancel::DurableRoot;
-    use crate::process::{Launch, PgidPolicy, StdioSpec};
-    use crate::sandbox::{ExecProjection, FsProjection, SandboxProjection};
+    use crate::process::{Launch, StdioSpec};
+    let mut launch = Launch::new(cmd());
+    launch.args(["/d", "/s", "/c", line]);
+    launch.current_dir(cwd);
+    launch.stdin(StdioSpec::null());
+    launch.stdout(StdioSpec::Piped);
+    launch.stderr(StdioSpec::Piped);
+    let image = RealPath::of(cmd()).expect("cmd.exe has a real path");
+    super::confine(
+        &mut launch,
+        projection,
+        Some(&image),
+        &DurableRoot::default().worker(),
+    )?;
+    Ok(launch)
+}
+
+/// Run `type relative` confined under `projection` from `cwd`, and assert it
+/// reads `secret` exactly when `readable`.
+#[allow(clippy::disallowed_methods, reason = "[test] confined child pipes")]
+fn assert_reads(
+    projection: &crate::sandbox::SandboxProjection,
+    cwd: &Path,
+    relative: &str,
+    readable: bool,
+) {
+    let launch = confined(projection, cwd, &format!("type {relative}")).unwrap();
+    assert_launch_reads(launch, relative, readable);
+}
+
+/// Spawn `launch`, a confined `type relative`, and assert it reads `secret`
+/// exactly when `readable`.
+#[allow(clippy::disallowed_methods, reason = "[test] confined child pipes")]
+fn assert_launch_reads(mut launch: crate::process::Launch, relative: &str, readable: bool) {
+    use crate::process::PgidPolicy;
     use std::io::Read;
-    use std::path::Path;
+    let (mut child, _pgid, _) = launch.spawn(PgidPolicy::Inherit).unwrap();
+    let mut stdout = Vec::new();
+    child
+        .take_stdout()
+        .unwrap()
+        .read_to_end(&mut stdout)
+        .unwrap();
+    let mut stderr = Vec::new();
+    child
+        .take_stderr()
+        .unwrap()
+        .read_to_end(&mut stderr)
+        .unwrap();
+    let ended = child.reap().unwrap();
+    assert_eq!(
+        ended.code(),
+        Some(i32::from(!readable)),
+        "{relative}: {ended:?}, stderr={}",
+        String::from_utf8_lossy(&stderr)
+    );
+    let expected: &[u8] = if readable { b"secret\r\n" } else { b"" };
+    assert_eq!(stdout, expected, "{relative}");
+}
 
-    with_state(|| {
-        let tree = DenyTree::new();
+/// The refusal `confine` gave, which must be one this host cannot establish.
+fn unavailable(refused: Result<crate::process::Launch, Refusal>) -> String {
+    match refused {
+        Err(Refusal::Unavailable(why)) => why,
+        Err(other) => panic!("expected an unavailable confinement, got {other}"),
+        Ok(_) => panic!("expected a refusal, and confine let the launch through"),
+    }
+}
+
+/// A Windows sandbox cannot have access taken away beneath a grant: the
+/// `AppContainer` pass of the access check ignores a deny ACE naming a
+/// capability. So the exclusion of `D` is carved out of the grant on `A`, and
+/// every shape beneath `D` — inherited, protected with the grant copied down,
+/// explicit — goes dark, while `A`'s other entries stay readable. An explicit
+/// `ALL APPLICATION PACKAGES` entry beneath `D` is reach no carving removes, and
+/// the launch is refused until it goes.
+#[test]
+fn a_deny_inside_a_grant_is_carved_out() {
+    with_scoped_state(|| {
+        let tree = Tree::new();
         let _session = SessionGuard;
-        let denied = [tree.deny.to_str().unwrap()];
-        let projection = |deny: bool| SandboxProjection {
-            fs: FsProjection::Restricted(rules(
-                &[tree.allow.to_str().unwrap()],
-                &[],
-                if deny { &denied[..] } else { &[] },
-            )),
-            net: false,
-            exec: ExecProjection::default(),
-        };
-        let cmd = Path::new(r"C:\Windows\System32\cmd.exe");
-        let image = RealPath::of(cmd).expect("cmd.exe has a real path");
-        let read = |relative: &str, deny: bool, readable: bool| {
-            let mut launch = Launch::new(cmd);
-            launch.args(["/d", "/s", "/c", &format!("type {relative}")]);
-            launch.current_dir(tree.cwd());
-            launch.stdin(StdioSpec::null());
-            launch.stdout(StdioSpec::Piped);
-            launch.stderr(StdioSpec::Piped);
-            super::confine(
-                &mut launch,
-                &projection(deny),
-                Some(&image),
-                &DurableRoot::default().worker(),
-            )
-            .unwrap();
-            let (mut child, _pgid, _) = launch.spawn(PgidPolicy::Inherit).unwrap();
-            let mut stdout = Vec::new();
-            child
-                .take_stdout()
-                .unwrap()
-                .read_to_end(&mut stdout)
-                .unwrap();
-            let mut stderr = Vec::new();
-            child
-                .take_stderr()
-                .unwrap()
-                .read_to_end(&mut stderr)
-                .unwrap();
-            let ended = child.reap().unwrap();
-            assert_eq!(
-                ended.code(),
-                Some(i32::from(!readable)),
-                "{relative}, deny={deny}: {ended:?}, stderr={}",
-                String::from_utf8_lossy(&stderr)
-            );
-            assert_eq!(
-                stdout,
-                if readable {
-                    b"secret\r\n".as_slice()
-                } else {
-                    b""
-                },
-                "{relative}, deny={deny}"
-            );
-        };
+        let a = tree.at("A");
+        let (allow, deny) = (tree.real("A"), tree.real(r"A\D"));
 
-        read("ok.txt", false, true);
+        let whole = projection(&[&allow], &[]);
+        assert_reads(&whole, &a, "ok.txt", true);
         tree.shape();
         for relative in READABLE {
-            read(relative, false, true);
+            assert_reads(&whole, &a, relative, true);
         }
-        read(r"D\dark\key.txt", false, false);
-        read("ok.txt", true, true);
-        for relative in READABLE.iter().skip(1) {
-            read(relative, true, false);
+        assert_reads(&whole, &a, DARK, false);
+
+        let carved = projection(&[&allow], &[&deny]);
+        let why = unavailable(confined(&carved, &a, "type ok.txt"));
+        assert!(
+            why.contains("could still open") && why.contains("key.txt"),
+            "{why}"
+        );
+        icacls(
+            &tree.at(r"A\D\explicit\key.txt"),
+            &["/remove", &format!("*{ALL_APPLICATION_PACKAGES}")],
+        );
+        assert_reads(&carved, &a, "ok.txt", true);
+        for relative in READABLE.iter().skip(1).copied().chain([DARK]) {
+            assert_reads(&carved, &a, relative, false);
         }
-        read(r"D\dark\key.txt", true, false);
-        // Persistent denies are projection-specific.
-        read(r"D\protected\key.txt", false, true);
+    });
+}
+
+/// The shape of exarch's `xdg-config` read less its credential directories:
+/// the carved directory launches as the child's working directory, an
+/// excluded entry is dark, its siblings readable, and neither an entry made
+/// after the carving nor an excluded name that did not exist then and is made
+/// after it is reached through the carved directory.
+#[test]
+fn an_xdg_config_style_grant_is_carved_and_launches() {
+    with_scoped_state(|| {
+        let tree = Tree::new();
+        for relative in [r"cfg\gh\hosts.yml", r"cfg\git\config", r"cfg\other.txt"] {
+            tree.write(relative);
+        }
+        let _session = SessionGuard;
+        let cfg = tree.at("cfg");
+        let (allow, gh) = (tree.real("cfg"), tree.real(r"cfg\gh"));
+        let op = format!("{allow}/op");
+        let carved = projection(&[&allow], &[&gh, &op]);
+
+        assert_reads(&carved, &cfg, r"gh\hosts.yml", false);
+        assert_reads(&carved, &cfg, r"git\config", true);
+        assert_reads(&carved, &cfg, "other.txt", true);
+
+        let launch = confined(&carved, &cfg, "type new.txt").unwrap();
+        tree.write(r"cfg\new.txt");
+        assert_launch_reads(launch, "new.txt", false);
+
+        let launch = confined(&carved, &cfg, r"type op\session").unwrap();
+        tree.write(r"cfg\op\session");
+        assert_launch_reads(launch, r"op\session", false);
+        assert_reads(&carved, &cfg, r"op\session", false);
+    });
+}
+
+/// An exclusion no grant reaches launches, and stays out of reach.
+#[test]
+fn a_deny_apart_from_every_grant_launches_and_stays_dark() {
+    with_scoped_state(|| {
+        let tree = Tree::new();
+        tree.write(r"B\key.txt");
+        let _session = SessionGuard;
+        let (allow, deny) = (tree.real("A"), tree.real("B"));
+        let denied = projection(&[&allow], &[&deny]);
+        assert_reads(&denied, &tree.at("A"), "ok.txt", true);
+        assert_reads(&denied, &tree.at("A"), r"..\B\key.txt", false);
+    });
+}
+
+/// What the lexical check cannot see, the access check does: a descendant
+/// whose own DACL admits every sandbox, and a hard link carrying a granted
+/// file's ACE to a name inside the exclusion. Either refuses the launch.
+#[test]
+#[allow(clippy::disallowed_methods, reason = "[test] hard link fixture")]
+fn a_deny_the_token_reaches_anyway_is_refused() {
+    with_scoped_state(|| {
+        let tree = Tree::new();
+        let _session = SessionGuard;
+        let a = tree.at("A");
+        let allow = tree.real("A");
+        // Stamp the grant on `A` first, so its ACE is on `ok.txt` to be linked.
+        assert_reads(&projection(&[&allow], &[]), &a, "ok.txt", true);
+
+        let open = tree.write(r"B\open\key.txt");
+        tree.write(r"B\closed.txt");
+        icacls(
+            &open,
+            &["/grant", &format!("*{ALL_APPLICATION_PACKAGES}:(RX)")],
+        );
+        let why = unavailable(confined(
+            &projection(&[&allow], &[&tree.real("B")]),
+            &a,
+            "type ok.txt",
+        ));
+        assert!(why.contains("could still open"), "{why}");
+        assert!(why.contains("key.txt"), "{why}");
+
+        std::fs::create_dir(tree.at("C")).unwrap();
+        std::fs::hard_link(tree.at(r"A\ok.txt"), tree.at(r"C\linked.txt")).unwrap();
+        let why = unavailable(confined(
+            &projection(&[&allow], &[&tree.real("C")]),
+            &a,
+            "type ok.txt",
+        ));
+        assert!(why.contains("linked.txt"), "{why}");
     });
 }
 

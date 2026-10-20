@@ -808,12 +808,13 @@ argues from.
 
 ### Absent denies
 
-- **An absent deny under a writable prefix reaches no Linux or Windows
-  kernel**: a mount needs a mountpoint and an ACE an object, and making either
-  writes the host. ral's own creation is refused in process; a child may make
-  the name in that launch, and the next launch finds an object to mask or
-  stamp. macOS holds it from the start, Seatbelt's rules being negative over
-  names (`docs/SPEC.md` §12.3;
+- **An absent deny under a writable prefix reaches no Linux kernel**: a mount
+  needs a mountpoint, and making one writes the host. ral's own creation is
+  refused in process; a child may make the name in that launch, and the next
+  launch finds an object to mask. macOS holds it from the start, Seatbelt's
+  rules being negative over names. Windows cannot take access away beneath a
+  grant at all, so it carves the allowance around the exclusion, and a name
+  made in a carved directory inherits nothing granted (`docs/SPEC.md` §12.3;
   [[internals/holding-a-deny|holding-a-deny]]).
 
 See also [[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]],

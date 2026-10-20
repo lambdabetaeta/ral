@@ -7,13 +7,13 @@ use crate::types::{
     refused_arm, sig, validate_handler_arity,
 };
 
+use crate::path::CwdPath;
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 /// Parsed `within [...]` options; each key becomes a `Shell::with_*` scope.
 pub(crate) struct WithinScope {
     env_overrides: Option<HashMap<String, String>>,
-    cwd: Option<PathBuf>,
+    cwd: Option<CwdPath>,
     handlers: Option<(Vec<HandlerEntry>, Option<Value>)>,
 }
 
@@ -112,8 +112,9 @@ fn parse_env(v: &Value) -> Settled<HashMap<String, String>> {
 }
 
 /// `dir:` — resolved, permission-checked, and required to exist as a
-/// directory before the body runs rather than at the first command.
-fn parse_dir(v: &Value, shell: &mut Shell) -> Settled<PathBuf> {
+/// directory, and to be one a path can be read against ([`CwdPath`]), before
+/// the body runs rather than at the first command.
+fn parse_dir(v: &Value, shell: &mut Shell) -> Settled<CwdPath> {
     let path = v.to_string();
     if path.is_empty() {
         return Err(sig("within dir: path cannot be empty"));
@@ -123,7 +124,7 @@ fn parse_dir(v: &Value, shell: &mut Shell) -> Settled<PathBuf> {
     if !rp.as_path().is_dir() {
         return Err(sig(format!("within dir: {path}: not a directory")));
     }
-    Ok(rp.into_inner())
+    rp.into_cwd().map_err(|e| sig(format!("within dir: {e}")))
 }
 
 /// What a handler body is typechecked against: the `within`'s own lexical
@@ -274,7 +275,10 @@ mod tests {
             statics: vec![PANIC_BUILTINS],
             ..crate::HostSurface::default()
         }
-        .shell(crate::terminal::TerminalState::default());
+        .shell(
+            crate::terminal::TerminalState::default(),
+            crate::test_helper::process_cwd(),
+        );
         match shell.run(Run::captured(
             "audit { core-panic-now }",
             SourceOrigin::named("<test>"),
@@ -302,7 +306,10 @@ mod tests {
             statics: vec![PANIC_BUILTINS],
             ..crate::HostSurface::default()
         }
-        .shell(crate::terminal::TerminalState::default());
+        .shell(
+            crate::terminal::TerminalState::default(),
+            crate::test_helper::process_cwd(),
+        );
         let before_cwd = shell.cwd();
         let tmp = shown(std::env::temp_dir());
 

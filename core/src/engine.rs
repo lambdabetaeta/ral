@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::first_order::FOValue;
 use crate::guard::GrantNarrower;
+use crate::path::CwdPath;
 use crate::process::{CancelCause, DurableRoot, Scope, ScopeNode};
 use crate::protocol::channel::WriteError;
 use crate::protocol::{
@@ -113,10 +114,11 @@ impl Engine {
         let runtime = Arc::new((installer.runtime)(spec));
         let shell = match &attach.origin {
             Origin::Root(root) => {
-                let mut shell = Shell::root(Arc::clone(&runtime));
+                let cwd =
+                    CwdPath::new(root.cwd.native().to_path_buf()).map_err(|e| e.to_string())?;
+                let mut shell = Shell::root(Arc::clone(&runtime), cwd);
                 crate::boot::seed_host_env(&mut shell);
                 (installer.root)(root, &mut shell)?;
-                shell.seed_cwd(root.cwd.native().to_path_buf());
                 for (name, value) in &root.env {
                     shell.set_env_var(name, value);
                 }

@@ -6,9 +6,9 @@
 //! `env_overrides`; the canonical directory lives on `context.cwd`.
 
 use super::Context;
-use crate::path::{Resolver, SearchCwd};
+use crate::path::{CwdPath, Resolver, SearchCwd};
 use crate::types::EnvVars;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 impl Context {
     /// Read-only borrow; mutation goes through [`Self::set_env_var`] and friends.
@@ -62,26 +62,20 @@ impl Context {
             .cloned()
     }
 
-    /// The cwd cell's directory, `None` while unseeded;
-    /// [`Shell::cwd`](super::Shell::cwd) adds the process-cwd fallback.
-    pub(crate) fn cwd(&self) -> Option<&Path> {
-        self.cwd.0.as_deref()
+    /// The cwd cell's directory.
+    pub(crate) fn cwd(&self) -> &CwdPath {
+        &self.cwd.0
     }
 
-    /// Where a child launched from this context starts: the cell's directory,
-    /// else [`cwd`](crate::host::cwd) for an unseeded shell,
-    /// else `"."` if even `getcwd(3)` fails.
+    /// Where a child launched from this context starts: the cell's directory.
     pub(crate) fn launch_cwd(&self) -> PathBuf {
-        self.cwd().map_or_else(
-            || crate::host::cwd().unwrap_or_else(|| PathBuf::from(".")),
-            Path::to_path_buf,
-        )
+        self.cwd().as_path().to_path_buf()
     }
 
     /// The anchor a `PATH` walk made from this context runs against: the
     /// [`Self::cwd`] every other consumer of "here" reads.
     pub(crate) fn search_cwd(&self) -> SearchCwd<'_> {
-        self.cwd().map_or_else(SearchCwd::nowhere, SearchCwd::of)
+        SearchCwd::of(self.cwd().as_path())
     }
 
     /// A [`Resolver`] bound to this layer's home and cwd — grant-prefix
@@ -90,6 +84,22 @@ impl Context {
         Resolver {
             home: self.home(),
             cwd: self.cwd(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Context {
+    /// A context under `grants` and nothing else, at the test process's cwd:
+    /// a fixture for the decisions that read a context alone.
+    pub(crate) fn under_grants(grants: crate::capability::GrantStack) -> Self {
+        Self {
+            env_overrides: EnvVars::default(),
+            cwd: super::Cwd(crate::test_helper::process_cwd()),
+            grants,
+            handlers: super::HandlerStack::default(),
+            args: Vec::new(),
+            modules: super::Modules::default(),
         }
     }
 }

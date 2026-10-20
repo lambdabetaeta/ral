@@ -19,11 +19,12 @@ use common::fresh_shell;
 #[cfg(unix)]
 use ral_core::capability::FsPolicy;
 use ral_core::capability::{Capabilities, GrantStack};
+use ral_core::path::shown;
 use ral_core::protocol::Run;
 use ral_core::source::SourceOrigin;
 use ral_core::types::{Settled, Shell};
 use ral_core::{Break, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // ── Harness ─────────────────────────────────────────────────────────────
 
@@ -72,20 +73,12 @@ fn parity_caps() -> Vec<Capabilities> {
     return vec![Capabilities::root()];
 }
 
-/// Render a path without a trailing platform separator.  On hosts where
-/// `std::env::temp_dir()` returns `"/tmp/"` (a trailing slash), the bare
-/// `display().to_string()` mismatches `Shell::cwd()`'s output (which is
-/// canonicalised and never carries a trailing separator).  Trimming the
-/// trailing separator here makes the comparison portable without
-/// dropping the macOS `/var` ↔ `/private/var` firmlink fallback below.
-/// The `len > 1` guard preserves the root "/" itself.
-fn display_no_trailing_sep(path: &std::path::Path) -> String {
-    let s = path.display().to_string();
-    if s.len() > 1 {
-        s.trim_end_matches(std::path::MAIN_SEPARATOR).to_string()
-    } else {
-        s
-    }
+/// `path` as ral shows it (`/`-separated on every host, as `cwd` returns it),
+/// without a trailing separator: `std::env::temp_dir()` may end in one
+/// (`/tmp/`, `…\Temp\`), and `Shell::cwd()` — canonicalised — never does.
+/// Re-collecting the components drops it and keeps the root itself.
+fn shown_dir(path: &Path) -> String {
+    shown(path.components().collect::<PathBuf>())
 }
 
 // ── (1) Top-level persistence ───────────────────────────────────────────
@@ -168,13 +161,14 @@ fn top_level_cd_persists_across_calls() {
     for caps in parity_caps() {
         let mut shell = fresh_shell();
         let tmp = std::env::temp_dir();
-        let tmp_disp = display_no_trailing_sep(&tmp);
+        let tmp_disp = shown_dir(&tmp);
         top_level_under(&mut shell, caps.clone(), &format!("cd '{tmp_disp}'"))
             .expect("cd should succeed");
         let result = top_level_under(&mut shell, caps, "cwd").expect("cwd should succeed");
-        // `Shell::cwd()` returns the canonicalised path; comparing string
-        // forms tolerates the macOS `/var` ↔ `/private/var` firmlink.
-        let canon = display_no_trailing_sep(&tmp.canonicalize().unwrap_or_else(|_| tmp.clone()));
+        // `cwd` returns the canonicalised path, shown; comparing shown forms
+        // tolerates the macOS `/var` ↔ `/private/var` firmlink and the
+        // Windows 8.3 short name `temp_dir()` may carry.
+        let canon = shown_dir(&tmp.canonicalize().unwrap_or_else(|_| tmp.clone()));
         let got = match result {
             Value::String(s) => s.into_string(),
             other => panic!("cwd must return a String, got {other:?}"),

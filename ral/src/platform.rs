@@ -27,18 +27,27 @@ pub(crate) fn probe_terminal(warn: bool) -> (InteractiveMode, TerminalState) {
 }
 
 /// An in-process engine's attach: its cwd and home are this process's own.
-pub(crate) fn local_attach(installer: &str, terminal: TerminalState, config: FOValue) -> Attach {
+///
+/// # Errors
+/// When the process has no working directory, which a session cannot start
+/// without: every relative path it reads is read against one.
+pub(crate) fn local_attach(
+    installer: &str,
+    terminal: TerminalState,
+    config: FOValue,
+) -> Result<Attach, String> {
     #[allow(
         clippy::disallowed_methods,
         reason = "host-env: an identity engine's home is this process's own"
     )]
     let home = ral_core::host::home().unwrap_or_default();
-    let cwd = ral_core::host::cwd().unwrap_or_else(|| ".".into());
-    Attach::root(
+    let cwd = ral_core::host::cwd()
+        .ok_or("the working directory is unavailable, so no relative path could be read")?;
+    Ok(Attach::root(
         EngineSpec::new(installer, EnginePath::Host(home.into())),
-        Root::new(EnginePath::Host(cwd)).with_config(config),
+        Root::new(EnginePath::Host(cwd.into_inner())).with_config(config),
     )
-    .with_terminal(terminal)
+    .with_terminal(terminal))
 }
 
 static DEFAULT_EXIT_HINTS: &str = include_str!("../../data/exit-hints.txt");

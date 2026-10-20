@@ -17,11 +17,11 @@
 //! POSIX-absolute and names no drive, `C:\x` and `\\srv\sh\x` are
 //! Windows-absolute, and a well-formed `//srv/sh/x` is both, so live on both.
 //! A UNC root, plain or verbatim (`\\?\UNC\srv\sh`), needs a server and a
-//! share; a bare `\\` or `//` is none, and no `\\?\` or `\\.\` path is
-//! read as anything but a drive path or such a root.  A head of two mixed
-//! separators, `/\x` or `\/srv/sh`, is refused on every host: Windows
-//! reads it as a UNC or device head, POSIX as something else.  A
-//! subpath is judged lexically, so that a profile fails alike everywhere.
+//! share, neither `.` nor `..`; a bare `\\` or `//` is none, and no `\\?\`
+//! or `\\.\` path is read as anything but a drive path or such a root.  A
+//! head of two mixed separators, `/\x` or `\/srv/sh`, is refused on every
+//! host: Windows reads it as a UNC or device head, POSIX as something else.
+//! A subpath is judged lexically, so that a profile fails alike everywhere.
 //! `~` and `xdg:NAME` are expanded by the resolver at run time, never in a
 //! grant, and are refused under every tag.
 //!
@@ -528,8 +528,9 @@ fn not_absolute(raw: &str, root: Root) -> PolicyError {
         Root::Malformed => format!(
             "{} is no well-formed UNC or verbatim path; a UNC path needs a \
              server and a share, as in {}; a verbatim path is \
-             {} or {}.  A '?' or \
-             '.' is no server name, and device paths are not accepted",
+             {} or {}.  A '?' is no server name, \
+             '.' and '..' are neither a server nor a share name, and device paths \
+             are not accepted",
             abs(&word),
             abs("'\\\\server\\share\\x'"),
             abs("'\\\\?\\C:\\x'"),
@@ -1081,6 +1082,8 @@ mod tests {
             r"\\",
             "//",
             r"\\srv",
+            r"\\srv\..\x",
+            r"\\..\sh\x",
             r"\\?\UNC\srv",
             "//?/UNC/",
             r"\\.\C:\x",

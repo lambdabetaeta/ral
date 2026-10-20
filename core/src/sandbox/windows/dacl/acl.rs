@@ -16,7 +16,7 @@ use std::os::windows::io::{AsRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SUCCESS};
 use windows_sys::Win32::Security::Authorization::{
-    ConvertStringSidToSidW, DENY_ACCESS, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
+    ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
     GetSecurityInfo, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW,
     SetSecurityInfo, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
@@ -211,9 +211,10 @@ pub(super) enum AclKind {
     Label,
 }
 
-/// The ACL borrows its storage from the owned descriptor.
+/// The ACL borrows its storage from the owned descriptor, held only to be
+/// freed after it.
 pub(super) struct Security {
-    sd: Local<c_void>,
+    _sd: Local<c_void>,
     pub(super) acl: *mut ACL,
 }
 
@@ -292,26 +293,9 @@ impl Security {
         }
         // SAFETY: the successful query transferred the descriptor allocation.
         Ok(Self {
-            sd: unsafe { Local::from_raw(sd) },
+            _sd: unsafe { Local::from_raw(sd) },
             acl,
         })
-    }
-
-    pub(super) fn protected(&self) -> io::Result<bool> {
-        let mut control = 0;
-        let mut revision = 0;
-        // SAFETY: sd owns a valid descriptor for the duration of this call.
-        if unsafe {
-            windows_sys::Win32::Security::GetSecurityDescriptorControl(
-                self.sd.as_ptr(),
-                &raw mut control,
-                &raw mut revision,
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(control & windows_sys::Win32::Security::SE_DACL_PROTECTED != 0)
     }
 
     pub(super) fn aces(&self) -> impl Iterator<Item = io::Result<Ace<'_>>> {
@@ -434,30 +418,16 @@ pub(super) fn win32_err_str(path: &Path, msg: &str) -> DaclError {
     }
 }
 
-pub(super) fn null_deny_dacl(path: &Path) -> DaclError {
-    win32_err_str(
-        path,
-        "cannot add a deny to a null DACL without removing ordinary access; give this path explicit permissions first",
-    )
-}
-
-/// Merge one explicit allow-or-deny ACE into `path`'s DACL, under the path
-/// mutex the caller holds across scan, ledger, and this. `SetEntriesInAclW`
-/// inserts in canonical order — explicit deny, explicit allow, inherited — so
-/// a deny nested inside an allowed parent beats the allow the parent
-/// inherits down to it. The other direction never reaches this backend at
-/// all: `SandboxProjection::of` calls
-/// [`Table::live`](crate::capability::table::Table::live) so an allow
-/// beneath a deny is dropped from the projection before any ACE is stamped,
-/// rather than relying on ACL order to bury it. A directory gets `OI|CI`;
-/// [`super::deny::descendants`] reasserts denies at descendants where inheritance
-/// cannot suffice, without changing their protection or ordinary permissions.
+/// Merge one explicit allow ACE into `path`'s DACL, under the path mutex the
+/// caller holds across scan, ledger, and this; `SetEntriesInAclW` keeps the
+/// result in canonical order. A directory gets `OI|CI`. Allow only: a deny ACE
+/// naming a capability SID is inert in the `AppContainer` pass of the access
+/// check, so there is no deny for this module to stamp (see `super::deny`).
 pub(super) fn apply_explicit_ace<'a>(
     target: impl Into<Target<'a>>,
     sid_str: &str,
     access_mask: u32,
     inheritable: bool,
-    ace_type: AceType,
 ) -> Result<(), DaclError> {
     let target = target.into();
     let path = target.path();
@@ -467,22 +437,14 @@ pub(super) fn apply_explicit_ace<'a>(
     } else {
         0
     };
-    let access_mode = match ace_type {
-        AceType::Allow => GRANT_ACCESS,
-        AceType::Deny => DENY_ACCESS,
-    };
     let ea = EXPLICIT_ACCESS_W {
         grfAccessPermissions: access_mask,
-        grfAccessMode: access_mode,
+        grfAccessMode: GRANT_ACCESS,
         grfInheritance: inheritance,
         Trustee: trustee_for(&sid),
     };
 
     let security = Security::of(target, AclKind::Dacl)?;
-    if security.acl.is_null() && ace_type == AceType::Deny {
-        return Err(null_deny_dacl(path));
-    }
-
     let mut new_dacl: *mut ACL = std::ptr::null_mut();
     // SAFETY: `ea` outlives the call; `existing_dacl` came from the query
     // above, and null there means "no prior DACL", which the callee accepts.

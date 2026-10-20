@@ -11,10 +11,8 @@
     clippy::disallowed_methods,
     reason = "[test] test fs/process scaffolding"
 )]
-use super::super::tests::with_scoped_state_dir;
-use super::super::{
-    GrantKind, RW_MASK, canonicalize_grant_target, ensure_fs_grant, needing_grant, pin_all,
-};
+use super::super::tests::{grant, real, with_scoped_state_dir};
+use super::super::{GrantKind, RW_MASK, needing_grant, pin_all};
 use super::*;
 #[test]
 fn sid_parse_valid_and_invalid() {
@@ -51,8 +49,8 @@ fn needing_grant_drops_well_known_grant() {
 
         // Everyone is one of the well-known AC SIDs, so a grant for it is
         // exactly what the filter must recognize as already covering.
-        let granted = canonicalize_grant_target(td_grant.path()).unwrap();
-        ensure_fs_grant(
+        let granted = real(td_grant.path());
+        grant(
             &granted,
             "S-1-1-0",
             GrantKind::ReadWrite,
@@ -60,7 +58,7 @@ fn needing_grant_drops_well_known_grant() {
         )
         .unwrap();
 
-        let not_granted = canonicalize_grant_target(td_no_grant.path()).unwrap();
+        let not_granted = real(td_no_grant.path());
         let pins = pin_all(
             &[granted.clone(), not_granted.clone()],
             GrantKind::ReadWrite,

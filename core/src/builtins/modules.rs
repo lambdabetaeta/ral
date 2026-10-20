@@ -59,7 +59,7 @@ pub(crate) fn builtin_use(
     shell: &mut Shell,
 ) -> Settled<Value> {
     let path = args[0].as_str("use")?.to_owned();
-    let target = resolve_in_current_script(&path, shell);
+    let target = resolve_in_current_script(&path, shell)?;
     // `use` falls back to a RAL_PATH search for a bare name, and failing
     // both reads the target itself, to report why it cannot.
     let file = target
@@ -103,7 +103,11 @@ pub(crate) fn builtin_use(
 /// A file source reads `path` beside itself
 /// ([`crate::path::Resolver::resolve_in_script`]); a virtual one has no
 /// directory, so `path` resolves against the cwd.
-fn resolve_in_current_script(path: &str, shell: &Shell) -> crate::path::LexicalPath {
+///
+/// # Errors
+/// When the source's directory is no working directory, against which no
+/// path can be read.
+fn resolve_in_current_script(path: &str, shell: &Shell) -> Settled<crate::path::LexicalPath> {
     let origin = shell.context.modules.stack.last().or_else(|| {
         shell
             .session
@@ -113,7 +117,9 @@ fn resolve_in_current_script(path: &str, shell: &Shell) -> crate::path::LexicalP
     });
     let resolver = shell.context.resolver();
     match origin.and_then(SourceOrigin::file).and_then(Path::parent) {
-        Some(dir) => resolver.resolve_in_script(path, dir),
-        None => resolver.resolve(path),
+        Some(dir) => resolver
+            .resolve_in_script(path, dir)
+            .map_err(|e| sig(format!("use: {e}"))),
+        None => Ok(resolver.resolve(path)),
     }
 }

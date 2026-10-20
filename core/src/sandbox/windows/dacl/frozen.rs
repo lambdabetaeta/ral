@@ -171,7 +171,7 @@ fn open_leaf(
 ) -> io::Result<OwnedHandle> {
     let ladder: &[u32] = match kind {
         GrantKind::ReadWrite => &[WRITE_DAC | WRITE_OWNER, WRITE_DAC, 0],
-        _ => &[WRITE_DAC, 0],
+        GrantKind::ReadOnly | GrantKind::List => &[WRITE_DAC, 0],
     };
     let (&bare, richer) = ladder.split_last().expect("the ladder is not empty");
     richer

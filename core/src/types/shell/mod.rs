@@ -66,7 +66,7 @@ pub const DEFAULT_STACK_LIMIT: usize = 100_000;
 ///
 /// `H` is the handler stack's form: the live [`HandlerStack`], or the seed's
 /// interned frames, which is the only other shape the context takes.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Context<H = HandlerStack> {
     // ── attenuable by within / grant ─────────────────────────────────────
     /// Process env-var overrides set by `within [env: …]`.  `PWD` is

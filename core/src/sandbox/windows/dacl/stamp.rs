@@ -15,7 +15,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// The stamp store: the completion witness for [`super::ensure_fs_grant`],
+/// The stamp store: the completion witness for [`super::ensure_frozen_grant`],
 /// one [`stamp_key`] entry per propagation that ran to the end. No upstream
 /// counterpart — mxc restores its stamps, so completion never needs
 /// witnessing across sessions.
@@ -35,13 +35,7 @@ struct StampStore {
     reason = "native: the canonical spelling the OS returned, kept as-is as a key"
 )]
 pub(super) fn stamp_key(canonical: &Path, kind: GrantKind) -> String {
-    // Earlier deny stamps witnessed only the root's propagation.
-    let tag = if kind == GrantKind::Deny {
-        "deny-tree"
-    } else {
-        kind.tag()
-    };
-    format!("{tag}|{}", canonical.to_string_lossy())
+    format!("{}|{}", kind.tag(), canonical.to_string_lossy())
 }
 
 /// [`stamp_key`]'s counterpart for the mandatory-label stamp — a distinct tag

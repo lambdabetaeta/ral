@@ -20,11 +20,13 @@ let lost2 = spawn { echo bravo }
 sleep 0.1
 echo only-this
 
-# The block's stderr replays to the awaiter's stderr, here a redirect: none
-# of it reaches stdout
+# The block's stderr replays to the awaiter's stderr, here a redirect to a
+# file: none of it reaches stdout
+let d = temp-dir
 let h3 = spawn { warn 'diag' }
-await $h3 2> /dev/null
+await $h3 2> "$d/err"
 echo after-diag
+rm -rf $d
 
 # A spawned command awaited where a value is wanted is captured, as the bind
 # rule decodes it; a value block's value is returned

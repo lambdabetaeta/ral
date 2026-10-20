@@ -60,6 +60,7 @@ fn armed() -> Shell {
             statics: vec![builtins::DETACH_BUILTIN],
             ..ral_core::boot::HostSurface::default()
         },
+        ral_core::test_helper::process_cwd(),
     );
     shell.arm_detach(16);
     shell

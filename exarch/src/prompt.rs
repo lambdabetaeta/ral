@@ -41,7 +41,7 @@ pub fn assemble(
     files: &[PathBuf],
     invocation: &Invocation,
     app: crate::app::App,
-    cwd: &Path,
+    cwd: &ral_core::path::CwdPath,
     config_dir: &Path,
     interactive: bool,
     edit: EditScheme,
@@ -71,7 +71,7 @@ pub fn assemble(
         include_str!("../data/context.md").into(),
     ));
     sections.push((Some("Host"), host_section(app)));
-    let agents = discover_agents(cwd, config_dir);
+    let agents = discover_agents(cwd.as_path(), config_dir);
     if !agents.is_empty() {
         sections.push((Some("Workspace"), read_files(&agents)?));
     }

@@ -2,7 +2,9 @@
 //!
 //! Platform backends (`linux`, `macos`, `windows`), the per-command
 //! launcher (`launch`) and its handoff to a confined re-exec (`warrant`),
-//! binary pinning and re-exec (`reexec`), kernel-denial diagnostics (`diag`).
+//! binary pinning and re-exec (`reexec`), kernel-denial diagnostics (`diag`),
+//! and the carving of exclusions out of allowances that the Windows backend,
+//! which cannot subtract, grants instead (`carve`).
 //!
 //! Exec is checked everywhere by `guard::check_exec`, the in-process guard.
 //! Both Unix backends also render the allow-list into the kernel, catching the
@@ -17,6 +19,8 @@ compile_error!("ral's sandbox has backends for Linux, macOS and Windows only");
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod carriers;
+#[cfg(any(windows, test))]
+mod carve;
 mod diag;
 mod launch;
 #[cfg(target_os = "linux")]

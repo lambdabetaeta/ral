@@ -1,7 +1,7 @@
 //! Prompt-box slash commands — registry, routing, and handlers.
 
 use std::fmt::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::App;
 use super::app::CommandCtx;
@@ -290,7 +290,7 @@ pub(super) fn unrecognized_command(trimmed: &str) -> Option<&str> {
     clippy::disallowed_methods,
     reason = "host-env: a path the operator types at the TUI means the operator's own `~`"
 )]
-pub(super) fn resolve_export_path(arg: &str, cwd: &Path) -> PathBuf {
+pub(super) fn resolve_export_path(arg: &str, cwd: &ral_core::path::CwdPath) -> PathBuf {
     ral_core::path::Resolver::at(ral_core::host::home(), cwd)
         .resolve(arg)
         .into_inner()
@@ -351,7 +351,13 @@ pub(super) fn cmd_copy(app: &mut App) {
 /// file.
 pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
     let id = app.tabs.focused();
-    let dest = resolve_export_path(arg, info.cwd);
+    let dest = match ral_core::path::CwdPath::new(info.cwd.to_path_buf()) {
+        Ok(cwd) => resolve_export_path(arg, &cwd),
+        Err(e) => {
+            app.push_error(id, &e.to_string());
+            return;
+        }
+    };
     if dest.exists() {
         app.push_error(
             id,

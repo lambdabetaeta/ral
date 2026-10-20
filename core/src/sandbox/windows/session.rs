@@ -15,6 +15,13 @@
 //! equal spelling; profile names are unique by construction rather than
 //! content-hashed, since a collision would merge two projections' namespaces.
 //!
+//! A deny mints nothing and stamps nothing: Windows cannot take back what a
+//! capability's ACE admits (see `dacl`'s `deny` module), so an exclusion holds
+//! only where no grant reaches. [`confine`] carves each exclusion out of the
+//! allowances holding it ([`crate::sandbox::carve`]), refuses one that sits on
+//! or around an allowance, and proves at every launch that the token it builds
+//! reaches nothing beneath any of them.
+//!
 //! Nothing here reverts anything. Grant frames do not, because a
 //! worker may outlive its frame under the token it was born with; and
 //! [`teardown`] does not either, because a stamped ACE no live token names is
@@ -33,10 +40,11 @@ use windows_sys::Win32::Security::{PSID, SID_AND_ATTRIBUTES};
 use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
 
 use crate::capability::FsScope;
-use crate::path::{FrozenPath, RealPath};
+use crate::path::{Deny, FrozenPath, RealPath, shown};
 use crate::process::Launch;
 use crate::process::cancel::Scope;
 use crate::sandbox::Refusal;
+use crate::sandbox::carve::{self, EntryKind, Listing};
 use crate::sandbox::{FsRules, SandboxProjection};
 use crate::sync::LockExt as _;
 
@@ -48,7 +56,10 @@ use super::dacl::{self, DaclError, DaclManager, FrozenPin, GrantKind};
 /// capabilities accumulate per key and reach every later token minted under
 /// it, so two launches that differ only in a place never share one. `net` is
 /// absent on purpose: network authority rides per-spawn on capability SIDs,
-/// never stamped on disk, so it needs no SID of its own.
+/// never stamped on disk, so it needs no SID of its own. `deny` is there
+/// because an exclusion carves the allowances around it into other grants: a
+/// projection without it would mint the whole allowance's capability, which
+/// reaches whatever is later made at the excluded name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ProjectionKey {
     read: Vec<PathBuf>,
@@ -61,13 +72,11 @@ struct ProjectionKey {
 /// [`confine`] mints into every token it builds for this projection.
 struct ProjectionSandbox {
     profile: AppContainerProfile,
-    /// Allow grants only, keyed on the frozen real path: an object replaced
-    /// under that name loses the ACE that went with the old NTFS object, so a
-    /// memo hit on a stale entry silently skips the restamp. For rw and ro
-    /// that fails closed — the child simply cannot reach the new object. A
-    /// deny memoized the same way would fail *open*, so denies are never
-    /// memoized; see [`ensure_denies`]. The memo is consulted only after the
-    /// redirect check, never in place of it.
+    /// Keyed on the frozen real path: an object replaced under that name
+    /// loses the ACE that went with the old NTFS object, so a memo hit on a
+    /// stale entry silently skips the restamp, which fails closed — the child
+    /// simply cannot reach the new object. The memo is consulted only after
+    /// the redirect check, never in place of it.
     granted: HashSet<(PathBuf, GrantKind)>,
     /// In first-grant order, without repeats. A path the filters dropped —
     /// already covered by the well-known `AppContainer` SIDs, or not on disk —
@@ -192,12 +201,20 @@ fn profile_name(index: u32) -> String {
 /// `Unrestricted` projection asks for no capability at all and shares the one
 /// empty-key profile — the `AppContainer` is deny-by-default regardless.
 ///
-/// Every `deny_path` gets its own capability, minted into this projection's
-/// tokens and no others: an `AppContainer` token retains the `Everyone` SID and
-/// `ALL APPLICATION PACKAGES` grants are system-wide, so a path outside this
-/// projection's own grants is still reachable through whatever ambient grant
-/// the token already carries — and a deny that were ambient would subtract from
-/// every projection, not just this one.
+/// A `deny` path is never stamped: Windows cannot take back access a
+/// capability's ACE admits. So an allowance holding an exclusion is carved
+/// first, on the tree as it stands at this launch: granted as its existing
+/// entries less the excluded ones, down to each exclusion, every directory on
+/// the way granted only its own listing ([`GrantKind::List`]). An exclusion on
+/// or around an allowance, the program image included, cannot be carved and is
+/// refused ([`refuse_deny_meeting_grant`]), before anything is minted. What no
+/// grant of this projection then reaches an `AppContainer` token can still meet
+/// through the system-wide `ALL APPLICATION PACKAGES` grants, or a hard link
+/// carrying a granted file's ACE to a name beneath an exclusion. So once the
+/// token's capabilities are settled, [`dacl::ensure_unreachable`] asks the
+/// access check itself whether that token could open anything beneath each
+/// exclusion, and refuses the launch if it could. Every launch, never
+/// memoized: a check passed once says nothing of the tree now.
 #[allow(
     clippy::significant_drop_tightening,
     reason = "the session lock is deliberately held for the whole of `confine`: see the comment at the guard"
@@ -229,16 +246,29 @@ pub(crate) fn confine(
     // ALL APPLICATION PACKAGES grants.
     let rules = projection.fs.rules().cloned().unwrap_or_default();
     refuse_universal_prefix(&rules)?;
-    let (read, write) = (real_paths(&rules.read), real_paths(&rules.write));
-    let deny: Vec<PathBuf> = rules
-        .deny
+    let denied: Vec<RealPath> = rules.deny.iter().map(RealPath::frozen).collect();
+    let readwrite: Vec<RealPath> = rules.write.iter().map(real_path).collect();
+    let readonly: Vec<RealPath> = rules
+        .read
         .iter()
-        .map(|p| RealPath::frozen(p).as_path().to_path_buf())
+        .map(real_path)
+        .filter(|p| !readwrite.contains(p))
         .collect();
+    let readwrite = carve::carve(&readwrite, &denied, &mut listing)?;
+    let mut readonly = carve::carve(&readonly, &denied, &mut listing)?;
+    readonly.whole.retain(|p| !readwrite.whole.contains(p));
+    if let Some(image) = program_image
+        && !readwrite.whole.contains(image)
+        && !readonly.whole.contains(image)
+    {
+        readonly.whole.push(image.clone());
+    }
+    let granted: Vec<&RealPath> = readwrite.whole.iter().chain(&readonly.whole).collect();
+    refuse_deny_meeting_grant(&granted, &denied)?;
     let key = ProjectionKey {
-        read: read.clone(),
-        write: write.clone(),
-        deny: deny.clone(),
+        read: real_paths(&rules.read),
+        write: real_paths(&rules.write),
+        deny: denied.iter().map(|p| p.as_path().to_path_buf()).collect(),
     };
     sandbox.ensure_projection(&key)?;
     crate::dbg_trace!(
@@ -247,7 +277,7 @@ pub(crate) fn confine(
         t_confine.elapsed(),
         key.read.len(),
         key.write.len(),
-        key.deny.len(),
+        rules.deny.len(),
     );
     let SessionSandbox {
         network_caps,
@@ -256,18 +286,15 @@ pub(crate) fn confine(
         ..
     } = sandbox;
     let proj = projections.get_mut(&key).expect("projection ensured above");
-
-    let readwrite = write;
-    let mut readonly: Vec<PathBuf> = read
-        .into_iter()
-        .filter(|p| !readwrite.contains(p))
-        .collect();
-    if let Some(image) = program_image.map(|image| image.as_path().to_path_buf())
-        && !readwrite.contains(&image)
-        && !readonly.contains(&image)
-    {
-        readonly.push(image);
-    }
+    let paths = |region: Vec<RealPath>| -> Vec<PathBuf> {
+        region.iter().map(|p| p.as_path().to_path_buf()).collect()
+    };
+    let mut carved = readwrite.entries;
+    carved.extend(readonly.entries);
+    carved.sort();
+    carved.dedup();
+    let (readwrite, readonly, carved) =
+        (paths(readwrite.whole), paths(readonly.whole), paths(carved));
 
     // The redirect check comes first, before every filter and whatever the
     // memo remembers: a path granted at an earlier launch and since replaced
@@ -277,47 +304,42 @@ pub(crate) fn confine(
     let t_filter = std::time::Instant::now();
     let readwrite = dacl::pin_all(&readwrite, GrantKind::ReadWrite)?;
     let readonly = dacl::pin_all(&readonly, GrantKind::ReadOnly)?;
+    let carved = dacl::pin_all(&carved, GrantKind::List)?;
     #[cfg(debug_assertions)]
-    let (offered_rw, offered_ro) = (readwrite.len(), readonly.len());
+    let offered = (readwrite.len(), readonly.len(), carved.len());
     // Cheapest filter first: the memo, then the well-known-SID
     // effective-access check, which is a real `GetSecurityInfo` and DACL walk
     // per path.
     let readwrite = filter_out_granted(&proj.granted, readwrite, GrantKind::ReadWrite);
     let readonly = filter_out_granted(&proj.granted, readonly, GrantKind::ReadOnly);
+    let carved = filter_out_granted(&proj.granted, carved, GrantKind::List);
     let readwrite = dacl::needing_grant(readwrite, dacl::RW_MASK);
     let readonly = dacl::needing_grant(readonly, dacl::RO_MASK);
+    let carved = dacl::needing_grant(carved, dacl::RO_MASK);
     crate::dbg_trace!(
         "sandbox-win",
-        "confine: access filter kept rw {}/{}, ro {}/{} in {:?}",
+        "confine: access filter kept rw {}/{}, ro {}/{}, carved {}/{} in {:?}",
         readwrite.len(),
-        offered_rw,
+        offered.0,
         readonly.len(),
-        offered_ro,
+        offered.1,
+        carved.len(),
+        offered.2,
         t_filter.elapsed(),
     );
-
-    // Denies skip both the memo and the effective-access filter. The filter
-    // answers whether the `AppContainer` already *has* this access, which says
-    // nothing about whether subtracting it needs a stamp; the memo would
-    // answer for a path whose object may since have been replaced, and a deny
-    // that skips its restamp is gone. So every deny reaches
-    // `dacl::ensure_fs_grant`, whose witness pair — stamp store plus a probe of
-    // the live object's own DACL — is the sole authority for it, at one
-    // `GetNamedSecurityInfoW` per deny path per launch.
-    let deny = existing_paths(deny);
 
     // Each of these is a witness check on a path already stamped, and a whole
     // tree propagation on one that is not — once ever, for every session.
     #[cfg(debug_assertions)]
     let t_stamp = std::time::Instant::now();
     #[cfg(debug_assertions)]
-    let (kept_rw, kept_ro, kept_deny) = (readwrite.len(), readonly.len(), deny.len());
+    let (kept_rw, kept_ro, kept_ls) = (readwrite.len(), readonly.len(), carved.len());
     ensure_allows(proj, fs_cap_sids, readwrite, GrantKind::ReadWrite, cancel)?;
     ensure_allows(proj, fs_cap_sids, readonly, GrantKind::ReadOnly, cancel)?;
-    ensure_denies(proj, fs_cap_sids, deny, cancel)?;
+    ensure_allows(proj, fs_cap_sids, carved, GrantKind::List, cancel)?;
     crate::dbg_trace!(
         "sandbox-win",
-        "confine: ensured {kept_rw} rw + {kept_ro} ro + {kept_deny} deny capability ACEs in {:?} \
+        "confine: ensured {kept_rw} rw + {kept_ro} ro + {kept_ls} carved capability ACEs in {:?} \
          ({} capability/ies on this projection's tokens)",
         t_stamp.elapsed(),
         proj.fs_caps.len(),
@@ -339,6 +361,23 @@ pub(crate) fn confine(
             Attributes: SE_GROUP_ENABLED as u32,
         });
     }
+
+    // Against the very package and capabilities the spawn is handed, so what
+    // is checked is the token the child gets.
+    #[cfg(debug_assertions)]
+    let t_deny = std::time::Instant::now();
+    if !rules.deny.is_empty() {
+        let access = dacl::ContainerAccess::of(profile_sid, &capabilities)?;
+        for denied in &rules.deny {
+            dacl::ensure_unreachable(RealPath::frozen(denied).as_path(), &access, cancel)?;
+        }
+    }
+    crate::dbg_trace!(
+        "sandbox-win",
+        "confine: {} exclusion(s) proven unreachable in {:?}",
+        rules.deny.len(),
+        t_deny.elapsed(),
+    );
     launch.security_capabilities(profile_sid, &capabilities);
     crate::dbg_trace!("sandbox-win", "confine: total {:?}", t_confine.elapsed());
     Ok(())
@@ -393,26 +432,6 @@ fn ensure_allows(
     Ok(())
 }
 
-/// Ensure the denies. An exclusion was re-resolved when the region was built
-/// and is canonicalised here, the one place it meets the disk, and never
-/// memoized: the same staleness that costs an
-/// allow its access would restore access the projection refused.
-fn ensure_denies(
-    proj: &mut ProjectionSandbox,
-    fs_cap_sids: &mut HashMap<String, FsCap>,
-    paths: Vec<PathBuf>,
-    cancel: &Scope,
-) -> Result<(), Refusal> {
-    for p in paths {
-        let canonical = dacl::canonicalize_grant_target(&p)?;
-        let name = dacl::fs_capability_name(&canonical, GrantKind::Deny);
-        let cap = derive(fs_cap_sids, &name)?;
-        dacl::ensure_fs_grant(&canonical, &cap.sid_string, GrantKind::Deny, cancel)?;
-        remember(proj, name);
-    }
-    Ok(())
-}
-
 /// Refuse "every path, less exclusions". The universal prefix means every
 /// path on every volume, and an `AppContainer` reaches only what is stamped for
 /// it; stamped as a path it would narrow to one drive and stamp that whole.
@@ -447,15 +466,89 @@ fn refuse_universal_prefix(rules: &FsRules) -> Result<(), Refusal> {
     )))
 }
 
-/// A region's frozen real paths, which the stamps and capability names key
-/// on, never re-resolved.
+/// Refuse what carving leaves: an exclusion meeting an allowance granted
+/// whole — on it or around it, as only an allowance equal to or inside an
+/// exclusion, or the program image, can be once carved. A Windows sandbox
+/// reaches everything beneath a granted folder, and nothing can take that
+/// access back, so such a pair is a promise the kernel does not keep. Run
+/// before anything is minted or stamped.
+///
+/// Judged on the frozen real paths the stamps key on, under the deny reading
+/// of names, which takes every spelling a filesystem could match as the same:
+/// a near miss is refused, never let through.
+fn refuse_deny_meeting_grant(granted: &[&RealPath], denied: &[RealPath]) -> Result<(), Refusal> {
+    for d in denied {
+        for g in granted {
+            if g.within::<Deny>(d) || d.within::<Deny>(g) {
+                let (d, g) = (shown(d.as_path()), shown(g.as_path()));
+                return Err(Refusal::Unavailable(format!(
+                    "this command is allowed '{g}' and '{d}' is excluded, which Windows \
+                     cannot enforce together: a sandbox can be kept out of what lies beneath \
+                     an allowance, but not out of the allowance itself or what holds it. \
+                     Allow paths outside '{d}', run a program outside it, or drop the \
+                     exclusion"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The listing [`carve::carve`] asks for, read without following links: a name
+/// surrogate (a symlink, a junction) is a link, any other reparse point (a
+/// cloud placeholder) the object it is.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:carve-list] Lists a directory an allowance is carved around, to grant its entries less the excluded ones. Sandbox setup, not model data I/O."
+)]
+fn listing(dir: &RealPath) -> Result<Listing, Refusal> {
+    let unlisted = |e: std::io::Error| {
+        Refusal::Launch(format!(
+            "sandbox: cannot list '{}' to grant around an exclusion in it: {e}",
+            shown(dir.as_path())
+        ))
+    };
+    let entries = match std::fs::read_dir(dir.as_path()) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Listing::Missing),
+        Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => {
+            return Ok(Listing::NotDirectory);
+        }
+        Err(e) => return Err(unlisted(e)),
+    };
+    entries
+        .map(|entry| {
+            let entry = entry.map_err(unlisted)?;
+            let kind = entry.file_type().map_err(unlisted)?;
+            Ok(carve::Entry {
+                name: entry.file_name(),
+                kind: if kind.is_symlink() {
+                    EntryKind::Link
+                } else if kind.is_dir() {
+                    EntryKind::Directory
+                } else {
+                    EntryKind::Other
+                },
+            })
+        })
+        .collect::<Result<_, _>>()
+        .map(Listing::Directory)
+}
+
+/// A scope's frozen real path, which the stamps and capability names key on,
+/// never re-resolved.
+fn real_path(scope: &FsScope) -> RealPath {
+    match scope {
+        FsScope::Prefix(p) => RealPath::frozen(p),
+        FsScope::Place(r) => r.clone(),
+    }
+}
+
+/// A region's frozen real paths.
 fn real_paths(region: &[FsScope]) -> Vec<PathBuf> {
     region
         .iter()
-        .map(|scope| match scope {
-            FsScope::Prefix(p) => RealPath::frozen(p).as_path().to_path_buf(),
-            FsScope::Place(r) => r.as_path().to_path_buf(),
-        })
+        .map(|scope| real_path(scope).as_path().to_path_buf())
         .collect()
 }
 
@@ -528,15 +621,6 @@ pub(crate) fn teardown() {
     );
 }
 
-/// Drop paths that are not on disk: `WRITE_DAC` needs an object to apply to.
-/// Where the Linux backend can mask an absent deny path with an empty tmpfs,
-/// Windows has no "deny something that might later exist" primitive, so an
-/// absent deny is simply skipped — a path the child creates later under a
-/// granted prefix falls within that grant's own authority anyway.
-fn existing_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
-    paths.into_iter().filter(|p| p.exists()).collect()
-}
-
 /// The pure half of the grant memo, free-standing so the tests below can
 /// exercise it without a real `AppContainer` profile or DACL manager.
 fn filter_out_granted<P: AsRef<Path>>(
@@ -556,12 +640,14 @@ fn io_refusal(context: &str, e: &std::io::Error) -> Refusal {
 
 /// A cancel mid-stamp is not a sandbox failure, so it stays a cancellation
 /// and never reads as `sandbox: fs grant failed`; nor does a redirected
-/// allowance, which says what it is.
+/// allowance, which says what it is; and an exclusion the token could still
+/// reach is confinement this host cannot establish.
 impl From<DaclError> for Refusal {
     fn from(e: DaclError) -> Self {
         match e {
             DaclError::Cancelled(cause) => Self::Cancelled(cause),
             e @ DaclError::Redirected { .. } => Self::Launch(e.to_string()),
+            e @ DaclError::Reachable { .. } => Self::Unavailable(e.to_string()),
             e => Self::Launch(format!("sandbox: fs grant failed: {e}")),
         }
     }

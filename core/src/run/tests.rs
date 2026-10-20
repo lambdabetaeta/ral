@@ -177,7 +177,10 @@ fn an_aside_hook_leaves_the_session_where_it_was() {
         (crate::types::DefaultPolicy::denied().aside(), false),
     ] {
         let mut shell = crate::test_helper::core_shell();
-        shell.seed_cwd(dir.path().to_path_buf());
+        shell.seed_cwd(
+            crate::path::CwdPath::new(dir.path().to_path_buf())
+                .expect("a tempdir is a working directory"),
+        );
         let start = shell.cwd();
         let name = crate::types::HookName::session("buffer-change");
         let ending = run_block_hook(&mut shell, name, "{ cd .. }", policy);
@@ -279,7 +282,7 @@ fn assert_nursery_emptied(panic: bool) {
             "run-door test: deliberate panic after parking a fork"
         );
     });
-    let mut shell = Shell::root(runtime.into());
+    let mut shell = Shell::root(runtime.into(), crate::test_helper::process_cwd());
 
     let _ = shell.run(RunRequest {
         fork: Some(crate::types::Fork::Park(nursery.clone())),
@@ -388,7 +391,7 @@ fn an_interrupt_mid_run_unwinds_the_eval() {
         "interrupt",
         strike(crate::process::CancelCause::Interrupted),
     );
-    let mut shell = Shell::root(runtime.into());
+    let mut shell = Shell::root(runtime.into(), crate::test_helper::process_cwd());
     let ending = shell
         .run(Run::captured(
             "interrupt\nlet rpv = 42\nreturn $rpv",
@@ -422,7 +425,7 @@ fn a_try_handler_cannot_settle_a_cancelled_run() {
         "interrupt",
         strike(crate::process::CancelCause::Interrupted),
     );
-    let mut shell = Shell::root(runtime.into());
+    let mut shell = Shell::root(runtime.into(), crate::test_helper::process_cwd());
     let ending = shell
         .run(Run::captured(
             "try { interrupt\nlet x = ()\nreturn $x } { |_| return () }",
@@ -470,7 +473,7 @@ fn an_aside_cannot_absorb_its_callers_interrupt() {
         let ending = report.expect_ran();
         *status.lock().unwrap() = Some(ending.status());
     });
-    let mut shell = Shell::root(runtime.into());
+    let mut shell = Shell::root(runtime.into(), crate::test_helper::process_cwd());
     *aside.lock().unwrap() = Some(shell.join_session());
     let ending = shell
         .run(Run::captured(
@@ -500,7 +503,7 @@ fn an_aside_unwinds_on_an_interrupt_raised_while_it_runs() {
         "interrupt",
         strike(crate::process::CancelCause::Interrupted),
     );
-    let shell = Shell::root(runtime.into());
+    let shell = Shell::root(runtime.into(), crate::test_helper::process_cwd());
     let mut aside = shell.join_session();
     let ending = aside
         .run(Run::captured(
@@ -558,7 +561,7 @@ fn a_session_is_deaf_to_the_ambient_causes() {
         crate::process::request_interrupt();
         crate::process::request_root_cancel(crate::process::CancelCause::Aborted);
     });
-    let mut shell = Shell::root(runtime.into());
+    let mut shell = Shell::root(runtime.into(), crate::test_helper::process_cwd());
     let report = shell.run(Run::captured(
         "raise\nlet rpv = 42\nreturn $rpv",
         test_origin(),
@@ -583,7 +586,7 @@ fn a_walled_run_ends_stopped_timed_out() {
         "expire",
         strike(crate::process::CancelCause::TimedOut),
     );
-    let mut shell = Shell::root(runtime.into());
+    let mut shell = Shell::root(runtime.into(), crate::test_helper::process_cwd());
     let ending = shell
         .run(Run {
             wall: Some(std::time::Duration::from_secs(30)),
@@ -702,7 +705,10 @@ fn panicking_shell() -> Shell {
         statics: vec![PANIC_BUILTINS],
         ..crate::HostSurface::default()
     }
-    .shell(crate::terminal::TerminalState::default())
+    .shell(
+        crate::terminal::TerminalState::default(),
+        crate::test_helper::process_cwd(),
+    )
 }
 
 /// Rollback is to the run's entry, not to session birth: the panicking run's
@@ -772,7 +778,7 @@ fn desk_handler_panic_is_caught_at_the_door() {
     install_act(&mut runtime, "enquire", |mooring, shell| {
         let _ = shell.enquire(mooring, crate::first_order::FOValue::Unit);
     });
-    let mut shell = Shell::root(runtime.into());
+    let mut shell = Shell::root(runtime.into(), crate::test_helper::process_cwd());
 
     match shell.run(RunRequest {
         desk: Some(Arc::new(PanickingDesk)),
@@ -867,7 +873,10 @@ fn narrowing_shell() -> Shell {
         captured: vec![entries],
         ..crate::HostSurface::default()
     }
-    .shell(crate::terminal::TerminalState::default())
+    .shell(
+        crate::terminal::TerminalState::default(),
+        crate::test_helper::process_cwd(),
+    )
 }
 
 /// Run `narrow`, then assert its session ceiling alone outlived it and
@@ -1062,7 +1071,7 @@ fn a_panicked_dispatch_reports_faulted_and_leaves_the_next_trail_empty() {
 
 /// A run's report over a runtime, its ending and captured stdout.
 fn ran(runtime: crate::Runtime, run: Run) -> (Ending, String) {
-    match Shell::root(runtime.into()).run(run) {
+    match Shell::root(runtime.into(), crate::test_helper::process_cwd()).run(run) {
         RunReport::Ran {
             ending, captured, ..
         } => {
@@ -1354,7 +1363,7 @@ fn a_stage_panic_stops_its_siblings_and_is_reraised() {
     let mut runtime = crate::test_helper::core_runtime();
     install_act(&mut runtime, "boom", |_, _| panic!("stage panic"));
     let started = std::time::Instant::now();
-    let report = Shell::root(runtime.into()).run(Run::captured(
+    let report = Shell::root(runtime.into(), crate::test_helper::process_cwd()).run(Run::captured(
         "!{ each { |i| echo $i } !{range 1 1000000} } | !{ boom }",
         test_origin(),
     ));

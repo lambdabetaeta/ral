@@ -59,7 +59,9 @@ pub fn for_invocation(
     // The loader evaluates ral source, so it needs a Shell.  This one is
     // scaffolding: the caller builds the session's real shell separately, from
     // the frozen GrantStack returned here.
-    let mut load_shell = ral_core::HostSurface::default().shell(TerminalState::default());
+    let anchor = ral_core::path::CwdPath::new(cwd.to_path_buf()).map_err(|e| e.to_string())?;
+    let mut load_shell =
+        ral_core::HostSurface::default().shell(TerminalState::default(), anchor.clone());
 
     let ctx = FreezeCtx {
         home: host::home(),
@@ -68,7 +70,7 @@ pub fn for_invocation(
 
     let mut ceiling: Capabilities = resolve_base(base_name, &ctx)?;
     if let Some(path) = extension {
-        let abs = absolute_in(&ctx.cwd, path);
+        let abs = absolute_in(&anchor, path);
         ceiling = ceiling.extend(load_fragment_ral(
             &ral_core::types::Mooring::adrift(),
             &mut load_shell,
@@ -83,7 +85,7 @@ pub fn for_invocation(
 
     let restricts: Vec<PathBuf> = restrict_files
         .iter()
-        .map(|p| absolute_in(&ctx.cwd, p))
+        .map(|p| absolute_in(&anchor, p))
         .collect();
     for path in &restricts {
         stack.push(load_capabilities_ral(
@@ -229,8 +231,8 @@ mod tests {
         let Invocation { stack, .. } =
             for_invocation(&cwd, "dangerous", None, std::slice::from_ref(&path)).unwrap();
 
-        let resolver = ral_core::path::Resolver::shell_less();
-        let rp = resolver.anchor(&path);
+        let here = ral_core::test_helper::process_cwd();
+        let rp = ral_core::path::Resolver::at(None, &here).anchor(&path);
         assert!(
             !stack.admits_fs(&ral_core::capability::FsOp::Write, &rp),
             "restrict file path should be write-denied"

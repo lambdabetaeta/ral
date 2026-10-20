@@ -368,7 +368,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     fn prelude_shell() -> Shell {
-        Shell::root(crate::repl::prelude_runtime().into())
+        Shell::root(
+            crate::repl::prelude_runtime().into(),
+            ral_core::test_helper::process_cwd(),
+        )
     }
 
     fn rc_map(shell: &mut Shell, rc_src: &str) -> Map {

@@ -5,7 +5,7 @@ status: active
 # Fs grants are path-derived capability SIDs, stamped once ever
 
 **A Windows fs grant is keyed by the *path* it covers, not by the container that
-consumes it: each `(canonical path, kind)` with kind ∈ {rw, ro, deny} derives a
+consumes it: each `(canonical path, kind)` with kind ∈ {rw, ro, ls} derives a
 deterministic capability SID whose ACE is stamped once, ever, and never
 reverted — so a spawn's kernel-enforced reach is the set of capability SIDs its
 token carries, and the tree walk is paid once per path rather than once per
@@ -20,6 +20,97 @@ Recovery reclaims profile registrations only; its ledger requires the owner's
 creation time and profile list. Persistent capability stamps remain in place.
 The implementation is split into `dacl/{mod,stamp,ledger,acl,mutex}.rs`, with
 owned descriptors and borrowed ACEs for security scans.
+
+**2026-10-20 amendment: a capability cannot be denied.** The deny half of this
+design never held. Windows CI showed `D\open.txt` — a file in a read-granted
+tree, beneath a directory carrying the explicit inheritable deny ACE for its
+`ral.fs.deny.*` capability ahead of the inherited allow — still read by the
+confined child, while the layout tests on the same run confirmed the ACEs were
+exactly as designed. The cause is the access check itself: its `AppContainer`
+pass matches an *allow* ACE against the token's package and capability SIDs,
+but a *deny* ACE only against the token's ordinary groups (and, in the
+restricted pass, its restricting SIDs). Forshaw, *Windows Security Internals*
+(No Starch, 2024), ch. 7; in the reference implementation accompanying it
+(`chapter_7/chapter_7_access_check_impl.psm1` in
+`github.com/tyranid/windows-security-internals`) a `Denied` ACE is tested with
+`Test-NtTokenGroup -DenyOnly -Restricted:$Restricted`, never `-Capability`. A
+deny ACE naming a capability is inert, and no ACE can take back what a
+capability's allow admits. Hence:
+
+- `GrantKind::Deny`, the `ral.fs.deny.*` capabilities, `DENY_MASK`, the walk
+  that reasserted deny ACEs below protected and explicit DACLs, and its
+  `deny-tree` witness are removed. Deny ACEs stamped by earlier builds name
+  capabilities no token carries again, and are inert.
+- **An exclusion inside an allowance is carved out of it.** Before anything is
+  minted, `session::confine` hands its read and write allowances (prefixes
+  and run places alike) and its exclusions, as frozen real paths, to
+  `sandbox::carve::carve`, a pure planner over an injected directory lister.
+  An allowance with an exclusion strictly beneath it is replaced by grants on
+  its entries as they exist at this launch, less the excluded ones, recursing
+  down every entry that leads to an exclusion: `xdg-config` less
+  `xdg-config/gh` becomes every entry of `xdg-config` but `gh`; `a` less
+  `a/b/c` becomes every entry of `a` but `b`, and every entry of `b` but `c`.
+  Entries are matched under the deny reading of names, so an excluded name is
+  withheld under every spelling a filesystem could take for it. Each directory
+  on the way is granted only its own listing: a new kind, `GrantKind::List`
+  (`ral.fs.ls.*`), the read-only rights on the directory object by an ACE with
+  no inheritance flags, so the child can enter it, traverse it and list its
+  names and reaches no entry through it. That is what fails closed:
+  - an entry made in a carved directory after the carving inherits only that
+    directory's inheritable ACEs, and no grant of the projection is one of
+    them, so it is unreadable for that launch (the next launch lists it and
+    grants it, unless excluded);
+  - an excluded name absent at launch needs nothing carved, as there is
+    nothing to protect, and is covered all the same: if it is made during the
+    run it is such an entry, inheriting nothing granted. This is the case that
+    made refusal look necessary; the carved parent's grant is exactly the one
+    thing that does not reach it;
+  - an absent directory on the way to an exclusion is not granted, since a
+    grant there would reach what is made in it;
+  - a link among the entries (a name surrogate: symlink, junction) is never
+    granted and never followed — what it leads to is another object, granted
+    or not under its own name — and every planned path is then pinned by
+    `FrozenPin`, which refuses one turned into a link since the listing;
+  - an entry that is not a directory yet has an exclusion beneath it is
+    withheld, since nothing can be carved from it;
+  - the deny paths are back in the projection key: a projection without them
+    mints the whole allowance's capability, which would reach the excluded name,
+    so the two must never share a token.
+  The cost is the carving's own: in a carved directory nothing can be created
+  or renamed into place, and its entries' names (and the metadata a listing
+  shows) are visible, as an exclusion's name is on Linux.
+- What carving cannot answer is refused (`refuse_deny_meeting_grant`): an
+  exclusion on an allowance or around it, the program image included, before
+  anything is minted or stamped.
+- An exclusion apart from every allowance needs no ACE, and after carving every
+  exclusion is apart: no grant of the projection reaches it. The token can still meet an `ALL APPLICATION PACKAGES`
+  grant, an explicit ACE on a descendant, or a hard link carrying a granted
+  file's ACE to a name inside the exclusion. So at every launch, once the
+  token's capabilities are settled, `dacl::ensure_unreachable` walks each
+  exclusion on disk and runs `AuthzAccessCheck` for `MAXIMUM_ALLOWED` on every
+  object beneath it, in an `AuthZ` context built from ral's own token — the one
+  `CreateProcessW` derives the child's from — set to the child's package SID
+  and exactly its capability SIDs (`AuthzSetAppContainerInformation`). Any
+  right granted refuses the launch and names the object. The context keeps
+  ral's integrity level where the child runs at `Low`; the mandatory check only
+  removes access, so the context is granted at least what the child is.
+  Reparse points are checked as themselves and not followed: what they lead to
+  is another object, judged under its own name. ral must be able to read every
+  descriptor and list every directory beneath an exclusion, or the launch is
+  refused. An exclusion not on disk passes: if created during the run, it
+  inherits from a parent no grant reaches — an ambient grant on that parent is
+  the residual.
+- **Future work: denies through a restricted token.** The restricted pass does
+  honour a deny ACE, against the token's restricting SIDs — Codex's Windows
+  sandbox stamps deny-write ACEs for its restricting capability SID in exactly
+  that pass
+  ([[decisions/260714_ace-free-fs-confinement|ace-free-fs-confinement]]). A child
+  token restricted to the user's SID plus one restricting SID per exclusion,
+  that exclusion's deny ACE stamped for it, and then made a `LowBox` token,
+  could carry an exclusion inside a grant. Unverified, and to be measured on
+  Windows before any plan: whether a `LowBox` token can be built on a
+  restricted one and still launch through `SECURITY_CAPABILITIES`, and how the
+  restricted pass composes with the capability grants.
 
 ## Context
 
@@ -53,7 +144,7 @@ Split the two: derive the SID from the path, and let the token select.
   folding buys nothing; and in an NTFS case-sensitive directory it would merge
   two genuinely distinct names into one authority. The hash therefore
   distinguishes what the filesystem distinguishes.
-- **Stamp once, never revert.** `dacl::ensure_fs_grant` stamps that SID's ACE
+- **Stamp once, never revert.** `dacl::ensure_frozen_grant` stamps that SID's ACE
   and leaves it. Persistence is safe because a capability SID is evaluated only
   in the *AppContainer pass* of the Windows access check, whose result
   **intersects** the normal user pass: an ACE that no live token names is inert,
@@ -68,24 +159,14 @@ Split the two: derive the SID from the path, and let the token select.
   leaves no witness, so the next
   grant re-stamps (idempotent) and a child that runs in the interim fails
   closed.
-- **A directory deny also walks descendants.** Protected DACLs do not inherit
-  it; explicit allows on unprotected descendants can precede it. The walk
-  stamps the same deny explicitly at every protected or explicit ACL boundary,
-  independently of which allow SIDs a particular token holds. Protection stays
-  set, ordinary permissions stay unchanged, and reparse points are not followed.
-  A busy, unreadable or unmodifiable descendant refuses the launch by name.
-  A null DACL is refused too: replacing its unrestricted access with a
-  deny-only DACL would also remove the host user's ordinary access.
-  The `deny-tree` completion key witnesses both the walk and root propagation;
-  earlier `deny` keys cannot stand in for it. Each entry is a cancellation
-  point, though Win32's propagation itself is not interruptible.
+- **A deny stamps nothing** (2026-10-20 amendment, above). An exclusion is
+  carved out of the allowances around it, refused where it sits on or around
+  one, and proven unreachable by the launch's own token at every launch.
 - **The token is the projection.** A spawn's kernel-enforced reach is exactly
   the capability SIDs `session::confine` mints into its
   `SECURITY_CAPABILITIES`, alongside the network capabilities as before.
   Attenuation still shrinks-only: a narrowed projection's token simply lacks the
-  wider paths' capabilities. A `deny_path` becomes a per-path *deny* capability
-  the token opts into, so projection-specific denies now coexist on a shared
-  path instead of one projection's deny bleeding onto another's.
+  wider paths' capabilities.
 - **Profiles stay, stripped of fs authority.** The per-projection AppContainer
   profile remains for what only it provides — the deny-by-default LowBox token
   and named-object namespace separation. `DaclManager` records profile
@@ -96,10 +177,10 @@ Split the two: derive the SID from the path, and let the token select.
   mandatory-integrity check *before* the AppContainer pass, and a directory
   with no explicit label defaults to `Medium` with an implicit no-write-up
   policy — which refuses a `Low`-IL `LowBox` child's *create* regardless of
-  what the DACL grants. `dacl::ensure_fs_grant` stamps a
+  what the DACL grants. `dacl::ensure_frozen_grant` stamps a
   `SYSTEM_MANDATORY_LABEL_ACE` at `S-1-16-4096` (`Low`) alongside the
   capability ACE, witnessed and memoized the same way, under its own stamp-key
-  namespace. Read-only and deny grants need no label, since `Low` already
+  namespace. Read-only grants need no label, since `Low` already
   reads `Medium` under the default policy.
 - **The label inherits to containers only, never to files.** Windows caps a
   new process at the label on its image file, so an object-inheriting `Low`
@@ -147,9 +228,10 @@ Split the two: derive the SID from the path, and let the token select.
   failed the DACL pass still does. Both mutations are required together; the
   capability ACE alone is not sufficient, which is what the open-work item
   below discovered.
-- **Denies are compositional.** Because a deny is its own capability rather than
-  a stamp on a shared path, two projections may grant and deny the same path
-  concurrently without one clobbering the other.
+- **A deny holds only where no grant reaches** (2026-10-20 amendment). This
+  item once read *denies are compositional*, on the strength of each deny being
+  its own capability; a capability's deny ACE is inert, so there was nothing
+  to compose.
 - **DACL growth on a hot root is bounded by construction:** at most three
   capability ACEs per distinct prefix, ever — one per kind — however many
   projections or sessions consume it.
@@ -176,24 +258,15 @@ load-bearing caveat of the design, accepted explicitly:
   rw-tree A into ro-tree B is still writable through `cap(A)`, though B grants
   only reads. A hard link across differently-granted prefixes is the same fact
   spelled differently — one object, several names, one descriptor.
-- **A deny walk witnesses the tree it inspected.** Its cached completion and
-  root ACE probe do not detect a protected descendant introduced afterwards,
-  a replaced descendant, or a later explicit allow. These can restore access
-  without changing the root's DACL. The walk closes the pre-existing ACL holes;
-  it does not provide continuous enforcement against this drift.
-- **The per-session memo may not speak for a deny.** `session::confine` keeps a
+- **The per-session memo speaks only for allows.** `session::confine` keeps a
   per-projection memo of `(path-as-spelled, kind)` pairs it has already ensured,
   to spare repeat launches even the witness check. Because it keys on the name
-  rather than the object, a replacement under that name — any editor that saves
-  by write-tmp-then-rename, inheriting allow from an rw-granted parent and
-  nothing else — leaves the memo satisfied and the new object unstamped. For an
-  allow grant that is the fail-closed drift above; for a deny it is fail-open,
-  and it needs no drift in the granted tree at all, only a save. **Denies are
-  therefore never memoized**: each reaches `ensure_fs_grant`, whose own two
-  witnesses probe the live object, at one `GetNamedSecurityInfoW` per deny path
-  per launch. Keying the memo on file id and volume serial instead would fix the
-  same hole for all three kinds, at a stat per path — worth doing when the memo's
-  savings are measured to matter.
+  rather than the object, a replacement under that name leaves the memo
+  satisfied and the new object unstamped: the fail-closed drift above. Keying
+  the memo on file id and volume serial instead would close it, at a stat per
+  path — worth doing when the memo's savings are measured to matter. An
+  exclusion is never memoized: its proof is the access check run on the live
+  tree at every launch.
 - **What changed is duration, not kind.** Both drifts exist under the
   session-scoped design too — the rename semantics are the OS's, not ral's — but
   restore-at-teardown bounded the fail-open one to a single session. Persistence
@@ -220,23 +293,28 @@ whole matrix below.
 Remaining validation:
 
 - no-capability, read-only and read-write LowBox arms across reads and writes;
-- `session::tests::confined_child_denies_protected_and_explicit_descendants`:
-  positive reads before denial, ordinary inheritance, protected directories
-  and files with copied allows, nested protection, a protected subtree with
-  inherited access removed, an explicit `ALL APPLICATION PACKAGES` allow on
-  the actual file read, and an unrestricted-by-this-deny token still reading
-  after the stamp. The test is implemented; Windows execution is pending;
+- `session::tests::a_deny_inside_a_grant_is_carved_out`: reads through
+  ordinary inheritance, protected directories and files with copied allows,
+  nested protection and an explicit `ALL APPLICATION PACKAGES` allow, all
+  readable under the whole grant; with `D` excluded, the launch refused while
+  the `ALL APPLICATION PACKAGES` entry stands, and once it goes every shape
+  beneath `D` dark and `A`'s other entries readable. Its predecessor's failure
+  on Windows CI is what the 2026-10-20 amendment records;
+- `session::tests::an_xdg_config_style_grant_is_carved_and_launches`: the
+  carved directory as working directory, the excluded entry dark, siblings
+  readable, and an entry made after carving, and an excluded name absent at
+  launch made after it, both unreachable;
+- `sandbox::carve::tests`, on every host: the plan itself;
+- `session::tests::a_deny_apart_from_every_grant_launches_and_stays_dark` and
+  `a_deny_the_token_reaches_anyway_is_refused`: the access-check gate on a dark
+  exclusion, an `ALL APPLICATION PACKAGES` descendant and a hard link to a
+  granted file. Windows execution is pending;
 - attenuation: a wide token and a narrowed token over the same tree;
 - a LowBox child spawning a descendant with a capability it does not itself
   hold. Nested AppContainer capabilities are *expected* to be subset-only —
   verify it rather than assume it, since the whole shrinks-only argument leans
   on it;
 - reparse points (junctions, symlinks) across granted prefixes;
-- `dacl::deny_tests`: preservation of DACL protection and deny ordering,
-  migration of root-only stamps, failure and retry after a root is recreated,
-  refusal of null DACLs without changing ordinary access, and a junction whose
-  target must receive no deny. Windows execution is
-  pending;
 - DACL growth on hot roots (expected ≤3 capability ACEs per distinct prefix);
 - token capability-array size limits, on a projection with many prefixes.
 
@@ -251,5 +329,6 @@ Remaining validation:
 [[design/grant|grant]], [[design/two-enforcers|two-enforcers]].
 
 Cite: `core/src/sandbox/windows/{dacl,session,appcontainer}.rs`
-(`fs_capability_name`, `ensure_fs_grant`, `confine`, `teardown`,
-`boot_recover`); `core/src/sandbox/launch.rs`.
+(`fs_capability_name`, `ensure_frozen_grant`, `ensure_unreachable`, `confine`,
+`refuse_deny_meeting_grant`, `teardown`, `boot_recover`);
+`core/src/sandbox/carve.rs` (`carve`); `core/src/sandbox/launch.rs`.

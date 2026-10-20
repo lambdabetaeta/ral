@@ -19,8 +19,8 @@ fn stack(fs: FsPolicy) -> GrantStack {
 }
 
 fn admits_read(grants: &GrantStack, path: &std::path::Path) -> bool {
-    let resolver = Resolver::shell_less();
-    let rp = resolver.anchor(path);
+    let cwd = crate::test_helper::process_cwd();
+    let rp = Resolver::at(None, &cwd).anchor(path);
     grants.admits_fs(&FsOp::Read, &rp)
 }
 
@@ -144,8 +144,7 @@ mod words {
     use crate::types::Context;
 
     fn ctx(layers: impl IntoIterator<Item = Capabilities>) -> Context {
-        let mut ctx = Context::default();
-        ctx.grants = GrantStack::root();
+        let mut ctx = Context::under_grants(GrantStack::root());
         layers.into_iter().for_each(|l| ctx.grants.push(l));
         ctx
     }
@@ -313,8 +312,8 @@ fn a_case_variant_spelling_meets_the_deny() {
         deny_paths: vec![FrozenPath::from_surface(&secret)],
         ..FsPolicy::default()
     });
-    let resolver = Resolver::shell_less();
-    let rp = resolver.anchor(&root.join("SECRET/key"));
+    let cwd = crate::test_helper::process_cwd();
+    let rp = Resolver::at(None, &cwd).anchor(&root.join("SECRET/key"));
     let located = walk(&rp, Leaf::Resolve).unwrap();
     assert_eq!(located.real(), secret.join("key"));
     assert!(!admits_read(&grants, located.real()));

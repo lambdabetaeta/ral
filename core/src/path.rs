@@ -46,7 +46,7 @@ pub use show::shown;
 pub use slug::project_slug;
 pub use tilde::abbreviate_home;
 
-pub use forms::{FrozenPath, LexicalPath};
+pub use forms::{CwdPath, FrozenPath, LexicalPath, NotACwd};
 pub use git::work_tree_chain;
 pub use identity::{Allow, Deny, Polarity};
 pub(crate) use lex::proper_ancestors;

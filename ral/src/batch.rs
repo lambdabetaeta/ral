@@ -164,7 +164,13 @@ pub(crate) fn run_source(
     } else {
         RequestedTerminalAccess::Denied
     };
-    let attach = local_attach(BATCH, terminal, BatchConfig { args: script_args }.encode());
+    let attach = match local_attach(BATCH, terminal, BatchConfig { args: script_args }.encode()) {
+        Ok(attach) => attach,
+        Err(why) => {
+            errln!("ral: {why}");
+            return ExitCode::from(2);
+        }
+    };
     let transport = match IdentityTransport::boot(&INSTALLERS, &attach) {
         Ok(transport) => transport,
         Err(severed) => {

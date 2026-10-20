@@ -9,8 +9,8 @@ anchors: [pinned_dirs, build_profile, DenyMask, Binds]
 **A `deny` must survive the filesystem moving around it, not just name a path to
 refuse.** [[design/grant|grant]] states the invariant: no confined child can
 make a denied path's contents reachable under a name the deny does not cover.
-This page says how each platform keeps it, and names the one case Linux and
-Windows cannot keep. It is the deny half of
+This page says how each platform keeps it, and names the one case Linux
+cannot keep. It is the deny half of
 [[internals/capability-enforcement|capability-enforcement]].
 
 ## The threat is an ancestor
@@ -90,7 +90,7 @@ errno came back.
 
 ## A name that does not exist yet
 
-**On Linux and Windows, a deny of a name that does not exist, inside a
+**On Linux, a deny of a name that does not exist, inside a
 writable prefix, is held by ral's own guard alone. A spawned program can create
 that name.** macOS holds it in full. The case is common: a grant that writes a
 whole repo and denies `.env`, run on a fresh checkout with no `.env`.
@@ -115,8 +115,16 @@ So `DenyMask::over` gives an absent name nothing (`LeftAbsent`).
   creation of the name, under every spelling
   ([[internals/path-judgment|path-judgment]]). It cannot see what a spawned
   program does.
-- **Windows has the same gap for the same reason.** An ACE attaches to an
-  object, just as a mount needs a mountpoint, and an absent name has neither.
+- **Windows carves the grant instead, and holds it.** A Windows sandbox cannot
+  have access taken away beneath a folder it is granted, absent name or
+  present: the `AppContainer` access check ignores a deny ACE naming a
+  capability. So an allowance holding an exclusion is granted as its existing
+  entries less the excluded ones, and each directory on the way only its own
+  listing, by an ACE nothing inherits. A name made there during the launch,
+  the excluded one included, inherits nothing granted and stays unreadable;
+  the cost is that nothing can be created in a carved directory at all
+  ([[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]],
+  amendment of 2026-10-20).
 - **macOS does not.** Seatbelt's rules are negative and range over names, not
   objects, so it refuses the creation
   (`capabilities::seatbelt_holds_an_absent_deny_inside_a_write_prefix`).

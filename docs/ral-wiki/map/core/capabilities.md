@@ -566,12 +566,12 @@ device for `net` to govern; the in-process guards apply unchanged
   Ported units retain their MXC provenance.
 
 The Windows backend is **path-keyed**: each `(canonical path, kind)` grant —
-kind ∈ {rw, ro, deny} — derives a deterministic capability name
+kind ∈ {rw, ro, ls} — derives a deterministic capability name
 `ral.fs.<kind>.<128-bit-truncated SHA-256 of the canonical path>` — hashed as-is,
 never case-folded, so a case-sensitive directory's two distinct names cannot
 merge into one authority — and thence a capability SID via
 `DeriveCapabilitySidsFromName` (`dacl::fs_capability_name`).
-`dacl::ensure_fs_grant` stamps that SID's
+`dacl::ensure_frozen_grant` stamps that SID's
 inheritable ACE once and never reverts it. **A read-write grant is two
 permanent mutations, and neither witnesses the other**: the mandatory-integrity
 check runs before the `AppContainer` pass, and an unlabeled object defaults to
@@ -597,14 +597,25 @@ Within that shape: an AppContainer profile is still minted per *distinct fs
 projection* (`SessionSandbox` maps `bind_spec` identity to profile) for the
 deny-by-default token and named-object namespace separation, carrying no fs
 authority, and `DaclManager` is the profile ledger — teardown deletes profiles
-but restores no ACEs; a `deny_paths` entry is its own per-path deny capability
-the token opts into, so projection-specific denies coexist on a shared path.
-`dacl/deny.rs` walks a directory deny and stamps it explicitly wherever a
-protected DACL or explicit ACE defeats inheritance. The walk holds ancestors
-against replacement and reparse conversion, skips reparse points, polls cancel
-per entry, and refuses an uninspectable or unmodifiable descendant by name.
-Its `deny-tree` stamp key witnesses the walk and root propagation together;
-the root probe cannot detect later changes deeper in the tree. The child's program image
+but restores no ACEs. **A deny stamps nothing**: the `AppContainer` pass of the
+access check matches a deny ACE against the token's ordinary groups only, never
+its capability SIDs, so Windows cannot take back what a grant's ACE admits
+([[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]],
+amendment of 2026-10-20). So `session::confine` first carves each exclusion out
+of the allowances around it: `sandbox::carve::carve`, a pure planner over an
+injected lister and tested on every host, replaces such an allowance with its
+existing entries less the excluded ones, down to each exclusion, and grants each
+directory on the way only its own listing (`GrantKind::List`, an ACE nothing
+inherits), so a name made there later, the excluded one included, reaches
+nothing granted; links among the entries are neither granted nor followed. An
+exclusion on or around an allowance, the program image included, cannot be
+carved, and `session::refuse_deny_meeting_grant` refuses it before anything is
+stamped. For every exclusion `dacl/deny.rs`'s `ensure_unreachable` then runs `AuthzAccessCheck` at each
+launch, in an `AuthZ` context carrying the child's package and capability SIDs,
+on every object beneath it, refusing the launch if any right is granted — an
+`ALL APPLICATION PACKAGES` ACE, or a hard link carrying a granted file's ACE.
+The walk checks reparse points as themselves without following them, polls
+cancel per entry, and refuses an exclusion it cannot read. The child's program image
 is granted read-only so a user-installed binary or the bundled-tool self image
 can load at all, handed to `session::confine` as a `RealPath`, so the
 canonical form the pin and the stamp's local-prefix allow-list demand is the

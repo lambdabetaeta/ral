@@ -101,8 +101,7 @@ impl Boot {
     ///
     /// # Errors
     /// The first path that is not UTF-8, or that is relative while the
-    /// invocation cwd is unknown or does not make it absolute (a Windows
-    /// drive-relative `C:x`), named.
+    /// invocation cwd is unknown, named.
     pub(crate) fn profiles(paths: &[PathBuf]) -> Result<Vec<String>, String> {
         let cwd = ral_core::host::cwd();
         paths
@@ -110,14 +109,15 @@ impl Boot {
             .map(|path| {
                 let anchored = match &cwd {
                     Some(cwd) => Resolver::at(None, cwd).anchor(path).into_inner(),
-                    None => path.clone(),
+                    None if is_absolute(path) => path.clone(),
+                    None => {
+                        return Err(format!(
+                            "ral: --capabilities: {} cannot be anchored: the working \
+                             directory is unavailable",
+                            shown(path)
+                        ));
+                    }
                 };
-                if !is_absolute(&anchored) {
-                    return Err(format!(
-                        "ral: --capabilities: {} cannot be anchored at the working directory",
-                        shown(path)
-                    ));
-                }
                 utf8(&anchored)
                     .map(str::to_owned)
                     .map_err(|e| format!("ral: --capabilities: {e}, so it cannot name a profile"))

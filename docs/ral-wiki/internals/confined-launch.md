@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 646bff0a
 verified_at_date: 2026-10-13
-anchors: [sandboxed_command, build_launch, serve_warrant, Warrant, Slot, Handoff, Landlocked, Envelope, Refusal, spawn_error, projection_enforceable, SessionSandbox, ensure_fs_grant, fs_capability_name]
+anchors: [sandboxed_command, build_launch, serve_warrant, Warrant, Slot, Handoff, Landlocked, Envelope, Refusal, spawn_error, projection_enforceable, SessionSandbox, ensure_frozen_grant, ensure_unreachable, fs_capability_name]
 ---
 
 # Launching a confined command
@@ -92,7 +92,7 @@ the one thing the child enters: `Seatbelt(profile)` on macOS; on Linux
 
 **Each `(canonical path, kind)` grant derives a fixed capability SID from a hash
 of the canonical path** (`dacl::fs_capability_name`). Its ACE is stamped once,
-ever, and never reverted (`dacl::ensure_fs_grant`). `session::confine` mints
+ever, and never reverted (`dacl::ensure_frozen_grant`). `session::confine` mints
 into the child's token exactly the capability SIDs its projection names, from
 the session's `SessionSandbox`.
 
@@ -110,8 +110,7 @@ the session's `SessionSandbox`.
   window between check and stamp. So the invariant is: resolution meets no
   redirecting reparse point anywhere on the path, and the grant lands on the very
   object checked. Components are held root first, each opened relative to its
-  parent's handle with `FILE_OPEN_REPARSE_POINT`, without delete sharing (as the
-  deny walk pins what it inspects); the tag of a reparse point is read on the
+  parent's handle with `FILE_OPEN_REPARSE_POINT`, without delete sharing; the tag of a reparse point is read on the
   held handle, and only a name surrogate (symlink, junction, mount point) refuses
   the launch, naming both; a cloud-files placeholder passes, which
   `OBJ_DONT_REPARSE` would have refused
@@ -129,12 +128,22 @@ the session's `SessionSandbox`.
   prefixes and different places never share one. Every run place is stamped as a
   read prefix is, frozen. The guest-jail launch branch still bypasses per-command
   projection and installs no kernel exec policy.
+- **An exclusion is never stamped.** The AppContainer pass ignores a deny ACE
+  naming a capability, so nothing can take back what a grant's ACE admits.
+  `session::confine` carves an exclusion out of the allowances around it,
+  granting their existing entries less the excluded ones and each directory on
+  the way only its own listing by an ACE nothing inherits (`sandbox::carve`),
+  and refuses one on or around an allowance, the program image among them,
+  before anything is stamped; for every exclusion it then asks `AuthzAccessCheck`, with the child's own package and capability SIDs,
+  whether the token could open anything beneath it, and refuses the launch,
+  naming the object, if so (`dacl::ensure_unreachable`;
+  [[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]],
+  amendment of 2026-10-20).
 - **A bundled tool's child is `ral.exe` itself**, loaded by the AppContainer,
   whose image keeps its read and execute grant: the spawn's, by the parent, not an
-  exec judged in a child. An fs exclusion over `ral.exe`'s folder would make the
-  deny walk put an explicit deny on the image, which outranks its grant; the guard
-  therefore refuses every bundled tool in that case, so the walk never meets a
-  launch that needs it, and Windows needs no exception.
+  exec judged in a child. An fs exclusion over `ral.exe`'s folder holds the
+  image, so `confine` refuses the launch, as the guard already refuses every
+  bundled tool in that case; Windows needs no exception.
 - **Residual:** an ACE lives on the NTFS object, but a grant names a path, and
   Windows does not re-inherit on a same-volume rename. A file moved into a
   granted tree stays dark; one moved out of a writable tree keeps that tree's

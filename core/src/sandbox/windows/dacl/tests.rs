@@ -11,7 +11,6 @@
     clippy::disallowed_methods,
     reason = "[test] test fs/process scaffolding"
 )]
-use super::acl::{AclKind, INHERITED_ACE_FLAG, OwnedSid, Security};
 use super::*;
 use crate::process::cancel::DurableRoot;
 use std::fs;
@@ -92,18 +91,34 @@ pub(super) fn with_scoped_state_dir<R>(f: impl FnOnce() -> R) -> R {
     crate::test_env::with_var("XDG_STATE_HOME", Some(&state_home), f)
 }
 
+/// `path`'s real path: the spelling a frozen allowance holds.
+pub(super) fn real(path: &Path) -> PathBuf {
+    crate::path::canon::canonicalise_strict(path).unwrap()
+}
+
+/// Stamp `kind` for `sid` on `canonical` through its pin, as `confine` does.
+pub(super) fn grant(
+    canonical: &Path,
+    sid: &str,
+    kind: GrantKind,
+    cancel: &Scope,
+) -> Result<(), DaclError> {
+    let pin = FrozenPin::open(canonical, kind)?.expect("the grant target is on disk");
+    ensure_frozen_grant(&pin, sid, kind, cancel)
+}
+
 #[test]
 fn ensure_grant_stamps_the_ace_and_records_the_witness() {
     with_scoped_state_dir(|| {
         let td = tempfile::tempdir().unwrap();
-        let canonical = canonicalize_grant_target(td.path()).unwrap();
+        let canonical = real(td.path());
         assert!(!capability_ace_present(
             &canonical,
             CAP_SID,
             GrantKind::ReadWrite,
             true
         ));
-        ensure_fs_grant(&canonical, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
+        grant(&canonical, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
         assert!(capability_ace_present(
             &canonical,
             CAP_SID,
@@ -125,8 +140,8 @@ fn a_read_write_label_reaches_directories_and_never_files() {
         let sub = td.path().join("sub");
         fs::write(&before, b"").unwrap();
         fs::create_dir(&sub).unwrap();
-        let canonical = canonicalize_grant_target(td.path()).unwrap();
-        ensure_fs_grant(&canonical, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
+        let canonical = real(td.path());
+        grant(&canonical, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
         let after = td.path().join("after.exe");
         fs::write(&after, b"").unwrap();
 
@@ -141,14 +156,14 @@ fn a_read_write_label_reaches_directories_and_never_files() {
 fn only_a_read_write_directory_grant_takes_the_label() {
     with_scoped_state_dir(|| {
         let td = tempfile::tempdir().unwrap();
-        let canonical = canonicalize_grant_target(td.path()).unwrap();
-        ensure_fs_grant(&canonical, CAP_SID, GrantKind::ReadOnly, &live()).unwrap();
+        let canonical = real(td.path());
+        grant(&canonical, CAP_SID, GrantKind::ReadOnly, &live()).unwrap();
         assert!(!low_integrity_label_present(&canonical));
 
         let file = td.path().join("f.txt");
         fs::write(&file, b"").unwrap();
-        let file = canonicalize_grant_target(&file).unwrap();
-        ensure_fs_grant(&file, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
+        let file = real(&file);
+        grant(&file, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
         assert!(!low_integrity_label_present(&file));
     });
 }
@@ -159,11 +174,11 @@ fn only_a_read_write_directory_grant_takes_the_label() {
 fn a_cancel_in_force_stops_the_stamp_before_it_applies() {
     with_scoped_state_dir(|| {
         let td = tempfile::tempdir().unwrap();
-        let canonical = canonicalize_grant_target(td.path()).unwrap();
+        let canonical = real(td.path());
         let cancel = DurableRoot::default().worker();
         cancel.cancel(CancelCause::TimedOut);
 
-        let err = ensure_fs_grant(&canonical, CAP_SID, GrantKind::ReadWrite, &cancel);
+        let err = grant(&canonical, CAP_SID, GrantKind::ReadWrite, &cancel);
         assert!(
             matches!(err, Err(DaclError::Cancelled(CancelCause::TimedOut))),
             "the poll must report the cause it saw, not a grant failure"
@@ -179,8 +194,8 @@ fn a_cancel_in_force_stops_the_stamp_before_it_applies() {
 fn a_read_only_stamp_does_not_satisfy_a_read_write_probe() {
     with_scoped_state_dir(|| {
         let td = tempfile::tempdir().unwrap();
-        let canonical = canonicalize_grant_target(td.path()).unwrap();
-        ensure_fs_grant(&canonical, CAP_SID, GrantKind::ReadOnly, &live()).unwrap();
+        let canonical = real(td.path());
+        grant(&canonical, CAP_SID, GrantKind::ReadOnly, &live()).unwrap();
         assert!(capability_ace_present(
             &canonical,
             CAP_SID,
@@ -207,12 +222,12 @@ fn a_recreated_root_fails_the_probe_and_is_restamped() {
         let td = tempfile::tempdir().unwrap();
         let root = td.path().join("project");
         std::fs::create_dir(&root).unwrap();
-        let canonical = canonicalize_grant_target(&root).unwrap();
-        ensure_fs_grant(&canonical, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
+        let canonical = real(&root);
+        grant(&canonical, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
 
         std::fs::remove_dir_all(&root).unwrap();
         std::fs::create_dir(&root).unwrap();
-        let canonical = canonicalize_grant_target(&root).unwrap();
+        let canonical = real(&root);
         assert!(stamp_recorded(&stamp_key(&canonical, GrantKind::ReadWrite)));
         assert!(!capability_ace_present(
             &canonical,
@@ -221,7 +236,7 @@ fn a_recreated_root_fails_the_probe_and_is_restamped() {
             true
         ));
 
-        ensure_fs_grant(&canonical, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
+        grant(&canonical, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
         assert!(capability_ace_present(
             &canonical,
             CAP_SID,
@@ -238,83 +253,8 @@ fn inheritance_propagation_applies_without_error() {
         let sub = td.path().join("sub");
         std::fs::create_dir(&sub).unwrap();
         std::fs::write(sub.join("file.txt"), b"x").unwrap();
-        let canonical = canonicalize_grant_target(td.path()).unwrap();
-        ensure_fs_grant(&canonical, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
-    });
-}
-
-#[test]
-fn nonexistent_path_errors_cleanly() {
-    let err = canonicalize_grant_target(Path::new(r"C:\__definitely_not_a_real_path__\xyzzy"));
-    assert!(matches!(err, Err(DaclError::PathNotFound(_))));
-}
-
-#[test]
-fn network_path_rejected_e2e() {
-    with_scoped_state_dir(|| {
-        let err = canonicalize_grant_target(Path::new(r"\\someserver\share\foo"));
-        // Which variant depends on how the host resolves an unreachable
-        // server name; all three mean "never silently succeeded". The
-        // unit tests above pin the classification deterministically.
-        match &err {
-            Err(
-                DaclError::NetworkPathRejected(_)
-                | DaclError::PathNotFound(_)
-                | DaclError::Win32 { .. },
-            ) => {}
-            other => panic!(
-                "expected NetworkPathRejected | PathNotFound | Win32 for UNC path, got: {other:?}"
-            ),
-        }
-    });
-}
-
-/// Every allow/deny ACE for `sid_str` as `(AceType byte, inherited?)` in
-/// ACL order — inherited ones included, unlike
-/// [`scan_explicit_aces_for_sid`] — so a test can assert the ordering.
-pub(super) fn sid_ace_sequence(path: &Path, sid_str: &str) -> Vec<(u8, bool)> {
-    let sid = OwnedSid::parse(sid_str).unwrap();
-    let security = Security::named(path, AclKind::Dacl).unwrap();
-    security
-        .aces()
-        .map(Result::unwrap)
-        .filter_map(|ace| {
-            ace.kind()?;
-            ace.mask_for(&sid)?;
-            Some((ace.0.AceType, ace.0.AceFlags & INHERITED_ACE_FLAG != 0))
-        })
-        .collect()
-}
-
-/// The property a token relies on when it carries both a grant's and a
-/// deny's capability: canonical order puts the explicit deny ahead of the
-/// allow inherited from the enclosing grant, whoever the trustees are —
-/// here one SID plays both so a single scan sees the whole sequence.
-#[test]
-fn deny_nested_in_grant_precedes_the_inherited_allow() {
-    with_scoped_state_dir(|| {
-        let td = tempfile::tempdir().unwrap();
-        let parent = canonicalize_grant_target(td.path()).unwrap();
-        let child = td.path().join("cred");
-        std::fs::create_dir(&child).unwrap();
-        let child = canonicalize_grant_target(&child).unwrap();
-
-        ensure_fs_grant(&parent, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
-        ensure_fs_grant(&child, CAP_SID, GrantKind::Deny, &live()).unwrap();
-
-        let explicit = scan_explicit_aces_for_sid(&child, CAP_SID).unwrap();
-        assert_eq!(explicit.len(), 1, "one explicit ACE expected: {explicit:?}");
-        assert_eq!(explicit[0].ace_type, AceType::Deny);
-        assert!(stamp_recorded(&stamp_key(&child, GrantKind::Deny)));
-
-        let seq = sid_ace_sequence(&child, CAP_SID);
-        let deny_idx = seq
-            .iter()
-            .position(|(t, inh)| *t == 0x01 && !*inh)
-            .expect("explicit deny present in DACL");
-        if let Some(allow_idx) = seq.iter().position(|(t, _)| *t == 0x00) {
-            assert!(deny_idx < allow_idx, "deny must precede allow: {seq:?}");
-        }
+        let canonical = real(td.path());
+        grant(&canonical, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
     });
 }
 
@@ -343,7 +283,7 @@ fn capability_name_is_deterministic_kind_and_path_keyed() {
         fs_capability_name(a, GrantKind::ReadWrite),
         fs_capability_name(b, GrantKind::ReadWrite)
     );
-    for kind in [GrantKind::ReadWrite, GrantKind::ReadOnly, GrantKind::Deny] {
+    for kind in [GrantKind::ReadWrite, GrantKind::ReadOnly] {
         let name = fs_capability_name(a, kind);
         assert!(name.starts_with("ral.fs."));
         assert!(

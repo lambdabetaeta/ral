@@ -129,6 +129,7 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("core/src/sandbox/reexec.rs", "silent:verify-stat"),
     ("core/src/sandbox/warrant.rs", "silent:respawn-exec"),
     ("core/src/sandbox/warrant.rs", "silent:respawn-spawn"),
+    ("core/src/sandbox/windows/session.rs", "silent:carve-list"),
     ("core/src/sandbox/windows/dacl/acl.rs", "silent:dacl-apply"),
     (
         "core/src/sandbox/windows/dacl/deny.rs",

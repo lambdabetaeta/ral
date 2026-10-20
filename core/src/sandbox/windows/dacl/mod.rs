@@ -11,7 +11,7 @@
 //!
 //! Authority here is path-keyed, not session-keyed. Every `(path, kind)` a
 //! projection grants names a capability SID derived from the canonical path
-//! ([`fs_capability_name`]); [`ensure_fs_grant`] stamps that SID's ACE onto
+//! ([`fs_capability_name`]); [`ensure_frozen_grant`] stamps that SID's ACE onto
 //! the prefix, and a child reaches the path only if `session` put the
 //! capability in its `LowBox` token. The stamp is the expensive part — one
 //! security write (`SetNamedSecurityInfoW`, or `SetSecurityInfo` through a
@@ -52,6 +52,17 @@
 //! creating it. The trade is recorded, with the mitigations weighed, in
 //! `docs/ral-wiki/decisions/260730_path-derived-capability-sids.md`.
 //!
+//! A deny stamps nothing. The `AppContainer` pass of the access check matches
+//! an allow ACE against the token's package and capability SIDs but a deny ACE
+//! against its ordinary groups alone, so a deny ACE naming a capability is
+//! inert and no ACE can take back what a capability's ACE admits. A deny is
+//! enforced by absence instead: `session` carves it out of the allowances
+//! around it (`sandbox::carve`), granting their other entries and each carved
+//! directory only its own listing ([`GrantKind::List`]), refuses one on or
+//! around an allowance, and [`ensure_unreachable`] proves, per launch, that the
+//! token reaches nothing beneath it. See `decisions/260730_path-derived-capability-sids.md`,
+//! amendment of 2026-10-20.
+//!
 //! What still needs undoing is the profile. `DaclManager` ledgers
 //! `AppContainer` profile registrations before the OS-level create, and
 //! [`recover_orphaned_state`] sweeps a crashed session's ledger at the next
@@ -69,8 +80,6 @@ use windows_sys::Win32::Storage::FileSystem::{
 
 mod acl;
 mod deny;
-#[cfg(test)]
-pub(super) mod deny_tests;
 mod frozen;
 mod ledger;
 mod mutex;
@@ -82,6 +91,7 @@ use acl::{
     AceType, OICI_ACE_FLAGS, Target, apply_explicit_ace, apply_mandatory_label_ace,
     low_integrity_label_present, scan_explicit_aces_for_sid,
 };
+pub(crate) use deny::{ContainerAccess, ensure_unreachable};
 pub(crate) use frozen::{FrozenPin, needing_grant, pin_all};
 pub(crate) use ledger::{DaclManager, recover_orphaned_state};
 use mutex::PathMutexGuard;
@@ -99,35 +109,34 @@ pub(crate) const RW_MASK: u32 =
 /// `FILE_TRAVERSE` reason as [`RW_MASK`].
 pub(crate) const RO_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
 
-/// Rights a deny stamp subtracts: the whole `FILE_ALL_ACCESS` surface
-/// (`STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0x1FF`). Explicit deny precedes
-/// inherited allow in canonical ACL order, so a deny nested inside a granted
-/// prefix beats the enclosing grant.
-pub(crate) const DENY_MASK: u32 = 0x001F_01FF;
-
 /// The three access shapes a grant stamps. Each keys its own capability name
 /// and its own stamp-store entry, so read-only coverage never satisfies a
-/// read-write request, and a deny is opted into per token rather than shared.
+/// read-write request, and a carved directory's listing never stands for a
+/// grant of what is in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum GrantKind {
     ReadWrite,
     ReadOnly,
-    Deny,
+    /// A directory carved around an exclusion (`sandbox::carve`): read-only
+    /// rights on the directory object alone, by an ACE nothing inherits, so
+    /// the child may traverse it, enter it and list its names, and reaches no
+    /// entry through it — an entry made there later included.
+    List,
 }
 
 impl GrantKind {
     fn mask(self) -> u32 {
         match self {
             Self::ReadWrite => RW_MASK,
-            Self::ReadOnly => RO_MASK,
-            Self::Deny => DENY_MASK,
+            Self::ReadOnly | Self::List => RO_MASK,
         }
     }
 
-    fn ace_type(self) -> AceType {
+    /// Whether the ACE reaches what lies beneath a directory.
+    fn inherits(self) -> bool {
         match self {
-            Self::ReadWrite | Self::ReadOnly => AceType::Allow,
-            Self::Deny => AceType::Deny,
+            Self::ReadWrite | Self::ReadOnly => true,
+            Self::List => false,
         }
     }
 
@@ -136,7 +145,7 @@ impl GrantKind {
         match self {
             Self::ReadWrite => "rw",
             Self::ReadOnly => "ro",
-            Self::Deny => "deny",
+            Self::List => "ls",
         }
     }
 }
@@ -160,7 +169,6 @@ pub(crate) enum DaclError {
     /// Neither a verbatim drive path nor a volume GUID path: no canonical
     /// local spelling.
     NotCanonicalLocal(PathBuf),
-    PathNotFound(PathBuf),
     /// A frozen allowance whose path now meets a reparse point at `at`,
     /// which is `granted` itself or an ancestor of it.
     Redirected {
@@ -171,6 +179,17 @@ pub(crate) enum DaclError {
     WriteDacDenied {
         path: PathBuf,
         reason: String,
+    },
+    /// `at`, inside the exclusion `denied` (or `denied` itself), is one the
+    /// launch's token could still open.
+    Reachable {
+        denied: PathBuf,
+        at: PathBuf,
+    },
+    /// The access check standing in for the launch's token could not be run.
+    AccessCheck {
+        op: &'static str,
+        error: io::Error,
     },
     Win32 {
         path: PathBuf,
@@ -203,7 +222,6 @@ impl std::fmt::Display for DaclError {
                  volume GUID path): {}",
                 shown(p)
             ),
-            Self::PathNotFound(p) => write!(f, "path does not exist: {}", shown(p)),
             Self::Redirected {
                 granted,
                 at,
@@ -235,6 +253,24 @@ impl std::fmt::Display for DaclError {
             }
             Self::WriteDacDenied { path, reason } => {
                 write!(f, "WRITE_DAC denied on {}: {reason}", shown(path))
+            }
+            Self::Reachable { denied, at } => {
+                write!(f, "'{}' is excluded", shown(at))?;
+                if at != denied {
+                    write!(f, " (it lies inside the excluded '{}')", shown(denied))?;
+                }
+                f.write_str(
+                    ", but a sandboxed program could still open it: its own permissions \
+                     admit every Windows sandbox (as `ALL APPLICATION PACKAGES` does) or carry \
+                     a folder this grant allows (as a hard link does), and Windows cannot take \
+                     such access away. Remove that access from it, or drop the exclusion",
+                )
+            }
+            Self::AccessCheck { op, error } => {
+                write!(
+                    f,
+                    "cannot check what the sandbox could open ({op}): {error}"
+                )
             }
             Self::Win32 { path, reason } => {
                 write!(f, "Win32 error on {}: {reason}", shown(path))
@@ -269,13 +305,6 @@ fn cancelled(cancel: &Scope) -> Result<(), DaclError> {
     }
 }
 
-/// Canonicalize a grant target the way stamps and capability names key it:
-/// `canonicalise_strict`, then local-only — a UNC path has no DACL we may
-/// write and no volume the marker could witness.
-pub(crate) fn canonicalize_grant_target(path: &Path) -> Result<PathBuf, DaclError> {
-    canonicalize_local(path)
-}
-
 /// The capability name whose derived SID carries one `(path, kind)` grant.
 /// Deterministic across sessions and machines — that is what lets a stamp be
 /// paid once and matched forever — and collision-resistant, since two paths
@@ -299,10 +328,11 @@ pub(crate) fn fs_capability_name(canonical: &Path, kind: GrantKind) -> String {
     name
 }
 
-/// Ensure the persistent ACE for `(canonical, kind)` under `sid_str` — the
-/// SID [`fs_capability_name`] derives to — and, for a read-write grant, the
-/// mandatory label alongside it when the target is a directory (see
-/// [`ensure_low_integrity_label`]).
+/// Ensure the persistent ACE for a frozen allowance's `kind` under `sid_str` —
+/// the SID [`fs_capability_name`] derives to — applied through the handle
+/// [`FrozenPin`] holds, so the object checked is the object stamped; and, for
+/// a read-write grant, the mandatory label alongside it when the target is a
+/// directory (see [`ensure_low_integrity_label`]).
 ///
 /// A read-write grant is two mutations, so each answers for itself and
 /// neither may speak for the other: the label is asked *before* the ACE's
@@ -311,48 +341,27 @@ pub(crate) fn fs_capability_name(canonical: &Path, kind: GrantKind) -> String {
 /// the label half did not yet exist — and, nothing here reverting, that path
 /// would stay unwritable for good with no witness able to say why. The ACE's
 /// own skip stands when both of its witnesses hold: the stamp store records a
-/// completed propagation, and the root's own DACL still carries it. `cancel` is
-/// polled between descendants of a deny walk; Win32's own propagation is
-/// not interruptible. A deny's witness includes that walk, since inheritance
-/// cannot cross protected DACLs or outrank explicit entries.
-pub(crate) fn ensure_fs_grant(
-    canonical: &Path,
-    sid_str: &str,
-    kind: GrantKind,
-    cancel: &Scope,
-) -> Result<(), DaclError> {
-    ensure_grant(Target::Named(canonical), sid_str, kind, cancel)
-}
-
-/// [`ensure_fs_grant`] for a frozen allowance, applied through the handle
-/// [`FrozenPin`] holds: the object checked is the object stamped. Allows only; a
-/// deny is re-resolved at every launch. A stamp already recorded needs no
-/// `WRITE_DAC`: only the write that would be new fails, as `WriteDacDenied`.
+/// completed propagation, and the root's own DACL still carries it. A stamp
+/// already recorded needs no `WRITE_DAC`: only the write that would be new
+/// fails, as `WriteDacDenied`. `cancel` is polled before the apply; Win32's
+/// own propagation is not interruptible.
 pub(crate) fn ensure_frozen_grant(
     pin: &FrozenPin,
     sid_str: &str,
     kind: GrantKind,
     cancel: &Scope,
 ) -> Result<(), DaclError> {
-    debug_assert!(kind != GrantKind::Deny, "a deny is stamped by name");
-    ensure_grant(pin.target(), sid_str, kind, cancel)
-}
-
-fn ensure_grant(
-    target: Target<'_>,
-    sid_str: &str,
-    kind: GrantKind,
-    cancel: &Scope,
-) -> Result<(), DaclError> {
     cancelled(cancel)?;
+    let target = pin.target();
     let canonical = target.path();
-    let inheritable = target.is_dir().map_err(|e| DaclError::Win32 {
-        path: canonical.to_path_buf(),
-        reason: format!("metadata: {e}"),
-    })?;
+    let inheritable = kind.inherits()
+        && target.is_dir().map_err(|e| DaclError::Win32 {
+            path: canonical.to_path_buf(),
+            reason: format!("metadata: {e}"),
+        })?;
     // A capability ACE alone cannot admit a create: the mandatory-integrity
     // check runs first, and a `Low`-IL child clears it only if the directory's
-    // own label is `Low` or below. Read-only and deny grants need no label —
+    // own label is `Low` or below. A read-only grant needs no label —
     // `Low` already reads `Medium` under the default no-write-up-only policy —
     // and neither does a file, whose write the capability ACE alone admits.
     if kind == GrantKind::ReadWrite && inheritable {
@@ -366,19 +375,14 @@ fn ensure_grant(
     }
     // A recreated root must not resurrect its old completion witness mid-apply.
     update_stamp(&key, false)?;
-    let _deny_root = if kind == GrantKind::Deny && inheritable {
-        Some(deny::descendants(canonical, sid_str, cancel)?)
-    } else {
-        None
-    };
-    apply_explicit_ace(target, sid_str, kind.mask(), inheritable, kind.ace_type())?;
+    apply_explicit_ace(target, sid_str, kind.mask(), inheritable)?;
     // Apply, then record: dying between the two leaves no witness, and the
     // next grant re-runs a propagation that is idempotent by construction.
     record_stamp(&key)
 }
 
 /// The mandatory-label half of a read-write grant, stamped and witnessed the
-/// same way [`ensure_fs_grant`] treats the capability ACE — its own stamp-key
+/// same way [`ensure_frozen_grant`] treats the capability ACE — its own stamp-key
 /// namespace, so the two mutations' idempotency never entangles, and its own
 /// probe, so a label removed or never stamped is seen whatever the DACL says.
 fn ensure_low_integrity_label(target: Target<'_>) -> Result<(), DaclError> {
@@ -390,9 +394,9 @@ fn ensure_low_integrity_label(target: Target<'_>) -> Result<(), DaclError> {
     record_stamp(&key)
 }
 
-/// Whether `canonical`'s own DACL already carries the stamp: an explicit ACE
-/// for `sid_str` of `kind`'s type, covering `kind`'s whole mask, inheritable
-/// when the target is a directory. An unreadable DACL answers `false` —
+/// Whether `canonical`'s own DACL already carries the stamp: an explicit allow
+/// ACE for `sid_str` covering `kind`'s whole mask, inheriting exactly when
+/// `inheritable`. An unreadable DACL answers `false` —
 /// attempt the real grant and let it fail loudly, the same posture as
 /// [`appcontainer_already_grants`].
 fn capability_ace_present<'a>(
@@ -403,9 +407,10 @@ fn capability_ace_present<'a>(
 ) -> bool {
     match scan_explicit_aces_for_sid(target.into(), sid_str) {
         Ok(aces) => aces.iter().any(|a| {
-            a.ace_type == kind.ace_type()
+            a.ace_type == AceType::Allow
                 && (a.access_mask & kind.mask()) == kind.mask()
-                && (!inheritable || (a.inherit_flags & OICI_ACE_FLAGS) == OICI_ACE_FLAGS)
+                && (a.inherit_flags & OICI_ACE_FLAGS)
+                    == if inheritable { OICI_ACE_FLAGS } else { 0 }
         }),
         Err(_) => false,
     }
@@ -430,21 +435,4 @@ fn ensure_local_canonical_prefix(canonical: &Path) -> Result<(), DaclError> {
         return Ok(());
     }
     Err(DaclError::NotCanonicalLocal(canonical.to_path_buf()))
-}
-
-fn canonicalize_local(path: &Path) -> Result<PathBuf, DaclError> {
-    let canonical = match crate::path::canon::canonicalise_strict(path) {
-        Ok(p) => p,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Err(DaclError::PathNotFound(path.to_path_buf()));
-        }
-        Err(e) => {
-            return Err(DaclError::Win32 {
-                path: path.to_path_buf(),
-                reason: format!("canonicalize: {e}"),
-            });
-        }
-    };
-    ensure_local_canonical_prefix(&canonical)?;
-    Ok(canonical)
 }

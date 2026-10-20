@@ -224,7 +224,7 @@ mod enquiry_tests {
         install_act(&mut runtime, "ask-desk", move |mooring, shell| {
             *asked.lock().unwrap() = Some(shell.enquire(mooring, FOValue::Int { value: 41 }));
         });
-        let mut shell = crate::Shell::root(runtime.into());
+        let mut shell = crate::Shell::root(runtime.into(), crate::test_helper::process_cwd());
         let desk: Desk = Arc::new(IdentityDesk {
             host: Arc::new(IncrementSeam),
             events: no_events(),

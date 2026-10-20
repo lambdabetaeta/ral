@@ -7,6 +7,7 @@
 //! as `Command::current_dir` and exports it as `PWD`.
 
 use super::Shell;
+use crate::path::CwdPath;
 use crate::types::Error;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -15,10 +16,11 @@ use std::path::PathBuf;
 /// it, and `within [dir: …]` is its local-state handler, restoring the cell on
 /// every exit.
 ///
-/// It keeps no previous directory, hence no `OLDPWD`.  `None` means unseeded — readers fall back through [`cwd`](crate::host::cwd) until
-/// [`boot_shell`](crate::boot::boot_shell) or [`Shell::seed_cwd`].
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Cwd(pub(in crate::types::shell) Option<PathBuf>);
+/// It keeps no previous directory, hence no `OLDPWD`.  Never empty: a root
+/// shell is constructed at one ([`Shell::root`]), and a child inherits its
+/// parent's.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Cwd(pub(in crate::types::shell) CwdPath);
 
 impl Shell {
     /// The logical cwd, [`Context::launch_cwd`](super::Context::launch_cwd).
@@ -29,18 +31,17 @@ impl Shell {
         self.context.launch_cwd()
     }
 
-    /// State the logical cwd outright, overriding whatever
-    /// [`boot_shell`](crate::boot::boot_shell) adopted, for a host that never
-    /// `chdir`s the process — exarch's `boot_root_shell` seats a session here.
-    pub fn seed_cwd(&mut self, cwd: PathBuf) {
-        self.context.cwd = Cwd(Some(cwd));
+    /// State the logical cwd outright, overriding the one the shell was
+    /// constructed at, for a host that never `chdir`s the process.
+    pub fn seed_cwd(&mut self, cwd: CwdPath) {
+        self.context.cwd = Cwd(cwd);
     }
 
     /// `within [dir: …]`'s entry: the cell becomes `dir`, and the prior cell
     /// comes back for [`Self::restore_cwd`].  Not a `cd`, so no `chdir`
     /// authority is asked.
-    pub(crate) fn enter_cwd(&mut self, dir: PathBuf) -> Cwd {
-        std::mem::replace(&mut self.context.cwd, Cwd(Some(dir)))
+    pub(crate) fn enter_cwd(&mut self, dir: CwdPath) -> Cwd {
+        std::mem::replace(&mut self.context.cwd, Cwd(dir))
     }
 
     /// Put back a cell [`Self::enter_cwd`] saved, undoing every `cd` since.
@@ -53,23 +54,21 @@ impl Shell {
     /// symlinks survive as under bash's default `cd -L`.
     ///
     /// # Errors
-    /// If the resolved target cannot be stat'd, or is not a directory.
+    /// If the resolved target cannot be stat'd, is not a directory, or is no
+    /// working directory ([`CwdPath`]).
     #[allow(
         clippy::disallowed_methods,
         reason = "[silent:cwd-stat] `cd`: stats the resolved target to confirm it is a directory before updating the logical cwd; a directory-existence check, not turn-time model data I/O, raises no surface card."
     )]
     pub(crate) fn apply_chdir(&mut self, target: &str) -> Result<(), Error> {
-        let resolved = self.resolve(target).into_inner();
-        let meta = std::fs::metadata(&resolved)
-            .map_err(|e| Error::new(format!("{}: {e}", crate::path::shown(&resolved))))?;
+        let resolved = self.resolve(target);
+        let meta = std::fs::metadata(resolved.as_path())
+            .map_err(|e| Error::new(format!("{}: {e}", resolved.shown())))?;
         if !meta.is_dir() {
-            return Err(Error::new(format!(
-                "{}: not a directory",
-                crate::path::shown(&resolved)
-            )));
+            return Err(Error::new(format!("{}: not a directory", resolved.shown())));
         }
-
-        self.context.cwd = Cwd(Some(resolved));
+        let resolved = resolved.into_cwd().map_err(|e| Error::new(e.to_string()))?;
+        self.context.cwd = Cwd(resolved);
         Ok(())
     }
 

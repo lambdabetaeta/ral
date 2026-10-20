@@ -7,8 +7,11 @@
 # Success: handler is not called.
 echo !{try { return 0 } { |e| return $e[status] }}
 
-# Command failure: status flows into the handler.
-echo !{try { cat /nonexistent 2> /dev/null; return 0 } { |e| return $e[status] }}
+# Command failure: status flows into the handler.  `cat`'s complaint lands in
+# a file, so the failure is `cat`'s own.
+let d = temp-dir
+echo !{try { cat /nonexistent 2> "$d/err"; return 0 } { |e| return $e[status] }}
+rm -rf $d
 
 # Explicit fail: status flows through.
 echo !{try { fail [status: 42, message: 'explicit status'] } { |e| return $e[status] }}

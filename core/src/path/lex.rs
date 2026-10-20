@@ -7,26 +7,29 @@
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
-use super::PathRules;
-use crate::host;
+use super::{CwdPath, PathRules};
 
 /// How a raw path string is rooted, judged on the string alone.  A UNC or
-/// verbatim-UNC root is recognised only with a server and a share both named:
-/// bare, its component list folds empty, a prefix of every path.
+/// verbatim-UNC root is recognised only with a server and a share both named,
+/// neither `.` nor `..`: bare, its component list folds empty, a prefix of
+/// every path, and a dot name is no name but a step the fold would take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Root {
     /// `/x`: rooted by one separator, no drive.
     Posix,
-    /// `\\server\share` with either separator, both names non-empty.
+    /// `\\server\share` with either separator, both names non-empty and
+    /// neither `.` nor `..`.
     Unc,
     /// `\\?\C:\x`, with either separator.
     VerbatimDrive,
-    /// `\\?\UNC\server\share`, with either separator, both names non-empty.
+    /// `\\?\UNC\server\share`, with either separator, both names as for
+    /// [`Unc`](Self::Unc).
     VerbatimUnc,
     /// `C:\x` or `C:/x`.
     Drive,
     /// Opens with two separators but is no well-formed UNC or verbatim root:
-    /// a missing server or share, a `?` or `.` server, a device path.
+    /// a missing server or share, a `?` server, a `.` or `..` server or
+    /// share, a device path.
     Malformed,
     /// Opens with two separators of different spellings, `/\` or `\/`, and
     /// no verbatim head.  Windows reads either as a separator, so to it this
@@ -211,39 +214,141 @@ fn is_drive(s: &str) -> bool {
     matches!(s.as_bytes(), [d, b':'] if d.is_ascii_alphabetic())
 }
 
-/// A non-empty server that is not `?` or `.`, then a non-empty share.
+/// A server, then a share: each non-empty and neither `.` nor `..`, which
+/// would read as a step of the fold rather than a name, and the server not
+/// `?`.
 fn server_share<'a>(mut parts: impl Iterator<Item = &'a str>) -> bool {
+    let named = |name: &str| !matches!(name, "" | "." | "..");
     parts
         .next()
-        .is_some_and(|server| !matches!(server, "" | "?" | "."))
-        && parts.next().is_some_and(|share| !share.is_empty())
+        .is_some_and(|server| named(server) && server != "?")
+        && parts.next().is_some_and(named)
 }
 
-/// Resolve `path` against `cwd`, or against the process cwd when `cwd` is
-/// `None`, folding `.` and `..`.  Purely lexical — no symlink resolution —
-/// so the answer can differ from `canonicalize`.
-pub(crate) fn resolve_path(cwd: Option<&Path>, path: &str) -> PathBuf {
+/// Resolve `path` against `cwd`, folding `.` and `..`: [`anchor`] on a
+/// string.
+pub(crate) fn resolve_path(cwd: &CwdPath, path: &str) -> PathBuf {
     anchor(cwd, &PathBuf::from(path))
 }
 
-/// [`resolve_path`] for a path already on the host's terms, which needs no
-/// lifting from a string.
-pub(crate) fn anchor(cwd: Option<&Path>, input: &Path) -> PathBuf {
+/// `input` made absolute against `cwd` as the host reads it, then folded.
+/// Purely lexical — no symlink resolution — so the answer can differ from
+/// `canonicalize`.
+///
+/// An absolute `input` is kept, and a relative one joins `cwd`.  Under
+/// Windows rules two more spellings are relative to less than a whole path,
+/// and are read as Win32 reads them, `cwd` standing for the process's
+/// current directory, as ral's logical cwd does:
+///
+/// - root-relative, `\x` or `/x`, lands on `cwd`'s drive or share;
+/// - drive-relative, `D:x`, joins `cwd` when `cwd` is on `D:`.  On another
+///   drive it joins that drive's own current directory, which Windows keeps
+///   per process, apart from ral's, in its `=D:` variable, and which only
+///   Win32 can answer: [`std::path::absolute`] asks it.  Where that gives no
+///   absolute answer, the drive's root stands in, as it does in Win32 when
+///   `=D:` is unset.
+///
+/// `cwd` is on a well-formed root ([`CwdPath`]), and each reading keeps it,
+/// so the result is absolute, and the fold, which keeps the root it reads,
+/// keeps it so: what [`LexicalPath`](super::LexicalPath) asserts.
+pub(crate) fn anchor(cwd: &CwdPath, input: &Path) -> PathBuf {
     let joined = if is_absolute(input) {
         input.to_path_buf()
-    } else if let Some(cwd) = cwd {
-        cwd.join(input)
-    } else if let Some(cwd) = host::cwd() {
-        cwd.join(input)
     } else {
-        input.to_path_buf()
+        against(cwd.as_path(), input)
     };
+    fold_dots(&joined)
+}
 
-    let normalized = fold_dots(&joined);
-    if normalized.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        normalized
+/// `input`, relative under the host's rules, read against `cwd` as
+/// [`anchor`] describes.
+fn against(cwd: &Path, input: &Path) -> PathBuf {
+    let bytes = input.as_os_str().as_encoded_bytes();
+    if PathRules::HOST == PathRules::Windows {
+        match root(&String::from_utf8_lossy(bytes)) {
+            Root::Driveless | Root::Posix => return joined(volume(cwd), bytes),
+            Root::DriveRelative => return drive_relative(cwd, input),
+            _ => {}
+        }
+    }
+    joined(cwd.as_os_str().as_encoded_bytes(), bytes)
+}
+
+/// `D:x` read as [`anchor`] describes, `cwd` a [`CwdPath`] under Windows
+/// rules.
+fn drive_relative(cwd: &Path, input: &Path) -> PathBuf {
+    let (drive, rest) = input.as_os_str().as_encoded_bytes().split_at(2);
+    let cwd = cwd.as_os_str().as_encoded_bytes();
+    if drive_letter(cwd).is_some_and(|letter| letter.eq_ignore_ascii_case(&drive[0])) {
+        return joined(cwd, rest);
+    }
+    std::path::absolute(input)
+        .ok()
+        .filter(|answer| is_absolute(answer))
+        .unwrap_or_else(|| joined(&[drive[0], b':', b'\\'], rest))
+}
+
+/// The drive a [`CwdPath`] under Windows rules is on, as its letter: that
+/// of `C:\x` or `\\?\C:\x`, none for a share.
+fn drive_letter(cwd: &[u8]) -> Option<u8> {
+    match root(&String::from_utf8_lossy(cwd)) {
+        Root::Drive => Some(cwd[0]),
+        Root::VerbatimDrive => Some(cwd[r"\\?\".len()]),
+        _ => None,
+    }
+}
+
+/// The drive or share a [`CwdPath`] under Windows rules is on, as spelled
+/// and with no separator after it: `C:`, `\\srv\sh`, `\\?\C:`,
+/// `\\?\UNC\srv\sh`.
+fn volume(cwd: &Path) -> &[u8] {
+    let cwd = cwd.as_os_str().as_encoded_bytes();
+    let len = match root(&String::from_utf8_lossy(cwd)) {
+        Root::Drive => "C:".len(),
+        Root::VerbatimDrive => r"\\?\C:".len(),
+        Root::Unc => share_end(cwd, r"\\".len()),
+        Root::VerbatimUnc => share_end(cwd, r"\\?\UNC\".len()),
+        other => unreachable!("a working directory is on a drive or a share, not {other:?}"),
+    };
+    &cwd[..len]
+}
+
+/// `base`, then `rest`, a separator of the host's between them unless one
+/// already stands there or `rest` is empty.
+fn joined(base: &[u8], rest: &[u8]) -> PathBuf {
+    let is_separator =
+        |b: Option<&u8>| b.is_some_and(|&b| PathRules::HOST.is_separator(char::from(b)));
+    let mut out = base.to_vec();
+    if !rest.is_empty() && !is_separator(base.last()) && !is_separator(rest.first()) {
+        out.push(separator(PathRules::HOST));
+    }
+    out.extend_from_slice(rest);
+    // SAFETY: `base` and `rest` are each a whole encoded path or a run of one
+    // cut at an ASCII byte, which cannot land inside a multi-byte
+    // UTF-8/WTF-8 sequence; and an ASCII separator stands at the seam,
+    // ending `base`, opening `rest` or put between them, unless `rest` is
+    // empty, so no surrogate half meets another, and `out` is encoded as
+    // validly as its parts.
+    PathBuf::from(unsafe { OsStr::from_encoded_bytes_unchecked(&out) })
+}
+
+/// Whether `path` can be a working directory under the host's rules: what
+/// [`CwdPath`] checks.  POSIX: absolute.  Windows: a drive root, a share, or
+/// the verbatim spelling of either, the roots with an extent a name joins
+/// past without changing what the root names.  A malformed or mixed head has
+/// none: `\\srv` joined with `sh` would name the share `\\srv\sh`.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "native: classified by its head, which is ASCII and so survives a lossy decode"
+)]
+pub(crate) fn is_working_directory(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    match PathRules::HOST {
+        PathRules::Posix => text.starts_with('/'),
+        PathRules::Windows => matches!(
+            root(&text),
+            Root::Drive | Root::Unc | Root::VerbatimDrive | Root::VerbatimUnc
+        ),
     }
 }
 
@@ -429,14 +534,8 @@ fn head(path: &[u8], rules: PathRules) -> Head {
         };
     }
     let kind = root(&text);
-    let next_separator = |from: usize| {
-        path.get(from..)
-            .and_then(|rest| rest.iter().position(|&b| rules.is_separator(char::from(b))))
-            .map_or(path.len(), |i| from + i)
-    };
     // Through the share, and the separator after it if one follows.
-    let through_share =
-        |server: usize| (next_separator(next_separator(server) + 1) + 1).min(path.len());
+    let through_share = |server: usize| (share_end(path, server) + 1).min(path.len());
     let len = match kind {
         Root::Relative => 0,
         Root::Posix | Root::Driveless => 1,
@@ -455,6 +554,20 @@ fn head(path: &[u8], rules: PathRules) -> Head {
             Root::Drive | Root::Unc | Root::Driveless | Root::DriveRelative | Root::Relative
         ),
     }
+}
+
+/// Where the share of a UNC head under Windows rules ends, its server name
+/// starting at `server`: the end of the name after the server's.
+fn share_end(path: &[u8], server: usize) -> usize {
+    let next_separator = |from: usize| {
+        path.get(from..)
+            .and_then(|rest| {
+                rest.iter()
+                    .position(|&b| PathRules::Windows.is_separator(char::from(b)))
+            })
+            .map_or(path.len(), |i| from + i)
+    };
+    next_separator(next_separator(server) + 1)
 }
 
 /// Whether `path` is absolute to the host's kernel, yet `std::path` finds no
@@ -799,6 +912,12 @@ mod tests {
         (r"\\.\C:\x", Malformed),
         (r"\\.\pipe\x", Malformed),
         (r"\\?\?\x", Malformed),
+        (r"\\..\sh", Malformed),
+        (r"\\srv\.", Malformed),
+        (r"\\srv\..\x", Malformed),
+        ("//x/../y", Malformed),
+        (r"\\?\UNC\..\sh", Malformed),
+        (r"\\?\UNC\srv\..", Malformed),
         (r"/\x", MixedHead),
         (r"/\srv\sh", MixedHead),
         (r"\/srv/sh", MixedHead),
@@ -1244,6 +1363,7 @@ mod tests {
             ("/a/b", r"/a\b"),
             (r"\a\..\x", r"\x"),
             ("//x/../y", "//x/../y"),
+            (r"\\srv\.\a\..", r"\\srv\.\a\.."),
             (r"\\\srv\sh\..\x", r"\\\srv\sh\..\x"),
             (r"/\x\..\y", r"/\x\..\y"),
             (r"\\.\pipe\a\..\b", r"\\.\pipe\a\..\b"),

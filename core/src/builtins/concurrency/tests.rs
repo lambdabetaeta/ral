@@ -1004,7 +1004,10 @@ fn detach_test_shell(budget: u64) -> Shell {
         statics: vec![crate::builtins::DETACH_BUILTIN],
         ..crate::HostSurface::default()
     }
-    .shell(crate::terminal::TerminalState::default());
+    .shell(
+        crate::terminal::TerminalState::default(),
+        crate::test_helper::process_cwd(),
+    );
     shell.arm_detach(budget);
     shell
 }
@@ -2547,6 +2550,7 @@ fn first_of_takes_the_winner_and_drains_losers() {
             &crate::HostSurface::default(),
         )
         .into(),
+        crate::test_helper::process_cwd(),
     );
     let started = std::time::Instant::now();
     let (ended, _) = run_captured(

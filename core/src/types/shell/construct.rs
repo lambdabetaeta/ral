@@ -3,20 +3,24 @@
 //! itself, made inside [`Shell::construct`].
 
 use super::bindings::{BindingLease, BindingLedger};
+use super::cwd::Cwd;
 use super::detached::DetachPolicy;
 use super::hooks::HookTable;
+use super::modules::Modules;
 use super::workers::Roster;
 use super::{Context, DEFAULT_STACK_LIMIT, LocalState, SessionState, Shell};
 use crate::capability::GrantStack;
 use crate::guard::{GrantNarrower, SpawnGrant};
 use crate::io::{Io, Source};
+use crate::path::CwdPath;
 use crate::process::{DurableRoot, Scope, TerminalLease};
 use crate::source::SourceDb;
 use crate::terminal::TerminalState;
 use crate::ty::Fixings;
 use crate::types::handler::{HandlerFrame, HandlerStack};
 use crate::types::{
-    Audit, BuiltinEntry, BuiltinTable, Convention, Cradle, Env, ExitHints, Set, Signature, Value,
+    Audit, BuiltinEntry, BuiltinTable, Convention, Cradle, Env, EnvVars, ExitHints, Set, Signature,
+    Value,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -167,13 +171,18 @@ pub struct Bequest {
 }
 
 impl Image {
-    /// Empty scope, root grants, no sources, `Terms::root()`, no fixings.
-    fn empty() -> Self {
+    /// Empty scope at `cwd`, root grants, no sources, `Terms::root()`, no
+    /// fixings.
+    fn empty(cwd: CwdPath) -> Self {
         Self {
             env: Env::new(),
             context: Context {
+                env_overrides: EnvVars::default(),
+                cwd: Cwd(cwd),
                 grants: GrantStack::root(),
-                ..Context::default()
+                handlers: Vec::new(),
+                args: Vec::new(),
+                modules: Modules::default(),
             },
             sources: SourceDb::default(),
             terms: Terms::root(),
@@ -271,12 +280,16 @@ impl Shell {
         Ok(child)
     }
 
-    /// A parentless session over `runtime`: no env, no cwd, no recipe.
+    /// A parentless session over `runtime` at `cwd`: no env, no recipe.
+    ///
+    /// The cwd is the one thing a root cannot start without: every relative
+    /// path it reads is read against it, so a front end that has none to give
+    /// fails to boot rather than lend one.
     ///
     /// The session faces no signals: its host forwards them as `Control`.
-    pub fn root(runtime: Arc<Runtime>) -> Self {
+    pub fn root(runtime: Arc<Runtime>, cwd: CwdPath) -> Self {
         let root = RootOnly::minted(runtime.terminal);
-        Self::construct(runtime, Image::empty(), Some(root))
+        Self::construct(runtime, Image::empty(cwd), Some(root))
     }
 }
 
@@ -291,7 +304,10 @@ mod tests {
             startup_foreground: true,
             ..TerminalState::default()
         };
-        let shell = Shell::root(HostSurface::default().runtime(terminal).into());
+        let shell = Shell::root(
+            HostSurface::default().runtime(terminal).into(),
+            crate::test_helper::process_cwd(),
+        );
         assert!(shell.session.hooks.is_some());
         #[cfg(unix)]
         assert!(shell.session.terminal_lease.is_some());

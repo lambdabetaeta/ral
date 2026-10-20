@@ -392,6 +392,7 @@ mod chokepoint_tests {
             crate::terminal::TerminalState::default(),
             BakedPrelude::runtime(),
             &crate::boot::HostSurface::default(),
+            crate::test_helper::process_cwd(),
         );
         shell.arm_binding_lease(BindingLease {
             idle_calls,
@@ -541,6 +542,7 @@ mod chokepoint_tests {
             crate::terminal::TerminalState::default(),
             BakedPrelude::runtime(),
             &crate::boot::HostSurface::default(),
+            crate::test_helper::process_cwd(),
         );
         let (prelude_name, _) = shell
             .bindings()

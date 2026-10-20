@@ -13,7 +13,7 @@ fn dressed_shell(extra: &[&'static [BuiltinEntry]]) -> Shell {
     for set in extra {
         runtime.install_builtins(set);
     }
-    Shell::root(runtime.into())
+    Shell::root(runtime.into(), ral_core::test_helper::process_cwd())
 }
 
 #[test]

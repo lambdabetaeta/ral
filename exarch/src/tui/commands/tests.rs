@@ -6,7 +6,7 @@ use super::{
 use crate::card::Mark;
 use crate::provider::allowance::{Allowance, Consumption, Reading};
 use crate::tui::app::tests::{app, ctx, text};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 fn replacements(line: &str) -> Vec<String> {
@@ -118,7 +118,8 @@ fn the_argument_hint_shows_but_is_never_spliced() {
 #[test]
 #[allow(clippy::disallowed_methods, reason = "[test] fixed fixture paths")]
 fn export_path_resolves_absolute_and_relative() {
-    let cwd = Path::new("/Users/me/proj");
+    let cwd = &ral_core::path::CwdPath::new(PathBuf::from("/Users/me/proj"))
+        .expect("an absolute fixture");
     assert_eq!(
         resolve_export_path("/tmp/out.txt", cwd),
         Path::new("/tmp/out.txt")
@@ -133,7 +134,8 @@ fn export_path_resolves_absolute_and_relative() {
 #[test]
 #[allow(clippy::disallowed_methods, reason = "[test] fixed fixture paths")]
 fn export_path_resolves_absolute_and_relative() {
-    let cwd = Path::new(r"C:\Users\me\proj");
+    let cwd = &ral_core::path::CwdPath::new(PathBuf::from(r"C:\Users\me\proj"))
+        .expect("an absolute fixture");
     assert_eq!(
         resolve_export_path(r"C:\scratch\out.txt", cwd),
         Path::new(r"C:\scratch\out.txt")

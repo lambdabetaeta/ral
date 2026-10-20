@@ -10,6 +10,12 @@ status: superseded
 > for within-session attenuation (narrowed grants, subagent permissions), so
 > SIDs are now keyed by fs-projection identity. The MXC-imitation ground
 > rules and the DACL engine below carry over unchanged.
+>
+> Its deny-ACEs never held (2026-10-20): the `AppContainer` pass of the access
+> check matches a deny ACE only against a token's ordinary groups, never its
+> package or capability SIDs, so a deny-ACE for the profile SID takes nothing
+> away. See the 2026-10-20 amendment of
+> [[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]].
 
 **The Windows OS sandbox is one AppContainer profile per shell session, with
 filesystem authority expressed as grant/deny ACEs stamped for the session's

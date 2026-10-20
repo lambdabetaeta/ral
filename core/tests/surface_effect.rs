@@ -31,6 +31,7 @@ fn host_shell() -> Shell {
             statics: vec![ral_core::builtins::SURFACE_BUILTIN],
             captured: Vec::new(),
         },
+        ral_core::test_helper::process_cwd(),
     )
 }
 

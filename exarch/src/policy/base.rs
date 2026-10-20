@@ -41,7 +41,8 @@ pub(super) fn resolve_base(name: &str, ctx: &FreezeCtx) -> Result<Capabilities, 
             ));
         }
     };
-    let mut shell = ral_core::HostSurface::default().shell(TerminalState::default());
+    let cwd = ral_core::path::CwdPath::new(ctx.cwd.clone()).map_err(|e| e.to_string())?;
+    let mut shell = ral_core::HostSurface::default().shell(TerminalState::default(), cwd);
     let origin = SourceOrigin::named(format!("<built-in:{name}>"));
     let mut caps = ral_core::load::profile::load_capabilities_from_str(
         &ral_core::types::Mooring::adrift(),
@@ -160,7 +161,8 @@ mod tests {
     /// exec guard judges it.
     #[cfg(unix)]
     fn object(path: &Path) -> String {
-        let real = ral_core::path::Resolver::shell_less()
+        let cwd = ral_core::test_helper::process_cwd();
+        let real = ral_core::path::Resolver::at(None, &cwd)
             .anchor(path)
             .canonicalise_lenient();
         ral_core::path::shown(real)

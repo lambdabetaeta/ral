@@ -24,6 +24,6 @@ fn stamp_store_roundtrip_and_merge() {
         record_stamp(key_a).unwrap(); // idempotent
         assert!(stamp_recorded(key_a));
         assert!(stamp_recorded(key_b));
-        assert!(!stamp_recorded("deny|\\\\?\\c:\\work\\a"));
+        assert!(!stamp_recorded("ro|\\\\?\\c:\\work\\a"));
     });
 }

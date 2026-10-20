@@ -24,11 +24,94 @@
 //! `surface` leaves the type only as a `String`, for rendering.
 
 use super::identity::{Polarity, path_within};
-use super::lex::is_absolute;
+use super::lex::{is_absolute, is_working_directory};
 use super::{GuestPath, PathRules};
 use crate::path::shown;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+/// A working directory as ral holds one: a path a relative one is read
+/// against.
+///
+/// Absolute under the host's rules and, on Windows, on a drive, a share, or
+/// the verbatim spelling of either
+/// ([`is_working_directory`](super::lex::is_working_directory)), so whatever
+/// [`anchor`](super::lex::anchor) reads against it, a relative, a
+/// root-relative or a drive-relative path, lands on that root and comes out
+/// absolute.
+///
+/// Checked at its door, [`new`](Self::new), which a copy read off the wire
+/// passes through again; there is no other.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "PathBuf", into = "PathBuf")]
+pub struct CwdPath(PathBuf);
+
+impl CwdPath {
+    /// `path` as a working directory.
+    ///
+    /// # Errors
+    /// [`NotACwd`] when `path` is relative, or, on Windows, on a malformed or
+    /// mixed head, past which no name joins without assembling a share or a
+    /// drive the path never named (`\\srv` and `sh` would make `\\srv\sh`).
+    pub fn new(path: PathBuf) -> Result<Self, NotACwd> {
+        if is_working_directory(&path) {
+            Ok(Self(path))
+        } else {
+            Err(NotACwd(path))
+        }
+    }
+
+    /// A borrow, for a join or a child's `current_dir`.
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+
+    /// Consume into the owned `PathBuf`.
+    pub fn into_inner(self) -> PathBuf {
+        self.0
+    }
+}
+
+impl TryFrom<PathBuf> for CwdPath {
+    type Error = NotACwd;
+
+    fn try_from(path: PathBuf) -> Result<Self, NotACwd> {
+        Self::new(path)
+    }
+}
+
+impl AsRef<Path> for CwdPath {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl From<CwdPath> for PathBuf {
+    fn from(cwd: CwdPath) -> Self {
+        cwd.0
+    }
+}
+
+/// A path refused as a working directory by [`CwdPath::new`].  Shows as the
+/// sentence naming it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotACwd(PathBuf);
+
+impl std::fmt::Display for NotACwd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let on = match PathRules::HOST {
+            PathRules::Posix => "",
+            PathRules::Windows => " on a drive or a share",
+        };
+        write!(
+            f,
+            "{} cannot be a working directory: it is not an absolute path{on}",
+            shown(&self.0)
+        )
+    }
+}
+
+impl std::error::Error for NotACwd {}
 
 /// A lexically-resolved path: absolute, `.`/`..`-collapsed, anchored
 /// against the logical cwd.
@@ -51,9 +134,17 @@ use std::path::{Path, PathBuf};
 pub struct LexicalPath(PathBuf);
 
 impl LexicalPath {
-    /// Wrap the output of [`super::lex::resolve_path`], asserting exactly
-    /// what that kernel guarantees — no further normalisation happens
-    /// here.  The public door is [`super::Resolver::resolve`].
+    /// Wrap the output of [`super::lex::anchor`], asserting exactly what
+    /// that kernel guarantees — no further normalisation happens here.  The
+    /// public doors are [`super::Resolver::resolve`] and
+    /// [`super::Resolver::anchor`].
+    ///
+    /// Asserted rather than checked, because the kernel is total on what it
+    /// is given: an absolute input it keeps, and every other it reads against
+    /// a [`CwdPath`], whose root each reading keeps, so the join is absolute;
+    /// the fold keeps the root it reads and is its own fixed point; and an
+    /// absolute path, folded, still has its root, so it is not empty.  A
+    /// check here would have no refusal to give a caller.
     pub(super) fn from_lexed(path: PathBuf) -> Self {
         debug_assert!(
             is_absolute(&path),
@@ -80,6 +171,16 @@ impl LexicalPath {
     /// Consume into the owned `PathBuf` a caller opens or stats.
     pub fn into_inner(self) -> PathBuf {
         self.0
+    }
+
+    /// This path as a working directory, for `cd`, `within [dir: …]`, or a
+    /// script's own directory.
+    ///
+    /// # Errors
+    /// [`CwdPath::new`]'s: a lexical path may be on a malformed or mixed
+    /// head, which no working directory is.
+    pub fn into_cwd(self) -> Result<CwdPath, NotACwd> {
+        CwdPath::new(self.0)
     }
 
     /// For audit fields and denial messages.

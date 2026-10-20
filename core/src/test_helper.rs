@@ -23,10 +23,18 @@ pub fn core_schemes() -> crate::typecheck::SessionSchemes {
     crate::typecheck::SessionSchemes::new(crate::HostSurface::default().manifest())
 }
 
-/// A shell over core's own surface alone: no env vars, no prelude.  The
-/// scaffold unit tests start from.
+/// The test process's working directory, which a test shell is rooted at.
+///
+/// # Panics
+/// If the process has none, which no test can run without.
+pub fn process_cwd() -> crate::path::CwdPath {
+    crate::host::cwd().expect("the test process has a working directory")
+}
+
+/// A shell over core's own surface alone at [`process_cwd`]: no env vars, no
+/// prelude.  The scaffold unit tests start from.
 pub fn core_shell() -> crate::Shell {
-    crate::Shell::root(core_runtime().into())
+    crate::Shell::root(core_runtime().into(), process_cwd())
 }
 
 /// Core's own surface as a runtime: what [`core_shell`] is a root over.

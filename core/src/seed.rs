@@ -235,6 +235,7 @@ mod tests {
             crate::terminal::TerminalState::default(),
             BakedPrelude::runtime(),
             &crate::boot::HostSurface::default(),
+            crate::test_helper::process_cwd(),
         );
         shell.set_exit_hints(crate::types::ExitHints::from_text("false 1 hinted\n"));
         shell.arm_binding_lease(crate::types::BindingLease {

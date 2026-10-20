@@ -68,6 +68,7 @@ fn boot() -> Shell {
         ral_core::terminal::TerminalState::default(),
         common::prelude(),
         &ral_core::boot::HostSurface::default(),
+        ral_core::test_helper::process_cwd(),
     )
 }
 

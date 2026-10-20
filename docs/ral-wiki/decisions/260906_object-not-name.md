@@ -91,19 +91,14 @@ in the language.
   dead under deny-wins, and a Windows ACL orders explicit allows before
   inherited denies, so handing one over inverted the rule.
 
-**Descendant coverage (2026-10-12).** Inheritance alone misses protected DACLs
-and loses to a descendant's explicit allow. `dacl::deny::descendants` walks a
-denied tree and reasserts its capability deny explicitly on protected objects
-and objects with any explicit ACE, preserving their protection and ordinary
-permissions. Reparse points are skipped; failure to inspect or stamp a
-descendant refuses confinement and names the path. The completion witness is
-versioned independently of the capability SID, so existing root-only stamps
-cannot skip the walk. It is invalidated before a retry and recorded only after
-the walk and root propagation finish.
-
-The regression matrix is
-`session::tests::confined_child_denies_protected_and_explicit_descendants`;
-Windows execution remains pending. A completed walk does not detect later
-descendant replacement or ACL edits: the persistent-stamp freshness limit in
-[[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]]
-still applies.
+**Descendant coverage (2026-10-12), withdrawn 2026-10-20.** The walk that
+reasserted a capability deny on protected and explicit descendants is gone,
+with the capability deny itself: Windows CI showed a file inheriting that deny
+still read by the confined child, because the `AppContainer` pass of the access
+check never matches a deny ACE against a capability SID. Windows now carves an
+exclusion out of the allowances around it, refuses one on or around an
+allowance, and proves every exclusion unreachable at each launch by an access
+check on the child's own SIDs; see the 2026-10-20 amendment
+of [[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]].
+The second invariant above still holds on every backend, though on Windows the
+order of ACEs it speaks of no longer arises.

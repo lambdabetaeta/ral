@@ -57,7 +57,7 @@ parent's seal, so core holds no spawn machinery for it.** The why is
 
 The frame algebra. Everything on it is a wire type; nothing here carries.
 
-- `PROTOCOL_VERSION` (currently 26) — checked at `Attach`; a mismatch refuses.
+- `PROTOCOL_VERSION` (currently 27) — checked at `Attach`; a mismatch refuses.
 - `check_media` — the same number compared at *build* time, against the
   `proto_version=` line `vm-image/build-boot.sh` records for the engine in the
   guest media; `synod/examples/check-media.rs`, tauri's `beforeBuildCommand`,

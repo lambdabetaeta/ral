@@ -1343,7 +1343,10 @@ mod tests {
                 ForkClaim::Sealed(
                     ral_core::seed::seal(
                         &ral_core::HostSurface::default()
-                            .shell(ral_core::terminal::TerminalState::default())
+                            .shell(
+                                ral_core::terminal::TerminalState::default(),
+                                ral_core::test_helper::process_cwd(),
+                            )
                             .bequeath(SpawnGrant::Inherit),
                     )
                     .expect("a bequest seals"),

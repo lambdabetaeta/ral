@@ -12,6 +12,7 @@
 
 use crate::evaluator::{Mode, run_phrases};
 use crate::ir::{CompKind, Phrase, Toplevel};
+use crate::path::CwdPath;
 use crate::terminal::TerminalState;
 use crate::typecheck::Manifest;
 use crate::types::{
@@ -60,14 +61,19 @@ impl BakedPrelude {
     /// shell seated from this bake starts from.
     ///
     /// # Panics
-    /// Panics if the prelude fails to run: a partial prelude is never seated.
+    /// Panics if the prelude fails to run: a partial prelude is never seated;
+    /// or if the process has no working directory for the shell it runs on
+    /// ([`crate::host::cwd`]), which a front end refuses to boot without
+    /// before it seats a prelude.
     pub fn seat(&self, runtime: &mut Runtime) {
         let map = self.map.get_or_init(|| self.evaluate());
         Arc::make_mut(&mut runtime.sig).install_prelude(Arc::clone(map));
     }
 
     fn evaluate(&self) -> Arc<PreludeMap> {
-        let mut shell = HostSurface::default().shell(TerminalState::default());
+        let cwd =
+            crate::host::cwd().expect("the prelude runs in a process with a working directory");
+        let mut shell = HostSurface::default().shell(TerminalState::default(), cwd);
         let ran = run_phrases(
             &self.comp().phrases,
             Env::new(),
@@ -246,12 +252,13 @@ impl HostSurface {
         runtime
     }
 
-    /// Core plus this surface, no env, no prelude: a loader's scaffold.
+    /// Core plus this surface at `cwd`, no env, no prelude: a loader's
+    /// scaffold.
     ///
     /// # Panics
     /// Panics if a name here collides with a core builtin or repeats.
-    pub fn shell(&self, terminal: TerminalState) -> Shell {
-        Shell::root(self.runtime(terminal).into())
+    pub fn shell(&self, terminal: TerminalState, cwd: CwdPath) -> Shell {
+        Shell::root(self.runtime(terminal).into(), cwd)
     }
 }
 
@@ -274,22 +281,27 @@ pub fn boot_runtime(
     runtime
 }
 
-/// A shell as every front end boots one: [`boot_runtime`] over a root, the
-/// env seeded from the host.
+/// A shell as every front end boots one: [`boot_runtime`] over a root at
+/// `cwd`, the env seeded from the host.
 ///
 /// Terminal handling, output capture, watchdogs, capability frames and rc
 /// files stay the host's, interposed around this call.
 ///
 /// # Panics
 /// As [`boot_runtime`].
-pub fn boot_shell(terminal: TerminalState, prelude: &BakedPrelude, surface: &HostSurface) -> Shell {
-    let mut shell = Shell::root(boot_runtime(terminal, prelude, surface).into());
+pub fn boot_shell(
+    terminal: TerminalState,
+    prelude: &BakedPrelude,
+    surface: &HostSurface,
+    cwd: CwdPath,
+) -> Shell {
+    let mut shell = Shell::root(boot_runtime(terminal, prelude, surface).into(), cwd);
     seed_host_env(&mut shell);
     shell
 }
 
-/// Adopt the host process's env and cwd onto a fresh shell, defaulting
-/// anything unset.
+/// Adopt the host process's env onto a fresh shell, defaulting anything
+/// unset.  The cwd is the root's own, given where it was constructed.
 ///
 /// Ral code reads these as `!{env}[KEY]`, so every front end sees one
 /// baseline whoever launched the process.  `SHLVL` is incremented rather than
@@ -357,9 +369,6 @@ pub fn seed_host_env(shell: &mut Shell) {
             .filter_map(|(key, value)| Some((key, value?)))
             .chain(facts),
     );
-    if let Some(cwd) = crate::host::cwd() {
-        shell.seed_cwd(cwd);
-    }
 }
 
 /// The host's `key`, else `default()` where the host binds nothing. A value

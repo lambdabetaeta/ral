@@ -3,8 +3,8 @@
     reason = "[test] Windows junction fixtures and real ACL regressions"
 )]
 
-use super::super::tests::with_scoped_state_dir;
-use super::super::{canonicalize_grant_target, ensure_frozen_grant};
+use super::super::ensure_frozen_grant;
+use super::super::tests::{real, with_scoped_state_dir};
 use super::*;
 use crate::process::cancel::DurableRoot;
 use std::process::Command;
@@ -24,10 +24,6 @@ fn mklink(link: &Path, target: &Path) -> std::process::Output {
 fn junction(link: &Path, target: &Path) {
     let output = mklink(link, target);
     assert!(output.status.success(), "create junction: {output:?}");
-}
-
-fn real(path: &Path) -> PathBuf {
-    canonicalize_grant_target(path).unwrap()
 }
 
 fn is_redirected(r: &Result<Option<FrozenPin>, DaclError>) -> bool {
