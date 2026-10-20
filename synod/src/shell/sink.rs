@@ -316,7 +316,7 @@ fn project_display(display: &Display) -> Option<SynodEvent> {
         Display::Card { card } => Some(SynodEvent::Card {
             marks: marks_dto(card.clone()),
         }),
-        Display::Context { turns } => process_card(Some(context_rows_card(turns))),
+        Display::Context { rows } => process_card(Some(context_rows_card(rows))),
         // The trunk's committed reasoning, its prose cut line by line for
         // the durable scrollback, a tool result already said on its call row,
         // a settled background block — a worker thread is no business of a
@@ -342,7 +342,7 @@ fn project_display_helper(display: &Display) -> Option<SynodEvent> {
         Display::Observation { value } => process_card(observation_display_card(value)),
         Display::Change { change } => process_card(Some(change_card(change))),
         Display::Card { card } => process_card(Some(card.clone())),
-        Display::Context { turns } => process_card(Some(context_rows_card(turns))),
+        Display::Context { rows } => process_card(Some(context_rows_card(rows))),
         Display::Done { .. }
         | Display::Thinking { .. }
         | Display::Answer { .. }
@@ -718,7 +718,7 @@ mod tests {
 
     #[test]
     fn context_and_a_lone_observation_both_collapse_to_process_card() {
-        let context = Record::Display(Display::Context { turns: Vec::new() });
+        let context = Record::Display(Display::Context { rows: Vec::new() });
         let observation = Record::Display(Display::Observation {
             value: observation_wire(Observed::Worker(Worker {
                 id: ral_core::types::WorkerId(1),
@@ -786,7 +786,7 @@ mod tests {
                 .is_none()
         );
 
-        let context = Record::Display(Display::Context { turns: Vec::new() });
+        let context = Record::Display(Display::Context { rows: Vec::new() });
         let Some(SynodEvent::ProcessCard { marks }) = router.route_fact(AgentId::new(1), &context)
         else {
             panic!("a helper's structural facts still fold into the dial");

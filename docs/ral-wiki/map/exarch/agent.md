@@ -286,7 +286,7 @@ Three nested loops, the same for root and child alike:
   append refused, or a host-side panic. Both types live in the leaf
   `agent/outcome.rs`, which `attend` and `nudge` read without depending on
   the loop. `deliberate` itself is a short driver: weigh the context for an
-  eviction (`must_evict`), take one `round_trip`, and act on the `Turn` it
+  eviction (`must_force_evict`), take one `round_trip`, and act on the `Turn` it
   answers — `Ends(Outcome)`, `Calls`, or `Retry` after an overflow that
   `relieve` answered with an eviction, never twice running. `round_trip`
   records the turn's start, renders the context and streams a reply through
@@ -460,15 +460,24 @@ a repair's records what it spent (`spent: Some(Spent { used, max })`).
 | pressure reminder | steering | gauge `Over` ∧ excursion untold | free |
 | usage reminder | steering | an allowance window climbs past 90 or 95% | free |
 
-The pressure reminder names the set it is warning about: the pressure reading
-calls `Avatar::planned_eviction` — a walk back over the turn table's own
-summed weights, no rendering — and carries the answer as
-`Pressure::Over { detail, planned }`, so the message tells the model which
-*turns* the next boundary would take, rendered as runs, that the material
-stays readable with `exarch-transcript`, and how to make the same cut with a line of
-its own — `` exarch-context `evict [turns: !{range a b}, note: `some '…'] `` — before they
-go. With nothing old enough to shed, `planned` is `None` and the
-reading alone is the whole message. Durability is the log's job, so the nudge
+The pressure reminder names the span it is warning about: the pressure
+reading calls `Avatar::planned_forced_eviction` — a walk back over the frontier's
+own summed weights, no rendering — and carries the answer as
+`Pressure::Over(Load { used, total, trigger, unit, planned: Option<Span> })`,
+the one payload `Reminder::Pressure` hands on: figures only, `unit` tokens or
+bytes, every sentence worded in `nudge.rs`. So the message tells the model the
+trigger (the forced-eviction threshold, a reserve beyond the warning, in the
+unit of the reading) and which turns a forced eviction
+would take as things stand — `Once it passes … a forced eviction will take the
+oldest part of your context; as things stand, that is turns 1–80`, the live
+prompt among them if it lies in the span. The eviction comes at a turn boundary
+only once the context passes the trigger, possibly many turns later, and takes
+the span planned at that moment. The message adds that the material stays
+readable with `exarch-transcript` but a forced eviction leaves no note, and how
+to make the cut with a line of its own —
+`` exarch-context `evict [from: a, to: b, note: '…'] `` — before they go.
+With nothing old enough to shed, `planned` is `None` and the message is the
+reading plus the trigger. Durability is the log's job, so the nudge
 never asks the model to write state to files.
 
 Everything else is accepted as-is, unspent, and deliberately so: `Replied` (a
@@ -797,7 +806,7 @@ ends it, the parent receiving the usual non-reply notice and a resume
 ignoring the record.
 
 `evict` sheds the older half of the context when pressure crosses the context
-window's reserve (`gauge.rs`'s `eviction_due` — used tokens into the top 15%
+window's reserve (`gauge.rs`'s `forced_eviction_due` — used tokens into the top 15%
 of a known window; `EVICT_THRESHOLD`, 500 KiB of serialised history, is the
 fallback when the window is unknown) and `Context::can_evict` holds (no
 pending tool results). It is called **at the top of every `deliberate` loop
@@ -808,48 +817,53 @@ hand, so there is no iteration where weighing is unsafe
 autonomous and headless sessions therefore stay bounded *within* one
 deliberation, without an interactive `/evict`.
 `suffix_keep_budget` (half the history bytes) sets the cut and
-`plan_eviction(keep)` walks back over the turn table's summed weights until
-that budget is spent, answering the **set** the cut would take —
-`Option<Vec<u64>>`, `None` when nothing is old enough. The walk's candidates
-are every resident turn but the last, so the work in hand is never in a plan's
-set — the budget alone would cut everything when the newest turn outweighs the
-whole of it. A prompt whose answers still hold a resident turn outside the set
-stays with them, so a cut that reaches into a prompt's answers keeps the
-prompt. **No provider call is
+`plan_forced_eviction(keep)` walks back over the frontier — resident turns and
+resident residues — from the newest item, spending that budget; the
+first item that does not fit sets `to`, and the cut is **one prefix span**
+from the frontier's first item to there, `Option<Span>`, `None` when
+nothing is old enough. The newest item is never a candidate, so the
+work in hand is never in a plan — the budget alone would cut everything when
+the newest turn outweighs the whole of it. The live prompt is an item like
+any other, so the span **may take it**; the model, warned first, keeps what
+was asked only by evicting under its own note. **The harness never
+rewrites**: a span that would be exactly one residue is no plan, since
+rewriting it without a note would save nothing, while two or more items,
+residues included, merge
+([[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]]). **No provider call is
 involved**, so a boundary Esc has nothing to interrupt and simply leaves the
 context as it lies
 ([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]).
 
-A successful eviction is `evict(turns, None, EditAuthority::Harness)`, which
-records `Protocol::Evicted { cut: Cut { turns, note: None }, by }` — the
-*resolved* set, the ids that actually left, so replay departs exactly those and
-re-derives nothing
-([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]])
-— wrapped in `Transient::State(AgentState::Evicting)`
-for the state row — momentary, since the edit is the whole of it. The same fold
-step marks the departing turns `Held::Evicted` and frees their resident
-records, retaining only their byte ranges in `record.jsonl`; this is residency
-following the context, not a second drain rule. `render_marker` draws one
-marker at each hole the cut opens, from those very turns and the `Cut` beside
-them, so what left is still named
-and still readable through `exarch-transcript`. Nothing old enough to shed is a no-op,
-not an event. The durable log is appended to, never rewritten.
+`force_eviction` applies the planned span as
+`evict_unbidden(span, EditAuthority::Harness)`, under one
+`Transient::State(AgentState::Evicting)` for the state row — momentary, since
+the edit is the whole of it — and answers whether it landed; `relieve`'s
+once-only retry is unchanged. It records `Protocol::Evicted { residue: Residue
+{ span, note: None, by } }`, the span being the resolved identity, so replay
+re-derives nothing. The same fold step pushes that `Residue` and stamps
+every resident turn and residue within its span as under it, moving the turns
+to `There`, freeing their records and retaining only their byte ranges in
+`record.jsonl`; this is residency following the context, not a second drain
+rule. The residue renders (`render_residue`) as one user-voice message saying
+the turns left in a forced eviction without a note and how to read them back.
+Nothing old enough to evict is a no-op, not an event. The durable log is
+appended to, never rewritten.
 
-Harness eviction is one authority over the one context edit
+A forced eviction is one authority over the one context edit
 ([[decisions/260812_context-is-a-projection|context-is-a-projection]]). The
 model reaches the other two: `` exarch-context `survey ``/``
-`evict [turns, note] `` survey and edit the context and `exarch-transcript`'s ``
+`evict [from, to, note] `` survey and edit the context and `exarch-transcript`'s ``
 `index ``/`` `read ``/`` `grep `` read the record, an edit recording
 `Protocol::Evicted` with `EditAuthority::Model` rather than `Harness`; only the
-model's own `` `evict `` carries a `note`. The user's own hand is
+model's own `` `evict `` carries a `note`, and it is required. The user's own hand is
 `/rewind`, a picker over the prompts on screen ([[map/exarch/frontend|frontend]]),
 which is **not an eviction**: `AgentLog::rewind(anchor)`
 records `Protocol::Rewound { anchor }` alone, and the fold step *withdraws* the
-anchor and every later turn — departed rows included — from the context, with no
-hole and no marker. The turns stay readable through `exarch-transcript`, the next
+anchor and every later turn — evicted ones included — from the context, leaving
+no residue. The turns stay readable through `exarch-transcript`, the next
 prompt is minted `reach + 1` so ids stay monotone, the automaton rests where the
-kept prefix leaves it (`state::resting`), and an anchor already withdrawn is
-refused. `Avatar::rewind` sheds
+kept prefix leaves it (`state::resting`), and an anchor already withdrawn, or
+strictly inside a resident residue's span, is refused. `Avatar::rewind` sheds
 queued self-nudges and rebuilds the nudge state; the screen learns of the rewind
 from the record. The shell is not rewound,
 and the picker says so. `AgentLog::append_user(text, continues, voice)` decides
@@ -859,9 +873,10 @@ iff its `Voice` is not `Harness`, so the screen knows exactly which turn each
 prompt opened (`Item::voice`: `Human` and `Wakeup` as themselves, a peer
 `Message` as `Peer`, and a child result, nudge or surface notice as `Harness`);
 `/context` surveys the context without editing it — `emit_context_survey`
-posts the survey's turns as a `Display::Context` fact, and `context_rows_card`
-groups them off their roles at draw time, one field per prompt with the
-resident turn range answering it and its weight — a `Read` beside
+posts the survey's span rows as a `Display::Context` fact, and
+`context_rows_card` groups them off their roles at draw time, a group opening
+at each user-role row — a prompt (`turn 12`) or a residue (`turns 12–40`,
+labelled by its note) — with the rows answering it and their weight — a `Read` beside
 `/resources` and the session-opening `/new` and `/branch`
 (`agent/command.rs`).
 
@@ -1030,7 +1045,7 @@ silently severed at this call site.
 for opaque error blobs (`OPAQUE_CAP`); `clip` measures what a terminal would
 show (`ral_core::ansi::visible`, replaying `\r` and backspace beside the
 escape strip). The whole-history gauges — the `EVICT_THRESHOLD` byte
-fallback, `eviction_due`/`eviction_trigger` (the reserve line and the token
+fallback, `forced_eviction_due`/`eviction_trigger` (the reserve line and the token
 count that names it, for `/resources`), `pressure_due` and its
 `PRESSURE_THRESHOLD_FALLBACK` one reserve ahead of it, and
 `suffix_keep_budget`, the half-the-bytes cut — are `gauge.rs`'s. These caps
@@ -1047,7 +1062,7 @@ head-on.
 
 Every `ral` result closes with a `TURN: <id>` line naming the turn it closes.
 That is how the model learns its own turn number, and so the address it evicts
-and reads by: the same id `` exarch-context `evict [turns: …] `` and
+and reads by: the id `` exarch-context `evict [from: …, to: …] `` and
 `` exarch-transcript `read [turns: …] `` take. It is appended in `agent/shell.rs`,
 from `AgentLog::current_turn()`, not in `digest`'s rendering — the id is the
 session's, known where the result is assembled and not inside a byte-capped
@@ -1078,6 +1093,8 @@ the later amendment that moved the run's settings onto the fleet's `Launch`),
 the unit of eviction, the loop-top weighing, and the pressure reminder's
 channel),
 [[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]
-(the one edit, its three authorities, and the marker at each hole),
+(the one edit and its three authorities),
+[[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]] (the residue an eviction leaves, and the pressure plan's
+one prefix span),
 [[map/synod|synod]] (`MachineFactory`, and synod's own helper surface built over
 the wire-seat spawn above).

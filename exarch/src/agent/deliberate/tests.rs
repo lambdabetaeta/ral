@@ -393,7 +393,7 @@ fn stale_token_measure_is_unknown_until_the_next_completion() {
     session
         .log
         .borrow_mut()
-        .evict(&[2], None, EditAuthority::Model)
+        .evict(crate::record::Span::single(2), None, EditAuthority::Model)
         .unwrap();
 
     assert_eq!(

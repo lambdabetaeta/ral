@@ -57,12 +57,18 @@ fn context_survey_records_a_display_commit() {
     let fact = crate::bus::drain_records(&rx)
         .into_iter()
         .find_map(|rec| match rec {
-            Record::Display(Display::Context { turns, .. }) => Some(turns),
+            Record::Display(Display::Context { rows }) => Some(rows),
             _ => None,
         })
         .expect("the survey records a Display::Context commit");
-    assert_eq!((fact[0].id, fact[0].role), (1, crate::record::Role::User));
-    assert_eq!(fact[0].kind, crate::record::TurnKind::Own);
+    assert_eq!(
+        (fact[0].span, fact[0].role),
+        (crate::record::Span::single(1), crate::record::Role::User)
+    );
+    assert_eq!(
+        fact[0].kind,
+        crate::record::ItemKind::Turn(crate::record::TurnKind::Own)
+    );
 }
 
 /// The agent half surveys what this thread owns: the worker registry's
@@ -247,7 +253,7 @@ fn known_window_reports_context_tokens_not_bytes() {
     assert_eq!(
         tokens.cap,
         Some(eviction_trigger(200_000)),
-        "the same trigger `Avatar::evict` fires auto-eviction on"
+        "the same trigger `Avatar::evict` forces an eviction on"
     );
     assert_eq!(tokens.policy, Policy::Evict);
     assert!(

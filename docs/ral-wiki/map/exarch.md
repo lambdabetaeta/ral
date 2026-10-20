@@ -248,10 +248,12 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   without a live `Shell`; zero-fuel agents omit `agents` alone.
 - **`Tasks`** (`data/tasks.md`) is the task-management kit API.
 - **`Context management`** (`data/context.md`) teaches the coding workflow:
-  bind large results and inspect projections, discard failed attempts in the
-  next call with a short lesson and an account of side effects, preserve
-  conclusions in bindings and eviction notes, and batch cuts of completed
-  work, including spent `explain` results. Each instruction is paired with
+  evict irrelevant retrievals and failed attempts once retried, each as one
+  run `[from, to]` under a required note that leaves one residue; cut at the
+  bottom or in batch, covering a residue whole or not at all; expect the
+  a forced eviction to take the current prompt too, so evict first under
+  one's own note, saying what was asked; and find residues again with
+  `exarch-transcript`. Each instruction is paired with
   an example call; the operation-by-operation `explain` guides in
   `shell_eval/builtins/harness.rs` own returned shapes, limits, refusals, and
   recovery details. Eviction changes visibility, never filesystem or shell

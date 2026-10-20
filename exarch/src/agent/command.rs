@@ -36,7 +36,7 @@ impl Avatar {
             }
             Rewrite::Evict => {
                 if self.log.borrow().context().can_evict() {
-                    self.shed();
+                    self.force_eviction();
                 } else {
                     self.note_error("cannot evict while tool results are pending");
                 }

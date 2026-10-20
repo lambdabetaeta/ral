@@ -9,7 +9,7 @@ pub(crate) mod ration;
 use crate::agent::Avatar;
 use crate::latch::Latch;
 use crate::provider::{Provider, Served, Usage};
-use crate::record::Forensic;
+use crate::record::{Forensic, Span};
 use ral_core::carrier::Severed;
 use std::io;
 use std::path::Path;
@@ -24,13 +24,8 @@ pub(crate) enum Warning {
 /// A standing condition newly crossed, for the model: the figures, not the
 /// sentence, which is [`nudge`](crate::agent::nudge)'s to word.
 pub(crate) enum Reminder {
-    /// The context has crossed the soft line; `planned` is the turns the next
-    /// boundary's cut would take, `None` when nothing is old enough to shed.
-    Pressure {
-        /// The rendered figure, e.g. "173000 of 200000 tokens".
-        detail: String,
-        planned: Option<Vec<u64>>,
-    },
+    /// The context has crossed the soft line.
+    Pressure(Load),
     /// An allowance window on `service` has climbed past a rung.
     Ration {
         service: String,
@@ -55,16 +50,34 @@ pub(crate) struct Measure {
 /// One stateless reading of the context-pressure gauge, taken by the caller.
 /// `Unknown` (a stale token measure under a known window) must neither warn
 /// nor re-arm: a stale measure relieves nothing.
+#[derive(Clone, Copy)]
 pub(crate) enum Pressure {
-    Over {
-        /// The rendered detail, e.g. "173000 of 200000 tokens".
-        detail: String,
-        /// The turns the next boundary's cut would take, `None` when nothing
-        /// is old enough to shed.
-        planned: Option<Vec<u64>>,
-    },
+    Over(Load),
     Under,
     Unknown,
+}
+
+/// What the context weighs against where a forced eviction falls, and what
+/// that eviction would take: the figures alone, every one in `unit`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Load {
+    pub used: u64,
+    /// The whole window, where it is known.
+    pub total: Option<u64>,
+    /// Where a forced eviction falls.
+    pub trigger: u64,
+    pub unit: Unit,
+    /// The span a forced eviction would take as things stand, `None` when
+    /// nothing is old enough to shed.
+    pub planned: Option<Span>,
+}
+
+/// What a [`Load`]'s figures count: the provider's tokens, or serialised
+/// bytes where the window is unknown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unit {
+    Tokens,
+    Bytes,
 }
 
 /// Every ladder an agent climbs, at its latch.
@@ -85,10 +98,10 @@ impl Gauges {
                 self.pressure.cross(false);
                 None
             }
-            Pressure::Over { detail, planned } => self
+            Pressure::Over(load) => self
                 .pressure
                 .cross(true)
-                .then_some(Warning::Model(Reminder::Pressure { detail, planned })),
+                .then_some(Warning::Model(Reminder::Pressure(load))),
         }
     }
 
@@ -124,9 +137,9 @@ impl Gauges {
 const DISK_WALK_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Fallback eviction trigger, in serialised model-view bytes, for
-/// [`Avatar::must_evict`] — used only when the model's context window is unknown
+/// [`Avatar::must_force_evict`] — used only when the model's context window is unknown
 /// (no source reports it).  A known window goes
-/// through [`eviction_due`] instead.
+/// through [`forced_eviction_due`] instead.
 pub(crate) const EVICT_THRESHOLD: usize = 500 * 1024;
 
 /// Fallback soft line when the window is unknown: three-quarters of
@@ -142,17 +155,17 @@ fn reserve_tokens(window: u64) -> u64 {
 
 /// Whether the live context (`used` input tokens) has grown into the
 /// reserve — i.e. crossed `window − reserve`.
-pub(crate) fn eviction_due(used: u64, window: u64) -> bool {
+pub(crate) fn forced_eviction_due(used: u64, window: u64) -> bool {
     used + reserve_tokens(window) > window
 }
 
-/// The token count past which [`eviction_due`] fires, spelled as a gauge
+/// The token count past which [`forced_eviction_due`] fires, spelled as a gauge
 /// cap for `/resources`.
 pub(crate) fn eviction_trigger(window: u64) -> u64 {
     window.saturating_sub(reserve_tokens(window))
 }
 
-/// The soft line one full reserve ahead of [`eviction_due`]: room enough for
+/// The soft line one full reserve ahead of [`forced_eviction_due`]: room enough for
 /// the model to leave itself a note before the older half of its context
 /// goes.
 pub(crate) fn pressure_due(used: u64, window: u64) -> bool {
@@ -196,28 +209,28 @@ impl Avatar {
         (!self.log.borrow().context().token_measure_is_stale(at)).then_some(tokens)
     }
 
-    /// Auto-eviction tracks real context pressure: the tokens the model last
+    /// Forced eviction tracks real context pressure: the tokens the model last
     /// saw against its window, firing once they grow into the reserve.  An
     /// unknown window falls back to the byte heuristic.
-    pub(super) fn must_evict(&self, provider: &Provider) -> bool {
+    pub(super) fn must_force_evict(&self, provider: &Provider) -> bool {
         match provider.context_window() {
             Some(window) => self
                 .measured_input()
-                .is_some_and(|tokens| eviction_due(tokens, window)),
+                .is_some_and(|tokens| forced_eviction_due(tokens, window)),
             None => self.log.borrow().context().history_bytes() >= EVICT_THRESHOLD,
         }
     }
 
-    /// The turns an eviction would take were it to run now, `None` when
+    /// The span an eviction would take were it to run now, `None` when
     /// nothing is old enough to shed.
-    /// [`crate::record::model::Context::plan_eviction`] never names the
-    /// newest turn, so this never answers with the work in hand either.
-    pub(super) fn planned_eviction(&self) -> Option<Vec<u64>> {
+    /// [`crate::record::model::Context::plan_forced_eviction`] never names the
+    /// newest item, so neither does this.
+    pub(super) fn planned_forced_eviction(&self) -> Option<Span> {
         let log = self.log.borrow();
         let context = log.context();
         context
             .can_evict()
-            .then(|| context.plan_eviction(suffix_keep_budget(context.history_bytes())))
+            .then(|| context.plan_forced_eviction(suffix_keep_budget(context.history_bytes())))
             .flatten()
     }
 
@@ -262,30 +275,36 @@ impl Avatar {
     }
 
     /// One reading of the pressure gauge, no state.  The soft line is
-    /// [`pressure_due`], one reserve ahead of auto-eviction; an unknown window
+    /// [`pressure_due`], one reserve ahead of a forced eviction; an unknown window
     /// falls back to the byte heuristic against
     /// [`PRESSURE_THRESHOLD_FALLBACK`].  Either way the reading carries the
-    /// cut [`Avatar::planned_eviction`] would make, so the reminder can name it.
+    /// cut [`Avatar::planned_forced_eviction`] would make, so the reminder can name it.
     fn pressure(&self, provider: &Provider) -> Pressure {
-        let detail = match provider.context_window() {
-            Some(window) if window > 0 => match self.measured_input() {
-                None => return Pressure::Unknown,
-                Some(tokens) => {
-                    pressure_due(tokens, window).then(|| format!("{tokens} of {window} tokens"))
+        let (used, total, trigger, unit) = match provider.context_window() {
+            Some(window) if window > 0 => {
+                let Some(tokens) = self.measured_input() else {
+                    return Pressure::Unknown;
+                };
+                if !pressure_due(tokens, window) {
+                    return Pressure::Under;
                 }
-            },
+                (tokens, Some(window), eviction_trigger(window), Unit::Tokens)
+            }
             _ => {
                 let bytes = self.log.borrow().context().history_bytes();
-                (bytes >= PRESSURE_THRESHOLD_FALLBACK).then(|| format!("{} KB", bytes / 1024))
+                if bytes < PRESSURE_THRESHOLD_FALLBACK {
+                    return Pressure::Under;
+                }
+                (bytes as u64, None, EVICT_THRESHOLD as u64, Unit::Bytes)
             }
         };
-        match detail {
-            Some(detail) => Pressure::Over {
-                detail,
-                planned: self.planned_eviction(),
-            },
-            None => Pressure::Under,
-        }
+        Pressure::Over(Load {
+            used,
+            total,
+            trigger,
+            unit,
+            planned: self.planned_forced_eviction(),
+        })
     }
 
     /// The disk-warn ceiling's verdict, once per excursion — nothing is ever

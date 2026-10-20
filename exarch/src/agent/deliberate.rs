@@ -1,7 +1,7 @@
 //! One prompt run to quiescence against the provider.
 //!
 //! [`Avatar::deliberate`] drives one round-trip at a time until the model
-//! stops calling tools.  Auto-eviction is weighed at every turn boundary,
+//! stops calling tools.  A forced eviction is weighed at every turn boundary,
 //! against the thresholds in [`gauge`](super::gauge); the standing-condition
 //! warnings ride the steering channel at a tool boundary.
 //! [`Avatar::attend`] is the loop around this, one call per inbox item.
@@ -59,8 +59,8 @@ impl Avatar {
         loop {
             // Every turn boundary is weighed, this one included: the turn a
             // cut would take is never the one in hand.
-            if self.must_evict(provider) {
-                self.shed();
+            if self.must_force_evict(provider) {
+                self.force_eviction();
             }
             match self.round_trip(provider, retried)? {
                 Turn::Ends(outcome) => return Ok(outcome),
@@ -158,7 +158,7 @@ impl Avatar {
                 context_window: window,
             });
         }
-        if retried || !self.shed() {
+        if retried || !self.force_eviction() {
             return Err(error.into());
         }
         self.note(format!(
@@ -309,10 +309,10 @@ impl Avatar {
             .collect()
     }
 
-    /// Shed the older half of the context, the harness writing no note of its
+    /// Force-evict the older half of the context, the harness writing no note of its
     /// own: the model's own `` exarch-context `evict `` is where a note comes
-    /// from. Whether anything was shed.
-    pub(crate) fn shed(&self) -> bool {
+    /// from. Whether anything was evicted.
+    pub(crate) fn force_eviction(&self) -> bool {
         if !self.log.borrow().context().can_evict() {
             return false;
         }
@@ -322,12 +322,12 @@ impl Avatar {
             return false;
         }
         // No turn old enough to shed is a no-op, not an event.
-        let Some(turns) = self.planned_eviction() else {
+        let Some(span) = self.planned_forced_eviction() else {
             return false;
         };
         self.recorder()
             .transient(Transient::State(AgentState::Evicting));
-        if let Err(e) = self.evict_unbidden(&turns, EditAuthority::Harness) {
+        if let Err(e) = self.evict_unbidden(span, EditAuthority::Harness) {
             self.note_error(&format!("evict failed: {e}"));
             return false;
         }

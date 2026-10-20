@@ -114,10 +114,13 @@ fn a_trunk_that_steers_nothing_says_nothing() {
     let mut nudges = Nudges::new(false);
     let log = fresh_log();
     assert!(nudges.react(EMPTY, &facts(), &log).is_none());
-    let pressure = Reminder::Pressure {
-        detail: "400 of 500 tokens".into(),
+    let pressure = Reminder::Pressure(Load {
+        used: 400,
+        total: Some(500),
+        trigger: 450,
+        unit: Unit::Tokens,
         planned: None,
-    };
+    });
     assert!(nudges.remind(&pressure, &log).is_none());
     assert_eq!(nudges.used, 0);
 }
@@ -338,19 +341,24 @@ fn reset_does_not_rearm_edges() {
     );
 }
 
-/// The pressure reminder carries both the reading and the turns the next
-/// boundary would cut, with the line that makes the same cut by hand.
+/// The pressure reminder carries both the reading and the span a forced
+/// eviction would take, with the line that makes the same cut by hand.
 #[test]
 fn pressure_names_the_cut_and_offers_the_note() {
-    let body = Reminder::Pressure {
-        detail: "400 of 500 tokens".into(),
-        planned: Some(vec![1, 2, 3, 4, 5, 6, 7]),
-    }
+    let body = Reminder::Pressure(Load {
+        used: 400,
+        total: Some(500),
+        trigger: 450,
+        unit: Unit::Tokens,
+        planned: Some(crate::record::Span::new(1, 7).expect("a run")),
+    })
     .body();
     assert!(body.contains("400 of 500 tokens"), "{body}");
     assert!(
-        body.contains("turns 1–7 will leave your context")
-            && body.contains("`` exarch-context `evict [turns: !{range 1 8}"),
+        body.contains("Once it passes 450 tokens")
+            && body.contains("that is turns 1–7. They would stay readable")
+            && body.contains("evict them yourself now")
+            && body.contains("`` exarch-context `evict [from: 1, to: 7, note: '…'] ``"),
         "must name the cut and offer the note: {body}"
     );
 }
@@ -359,14 +367,17 @@ fn pressure_names_the_cut_and_offers_the_note() {
 /// announce and no note to offer.
 #[test]
 fn pressure_without_a_planned_cut_states_the_reading_alone() {
-    let body = Reminder::Pressure {
-        detail: "400 of 500 tokens".into(),
+    let body = Reminder::Pressure(Load {
+        used: 400,
+        total: Some(500),
+        trigger: 450,
+        unit: Unit::Tokens,
         planned: None,
-    }
+    })
     .body();
     assert!(body.contains("400 of 500 tokens"), "{body}");
     assert!(
-        !body.contains("evict") && !body.contains("will leave your context"),
+        !body.contains("evict them") && body.contains("due once it passes 450 tokens"),
         "with no cut planned there is nothing to announce: {body}"
     );
 }

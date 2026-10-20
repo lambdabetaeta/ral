@@ -9,7 +9,7 @@ use crate::agent::EngineLost;
 use crate::agent::desk;
 use crate::agent::digest::{OPAQUE_CAP, clip, render};
 use crate::bus::Emitter;
-use crate::record::{AgentLog, EditAuthority};
+use crate::record::{AgentLog, EditAuthority, Span};
 use crate::record::{AgentState, Forensic};
 use crate::shell_eval;
 use atomic_refcell::{AtomicRef, AtomicRefCell, AtomicRefMut};
@@ -92,10 +92,10 @@ impl Avatar {
         self.log.borrow().record_emitter()
     }
 
-    /// Evict on an authority no act row speaks for — the harness's pressure
-    /// cut — so the eviction draws its own row.
-    pub(crate) fn evict_unbidden(&self, turns: &[u64], by: EditAuthority) -> Result<(), String> {
-        self.log.borrow_mut().evict(turns, None, by).map(drop)
+    /// Evict on an authority no act row speaks for — a forced
+    /// eviction — so it draws its own row.
+    pub(crate) fn evict_unbidden(&self, span: Span, by: EditAuthority) -> Result<(), String> {
+        self.log.borrow_mut().evict(span, None, by)
     }
 
     /// A log that cannot take the error is the one failure that cannot go

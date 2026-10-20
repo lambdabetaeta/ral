@@ -1,88 +1,58 @@
 //! The one fold: [`Context::step`] judges a record and applies it. An eviction
 //! or a withdrawal is what moves a turn from here to there — the eviction's
-//! resolution and its planning live beside it.
+//! rules and its planning live beside it.
 
 use super::state::{admissible, advance, resting};
+use super::table::{Item, holder};
 use super::transcript::read_seeds;
 use super::{
-    Context, Held, Turn, chat_messages, message_bytes, message_label, message_role,
-    not_recorded_refusal_turn, opening_line, runs,
+    Context, Location, Span, Turn, chat_messages, message_bytes, message_label, message_role,
+    not_recorded_refusal_turn, opening_line,
 };
 use crate::record::{Protocol, Record, Recorded, Refusal, Role, TurnKind};
-use std::collections::BTreeSet;
 
 impl Context {
-    /// The set of resident turns an eviction naming `turns` actually takes:
-    /// the one place the survivor rule lives, and the set the writer records
-    /// so replay departs exactly these ids.
-    ///
-    /// Refused by name: a turn never recorded, one that has already left, and
-    /// the turn being written now. Kept silently: a prompt one of whose
-    /// answers the set leaves in the context — hence the invariant that every
-    /// resident assistant turn has its prompt resident before it.
+    /// Whether an eviction may take the run `span`: the one place its rules
+    /// live, for the writer and the judge alike.
     ///
     /// # Errors
-    /// Refuses an eviction that names no turn, one of the three above, and a
-    /// set the survivor rule would empty.
-    pub(crate) fn resolve_cut(&self, turns: &[u64]) -> Result<Vec<u64>, String> {
-        // Order and repeats are the caller's business, not a refusal.
-        let mut named: BTreeSet<u64> = turns.iter().copied().collect();
-        if named.is_empty() {
-            return Err("an eviction must name at least one turn".into());
-        }
-        for &id in &named {
+    /// Refuses an end never recorded or withdrawn, a run holding the turn
+    /// being written now, and one that cuts a residue.
+    pub(crate) fn resolve_cut(&self, span: Span) -> Result<(), String> {
+        for id in [span.from(), span.to()] {
             let Some(turn) = self.turn(id) else {
                 return Err(not_recorded_refusal_turn(id, self.reach()));
             };
-            if !turn.is_resident() {
-                return Err(self.departed_turn_refusal(id));
-            }
-            if self.unclosed_turn() == Some(id) {
+            if turn.is_withdrawn() {
                 return Err(format!(
-                    "turn {id} is being written now: an eviction keeps the work in hand"
+                    "turn {id} was rewound or cleared away: it is no longer in your context"
                 ));
             }
         }
-        // The survivor rule: a prompt one of whose answers the set leaves in
-        // the context stays with it.
-        let kept: Vec<u64> = named
-            .iter()
-            .copied()
-            .filter(|&id| {
-                self.turn(id).is_some_and(Turn::is_user)
-                    && self
-                        .answers(id)
-                        .any(|turn| turn.is_resident() && !named.contains(&turn.id))
-            })
-            .collect();
-        for id in &kept {
-            let _ = named.remove(id);
-        }
-        if named.is_empty() {
-            let user = *kept
-                .first()
-                .expect("the set emptied, so the rule kept a prompt back");
-            let rest: Vec<u64> = self
-                .answers(user)
-                .filter(|turn| turn.is_resident())
-                .map(|turn| turn.id)
-                .collect();
-            let (turns, are, them) = if rest.len() == 1 {
-                ("turn", "is", "it")
-            } else {
-                ("turns", "are", "them")
-            };
+        if let Some(id) = self.unclosed_turn().filter(|&id| span.contains(id)) {
             return Err(format!(
-                "turn {user} is the prompt whose {turns} {} {are} still in your context, and a \
-                 prompt stays with {them}: name {them} too, or leave it",
-                runs(&rest)
+                "turn {id} is being written now: an eviction keeps the work in hand"
             ));
         }
-        Ok(named.into_iter().collect())
+        // `to` ends an item exactly when `to + 1` starts one.
+        if let Some(straddled) = self
+            .table
+            .straddling(span.from())
+            .or_else(|| self.table.straddling(span.to().saturating_add(1)))
+            .map(|residue| residue.span)
+        {
+            return Err(format!(
+                "{straddled} stand together under one note: name from: {}, to: {} whole, or \
+                 leave it",
+                straddled.from(),
+                straddled.to()
+            ));
+        }
+        Ok(())
     }
 
     /// Whether `/rewind anchor` may be recorded now: the anchor is a turn the
-    /// lineage recorded and has not yet withdrawn, resident or evicted, and no
+    /// lineage recorded and has not yet withdrawn, it starts an item, and no
     /// batch is awaiting results.
     ///
     /// # Errors
@@ -100,6 +70,14 @@ impl Context {
                 "turn {anchor} was already rewound or cleared away; {earliest}"
             ));
         }
+        if let Some(residue) = self.table.straddling(anchor) {
+            let span = residue.span;
+            return Err(format!(
+                "turn {anchor} lies under the residue over {span}: rewind to turn {} or turn {}",
+                span.from(),
+                span.to() + 1
+            ));
+        }
         if !self.is_ready() {
             return Err(format!(
                 "cannot rewind while the session is {}",
@@ -109,62 +87,31 @@ impl Context {
         Ok(())
     }
 
-    fn departed_turn_refusal(&self, turn: u64) -> String {
-        match self.resident().next() {
-            Some(first) => format!(
-                "turn {turn} has already left your context: the earliest still in it is {}",
-                first.id
-            ),
-            None => {
-                format!("turn {turn} has already left your context: no turn is still in it")
-            }
-        }
-    }
-
-    /// The cut the harness's pressure eviction would make to spend no more
-    /// than `keep` bytes on what stays, resolved; `None` when nothing is old
-    /// enough to shed.
+    /// The span a forced eviction would take to spend no more
+    /// than `keep` bytes on what stays; `None` when nothing is old enough to
+    /// shed.
     ///
-    /// Candidates are every turn in the context but the last, so the work in
-    /// hand is unnameable rather than merely unlikely. The last turn's own
-    /// weight is spent up front, and its prompt's with it: a prompt stays
-    /// while one of its answers is in context, so that one is never a saving.
-    /// For the same reason a prompt that overshoots cannot leave alone — its
-    /// answers go with it, the cut falling through the newest resident one.
-    pub(crate) fn plan_eviction(&self, keep: usize) -> Option<Vec<u64>> {
-        let resident: Vec<&Turn> = self.resident().collect();
-        let (last, candidates) = resident.split_last()?;
-        let mut spent = last.bytes;
-        let paid = (!last.is_user()).then(|| self.prompt_of(last.id)).flatten();
-        if let Some(user) = paid.and_then(|id| self.turn(id)) {
-            spent = spent.saturating_add(user.bytes);
-        }
-        for turn in candidates.iter().rev() {
-            if paid == Some(turn.id) {
-                continue;
+    /// A walk back over the frontier from the newest item, which is never a
+    /// candidate: the first item that does not fit ends a prefix. A prefix
+    /// that is one residue alone is no plan: rewriting it without a note
+    /// would save nothing.
+    pub(crate) fn plan_forced_eviction(&self, keep: usize) -> Option<Span> {
+        let items = self.table.frontier();
+        let (last, candidates) = items.split_last()?;
+        let mut spent = last.bytes();
+        let mut through = None;
+        for (index, item) in candidates.iter().enumerate().rev() {
+            spent = spent.saturating_add(item.bytes());
+            if spent > keep {
+                through = Some(index);
+                break;
             }
-            let total = spent.saturating_add(turn.bytes);
-            if total > keep {
-                let through = if turn.is_user() {
-                    self.answers(turn.id)
-                        .filter(|t| t.is_resident())
-                        .last()
-                        .map_or(turn.id, |t| t.id)
-                } else {
-                    turn.id
-                };
-                let prefix: Vec<u64> = resident
-                    .iter()
-                    .filter(|turn| turn.id <= through)
-                    .map(|turn| turn.id)
-                    .collect();
-                // A cut that takes nothing is no plan, and an empty set is
-                // exactly what `resolve_cut` refuses.
-                return self.resolve_cut(&prefix).ok();
-            }
-            spent = total;
         }
-        None
+        let through = through?;
+        if let [Item::Residue(..)] = candidates[..=through] {
+            return None;
+        }
+        Some(candidates[0].span().hull(candidates[through].span()))
     }
 
     /// The one fold, judging each record before applying it — so a
@@ -185,13 +132,13 @@ impl Context {
         let mut state = advance(&self.state, &protocol);
         match &protocol {
             Protocol::System { text } => self.system = text.as_str().into(),
-            Protocol::Inherited { turns, notes } => {
+            Protocol::Inherited { turns, residues } => {
                 // Read first: a failure leaves the structure as it was.
                 let seeds = read_seeds(turns)?;
-                self.table.install(turns, notes, seeds);
+                self.table.install(turns, residues, seeds);
             }
-            Protocol::Evicted { cut, .. } => {
-                self.table.evict(&cut.turns, cut.note.clone());
+            Protocol::Evicted { residue } => {
+                self.table.evict(residue.clone());
                 self.newest_edit = Some(index);
             }
             Protocol::Rewound { .. } | Protocol::Cleared => {
@@ -237,7 +184,7 @@ impl Context {
                 "record {n} names turn {id}, which the log had already moved past; no live session records a stale id"
             )));
         }
-        if let Protocol::Inherited { turns, notes } = protocol {
+        if let Protocol::Inherited { turns, residues } = protocol {
             // The position is the rule: a link stands as the first protocol
             // record of a fork's log, and nowhere else.
             if index != 0 {
@@ -254,14 +201,46 @@ impl Context {
                     pair[0].row.id, pair[1].row.id
                 )));
             }
-            let past = turns.iter().find(
-                |linked| matches!(linked.row.held, Held::Evicted { cut } if cut >= notes.len()),
-            );
-            if let Some(linked) = past {
+            let carried = |id: u64| turns.iter().any(|linked| linked.row.id == id);
+            if let Some(span) = residues
+                .iter()
+                .map(|residue| residue.span)
+                .find(|span| !carried(span.from()) || !carried(span.to()))
+            {
                 return Err(foreign(format!(
-                    "record {n} says turn {} left at an eviction the link does not carry a note for, of the {} it carries; was this log's opening record hand-edited?",
-                    linked.row.id,
-                    notes.len()
+                    "record {n} links a residue over {span}, whose ends are not a run of turns the link carries; was this log's opening record hand-edited?"
+                )));
+            }
+            let crossed = residues.iter().enumerate().find_map(|(i, earlier)| {
+                residues[i + 1..]
+                    .iter()
+                    .find(|later| {
+                        let (earlier, later) = (earlier.span, later.span);
+                        !(earlier.within(later)
+                            || earlier.to() < later.from()
+                            || later.to() < earlier.from())
+                    })
+                    .map(|later| (earlier.span, later.span))
+            });
+            if let Some((earlier, later)) = crossed {
+                return Err(foreign(format!(
+                    "record {n} links a residue over {earlier} and a later one over {later}, which no sequence of evictions leaves: a later residue covers an earlier one whole or lies apart from it; was this log's opening record hand-edited?"
+                )));
+            }
+            let contradicted = turns.iter().map(|linked| &linked.row).find(|row| {
+                row.location != Location::Withdrawn
+                    && row.location
+                        != holder(
+                            Span::single(row.id),
+                            residues.iter().map(|residue| residue.span),
+                        )
+                        .map_or(Location::Resident, Location::Under)
+            });
+            if let Some(row) = contradicted {
+                return Err(foreign(format!(
+                    "record {n} links turn {} as {}, which its residues contradict; was this log's opening record hand-edited?",
+                    row.id,
+                    row.location.as_str()
                 )));
             }
         }
@@ -277,22 +256,21 @@ impl Context {
                 "record {n} rewinds to turn {anchor}, which {gone}; was record.jsonl hand-edited?"
             )));
         }
-        if let Protocol::Evicted { cut, .. } = protocol {
-            if cut.turns.is_empty() {
-                return Err(foreign(format!(
-                    "record {n} evicts no turn; was record.jsonl hand-edited?"
-                )));
-            }
-            if let Some(id) = cut
-                .turns
-                .iter()
-                .copied()
-                .find(|id| !self.turn(*id).is_some_and(Turn::is_resident))
-            {
-                return Err(foreign(format!(
-                    "record {n} evicts turn {id}, which is not in the context; was record.jsonl hand-edited?"
-                )));
-            }
+        if let Protocol::Rewound { anchor } = protocol
+            && let Some(residue) = self.table.straddling(*anchor)
+        {
+            return Err(foreign(format!(
+                "record {n} rewinds to turn {anchor}, inside the residue over {}; was record.jsonl hand-edited?",
+                residue.span
+            )));
+        }
+        if let Protocol::Evicted { residue } = protocol
+            && let Err(reason) = self.resolve_cut(residue.span)
+        {
+            return Err(foreign(format!(
+                "record {n} evicts {}, which no live session could: {reason}; was record.jsonl hand-edited?",
+                residue.span
+            )));
         }
         if matches!(protocol, Protocol::Steering { .. }) && self.table.turns().is_empty() {
             return Err(foreign(format!(

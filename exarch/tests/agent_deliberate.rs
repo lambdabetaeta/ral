@@ -19,8 +19,8 @@ use exarch::bus::{Emitter, channel};
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{CutShort, Provider, ProviderError};
 use exarch::record::{AgentId, AgentState};
-use exarch::record::{Cut, EditAuthority};
 use exarch::record::{Display, Forensic, Protocol, Record, Transient, Voice};
+use exarch::record::{EditAuthority, Residue};
 use genai::chat::{ChatRole, ContentPart, ToolCall};
 use std::sync::Arc;
 
@@ -332,8 +332,8 @@ fn empty_reply_commits_a_stub_not_empty_content() {
     );
 }
 
-/// Auto-eviction is weighed at every turn boundary, before the request is
-/// taken, and rewrites the context to the head marker plus the recent
+/// A forced eviction is weighed at every turn boundary, before the request is
+/// taken, and rewrites the context to the head residue plus the recent
 /// exchange, verbatim, with no provider round-trip of its own.  `test-model`
 /// has no pricing-catalog entry, so the context window is unknown and the
 /// byte fallback (`digest::EVICT_THRESHOLD`, 500 KiB) is the live trigger:
@@ -379,14 +379,14 @@ fn eviction_fires_at_the_turn_boundary_and_keeps_the_recent_exchange() {
     // provider before this line.
     let view = session.rendered_messages();
     assert_eq!(view[0].role, ChatRole::User);
-    let marker = view[0].content.first_text().unwrap_or_default();
+    let residue = view[0].content.first_text().unwrap_or_default();
     assert!(
-        marker.starts_with("[EXARCH // Turn") && marker.contains("left your context"),
-        "the context must open on the head hole's marker, got {marker:?}"
+        residue.starts_with("[EXARCH // Turn") && residue.contains("left your context"),
+        "the context must open on the forced eviction's residue, got {residue:?}"
     );
     assert!(
-        marker.contains("EXCHANGE1"),
-        "the marker lists the evicted prompt by its opening line, got {marker:?}"
+        residue.contains("in a forced eviction, without a note"),
+        "the residue says it was a forced eviction, got {residue:?}"
     );
     let rendered = serde_json::to_string(&view).unwrap();
     assert!(
@@ -422,11 +422,14 @@ fn eviction_fires_at_the_turn_boundary_and_keeps_the_recent_exchange() {
         records.iter().any(|record| matches!(
             record,
             Record::Protocol(Protocol::Evicted {
-                cut: Cut { note: None, .. },
-                by: EditAuthority::Harness,
+                residue: Residue {
+                    note: None,
+                    by: EditAuthority::Harness,
+                    ..
+                },
             })
         )),
-        "auto-eviction must record a harness-authored context edit, and write no note"
+        "a forced eviction must record a harness-authored context edit, and write no note"
     );
 }
 

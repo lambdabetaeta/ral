@@ -1,5 +1,5 @@
 ---
-status: 'superseded in part by [[decisions/260907_the-turn-is-the-atom]] — evict-don''t-summarise, the head marker as one message at 0, evictions as prefix operations, the cache arithmetic, the lineage''s one address space and `transcript` as the door all stand. What resolves otherwise: the atom of a cut is the **turn**, not the exchange; its address is `through`, not `through_exchange`; it is weighed at every turn boundary, not at `deliberate` entry; and the model fold''s `View` / `Eviction` / `EvictedRow` / `span_row` carriers dissolve into one `Turn` table with its `Cut`s.'
+status: 'superseded in part by [[decisions/260907_the-turn-is-the-atom]] — evict-don''t-summarise, the head marker as one message at 0, evictions as prefix operations, the cache arithmetic, the lineage''s one address space and `transcript` as the door all stand. What resolves otherwise: the atom of a cut is the **turn**, not the exchange; its address is `through`, not `through_exchange`; it is weighed at every turn boundary, not at `deliberate` entry; and the model fold''s `View` / `Eviction` / `EvictedRow` / `span_row` carriers dissolve into one `Turn` table with its `Cut`s. Superseded in part again by [[decisions/261019_an-eviction-is-a-span]]: no head marker, but one residue per eviction, bounded by its note.'
 generated_at_commit: 14c8cae4
 ---
 
@@ -19,6 +19,11 @@ generated_at_commit: 14c8cae4
 > copied for every row, so the memoised ancestry walk (`AncestorIndex`,
 > `Break`, `Fault`) is gone with the two-mechanism split it existed to bridge.
 > `Admission` is `Context::step`.
+
+> Superseded in part by [[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]]: there is no head marker
+> and no `HEAD_ROWS`; each eviction leaves one residue, bounded by its note
+> (see the note under *The marker is bounded* below). Evict-don't-summarise
+> stands.
 
 **When the context fills, its older half leaves and nothing is written in its
 place but the harness's own index of what left.** No summariser runs. Nothing
@@ -81,6 +86,15 @@ while a row of its own survives the collapse (`drawn_cuts`), so a note cannot
 outlive the rows it belongs to and contributes at most one line beside them.
 The marker's height is therefore bounded by `HEAD_ROWS`, not by how many cuts
 the session has run.
+
+> **Superseding note (261019).** This bound is gone with the marker.
+> [[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]] draws no
+> rows at all: each eviction leaves one residue whose message is a fixed
+> sentence over its span `[from, to]`, the note (still one line of at most
+> 240 bytes, `Debug`-quoted), and the read-back line — ≤ ~0.64 KB whatever it
+> covers. The context's overhead is the number of resident residues times
+> that; a forced eviction leaves exactly one, and a larger run swallowing old
+> residues makes one of them.
 
 **A `Drop` writes no row.** Prefix caching invalidates from the earliest
 changed message onward, so an `Evict` — which removes the prefix — costs

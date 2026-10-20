@@ -20,13 +20,17 @@ disagree with the first, and nothing for a resume to compare
 
 Sequencing is **not** strict user/assistant alternation, and never was.
 Consecutive same-role messages are routine: a session that has evicted sends
-one marker — the harness's user-voice index of what left — at each **hole**,
-the maximal run of departed turns it stands in, so a marker adjacent to the
-next prompt puts two user-voice messages in a row, whether the hole is at
-message 0 before the oldest surviving prompt or mid-history
-([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]); an
-inherited turn can end on a user message with the child's launch prompt
-behind it, and a prompt whose predecessor's answers were interrupted follows
+one **residue** — a bracketed user-voice message carrying the eviction's note —
+where each evicted run began, between items and never inside a turn, so a
+residue adjacent to a prompt puts two user-voice messages in a row, whether
+it stands before the oldest surviving prompt or mid-history
+([[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]]). A
+residue is never the last message while a request is built: the unclosed
+turn is never in a cut, and a forced eviction never names the newest item.
+Its user voice is also what makes a prompt's eviction
+legal to the provider: the frontier opens with a user-role item whether its
+first prompt stayed or left. Likewise an inherited turn can end on a user
+message with the child's launch prompt behind it, and a prompt whose predecessor's answers were interrupted follows
 those answers' last tool results or steering directly
 ([[invariants/turn-ends-ready|exchange-ends-ready]]). genai's Anthropic
 adapter pushes one JSON object per `ChatMessage` and merges nothing, so those
@@ -67,10 +71,12 @@ Three adjacent obligations keep the invariant whole:
   ([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]). What keeps
   a cut off the work in hand is not this predicate but the rule that **no edit
   touches the unclosed turn** — the one being written, which exists only while
-  a turn is open: `Context::resolve_cut` refuses it by name, and
-  `plan_eviction` draws its candidates from every resident turn *but the last*,
-  so a harness plan cannot even name it
-  ([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
+  a turn is open: `Context::resolve_cut` refuses a run with it within, and
+  `plan_forced_eviction` walks back from the newest-but-one frontier item, so a
+  forced eviction cannot even name it. The plan is one prefix span and may take
+  the live prompt with the rest; the model, warned first, may evict the
+  prompt under its own note
+  ([[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]]).
 - **`Inherited` stands only at a fork's opening.** `Context::step` refuses
   `Protocol::Inherited` anywhere but the first protocol record of a child log —
   the position *is* the rule, `len == 0`, needing no flag and no reading of
@@ -80,8 +86,11 @@ Three adjacent obligations keep the invariant whole:
   what makes "a log has at most one ancestry, fixed at the fork that opened it"
   a property of the file rather than a habit of the writer
   ([[decisions/260906_context-rollover|context-rollover]]). What the link
-  carries — the parent's whole table and its cuts — is
-  [[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]'s. It is also
+  carries — the parent's whole table and its residues — is
+  [[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]'s and
+  [[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]]'s, the
+  judge refusing residues that are not laminar or rows whose `location`
+  disagrees with them. It is also
   the one record whose meaning lies in another file: its step reads each
   resident row's records back through digest-checked pointers, keeping each
   row's admissible prefix so that no dangling `tool_use` of the parent's

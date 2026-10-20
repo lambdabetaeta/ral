@@ -7,13 +7,13 @@
 
 use crate::card::{Card, encode_card, value_to_card};
 use crate::record::model::ContextSurvey;
-use crate::record::{Memory, TranscriptPart};
+use crate::record::{Location, Memory, Span, SpanRow, TranscriptPart};
 use crate::schedule::{CronSchedule, ScheduleInfo, Trigger, fmt_duration, parse_duration};
 use ral_core::SpawnGrant;
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::{Datum, exact_keys, field, tag, untag};
 use ral_core::text::code;
-use ral_core::ty::{Ty, Typed};
+use ral_core::ty::{Ty, Typed, closed_record};
 use ral_core::types::NurseryId;
 use ral_core::{record, variant};
 use regex::Regex;
@@ -807,19 +807,41 @@ impl Family for Context {
     }
 }
 
-/// Which turns leave, and the note the marker keeps in their place.
+/// The run `[from, to]` that leaves, both ends inclusive, and the note its
+/// residue keeps in its place. An inverted run is refused here, once.
 pub(crate) struct Evict {
-    pub(crate) turns: Vec<u64>,
-    pub(crate) note: Option<Note>,
+    pub(crate) span: Span,
+    pub(crate) note: Note,
 }
 
-record!(typed Evict {
-    turns: "turns",
-    note: "note",
-});
+impl Typed for Evict {
+    fn ty() -> Ty {
+        closed_record(&[("from", u64::ty()), ("to", u64::ty()), ("note", Note::ty())])
+    }
+}
 
-/// An eviction's note: one short line, since the marker keeps it for the
-/// rest of the session and draws one row per turn the cut takes.
+impl Datum for Evict {
+    fn encode(self) -> FOValue {
+        FOValue::Map {
+            entries: vec![
+                ("from".into(), self.span.from().encode()),
+                ("note".into(), self.note.encode()),
+                ("to".into(), self.span.to().encode()),
+            ],
+        }
+    }
+
+    fn decode(v: &FOValue) -> Result<Self, String> {
+        exact_keys(v, &["from", "to", "note"])?;
+        Ok(Self {
+            span: Span::new(field(v, "from")?, field(v, "to")?).map_err(|e| e.to_string())?,
+            note: field(v, "note")?,
+        })
+    }
+}
+
+/// An eviction's note: one short line, since the residue keeps it in place
+/// of the run for the rest of the session.
 pub(crate) struct Note(pub(crate) String);
 
 impl Note {
@@ -840,31 +862,31 @@ impl Datum for Note {
     fn decode(v: &FOValue) -> Result<Self, String> {
         let note = String::decode(v)?;
         if note.is_empty() {
-            return Err("text must not be empty: `none leaves no note".into());
+            return Err(
+                "text must not be empty: the residue keeps one short line, and it is the only \
+                 trace of the run left in your context"
+                    .into(),
+            );
         }
         if note.len() > Self::CAP {
             return Err(format!(
-                "text is {} bytes; the marker keeps one short line: {} at most. What is the one \
+                "text is {} bytes; the residue keeps one short line: {} at most. What is the one \
                  thing your future self needs to know?",
                 note.len(),
                 Self::CAP
             ));
         }
         if note.contains(['\n', '\r']) {
-            return Err(
-                "text must be a single line: the marker draws one row per turn the cut \
-                        takes, and a line break in a note reads as one of them."
-                    .into(),
-            );
+            return Err("text must be a single line: the residue keeps one short line".into());
         }
         Ok(Self(note))
     }
 }
 
-/// The context as `` `survey `` rows it: one line per resident turn, then
-/// what the whole of it weighs.
+/// The context as `` `survey `` rows it: one row per item in it, then what
+/// the whole of it weighs.
 pub(crate) struct Survey {
-    pub(crate) rows: Vec<Line>,
+    pub(crate) rows: Vec<Row>,
     pub(crate) total_bytes: usize,
 }
 
@@ -873,16 +895,19 @@ record!(typed Survey {
     total_bytes: "total-bytes",
 });
 
-pub(crate) struct Line {
-    pub(crate) id: u64,
+/// One item, turn or residue, by its span.
+pub(crate) struct Row {
+    pub(crate) from: u64,
+    pub(crate) to: u64,
     pub(crate) role: String,
     pub(crate) kind: String,
     pub(crate) label: String,
     pub(crate) bytes: usize,
 }
 
-record!(typed Line {
-    id: "id",
+record!(typed Row {
+    from: "from",
+    to: "to",
     role: "role",
     kind: "kind",
     label: "label",
@@ -892,20 +917,21 @@ record!(typed Line {
 impl From<ContextSurvey> for Survey {
     fn from(survey: ContextSurvey) -> Self {
         Self {
-            rows: survey.rows.iter().map(Line::from).collect(),
+            rows: survey.rows.iter().map(Row::from).collect(),
             total_bytes: survey.total_bytes,
         }
     }
 }
 
-impl From<&crate::record::TurnRow> for Line {
-    fn from(turn: &crate::record::TurnRow) -> Self {
+impl From<&SpanRow> for Row {
+    fn from(row: &SpanRow) -> Self {
         Self {
-            id: turn.id,
-            role: turn.role.as_str().into(),
-            kind: turn.kind.as_str().into(),
-            label: turn.label.clone(),
-            bytes: turn.bytes,
+            from: row.span.from(),
+            to: row.span.to(),
+            role: row.role.as_str().into(),
+            kind: row.kind.as_str().into(),
+            label: row.label.clone(),
+            bytes: row.bytes,
         }
     }
 }
@@ -996,41 +1022,85 @@ impl Datum for Grep {
     }
 }
 
-/// One row of `` `index ``: a survey's line, and whether the turn is held.
+/// One row of `` `index ``: a survey's row, and where the item is.
 pub(crate) struct Indexed {
-    pub(crate) id: u64,
+    pub(crate) from: u64,
+    pub(crate) to: u64,
     pub(crate) role: String,
     pub(crate) kind: String,
     pub(crate) label: String,
     pub(crate) bytes: usize,
-    pub(crate) held: String,
+    pub(crate) location: Location,
 }
 
 record!(Indexed {
-    id: "id",
+    from: "from",
+    to: "to",
     role: "role",
     kind: "kind",
     label: "label",
     bytes: "bytes",
-    held: "held",
+    location: "location",
 });
 
-impl From<crate::record::TurnRow> for Indexed {
-    fn from(turn: crate::record::TurnRow) -> Self {
-        let Line {
-            id,
+impl From<SpanRow> for Indexed {
+    fn from(row: SpanRow) -> Self {
+        let Row {
+            from,
+            to,
             role,
             kind,
             label,
             bytes,
-        } = Line::from(&turn);
+        } = Row::from(&row);
         Self {
-            id,
+            from,
+            to,
             role,
             kind,
             label,
             bytes,
-            held: turn.held.as_str().into(),
+            location: row.location,
+        }
+    }
+}
+
+/// `[from: Int, to: Int]`, as every span reads at the surface.
+impl Datum for Span {
+    fn encode(self) -> FOValue {
+        FOValue::Map {
+            entries: vec![
+                ("from".into(), self.from().encode()),
+                ("to".into(), self.to().encode()),
+            ],
+        }
+    }
+
+    fn decode(v: &FOValue) -> Result<Self, String> {
+        exact_keys(v, &["from", "to"])?;
+        Self::new(field(v, "from")?, field(v, "to")?).map_err(|e| e.to_string())
+    }
+}
+
+/// `` `resident ``, `` `under [from: Int, to: Int] `` naming the smallest
+/// later residue over the item, or `` `withdrawn ``.
+impl Datum for Location {
+    fn encode(self) -> FOValue {
+        match self {
+            Self::Under(span) => tag("under", Some(span.encode())),
+            location => tag(location.as_str(), None),
+        }
+    }
+
+    fn decode(v: &FOValue) -> Result<Self, String> {
+        match untag(v) {
+            Some(("resident", None)) => Ok(Self::Resident),
+            Some(("withdrawn", None)) => Ok(Self::Withdrawn),
+            Some(("under", Some(span))) => Span::decode(span).map(Self::Under),
+            _ => Err(format!(
+                "expected `resident, `under [from: Int, to: Int] or `withdrawn, got {}",
+                v.shape()
+            )),
         }
     }
 }
@@ -1046,15 +1116,20 @@ record!(Hits {
     total: "total",
 });
 
+/// One matching line, naming the item it lies in by `(from, to, kind)`.
 pub(crate) struct Hit {
-    pub(crate) turn: u64,
+    pub(crate) from: u64,
+    pub(crate) to: u64,
+    pub(crate) kind: String,
     pub(crate) role: String,
     pub(crate) line: usize,
     pub(crate) text: String,
 }
 
 record!(Hit {
-    turn: "turn",
+    from: "from",
+    to: "to",
+    kind: "kind",
     role: "role",
     line: "line",
     text: "text",
@@ -1067,7 +1142,9 @@ impl From<crate::record::GrepAnswer> for Hits {
                 .hits
                 .into_iter()
                 .map(|hit| Hit {
-                    turn: hit.turn,
+                    from: hit.span.from(),
+                    to: hit.span.to(),
+                    kind: hit.kind.as_str().into(),
                     role: crate::record::role_label(&hit.role).into(),
                     line: hit.line,
                     text: hit.text,
@@ -1334,12 +1411,8 @@ mod tests {
         round_trips([
             Request::Context(Context::Survey),
             Request::Context(Context::Evict(Evict {
-                turns: vec![3, 1, 2],
-                note: None,
-            })),
-            Request::Context(Context::Evict(Evict {
-                turns: vec![1],
-                note: Some(Note("the parser is fixed".into())),
+                span: Span::new(1, 3).unwrap(),
+                note: Note("the parser is fixed".into()),
             })),
         ]);
     }
@@ -1467,21 +1540,82 @@ mod tests {
         );
     }
 
-    /// The address is the edit, so a spec carrying only a note never reaches
-    /// the host. The scheme anchors `turns`, so no program written in ral
-    /// gets this far — the decoder is the second line of defence.
+    fn evict_with(entries: &[(&str, FOValue)]) -> Result<Context, String> {
+        let entries = entries
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), value.clone()))
+            .collect();
+        family::<Context>(&tag("evict", Some(FOValue::Map { entries })))
+    }
+
+    /// A residue stands on its note, so an eviction without one never reaches
+    /// the host; nor does the old `turns` address. The scheme closes the
+    /// record, so the decoder is the second line of defence.
     #[test]
-    fn an_eviction_naming_no_turns_is_refused() {
-        let note = FOValue::Map {
-            entries: vec![("note".into(), "nothing to say".to_string().encode())],
-        };
-        let Err(why) = family::<Context>(&tag("evict", Some(note))) else {
-            panic!("an eviction must name the turns it takes");
+    fn an_eviction_without_a_note_or_by_turns_is_refused() {
+        let int = |value| FOValue::Int { value };
+        let Err(why) = evict_with(&[("from", int(1)), ("to", int(2))]) else {
+            panic!("an eviction must carry its note");
         };
         assert_eq!(
             why,
-            "`` exarch-context `evict ``: no `turns field in a record of 1 field"
+            "`` exarch-context `evict ``: no `note field in a record of 2 fields"
         );
+        let turns = FOValue::List {
+            items: vec![int(1), int(2)],
+        };
+        let note = "the parser is fixed".to_string().encode();
+        assert!(
+            evict_with(&[("turns", turns), ("note", note)]).is_err(),
+            "a run is named by from and to, not by a list of turns"
+        );
+    }
+
+    /// `location` is a variant, and `under` names the holder's span.
+    #[test]
+    fn an_index_row_encodes_its_span_and_holder() {
+        let row = Indexed::from(SpanRow {
+            span: Span::single(3),
+            role: crate::record::Role::User,
+            kind: crate::record::ItemKind::Turn(crate::record::TurnKind::Own),
+            label: "first".into(),
+            bytes: 7,
+            location: Location::Under(Span::new(3, 4).unwrap()),
+        })
+        .encode();
+        let int = |value| FOValue::Int { value };
+        assert_eq!(row.field("from"), Some(&int(3)));
+        assert_eq!(row.field("to"), Some(&int(3)));
+        assert_eq!(
+            row.field("location"),
+            Some(&tag(
+                "under",
+                Some(FOValue::Map {
+                    entries: vec![("from".into(), int(3)), ("to".into(), int(4))]
+                })
+            ))
+        );
+        assert!(Vec::<Indexed>::decode(&FOValue::List { items: vec![row] }).is_ok());
+    }
+
+    /// A hit names its item, a residue's note by its whole span.
+    #[test]
+    fn a_hit_encodes_its_item() {
+        let hits = Hits::from(crate::record::GrepAnswer {
+            hits: vec![crate::record::GrepHit {
+                span: Span::new(3, 4).unwrap(),
+                kind: crate::record::ItemKind::Residue,
+                role: genai::chat::ChatRole::User,
+                line: 1,
+                text: "the parser is fixed".into(),
+            }],
+            total: 1,
+        })
+        .encode();
+        let hit = &hits.field("hits").and_then(FOValue::as_list).expect("hits")[0];
+        assert_eq!(hit.field("from"), Some(&FOValue::Int { value: 3 }));
+        assert_eq!(hit.field("to"), Some(&FOValue::Int { value: 4 }));
+        assert_eq!(hit.field("kind"), Some(&"residue".to_string().encode()));
     }
 
     /// A tag that reads nothing refuses a payload rather than dropping it.

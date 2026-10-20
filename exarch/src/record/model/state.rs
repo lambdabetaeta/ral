@@ -31,7 +31,7 @@ impl Context {
     /// An edit may land at any rest but a batch in flight: outstanding tool
     /// calls name the assistant frame their results answer, so nothing may
     /// come between. What keeps the work in hand is
-    /// [`Self::plan_eviction`]'s own shape and [`Self::resolve_cut`]'s
+    /// [`Self::plan_forced_eviction`]'s own shape and [`Self::resolve_cut`]'s
     /// refusal of the unclosed turn, not this.
     pub fn can_evict(&self) -> bool {
         self.is_ready()

@@ -1,6 +1,6 @@
 use super::*;
 use crate::provider::Tuning;
-use crate::record::model::Held;
+use crate::record::model::{ItemKind, Location};
 use crate::record::{Spent, TurnKind};
 use genai::chat::{ContentPart, ToolCall};
 use regex::Regex;
@@ -43,34 +43,22 @@ fn regex(pattern: &str) -> Regex {
     Regex::new(pattern).expect("a test pattern is a regex")
 }
 
-/// The resident turns at or below `through`: what a prefix cut names, now
-/// spelled as the set it always was.
-fn prefix(log: &AgentLog, through: u64) -> Vec<u64> {
+/// The context's items by span, oldest first: `(n, n)` for turn `n`.
+fn survey(log: &AgentLog) -> Vec<(u64, u64)> {
     log.context()
         .context_survey()
         .rows
         .iter()
-        .map(|row| row.id)
-        .filter(|id| *id <= through)
+        .map(|row| (row.span.from(), row.span.to()))
         .collect()
 }
 
-/// Every resident turn of the named prompts: each prompt and the turns
-/// answering it, up to the next prompt.
-fn answered(log: &AgentLog, prompts: &[u64]) -> Vec<u64> {
-    let mut under = false;
-    log.context()
-        .context_survey()
-        .rows
-        .iter()
-        .filter(|row| {
-            if row.role == Role::User {
-                under = prompts.contains(&row.id);
-            }
-            under
-        })
-        .map(|row| row.id)
-        .collect()
+fn span(from: u64, to: u64) -> Span {
+    Span::new(from, to).expect("a test names a run first turn first")
+}
+
+fn under(from: u64, to: u64) -> Location {
+    Location::Under(span(from, to))
 }
 
 fn record_path(log: &AgentLog) -> PathBuf {
@@ -108,7 +96,7 @@ fn turn_partition_joins_steering_and_opens_one_turn_per_id() {
         s.context()
             .transcript_index()
             .iter()
-            .map(|row| (row.id, row.role))
+            .map(|row| (row.span.from(), row.role))
             .collect::<Vec<_>>(),
         vec![
             (1, Role::User),
@@ -119,7 +107,10 @@ fn turn_partition_joins_steering_and_opens_one_turn_per_id() {
             (6, Role::Assistant),
         ]
     );
-    assert_eq!(s.context().transcript_index()[0].kind, TurnKind::Import);
+    assert_eq!(
+        s.context().transcript_index()[0].kind,
+        ItemKind::Turn(TurnKind::Import)
+    );
     assert!(
         !s.context()
             .rendered()
@@ -136,12 +127,10 @@ fn ids_mint_monotonically_across_edits() {
     complete_round(&mut s, "one", "one");
     complete_round(&mut s, "two", "two");
     assert_eq!(s.context().current_prompt(), Some(3));
-    s.evict(&answered(&s, &[3]), None, EditAuthority::Model)
-        .unwrap();
+    s.evict(span(3, 4), None, EditAuthority::Model).unwrap();
     complete_round(&mut s, "three", "three");
     assert_eq!(s.context().current_prompt(), Some(5));
-    s.evict(&prefix(&s, 2), None, EditAuthority::Harness)
-        .unwrap();
+    s.evict(span(1, 2), None, EditAuthority::Harness).unwrap();
     complete_round(&mut s, "four", "four");
     assert_eq!(s.context().current_prompt(), Some(7));
     assert_eq!(
@@ -168,7 +157,7 @@ fn continues_resolution_requires_the_live_prompt() {
     let mut rewound = fresh_root();
     complete_round(&mut rewound, "one", "one");
     rewound
-        .evict(&answered(&rewound, &[1]), None, EditAuthority::Model)
+        .evict(span(1, 2), None, EditAuthority::Model)
         .unwrap();
     rewound
         .append_user("fresh".into(), Some(1), Voice::Human)
@@ -187,7 +176,7 @@ fn continues_resolution_requires_the_live_prompt() {
     complete_round(&mut moved_past, "one", "one");
     complete_round(&mut moved_past, "two", "two");
     moved_past
-        .evict(&answered(&moved_past, &[3]), None, EditAuthority::Model)
+        .evict(span(3, 4), None, EditAuthority::Model)
         .unwrap();
     moved_past
         .append_user("fresh".into(), Some(1), Voice::Human)
@@ -199,68 +188,35 @@ fn continues_resolution_requires_the_live_prompt() {
     );
 }
 
-/// The three refusals an eviction makes by name, and the empty set.
+/// The three refusals an eviction makes by name.
 #[test]
-fn evict_refuses_the_unclosed_turn_the_unknown_the_departed_and_the_empty_set() {
+fn evict_refuses_the_unclosed_turn_the_unknown_and_a_run_cutting_a_residue() {
     let mut live = fresh_root();
     live.append_user("live".into(), None, Voice::Human).unwrap();
     assert_eq!(
-        live.evict(&[1], None, EditAuthority::Model).unwrap_err(),
+        live.evict(span(1, 1), None, EditAuthority::Model)
+            .unwrap_err(),
         "turn 1 is being written now: an eviction keeps the work in hand"
     );
 
     let mut unknown = fresh_root();
     complete_round(&mut unknown, "one", "one");
     assert_eq!(
-        unknown.evict(&[7], None, EditAuthority::Model).unwrap_err(),
+        unknown
+            .evict(span(7, 7), None, EditAuthority::Model)
+            .unwrap_err(),
         "turn 7 is not recorded: the latest is 2"
-    );
-    assert_eq!(
-        unknown.evict(&[], None, EditAuthority::Model).unwrap_err(),
-        "an eviction must name at least one turn"
     );
 
     complete_round(&mut unknown, "two", "two");
     unknown
-        .evict(&prefix(&unknown, 2), None, EditAuthority::Harness)
+        .evict(span(1, 2), None, EditAuthority::Harness)
         .unwrap();
     assert_eq!(
-        unknown.evict(&[1], None, EditAuthority::Model).unwrap_err(),
-        "turn 1 has already left your context: the earliest still in it is 3"
-    );
-}
-
-/// A prompt one of whose answers the set does not name stays with it; a
-/// set the rule would empty is refused, and says which turns to add.
-#[test]
-fn the_survivor_rule_keeps_a_prompt_and_refuses_a_cut_that_takes_nothing() {
-    let mut s = fresh_root();
-    s.append_user("work on the parser".into(), None, Voice::Human)
-        .unwrap();
-    s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
-        .unwrap();
-    s.append_tool_results(vec![ToolResult {
-        id: "call".into(),
-        content: "result".into(),
-    }])
-    .unwrap();
-    s.append_assistant(ChatMessage::assistant("done"), vec![], None)
-        .unwrap();
-    assert_eq!(
-        s.evict(&[1], None, EditAuthority::Model).unwrap_err(),
-        "turn 1 is the prompt whose turns 2–3 are still in your context, and a prompt \
-         stays with them: name them too, or leave it"
-    );
-    s.evict(&[1, 2], None, EditAuthority::Model).unwrap();
-    assert_eq!(
-        s.context()
-            .context_survey()
-            .rows
-            .iter()
-            .map(|row| row.id)
-            .collect::<Vec<_>>(),
-        vec![1, 3],
-        "the prompt stays with the reply that survived the cut"
+        unknown
+            .evict(span(1, 1), None, EditAuthority::Model)
+            .unwrap_err(),
+        "turns 1–2 stand together under one note: name from: 1, to: 2 whole, or leave it"
     );
 }
 
@@ -315,7 +271,7 @@ fn the_door_answers_one_element_per_turn() {
     );
 }
 
-/// A rewind withdraws the anchor on: no row is removed and no marker stands
+/// A rewind withdraws the anchor on: no row is removed and no residue stands
 /// where they were, the next prompt takes the id after the newest ever
 /// minted, the withdrawn turns stay readable, and replay rebuilds the lot.
 #[test]
@@ -334,19 +290,19 @@ fn a_rewind_withdraws_the_anchor_on_and_the_next_prompt_takes_the_next_id() {
     complete_round(&mut s, "one", "one");
     complete_round(&mut s, "two", "two");
     complete_round(&mut s, "three", "three");
-    s.evict(&answered(&s, &[1]), None, EditAuthority::Model)
-        .unwrap();
+    s.evict(span(1, 2), None, EditAuthority::Model).unwrap();
 
     s.rewind(3).expect("a recorded anchor");
     assert_eq!(
         s.context()
             .transcript_index()
             .iter()
-            .map(|row| row.held)
+            .map(|row| row.location)
             .collect::<Vec<_>>(),
         [
-            [Held::Evicted { cut: 0 }; 2].as_slice(),
-            [Held::Withdrawn; 4].as_slice()
+            [Location::Resident].as_slice(),
+            [under(1, 2); 2].as_slice(),
+            [Location::Withdrawn; 4].as_slice()
         ]
         .concat(),
         "the index still reaches every turn"
@@ -354,7 +310,7 @@ fn a_rewind_withdraws_the_anchor_on_and_the_next_prompt_takes_the_next_id() {
     assert_eq!(
         s.context().rendered().len(),
         1,
-        "the evicted turns' marker stands alone"
+        "the evicted turns' residue stands alone"
     );
     assert!(s.context().is_ready());
     assert_eq!(s.context().next_id(), 7);
@@ -372,7 +328,8 @@ fn a_rewind_withdraws_the_anchor_on_and_the_next_prompt_takes_the_next_id() {
 
     complete_round(&mut s, "three again", "again");
     assert_eq!(s.context().current_turn(), Some(8));
-    s.rewind(1).expect("an evicted anchor may be rewound to");
+    s.rewind(1)
+        .expect("an evicted anchor starting a residue may be rewound to");
     assert_eq!(s.context().rendered().len(), 0, "the context may empty");
     assert_eq!(s.context().next_id(), 9);
     assert_eq!(
@@ -412,8 +369,7 @@ fn a_clear_withdraws_every_turn_in_the_same_file() {
     .unwrap();
     complete_round(&mut s, "one", "one");
     complete_round(&mut s, "two", "two");
-    s.evict(&answered(&s, &[3]), None, EditAuthority::Model)
-        .unwrap();
+    s.evict(span(3, 4), None, EditAuthority::Model).unwrap();
 
     s.clear().expect("clear");
     assert_eq!(
@@ -432,13 +388,13 @@ fn a_clear_withdraws_every_turn_in_the_same_file() {
         s.context()
             .transcript_index()
             .iter()
-            .all(|row| row.held == Held::Withdrawn),
-        "the evicted turns are withdrawn too"
+            .all(|row| row.location == Location::Withdrawn),
+        "the evicted turns and their residue are withdrawn too"
     );
     assert_eq!(
         s.context().rendered().len(),
         0,
-        "no marker survives a clear"
+        "no residue survives a clear"
     );
     assert_eq!(&**s.context().system(), "be brief");
     assert!(s.context().is_ready());
@@ -492,21 +448,21 @@ fn resume_after_a_clear_and_a_rewind_yields_the_live_table() {
     .unwrap();
     complete_round(&mut live, "one", "one");
     complete_round(&mut live, "two", "two");
-    live.evict(&prefix(&live, 2), Some("note".into()), EditAuthority::Model)
+    live.evict(span(1, 2), Some("note".into()), EditAuthority::Model)
         .unwrap();
     live.clear().unwrap();
     complete_round(&mut live, "three", "three");
     complete_round(&mut live, "four", "four");
     live.rewind(7).unwrap();
     let rows = live.context().transcript_index();
-    let notes = live.context().notes().to_vec();
+    let residues = live.context().residues();
     let expected =
         serde_json::to_vec(&live.context().rendered().iter().collect::<Vec<_>>()).unwrap();
     drop(live);
 
     let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
     assert_eq!(resumed.context().transcript_index(), rows);
-    assert_eq!(resumed.context().notes(), notes.as_slice());
+    assert_eq!(resumed.context().residues(), residues);
     assert_eq!(&**resumed.context().system(), "sys");
     assert_eq!(
         serde_json::to_vec(&resumed.context().rendered().iter().collect::<Vec<_>>()).unwrap(),
@@ -528,9 +484,9 @@ fn a_rewind_waits_for_the_batch_in_flight() {
     );
 }
 
-/// The marker standing at the head hole — message 0 — or `None` when the
-/// context does not open with a hole.
-fn head_marker(s: &AgentLog) -> Option<String> {
+/// The residue standing at the head — message 0 — or `None` when the
+/// context does not open with one.
+fn head_residue(s: &AgentLog) -> Option<String> {
     s.context()
         .rendered()
         .first()
@@ -539,107 +495,38 @@ fn head_marker(s: &AgentLog) -> Option<String> {
         .map(str::to_string)
 }
 
-/// A cut leaves a prompt with a surviving answer standing, and the marker
-/// says which turns went.
+/// A run covering an earlier residue whole nests it: the new residue stands
+/// for both, under its own note, and the earlier stays recorded beneath.
 #[test]
-fn a_cut_between_a_prompt_and_its_answer_keeps_the_prompt() {
-    let mut s = fresh_root();
-    s.append_user("work on the parser".into(), None, Voice::Human)
-        .unwrap();
-    s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
-        .unwrap();
-    s.append_tool_results(vec![ToolResult {
-        id: "call".into(),
-        content: "result".into(),
-    }])
-    .unwrap();
-    s.append_assistant(ChatMessage::assistant("done"), vec![], None)
-        .unwrap();
-    assert_eq!(
-        s.context()
-            .transcript_index()
-            .iter()
-            .map(|row| row.id)
-            .collect::<Vec<_>>(),
-        vec![1, 2, 3]
-    );
-
-    s.evict(&prefix(&s, 2), None, EditAuthority::Model).unwrap();
-    assert_eq!(
-        s.context()
-            .context_survey()
-            .rows
-            .iter()
-            .map(|row| row.id)
-            .collect::<Vec<_>>(),
-        vec![1, 3],
-        "the prompt stays with the reply that survived the cut"
-    );
-    // The marker stands where the turn did: after the prompt, before the
-    // reply that survived it.
-    let rendered: Vec<String> = s
-        .context()
-        .rendered()
-        .iter()
-        .map(|message| message.content.first_text().unwrap_or_default().to_string())
-        .collect();
-    let [prompt, marker, done] = rendered.as_slice() else {
-        panic!("the prompt, one marker, and the surviving reply, got {rendered:?}")
-    };
-    assert_eq!(prompt, "work on the parser");
-    assert!(
-        marker.starts_with("[EXARCH // Turn 2 has left your context."),
-        "{marker}"
-    );
-    assert!(
-        marker.contains(
-            "`` exarch-transcript `read [turns: !{range 2 3}] `` reads turn 2 back as material"
-        ),
-        "{marker}"
-    );
-    assert_eq!(done, "done");
-}
-
-#[test]
-fn evict_of_evict_indexes_both_cuts_and_keeps_the_suffix() {
+fn evict_of_evict_nests_both_residues_and_keeps_the_suffix() {
     let mut s = fresh_root();
     for prompt in ["one", "two", "three"] {
         complete_round(&mut s, prompt, prompt);
     }
     s.evict(
-        &prefix(&s, 2),
+        span(1, 2),
         Some("the parser is fixed".into()),
         EditAuthority::Model,
     )
     .unwrap();
-    s.evict(&prefix(&s, 4), None, EditAuthority::Harness)
-        .unwrap();
+    s.evict(span(1, 4), None, EditAuthority::Harness).unwrap();
 
-    assert_eq!(s.context().notes().len(), 2);
-    assert_eq!(
-        s.context()
-            .context_survey()
-            .rows
-            .iter()
-            .map(|row| row.id)
-            .collect::<Vec<_>>(),
-        vec![5, 6]
-    );
-    let marker = head_marker(&s).expect("two cuts render one marker");
+    assert_eq!(s.context().residues().len(), 2);
+    assert_eq!(survey(&s), [(1, 4), (5, 5), (6, 6)]);
+    let residue = head_residue(&s).expect("the outer residue stands at the head");
     assert!(
-        marker.starts_with("[EXARCH // Turns 1–4 have left your context."),
-        "{marker}"
+        residue.starts_with("[EXARCH // Turns 1–4 have left your context in a forced eviction"),
+        "{residue}"
     );
-    assert!(marker.contains("Your note: \"the parser is fixed\""));
+    assert!(!residue.contains("the parser is fixed"), "{residue}");
 }
 
-/// The prompt cache reads message 0 byte for byte, so the marker must
-/// depend on the table and its cuts and nothing else — not on how many
-/// times it is rendered, and not on whether the fold was built live or
-/// refolded.
+/// The prompt cache reads message 0 byte for byte, so the residue must
+/// depend on its record and nothing else — not on how many times it is
+/// rendered, and not on whether the fold was built live or refolded.
 #[test]
-fn head_marker_is_a_pure_function_of_the_table() {
-    let sessions = sessions_root("head-marker-purity");
+fn head_residue_is_a_pure_function_of_the_log() {
+    let sessions = sessions_root("head-residue-purity");
     let mut live = AgentLog::root(
         sessions.path(),
         AgentId::new(0),
@@ -653,130 +540,61 @@ fn head_marker_is_a_pure_function_of_the_table() {
     for prompt in ["one", "two", "three"] {
         complete_round(&mut live, prompt, prompt);
     }
-    live.evict(
-        &prefix(&live, 4),
-        Some("keep going".into()),
-        EditAuthority::Model,
-    )
-    .unwrap();
-    let first = head_marker(&live).expect("a cut renders a marker");
-    assert_eq!(head_marker(&live).as_ref(), Some(&first));
+    live.evict(span(1, 4), Some("keep going".into()), EditAuthority::Model)
+        .unwrap();
+    let first = head_residue(&live).expect("a cut leaves a residue");
+    assert_eq!(head_residue(&live).as_ref(), Some(&first));
     drop(live);
 
     let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
-    assert_eq!(head_marker(&resumed), Some(first));
+    assert_eq!(head_residue(&resumed), Some(first));
 }
 
+/// A later cut leaves a residue of its own, so the provider re-reads from
+/// there and message 0 stays byte for byte what it was.
 #[test]
-fn head_marker_collapses_rows_past_the_cap() {
-    let mut s = fresh_root();
-    for n in 1..=45u64 {
-        let prompt = format!("prompt {n}");
-        complete_round(&mut s, &prompt, "answer");
-    }
-    // 45 rounds hold turns 1..90; a cut through turn 88 takes 88 of them.
-    s.evict(&prefix(&s, 88), None, EditAuthority::Harness)
-        .unwrap();
-    let marker = head_marker(&s).expect("a cut renders a marker");
-    assert!(
-        marker.contains("1–48  (48 earlier turns: exarch-transcript `index)"),
-        "the rows past the cap collapse to one line, got: {marker}"
-    );
-    assert!(
-        !marker.lines().any(|line| line.starts_with("   1  "))
-            && marker.lines().any(|line| line.starts_with("  49  ")),
-        "the collapsed rows are the oldest, got: {marker}"
-    );
-    assert_eq!(
-        marker.lines().count(),
-        1 + 1 + 40,
-        "one sentence, one collapse line, and the capped rows"
-    );
-}
-
-/// A note is drawn only alongside a fragment of its own cut, so a cut
-/// collapsed away entirely takes its note with it — message 0 stays
-/// bounded by the row cap rather than growing with how many cuts the
-/// session has run.
-#[test]
-fn a_note_collapses_with_its_rows() {
-    let mut s = fresh_root();
-    for n in 1..=45u64 {
-        let prompt = format!("prompt {n}");
-        complete_round(&mut s, &prompt, "answer");
-        if n > 1 {
-            s.evict(
-                &prefix(&s, 2 * (n - 1)),
-                Some(format!("note {n}")),
-                EditAuthority::Model,
-            )
-            .unwrap();
-        }
-    }
-    let marker = head_marker(&s).expect("44 cuts render one marker");
-    assert!(
-        marker.contains("\"note 45\""),
-        "the newest note must survive, got: {marker}"
-    );
-    assert!(
-        !marker.contains("\"note 2\""),
-        "a note collapsed with its rows must not survive, got: {marker}"
-    );
-    assert_eq!(
-        marker.lines().count(),
-        1 + 1 + 40 + 20,
-        "bounded by the row cap: 40 rows, and a note per cut that kept one"
-    );
-}
-
-/// A later cut opens a hole of its own, so the provider re-reads from
-/// there and message 0 stays byte for byte what it was. A cut adjacent
-/// to the head hole joins it instead: a hole is a maximal run.
-#[test]
-fn a_late_cut_leaves_the_head_marker_untouched() {
+fn a_late_cut_leaves_the_head_residue_untouched() {
     let mut s = fresh_root();
     for prompt in ["one", "two", "three", "four", "five"] {
         complete_round(&mut s, prompt, prompt);
     }
-    s.evict(&prefix(&s, 4), None, EditAuthority::Harness)
-        .unwrap();
-    let before = head_marker(&s).expect("a cut renders a marker");
-    s.evict(&answered(&s, &[7]), None, EditAuthority::Model)
-        .unwrap();
-    assert_eq!(head_marker(&s), Some(before));
+    s.evict(span(1, 4), None, EditAuthority::Harness).unwrap();
+    let before = head_residue(&s).expect("a cut leaves a residue");
+    s.evict(span(7, 8), None, EditAuthority::Model).unwrap();
+    assert_eq!(head_residue(&s), Some(before));
     assert!(
         s.context()
             .transcript_index()
             .iter()
-            .filter(|row| [7, 8].contains(&row.id))
-            .all(|row| row.held == Held::Evicted { cut: 1 })
+            .filter(|row| row.kind != ItemKind::Residue && [7, 8].contains(&row.span.from()))
+            .all(|row| row.location == under(7, 8))
     );
     assert_eq!(
         s.context().rendered().len(),
         6,
-        "marker, turns 5 and 6, marker, turns 9 and 10"
+        "residue, turns 5 and 6, residue, turns 9 and 10"
     );
 }
 
 #[test]
-fn evict_refuses_a_turn_already_gone_and_the_unclosed_one() {
+fn evict_refuses_a_run_cutting_a_residue_and_the_unclosed_turn() {
     let mut s = fresh_root();
     for prompt in ["one", "two", "three"] {
         complete_round(&mut s, prompt, prompt);
     }
-    s.evict(&prefix(&s, 4), None, EditAuthority::Harness)
-        .unwrap();
+    s.evict(span(1, 4), None, EditAuthority::Harness).unwrap();
     assert_eq!(
-        s.evict(&[2], None, EditAuthority::Model).unwrap_err(),
-        "turn 2 has already left your context: the earliest still in it is 5"
+        s.evict(span(2, 2), None, EditAuthority::Model).unwrap_err(),
+        "turns 1–4 stand together under one note: name from: 1, to: 4 whole, or leave it"
     );
     s.append_user("four".into(), None, Voice::Human).unwrap();
     assert_eq!(
-        s.evict(&[7], None, EditAuthority::Model).unwrap_err(),
+        s.evict(span(7, 7), None, EditAuthority::Model).unwrap_err(),
         "turn 7 is being written now: an eviction keeps the work in hand"
     );
     assert_eq!(
-        s.evict(&[99], None, EditAuthority::Model).unwrap_err(),
+        s.evict(span(99, 99), None, EditAuthority::Model)
+            .unwrap_err(),
         "turn 99 is not recorded: the latest is 7"
     );
 }
@@ -792,8 +610,7 @@ fn read_transcript_reads_evicted_turns_byte_identically() {
         "{:?}",
         s.context().read_transcript(&[1, 2]).expect("in context")
     );
-    s.evict(&prefix(&s, 2), None, EditAuthority::Harness)
-        .unwrap();
+    s.evict(span(1, 2), None, EditAuthority::Harness).unwrap();
     let after = format!(
         "{:?}",
         s.context()
@@ -814,8 +631,7 @@ fn a_record_that_does_not_hash_to_its_locus_is_refused_by_name() {
     let mut s = fresh_root();
     complete_round(&mut s, "alpha", "alpha answered");
     complete_round(&mut s, "beta", "beta answered");
-    s.evict(&prefix(&s, 2), None, EditAuthority::Harness)
-        .unwrap();
+    s.evict(span(1, 2), None, EditAuthority::Harness).unwrap();
 
     // Equal-length substitution: every locus's byte range still names a
     // whole, well-formed record — just not the one it measured.
@@ -840,41 +656,50 @@ fn a_record_that_does_not_hash_to_its_locus_is_refused_by_name() {
     );
 }
 
-/// The index is every turn the transcript holds, whatever took it out of
-/// the context — and the turn in flight is listed like any other.
+/// The index is every turn the transcript holds and every residue, whatever
+/// took it out of the context — and the turn in flight is listed like any
+/// other.
 #[test]
-fn transcript_index_lists_every_turn_with_how_it_is_held() {
+fn transcript_index_lists_every_item_with_how_it_is_held() {
     let mut s = fresh_root();
     for prompt in ["one", "two", "three"] {
         complete_round(&mut s, prompt, prompt);
     }
-    s.evict(&prefix(&s, 2), None, EditAuthority::Harness)
-        .unwrap();
-    s.evict(&answered(&s, &[3]), None, EditAuthority::Model)
-        .unwrap();
+    s.evict(span(1, 2), None, EditAuthority::Harness).unwrap();
+    s.evict(
+        span(3, 4),
+        Some("three is answered".into()),
+        EditAuthority::Model,
+    )
+    .unwrap();
     s.append_user("live".into(), None, Voice::Human).unwrap();
 
     let index = s.context().transcript_index();
     assert_eq!(
         index
             .iter()
-            .map(|row| (row.id, row.role, row.held))
+            .map(|row| (row.span.from(), row.span.to(), row.role, row.location))
             .collect::<Vec<_>>(),
         vec![
-            (1, Role::User, Held::Evicted { cut: 0 }),
-            (2, Role::Assistant, Held::Evicted { cut: 0 }),
-            (3, Role::User, Held::Evicted { cut: 1 }),
-            (4, Role::Assistant, Held::Evicted { cut: 1 }),
-            (5, Role::User, Held::Resident),
-            (6, Role::Assistant, Held::Resident),
-            (7, Role::User, Held::Resident),
+            (1, 2, Role::User, Location::Resident),
+            (1, 1, Role::User, under(1, 2)),
+            (2, 2, Role::Assistant, under(1, 2)),
+            (3, 4, Role::User, Location::Resident),
+            (3, 3, Role::User, under(3, 4)),
+            (4, 4, Role::Assistant, under(3, 4)),
+            (5, 5, Role::User, Location::Resident),
+            (6, 6, Role::Assistant, Location::Resident),
+            (7, 7, Role::User, Location::Resident),
         ]
     );
-    assert_eq!(index[0].label, "one");
+    assert_eq!(index[0].label, "forced eviction, without a note");
+    assert_eq!(index[1].label, "one");
+    assert_eq!(index[3].label, "three is answered");
+    assert!(index.iter().all(|row| row.bytes > 0));
     assert!(
         index
             .iter()
-            .all(|row| row.bytes > 0 && row.kind == TurnKind::Own)
+            .all(|row| [ItemKind::Residue, ItemKind::Turn(TurnKind::Own)].contains(&row.kind))
     );
 }
 
@@ -916,8 +741,7 @@ fn grep_walks_resident_then_freed() {
     let mut s = fresh_root();
     complete_round(&mut s, "the parser is broken", "I will fix the parser");
     complete_round(&mut s, "the lexer is fine", "nothing to do");
-    s.evict(&prefix(&s, 2), None, EditAuthority::Harness)
-        .unwrap();
+    s.evict(span(1, 2), None, EditAuthority::Harness).unwrap();
 
     let answer = s
         .context()
@@ -928,12 +752,12 @@ fn grep_walks_resident_then_freed() {
         answer
             .hits
             .iter()
-            .map(|hit| (hit.turn, hit.role.clone(), hit.line))
+            .map(|hit| (hit.span.from(), hit.span.to(), hit.role.clone(), hit.line))
             .collect::<Vec<_>>(),
         vec![
-            (1, ChatRole::User, 1),
-            (2, ChatRole::Assistant, 1),
-            (3, ChatRole::User, 1),
+            (1, 1, ChatRole::User, 1),
+            (2, 2, ChatRole::Assistant, 1),
+            (3, 3, ChatRole::User, 1),
         ]
     );
     assert_eq!(answer.hits[0].text, "the parser is broken");
@@ -943,7 +767,7 @@ fn grep_walks_resident_then_freed() {
         .grep_transcript(&regex(r"\bthe\b"), Some(&[1, 4]))
         .expect("a list with a gap searches exactly what it names");
     assert_eq!(narrowed.total, 1, "turns 2 and 3 are not searched");
-    assert_eq!(narrowed.hits[0].turn, 1);
+    assert_eq!(narrowed.hits[0].span, Span::single(1));
     assert_eq!(
         s.context()
             .grep_transcript(&regex("parser"), Some(&[9]))
@@ -990,17 +814,11 @@ fn eviction_plan_walks_back_from_the_turn_in_hand() {
     complete_round(&mut s, "three", "three");
     let rows = s.context().context_survey().rows;
     let keep = rows[4].bytes + rows[5].bytes;
-    let plan = s.context().plan_eviction(keep).expect("old turns to shed");
-    assert_eq!(plan, vec![1, 2, 3, 4]);
-    s.evict(&plan, None, EditAuthority::Harness).unwrap();
+    assert_eq!(s.context().plan_forced_eviction(keep), Some(span(1, 4)));
+    s.evict(span(1, 4), None, EditAuthority::Harness).unwrap();
     assert_eq!(
-        s.context()
-            .context_survey()
-            .rows
-            .iter()
-            .map(|row| row.id)
-            .collect::<Vec<_>>(),
-        vec![5, 6],
+        survey(&s),
+        [(1, 4), (5, 5), (6, 6)],
         "the planned turns left the context"
     );
     assert!(
@@ -1013,7 +831,7 @@ fn eviction_plan_walks_back_from_the_turn_in_hand() {
 
 /// A turn in hand heavy enough to fill the whole keep budget on its own
 /// must never be the one a plan names: that would leave the model with
-/// nothing, and the set would be one `resolve_cut` refuses.
+/// nothing, and the run would be one `resolve_cut` refuses.
 #[test]
 fn a_plan_never_takes_the_newest_turn() {
     let mut s = fresh_root();
@@ -1021,29 +839,20 @@ fn a_plan_never_takes_the_newest_turn() {
     let big = "x".repeat(100_000);
     complete_round(&mut s, "two", &big);
     let keep = s.context().history_bytes() / 2;
-    let plan = s
-        .context()
-        .plan_eviction(keep)
-        .expect("the older turns to shed");
-    assert_eq!(plan, vec![1, 2]);
-    s.evict(&plan, None, EditAuthority::Harness).unwrap();
+    assert_eq!(s.context().plan_forced_eviction(keep), Some(span(1, 3)));
+    s.evict(span(1, 3), None, EditAuthority::Harness).unwrap();
     assert_eq!(
-        s.context()
-            .context_survey()
-            .rows
-            .iter()
-            .map(|row| row.id)
-            .collect::<Vec<_>>(),
-        vec![3, 4],
+        survey(&s),
+        [(1, 3), (4, 4)],
         "the work in hand must survive the eviction it could not itself be named by"
     );
 }
 
 #[test]
-fn a_lone_prompt_is_never_planned_away() {
+fn a_forced_eviction_may_take_the_prompt_but_not_the_newest_turn() {
     let mut s = fresh_root();
     complete_round(&mut s, "one", "one");
-    assert!(s.context().plan_eviction(0).is_none());
+    assert_eq!(s.context().plan_forced_eviction(0), Some(span(1, 1)));
 }
 
 #[test]
@@ -1178,32 +987,28 @@ fn a_reply_keeps_its_capstone_and_stays_visible() {
     );
 }
 
-/// The recorded set is the resolved set: what the writer worked out is
-/// what the file carries, so replay departs exactly these ids.
+/// The recorded cut is the span the writer resolved, so replay leaves
+/// exactly this residue.
 #[test]
-fn record_jsonl_round_trip_carries_the_resolved_cut() {
+fn record_jsonl_round_trip_carries_the_cut() {
     let mut s = fresh_root();
     complete_round(&mut s, "one", "one");
     complete_round(&mut s, "two", "two");
     s.evict(
-        &[1, 2, 3],
+        span(1, 3),
         Some("the parser is fixed".into()),
         EditAuthority::Model,
     )
     .unwrap();
-
-    assert!(
-        records(&s).iter().any(|record| {
-            matches!(
-                record,
-                Record::Protocol(Protocol::Evicted {
-                    cut,
-                    by: EditAuthority::Model,
-                }) if cut.turns == [1, 2] && cut.note.as_deref() == Some("the parser is fixed")
-            )
-        }),
-        "turn 3 is the prompt turn 4 still answers, and never reaches the file"
-    );
+    let residue = Residue {
+        span: span(1, 3),
+        note: Some("the parser is fixed".into()),
+        by: EditAuthority::Model,
+    };
+    assert!(records(&s).iter().any(|record| matches!(
+        record,
+        Record::Protocol(Protocol::Evicted { residue: recorded }) if *recorded == residue
+    )));
 }
 
 /// A record naming a turn no live session could have evicted is the
@@ -1225,11 +1030,11 @@ fn resume_refuses_an_eviction_of_a_turn_not_in_the_context() {
     let path = sessions.path().join("0/record.jsonl");
     drop(live);
     let foreign = Record::Protocol(Protocol::Evicted {
-        cut: Cut {
-            turns: vec![9],
+        residue: Residue {
+            span: Span::single(9),
             note: None,
+            by: EditAuthority::Model,
         },
-        by: EditAuthority::Model,
     });
     let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
     file.write_all(&crate::record::envelope_line(&foreign))
@@ -1241,10 +1046,7 @@ fn resume_refuses_an_eviction_of_a_turn_not_in_the_context() {
         .err()
         .expect("an eviction of a turn not in the context is foreign data");
     let text = error.to_string();
-    assert!(
-        text.contains("evicts turn 9, which is not in the context"),
-        "{text}"
-    );
+    assert!(text.contains("turn 9 is not recorded"), "{text}");
 }
 
 #[test]
@@ -1301,12 +1103,11 @@ fn a_forked_log_records_the_selection_it_was_handed() {
 fn a_departed_turn_keeps_no_resident_state() {
     let mut s = fresh_root();
     complete_round(&mut s, "one", "one");
-    s.evict(&answered(&s, &[1]), None, EditAuthority::Model)
-        .unwrap();
+    s.evict(span(1, 2), None, EditAuthority::Model).unwrap();
     assert_eq!(
         s.context().event_count(),
         1,
-        "no turn's records are owned any more; the hole's marker is what stands"
+        "no turn's records are owned any more; the residue is what stands"
     );
 }
 
@@ -1326,7 +1127,7 @@ fn resume_replays_a_scripted_history_and_preserves_the_context() {
     live.import_note(ChatMessage::user("inherited")).unwrap();
     complete_round(&mut live, "one", "answer one");
     complete_round(&mut live, "two", "answer two");
-    live.evict(&prefix(&live, 3), None, EditAuthority::Harness)
+    live.evict(span(1, 3), None, EditAuthority::Harness)
         .unwrap();
     let expected =
         serde_json::to_vec(&live.context().rendered().iter().collect::<Vec<_>>()).unwrap();
@@ -1664,43 +1465,30 @@ fn resume_matches_live_after_a_small_edit_sequence_family() {
         match pattern {
             0 => {}
             1 => {
-                live.evict(&answered(&live, &[3]), None, EditAuthority::Model)
-                    .unwrap();
+                live.evict(span(3, 4), None, EditAuthority::Model).unwrap();
             }
             2 => {
-                live.evict(&prefix(&live, 4), None, EditAuthority::Harness)
+                live.evict(span(1, 4), None, EditAuthority::Harness)
                     .unwrap();
             }
             3 => {
-                live.evict(&answered(&live, &[1]), None, EditAuthority::Model)
-                    .unwrap();
-                live.evict(&answered(&live, &[3]), None, EditAuthority::Model)
-                    .unwrap();
+                live.evict(span(1, 2), None, EditAuthority::Model).unwrap();
+                live.evict(span(3, 4), None, EditAuthority::Model).unwrap();
             }
             4 => {
-                live.evict(
-                    &prefix(&live, 4),
-                    Some("halfway".into()),
-                    EditAuthority::Harness,
-                )
-                .unwrap();
-                live.evict(&answered(&live, &[5]), None, EditAuthority::Model)
+                live.evict(span(1, 4), Some("halfway".into()), EditAuthority::Harness)
                     .unwrap();
+                live.evict(span(5, 6), None, EditAuthority::Model).unwrap();
             }
             5 => {
-                live.evict(&answered(&live, &[3]), None, EditAuthority::Model)
-                    .unwrap();
+                live.evict(span(3, 4), None, EditAuthority::Model).unwrap();
                 complete_round(&mut live, "four", "four");
             }
             6 => {
-                live.evict(&prefix(&live, 2), None, EditAuthority::Harness)
+                live.evict(span(1, 2), None, EditAuthority::Harness)
                     .unwrap();
-                live.evict(
-                    &prefix(&live, 4),
-                    Some("second cut".into()),
-                    EditAuthority::Model,
-                )
-                .unwrap();
+                live.evict(span(1, 4), Some("second cut".into()), EditAuthority::Model)
+                    .unwrap();
             }
             7 => {
                 let emit = live.record_emitter();
@@ -1713,7 +1501,7 @@ fn resume_matches_live_after_a_small_edit_sequence_family() {
                 });
             }
             8 => {
-                live.evict(&prefix(&live, 2), None, EditAuthority::Harness)
+                live.evict(span(1, 2), None, EditAuthority::Harness)
                     .unwrap();
                 live.rewind(3).unwrap();
                 complete_round(&mut live, "three again", "again");
@@ -1735,10 +1523,9 @@ fn resume_matches_live_after_a_small_edit_sequence_family() {
 }
 
 /// The structure is a fold of the log, so replaying the file rebuilds
-/// every row and every note the live session held — weights included, a
-/// misplaced departed record showing up as a marker that had drifted.
+/// every row and every residue the live session held — weights included.
 #[test]
-fn resume_rebuilds_the_same_rows_and_notes() {
+fn resume_rebuilds_the_same_rows_and_residues() {
     let sessions = sessions_root("fold-equals-memo-evict");
     let mut live = AgentLog::root(
         sessions.path(),
@@ -1757,18 +1544,18 @@ fn resume_rebuilds_the_same_rows_and_notes() {
         complete_round(&mut live, prompt, prompt);
     }
     live.evict(
-        &prefix(&live, 5),
+        span(1, 5),
         Some("the abandoned work is indexed too".into()),
         EditAuthority::Model,
     )
     .unwrap();
     let rows = live.context().transcript_index();
-    let notes = live.context().notes().to_vec();
+    let residues = live.context().residues();
     drop(live);
 
     let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
     assert_eq!(resumed.context().transcript_index(), rows);
-    assert_eq!(resumed.context().notes(), notes.as_slice());
+    assert_eq!(resumed.context().residues(), residues);
 }
 
 /// A departed turn's address is not written down anywhere: the fold mints
@@ -1789,7 +1576,7 @@ fn a_departed_turn_reads_back_after_resume() {
     .unwrap();
     complete_round(&mut live, "one", "answer one");
     complete_round(&mut live, "two", "answer two");
-    live.evict(&prefix(&live, 2), None, EditAuthority::Harness)
+    live.evict(span(1, 2), None, EditAuthority::Harness)
         .unwrap();
     let before = format!(
         "{:?}",
@@ -1799,14 +1586,8 @@ fn a_departed_turn_reads_back_after_resume() {
 
     let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
     assert_eq!(
-        resumed
-            .context()
-            .context_survey()
-            .rows
-            .iter()
-            .map(|row| row.id)
-            .collect::<Vec<_>>(),
-        vec![3, 4],
+        survey(&resumed),
+        [(1, 2), (3, 3), (4, 4)],
         "the cut crossed the resume"
     );
     let after = format!(
@@ -1858,7 +1639,7 @@ fn a_seed_cut_never_owes_a_tool_result() {
         .append_assistant(assistant_with_tool("call-1"), vec!["call-1".into()], None)
         .unwrap();
     parent
-        .evict(&answered(&parent, &[1]), None, EditAuthority::Model)
+        .evict(span(1, 2), None, EditAuthority::Model)
         .unwrap();
 
     let child = mnemon(&parent, AgentId::new(1));
@@ -1951,7 +1732,7 @@ fn a_seeded_turn_reads_back_from_its_origin() {
 
     complete_round(&mut child, "the child's own", "answer");
     child
-        .evict(&prefix(&child, 4), None, EditAuthority::Harness)
+        .evict(span(1, 4), None, EditAuthority::Harness)
         .unwrap();
     let departed = child
         .context()
@@ -1991,20 +1772,14 @@ fn a_mnemon_child_reads_an_ancestors_evicted_turns_and_mints_ids_above_it() {
         complete_round(&mut parent, prompt, prompt);
     }
     parent
-        .evict(&prefix(&parent, 6), None, EditAuthority::Harness)
+        .evict(span(1, 6), None, EditAuthority::Harness)
         .unwrap();
 
     let mut child = mnemon(&parent, AgentId::new(1));
     assert_eq!(
-        child
-            .context()
-            .context_survey()
-            .rows
-            .iter()
-            .map(|row| row.id)
-            .collect::<Vec<_>>(),
-        vec![7, 8],
-        "the parent's surviving turns cross under the parent's own ids"
+        survey(&child),
+        [(1, 6), (7, 7), (8, 8)],
+        "the parent's residue and surviving turns cross under the parent's own ids"
     );
     complete_round(&mut child, "the child's own", "answer");
     assert_eq!(child.context().current_prompt(), Some(9));
@@ -2033,7 +1808,7 @@ fn a_mnemon_child_reads_an_ancestors_evicted_turns_and_mints_ids_above_it() {
     assert_eq!(grandchild.context().current_prompt(), Some(11));
 }
 
-/// A cut between a prompt and its answers, then a fork, leaves them in
+/// A cut between a prompt and its answer, then a fork, leaves them in
 /// two files: the evicted turn in the ancestor's, the survivors
 /// re-recorded as the child's own. Each turn reads back from wherever its
 /// placement says, so the read answers them all rather than the local half
@@ -2067,7 +1842,7 @@ fn turns_split_across_a_fork_read_back_out_of_both_files() {
         .append_assistant(ChatMessage::assistant("done"), vec![], None)
         .unwrap();
     parent
-        .evict(&prefix(&parent, 2), None, EditAuthority::Harness)
+        .evict(span(2, 2), None, EditAuthority::Harness)
         .unwrap();
 
     let child = mnemon(&parent, AgentId::new(1));
@@ -2112,9 +1887,7 @@ fn an_empty_parent_context_still_floors_the_childs_first_id() {
     .unwrap();
     complete_round(&mut parent, "one", "one");
     complete_round(&mut parent, "two", "two");
-    parent
-        .evict(&answered(&parent, &[1, 3]), None, EditAuthority::Model)
-        .unwrap();
+    parent.rewind(1).unwrap();
     assert_eq!(parent.context().context_survey().rows.len(), 0);
 
     let mut child = mnemon(&parent, AgentId::new(1));
@@ -2145,7 +1918,7 @@ fn admission_refuses_inherited_after_the_first_turn() {
     drop(live);
     let late = Record::Protocol(Protocol::Inherited {
         turns: Vec::new(),
-        notes: Vec::new(),
+        residues: Vec::new(),
     });
     let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
     file.write_all(&crate::record::envelope_line(&late))
@@ -2182,7 +1955,7 @@ fn a_broken_ancestry_link_is_refused_by_path_and_fault() {
         complete_round(&mut parent, prompt, prompt);
     }
     parent
-        .evict(&prefix(&parent, 2), None, EditAuthority::Harness)
+        .evict(span(1, 2), None, EditAuthority::Harness)
         .unwrap();
     let source = record_path(&parent);
     let child = mnemon(&parent, AgentId::new(1));
@@ -2225,11 +1998,11 @@ fn a_broken_ancestry_link_is_refused_by_path_and_fault() {
 }
 
 /// The link is folded, not just recorded: replaying it rebuilds the
-/// parent's rows and its notes, so a resume covers an inherited context
-/// as it covers an evicted one — and the marker at the child's head hole,
-/// being that same projection, carries the parent's own note.
+/// parent's rows and its residues, so a resume covers an inherited context
+/// as it covers an evicted one — and the residue at the child's head, being
+/// that same projection, carries the parent's own note.
 #[test]
-fn resume_rebuilds_the_same_rows_and_notes_across_a_link() {
+fn resume_rebuilds_the_same_rows_and_residues_across_a_link() {
     let ancestry = sessions_root("fold-equals-memo-ancestor");
     let mut ancestor = AgentLog::root(
         ancestry.path(),
@@ -2246,7 +2019,7 @@ fn resume_rebuilds_the_same_rows_and_notes_across_a_link() {
     }
     ancestor
         .evict(
-            &prefix(&ancestor, 4),
+            span(1, 4),
             Some("the parser is fixed".into()),
             EditAuthority::Model,
         )
@@ -2264,39 +2037,31 @@ fn resume_rebuilds_the_same_rows_and_notes_across_a_link() {
     )
     .unwrap();
     assert_eq!(
-        live.context().notes(),
-        [Some("the parser is fixed".to_string())],
-        "the parent's cut crosses the link"
+        live.context().residues(),
+        ancestor.context().residues(),
+        "the parent's residue crosses the link"
     );
-    let head = live
-        .context()
-        .rendered()
-        .first()
-        .expect("an inherited context that was cut renders a head marker")
-        .content
-        .first_text()
-        .unwrap_or_default()
-        .to_string();
+    let head = head_residue(&live).expect("an inherited context that was cut opens with a residue");
     assert!(
-        head.starts_with("[EXARCH //") && head.contains("the parser is fixed"),
-        "the child's marker is the same projection of the same fold: {head}"
+        head.contains("the parser is fixed"),
+        "the child's residue is the same projection of the same fold: {head}"
     );
 
     complete_round(&mut live, "own", "own");
-    live.evict(&prefix(&live, 6), None, EditAuthority::Harness)
+    live.evict(span(1, 6), None, EditAuthority::Harness)
         .unwrap();
     let rows = live.context().transcript_index();
-    let notes = live.context().notes().to_vec();
+    let residues = live.context().residues();
     drop(live);
 
     let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
     assert_eq!(resumed.context().transcript_index(), rows);
-    assert_eq!(resumed.context().notes(), notes.as_slice());
+    assert_eq!(resumed.context().residues(), residues);
 }
 
 /// The index is the whole lineage's table, in id order: a child inherits
-/// every turn its ancestry recorded, `held` as the parent had it, and its
-/// own turns land above them.
+/// every turn and residue its ancestry recorded, `location` as the parent had
+/// it, and its own turns land above them.
 #[test]
 fn transcript_index_carries_the_inherited_table() {
     let sessions = sessions_root("lineage-index");
@@ -2314,30 +2079,33 @@ fn transcript_index_carries_the_inherited_table() {
         complete_round(&mut parent, prompt, prompt);
     }
     parent
-        .evict(&prefix(&parent, 4), None, EditAuthority::Harness)
+        .evict(span(1, 4), None, EditAuthority::Harness)
         .unwrap();
 
     let mut child = mnemon(&parent, AgentId::new(1));
     complete_round(&mut child, "four", "four");
 
     let index = child.context().transcript_index();
+    let inherited = ItemKind::Turn(TurnKind::Inherited);
+    let own = ItemKind::Turn(TurnKind::Own);
     assert_eq!(
         index
             .iter()
-            .map(|row| (row.id, row.kind, row.held))
+            .map(|row| (row.span.from(), row.span.to(), row.kind, row.location))
             .collect::<Vec<_>>(),
         vec![
-            (1, TurnKind::Inherited, Held::Evicted { cut: 0 }),
-            (2, TurnKind::Inherited, Held::Evicted { cut: 0 }),
-            (3, TurnKind::Inherited, Held::Evicted { cut: 0 }),
-            (4, TurnKind::Inherited, Held::Evicted { cut: 0 }),
-            (5, TurnKind::Inherited, Held::Resident),
-            (6, TurnKind::Inherited, Held::Resident),
-            (7, TurnKind::Own, Held::Resident),
-            (8, TurnKind::Own, Held::Resident),
+            (1, 4, ItemKind::Residue, Location::Resident),
+            (1, 1, inherited, under(1, 4)),
+            (2, 2, inherited, under(1, 4)),
+            (3, 3, inherited, under(1, 4)),
+            (4, 4, inherited, under(1, 4)),
+            (5, 5, inherited, Location::Resident),
+            (6, 6, inherited, Location::Resident),
+            (7, 7, own, Location::Resident),
+            (8, 8, own, Location::Resident),
         ]
     );
-    assert_eq!(index[0].label, "one");
+    assert_eq!(index[1].label, "one");
 }
 
 /// One search over the whole lineage: the child's resident turns, its own
@@ -2359,13 +2127,13 @@ fn grep_walks_resident_then_freed_then_ancestors() {
     complete_round(&mut parent, "the parser is broken", "I will fix the parser");
     complete_round(&mut parent, "the lexer is fine", "nothing to do");
     parent
-        .evict(&prefix(&parent, 2), None, EditAuthority::Harness)
+        .evict(span(1, 2), None, EditAuthority::Harness)
         .unwrap();
 
     let mut child = mnemon(&parent, AgentId::new(1));
     complete_round(&mut child, "the tests pass", "good");
     child
-        .evict(&prefix(&child, 4), None, EditAuthority::Harness)
+        .evict(span(3, 4), None, EditAuthority::Harness)
         .unwrap();
 
     let answer = child
@@ -2377,7 +2145,7 @@ fn grep_walks_resident_then_freed_then_ancestors() {
         answer
             .hits
             .iter()
-            .map(|hit| (hit.turn, hit.role.clone()))
+            .map(|hit| (hit.span.from(), hit.role.clone()))
             .collect::<Vec<_>>(),
         vec![
             (1, ChatRole::User),
@@ -2390,8 +2158,7 @@ fn grep_walks_resident_then_freed_then_ancestors() {
 }
 
 /// A search of the whole transcript answers what it can reach and passes
-/// over what it cannot — the marker at its hole has already told the model
-/// which turns it cannot have back. A narrowing that names one of them is
+/// over what it cannot. A narrowing that names one of them is
 /// refused instead, by the path that would not answer.
 #[test]
 fn an_unnarrowed_grep_passes_over_an_unreadable_file() {
@@ -2536,7 +2303,7 @@ fn record_resumed_records_the_system_prompt_only_when_it_changed() {
 }
 
 /// A fork after a clear or a rewind carries the withdrawn rows as such: no
-/// marker draws them, and the child can still read them.
+/// residue stands for them, and the child can still read them.
 #[test]
 fn a_fork_carries_withdrawn_rows_unmarked_and_readable() {
     let mut parent = fresh_root();
@@ -2550,18 +2317,18 @@ fn a_fork_carries_withdrawn_rows_unmarked_and_readable() {
             .context()
             .transcript_index()
             .iter()
-            .map(|row| row.held)
+            .map(|row| row.location)
             .collect::<Vec<_>>(),
         [
-            [Held::Resident; 2].as_slice(),
-            [Held::Withdrawn; 4].as_slice()
+            [Location::Resident; 2].as_slice(),
+            [Location::Withdrawn; 4].as_slice()
         ]
         .concat()
     );
     assert_eq!(
         child.context().rendered().len(),
         2,
-        "turns 1 and 2, and no marker for the rest"
+        "turns 1 and 2, and no residue for the rest"
     );
     assert_eq!(
         openings(&child.context().read_transcript(&[3, 4]).unwrap()),
@@ -2599,7 +2366,7 @@ fn a_forks_resident_rows_are_read_through_their_pointers() {
             .context_survey()
             .rows
             .iter()
-            .map(|row| (row.id, row.bytes))
+            .map(|row| (row.span.from(), row.bytes))
             .collect::<Vec<_>>()
     };
     let (theirs, ours) = (weights(&parent), weights(&child));

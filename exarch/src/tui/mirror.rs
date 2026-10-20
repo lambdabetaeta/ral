@@ -366,8 +366,8 @@ impl Mirror {
             K::Done { id, cmd, outcome } => {
                 chrome(Chrome::Settled(card::settled_spans(*id, cmd, outcome)))
             }
-            K::Context { turns } => {
-                vec![surfaced(record::context_rows_card(turns))]
+            K::Context { rows } => {
+                vec![surfaced(record::context_rows_card(rows))]
             }
             K::Cancelled => chrome(Chrome::Cancelled),
             K::Error { text } => chrome(Chrome::Error(text.clone())),
@@ -376,10 +376,7 @@ impl Mirror {
             K::Stalled { error } => chrome(Chrome::Stalled(error.clone())),
             K::SystemNote { text } => note(text),
             K::Turn { .. } => vec![Item::Member(Member::Turn)],
-            K::Evicted { cut, by } => {
-                let runs = crate::record::model::runs(&cut.turns);
-                note(&format!("[turns {runs} left the context ({})]", by.name()))
-            }
+            K::Evicted { residue } => note(&residue.evicted_line()),
             K::Rewound { anchor } => note(&format!("[rewound to turn {anchor}]")),
             K::Cleared => note("[cleared]"),
         }

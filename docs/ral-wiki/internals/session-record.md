@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 62f8f2a9
 verified_at_date: 2026-10-19
-anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, Blocks::step, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Selection, replay, model::resume, Mirror::step, Scrollback::fact, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, TurnRow, Held, Locus, Table::withdraw, Context::step, read_seeds, render_marker, Context::plan_eviction, Context::resolve_cut, Context::place]
+anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, Blocks::step, BLOCKS_WINDOW, Delta, Sink::fact, Blocks::model, Selection, replay, model::resume, Mirror::step, Scrollback::fact, export_to, AgentLog::clear, AgentLog::rewind, Context, Turn, Body, Pointer, Residue, SpanRow, Held, Locus, Table::evict, Table::withdraw, Table::frontier, Context::step, read_seeds, render_residue, Context::plan_forced_eviction, Context::resolve_cut, Context::place, Context::rewindable]
 ---
 
 # Session record: one seam, one log
@@ -116,7 +116,7 @@ bookends and nothing else; every other worker emits through the agent's
 ### One structure, one fold, everything else a projection
 
 The log is the durable structure; `Context` is its fold in memory — the
-vocabulary in `record/model.rs`, the turns and cuts in `model/table.rs`, the
+vocabulary in `record/model.rs`, the turns and residues in `model/table.rs`, the
 automaton in `model/state.rs`, the fold in `model/fold.rs`, the render in
 `model/render.rs`, the transcript door in `model/transcript.rs`, resume in
 `model/resume.rs` — and it holds **every turn the lineage has recorded, and
@@ -125,60 +125,113 @@ where each one is**
 
 - `turns: Vec<Turn>` in id order — `{ id, role, kind, label, bytes, body }` —
   `role` being `user` or `assistant`, and `kind` `own`, `import` or
-  `inherited`; rows are never removed; which assistant turns answer a given prompt is a function of
-  role and order, derived where the survivor rule and `plan_eviction` need it
-  and held nowhere
+  `inherited`; rows are never removed; which assistant turns answer a given
+  prompt is a function of role and order, held nowhere, and the live prompt —
+  the newest user-role turn, `current_prompt` — is what a nudge continues
   ([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]);
 - a turn's `body` is either `Here { records, origin }`, its records in memory,
-  or `There { at, cut }`, a `Pointer` to the file and byte ranges that hold
-  them; the *context* is the `Here` subsequence. A turn that left has left one
-  of two ways, and `cut` says which: `Some` is an eviction, which indexes a
-  note and is drawn in a marker; `None` is a *withdrawal*, which is never drawn;
-- `notes: Vec<Option<String>>`, one slot per eviction, which `There::cut`
-  indexes — `None` is a cut made without a note, the harness's own, and the
-  marker then has no line to draw;
+  or `There { at, withdrawn }`, a `Pointer` to the file and byte ranges that
+  hold them. A turn that left has left one of two ways: by an eviction, which
+  puts it *under* a residue, or by a *withdrawal*, which is never drawn.
+  Whether a `There` turn is under a residue is a function of `residues`, not
+  stored;
+- `residues: Vec<Residue>`, one `Residue { span, note, by }` per eviction in
+  the order recorded, never removed — exactly what its `Protocol::Evicted {
+  residue }` carries: a span of turn ids and the model's note, `None` for the
+  harness's own ([[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]]);
 - `source`, this log's own `record.jsonl`, where a turn recorded here points
   once it leaves; the system prompt in force (`Context::system`, set by
   `Protocol::System`); the protocol's resting state; and the count of records
   folded, beside the index of the newest context edit.
 
 Those first three live in a `Table` private to `model/table.rs`, which hands
-the rest of the module a `&[Turn]` and nothing writable. A turn therefore
-changes where it is only through `Table::evict` and `Table::withdraw`, the two
-functions that move a turn from here to there, and no row ever leaves the table
-— so the invariant *the first resident turn is a user turn* is kept by
-construction rather than by every caller remembering the survivor rule.
+the rest of the module a `&[Turn]` and nothing writable. A turn or a residue
+therefore changes where it is only through `Table::evict` and
+`Table::withdraw`, the two functions that move an item from here to there,
+and no row or residue ever leaves the table.
+
+**Residues nest by containment, location is stored, and the context is the
+frontier.** A residue *covers* every turn whose id lies in its span, and every
+earlier residue whose span lies within its own, an equal span included — so
+the same span again rewrites a note. Spans are *laminar*, any two nested or
+disjoint, because an eviction's ends must be item boundaries. Hence:
+
+- an item's location is stamped on it as it departs, a residue's as a
+  turn's: the table holds each residue as a `Standing { residue, departure }`,
+  `departure` saying what a turn's `Body` says without records — `None`
+  while resident, else a `Departure`, `Under(span)` or `Withdrawn`, which a
+  departed turn's `Body::There` carries too. `Departure` is a `Location`
+  that cannot be `Resident`. `Table::evict` stamps `Under` the new span on
+  every resident turn *and residue* within it, a rewritten one included,
+  and stands the new residue resident; `Table::withdraw` stamps `Withdrawn`
+  on every item from its anchor on, whatever held it;
+- the stamp cannot go stale. The residue an item departs under is its
+  *holder*, the smallest later residue covering it, for good: any residue
+  recorded later that covers the item covers that one whole, by laminarity,
+  so it is wider, or equal for a rewrite, and an equal span names the same
+  holder. Withdrawal dominates and is permanent;
+- `Table::frontier` is the resident items in index order — disjoint, so in id
+  order. Its first item is user-role by construction: the first
+  non-withdrawn turn is a prompt or an import, since nothing leaves without a
+  residue standing where it began, or the first item is that residue, a
+  user-voice message.
+
+**A span is one type.** `Span { from, to }`, both ends inclusive, has
+private fields: `Span::new` refuses `from > to`, and deserialisation goes
+through it, so no span anywhere is inverted. It owns `contains`, `within`,
+`width` and `hull`, and its `Display` is the one spelling of a span, `turn 12`
+or `turns 12–40` (`capitalised` for a sentence's opening). The model's
+`` `evict `` input is checked once, where `enquiry::Evict` is decoded; at the
+ral surface a span stays the named fields `from` and `to`.
 
 `Turn` and `Body` are private to the module: a turn holds records, so it is
-not a value to hand out. Two projections take its place. `Turn::row` yields a
-`TurnRow { id, role, kind, label, bytes, held }`, `Held` read *off the body* —
-`Here` is `Resident`, `There { cut: Some(cut) }` is `Evicted { cut }`, and
-`There { cut: None }` is `Withdrawn` — so residency and the structure cannot
-disagree, and a row states which eviction took its turn rather than leaving a
-reader to infer it from an id window. `Context::linked` yields one
-`Linked { row, at }` per turn: the row, and the address of its transcript
-copy. Those two, with `TurnRow`, `Held`, `Pointer` and `Linked`, are the whole
-public surface; `Display::Context` carries `Vec<TurnRow>`.
+not a value to hand out. Every reader sees an item as one line, a span:
+`SpanRow { span, role, kind, label, bytes, location }`, `kind` an `ItemKind`
+— `own`, `import`, `inherited` or `residue`. A turn's row has its own id alone;
+a residue's has its span, role `user`, its note (or `forced eviction,
+without a note`) as label, and its rendered message's weight. Its `Location`
+is the item's own stamp, read and never derived (`Item::location`): a
+resident item is `Resident`, a withdrawn one `Withdrawn`, and any other
+`Under(span)`, its holder's span. `Context::linked` yields one `Linked { row, at }`
+per turn — a `TurnRow` and the address of its transcript copy — for a fork's
+link. `Residue`, `SpanRow`, `ItemKind`, `Location`, `Pointer` and `Linked` are
+the public shapes; `Display::Context` carries `Vec<SpanRow>`.
 
 Everything the model or the human reads off the structure is a pure function
 of it, computed on call and memoised nowhere: `rendered`, `history_bytes`,
-`context_survey`, `transcript_index`, `render_marker`, `plan_eviction` — which
-answers the whole set a pressure cut would take — and `sourced`.
+`context_survey` (the frontier's rows), `transcript_index` (every item, by
+`from`, wider span first, later-recorded first, so a residue precedes what it
+covers), `plan_forced_eviction`, and the transcript door's `locate_read` and
+`locate_grep`. A read holds only turns; a search holds turns and noted
+residues in index order, so `` `grep ``'s hits come in `` `index ``'s order,
+and the first hundred kept are the oldest.
 `Context::step` is the one
 fold — it judges a record before applying it, so a hand-edited or foreign file
 is refused by the same function that folds a live one, and a resume has
 nothing to compare its result with. `Table::evict` and
 `Table::withdraw` are the two places a turn moves from here to there.
 
-**A recorded cut is the resolved cut.** `Context::resolve_cut` applies the
-survivor rule at the writer — a prompt whose answers still hold a resident
-turn outside the set stays — so `Cut { turns, note }` names the ids
-that actually left. Replay departs exactly those and `judge` refuses a record
-naming a turn that is not resident, re-deriving nothing
-([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
+**A recorded eviction is a span.** `Protocol::Evicted { residue }` is
+admitted when both ends of its span are recorded and not withdrawn, neither end falls
+strictly inside a residue — *a run that reaches into a residue must cover it
+whole* — and the unclosed turn is not within. `Context::resolve_cut` states
+those rules at the writer, each refusal naming the fix, and `judge` states
+them again at replay. The span is the resolved identity: the turns it covers
+are the recorded ids in it at that point of the log, the residues it covers
+the recorded ones within it, and nothing is re-derived from later records.
+`Table::evict` moves every resident turn and residue within the span there,
+stamped `Under` the span, and pushes the new residue, resident; an item
+already departed keeps its stamp. `plan_forced_eviction(keep)`
+walks back over the frontier from the newest item, which is never a
+candidate, spending `keep`; the first item that does not fit ends the one
+span it answers, a prefix from the frontier's first item. The live prompt is
+an item like any other, so the span may take it. A prefix that is one residue
+alone is no plan — the harness never rewrites a note — while two or more
+items, residues included, merge
+([[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]]).
 
 **Leaving the context is a change of address, not a deletion.** The table sets
-each departing turn's body to `There { at, cut }`, where `at` is its `origin`
+each departing turn's body to `There { at, departure }`, where `at` is its `origin`
 if it has one and otherwise this log's `source` beside the `Locus` of every
 record it held; the records leave memory and nothing durable is touched. Every
 read of a range checks the record's bytes against the digest the `Locus`
@@ -192,13 +245,25 @@ transcript as well as its identity
 ([[decisions/260906_context-rollover|context-rollover]]).
 
 **A turn's transcript copy is where it was first recorded.** A fork's link
-(`Protocol::Inherited { turns: Vec<Linked>, notes }`) carries an address for
-every row, resident, evicted or withdrawn, and the child records no copy of
+(`Protocol::Inherited { turns: Vec<Linked>, residues }`) carries an address for
+every row, resident, under a residue or withdrawn, and the parent's residues
+by value, and the child records no copy of
 the parent's messages: its resident rows are *read back through those
 addresses*, each row's `origin` keeping the original copy, so evicting one in
 the child points there. The lineage is flattened at each fork — a grandchild's
 row already names the grandparent's file — so nothing walks an ancestry, and
 `Context::sourced` is the whole of "seek in the structure, then the file".
+A residue is rendered from its own record, so the link carries nothing
+rendered; the link's judge checks that its residues are laminar and lie
+within its ids, and that every row's `location` agrees with them —
+`location` is redundant with `residues`, and the judge keeps the redundancy
+honest. `Table::install` takes each turn's location from its row. The link
+carries no residue's location: `Table::install` derives each as the fold
+stamped it, withdrawn with its `from` and otherwise under its `holder`, if
+any. Carrying it instead would add a second redundancy for the judge to
+check, and `holder` would serve that check anyway; it lives in
+`model/table.rs` for these two readings of a link, and the fold never calls
+it.
 
 **A link is the one record whose meaning lies in another file.** Its step reads
 the parent's records through digest-checked pointers (`read_seeds`, after
@@ -215,26 +280,32 @@ needs that session's file to read back.
 ### Withdrawal: `/clear` and `/rewind`
 
 **A clear and a rewind are one operation: the turns leave the context, leaving
-no marker, and stay in the transcript.** `Protocol::Cleared` is
+no residue, and stay in the transcript.** `Protocol::Cleared` is
 `Table::withdraw(0)` and `Protocol::Rewound { anchor }` is
 `Table::withdraw(anchor)`; both keep the system prompt.
 
-- Every turn with `id >= from` departs with `cut: None`. A resident turn gets
-  the address `Table::evict` would give it; an evicted turn keeps its address
-  and *loses its cut*. That is why a withdrawal leaves no eviction note behind,
-  even for turns an earlier eviction had taken: a marker for turns the model is
-  meant to have forgotten would bring them back. A cut straddling a rewind's
-  anchor keeps its cut on the rows below it, and its note may then mention
-  withdrawn turns.
-- Rendering skips withdrawn turns before it forms holes, so a hole is a maximal
-  run of *evicted* turns once withdrawn ones are passed over.
+- Every turn with `id >= from` becomes `There { at, withdrawn: true }`. A
+  resident turn gets the address `Table::evict` would give it; a turn under a
+  residue keeps its address and sets the flag. Every residue whose span's
+  `from` is at least `from` is withdrawn the same way, so no note survives
+  for turns the model is meant to have forgotten.
+- **A rewind anchors at an item start.** `Context::rewindable` refuses an
+  anchor strictly inside a resident residue's span, naming the residue's
+  `from` and the turn after its `to`. Hence a residue's turns are all
+  withdrawn or its `from` is not, so withdrawing by `from` takes a residue
+  exactly when it takes its turns. A turn under a residue is rewindable only
+  at that residue's `from`.
+- **A withdrawn turn may lie inside a span.** A rewind leaves withdrawn ids
+  mid-sequence and a forced eviction must span them, so only a span's
+  ends must be non-withdrawn; a withdrawn turn inside stays `Withdrawn` —
+  withdrawal dominates — and the frontier passes over it.
 - A withdrawn turn stays readable: `transcript_index`, `` `read `` and
   `` `grep `` walk every turn through its pointer, withdrawn ones included, and
   `` exarch-transcript `` says so.
 - **Ids stay lineage-monotone.** The next prompt after either takes `reach + 1`;
   a rewind does not mint `anchor` again. `AgentLog::rewind` refuses an anchor
-  already withdrawn, naming the earliest turn still rewindable (an evicted
-  anchor stays rewindable), and `Context::step` refuses a replayed `Rewound`
+  already withdrawn, naming the earliest turn still rewindable, and
+  `Context::step` refuses a replayed `Rewound`
   of a withdrawn anchor as foreign. `AgentLog::clear` refuses while tool
   results are outstanding. After a clear the automaton rests at its default;
   after a rewind it rests where the newest resident turn below the anchor leaves
@@ -255,27 +326,24 @@ in the transcript for the life of the log.
 ### The provider-facing context is a pure function of the structure
 
 `Context::rendered()` builds an owned `Vec<ChatMessage>`, with no render memo
-behind it. Assembly is one walk: at each **hole** — a maximal run of departed
-turns — the one marker `render_marker` yields for it, and every resident turn's
-messages, in order, withdrawn turns passed over — a prompt whose answers were interrupted
-short of a reply included, as they lie
-([[invariants/turn-ends-ready|exchange-ends-ready]]). `history_bytes` is the
-same walk over the per-turn sums with no turn rendered at all, and
-`context_survey` reports it as `total-bytes` beside the rows rather than
-summing them.
+behind it. Assembly is one walk over the frontier: a turn yields its resident
+messages — a prompt whose answers were interrupted short of a reply included,
+as they lie ([[invariants/turn-ends-ready|exchange-ends-ready]]) — and a
+residue its one message, `ChatMessage::user(render_residue(r))`. `history_bytes`
+is the same walk over the per-turn sums and each residue's message weight,
+with no turn rendered at all, and `context_survey` reports it as
+`total-bytes` beside the rows rather than summing them.
 
-`render_marker` renders on every call too. Per hole it draws one role-marked
-row per departed turn, grouped by the cut their body names, with `notes[i]`
-after cut *i*'s rows, in one bracketed user-voice message standing at the
-hole's own position — `[EXARCH // Turns 1–29, 31–35 have left your context. …]`
-over rows like `  41  assistant  <label>  12 KB`, forty rows to a hole before
-the rest collapse into a line naming their range. The hole
-at position 0 is the marker a prefix cut leaves; a later cut touches its own
-hole and nothing else, so the provider re-reads from the hole rather than from
-the start. Correct by
-construction, since the body says which cut took a turn; and a message stays
-byte-stable between edits not because it is cached but because it is a
-function of a structure that did not change. This is the model fold's
+`render_residue` is a pure function of the record —
+`[EXARCH // Turns 41–60 have left your context.` (singular for one turn, and
+`… in a forced eviction, without a note.` for a forced eviction), then `Your note:`
+and the note `Debug`-quoted, then the read-back line naming
+`` exarch-transcript `read [turns: !{range 41 61}] ``, `` `index `` and
+`` `grep `` — no rows, no byte sums, no clock. Its size does not depend on
+what it covers. A cut changes the context from its `from` onward, so the
+provider re-reads from there; a forced eviction rewrites everything. A
+message stays byte-stable between edits not because it is cached but because
+it is a function of a structure that did not change. This is the model fold's
 recompute invariant taken to its end: there is no memo to read as authority,
 and nothing to keep in step.
 
@@ -321,8 +389,9 @@ the view fold reads `model()` and `window()`, so neither keeps a copy.
 The view path is `Blocks::step` over all three classes, with one exhaustive match
 over `Protocol`: a `UserPrompt` or `Steering` draws a prompt block iff its
 `Voice` is not `Harness` (nudges, reminders, child results and surface notices
-are spoken for elsewhere); an `Evicted` by the harness draws a marker, while the
-model's own is drawn by its `HarnessCall` act row; `Rewound` truncates the blocks
+are spoken for elsewhere); a forced `Evicted` draws one line naming its
+span (`[turns 1–40 left the context (harness)]`), while the model's own is drawn
+by its `HarnessCall` act row; `Rewound` truncates the blocks
 from its anchor and opens `BlockKind::Rewound`; `Cleared` drops every block and
 opens `BlockKind::Cleared`, returning `Delta::Cleared`, while usage, the
 selection and the sequences already folded persist; `System`, `Import`,
@@ -404,6 +473,8 @@ ADR for the one wire door, and
 structure every view above projects — the turn as the atom of eviction, and
 the turn's own body as the one statement of where it is, and
 [[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]
-for the one edit that moves a turn and the marker each hole carries;
+for the one edit that moves a turn, and
+[[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]] for the
+residue it leaves and the frontier the context is;
 [[map/exarch/provider|provider]] covers the one door that turns those messages into an owned wire
 request.

@@ -1,18 +1,26 @@
 use super::*;
 use crate::agent::TestTrunk;
+use crate::record::Span;
+
+fn load() -> Load {
+    Load {
+        used: 400,
+        total: Some(500),
+        trigger: 450,
+        unit: Unit::Tokens,
+        planned: Some(Span::new(1, 7).expect("a run")),
+    }
+}
 
 fn over() -> Pressure {
-    Pressure::Over {
-        detail: "400 of 500 tokens".into(),
-        planned: Some(vec![1, 2, 3, 4, 5, 6, 7]),
-    }
+    Pressure::Over(load())
 }
 
 #[test]
 fn pressure_line_sits_a_full_reserve_before_the_trigger() {
     let w = 200_000;
     let trigger = eviction_trigger(w);
-    assert!(!eviction_due(trigger, w) && eviction_due(trigger + 1, w));
+    assert!(!forced_eviction_due(trigger, w) && forced_eviction_due(trigger + 1, w));
     assert!(
         pressure_due(trigger, w),
         "eviction due implies pressure due"
@@ -20,17 +28,15 @@ fn pressure_line_sits_a_full_reserve_before_the_trigger() {
     assert!(!pressure_due(w / 2, w), "half a window is not pressure");
 }
 
-/// The reminder carries the reading and the cut the next boundary would
-/// make; the wording is the nudge module's.
+/// The reminder carries the reading and the trigger and the span a forced
+/// eviction would take; the wording is the nudge module's.
 #[test]
 fn pressure_hands_the_model_its_reading_and_the_planned_cut() {
-    let Some(Warning::Model(Reminder::Pressure { detail, planned })) =
-        Gauges::default().pressure(over())
+    let Some(Warning::Model(Reminder::Pressure(reminded))) = Gauges::default().pressure(over())
     else {
         panic!("pressure due should remind the model");
     };
-    assert_eq!(detail, "400 of 500 tokens");
-    assert_eq!(planned, Some(vec![1, 2, 3, 4, 5, 6, 7]));
+    assert_eq!(reminded, load());
 }
 
 /// A stale token measure (`Unknown`) neither warns nor re-arms a warning

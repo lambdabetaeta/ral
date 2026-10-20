@@ -1,33 +1,13 @@
-//! The provider-facing projection: the context as an owned message list,
-//! what it weighs, and the marker standing at each hole the evictions left.
+//! The provider-facing projection: the frontier as an owned message list, and
+//! what it weighs.
 
-use super::{Context, Held, OPENING_CHARS, Turn, message_bytes, resident_messages, runs};
+use super::table::Item;
+use super::{Context, Residue, message_bytes, resident_messages};
 use genai::chat::ChatMessage;
 
-/// The table as the provider reads it: withdrawn turns are passed over, a
-/// maximal run of evicted turns is one hole, and every resident turn is
-/// itself. The one walk the rendering, the weight and the record count all
-/// read, so the three agree by construction.
-enum Piece<'a> {
-    Hole(Vec<&'a Turn>),
-    Turn(&'a Turn),
-}
-
-fn pieces(turns: &[Turn]) -> Vec<Piece<'_>> {
-    let mut pieces: Vec<Piece<'_>> = Vec::new();
-    for turn in turns.iter().filter(|turn| !turn.is_withdrawn()) {
-        match (turn.is_resident(), pieces.last_mut()) {
-            (false, Some(Piece::Hole(hole))) => hole.push(turn),
-            (false, _) => pieces.push(Piece::Hole(vec![turn])),
-            (true, _) => pieces.push(Piece::Turn(turn)),
-        }
-    }
-    pieces
-}
-
 impl Context {
-    /// The provider-facing context: each hole's marker where its turns stood,
-    /// and every resident turn as it lies, in table order.
+    /// The provider-facing context: the frontier in id order, each residue as
+    /// its one message and every resident turn as it lies.
     ///
     /// A turn interrupted short of a reply renders whole too — it is the work
     /// the model did, and the next prompt following its last tool results is
@@ -35,27 +15,20 @@ impl Context {
     /// place: a quiesce has already answered any call that never ran, so no
     /// dangling tool-call block can be here.
     pub fn rendered(&self) -> Vec<ChatMessage> {
-        pieces(self.table.turns())
+        self.table
+            .frontier()
             .iter()
-            .flat_map(|piece| match piece {
-                Piece::Hole(hole) => vec![ChatMessage::user(render_marker(self, hole))],
-                Piece::Turn(turn) => resident_messages(turn.records()),
-            })
+            .flat_map(Item::messages)
             .collect()
     }
 
     /// Approximate context size in serialised bytes — the fallback eviction
-    /// trigger when the model's context window is unknown. Renders no turn:
-    /// each marker's weight, plus each resident turn's own sum.
+    /// trigger when the model's context window is unknown. Renders no turn.
     pub(crate) fn history_bytes(&self) -> usize {
-        pieces(self.table.turns())
+        self.table
+            .frontier()
             .iter()
-            .map(|piece| match piece {
-                Piece::Hole(hole) => message_bytes(std::slice::from_ref(&ChatMessage::user(
-                    render_marker(self, hole),
-                ))),
-                Piece::Turn(turn) => turn.bytes,
-            })
+            .map(Item::bytes)
             .fold(0, usize::saturating_add)
     }
 
@@ -63,112 +36,65 @@ impl Context {
     /// structure retains what an eviction removes, so this is not
     /// [`Self::log_len`].
     pub(crate) fn event_count(&self) -> usize {
-        pieces(self.table.turns())
+        self.table
+            .frontier()
             .iter()
-            .map(|piece| match piece {
-                Piece::Hole(_) => 1,
-                Piece::Turn(turn) => turn.records().len(),
+            .map(|item| match item {
+                Item::Turn(turn) => turn.records().len(),
+                Item::Residue(..) => 1,
             })
             .sum()
     }
 }
 
-/// Turns a marker draws a row each for; everything older collapses into one
-/// line naming the range.
-const MARKER_ROWS: usize = 40;
+impl Item<'_> {
+    fn messages(&self) -> Vec<ChatMessage> {
+        match self {
+            Self::Turn(turn) => resident_messages(turn.records()),
+            Self::Residue(standing) => {
+                vec![ChatMessage::user(render_residue(&standing.residue))]
+            }
+        }
+    }
 
-/// The turn-id column both a row and the collapse line are set in.
-const MARKER_ID: usize = 4;
+    /// The item's weight as sent: a turn's own sum, or its residue's message.
+    pub(super) fn bytes(&self) -> usize {
+        match self {
+            Self::Turn(turn) => turn.bytes,
+            Self::Residue(..) => message_bytes(&self.messages()),
+        }
+    }
+}
 
-/// The column a row's role is set in.
-const MARKER_ROLE: usize = 9;
-
-/// One hole's marker: the one user-voice message standing where its turns
-/// were, indexing each of them so the model can ask for any of them back.
-///
-/// Correct by construction: a turn's body says which cut took it, so nothing
-/// here re-derives that from an id window. A pure function of the hole and
-/// the structure around it — no clock, no path, no ordering-unstable
-/// container — so the head hole's marker stays byte-stable between two cuts
-/// made behind it, and the provider's prompt cache survives from the hole
-/// forward.
+/// A residue's one message: a pure function of the record, so it is
+/// byte-stable and the provider's prompt cache survives it.
 ///
 /// In the user's voice, bracketed: the harness may state a fact about the
-/// conversation, never speak in the model's own voice — a placeholder in the
-/// assistant's voice is read back as something it chose to say, and imitated.
-pub(super) fn render_marker(context: &Context, hole: &[&Turn]) -> String {
-    // Grouped by cut, so each note follows the rows it belongs to.
-    let by_cut: Vec<Vec<&Turn>> = (0..context.notes().len())
-        .map(|cut| {
-            hole.iter()
-                .copied()
-                .filter(|turn| turn.held() == Held::Evicted { cut })
-                .collect()
-        })
-        .collect();
-    let rows: Vec<&Turn> = by_cut.iter().flatten().copied().collect();
-    let ids: Vec<u64> = hole.iter().map(|turn| turn.id).collect();
-    let departed = match ids.as_slice() {
-        [one] => format!("Turn {one} has left your context."),
-        _ => format!("Turns {} have left your context.", runs(&ids)),
-    };
-    let mut lines = vec![format!("[EXARCH // {departed} {}", whereabouts(hole))];
-    let collapsed = rows.len().saturating_sub(MARKER_ROWS);
-    if collapsed > 0 {
-        let range = format!("{}–{}", rows[0].id, rows[collapsed - 1].id);
-        lines.push(format!(
-            "{range:>MARKER_ID$}  ({collapsed} earlier turns: exarch-transcript `index)"
-        ));
-    }
-    let mut seen = 0usize;
-    for (cut, drawn) in by_cut.iter().enumerate() {
-        let start = collapsed.saturating_sub(seen).min(drawn.len());
-        seen += drawn.len();
-        if start >= drawn.len() {
-            continue;
-        }
-        for turn in &drawn[start..] {
-            lines.push(marker_row(turn));
-        }
-        // `Debug`-quoted, so no note — the model's own, or one inherited off
-        // an ancestor's link — can add a line to the marker.
-        if let Some(note) = context.notes()[cut].as_deref() {
-            lines.push(format!("Your note: {note:?}"));
-        }
-    }
-    format!("{}]", lines.join("\n"))
-}
-
-/// How the hole's own turns are read back: `` `read `` names them by the
-/// range this hole spans, and the other two doors reach the whole
-/// transcript.
-fn whereabouts(hole: &[&Turn]) -> String {
-    let (from, past) = match (hole.first(), hole.last()) {
-        (Some(first), Some(last)) => (first.id, last.id + 1),
-        _ => return String::new(),
-    };
-    let reads = if past - from == 1 {
-        format!("reads turn {from} back as material")
+/// conversation, never speak in the model's own voice. The note is
+/// `Debug`-quoted, so it cannot add a line.
+pub(super) fn render_residue(residue: &Residue) -> String {
+    let Residue { span, note, .. } = residue;
+    let turns = span.capitalised();
+    let (have, they, them) = if span.is_single() {
+        ("has", "It is", "it")
     } else {
-        format!("reads turns {from} through {} back as material", past - 1)
+        ("have", "They are", "them")
     };
-    let code = ral_core::text::code;
+    let departed = match note {
+        Some(note) => format!("{turns} {have} left your context.\nYour note: {note:?}"),
+        None => format!("{turns} {have} left your context in a forced eviction, without a note."),
+    };
     format!(
-        "They are still readable: {} {reads}, {} searches every turn ever recorded, and {} lists them.",
-        code(&format!(
-            "exarch-transcript `read [turns: !{{range {from} {past}}}]"
-        )),
-        code("exarch-transcript `grep [pattern: 're', turns: `all]"),
-        code("exarch-transcript `index"),
+        "[EXARCH // {departed}\n{they} still readable: exarch-transcript `read [turns: !{{range {} {}}}] reads {them} back as material, exarch-transcript `index lists every turn and every note, and exarch-transcript `grep [pattern: 're', turns: `all] searches both.]",
+        span.from(),
+        span.to() + 1
     )
 }
 
-fn marker_row(turn: &Turn) -> String {
-    format!(
-        "{:>MARKER_ID$}  {:<MARKER_ROLE$} {:<OPENING_CHARS$}{:>5} KB",
-        turn.id,
-        turn.role.as_str(),
-        turn.label,
-        turn.bytes / 1024
-    )
+/// A residue's label in rows: the note bare, or what stands for its absence.
+pub(super) fn residue_label(residue: &Residue) -> String {
+    residue
+        .note
+        .clone()
+        .unwrap_or_else(|| "forced eviction, without a note".into())
 }

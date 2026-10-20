@@ -1,11 +1,15 @@
 ---
-status: 'active; amended in carrier — the same decision carried through to residency: one `Context` holding every turn and *where* it is, `Held` a projection off it. See *Amended: the context is one structure*.'
+status: 'active; amended in carrier — the same decision carried through to residency: one `Context` holding every turn and *where* it is, `Held` a projection off it. See *Amended: the context is one structure*. Superseded in part by [[decisions/261019_an-eviction-is-a-span]]: an eviction leaves a residue over a span; one id space stands.'
 generated_at_commit: 14c8cae4
 ---
 
 # The turn is the atom of eviction
 
 > Superseded in part: a fork no longer re-records the parent's messages as `ContextMessage`s; its link is read back through digest-checked pointers into the parent's file, and a turn may also leave the context by *withdrawal* (`/clear`, `/rewind`). See [[internals/session-record|session-record]].
+
+> Superseded in part by [[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]]: a cut is a contiguous run and leaves
+> one residue, a span `[from, to]` and a note; see the last superseding note
+> below. One id space stands.
 
 **The context is a table of *turns*; an eviction is a cut in it, addressed by
 a turn id, weighed at every turn boundary.** One growing structure, one fold,
@@ -403,6 +407,26 @@ exchange id leaves the records with it: a turn carries a `role`, `user` or
 `assistant`, `UserPrompt { turn, text }` names the prompt's own id and
 `ContextMessage { id, message }` its turn alone, and which assistant turns
 answer a prompt is derived from role and order where it is needed.
+
+## Superseding note: a cut is a run, and a residue stands for it
+
+[[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]] replaces the marker. A cut is
+`Protocol::Evicted { residue }`, its `Residue { span, note, by }` one
+contiguous run of the context, kept in the table's `residues`, beside
+`turns`; residues nest by containment, and the context is the *frontier* —
+uncovered turns and outermost residues — in id order. `Context::notes`,
+`Held::Evicted { cut }` and the marker go: a departed turn's body is
+`There { at, departure }`, and `Location::Under(span)`, stamped as the turn
+departs, names the innermost residue over it. §1's **one
+id space stands untouched**: a residue takes no id, being addressed by the
+ids it covers, so table order stays id order, `reach` stays the last turn's
+id, and `TURN: N` is the address of a turn and of every span that ends at
+it. The turn stays the atom, the loop-top weighing stands, and the newest
+frontier item is never in a plan. The plan is one prefix span, and it may
+take the live prompt: in the case this page was written for, a prompt whose
+work outgrows the window, the task in hand is now kept only by the model's
+own eviction, under a note saying what was asked. §7's link carries `residues`
+where it carried `notes`.
 
 ## See also
 

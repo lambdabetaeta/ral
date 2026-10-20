@@ -8,9 +8,9 @@
 //! `tui::scrollback` folds the same log's `Display`/`Forensic` classes into the
 //! scrollback.
 
-use super::model::{Context, Linked, Model, validate_result_ids};
+use super::model::{Context, ItemKind, Linked, Model, Residue, Span, validate_result_ids};
 use super::{
-    Cut, EditAuthority, Fold as _, Forensic, Memory, Protocol, QuiesceReason, Record, Recorded,
+    EditAuthority, Fold as _, Forensic, Memory, Protocol, QuiesceReason, Record, Recorded,
     RecordedAccount, RecordedModel, Refusal, Role, ToolResult, Voice,
 };
 use crate::record::AgentId;
@@ -22,11 +22,12 @@ use std::path::{Path, PathBuf};
 /// One line of one message that matched `` exarch-transcript `grep ``'s pattern.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GrepHit {
-    /// The turn the line lies in — the search walks turn by turn, so a hit
-    /// names one outright.
-    pub turn: u64,
+    /// The item the line lies in, by `(span, kind)` — the search walks item
+    /// by item, so a hit names one outright.
+    pub span: Span,
+    pub kind: ItemKind,
     pub role: ChatRole,
-    /// 1-based, within that message's searched text.
+    /// 1-based, within that message's searched text; a note is one line.
     pub line: usize,
     pub text: String,
 }
@@ -120,16 +121,17 @@ pub struct AgentLog {
     seam: crate::record::Emitter,
 }
 
-/// What a `mnemon` child is forked with: its parent's whole turn table, turn
-/// by turn under the parent's own ids, each row carrying the address that
-/// makes it readable whoever recorded it first.
+/// What a `mnemon` child is forked with: its parent's turn table and residues.
+///
+/// The table is turn by turn under the parent's own ids, each row carrying
+/// the address that makes it readable whoever recorded it first.
 pub struct Inherited {
     /// The parent's table at the fork, each row beside the address its
     /// transcript copy lies at.
     pub turns: Vec<Linked>,
-    /// The notes made at those evictions: the child folds them in, so its
-    /// markers are the same projection the parent's were.
-    pub notes: Vec<Option<String>>,
+    /// The parent's residues: the child folds them in, so its context is
+    /// the same projection the parent's was.
+    pub residues: Vec<Residue>,
 }
 
 impl AgentLog {
@@ -412,7 +414,7 @@ impl AgentLog {
     pub fn inherited_context(&self) -> Inherited {
         Inherited {
             turns: self.context.linked(),
-            notes: self.context.notes().to_vec(),
+            residues: self.context.residues(),
         }
     }
 
@@ -554,36 +556,29 @@ impl AgentLog {
         }
     }
 
-    /// The resolved turns the harness's own pressure cut would take, to spend
-    /// no more than `keep_budget_bytes` on what stays; `None` when nothing is
-    /// old enough to shed.
-    pub fn plan_eviction(&self, keep_budget_bytes: usize) -> Option<Vec<u64>> {
-        self.context.plan_eviction(keep_budget_bytes)
+    /// The span a forced eviction would take to spend no more
+    /// than `keep_budget_bytes` on what stays; `None` when nothing is old
+    /// enough to shed.
+    pub fn plan_forced_eviction(&self, keep_budget_bytes: usize) -> Option<Span> {
+        self.context.plan_forced_eviction(keep_budget_bytes)
     }
 
-    /// Take `turns` out of the context at once, leaving a marker where they
-    /// stood and `note` beneath it. The set is resolved before it is
-    /// recorded, so replay departs exactly the ids on disk. Returns the
-    /// resolved cut; its row on screen is the caller's to author.
+    /// Take the run `span` out of the context, leaving one residue standing
+    /// for it with `note`. Its row on screen is the caller's to author.
     ///
     /// # Errors
-    /// Refuses an eviction naming no turn, a turn never recorded, one that
-    /// has already left, the turn being written now, and a set that would
-    /// take nothing.
+    /// Refuses what [`Context::resolve_cut`] refuses.
     pub fn evict(
         &mut self,
-        turns: &[u64],
+        span: Span,
         note: Option<String>,
         by: EditAuthority,
-    ) -> Result<Cut, String> {
-        let turns = self.context.resolve_cut(turns)?;
-        let cut = Cut { turns, note };
+    ) -> Result<(), String> {
+        self.context.resolve_cut(span)?;
         self.record_protocol(Protocol::Evicted {
-            cut: cut.clone(),
-            by,
+            residue: Residue { span, note, by },
         })
-        .map_err(|e| e.to_string())?;
-        Ok(cut)
+        .map_err(|e| e.to_string())
     }
 
     /// `/rewind`: turn `anchor` and every turn after it are withdrawn from
@@ -665,8 +660,8 @@ impl AgentLog {
                 at_unix_ms: crate::app::now_unix_ms(),
             })
             .map(drop)?;
-        if let Some(Inherited { turns, notes }) = inherited {
-            self.record_protocol(Protocol::Inherited { turns, notes })?;
+        if let Some(Inherited { turns, residues }) = inherited {
+            self.record_protocol(Protocol::Inherited { turns, residues })?;
         }
         self.record_protocol(Protocol::System {
             text: system.to_string(),

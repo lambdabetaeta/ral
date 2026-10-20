@@ -283,18 +283,16 @@ fn scheme_pins(u: &mut Unifier) -> Scheme {
     )
 }
 
-/// One turn as both `` exarch-context `survey `` and `` exarch-transcript `index `` name
-/// it; the index adds `held`, which a closed row of this shape cannot carry,
+/// One item as both `` exarch-context `survey `` and `` exarch-transcript `index `` name
+/// it; the index adds `location`, which a closed row of this shape cannot carry,
 /// so `` `exarch-transcript ``'s own answer type is left free.
-/// `exarch-context :: ∀ρ. <survey | evict [turns: [Int], note: <none | some Str>] | ρ> → F [rows: [[id: Int, role: Str, kind: Str, label: Str, bytes: Int]], total-bytes: Int]`
+/// `exarch-context :: ∀ρ. <survey | evict [from: Int, to: Int, note: Str] | ρ> → F [rows: [[from: Int, to: Int, role: Str, kind: Str, label: Str, bytes: Int]], total-bytes: Int]`
 ///
 /// Same shape as [`scheme_agents`] and [`scheme_schedules`]: an open outer
 /// tag row so an unknown tag reaches the door naming the two legal ones.
 ///
-/// `evict`'s record is closed: `note` is `` `none `` or `` `some Str ``, so
-/// absence is data rather than a missing key. The door refuses an empty,
-/// oversized, or multi-line `` `some `` — a marker reading
-/// `Your note at eviction: ""` is a defect.
+/// `evict`'s record is closed, `note` included: a residue stands on its note.
+/// The door refuses an empty, oversized, or multi-line one.
 ///
 /// One answer for both tags: an edit changes what is addressable, so the
 /// survey the transition leaves behind is what the next edit must be written
@@ -513,7 +511,7 @@ only the binding changes. After both completion notices, collect the replies:
     BuiltinEntry::new(
         Cow::Borrowed("exarch-context"),
         scheme_context,
-        r"exarch-context <tag>  — inspect or evict the turns sent on your next model request.
+        r"exarch-context <tag>  — inspect or evict what is sent on your next model request.
 
 Eviction removes conversation from context while keeping it readable through
 exarch-transcript. It preserves bindings, files, and running work. Call this
@@ -523,52 +521,58 @@ Turns and ids
 
 A user turn contains a prompt (or an import's opening). An assistant turn contains
 one assistant message, its tool results, and any steering before the next request.
-Eviction always removes whole turns. Ids rise per lineage and are never reused;
-every tool result ends with TURN: <id>, the assistant turn it closes. Use those
-ids, not positions in a list.
+Ids rise per lineage and are never reused; every tool result ends with TURN: <id>,
+the assistant turn it closes. Use those ids, not positions in a list.
+
+Eviction takes one contiguous run of turns (and of residues, the notes earlier
+evictions left) and leaves one residue standing for the run, carrying your note.
+from and to are turn ids, both inclusive: [from: 41, to: 60] names turns 41–60
+and is the address of the residue it leaves. A run that reaches into a residue
+must cover it whole. The same span over one residue rewrites its note. A prompt
+may be evicted; say in the note what was asked.
 
 Survey
 
     exarch-context `survey
 
-Returns the resident turns, oldest first:
+The survey lists what is in your context now: one row per turn or residue, oldest
+first, from == to for a turn, kind #'residue'# for a residue and its note as label:
 
-    [rows: [[id: Int, role: Str, kind: Str, label: Str, bytes: Int]], total-bytes: Int]
+    [rows: [[from: Int, to: Int, role: Str, kind: Str, label: Str, bytes: Int]], total-bytes: Int]
 
-role is #'user'# or #'assistant'#. kind is #'own'#, #'import'# (imported by the harness),
-or #'inherited'# (recorded by an ancestor before your fork). label is the first
-50 characters of the turn, or its first tool call's description. bytes is the
-turn's serialized size; total-bytes measures the current conversation including
-eviction markers. These are byte counts, not token counts.
+role is #'user'# or #'assistant'#; a residue's is #'user'#. kind is #'own'#,
+#'import'# (imported by the harness), #'inherited'# (recorded by an ancestor
+before your fork), or #'residue'#. A turn's label is its first 50 characters,
+or its first tool call's description. bytes is the item's serialized size;
+total-bytes measures the current conversation. These are byte counts, not
+token counts.
 
 Evict
 
-    exarch-context `evict [turns: [41, 43], note: `some #'Search ruled out the lexer; inspect parse_options next. No edits.'#]
+    exarch-context `evict [from: 41, to: 43, note: #'Search ruled out the lexer; inspect parse_options next. No edits.'#]
 
-turns accepts a list of ids, including nonadjacent ones. For a contiguous run,
-turns: !{range 41 44} names [41, 42, 43]. Both turns and note are required.
-Use `none for no note, or `some #'text'# for a nonempty, single-line note of at most
-240 UTF-8 bytes. Longer notes and notes containing a newline are refused.
+All three fields are required. note is a nonempty, single-line note of at most
+240 UTF-8 bytes; longer notes and notes containing a newline are refused. The
+result is the survey after the edit, in the same shape as above.
 
-Each run of removed turns leaves a marker naming the turns and carrying your
-note. The result is the survey after the edit, in the same shape as above.
-
-Unknown ids, already departed turns, and the current unclosed turn are refused.
-A user prompt is retained if any assistant turn answering it remains outside the
-cut. A cut that removes nothing is refused. Check the returned survey to see
-which turns remain.
+Refused: an id never recorded, a turn rewound or cleared away, a run holding
+the turn being written now, and a run that cuts a residue, reaching into it
+without covering it whole.
 
 Recovery and cost
 
 An eviction that reports an error may already have landed. Survey before retrying
 so you do not name turns that have already left. Read evicted material with:
 
-    exarch-transcript `read [turns: [41]]
+    exarch-transcript `read [turns: !{range 41 44}]
 
-Provider cache reuse is lost from the earliest evicted turn onward. Batch cuts
+Provider cache reuse is lost from the start of the evicted run onward. Batch cuts
 of completed work; removing a just-failed turn affects only the recent end.
-Near the context limit the harness warns once, then evicts old turns without a
-note. Evict first if you want to leave your own conclusion.",
+Near the context limit the harness warns you. When the context passes the
+trigger, a reserve beyond the warning, a forced eviction takes the oldest turns
+at a turn boundary, without a note. It may take your current prompt too, so
+evict first under your own note if you want to leave your conclusion, saying
+what was asked.",
         BuiltinBody::Static(builtin_family::<Context>),
     ),
     BuiltinEntry::boundary(
@@ -587,13 +591,15 @@ Search by content
     exarch-transcript `grep [pattern: #'duplicate flag'#, turns: `only [31, 35]]
 
 Both pattern and turns are required. pattern is a Rust regex; turns is `all or
-`only a list of ids. The search covers message text, tool scripts, tool results,
-and recorded reasoning. It returns:
+`only a list of ids. grep searches turns' text and residues' notes: message
+text, tool scripts, tool results, recorded reasoning, and every note a residue
+keeps, which `only reaches when it names every id the residue covers. It returns:
 
-    [hits: [[turn: Int, role: Str, line: Int, text: Str]], total: Int]
+    [hits: [[from: Int, to: Int, kind: Str, role: Str, line: Int, text: Str]], total: Int]
 
-turn identifies the containing turn; role is the message's role as a string.
-line is 1-based within that message's searched text, not a source-file line.
+A hit names the item by from, to and kind: a turn's from == to, and a note's
+kind is #'residue'#. role is the message's role as a string. line is 1-based
+within that message's searched text, not a source-file line; a note is line 1.
 There are at most 100 hits, oldest first, and each hit's text is clipped to
 200 bytes. total counts all matches. If total exceeds the returned hit count,
 narrow the pattern or turn ids: the returned hits may omit recent matches.
@@ -602,20 +608,24 @@ Find turns by label or size
 
     exarch-transcript `index
 
-Returns every recorded turn in order:
+index lists every turn and every residue ever recorded, in id order, a residue
+before what it covers:
 
-    [[id: Int, role: Str, kind: Str, label: Str, bytes: Int, held: Str]]
+    [[from: Int, to: Int, role: Str, kind: Str, label: Str, bytes: Int, location: `resident|`under [from: Int, to: Int]|`withdrawn]]
 
-The first five fields have the same meaning as in exarch-context `survey.
-held is #'resident'#, #'evicted'#, or #'withdrawn'#. bytes is the serialized size of
-the original turn, not its eviction marker. Use the index when you know the
-stretch of work you want but do not have a useful search term.
+The first six fields have the same meaning as in exarch-context `survey.
+location is `resident, `under [from, to] naming the innermost residue over it,
+or `withdrawn. A turn's bytes is its own serialized size, wherever it lies. Use
+the index when you know the stretch of work you want but do not have a useful
+search term.
 
 Read selected turns
 
     exarch-transcript `read [turns: [35]]
 
-Returns one record per selected turn, in id order:
+read [turns: [Int]] reads turn material; !{range a b} is half-open, so the turns
+under [from: 41, to: 60] are !{range 41 61}. Returns one record per selected
+turn, in id order:
 
     [[turn: Int, role: Str, messages: [Message]]]
 

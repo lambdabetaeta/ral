@@ -1,5 +1,10 @@
+use super::render::render_residue;
+use super::table::holder;
 use super::*;
-use crate::record::Seq;
+use crate::record::{
+    AgentId, AgentLog, GrepHit, Inherited, RecordedAccount, Seq, ToolResult, Voice,
+};
+use regex::Regex;
 
 /// A turn in the context. Its records are elided: every fold under test
 /// here reads `bytes`, never the material.
@@ -17,25 +22,50 @@ fn here(id: u64, role: Role, label: &str, bytes: usize) -> Turn {
     }
 }
 
-/// A departed turn: `Some(cut)` indexes the notes, `None` is withdrawn.
-fn there(id: u64, role: Role, label: &str, bytes: usize, cut: Option<usize>) -> Turn {
+/// A turn under the residue over `holder`.
+fn there(id: u64, holder: Span, role: Role, label: &str, bytes: usize) -> Turn {
     Turn {
         body: Body::There {
             at: Pointer {
                 source: PathBuf::from("record.jsonl"),
                 loci: Vec::new(),
             },
-            cut,
+            departure: Departure::Under(holder),
         },
         ..here(id, role, label, bytes)
     }
 }
 
-fn context(turns: Vec<Turn>, notes: Vec<Option<String>>) -> Context {
+fn context(turns: Vec<Turn>, residues: Vec<Residue>) -> Context {
     Context {
-        table: Table::seeded(PathBuf::from("record.jsonl"), turns, notes),
+        table: Table::seeded(PathBuf::from("record.jsonl"), turns, residues),
         ..Context::new(PathBuf::from("record.jsonl"))
     }
+}
+
+/// The model writes a note; a forced eviction has none.
+fn by(note: Option<&str>) -> EditAuthority {
+    if note.is_some() {
+        EditAuthority::Model
+    } else {
+        EditAuthority::Harness
+    }
+}
+
+fn span(from: u64, to: u64) -> Span {
+    Span::new(from, to).expect("a test names a run first turn first")
+}
+
+fn residue(from: u64, to: u64, note: Option<&str>) -> Residue {
+    Residue {
+        span: span(from, to),
+        note: note.map(str::to_string),
+        by: by(note),
+    }
+}
+
+fn under(from: u64, to: u64) -> Location {
+    Location::Under(span(from, to))
 }
 
 /// One record through the live fold. The table is what these tests read,
@@ -45,17 +75,162 @@ fn step(context: &mut Context, protocol: Protocol) -> Result<(), Refusal> {
     context.step(Recorded::new(Locus::placeholder(seq), protocol))
 }
 
-fn held(context: &Context) -> Vec<(u64, Held)> {
+/// Evict through the fold, as a recorded cut does.
+fn evict(context: &mut Context, from: u64, to: u64, note: Option<&str>) -> Result<(), Refusal> {
+    step(
+        context,
+        Protocol::Evicted {
+            residue: residue(from, to, note),
+        },
+    )
+}
+
+fn prompt(context: &mut Context, text: &str) {
+    let turn = context.next_id();
+    step(
+        context,
+        Protocol::UserPrompt {
+            turn,
+            text: text.into(),
+            voice: Voice::Human,
+        },
+    )
+    .expect("a prompt at rest");
+}
+
+fn reply(context: &mut Context, text: &str) {
+    let turn = context.next_id();
+    step(
+        context,
+        Protocol::AssistantMessage {
+            turn,
+            message: ChatMessage::assistant(text),
+            pending_tool_ids: Vec::new(),
+            stop_reason: None,
+        },
+    )
+    .expect("a reply where one is awaited");
+}
+
+/// An assistant turn that calls a tool, and the result answering it.
+fn call(context: &mut Context, result: &str) {
+    let turn = context.next_id();
+    step(
+        context,
+        Protocol::AssistantMessage {
+            turn,
+            message: called(None),
+            pending_tool_ids: vec!["t1".into()],
+            stop_reason: None,
+        },
+    )
+    .expect("a call where a reply is awaited");
+    step(
+        context,
+        Protocol::ToolResults {
+            results: vec![ToolResult {
+                id: "t1".into(),
+                content: result.into(),
+            }],
+        },
+    )
+    .expect("the result the call awaits");
+}
+
+/// `n` closed exchanges through the live fold: leaves `1..=2n`, prompts odd.
+fn exchanges(n: u64) -> Context {
+    let mut context = Context::new(PathBuf::from("record.jsonl"));
+    for k in 1..=n {
+        prompt(&mut context, &format!("prompt {k}"));
+        reply(&mut context, &format!("reply {k}"));
+    }
+    context
+}
+
+/// A log on disk, for what reads records back through their pointers.
+fn log() -> AgentLog {
+    AgentLog::for_test(
+        AgentId::new(0),
+        "model",
+        &RecordedAccount::for_test("provider"),
+    )
+    .expect("log")
+}
+
+fn cut(log: &mut AgentLog, from: u64, to: u64, note: Option<&str>) {
+    log.evict(span(from, to), note.map(str::to_string), by(note))
+        .expect("a legal cut");
+}
+
+fn rounds(log: &mut AgentLog, n: u64) {
+    for k in 1..=n {
+        log.append_user(format!("prompt {k}"), None, Voice::Human)
+            .unwrap();
+        log.append_assistant(ChatMessage::assistant(format!("reply {k}")), vec![], None)
+            .unwrap();
+    }
+}
+
+fn wire(context: &Context) -> Vec<u8> {
+    serde_json::to_vec(&context.rendered()).expect("messages serialise")
+}
+
+fn regex(pattern: &str) -> Regex {
+    Regex::new(pattern).expect("a test pattern is a regex")
+}
+
+/// An item as a test spells it: a turn by its id, a residue by its span.
+#[derive(Debug, PartialEq, Eq)]
+enum Shown {
+    T(u64),
+    R(u64, u64),
+}
+
+use Shown::{R, T};
+
+impl Shown {
+    fn of(item: &Item<'_>) -> Self {
+        match item {
+            Item::Turn(turn) => T(turn.id),
+            Item::Residue(standing) => R(standing.residue.span.from(), standing.residue.span.to()),
+        }
+    }
+
+    fn row(row: &SpanRow) -> Self {
+        match row.kind {
+            ItemKind::Residue => R(row.span.from(), row.span.to()),
+            ItemKind::Turn(_) => T(row.span.from()),
+        }
+    }
+}
+
+fn frontier(context: &Context) -> Vec<Shown> {
+    context.table.frontier().iter().map(Shown::of).collect()
+}
+
+fn index(context: &Context) -> Vec<(Shown, Location)> {
+    context
+        .transcript_index()
+        .iter()
+        .map(|row| (Shown::row(row), row.location))
+        .collect()
+}
+
+fn locations(context: &Context) -> Vec<(u64, Location)> {
     context
         .table
         .turns()
         .iter()
-        .map(|turn| (turn.id, turn.held()))
+        .map(|turn| (turn.id, turn.location()))
         .collect()
 }
 
-fn resident_ids(context: &Context) -> Vec<u64> {
-    context.resident().map(|turn| turn.id).collect()
+fn texts(context: &Context) -> Vec<String> {
+    context
+        .rendered()
+        .iter()
+        .map(|message| message.content.first_text().unwrap_or_default().to_string())
+        .collect()
 }
 
 fn called(desc: Option<&str>) -> ChatMessage {
@@ -69,6 +244,20 @@ fn called(desc: Option<&str>) -> ChatMessage {
         fn_arguments: args,
         thought_signatures: None,
     })])
+}
+
+/// A span is never inverted: neither constructed nor read back so.
+#[test]
+fn an_inverted_span_is_refused() {
+    assert_eq!(
+        Span::new(4, 3).unwrap_err().to_string(),
+        "`from` is 4 and `to` is 3: a run names its first turn, then its last"
+    );
+    assert_eq!(
+        serde_json::from_str::<Span>(r#"{"from":3,"to":4}"#).expect("a span"),
+        span(3, 4)
+    );
+    assert!(serde_json::from_str::<Span>(r#"{"from":4,"to":3}"#).is_err());
 }
 
 /// A call-first message still states what it is for: where no prose opened
@@ -90,60 +279,417 @@ fn prose_beats_intent_and_an_undeclared_call_stays_unlabelled() {
     assert_eq!(message_label(&prose), "now the write");
 }
 
-/// Every hole's marker, in the order [`Context::rendered`] stands them: the
-/// turns here hold no records, so markers are all it renders.
-fn markers(context: &Context) -> Vec<String> {
-    context
-        .rendered()
+#[test]
+fn an_eviction_leaves_a_residue_over_its_span() {
+    let mut context = exchanges(3);
+    evict(&mut context, 3, 4, Some("the lexer was a dead end")).expect("a run of closed turns");
+    assert_eq!(frontier(&context), [T(1), T(2), R(3, 4), T(5), T(6)]);
+    assert_eq!(
+        locations(&context)[2..4],
+        [(3, under(3, 4)), (4, under(3, 4))]
+    );
+    let rendered = context.rendered();
+    assert_eq!(rendered.len(), 5);
+    assert_eq!(rendered[2].role, ChatRole::User);
+    let text = rendered[2].content.first_text().unwrap_or_default();
+    assert!(text.contains("Turns 3–4 have left your context"), "{text}");
+    assert!(
+        text.contains("Your note: \"the lexer was a dead end\""),
+        "{text}"
+    );
+    assert!(text.contains("!{range 3 5}"), "{text}");
+    let turns: usize = [1, 2, 5, 6]
         .iter()
-        .filter_map(|message| message.content.first_text().map(str::to_string))
-        .collect()
+        .map(|&id| context.turn(id).expect("recorded").bytes)
+        .sum();
+    assert_eq!(
+        context.history_bytes(),
+        turns + message_bytes(&rendered[2..3])
+    );
 }
 
-/// The one marker a table with a single hole draws.
-fn marker(context: &Context) -> String {
-    let drawn = markers(context);
-    let [marker] = drawn.as_slice() else {
-        panic!("one hole draws one marker, got {drawn:?}")
+#[test]
+fn a_larger_run_nests_the_residue() {
+    let mut context = exchanges(3);
+    evict(&mut context, 3, 4, Some("inner")).expect("a run of closed turns");
+    evict(&mut context, 2, 5, Some("outer")).expect("a run covering a residue whole");
+    assert_eq!(frontier(&context), [T(1), R(2, 5), T(6)]);
+    let residues = context.residues();
+    let [inner, outer] = residues.as_slice() else {
+        panic!("two evictions, two residues")
     };
-    marker.clone()
+    assert!(inner.span.within(outer.span), "the residues are laminar");
+    assert_eq!(
+        holder(Span::single(3), residues.iter().map(|r| r.span)),
+        Some(span(3, 4))
+    );
+    assert_eq!(
+        index(&context),
+        [
+            (T(1), Location::Resident),
+            (R(2, 5), Location::Resident),
+            (T(2), under(2, 5)),
+            (R(3, 4), under(2, 5)),
+            (T(3), under(3, 4)),
+            (T(4), under(3, 4)),
+            (T(5), under(2, 5)),
+            (T(6), Location::Resident),
+        ]
+    );
 }
 
-/// Evict through the fold, as a recorded cut does: resolve, then depart
-/// exactly what was resolved.
-fn evict(context: &mut Context, turns: &[u64], note: Option<&str>) {
-    let resolved = context.resolve_cut(turns).expect("a legal cut");
-    context.table.evict(&resolved, note.map(str::to_string));
-}
-
-/// A marker row's turn id and its weight in whole KB.
-fn columns(line: &str) -> (&str, &str) {
-    // The marker's last line closes its bracket.
-    let row = line.trim_end_matches(']');
-    let id = row
-        .split_whitespace()
-        .next()
-        .expect("a row opens with its turn id");
-    let mut fields = row.split_whitespace().rev();
-    assert_eq!(fields.next(), Some("KB"), "{line}");
-    let weight = fields.next().expect("a row ends in a weight");
-    (id, weight)
-}
-
-/// Sorted ids read as en-dash runs — the one spelling a turn set has.
 #[test]
-fn runs_reads_ids_as_en_dash_runs() {
-    assert_eq!(runs(&[41, 42, 43, 50]), "41–43, 50");
-    assert_eq!(runs(&[7]), "7");
-    assert_eq!(runs(&[]), "");
-    assert_eq!(runs(&[3, 1, 2]), "1–3", "the ids are sorted first");
-    assert_eq!(runs(&[5, 5, 6]), "5–6", "a repeat is no run of its own");
+fn a_run_over_one_residue_rewrites_its_note() {
+    let mut context = exchanges(3);
+    evict(&mut context, 3, 4, Some("first thoughts")).expect("a run of closed turns");
+    evict(&mut context, 3, 4, Some("second thoughts")).expect("the same span over a residue");
+    assert_eq!(frontier(&context), [T(1), T(2), R(3, 4), T(5), T(6)]);
+    let text = &texts(&context)[2];
+    assert!(
+        text.contains("second thoughts") && !text.contains("first thoughts"),
+        "{text}"
+    );
+    assert_eq!(
+        context
+            .transcript_index()
+            .into_iter()
+            .filter(|row| row.kind == ItemKind::Residue)
+            .map(|row| (row.label, row.location))
+            .collect::<Vec<_>>(),
+        [
+            ("second thoughts".to_string(), Location::Resident),
+            ("first thoughts".to_string(), under(3, 4)),
+        ]
+    );
 }
 
-/// The grouping a turn's role and order imply: the prompt a turn answers,
-/// and the turns answering a prompt — a prompt with none included.
 #[test]
-fn a_prompt_and_its_answers_are_read_off_role_and_order() {
+fn a_run_cutting_a_residue_is_refused() {
+    let mut context = exchanges(3);
+    evict(&mut context, 3, 4, Some("held together")).expect("a run of closed turns");
+    for (from, to) in [(4, 5), (2, 3)] {
+        assert_eq!(
+            context.resolve_cut(span(from, to)).unwrap_err(),
+            "turns 3–4 stand together under one note: name from: 3, to: 4 whole, or leave it"
+        );
+    }
+}
+
+#[test]
+fn a_prompt_may_leave_alone() {
+    let mut context = Context::new(PathBuf::from("record.jsonl"));
+    prompt(&mut context, "where is the duplicate flag?");
+    call(&mut context, "lexer.rs: none");
+    reply(&mut context, "in the parser");
+    evict(
+        &mut context,
+        1,
+        1,
+        Some("asked where the duplicate flag is"),
+    )
+    .expect("a prompt may leave under a note");
+    assert_eq!(frontier(&context), [R(1, 1), T(2), T(3)]);
+    let rendered = context.rendered();
+    assert_eq!(rendered[0].role, ChatRole::User);
+    let text = rendered[0].content.first_text().unwrap_or_default();
+    assert!(
+        text.starts_with("[EXARCH // Turn 1 has left your context."),
+        "{text}"
+    );
+}
+
+/// Old turns under a note, then the live prompt and its two answers.
+fn under_a_note() -> Context {
+    let mut turns: Vec<Turn> = (1..=40)
+        .map(|id| there(id, span(1, 40), Role::Assistant, "", 10))
+        .collect();
+    turns.extend([
+        here(41, Role::User, "", 100),
+        here(42, Role::Assistant, "", 100),
+        here(43, Role::Assistant, "", 50),
+    ]);
+    context(turns, vec![residue(1, 40, Some("read the lexer"))])
+}
+
+#[test]
+fn plan_eviction_is_a_prefix_over_the_frontier() {
+    let context = under_a_note();
+    assert_eq!(context.current_prompt(), Some(41));
+    assert_eq!(
+        context.plan_forced_eviction(200),
+        Some(span(1, 41)),
+        "the live prompt is charged and taken"
+    );
+    assert_eq!(
+        context.plan_forced_eviction(0),
+        Some(span(1, 42)),
+        "never the newest"
+    );
+    assert_eq!(context.plan_forced_eviction(1000), None);
+    context
+        .resolve_cut(span(41, 41))
+        .expect("the model may evict the live prompt");
+}
+
+/// A prefix that is one residue alone would rewrite it with no note, saving
+/// nothing: no plan.
+#[test]
+fn a_lone_residue_is_never_planned() {
+    let context = under_a_note();
+    assert_eq!(context.plan_forced_eviction(249), Some(span(1, 41)));
+    assert_eq!(
+        context.plan_forced_eviction(250),
+        None,
+        "only the residue overflows"
+    );
+}
+
+/// Pressure at the next boundary finds only the harness's own residue old
+/// enough to shed, and appends no second one.
+#[test]
+fn a_forced_eviction_never_rewrites_its_own_residue() {
+    let mut context = exchanges(2);
+    assert_eq!(context.plan_forced_eviction(0), Some(span(1, 3)));
+    evict(&mut context, 1, 3, None).expect("a forced eviction");
+    assert_eq!(frontier(&context), [R(1, 3), T(4)]);
+    assert_eq!(context.plan_forced_eviction(0), None);
+    assert_eq!(context.residues().len(), 1);
+}
+
+#[test]
+fn forced_eviction_renders_without_a_note() {
+    let mut context = exchanges(2);
+    evict(&mut context, 1, 2, None).expect("a forced eviction");
+    assert_eq!(
+        texts(&context)[0],
+        "[EXARCH // Turns 1–2 have left your context in a forced eviction, without a note.\nThey are still readable: exarch-transcript `read [turns: !{range 1 3}] reads them back as material, exarch-transcript `index lists every turn and every note, and exarch-transcript `grep [pattern: 're', turns: `all] searches both.]"
+    );
+    assert_eq!(
+        context.context_survey().rows[0].label,
+        "forced eviction, without a note"
+    );
+    evict(&mut context, 3, 3, None).expect("one turn");
+    let text = &texts(&context)[1];
+    assert!(
+        text.starts_with(
+            "[EXARCH // Turn 3 has left your context in a forced eviction, without a note.\nIt is still readable: exarch-transcript `read [turns: !{range 3 4}] reads it back"
+        ),
+        "{text}"
+    );
+}
+
+/// A withdrawal is by id, keeps every row and residue, leaves no residue
+/// standing for what it took, and mints no id twice; its anchor starts an
+/// item.
+#[test]
+fn rewind_withdraws_by_id_and_refuses_an_anchor_inside_a_residue() {
+    let mut context = context(
+        vec![
+            there(1, span(1, 2), Role::User, "one", 10),
+            there(2, span(1, 2), Role::Assistant, "", 10),
+            here(3, Role::User, "three", 10),
+            here(4, Role::Assistant, "", 10),
+            there(5, span(5, 6), Role::User, "five", 10),
+            there(6, span(5, 6), Role::Assistant, "", 10),
+        ],
+        vec![residue(1, 2, Some("first")), residue(5, 6, None)],
+    );
+    assert_eq!(
+        context.rewindable(9).unwrap_err(),
+        "turn 9 is not recorded: the latest is 6"
+    );
+    assert_eq!(
+        context.rewindable(6).unwrap_err(),
+        "turn 6 lies under the residue over turns 5–6: rewind to turn 5 or turn 7"
+    );
+    assert!(matches!(
+        step(&mut context, Protocol::Rewound { anchor: 2 }),
+        Err(Refusal::Foreign { reason, .. }) if reason.contains("inside the residue over turns 1–2")
+    ));
+    step(&mut context, Protocol::Rewound { anchor: 5 }).expect("a residue's first turn");
+    assert_eq!(
+        index(&context),
+        [
+            (R(1, 2), Location::Resident),
+            (T(1), under(1, 2)),
+            (T(2), under(1, 2)),
+            (T(3), Location::Resident),
+            (T(4), Location::Resident),
+            (R(5, 6), Location::Withdrawn),
+            (T(5), Location::Withdrawn),
+            (T(6), Location::Withdrawn),
+        ]
+    );
+    assert_eq!(frontier(&context), [R(1, 2), T(3), T(4)]);
+    assert_eq!(context.residues().len(), 2, "residues are never dropped");
+    assert_eq!(context.next_id(), 7, "ids stay monotone");
+    assert!(context.is_ready());
+    assert!(context.token_measure_is_stale(0));
+    assert_eq!(
+        context.rewindable(6).unwrap_err(),
+        "turn 6 was already rewound or cleared away; the earliest you can rewind to is turn 1"
+    );
+    context
+        .rewindable(1)
+        .expect("an evicted anchor starting a residue may be rewound to");
+
+    step(&mut context, Protocol::Rewound { anchor: 1 }).expect("an evicted anchor");
+    assert!(
+        index(&context)
+            .iter()
+            .all(|(_, location)| *location == Location::Withdrawn)
+    );
+    assert_eq!(context.rendered().len(), 0, "not even a residue stands");
+    assert_eq!(context.next_id(), 7);
+    assert_eq!(
+        context.rewindable(1).unwrap_err(),
+        "turn 1 was already rewound or cleared away; nothing has been said since the last \
+         /clear or /rewind"
+    );
+    for (anchor, said) in [(1, "already withdrawn"), (9, "never recorded")] {
+        assert!(
+            matches!(
+                step(&mut context, Protocol::Rewound { anchor }),
+                Err(Refusal::Foreign { reason, .. }) if reason.contains(said)
+            ),
+            "a rewind to turn {anchor} is foreign"
+        );
+    }
+}
+
+#[test]
+fn a_span_may_cover_a_withdrawn_run() {
+    let mut context = exchanges(3);
+    step(&mut context, Protocol::Rewound { anchor: 4 }).expect("a rewind at rest");
+    reply(&mut context, "reply 3, again");
+    prompt(&mut context, "prompt 8");
+    assert_eq!(
+        context.plan_forced_eviction(0),
+        Some(span(1, 7)),
+        "the harness's prefix spans the withdrawn run"
+    );
+    evict(&mut context, 1, 7, Some("the first attempt")).expect("a span over a withdrawn run");
+    assert_eq!(frontier(&context), [R(1, 7), T(8)]);
+    assert_eq!(locations(&context)[4], (5, Location::Withdrawn));
+}
+
+#[test]
+fn an_inherited_table_keeps_residues() {
+    let mut parent = log();
+    rounds(&mut parent, 3);
+    cut(&mut parent, 3, 4, Some("inner"));
+    cut(&mut parent, 2, 5, Some("outer"));
+    let Inherited { turns, residues } = parent.inherited_context();
+    assert_eq!(
+        turns
+            .iter()
+            .map(|linked| (linked.row.id, linked.row.location))
+            .collect::<Vec<_>>(),
+        [
+            (1, Location::Resident),
+            (2, under(2, 5)),
+            (3, under(3, 4)),
+            (4, under(3, 4)),
+            (5, under(2, 5)),
+            (6, Location::Resident),
+        ]
+    );
+    let link = |turns, residues| Protocol::Inherited { turns, residues };
+    let child = || Context::new(PathBuf::from("child.jsonl"));
+
+    let mut inherited = child();
+    step(&mut inherited, link(turns.clone(), residues.clone())).expect("the parent's own link");
+    assert_eq!(wire(&inherited), wire(parent.context()));
+    let located = |context: &Context| {
+        context
+            .transcript_index()
+            .into_iter()
+            .map(|row| (row.span, row.location))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        located(&inherited),
+        located(parent.context()),
+        "every residue keeps its residency across the link"
+    );
+
+    let crossed = [residues.clone(), vec![residue(4, 6, Some("across"))]].concat();
+    assert!(matches!(
+        step(&mut child(), link(turns.clone(), crossed)),
+        Err(Refusal::Foreign { reason, .. }) if reason.contains("no sequence of evictions leaves")
+    ));
+    let mut contradicted = turns;
+    contradicted[2].row.location = under(2, 5);
+    assert!(matches!(
+        step(&mut child(), link(contradicted, residues)),
+        Err(Refusal::Foreign { reason, .. }) if reason.contains("its residues contradict")
+    ));
+}
+
+#[test]
+fn fold_equals_memo_across_nested_evictions() {
+    let mut live = log();
+    rounds(&mut live, 4);
+    cut(&mut live, 3, 4, Some("inner"));
+    cut(&mut live, 2, 5, Some("outer"));
+    cut(&mut live, 1, 6, None);
+    rounds(&mut live, 1);
+    let (memo, _) = resume(&live.dir().join("record.jsonl")).expect("replay");
+    assert_eq!(wire(&memo), wire(live.context()));
+    assert_eq!(memo.history_bytes(), live.context().history_bytes());
+    assert_eq!(memo.transcript_index(), live.context().transcript_index());
+}
+
+#[test]
+fn the_residue_text_is_a_function_of_the_record() {
+    let record = residue(3, 4, Some("the lexer was a dead end"));
+    assert_eq!(render_residue(&record), render_residue(&record.clone()));
+    let rendered = |bytes: usize, label: &str| {
+        texts(&context(
+            vec![
+                there(3, span(3, 4), Role::User, label, bytes),
+                there(4, span(3, 4), Role::Assistant, label, bytes),
+            ],
+            vec![record.clone()],
+        ))
+    };
+    assert_eq!(rendered(10, "one"), rendered(90_000, "another"));
+    assert_eq!(rendered(10, "one"), [render_residue(&record)]);
+}
+
+#[test]
+fn grep_finds_a_note_and_names_its_span() {
+    let mut log = log();
+    rounds(&mut log, 4);
+    cut(&mut log, 3, 4, Some("the parser holds the duplicate flag"));
+    cut(&mut log, 5, 6, None);
+    let hits = |pattern: &str, turns: Option<&[u64]>| {
+        log.context()
+            .grep_transcript(&regex(pattern), turns)
+            .expect("a legal search")
+            .hits
+    };
+    let noted = |hits: Vec<GrepHit>| {
+        hits.into_iter()
+            .filter(|hit| hit.kind == ItemKind::Residue)
+            .map(|hit| (hit.span.from(), hit.span.to(), hit.line, hit.text))
+            .collect::<Vec<_>>()
+    };
+    let note = || vec![(3, 4, 1, "the parser holds the duplicate flag".to_string())];
+    assert_eq!(noted(hits("parser", None)), note());
+    assert_eq!(hits("parser", None).len(), 1, "no turn says parser");
+    assert_eq!(noted(hits("parser", Some(&[3, 4]))), note());
+    assert_eq!(hits("parser", Some(&[3])), Vec::<GrepHit>::new());
+    assert_eq!(
+        noted(hits(".", None)),
+        note(),
+        "a forced eviction's residue has no note to search"
+    );
+}
+
+/// The prompt a turn belongs to is read off role and order.
+#[test]
+fn a_prompt_is_read_off_role_and_order() {
     let context = context(
         vec![
             here(1, Role::User, "one", 10),
@@ -155,16 +701,11 @@ fn a_prompt_and_its_answers_are_read_off_role_and_order() {
         ],
         Vec::new(),
     );
-    let answers = |prompt| context.answers(prompt).map(|t| t.id).collect::<Vec<_>>();
     assert_eq!(
         (1..=6).map(|id| context.prompt_of(id)).collect::<Vec<_>>(),
         vec![Some(1), Some(1), Some(1), Some(4), Some(4), Some(6)]
     );
     assert_eq!(context.prompt_of(9), None, "turn 9 is not recorded");
-    assert_eq!(answers(1), vec![2, 3]);
-    assert_eq!(answers(4), vec![5]);
-    assert_eq!(answers(6), Vec::<u64>::new(), "the newest prompt has none");
-    assert_eq!(answers(9), Vec::<u64>::new());
     assert_eq!(context.current_prompt(), Some(6));
     assert_eq!(context.current_turn(), Some(6));
 }
@@ -202,95 +743,15 @@ fn an_import_opens_a_turn_in_its_messages_voice() {
         context
             .transcript_index()
             .iter()
-            .map(|row| (row.id, row.role, row.kind))
+            .map(|row| (row.span.from(), row.role, row.kind))
             .collect::<Vec<_>>(),
         vec![
-            (1, Role::User, TurnKind::Import),
-            (2, Role::Assistant, TurnKind::Import),
+            (1, Role::User, ItemKind::Turn(TurnKind::Import)),
+            (2, Role::Assistant, ItemKind::Turn(TurnKind::Import)),
         ]
     );
     assert_eq!(context.current_prompt(), Some(1));
     assert_eq!(context.current_turn(), Some(2));
-}
-
-/// A prompt one of whose answers the set does not name stays with it,
-/// silently.
-#[test]
-fn a_cut_keeps_a_user_turn_with_survivors() {
-    let mut context = context(
-        vec![
-            here(1, Role::User, "one", 10),
-            here(2, Role::Assistant, "", 10),
-            here(3, Role::User, "three", 10),
-            here(4, Role::Assistant, "", 10),
-            here(5, Role::Assistant, "", 10),
-        ],
-        Vec::new(),
-    );
-    assert_eq!(
-        context.resolve_cut(&[1, 2, 3, 4]).expect("a legal cut"),
-        vec![1, 2, 4],
-        "turn 3 is the prompt turn 5 still answers"
-    );
-    evict(&mut context, &[1, 2, 3, 4], None);
-    assert_eq!(
-        held(&context),
-        vec![
-            (1, Held::Evicted { cut: 0 }),
-            (2, Held::Evicted { cut: 0 }),
-            (3, Held::Resident),
-            (4, Held::Evicted { cut: 0 }),
-            (5, Held::Resident),
-        ]
-    );
-    assert_eq!(resident_ids(&context), vec![3, 5]);
-    assert_eq!(context.notes(), &[None]);
-}
-
-/// A prompt that keeps no answer leaves like any other turn.
-#[test]
-fn a_cut_takes_a_user_turn_with_no_survivors() {
-    let mut context = context(
-        vec![
-            here(1, Role::User, "one", 10),
-            here(2, Role::Assistant, "", 10),
-            here(3, Role::User, "three", 10),
-        ],
-        Vec::new(),
-    );
-    evict(&mut context, &[1, 2], None);
-    assert_eq!(
-        held(&context),
-        vec![
-            (1, Held::Evicted { cut: 0 }),
-            (2, Held::Evicted { cut: 0 }),
-            (3, Held::Resident),
-        ]
-    );
-    assert_eq!(resident_ids(&context), vec![3]);
-}
-
-/// The survivor rule refuses rather than takes nothing, and says which
-/// answers would have to be named too.
-#[test]
-fn a_cut_that_would_take_nothing_names_what_to_add() {
-    let context = context(
-        vec![
-            here(30, Role::User, "the prompt", 10),
-            here(31, Role::Assistant, "", 10),
-            here(32, Role::Assistant, "", 10),
-        ],
-        Vec::new(),
-    );
-    assert_eq!(
-        context.resolve_cut(&[30]).unwrap_err(),
-        "turn 30 is the prompt whose turns 31–32 are still in your context, and a prompt \
-         stays with them: name them too, or leave it"
-    );
-    assert_eq!(
-        context.resolve_cut(&[]).unwrap_err(),
-        "an eviction must name at least one turn"
-    );
 }
 
 /// The one turn no eviction takes is the one being written.
@@ -305,25 +766,19 @@ fn a_cut_refuses_the_unclosed_turn() {
     );
     context.state = State::AwaitingAssistantAfterUser;
     assert_eq!(
-        context.resolve_cut(&[2]).unwrap_err(),
+        context.resolve_cut(span(2, 2)).unwrap_err(),
         "turn 2 is being written now: an eviction keeps the work in hand"
     );
     assert_eq!(
-        context.resolve_cut(&[9]).unwrap_err(),
+        context.resolve_cut(span(9, 9)).unwrap_err(),
         "turn 9 is not recorded: the latest is 2"
-    );
-    assert_eq!(
-        context.resolve_cut(&[1]).unwrap_err(),
-        "turn 1 is the prompt whose turn 2 is still in your context, and a prompt stays with \
-         it: name it too, or leave it",
-        "the prompt stays with the unclosed turn, which the set may not name"
     );
 }
 
 /// A detour inside the work in hand: the good work stands, the detour
-/// leaves as one hole, and the turn in hand is untouched.
+/// leaves under one residue, and the turn in hand is untouched.
 #[test]
-fn a_cut_inside_the_work_in_hand_leaves_one_hole() {
+fn a_cut_inside_the_work_in_hand_leaves_one_residue() {
     let mut context = context(
         vec![
             here(30, Role::User, "fix the parser", 10),
@@ -338,156 +793,50 @@ fn a_cut_inside_the_work_in_hand_leaves_one_hole() {
         Vec::new(),
     );
     context.state = State::AwaitingAssistantAfterUser;
+    evict(&mut context, 34, 36, Some("that read was a dead end")).expect("a legal cut");
     assert_eq!(
-        context.resolve_cut(&[34, 35, 36]).expect("a legal cut"),
-        vec![34, 35, 36]
-    );
-    evict(
-        &mut context,
-        &[34, 35, 36],
-        Some("that read was a dead end"),
-    );
-    assert_eq!(resident_ids(&context), vec![30, 31, 32, 33, 37]);
-    let marker = marker(&context);
-    assert!(
-        marker.starts_with("[EXARCH // Turns 34–36 have left your context."),
-        "{marker}"
-    );
-    assert!(
-        marker.contains("`` exarch-transcript `read [turns: !{range 34 37}] `` reads turns 34 through 36 back as material"),
-        "{marker}"
-    );
-    assert!(
-        marker.contains("Your note: \"that read was a dead end\""),
-        "{marker}"
+        frontier(&context),
+        [T(30), T(31), T(32), T(33), R(34, 36), T(37)]
     );
 }
 
-/// A row states the turn's id, whose it was, its opening line and its
-/// weight — and a hole of one turn says so in the singular.
-#[test]
-fn a_marker_row_sets_id_role_label_and_weight() {
-    let context = context(
-        vec![
-            here(1, Role::User, "fix the parser", 10),
-            there(
-                2,
-                Role::Assistant,
-                "I will fix the parser",
-                12 * 1024,
-                Some(0),
-            ),
-            here(3, Role::User, "next", 10),
-        ],
-        vec![Some("the parser is fixed".into())],
-    );
-    let marker = marker(&context);
-    assert!(
-        marker.starts_with("[EXARCH // Turn 2 has left your context."),
-        "{marker}"
-    );
-    let row = marker
-        .lines()
-        .find(|line| line.contains(" KB"))
-        .expect("one departed turn, one row");
-    assert_eq!(
-        row,
-        format!(
-            "{:>4}  {:<9} {:<OPENING_CHARS$}{:>5} KB",
-            2, "assistant", "I will fix the parser", 12
-        )
-    );
-}
-
-/// A marker names every turn that left, draws one row for each, and puts
-/// each cut's note after its own rows.
-#[test]
-fn a_marker_draws_a_row_per_departed_turn() {
-    let context = context(
-        vec![
-            there(1, Role::User, "fix the parser", 12 * 1024, Some(0)),
-            there(2, Role::Assistant, "", 0, Some(0)),
-            there(3, Role::Assistant, "", 0, Some(0)),
-            here(4, Role::User, "add tests for the fold", 0),
-            there(5, Role::Assistant, "the fold reads", 85 * 1024, Some(1)),
-            here(6, Role::Assistant, "", 10),
-        ],
-        vec![Some("the parser is fixed".into()), None],
-    );
-    let [first, second] = markers(&context).try_into().expect("two holes");
-    assert!(
-        first.starts_with("[EXARCH // Turns 1–3 have left your context."),
-        "{first}"
-    );
-    assert!(
-        first.contains("`` exarch-transcript `index `` lists them."),
-        "{first}"
-    );
-    let rows: Vec<&str> = first.lines().filter(|line| line.contains(" KB")).collect();
-    assert_eq!(rows.len(), 3, "one row per departed turn, got {first}");
-    assert!(
-        rows[0].contains("user") && rows[0].contains("fix the parser"),
-        "{first}"
-    );
-    assert_eq!(columns(rows[0]), ("1", "12"));
-    assert!(
-        first.contains("Your note: \"the parser is fixed\""),
-        "{first}"
-    );
-    assert!(
-        second.starts_with("[EXARCH // Turn 5 has left your context."),
-        "{second}"
-    );
-    let rows: Vec<&str> = second.lines().filter(|line| line.contains(" KB")).collect();
-    assert_eq!(rows.len(), 1, "{second}");
-    assert!(
-        rows[0].contains("assistant") && rows[0].contains("the fold reads"),
-        "{second}"
-    );
-    assert_eq!(columns(rows[0]), ("5", "85"));
-}
-
-/// Two holes with a resident turn between them render two markers, each
+/// Two residues with a resident turn between them render two messages, each
 /// at its own place, and both weigh and count.
 #[test]
-fn two_holes_render_two_markers_in_place() {
+fn two_residues_stand_in_place_and_weigh_and_count() {
     let context = context(
         vec![
             here(1, Role::User, "one", 10),
-            there(2, Role::Assistant, "", 4 * 1024, Some(0)),
+            there(2, span(2, 2), Role::Assistant, "", 4 * 1024),
             here(3, Role::User, "three", 10),
-            there(4, Role::Assistant, "", 8 * 1024, Some(1)),
+            there(4, span(4, 4), Role::Assistant, "", 8 * 1024),
             here(5, Role::User, "five", 10),
         ],
-        vec![None, None],
+        vec![residue(2, 2, None), residue(4, 4, None)],
     );
-    assert_eq!(markers(&context).len(), 2);
+    assert_eq!(frontier(&context), [T(1), R(2, 2), T(3), R(4, 4), T(5)]);
     assert_eq!(
         context.event_count(),
         2,
-        "no resident turn holds a record here, so the count is the two holes"
-    );
-    let weight: usize = markers(&context)
-        .iter()
-        .map(|text| message_bytes(std::slice::from_ref(&ChatMessage::user(text.clone()))))
-        .sum();
-    assert_eq!(
-        context.history_bytes(),
-        weight + 30,
-        "each marker weighs beside the resident turns' own bytes"
+        "no resident turn holds a record here, so the count is the two residues"
     );
     let rendered = context.rendered();
     assert_eq!(
         rendered.len(),
         2,
-        "the resident turns hold no records, so only the markers render"
+        "the resident turns hold no records, so only the residues render"
+    );
+    assert_eq!(
+        context.history_bytes(),
+        message_bytes(&rendered) + 30,
+        "each residue weighs beside the resident turns' own bytes"
     );
 }
 
-/// A suffix cut at a ready boundary may take the whole context, and the
-/// marker then stands alone.
+/// A cut at a ready boundary may take the whole context, and the residue
+/// then stands alone.
 #[test]
-fn a_suffix_cut_may_empty_the_context() {
+fn a_cut_may_take_the_whole_context() {
     let mut context = context(
         vec![
             here(1, Role::User, "one", 10),
@@ -496,82 +845,9 @@ fn a_suffix_cut_may_empty_the_context() {
         ],
         Vec::new(),
     );
-    evict(&mut context, &[1, 2, 3], None);
-    assert_eq!(resident_ids(&context), Vec::<u64>::new());
-    assert_eq!(markers(&context).len(), 1, "one hole, one marker");
-    assert_eq!(context.rendered().len(), 1, "the marker stands alone");
-}
-
-/// A withdrawal keeps every row, leaves no marker where its turns stood —
-/// an earlier eviction they covered included — and mints no id twice.
-#[test]
-fn a_rewind_withdraws_from_the_anchor_on_and_leaves_no_hole() {
-    let mut context = context(
-        vec![
-            there(1, Role::User, "one", 10, Some(0)),
-            there(2, Role::Assistant, "", 10, Some(0)),
-            here(3, Role::User, "three", 10),
-            here(4, Role::Assistant, "", 10),
-            there(5, Role::User, "five", 10, Some(1)),
-            here(6, Role::Assistant, "", 10),
-        ],
-        vec![Some("first".into()), None],
-    );
-    assert_eq!(
-        context.rewindable(9).unwrap_err(),
-        "turn 9 is not recorded: the latest is 6"
-    );
-    step(&mut context, Protocol::Rewound { anchor: 5 }).expect("a recorded anchor");
-    assert_eq!(
-        held(&context),
-        vec![
-            (1, Held::Evicted { cut: 0 }),
-            (2, Held::Evicted { cut: 0 }),
-            (3, Held::Resident),
-            (4, Held::Resident),
-            (5, Held::Withdrawn),
-            (6, Held::Withdrawn),
-        ]
-    );
-    assert_eq!(markers(&context).len(), 1, "turn 5's cut leaves no marker");
-    assert_eq!(context.notes().len(), 2, "notes are never dropped");
-    assert_eq!(context.next_id(), 7, "ids stay monotone");
-    assert!(context.is_ready());
-    assert!(context.token_measure_is_stale(0));
-    assert_eq!(
-        context.rewindable(6).unwrap_err(),
-        "turn 6 was already rewound or cleared away; the earliest you can rewind to is turn 1"
-    );
-    context
-        .rewindable(1)
-        .expect("an evicted anchor may be rewound to");
-
-    step(&mut context, Protocol::Rewound { anchor: 1 }).expect("an evicted anchor");
-    assert!(
-        held(&context)
-            .iter()
-            .all(|(_, held)| *held == Held::Withdrawn)
-    );
-    assert_eq!(
-        context.rendered().len(),
-        0,
-        "not even the earlier eviction's marker stands"
-    );
-    assert_eq!(context.next_id(), 7);
-    assert_eq!(
-        context.rewindable(1).unwrap_err(),
-        "turn 1 was already rewound or cleared away; nothing has been said since the last \
-         /clear or /rewind"
-    );
-    for (anchor, said) in [(1, "already withdrawn"), (9, "never recorded")] {
-        assert!(
-            matches!(
-                step(&mut context, Protocol::Rewound { anchor }),
-                Err(Refusal::Foreign { reason, .. }) if reason.contains(said)
-            ),
-            "a rewind to turn {anchor} is foreign"
-        );
-    }
+    evict(&mut context, 1, 3, None).expect("a cut at rest");
+    assert_eq!(frontier(&context), [R(1, 3)]);
+    assert_eq!(context.rendered().len(), 1, "the residue stands alone");
 }
 
 /// A clear withdraws every turn, keeps the system prompt, and waits for the
@@ -580,11 +856,11 @@ fn a_rewind_withdraws_from_the_anchor_on_and_leaves_no_hole() {
 fn a_clear_withdraws_every_turn_and_keeps_the_system_prompt() {
     let mut context = context(
         vec![
-            there(1, Role::User, "one", 10, Some(0)),
+            there(1, span(1, 1), Role::User, "one", 10),
             here(2, Role::Assistant, "", 10),
             here(3, Role::User, "three", 10),
         ],
-        vec![None],
+        vec![residue(1, 1, None)],
     );
     step(
         &mut context,
@@ -606,9 +882,9 @@ fn a_clear_withdraws_every_turn_and_keeps_the_system_prompt() {
     context.state = State::default();
     step(&mut context, Protocol::Cleared).expect("a clear at rest");
     assert!(
-        held(&context)
+        index(&context)
             .iter()
-            .all(|(_, held)| *held == Held::Withdrawn)
+            .all(|(_, location)| *location == Location::Withdrawn)
     );
     assert_eq!(&**context.system(), "be brief");
     assert_eq!(context.state, State::default());
@@ -639,7 +915,7 @@ fn a_system_prompt_is_folded_and_sequencing_neutral() {
     )
     .expect("a later prompt");
     assert_eq!(&**context.system(), "second");
-    assert_eq!(context.transcript_index(), Vec::<TurnRow>::new());
+    assert_eq!(context.transcript_index(), Vec::<SpanRow>::new());
     assert_eq!(
         context.state,
         State::AwaitingToolResults {
@@ -650,33 +926,6 @@ fn a_system_prompt_is_folded_and_sequencing_neutral() {
         context.rendered().len(),
         0,
         "the prompt travels beside the transcript"
-    );
-}
-
-/// A hole is a maximal run of evicted turns once withdrawn ones are passed
-/// over, and the marker names only the evicted.
-#[test]
-fn withdrawn_turns_are_passed_over_when_forming_holes() {
-    let context = context(
-        vec![
-            there(3, Role::User, "three", 10, Some(0)),
-            there(4, Role::Assistant, "", 10, Some(0)),
-            there(5, Role::User, "five", 10, None),
-            there(8, Role::Assistant, "", 10, None),
-            there(9, Role::User, "nine", 10, Some(0)),
-            here(10, Role::User, "ten", 10),
-        ],
-        vec![None],
-    );
-    let marker = marker(&context);
-    assert!(
-        marker.starts_with("[EXARCH // Turns 3–4, 9 have left your context."),
-        "{marker}"
-    );
-    assert_eq!(
-        marker.lines().filter(|line| line.contains(" KB")).count(),
-        3,
-        "no row for a withdrawn turn: {marker}"
     );
 }
 
@@ -705,32 +954,10 @@ fn an_import_must_be_fresh() {
     assert_eq!(context.current_turn(), Some(3));
 }
 
-/// The plan spends the last turn's weight and its prompt's up front, then
-/// walks back until a turn does not fit — and answers the resolved set, a
-/// prompt with a surviving answer kept back.
+/// A forced eviction may take the prompt, but never the newest turn, even
+/// when the budget is zero.
 #[test]
-fn a_plan_walks_back_from_the_turn_in_hand() {
-    let context = context(
-        vec![
-            here(1, Role::User, "one", 100),
-            here(2, Role::Assistant, "", 100),
-            here(3, Role::User, "three", 100),
-            here(4, Role::Assistant, "", 100),
-        ],
-        Vec::new(),
-    );
-    assert_eq!(
-        context.plan_eviction(250),
-        Some(vec![1, 2]),
-        "the turn in hand and its prompt are paid first, so turn 2 does not fit"
-    );
-    assert_eq!(context.plan_eviction(1000), None, "everything fits");
-}
-
-/// Nothing is old enough to shed when the work in hand alone fills the
-/// budget: a cut that would take no turn is no plan.
-#[test]
-fn a_lone_prompt_is_never_planned_away() {
+fn a_forced_eviction_may_take_the_prompt_but_not_the_newest_turn() {
     let context = context(
         vec![
             here(1, Role::User, "one", 100),
@@ -738,76 +965,7 @@ fn a_lone_prompt_is_never_planned_away() {
         ],
         Vec::new(),
     );
-    assert_eq!(context.plan_eviction(0), None);
-}
-
-/// A survivor user turn belongs to the cut that finally took it, and the
-/// earlier cut's rows never gain its weight after the fact.
-#[test]
-fn a_marker_attributes_a_survivor_user_turn_to_the_cut_that_took_it() {
-    let mut context = context(
-        vec![
-            here(3, Role::User, "fix the parser", 40 * 1024),
-            here(4, Role::Assistant, "", 12 * 1024),
-            here(5, Role::Assistant, "", 8 * 1024),
-            here(6, Role::Assistant, "", 4 * 1024),
-        ],
-        Vec::new(),
-    );
-    evict(&mut context, &[3, 4, 5], Some("half the parser work"));
-    assert_eq!(
-        resident_ids(&context),
-        vec![3, 6],
-        "the prompt stays with the answer that survived it"
-    );
-    let first = marker(&context);
-    let rows: Vec<&str> = first.lines().filter(|line| line.contains(" KB")).collect();
-    assert_eq!(rows.len(), 2, "{first}");
-    assert_eq!(columns(rows[0]), ("4", "12"), "{first}");
-    assert_eq!(columns(rows[1]), ("5", "8"), "{first}");
-
-    evict(&mut context, &[3, 6], Some("the parser is fixed"));
-    assert_eq!(
-        held(&context),
-        vec![
-            (3, Held::Evicted { cut: 1 }),
-            (4, Held::Evicted { cut: 0 }),
-            (5, Held::Evicted { cut: 0 }),
-            (6, Held::Evicted { cut: 1 }),
-        ]
-    );
-    let marker = marker(&context);
-    let lines: Vec<&str> = marker.lines().collect();
-    let note = |text: &str| {
-        lines
-            .iter()
-            .position(|line| line.contains(text))
-            .unwrap_or_else(|| panic!("{marker}"))
-    };
-    let (half, fixed) = (note("half the parser work"), note("the parser is fixed"));
-    let rows: Vec<(usize, &str)> = lines
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| line.contains(" KB"))
-        .map(|(at, line)| (at, *line))
-        .collect();
-    assert_eq!(rows.len(), 4, "{marker}");
-    assert!(
-        rows[1].0 < half && columns(rows[0].1) == ("4", "12") && columns(rows[1].1) == ("5", "8"),
-        "the first cut's rows weigh turns 4 and 5 alone, as they did before the second cut: {marker}"
-    );
-    assert!(
-        rows[2].0 > half && rows[2].0 < fixed && columns(rows[2].1) == ("3", "40"),
-        "the survivor user turn stands under the cut that took it: {marker}"
-    );
-    assert!(
-        rows[3].0 > half && rows[3].0 < fixed && columns(rows[3].1) == ("6", "4"),
-        "turn 6 left with it, under the same cut: {marker}"
-    );
-    assert!(
-        marker.starts_with("[EXARCH // Turns 3–6 have left your context."),
-        "{marker}"
-    );
+    assert_eq!(context.plan_forced_eviction(0), Some(span(1, 1)));
 }
 
 /// A link whose parent's file will not read back is refused as unreadable,
@@ -824,14 +982,14 @@ fn an_unreadable_parent_refuses_the_link_and_changes_nothing() {
                 kind: TurnKind::Inherited,
                 label: "one".into(),
                 bytes: 10,
-                held: Held::Resident,
+                location: Location::Resident,
             },
             at: Pointer {
                 source: source.clone(),
                 loci: vec![Locus::placeholder(Seq::new(1))],
             },
         }],
-        notes: Vec::new(),
+        residues: Vec::new(),
     };
     let Err(Refusal::Unreadable(error)) = step(&mut context, link) else {
         panic!("a missing parent file is unreadable")
@@ -841,5 +999,5 @@ fn an_unreadable_parent_refuses_the_link_and_changes_nothing() {
         "{error}"
     );
     assert_eq!(context.log_len(), 0);
-    assert_eq!(context.transcript_index(), Vec::<TurnRow>::new());
+    assert_eq!(context.transcript_index(), Vec::<SpanRow>::new());
 }

@@ -197,19 +197,19 @@ isolation ([[decisions/260702_subagent-memory-modes|subagent-memory-modes]]):
   not inherited; the child forks the request context, not a dangling protocol.
 
 Inheritance is **the parent's table, under the parent's own ids**. Ahead of
-everything goes one `Protocol::Inherited { turns, notes }` — the parent's whole
-turn table, each row `kind: Inherited`, `held` as the parent had it and
-carrying the address of its transcript copy, beside the notes made at the cuts
-that emptied those rows. The child records no copy of the parent's messages:
+everything goes one `Protocol::Inherited { turns, residues }` — the parent's whole
+turn table, each row `kind: Inherited`, `location` as the parent had it and
+carrying the address of its transcript copy, beside the residues its
+evictions left. The child records no copy of the parent's messages:
 folding the link reads each resident row's records back through its address
 and keeps them under the parent's own turn ids and roles.
 `` exarch-context `survey `` shows them as `inherited` rows, and
-`` exarch-context `evict `` names any of them by turn id, exactly as it names the
-child's own. Nothing
-marker-shaped crosses by value — the child's markers, survey and index are the
-same projections of the same fold
+`` exarch-context `evict `` names any run of them by turn ids, exactly as it
+names the child's own. Nothing rendered crosses by value — a residue renders
+from its own record, and the child's context, survey and index are the same
+projections of the same fold
 ([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]],
-[[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
+[[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]]).
 That link is what makes the two logs **one transcript**: an id at or below the
 reach
 resolves through its row's address into the file that first recorded it — the
@@ -265,7 +265,7 @@ the binding to an `` `amnemon `` child:
 ```ral
 let ctx = exarch-transcript `read [turns: !{range 4 9}]
 let handoff = take 12 $ctx[0][messages]
-exarch-context `evict [turns: !{range 4 9}, note: `some 'handed to `researcher`']
+exarch-context `evict [from: 4, to: 8, note: #'handed to researcher'#]
 exarch-agents `start [
   prompt: "read `handoff` for the material to work from; report your findings",
   name: 'researcher',

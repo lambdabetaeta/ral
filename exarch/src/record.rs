@@ -23,7 +23,7 @@ mod selection;
 mod session;
 mod view;
 
-pub use model::{Held, Linked, Pointer, TurnRow};
+pub use model::{ItemKind, Linked, Location, Pointer, Residue, Span, SpanRow, TurnRow};
 pub use replay::{Refusal, replay};
 pub use seam::Emitter;
 pub use selection::Selection;
@@ -203,16 +203,17 @@ pub enum Protocol {
         message: ChatMessage,
     },
     /// The link a `mnemon` child opens with: the parent's whole turn table,
-    /// each row carrying the address its transcript copy lies at.
+    /// each row carrying the address its transcript copy lies at, and its
+    /// residues.
     Inherited {
         /// The parent's table at the fork, every row `kind: Inherited` and
-        /// `held` as the parent had it, beside where that turn was first
-        /// recorded.  The child's marker, survey and index are the same
+        /// `location` as the parent had it, beside where that turn was first
+        /// recorded.  The child's context, survey and index are the same
         /// projections of it.
         turns: Vec<model::Linked>,
-        /// The notes made at those evictions, so the child's markers are the
-        /// same projection of the same structure.
-        notes: Vec<Option<String>>,
+        /// The parent's residues in creation order: a resident one is
+        /// rendered from its own record, so the link carries nothing rendered.
+        residues: Vec<model::Residue>,
     },
     AssistantMessage {
         /// This turn's id, minted by the log.
@@ -224,11 +225,9 @@ pub enum Protocol {
     ToolResults {
         results: Vec<ToolResult>,
     },
-    /// One eviction: the resident turns it took, resolved by the writer, and
-    /// the model's note.  Replay departs exactly these ids.
+    /// One eviction: the residue it leaves standing, as the table keeps it.
     Evicted {
-        cut: Cut,
-        by: EditAuthority,
+        residue: model::Residue,
     },
     /// `/rewind`: turn `anchor` and every turn after it are withdrawn.
     Rewound {
@@ -331,7 +330,7 @@ pub enum Display {
         outcome: DoneOutcome,
     },
     Context {
-        turns: Vec<model::TurnRow>,
+        rows: Vec<model::SpanRow>,
     },
 }
 
@@ -558,15 +557,6 @@ impl EditAuthority {
             Self::Harness => "harness",
         }
     }
-}
-
-/// One eviction as recorded: the resident turns it took — resolved by the
-/// writer, so replay departs exactly these — and the model's note.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Cut {
-    pub turns: Vec<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
 }
 
 /// Why the work in hand is ending with no real assistant reply: decides whether it

@@ -122,13 +122,13 @@ fn a_prompt_is_drawn_unless_the_harness_spoke_it() {
 /// The model's own eviction is drawn by its act row, so only the harness's
 /// draws a marker.
 #[test]
-fn only_a_harness_eviction_draws() {
+fn only_a_forced_eviction_draws() {
     let evicted = |by| Protocol::Evicted {
-        cut: Cut {
-            turns: vec![1],
+        residue: Residue {
+            span: crate::record::Span::single(1),
             note: None,
+            by,
         },
-        by,
     };
     let mut memo = Blocks::default();
     assert_eq!(
@@ -141,7 +141,15 @@ fn only_a_harness_eviction_draws() {
     );
     assert!(matches!(
         memo.blocks(),
-        [b] if matches!(b.kind, BlockKind::Evicted { by: EditAuthority::Harness, .. })
+        [b] if matches!(
+            b.kind,
+            BlockKind::Evicted {
+                residue: Residue {
+                    by: EditAuthority::Harness,
+                    ..
+                }
+            }
+        )
     ));
 }
 

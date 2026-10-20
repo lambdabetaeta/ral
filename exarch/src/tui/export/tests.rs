@@ -1,6 +1,6 @@
 use super::*;
 use crate::record::{
-    BlockId, Cut, Display, EditAuthority, Emitter as Recorder, Protocol, Verdict, Voice,
+    BlockId, Display, EditAuthority, Emitter as Recorder, Protocol, Residue, Span, Verdict, Voice,
 };
 use ral_core::fact::Read;
 use ral_core::first_order::datum::Datum as _;
@@ -62,11 +62,11 @@ fn session(dir: &Path) -> (Recorder, std::path::PathBuf) {
     );
     let _ = emit(
         Protocol::Evicted {
-            cut: Cut {
-                turns: vec![1],
+            residue: Residue {
+                span: Span::single(1),
                 note: None,
+                by: EditAuthority::Harness,
             },
-            by: EditAuthority::Harness,
         }
         .into(),
     );

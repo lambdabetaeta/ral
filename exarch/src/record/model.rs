@@ -6,9 +6,9 @@
 //! One structure, one fold, everything else a projection. [`Context`] holds
 //! every turn the lineage has recorded: a turn is either *here* — its records
 //! in memory — or *there* — a [`Pointer`] to the file and byte ranges that
-//! hold them. The context sent to the provider, the survey, the transcript
-//! index, the markers standing at its holes and the eviction plan are all
-//! pure functions of it.
+//! hold them. Each eviction leaves a [`Residue`] standing for the span it
+//! took. The context sent to the provider, the survey, the transcript index
+//! and the eviction plan are all pure functions of it.
 //!
 //! [`Display`](super::Display) and [`Forensic`](super::Forensic) records pass
 //! through untouched: this fold projects the protocol subsequence alone.
@@ -25,20 +25,23 @@
 mod fold;
 mod render;
 mod resume;
+mod span;
 mod state;
 mod table;
 mod transcript;
 
 pub use resume::resume;
+pub use span::Span;
 
-use super::{Fold, Locus, Protocol, Record, Recorded, Refusal, Role, TurnKind};
+use super::{EditAuthority, Fold, Locus, Protocol, Record, Recorded, Refusal, Role, TurnKind};
 use genai::chat::{ChatMessage, ChatRole, ContentPart, ToolResponse};
+use render::residue_label;
 use serde::{Deserialize, Serialize};
 use state::State;
 pub(super) use state::validate_result_ids;
 use std::path::PathBuf;
 use std::sync::Arc;
-use table::Table;
+use table::{Item, Table};
 
 /// Marker type implementing [`Fold`] for the model projection; carries no
 /// state of its own; [`Context`] is where the projection lives.
@@ -55,21 +58,19 @@ impl Fold for Model {
     }
 }
 
-/// `` exarch-context `survey ``'s answer: one row per turn in the context, beside
+/// `` exarch-context `survey ``'s answer: one row per frontier item, beside
 /// the truth about what is sent.
-///
-/// `total_bytes` is the assembled context's own weight, not the sum of the
-/// rows: each hole's marker weighs too, and is no turn.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ContextSurvey {
-    pub rows: Vec<TurnRow>,
+    pub rows: Vec<SpanRow>,
     pub total_bytes: usize,
 }
 
-/// Every turn this lineage recorded, and where each of them is.
+/// Every turn this lineage recorded, every residue its evictions left, and
+/// where each turn is.
 ///
-/// The context is the [`Body::Here`] subsequence of `turns`. Invariant: the
-/// first resident turn is a user turn.
+/// The context is the frontier: every item still resident, in id order.
+/// Invariant: the frontier opens with a user-role item.
 pub struct Context {
     table: Table,
     state: State,
@@ -108,9 +109,51 @@ enum Body {
         records: Vec<Recorded<Protocol>>,
         origin: Option<Pointer>,
     },
-    /// Departed. `Some(cut)` indexes [`Context::notes`]: an eviction, drawn in
-    /// a marker. `None` is a withdrawal, which is never drawn.
-    There { at: Pointer, cut: Option<usize> },
+    /// Departed, as stamped when it left.
+    There { at: Pointer, departure: Departure },
+}
+
+/// One residue as the table keeps it: the record, and where it is — what a
+/// turn's [`Body`] says of a turn, without records.
+struct Standing {
+    residue: Residue,
+    /// `None` while the residue is resident, else its stamp, as
+    /// [`Body::There`] keeps a turn's.
+    departure: Option<Departure>,
+}
+
+/// Where a departed item is, stamped as it leaves: a [`Location`] that is
+/// never resident.
+///
+/// A stamp never goes stale. The residue an item departs under covers it, and
+/// any later residue covering it covers that one whole, since residues are
+/// laminar, so the first is its innermost holder for good. Withdrawal
+/// dominates, and is permanent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Departure {
+    Under(Span),
+    Withdrawn,
+}
+
+impl From<Departure> for Location {
+    fn from(departure: Departure) -> Self {
+        match departure {
+            Departure::Under(span) => Self::Under(span),
+            Departure::Withdrawn => Self::Withdrawn,
+        }
+    }
+}
+
+/// One eviction as recorded, and what it leaves standing: the span of turn
+/// ids it took and the model's note, `None` for the harness's own. It has no
+/// id: its span is its address.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Residue {
+    pub span: Span,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub by: EditAuthority,
 }
 
 /// Where a turn's records lie: a file, and their loci in it.
@@ -120,7 +163,38 @@ pub struct Pointer {
     pub loci: Vec<Locus>,
 }
 
-/// The one line every view draws for a turn: survey, index, TUI card.
+/// What an item is: a turn of some provenance, or a residue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemKind {
+    Turn(TurnKind),
+    Residue,
+}
+
+impl ItemKind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Turn(kind) => kind.as_str(),
+            Self::Residue => "residue",
+        }
+    }
+}
+
+/// The one line every view draws for an item: survey, index, TUI card. A
+/// turn's span is its own id alone; an item is named by `(span, kind)`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpanRow {
+    pub span: Span,
+    pub role: Role,
+    pub kind: ItemKind,
+    pub label: String,
+    pub bytes: usize,
+    pub location: Location,
+}
+
+/// One turn as a link carries it, `location` kept for the link's judge.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TurnRow {
@@ -129,31 +203,38 @@ pub struct TurnRow {
     pub kind: TurnKind,
     pub label: String,
     pub bytes: usize,
-    pub held: Held,
+    pub location: Location,
 }
 
-/// Whether a turn is still in the context, and what took it out. A projection
-/// of [`Body`], never stored in the structure.
+/// Whether an item is in the context, and what holds it if not: kept on the
+/// item, stamped as it departs, and never derived.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Held {
+pub enum Location {
     Resident,
-    /// `cut` indexes the notes the marker draws, so the row states which
-    /// eviction took it rather than leaving a reader to infer it.
-    Evicted {
-        cut: usize,
-    },
-    /// Taken out by `/clear` or `/rewind`: no marker, no note.
+    /// Under the residue whose eviction took it, named by its span: the
+    /// smallest later residue covering it.
+    Under(Span),
+    /// Taken out by `/clear` or `/rewind`.
     Withdrawn,
 }
 
-impl Held {
+impl Location {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Resident => "resident",
-            Self::Evicted { .. } => "evicted",
+            Self::Under(_) => "under",
             Self::Withdrawn => "withdrawn",
+        }
+    }
+
+    /// Where an item so located has departed to; `None` while resident.
+    fn departure(self) -> Option<Departure> {
+        match self {
+            Self::Resident => None,
+            Self::Under(span) => Some(Departure::Under(span)),
+            Self::Withdrawn => Some(Departure::Withdrawn),
         }
     }
 }
@@ -168,39 +249,24 @@ pub struct Linked {
 }
 
 impl Turn {
-    /// The one way a turn leaves the structure as a row: `held` is projected
-    /// off the body, so the two cannot disagree.
-    fn row(&self) -> TurnRow {
-        TurnRow {
-            id: self.id,
-            role: self.role,
-            kind: self.kind,
-            label: self.label.clone(),
-            bytes: self.bytes,
-            held: self.held(),
-        }
-    }
-
-    fn held(&self) -> Held {
-        match &self.body {
-            Body::Here { .. } => Held::Resident,
-            Body::There { cut: Some(cut), .. } => Held::Evicted { cut: *cut },
-            Body::There { cut: None, .. } => Held::Withdrawn,
-        }
-    }
-
-    /// A user turn is the one turn a cut may keep silently — see
-    /// [`Context::resolve_cut`]'s survivor rule.
+    /// A user turn is a prompt, or an import's opening.
     fn is_user(&self) -> bool {
         self.role == Role::User
     }
 
+    fn location(&self) -> Location {
+        match self.body {
+            Body::Here { .. } => Location::Resident,
+            Body::There { departure, .. } => departure.into(),
+        }
+    }
+
     fn is_resident(&self) -> bool {
-        matches!(self.body, Body::Here { .. })
+        self.location() == Location::Resident
     }
 
     fn is_withdrawn(&self) -> bool {
-        matches!(self.body, Body::There { cut: None, .. })
+        self.location() == Location::Withdrawn
     }
 
     /// The records this turn holds in memory; empty once it has left.
@@ -209,6 +275,12 @@ impl Turn {
             Body::Here { records, .. } => records,
             Body::There { .. } => &[],
         }
+    }
+}
+
+impl Standing {
+    fn location(&self) -> Location {
+        self.departure.map_or(Location::Resident, Location::from)
     }
 }
 
@@ -247,10 +319,9 @@ impl Context {
         &self.system
     }
 
-    /// The model's own line to its future self, one slot per eviction.
-    #[must_use]
-    pub fn notes(&self) -> &[Option<String>] {
-        self.table.notes()
+    /// Every residue the lineage's evictions left, in creation order.
+    pub(crate) fn residues(&self) -> Vec<Residue> {
+        self.table.residues().cloned().collect()
     }
 
     /// The one way a turn leaves the structure as an address: the link a fork
@@ -266,8 +337,12 @@ impl Context {
             .iter()
             .map(|turn| Linked {
                 row: TurnRow {
+                    id: turn.id,
+                    role: turn.role,
                     kind: TurnKind::Inherited,
-                    ..turn.row()
+                    label: turn.label.clone(),
+                    bytes: turn.bytes,
+                    location: turn.location(),
                 },
                 at: match &turn.body {
                     Body::Here {
@@ -307,7 +382,7 @@ impl Context {
     }
 
     fn turn(&self, id: u64) -> Option<&Turn> {
-        self.table.turns().iter().find(|turn| turn.id == id)
+        self.table.turn(id)
     }
 
     /// The newest turn's id — what a tool result's `TURN:` stamp names, and
@@ -349,18 +424,6 @@ impl Context {
             .map(|turn| turn.id)
     }
 
-    /// The turns answering `prompt`: those after it in table order, up to the
-    /// next user turn. With [`Self::prompt_of`], the one place the grouping a
-    /// turn's role and order imply is derived.
-    fn answers(&self, prompt: u64) -> impl Iterator<Item = &Turn> {
-        let turns = self.table.turns();
-        let from = turns
-            .iter()
-            .position(|turn| turn.id == prompt)
-            .map_or(turns.len(), |at| at + 1);
-        turns[from..].iter().take_while(|turn| !turn.is_user())
-    }
-
     /// The id the next turn this log opens is minted above.
     fn id_floor(&self) -> u64 {
         self.reach().unwrap_or(0)
@@ -380,29 +443,47 @@ impl Context {
         self.newest_edit.is_some_and(|index| index >= measured_at)
     }
 
-    /// One row per resident turn, at the weight the fold summed, beside the
-    /// truth about what is sent: `total_bytes` is [`Self::history_bytes`],
-    /// not a second opinion on it, so each marker's weight is counted once
-    /// and never as a row.
+    /// One row per frontier item, beside the truth about what is sent:
+    /// `total_bytes` is [`Self::history_bytes`], not a second opinion on it.
     pub(crate) fn context_survey(&self) -> ContextSurvey {
         ContextSurvey {
-            rows: self.resident().map(Turn::row).collect(),
+            rows: self.table.frontier().iter().map(Item::row).collect(),
             total_bytes: self.history_bytes(),
         }
     }
 
-    /// Every turn the transcript holds, in id order, each saying whether it
-    /// is still in the context. The whole lineage's, since a fork inherits
-    /// the table.
-    pub(crate) fn transcript_index(&self) -> Vec<TurnRow> {
-        self.table.turns().iter().map(Turn::row).collect()
+    /// Every turn and every residue the lineage recorded, each saying what
+    /// holds it: by `from`, a wider span first, a later residue first, the
+    /// turn last. The whole lineage's, since a fork inherits the table.
+    pub(crate) fn transcript_index(&self) -> Vec<SpanRow> {
+        self.table.items().iter().map(Item::row).collect()
     }
 }
 
-/// What a turn's opening line is clipped to as it opens, and the column a
-/// marker pads that label to. One measure, so no reader of a row — a
-/// marker's own table, a survey, the transcript index, or an ancestor's table
-/// as it lands in a child's log — holds or aligns a different length.
+impl Item<'_> {
+    /// The item's one line, for the survey and the index alike.
+    fn row(&self) -> SpanRow {
+        let (role, kind, label) = match *self {
+            Item::Turn(turn) => (turn.role, ItemKind::Turn(turn.kind), turn.label.clone()),
+            Item::Residue(standing) => (
+                Role::User,
+                ItemKind::Residue,
+                residue_label(&standing.residue),
+            ),
+        };
+        SpanRow {
+            span: self.span(),
+            role,
+            kind,
+            label,
+            bytes: self.bytes(),
+            location: self.location(),
+        }
+    }
+}
+
+/// What a turn's opening line is clipped to as it opens. One measure, so no
+/// reader of a row holds a different length.
 const OPENING_CHARS: usize = 50;
 
 fn opening_line(text: &str) -> String {
@@ -412,32 +493,6 @@ fn opening_line(text: &str) -> String {
         .chars()
         .take(OPENING_CHARS)
         .collect()
-}
-
-/// Sorted ids as en-dash runs: `[41, 42, 43, 50]` reads `41–43, 50`. The one
-/// spelling of a turn set anything shows a reader.
-#[must_use]
-pub fn runs(ids: &[u64]) -> String {
-    let mut sorted = ids.to_vec();
-    sorted.sort_unstable();
-    let mut runs: Vec<(u64, u64)> = Vec::new();
-    for id in sorted {
-        match runs.last_mut() {
-            Some(open) if open.1 + 1 == id => open.1 = id,
-            Some(open) if open.1 == id => {}
-            _ => runs.push((id, id)),
-        }
-    }
-    runs.iter()
-        .map(|(from, to)| {
-            if from == to {
-                from.to_string()
-            } else {
-                format!("{from}–{to}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 /// A turn's label: the message's opening line, or — where a call opened the

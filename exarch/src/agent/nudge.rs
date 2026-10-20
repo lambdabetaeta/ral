@@ -24,7 +24,7 @@
 //! decided-but-uncommitted nudge (`/clear`, `/rewind`) is reborn whole
 //! ([`Nudges::reborn`]), since a decided edge cannot be un-consumed piecemeal.
 
-use crate::agent::gauge::Reminder;
+use crate::agent::gauge::{Load, Reminder, Unit};
 use crate::agent::outcome::Outcome;
 use crate::provider::{CutShort, ProviderError};
 use crate::record::{AgentLog, Forensic, Spent};
@@ -45,32 +45,44 @@ fn wrap_reminder(body: &str) -> String {
 impl Reminder {
     fn cause(&self) -> String {
         match self {
-            Self::Pressure { .. } => "context pressure".into(),
+            Self::Pressure(_) => "context pressure".into(),
             Self::Ration { pct, .. } => format!("usage {pct}%"),
         }
     }
 
-    /// The cut is announced before it happens, so the model can leave its
-    /// future self a line.  With nothing old enough to shed there is no cut to
-    /// announce, and the reading alone is the whole message.
+    /// The forced eviction is announced before it comes, so the model can
+    /// leave its future self a line.  With nothing old enough to shed there is
+    /// no span to name, and the trigger alone is the whole warning.
     fn body(&self) -> String {
         match self {
-            Self::Pressure {
-                detail,
-                planned: Some(turns),
-            } if !turns.is_empty() => {
-                let runs = crate::record::model::runs(turns);
-                let first = turns[0];
-                let last_plus_one = turns[turns.len() - 1] + 1;
+            Self::Pressure(
+                load @ Load {
+                    planned: Some(span),
+                    ..
+                },
+            ) => {
+                let (they, them) = if span.is_single() {
+                    ("It", "it")
+                } else {
+                    ("They", "them")
+                };
                 format!(
-                    "Context pressure: {detail}. At the next turn boundary, turns {runs} will \
-                     leave your context; they stay readable with `exarch-transcript`. To leave \
-                     your future self a line, run `` exarch-context `evict [turns: !{{range {first} \
-                     {last_plus_one}}}, note: `some '…'] `` now: a prompt whose exchange is still \
-                     in hand stays on its own; otherwise nothing is required of you."
+                    "Context pressure: {}. Once it passes {}, a forced eviction will take the \
+                     oldest part of your context; as things stand, that is {span}. {they} would \
+                     stay readable with `exarch-transcript`, but a forced eviction leaves no \
+                     note. To leave your future self a line, evict {them} yourself now: \
+                     `` exarch-context `evict [from: {}, to: {}, note: '…'] ``.",
+                    load.detail(),
+                    load.trigger(),
+                    span.from(),
+                    span.to()
                 )
             }
-            Self::Pressure { detail, .. } => format!("Context pressure: {detail}."),
+            Self::Pressure(load) => format!(
+                "Context pressure: {}. A forced eviction is due once it passes {}.",
+                load.detail(),
+                load.trigger()
+            ),
             Self::Ration {
                 service,
                 label,
@@ -87,6 +99,47 @@ impl Reminder {
                 };
                 format!("Your {service} usage allowance is {pct}% spent ({label}). {outcome}")
             }
+        }
+    }
+}
+
+impl Load {
+    /// What the context weighs: `173000 of 200000 tokens`, or `400 KB` where
+    /// the window is unknown.
+    fn detail(&self) -> String {
+        let Self {
+            used, total, unit, ..
+        } = *self;
+        match total {
+            Some(total) => format!(
+                "{} of {} {}",
+                unit.count(used),
+                unit.count(total),
+                unit.name()
+            ),
+            None => format!("{} {}", unit.count(used), unit.name()),
+        }
+    }
+
+    /// Where a forced eviction falls: `170000 tokens`, or `500 KB`.
+    fn trigger(&self) -> String {
+        format!("{} {}", self.unit.count(self.trigger), self.unit.name())
+    }
+}
+
+impl Unit {
+    /// A figure as the model reads it: tokens as counted, bytes in whole KB.
+    fn count(self, figure: u64) -> u64 {
+        match self {
+            Self::Tokens => figure,
+            Self::Bytes => figure / 1024,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Tokens => "tokens",
+            Self::Bytes => "KB",
         }
     }
 }

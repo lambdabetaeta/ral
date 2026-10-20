@@ -9,8 +9,8 @@
 //! clones nothing.
 
 use super::{
-    BlockId, Cut, Display, EditAuthority, Fold, Forensic, Protocol, Record, Recorded, Refusal,
-    Role, Selection, Seq, Settlement, Spent, TurnRow, Voice,
+    BlockId, Display, EditAuthority, Fold, Forensic, ItemKind, Protocol, Record, Recorded, Refusal,
+    Residue, Role, Selection, Seq, Settlement, SpanRow, Spent, Voice,
 };
 use crate::card::{Card, Change, DoneOutcome, Field, FieldVal, Mark, Role as Ink, Span};
 use crate::provider::{ProviderError, Usage};
@@ -66,7 +66,7 @@ pub enum BlockKind {
         outcome: DoneOutcome,
     },
     Context {
-        turns: Vec<TurnRow>,
+        rows: Vec<SpanRow>,
     },
     Cancelled,
     Error {
@@ -92,8 +92,7 @@ pub enum BlockKind {
         id: u64,
     },
     Evicted {
-        cut: Cut,
-        by: EditAuthority,
+        residue: Residue,
     },
     Rewound {
         anchor: u64,
@@ -307,13 +306,15 @@ impl Blocks {
                 },
             ),
             Protocol::Evicted {
-                cut,
-                by: by @ EditAuthority::Harness,
+                residue:
+                    residue @ Residue {
+                        by: EditAuthority::Harness,
+                        ..
+                    },
             } => self.push(
                 seq,
                 BlockKind::Evicted {
-                    cut: cut.clone(),
-                    by: *by,
+                    residue: residue.clone(),
                 },
             ),
             Protocol::Rewound { anchor } => {
@@ -331,8 +332,11 @@ impl Blocks {
                 Delta::Cleared
             }
             Protocol::Evicted {
-                by: EditAuthority::Model,
-                ..
+                residue:
+                    Residue {
+                        by: EditAuthority::Model,
+                        ..
+                    },
             }
             | Protocol::UserPrompt { .. }
             | Protocol::Steering { .. }
@@ -390,7 +394,7 @@ impl Blocks {
             Display::Done { id, cmd, outcome } => {
                 self.push(seq, BlockKind::Done { id, cmd, outcome })
             }
-            Display::Context { turns } => self.push(seq, BlockKind::Context { turns }),
+            Display::Context { rows } => self.push(seq, BlockKind::Context { rows }),
         }
     }
 
@@ -506,26 +510,36 @@ impl Fold for View {
     }
 }
 
+impl Residue {
+    /// The line an eviction leaves in scrollback, `tui` and `headless` alike.
+    #[must_use]
+    pub fn evicted_line(&self) -> String {
+        format!("[{} left the context ({})]", self.span, self.by.name())
+    }
+}
+
 /// A `/context` survey's rows as one [`Mark::Fields`] matrix under a
 /// "context" header: the one rendering `tui`, `headless` and synod all draw from.
 ///
-/// The survey is one row per turn; the card groups them at draw time into a
-/// prompt and the turns answering it, since two hundred tool turns under one
-/// prompt are one thing the human is reading about. No live marker: the
-/// newest turn is the one an eviction structurally cannot name, so saying so
-/// twice would say nothing.
-pub fn context_rows_card(rows: &[TurnRow]) -> Card {
+/// The survey is one row per item, a turn or a residue; the card groups them
+/// at draw time into a prompt and the turns answering it, since two hundred
+/// tool turns under one prompt are one thing the human is reading about. The
+/// newest turn is not flagged as un-evictable: no eviction can name it, so
+/// flagging it would say nothing.
+pub fn context_rows_card(rows: &[SpanRow]) -> Card {
     let fields = context_groups(rows)
         .into_iter()
-        .map(|group| Field {
-            label: format!("turn {}", group.prompt),
-            value: FieldVal::Inline(vec![
-                Span::plain(group.label),
-                Span::new(
-                    Ink::Muted,
-                    format!("  {} · {} KB", group.turns, group.bytes / 1024),
-                ),
-            ]),
+        .map(|group| {
+            let reach = group
+                .reach
+                .map_or_else(String::new, |reach| format!("{reach} · "));
+            Field {
+                label: group.head.to_string(),
+                value: FieldVal::Inline(vec![
+                    Span::plain(group.label),
+                    Span::new(Ink::Muted, format!("  {reach}{} KB", group.bytes / 1024)),
+                ]),
+            }
         })
         .collect();
     let mut marks = vec![Mark::Text {
@@ -535,41 +549,36 @@ pub fn context_rows_card(rows: &[TurnRow]) -> Card {
     Card(marks)
 }
 
-/// One drawn group: the prompt it opens on, its opening line, the turns of it
-/// still in the context, and what they weigh together.
+/// One drawn group: the item it opens on, its opening line, the span of the
+/// context it reaches over, and what its rows weigh together.
 struct ContextGroup {
-    prompt: u64,
+    head: super::Span,
     label: String,
-    /// `turns 13–15`, or `turn 13` where one stands alone.
-    turns: String,
+    /// `None` for a lone residue, whose head already names all it reaches.
+    reach: Option<super::Span>,
     bytes: usize,
 }
 
-/// The survey's turns grouped as a prompt and the turns answering it: a group
-/// opens at every user row, so rows before the first one — an ancestor's
-/// turns, or an answer whose prompt a cut took — form a group of their own.
-/// The label is the opening line of whichever row opens the group.
-fn context_groups(rows: &[TurnRow]) -> Vec<ContextGroup> {
-    let mut drawn: Vec<(&TurnRow, u64, usize)> = Vec::new();
+/// The survey's items grouped as a prompt and the turns answering it: a group
+/// opens at every user-role row, so a residue opens its own, labelled by its
+/// note. The label is the opening line of whichever row opens the group.
+fn context_groups(rows: &[SpanRow]) -> Vec<ContextGroup> {
+    let mut drawn: Vec<(&SpanRow, super::Span, usize)> = Vec::new();
     for row in rows {
         match drawn.last_mut() {
-            Some((_, last, bytes)) if !matches!(row.role, Role::User) => {
-                *last = row.id;
+            Some((_, reach, bytes)) if !matches!(row.role, Role::User) => {
+                *reach = reach.hull(row.span);
                 *bytes += row.bytes;
             }
-            _ => drawn.push((row, row.id, row.bytes)),
+            _ => drawn.push((row, row.span, row.bytes)),
         }
     }
     drawn
         .into_iter()
-        .map(|(first, last, bytes)| ContextGroup {
-            prompt: first.id,
+        .map(|(first, reach, bytes)| ContextGroup {
+            head: first.span,
             label: first.label.clone(),
-            turns: if first.id == last {
-                format!("turn {last}")
-            } else {
-                format!("turns {}–{last}", first.id)
-            },
+            reach: (first.kind != ItemKind::Residue || reach != first.span).then_some(reach),
             bytes,
         })
         .collect()

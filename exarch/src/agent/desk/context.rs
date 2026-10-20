@@ -9,14 +9,6 @@ use ral_core::types::Error;
 
 use super::{DeskAct, ExarchDesk};
 
-/// The rail subject a cut mints from a turn address, as runs: `"turns 41–43,
-/// 50"`. Sorted here, since the model's own list need not be.
-fn turns_subject(turns: &[u64]) -> String {
-    let mut sorted = turns.to_vec();
-    sorted.sort_unstable();
-    format!("turns {}", crate::record::model::runs(&sorted))
-}
-
 impl ExarchDesk {
     /// The context as the log holds it. Silent, like the roster: a survey
     /// commits no act, and every edit tag answers one of these too.
@@ -38,33 +30,40 @@ impl ExarchDesk {
         located.and_then(read).map_err(Error::new)
     }
 
-    /// `` `exarch-context `evict `` — the turns the address names leave the
-    /// context at once, wherever they lie, but for a user turn whose answers
-    /// still have a resident turn outside the set; the model's optional
-    /// `note` stands in the marker left where they were. Commits the act
-    /// under `refused` on either outcome, and mirrors the surviving weight or
-    /// the refusal onto the trace before answering the survey.
-    pub(super) fn context_evict(&self, Evict { turns, note }: Evict) -> Result<FOValue, Error> {
-        let note = note.map(|Note(note)| note);
-        let payload = note
-            .as_ref()
-            .map_or_else(String::new, |note| format!("note {note}"));
-        let subject = turns_subject(&turns);
+    /// `` `exarch-context `evict `` — the run `[from, to]` leaves the
+    /// context at once, one residue standing for it with the model's note.
+    /// Commits the act under `refused` on either outcome, and mirrors the
+    /// surviving weight or the refusal onto the trace before answering the
+    /// survey.
+    pub(super) fn context_evict(
+        &self,
+        Evict {
+            span,
+            note: Note(note),
+        }: Evict,
+    ) -> Result<FOValue, Error> {
+        let payload = format!("note {note}");
         let evicted = self
             .services
             .log
             .borrow_mut()
-            .evict(&turns, note, EditAuthority::Model);
+            .evict(span, Some(note), EditAuthority::Model);
         // The act row is this eviction's only row.
         self.services.commit_act(
             DeskAct::ContextEvict,
-            Some(&subject),
+            Some(&span.to_string()),
             payload,
             evicted.is_err(),
         );
-        let survey = evicted.map(|_| self.context_survey());
+        let survey = evicted.map(|()| self.context_survey());
         let text = match &survey {
-            Ok(survey) => format!("context is now {} serialized bytes", survey.total_bytes),
+            Ok(survey) => {
+                let stand = if span.is_single() { "stands" } else { "stand" };
+                format!(
+                    "{span} now {stand} under your note; context is now {} serialized bytes",
+                    survey.total_bytes
+                )
+            }
             Err(error) => error.clone(),
         };
         self.services

@@ -1,11 +1,20 @@
 ---
-status: accepted
+status: 'accepted; superseded in part by [[decisions/261019_an-eviction-is-a-span]] — a cut is a run, not a set, and one residue stands for it'
 generated_at_commit: ced3518c
 ---
 
 # An eviction is a set of turns
 
 > Superseded in part: `Display::Rewound` is gone, and `/rewind` withdraws turns instead of truncating the table, so the 261007 note below is reversed on readability (withdrawn turns stay readable through `exarch-transcript`) and on re-minting the anchor (ids stay lineage-monotone). See [[internals/session-record|session-record]].
+
+> Superseded in part by [[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]]: **a cut is a run, not a set.**
+> `` `evict [from: Int, to: Int, note: Str] `` takes one contiguous run of
+> turns and residues, requires the note, and leaves one *residue* — a span
+> `[from, to]` and the note, rendered as one bracketed user-voice message —
+> in place of the marker per hole. The one edit, its authorities, the
+> unclosed-turn guard, roles without exchanges, `TURN: <id>` and the
+> `[Int]` read door all stand. The notes at §3, §4, §6, §7 and §8 below
+> say what goes.
 
 **There is one context edit. It takes a set of resident turns out of the
 context, wherever they lie, leaves a marker standing where they were, and
@@ -70,6 +79,13 @@ name a turn; neither carried a note that stood *where the hole is*.
    coarsest address at which the real invariant — *no edit touches the
    unclosed turn* — could be stated. `is_live_exchange` leaves the fold.
 
+   > **Superseding note (261019).** The silent rule and the emptied-set
+   > refusal are gone: two numbers cannot name an empty run, and a residue
+   > standing where its run began keeps the context opening with a user-role
+   > item by construction, so a prompt may leave under a note while its
+   > answers stay. The guard that remains beside the unclosed turn is
+   > alignment — a run that reaches into a residue must cover it whole.
+
 4. **A marker per hole, in place.** A hole is a maximal run of departed
    turns in the table. Each renders as one bracketed user-voice message at
    its own position: the sentence of what left, one row per exchange
@@ -80,6 +96,14 @@ name a turn; neither carried a note that stood *where the hole is*.
    cut adjacent to a hole joins it; a late cut with resident turns between it
    and the head hole leaves message 0 untouched, and the provider re-reads
    from the hole, not from the start.
+
+   > **Superseding note (261019).** There are no holes and no markers. Each
+   > eviction records a residue over its span, residues nest by
+   > containment, and the context is the frontier: uncovered turns and
+   > outermost residues, in id order. A residue's message is its sentence,
+   > its note and the read-back line — no rows — so its size does not
+   > depend on what it covers. The cache argument stands: a cut rewrites
+   > from its `from`.
 
 5. ~~**The user's rewind leaves a marker with no note.**~~ Withdrawn, see
    the superseding note above: a rewind leaves nothing.
@@ -92,10 +116,20 @@ name a turn; neither carried a note that stood *where the hole is*.
    element per turn, `[turn, exchange, messages]`. What you can read, you can
    evict, by the same name.
 
+   > **Superseding note (261019).** The `[from, to]` pair returns, as the
+   > *context* family's address for a run, not as a read range: `read` and
+   > `grep`'s narrowing stay `[Int]`. A grep hit names the item it lies in,
+   > `[from, to, kind, role, line, text]`; a model residue's note is
+   > searchable, a turn hit being `from == to`.
+
 7. **The pressure reminder names the set.** `Pressure::Over` carries the
    turns the planned cut would take; the reminder renders them as runs and
    offers `` context `evict [turns: !{range a b}, note: '…'] `` for the
    model to make the same cut with a note.
+
+   > **Superseding note (261019).** `Pressure::Over` carries at most one
+   > span, the forced eviction, which may take the live prompt. The
+   > reminder names it and offers one `` `evict [from, to, note] `` for it.
 
 8. **A turn has a role; there is no exchange.** Every turn is `user` or
    `assistant`, and that is what every row says (`TurnRow { id, role, kind,
@@ -114,6 +148,14 @@ name a turn; neither carried a note that stood *where the hole is*.
    role-marked row per departed turn. The survey's receipt is `[rows,
    total-bytes]`: which turns have left is `` transcript `index ``'s `held`
    column, not a second count.
+
+   > **Superseding note (261019).** There is no marker sentence listing
+   > runs; a residue says `Turns 41–60 have left your context.` over its
+   > own span. Every row is a span: `SpanRow { from, to, role, kind, label,
+   > bytes, held }`, `kind` gaining `residue`, `held` being `resident`,
+   > `under [a, b]` (the innermost residue over the item) or `withdrawn`.
+   > `TurnRow` survives only inside the link's `Linked`. Roles and the
+   > absence of exchanges stand.
 
 9. **Every tool result ends with `TURN: <id>`.** The id of the turn it
    closes — the same id the survey, the index, the marker and the TUI speak.

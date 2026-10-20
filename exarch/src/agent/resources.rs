@@ -134,7 +134,7 @@ fn pressure_rows(measured: Option<u64>, history_bytes: u64, window: Option<u64>)
                 tokens,
                 Some(eviction_trigger(w)),
                 Policy::Evict,
-                Some(format!("auto-eviction trigger; window {w} tokens")),
+                Some(format!("forced-eviction trigger; window {w} tokens")),
             ),
             ProbeRow::new(
                 "log.bytes",
@@ -153,7 +153,7 @@ fn pressure_rows(measured: Option<u64>, history_bytes: u64, window: Option<u64>)
             Some(EVICT_THRESHOLD as u64),
             Policy::Evict,
             Some(format!(
-                "auto-eviction threshold; token measure stale (window {w} tokens)"
+                "forced-eviction threshold; token measure stale (window {w} tokens)"
             )),
         )],
         _ => vec![ProbeRow::new(
@@ -161,7 +161,7 @@ fn pressure_rows(measured: Option<u64>, history_bytes: u64, window: Option<u64>)
             history_bytes,
             Some(EVICT_THRESHOLD as u64),
             Policy::Evict,
-            Some("auto-eviction threshold; window unknown".to_string()),
+            Some("forced-eviction threshold; window unknown".to_string()),
         )],
     }
 }
@@ -346,14 +346,14 @@ impl Avatar {
         });
     }
 
-    /// `/context`'s one fact: the survey's turns as they stand, for the
+    /// `/context`'s one fact: the survey's rows as they stand, for the
     /// scrollback fold to draw.
     pub(crate) fn emit_context_survey(&self) {
         let survey = self.log.borrow().context().context_survey();
         // The card is a rendering the scrollback fold rebuilds at draw time,
         // never what the log carries.
         self.recorder()
-            .emit_or_report(crate::record::Display::Context { turns: survey.rows });
+            .emit_or_report(crate::record::Display::Context { rows: survey.rows });
     }
 }
 

@@ -336,8 +336,8 @@ impl Headless<'_> {
             K::Done { id, cmd, outcome } => {
                 let _ = writeln!(self.err, "{}", card::settled_text(*id, cmd, outcome));
             }
-            K::Context { turns } => {
-                self.print_card(&record::context_rows_card(turns));
+            K::Context { rows } => {
+                self.print_card(&record::context_rows_card(rows));
             }
             K::Turn { id: turn } => {
                 if id == self.root_id {
@@ -345,9 +345,8 @@ impl Headless<'_> {
                     let _ = writeln!(self.err, "[turn {turn}]");
                 }
             }
-            K::Evicted { cut, by } => {
-                let runs = crate::record::model::runs(&cut.turns);
-                let _ = writeln!(self.err, "[turns {runs} left the context ({})]", by.name());
+            K::Evicted { residue } => {
+                let _ = writeln!(self.err, "{}", residue.evicted_line());
             }
             K::Rewound { anchor } => {
                 let _ = writeln!(self.err, "[rewound to turn {anchor}]");

@@ -1,11 +1,12 @@
 //! The context and transcript families.
 
 use super::*;
+use crate::record::Span;
 
-fn context_evict_request(turns: &[u64], note: Option<&str>) -> Request {
+fn context_evict_request(from: u64, to: u64, note: &str) -> Request {
     Request::Context(Context::Evict(Evict {
-        turns: turns.to_vec(),
-        note: note.map(|note| Note(note.to_string())),
+        span: Span::new(from, to).expect("a test names a run first turn first"),
+        note: Note(note.to_string()),
     }))
 }
 
@@ -24,15 +25,21 @@ fn transcript_grep_request(pattern: &str, turns: Option<&[u64]>) -> Request {
     }))
 }
 
+/// One row per frontier item by its span: a residue where the run was, then
+/// the turns no residue covers.
 #[test]
-fn context_survey_rows_every_resident_turn() {
+fn context_survey_rows_every_item_in_the_context() {
     let desk = desk();
     {
         let mut log = desk.services.log.borrow_mut();
         append_prompt_and_answer(&mut log, "closed\nturn", "answer");
         append_prompt_and_answer(&mut log, "evicted", "answer");
-        log.evict(&[1, 2], None, EditAuthority::Model)
-            .expect("evict");
+        log.evict(
+            Span::new(1, 2).expect("a run"),
+            Some("closed".into()),
+            EditAuthority::Model,
+        )
+        .expect("evict");
         log.import_note(genai::chat::ChatMessage::user("inherited\ncontext"))
             .expect("import");
         log.append_user("live".into(), None, Voice::Human)
@@ -43,11 +50,26 @@ fn context_survey_rows_every_resident_turn() {
     let answer = desk
         .ask(Request::Context(Context::Survey))
         .expect("context survey");
-    let kinds = survey_rows(&answer)
+    let rows = survey_rows(&answer)
         .iter()
-        .map(|row| str_field(row, "kind").expect("survey kind"))
+        .map(|row| {
+            (
+                int_field(row, "from"),
+                int_field(row, "to"),
+                str_field(row, "kind").expect("survey kind"),
+            )
+        })
         .collect::<Vec<_>>();
-    assert_eq!(kinds, vec!["own", "own", "import", "own"]);
+    assert_eq!(
+        rows,
+        vec![
+            (1, 2, "residue"),
+            (3, 3, "own"),
+            (4, 4, "own"),
+            (5, 5, "import"),
+            (6, 6, "own")
+        ]
+    );
     assert_eq!(
         int_field(&answer, "total-bytes"),
         i64::try_from(expected_bytes).unwrap()
@@ -238,7 +260,7 @@ fn context_evict_answers_the_survey_it_leaves_behind_and_commits_the_act() {
         append_prompt_and_answer(&mut log, "two", "another answer");
     }
     let answer = desk
-        .ask(context_evict_request(&[1, 2], Some("the parser is fixed")))
+        .ask(context_evict_request(1, 2, "the parser is fixed"))
         .expect("context evict");
     assert_eq!(
         int_field(&answer, "total-bytes"),
@@ -249,14 +271,17 @@ fn context_evict_answers_the_survey_it_leaves_behind_and_commits_the_act() {
     assert_eq!(
         rows.iter()
             .map(|row| (
-                int_field(row, "id"),
+                int_field(row, "from"),
+                int_field(row, "to"),
                 str_field(row, "role").expect("a survey row names its role")
             ))
             .collect::<Vec<_>>(),
-        vec![(3, "user"), (4, "assistant")],
-        "the evicted turns are gone from the answer"
+        vec![(1, 2, "user"), (3, 3, "user"), (4, 4, "assistant")],
+        "one residue stands where the run was"
     );
-    assert_eq!(str_field(&rows[0], "kind"), Some("own"));
+    assert_eq!(str_field(&rows[0], "kind"), Some("residue"));
+    assert_eq!(str_field(&rows[0], "label"), Some("the parser is fixed"));
+    assert_eq!(str_field(&rows[1], "kind"), Some("own"));
     let audit = desk
         .services
         .acts
@@ -276,9 +301,9 @@ fn survey_rows(answer: &FOValue) -> &[FOValue] {
         .expect("a context answer carries its survey rows")
 }
 
-/// The marker keeps a note as one short row for the rest of the session, so
-/// an empty one, an overlong one, and one that breaks a line are refused at
-/// decode rather than drawn.
+/// The residue keeps a note as one short line for the rest of the session,
+/// so an empty one, an overlong one, and one that breaks a line are refused
+/// at decode rather than drawn.
 #[test]
 fn context_evict_refuses_a_note_that_is_not_one_short_line() {
     let desk = desk();
@@ -287,13 +312,16 @@ fn context_evict_refuses_a_note_that_is_not_one_short_line() {
         append_prompt_and_answer(&mut log, "one", "answer");
         append_prompt_and_answer(&mut log, "two", "answer");
     }
-    let single_line = "`note: text must be a single line: the marker draws one row per turn the \
-                       cut takes, and a line break in a note reads as one of them.";
+    let single_line = "`note: text must be a single line: the residue keeps one short line";
     let cases = [
-        ("", "`note: text must not be empty: `none leaves no note"),
+        (
+            "",
+            "`note: text must not be empty: the residue keeps one short line, and it is the \
+             only trace of the run left in your context",
+        ),
         (
             &*"x".repeat(241),
-            "`note: text is 241 bytes; the marker keeps one short line: 240 at most. What is \
+            "`note: text is 241 bytes; the residue keeps one short line: 240 at most. What is \
              the one thing your future self needs to know?",
         ),
         ("line one\nline two", single_line),
@@ -301,7 +329,7 @@ fn context_evict_refuses_a_note_that_is_not_one_short_line() {
     ];
     for (note, refusal) in cases {
         let err = desk
-            .ask(context_evict_request(&[1], Some(note)))
+            .ask(context_evict_request(1, 1, note))
             .expect_err("a note that is not one short line is refused");
         assert_eq!(
             err.message,
@@ -326,12 +354,7 @@ fn context_evict_refuses_a_field_it_does_not_read() {
             "evict",
             Some(FOValue::Map {
                 entries: vec![
-                    (
-                        "turns".to_string(),
-                        FOValue::List {
-                            items: vec![FOValue::Int { value: 1 }],
-                        },
-                    ),
+                    ("from".to_string(), FOValue::Int { value: 1 }),
                     ("through".to_string(), FOValue::Int { value: 2 }),
                 ],
             }),
@@ -339,8 +362,78 @@ fn context_evict_refuses_a_field_it_does_not_read() {
         .expect_err("`through` is not a field `evict` reads");
     assert_eq!(
         err.message,
-        "`` exarch-context `evict ``: unknown field `through`: expected `turns`, `note`"
+        "`` exarch-context `evict ``: unknown field `through`: expected `from`, `to`, `note`"
     );
-    desk.ask(context_evict_request(&[1, 2], Some("the parser is fixed")))
+    desk.ask(context_evict_request(1, 2, "the parser is fixed"))
         .expect("the fields the tag does read still evict");
+}
+
+/// The index rows every item the lineage recorded by its span, a residue
+/// before what it covers, each naming what holds it; a grep hit on a note
+/// names the residue's whole span.
+#[test]
+fn the_index_and_grep_name_items_by_span() {
+    let desk = desk();
+    {
+        let mut log = desk.services.log.borrow_mut();
+        append_prompt_and_answer(&mut log, "one", "answer");
+        append_prompt_and_answer(&mut log, "two", "answer");
+    }
+    desk.ask(context_evict_request(3, 4, "the parser is fixed"))
+        .expect("context evict");
+    let index = desk
+        .ask(Request::Transcript(Transcript::Index))
+        .expect("exarch-transcript `index");
+    let index = index.as_list().expect("the index is a list");
+    let spans = index
+        .iter()
+        .map(|row| {
+            (
+                int_field(row, "from"),
+                int_field(row, "to"),
+                str_field(row, "kind").expect("an index row names its kind"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        spans,
+        vec![
+            (1, 1, "own"),
+            (2, 2, "own"),
+            (3, 4, "residue"),
+            (3, 3, "own"),
+            (4, 4, "own")
+        ]
+    );
+    let int = |value| FOValue::Int { value };
+    assert_eq!(index[2].field("location"), Some(&tag("resident", None)));
+    assert_eq!(
+        index[3].field("location"),
+        Some(&tag(
+            "under",
+            Some(FOValue::Map {
+                entries: vec![("from".into(), int(3)), ("to".into(), int(4))]
+            })
+        ))
+    );
+
+    let hits = desk
+        .ask(transcript_grep_request("parser", None))
+        .expect("exarch-transcript `grep");
+    let hits = hits
+        .field("hits")
+        .and_then(FOValue::as_list)
+        .expect("a grep answers hits");
+    let [hit] = hits else {
+        panic!("the note is the one line that matches, got {hits:?}")
+    };
+    assert_eq!(
+        (
+            int_field(hit, "from"),
+            int_field(hit, "to"),
+            str_field(hit, "kind"),
+            int_field(hit, "line")
+        ),
+        (3, 4, Some("residue"), 1)
+    );
 }

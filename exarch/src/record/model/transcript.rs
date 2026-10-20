@@ -1,14 +1,18 @@
-//! The transcript door: locate the turns a read or grep names under the
-//! session lock, then read them back through their [`Pointer`]s with the
+//! The transcript door: locate the items a read or grep names under the
+//! session lock, then read turns back through their [`Pointer`]s with the
 //! lock gone — each record checked against its [`Locus`] digest before it
 //! is parsed.
 
 use super::state::admissible_prefix;
-use super::{Body, Context, Held, Linked, Pointer, Turn, chat_messages, not_recorded_refusal_turn};
+use super::table::Item;
+use super::{
+    Body, Context, ItemKind, Linked, Location, Pointer, Span, Standing, Turn, chat_messages,
+    not_recorded_refusal_turn,
+};
 use crate::provider::tools::RAL_TOOL;
 use crate::record::{
     Entry, GrepAnswer, GrepHit, Locus, Protocol, Record, Recorded, Refusal, Role,
-    TranscriptMessage, TranscriptPart, TranscriptTurn,
+    TranscriptMessage, TranscriptPart, TranscriptTurn, TurnKind,
 };
 use genai::chat::{Binary, BinarySource, ChatMessage, ContentPart, CustomPart, ToolCall};
 use regex::Regex;
@@ -53,30 +57,52 @@ fn read_at(reader: &mut File, locus: &Locus) -> io::Result<Protocol> {
     }
 }
 
-/// One turn's records, or the address to read them back by.
-enum Sourced {
+/// Where one turn's records are: in hand, or at the address to read them
+/// back by.
+enum Source {
     Held(Vec<Protocol>),
     Located(Pointer),
 }
 
-/// The whole of "seek in the context, then the file": one turn's records
-/// where they are held, or the address to read them back by.
-fn sourced(turn: &Turn) -> Sourced {
-    match &turn.body {
-        Body::Here {
-            records,
-            origin: None,
-        } => Sourced::Held(
-            records
-                .iter()
-                .map(|recorded| recorded.value().clone())
-                .collect(),
-        ),
-        Body::Here {
-            origin: Some(at), ..
+/// One turn as a door read places it: whose it was, and where its records
+/// lie.
+struct Placed {
+    id: u64,
+    role: Role,
+    source: Source,
+}
+
+impl Placed {
+    /// The whole of "seek in the context, then the file": one turn's records
+    /// where they are held, or the address to read them back by.
+    fn of(turn: &Turn) -> Self {
+        let source = match &turn.body {
+            Body::Here {
+                records,
+                origin: None,
+            } => Source::Held(
+                records
+                    .iter()
+                    .map(|recorded| recorded.value().clone())
+                    .collect(),
+            ),
+            Body::Here {
+                origin: Some(at), ..
+            }
+            | Body::There { at, .. } => Source::Located(at.clone()),
+        };
+        Self {
+            id: turn.id,
+            role: turn.role,
+            source,
         }
-        | Body::There { at, .. } => Sourced::Located(at.clone()),
     }
+}
+
+/// What a search covers: a turn's material, or a residue's note.
+enum Searchable {
+    Turn(TurnKind, Placed),
+    Note(Span, String),
 }
 
 /// One turn's own material, wherever the lineage keeps it.
@@ -84,25 +110,37 @@ fn turn_messages(records: &[Protocol]) -> Vec<ChatMessage> {
     records.iter().flat_map(chat_messages).collect()
 }
 
-/// What a read does where a turn's file will not read back: refuse by path,
-/// or pass over the turn. A narrowing answers for what it named; a search of
-/// the whole transcript passes over what it cannot reach, the marker at each
-/// hole having already told the model which turns it cannot have back.
+/// A placed turn's material, read back through `open`: consecutive turns
+/// naming one log share the one descriptor, so each file is read in a single
+/// pass in locus order.
+///
+/// # Errors
+/// Names the turn and the file that will not read back.
+fn material(open: &mut Option<(PathBuf, File)>, turn: &Placed) -> Result<Vec<ChatMessage>, String> {
+    match &turn.source {
+        Source::Held(records) => Ok(turn_messages(records)),
+        Source::Located(Pointer { source, loci }) => read_pointer(open, source, loci)
+            .map(|records| turn_messages(&records))
+            .map_err(|error| read_back_refusal(turn.id, source, &error)),
+    }
+}
+
+/// What a search does where a turn's file will not read back: refuse by
+/// path, or pass over the turn. A narrowing answers for what it named; a
+/// search of the whole transcript passes over what it cannot reach.
 #[derive(Clone, Copy)]
 enum Unreadable {
     Skip,
     Refuse,
 }
 
-/// Where every turn a door read names lies, owned outright: the read borrows
+/// Where every turn a read names lies, owned outright: the read borrows
 /// nothing from the structure, so the desk can drop the session lock before
 /// it touches a file.
 ///
-/// A fork can leave consecutive turns in two files, so placement is per turn,
-/// and each turn carries whose turn it was.
+/// A fork can leave consecutive turns in two files, so placement is per turn.
 pub(crate) struct TranscriptRead {
-    turns: Vec<(u64, Role, Sourced)>,
-    unreadable: Unreadable,
+    turns: Vec<Placed>,
 }
 
 impl TranscriptRead {
@@ -112,57 +150,57 @@ impl TranscriptRead {
     /// # Errors
     /// Refuses a turn whose file will not read back.
     pub(crate) fn turns(self) -> Result<Vec<TranscriptTurn>, String> {
-        let mut read = Vec::with_capacity(self.turns.len());
-        self.walk(|turn, role, records| {
-            read.push(TranscriptTurn {
-                turn,
-                role,
-                messages: turn_messages(records)
-                    .iter()
-                    .map(transcript_message)
-                    .collect(),
-            });
-        })?;
-        Ok(read)
+        let mut open = None;
+        self.turns
+            .into_iter()
+            .map(|turn| {
+                Ok(TranscriptTurn {
+                    turn: turn.id,
+                    role: turn.role,
+                    messages: material(&mut open, &turn)?
+                        .iter()
+                        .map(transcript_message)
+                        .collect(),
+                })
+            })
+            .collect()
     }
+}
 
-    /// One hit per matching line, oldest first and bounded by [`GREP_HITS`].
-    /// Searched turn by turn, so every hit names the turn it lies in.
+/// Where every item a search covers lies, in index order, owned outright as
+/// [`TranscriptRead`] is.
+pub(crate) struct TranscriptSearch {
+    items: Vec<Searchable>,
+    unreadable: Unreadable,
+}
+
+impl TranscriptSearch {
+    /// One hit per matching line, in index order and bounded by
+    /// [`GREP_HITS`]. Searched item by item, a note as the one line it is,
+    /// so every hit names the item it lies in.
     ///
     /// # Errors
-    /// Refuses a file that will not read back.
+    /// Refuses a file that will not read back, where a narrowing named it.
     pub(crate) fn grep(self, pattern: &Regex) -> Result<GrepAnswer, String> {
+        let Self { items, unreadable } = self;
+        let mut open = None;
         let mut tally = Tally::default();
-        self.walk(|turn, _, records| {
-            grep_messages(pattern, turn, &turn_messages(records), &mut tally);
-        })?;
-        Ok(tally.answer())
-    }
-
-    /// Hand every located turn's records to `visit`, in transcript order,
-    /// holding at most one open file: consecutive turns naming one log share
-    /// it, so each file is read in a single pass in locus order.
-    fn walk(self, mut visit: impl FnMut(u64, Role, &[Protocol])) -> Result<(), String> {
-        let unreadable = self.unreadable;
-        let mut open: Option<(PathBuf, File)> = None;
-        for (turn, role, sourced) in self.turns {
-            let records = match sourced {
-                Sourced::Held(records) => records,
-                Sourced::Located(Pointer { source, loci }) => {
-                    match read_pointer(&mut open, &source, &loci) {
-                        Ok(records) => records,
-                        Err(error) => match unreadable {
-                            Unreadable::Refuse => {
-                                return Err(read_back_refusal(turn, &source, &error));
-                            }
-                            Unreadable::Skip => continue,
-                        },
-                    }
+        for item in items {
+            let (span, kind, messages) = match item {
+                Searchable::Note(span, note) => {
+                    (span, ItemKind::Residue, vec![ChatMessage::user(note)])
                 }
+                Searchable::Turn(kind, turn) => match material(&mut open, &turn) {
+                    Ok(messages) => (Span::single(turn.id), ItemKind::Turn(kind), messages),
+                    Err(refusal) => match unreadable {
+                        Unreadable::Refuse => return Err(refusal),
+                        Unreadable::Skip => continue,
+                    },
+                },
             };
-            visit(turn, role, &records);
+            grep_messages(pattern, span, kind, &messages, &mut tally);
         }
-        Ok(())
+        Ok(tally.answer())
     }
 }
 
@@ -193,7 +231,7 @@ pub(super) fn read_seeds(turns: &[Linked]) -> Result<Vec<Vec<Recorded<Protocol>>
     let mut open = None;
     turns
         .iter()
-        .filter(|linked| linked.row.held == Held::Resident)
+        .filter(|linked| linked.row.location == Location::Resident)
         .map(|Linked { row, at }| {
             let read = read_pointer(&mut open, &at.source, &at.loci).map_err(|error| {
                 Refusal::Unreadable(io::Error::other(format!(
@@ -244,8 +282,11 @@ impl Context {
     /// Refuses whatever `Self::read_transcript` refuses at location time.
     pub(crate) fn locate_read(&self, turns: &[u64]) -> Result<TranscriptRead, String> {
         Ok(TranscriptRead {
-            turns: self.located(&self.readable(turns)?),
-            unreadable: Unreadable::Refuse,
+            turns: self
+                .readable(turns)?
+                .into_iter()
+                .filter_map(|id| self.turn(id).map(Placed::of))
+                .collect(),
         })
     }
 
@@ -274,28 +315,15 @@ impl Context {
         Ok(named.into_iter().collect())
     }
 
-    /// Where each turn's records lie, beside whose turn it was. Every id has
-    /// been checked recorded, so nothing here can fail.
-    fn located(&self, turns: &[u64]) -> Vec<(u64, Role, Sourced)> {
-        turns
-            .iter()
-            .filter_map(|&id| {
-                let turn = self.turn(id)?;
-                Some((id, turn.role, sourced(turn)))
-            })
-            .collect()
-    }
-
-    /// Search the closed turns' text: the ones a narrowing names, or the
-    /// whole transcript. Each file is read in one pass in locus order, and
-    /// every hit names the turn it lies in.
+    /// Search the closed turns' text and the residues' notes: the ones a
+    /// narrowing names, or the whole transcript. Each file is read in one
+    /// pass in locus order, and every hit names the item it lies in.
     ///
     /// An unreadable turn is refused when a narrowing named it and passed
-    /// over when the whole transcript was searched: the marker at its hole
-    /// has already told the model which of its turns it cannot have back.
+    /// over when the whole transcript was searched.
     ///
     /// Both halves in one call — [`Self::locate_grep`] then
-    /// [`TranscriptRead::grep`] — for a test; the desk keeps them apart so
+    /// [`TranscriptSearch::grep`] — for a test; the desk keeps them apart so
     /// only the first runs under the session lock.
     ///
     /// # Errors
@@ -309,40 +337,57 @@ impl Context {
         self.locate_grep(turns)?.grep(pattern)
     }
 
-    /// `Self::grep_transcript`'s first half: where every searchable turn
+    /// `Self::grep_transcript`'s first half: where every searchable item
     /// lies, resolved under the caller's lock and borrowing nothing.
     ///
-    /// With no narrowing at all the whole transcript is searched, bar the
-    /// turn in hand.
+    /// With no narrowing at all, every turn bar the one in hand and every
+    /// noted residue; with one, the turns named and every noted residue all
+    /// of whose turns are named. A forced eviction's residue has no note to search.
     ///
     /// # Errors
     /// Refuses whatever `Self::grep_transcript` refuses at location time.
-    pub(crate) fn locate_grep(&self, turns: Option<&[u64]>) -> Result<TranscriptRead, String> {
-        let Some(narrowing) = turns else {
-            return Ok(TranscriptRead {
-                turns: self.located(&self.every_turn()),
-                unreadable: Unreadable::Skip,
-            });
+    pub(crate) fn locate_grep(&self, turns: Option<&[u64]>) -> Result<TranscriptSearch, String> {
+        let (named, unreadable) = match turns {
+            None => (None, Unreadable::Skip),
+            Some([]) => {
+                return Err("`turns` names no turn: omit it to search the whole transcript".into());
+            }
+            Some(narrowing) => (
+                Some(
+                    self.readable(narrowing)?
+                        .into_iter()
+                        .collect::<BTreeSet<u64>>(),
+                ),
+                Unreadable::Refuse,
+            ),
         };
-        if narrowing.is_empty() {
-            return Err("`turns` names no turn: omit it to search the whole transcript".into());
-        }
-        Ok(TranscriptRead {
-            turns: self.located(&self.readable(narrowing)?),
-            unreadable: Unreadable::Refuse,
-        })
-    }
-
-    /// Every turn the structure recorded bar the one in hand — how an
-    /// unnarrowed `` `grep `` names the whole transcript.
-    fn every_turn(&self) -> Vec<u64> {
         let unclosed = self.unclosed_turn();
-        self.table
-            .turns()
-            .iter()
-            .map(|turn| turn.id)
-            .filter(|id| Some(*id) != unclosed)
-            .collect()
+        let searched = |id: u64| match &named {
+            Some(named) => named.contains(&id),
+            None => Some(id) != unclosed,
+        };
+        let items = self
+            .table
+            .items()
+            .into_iter()
+            .filter_map(|item| match item {
+                Item::Turn(turn) => {
+                    searched(turn.id).then(|| Searchable::Turn(turn.kind, Placed::of(turn)))
+                }
+                Item::Residue(Standing { residue, .. }) => residue
+                    .note
+                    .clone()
+                    .filter(|_| {
+                        self.table
+                            .turns()
+                            .iter()
+                            .filter(|turn| residue.span.contains(turn.id))
+                            .all(|turn| searched(turn.id))
+                    })
+                    .map(|note| Searchable::Note(residue.span, note)),
+            })
+            .collect();
+        Ok(TranscriptSearch { items, unreadable })
     }
 }
 
@@ -352,50 +397,50 @@ const GREP_HITS: usize = 100;
 /// What a hit's line is clipped to, in bytes.
 const GREP_TEXT_BYTES: usize = 200;
 
-/// Transcript order: turn, then message within it, then line within that.
-type HitKey = (u64, usize, usize);
-
-/// The oldest [`GREP_HITS`] matches in transcript order, and how many there
-/// were in all — bounded, so a pattern that matches everything costs one
-/// answer rather than the whole transcript.
+/// The first [`GREP_HITS`] matches, and how many there were in all —
+/// bounded, so a pattern that matches everything costs one answer rather
+/// than the whole transcript. Hits are offered in index order (item, then
+/// message, then line), so the first kept are the first in that order.
 #[derive(Default)]
 struct Tally {
-    hits: Vec<(HitKey, GrepHit)>,
+    hits: Vec<GrepHit>,
     total: usize,
 }
 
 impl Tally {
-    fn offer(&mut self, key: HitKey, hit: GrepHit) {
+    fn offer(&mut self, hit: GrepHit) {
         self.total += 1;
-        let at = self.hits.partition_point(|(seen, _)| *seen < key);
-        if at < GREP_HITS {
-            self.hits.insert(at, (key, hit));
-            self.hits.truncate(GREP_HITS);
+        if self.hits.len() < GREP_HITS {
+            self.hits.push(hit);
         }
     }
 
     fn answer(self) -> GrepAnswer {
         GrepAnswer {
-            hits: self.hits.into_iter().map(|(_, hit)| hit).collect(),
+            hits: self.hits,
             total: self.total,
         }
     }
 }
 
-/// One hit per matching line of one turn's messages.
-fn grep_messages(pattern: &Regex, turn: u64, messages: &[ChatMessage], tally: &mut Tally) {
-    for (position, message) in messages.iter().enumerate() {
+/// One hit per matching line of one item's messages.
+fn grep_messages(
+    pattern: &Regex,
+    span: Span,
+    kind: ItemKind,
+    messages: &[ChatMessage],
+    tally: &mut Tally,
+) {
+    for message in messages {
         for (index, line) in searched_text(message).lines().enumerate() {
             if pattern.is_match(line) {
-                tally.offer(
-                    (turn, position, index),
-                    GrepHit {
-                        turn,
-                        role: message.role.clone(),
-                        line: index + 1,
-                        text: line[..line.floor_char_boundary(GREP_TEXT_BYTES)].to_string(),
-                    },
-                );
+                tally.offer(GrepHit {
+                    span,
+                    kind,
+                    role: message.role.clone(),
+                    line: index + 1,
+                    text: line[..line.floor_char_boundary(GREP_TEXT_BYTES)].to_string(),
+                });
             }
         }
     }

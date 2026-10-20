@@ -432,7 +432,7 @@ fn rewind_validates_the_anchor_and_sheds_nudges() {
             .context_survey()
             .rows
             .iter()
-            .map(|row| row.id)
+            .map(|row| row.span.from())
             .collect::<Vec<_>>(),
         vec![1, 2],
         "the rewind removes the anchor and everything after it"

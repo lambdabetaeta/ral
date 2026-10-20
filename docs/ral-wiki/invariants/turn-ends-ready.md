@@ -86,9 +86,10 @@ Eviction is not stated at this granularity at all. The rule is that **no
 edit touches the unclosed turn** — the one being written, which exists only
 while a turn is open, so at `ReadyForUser` nothing is unclosed
 and a user rewind or clear (`Protocol::Rewound` and `Protocol::Cleared`, withdrawals
-rather than cuts, admitted whenever a new turn is) may empty the context. `Context::resolve_cut` refuses that
-turn by name, and `plan_eviction` draws its candidates from every resident turn
-*but the last*, so a harness plan cannot name it either. The reading door
+rather than cuts, admitted whenever a new turn is) may empty the context. `Context::resolve_cut` refuses a
+run with that turn within, and `plan_forced_eviction` walks back from the
+newest-but-one frontier item, so a forced eviction cannot name it either
+([[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]]). The reading door
 refuses the same turn, and that refusal names the closed turns of the work in
 hand, which are readable
 ([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).

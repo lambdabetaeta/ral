@@ -1126,32 +1126,38 @@ fn unknown_context_tag_reaches_the_door_naming_every_legal_tag() {
     }
 }
 
-/// `` `evict ``'s record row is open only on the tail, so `turns` itself
-/// is still static: a misspelling reaches the type error, not the door.
+/// `` `evict ``'s record row is closed, so `from` is static: a misspelling
+/// reaches the type error, not the door.
 #[test]
 fn misspelled_evict_field_errors_statically_naming_the_field() {
     let session = crate::agent::Avatar::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
     let emit = crate::bus::Emitter::new(tx, session.agent.id);
     let result = session
-        .ral("exarch-context `evict [turn: [1], note: `none]", 5, &emit)
+        .ral(
+            "exarch-context `evict [form: 1, to: 1, note: 'x']",
+            5,
+            &emit,
+        )
         .text;
     assert!(
-        !result.contains("EXIT: 0") && result.contains("turns"),
+        !result.contains("EXIT: 0") && result.contains("from"),
         "the diagnostic must name the field the row demands, got: {result}"
     );
 }
 
-/// Absence is a variant, so the calls that leave a key out or pass a bare
-/// value in its place are type errors naming the key.
+/// A residue stands on its note, so an eviction leaving it out is a type
+/// error naming it, as is one still addressed by `turns`; `grep`'s absence is
+/// a variant, so leaving `turns` out or passing a bare list in its place is
+/// one too.
 #[test]
-fn absence_is_spelled_with_its_variant() {
+fn a_missing_or_foreign_key_is_a_type_error_naming_it() {
     let session = crate::agent::Avatar::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();
     let emit = crate::bus::Emitter::new(tx, session.agent.id);
     for (call, key) in [
-        ("exarch-context `evict [turns: [1]]", "note"),
-        ("exarch-context `evict [turns: [1], note: 'x']", "note"),
+        ("exarch-context `evict [from: 1, to: 1]", "note"),
+        ("exarch-context `evict [turns: [1], note: 'x']", "from"),
         ("exarch-transcript `grep [pattern: 'x']", "turns"),
         (
             "exarch-transcript `grep [pattern: 'x', turns: [1]]",
@@ -1168,9 +1174,8 @@ fn absence_is_spelled_with_its_variant() {
 
 /// The whole family through the real shell: an edit answers the survey
 /// the transition leaves behind, so the count of what left is there to
-/// read without a second call. The address names turns — 1 and 2 are the
-/// first prompt and its reply — and `note` is a variant, so both of its
-/// shapes type-check.
+/// read without a second call. The run names turns: 1 and 2 are the first
+/// prompt and its reply.
 #[test]
 fn an_eviction_answers_the_survey_it_leaves_behind() {
     let session = trunk_with_an_answered_prompt();
@@ -1180,7 +1185,7 @@ fn an_eviction_answers_the_survey_it_leaves_behind() {
 
     let result = session
         .ral(
-            "exarch-context `evict [turns: [1, 2], note: `some 'the old work is done']",
+            "exarch-context `evict [from: 1, to: 2, note: 'the old work is done']",
             5,
             &emit,
         )
@@ -1196,28 +1201,6 @@ fn an_eviction_answers_the_survey_it_leaves_behind() {
     assert!(
         !result.contains("bytes-delta"),
         "the edit answers the state, never a receipt for the transition, got: {result}"
-    );
-}
-
-/// The same tag with `none` for its note: the harness never asks the model
-/// for an empty string.
-#[test]
-fn an_eviction_without_a_note_type_checks() {
-    let session = trunk_with_an_answered_prompt();
-    crate::agent::testkit::close_exchange(&session, "second prompt", "second answer");
-    let (tx, _rx) = crate::bus::channel();
-    let emit = crate::bus::Emitter::new(tx, session.agent.id);
-
-    let result = session
-        .ral(
-            "exarch-context `evict [turns: !{range 1 3}, note: `none]",
-            5,
-            &emit,
-        )
-        .text;
-    assert!(
-        result.contains("EXIT: 0"),
-        "an eviction with no note must succeed, got: {result}"
     );
 }
 
@@ -1332,9 +1315,10 @@ fn unknown_transcript_tag_reaches_the_door_naming_every_legal_tag() {
 }
 
 /// The answer type is free, so each tag's own shape has to type-check
-/// against the use the program makes of it: an index row carries `id` and
-/// `held`, and a grep answer projects `hits` and `total` as a record, each
-/// hit naming the turn it lies in. `turns` is `` `all `` or `` `only ``.
+/// against the use the program makes of it: an index row carries its span
+/// and a `location` variant, and a grep answer projects `hits` and `total` as a
+/// record, each hit naming the item it lies in. `turns` is `` `all `` or
+/// `` `only ``.
 #[test]
 fn index_and_grep_answer_their_own_shapes() {
     let session = trunk_with_an_answered_prompt();
@@ -1344,10 +1328,15 @@ fn index_and_grep_answer_their_own_shapes() {
     let result = session
         .ral(
             r"let listed = exarch-transcript `index
-           echo $listed[0][id] $listed[0][role] $listed[0][held]
+           echo $listed[0][from] $listed[0][to] $listed[0][role] $listed[0][kind]
+           case $listed[0][location] [
+             `resident: { |_| echo location=resident },
+             `under: { |_| echo location=under },
+             `withdrawn: { |_| echo location=withdrawn },
+           ]
            let matched = exarch-transcript `grep [pattern: 'first (prompt|answer)', turns: `all]
            echo !{length $matched[hits]} $matched[total]
-           echo $matched[hits][0][turn] $matched[hits][1][turn]
+           echo hits $matched[hits][0][from] $matched[hits][1][to] $matched[hits][1][kind]
            let narrowed = exarch-transcript `grep [pattern: 'first', turns: `only [2]]
            echo $narrowed[total]
            let missed = exarch-transcript `grep [pattern: 'nothing here', turns: `only [1, 2]]
@@ -1357,7 +1346,7 @@ fn index_and_grep_answer_their_own_shapes() {
         )
         .text;
     assert!(
-        result.contains("1 user resident"),
+        result.contains("1 1 user own") && result.contains("location=resident"),
         "the first turn is listed and still in the context, got: {result}"
     );
     assert!(
@@ -1365,8 +1354,8 @@ fn index_and_grep_answer_their_own_shapes() {
         "both of its turns match, and `total` counts them all, got: {result}"
     );
     assert!(
-        result.contains("1 2"),
-        "the hits name the turns they lie in, got: {result}"
+        result.contains("hits 1 2 own"),
+        "the hits name the items they lie in, got: {result}"
     );
     assert!(
         result.contains("\n1\n"),

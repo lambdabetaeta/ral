@@ -28,8 +28,8 @@ that context bounded and isolated:
 
 - **persistence.** `let`, `cd`, and env carry across tool calls;
 - **eviction.** Long autonomous runs stay bounded — when the context fills,
-  its older half leaves at the next **turn** boundary for the harness's index
-  of what went, and stays readable in the log through `exarch-transcript`
+  its older half leaves at the next **turn**
+  boundary with a residue standing in its place, and stays readable in the log through `exarch-transcript`
   ([[decisions/260906_context-rollover|context-rollover]],
   [[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]); a nudge
   policy decides whether to stop or loop with a synthetic next prompt;
