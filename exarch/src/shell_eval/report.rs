@@ -1,12 +1,15 @@
 //! The one composition of a dispatch's model-facing ending.
 //!
-//! [`render`] is the single stderr-composing function for a tool call: the
-//! engine's own rendering, its remedy, the audit of what already stands, and
-//! the orphaned-work sentence — in that order, and nowhere else.  Everything
-//! it reads is handed in, so it never touches a transport or a registry
-//! itself.
+//! [`render`] is the single stderr-composing function for a call that reached
+//! evaluation: the engine's own rendering, its remedy, the audit of what
+//! already stands, and the orphaned-work sentence — in that order, and nowhere
+//! else.  Everything it reads is handed in, so it never touches a transport or
+//! a registry itself.  A call that did not reach one has its own two endings:
+//! [`rejection`], for a refusal before evaluation, and [`fault`], for an
+//! engine that could not say what became of it.
 
 use super::{ToolResult, ral_value_to_text};
+use crate::agent::digest::{OPAQUE_CAP, clip};
 use ral_core::process::CancelCause;
 use ral_core::protocol::Ending;
 use ral_core::protocol::probe::WorkerRow;
@@ -15,6 +18,17 @@ use std::collections::HashSet;
 /// Enough of one call's fan-out to name without crowding the stderr it rides
 /// on; the rest is counted aloud, never dropped in silence.
 const NAMED: usize = 5;
+
+/// What a rejection means, said after its diagnostic: the refusal came before
+/// evaluation, so nothing stands and the whole call is resent corrected.
+const REJECTION_TIP: &str = "\nThis call was rejected before it ran: no command ran and no `let` \
+     bound. Fix it and resend the whole call, then consider evicting this turn.\n";
+
+/// What a fault means, said after its one-liner: the engine lost the
+/// report, so nothing about what ran can be assumed either way.
+const FAULT_TIP: &str = "\nThe engine faulted and lost this call's report, so what it did is unknown: \
+     any part of it may have run, and its `let` bindings may or may not stand. Find out \
+     what changed before you resend any of it.\n";
 
 /// The model's sections of a run that reached evaluation: its captured
 /// streams, its settled value, and [`render`]'s suffix and exit; `audit` is
@@ -94,6 +108,23 @@ fn render(
         out.push_str(&orphans);
     }
     (out, exit)
+}
+
+/// A call refused before evaluation: the diagnostic, clipped, then
+/// [`REJECTION_TIP`], which is never clipped.
+pub(crate) fn rejection(rendered: &str) -> String {
+    format!("{}{REJECTION_TIP}", clip(rendered, OPAQUE_CAP))
+}
+
+/// A call the engine could not report: the one-liner, clipped, then
+/// [`FAULT_TIP`], which is never clipped, then the audit of what the run
+/// already committed, if any — [`render`]'s order of remedy and audit.
+pub(crate) fn fault(rendered: &str, audit: Option<&str>) -> String {
+    format!(
+        "{}{FAULT_TIP}{}",
+        clip(rendered, OPAQUE_CAP),
+        audit.unwrap_or_default()
+    )
 }
 
 fn timeout_tip(timeout_secs: u64) -> String {

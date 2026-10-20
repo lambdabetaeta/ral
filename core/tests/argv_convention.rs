@@ -53,6 +53,7 @@ fn run_capture(src: &str) -> (Settled<Value>, String) {
             "{src:?} must reach the evaluator, got {}",
             diagnostics.render().0
         ),
+        RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
     }
 }
 
@@ -79,6 +80,7 @@ fn static_codes(src: &str) -> Vec<String> {
             diagnostics: StaticDiagnostics::Host(e),
             ..
         } => panic!("{src:?}: expected type diagnostics, got host {e:?}"),
+        RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
         RunReport::Ran { .. } => Vec::new(),
     }
 }

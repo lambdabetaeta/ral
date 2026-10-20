@@ -50,14 +50,10 @@ fn strike(cause: crate::process::CancelCause) -> impl Fn(&Mooring, &mut Shell) +
 #[test]
 fn clean_run_settles_with_zero_status() {
     let mut shell = crate::test_helper::core_shell();
-    match shell.run(Run::captured("$[1 + 1]", "<test>")) {
-        RunReport::Ran { ending, .. } => {
-            assert_eq!(ending.status(), 0);
-            let result = ending.into_result();
-            assert!(result.is_ok(), "expected Ok, got {result:?}");
-        }
-        RunReport::Static { .. } => panic!("clean source must not be Static"),
-    }
+    let ending = shell.run(Run::captured("$[1 + 1]", "<test>")).expect_ran();
+    assert_eq!(ending.status(), 0);
+    let result = ending.into_result();
+    assert!(result.is_ok(), "expected Ok, got {result:?}");
 }
 
 #[test]
@@ -73,7 +69,9 @@ fn parse_failure_is_static() {
                 "expected a parse diagnostic"
             );
         }
-        RunReport::Ran { .. } => panic!("malformed source must be Static"),
+        RunReport::Ran { .. } | RunReport::Faulted { .. } => {
+            panic!("malformed source must be Static")
+        }
     }
 }
 
@@ -190,24 +188,22 @@ fn type_failure_is_static() {
                 "expected type diagnostics"
             );
         }
-        RunReport::Ran { .. } => panic!("ill-typed source must be Static"),
+        RunReport::Ran { .. } | RunReport::Faulted { .. } => {
+            panic!("ill-typed source must be Static")
+        }
     }
 }
 
 #[test]
 fn exit_escape_reports_code() {
     let mut shell = crate::test_helper::core_shell();
-    match shell.run(Run::captured("exit 3", "<test>")) {
-        RunReport::Ran { ending, .. } => {
-            assert_eq!(ending.status(), 3);
-            let result = ending.into_result();
-            assert!(
-                matches!(result, Err(Break::Escape(Escape::Exit(3)))),
-                "expected Escape::Exit(3), got {result:?}"
-            );
-        }
-        RunReport::Static { .. } => panic!("`exit 3` must reach evaluation"),
-    }
+    let ending = shell.run(Run::captured("exit 3", "<test>")).expect_ran();
+    assert_eq!(ending.status(), 3);
+    let result = ending.into_result();
+    assert!(
+        matches!(result, Err(Break::Escape(Escape::Exit(3)))),
+        "expected Escape::Exit(3), got {result:?}"
+    );
 }
 
 #[test]
@@ -223,6 +219,7 @@ fn capture_returns_stdout_bytes() {
             );
         }
         RunReport::Static { .. } => panic!("`echo hi` must reach evaluation"),
+        RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
     }
 }
 
@@ -384,29 +381,27 @@ fn an_interrupt_mid_run_unwinds_the_eval() {
         strike(crate::process::CancelCause::Interrupted),
     );
     let mut shell = Shell::root(runtime.into());
-    match shell.run(Run::captured(
-        "interrupt\nlet rpv = 42\nreturn $rpv",
-        "<test>",
-    )) {
-        RunReport::Ran { ending, .. } => {
-            assert_eq!(
-                ending.status(),
-                130,
-                "a foreground cancel observed mid-eval reports 130"
-            );
-            assert!(
-                matches!(
-                    ending,
-                    Ending::Stopped {
-                        cause: crate::process::CancelCause::Interrupted,
-                        ..
-                    }
-                ),
-                "the cancel must unwind into a stop, got {ending:?}"
-            );
-        }
-        RunReport::Static { .. } => panic!("valid source must reach evaluation"),
-    }
+    let ending = shell
+        .run(Run::captured(
+            "interrupt\nlet rpv = 42\nreturn $rpv",
+            "<test>",
+        ))
+        .expect_ran();
+    assert_eq!(
+        ending.status(),
+        130,
+        "a foreground cancel observed mid-eval reports 130"
+    );
+    assert!(
+        matches!(
+            ending,
+            Ending::Stopped {
+                cause: crate::process::CancelCause::Interrupted,
+                ..
+            }
+        ),
+        "the cancel must unwind into a stop, got {ending:?}"
+    );
 }
 
 /// A stop is no error, so `try` passes it and its handler never runs; the
@@ -420,29 +415,27 @@ fn a_try_handler_cannot_settle_a_cancelled_run() {
         strike(crate::process::CancelCause::Interrupted),
     );
     let mut shell = Shell::root(runtime.into());
-    match shell.run(Run::captured(
-        "try { interrupt\nlet x = ()\nreturn $x } { |_| return () }",
-        "<test>",
-    )) {
-        RunReport::Ran { ending, .. } => {
-            assert_eq!(
-                ending.status(),
-                130,
-                "a try handler must not settle a cancelled run at 0"
-            );
-            assert!(
-                matches!(
-                    ending,
-                    Ending::Stopped {
-                        cause: crate::process::CancelCause::Interrupted,
-                        ..
-                    }
-                ),
-                "a try handler must not catch a stop, got {ending:?}"
-            );
-        }
-        RunReport::Static { .. } => panic!("valid source must reach evaluation"),
-    }
+    let ending = shell
+        .run(Run::captured(
+            "try { interrupt\nlet x = ()\nreturn $x } { |_| return () }",
+            "<test>",
+        ))
+        .expect_ran();
+    assert_eq!(
+        ending.status(),
+        130,
+        "a try handler must not settle a cancelled run at 0"
+    );
+    assert!(
+        matches!(
+            ending,
+            Ending::Stopped {
+                cause: crate::process::CancelCause::Interrupted,
+                ..
+            }
+        ),
+        "a try handler must not catch a stop, got {ending:?}"
+    );
 }
 
 /// An aside — a separate `Shell` beside the session, as the REPL runs plugin
@@ -466,24 +459,22 @@ fn an_aside_cannot_absorb_its_callers_interrupt() {
             .as_mut()
             .expect("the aside is joined before the run")
             .run(Run::captured("let y = 1\nreturn $y", "<test>"));
-        match report {
-            RunReport::Ran { ending, .. } => *status.lock().unwrap() = Some(ending.status()),
-            RunReport::Static { .. } => panic!("valid source must reach evaluation"),
-        }
+        let ending = report.expect_ran();
+        *status.lock().unwrap() = Some(ending.status());
     });
     let mut shell = Shell::root(runtime.into());
     *aside.lock().unwrap() = Some(shell.join_session());
-    match shell.run(Run::captured(
-        "interrupt-then-aside\nlet rpv = 42\nreturn $rpv",
-        "<test>",
-    )) {
-        RunReport::Ran { ending, .. } => assert_eq!(
-            ending.status(),
-            130,
-            "the interrupt must survive the aside's entry and unwind the run it was aimed at"
-        ),
-        RunReport::Static { .. } => panic!("valid source must reach evaluation"),
-    }
+    let ending = shell
+        .run(Run::captured(
+            "interrupt-then-aside\nlet rpv = 42\nreturn $rpv",
+            "<test>",
+        ))
+        .expect_ran();
+    assert_eq!(
+        ending.status(),
+        130,
+        "the interrupt must survive the aside's entry and unwind the run it was aimed at"
+    );
     assert_eq!(
         *hook_status.lock().unwrap(),
         Some(0),
@@ -503,14 +494,14 @@ fn an_aside_unwinds_on_an_interrupt_raised_while_it_runs() {
     );
     let shell = Shell::root(runtime.into());
     let mut aside = shell.join_session();
-    match aside.run(Run::captured("interrupt\nlet y = 1\nreturn $y", "<test>")) {
-        RunReport::Ran { ending, .. } => assert_eq!(
-            ending.status(),
-            130,
-            "a Ctrl-C during a hook must unwind the hook it lands in"
-        ),
-        RunReport::Static { .. } => panic!("valid source must reach evaluation"),
-    }
+    let ending = aside
+        .run(Run::captured("interrupt\nlet y = 1\nreturn $y", "<test>"))
+        .expect_ran();
+    assert_eq!(
+        ending.status(),
+        130,
+        "a Ctrl-C during a hook must unwind the hook it lands in"
+    );
 }
 
 /// [`Shell::cancel_handle`] — how a host stops a session it owns — does
@@ -525,26 +516,24 @@ fn cancelling_a_session_by_handle_reaches_its_aside() {
         .cancel_handle()
         .cancel(crate::process::CancelCause::Cancelled);
 
-    match aside.run(Run::captured("let y = 1\nreturn $y", "<test>")) {
-        RunReport::Ran { ending, .. } => {
-            assert_eq!(
-                ending.status(),
-                143,
-                "the aside's run unwinds with the session"
-            );
-            assert!(
-                matches!(
-                    ending,
-                    Ending::Stopped {
-                        cause: crate::process::CancelCause::Cancelled,
-                        ..
-                    }
-                ),
-                "the handle cancel must unwind the aside, got {ending:?}"
-            );
-        }
-        RunReport::Static { .. } => panic!("valid source must reach evaluation"),
-    }
+    let ending = aside
+        .run(Run::captured("let y = 1\nreturn $y", "<test>"))
+        .expect_ran();
+    assert_eq!(
+        ending.status(),
+        143,
+        "the aside's run unwinds with the session"
+    );
+    assert!(
+        matches!(
+            ending,
+            Ending::Stopped {
+                cause: crate::process::CancelCause::Cancelled,
+                ..
+            }
+        ),
+        "the handle cancel must unwind the aside, got {ending:?}"
+    );
 }
 
 /// No session folds the ambient causes: a signal reaches a run only as
@@ -561,17 +550,13 @@ fn a_session_is_deaf_to_the_ambient_causes() {
     let mut shell = Shell::root(runtime.into());
     let report = shell.run(Run::captured("raise\nlet rpv = 42\nreturn $rpv", "<test>"));
     crate::process::cancel::clear_root_request();
-    match report {
-        RunReport::Ran { ending, .. } => {
-            assert_eq!(
-                ending.status(),
-                0,
-                "an ambient cause must not reach the run"
-            );
-            assert!(ending.into_result().is_ok());
-        }
-        RunReport::Static { .. } => panic!("valid source must reach evaluation"),
-    }
+    let ending = report.expect_ran();
+    assert_eq!(
+        ending.status(),
+        0,
+        "an ambient cause must not reach the run"
+    );
+    assert!(ending.into_result().is_ok());
 }
 
 /// The act fires the `TimedOut` cause directly, pinning the `Stopped`
@@ -585,24 +570,22 @@ fn a_walled_run_ends_stopped_timed_out() {
         strike(crate::process::CancelCause::TimedOut),
     );
     let mut shell = Shell::root(runtime.into());
-    match shell.run(Run {
-        wall: Some(std::time::Duration::from_secs(30)),
-        ..Run::captured("expire\nlet rpv = 42\nreturn $rpv", "<test>")
-    }) {
-        RunReport::Ran { ending, .. } => {
-            assert!(
-                matches!(
-                    ending,
-                    Ending::Stopped {
-                        cause: crate::process::CancelCause::TimedOut,
-                        ..
-                    }
-                ),
-                "a TimedOut foreground cancel must end the run stopped"
-            );
-        }
-        RunReport::Static { .. } => panic!("valid source must reach evaluation"),
-    }
+    let ending = shell
+        .run(Run {
+            wall: Some(std::time::Duration::from_secs(30)),
+            ..Run::captured("expire\nlet rpv = 42\nreturn $rpv", "<test>")
+        })
+        .expect_ran();
+    assert!(
+        matches!(
+            ending,
+            Ending::Stopped {
+                cause: crate::process::CancelCause::TimedOut,
+                ..
+            }
+        ),
+        "a TimedOut foreground cancel must end the run stopped"
+    );
 }
 
 /// A real wall, so the cancel lands *during* the script: in
@@ -615,22 +598,22 @@ fn a_walled_run_ends_stopped_timed_out() {
 #[test]
 fn mid_script_wall_keeps_the_bindings_that_landed() {
     let mut shell = crate::test_helper::core_shell();
-    match shell.run(Run {
-        wall: Some(std::time::Duration::from_millis(500)),
-        ..Run::captured("let pre_wall = 1\nsleep 30\nlet post_wall = 2", "<test>")
-    }) {
-        RunReport::Ran { ending, .. } => assert!(
-            matches!(
-                ending,
-                Ending::Stopped {
-                    cause: crate::process::CancelCause::TimedOut,
-                    ..
-                }
-            ),
-            "a wall cut mid-script must end the run stopped, got {ending:?}"
+    let ending = shell
+        .run(Run {
+            wall: Some(std::time::Duration::from_millis(500)),
+            ..Run::captured("let pre_wall = 1\nsleep 30\nlet post_wall = 2", "<test>")
+        })
+        .expect_ran();
+    assert!(
+        matches!(
+            ending,
+            Ending::Stopped {
+                cause: crate::process::CancelCause::TimedOut,
+                ..
+            }
         ),
-        RunReport::Static { .. } => panic!("valid source must reach evaluation"),
-    }
+        "a wall cut mid-script must end the run stopped, got {ending:?}"
+    );
     assert!(
         shell.scope_lookup("pre_wall").is_some(),
         "the `let` that landed before the wall stays bound in the session"
@@ -711,10 +694,10 @@ fn panicking_shell() -> Shell {
 fn panicking_run_reports_failed_and_rolls_back() {
     let mut shell = panicking_shell();
 
-    match shell.run(Run::captured("let pre_panic = 1", "<test>")) {
-        RunReport::Ran { ending, .. } => assert!(matches!(ending, Ending::Settled { .. })),
-        RunReport::Static { .. } => panic!("the pre-run binding must evaluate"),
-    }
+    let ending = shell
+        .run(Run::captured("let pre_panic = 1", "<test>"))
+        .expect_ran();
+    assert!(matches!(ending, Ending::Settled { .. }));
 
     match shell.run(Run::captured("let mid_panic = 2\ncore-panic-now", "<test>")) {
         RunReport::Static {
@@ -743,15 +726,13 @@ fn panicking_run_reports_failed_and_rolls_back() {
         "the panicking run's own partial binding must be rolled back"
     );
 
-    match shell.run(Run::captured("$pre_panic", "<test>")) {
-        RunReport::Ran { ending, .. } => {
-            assert!(
-                matches!(ending, Ending::Settled { .. }),
-                "the next run must evaluate clean on the same shell"
-            );
-        }
-        RunReport::Static { .. } => panic!("the healed shell must still evaluate"),
-    }
+    let ending = shell
+        .run(Run::captured("$pre_panic", "<test>"))
+        .expect_ran();
+    assert!(
+        matches!(ending, Ending::Settled { .. }),
+        "the next run must evaluate clean on the same shell"
+    );
 }
 
 /// A host-supplied handler panicking mid-enquiry unwinds back through the
@@ -972,6 +953,7 @@ fn single_command_still_reports_the_input_shape() {
             }
             RunReport::Ran { ending, .. } => panic!("{src:?} must fault, got {ending:?}"),
             RunReport::Static { .. } => panic!("{src:?} must reach evaluation"),
+            RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
         }
     }
 }
@@ -1022,6 +1004,7 @@ fn a_dispatch_asking_no_trail_reports_none() {
             "an unasked dispatch must report no trail at all"
         ),
         RunReport::Static { .. } => panic!("valid source must reach evaluation"),
+        RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
     }
 }
 
@@ -1053,6 +1036,7 @@ fn a_panicked_dispatch_reports_static_and_leaves_the_next_trail_empty() {
             "the panicked dispatch's scope must not leak into the next one"
         ),
         RunReport::Static { .. } => panic!("valid source must reach evaluation"),
+        RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
     }
 }
 
@@ -1068,6 +1052,7 @@ fn ran(runtime: crate::Runtime, run: Run) -> (Ending, String) {
             (ending, String::from_utf8_lossy(&stdout).into_owned())
         }
         RunReport::Static { .. } => panic!("valid source must reach evaluation"),
+        RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
     }
 }
 

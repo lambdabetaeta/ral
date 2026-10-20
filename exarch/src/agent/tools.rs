@@ -30,13 +30,32 @@ pub(crate) fn dispatch(
 }
 
 /// A required string field of the model's input, or the reason it is not one.
+/// The reason says what was received, so the model can correct the call: the
+/// fields it sent when the field is absent, the field's name when it is not a
+/// string.
 pub(crate) fn required_str<'a>(input: &'a Value, field: &str) -> Result<&'a str, String> {
-    input
+    let object = input
         .as_object()
-        .ok_or_else(|| "tool input is not a JSON object".to_string())?
-        .get(field)
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("missing required string field `{field}`"))
+        .ok_or_else(|| "tool input is not a JSON object".to_string())?;
+    match object.get(field) {
+        None => {
+            let received = if object.is_empty() {
+                "no fields".to_string()
+            } else {
+                object
+                    .keys()
+                    .map(|key| format!("`{key}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            Err(format!(
+                "missing required string field `{field}`; got {received}"
+            ))
+        }
+        Some(value) => value
+            .as_str()
+            .ok_or_else(|| format!("field `{field}` must be a string")),
+    }
 }
 
 /// The result a malformed call earns.

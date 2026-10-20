@@ -57,7 +57,7 @@ parent's seal, so core holds no spawn machinery for it.** The why is
 
 The frame algebra. Everything on it is a wire type; nothing here carries.
 
-- `PROTOCOL_VERSION` (currently 23) — checked at `Attach`; a mismatch refuses.
+- `PROTOCOL_VERSION` (currently 24) — checked at `Attach`; a mismatch refuses.
 - `check_media` — the same number compared at *build* time, against the
   `proto_version=` line `vm-image/build-boot.sh` records for the engine in the
   guest media; `synod/examples/check-media.rs`, tauri's `beforeBuildCommand`,
@@ -95,8 +95,12 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
   `Terminate` whose cause is `RootAbort`); applied by `Scopes::apply` under
   both carriers.
 - `Report` / `Ending` / `FailureStatus` — the terminal frame:
-  `Static { rendered, status }` or `Ran { ending, captured, trail }`; `Ending`
-  has no process-stop arm — ral does not suspend — so every ending is
+  `Static { rendered, status }` (a refusal: the run never reached evaluation, so
+  no command ran and nothing was bound), `Ran { ending, captured, trail }`, or
+  `Faulted { rendered, status }` (the engine could not report the run: a panic
+  in the run or in the report plumbing, or a report the fuse would not pass; what
+  the run did is unknown, so a host reads it as neither a refusal nor an ending);
+  `Ending` has no process-stop arm — ral does not suspend — so every ending is
   `Settled`/`Raised`/`Stopped`/`Unreturnable`/`Exited`. `Stopped` is a
   cancellation stop that reached the top, a top-level effect like `Exited`,
   carrying its cause and its rendered diagnostic (empty for the closed-stdout
@@ -117,10 +121,15 @@ every diagnostic renders here, runtime errors against the `SourceDb` and static
 ones against the `Source` the diagnostic carries
 ([[decisions/260902_static-diagnostics-render-at-the-seam|static-diagnostics-render-at-the-seam]]).
 `not_data` / `unreturnable` word a value the wire cannot carry; `record_of`
-is the record `try` hands its handler. `Report::host_fault` is the engine's
-own refusal (a panicked worker, a busy engine) shaped as a `Static`, so a host
-never has to tell it from a run's own failure. The two seam test modules live
-here.
+is the record `try` hands its handler. A panicked run is a
+`RunReport::Faulted`, projected to a `Report::Faulted` on its error's status.
+`Report::refused` is the engine's own refusal before the run reached
+evaluation (a busy engine, a dispatch that could not be sent) shaped as a
+`Static`, so a host never has to tell it from a run's own failure;
+`Report::faulted` is a fault outside the run's report (a panicked worker, a
+report the fuse would not pass) shaped as a `Faulted`. Both render the
+spanless one-liner through the one rule `StaticDiagnostics::Host` uses. The
+two seam test modules live here.
 
 ## `core/src/protocol/probe.rs`
 
@@ -241,7 +250,7 @@ The two interpretations of the algebra, and what they share.
   its own patience, counted in waits observed. A probe writes `Frame::Probe`
   and drains the event queue to the `Event::Reading` under its id, stashing
   what it reads past. A frame the fuse refuses is answered where its writer
-  stands: a `Dispatch` by a `Report::host_fault` stashed on its own event
+  stands: a `Dispatch` by a `Report::refused` stashed on its own event
   stream, a `Probe` by `ProbeError::Rejected`, an `Answer` by an `Err` answer;
   an `Attach`, with no session yet to refuse into, severs `Refused`.
 - `spawn_wire_reader` / `spawn_heartbeat` — the reader severs *before*
@@ -266,16 +275,17 @@ The wire carrier's engine half: a connection-lived engine process.
   reported as an end the front-end asked for; a wire fault demotes even a
   `Requested` end to `1`.
 - `engine_write` / `engine_send` — every engine-side write. A `Report` or
-  `Reading` the fuse refuses is replaced by its `refusal`; any other refusal
+  `Reading` the fuse refuses is replaced by a `fault`; any other refusal
   goes back to its writer, `engine_send` diagnosing and dropping a frame with
   no writer to refuse into (a session frame, a `Pong`).
 - The worker's `Rails` — an outlet writing `Frame::Event` through
   `engine_write` (an `Outlet` answers `Result<(), WriteError>`), a
   `ChannelDeferredSink` writing `Frame::Session`, a `WireDesk`, and
   `Fork::Seal`.
-- `WorkItem` / `refusal` — what the worker is handed, a run or a probe, and
-  the refusal in the shape each waits on: a busy or panicked run ends in a
-  `Report::host_fault`, a probe in an `Event::Reading(Err(..))`.
+- `WorkItem` / `refusal` / `fault` — what the worker is handed, a run or a probe, and
+  the refusal or fault in the shape each waits on: a busy engine's run ends in
+  a `Report::refused`, a panicked worker's or fuse-refused one in a
+  `Report::faulted`, a probe in an `Event::Reading(Err(..))` either way.
 - `WireDesk` / `Parks` — the wire engine's `EnquiryDesk`: writes
   `Event::Enquiry` (a refused or severed write is its own `Err`), then parks on a oneshot registered under its `EnquiryId`
   until `Frame::Answer` fills it or the run's own cancel scope fires. A park

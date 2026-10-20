@@ -648,6 +648,7 @@ fn run_captured(
         RunReport::Static { .. } => {
             panic!("well-formed source must run, not fail statically: {src:?}")
         }
+        RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
     }
 }
 

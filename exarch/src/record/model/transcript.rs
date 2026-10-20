@@ -9,7 +9,7 @@ use super::{
     Body, Context, ItemKind, Linked, Location, Pointer, Span, Standing, Turn, chat_messages,
     not_recorded_refusal_turn,
 };
-use crate::provider::tools::RAL_TOOL;
+use crate::provider::tools::{COMMAND, RAL_TOOL};
 use crate::record::{
     Entry, GrepAnswer, GrepHit, Locus, Protocol, Record, Recorded, Refusal, Role,
     TranscriptMessage, TranscriptPart, TranscriptTurn, TurnKind,
@@ -505,7 +505,7 @@ fn transcript_program(call: &ToolCall) -> TranscriptPart {
         .unwrap_or_default();
     let source = if call.fn_name == RAL_TOOL {
         call.fn_arguments
-            .get("cmd")
+            .get(COMMAND)
             .and_then(serde_json::Value::as_str)
             .map(str::to_string)
             .unwrap_or_default()

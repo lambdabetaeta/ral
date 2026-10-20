@@ -176,16 +176,13 @@ static WORKER_TEST_BUILTINS: &[BuiltinEntry] = &WORKER_TEST_BUILTINS_ARR;
 fn run_top_level(shell: &mut Shell, src: &str) {
     use ral_core::protocol::Run;
 
-    use ral_core::run::{RunReport, RunRequest};
+    use ral_core::run::RunRequest;
     let req = RunRequest::from(Run::captured(src, "<test>"));
-    match shell.run(req) {
-        RunReport::Ran { ending, .. } => {
-            ending
-                .into_result()
-                .expect("worker-registry fixture source must run cleanly");
-        }
-        RunReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
-    }
+    shell
+        .run(req)
+        .expect_ran()
+        .into_result()
+        .expect("worker-registry fixture source must run cleanly");
 }
 
 /// Dressed, `service` resolves to its own `Handle`-returning scheme rather
@@ -632,6 +629,7 @@ fn help_lists_a_library_section_only_on_a_shell_that_sourced_it() {
                     .expect("help output is UTF-8")
             }
             RunReport::Static { .. } => panic!("`help` must compile"),
+            RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
         }
     };
 

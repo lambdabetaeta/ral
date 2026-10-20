@@ -5,22 +5,22 @@
 use super::{input_error, required_str};
 use crate::agent::Avatar;
 use crate::bus::Emitter;
-use crate::provider::tools::{CALL_TIMEOUT_SECS, DESCRIPTION_MAX, RAL};
+use crate::provider::tools::{CALL_TIMEOUT_SECS, COMMAND, DESCRIPTION_MAX, RAL};
 use crate::record::ToolResult as SessionToolResult;
 use crate::record::{BlockId, Display, Verdict};
 use serde_json::Value;
 
 #[cfg_attr(test, derive(Debug))]
 struct RalArgs {
-    cmd: String,
-    /// The rail's collapsed label, with the full `cmd` behind it.
+    command: String,
+    /// The rail's collapsed label, with the full `command` behind it.
     description: String,
     timeout_secs: u64,
 }
 
 /// Parse the model's JSON, or a reason short enough for the rail's error block.
 fn parse_args(input: &Value) -> Result<RalArgs, String> {
-    let cmd = required_str(input, "cmd")?.to_string();
+    let command = required_str(input, COMMAND)?.to_string();
     let description = required_str(input, "description")?.trim().to_string();
     if description.is_empty() {
         return Err("`description` must be non-empty".to_string());
@@ -52,7 +52,7 @@ fn parse_args(input: &Value) -> Result<RalArgs, String> {
         }
     };
     Ok(RalArgs {
-        cmd,
+        command,
         description,
         timeout_secs,
     })
@@ -106,12 +106,16 @@ pub(crate) fn dispatch(
     session: &Avatar,
     emit: &Emitter,
 ) -> SessionToolResult {
-    let args = match parse_args(input) {
-        Ok(a) => a,
+    let RalArgs {
+        command,
+        description,
+        timeout_secs,
+    } = match parse_args(input) {
+        Ok(args) => args,
         Err(reason) => return invalid_input(id, &reason, session),
     };
-    let call = record_call(session, args.cmd.clone(), Some(args.description.clone()));
-    let crate::agent::Evaluated { text, failed } = session.ral(&args.cmd, args.timeout_secs, emit);
+    let call = record_call(session, command.clone(), Some(description));
+    let crate::agent::Evaluated { text, failed } = session.ral(&command, timeout_secs, emit);
     record_result(session, &text, failed, call);
     SessionToolResult { id, content: text }
 }

@@ -231,6 +231,7 @@ mod enquiry_tests {
         }) {
             RunReport::Ran { .. } => {}
             RunReport::Static { .. } => panic!("`ask-desk` must reach evaluation"),
+            RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
         }
 
         let answer = answer
@@ -337,27 +338,30 @@ mod durability_tests {
         |_, _| Ok(()),
     )];
 
-    /// A panicking run arrives as an ordinary `Report::Static{Host}` — the run
-    /// door caught it and rolled the shell back — and the same transport
-    /// dispatches the next run cleanly.
+    /// A panicking run arrives as a `Report::Faulted` — the run door caught it
+    /// and rolled the shell back — and the same transport dispatches the next
+    /// run cleanly.
     #[test]
     fn panicking_dispatch_reports_and_the_session_survives() {
         let transport = crate::carrier::testkit::boot(&PANICKY);
 
         let report = crate::carrier::testkit::eval(&transport, "protocol-panic-now");
         match report {
-            Report::Static { rendered, .. } => {
+            Report::Faulted { rendered, status } => {
                 assert!(rendered.contains("run panicked"), "got {rendered:?}");
+                assert_eq!(status.get(), 101);
             }
-            other @ Report::Ran { .. } => {
-                panic!("a panicking run must report Static Host, got {other:?}")
+            other @ (Report::Static { .. } | Report::Ran { .. }) => {
+                panic!("a panicking run must report Faulted, got {other:?}")
             }
         }
 
         let report = crate::carrier::testkit::eval(&transport, "$[1 + 1]");
         match report {
             Report::Ran { ending, .. } => assert!(matches!(ending, Ending::Settled { .. })),
-            Report::Static { .. } => panic!("the healed session must evaluate"),
+            Report::Static { .. } | Report::Faulted { .. } => {
+                panic!("the healed session must evaluate")
+            }
         }
     }
 }

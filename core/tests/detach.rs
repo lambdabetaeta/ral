@@ -85,6 +85,7 @@ fn birth(shell: &mut Shell, call: &str) -> serde_json::Value {
             panic!("{call} must return a receipt record, got {ending:?}")
         }
         RunReport::Static { .. } => panic!("{call} must compile"),
+        RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
     }
 }
 
@@ -103,6 +104,7 @@ fn refusal(shell: &mut Shell, source: &str) -> String {
         } => error.to_string(),
         RunReport::Ran { ending, .. } => panic!("{source} must be refused, got {ending:?}"),
         RunReport::Static { .. } => panic!("{source} must compile"),
+        RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
     }
 }
 

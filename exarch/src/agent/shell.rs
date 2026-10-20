@@ -7,7 +7,7 @@
 use crate::agent::Avatar;
 use crate::agent::EngineLost;
 use crate::agent::desk;
-use crate::agent::digest::{OPAQUE_CAP, clip, render};
+use crate::agent::digest::render;
 use crate::bus::Emitter;
 use crate::record::{AgentLog, EditAuthority, Span};
 use crate::record::{AgentState, Forensic};
@@ -181,7 +181,11 @@ impl Avatar {
                 }
                 Err(s) => (lost(s), true),
             },
-            Ok(Report::Static { rendered, .. }) => (clip(&rendered, OPAQUE_CAP), true),
+            Ok(Report::Static { rendered, .. }) => (shell_eval::report::rejection(&rendered), true),
+            Ok(Report::Faulted { rendered, .. }) => (
+                shell_eval::report::fault(&rendered, host.desk.services.acts.audit().as_deref()),
+                true,
+            ),
             Err(s) => (lost(s), true),
         };
         if let Some(turn) = turn {

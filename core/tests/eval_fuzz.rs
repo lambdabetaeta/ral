@@ -25,6 +25,8 @@ fn run_on(shell: &mut Shell, input: &str) -> ral_core::types::Settled<Value> {
             let msg = diagnostics.render().0;
             Err(ral_core::types::Error::raised(msg, 2).into())
         }
+        // A panic is never a legitimate "no value": it fails the test.
+        RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
     }
 }
 

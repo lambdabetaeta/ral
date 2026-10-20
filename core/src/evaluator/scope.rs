@@ -230,13 +230,14 @@ mod tests {
     #[test]
     fn try_names_the_failing_command_without_a_trail() {
         let mut shell = crate::test_helper::core_shell();
-        let cmd = match shell.run(Run::captured(
-            r#"try { sh -c "exit 1"; return 'unreached' } { |e| return $e[cmd] }"#,
-            "<test>",
-        )) {
-            RunReport::Ran { ending, .. } => ending.into_result().expect("the handler must run"),
-            RunReport::Static { .. } => panic!("well-formed source must run"),
-        };
+        let cmd = shell
+            .run(Run::captured(
+                r#"try { sh -c "exit 1"; return 'unreached' } { |e| return $e[cmd] }"#,
+                "<test>",
+            ))
+            .expect_ran()
+            .into_result()
+            .expect("the handler must run");
         assert_eq!(cmd.to_string(), "sh");
         assert_eq!(
             shell.local.audit.active_policy(),
@@ -274,8 +275,10 @@ mod tests {
         }
         .shell(crate::terminal::TerminalState::default());
         match shell.run(Run::captured("audit { core-panic-now }", "<test>")) {
-            RunReport::Static { .. } => {}
-            RunReport::Ran { .. } => panic!("a panicking body must report Static"),
+            RunReport::Faulted { .. } => {}
+            RunReport::Static { .. } | RunReport::Ran { .. } => {
+                panic!("a panicking body must report Faulted")
+            }
         }
         assert_eq!(
             shell.local.audit.active_policy(),
@@ -303,8 +306,10 @@ mod tests {
             format!("let checkpoint_leak = 1\ncd '{tmp}'\ncore-panic-now"),
             "<test>",
         )) {
-            RunReport::Static { .. } => {}
-            RunReport::Ran { .. } => panic!("a panicking body must report Static"),
+            RunReport::Faulted { .. } => {}
+            RunReport::Static { .. } | RunReport::Ran { .. } => {
+                panic!("a panicking body must report Faulted")
+            }
         }
 
         assert!(
@@ -325,13 +330,10 @@ mod tests {
     #[cfg(unix)]
     fn nested_delimiters_flat_merge() {
         let mut shell = crate::test_helper::core_shell();
-        let report = match shell.run(Run::captured(
+        let report = shell.run(Run::captured(
             "audit { /bin/echo one; try { /bin/echo two } { |_e| return () }; /bin/echo three }",
             "<test>",
-        )) {
-            RunReport::Ran { ending, .. } => ending.into_result().expect("audit body must succeed"),
-            RunReport::Static { .. } => panic!("well-formed source must run"),
-        };
+        )).expect_ran().into_result().expect("audit body must succeed");
         assert_eq!(
             command_argv0s(&report),
             ["/bin/echo", "/bin/echo", "/bin/echo"]
@@ -344,13 +346,14 @@ mod tests {
     #[test]
     fn builtins_leave_no_command_observation() {
         let mut shell = crate::test_helper::core_shell();
-        let report = match shell.run(Run::captured(
-            "audit { echo one; length [1, 2]; /bin/echo two }",
-            "<test>",
-        )) {
-            RunReport::Ran { ending, .. } => ending.into_result().expect("audit body must succeed"),
-            RunReport::Static { .. } => panic!("well-formed source must run"),
-        };
+        let report = shell
+            .run(Run::captured(
+                "audit { echo one; length [1, 2]; /bin/echo two }",
+                "<test>",
+            ))
+            .expect_ran()
+            .into_result()
+            .expect("audit body must succeed");
         assert_eq!(command_argv0s(&report), ["/bin/echo"]);
     }
 
@@ -360,12 +363,11 @@ mod tests {
     #[cfg(unix)]
     fn audit_reports_ok_over_its_trail() {
         let mut shell = crate::test_helper::core_shell();
-        let report = match shell.run(Run::captured("audit { /bin/echo hi }", "<test>")) {
-            RunReport::Ran { ending, .. } => ending
-                .into_result()
-                .expect("audit { echo hi } must succeed"),
-            RunReport::Static { .. } => panic!("well-formed source must run"),
-        };
+        let report = shell
+            .run(Run::captured("audit { /bin/echo hi }", "<test>"))
+            .expect_ran()
+            .into_result()
+            .expect("audit { echo hi } must succeed");
         let map = report.as_map("test").expect("audit returns a map");
         match map.get("outcome").as_deref() {
             Some(Value::Variant { label, .. }) => assert_eq!(label.as_ref(), "ok"),

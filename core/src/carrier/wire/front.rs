@@ -372,7 +372,7 @@ impl Transport for WireTransport {
         // crossing a wire is a frame on `events()`, answered by whoever drains
         // it — `dispatch_to_report`.
         if let Err(WriteError::Unencodable(e)) = self.write(&Frame::Dispatch(id, Box::new(run))) {
-            let report = Report::host_fault(format!("dispatch: the run could not be sent: {e}"));
+            let report = Report::refused(format!("dispatch: the run could not be sent: {e}"));
             self.ends
                 .events
                 .stash

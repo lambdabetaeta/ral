@@ -20,10 +20,10 @@ use ral_core::types::{Break, Escape, Settled, Shell, Value};
 /// and return the body's `Settled<Value>`.  Every test below picks source
 /// it expects to compile, so a static diagnostic is a test bug.
 fn eval(shell: &mut Shell, source: &str) -> Settled<Value> {
-    match shell.run(Run::foreground(source, "<test>")) {
-        RunReport::Ran { ending, .. } => ending.into_result(),
-        RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
-    }
+    shell
+        .run(Run::foreground(source, "<test>"))
+        .expect_ran()
+        .into_result()
 }
 
 /// Run `source` expecting it to be rejected before evaluation, and hand back
@@ -35,6 +35,7 @@ fn expect_static(source: &str) -> StaticDiagnostics {
         RunReport::Ran { ending, .. } => {
             panic!("{source:?}: expected a static rejection, got {ending:?}")
         }
+        RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
     }
 }
 

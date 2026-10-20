@@ -386,7 +386,7 @@ mod tests {
             captured_content: Some(MessageContent::from(vec![ToolCall {
                 call_id: "call-1".into(),
                 fn_name: "ral".into(),
-                fn_arguments: serde_json::json!({ "cmd": "echo hi" }),
+                fn_arguments: serde_json::json!({ "command": "echo hi" }),
                 thought_signatures: None,
             }])),
             captured_stop_reason: Some(StopReason::MaxTokens("length".into())),

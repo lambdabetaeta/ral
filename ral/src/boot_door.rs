@@ -140,9 +140,9 @@ pub(crate) fn settle(report: Result<Report, Severed>) -> Result<RcSettings, i32>
             errln!("ral: {severed}");
             return Err(1);
         }
-        Ok(Report::Static { rendered, status }) => {
+        Ok(Report::Static { rendered, status } | Report::Faulted { rendered, status }) => {
             err!("{rendered}");
-            return Err(status);
+            return Err(status.get());
         }
         Ok(Report::Ran { ending, .. }) => ending,
     };

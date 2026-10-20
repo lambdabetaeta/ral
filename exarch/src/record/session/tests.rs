@@ -28,7 +28,7 @@ fn assistant_with_tool(id: &str) -> ChatMessage {
     ChatMessage::assistant(vec![ContentPart::ToolCall(ToolCall {
         call_id: id.into(),
         fn_name: "ral".into(),
-        fn_arguments: serde_json::json!({"cmd": "pwd"}),
+        fn_arguments: serde_json::json!({"command": "pwd"}),
         thought_signatures: None,
     })])
 }

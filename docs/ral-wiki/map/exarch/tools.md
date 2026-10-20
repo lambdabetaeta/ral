@@ -27,13 +27,14 @@ module. The fleet's `Launch` carries one `Toolset`, and both `provider.complete`
 what is recognised cannot disagree; an unadvertised name earns `unknown tool` and a `Forensic::Error`.
 Every fork and desk spawn inherits its parent's set verbatim. Malformed input is
 answered through the shared `required_str`/`input_error` (`agent/tools.rs`), in the same words
-for every tool.
+for every tool; a missing field is answered with the fields the call did carry, so the model
+can see what it sent.
 
 - **`ral`** (`agent/tools/ral.rs`) — the one call that crosses the provider
   boundary: evaluate ral source against the session shell, synchronously,
-  through `Avatar::ral` and [[map/exarch/shell-eval|`run_shell`]]. Its input is a required `cmd`
+  through `Avatar::ral` and [[map/exarch/shell-eval|`run_shell`]]. Its input is a required `command`
   (the ral source) and a required one-line `description` (shown on the
-  [[map/exarch/frontend|rail]]; the full `cmd` opens in the collapsible
+  [[map/exarch/frontend|rail]]; the full `command` opens in the collapsible
   tool-call block; oversize descriptions are truncated, never rejected). An
   optional `timeout_secs` bounds the call, defaulting to `CALL_TIMEOUT_SECS`
   (60s) — a default, not a cap: raise it for known-long work, or `spawn` what

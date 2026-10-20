@@ -14,7 +14,7 @@ use ral_core::boot::{HostSurface, boot_shell};
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::untag;
 use ral_core::protocol::Run;
-use ral_core::run::{RunReport, RunRequest};
+use ral_core::run::RunRequest;
 use ral_core::terminal::TerminalState;
 use ral_core::types::{Observation, Settled, Shell, Value};
 use ral_core::{EventSink, SurfaceSink};
@@ -63,13 +63,13 @@ fn kit_events(events: &[FOValue]) -> Vec<FOValue> {
 /// settled value.  These sources are well-formed, so a static diagnostic is
 /// a test bug.
 fn run(shell: &mut Shell, source: &str, surface: Option<SurfaceSink>) -> Settled<Value> {
-    match shell.run(RunRequest {
-        surface,
-        ..RunRequest::from(Run::foreground(source, "<test>"))
-    }) {
-        RunReport::Ran { ending, .. } => ending.into_result(),
-        RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
-    }
+    shell
+        .run(RunRequest {
+            surface,
+            ..RunRequest::from(Run::foreground(source, "<test>"))
+        })
+        .expect_ran()
+        .into_result()
 }
 
 /// With no sink installed `surface` returns Unit and is otherwise inert.

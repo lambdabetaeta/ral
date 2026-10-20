@@ -284,7 +284,7 @@ pub(crate) fn ral_call(id: &str, cmd: &str) -> ToolCall {
         call_id: id.into(),
         fn_name: "ral".into(),
         fn_arguments: serde_json::json!({
-            "cmd": cmd,
+            "command": cmd,
             "description": "a4 test command",
         }),
         thought_signatures: None,

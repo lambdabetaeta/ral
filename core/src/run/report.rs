@@ -9,7 +9,7 @@ use crate::first_order::datum::Datum;
 use crate::first_order::{FOValue, NotData, Opaque};
 use crate::process::CancelCause;
 use crate::protocol::{Ending, FailureStatus, Report};
-use crate::run::{RunReport, StaticDiagnostics};
+use crate::run::RunReport;
 use crate::types::{Error, Shell};
 
 /// A settled result that cannot cross, said with what the author likely
@@ -117,7 +117,10 @@ impl RunReport {
             // carets point into, so nothing about it was ever registered.
             Self::Static { diagnostics } => {
                 let (rendered, status) = diagnostics.render();
-                Report::Static { rendered, status }
+                Report::Static {
+                    rendered,
+                    status: FailureStatus::from(status),
+                }
             }
             Self::Ran {
                 ending,
@@ -128,17 +131,39 @@ impl RunReport {
                 captured,
                 trail: trail.into_iter().map(Datum::encode).collect(),
             },
+            Self::Faulted { error } => {
+                let (rendered, status) = super::render_spanless(&error);
+                Report::Faulted {
+                    rendered,
+                    status: FailureStatus::from(status),
+                }
+            }
         }
     }
 }
 
 impl Report {
-    /// A refusal raised outside the run — a panicked worker, a busy engine, a
-    /// frame the fuse would not pass — rendered through the same door as a run's own static
-    /// failure, so a host never has to know which of the two it is printing.
-    pub(crate) fn host_fault(message: impl Into<String>) -> Self {
-        let (rendered, status) = StaticDiagnostics::Host(Error::new(message)).render();
-        Self::Static { rendered, status }
+    /// A refusal before the run reached evaluation (a busy engine, a dispatch
+    /// that could not be sent), rendered as the same one-liner a run's own
+    /// host-level static failure is, so a host never has to know which of the
+    /// two it is printing.
+    pub(crate) fn refused(message: impl Into<String>) -> Self {
+        let (rendered, status) = super::render_spanless(&Error::new(message));
+        Self::Static {
+            rendered,
+            status: FailureStatus::from(status),
+        }
+    }
+
+    /// A fault outside the run's own report (a panicked engine worker, a
+    /// report the frame fuse would not pass): the run may have run, in part or
+    /// whole, so it is no refusal. Rendered as the same one-liner a refusal is.
+    pub(crate) fn faulted(message: impl Into<String>) -> Self {
+        let (rendered, status) = super::render_spanless(&Error::new(message));
+        Self::Faulted {
+            rendered,
+            status: FailureStatus::from(status),
+        }
     }
 }
 
@@ -192,6 +217,7 @@ mod runtime_error_seam_tests {
 mod static_diagnostic_seam_tests {
     use super::*;
     use crate::protocol::Run;
+    use crate::run::StaticDiagnostics;
 
     /// The wire report for `src`, and how many registry ids the run minted.
     fn project(src: &str) -> (String, i32, u32) {
@@ -206,7 +232,7 @@ mod static_diagnostic_seam_tests {
         let Report::Static { rendered, status } = report.into_report(&shell) else {
             panic!("a static run must project to Report::Static");
         };
-        (rendered, status, minted)
+        (rendered, status.get(), minted)
     }
 
     #[test]
@@ -269,5 +295,36 @@ mod static_diagnostic_seam_tests {
         assert!(rendered.contains("hook 'x' is not registered"));
         assert!(!rendered.contains('╰'), "no span, no caret: {rendered:?}");
         assert!(rendered.ends_with('\n'));
+    }
+
+    /// A refusal is a `Static`, a fault is a `Faulted`; both are the one-liner.
+    #[test]
+    fn a_refusal_and_a_fault_are_distinct_one_liners() {
+        let Report::Static { rendered, status } = Report::refused("engine busy") else {
+            panic!("a refusal must be Report::Static");
+        };
+        assert_eq!(status.get(), 1);
+        assert!(rendered.contains("engine busy") && !rendered.contains('╰'));
+
+        let Report::Faulted { rendered, status } = Report::faulted("worker panicked") else {
+            panic!("a fault must be Report::Faulted");
+        };
+        assert_eq!(status.get(), 1);
+        assert!(rendered.contains("worker panicked") && !rendered.contains('╰'));
+    }
+
+    /// A panicked run projects to `Faulted` on its own status, not to `Static`.
+    #[test]
+    fn a_faulted_run_projects_to_a_faulted_report() {
+        let shell = crate::test_helper::core_shell();
+        let report = RunReport::Faulted {
+            error: Error::raised("run panicked: boom", 101),
+        }
+        .into_report(&shell);
+        let Report::Faulted { rendered, status } = report else {
+            panic!("a faulted run must project to Report::Faulted");
+        };
+        assert_eq!(status.get(), 101);
+        assert!(rendered.contains("run panicked: boom"), "{rendered:?}");
     }
 }

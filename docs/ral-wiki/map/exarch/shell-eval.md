@@ -32,7 +32,11 @@ through `report::tool_result`, which also reports whether the run failed:
   one inference pass every evaluated path shares
   ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]).
   Parse/type errors come back as `Report::Static { rendered, status }`, already
-  the caret report the protocol drew, which the model reads clipped whole; on
+  the caret report the protocol drew, which the model reads clipped whole, then
+  the rejection tip (`report::rejection`: no command ran and no `let` bound,
+  resend the whole call); a `Report::Faulted` reads clipped, then the fault
+  sentence (`report::fault`: some or all of the call may have run, check what
+  stands before retrying); on
   success the *annotated* comp
   runs ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]);
 - **`caps`** — the agent's `GrantStack` (`Agent::caps`), pushed for the eval's dynamic extent.

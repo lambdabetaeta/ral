@@ -12,17 +12,16 @@ use common::fresh_shell;
 
 use ral_core::Value;
 use ral_core::protocol::Run;
-use ral_core::run::RunReport;
 use ral_core::types::{Settled, Shell};
 
 /// Run one top-level run of `source` through the public `run` door
 /// and return the body's `Settled<Value>`.  Every test below picks source
 /// it expects to compile, so a static diagnostic is a test bug.
 fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
-    match shell.run(Run::foreground(source, "<test>")) {
-        RunReport::Ran { ending, .. } => ending.into_result(),
-        RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
-    }
+    shell
+        .run(Run::foreground(source, "<test>"))
+        .expect_ran()
+        .into_result()
 }
 
 /// Pull the `answer` field out of a module Map.

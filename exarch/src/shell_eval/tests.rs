@@ -90,6 +90,9 @@ fn run_shell_under(
         Ok(ral_core::protocol::Report::Static { rendered, .. }) => {
             panic!("static failure: {rendered}")
         }
+        Ok(ral_core::protocol::Report::Faulted { rendered, .. }) => {
+            panic!("engine fault: {rendered}")
+        }
         Err(s) => panic!("an identity seat never severs: {s}"),
     }
 }

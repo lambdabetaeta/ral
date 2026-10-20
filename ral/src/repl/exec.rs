@@ -146,9 +146,9 @@ pub(super) fn step(
             errln!("ral: {severed}");
             return Step::Exit(1);
         }
-        Ok(Report::Static { rendered, status }) => {
+        Ok(Report::Static { rendered, status } | Report::Faulted { rendered, status }) => {
             err!("{rendered}");
-            (status, Step::Continue)
+            (status.get(), Step::Continue)
         }
         Ok(Report::Ran { ending, .. }) => {
             let status = ending.status();

@@ -21,6 +21,10 @@ impl ToolSpec {
 /// The one tool every agent is offered, by the name its calls are recorded under.
 pub const RAL_TOOL: &str = "ral";
 
+/// The `ral` tool's argument carrying the script: the one spelling the
+/// schema advertises, the parser reads, and the transcript recovers.
+pub(crate) const COMMAND: &str = "command";
+
 pub static RAL: ToolSpec = ToolSpec {
     name: RAL_TOOL,
     description: "Run a ral shell command in the sandboxed working directory.",
@@ -71,7 +75,7 @@ fn ral_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "cmd": { "type": "string", "description": "The ral source to evaluate." },
+            COMMAND: { "type": "string", "description": "The ral source to evaluate." },
             "description": {
                 "type": "string",
                 "maxLength": DESCRIPTION_MAX,
@@ -87,7 +91,7 @@ fn ral_schema() -> Value {
         Keep defer for work you can overlap.",
             },
         },
-        "required": ["cmd", "description"],
+        "required": [COMMAND, "description"],
     })
 }
 

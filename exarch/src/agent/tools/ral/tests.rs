@@ -2,23 +2,44 @@ use super::*;
 use serde_json::json;
 
 #[test]
-fn parse_accepts_cmd_and_description() {
+fn parse_accepts_command_and_description() {
     let a = parse_args(&json!({
-        "cmd": "pwd",
+        "command": "pwd",
         "description": "Printing the working directory.",
     }))
     .unwrap();
-    assert_eq!(a.cmd, "pwd");
+    assert_eq!(a.command, "pwd");
     assert_eq!(a.description, "Printing the working directory.");
 }
 
 #[test]
-fn parse_rejects_missing_cmd() {
+fn parse_rejects_missing_command() {
     let e = parse_args(&json!({
         "description": "noop",
     }))
     .unwrap_err();
-    assert!(e.contains("`cmd`"));
+    assert!(e.contains("`command`"));
+}
+
+#[test]
+fn parse_names_the_fields_received() {
+    let e = parse_args(&json!({
+        "cmd": "pwd",
+        "description": "x",
+    }))
+    .unwrap_err();
+    assert!(e.contains("`command`"));
+    assert!(e.contains("got `cmd`, `description`"));
+}
+
+#[test]
+fn parse_rejects_non_string_command() {
+    let e = parse_args(&json!({
+        "command": 3,
+        "description": "x",
+    }))
+    .unwrap_err();
+    assert!(e.contains("must be a string"));
 }
 
 #[test]
@@ -29,14 +50,14 @@ fn parse_rejects_non_object() {
 
 #[test]
 fn parse_rejects_missing_description() {
-    let e = parse_args(&json!({ "cmd": "pwd" })).unwrap_err();
+    let e = parse_args(&json!({ "command": "pwd" })).unwrap_err();
     assert!(e.contains("`description`"));
 }
 
 #[test]
 fn parse_rejects_empty_description() {
     let e = parse_args(&json!({
-        "cmd": "pwd",
+        "command": "pwd",
         "description": "   ",
     }))
     .unwrap_err();
@@ -47,7 +68,7 @@ fn parse_rejects_empty_description() {
 fn parse_truncates_oversize_description() {
     let big = "x".repeat(DESCRIPTION_MAX + 1);
     let a = parse_args(&json!({
-        "cmd": "pwd",
+        "command": "pwd",
         "description": big,
     }))
     .unwrap();
@@ -57,7 +78,7 @@ fn parse_truncates_oversize_description() {
 #[test]
 fn parse_rejects_multiline_description() {
     let e = parse_args(&json!({
-        "cmd": "pwd",
+        "command": "pwd",
         "description": "first\nsecond",
     }))
     .unwrap_err();
@@ -67,7 +88,7 @@ fn parse_rejects_multiline_description() {
 #[test]
 fn parse_timeout_defaults_when_absent() {
     let a = parse_args(&json!({
-        "cmd": "pwd",
+        "command": "pwd",
         "description": "noop",
     }))
     .unwrap();
@@ -78,7 +99,7 @@ fn parse_timeout_defaults_when_absent() {
 #[test]
 fn parse_timeout_accepts_explicit() {
     let a = parse_args(&json!({
-        "cmd": "pwd",
+        "command": "pwd",
         "description": "noop",
         "timeout_secs": 300,
     }))
@@ -89,7 +110,7 @@ fn parse_timeout_accepts_explicit() {
 #[test]
 fn parse_timeout_null_takes_default() {
     let a = parse_args(&json!({
-        "cmd": "pwd",
+        "command": "pwd",
         "description": "noop",
         "timeout_secs": null,
     }))
@@ -101,7 +122,7 @@ fn parse_timeout_null_takes_default() {
 #[test]
 fn parse_timeout_rejects_zero() {
     let e = parse_args(&json!({
-        "cmd": "pwd",
+        "command": "pwd",
         "description": "noop",
         "timeout_secs": 0,
     }))
@@ -113,7 +134,7 @@ fn parse_timeout_rejects_zero() {
 #[test]
 fn parse_timeout_rejects_negative() {
     let e = parse_args(&json!({
-        "cmd": "pwd",
+        "command": "pwd",
         "description": "noop",
         "timeout_secs": -5,
     }))
@@ -126,7 +147,7 @@ fn parse_timeout_rejects_negative() {
 #[test]
 fn parse_timeout_rejects_float() {
     let e = parse_args(&json!({
-        "cmd": "pwd",
+        "command": "pwd",
         "description": "noop",
         "timeout_secs": 5.0,
     }))
@@ -138,7 +159,7 @@ fn parse_timeout_rejects_float() {
 #[test]
 fn parse_timeout_rejects_string() {
     let e = parse_args(&json!({
-        "cmd": "pwd",
+        "command": "pwd",
         "description": "noop",
         "timeout_secs": "30",
     }))

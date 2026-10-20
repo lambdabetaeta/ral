@@ -6,7 +6,6 @@ mod common;
 use ral_core::Value;
 use ral_core::boot::{HostSurface, boot_shell};
 use ral_core::protocol::Run;
-use ral_core::run::RunReport;
 use ral_core::terminal::TerminalState;
 use ral_core::types::{Break, Escape, Mooring, Settled, Shell};
 
@@ -14,10 +13,10 @@ use ral_core::types::{Break, Escape, Mooring, Settled, Shell};
 /// and return the body's `Settled<Value>`.  Every test below picks source
 /// it expects to compile, so a static diagnostic is a test bug.
 fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
-    match shell.run(Run::foreground(source, "<test>")) {
-        RunReport::Ran { ending, .. } => ending.into_result(),
-        RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
-    }
+    shell
+        .run(Run::foreground(source, "<test>"))
+        .expect_ran()
+        .into_result()
 }
 
 // ── handler self-masking survives a panic mid-body (finding E5; rec. A4) ──

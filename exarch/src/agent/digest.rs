@@ -16,9 +16,11 @@ const VALUE_CAP: usize = 20_000;
 const STDOUT_CAP: usize = 10_000;
 const STDERR_CAP: usize = 10_000;
 
-/// Cap for a `Report::Static` blob (parse / type errors), which
-/// the model reads whole and cannot query — so it sits well under the
-/// section caps: a diagnostic past a few KB is noise.
+/// Cap for a `Report::Static` or `Report::Faulted` blob.
+///
+/// The model reads a parse / type error or an engine fault whole and cannot
+/// query it, so the cap sits well under the section caps: a diagnostic past a
+/// few KB is noise.
 pub const OPAQUE_CAP: usize = 3000;
 
 /// The elided bytes are kept nowhere, so re-running the command reproduces

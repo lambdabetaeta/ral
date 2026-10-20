@@ -62,10 +62,7 @@ pub(crate) fn run_interactive(opts: &crate::cli::InteractiveOpts) -> ExitCode {
 #[cfg(test)]
 pub(crate) fn eval(shell: &mut ral_core::Shell, src: &str) -> ral_core::Value {
     let run = exec::line_run(src);
-    match shell.run(run) {
-        ral_core::run::RunReport::Ran { ending, .. } => ending.into_result().expect("evaluate"),
-        ral_core::run::RunReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
-    }
+    shell.run(run).expect_ran().into_result().expect("evaluate")
 }
 
 /// Core's surface with the REPL's prelude seated: the runtime a test engine

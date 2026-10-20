@@ -234,7 +234,7 @@ fn texts(context: &Context) -> Vec<String> {
 }
 
 fn called(desc: Option<&str>) -> ChatMessage {
-    let mut args = serde_json::json!({ "cmd": "ls" });
+    let mut args = serde_json::json!({ "command": "ls" });
     if let Some(desc) = desc {
         args["description"] = serde_json::json!(desc);
     }

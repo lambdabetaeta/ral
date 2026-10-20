@@ -403,10 +403,10 @@ mod chokepoint_tests {
     /// One top-level run through the public door. Every source below must
     /// compile; a `Static` report is a test bug.
     fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
-        match shell.run(Run::foreground(source, "<test>")) {
-            RunReport::Ran { ending, .. } => ending.into_result(),
-            RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
-        }
+        shell
+            .run(Run::foreground(source, "<test>"))
+            .expect_ran()
+            .into_result()
     }
 
     /// One captured run's stderr — where the ready boundary writes the
@@ -421,6 +421,7 @@ mod chokepoint_tests {
                 String::from_utf8_lossy(&captured.stderr).into_owned()
             }
             RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
+            RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
         }
     }
 
@@ -588,7 +589,9 @@ mod chokepoint_tests {
 
         match shell.run(Run::foreground("$[1 + true]", "<test>")) {
             RunReport::Static { .. } => {}
-            RunReport::Ran { .. } => panic!("ill-typed source must not run"),
+            RunReport::Ran { .. } | RunReport::Faulted { .. } => {
+                panic!("ill-typed source must be refused statically")
+            }
         }
 
         assert_eq!(
@@ -634,12 +637,10 @@ mod chokepoint_tests {
             },
             "<test>",
         ));
-        match report {
-            RunReport::Ran { ending, .. } => {
-                ending.into_result().expect("the hook body must run");
-            }
-            RunReport::Static { .. } => panic!("the registered hook must run"),
-        }
+        report
+            .expect_ran()
+            .into_result()
+            .expect("the hook body must run");
 
         assert_eq!(
             epoch(&shell),
@@ -753,7 +754,7 @@ mod chokepoint_tests {
                     "expected an undefined-variable diagnostic, got: {msg}"
                 );
             }
-            RunReport::Ran { .. } => {
+            RunReport::Ran { .. } | RunReport::Faulted { .. } => {
                 panic!("a pruned name must be refused before it runs")
             }
         }

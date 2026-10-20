@@ -147,7 +147,8 @@ module's framed scaffold:
   rolls back does not cover `local.audit`, so only a scope the panic itself cannot skip keeps
   the trail's close law true at dispatch granularity. A clean exit's
   observations land in `RunReport::Ran.trail`; a caught panic's are drained
-  and discarded — the panicked dispatch reports `Static`, never a trail.
+  and discarded — the panicked dispatch reports `RunReport::Faulted`, never a
+  trail.
   `RunReport::into_report` then renders the engine's `Ending` against the
   shell — a `Raised` error or a `Stopped` stop becomes the string the host prints
   verbatim and the `{cmd, status, message, site}` record `try` would hand its

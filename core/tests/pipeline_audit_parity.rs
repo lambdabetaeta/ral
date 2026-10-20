@@ -19,7 +19,7 @@ mod common;
 use common::fresh_shell;
 
 use ral_core::protocol::Run;
-use ral_core::run::{RunReport, RunRequest};
+use ral_core::run::RunRequest;
 use ral_core::types::{Map, Observation, Settled, Value};
 use ral_core::{EventSink, SurfaceSink};
 use std::sync::{Arc, Mutex};
@@ -42,13 +42,13 @@ fn run(source: &str, sink: bool) -> (Settled<Value>, Vec<Value>) {
     let log: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
     let recorder: SurfaceSink = Arc::new(Recorder(Arc::clone(&log)));
     let mut shell = fresh_shell();
-    let result = match shell.run(RunRequest {
-        surface: sink.then_some(recorder),
-        ..RunRequest::from(Run::foreground(source, "<test>"))
-    }) {
-        RunReport::Ran { ending, .. } => ending.into_result(),
-        RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
-    };
+    let result = shell
+        .run(RunRequest {
+            surface: sink.then_some(recorder),
+            ..RunRequest::from(Run::foreground(source, "<test>"))
+        })
+        .expect_ran()
+        .into_result();
     let events = log.lock().unwrap().clone();
     (result, events)
 }

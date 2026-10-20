@@ -46,6 +46,7 @@ fn printed(src: &str) -> String {
             "{src:?} must reach the evaluator, got {}",
             diagnostics.render().0
         ),
+        RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
     }
 }
 

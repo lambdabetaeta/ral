@@ -260,6 +260,9 @@ fn prove_the_host_can_dial_in(
             Ok(Ok(Report::Static { rendered, .. })) => {
                 eprint!("the guest never ran the listener: {rendered}");
             }
+            Ok(Ok(Report::Faulted { rendered, .. })) => {
+                eprint!("the guest faulted running the listener: {rendered}");
+            }
             Ok(Err(severed)) => eprintln!("{severed}"),
             Err(_) => eprintln!("the listening thread panicked"),
         }

@@ -11,7 +11,6 @@ mod common;
 
 use ral_core::compile::{CompileError, compile_and_typecheck};
 use ral_core::protocol::Run;
-use ral_core::run::RunReport;
 use ral_core::source::FileId;
 use ral_core::test_access::binding_scheme as scheme_of;
 use ral_core::types::Settled;
@@ -26,10 +25,10 @@ fn shell() -> Shell {
 /// failure — callers that expect a clean run pick source that compiles;
 /// callers probing an *eval* failure get the body's `Settled` back.
 fn run(shell: &mut Shell, src: &str) -> Settled<Value> {
-    match shell.run(Run::foreground(src, "<test>")) {
-        RunReport::Ran { ending, .. } => ending.into_result(),
-        RunReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
-    }
+    shell
+        .run(Run::foreground(src, "<test>"))
+        .expect_ran()
+        .into_result()
 }
 
 /// Check `src` against the live session without evaluating it — the

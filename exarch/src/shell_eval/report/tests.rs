@@ -204,3 +204,39 @@ fn ending_matrix_gates_audit_and_orphan_on_unshown_effects() {
         }
     }
 }
+
+#[test]
+fn a_rejection_keeps_its_diagnostic_and_ends_with_the_tip() {
+    let out = rejection("error[T0010]: Integer doesn't match Bool\n");
+    assert!(
+        out.starts_with("error[T0010]: Integer doesn't match Bool\n"),
+        "{out:?}"
+    );
+    assert!(out.ends_with(REJECTION_TIP), "{out:?}");
+    assert!(out.contains("no command ran and no `let` bound"), "{out:?}");
+}
+
+#[test]
+fn an_oversize_rejection_is_clipped_but_its_tip_survives_whole() {
+    let out = rejection(&"x".repeat(OPAQUE_CAP * 4));
+    assert!(out.len() < OPAQUE_CAP * 2, "the diagnostic was not clipped");
+    assert!(out.ends_with(REJECTION_TIP), "{out:?}");
+}
+
+#[test]
+fn a_fault_keeps_its_one_liner_and_ends_with_the_tip() {
+    let out = fault("error: run panicked: boom\n", None);
+    assert!(out.starts_with("error: run panicked: boom\n"), "{out:?}");
+    assert!(out.ends_with(FAULT_TIP), "{out:?}");
+    assert!(
+        out.contains("`let` bindings may or may not stand"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn a_fault_puts_the_audit_after_the_tip() {
+    let audit = "\nAudit: 1 file written.\n";
+    let out = fault("error: run panicked: boom\n", Some(audit));
+    assert!(out.ends_with(&format!("{FAULT_TIP}{audit}")), "{out:?}");
+}

@@ -28,28 +28,28 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 /// The engine's half of the severance law: [`write_or_sever`]
-/// recording into `fault` — the flag the reader loop consults on exit so a
+/// recording into `wire_fault` — the flag the reader loop consults on exit so a
 /// front-end that stopped reading is never mistaken for one that cleanly
 /// detached.
 ///
 /// Every engine-side write crosses here: a surface emit, a deferred batch, an
 /// enquiry, a report, a `Pong`. None of them may park the reader loop, so a
 /// stalled write becomes exactly the same fatal, non-blocking event a severed
-/// pipe already is. A run's end or reading the fuse refuses is replaced by its
-/// [`refusal`], so the front-end is not left waiting; any other refusal goes
+/// pipe already is. A run's end or reading the fuse refuses is replaced by a
+/// [`fault`], so the front-end is not left waiting; any other refusal goes
 /// back to its writer.
 fn engine_write(
     writer: &Mutex<WireChannel>,
-    fault: &AtomicBool,
+    wire_fault: &AtomicBool,
     frame: &Frame,
 ) -> Result<(), WriteError> {
-    let record = |_: &std::io::Error| fault.store(true, Ordering::SeqCst);
+    let record = |_: &std::io::Error| wire_fault.store(true, Ordering::SeqCst);
     match (write_or_sever(writer, frame, record), frame) {
         (
             Err(WriteError::Unencodable(e)),
             Frame::Event(id, ev @ (Event::Report(_) | Event::Reading(_))),
         ) => {
-            let small = refusal(matches!(ev, Event::Reading(_)), &e.to_string());
+            let small = fault(matches!(ev, Event::Reading(_)), &e.to_string());
             write_or_sever(writer, &Frame::Event(*id, small), record)
         }
         (outcome, _) => outcome,
@@ -58,8 +58,8 @@ fn engine_write(
 
 /// [`engine_write`] for a frame with no writer to refuse into: one the fuse
 /// refuses is diagnosed and dropped, and the wire stays alive.
-fn engine_send(writer: &Mutex<WireChannel>, fault: &AtomicBool, frame: &Frame) {
-    if let Err(WriteError::Unencodable(e)) = engine_write(writer, fault, frame) {
+fn engine_send(writer: &Mutex<WireChannel>, wire_fault: &AtomicBool, frame: &Frame) {
+    if let Err(WriteError::Unencodable(e)) = engine_write(writer, wire_fault, frame) {
         crate::errln!("engine: dropped a {} frame: {e}", frame.kind());
     }
 }
@@ -204,12 +204,22 @@ enum WorkItem {
 const BUSY: &str = "engine busy";
 
 /// The engine's refusal of `why`, in the shape the front-end waits on: a run
-/// ends in a `Report`, a probe in its `Reading`.
+/// ends in a `Report`, a probe in its `Reading`. Nothing ran.
 fn refusal(probing: bool, why: &str) -> Event {
     if probing {
         Event::Reading(Err(why.to_string()))
     } else {
-        Event::Report(Report::host_fault(why))
+        Event::Report(Report::refused(why))
+    }
+}
+
+/// The engine's fault of `why`, in the shape [`refusal`] takes: the run may
+/// have run, in part or whole, but its report is lost.
+fn fault(probing: bool, why: &str) -> Event {
+    if probing {
+        Event::Reading(Err(why.to_string()))
+    } else {
+        Event::Report(Report::faulted(why))
     }
 }
 
@@ -445,7 +455,7 @@ fn engine_session(
                     WorkItem::Probe(probe) => Event::Reading(Ok(engine.probe(&probe))),
                 }))
                 .unwrap_or_else(|_| {
-                    refusal(probing, "engine: dispatch panicked in the engine worker")
+                    fault(probing, "engine: dispatch panicked in the engine worker")
                 });
 
                 // `claim` drops before this, never after: the same thread

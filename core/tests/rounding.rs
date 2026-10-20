@@ -24,6 +24,7 @@ fn expect_static_reject(source: &str) {
         RunReport::Ran { ending, .. } => {
             panic!("{source:?}: expected a static type error, but it ran: {ending:?}")
         }
+        RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
     }
 }
 

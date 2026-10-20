@@ -20,7 +20,6 @@ use common::fresh_shell;
 use ral_core::capability::FsPolicy;
 use ral_core::capability::{Capabilities, GrantStack};
 use ral_core::protocol::Run;
-use ral_core::run::RunReport;
 use ral_core::types::{Settled, Shell};
 use ral_core::{Break, Value};
 use std::path::Path;
@@ -33,13 +32,13 @@ use std::path::Path;
 /// test below picks source it expects to compile, so a static diagnostic is a
 /// test bug.
 fn top_level_under(shell: &mut Shell, caps: Capabilities, source: &str) -> Settled<Value> {
-    match shell.run(Run {
-        caps: GrantStack::of(caps),
-        ..Run::foreground(source, "<test>")
-    }) {
-        RunReport::Ran { ending, .. } => ending.into_result(),
-        RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
-    }
+    shell
+        .run(Run {
+            caps: GrantStack::of(caps),
+            ..Run::foreground(source, "<test>")
+        })
+        .expect_ran()
+        .into_result()
 }
 
 fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {

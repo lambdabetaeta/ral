@@ -111,14 +111,14 @@ fn restrict_to(dir: &str) -> Capabilities {
 /// exarch's per-tool flow: the run carries the attenuated capability
 /// ceiling in its request and compiles against the live bindings.
 fn top_level_under(shell: &mut Shell, caps: Capabilities, src: &str) -> Settled<Value> {
-    match shell.run(Run {
-        io: RunIo::Inherit,
-        caps: GrantStack::of(caps),
-        ..Run::captured(src, "<test>")
-    }) {
-        RunReport::Ran { ending, .. } => ending.into_result(),
-        RunReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
-    }
+    shell
+        .run(Run {
+            io: RunIo::Inherit,
+            caps: GrantStack::of(caps),
+            ..Run::captured(src, "<test>")
+        })
+        .expect_ran()
+        .into_result()
 }
 
 /// Assert that a confined child failed closed (the eval surfaced an

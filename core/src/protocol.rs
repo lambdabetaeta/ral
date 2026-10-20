@@ -20,7 +20,7 @@ pub mod probe;
 /// The frame algebra's generation, checked at `Attach` and refused on
 /// mismatch.  Public because a build has to compare it against the engine
 /// sitting in the guest media beside it: see [`check_media`].
-pub const PROTOCOL_VERSION: u32 = 23;
+pub const PROTOCOL_VERSION: u32 = 24;
 
 /// The key `vm-image/build-boot.sh` records [`PROTOCOL_VERSION`] under in the
 /// boot media's manifest, `vm-image/out/boot/boot-manifest.txt`.
@@ -447,10 +447,13 @@ impl Control {
 /// [`RunReport::into_report`](crate::run::RunReport::into_report).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Report {
-    /// Parse/type/host failure: the run never reached evaluation. `rendered`
-    /// is the whole report — prefix, code, caret, hint — so the host prints it
-    /// and exits on `status`.
-    Static { rendered: String, status: i32 },
+    /// Parse/type/host refusal: the run never reached evaluation, so no
+    /// command ran and nothing was bound. `rendered` is the whole report —
+    /// prefix, code, caret, hint — so the host prints it and exits on `status`.
+    Static {
+        rendered: String,
+        status: FailureStatus,
+    },
     /// The run ran to a settled result.
     Ran {
         ending: Ending,
@@ -460,6 +463,15 @@ pub enum Report {
         /// asked. Unbounded by declaration — the wire's frame fuse is the
         /// shared backstop, exactly as it is for `captured`.
         trail: Vec<FOValue>,
+    },
+    /// The engine could not report the run: a panic in the run or in the
+    /// report plumbing, or a report the frame fuse would not pass. What the run
+    /// did is unknown (it may have run in part or whole), so a host must read it
+    /// as neither a refusal nor an ending. `rendered` is the whole one-liner;
+    /// the host prints it and exits on `status`.
+    Faulted {
+        rendered: String,
+        status: FailureStatus,
     },
 }
 
@@ -634,7 +646,15 @@ mod ending_wire_round_trip_tests {
     fn static_round_trips() {
         round_trips(&Report::Static {
             rendered: "Error: boom\n".into(),
-            status: 1,
+            status: 1.into(),
+        });
+    }
+
+    #[test]
+    fn faulted_round_trips() {
+        round_trips(&Report::Faulted {
+            rendered: "Error: boom\n".into(),
+            status: 101.into(),
         });
     }
 }

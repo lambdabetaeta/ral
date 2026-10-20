@@ -42,18 +42,22 @@ impl StaticDiagnostics {
     pub fn render(&self) -> (String, i32) {
         match self {
             Self::Compile(rejection) => (rejection.render(), rejection.status),
-            Self::Host(e) => {
-                let report = Report {
-                    code: None,
-                    message: e.message.clone(),
-                    at: None,
-                    also: None,
-                    hint: e.hint.as_deref().map(Into::into),
-                };
-                (report.plain(), e.code())
-            }
+            Self::Host(e) => render_spanless(e),
         }
     }
+}
+
+/// A spanless [`Error`] drawn as the one-liner, with the exit status it ends
+/// on: the one rule for an error that has no source to point a caret into.
+fn render_spanless(e: &Error) -> (String, i32) {
+    let report = Report {
+        code: None,
+        message: e.message.clone(),
+        at: None,
+        also: None,
+        hint: e.hint.as_deref().map(Into::into),
+    };
+    (report.plain(), e.code())
 }
 
 // ── The run entry: one synchronous, runtime-agnostic host door ──────────────
@@ -97,8 +101,9 @@ impl From<Run> for RunRequest {
 
 /// One report the host matches once — a `Static` run never ran.
 pub enum RunReport {
-    /// The run never reached evaluation; the host renders the diagnostics and
-    /// treats it as status 1.
+    /// The run never reached evaluation, so no command ran and nothing was
+    /// bound; the host renders the diagnostics and exits on the status they
+    /// carry.
     Static { diagnostics: StaticDiagnostics },
     Ran {
         ending: Ending,
@@ -107,6 +112,33 @@ pub enum RunReport {
         /// scope it held closes; empty when `Run.trail` was `None`.
         trail: Vec<Observation>,
     },
+    /// The run panicked. `env` and `context` were rolled back to the
+    /// checkpoint taken at entry, but whatever the run did outside them
+    /// (commands, files) stands.
+    Faulted { error: Error },
+}
+
+#[cfg(any(test, feature = "test-util"))]
+impl RunReport {
+    /// The ending of a run whose source must reach evaluation and report;
+    /// a static rejection or a fault panics, naming its diagnostic.
+    ///
+    /// # Panics
+    /// On [`Self::Static`] and [`Self::Faulted`].
+    #[track_caller]
+    pub fn expect_ran(self) -> Ending {
+        match self {
+            Self::Ran { ending, .. } => ending,
+            Self::Static { diagnostics } => panic!(
+                "the run must reach evaluation, but was refused:\n{}",
+                diagnostics.render().0
+            ),
+            Self::Faulted { error } => panic!(
+                "the run must reach evaluation and report, but faulted: {}",
+                error.message
+            ),
+        }
+    }
 }
 
 /// How a run left evaluation — one arm per way out.
@@ -202,7 +234,7 @@ impl Shell {
     /// `dispatch`'s panic arm rolls back does not cover `local.audit`
     /// (`LocalState` partitions it deliberately), so only a scope the panic
     /// cannot skip keeps the opener's close law true at dispatch
-    /// granularity. A panic reports `Static` by declaration — the trail
+    /// granularity. A panic reports `Faulted` by declaration — the trail
     /// closes and is discarded, never attached.
     pub(crate) fn run_under(&mut self, under: &Scope, req: RunRequest) -> RunReport {
         // A run is the extent of ral's picture of `PATH`: whatever happened to
@@ -226,14 +258,14 @@ impl Shell {
             }
             Err(payload) => {
                 (self.env, self.context) = checkpoint;
-                RunReport::Static {
-                    diagnostics: StaticDiagnostics::Host(crate::types::Error::raised(
+                RunReport::Faulted {
+                    error: Error::raised(
                         format!(
                             "run panicked: {}",
                             crate::types::panic_text(payload.as_ref())
                         ),
                         101,
-                    )),
+                    ),
                 }
             }
         }

@@ -200,9 +200,9 @@ fn dispatch(transport: &IdentityTransport, run: Run, audit: Option<bool>) -> i32
         }
     };
     match report {
-        Report::Static { rendered, status } => {
+        Report::Static { rendered, status } | Report::Faulted { rendered, status } => {
             err!("{rendered}");
-            status
+            status.get()
         }
         Report::Ran { ending, trail, .. } => {
             match (&ending, audit) {
