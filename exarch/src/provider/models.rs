@@ -492,7 +492,7 @@ pub fn listing_of<S: ModelSource + Clone>(
 /// the catalog then runs memo-only.
 fn cache_path(app: crate::app::App) -> Option<PathBuf> {
     let dir = app.xdg_dir(ral_core::path::XdgKind::Cache);
-    dir.is_absolute().then(|| dir.join("models.json"))
+    ral_core::path::is_absolute(&dir).then(|| dir.join("models.json"))
 }
 
 #[allow(

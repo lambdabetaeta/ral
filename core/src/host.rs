@@ -14,7 +14,7 @@
 
 use std::path::PathBuf;
 
-use crate::path::{XdgKind, resolve_xdg_in};
+use crate::path::{XdgKind, is_absolute, resolve_xdg_in};
 
 pub(crate) const HOME_VARS: [&str; 2] = ["HOME", "USERPROFILE"];
 pub(crate) const USER_VARS: [&str; 2] = ["USER", "USERNAME"];
@@ -71,7 +71,7 @@ pub fn user() -> Option<String> {
     reason = "ral's own config/data live where the tool is installed: a script's env overlay must not relocate them"
 )]
 pub fn xdg(kind: XdgKind) -> Option<PathBuf> {
-    resolve_xdg(kind, home().as_deref()).filter(|p| p.is_absolute())
+    resolve_xdg(kind, home().as_deref()).filter(|p| is_absolute(p))
 }
 
 /// `~/<name>` (e.g. `home_dot(".ralrc")`), the single-file convention rc
@@ -81,7 +81,7 @@ pub fn xdg(kind: XdgKind) -> Option<PathBuf> {
     reason = "the dot-file convention names the launching user's real home: a script's env overlay must not relocate it"
 )]
 pub fn home_dot(name: &str) -> Option<PathBuf> {
-    Some(PathBuf::from(home()?).join(name)).filter(|p| p.is_absolute())
+    Some(PathBuf::from(home()?).join(name)).filter(|p| is_absolute(p))
 }
 
 #[cfg(test)]

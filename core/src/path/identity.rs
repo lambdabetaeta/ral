@@ -5,7 +5,7 @@
 //! and canonicaliser can never see different aliases.
 
 use std::borrow::Cow;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use icu_casemap::CaseMapper;
@@ -13,6 +13,7 @@ use icu_locale_core::LanguageIdentifier;
 use icu_normalizer::DecomposingNormalizerBorrowed;
 
 use super::PathRules;
+use super::lex::{Heads, Namespace, namespace_head};
 
 /// `p` plus any alternate spelling the host treats as the same file
 /// (`/tmp/foo` ↔ `/private/tmp/foo` on macOS; just `[p]` elsewhere).
@@ -69,11 +70,30 @@ impl Polarity for Deny {
 /// is finer.  NFKD comes first: `𝚤` decomposes to ı, which ZFS upcases to I,
 /// yet has no uppercase of its own.
 pub(super) fn collision_key(name: &OsStr) -> Cow<'_, OsStr> {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "native: a name that is not UTF-8 is its own key"
+    )]
     let Some(s) = name.to_str() else {
         return Cow::Borrowed(name);
     };
+    Cow::Owned(collision_fold(s).into())
+}
+
+/// [`collision_key`] of a name as its host encodes it
+/// ([`OsStr::as_encoded_bytes`]): a name that is not UTF-8 is its own key
+/// here too, byte for byte, so no two such names merge as their
+/// replacement-character decodings would.
+fn encoded_collision_key(name: &[u8]) -> Cow<'_, [u8]> {
+    std::str::from_utf8(name).map_or(Cow::Borrowed(name), |s| {
+        Cow::Owned(collision_fold(s).into_bytes())
+    })
+}
+
+/// [`collision_key`] of a name that is UTF-8.
+fn collision_fold(s: &str) -> String {
     if s.is_ascii() {
-        return Cow::Owned(s.to_ascii_lowercase().into());
+        return s.to_ascii_lowercase();
     }
     let nfd = DecomposingNormalizerBorrowed::new_nfd();
     let nfkd = DecomposingNormalizerBorrowed::new_nfkd();
@@ -84,12 +104,12 @@ pub(super) fn collision_key(name: &OsStr) -> Cow<'_, OsStr> {
     let once = nfkd
         .normalize(&case.fold_string(&nfd.normalize(&upper)))
         .into_owned();
-    Cow::Owned(nfkd.normalize(&case.fold_string(&once)).into_owned().into())
+    nfkd.normalize(&case.fold_string(&once)).into_owned()
 }
 
 /// True iff some alias of `path` starts with some alias of `prefix`: `path`
-/// lies inside `prefix` modulo firmlinks and `identity`, on Windows the
-/// path identity [`starts_with_identity`] applies at the least.
+/// lies inside `prefix` modulo firmlinks and `identity`, on Windows with
+/// heads and separators normalised under either.
 ///
 /// Every authority judgment, fs and exec, decides containment through it.
 ///
@@ -103,23 +123,16 @@ pub(super) fn path_within(path: &Path, prefix: &Path, identity: Identity) -> boo
     let rules = PathRules::HOST;
     let ps = path_aliases(path);
     let qs = path_aliases(prefix);
+    // Every arm compares names as the host encodes them, never their
+    // `to_string_lossy` forms: two distinct names that are not Unicode (bytes
+    // off Windows, an unpaired surrogate on it) can decode to one
+    // replacement-character string, and the matcher would call them one.
     ps.iter().any(|p| {
         qs.iter().any(|q| match identity {
-            // The identity fold is defined on strings, so this arm
-            // necessarily accepts the lossy form: two distinct non-UTF-8
-            // paths that decode alike compare equal here.  A grant refuses a
-            // non-Unicode real path when it is frozen, but a path checked at
-            // run time can still be one, and failing closed here would make
-            // a *deny* prefix fail open.
             Identity::Stored if rules == PathRules::Windows => {
-                let p = windows_stored_components(&p.to_string_lossy());
-                let q = windows_stored_components(&q.to_string_lossy());
-                p.starts_with(&q)
+                windows_stored_components(p.as_os_str())
+                    .starts_with(&windows_stored_components(q.as_os_str()))
             }
-            // Compare the `&Path`s, not their `to_string_lossy` forms: two
-            // distinct non-UTF-8 paths can decode to the same
-            // replacement-character string, and the matcher would call them
-            // one.
             Identity::Stored => p.starts_with(q),
             Identity::Collision => starts_with_collision(p, q, rules),
         })
@@ -140,14 +153,14 @@ pub(super) fn path_within_str(path: &str, prefix: &str, identity: Identity) -> b
 /// [`Path::components`] otherwise, then compared key by key, so no fold
 /// crosses a component boundary (`/w/secretsx` is not within `/w/Secrets`).
 fn starts_with_collision(path: &Path, prefix: &Path, rules: PathRules) -> bool {
-    let keys = |p: &Path| -> Vec<OsString> {
+    let keys = |p: &Path| -> Vec<Vec<u8>> {
         match rules {
-            PathRules::Windows => windows_components(&p.to_string_lossy(), |c| {
-                collision_key(OsStr::new(c)).into_owned()
-            }),
+            PathRules::Windows => windows_components(p.as_os_str().as_encoded_bytes())
+                .map(|c| encoded_collision_key(c).into_owned())
+                .collect(),
             PathRules::Posix => p
                 .components()
-                .map(|c| collision_key(c.as_os_str()).into_owned())
+                .map(|c| encoded_collision_key(c.as_os_str().as_encoded_bytes()).into_owned())
                 .collect(),
         }
     };
@@ -157,13 +170,16 @@ fn starts_with_collision(path: &Path, prefix: &Path, rules: PathRules) -> bool {
 
 /// Component-wise prefix test: byte-exact under POSIX rules (via
 /// [`Path::starts_with`], so `/tmp` never matches `/tmpx`), and under Windows
-/// rules by Windows path identity: `/` ≡ `\`, case-insensitive components, a
-/// `\\?\`-verbatim prefix equivalent to its plain spelling, so a grant that
-/// went through `canonicalize` still matches a candidate that did not.
+/// rules by Windows path identity: `/` ≡ `\`, ASCII-case-insensitive
+/// components, a `\\?\`-verbatim prefix equivalent to its plain spelling.
+///
+/// A display identity, not an authority one: the prompt's home-strip asks
+/// it whether to fold a path to `~`.  Grant containment, [`path_within`],
+/// never asks it: an allow there keeps case ([`Identity::Stored`]) and a
+/// deny folds by [`collision_key`], each per its [`Polarity`].
 ///
 /// String logic rather than `std::path::Path`, whose separator and prefix
-/// parsing are fixed at compile time to the build target.  The platform gate
-/// sits at the sole call site, [`path_within`].
+/// parsing are fixed at compile time to the build target.
 #[allow(
     clippy::disallowed_methods,
     reason = "path-form: POSIX identity is `Path::starts_with` itself, byte-exact per component"
@@ -189,62 +205,85 @@ pub(crate) fn starts_with_identity(path: &str, prefix: &str, rules: PathRules) -
 /// `which`'s `name_key_on` so paths and command names fold alike, and
 /// erring below the real NTFS `$UpCase` table rather than above it: missing
 /// non-ASCII folds sooner than claiming equivalences the driver would refuse.
-pub(crate) fn windows_identity_components(p: &str) -> Vec<String> {
-    windows_components(p, str::to_ascii_lowercase)
+pub(crate) fn windows_identity_components(p: &str) -> Vec<Vec<u8>> {
+    windows_components(p.as_bytes())
+        .map(<[u8]>::to_ascii_lowercase)
+        .collect()
+}
+
+/// A native path as one key under which every spelling some filesystem may
+/// take for the same object collides: split as
+/// [`windows_identity_components`] splits, each component through
+/// [`collision_key`].  For a caller that must name a kernel object by a path
+/// and errs safe by merging, never by splitting: a lock.
+///
+/// Coarser than NTFS, which upcases each UTF-16 unit by its volume's
+/// `$UpCase` table, one simple (single-character) uppercase mapping per
+/// unit: every pair of names that table equates shares a compatibility
+/// caseless key, so two spellings of one NTFS name never part.  The excess,
+/// `ß` with `SS` or `ﬁ` with `fi`, merges names NTFS keeps apart, which a
+/// lock pays for in a wait.  Not for a witness or a capability, which would
+/// fail open by merging.
+///
+/// Defined on absolute paths alone: the key keeps no root separators, so a
+/// relative `srv\sh\x` keys as `\\srv\sh\x` does, and `x` as `\x`.
+///
+/// Bytes in the host's encoding ([`OsStr::as_encoded_bytes`]), not a
+/// `String`: a component that is not Unicode keys as itself, so two such
+/// names never merge through a replacement character.
+#[cfg(any(windows, test))]
+pub(crate) fn windows_collision_key(p: &OsStr) -> Vec<u8> {
+    windows_components(p.as_encoded_bytes())
+        .map(encoded_collision_key)
+        .collect::<Vec<_>>()
+        .join(&b'\\')
 }
 
 /// Canonical names keep their case; a drive letter is not a directory entry.
-pub(crate) fn windows_stored_components(p: &str) -> Vec<String> {
-    let mut parts = windows_components(p, str::to_owned);
+///
+/// Each component in the host's encoding ([`OsStr::as_encoded_bytes`]), so
+/// the identity is lossless: a name holding an unpaired surrogate is not the
+/// name holding U+FFFD that its lossy decoding would be.
+pub(crate) fn windows_stored_components(p: &OsStr) -> Vec<Vec<u8>> {
+    let mut parts: Vec<Vec<u8>> = windows_components(p.as_encoded_bytes())
+        .map(<[u8]>::to_vec)
+        .collect();
     if let Some(drive) = parts.first_mut()
-        && drive.ends_with(':')
+        && drive.ends_with(b":")
     {
         drive.make_ascii_lowercase();
     }
     parts
 }
 
-/// A path string's components under Windows path identity, each through
-/// `key`: the one split [`windows_identity_components`] and
+/// A path's components under Windows path identity, past its
+/// [head](windows_head), in the encoding it came in: the bytes of a `str`, or
+/// of an [`OsStr`] as the host encodes it.  The one split
+/// [`windows_identity_components`], [`windows_stored_components`] and
 /// [`starts_with_collision`] share.
-fn windows_components<T>(p: &str, key: impl Fn(&str) -> T) -> Vec<T> {
-    windows_head(p)
-        .split(['/', '\\'])
+///
+/// Lossless on either encoding: a separator is ASCII, and an ASCII byte in
+/// either stands for that character alone; a head is ASCII, so it lies
+/// within the UTF-8 run the path opens with whenever it is there at all.
+fn windows_components(p: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let text = p.utf8_chunks().next().map_or("", |chunk| chunk.valid());
+    let head = text.len() - windows_head(text).len();
+    p[head..]
+        .split(|&b| PathRules::Windows.is_separator(char::from(b)))
         .filter(|c| !c.is_empty())
-        .map(key)
-        .collect()
 }
 
-/// A path string with its Windows head normalised: a verbatim prefix
-/// stripped, a verbatim UNC head folded back to `\server\share`.  The step
-/// [`windows_identity_components`] takes before it lower-cases and splits,
-/// shared with the prompt's home-strip (`super::tilde`), which needs the head
-/// fold without the case fold.  One copy, because a head the two folded
-/// differently would silently unfold a `~`.
-pub(crate) fn windows_head(p: &str) -> String {
-    let Some(s) = strip_verbatim_prefix(p) else {
-        return p.to_string();
+/// A path string past its Windows head: a verbatim prefix stripped, and a
+/// verbatim UNC head's `UNC` with it, so `\\?\UNC\server\share` splits as
+/// `\\server\share` does.  The step [`windows_components`] takes before it
+/// splits, shared with the prompt's home-strip (`super::tilde`), which needs
+/// the head fold without the case fold.  One copy, because a head the two
+/// folded differently would silently unfold a `~`.
+pub(crate) fn windows_head(p: &str) -> &str {
+    let Some((Namespace::Verbatim, tail)) = namespace_head(p, Heads::Written) else {
+        return p;
     };
-    match s.split_at_checked(4) {
-        Some((unc, rest))
-            if unc.as_bytes()[..3].eq_ignore_ascii_case(b"UNC") && is_sep(unc.as_bytes()[3]) =>
-        {
-            format!(r"\{rest}")
-        }
-        _ => s.to_string(),
-    }
-}
-
-/// Strip a leading verbatim prefix (two separators, `?`, a separator) under
-/// either slash spelling and the mixed forms between.
-fn strip_verbatim_prefix(p: &str) -> Option<&str> {
-    let b = p.as_bytes();
-    (b.len() >= 4 && is_sep(b[0]) && is_sep(b[1]) && b[2] == b'?' && is_sep(b[3])).then(|| &p[4..])
-}
-
-/// A path separator under Windows path identity: `/` and `\` alike.
-pub(super) fn is_sep(c: u8) -> bool {
-    matches!(c, b'/' | b'\\')
+    super::lex::verbatim_unc_tail(tail).unwrap_or(tail)
 }
 
 #[cfg(test)]
@@ -257,6 +296,99 @@ mod tests {
 
     fn pb(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    fn os(s: &str) -> &OsStr {
+        OsStr::new(s)
+    }
+
+    /// Every comparison and key, of `raw` and of `lossy`, a name that is not
+    /// Unicode and the replacement-character spelling it decodes to: none
+    /// may call them one.
+    fn assert_lossless(raw: &Path, lossy: &Path) {
+        assert_eq!(
+            raw.to_string_lossy(),
+            lossy.to_string_lossy(),
+            "the two must decode alike, or this proves nothing"
+        );
+        for identity in [Identity::Stored, Identity::Collision] {
+            assert!(!path_within(raw, lossy, identity), "{identity:?}");
+            assert!(!path_within(lossy, raw, identity), "{identity:?}");
+        }
+        for (p, q) in [(raw, lossy), (lossy, raw)] {
+            assert!(!starts_with_collision(p, q, PathRules::Windows));
+            assert!(!starts_with_collision(p, q, PathRules::Posix));
+        }
+        assert_ne!(
+            windows_stored_components(raw.as_os_str()),
+            windows_stored_components(lossy.as_os_str())
+        );
+        assert_ne!(
+            windows_collision_key(raw.as_os_str()),
+            windows_collision_key(lossy.as_os_str())
+        );
+    }
+
+    /// A byte that is not UTF-8 is not U+FFFD, under either identity and
+    /// either split.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_byte_is_not_its_replacement_character() {
+        use std::os::unix::ffi::OsStrExt;
+        assert_lossless(
+            Path::new(OsStr::from_bytes(b"/opt/\xFFsecret")),
+            Path::new("/opt/\u{FFFD}secret"),
+        );
+    }
+
+    /// An unpaired surrogate is not U+FFFD, under either identity and
+    /// either split.
+    #[cfg(windows)]
+    #[test]
+    fn an_unpaired_surrogate_is_not_its_replacement_character() {
+        use std::os::windows::ffi::OsStringExt;
+        let wide: Vec<u16> = r"C:\opt\"
+            .encode_utf16()
+            .chain([0xD800])
+            .chain("secret".encode_utf16())
+            .collect();
+        assert_lossless(
+            &PathBuf::from(std::ffi::OsString::from_wide(&wide)),
+            Path::new("C:\\opt\\\u{FFFD}secret"),
+        );
+    }
+
+    #[test]
+    fn spellings_of_one_windows_path_share_a_collision_key() {
+        let key = windows_collision_key(os(r"C:\Tmp\Foo"));
+        for spelling in [r"c:\tmp\foo", r"\\?\C:\TMP\foo", "c:/tmp/foo/"] {
+            assert_eq!(windows_collision_key(os(spelling)), key, "{spelling}");
+        }
+        assert_eq!(
+            windows_collision_key(os(r"\\?\UNC\Srv\Sh\x")),
+            windows_collision_key(os(r"\\srv\sh\X"))
+        );
+        assert_ne!(
+            windows_collision_key(os(r"C:\tmp\foo")),
+            windows_collision_key(os(r"C:\tmp\fo"))
+        );
+    }
+
+    /// NTFS upcases beyond ASCII, so a lock keyed by a path must too: the
+    /// two spellings below are one NTFS name.
+    #[test]
+    fn a_collision_key_folds_beyond_ascii() {
+        for (a, b) in [
+            (r"C:\Ä\state", r"C:\ä\state"),
+            (r"C:\Σ\x", r"C:\σ\x"),
+            (r"C:\work\ÉCLAIR", r"c:\WORK\éclair"),
+        ] {
+            assert_eq!(
+                windows_collision_key(os(a)),
+                windows_collision_key(os(b)),
+                "{a} {b}"
+            );
+        }
     }
 
     /// Each row: a path and the alias it gains on macOS (none elsewhere).
@@ -375,9 +507,7 @@ mod tests {
         assert!(within("/w/SECRETS", "/w/Secrets", Identity::Collision));
         assert!(!within("/w/secretsx", "/w/Secrets", Identity::Collision));
         assert!(!within("/w/other/t", "/w/Secrets", Identity::Collision));
-        if cfg!(not(windows)) {
-            assert!(!within("/w/secrets/t", "/w/Secrets", Identity::Stored));
-        }
+        assert!(!within("/w/secrets/t", "/w/Secrets", Identity::Stored));
     }
 
     /// T2 under the Windows split, pinned on every host: heads and
@@ -404,12 +534,12 @@ mod tests {
     #[test]
     fn windows_stored_names_distinguish_case_except_in_the_drive() {
         assert_eq!(
-            windows_stored_components(r"\\?\C:\Work\file"),
-            windows_stored_components("c:/Work/file")
+            windows_stored_components(os(r"\\?\C:\Work\file")),
+            windows_stored_components(os("c:/Work/file"))
         );
         assert_ne!(
-            windows_stored_components(r"C:\Work"),
-            windows_stored_components(r"C:\work")
+            windows_stored_components(os(r"C:\Work")),
+            windows_stored_components(os(r"C:\work"))
         );
     }
 

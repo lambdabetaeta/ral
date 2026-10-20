@@ -995,7 +995,7 @@ fn an_unreadable_parent_refuses_the_link_and_changes_nothing() {
         panic!("a missing parent file is unreadable")
     };
     assert!(
-        error.to_string().contains(&source.display().to_string()),
+        error.to_string().contains(&ral_core::path::shown(&source)),
         "{error}"
     );
     assert_eq!(context.log_len(), 0);

@@ -18,11 +18,11 @@
 use crate::bus::signal::Signal;
 use crate::record::AgentId;
 use crate::record::Transient;
-use ral_core::sync::LockExt;
+use ral_core::sync::{CondvarExt, LockExt};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, SendError, TryRecvError};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// The coalescible class a signal belongs to; `None` is a reserved signal.
@@ -282,11 +282,7 @@ impl BusReceiver {
             if self.0.senders.load(Ordering::Acquire) == 0 {
                 return Err(std::sync::mpsc::RecvError);
             }
-            q = self
-                .0
-                .signal
-                .wait(q)
-                .unwrap_or_else(PoisonError::into_inner);
+            q = self.0.signal.wait_ignore_poison(q);
         }
     }
 
@@ -325,11 +321,7 @@ impl BusReceiver {
             if now >= deadline {
                 return Err(RecvTimeoutError::Timeout);
             }
-            let (guard, _) = self
-                .0
-                .signal
-                .wait_timeout(q, deadline - now)
-                .unwrap_or_else(PoisonError::into_inner);
+            let (guard, _) = self.0.signal.wait_timeout_ignore_poison(q, deadline - now);
             q = guard;
         }
     }

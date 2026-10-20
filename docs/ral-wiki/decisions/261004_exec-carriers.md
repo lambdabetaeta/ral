@@ -48,8 +48,9 @@ envelope binds each read-only.
 grant entry. Following it would read `PATH`, which the confined code controls.
 
 **A carrier is admitted only on bytes the session's uid cannot author.**
-`trusted_real` walks a path from `/` one component at a time with `lstat`,
-following links itself: every directory and the final file must be neither
+`trusted_real` walks a path from `/` with `path::walk::walk_vetted`, the
+handle-relative walk that splices links itself, vetting each object it passes:
+every directory and the final file must be neither
 owned nor writable by the euid, and every symlink not owned by it. The program
 that names a hop and the hop itself must both pass. Otherwise
 `#!/any/binary` written into an admitted script would admit any binary. A

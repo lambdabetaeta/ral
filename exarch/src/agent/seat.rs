@@ -7,6 +7,7 @@ use crate::cancel::InterruptTarget;
 use crate::shell_eval::builtins;
 use ral_core::carrier::{IdentityTransport, ProbeError, Severed, Transport};
 use ral_core::engine::EngineInstaller;
+use ral_core::path::EnginePath;
 use ral_core::protocol::{Attach, EngineSpec, Root};
 use std::sync::Arc;
 
@@ -62,10 +63,14 @@ impl Seat {
         terminal: ral_core::terminal::TerminalState,
         scratch: Arc<Scratch>,
     ) -> Result<Self, Severed> {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "host-env: the engine's home is the launching user's HOME"
+        )]
         let home = ral_core::host::home().unwrap_or_default();
         let attach = Attach::root(
-            EngineSpec::new(builtins::INSTALLER_TAG, home.into()),
-            Root::new(cwd).with_env(scratch.env()),
+            EngineSpec::new(builtins::INSTALLER_TAG, EnginePath::Host(home.into())),
+            Root::new(EnginePath::Host(cwd)).with_env(scratch.env()),
         )
         .with_terminal(terminal);
         let transport = Arc::new(IdentityTransport::boot(installers, &attach)?);

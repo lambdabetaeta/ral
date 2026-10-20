@@ -522,7 +522,11 @@ pub fn run(
     {
         r = Err(format!("writing reply: {e}"));
     }
-    let _ = writeln!(headless.err, "Agent log: {}", session.log_dir().display());
+    let _ = writeln!(
+        headless.err,
+        "Agent log: {}",
+        ral_core::path::shown(session.log_dir())
+    );
     let _ = writeln!(
         headless.err,
         "[done] {} turns · {:.1}s · {}",

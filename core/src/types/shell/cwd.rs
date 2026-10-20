@@ -61,11 +61,11 @@ impl Shell {
     pub(crate) fn apply_chdir(&mut self, target: &str) -> Result<(), Error> {
         let resolved = self.resolve(target).into_inner();
         let meta = std::fs::metadata(&resolved)
-            .map_err(|e| Error::new(format!("{}: {e}", resolved.display())))?;
+            .map_err(|e| Error::new(format!("{}: {e}", crate::path::shown(&resolved))))?;
         if !meta.is_dir() {
             return Err(Error::new(format!(
                 "{}: not a directory",
-                resolved.display()
+                crate::path::shown(&resolved)
             )));
         }
 

@@ -3,6 +3,7 @@
 use super::*;
 use crate::carrier::{Dispatching, dispatch_to_report};
 use crate::guard::SpawnGrant;
+use crate::path::EnginePath;
 use crate::protocol::{Control, Ending, EnquiryError, Report, Root};
 use crate::types::Shell;
 
@@ -25,7 +26,10 @@ mod identity_cancel_tests {
             std::thread::spawn(move || {
                 transport.dispatch(
                     DispatchId(1),
-                    crate::protocol::Run::captured("sleep 30", "<test>"),
+                    crate::protocol::Run::captured(
+                        "sleep 30",
+                        crate::source::SourceOrigin::named("<test>"),
+                    ),
                     &(Arc::new(()) as Arc<dyn Host>),
                 );
             })
@@ -176,6 +180,7 @@ mod enquiry_tests {
     use super::*;
     use crate::run::tests::install_act;
     use crate::run::{RunReport, RunRequest};
+    use crate::source::SourceOrigin;
     use crate::types::{Break, Desk, Mooring};
     use std::sync::Mutex;
 
@@ -227,7 +232,7 @@ mod enquiry_tests {
 
         match shell.run(RunRequest {
             desk: Some(desk),
-            ..RunRequest::from(Run::captured("ask-desk", "<test>"))
+            ..RunRequest::from(Run::captured("ask-desk", SourceOrigin::named("<test>")))
         }) {
             RunReport::Ran { .. } => {}
             RunReport::Static { .. } => panic!("`ask-desk` must reach evaluation"),
@@ -289,7 +294,7 @@ mod enquiry_tests {
         fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
             let _ = dispatch_to_report(
                 &*self.0,
-                crate::protocol::Run::captured("", "<test>"),
+                crate::protocol::Run::captured("", crate::source::SourceOrigin::named("<test>")),
                 Arc::new(()),
             );
             Ok(req)
@@ -375,6 +380,7 @@ mod probe_tests {
     use super::*;
     use crate::carrier::testkit::{BARE, attach, boot, boot_at, eval};
     use crate::protocol::probe::PathEntry;
+    use crate::source::SourceOrigin;
 
     fn fresh() -> IdentityTransport {
         boot(&BARE)
@@ -384,7 +390,10 @@ mod probe_tests {
     fn at(dir: &std::path::Path) -> IdentityTransport {
         boot_at(
             &BARE,
-            &Attach::root(attach(&BARE).engine, Root::new(dir.to_path_buf())),
+            &Attach::root(
+                attach(&BARE).engine,
+                Root::new(EnginePath::Host(dir.to_path_buf())),
+            ),
         )
     }
 
@@ -424,7 +433,8 @@ mod probe_tests {
     fn env_var_reads_the_overlay() {
         let attach = Attach::root(
             attach(&BARE).engine,
-            Root::new(std::env::temp_dir()).with_env(vec![("PROBE_TEST_VAR".into(), "42".into())]),
+            Root::new(EnginePath::Host(std::env::temp_dir()))
+                .with_env(vec![("PROBE_TEST_VAR".into(), "42".into())]),
         );
         let transport = boot_at(&BARE, &attach);
         assert_eq!(transport.env_var("PROBE_TEST_VAR_ABSENT"), Ok(None));
@@ -509,7 +519,7 @@ mod probe_tests {
         assert_eq!(transport.cwd(), Err(ProbeError::Severed(first.clone())));
         let refused = dispatch_to_report(
             &transport,
-            Run::captured("$[1 + 1]", "<test>"),
+            Run::captured("$[1 + 1]", SourceOrigin::named("<test>")),
             Arc::new(()),
         );
         assert_eq!(refused, Err(first));

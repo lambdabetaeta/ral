@@ -35,7 +35,7 @@ pub(crate) fn answer(shell: &Shell, probe: &Probe) -> FOValue {
             .map(str::to_string)
             .collect::<Vec<_>>()
             .encode(),
-        Probe::PathBytes(path) => crate::path::tree::bytes(&shell.cwd().join(path)).encode(),
+        Probe::PathBytes(path) => crate::path::tree::bytes(shell.anchor(path).as_path()).encode(),
         Probe::Workers => shell
             .workers()
             .iter()
@@ -49,7 +49,7 @@ pub(crate) fn answer(shell: &Shell, probe: &Probe) -> FOValue {
             .encode(),
         Probe::CompletionNames => completion_names(shell).encode(),
         Probe::Bindings => binding_rows(shell).encode(),
-        Probe::PathEntries(dir) => fs::entries(&shell.cwd().join(dir)).encode(),
+        Probe::PathEntries(dir) => fs::entries(shell.anchor(dir).as_path()).encode(),
         Probe::Grants => shell.context.grants.clone().encode(),
         #[cfg(feature = "test-util")]
         Probe::WorkerCount => shell.worker_count().encode(),

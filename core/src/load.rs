@@ -13,16 +13,16 @@ pub mod profile;
 
 use crate::evaluator::{Mode, Ran};
 use crate::ir::Toplevel;
-use crate::source::Source;
+use crate::source::{Source, SourceOrigin};
 use crate::types::{Env, Mooring, Settled, Shell, Value, sig};
 
 const MAX_SOURCE_DEPTH: usize = 100;
 
-/// Compile `source` under `virtual_path` and run it in the caller's own
-/// scope, its defines landing in `shell.env`.
+/// Compile `source`, read from `origin`, and run it in the caller's own scope,
+/// its defines landing in `shell.env`.
 ///
-/// The path is virtual: the caller owns the filesystem read; this only
-/// names the registered source and keys the cycle stack.  `contract` is the
+/// The caller owns the filesystem read; `origin` only identifies the
+/// registered source and keys the cycle stack.  `contract` is the
 /// loading form's declared table, whose closed keyset `source`'s returned row
 /// is held to — the plugin loader's door, for a manifest's fields — in the
 /// same check as the rest of the file.
@@ -34,14 +34,11 @@ pub fn evaluate_source(
     mooring: &Mooring,
     shell: &mut Shell,
     source: &str,
-    virtual_path: &str,
+    origin: &SourceOrigin,
     contract: Option<crate::typecheck::ReturnContract>,
 ) -> Settled<Value> {
-    let top = check_source(source, virtual_path, shell, contract)?;
-    let load = ModuleLoad {
-        top: &top,
-        virtual_path,
-    };
+    let top = check_source(source, origin, shell, contract)?;
+    let load = ModuleLoad { top: &top, origin };
     let ran = module_phrases(load, shell.env.clone(), Mode::Local, mooring, shell)?;
     // Unlike a nested `use`, this loader's whole point is to install its
     // defines into the running session — rc, a plugin, a capability file,
@@ -59,7 +56,7 @@ pub fn evaluate_source(
 #[derive(Clone, Copy)]
 pub(crate) struct ModuleLoad<'a> {
     pub(crate) top: &'a Toplevel,
-    pub(crate) virtual_path: &'a str,
+    pub(crate) origin: &'a SourceOrigin,
 }
 
 /// Run `load`'s phrases under `mode`, guarded by the cycle check, the depth
@@ -79,18 +76,17 @@ pub(crate) fn module_phrases(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Ran> {
-    let ModuleLoad { top, virtual_path } = load;
-    let key = virtual_path.to_string();
-    if shell.context.modules.stack.contains(&key) {
-        let cycle: Vec<&str> = shell
+    let ModuleLoad { top, origin } = load;
+    if shell.context.modules.stack.contains(origin) {
+        let cycle: Vec<String> = shell
             .context
             .modules
             .stack
             .iter()
-            .map(std::string::String::as_str)
+            .map(SourceOrigin::to_string)
             .collect();
         return Err(sig(format!(
-            "circular dependency: {} -> {key}",
+            "circular dependency: {} -> {origin}",
             cycle.join(" -> ")
         )));
     }
@@ -99,7 +95,7 @@ pub(crate) fn module_phrases(
             "recursion depth limit ({MAX_SOURCE_DEPTH}) exceeded"
         )));
     }
-    let frame = ModuleStackFrame::enter(shell, key);
+    let frame = ModuleStackFrame::enter(shell, origin.clone());
     let ran = crate::evaluator::run_phrases(&top.phrases, env, mode, mooring, frame.shell);
     drop(frame);
     Ok(ran)
@@ -111,8 +107,8 @@ struct ModuleStackFrame<'a> {
 }
 
 impl<'a> ModuleStackFrame<'a> {
-    fn enter(shell: &'a mut Shell, key: String) -> Self {
-        shell.context.modules.stack.push(key);
+    fn enter(shell: &'a mut Shell, origin: SourceOrigin) -> Self {
+        shell.context.modules.stack.push(origin);
         Self { shell }
     }
 }
@@ -124,8 +120,8 @@ impl Drop for ModuleStackFrame<'_> {
 }
 
 /// Compile `source` seeded from the live session's schemes, so a loaded
-/// file sees the names already installed.  `virtual_path` is the compile
-/// door's script name too, so the file's `$SCRIPT` references bake to it.
+/// file sees the names already installed.  A file `origin` is the compile
+/// door's script too, so the file's `$SCRIPT` references bake to it.
 ///
 /// Registers `source` before compiling, so every span the compile stamps,
 /// a rejection's among them, resolves in the session's registry.
@@ -135,17 +131,17 @@ impl Drop for ModuleStackFrame<'_> {
 /// count as real uses and renewing them once here covers all of them.
 pub(crate) fn check_source(
     source: &str,
-    virtual_path: &str,
+    origin: &SourceOrigin,
     shell: &mut Shell,
     contract: Option<crate::typecheck::ReturnContract>,
 ) -> Settled<Toplevel> {
-    let text = Source::from_text(virtual_path, source);
+    let text = Source::from_text(origin.clone(), source);
     let file = shell.session.sources.register(text.clone());
     let top = crate::compile::compile_and_typecheck(
         source,
         shell.session_schemes(),
         file,
-        virtual_path,
+        origin.file(),
         contract,
     )
     .map_err(|error| error.into_error(text))?;

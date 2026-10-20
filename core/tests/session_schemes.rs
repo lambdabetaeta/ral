@@ -12,6 +12,7 @@ mod common;
 use ral_core::compile::{CompileError, compile_and_typecheck};
 use ral_core::protocol::Run;
 use ral_core::source::FileId;
+use ral_core::source::SourceOrigin;
 use ral_core::test_access::binding_scheme as scheme_of;
 use ral_core::types::Settled;
 use ral_core::{Shell, TypeError, Value};
@@ -26,7 +27,7 @@ fn shell() -> Shell {
 /// callers probing an *eval* failure get the body's `Settled` back.
 fn run(shell: &mut Shell, src: &str) -> Settled<Value> {
     shell
-        .run(Run::foreground(src, "<test>"))
+        .run(Run::foreground(src, SourceOrigin::named("<test>")))
         .expect_ran()
         .into_result()
 }
@@ -34,7 +35,7 @@ fn run(shell: &mut Shell, src: &str) -> Settled<Value> {
 /// Check `src` against the live session without evaluating it — the
 /// errors a run would surface before running.
 fn check_errors(shell: &Shell, src: &str) -> Vec<TypeError> {
-    match compile_and_typecheck(src, shell.session_schemes(), FileId::DUMMY, "", None) {
+    match compile_and_typecheck(src, shell.session_schemes(), FileId::DUMMY, None, None) {
         Ok(_) => Vec::new(),
         Err(CompileError::Parse(e)) => panic!("parse: {src:?}: {e}"),
         Err(CompileError::Types(errs)) => errs,
@@ -363,7 +364,7 @@ fn check_with_stored(names: &[&str], src: &str) -> Vec<TypeError> {
         .map(|name| ((*name).to_string(), stored_weak_list(0)))
         .collect();
     let schemes = ral_core::test_access::with_stored_schemes(shell().session_schemes(), stored);
-    match compile_and_typecheck(src, schemes, FileId::DUMMY, "", None) {
+    match compile_and_typecheck(src, schemes, FileId::DUMMY, None, None) {
         Ok(_) => Vec::new(),
         Err(CompileError::Parse(e)) => panic!("parse: {src:?}: {e}"),
         Err(CompileError::Types(errs)) => errs,
@@ -537,7 +538,7 @@ fn a_recursive_document_its_unit_fixed_is_used_later_as_fixed() {
     assert!(stored.starts_with("μ"), "{stored}");
     let later = "let second = fold { |node key| return $node[$key] } $doc ['a', 'b']";
     assert!(check_errors(&sh, later).is_empty());
-    let top = compile_and_typecheck(later, sh.session_schemes(), FileId::DUMMY, "", None)
+    let top = compile_and_typecheck(later, sh.session_schemes(), FileId::DUMMY, None, None)
         .expect("the later line checks");
     assert!(top.admits.is_empty(), "nothing is left to admit again");
     run(&mut sh, later).unwrap();
@@ -550,7 +551,7 @@ fn a_residual_datum_is_admitted_again_by_each_unit_that_uses_it() {
     let mut sh = shell();
     run(&mut sh, DECODE_A).unwrap();
     let admits = |src: &str| {
-        compile_and_typecheck(src, sh.session_schemes(), FileId::DUMMY, "", None)
+        compile_and_typecheck(src, sh.session_schemes(), FileId::DUMMY, None, None)
             .expect("the line checks")
             .admits
             .len()

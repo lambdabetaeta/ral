@@ -7,6 +7,7 @@
 use ral_core::carrier::Severed;
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::Datum as _;
+use ral_core::path::{Resolver, is_absolute, shown, utf8};
 use ral_core::protocol::{Ending, Program, Report};
 use ral_core::record;
 use ral_core::ty::{Row, Scheme, Ty, Typed as _};
@@ -19,6 +20,7 @@ use ral_core::types::{
 use ral_core::{Shell, Value};
 use ral_core::{err, errln};
 use std::borrow::Cow;
+use std::path::PathBuf;
 
 use crate::repl::{RcSettings, install_default_prompt, source_startup_files};
 
@@ -73,6 +75,8 @@ pub(crate) struct Boot {
     pub(crate) login: bool,
     pub(crate) no_rc: bool,
     pub(crate) recursion_limit: Option<usize>,
+    /// The `--capabilities` profiles, each the native spelling of an
+    /// absolute path ([`Self::profiles`]).
     pub(crate) capabilities: Vec<String>,
 }
 
@@ -84,6 +88,43 @@ record!(Boot {
 });
 
 impl Boot {
+    /// The `--capabilities` profiles as the record carries them: each path
+    /// anchored at the invocation cwd and spelled natively, which the door
+    /// lifts back unchanged.
+    ///
+    /// A relative argument names a file beside the user who typed it, and the
+    /// rc and earlier profiles run before a profile loads and may `cd`, so the
+    /// argument is anchored here, before any of them runs: the shell's cwd at
+    /// load time is not the one the user meant.  The invocation cwd is the
+    /// process's own, which ral never moves.  The record is text, so a path
+    /// that is not UTF-8 cannot board it.
+    ///
+    /// # Errors
+    /// The first path that is not UTF-8, or that is relative while the
+    /// invocation cwd is unknown or does not make it absolute (a Windows
+    /// drive-relative `C:x`), named.
+    pub(crate) fn profiles(paths: &[PathBuf]) -> Result<Vec<String>, String> {
+        let cwd = ral_core::host::cwd();
+        paths
+            .iter()
+            .map(|path| {
+                let anchored = match &cwd {
+                    Some(cwd) => Resolver::at(None, cwd).anchor(path).into_inner(),
+                    None => path.clone(),
+                };
+                if !is_absolute(&anchored) {
+                    return Err(format!(
+                        "ral: --capabilities: {} cannot be anchored at the working directory",
+                        shown(path)
+                    ));
+                }
+                utf8(&anchored)
+                    .map(str::to_owned)
+                    .map_err(|e| format!("ral: --capabilities: {e}, so it cannot name a profile"))
+            })
+            .collect()
+    }
+
     pub(crate) fn program(self) -> Program {
         Program::Hook {
             name: hook(),
@@ -104,6 +145,14 @@ fn boot(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> 
         .and_then(|v| FOValue::try_from(v).ok())
         .ok_or_else(|| refuse("the boot record must be first-order data"))?;
     let boot = Boot::decode(&record).map_err(|e| refuse(&format!("in the boot record, {e}")))?;
+    // The front-end anchored every profile (`Boot::profiles`); a relative
+    // one would now read the shell's cwd, which the rc may yet move.
+    if let Some(path) = boot.capabilities.iter().find(|p| !is_absolute(p)) {
+        return Err(refuse(&format!(
+            "the --capabilities profile {} is not absolute",
+            shown(path)
+        )));
+    }
     let settings = if boot.no_rc {
         RcSettings::default()
     } else {
@@ -112,7 +161,7 @@ fn boot(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> 
     if let Some(n) = boot.recursion_limit {
         shell.set_stack_limit(n);
     }
-    let paths: Vec<std::path::PathBuf> = boot.capabilities.iter().map(Into::into).collect();
+    let paths: Vec<PathBuf> = boot.capabilities.iter().map(Into::into).collect();
     ral_core::load::profile::apply_session_profiles(mooring, shell, &paths).map_err(
         |e| match e {
             Break::Error(mut e) => {

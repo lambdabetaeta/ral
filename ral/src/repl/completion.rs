@@ -24,6 +24,7 @@ use ral_core::carrier::Transport;
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::{Datum, exact_keys, field};
 use ral_core::path::SearchCwd;
+use ral_core::path::complete::{PartialPath, Tilde, spell_entry};
 use ral_core::protocol::probe::PathEntry;
 use ral_core::record;
 use ral_core::source::Span as ByteSpan;
@@ -271,10 +272,6 @@ fn entries(engine: &dyn Transport, dir: &Path) -> Vec<PathEntry> {
 /// the last lexeme touching `pos`, and it is at command position when what
 /// precedes it is nothing or a separator.  A path candidate replaces the whole
 /// atom, so it is one atom again — words that touch do not parse.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "adapter: the directory part of a user-typed token, read for candidates"
-)]
 pub(super) fn complete(line: &str, pos: usize, sources: &Sources<'_>) -> (usize, Vec<Candidate>) {
     let Some(lexemes) = lex_open(&line[..pos]) else {
         return (pos, vec![]);
@@ -288,18 +285,20 @@ pub(super) fn complete(line: &str, pos: usize, sources: &Sources<'_>) -> (usize,
         .len()
         .checked_sub(1 + usize::from(atom.is_some()))
         .is_none_or(|i| separates(&seen[i].token));
+    let home = home();
     // A quoted atom does not expand `~`.
-    let (start, text, tilde) = match atom.map(|l| (&l.token, l.span)) {
-        None => (pos, String::new(), false),
+    let (start, partial) = match atom.map(|l| (&l.token, l.span)) {
+        None => (pos, PartialPath::of("", Tilde::Literal)),
         Some((Token::Word(_), span)) => (
             span.start as usize,
-            match &line[span.start as usize..span.end as usize] {
-                "~" => "~/".into(), // a lone `~` is home as a directory
-                word => word.to_owned(),
-            },
-            true,
+            PartialPath::of(
+                &line[span.start as usize..span.end as usize],
+                Tilde::Home(home.as_deref()),
+            ),
         ),
-        Some((Token::SingleQuoted(body), span)) => (span.start as usize, body.clone(), false),
+        Some((Token::SingleQuoted(body), span)) => {
+            (span.start as usize, PartialPath::of(body, Tilde::Literal))
+        }
         Some((Token::Variable { name, delimited }, span)) => {
             let pool = sources.cache.variables.iter().map(|v| Item::Name(v));
             return (
@@ -309,45 +308,44 @@ pub(super) fn complete(line: &str, pos: usize, sources: &Sources<'_>) -> (usize,
         }
         Some(_) => return (pos, vec![]),
     };
-    if at_command && !text.contains('/') {
-        let names = sources.command_names();
-        let cwd = entries(sources.engine, Path::new("./"));
-        // A directory may lead to an executable (`dir/cmd`).
-        let dirs = cwd
-            .iter()
-            .filter(|e| e.dir && dotfile_visible(&e.name, &text))
-            .map(|entry| Item::Path {
-                dir: "",
-                entry,
-                tilde: true,
-            });
-        let pool = names.iter().map(|n| Item::Name(n)).chain(dirs);
-        return (start, offer(&text, pool));
-    }
-    let (dir, needle) = text.split_at(text.rfind('/').map_or(0, |slash| slash + 1));
-    let read = if dir.is_empty() { "./" } else { dir };
-    let Some(read) = (!tilde)
-        .then(|| read.to_owned())
-        .or_else(|| expand_tilde(read))
-    else {
+    let Some(listing) = partial.listing() else {
         return (start, vec![]);
     };
     // The engine anchors a relative directory against its logical cwd.
-    let found = entries(sources.engine, Path::new(&read));
-    let pool = found
+    let found = entries(sources.engine, &listing);
+    let command = at_command && partial.is_bare();
+    // At command position, only a directory: it may lead to an executable (`dir/cmd`).
+    let paths = found
         .iter()
-        .filter(|e| dotfile_visible(&e.name, needle))
-        .map(|entry| Item::Path { dir, entry, tilde });
-    (start, offer(needle, pool))
+        .filter(|e| partial.offers(&e.name) && (e.dir || !command))
+        .map(|entry| Item::Path {
+            partial: &partial,
+            entry,
+        });
+    let names = if command {
+        sources.command_names()
+    } else {
+        Vec::new()
+    };
+    let pool = names.iter().map(|n| Item::Name(n)).chain(paths);
+    (start, offer(partial.needle(), pool))
+}
+
+/// The launching user's home, for a typed `~`.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "host-env: completion completes for the launching user, outside any shell overlay"
+)]
+fn home() -> Option<String> {
+    ral_core::host::home()
 }
 
 /// One offerable name, borrowed from the pool it was gathered from.
 enum Item<'a> {
     Name(&'a str),
     Path {
-        dir: &'a str,
+        partial: &'a PartialPath<'a>,
         entry: &'a PathEntry,
-        tilde: bool,
     },
 }
 
@@ -361,24 +359,20 @@ impl AsRef<str> for Item<'_> {
 }
 
 impl Item<'_> {
-    /// A path replaces the whole atom `dir` + name (+ `/` for a directory),
-    /// quoted unless a bare word; a `tilde` path that needs quoting is expanded
-    /// first, since a quoted `~` would not expand.
+    /// A path replaces the whole atom, [`PartialPath::completed`], quoted
+    /// unless a bare word; one that needs quoting has its `~` expanded first,
+    /// since a quoted `~` would not expand.
     fn candidate(self) -> Candidate {
         match self {
             Item::Name(n) => Candidate {
                 display: n.to_owned(),
                 replacement: n.to_owned(),
             },
-            Item::Path { dir, entry, tilde } => {
-                let display = if entry.dir {
-                    format!("{}/", entry.name)
-                } else {
-                    entry.name.clone()
-                };
-                let full = format!("{dir}{display}");
-                let full = if tilde && matches!(quote_word(&full), Cow::Owned(_)) {
-                    expand_tilde(&full).unwrap_or(full)
+            Item::Path { partial, entry } => {
+                let display = spell_entry(&entry.name, entry.dir);
+                let full = partial.completed(&display);
+                let full = if matches!(quote_word(&full), Cow::Owned(_)) {
+                    partial.expand(&full).unwrap_or(full)
                 } else {
                     full
                 };
@@ -422,28 +416,6 @@ fn extends(name: &str, needle: &str) -> bool {
         .chars()
         .flat_map(char::to_lowercase)
         .all(|c| name.next() == Some(c))
-}
-
-// ── Path completion ───────────────────────────────────────────────────────────
-
-/// `dir` with a leading `~` expanded; `None` when no home is known, so the
-/// caller offers no candidates rather than a fabricated path.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "host-env: completion completes for the launching user, outside any shell overlay"
-)]
-fn expand_tilde(dir: &str) -> Option<String> {
-    ral_core::path::tilde::TildePath::parse(dir).map_or_else(
-        || Some(dir.to_string()),
-        |t| ral_core::host::home().map(|home| t.expand(&home)),
-    )
-}
-
-/// Whether `name` is offerable given the needle: a dotfile is hidden unless
-/// the needle itself starts with `.`.  The match against the needle is
-/// [`matching`]'s job; this is only the visibility gate.
-fn dotfile_visible(name: &str, needle: &str) -> bool {
-    needle.starts_with('.') || !name.starts_with('.')
 }
 
 // ── The simple command at the cursor ─────────────────────────────────────────
@@ -550,6 +522,7 @@ mod tests {
     use super::*;
 
     use ral_core::carrier::IdentityTransport;
+    use ral_core::path::EnginePath;
 
     /// Backing storage for a hand-built [`Sources`], which borrows its cache.
     struct Fixture {
@@ -613,8 +586,12 @@ mod tests {
     /// An engine whose `PATH` is exactly `path` and whose logical cwd is `cwd`.
     fn engine_at(path: &str, cwd: &Path) -> IdentityTransport {
         let attach = ral_core::protocol::Attach::root(
-            ral_core::protocol::EngineSpec::new(crate::repl::TEST_TAG, cwd.into()),
-            ral_core::protocol::Root::new(cwd.into()).with_env(vec![("PATH".into(), path.into())]),
+            ral_core::protocol::EngineSpec::new(
+                crate::repl::TEST_TAG,
+                EnginePath::Host(cwd.into()),
+            ),
+            ral_core::protocol::Root::new(EnginePath::Host(cwd.into()))
+                .with_env(vec![("PATH".into(), path.into())]),
         );
         let runtime =
             ral_core::HostSurface::default().runtime(ral_core::terminal::TerminalState::default());
@@ -891,7 +868,7 @@ mod tests {
         assert_eq!(cands[0].replacement, "src/");
     }
 
-    // ── path completion / dotfile_visible ───────────────────────────────
+    // ── path completion ───────────────────────────────
 
     #[test]
     fn path_completion_expands_home_tilde_prefix() {
@@ -911,14 +888,6 @@ mod tests {
         let (start, _) = complete("ls ~", 4, &sources(&[], &[]).view());
         assert_eq!(start, 3);
     }
-    #[test]
-    fn dotfile_gate_hides_dotfiles_unless_needle_has_dot() {
-        assert!(!dotfile_visible(".git", ""));
-        assert!(!dotfile_visible(".git", "g"));
-        assert!(dotfile_visible(".git", "."));
-        assert!(dotfile_visible("src", ""));
-    }
-
     // ── Engine cwd anchoring ────────────────────────────────────────────
 
     #[test]
@@ -1003,7 +972,7 @@ mod tests {
 
         // The fixture's cwd is wholly unrelated; the absolute prefix should win.
         let src = sources(&[], &[]);
-        let line = format!("ls {}/", tmp.path().display());
+        let line = format!("ls {}/", ral_core::path::shown(tmp.path()));
         let (_, cands) = complete(&line, line.len(), &src.view());
         let names: Vec<&str> = cands.iter().map(|c| c.display.as_str()).collect();
         assert_eq!(names, vec!["delta"]);

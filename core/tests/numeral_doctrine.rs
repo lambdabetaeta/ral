@@ -26,13 +26,17 @@ use ral_core::first_order::Finite;
 use ral_core::ir::Val;
 use ral_core::protocol::Run;
 use ral_core::run::RunReport;
+use ral_core::source::SourceOrigin;
 use ral_core::types::Value;
 
 /// A session as every front end builds one: prelude registered, env seeded,
 /// capabilities at root.
 /// What `src` writes to stdout, the run having succeeded.
 fn printed(src: &str) -> String {
-    match fresh_shell().run(Run::captured(src, "<numeral-doctrine>")) {
+    match fresh_shell().run(Run::captured(
+        src,
+        SourceOrigin::named("<numeral-doctrine>"),
+    )) {
         RunReport::Ran {
             ending, captured, ..
         } => {

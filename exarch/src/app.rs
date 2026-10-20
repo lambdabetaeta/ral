@@ -2,6 +2,7 @@
 //! those share.
 
 use ral_core::Shell;
+use ral_core::path::{GuestPath, join_slash, strip_appended_suffix};
 use std::cmp::Ordering;
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -17,6 +18,10 @@ impl RunLock {
     ///
     /// # Errors
     /// Returns an error when another exarch owns the lock.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[silent:run-lock] opens the run directory's advisory lock file; infra, not turn-time data I/O"
+    )]
     pub fn try_acquire(run_dir: &Path) -> io::Result<Self> {
         let file = OpenOptions::new()
             .create(true)
@@ -86,6 +91,10 @@ struct SessionHold {
 impl Drop for SessionHold {
     /// The directory, then the lock: closed before it is unlinked, because
     /// Windows will not unlink an open file.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[silent:scratch-drop] removes a finished session's scratch and its lock; not turn-time data I/O"
+    )]
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.dir);
         drop(self.lock.take());
@@ -93,9 +102,11 @@ impl Drop for SessionHold {
     }
 }
 
-/// The lock file's name is its scratch's plus this, so each stands beside the
-/// other and either names the other by [`Path::with_extension`].
-const LOCK_SUFFIX: &str = ".lock";
+/// The lock file's name is its scratch's with this appended, so each stands
+/// beside the other and either names the other: the lock by
+/// [`ral_core::path::with_appended_suffix`], the scratch by
+/// [`strip_appended_suffix`].
+const LOCK_SUFFIX: &str = "lock";
 
 /// What a tool home takes under a scratch: a subdirectory, or a command-line
 /// flag whose value is one.
@@ -106,10 +117,11 @@ enum Home {
 }
 
 impl Home {
-    fn value(self, scratch: &str) -> String {
+    /// The value, given how a subdirectory of the scratch is spelled.
+    fn value(self, under: impl Fn(&'static str) -> String) -> String {
         match self {
-            Self::Dir(sub) => format!("{scratch}/{sub}"),
-            Self::Flag(prefix, sub) => format!("{prefix}{scratch}/{sub}"),
+            Self::Dir(sub) => under(sub),
+            Self::Flag(prefix, sub) => format!("{prefix}{}", under(sub)),
         }
     }
 }
@@ -152,6 +164,10 @@ impl Scratch {
     ///
     /// # Errors
     /// Returns `Err` if the lock file or the directory cannot be created.
+    ///
+    /// # Panics
+    /// Never: the lock is made with [`LOCK_SUFFIX`] appended, which is what
+    /// names its scratch.
     #[allow(
         clippy::disallowed_methods,
         reason = "[silent:scratch-bootstrap] disposable scratch-dir setup; not turn-time data I/O"
@@ -161,12 +177,13 @@ impl Scratch {
         let prefix = format!("{}-scratch-", app.name());
         let (file, lock) = tempfile::Builder::new()
             .prefix(&prefix)
-            .suffix(LOCK_SUFFIX)
+            .suffix(&format!(".{LOCK_SUFFIX}"))
             .tempfile_in(&temp)?
             .keep()
             .map_err(|kept| kept.error)?;
         let lock_guard = hold_exclusive(file)?;
-        let dir = lock.with_extension("");
+        let dir = strip_appended_suffix(&lock, LOCK_SUFFIX)
+            .expect("a lock file is named with the suffix it was made with");
         fs::create_dir(&dir)?;
         reap_unheld(&temp, &prefix, &lock);
         Ok(Self {
@@ -227,6 +244,10 @@ impl Scratch {
     /// Returns `Err` on a session's scratch, which has no room beside it, or
     /// if the directory cannot be created.
     #[doc(hidden)]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] makes the test double's directory beside a test scratch"
+    )]
     pub fn test_sibling(&self, name: &str) -> io::Result<PathBuf> {
         let Hold::Test(root) = &self.hold else {
             return Err(io::Error::other(
@@ -256,23 +277,50 @@ impl Scratch {
     }
 }
 
-/// What a scratch at `dir` names to the agent.
+/// What a host scratch at `dir` names to the agent: each path native, joined
+/// as the host joins.
+fn scratch_env(app: App, dir: &Path) -> Vec<(String, String)> {
+    env_under(app, env_value(dir), |sub| env_value(&join_slash(dir, sub)))
+}
+
+/// What a scratch at `dir` inside a Posix guest names to the agent.
 ///
-/// The scratch var, the tool homes under it, and the confined tool settings:
-/// one spelling for a host's own `Scratch` and for a guest path the host
-/// cannot hold.
-pub fn scratch_env(app: App, dir: &Path) -> Vec<(String, String)> {
-    let scratch = dir.to_string_lossy().into_owned();
+/// `dir` is the guest's path, which the host cannot hold as a `PathBuf`, so
+/// every home joins under it as the guest joins, with `/`, whatever the host.
+pub fn guest_scratch_env(app: App, dir: &GuestPath) -> Vec<(String, String)> {
+    env_under(app, dir.as_str().to_owned(), |sub| {
+        dir.join(sub).as_str().to_owned()
+    })
+}
+
+/// The scratch var, the tool homes under it, and the confined tool settings,
+/// for a scratch spelled `scratch` whose subdirectories `under` spells: one
+/// table for a host's own [`Scratch`] and for a guest's.
+fn env_under(
+    app: App,
+    scratch: String,
+    under: impl Fn(&'static str) -> String,
+) -> Vec<(String, String)> {
     let homes = TOOL_HOMES
         .iter()
-        .map(|(var, home)| ((*var).to_string(), home.value(&scratch)));
+        .map(|(var, home)| ((*var).to_string(), home.value(&under)));
     let settings = CONFINED_TOOL_SETTINGS
         .iter()
         .map(|(var, value)| ((*var).to_string(), (*value).to_string()));
-    std::iter::once((app.scratch_var(), scratch.clone()))
+    std::iter::once((app.scratch_var(), scratch))
         .chain(homes)
         .chain(settings)
         .collect()
+}
+
+/// `path` as the environment value a child process reads: native, lossy
+/// where it is not UTF-8, as an environment value must be text.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "native: a path an environment value names, which the child reads back natively"
+)]
+fn env_value(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
 }
 
 /// Delete the scratches no live session answers for.
@@ -302,10 +350,13 @@ fn reap_unheld(temp: &Path, prefix: &str, mine: &Path) {
     };
     for entry in entries.flatten() {
         let lock = entry.path();
-        let Some(name) = lock.file_name().and_then(|n| n.to_str()) else {
+        let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        if lock == mine || !name.starts_with(prefix) || !name.ends_with(LOCK_SUFFIX) {
+        let Some(scratch) = strip_appended_suffix(&lock, LOCK_SUFFIX) else {
+            continue;
+        };
+        if lock == mine || !name.starts_with(prefix) {
             continue;
         }
         // Opened, never created: a lock file that has just been deleted names
@@ -323,7 +374,7 @@ fn reap_unheld(temp: &Path, prefix: &str, mine: &Path) {
         // fails harmlessly, and no *live* session can be the one that takes
         // it, since a new session always makes a new name.
         drop(unheld);
-        let _ = fs::remove_dir_all(lock.with_extension(""));
+        let _ = fs::remove_dir_all(scratch);
         let _ = fs::remove_file(&lock);
     }
 }
@@ -367,23 +418,12 @@ impl App {
         format!("{}_SCRATCH", self.0.to_uppercase())
     }
 
-    /// This app's directory under an XDG base: `$XDG_<kind>_HOME/<app>/`.  The
-    /// one spelling of that convention — [`App::project_dir`] and
+    /// This app's directory under an XDG base, `$XDG_<kind>_HOME/<app>/`, by
+    /// [`ral_core::path::app_dir_or_temp`]: [`App::project_dir`] and
     /// `provider::models`'s cache path both build on it.
-    ///
-    /// With no home and no absolute override the base is the temp dir, so a
-    /// run still records and configures — losing that state on reboot, where
-    /// defaulting under the cwd would instead scatter it through the working
-    /// tree the agent is editing.
     #[must_use]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "host-env: exarch's own config/state directories live under the launching user's XDG bases"
-    )]
     pub fn xdg_dir(self, kind: ral_core::path::XdgKind) -> PathBuf {
-        ral_core::host::xdg(kind)
-            .unwrap_or_else(std::env::temp_dir)
-            .join(self.0)
+        ral_core::path::app_dir_or_temp(kind, self.0)
     }
 
     /// `$XDG_STATE_HOME/<app>/<project>/`, `<project>` being the slugified
@@ -391,9 +431,9 @@ impl App {
     /// per-run logs, so a project's state is one directory keyed by where it was
     /// launched, never scattered into cwd.
     #[must_use]
-    pub fn project_dir(self, cwd: &str) -> PathBuf {
+    pub fn project_dir(self, cwd: &Path) -> PathBuf {
         self.xdg_dir(ral_core::path::XdgKind::State)
-            .join(project_slug(cwd))
+            .join(ral_core::path::project_slug(cwd))
     }
 
     /// The per-run log directory, `<project>/<YYYY-MM-DD-HHMMSS>-<pid>/` — the
@@ -417,7 +457,7 @@ impl App {
         clippy::disallowed_methods,
         reason = "[silent:log-run-dir] per-run log dir under XDG state; infra, not turn-time data I/O"
     )]
-    pub fn log_run_dir(self, cwd: &str) -> io::Result<PathBuf> {
+    pub fn log_run_dir(self, cwd: &Path) -> io::Result<PathBuf> {
         let stamp = format!("{}-{}", stamp_from_secs(now_secs()), std::process::id());
         let dir = self.project_dir(cwd).join(stamp);
         fs::create_dir_all(&dir)?;
@@ -428,11 +468,15 @@ impl App {
     ///
     /// # Errors
     /// Returns an error when the project state directory cannot be inspected.
-    pub fn resume_candidates(self, cwd: &str) -> io::Result<Vec<PathBuf>> {
+    pub fn resume_candidates(self, cwd: &Path) -> io::Result<Vec<PathBuf>> {
         resume_candidates_in(&self.project_dir(cwd))
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:resume-list] lists a project's run directories and stats each for its modified time; not turn-time data I/O"
+)]
 fn resume_candidates_in(project: &Path) -> io::Result<Vec<PathBuf>> {
     let entries = match fs::read_dir(project) {
         Ok(entries) => entries,
@@ -444,12 +488,11 @@ fn resume_candidates_in(project: &Path) -> io::Result<Vec<PathBuf>> {
         .filter_map(|entry| {
             let path = entry.path();
             let is_dir = entry.file_type().ok()?.is_dir();
-            let record = path.join("sessions/0/record.jsonl");
-            is_dir.then_some((path, record.is_file()))
+            let has_record = join_slash(&path, "sessions/0/record.jsonl").is_file();
+            let name = entry.file_name().into_string().ok()?;
+            (is_dir && has_record).then_some((name, path))
         })
-        .filter(|(_, has_record)| *has_record)
-        .filter_map(|(path, _)| {
-            let name = path.file_name()?.to_str()?;
+        .filter_map(|(name, path)| {
             let (stamp, _pid) = name.rsplit_once('-')?;
             let timestamp = jiff::civil::DateTime::strptime("%Y-%m-%d-%H%M%S", stamp).ok()?;
             let modified = fs::metadata(&path)
@@ -492,10 +535,13 @@ pub(crate) fn now_unix_ms() -> u64 {
 /// # Errors
 /// Returns a sentence when the target names a malformed session directory.
 pub fn normalize_resume_target(target: &Path) -> Result<PathBuf, String> {
-    let Some(session) = target.file_name().and_then(|name| name.to_str()) else {
+    let Some(session) = target
+        .file_name()
+        .and_then(|name| name.to_os_string().into_string().ok())
+    else {
         return Err(format!(
             "cannot resume {}: the target has no session or run directory name",
-            target.display()
+            ral_core::path::shown(target)
         ));
     };
     let Some(sessions) = target.parent().and_then(Path::file_name) else {
@@ -507,7 +553,7 @@ pub fn normalize_resume_target(target: &Path) -> Result<PathBuf, String> {
     if session.parse::<u64>().is_err() {
         return Err(format!(
             "cannot resume {}: the session directory name must be a number",
-            target.display()
+            ral_core::path::shown(target)
         ));
     }
     target
@@ -517,7 +563,7 @@ pub fn normalize_resume_target(target: &Path) -> Result<PathBuf, String> {
         .ok_or_else(|| {
             format!(
                 "cannot resume {}: the session directory has no run-directory parent",
-                target.display()
+                ral_core::path::shown(target)
             )
         })
 }
@@ -536,39 +582,6 @@ fn stamp_from_secs(secs: u64) -> String {
     )
 }
 
-/// Slugify an absolute path into one directory-name component: `/Users/x/proj`
-/// becomes `-Users-x-proj`, the leading `-` standing in for the root.  Built on
-/// [`std::path::Path::components`], so `\` and drive prefixes come out right too.
-// The `Path` here is only decomposed, never resolved, so this is not one of the
-// construction sites `ral_core::path` exists to own.
-#[allow(clippy::disallowed_methods)]
-fn project_slug(cwd: &str) -> String {
-    use std::path::Component;
-    let mut parts: Vec<String> = Vec::new();
-    let mut rooted = false;
-    for comp in std::path::Path::new(cwd).components() {
-        match comp {
-            Component::Prefix(p) => {
-                let drive: String = p
-                    .as_os_str()
-                    .to_string_lossy()
-                    .chars()
-                    .filter(|c| c.is_alphanumeric())
-                    .collect();
-                if !drive.is_empty() {
-                    parts.push(drive);
-                }
-            }
-            Component::RootDir => rooted = true,
-            Component::Normal(s) => parts.push(s.to_string_lossy().into_owned()),
-            Component::CurDir | Component::ParentDir => {}
-        }
-    }
-    let body = parts.join("-");
-    let slug = if rooted { format!("-{body}") } else { body };
-    if slug.is_empty() { "_".into() } else { slug }
-}
-
 /// Seed `name` into `shell` twice over: an environment variable, so spawned
 /// children inherit it, and a scope binding, so `$name` resolves in ral source.
 pub(crate) fn seed_var(shell: &mut Shell, name: &str, value: &str) {
@@ -579,21 +592,27 @@ pub(crate) fn seed_var(shell: &mut Shell, name: &str, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CONFINED_TOOL_SETTINGS, EXARCH, LOCK_SUFFIX, Scratch, TOOL_HOMES, hold_exclusive,
-        normalize_resume_target, project_slug, reap_unheld, resume_candidates_in, scratch_env,
+        CONFINED_TOOL_SETTINGS, EXARCH, LOCK_SUFFIX, Scratch, TOOL_HOMES, guest_scratch_env,
+        hold_exclusive, normalize_resume_target, reap_unheld, resume_candidates_in, scratch_env,
     };
+    use ral_core::path::{GuestPath, strip_appended_suffix, with_appended_suffix};
     use std::fs;
 
     #[test]
+    #[allow(clippy::disallowed_methods, reason = "[test] a fixed fixture path")]
     fn scratch_env_names_the_var_the_homes_and_the_settings() {
-        let env = scratch_env(EXARCH, std::path::Path::new("/tmp/x"));
+        let dir = std::path::Path::new("/tmp/x");
+        let env = scratch_env(EXARCH, dir);
         assert_eq!(
             env.len(),
             1 + TOOL_HOMES.len() + CONFINED_TOOL_SETTINGS.len()
         );
-        assert_eq!(env[0], (EXARCH.scratch_var(), "/tmp/x".to_string()));
-        for (var, home) in TOOL_HOMES {
-            assert!(env.contains(&((*var).to_string(), home.value("/tmp/x"))));
+        // Every value is native, as the child reads it back: on Windows the
+        // subdirectories join with `\`.
+        let native = |p: &std::path::Path| p.to_string_lossy().into_owned();
+        assert_eq!(env[0], (EXARCH.scratch_var(), native(dir)));
+        for (var, _) in TOOL_HOMES {
+            assert!(env.iter().any(|(name, _)| name == var), "{var} is missing");
         }
         for (var, value) in CONFINED_TOOL_SETTINGS {
             assert!(env.contains(&((*var).to_string(), (*value).to_string())));
@@ -601,15 +620,42 @@ mod tests {
         let get = |name: &str| {
             env.iter()
                 .find(|(var, _)| var == name)
-                .map(|(_, v)| v.as_str())
+                .map(|(_, v)| v.clone())
         };
-        assert_eq!(get("XDG_CACHE_HOME"), Some("/tmp/x/xdg-cache"));
-        assert_eq!(get("GOMODCACHE"), Some("/tmp/x/go/pkg/mod"));
-        assert_eq!(get("MAVEN_ARGS"), Some("-Dmaven.repo.local=/tmp/x/maven"));
+        assert_eq!(get("XDG_CACHE_HOME"), Some(native(&dir.join("xdg-cache"))));
+        assert_eq!(
+            get("GOMODCACHE"),
+            Some(native(&dir.join("go").join("pkg").join("mod")))
+        );
+        assert_eq!(
+            get("MAVEN_ARGS"),
+            Some(format!("-Dmaven.repo.local={}", native(&dir.join("maven"))))
+        );
         assert_eq!(get("RUSTUP_HOME"), None);
     }
 
+    /// A guest's scratch is a Posix path on every host: its homes join with
+    /// `/` even on Windows, where a native join would name `/tmp\xdg-cache`.
     #[test]
+    fn guest_scratch_env_joins_with_slash_on_every_host() {
+        let env = guest_scratch_env(EXARCH, &GuestPath::from_static("/tmp"));
+        assert_eq!(
+            env.len(),
+            1 + TOOL_HOMES.len() + CONFINED_TOOL_SETTINGS.len()
+        );
+        let get = |name: &str| {
+            env.iter()
+                .find(|(var, _)| var == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(get(&EXARCH.scratch_var()), Some("/tmp"));
+        assert_eq!(get("XDG_CACHE_HOME"), Some("/tmp/xdg-cache"));
+        assert_eq!(get("GOMODCACHE"), Some("/tmp/go/pkg/mod"));
+        assert_eq!(get("MAVEN_ARGS"), Some("-Dmaven.repo.local=/tmp/maven"));
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods, reason = "[test] fixtures")]
     fn an_inherited_maven_args_is_replaced() {
         let scratch = Scratch::for_test(EXARCH, "maven-args").expect("test scratch");
         let mut shell = crate::boot::test_shell();
@@ -618,8 +664,8 @@ mod tests {
         assert_eq!(
             shell.env_var("MAVEN_ARGS"),
             Some(format!(
-                "-Dmaven.repo.local={}/maven",
-                scratch.path().display()
+                "-Dmaven.repo.local={}",
+                ral_core::path::join_slash(scratch.path(), "maven").to_string_lossy()
             ))
         );
     }
@@ -628,23 +674,31 @@ mod tests {
     fn dropping_a_session_scratch_removes_its_directory_and_its_lock() {
         let scratch = Scratch::new(EXARCH).expect("session scratch");
         let dir = scratch.path().to_path_buf();
-        let lock = dir.with_extension(LOCK_SUFFIX.trim_start_matches('.'));
+        let lock = with_appended_suffix(&dir, LOCK_SUFFIX);
         assert!(dir.exists() && lock.exists());
         drop(scratch);
         assert!(!dir.exists() && !lock.exists());
     }
 
     /// Seed a scratch and its lock file, as [`super::Scratch::new`] would.
+    #[allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
     fn seed_scratch(temp: &std::path::Path, name: &str) -> std::path::PathBuf {
-        let lock = temp.join(format!("{name}{LOCK_SUFFIX}"));
+        let scratch = temp.join(name);
+        let lock = with_appended_suffix(&scratch, LOCK_SUFFIX);
         fs::write(&lock, b"").expect("seed lock file");
-        fs::create_dir_all(temp.join(name)).expect("seed scratch dir");
+        fs::create_dir_all(scratch).expect("seed scratch dir");
         lock
+    }
+
+    /// The scratch `lock` stands beside.
+    fn scratch_of(lock: &std::path::Path) -> std::path::PathBuf {
+        strip_appended_suffix(lock, LOCK_SUFFIX).expect("a seeded lock")
     }
 
     /// The lock alone divides the living from the dead, and nothing outside
     /// the prefix is any of the reaper's business.
     #[test]
+    #[allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
     fn a_scratch_survives_exactly_while_its_lock_is_held() {
         let temp = tempfile::tempdir().expect("temp root");
         let held = seed_scratch(temp.path(), "exarch-scratch-held");
@@ -664,19 +718,19 @@ mod tests {
         reap_unheld(temp.path(), "exarch-scratch-", &mine);
 
         assert!(
-            held.with_extension("").exists(),
+            scratch_of(&held).exists(),
             "a held lock is a session still running: its scratch must survive"
         );
         assert!(
-            !unheld.with_extension("").exists() && !unheld.exists(),
+            !scratch_of(&unheld).exists() && !unheld.exists(),
             "an unheld lock answers for nobody, so the scratch and the lock both go"
         );
         assert!(
-            mine.with_extension("").exists(),
+            scratch_of(&mine).exists(),
             "this session's own scratch is never its own to reap"
         );
         assert!(
-            synod.with_extension("").exists(),
+            scratch_of(&synod).exists(),
             "synod's scratches are outside exarch's prefix and untouchable"
         );
         assert!(
@@ -686,12 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn slug_joins_path_components_with_dashes() {
-        assert_eq!(project_slug("/Users/x/ral-private"), "-Users-x-ral-private");
-        assert_eq!(project_slug("/"), "-");
-    }
-
-    #[test]
+    #[allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
     fn resume_candidates_parse_timestamps_and_skip_mirror_only_runs() {
         let root = tempfile::tempdir().expect("temp root");
         let project = root.path().join("project");
@@ -710,6 +759,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods, reason = "[test] a fixed fixture path")]
     fn resume_target_normalizes_any_session_and_refuses_a_malformed_one() {
         let run = std::path::Path::new("/tmp/exarch-run");
         for session in ["sessions/0", "sessions/3"] {

@@ -26,7 +26,14 @@ struct StampStore {
 }
 
 /// Keyed on the canonical spelling exactly as [`super::fs_capability_name`] is, and
-/// unfolded for the same case-sensitive-directory reason.
+/// unfolded for the same case-sensitive-directory reason: a folded witness
+/// would let one object stand for another's stamp.  The path mutex guarding
+/// it folds, by design (`super::mutex`'s `mutex_name_for`): a lock errs the
+/// other way.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "native: the canonical spelling the OS returned, kept as-is as a key"
+)]
 pub(super) fn stamp_key(canonical: &Path, kind: GrantKind) -> String {
     // Earlier deny stamps witnessed only the root's propagation.
     let tag = if kind == GrantKind::Deny {
@@ -40,6 +47,10 @@ pub(super) fn stamp_key(canonical: &Path, kind: GrantKind) -> String {
 /// [`stamp_key`]'s counterpart for the mandatory-label stamp — a distinct tag
 /// so the label's witness can never collide with a DACL grant's, even though
 /// both key off the same canonical path.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "native: the canonical spelling the OS returned, kept as-is as a key"
+)]
 pub(super) fn label_stamp_key(canonical: &Path) -> String {
     format!("label|{}", canonical.to_string_lossy())
 }

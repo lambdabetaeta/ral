@@ -2011,8 +2011,8 @@ mod tests {
         bindings: Vec<(String, Option<Arc<Scheme>>)>,
     ) -> Vec<&'static str> {
         let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
-        let comp =
-            elaborate(&ast, [], "").unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
+        let comp = elaborate(&ast, [], None)
+            .unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
         let schemes = SessionSchemes {
             bindings,
             ..crate::test_helper::core_schemes()

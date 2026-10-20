@@ -175,7 +175,10 @@ mod tests {
             s.spawn(|| strike(&scope, trapper.pid()));
             let _ = shell.run_under(
                 &scope,
-                crate::run::RunRequest::from(crate::protocol::Run::captured(src, "<test>")),
+                crate::run::RunRequest::from(crate::protocol::Run::captured(
+                    src,
+                    crate::source::SourceOrigin::named("<test>"),
+                )),
             );
         });
     }

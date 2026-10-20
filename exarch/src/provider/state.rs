@@ -176,11 +176,11 @@ pub fn load(dir: &Path) -> Option<State> {
     reason = "[silent:state-write] persists the picker selection; recoverable session state, not turn-time data I/O"
 )]
 pub fn save(dir: &Path, state: &State) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", ral_core::path::shown(dir)))?;
     let path = path_in(dir);
     let json =
         serde_json::to_string_pretty(state).map_err(|e| format!("serialise {STATE_FILE}: {e}"))?;
-    std::fs::write(&path, json).map_err(|e| format!("{}: {e}", path.display()))
+    std::fs::write(&path, json).map_err(|e| format!("{}: {e}", ral_core::path::shown(&path)))
 }
 
 #[cfg(test)]

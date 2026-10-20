@@ -57,7 +57,7 @@ config file or a shell script.
   session-log directory.** It lives at
   `$XDG_STATE_HOME/exarch/<project-slug(cwd)>/state.json`, the same
   per-project directory the session logs already use
-  (`bootstrap::project_dir`, `project_slug`) — so the memory is per-project
+  (`bootstrap::project_dir`, `ral_core::path::project_slug`) — so the memory is per-project
   without scattering a dotfile into the working tree, and exarch's
   per-project artifacts are one findable place. Because it sits *outside*
   cwd, the sandboxed agent cannot reach it at all: the protection is

@@ -163,6 +163,10 @@ impl Entry {
     ///
     /// # Errors
     /// A name no ral string can hold.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "native: the refusal of a name no ral string can hold"
+    )]
     pub fn name(&self) -> Settled<String> {
         self.shown
             .to_str()
@@ -208,6 +212,10 @@ impl<I: Iterator<Item = Settled<Sighting>>> Admitted<I> {
     reason = "Debug escapes the invalid bytes; Display would mangle them"
 )]
 fn unnameable(who: &str, shown: &Path) -> crate::types::Break {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "native: the longest ancestor that is UTF-8, to say where the name stops being"
+    )]
     let dir = shown.ancestors().find_map(Path::to_str).unwrap_or("");
     let name = shown.strip_prefix(dir).unwrap_or(shown);
     sig(format!(

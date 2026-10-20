@@ -23,7 +23,7 @@
 //! English fragment — is the `tests/reject/parse-*.ral` corpus, which
 //! `ral/tests/corpus.rs` runs under the same jargon scan.
 
-use ral_core::source::Source;
+use ral_core::source::{Source, SourceFile, SourceOrigin};
 use ral_core::syntax::parser::ParseError;
 use ral_core::syntax::parser::parse;
 
@@ -99,7 +99,10 @@ fn strip_ansi(s: &str) -> String {
 
 /// The report `err` draws against `src`, as stderr shows it.
 fn rendered_report(src: &str, err: &ParseError) -> String {
-    let source = Source::from_text("fuzz.ral", src);
+    let source = Source::from_text(
+        SourceOrigin::File(SourceFile::new("fuzz.ral").expect("UTF-8")),
+        src,
+    );
     err.report(&source).render(&source)
 }
 

@@ -54,12 +54,12 @@ impl Hypervisor for Brokered {
     ///
     /// # Errors
     /// Returns [`Error`] if the spec is not usable, if the service cannot be
-    /// reached or speaks another version, or if it refused — carrying its own
-    /// sentence, which is already written for the person who granted the folder.
+    /// reached or speaks another version, or if it refused — the service's own
+    /// [`Error`], passed on as it arrived.
     fn boot(&self, spec: &MachineSpec) -> Result<Box<dyn Machine>, Error> {
         let folder = spec.resolve()?;
         let mut pipe = connect().map_err(|cause| {
-            unavailable(&format!(
+            backend(&format!(
                 "synod's machine service is not answering: {cause}. It is installed with synod \
                  and started by Windows; if it has been stopped, ask whoever administers this \
                  computer to start the 'Synod machine broker' service"
@@ -74,7 +74,7 @@ impl Hypervisor for Brokered {
                 read_only: spec.workspace.read_only,
             },
         )
-        .map_err(|cause| unavailable(&format!("synod could not ask for a machine: {cause}")))?;
+        .map_err(|cause| backend(&format!("synod could not ask for a machine: {cause}")))?;
 
         match frame::read(&mut pipe) {
             Ok(Some(Reply::Booted {
@@ -83,13 +83,13 @@ impl Hypervisor for Brokered {
                 net,
             })) => {
                 let control = adopt_socket(&control).map_err(|cause| {
-                    unavailable(&format!(
+                    backend(&format!(
                         "the machine started, but its control plane could not be taken over: \
                          {cause}"
                     ))
                 })?;
                 let net = adopt_socket(&net).map_err(|cause| {
-                    unavailable(&format!(
+                    backend(&format!(
                         "the machine started, but its net wire could not be taken over: {cause}"
                     ))
                 })?;
@@ -97,7 +97,7 @@ impl Hypervisor for Brokered {
                 // sockets — see [`Request::Adopted`] for why both the earlier
                 // and the later moment are wrong.
                 frame::write(&mut pipe, &Request::Adopted).map_err(|cause| {
-                    unavailable(&format!(
+                    backend(&format!(
                         "synod took over the machine's wires but could not say so: {cause}"
                     ))
                 })?;
@@ -107,14 +107,14 @@ impl Hypervisor for Brokered {
                     wires: Some(crate::Wires { control, net }),
                 }))
             }
-            Ok(Some(Reply::Refused(why))) => Err(unavailable(&why)),
-            Ok(Some(other)) => Err(unavailable(&format!(
+            Ok(Some(Reply::Refused(error))) => Err(error),
+            Ok(Some(other)) => Err(backend(&format!(
                 "synod's machine service answered a boot with {other:?}"
             ))),
-            Ok(None) => Err(unavailable(
+            Ok(None) => Err(backend(
                 "synod's machine service closed the connection without answering",
             )),
-            Err(cause) => Err(unavailable(&format!(
+            Err(cause) => Err(backend(&format!(
                 "synod could not read the machine service's answer: {cause}"
             ))),
         }
@@ -174,8 +174,8 @@ impl Machine for BrokeredGuest {
     /// grace window then observes a machine already stopping.
     ///
     /// # Errors
-    /// Returns [`Error::Unavailable`] if the service reports that the machine
-    /// did not stop cleanly, or if it could not be asked at all.
+    /// Returns the service's own [`Error`] if it reports that the machine did
+    /// not stop cleanly, and [`Error::Backend`] if it answered out of turn.
     fn shutdown(mut self: Box<Self>) -> Result<(), Error> {
         self.wires = None;
         let Some(mut pipe) = self.pipe.take() else {
@@ -188,8 +188,8 @@ impl Machine for BrokeredGuest {
         }
         match frame::read(&mut pipe) {
             Ok(Some(Reply::Stopped(Ok(()))) | None) | Err(_) => Ok(()),
-            Ok(Some(Reply::Stopped(Err(why)))) => Err(unavailable(&why)),
-            Ok(Some(other)) => Err(unavailable(&format!(
+            Ok(Some(Reply::Stopped(Err(error)))) => Err(error),
+            Ok(Some(other)) => Err(backend(&format!(
                 "synod's machine service answered a stop with {other:?}"
             ))),
         }
@@ -294,10 +294,10 @@ pub fn adopt_socket(description: &[u8]) -> io::Result<OwnedSocket> {
     Ok(unsafe { OwnedSocket::from_raw_socket(socket as u64) })
 }
 
-/// An [`Error::Unavailable`] for this backend carrying `why`.
-fn unavailable(why: &str) -> Error {
-    Error::Unavailable {
-        hypervisor: HYPERVISOR,
+/// An [`Error::Backend`] for this backend carrying `why`.
+fn backend(why: &str) -> Error {
+    Error::Backend {
+        hypervisor: HYPERVISOR.into(),
         why: why.to_string(),
     }
 }

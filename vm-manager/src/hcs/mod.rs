@@ -44,10 +44,15 @@
     clippy::disallowed_macros,
     reason = "[silent:windows-host] a host diagnostic with no ral shell to print through"
 )]
+use std::ffi::OsString;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::{BootArtifact, Error, Hypervisor, Machine, MachineSpec, Wires};
+use crate::{
+    Act, BootArtifact, Error, GuestConsole, HostFile, Hypervisor, Machine, MachineFiles,
+    MachineSpec, Wire, Wires,
+};
 
 mod api;
 mod console;
@@ -111,23 +116,6 @@ const ORPHAN_AGE: Duration = Duration::from_hours(1);
 /// The backend's name, as a person should see it.
 const HYPERVISOR: &str = "Hyper-V";
 
-/// Shown when the compute service refuses this user.
-///
-/// The Windows analogue of macOS's missing-entitlement refusal, and the same
-/// kind of thing: a machine that could host a guest, and a synod that is not
-/// permitted to ask it to.  Windows explains the group membership itself
-/// (`api`'s tests pin that), so this text says what to do about it in the
-/// register a secretary reads, and leaves the mechanism to the detail.
-const NOT_PERMITTED: &str = "synod is not allowed to create virtual machines on this computer — \
-                             ask whoever administers this computer to add this account to the \
-                             computer's 'Hyper-V Administrators' group";
-
-/// Shown when boot media is present and the platform could host a guest, but
-/// the compute service is not answering at all.
-fn service_unreachable(why: &str) -> String {
-    format!("synod could not reach this computer's virtual-machine service: {why}")
-}
-
 /// Whether this Windows can host a guest for this user, and why not when it
 /// cannot.
 ///
@@ -137,14 +125,20 @@ fn service_unreachable(why: &str) -> String {
 /// group membership), or the service is not running (a fault to report).
 ///
 /// # Errors
-/// Returns the sentence to show the person who granted the folder.
-pub fn available() -> Result<(), String> {
+/// Returns [`Error::NotPermitted`] if the compute service refuses this account
+/// — the Windows analogue of macOS's missing entitlement: a computer that
+/// could host a guest, and a synod not permitted to ask it to — and
+/// [`Error::Backend`] naming the missing feature or the unreachable service
+/// otherwise.
+pub fn available() -> Result<(), Error> {
     let api = api::Api::open()?;
     api.probe_service().map_err(|error| {
         if error.code == api::HCS_E_ACCESS_DENIED {
-            NOT_PERMITTED.to_string()
+            Error::NotPermitted
         } else {
-            service_unreachable(&error.to_string())
+            backend(&format!(
+                "synod could not reach this computer's virtual-machine service: {error}"
+            ))
         }
     })
 }
@@ -216,9 +210,10 @@ impl Hypervisor for Hyperv {
     ///
     /// # Errors
     /// Returns [`Error`] if the spec is not usable (see
-    /// [`MachineSpec::resolve`]), if a disk cannot be made or wrapped, if the
-    /// compute service refuses the machine, or if the guest does not dial
-    /// within [`BOOT_TIMEOUT`].
+    /// [`MachineSpec::resolve`]), if a disk cannot be made or wrapped, if a
+    /// path the machine's document would carry is not Unicode
+    /// ([`document_text`]), if the compute service refuses the machine, or if
+    /// the guest does not dial within [`BOOT_TIMEOUT`].
     fn boot(&self, spec: &MachineSpec) -> Result<Box<dyn Machine>, Error> {
         // Both of these resolve to absolute paths, and both are then spelled
         // plainly ([`plain`]) — every path in the document is opened by the
@@ -231,11 +226,10 @@ impl Hypervisor for Hyperv {
             initramfs: plain(resolved.initramfs),
             rootfs: plain(resolved.rootfs),
         };
-        let api = api::Api::open().map_err(|why| unavailable(&why))?;
+        let api = api::Api::open()?;
 
-        let rootfs = vhd::ensure_rootfs_vhd(&artifact.rootfs, &self.cache)
-            .map_err(|why| unavailable(&why))?;
-        let session = vhd::create_session_vhd(&self.cache).map_err(|why| unavailable(&why))?;
+        let rootfs = vhd::ensure_rootfs_vhd(&artifact.rootfs, &self.cache)?;
+        let session = vhd::create_session_vhd(&self.cache)?;
         // From here on every early return must take the session disk with it:
         // it is this session's alone, and a machine that never started has no
         // teardown of its own to release it.
@@ -261,10 +255,6 @@ impl Hypervisor for Hyperv {
 /// A free function rather than a method, because by this point nothing of the
 /// backend's own state is left to consult: the boot media has been resolved and
 /// the disks made, so every path this needs arrives as an argument.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "outside ral: vm-manager does not depend on ral-core"
-)]
 fn assemble(
     api: &'static api::Api,
     spec: &MachineSpec,
@@ -286,12 +276,15 @@ fn assemble(
     let console = match console::Console::create(&id, cache) {
         Ok(console) => Some(console),
         Err(why) => {
-            eprintln!("synod: the guest's console could not be opened: {why}");
+            eprintln!(
+                "synod: the guest's console could not be opened: {}",
+                why.worded(aside_spelling)
+            );
             None
         }
     };
 
-    let socket_sddl = hvsock::socket_sddl().map_err(|why| unavailable(&why))?;
+    let socket_sddl = hvsock::socket_sddl()?;
     let control_service = hvsock::format_guid(&hvsock::service_guid(CONTROL_PORT));
     let net_service = hvsock::format_guid(&hvsock::service_guid(crate::NET_PORT));
     let document = spec::document(&spec::Plan {
@@ -310,16 +303,16 @@ fn assemble(
         socket_sddl: &socket_sddl,
         control_service: &control_service,
         net_service: &net_service,
-    });
+    })?;
     let document = serde_json::to_string(&document).map_err(|e| {
-        unavailable(&format!(
+        backend(&format!(
             "the machine's description could not be written: {e}"
         ))
     })?;
 
     let system = api.create(&id, &document).map_err(|error| {
         if error.code == api::HCS_E_ACCESS_DENIED {
-            unavailable(NOT_PERMITTED)
+            Error::NotPermitted
         } else {
             // The service's own complaint about a file it could not open
             // names no file — "the system cannot find the path specified",
@@ -327,15 +320,17 @@ fn assemble(
             // document carried are named here instead.  Every one of them
             // is opened by the service, in its own process, so every one is
             // a candidate and the reader should not have to guess.
-            unavailable(&format!(
-                "{error}. The machine's files were: kernel {}, initramfs {}, rootfs {}, \
-                     session disk {}, and the granted folder {}",
-                artifact.kernel.display(),
-                artifact.initramfs.display(),
-                rootfs.display(),
-                session.display(),
-                folder.display(),
-            ))
+            Error::NotConstructed {
+                hypervisor: HYPERVISOR.into(),
+                why: error.to_string(),
+                files: Box::new(MachineFiles {
+                    kernel: artifact.kernel.clone(),
+                    initramfs: artifact.initramfs.clone(),
+                    rootfs: rootfs.to_path_buf(),
+                    session: session.to_path_buf(),
+                    folder: folder.to_path_buf(),
+                }),
+            }
         }
     })?;
     // The machine exists, so from here every failure goes out through
@@ -360,7 +355,7 @@ fn assemble(
     for file in [&artifact.kernel, &artifact.initramfs, rootfs, session] {
         let granted = api
             .grant_vm_access(&guest.id, file)
-            .map_err(|error| unavailable(&format!("{} — {error}", file.display())))?;
+            .map_err(Error::host_file(HostFile::MachineFile, Act::Grant, file))?;
         if !granted {
             // The call does not exist on this Windows.  Say so once and carry
             // on: the machine may open its files anyway, and if it cannot, the
@@ -379,18 +374,18 @@ fn assemble(
     // few seconds' patience, and a listener bound afterwards would be racing
     // a boot.
     let control_listener = hvsock::Listener::bind(&machine_id, CONTROL_PORT).map_err(|cause| {
-        unavailable(&format!(
+        backend(&format!(
             "the machine's control plane could not be opened: {cause}"
         ))
     })?;
     let net_listener = hvsock::Listener::bind(&machine_id, crate::NET_PORT).map_err(|cause| {
-        unavailable(&format!(
+        backend(&format!(
             "the machine's net wire could not be opened: {cause}"
         ))
     })?;
 
     api.start(guest.system)
-        .map_err(|error| unavailable(&error.to_string()))?;
+        .map_err(|error| backend(&error.to_string()))?;
 
     // A started machine is not a booted guest: a kernel can panic on the way
     // up and never reach userspace.  The two dials are the proof, taken in
@@ -401,22 +396,10 @@ fn assemble(
     let deadline = Instant::now() + BOOT_TIMEOUT;
     let control = control_listener
         .accept_within(deadline.saturating_duration_since(Instant::now()))
-        .map_err(|cause| {
-            unavailable(&format!(
-                "the guest did not dial the control plane within {}s of starting: {cause}. {}",
-                BOOT_TIMEOUT.as_secs(),
-                console_says(guest.console.as_ref())
-            ))
-        })?;
+        .map_err(|cause| undialled(Wire::Control, &cause, guest.console.as_ref()))?;
     let net = net_listener
         .accept_within(deadline.saturating_duration_since(Instant::now()))
-        .map_err(|cause| {
-            unavailable(&format!(
-                "the guest did not dial the net wire within {}s of starting: {cause}. {}",
-                BOOT_TIMEOUT.as_secs(),
-                console_says(guest.console.as_ref())
-            ))
-        })?;
+        .map_err(|cause| undialled(Wire::Net, &cause, guest.console.as_ref()))?;
     guest.wires = Some(Wires { control, net });
     // Both dials are in, so this boot has nothing left to explain and its
     // console log may go when the machine does.
@@ -424,59 +407,25 @@ fn assemble(
     Ok(Box::new(guest))
 }
 
-/// What a guest that would not dial has to say for itself, as the second half
-/// of the boot failure's sentence.
-///
-/// The message this replaces told the reader the console was "above", which on
-/// an installed synod it never was: the broker is a `LocalSystem` service and
-/// its standard output goes nowhere, so the one line explaining the refusal was
-/// written and thrown away.  Three answers are possible and each leaves the
-/// reader somewhere different:
-///
-/// - the guest **spoke**, and its last words are quoted here, which is usually
-///   the whole diagnosis;
-/// - the guest **said nothing**, which is itself the finding — a machine that
-///   started and never reached a kernel message — so the log is named for
-///   whoever wants to confirm the emptiness;
-/// - there was **no console**, so the diagnostic was lost before the machine
-///   existed, and saying so is better than implying the guest was silent.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "outside ral: vm-manager does not depend on ral-core"
-)]
-fn console_says(console: Option<&console::Console>) -> String {
-    let Some(console) = console else {
-        return "Synod could not open a console for this machine, so the guest has no words to \
-                quote — and that is a fault in synod, not in the guest"
-            .to_string();
-    };
-    let kept = console.log().map_or_else(
-        || "and its console could not be kept on disk either".to_string(),
-        |path| format!("and its whole console log is at {}", path.display()),
-    );
-    let lines = console.tail();
-    if lines.is_empty() {
-        format!(
-            "The guest said nothing at all on its console, so it never got as far as a first \
-             message — {kept}"
-        )
-    } else {
-        format!(
-            "The guest's last words on its console were {} — {kept}",
-            quoted(&lines)
-        )
+/// The boot failure of a guest that did not dial `wire`, carrying what it said
+/// on its console on the way — or that it had no console to say it on.
+fn undialled(wire: Wire, cause: &std::io::Error, console: Option<&console::Console>) -> Error {
+    Error::Undialled {
+        hypervisor: HYPERVISOR.into(),
+        wire,
+        within_secs: BOOT_TIMEOUT.as_secs(),
+        cause: cause.to_string(),
+        console: console.map(kept),
     }
 }
 
-/// Console lines as one quotation: oldest first, each in its own quotes and
-/// separated by a slash, so a reader can see where one line ended and the next
-/// began without the error becoming a dump.
-fn quoted(lines: &[String]) -> String {
-    lines
-        .iter()
-        .map(|line| format!("\u{201c}{}\u{201d}", line.trim()))
-        .collect::<Vec<_>>()
-        .join(" / ")
+/// What `console` has kept of the guest's words: its log, if it has one, and
+/// its last lines.
+fn kept(console: &console::Console) -> GuestConsole {
+    GuestConsole {
+        log: console.log().map(Path::to_path_buf),
+        tail: console.tail(),
+    }
 }
 
 /// A booted guest, and the four things that have to be released when it stops:
@@ -527,7 +476,7 @@ impl Guest {
     /// what lets [`Machine::shutdown`] and [`Drop`] share one path.
     ///
     /// # Errors
-    /// Returns [`Error::Unavailable`] if the guest did not stop within
+    /// Returns [`Error::ForcedStop`] if the guest did not stop within
     /// [`STOP_GRACE`] and the machine had to be stopped for it.
     fn stop(&mut self) -> Result<(), Error> {
         // Closing the host ends of both wires first is what makes this a
@@ -573,10 +522,10 @@ impl Guest {
         release(&self.session);
 
         if forced {
-            return Err(unavailable(
-                "the guest did not shut down within the grace period, so the machine was stopped \
-                 for it — anything it had not finished writing to the folder may be missing",
-            ));
+            return Err(Error::ForcedStop {
+                hypervisor: HYPERVISOR.into(),
+                grace_secs: STOP_GRACE.as_secs(),
+            });
         }
         Ok(())
     }
@@ -632,26 +581,21 @@ impl Machine for Guest {
     /// running since before the machine started.
     ///
     /// Answerable at any point in a machine's life, and deliberately so: the
-    /// boot failure that quotes [`console_says`] is only the first question
+    /// boot failure that quotes the console ([`undialled`]) is only the first question
     /// worth asking a console, and the second — why did the engine stop
     /// talking mid-session — is asked long after a boot succeeded.  The ring
     /// is bounded and the log is capped, so asking late costs no more than
     /// asking early.
-    fn console(&self) -> crate::GuestConsole {
+    fn console(&self) -> GuestConsole {
         self.console
             .as_ref()
-            .map_or_else(crate::GuestConsole::default, |console| {
-                crate::GuestConsole {
-                    log: console.log().map(std::path::Path::to_path_buf),
-                    tail: console.tail(),
-                }
-            })
+            .map_or_else(GuestConsole::default, kept)
     }
 
     /// Close the wire, let the guest power itself off, and release the machine.
     ///
     /// # Errors
-    /// Returns [`Error::Unavailable`] if the guest had to be stopped for.
+    /// Returns [`Error::ForcedStop`] if the guest had to be stopped for.
     fn shutdown(mut self: Box<Self>) -> Result<(), Error> {
         self.stop()
     }
@@ -678,23 +622,53 @@ impl Drop for Guest {
 /// granted folder on a network file share canonicalises to, and those are
 /// as common as folders on local disk) becomes `\\server\share` again.
 /// Anything else is already plain and passes through untouched.
-/// `pub(crate)` for the broker, which spells a client's canonicalised folder
-/// this way in the one sentence a refused boot sends back.
+///
+/// The prefix is stripped from the path's own UTF-16 units, never from a
+/// rendering of them, so nothing else about the path changes — an unpaired
+/// surrogate included, for [`document_text`] to refuse.
+/// `pub(crate)` for the broker, which names a client's canonicalised folder
+/// this way in the refusals it sends back.
 pub(crate) fn plain(path: PathBuf) -> PathBuf {
-    let text = path.to_string_lossy();
-    if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
-        return PathBuf::from(format!(r"\\{unc}"));
+    let units: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let wide = |text: &str| text.encode_utf16().collect::<Vec<u16>>();
+    let rebuilt = |units: &[u16]| PathBuf::from(OsString::from_wide(units));
+    if let Some(unc) = units.strip_prefix(wide(r"\\?\UNC\").as_slice()) {
+        return rebuilt(&[wide(r"\\").as_slice(), unc].concat());
     }
-    match text.strip_prefix(r"\\?\") {
-        Some(rest) => PathBuf::from(rest),
+    match units.strip_prefix(wide(r"\\?\").as_slice()) {
+        Some(rest) => rebuilt(rest),
         None => path,
     }
 }
 
-/// An [`Error::Unavailable`] for this backend carrying `why`.
-fn unavailable(why: &str) -> Error {
-    Error::Unavailable {
-        hypervisor: HYPERVISOR,
+/// A path as the text a machine's document carries it in, or the refusal that
+/// it has none.
+///
+/// The document is JSON, and JSON text is Unicode, so a Windows name holding an
+/// unpaired surrogate cannot be spelled in it.  Rendering it lossily would hand
+/// the compute service — which opens the path as itself, after every check on
+/// the folder is over — the name with U+FFFD in the surrogate's place: a
+/// *different* name, legal in its own right, which may be a sibling of the
+/// folder that was checked or a junction to anywhere.  So such a path is
+/// refused, never approximated.  The broker asks this of a client's folder
+/// before checking it at all (`broker::service`), and [`spec::document`] asks
+/// it of every path it writes, so none reaches the service by another route.
+///
+/// # Errors
+/// Returns [`Error::NotUnicode`] if `path` is not Unicode.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "native: the path as the JSON text the compute service opens it by; never shown"
+)]
+pub(crate) fn document_text(path: &Path) -> Result<&str, Error> {
+    path.to_str()
+        .ok_or_else(|| Error::NotUnicode(path.to_path_buf()))
+}
+
+/// An [`Error::Backend`] for this backend carrying `why`.
+pub(crate) fn backend(why: &str) -> Error {
+    Error::Backend {
+        hypervisor: HYPERVISOR.into(),
         why: why.to_string(),
     }
 }
@@ -731,17 +705,13 @@ fn unix_seconds() -> u64 {
 /// missing — and must not be raised over a stale file.  So: stderr, once, only
 /// when there is something to say, naming the file and what will eventually
 /// happen to it.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "outside ral: vm-manager does not depend on ral-core"
-)]
 fn release(session: &Path) {
     if let Err(why) = remove(session) {
         eprintln!(
             "synod: the session disk {} could not be deleted after {}s — {why}. It is {} MiB that \
              nothing will ever read again; the next synod to start on this computer sweeps up disks \
              like it once they are an hour old, or you may delete it yourself",
-            session.display(),
+            aside_spelling(session),
             REMOVE_GRACE.as_secs(),
             mebibytes(session),
         );
@@ -815,7 +785,8 @@ fn mebibytes(path: &Path) -> u64 {
     clippy::disallowed_methods,
     reason = "REASONED-SILENT: reading synod's own machine cache and deleting the session disks it \
               leaked there. Host-side housekeeping before any guest exists; no shell, no run, no \
-              card."
+              card. Each entry's name is read as text (native) only to match it against the \
+              session disks' own naming."
 )]
 fn sweep_orphans(cache: &Path) {
     let Ok(entries) = std::fs::read_dir(cache) else {
@@ -840,13 +811,35 @@ fn sweep_orphans(cache: &Path) {
         }
     }
     if swept > 0 {
-        eprintln!(
-            "synod: {swept} session disk(s) from earlier runs were still in {} — deleted, {} MiB \
-             back",
-            cache.display(),
-            reclaimed / (1024 * 1024),
-        );
+        report_swept(cache, swept, reclaimed);
     }
+}
+
+/// Say on stderr how much [`sweep_orphans`] took back from `cache`.
+fn report_swept(cache: &Path, swept: usize, reclaimed: u64) {
+    eprintln!(
+        "synod: {swept} session disk(s) from earlier runs were still in {} — deleted, {} MiB back",
+        aside_spelling(cache),
+        reclaimed / (1024 * 1024),
+    );
+}
+
+/// A path as this backend's own stderr diagnostics spell it: the platform's
+/// way, because no front-end words those lines.
+///
+/// The one place the machine layer spells a path itself.  Everything it
+/// *reports* is an [`Error`] carrying the path, worded by the front-end that
+/// shows it; these lines are not reports but asides to whoever runs the
+/// process — a checkout's terminal, or a service's output that goes nowhere —
+/// and no front-end ever reads them.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:windows-host] a host diagnostic with no ral shell to print through: the \
+              machine layer's own aside to whoever runs it, which no front-end words and so no \
+              front-end's spelling reaches"
+)]
+fn aside_spelling(path: &Path) -> String {
+    path.display().to_string()
 }
 
 /// The Unix second a session disk's *name* says it was made, if the name is a
@@ -896,6 +889,25 @@ mod tests {
         );
     }
 
+    /// Stripping the prefix changes nothing else about a path: an unpaired
+    /// surrogate survives it, to be refused by [`document_text`] by name rather
+    /// than turned into U+FFFD — which spells some other folder.
+    #[test]
+    fn a_plain_spelling_keeps_every_unit() {
+        let units = |text: &str| text.encode_utf16().collect::<Vec<u16>>();
+        let with_surrogate = |prefix: &str| {
+            let mut path = units(prefix);
+            path.push(0xD800);
+            PathBuf::from(OsString::from_wide(&path))
+        };
+        let stripped = plain(with_surrogate(r"\\?\C:\Invoices"));
+        assert_eq!(stripped, with_surrogate(r"C:\Invoices"));
+        match document_text(&stripped) {
+            Err(Error::NotUnicode(path)) => assert_eq!(path, stripped),
+            other => panic!("a name that is not Unicode is refused: {other:?}"),
+        }
+    }
+
     /// Boot media is resolved to absolute paths before a document names it, and
     /// a file that is not there is refused by name rather than becoming the
     /// compute service's unattributed "cannot find the path specified".
@@ -913,7 +925,7 @@ mod tests {
             rootfs: make("rootfs.img"),
         };
         let resolved = artifact.resolve().expect("every file is there");
-        assert!(plain(resolved.kernel).is_absolute());
+        assert!(ral_core::path::is_absolute(plain(resolved.kernel)));
 
         let missing = BootArtifact {
             kernel: dir.path().join("nowhere"),
@@ -1047,46 +1059,6 @@ mod tests {
             .expect("the fixture's own file opens")
     }
 
-    /// A guest that will not dial is quoted, not pointed at: the failure
-    /// carries the console's last lines, oldest first, each in its own quotes,
-    /// because under a service there is no "above" to point to.
-    #[test]
-    fn a_failing_boot_quotes_the_guest() {
-        let said = quoted(&[
-            "  EXT4-fs (sda): mounted filesystem  ".to_string(),
-            "ral-daemon: no ral.port on the command line".to_string(),
-        ]);
-        assert_eq!(
-            said,
-            "\u{201c}EXT4-fs (sda): mounted filesystem\u{201d} / \u{201c}ral-daemon: no ral.port \
-             on the command line\u{201d}"
-        );
-    }
-
-    /// A guest that said nothing is said to have said nothing, and its log is
-    /// named so a reader can confirm the silence rather than being told to look
-    /// "above" at output a service never wrote anywhere.  A session with no
-    /// console at all admits the loss is synod's.
-    #[test]
-    fn a_silent_guest_and_a_missing_console_are_different_sentences() {
-        let dir = tempfile::tempdir().expect("a cache");
-        let console = console::Console::create("0000-mute", dir.path()).expect("a console");
-        let silence = console_says(Some(&console));
-        assert!(silence.contains("said nothing at all"), "{silence}");
-        assert!(
-            silence.contains("synod-console-0000-mute.log"),
-            "the log must be named for a reader to open: {silence}"
-        );
-        console.wake();
-
-        let lost = console_says(None);
-        assert!(lost.contains("could not open a console"), "{lost}");
-        assert!(
-            !lost.contains("above"),
-            "nothing may point at output a service never wrote: {lost}"
-        );
-    }
-
     /// Whatever this computer answers about hosting a guest, it answers in a
     /// sentence a secretary could act on — and the access denial names the
     /// group, since that is the one whoever administers the computer fixes.
@@ -1094,8 +1066,8 @@ mod tests {
     fn availability_answers_in_a_sentence() {
         match available() {
             Ok(()) => {}
-            Err(why) => {
-                assert!(!why.is_empty());
+            Err(refusal) => {
+                let why = refusal.worded(|_| String::new()).to_string();
                 assert!(
                     why.contains("Hyper-V Administrators")
                         || why.contains("Virtual Machine Platform")

@@ -30,6 +30,7 @@ use ral_core::first_order::FOValue;
 use ral_core::protocol::Run;
 use ral_core::protocol::probe::Probe;
 use ral_core::run::RunReport;
+use ral_core::source::SourceOrigin;
 use ral_core::sync::LockExt as _;
 use ral_core::test_helper::eventually;
 use ral_core::types::Shell;
@@ -70,7 +71,10 @@ fn armed() -> Shell {
 fn birth(shell: &mut Shell, call: &str) -> serde_json::Value {
     let report = shell.run(Run {
         io: RunIo::Capture,
-        ..Run::foreground(format!("let r = {call}; to-json $r"), "<test>")
+        ..Run::foreground(
+            format!("let r = {call}; to-json $r"),
+            SourceOrigin::named("<test>"),
+        )
     });
     match report {
         RunReport::Ran {
@@ -95,7 +99,7 @@ fn birth(shell: &mut Shell, call: &str) -> serde_json::Value {
 fn refusal(shell: &mut Shell, source: &str) -> String {
     let report = shell.run(Run {
         io: RunIo::Capture,
-        ..Run::foreground(source, "<test>")
+        ..Run::foreground(source, SourceOrigin::named("<test>"))
     });
     match report {
         RunReport::Ran {

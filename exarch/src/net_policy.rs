@@ -7,6 +7,7 @@
 //! fixed system path, never a per-user one, and evaluated under the same
 //! no-authority grant as [`crate::config::load_declared`].
 
+use ral_core::source::{SourceFile, SourceOrigin};
 use ral_core::types::Value;
 
 /// A system path, deliberately: the sandboxed guest writes only cwd and scratch.
@@ -118,20 +119,27 @@ impl NetPolicy {
 /// Returns `Err` if the file is present but unreadable, if evaluating it
 /// raises, or if its terminal map fails to decode.
 pub fn load() -> Result<NetPolicy, String> {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "path-form: a fixed absolute config path"
+    )]
     let path = std::path::Path::new(POLICY_PATH);
-    let (source, display) = match crate::config::read_optional_file(path, LABEL)? {
-        Some(text) => (text, path.to_string_lossy().into_owned()),
+    let (source, origin) = match crate::config::read_optional_file(path, LABEL)? {
+        Some(text) => (
+            text,
+            SourceOrigin::File(SourceFile::new(path).map_err(|e| format!("{LABEL} {e}"))?),
+        ),
         None => (
             DEFAULT_POLICY_RAL.to_string(),
-            "<built-in:net-policy>".to_string(),
+            SourceOrigin::named("<built-in:net-policy>"),
         ),
     };
     let source = ral_core::source::normalize_source_text(source);
     let mut shell =
         ral_core::HostSurface::default().shell(ral_core::terminal::TerminalState::default());
     decode(
-        crate::config::evaluate_no_authority(&mut shell, &source, &display, LABEL)?,
-        &display,
+        crate::config::evaluate_no_authority(&mut shell, &source, &origin, LABEL)?,
+        &origin.to_string(),
     )
 }
 
@@ -231,7 +239,12 @@ mod tests {
         let mut shell = ral_core::test_helper::core_shell();
         let source = ral_core::source::normalize_source_text(source.to_string());
         decode(
-            crate::config::evaluate_no_authority(&mut shell, &source, "<test:net-policy>", LABEL)?,
+            crate::config::evaluate_no_authority(
+                &mut shell,
+                &source,
+                &SourceOrigin::named("<test:net-policy>"),
+                LABEL,
+            )?,
             "<test:net-policy>",
         )
     }

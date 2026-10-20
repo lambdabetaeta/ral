@@ -6,6 +6,7 @@ mod common;
 use ral_core::Value;
 use ral_core::boot::{HostSurface, boot_shell};
 use ral_core::protocol::Run;
+use ral_core::source::SourceOrigin;
 use ral_core::terminal::TerminalState;
 use ral_core::types::{Break, Escape, Mooring, Settled, Shell};
 
@@ -14,7 +15,7 @@ use ral_core::types::{Break, Escape, Mooring, Settled, Shell};
 /// it expects to compile, so a static diagnostic is a test bug.
 fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
     shell
-        .run(Run::foreground(source, "<test>"))
+        .run(Run::foreground(source, SourceOrigin::named("<test>")))
         .expect_ran()
         .into_result()
 }

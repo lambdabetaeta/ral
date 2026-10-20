@@ -119,7 +119,12 @@ fn serve_bundled_tool(args: &[OsString]) -> u8 {
         );
         return 2;
     };
-    uutils::run(&tool.to_string_lossy(), args.to_vec()).unwrap_or_else(|e| {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "native: a tool name from argv, not a path"
+    )]
+    let tool = tool.to_string_lossy();
+    uutils::run(&tool, args.to_vec()).unwrap_or_else(|e| {
         terminal::cmd_error("ral", &e.to_string());
         127
     })

@@ -16,7 +16,7 @@ use crate::types::EnvVars;
 /// single basedir.
 pub fn entries(env_overrides: &EnvVars) -> Vec<PathBuf> {
     let raw = env_overrides.get_or_host("RAL_PATH").unwrap_or_default();
-    std::env::split_paths(&raw).collect()
+    super::path_entries(std::ffi::OsStr::new(&raw)).collect()
 }
 
 /// First `$dir/$name` that is a regular file, canonicalised, scanning
@@ -31,7 +31,7 @@ pub(crate) fn find_file(name: &str, env_overrides: &EnvVars) -> Option<PathBuf> 
         .map(|dir| dir.join(name))
         .find_map(|cand| {
             Resolver::shell_less()
-                .resolve(&cand.to_string_lossy())
+                .anchor(&cand)
                 .canonicalise_strict()
                 .ok()
                 .filter(|p| p.is_file())

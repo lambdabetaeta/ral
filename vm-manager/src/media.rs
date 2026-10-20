@@ -6,16 +6,13 @@
 //! trusted against a shipped checksum, which is why that check is
 //! [`inflate`]'s own `verify` parameter rather than a second copy of the loop
 //! that only one caller runs.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: host-side disk plumbing before any engine exists; no shell, no \
-              run, no card. See hcs::vhd's module docs for the fuller argument this shares."
-)]
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
+
+use crate::{Act, Error, HostFile};
 
 /// Decompress the zstd `archive` into `out`, verifying the result against
 /// `verify` — the expected hex SHA-256 of the inflated bytes — when given,
@@ -27,88 +24,71 @@ use sha2::{Digest, Sha256};
 /// whole one should be.
 ///
 /// # Errors
-/// Returns a sentence naming `archive` or `out` if the archive cannot be
-/// opened, is not a zstd stream readable within [`crate::ROOTFS_WINDOW`], if
-/// the `.part` file cannot be written or renamed into place, or if `verify`
-/// is given and does not match the inflated bytes.
-pub fn inflate(archive: &Path, out: &Path, verify: Option<&str>) -> Result<u64, String> {
-    let source = std::fs::File::open(archive).map_err(|e| {
-        format!(
-            "the guest image {} could not be opened: {e}",
-            archive.display()
-        )
-    })?;
+/// Returns [`Error::HostFile`] naming `archive` or `out` if the archive cannot
+/// be opened, is not a zstd stream readable within [`crate::ROOTFS_WINDOW`], or
+/// if the `.part` file cannot be written or renamed into place; and
+/// [`Error::CorruptGuestImage`] if `verify` is given and does not match the
+/// inflated bytes.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "REASONED-SILENT: host-side disk plumbing before any engine exists — the archive \
+              read, the part file written, renamed into place, or removed; no shell, no run, no \
+              card. See hcs::vhd's module docs for the fuller argument this shares."
+)]
+pub fn inflate(archive: &Path, out: &Path, verify: Option<&str>) -> Result<u64, Error> {
+    let source = std::fs::File::open(archive).map_err(Error::host_file(
+        HostFile::GuestImage,
+        Act::Open,
+        archive,
+    ))?;
     let mut decoder = ruzstd::decoding::StreamingDecoder::new_with_max_window_size(
         std::io::BufReader::new(source),
         crate::ROOTFS_WINDOW,
     )
-    .map_err(|e| {
-        format!(
-            "the guest image {} could not be read: {e}",
-            archive.display()
-        )
-    })?;
+    .map_err(Error::host_file(HostFile::GuestImage, Act::Read, archive))?;
 
     let mut part = out.as_os_str().to_os_string();
     part.push(".part");
     let part = PathBuf::from(part);
 
-    let mut land = || -> Result<u64, String> {
-        let mut sink = std::io::BufWriter::new(std::fs::File::create(&part).map_err(|e| {
-            format!(
-                "the guest image could not be written to {}: {e}",
-                part.display()
-            )
-        })?);
+    let mut land = || -> Result<u64, Error> {
+        let unwritten = || Error::host_file(HostFile::UnpackedImage, Act::Write, &part);
+        let mut sink = std::io::BufWriter::new(std::fs::File::create(&part).map_err(unwritten())?);
         let mut hasher = verify.map(|_| Sha256::new());
         let mut bytes = 0u64;
         let mut buf = vec![0u8; 1 << 20];
         loop {
-            let n = decoder.read(&mut buf).map_err(|e| {
-                format!(
-                    "the guest image {} could not be unpacked: {e}",
-                    archive.display()
-                )
-            })?;
+            let n = decoder.read(&mut buf).map_err(Error::host_file(
+                HostFile::GuestImage,
+                Act::Unpack,
+                archive,
+            ))?;
             if n == 0 {
                 break;
             }
             if let Some(hasher) = &mut hasher {
                 hasher.update(&buf[..n]);
             }
-            sink.write_all(&buf[..n]).map_err(|e| {
-                format!(
-                    "the guest image could not be written to {}: {e}",
-                    part.display()
-                )
-            })?;
+            sink.write_all(&buf[..n]).map_err(unwritten())?;
             bytes += u64::try_from(n).unwrap_or(u64::MAX);
         }
-        sink.flush().map_err(|e| {
-            format!(
-                "the guest image could not be written to {}: {e}",
-                part.display()
-            )
-        })?;
+        sink.flush().map_err(unwritten())?;
         drop(sink);
 
         if let (Some(expected), Some(hasher)) = (verify, hasher) {
             let actual = hex(&hasher.finalize());
             if actual != expected {
-                return Err(format!(
-                    "the guest image unpacked from {} did not match its checksum — the download \
-                     is corrupt",
-                    archive.display()
-                ));
+                return Err(Error::CorruptGuestImage {
+                    archive: archive.to_path_buf(),
+                });
             }
         }
 
-        std::fs::rename(&part, out).map_err(|e| {
-            format!(
-                "the unpacked guest image could not be moved into place at {}: {e}",
-                out.display()
-            )
-        })?;
+        std::fs::rename(&part, out).map_err(Error::host_file(
+            HostFile::UnpackedImage,
+            Act::Place,
+            out,
+        ))?;
         Ok(bytes)
     };
     // The part file dies with whatever failure left it there: an inflate cut

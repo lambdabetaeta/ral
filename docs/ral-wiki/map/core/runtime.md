@@ -61,13 +61,17 @@ evaluator item; the evaluator reaches it at
   - **The program and the 126/127 verdict are two projections of one `PATH`
     walk.** `Head::resolve` calls `path::search` once, anchored through
     `Context::search_cwd`, the shell's one cwd cell; a miss is
-    `Missing::NotFound`, a hit lacking `+x` `Missing::NotExecutable`, and
+    `Missing::NotFound` (keeping the file a path looked for, so the refusal
+    can offer the extension it lacks), a hit lacking `+x`
+    `Missing::NotExecutable`, and
     `vet` reads that rather than probing the disk, so walk and verdict cannot
     disagree and a missing command never reaches the in-process guard
     ([[decisions/260731_one-walk-one-anchor|one-walk-one-anchor]]). A path
-    head is anchored at the launch cwd with only `.` folded, so the guard
-    judges the file the kernel will reach and the launcher runs that very file,
-    by its real path, under the spelling as `argv[0]`
+    head's native target — as written, or a `~` head expanded by
+    `TildePath::expand`, never re-read for a sigil — is anchored at the launch
+    cwd with only `.` folded, so the guard judges the file the kernel will
+    reach and the launcher runs that very file, by its real path, under the
+    shown spelling as `argv[0]`
     ([[decisions/261004_exec-rules|exec-rules]]).
   - **The argv-shape step is one refused set read at two moments.**
     `vet::reject_exec_arg` maps each argument's head (`Value::heads`) through

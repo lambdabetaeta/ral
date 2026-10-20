@@ -81,7 +81,7 @@ impl std::fmt::Display for EngineLost {
         };
         f.write_str(sentence)?;
         match &self.log_dir {
-            Some(dir) => write!(f, " (details in {})", dir.display()),
+            Some(dir) => write!(f, " (details in {})", ral_core::path::shown(dir)),
             None => Ok(()),
         }
     }

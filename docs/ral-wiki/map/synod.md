@@ -290,7 +290,9 @@ is visible to a running conversation's next spawn and the two can never drift.
 `mod.rs` also owns the two refresh entries, `refresh_menu_now`
 (synchronous) and `refresh_menu_async` (off the calling thread); the debounce
 that decides when a refresh is worth asking for at all, `RefreshGate`, lives
-in `commands.rs`. `commands.rs` holds the folder picker, the
+in `commands.rs`. `commands.rs` holds the folder picker, which answers a
+`PickedFolder` — the native `path` the window hands back as it came, and the
+shown `label` it displays — the
 conversation verbs (start, send, restart, end), the model listing (instant
 from the cache, one background refresh), and opening before/after versions
 with the user's own applications. The worker's `Emitter` is gated on the
@@ -441,10 +443,11 @@ because each platform owns its own accepted sockets, and both are adopted by
 the engine protocol unchanged.
 
 **The crate boots only real machines.** `detect(Option<BootMedia>)` answers
-`Vz`, `Brokered`, or `Hyperv`, or refuses with a sentence for a
-non-programmer: not a platform with a hypervisor at all, no boot media, a
-macOS build unsigned for virtualization, or a Windows account the compute
-service will not serve. On Windows the order is the machine broker first —
+`Vz`, `Brokered`, or `Hyperv`, or refuses with an `Error` worded for a
+non-programmer: not a platform with a hypervisor at all (`NoBackend`), no
+boot media (`NoBootMedia`), a macOS build unsigned for virtualization
+(`Unentitled`), or a Windows account the compute service will not serve
+(`NotPermitted`). On Windows the order is the machine broker first —
 which needs no boot media from this process at all, since the service has its
 own installed beside it — and only then the in-process `Hyperv`, which is a
 checkout rather than an installation. There is deliberately no software
@@ -452,6 +455,32 @@ fallback: a synod that cannot put hardware between the agent and the rest of
 the computer refuses to start rather than degrade to a weaker mode.
 `examples/boot-smoke.rs` is the human-driven boot, one body over both
 backends.
+
+**Every failure is one data-only `Error`** (`error.rs`), from `detect`, the
+`BootMedia` closure, `boot`, and `shutdown` alike: paths are carried as
+`PathBuf`s, there is no `Display`, and the sentence is assembled only where it
+is shown, by `Error::worded(spell)` with the front-end's spelling (synod passes
+`ral_core::path::shown`, once, at its boundary in `session.rs`). A sentence
+says what went wrong and never at which stage — the caller asked for a
+backend, a boot, or a stop, so it frames that (`session.rs`'s "could not start
+a machine for …", "the machine did not stop cleanly: …"), and nothing is
+framed twice. The variants with data of their own are their own —
+`NotConstructed` (the five files the hypervisor was handed), `Undialled` (the
+guest's console), `ForcedStop` (the grace), `VersionSkew` (both broker
+versions), `ServiceUnlocated`, the folder and `HostFile` refusals — and
+`Backend { hypervisor, why }` is the rest: the hypervisor's own complaint, or
+the machine layer's account of the plumbing around it. Synod's own media
+readying (`boot.rs`) refuses in the same `HostFile` vocabulary the machine
+layer's inflate does. Serialised for the broker's pipe, with every path — in
+the `Error` and in `Request`/`Reply` — encoded by `os_path` as the platform's
+own units (bytes on Unix, UTF-16 little-endian on Windows) in one base64
+string, so a path that is not Unicode crosses whole rather than failing the
+frame that was to carry the refusal, at a uniform 8/3 bytes per UTF-16 unit
+(`serde_json` would write the units as an array of numbers, up to six bytes
+each). Crossing is not reaching a hypervisor, though: a path either backend
+would have to hand its hypervisor as text — the HCS document, an `NSURL` — and
+that is not Unicode is refused as `NotUnicode`, never spelled lossily into some
+other file's name.
 
 - `vz.rs` — `Vz`: Virtualization.framework, macOS arm64, bound through
   `objc2-virtualization`. It builds and validates the full configuration —
@@ -486,8 +515,14 @@ backends.
   `engine()` dials `ral_daemon::boot::FACTORY_PORT`, never spelled twice. The
   `Mutex` it wraps the machine in is for `Sync`, not for the dial: `Machine` is
   declared `Send` and no more, and one `Arc<dyn Factory>` crosses the desk's
-  threads. The conversation's scratch is `GUEST_SCRATCH` (`/tmp`), named as
-  `$EXARCH_SCRATCH` in the root's `Attach` and in every child's.
+  threads. The conversation's scratch is `GUEST_SCRATCH` (`/tmp`), a
+  `ral_core::path::GuestPath` const, named as `$EXARCH_SCRATCH` in the root's
+  `Attach` and in every child's, with its tool homes from
+  `exarch::app::guest_scratch_env`, `/`-joined whatever the host. The root's
+  `Attach` (`control_seat`) names its `HOME` and cwd as `EnginePath::Guest`
+  paths: the scratch, and the mount point `Machine::workspace_path` reports,
+  which `vm_manager` still hands over as a `Path` and `seat_machine` lifts
+  into a `GuestPath` through `path::utf8`.
 
 ## vm-manager/src/hcs/ — the Windows machine
 
@@ -517,8 +552,8 @@ blocking I/O.
   `session_disk_epoch` is what makes that sweep incapable of naming anything but
   a session disk
   ([[decisions/260730_session-disk-outlives-its-machine|session-disk-outlives-its-machine]]).
-  Both dial timeouts end in `console_says`, which quotes the guest's own last
-  lines and names its log, and `Guest::dialled` is what decides whether that log
+  Both dial timeouts are `Error::Undialled` (`vm-manager/src/error.rs`), whose
+  wording quotes the guest's own last lines and names its log, and `Guest::dialled` is what decides whether that log
   survives the teardown
   ([[decisions/260730_guest-console-outlives-stdout|guest-console-outlives-stdout]]).
 - `api.rs` — the entry points, resolved with `LoadLibraryW`/`GetProcAddress`
@@ -584,8 +619,9 @@ read-only flag), and everything else about the machine is the service's own
 
 - `mod.rs` — the protocol and the argument: `PIPE`
   (`\\.\pipe\synod-machine-broker`), `VERSION` checked before anything else,
-  the `Request`/`Reply` pair, and length-prefixed JSON with a 64 KiB frame cap
-  written out here rather than borrowed from `ral-core` (a machine layer that
+  the `Request`/`Reply` pair, and length-prefixed JSON with a 512 KiB frame cap
+  — sized for a refusal naming five longest Windows paths, the arithmetic on
+  `frame::MAX` — written out here rather than borrowed from `ral-core` (a machine layer that
   needed the shell to talk to its own service would have the dependency
   backwards). `Request::Adopted` is the third step of `Boot` → `Booted` →
   `Adopted`, and its doc is where the ordering trap is stated.
@@ -598,9 +634,13 @@ read-only flag), and everything else about the machine is the service's own
 - `service.rs` — the only privileged code synod ships, and the file to review:
   `PIPE_SDDL` (`D:P`, SYSTEM + built-in Administrators + *interactively
   logged-on* users, never `AU` and never a wildcard), `serve`/`serve_client`
-  (one machine per connection, held in the serving thread's local),
-  `readable_by_client` (`ImpersonateNamedPipeClient`, the folder opened as the
-  caller, reverted by a `Drop` guard on every path out including an unwind),
+  (one machine per connection, held in the serving thread's local; a client of
+  another protocol version is refused with `Error::VersionSkew`),
+  `boot_for` (a folder whose name is not Unicode refused first, as
+  `Error::NotUnicode`, since the machine's document could only spell it as some
+  other name), `open_for_client` (`ImpersonateNamedPipeClient`, the folder
+  opened as the caller, reverted by a `Drop` guard on every path out including
+  an unwind),
   `client_process` (`GetNamedPipeClientProcessId` — the kernel's answer, not
   the client's), `describe_socket` (`WSADuplicateSocketW` for that one process
   id), `media` (the boot artifact beside *this* executable), and `cache`

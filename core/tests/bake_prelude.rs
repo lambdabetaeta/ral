@@ -14,7 +14,7 @@ use ral_core::ir::{CompKind, Phrase, Toplevel};
 fn rebake() -> Toplevel {
     let src = include_str!("../src/prelude.ral");
     let ast = ral_core::syntax::parser::parse(src).expect("prelude parse");
-    let top = ral_core::elaborator::elaborate(&ast, [], "").expect("elaborate");
+    let top = ral_core::elaborator::elaborate(&ast, [], None).expect("elaborate");
     ral_core::bake_prelude(&top, &common::manifest(&ral_core::HostSurface::default()))
 }
 
@@ -63,7 +63,7 @@ fn bake_returns_top_level_let_bindings() {
 fn a_prelude_binding_colliding_with_a_native_survives_the_harvest() {
     let ast =
         ral_core::syntax::parser::parse("let upper = { |x| return $x }").expect("fixture parse");
-    let top = ral_core::elaborator::elaborate(&ast, [], "").expect("elaborate");
+    let top = ral_core::elaborator::elaborate(&ast, [], None).expect("elaborate");
     let schemes = schemes_on_defines(&ral_core::bake_prelude(
         &top,
         &common::manifest(&ral_core::HostSurface::default()),
@@ -85,7 +85,7 @@ fn a_prelude_binding_colliding_with_a_native_survives_the_harvest() {
 fn bake_inserts_an_interior_capture() {
     let ast = ral_core::syntax::parser::parse("let count = { |p| int !{wc -l < $p} }")
         .expect("fixture parse");
-    let top = ral_core::elaborator::elaborate(&ast, [], "").expect("elaborate");
+    let top = ral_core::elaborator::elaborate(&ast, [], None).expect("elaborate");
     let annotated =
         ral_core::bake_prelude(&top, &common::manifest(&ral_core::HostSurface::default()));
     let mut capture = false;

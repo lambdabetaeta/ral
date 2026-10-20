@@ -34,6 +34,8 @@ use std::os::windows::io::{FromRawSocket, OwnedSocket};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use crate::Error;
+
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
 use windows_sys::Win32::Networking::WinSock::{
     AF_HYPERV, INVALID_SOCKET, POLLRDNORM, SOCKADDR, SOCKET, SOCKET_ERROR,
@@ -138,25 +140,25 @@ pub(super) fn fresh_machine_id() -> GUID {
 /// `D:P` is a protected DACL, so no inherited entry widens it afterwards.
 ///
 /// # Errors
-/// Returns a sentence if this process cannot read its own user, which would
-/// leave synod unable to say who may reach the guest — a refusal, never a
-/// fallback to a permissive descriptor.
-pub(super) fn socket_sddl() -> Result<String, String> {
+/// Returns [`Error::Backend`] if this process cannot read its own user, which
+/// would leave synod unable to say who may reach the guest — a refusal, never
+/// a fallback to a permissive descriptor.
+pub(super) fn socket_sddl() -> Result<String, Error> {
     let sid = current_user_sid()?;
     Ok(format!("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{sid})"))
 }
 
 /// This process's user, as an SDDL SID string.
-fn current_user_sid() -> Result<String, String> {
+fn current_user_sid() -> Result<String, Error> {
     let mut token: HANDLE = std::ptr::null_mut();
     // SAFETY: a pseudo-handle for this process, a read-only access mask, and a
     // writable slot for the token handle.
     let opened = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) };
     if opened == 0 {
-        return Err(format!(
+        return Err(super::backend(&format!(
             "synod could not read its own user identity: {}",
             io::Error::last_os_error()
-        ));
+        )));
     }
     let token = TokenHandle(token);
 
@@ -168,7 +170,7 @@ fn current_user_sid() -> Result<String, String> {
     // the required length in `needed`, writing nothing.
     unsafe { GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &raw mut needed) };
     if needed == 0 {
-        return Err("synod could not size its own user identity".to_string());
+        return Err(super::backend("synod could not size its own user identity"));
     }
     // A `Vec<u64>` rather than a `Vec<u8>`, because what comes back is a
     // `TOKEN_USER` — a struct with a pointer in it — and a byte vector's
@@ -188,10 +190,10 @@ fn current_user_sid() -> Result<String, String> {
         )
     };
     if read == 0 {
-        return Err(format!(
+        return Err(super::backend(&format!(
             "synod could not read its own user identity: {}",
             io::Error::last_os_error()
-        ));
+        )));
     }
 
     // SAFETY: on success the word-aligned buffer holds a `TOKEN_USER` whose `User.Sid`
@@ -202,10 +204,10 @@ fn current_user_sid() -> Result<String, String> {
     // `text` is a writable slot the call fills with a `LocalAlloc`'d string.
     let converted = unsafe { ConvertSidToStringSidW(sid, &raw mut text) };
     if converted == 0 || text.is_null() {
-        return Err(format!(
+        return Err(super::backend(&format!(
             "synod could not render its own user identity: {}",
             io::Error::last_os_error()
-        ));
+        )));
     }
     // SAFETY: `text` is a NUL-terminated wide string owned by this function.
     let rendered = unsafe {

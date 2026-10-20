@@ -540,7 +540,7 @@ impl Datum for AgentInfo {
                 ("elapsed-s".into(), self.elapsed.as_secs().encode()),
                 (
                     "log-dir".into(),
-                    self.log_dir.display().to_string().encode(),
+                    ral_core::path::shown(&self.log_dir).encode(),
                 ),
             ],
         }

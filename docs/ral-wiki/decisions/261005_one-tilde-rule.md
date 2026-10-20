@@ -116,3 +116,10 @@ statement.
 > (`CompKind::Tilde`). `$CWD` and `$USER` went the same way, so `"$HOME/x"`
 > is spelled `"~/x"` and `"!{abbreviate-home !{cwd}} ❯ "` is the short prompt
 > ([[decisions/261005_ambient-reads-are-builtins|ambient-reads-are-builtins]]).
+
+> **Amended 2026-10-20.** `~` and `home` now share one spelling,
+> `TildePath::shown`, which folds the expanded path through
+> `ral_core::path::shown` so a Windows home reads `/`-separated
+> ([[invariants/paths-are-shown-with-slash|paths-are-shown-with-slash]]).
+> `Context::require_home` returns the raw home, unset `HOME` being its one
+> error; each caller shows it.

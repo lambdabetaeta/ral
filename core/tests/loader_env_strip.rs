@@ -32,6 +32,7 @@ use ral_core::capability::{Capabilities, EditorVerb, FsPolicy, GrantStack, Shell
 use ral_core::path::FrozenPath;
 use ral_core::protocol::Run;
 use ral_core::run::RunReport;
+use ral_core::source::SourceOrigin;
 use ral_core::types::{Shell, Value};
 use std::collections::BTreeSet;
 use strum::VariantArray;
@@ -91,7 +92,7 @@ fn child_env(layers: impl IntoIterator<Item = Capabilities>, vars: &str) -> Stri
     let report = boot().run(Run {
         io: RunIo::Inherit,
         caps,
-        ..Run::captured(src.as_str(), "<test>")
+        ..Run::captured(src.as_str(), SourceOrigin::named("<test>"))
     });
     let RunReport::Ran { ending, .. } = report else {
         panic!("well-formed source must run: {src:?}");

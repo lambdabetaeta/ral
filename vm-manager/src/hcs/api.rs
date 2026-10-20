@@ -50,6 +50,8 @@ use windows_sys::Win32::System::Diagnostics::Debug::{
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_sys::core::{HRESULT, PCWSTR, PWSTR};
 
+use crate::Error;
+
 /// A live compute system — one virtual machine — as HCS names it.
 pub(super) type HcsSystem = *mut c_void;
 
@@ -61,7 +63,7 @@ pub(super) type HcsOperation = *mut c_void;
 /// *Hyper-V Administrators* group, and so may not touch virtual machines at
 /// all.  It is the one HCS failure synod must recognise rather than merely
 /// report, because it is the one fixed with a group membership
-/// rather than a bug report ([`super::NOT_PERMITTED`]).
+/// rather than a bug report ([`crate::Error::NotPermitted`]).
 pub(super) const HCS_E_ACCESS_DENIED: HRESULT = 0x8037_011B_u32.cast_signed();
 
 /// How long any single HCS call is given to settle before the backend stops
@@ -114,8 +116,8 @@ impl Api {
     /// Resolution is attempted once and its outcome — success or refusal — is
     /// remembered, so a machine without the feature is not re-probed on every
     /// [`crate::detect`].
-    pub(super) fn open() -> Result<&'static Self, String> {
-        static API: OnceLock<Result<Api, String>> = OnceLock::new();
+    pub(super) fn open() -> Result<&'static Self, Error> {
+        static API: OnceLock<Result<Api, Error>> = OnceLock::new();
         API.get_or_init(Self::resolve)
             .as_ref()
             .map_err(Clone::clone)
@@ -123,11 +125,12 @@ impl Api {
 
     /// Load `computecore.dll` and bind every entry point, or say what is
     /// missing.
-    fn resolve() -> Result<Self, String> {
+    fn resolve() -> Result<Self, Error> {
         let core = library("computecore.dll").ok_or_else(|| {
-            "this computer has no computecore.dll, the Windows component that creates virtual \
-             machines — the Virtual Machine Platform feature is not installed"
-                .to_string()
+            super::backend(
+                "this computer has no computecore.dll, the Windows component that creates \
+                 virtual machines — the Virtual Machine Platform feature is not installed",
+            )
         })?;
         // The two access calls are looked for in `computecore.dll` first and
         // `computestorage.dll` second, because that is where they actually are.
@@ -488,15 +491,15 @@ fn library(name: &str) -> Option<HMODULE> {
 }
 
 /// Resolve one entry point, or say which name was missing.
-fn bind<T>(module: HMODULE, name: &std::ffi::CStr) -> Result<T, String> {
+fn bind<T>(module: HMODULE, name: &std::ffi::CStr) -> Result<T, Error> {
     // SAFETY: `module` is a live module handle and `name` is NUL-terminated.
     let symbol: FARPROC = unsafe { GetProcAddress(module, name.as_ptr().cast()) };
     let symbol = symbol.ok_or_else(|| {
-        format!(
+        super::backend(&format!(
             "this computer's Host Compute System library has no {} — its Virtual Machine \
              Platform is too old for synod",
             name.to_string_lossy()
-        )
+        ))
     })?;
     // SAFETY: HCS entry points are `extern "system"` functions, and each call
     // site above pairs a name with the signature `computecore.h` declares for
@@ -589,17 +592,18 @@ mod tests {
     fn the_api_either_resolves_or_names_what_is_missing() {
         match Api::open() {
             Ok(_) => {}
-            Err(why) => assert!(
+            Err(Error::Backend { why, .. }) => assert!(
                 why.contains("Virtual Machine Platform"),
                 "a refusal must name the feature: {why}"
             ),
+            Err(other) => panic!("a refusal must name the feature: {other:?}"),
         }
     }
 
     /// Windows explains the one code synod classifies rather than merely
     /// prints, and its explanation names the group the user must be added
-    /// to.  If this ever stops holding, [`super::NOT_PERMITTED`] is
-    /// carrying the whole message alone and should say more.
+    /// to.  If this ever stops holding, [`crate::Error::NotPermitted`]'s
+    /// sentence is carrying the whole message alone and should say more.
     #[test]
     fn windows_explains_the_access_denial_itself() {
         let text = message_for(HCS_E_ACCESS_DENIED);
@@ -614,6 +618,6 @@ mod tests {
     #[test]
     fn an_unexplained_code_still_renders() {
         let text = message_for(0x8037_0FFF_u32.cast_signed());
-        assert!(!text.trim().is_empty());
+        assert_ne!(text.trim(), "");
     }
 }

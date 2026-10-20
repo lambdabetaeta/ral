@@ -176,8 +176,13 @@ the shell every seat starts from.
   variables, each replacing the inherited value with a subdirectory of the
   scratch (`XDG_CACHE_HOME`, `CARGO_HOME`, `GOPATH`, `GOCACHE`, the pnpm, Bun and
   Yarn stores, …) or, for Maven, which has no such variable, `MAVEN_ARGS` set to
-  `-Dmaven.repo.local=<scratch>/maven`; `scratch_env` stays a function of the
-  app and the scratch alone, which the guest needs. No profile writes the user's
+  `-Dmaven.repo.local=<scratch>/maven`. The table is spelled in two namespaces
+  by one `env_under`: a host `Scratch` joins its homes natively (`join_slash`),
+  and `guest_scratch_env`, a function of the app and a `GuestPath` alone, which
+  synod's guest needs, joins with `/` on every host (`GuestPath::join`), since a
+  guest path lifted into a host `PathBuf` would join `/tmp\pip` on Windows.
+  `Seat::root` attaches its identity engine at `EnginePath::Host` paths, the
+  launching user's cwd and `HOME`. No profile writes the user's
   caches, so a write lands in the scratch rather than in a denied real one.
   `RUSTUP_HOME` is not in the table: it holds what runs and stays the host's. A
   `Hold::Session`'s drop deletes the directory, then closes and removes its
@@ -191,10 +196,11 @@ the shell every seat starts from.
   `APPS`) rather than each naming its own: composing a grant means carving out
   every product's credential directories, so one place has to know which apps
   there are. `App::xdg_dir` is the one spelling of
-  `$XDG_<kind>_HOME/<app>/` that the project state, model cache, and trusted
+  `$XDG_<kind>_HOME/<app>/` (over core's `path::app_dir_or_temp`, which ral's
+  own directories share) that the project state, model cache, and trusted
   config home all build on ([[design/exarch-config-dir|exarch-config-dir]]);
   `App::project_dir` keys per-project state by a slug of the launch cwd
-  (`project_slug`), holding the persisted model selection (`state.json`); and
+  (`ral_core::path::project_slug`), holding the persisted model selection (`state.json`); and
   `App::log_run_dir` is the durable per-run
   [[map/exarch/frontend|session-log]] directory
   `$XDG_STATE_HOME/<app>/<project>/<run>/`, so logs survive an abnormal exit; each

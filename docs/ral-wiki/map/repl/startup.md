@@ -143,7 +143,9 @@ one ending law and one typecheck
   applied to the REPL's own record, `{login: false, no-rc: true,
   recursion-limit, capabilities}`. The door is one-shot — it unregisters its
   own hook — sources no startup file here, sets the recursion limit, and
-  applies `--capabilities` under its own mooring. `boot_door::settle` reads
+  applies `--capabilities` under its own mooring. Each profile path reaches
+  it absolute, anchored at the invocation cwd by `Boot::profiles`, so no
+  profile's `cd` can redirect a later one. `boot_door::settle` reads
   its `Ending`: a load failure is `Raised` status 2, an `exit N` is
   `Exited(N)`, and either stops batch there, exactly as it stops the REPL.
 - **The run.** The script is a `Program::Source` dispatch under

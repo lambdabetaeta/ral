@@ -510,7 +510,7 @@ impl Machine {
             }
 
             CompKind::Tilde(path) => Focus::Return(Terminal::Value(Value::string(
-                path.expand(&shell.context.home_dir()?),
+                path.shown(&shell.context.require_home()?),
             ))),
 
             CompKind::Force(val) => Self::force_val(val, env, mooring, shell)?,
@@ -1140,7 +1140,7 @@ mod tests {
             source,
             crate::test_helper::core_schemes(),
             FileId::DUMMY,
-            "<test>",
+            None,
             None,
         )
         .expect("compile");

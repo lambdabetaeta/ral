@@ -208,7 +208,7 @@ pub(crate) fn run_source(source: &str, shell: &mut Shell) -> Settled<Value> {
         source,
         shell.session_schemes(),
         crate::source::FileId::DUMMY,
-        "<test>",
+        None,
         None,
     )
     .expect("compile");
@@ -233,7 +233,7 @@ mod tests {
             source,
             crate::test_helper::core_schemes(),
             crate::source::FileId::DUMMY,
-            "<test>",
+            None,
             None,
         )
         .expect("compile")

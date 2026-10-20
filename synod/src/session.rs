@@ -38,7 +38,7 @@ use exarch::provider::{
     models::resolve_account,
     pricing,
 };
-use ral_core::path::shown;
+use ral_core::path::{EnginePath, GuestPath, shown};
 use ral_core::sync::LockExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -192,7 +192,8 @@ impl Conversation {
         // the closure and lets it decide.
         let boot = crate::boot::boot_media()
             .map(|plan| -> vm_manager::BootMedia { Box::new(move || plan.realise()) });
-        let hypervisor = vm_manager::detect(boot)?;
+        let hypervisor =
+            vm_manager::detect(boot).map_err(|e| e.worded(|path| shown(path)).to_string())?;
 
         let disk_warn_bytes = exarch::config::disk_warn_bytes()?;
         // The network policy, audit ledger, and rate budget set for this
@@ -213,7 +214,7 @@ impl Conversation {
             .to_string();
 
         let run_dir = SYNOD
-            .log_run_dir(&grant.root().to_string_lossy())
+            .log_run_dir(grant.root())
             .map_err(|e| format!("could not make a log folder: {e}"))?;
         let run_lock = exarch::app::RunLock::try_acquire(&run_dir)
             .map_err(|e| format!("could not lock the log folder {}: {e}", shown(&run_dir)))?;
@@ -232,9 +233,13 @@ impl Conversation {
         let baseline =
             Baseline::spawn(grant.root().to_path_buf(), baseline_stop, baseline_progress);
 
-        let machine = hypervisor
-            .boot(&grant.machine_spec())
-            .map_err(|e| format!("could not start a machine for {}: {e}", shown(grant.root())))?;
+        let machine = hypervisor.boot(&grant.machine_spec()).map_err(|e| {
+            format!(
+                "could not start a machine for {}: {}",
+                shown(grant.root()),
+                e.worded(|path| shown(path))
+            )
+        })?;
 
         // Everything the agent is told, and everything it is allowed, is in
         // the guest's namespace: the engine lives there, and the host path
@@ -428,7 +433,12 @@ impl Conversation {
         let net_end = net.join();
         let shutdown = machine
             .shutdown()
-            .map_err(|e| format!("the machine did not stop cleanly: {e}"))
+            .map_err(|e| {
+                format!(
+                    "the machine did not stop cleanly: {}",
+                    e.worded(|path| shown(path))
+                )
+            })
             .and(net_end);
         // Only after the machine is down: a conversation can end before its
         // first exchange, and joining a still-running walk must not hold a
@@ -470,7 +480,11 @@ pub fn seat_machine(
     mut config: exarch::agent::RootConfig,
     provider: Arc<Provider>,
 ) -> Result<(Arc<crate::machine_factory::MachineFactory>, Avatar, NetWire), String> {
-    let workspace = machine.workspace_path().to_path_buf();
+    // `vm_manager` reports the mount point as a `Path`; its text is the
+    // guest's own spelling, which is all a guest path is.
+    let workspace = ral_core::path::utf8(machine.workspace_path())
+        .map(|path| GuestPath::new(path.to_owned()))
+        .map_err(|e| format!("the machine's folder cannot be named inside it: {e}"))?;
     let wires = machine.take_wires();
     let root_seat = control_seat(wires.control, workspace)?;
     let factory = Arc::new(crate::machine_factory::MachineFactory::new(machine));
@@ -617,9 +631,8 @@ fn select_account(store: &Mutex<CredentialStore>, choice: Choice) -> Result<Sele
 /// Returns `Err` if the control plane cannot be adopted as a wire.
 fn control_seat(
     control: impl Into<ral_core::protocol::channel::WireStream>,
-    cwd: std::path::PathBuf,
+    cwd: GuestPath,
 ) -> Result<exarch::agent::RootSeat, String> {
-    let scratch = std::path::PathBuf::from(crate::grant::GUEST_SCRATCH);
     // Home is the guest scratch, not the workspace: `HOME` is where
     // XDG-defaulting tools drop caches and dotfiles, and pointed at
     // `/work` that litter would land among the user's own documents —
@@ -627,10 +640,11 @@ fn control_seat(
     let attach = ral_core::protocol::Attach::root(
         ral_core::protocol::EngineSpec::new(
             exarch::shell_eval::builtins::INSTALLER_TAG,
-            scratch.clone(),
+            EnginePath::Guest(crate::grant::GUEST_SCRATCH),
         ),
-        ral_core::protocol::Root::new(cwd)
-            .with_env(exarch::app::scratch_env(exarch::app::EXARCH, &scratch)),
+        ral_core::protocol::Root::new(EnginePath::Guest(cwd)).with_env(
+            exarch::app::guest_scratch_env(exarch::app::EXARCH, &crate::grant::GUEST_SCRATCH),
+        ),
     );
     Ok(exarch::agent::RootSeat::Wire {
         transport: Box::new(

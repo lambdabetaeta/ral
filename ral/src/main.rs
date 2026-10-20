@@ -46,7 +46,12 @@ fn run(mode: Mode) -> ExitCode {
             code,
             script_args,
             batch,
-        } => batch::run_source("-c", code, script_args, batch),
+        } => batch::run_source(
+            &ral_core::source::SourceOrigin::named("-c"),
+            code,
+            script_args,
+            batch,
+        ),
     }
 }
 

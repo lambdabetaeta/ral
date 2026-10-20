@@ -67,11 +67,18 @@ pub fn engine_root(root: &Root, shell: &mut Shell) -> Result<(), String> {
 
 /// The engine and root a test attaches, the root naming the scratch.
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[test] a temp dir lifted into the scratch env var"
+)]
 pub(crate) fn test_attach() -> (EngineSpec, Root) {
     let temp = std::env::temp_dir();
     (
-        EngineSpec::new(builtins::INSTALLER_TAG, temp.clone()),
-        Root::new(temp.clone()).with_env(vec![(
+        EngineSpec::new(
+            builtins::INSTALLER_TAG,
+            ral_core::path::EnginePath::Host(temp.clone()),
+        ),
+        Root::new(ral_core::path::EnginePath::Host(temp.clone())).with_env(vec![(
             EXARCH.scratch_var(),
             temp.to_string_lossy().into_owned(),
         )]),
@@ -112,6 +119,7 @@ mod tests {
     use super::{engine_root, engine_runtime, test_shell};
     use crate::app::{EXARCH, Scratch};
     use ral_core::Shell;
+    use ral_core::path::EnginePath;
     use ral_core::protocol::{EngineSpec, Root};
 
     /// Cargo's own TLS wants a door no profile admits, so a confined session
@@ -131,9 +139,12 @@ mod tests {
     #[test]
     fn an_attach_naming_no_scratch_is_refused() {
         let temp = std::env::temp_dir();
-        let spec = EngineSpec::new(crate::shell_eval::builtins::INSTALLER_TAG, temp.clone());
+        let spec = EngineSpec::new(
+            crate::shell_eval::builtins::INSTALLER_TAG,
+            EnginePath::Host(temp.clone()),
+        );
         let mut shell = Shell::root(engine_runtime(&spec).into());
-        let Err(why) = engine_root(&Root::new(temp), &mut shell) else {
+        let Err(why) = engine_root(&Root::new(EnginePath::Host(temp)), &mut shell) else {
             panic!("an unnamed scratch must refuse the attach");
         };
         assert!(why.contains(&EXARCH.scratch_var()), "{why}");

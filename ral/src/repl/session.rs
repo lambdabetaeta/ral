@@ -103,12 +103,10 @@ impl Session {
             login: opts.login,
             no_rc: opts.no_rc,
             recursion_limit: opts.run.recursion_limit,
-            capabilities: opts
-                .run
-                .capabilities
-                .iter()
-                .map(|p| p.to_string_lossy().into_owned())
-                .collect(),
+            capabilities: Boot::profiles(&opts.run.capabilities).map_err(|e| {
+                errln!("{e}");
+                ExitCode::from(2)
+            })?,
         };
         let (report, _) = host.dispatch(&*transport, hook_run(boot.program(), None), None);
         let mut settings = boot_door::settle(report).map_err(exit)?;
@@ -178,7 +176,7 @@ impl Session {
         // next Ctrl-C toward the third-signal force-exit.
         ral_core::process::clear();
         let cwd = t.cwd().unwrap_or_default();
-        write_terminal_title(&self.terminal, &cwd.to_string_lossy());
+        write_terminal_title(&self.terminal, &ral_core::path::shown(cwd));
         let prompt = render_prompt(t, &self.host);
 
         let read = self.frontend.read(

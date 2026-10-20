@@ -4,7 +4,9 @@
 //! position known" is `Option<Span>` = `None` throughout the AST, IR, and
 //! typechecker.  A span into text no `SourceDb` holds carries [`FileId::DUMMY`].
 
+use crate::path::NotUtf8;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// A half-open byte range `[start, end)` within a single source file.
@@ -157,13 +159,86 @@ pub(crate) trait WithSpan {
 
 // ── Loaded source text ───────────────────────────────────────────────
 
+/// Where a source's text came from: its identity as a load, the key of the
+/// module stack's cycle check.
+///
+/// A file is held by the native path it was read from, so the directory a
+/// script-relative path resolves beside and the `$SCRIPT` it bakes are read
+/// off the host's own name, never re-parsed from a rendering of it.  Text no
+/// file holds is named only, for diagnostics.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceOrigin {
+    /// A file on disk, by its native path.
+    File(SourceFile),
+    /// Text with no file behind it — the REPL, `-c`, a hook, an embedded
+    /// profile — known only by the label a diagnostic shows, such as
+    /// `<stdin>`.
+    Virtual(Arc<str>),
+}
+
+/// The native path of a source file, UTF-8 by construction.
+///
+/// An origin travels serialized — in a run sent across the wire, on the
+/// module stack, in the [`SourceDb`] — and serde holds a path only as text,
+/// so a file whose path is not UTF-8 is refused here, before it is read,
+/// rather than failing late at serialization.  Deserialization is no second
+/// door: serde lifts a `PathBuf` only from UTF-8.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SourceFile(PathBuf);
+
+impl SourceFile {
+    /// The source file at `path`.
+    ///
+    /// # Errors
+    /// [`NotUtf8`] when `path` is not UTF-8, naming it.
+    pub fn new(path: impl Into<PathBuf>) -> Result<Self, NotUtf8> {
+        let path = path.into();
+        crate::path::utf8(&path)?;
+        Ok(Self(path))
+    }
+
+    /// The native path.
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl SourceOrigin {
+    /// A virtual source labelled `label`.
+    pub fn named(label: impl Into<Arc<str>>) -> Self {
+        Self::Virtual(label.into())
+    }
+
+    /// The file this source was read from; `None` for a virtual source, which
+    /// has no script identity.
+    pub fn file(&self) -> Option<&Path> {
+        match self {
+            Self::File(file) => Some(file.path()),
+            Self::Virtual(_) => None,
+        }
+    }
+}
+
+/// The name a diagnostic shows: a file's path [shown](crate::path::shown), a
+/// virtual source's label as given.
+impl std::fmt::Display for SourceOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::File(file) => f.write_str(&crate::path::shown(file.path())),
+            Self::Virtual(label) => f.write_str(label),
+        }
+    }
+}
+
 /// Source text with a line-start index built once at load, so `byte → (line,
 /// col)` costs O(log lines) at any file size.  Cloning bumps refcounts rather
 /// than copying the text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Source {
-    /// A script path, `<stdin>`, or a module's virtual path — what a rendered
-    /// error names as the file its caret points into.
+    origin: SourceOrigin,
+    /// `origin` as shown, derived once at load: what a rendered error names as
+    /// the file its caret points into, and what a [`CallSite`] carries.
     name: Arc<str>,
     text: Arc<str>,
     /// Ascending; `[0]` is always 0 and each later entry is the byte just past
@@ -172,8 +247,8 @@ pub struct Source {
 }
 
 impl Source {
-    /// Wrap `text` under display `name`, indexing the lines in one pass.
-    pub fn new(name: Arc<str>, text: Arc<str>) -> Self {
+    /// Wrap `text` read from `origin`, indexing the lines in one pass.
+    pub fn new(origin: SourceOrigin, text: Arc<str>) -> Self {
         let mut starts: Vec<u32> =
             Vec::with_capacity(text.bytes().filter(|&b| b == b'\n').count() + 1);
         starts.push(0);
@@ -187,15 +262,21 @@ impl Source {
             }
         }
         Self {
-            name,
+            name: origin.to_string().into(),
+            origin,
             text,
             line_starts: starts.into(),
         }
     }
 
     /// Allocating counterpart of [`Self::new`].
-    pub fn from_text(name: &str, text: &str) -> Self {
-        Self::new(Arc::from(name), Arc::from(text))
+    pub fn from_text(origin: SourceOrigin, text: &str) -> Self {
+        Self::new(origin, Arc::from(text))
+    }
+
+    /// Where the text came from.
+    pub fn origin(&self) -> &SourceOrigin {
+        &self.origin
     }
 
     /// The display name.
@@ -304,18 +385,18 @@ impl SourceDb {
 
 impl Serialize for SourceDb {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_seq(self.sources.iter().map(|s| (s.name(), s.text())))
+        serializer.collect_seq(self.sources.iter().map(|s| (s.origin(), s.text())))
     }
 }
 
 impl<'de> Deserialize<'de> for SourceDb {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let pairs = Vec::<(Arc<str>, Arc<str>)>::deserialize(deserializer)?;
+        let pairs = Vec::<(SourceOrigin, Arc<str>)>::deserialize(deserializer)?;
         Ok(Self {
             sources: Arc::new(
                 pairs
                     .into_iter()
-                    .map(|(name, text)| Source::new(name, text))
+                    .map(|(origin, text)| Source::new(origin, text))
                     .collect(),
             ),
         })
@@ -332,5 +413,21 @@ mod tests {
         assert_eq!(normalize("\u{feff}a\r\nb".into()), "a\nb");
         assert_eq!(normalize("\u{feff}\u{feff}x".into()), "\u{feff}x");
         assert_eq!(normalize("echo \u{feff}hi".into()), "echo \u{feff}hi");
+    }
+
+    /// A path no string can hold is refused as a source file where it
+    /// enters, naming it, and never reaches a serializer.
+    #[cfg(unix)]
+    #[test]
+    fn a_source_file_path_must_be_utf8() {
+        use super::SourceFile;
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let bad = std::path::PathBuf::from(OsStr::from_bytes(b"/tmp/s\xffx.ral"));
+        let err = SourceFile::new(bad).expect_err("not UTF-8");
+        assert_eq!(err.to_string(), "/tmp/s\u{fffd}x.ral is not UTF-8");
+        let good = SourceFile::new("/tmp/s.ral").expect("UTF-8");
+        assert_eq!(good.path(), std::path::PathBuf::from("/tmp/s.ral"));
     }
 }

@@ -373,6 +373,7 @@ mod chokepoint_tests {
     use crate::boot::BakedPrelude;
     use crate::protocol::{Program, Run};
     use crate::run::RunReport;
+    use crate::source::SourceOrigin;
     use crate::test_helper::eventually;
     use crate::types::{Sample, Settled, Shell, Value};
     use std::time::Duration;
@@ -403,7 +404,7 @@ mod chokepoint_tests {
     /// compile; a `Static` report is a test bug.
     fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
         shell
-            .run(Run::foreground(source, "<test>"))
+            .run(Run::foreground(source, SourceOrigin::named("<test>")))
             .expect_ran()
             .into_result()
     }
@@ -413,7 +414,7 @@ mod chokepoint_tests {
     fn top_level_stderr(shell: &mut Shell, source: &str) -> String {
         match shell.run(Run {
             io: RunIo::Capture,
-            ..Run::foreground(source, "<test>")
+            ..Run::foreground(source, SourceOrigin::named("<test>"))
         }) {
             RunReport::Ran { captured, .. } => {
                 let captured = captured.expect("Capture must return buffers");
@@ -586,7 +587,10 @@ mod chokepoint_tests {
         let epoch_before = epoch(&shell);
         let stale = last_used_of(&shell, "static_x");
 
-        match shell.run(Run::foreground("$[1 + true]", "<test>")) {
+        match shell.run(Run::foreground(
+            "$[1 + true]",
+            SourceOrigin::named("<test>"),
+        )) {
             RunReport::Static { .. } => {}
             RunReport::Ran { .. } | RunReport::Faulted { .. } => {
                 panic!("ill-typed source must be refused statically")
@@ -634,7 +638,7 @@ mod chokepoint_tests {
                 name: crate::types::HookName::session("test_prompt"),
                 args: vec![],
             },
-            "<test>",
+            SourceOrigin::named("<test>"),
         ));
         report
             .expect_ran()
@@ -745,7 +749,10 @@ mod chokepoint_tests {
         assert_eq!(notices[0].kind, "Int");
         assert!(shell.scope_lookup("prune_x").is_none());
 
-        match shell.run(Run::foreground("return $prune_x", "<test>")) {
+        match shell.run(Run::foreground(
+            "return $prune_x",
+            SourceOrigin::named("<test>"),
+        )) {
             RunReport::Static { diagnostics } => {
                 let msg = diagnostics.render().0;
                 assert!(

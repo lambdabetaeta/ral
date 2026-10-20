@@ -116,7 +116,7 @@ impl Engine {
                 let mut shell = Shell::root(Arc::clone(&runtime));
                 crate::boot::seed_host_env(&mut shell);
                 (installer.root)(root, &mut shell)?;
-                shell.seed_cwd(root.cwd.clone());
+                shell.seed_cwd(root.cwd.native().to_path_buf());
                 for (name, value) in &root.env {
                     shell.set_env_var(name, value);
                 }

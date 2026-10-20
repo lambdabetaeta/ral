@@ -12,10 +12,6 @@
         reason = "[test] libtest captures print macros"
     )
 )]
-#![allow(
-    clippy::disallowed_methods,
-    reason = "exarch is an application, not the ral shell; the clippy.toml invariants target ral-core's Shell path/cwd/fs discipline"
-)]
 pub mod agent;
 pub mod app;
 pub mod boot;
@@ -126,7 +122,7 @@ pub struct SessionInfo<'a> {
     pub base: &'a str,
     pub extend: Option<&'a std::path::Path>,
     pub restrict_files: &'a [std::path::PathBuf],
-    pub cwd: &'a str,
+    pub cwd: &'a std::path::Path,
 }
 
 /// The binary's entry point, lifted into the library so integration tests can
@@ -171,14 +167,14 @@ pub fn run() -> Result<(), String> {
                 if !record.is_file() {
                     return Err(format!(
                         "no record.jsonl at {}; is this a session directory under $XDG_STATE_HOME/exarch?",
-                        record.display()
+                        ral_core::path::shown(&record)
                     ));
                 }
                 match &out {
                     Some(dest) => tui::export_to(&record, dest, tui::Format::Plain),
                     None => tui::export(&record, &mut std::io::stdout().lock(), tui::Format::Plain),
                 }
-                .map_err(|e| format!("could not export {}: {e}", record.display()))
+                .map_err(|e| format!("could not export {}: {e}", ral_core::path::shown(&record)))
             }
         };
     }
@@ -204,11 +200,8 @@ pub fn run() -> Result<(), String> {
         );
     }
 
-    let cwd = std::env::current_dir()
-        .map_err(|e| format!("launch cwd: {e}"))?
-        .to_string_lossy()
-        .into_owned();
-    let state_dir = app::EXARCH.project_dir(&cwd);
+    let launch_cwd = ral_core::host::cwd().ok_or("launch cwd: unavailable")?;
+    let state_dir = app::EXARCH.project_dir(&launch_cwd);
 
     let holdings = Holdings::new(store, app::EXARCH);
     let saved = provider::state::load(&state_dir);
@@ -232,16 +225,17 @@ pub fn run() -> Result<(), String> {
         |account| provider::models::listing_of(&holdings.catalog, &account.id),
     )?;
 
-    let invocation = policy::for_invocation(&cwd, &c.base, c.extend.as_deref(), &c.restrict)?;
+    let invocation =
+        policy::for_invocation(&launch_cwd, &c.base, c.extend.as_deref(), &c.restrict)?;
     let scratch =
         Arc::new(app::Scratch::new(app::EXARCH).map_err(|e| format!("scratch dir: {e}"))?);
     let (_mode, terminal, _warn) = ral_core::terminal::TerminalState::probe_from_env();
     boot::face_process_signals(&terminal);
     // Held for the whole run: the lock is the launcher's, not the node's.
-    let (run_dir, _run_lock, resumes) = resolve_run(&cwd, c.resume)?;
+    let (run_dir, _run_lock, resumes) = resolve_run(&launch_cwd, c.resume)?;
     if headless && resumes {
         let open = record::AgentLog::live_roots(&run_dir.join("sessions"))
-            .map_err(|e| format!("could not inspect {}: {e}", run_dir.display()))?
+            .map_err(|e| format!("could not inspect {}: {e}", ral_core::path::shown(&run_dir)))?
             .len();
         if open != 1 {
             return Err(format!(
@@ -250,7 +244,6 @@ pub fn run() -> Result<(), String> {
         }
     }
     let config_dir = app::EXARCH.xdg_dir(ral_core::path::XdgKind::Config);
-    let cwd_path = std::path::PathBuf::from(&cwd);
     // Chat registers no tools, so there is nothing for a system prompt to say.
     let system = if c.chat {
         prompt::CHAT_SYSTEM.to_string()
@@ -259,7 +252,7 @@ pub fn run() -> Result<(), String> {
             &c.system_files,
             &invocation,
             app::EXARCH,
-            &cwd_path,
+            &launch_cwd,
             &config_dir,
             !headless,
             c.edit,
@@ -310,7 +303,7 @@ pub fn run() -> Result<(), String> {
     };
     let seat = agent::RootSeat::Identity {
         scratch,
-        cwd: cwd_path,
+        cwd: launch_cwd.clone(),
         terminal,
     };
     let roots: Vec<_> = if resumes {
@@ -331,7 +324,7 @@ pub fn run() -> Result<(), String> {
         base: &c.base,
         extend: c.extend.as_deref(),
         restrict_files: &invocation.restricts,
-        cwd: &cwd,
+        cwd: &launch_cwd,
     };
     if headless {
         let [(mut session, _)] =
@@ -354,7 +347,7 @@ pub fn run() -> Result<(), String> {
     reason = "the CLI distinguishes absent, bare, and named resume"
 )]
 fn resolve_run(
-    cwd: &str,
+    cwd: &std::path::Path,
     resume: Option<Option<std::path::PathBuf>>,
 ) -> Result<(std::path::PathBuf, app::RunLock, bool), String> {
     if let Some(target) = resume {
@@ -366,13 +359,18 @@ fn resolve_run(
                 .map_err(|error| format!("could not inspect resumable runs: {error}"))?,
         };
         for run_dir in candidates {
-            let open = record::AgentLog::live_roots(&run_dir.join("sessions"))
-                .map_err(|error| format!("cannot inspect {}: {error}", run_dir.display()))?;
+            let open =
+                record::AgentLog::live_roots(&run_dir.join("sessions")).map_err(|error| {
+                    format!(
+                        "cannot inspect {}: {error}",
+                        ral_core::path::shown(&run_dir)
+                    )
+                })?;
             if open.is_empty() {
                 if explicit {
                     return Err(format!(
                         "--resume target {} has no open session; pass a run directory with a sessions/<n>/record.jsonl that was not closed with /close",
-                        run_dir.display()
+                        ral_core::path::shown(&run_dir)
                     ));
                 }
                 continue;
@@ -383,30 +381,34 @@ fn resolve_run(
                     if explicit {
                         return Err(format!(
                             "--resume target {} is already running; run.lock is held by another exarch",
-                            run_dir.display()
+                            ral_core::path::shown(&run_dir)
                         ));
                     }
                 }
                 Err(error) => {
                     return Err(format!(
                         "cannot resume {}: could not acquire {}: {error}",
-                        run_dir.display(),
-                        run_dir.join("run.lock").display()
+                        ral_core::path::shown(&run_dir),
+                        ral_core::path::shown(run_dir.join("run.lock"))
                     ));
                 }
             }
         }
         return Err(format!(
             "--resume found no unlocked run with an open session under {}",
-            app::EXARCH.project_dir(cwd).display()
+            ral_core::path::shown(app::EXARCH.project_dir(cwd))
         ));
     }
 
     let run_dir = app::EXARCH
         .log_run_dir(cwd)
         .map_err(|error| format!("log dir: {error}"))?;
-    let lock = app::RunLock::try_acquire(&run_dir)
-        .map_err(|error| format!("could not lock {}: {error}", run_dir.display()))?;
+    let lock = app::RunLock::try_acquire(&run_dir).map_err(|error| {
+        format!(
+            "could not lock {}: {error}",
+            ral_core::path::shown(&run_dir)
+        )
+    })?;
     Ok((run_dir, lock, false))
 }
 

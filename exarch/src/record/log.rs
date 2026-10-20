@@ -298,7 +298,7 @@ impl Log {
                         .map_err(|error| {
                             io::Error::other(format!(
                                 "line {seq} of {} is not a record this exarch writes ({error}); was this session recorded by an older exarch? Older sessions can be neither resumed nor exported.",
-                                path.display()
+                                ral_core::path::shown(path)
                             ))
                         }),
                 );

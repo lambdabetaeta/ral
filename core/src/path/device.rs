@@ -1,7 +1,7 @@
 //! Device names: the discard sink, and the DOS names no file may take.
 
 use super::PathRules;
-use super::identity::is_sep;
+use super::lex::{Heads, Namespace, namespace_head};
 
 /// True iff `path` names the discard device: the sink that swallows every
 /// byte and keeps none.  `/dev/null` under POSIX rules; under Windows', the
@@ -14,20 +14,19 @@ use super::identity::is_sep;
 pub(crate) fn is_discard_device(path: &str, rules: PathRules) -> bool {
     match rules {
         PathRules::Posix => path == "/dev/null",
-        PathRules::Windows => match path.as_bytes() {
-            [a, b, b'.', c, name @ ..] => {
-                [a, b, c].into_iter().all(|&s| is_sep(s)) && name.eq_ignore_ascii_case(b"nul")
-            }
-            _ => false,
-        },
+        PathRules::Windows => {
+            matches!(namespace_head(path, Heads::Written),
+                Some((Namespace::Device, name)) if name.eq_ignore_ascii_case("nul"))
+        }
     }
 }
 
 /// The refusal owed `path` under Windows rules when its last component is a
 /// DOS reserved device name (`NUL`, `CON`, `PRN`, `AUX`, `COM1`-`COM9`,
-/// `LPT1`-`LPT9`, in any case, with or without an extension, trailing dots and
-/// blanks as Win32 trims them), and `None` for every other path, the discard
-/// device's own spelling included.
+/// `LPT1`-`LPT9`, and `COM`/`LPT` with a superscript `¹`, `²` or `³`, which
+/// Windows reads as digits; in any case, with or without an extension,
+/// trailing dots and blanks as Win32 trims them), and `None` for every other
+/// path, the discard device's own spelling included.
 ///
 /// Such a name is no file: most Windows tools read it as the device, so a file
 /// made under it is unusable to them, and ral does not take the device meaning
@@ -39,12 +38,10 @@ pub(crate) fn reserved_device_refusal(path: &str, rules: PathRules) -> Option<St
     if rules == PathRules::Posix || is_discard_device(path, rules) {
         return None;
     }
-    let last = path.rsplit(['/', '\\']).find(|c| !c.is_empty())?;
-    let stem = last
-        .trim_end_matches(['.', ' '])
-        .split('.')
-        .next()?
-        .trim_end_matches(' ');
+    let last = path
+        .rsplit(|c| rules.is_separator(c))
+        .find(|c| !c.is_empty())?;
+    let stem = win32_trimmed(last).split('.').next()?.trim_end_matches(' ');
     if !is_reserved_device_stem(stem) {
         return None;
     }
@@ -62,13 +59,28 @@ pub(crate) fn reserved_device_refusal(path: &str, rules: PathRules) -> Option<St
     })
 }
 
+/// A final component as Win32 reads it: trailing dots and blanks dropped,
+/// as the Win32 path parser drops them before the file system sees the
+/// name, so `NUL.` opens the device and `run.bat .` runs the batch file.
+/// The one copy of that rule, for every check that names a component by
+/// what Windows will make of it.
+pub(crate) fn win32_trimmed(name: &str) -> &str {
+    name.trim_end_matches(['.', ' '])
+}
+
 fn is_reserved_device_stem(stem: &str) -> bool {
     let upper = stem.to_ascii_uppercase();
     matches!(upper.as_str(), "NUL" | "CON" | "PRN" | "AUX")
         || upper
             .strip_prefix("COM")
             .or_else(|| upper.strip_prefix("LPT"))
-            .is_some_and(|n| matches!(n.as_bytes(), [b'1'..=b'9']))
+            .is_some_and(is_port_digit)
+}
+
+/// A port number Windows reserves: one digit `1`-`9`, or one of the
+/// ISO 8859-1 superscripts `¹`, `²`, `³`, which it reads as digits.
+fn is_port_digit(n: &str) -> bool {
+    matches!(n.as_bytes(), [b'1'..=b'9']) || matches!(n, "\u{b9}" | "\u{b2}" | "\u{b3}")
 }
 
 #[cfg(test)]
@@ -116,6 +128,10 @@ mod tests {
             "con",
             "COM1.log",
             "LPT9",
+            "COM\u{b9}",
+            "com\u{b2}.txt",
+            "LPT\u{b3}",
+            "C:\\x\\lpt\u{b9} .log",
             "prn.",
             "AUX ",
             r"C:\x\NUL",
@@ -137,7 +153,11 @@ mod tests {
             "CONFIG",
             "COM10",
             "COM0",
+            "LPT0",
             "LPTA",
+            "COM\u{2074}",
+            "LPT\u{2070}",
+            "COM\u{b9}\u{b2}",
             r"C:\x\nul\file",
             r"\\.\NUL\test-agent",
             r"C:\",

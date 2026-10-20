@@ -274,7 +274,7 @@ impl Avatar {
             ral_core::path::tree::bytes(&log_dir),
             None,
             Policy::Warn,
-            Some(log_dir.display().to_string()),
+            Some(ral_core::path::shown(&log_dir)),
         ));
         if let Some((scratch, bytes)) = self.scratch_bytes()? {
             rows.push(ProbeRow::new(
@@ -282,7 +282,7 @@ impl Avatar {
                 bytes,
                 None,
                 Policy::Warn,
-                Some(scratch),
+                Some(ral_core::path::shown(scratch)),
             ));
         }
 

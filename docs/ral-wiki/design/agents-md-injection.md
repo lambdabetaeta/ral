@@ -15,8 +15,8 @@ dominates:
 - **The operator's `<config>/AGENTS.md` leads** — from the trusted
   [[design/exarch-config-dir|config dir]], the same root `config.ral` loads from.
 - **Then every repo `AGENTS.md` from the git root down to `cwd`**, deepest last.
-  The ancestor walk stops at the first directory holding a `.git` *entry* — file
-  or directory, so worktrees and submodules count — which bounds discovery to the
+  The chain is `path::work_tree_chain`, stopping at the first directory holding
+  a `.git` *entry* — file or directory, so worktrees and submodules count — which bounds discovery to the
   project the agent was launched in.
 - **Outside a git repo, only `cwd/AGENTS.md`.** The bare ancestor chain is *not*
   followed up into unrelated parents (the chain is truncated to one when no `.git`

@@ -485,6 +485,10 @@ mod tests {
 
     /// The `Arc` a live provider still holds is the one that sees the refresh.
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] a poisoned lock is the test's own failure"
+    )]
     fn add_oauth_relogin_updates_the_shared_cell_in_place() {
         let mut store = CredentialStore::default();
         let account = store.add_oauth(&oauth_token("acc_1", Some("alex@work")));
@@ -527,6 +531,10 @@ mod tests {
     /// Neither may shadow the other, and a refresh of one never reaches the
     /// other's token cell.
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] a poisoned lock is the test's own failure"
+    )]
     fn two_accounts_on_one_email_stay_distinct() {
         let mut store = CredentialStore::default();
 

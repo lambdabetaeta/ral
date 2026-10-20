@@ -30,7 +30,7 @@ export function show(name) {
 }
 
 export const state = {
-  /** @type {string | null} */
+  /** @type {import("./bindings/PickedFolder.ts").PickedFolder | null} */
   folder: null,
   choice: null,  // { account, model, effort } picked on the start screen
   busy: false,   // an exchange is in flight

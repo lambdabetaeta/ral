@@ -27,6 +27,7 @@ use common::fresh_shell;
 use ral_core::Settled;
 use ral_core::protocol::Run;
 use ral_core::run::{RunReport, StaticDiagnostics};
+use ral_core::source::SourceOrigin;
 use ral_core::types::{Break, Value};
 
 /// A session as every front end builds one: prelude registered, env seeded,
@@ -34,7 +35,7 @@ use ral_core::types::{Break, Value};
 /// One top-level dispatch through the public door, stdout captured — the report
 /// as a front end receives it, diagnosed or run.
 fn report(src: &str) -> RunReport {
-    fresh_shell().run(Run::captured(src, "<argv-convention>"))
+    fresh_shell().run(Run::captured(src, SourceOrigin::named("<argv-convention>")))
 }
 
 /// A run that must reach the evaluator, with what it wrote to stdout.

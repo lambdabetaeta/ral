@@ -24,9 +24,7 @@ fn quarantine_tail(path: &Path) -> io::Result<()> {
     if tail.is_empty() {
         return Ok(());
     }
-    let mut sidecar_name = path.file_name().unwrap_or_default().to_os_string();
-    sidecar_name.push(".crash");
-    let sidecar = path.with_file_name(sidecar_name);
+    let sidecar = ral_core::path::with_appended_suffix(path, "crash");
     let mut quarantine = OpenOptions::new()
         .create(true)
         .append(true)
@@ -41,8 +39,8 @@ fn quarantine_tail(path: &Path) -> io::Result<()> {
     ral_core::errln!(
         "exarch: quarantined {} bytes from {} in {} before trimming the live log",
         tail.len(),
-        path.display(),
-        sidecar.display()
+        ral_core::path::shown(path),
+        ral_core::path::shown(&sidecar)
     );
     Ok(())
 }
@@ -77,13 +75,13 @@ pub fn resume(path: &Path) -> io::Result<(Context, Selection)> {
                 }) => {
                     return Err(io::Error::other(format!(
                         "cannot resume {}: the first record starts session {session_id} with parent {parent:?}; expected a root, SessionStarted {{ parent: None, .. }}; is this a child log?",
-                        path.display()
+                        ral_core::path::shown(path)
                     )));
                 }
                 other @ (Record::Protocol(_) | Record::Display(_) | Record::Forensic(_)) => {
                     return Err(io::Error::other(format!(
                         "cannot resume {}: the first record is {other:?}; expected a root, SessionStarted {{ parent: None, .. }}; is this a copied child log?",
-                        path.display()
+                        ral_core::path::shown(path)
                     )));
                 }
             }
@@ -97,7 +95,7 @@ pub fn resume(path: &Path) -> io::Result<(Context, Selection)> {
     if selection.model().is_none() {
         return Err(io::Error::other(format!(
             "cannot resume {}: no complete session records were found; is the file truncated?",
-            path.display()
+            ral_core::path::shown(path)
         )));
     }
     Ok((context, selection))

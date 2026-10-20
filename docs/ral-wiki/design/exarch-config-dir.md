@@ -11,7 +11,8 @@ agent must not be able to forge.
 
 Every exarch directory resolves through `app::App::xdg_dir(kind)`
 (`exarch/src/app.rs`), with `app::EXARCH` supplying the `exarch`
-component — `$XDG_<kind>_HOME/exarch/` over the shared
+component — `$XDG_<kind>_HOME/exarch/`, spelled by core's
+`path::app_dir_or_temp`, the convention ral's own directories share, over the shared
 [[decisions/260601_xdg-resolver-consolidation|xdg-resolver-consolidation]]
 resolver (`core/src/path/basedir.rs`, `XdgKind`). Three roles, three relationships
 to trust:

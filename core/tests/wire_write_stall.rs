@@ -21,6 +21,7 @@
 use ral_core::carrier::{Host, Transport, WireTransport};
 use ral_core::protocol::channel::Liveness;
 use ral_core::protocol::{DispatchId, Run};
+use ral_core::source::SourceOrigin;
 use ral_core::test_helper::eventually;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
@@ -47,7 +48,7 @@ fn brisk_liveness() -> Liveness {
 /// buffer many times over, so a peer that never drains it reliably parks the
 /// write rather than merely slowing it down.
 fn big_run() -> Run {
-    Run::captured("x".repeat(16 * 1024 * 1024), "<test>")
+    Run::captured("x".repeat(16 * 1024 * 1024), SourceOrigin::named("<test>"))
 }
 
 /// Whether `peer` has bytes waiting, without consuming any: the one

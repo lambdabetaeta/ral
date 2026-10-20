@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
+
 use super::*;
 use crate::provider::Tuning;
 use crate::record::model::{ItemKind, Location};
@@ -1978,7 +1980,7 @@ fn a_broken_ancestry_link_is_refused_by_path_and_fault() {
     assert!(
         refusal.starts_with(&format!(
             "turn 1 could not be read back from {}: ",
-            source.display()
+            ral_core::path::shown(&source)
         )) && refusal.contains("did not hash to the locus that named it"),
         "{refusal}"
     );
@@ -1991,7 +1993,7 @@ fn a_broken_ancestry_link_is_refused_by_path_and_fault() {
     assert!(
         refusal.starts_with(&format!(
             "turn 1 could not be read back from {}: ",
-            source.display()
+            ral_core::path::shown(&source)
         )),
         "{refusal}"
     );
@@ -2194,7 +2196,7 @@ fn an_unnarrowed_grep_passes_over_an_unreadable_file() {
     assert!(
         refusal.starts_with(&format!(
             "turn 1 could not be read back from {}: ",
-            source.display()
+            ral_core::path::shown(&source)
         )),
         "{refusal}"
     );
@@ -2409,7 +2411,8 @@ fn an_unreadable_parent_refuses_the_fork_by_file() {
     .expect("the parent's file is gone");
     let text = error.to_string();
     assert!(
-        text.contains("turn 1 was inherited from") && text.contains(&source.display().to_string()),
+        text.contains("turn 1 was inherited from")
+            && text.contains(&ral_core::path::shown(&source)),
         "{text}"
     );
 }

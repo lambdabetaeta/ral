@@ -88,7 +88,7 @@ fn open_audit_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     reason = "[silent:net-audit-rotate] rotates the network audit ledger once it exceeds its size cap."
 )]
 fn rotate(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    let rotated = path.with_extension("jsonl.1");
+    let rotated = ral_core::path::with_appended_suffix(path, "1");
     std::fs::rename(path, &rotated)?;
     open_audit_file(path)
 }
@@ -101,7 +101,7 @@ impl AuditLog {
     fn at_in(path: &std::path::Path, scratch: Option<tempfile::TempDir>) -> std::io::Result<Self> {
         let file = open_audit_file(path)?;
         #[cfg(unix)]
-        let rotation_lock = open_audit_file(&path.with_extension("jsonl.lock"))?;
+        let rotation_lock = open_audit_file(&ral_core::path::with_appended_suffix(path, "lock"))?;
         Ok(Self(Arc::new(Mutex::new(LedgerFile {
             path: path.to_path_buf(),
             file,
@@ -281,6 +281,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
     fn audit_log_records_two_independently_parseable_lines() {
         let (_dir, path) = tmp_path("audit-two-lines");
         let log = AuditLog::for_test(&path);
@@ -314,9 +315,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
     fn a_ledger_that_exceeds_its_cap_rotates_and_keeps_appending() {
         let (_dir, path) = tmp_path("audit-rotate");
-        let rotated = path.with_extension("jsonl.1");
+        let rotated = ral_core::path::with_appended_suffix(&path, "1");
         // Through a write handle, before the ledger opens: an append-mode
         // handle carries no write access on Windows, which refuses `set_len`.
         std::fs::File::create(&path)
@@ -346,9 +348,10 @@ mod tests {
     /// only on Unix, where `RotationGuard` exists.
     #[cfg(unix)]
     #[test]
+    #[allow(clippy::disallowed_methods, reason = "[test] fixtures")]
     fn rotation_under_cross_process_contention_loses_no_record() {
         let (_dir, path) = tmp_path("audit-race");
-        let rotated = path.with_extension("jsonl.1");
+        let rotated = ral_core::path::with_appended_suffix(&path, "1");
 
         let log_a = AuditLog::at(&path).expect("test ledger a");
         let log_b = AuditLog::at(&path).expect("test ledger b");
@@ -397,6 +400,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] a poisoned lock is the test's own failure"
+    )]
     fn a_record_that_cannot_be_written_reports_err() {
         let (_dir, path) = tmp_path("audit-poisoned");
         let log = AuditLog::at(&path).expect("test ledger");

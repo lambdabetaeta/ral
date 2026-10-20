@@ -2,7 +2,7 @@
 status: accepted
 generated_at_commit: f52a58a9
 verified_at_commit: f52a58a9
-anchors: [ambient, home_dir, CompKind::Tilde, variable_val, pure_int, pure_strs, pure_string_map]
+anchors: [ambient, require_home, CompKind::Tilde, variable_val, pure_int, pure_strs, pure_string_map]
 ---
 
 # Ambient reads are builtins

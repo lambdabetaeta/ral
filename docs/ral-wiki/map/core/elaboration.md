@@ -40,12 +40,12 @@ It also resolves command heads against lexical scope
 The prelude's exports and the caller's live bindings (REPL env, tool harness) are
 pre-loaded into the outermost scope.
 
-`name` is the compiling source's display name, and `$SCRIPT` bakes to it as a
-`Val::String` rather than a `Val::Variable` lookup (`Elaborator::variable_val`),
-so self-location is lexical by construction. A source with no script identity
-(`path::lex::has_script_identity` — the REPL, `-c`, a synthetic `<…>` source)
-therefore has nothing to bake, and a `$SCRIPT` reference there is a static
-error. That is the only way elaboration can fail: the error is parked in one
+`script` is the file the compiling source was read from (`SourceOrigin::file`),
+and `$SCRIPT` bakes to it, shown, as a `Val::String` rather than a
+`Val::Variable` lookup (`Elaborator::variable_val`), so self-location is
+lexical by construction. A virtual source (the REPL, `-c`, a hook, an embedded
+`<…>` source) has no file and therefore nothing to bake, and a `$SCRIPT`
+reference there is a static error. That is the only way elaboration can fail: the error is parked in one
 `Option<ParseError>` slot and checked once at the end, rather than threading
 `Result` through every traversal.
 

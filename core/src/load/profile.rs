@@ -12,38 +12,44 @@ use std::path::Path;
 use crate::capability::{Capabilities, Fragment};
 use crate::guard::decode_capability_map;
 use crate::guard::freeze::FreezeCtx;
+use crate::source::{SourceFile, SourceOrigin};
 use crate::types::{Break, Mooring, Settled, Shell, sig};
 
 /// Evaluate `source` and decode its terminal value into a frozen
 /// [`Capabilities`], resolving places against `ctx`.
 ///
-/// `virtual_path` names the file in errors and keys the cycle stack —
-/// synthetic (`<built-in:NAME>`) for embedded profiles.
+/// `origin` names the file in errors and keys the cycle stack — virtual
+/// (`<built-in:NAME>`) for embedded profiles.
 ///
 /// # Errors
-/// A compile, runtime, or decode failure, named with `virtual_path`; an escape
+/// A compile, runtime, or decode failure, named with `origin`; an escape
 /// (`exit`, a stopped child) passes through untouched.
 pub fn load_capabilities_from_str(
     mooring: &Mooring,
     shell: &mut Shell,
     source: &str,
-    virtual_path: &str,
+    origin: &SourceOrigin,
     ctx: &FreezeCtx,
 ) -> Settled<Capabilities> {
     // A profile's dimensions are `grant`'s own options, so the file's returned
     // row is held to the same table the form is.
     let contract = crate::typecheck::contract::declared(crate::typecheck::Form::Grant);
-    let value = super::evaluate_source(mooring, shell, source, virtual_path, Some(contract))
-        .map_err(|e| wrap(virtual_path, e))?;
-    let prefix = format!("capability file {virtual_path}");
+    let value = super::evaluate_source(mooring, shell, source, origin, Some(contract))
+        .map_err(|e| wrap(origin, e))?;
+    let prefix = format!("capability file {origin}");
     decode_capability_map(&value, &prefix, ctx).map_err(Break::from)
 }
 
 /// Read `path` and forward to [`load_capabilities_from_str`], keyed by its
 /// canonical form so two spellings of one file share a cycle-stack entry.
 ///
+/// `path` is anchored against the shell's cwd, not the process's, and the
+/// bytes are read through the very path the source is keyed by, so the
+/// identity and the text are one file.
+///
 /// # Errors
-/// The file cannot be read, or any failure of [`load_capabilities_from_str`].
+/// Its canonical path is not UTF-8, the file cannot be read, or any failure
+/// of [`load_capabilities_from_str`].
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:cap-load] reads a capability-policy file from disk to configure the sandbox; policy/configuration loading at setup, not turn-time model data I/O, raises no surface card."
@@ -54,8 +60,13 @@ pub fn load_capabilities_from_path(
     path: &Path,
     ctx: &FreezeCtx,
 ) -> Settled<Capabilities> {
-    let display = path.to_string_lossy().into_owned();
-    let source = std::fs::read_to_string(path).map_err(|e| {
+    let display = crate::path::shown(path);
+    let anchored = shell.anchor(path);
+    let located = anchored
+        .canonicalise_strict()
+        .unwrap_or_else(|_| anchored.into_inner());
+    let file = SourceFile::new(located).map_err(|e| sig(format!("capability file {e}")))?;
+    let source = std::fs::read_to_string(file.path()).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             sig(format!("file not found: {display}"))
         } else {
@@ -63,12 +74,7 @@ pub fn load_capabilities_from_path(
         }
     })?;
     let source = crate::source::normalize_source_text(source);
-    let abs = shell
-        .resolve(&path.to_string_lossy())
-        .canonicalise_strict()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or(display);
-    load_capabilities_from_str(mooring, shell, &source, &abs, ctx)
+    load_capabilities_from_str(mooring, shell, &source, &SourceOrigin::File(file), ctx)
 }
 
 /// [`load_capabilities_from_str`] for an extension file: what the source states
@@ -80,10 +86,10 @@ pub fn load_fragment_from_str(
     mooring: &Mooring,
     shell: &mut Shell,
     source: &str,
-    virtual_path: &str,
+    origin: &SourceOrigin,
     ctx: &FreezeCtx,
 ) -> Settled<Fragment> {
-    load_capabilities_from_str(mooring, shell, source, virtual_path, ctx).map(Fragment::of)
+    load_capabilities_from_str(mooring, shell, source, origin, ctx).map(Fragment::of)
 }
 
 /// [`load_capabilities_from_path`] for an extension file.
@@ -100,6 +106,11 @@ pub fn load_fragment_from_path(
 }
 
 /// Load each profile in `paths` and push each as its own permanent, session-wide layer.
+///
+/// A front-end passes its command-line paths already anchored at the
+/// invocation cwd: by the time they load, the startup files and every earlier
+/// profile have run and may have moved the shell's cwd, against which a
+/// relative path would anchor.
 ///
 /// Root first, and the stack folds them at every check, so no file's opinion
 /// is ever flattened away by a sibling that is silent on the same key.
@@ -130,9 +141,9 @@ pub fn apply_session_profiles(
     Ok(())
 }
 
-fn wrap(virtual_path: &str, e: Break) -> Break {
+fn wrap(origin: &SourceOrigin, e: Break) -> Break {
     match e {
-        Break::Error(err) => Break::Error(err.context(format!("capability file {virtual_path}"))),
+        Break::Error(err) => Break::Error(err.context(format!("capability file {origin}"))),
         other @ Break::Escape(_) => other,
     }
 }
@@ -164,7 +175,7 @@ mod tests {
             &Mooring::adrift(),
             &mut shell,
             "return [exec: [allow: [`name ls]]]",
-            "<test:minimal>",
+            &SourceOrigin::named("<test:minimal>"),
             &ctx(),
         )
         .unwrap();
@@ -189,7 +200,7 @@ mod tests {
             &Mooring::adrift(),
             &mut shell,
             "return [exec: [deny: [`name bash]]]",
-            "<test:deny>",
+            &SourceOrigin::named("<test:deny>"),
             &ctx(),
         )
         .unwrap();
@@ -209,7 +220,7 @@ mod tests {
                 &Mooring::adrift(),
                 &mut shell,
                 source,
-                "<test:fragment>",
+                &SourceOrigin::named("<test:fragment>"),
                 &ctx(),
             )
             .unwrap()
@@ -228,7 +239,7 @@ mod tests {
             &Mooring::adrift(),
             &mut shell,
             "return 42",
-            "<test:nonmap>",
+            &SourceOrigin::named("<test:nonmap>"),
             &ctx(),
         )
         .unwrap_err();
@@ -239,10 +250,12 @@ mod tests {
         assert!(msg.contains("<test:nonmap>"), "should name the file: {msg}");
     }
 
-    fn load_err_message(source: &str, path: &str) -> String {
+    fn load_err_message(source: &str, label: &str) -> String {
         let mut shell = shell();
-        let err = load_capabilities_from_str(&Mooring::adrift(), &mut shell, source, path, &ctx())
-            .unwrap_err();
+        let origin = SourceOrigin::named(label);
+        let err =
+            load_capabilities_from_str(&Mooring::adrift(), &mut shell, source, &origin, &ctx())
+                .unwrap_err();
         match err {
             Break::Error(e) => e.message,
             other @ Break::Escape(_) => panic!("unexpected: {other:?}"),
@@ -276,7 +289,7 @@ mod tests {
             &Mooring::adrift(),
             &mut shell,
             "return ()",
-            "<test:unit>",
+            &SourceOrigin::named("<test:unit>"),
             &ctx(),
         )
         .unwrap();
@@ -290,7 +303,7 @@ mod tests {
             &Mooring::adrift(),
             &mut shell,
             "exit 3",
-            "<test:exit>",
+            &SourceOrigin::named("<test:exit>"),
             &ctx(),
         )
         .unwrap_err();

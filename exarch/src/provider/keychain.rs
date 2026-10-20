@@ -38,7 +38,7 @@ impl std::fmt::Display for Vault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Os(name) => f.write_str(name),
-            Self::File(path) => write!(f, "the file {}", path.display()),
+            Self::File(path) => write!(f, "the file {}", ral_core::path::shown(path)),
         }
     }
 }
@@ -170,12 +170,12 @@ impl Keychain {
         let path = self.fallback_path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|e| format!("could not make {}: {e}", parent.display()))?;
+                .map_err(|e| format!("could not make {}: {e}", ral_core::path::shown(parent)))?;
         }
         let json = serde_json::to_string_pretty(keys)
             .map_err(|e| format!("could not write out the keys: {e}"))?;
         secret_file::write_private(&path, json.as_bytes())
-            .map_err(|e| format!("could not write {}: {e}", path.display()))
+            .map_err(|e| format!("could not write {}: {e}", ral_core::path::shown(&path)))
     }
 }
 

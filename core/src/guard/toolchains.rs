@@ -12,10 +12,9 @@
 //! [`expand`] is its live wrapper, which the freeze and the fs floor read.
 
 use super::freeze::{PolicyError, Selector, refuse_the_world};
-use crate::path::{Allow, FrozenPath, is_absolute};
+use crate::path::{Allow, FrozenPath, is_absolute, join_slash, path_entries, shown};
 use crate::path::{XdgKind, resolve_xdg_in};
-use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use strum::{EnumString, IntoStaticStr, VariantArray};
 
 /// A package manager, or `system`: the selector names `dir` takes.
@@ -340,16 +339,16 @@ impl Override {
         sub
     }
 
-    /// The variable's value if usable: non-empty and absolute under the
-    /// host's rules.  An empty or relative one is skipped, as `path` skips a
-    /// relative `$PATH` entry.
-    fn value(self, env: &impl Fn(&str) -> Option<String>) -> Option<String> {
+    /// The directory the variable names, if usable: non-empty and absolute
+    /// under the host's rules.  An empty or relative one is skipped, as
+    /// `path` skips a relative `$PATH` entry.
+    fn value(self, env: &impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
         let raw = env(self.var())?;
         let value = match self {
-            Self::Var(..) => raw,
-            Self::Head(..) => std::env::split_paths(&raw).next()?.to_str()?.to_owned(),
+            Self::Var(..) => PathBuf::from(raw),
+            Self::Head(..) => path_entries(raw.as_ref()).next()?,
         };
-        (!value.is_empty() && is_absolute(&value)).then_some(value)
+        is_absolute(&value).then_some(value)
     }
 }
 
@@ -357,25 +356,17 @@ impl Base {
     /// The directory, or `None` where its anchor is unbound or it is not
     /// absolute under the host's rules: a foreign-rooted default belongs to
     /// the other platform.
-    fn dir(self, env: &impl Fn(&str) -> Option<String>, home: Option<&str>) -> Option<String> {
-        let xdg = |kind| resolve_xdg_in(env, kind, home).map(|p| p.to_string_lossy().into_owned());
+    fn dir(self, env: &impl Fn(&str) -> Option<String>, home: Option<&str>) -> Option<PathBuf> {
+        let xdg = |kind| resolve_xdg_in(env, kind, home);
         let (root, sub) = match self {
-            Self::Abs(path) => (path.to_owned(), ""),
-            Self::Home(sub) => (home?.to_owned(), sub),
+            Self::Abs(path) => (PathBuf::from(path), ""),
+            Self::Home(sub) => (PathBuf::from(home?), sub),
             Self::Config(sub) => (xdg(XdgKind::Config)?, sub),
             Self::Data(sub) => (xdg(XdgKind::Data)?, sub),
             Self::Cache(sub) => (xdg(XdgKind::Cache)?, sub),
         };
-        Some(join(&root, sub)).filter(|dir| is_absolute(dir))
+        Some(join_slash(root, sub)).filter(|dir| is_absolute(dir))
     }
-}
-
-/// `sub` joined to `root` per component, as `resolve_xdg` joins its suffixes.
-fn join(root: impl AsRef<OsStr>, sub: &str) -> String {
-    (sub.split('/').filter(|c| !c.is_empty()))
-        .fold(PathBuf::from(root.as_ref()), |dir, c| dir.join(c))
-        .to_string_lossy()
-        .into_owned()
 }
 
 impl Location {
@@ -385,7 +376,7 @@ impl Location {
         toolchain: Toolchain,
         env: &impl Fn(&str) -> Option<String>,
         home: Option<&str>,
-    ) -> Result<Vec<String>, PolicyError> {
+    ) -> Result<Vec<PathBuf>, PolicyError> {
         let Some((over, value)) = (self.overrides.iter()).find_map(|&o| Some((o, o.value(env)?)))
         else {
             return Ok(self
@@ -394,8 +385,8 @@ impl Location {
                 .filter_map(|b| b.dir(env, home))
                 .collect());
         };
-        let dir = join(&value, over.sub());
-        let subject = format!("{} is {value}", over.var());
+        let dir = join_slash(&value, over.sub());
+        let subject = format!("{} is {}", over.var(), shown(&value));
         refuse_the_world(
             Selector::Toolchain(toolchain),
             &subject,
@@ -408,7 +399,8 @@ impl Location {
 }
 
 /// The directories `toolchain` expands to over an injected environment, home
-/// and `exists`.  A toolchain that is absent expands to nothing.
+/// and `exists`, native as the OS takes them.  A toolchain that is absent
+/// expands to nothing.
 ///
 /// # Errors
 /// An override that names the filesystem root, the home or an ancestor of it.
@@ -416,8 +408,8 @@ pub fn expand_in(
     toolchain: Toolchain,
     env: impl Fn(&str) -> Option<String>,
     home: Option<&str>,
-    exists: impl Fn(&str) -> bool,
-) -> Result<Vec<String>, PolicyError> {
+    exists: impl Fn(&Path) -> bool,
+) -> Result<Vec<PathBuf>, PolicyError> {
     let chosen = (toolchain.locations().iter())
         .map(|l| l.chosen(toolchain, &env, home))
         .collect::<Result<Vec<_>, _>>()?;
@@ -432,13 +424,8 @@ pub fn expand_in(
 ///
 /// # Errors
 /// As [`expand_in`].
-pub fn expand(toolchain: Toolchain, home: Option<&str>) -> Result<Vec<String>, PolicyError> {
-    expand_in(
-        toolchain,
-        |k| std::env::var(k).ok(),
-        home,
-        crate::path::exists,
-    )
+pub fn expand(toolchain: Toolchain, home: Option<&str>) -> Result<Vec<PathBuf>, PolicyError> {
+    expand_in(toolchain, |k| std::env::var(k).ok(), home, Path::exists)
 }
 
 /// The [`FLOOR`] rows' directories outside `home`: a prefix an override puts
@@ -447,10 +434,10 @@ pub fn expand(toolchain: Toolchain, home: Option<&str>) -> Result<Vec<String>, P
 pub(crate) fn floor_in(
     env: impl Fn(&str) -> Option<String>,
     home: Option<&str>,
-    exists: impl Fn(&str) -> bool,
-) -> Vec<String> {
+    exists: impl Fn(&Path) -> bool,
+) -> Vec<PathBuf> {
     let held = home.map(FrozenPath::from_surface);
-    let outside = |dir: &String| {
+    let outside = |dir: &PathBuf| {
         held.as_ref()
             .is_none_or(|h| !h.contains::<Allow>(FrozenPath::from_surface(dir).real_path()))
     };
@@ -463,14 +450,46 @@ pub(crate) fn floor_in(
 }
 
 /// [`floor_in`] over the host environment and filesystem.
-pub(crate) fn floor(home: Option<&str>) -> Vec<String> {
-    floor_in(|k| std::env::var(k).ok(), home, crate::path::exists)
+pub(crate) fn floor(home: Option<&str>) -> Vec<PathBuf> {
+    floor_in(|k| std::env::var(k).ok(), home, Path::exists)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::guard::freeze::Anchor;
+
+    /// A directory as the fixtures spell it: natively, as `exists` is asked
+    /// and the expansion answers.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] fixture directories are UTF-8 by construction"
+    )]
+    fn spelled(dir: &Path) -> &str {
+        dir.to_str().expect("a UTF-8 fixture")
+    }
+
+    /// [`super::expand_in`] over string fixtures.
+    fn expand_in(
+        toolchain: Toolchain,
+        env: impl Fn(&str) -> Option<String>,
+        home: Option<&str>,
+        exists: impl Fn(&str) -> bool,
+    ) -> Result<Vec<String>, PolicyError> {
+        let dirs = super::expand_in(toolchain, env, home, |dir| exists(spelled(dir)))?;
+        Ok(dirs.iter().map(|dir| spelled(dir).to_owned()).collect())
+    }
+
+    /// [`super::floor_in`] over string fixtures.
+    #[cfg(unix)]
+    fn floor_in(
+        env: impl Fn(&str) -> Option<String>,
+        home: Option<&str>,
+        exists: impl Fn(&str) -> bool,
+    ) -> Vec<String> {
+        let dirs = super::floor_in(env, home, |dir| exists(spelled(dir)));
+        dirs.iter().map(|dir| spelled(dir).to_owned()).collect()
+    }
 
     fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
         move |k| {

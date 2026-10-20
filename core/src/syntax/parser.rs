@@ -1208,7 +1208,7 @@ impl Parser {
 
     /// The bash `x=5` where `let x = 5` is meant: a word with the `=` inside.
     fn glued_equals(&self) -> Option<ParseError> {
-        let Token::Word(Word::Plain(word) | Word::Slash(word)) = self.peek() else {
+        let Token::Word(Word::Plain(word) | Word::Path(word)) = self.peek() else {
             return None;
         };
         word.contains('=').then(|| {
@@ -1550,7 +1550,7 @@ impl Parser {
                 if let Redirect::Stdin(StdinSource::Here(Ast::Word(w))) = &redirect {
                     let message = match w {
                         Word::Plain(_) => crate::syntax::NO_HEREDOCS,
-                        Word::Slash(_) | Word::Tilde(_) => {
+                        Word::Path(_) | Word::Tilde(_) => {
                             "`<<` feeds a string to stdin, not a file: \
                              to read a file into stdin, use `< path`"
                         }
@@ -1619,7 +1619,7 @@ impl Parser {
                     self.end_unit(caret.join(self.prev_byte_span()))?;
                     Ok(Head::ExternalName(name))
                 }
-                Token::Word(Word::Slash(_) | Word::Tilde(_)) => {
+                Token::Word(Word::Path(_) | Word::Tilde(_)) => {
                     Err(self.error("'^' expects a bare command name, not a path"))
                 }
                 _ => Err(self.error("expected bare command name after '^'")),
@@ -1631,7 +1631,7 @@ impl Parser {
         }
         // A literal word (`42`, `true`) and a lone `~` are values too.
         Ok(match self.parse_atom()? {
-            Ast::Word(Word::Slash(s)) => Head::Path(s),
+            Ast::Word(Word::Path(s)) => Head::Path(s),
             Ast::Word(Word::Plain(s)) if WordLiteral::classify(&s).is_none() => Head::Bare(s),
             Ast::Word(Word::Tilde(path)) if path.suffix.is_some() => Head::TildePath(path),
             other => Head::Value(Box::new(other)),

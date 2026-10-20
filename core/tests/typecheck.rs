@@ -25,7 +25,7 @@ fn raw_errors(src: &str) -> Vec<TypeError> {
 fn errors_against(src: &str, surface: &ral_core::HostSurface) -> Vec<TypeError> {
     let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
     let comp =
-        elaborate(&ast, [], "").unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
+        elaborate(&ast, [], None).unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
     typecheck(&comp, common::schemes_for(surface), None)
         .err()
         .unwrap_or_default()
@@ -231,7 +231,7 @@ fn an_arm_for_detach_returns_its_receipt() {
 
 fn toplevel(src: &str) -> Unchecked {
     let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
-    elaborate(&ast, [], "").unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"))
+    elaborate(&ast, [], None).unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"))
 }
 
 fn toplevel_ok(src: &str) -> Toplevel {
@@ -507,7 +507,7 @@ static REQUIRED_TABLE: ral_core::typecheck::Table = ral_core::typecheck::Table {
 fn contract_errors(table: &'static ral_core::typecheck::Table, src: &str) -> Vec<TypeError> {
     let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
     let top =
-        elaborate(&ast, [], "").unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
+        elaborate(&ast, [], None).unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
     typecheck(
         &top,
         common::schemes_for(&ral_core::HostSurface::default()),

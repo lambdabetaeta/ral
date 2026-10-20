@@ -107,7 +107,7 @@ fn strip_one(n: Ast) -> Ast {
     match n {
         Ast::Call { head, args } if args.is_empty() => match head.item {
             Head::Bare(s) => plain(&s),
-            Head::Path(s) => Ast::Word(Word::Slash(s)),
+            Head::Path(s) => Ast::Word(Word::Path(s)),
             Head::TildePath(path) => tilde_word(path),
             Head::Value(ast) => strip_one(*ast),
             Head::ExternalName(s) => app(Head::ExternalName(s), vec![]),

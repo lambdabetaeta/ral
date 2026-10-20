@@ -10,6 +10,7 @@
 //! untouched.  Unloading is the exact inverse.
 
 use ral_core::first_order::datum::Datum as _;
+use ral_core::source::{SourceFile, SourceOrigin};
 use ral_core::typecheck::builtins::scheme;
 use ral_core::types::{
     Break, BuiltinBody, BuiltinEntry, DefaultPolicy, Error, FrameHandle, HookName, HookSig, Map,
@@ -17,6 +18,7 @@ use ral_core::types::{
 };
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
+use std::path::PathBuf;
 
 use super::super::enquiry::{Enquiry, PluginNote};
 use super::load_err;
@@ -68,25 +70,29 @@ pub(crate) fn load_plugin(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<()> {
-    let path = resolve_plugin_path(name_or_path, shell)?;
-    let rp = shell.resolve(&path);
+    let file = SourceFile::new(resolve_plugin_path(name_or_path, shell)?).map_err(load_err)?;
+    let path = file.path();
+    let rp = shell.anchor(path);
     shell.check_fs_read(&rp)?;
+    let name = ral_core::path::shown(path);
     #[allow(
         clippy::disallowed_methods,
         reason = "[silent:plugin-read] reads plugin source for loading; not turn-time model I/O"
     )]
-    let source = std::fs::read_to_string(&path).map_err(|e| load_err(format!("{path}: {e}")))?;
+    let source =
+        std::fs::read_to_string(rp.as_path()).map_err(|e| load_err(format!("{name}: {e}")))?;
     let source = ral_core::source::normalize_source_text(source);
     // Core's module loader owns cycle detection, the recursion guard, and the
     // source registration; the plugin policy adds only the fresh frame —
     // top-level helper bindings are discarded, since the manifest is the
     // file's *return value*, not its bindings.
+    let origin = SourceOrigin::File(file);
     let value = shell.in_fresh_scope(|shell| {
         ral_core::load::evaluate_source(
             mooring,
             shell,
             &source,
-            &path,
+            &origin,
             Some(ral_core::typecheck::contract::declared(
                 ral_core::typecheck::Form::Manifest,
             )),
@@ -260,23 +266,26 @@ fn check_is_manifest(val: &Value) -> Result<(), Error> {
 /// 1. `<config>/ral/plugins/<name>.ral`
 /// 2. Each directory in `RAL_PATH`: `$dir/<name>.ral`
 /// 3. The literal path, then `<name>.ral`
-fn resolve_plugin_path(name_or_path: &str, shell: &Shell) -> Result<String, Error> {
+fn resolve_plugin_path(name_or_path: &str, shell: &Shell) -> Result<PathBuf, Error> {
     let plugin_file = format!("{name_or_path}.ral");
-    let config_candidate = ral_core::host::xdg(ral_core::path::XdgKind::Config)
-        .map(|d| d.join("ral/plugins"))
-        .map(|dir| dir.join(&plugin_file));
+    let config_candidate = ral_core::path::app_dir(ral_core::path::XdgKind::Config, "ral")
+        .map(|dir| dir.join("plugins").join(&plugin_file));
     let ral_path_candidates = ral_core::path::ral_path::entries(shell.env_overrides())
         .into_iter()
         .map(|dir| dir.join(&plugin_file));
-    // Final fallbacks: the identifier verbatim, then with `.ral`; the live
-    // cwd and `~` apply, as to any other path.
+    // The directories above are the host's, so their candidates are taken as
+    // they are.  Final fallbacks: the identifier verbatim, then with `.ral`;
+    // these are written in ral, so the live cwd and `~` apply, as to any
+    // other written path.
+    let written = [name_or_path, &plugin_file]
+        .into_iter()
+        .map(|cand| shell.resolve(cand));
     config_candidate
         .into_iter()
         .chain(ral_path_candidates)
-        .map(|p| p.to_string_lossy().into_owned())
-        .chain([name_or_path.to_string(), plugin_file.clone()])
-        .find_map(|cand| shell.resolve(&cand).canonicalise_strict().ok())
-        .map(|p| p.to_string_lossy().into_owned())
+        .map(|cand| shell.anchor(&cand))
+        .chain(written)
+        .find_map(|cand| cand.canonicalise_strict().ok())
         .ok_or_else(|| load_err("not found; is it in <config>/ral/plugins or RAL_PATH?"))
 }
 

@@ -220,12 +220,13 @@ mod static_diagnostic_seam_tests {
     use super::*;
     use crate::protocol::Run;
     use crate::run::StaticDiagnostics;
+    use crate::source::SourceOrigin;
 
     /// The wire report for `src`, and how many registry ids the run minted.
     fn project(src: &str) -> (String, i32, u32) {
         let mut shell = crate::test_helper::core_shell();
         let before = shell.sources().next_id().0;
-        let report = shell.run(Run::captured(src, "<test>"));
+        let report = shell.run(Run::captured(src, SourceOrigin::named("<test>")));
         assert!(
             matches!(report, RunReport::Static { .. }),
             "{src:?} must fail before evaluation"

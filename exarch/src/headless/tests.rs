@@ -305,7 +305,7 @@ fn a_blank_seed_is_no_seed_and_the_refusal_names_every_flag() {
             base: "dangerous",
             extend: None,
             restrict_files: &[],
-            cwd: "/tmp",
+            cwd: std::path::Path::new("/tmp"),
         },
         &Provider::scripted("test-model", Script::new()),
         seed,

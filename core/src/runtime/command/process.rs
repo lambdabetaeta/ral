@@ -213,6 +213,10 @@ pub(crate) fn apply_env(cmd: &mut crate::process::Launch, shell: &Shell) {
 /// added by a future dyld must not become a hole.
 fn dyld_vars(shell: &Shell) -> Vec<std::ffi::OsString> {
     const PREFIX: &str = "DYLD_";
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "native: an environment variable name, not a path"
+    )]
     let inherited = std::env::vars_os()
         .map(|(k, _)| k)
         .filter(|k| k.to_string_lossy().starts_with(PREFIX));

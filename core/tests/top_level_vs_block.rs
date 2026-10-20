@@ -20,6 +20,7 @@ use common::fresh_shell;
 use ral_core::capability::FsPolicy;
 use ral_core::capability::{Capabilities, GrantStack};
 use ral_core::protocol::Run;
+use ral_core::source::SourceOrigin;
 use ral_core::types::{Settled, Shell};
 use ral_core::{Break, Value};
 use std::path::Path;
@@ -35,7 +36,7 @@ fn top_level_under(shell: &mut Shell, caps: Capabilities, source: &str) -> Settl
     shell
         .run(Run {
             caps: GrantStack::of(caps),
-            ..Run::foreground(source, "<test>")
+            ..Run::foreground(source, SourceOrigin::named("<test>"))
         })
         .expect_ran()
         .into_result()

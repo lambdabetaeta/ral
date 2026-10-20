@@ -479,7 +479,10 @@ mod tests {
         let src = format!("sh -c 'touch {}; exec sleep 30'", marker.display());
         let report = shell.run_under(
             &scope,
-            crate::run::RunRequest::from(crate::protocol::Run::captured(src.as_str(), "<test>")),
+            crate::run::RunRequest::from(crate::protocol::Run::captured(
+                src.as_str(),
+                crate::source::SourceOrigin::named("<test>"),
+            )),
         );
         if let Some(canceller) = canceller {
             canceller.join().expect("canceller thread");
@@ -530,7 +533,7 @@ mod tests {
         let scope = shell.run_cancel_handle();
         let run = crate::protocol::Run {
             wall: Some(std::time::Duration::from_millis(300)),
-            ..crate::protocol::Run::captured(src, "<test>")
+            ..crate::protocol::Run::captured(src, crate::source::SourceOrigin::named("<test>"))
         };
         let t0 = std::time::Instant::now();
         let report = shell.run_under(&scope, crate::run::RunRequest::from(run));

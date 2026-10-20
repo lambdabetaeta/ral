@@ -96,7 +96,10 @@ fn main() {
     let machine = match hypervisor.boot(&MachineSpec::for_folder(&folder)) {
         Ok(machine) => machine,
         Err(err) => {
-            eprintln!("boot failed: {err}");
+            eprintln!(
+                "boot failed: {}",
+                err.worded(|path| ral_core::path::shown(path))
+            );
             std::process::exit(1);
         }
     };
@@ -202,7 +205,10 @@ fn main() {
 
     match machine.shutdown() {
         Ok(()) => println!("stopped cleanly"),
-        Err(err) => eprintln!("shutdown failed: {err}"),
+        Err(err) => eprintln!(
+            "shutdown failed: {}",
+            err.worded(|path| ral_core::path::shown(path))
+        ),
     }
     if exchange.is_err() || !report_ok {
         std::process::exit(1);

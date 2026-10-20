@@ -14,6 +14,10 @@ path = "src/lib.rs"
 [dependencies]
 serde      = { workspace = true }
 serde_json = { workspace = true }
+# `os_path` carries a path's own units across the broker's pipe as one base64
+# string: JSON has no byte type, and serde_json writes `Vec<u8>` as an array of
+# decimal numbers — up to six bytes on the wire for every UTF-16 unit.
+base64     = { workspace = true }
 # `boot::command_line` is the single writer of the kernel command line, shared
 # with the guest's own reader so the two ends of the boot contract cannot drift
 # apart at compile time; `boot::Net`/`NET_PORT` are this crate's own re-export

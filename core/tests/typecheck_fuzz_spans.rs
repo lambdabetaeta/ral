@@ -19,7 +19,7 @@ fn raw_errors(src: &str) -> Vec<TypeError> {
     let Ok(ast) = parse(src) else {
         return Vec::new();
     };
-    let comp = elaborate(&ast, [], "").expect("elaborate");
+    let comp = elaborate(&ast, [], None).expect("elaborate");
     typecheck(
         &comp,
         common::schemes_for(&ral_core::HostSurface::default()),

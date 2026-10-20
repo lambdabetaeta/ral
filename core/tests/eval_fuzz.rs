@@ -10,13 +10,14 @@ mod common;
 
 use ral_core::protocol::Run;
 use ral_core::run::RunReport;
+use ral_core::source::SourceOrigin;
 use ral_core::types::{Break, Shell, Value};
 
 /// Evaluate `input` through the public run door on an already-configured
 /// `shell` — parse, elaborate, typecheck against the prelude schemes, run
 /// the phrases.
 fn run_on(shell: &mut Shell, input: &str) -> ral_core::types::Settled<Value> {
-    match shell.run(Run::foreground(input, "<test>")) {
+    match shell.run(Run::foreground(input, SourceOrigin::named("<test>"))) {
         RunReport::Ran { ending, .. } => ending.into_result(),
         // A parse or type failure is a static diagnostic, not a run
         // outcome — `must_fail` reads it the same as a runtime error, since
@@ -360,7 +361,7 @@ fn elaborator_never_wraps_exec_in_redirect() {
     for src in sources {
         let ast =
             ral_core::syntax::parser::parse(src).unwrap_or_else(|e| panic!("parse {src:?}: {e}"));
-        let top = ral_core::elaborator::elaborate(&ast, [], "").expect("elaborate");
+        let top = ral_core::elaborator::elaborate(&ast, [], None).expect("elaborate");
         let mut saw = false;
         for phrase in &top {
             let comp: &ral_core::ir::Comp = match &phrase.item {

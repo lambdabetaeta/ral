@@ -12,6 +12,7 @@ use common::fresh_shell;
 
 use ral_core::Value;
 use ral_core::protocol::Run;
+use ral_core::source::SourceOrigin;
 use ral_core::types::{Settled, Shell};
 
 /// Run one top-level run of `source` through the public `run` door
@@ -19,7 +20,7 @@ use ral_core::types::{Settled, Shell};
 /// it expects to compile, so a static diagnostic is a test bug.
 fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
     shell
-        .run(Run::foreground(source, "<test>"))
+        .run(Run::foreground(source, SourceOrigin::named("<test>")))
         .expect_ran()
         .into_result()
 }

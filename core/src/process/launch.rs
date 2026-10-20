@@ -502,6 +502,10 @@ impl Launch {
 }
 
 #[cfg(windows)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "native: an environment key, folded as Windows compares env names"
+)]
 fn env_key(key: &OsStr) -> EnvKey {
     EnvKey {
         folded: key.to_string_lossy().to_ascii_uppercase(),
@@ -576,6 +580,10 @@ mod windows_args {
     // Non-BMP text through the argv UTF-16 conversion, so a wide-char
     // regression is caught apart from a quoting one.  Windows CI only.
     #[cfg(test)]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] the expected text is built from fixtures that are UTF-8 by construction"
+    )]
     mod tests;
 }
 
@@ -777,16 +785,8 @@ mod windows {
     /// command line through its own escaping rules on top of
     /// `CreateProcessW`'s, so batch argument quoting has no safe general
     /// encoding (the CVE-2024-24576 class).  A `cmd /c` wrapper only moves it.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "FFI glue: the image name arrives as the `&OsStr` bound for CreateProcessW; the crate::path helpers are `&str`-shaped, and lossy-decoding a path to classify its extension would be the real hazard"
-    )]
     fn reject_batch(program: &OsStr) -> io::Result<()> {
-        let Some(ext) = std::path::Path::new(program).extension() else {
-            return Ok(());
-        };
-        let ext = ext.to_string_lossy();
-        if ext.eq_ignore_ascii_case("bat") || ext.eq_ignore_ascii_case("cmd") {
+        if crate::path::is_batch_image(program) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
@@ -797,7 +797,7 @@ mod windows {
                      inject additional commands through cmd.exe's own escaping rules. Invoke \
                      the batch file through cmd.exe yourself if you accept that risk, or run \
                      the underlying program directly.",
-                    std::path::Path::new(program).display()
+                    crate::path::shown(program)
                 ),
             ));
         }
@@ -1188,5 +1188,9 @@ mod windows {
     // The other two UTF-16 conversions: `wide_null` for the program path and
     // cwd, `environment_block` for the env block.
     #[cfg(test)]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] the expected text is built from fixtures that are UTF-8 by construction"
+    )]
     mod tests;
 }

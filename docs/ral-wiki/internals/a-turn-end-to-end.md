@@ -165,8 +165,8 @@ module's framed scaffold:
 
 **The hosts differ only in the request they supply.**
 
-- The REPL's `exec::step` (`ral/src/repl/exec.rs`) supplies `script_name:
-  "<stdin>"`, `GrantStack::root()`, no limits, `RunIo::Inherit`,
+- The REPL's `exec::step` (`ral/src/repl/exec.rs`) supplies `origin:
+  SourceOrigin::named("<stdin>")`, `GrantStack::root()`, no limits, `RunIo::Inherit`,
   `RequestedTerminalAccess::Leased`, `RunStdin::Inherit`; it builds a
   `Program::Source` `Run` and drains it through `protocol::dispatch_to_report`
   on its `IdentityTransport` with the REPL's own `Host` (`ReplHost`),
@@ -176,8 +176,8 @@ module's framed scaffold:
   prompt body and every other hook (`ral/src/repl/plugin.rs`, `prompt.rs`):
   `Program::Hook` runs of hooks registered by name, through the same door
   ([[map/repl/loop|loop]]).
-- exarch's `run_shell` (`exarch/src/shell_eval.rs`) supplies `script_name:
-  "<tool>"`, its session grant profile, a per-tool `wall`, a `worker_cap` on
+- exarch's `run_shell` (`exarch/src/shell_eval.rs`) supplies a virtual
+  `origin` naming the call's turn (`turn N`), its session grant profile, a per-tool `wall`, a `worker_cap` on
   concurrently running workers, a 2 s `cleanup_grace`, a required
   `worker_title`, `RunIo::Capture`, `RequestedTerminalAccess::Denied`,
   `RunStdin::Empty`, `trail: Some(CapturePolicy::Off)`; it builds a

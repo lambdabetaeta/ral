@@ -46,7 +46,7 @@ use super::sig;
 use crate::capability::GrantStack;
 use crate::io::{Io, WriteStopped};
 use crate::process::{CancelCause, DurableRoot, Scope};
-use crate::source::{CallSite, FileId, Source, SourceDb, Span};
+use crate::source::{CallSite, FileId, Source, SourceDb, SourceOrigin, Span};
 use crate::types::Cradle;
 use std::sync::Arc;
 use std::time::Duration;
@@ -274,18 +274,20 @@ impl Shell {
         }
     }
 
-    /// Register `text` under display `name`, returning the [`FileId`] the
+    /// Register `text`, read from `origin`, returning the [`FileId`] the
     /// compiled program's spans must carry to resolve back to it.
-    pub(crate) fn install_script_context(&mut self, name: &str, text: &str) -> FileId {
-        self.session.sources.register(Source::from_text(name, text))
+    pub(crate) fn install_script_context(&mut self, origin: &SourceOrigin, text: &str) -> FileId {
+        self.session
+            .sources
+            .register(Source::from_text(origin.clone(), text))
     }
 
     /// Register a top-level run's script and point [`SessionState::root_file`]
     /// at it.  [`crate::run::run_framed`] alone calls this; a module load takes
     /// [`Self::install_script_context`], which appends without disturbing
-    /// `root_file`, so the run's own root keeps its name.
-    pub(crate) fn install_root_context(&mut self, name: &str, text: &str) -> FileId {
-        let file = self.install_script_context(name, text);
+    /// `root_file`, so the run's own root keeps its origin.
+    pub(crate) fn install_root_context(&mut self, origin: &SourceOrigin, text: &str) -> FileId {
+        let file = self.install_script_context(origin, text);
         self.session.root_file = Some(file);
         file
     }

@@ -57,7 +57,7 @@ parent's seal, so core holds no spawn machinery for it.** The why is
 
 The frame algebra. Everything on it is a wire type; nothing here carries.
 
-- `PROTOCOL_VERSION` (currently 24) — checked at `Attach`; a mismatch refuses.
+- `PROTOCOL_VERSION` (currently 26) — checked at `Attach`; a mismatch refuses.
 - `check_media` — the same number compared at *build* time, against the
   `proto_version=` line `vm-image/build-boot.sh` records for the engine in the
   guest media; `synod/examples/check-media.rs`, tauri's `beforeBuildCommand`,
@@ -70,7 +70,14 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
   `installer`, `terminal`, `home`. `Origin` is `Root(Root { cwd, env, config })`
   (`env`: per-session variables the host seeds; `config`: the installer's own
   settings, an `FOValue` its recipe decodes) or `Child(Sealed)` (a child's
-  parent, sealed, carrying its own cwd and env). `Attach::new` is a plain root's, at
+  parent, sealed, carrying its own cwd and env). `home` and `cwd` are
+  `path::EnginePath`s (`path/namespace.rs`): a path on the engine's machine,
+  named in the namespace the front-end can name it in — `Host(PathBuf)` for an
+  engine sharing the front-end's computer (in process, or a child process),
+  `Guest(GuestPath)` for one inside a Posix guest, a `/`-separated string that
+  a Windows front-end has no `PathBuf` for. The engine reads either as its own
+  through `EnginePath::native`, crate-private, since only the engine's side
+  has the OS a guest path is native to. `Attach::new` is a plain root's, at
   this build's version; `Attach::root` pairs an `EngineSpec` with a `Root`, whose
   `with_env` and `with_config` edit it; `Attach::child` pairs an `EngineSpec`
   with a seal; `with_terminal` edits either.
@@ -267,7 +274,7 @@ The wire carrier's engine half: a connection-lived engine process.
   `engine_session`.
 - `engine_session` — reads `Attach` (the only legal first frame), `restore_process_dirs` (the
   process-level half of an attach, which only a carrier owning its process
-  performs: a root's cwd, every engine's `HOME`; a child restores no cwd), `Engine::boot`, writes `Attached`/`Refused`, moves the engine
+  performs: a root's cwd, every engine's `HOME`, each read `EnginePath::native`; a child restores no cwd), `Engine::boot`, writes `Attached`/`Refused`, moves the engine
   onto a worker thread, then runs the reader loop; returns the process exit
   code. The loop breaks on a `SessionEnd` — `Requested` (a `Detach` or the
   front-end's EOF) or `Corrupt` (a read error, a dead worker, silence past the

@@ -34,7 +34,7 @@ pub fn is_bare_word(s: &str) -> bool {
     let mut significant = tokens.iter().filter(|l| l.token != Token::Eof);
     matches!(
         (significant.next(), significant.next()),
-        (Some(Lexeme { token: Token::Word(Word::Plain(w) | Word::Slash(w)), .. }), None) if w == s
+        (Some(Lexeme { token: Token::Word(Word::Plain(w) | Word::Path(w)), .. }), None) if w == s
     )
 }
 
@@ -91,7 +91,7 @@ pub(crate) fn one_word(run: &str) -> Option<String> {
         let next = tokens.get(i + 1).map_or(end, |l| l.span.start as usize);
         match token {
             _ if depth > 0 => body.push_str(&run[start..next]),
-            Token::Word(Word::Plain(w) | Word::Slash(w)) | Token::SingleQuoted(w) => {
+            Token::Word(Word::Plain(w) | Word::Path(w)) | Token::SingleQuoted(w) => {
                 // A leading `~` in `"…"` is home-rooted; a literal one was not.
                 if body.is_empty() && w.starts_with('~') {
                     body.push('\\');
@@ -143,9 +143,9 @@ mod tests {
         );
         let body = match payloads[0] {
             Token::SingleQuoted(s)
-            | Token::Word(
-                crate::syntax::ast::Word::Plain(s) | crate::syntax::ast::Word::Slash(s),
-            ) => s.clone(),
+            | Token::Word(crate::syntax::ast::Word::Plain(s) | crate::syntax::ast::Word::Path(s)) => {
+                s.clone()
+            }
             other => panic!("unexpected token kind for {src:?}: {other:?}"),
         };
         assert_eq!(body, expected, "round-trip failed for source {src:?}");
@@ -277,7 +277,7 @@ mod tests {
     // ── lexer round-trips ────────────────────────────────────────────
 
     /// The whole corpus is load-bearing: `lex_round_trip` accepts only a
-    /// single `SingleQuoted`/`Plain`/`Slash` token, so any input whose
+    /// single `SingleQuoted`/`Plain`/`Path` token, so any input whose
     /// emission is left bare (`$HOME`, `a!b`, `~foo`, …) lexes as some
     /// other token kind and fails here.  Trim it and that cover is lost.
     #[test]

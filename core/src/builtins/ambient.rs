@@ -6,6 +6,14 @@ pub(super) fn cwd(shell: &Shell) -> Value {
     Value::string(crate::path::shown(shell.cwd()))
 }
 
+/// Home as ral shows it: the spelling `~` expands to
+/// ([`crate::path::tilde::TildePath::shown`]), so `~/x` and `"!{home}/x"` are
+/// the same string on every host.
+pub(super) fn home(shell: &Shell) -> Result<Value, Error> {
+    let home = shell.context.require_home()?;
+    Ok(Value::string(crate::path::shown(home)))
+}
+
 /// The host process environment, overlaid with `within [env: …]`.
 /// The host's `PWD` is stale the moment ral `cd`s — the live one is
 /// `context.cwd` — and its `OLDPWD` names the launcher's history, so both are

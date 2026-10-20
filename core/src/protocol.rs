@@ -6,10 +6,10 @@
 //! engine to front-end, and Control flows front-end to engine. The carriers
 //! that interpret the algebra are [`crate::carrier`]'s.
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 use crate::first_order::FOValue;
 use crate::io::{Captured, RunIo, RunStdin};
+use crate::path::EnginePath;
 use crate::process::{CancelCause, RequestedTerminalAccess};
 use crate::types::{CapturePolicy, Error};
 use probe::Probe;
@@ -20,7 +20,7 @@ pub mod probe;
 /// The frame algebra's generation, checked at `Attach` and refused on
 /// mismatch.  Public because a build has to compare it against the engine
 /// sitting in the guest media beside it: see [`check_media`].
-pub const PROTOCOL_VERSION: u32 = 25;
+pub const PROTOCOL_VERSION: u32 = 26;
 
 /// The key `vm-image/build-boot.sh` records [`PROTOCOL_VERSION`] under in the
 /// boot media's manifest, `vm-image/out/boot/boot-manifest.txt`.
@@ -166,7 +166,8 @@ pub struct EngineSpec {
     /// it names.
     pub installer: String,
     pub terminal: crate::terminal::TerminalState,
-    pub home: PathBuf,
+    /// The engine's `HOME`, on the machine it runs on.
+    pub home: EnginePath,
 }
 
 /// How the engine's session comes to be: a root from a recipe, a child from
@@ -181,8 +182,8 @@ pub enum Origin {
 /// What only a root is told: the session it starts from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Root {
-    /// The session's logical cwd.
-    pub cwd: PathBuf,
+    /// The session's logical cwd, on the machine the engine runs on.
+    pub cwd: EnginePath,
     /// Per-session variables the host seeds into the engine's environment.
     pub env: Vec<(String, String)>,
     /// The installer's own settings: its recipe decodes them, and refuses
@@ -192,7 +193,7 @@ pub struct Root {
 
 impl EngineSpec {
     /// A spec at this build's protocol version, on the default terminal.
-    pub fn new(installer: impl Into<String>, home: PathBuf) -> Self {
+    pub fn new(installer: impl Into<String>, home: EnginePath) -> Self {
         Self {
             proto_version: PROTOCOL_VERSION,
             installer: installer.into(),
@@ -204,7 +205,7 @@ impl EngineSpec {
 
 impl Root {
     /// A root at `cwd`, seeding no variables and configuring nothing.
-    pub fn new(cwd: PathBuf) -> Self {
+    pub fn new(cwd: EnginePath) -> Self {
         Self {
             cwd,
             env: Vec::new(),
@@ -229,7 +230,7 @@ impl Root {
 
 impl Attach {
     /// A root's attach, seeding no variables and configuring nothing.
-    pub fn new(installer: impl Into<String>, cwd: PathBuf, home: PathBuf) -> Self {
+    pub fn new(installer: impl Into<String>, cwd: EnginePath, home: EnginePath) -> Self {
         Self {
             engine: EngineSpec::new(installer, home),
             origin: Origin::Root(Root::new(cwd)),
@@ -263,9 +264,9 @@ impl Attach {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Run {
     pub program: Program,
-    /// Label for the root source context: `"<stdin>"` for the REPL, `"<tool>"`
-    /// for exarch.
-    pub script_name: String,
+    /// Where the program's text came from: the script file batch runs, or a
+    /// virtual `<stdin>` for the REPL, `<tool>` for exarch.
+    pub origin: crate::source::SourceOrigin,
     /// The capability ceiling pushed for the eval's dynamic extent, every
     /// layer of it: the stack is the meet, and folding it into one frame
     /// would lose what a layer says only about a resolved name.
@@ -296,21 +297,21 @@ pub struct Run {
 impl Run {
     /// `program` under no authority beyond ⊤, its streams captured, the
     /// terminal denied and stdin empty: exarch's tool runs, and most tests.
-    pub fn captured(program: impl Into<Program>, script_name: impl Into<String>) -> Self {
+    pub fn captured(program: impl Into<Program>, origin: crate::source::SourceOrigin) -> Self {
         Self {
             io: RunIo::Capture,
             terminal: RequestedTerminalAccess::Denied,
             stdin: RunStdin::Empty,
-            ..Self::foreground(program, script_name)
+            ..Self::foreground(program, origin)
         }
     }
 
     /// `program` under no authority beyond ⊤, on the inherited streams and the
     /// leased terminal: the REPL and batch.
-    pub fn foreground(program: impl Into<Program>, script_name: impl Into<String>) -> Self {
+    pub fn foreground(program: impl Into<Program>, origin: crate::source::SourceOrigin) -> Self {
         Self {
             program: program.into(),
-            script_name: script_name.into(),
+            origin,
             caps: crate::capability::GrantStack::root(),
             wall: None,
             cleanup_grace: std::time::Duration::from_secs(5),

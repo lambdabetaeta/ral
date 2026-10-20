@@ -8,30 +8,64 @@
 //! ([`crate::host`]).
 
 use crate::host::resolve_xdg;
-use crate::path::XdgKind;
+use crate::path::lex::join_relative;
 use crate::path::tilde::TildePath;
+use crate::path::{PathRules, XdgKind};
 
-/// Parse `xdg:NAME[/sub]`; `None` for a non-`xdg:` input or an unknown name.
-pub(crate) fn parse_xdg_token(input: &str) -> Option<(XdgKind, Option<&str>)> {
+/// Parse `xdg:NAME[/sub]` under `rules`, the name ending at a separator as
+/// `~` does: `/`, or `\` under Windows.  The subpath is everything after
+/// that one separator, as written, for [`join_relative`] to judge whole.
+/// `None` for a non-`xdg:` input or an unknown name.
+fn parse_xdg_token(input: &str, rules: PathRules) -> Option<(XdgKind, Option<&str>)> {
     let body = input.strip_prefix("xdg:")?;
-    let (name, sub) = match body.split_once('/') {
-        Some((n, s)) => (n, Some(relative_suffix(s))),
+    let (name, sub) = match body.split_once(|c| rules.is_separator(c)) {
+        Some((n, s)) => (n, Some(s)),
         None => (body, None),
     };
     Some((name.parse().ok()?, sub))
 }
 
-/// A sigil's sub-path as something that joins *onto* its base: leading
-/// separators come off, because `Path::join` on a rooted suffix discards the
-/// base outright — `xdg:data//etc` would otherwise name `/etc`.
-fn relative_suffix(s: &str) -> &str {
-    s.trim_start_matches(['/', '\\'])
+/// A run-time sigil at the head of a path: what [`expand_path_prefix`]
+/// would read there, and what a grant must therefore refuse to take
+/// literally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SigilHead<'a> {
+    /// `~` or `~/sub`.
+    Tilde(TildePath),
+    /// `xdg:NAME[/sub]`, `NAME` a known kind, `sub` as written past the
+    /// separator that ends the name.
+    Xdg(XdgKind, Option<&'a str>),
+    /// `xdg:` and a name no kind answers to, which expansion passes through
+    /// literally.
+    UnknownXdg,
+}
+
+impl<'a> SigilHead<'a> {
+    /// The sigil `input` opens with under the host's rules, if any.
+    pub(crate) fn of(input: &'a str) -> Option<Self> {
+        Self::of_for(input, PathRules::HOST)
+    }
+
+    /// [`Self::of`] under given rules: the separator that ends the name of an
+    /// `xdg:` head, or follows a `~`, is one of `rules`' own.
+    pub(crate) fn of_for(input: &'a str, rules: PathRules) -> Option<Self> {
+        if let Some((kind, sub)) = parse_xdg_token(input, rules) {
+            return Some(Self::Xdg(kind, sub));
+        }
+        if input.starts_with("xdg:") {
+            return Some(Self::UnknownXdg);
+        }
+        TildePath::parse_for(input, rules).map(Self::Tilde)
+    }
 }
 
 /// A relative `name` spelled so [`expand_path_prefix`] leaves it as it is:
 /// `./~/x` for a directory named `~`.
 pub(crate) fn literal_relative(name: &str) -> String {
-    if parse_xdg_token(name).is_some() || TildePath::parse(name).is_some() {
+    if matches!(
+        SigilHead::of(name),
+        Some(SigilHead::Tilde(_) | SigilHead::Xdg(..))
+    ) {
         format!("./{name}")
     } else {
         name.to_owned()
@@ -42,25 +76,31 @@ pub(crate) fn literal_relative(name: &str) -> String {
 /// of expansion: no filesystem access, and `home` is both the tilde root and the
 /// fallback when an XDG env var is unset.
 ///
+/// The expansion is native, in the host's own spelling, for the resolver to
+/// hand on to the OS: `~` as [`TildePath::expand`] expands it, and the `xdg:`
+/// sub-path joined as [`join_relative`] joins it, its leading separators
+/// dropped and `..` included, for the resolver to fold.
+///
 /// Infallible, because [`Resolver::resolve`](super::Resolver::resolve) is:
 /// whatever cannot be answered passes through literally — an unknown `home`
-/// leaves `~/x` as `~/x`.  That fails closed, a prefix matching nothing
-/// beating a fabricated path that might.  A grant refuses the gap instead, in
+/// leaves `~/x` as `~/x`, an expansion that is not UTF-8 is no string to
+/// expand into, and an `xdg:` sub-path naming a volume of its own, which
+/// would re-root the join, leaves the whole path as written: under Windows,
+/// a drive component (`xdg:config/C:\x`) or a share or namespace head
+/// opening the sub-path (`xdg:config/\\?\UNC\srv\sh`, `xdg:config///x`).
+/// That fails closed, a prefix matching nothing beating a fabricated path
+/// that might.  A grant refuses the gap instead, in
 /// `guard::freeze::FreezeCtx::place`.
 pub fn expand_path_prefix(input: &str, home: Option<&str>) -> String {
-    if let Some((kind, sub)) = parse_xdg_token(input) {
-        return match resolve_xdg(kind, home) {
-            None => input.to_string(),
-            Some(base) => match sub {
-                None => base.to_string_lossy().into_owned(),
-                Some(s) => base.join(s).to_string_lossy().into_owned(),
-            },
-        };
-    }
-    if let Some(t) = TildePath::parse(input) {
-        return home.map_or_else(|| input.to_string(), |home| t.expand(home));
-    }
-    input.to_string()
+    let expanded = match SigilHead::of(input) {
+        Some(SigilHead::Xdg(kind, sub)) => resolve_xdg(kind, home)
+            .and_then(|base| join_relative(base, sub.unwrap_or_default()).ok()),
+        Some(SigilHead::Tilde(t)) => home.map(|home| t.expand(home)),
+        Some(SigilHead::UnknownXdg) | None => None,
+    };
+    expanded
+        .and_then(|path| path.into_os_string().into_string().ok())
+        .unwrap_or_else(|| input.to_owned())
 }
 
 #[cfg(test)]
@@ -77,7 +117,7 @@ mod tests {
             ("bin", XdgKind::Bin),
         ] {
             let token = format!("xdg:{name}");
-            let (k, sub) = parse_xdg_token(&token).expect("known kind");
+            let (k, sub) = parse_xdg_token(&token, PathRules::HOST).expect("known kind");
             assert_eq!(k, kind);
             assert!(sub.is_none());
         }
@@ -85,19 +125,40 @@ mod tests {
 
     #[test]
     fn parse_xdg_token_carries_subpath() {
-        let (k, sub) = parse_xdg_token("xdg:config/agda/lib").unwrap();
+        let (k, sub) = parse_xdg_token("xdg:config/agda/lib", PathRules::HOST).unwrap();
         assert_eq!(k, XdgKind::Config);
         assert_eq!(sub, Some("agda/lib"));
     }
 
     #[test]
     fn parse_xdg_token_rejects_unknown_name() {
-        assert!(parse_xdg_token("xdg:cofnig").is_none());
+        assert!(parse_xdg_token("xdg:cofnig", PathRules::HOST).is_none());
     }
 
     #[test]
     fn parse_xdg_token_rejects_non_xdg() {
-        assert!(parse_xdg_token("/etc").is_none());
+        assert!(parse_xdg_token("/etc", PathRules::HOST).is_none());
+    }
+
+    /// The name ends at one separator under each rules' own separators, and
+    /// the sub-path is the rest as written: under Posix a backslash is a
+    /// filename byte, so `xdg:config\x` names no kind.
+    #[test]
+    fn parse_xdg_token_reads_the_separators_of_its_rules() {
+        for (input, posix, windows) in [
+            ("xdg:config//etc", Some("/etc"), Some("/etc")),
+            (r"xdg:config/\x", Some(r"\x"), Some(r"\x")),
+            (r"xdg:config\x", None, Some("x")),
+            (r"xdg:config/\\?\C:\x", Some(r"\\?\C:\x"), Some(r"\\?\C:\x")),
+        ] {
+            for (rules, want) in [(PathRules::Posix, posix), (PathRules::Windows, windows)] {
+                assert_eq!(
+                    parse_xdg_token(input, rules),
+                    want.map(|sub| (XdgKind::Config, Some(sub))),
+                    "{input:?} under {rules:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -125,5 +186,26 @@ mod tests {
         // Only the tail is asserted: the base moves with `XDG_CACHE_HOME`.
         let out = expand_path_prefix("xdg:cache/foo", Some("/h"));
         assert!(out.ends_with("/foo"), "got {out}");
+    }
+
+    /// A drive, a share or a namespace head in the sub-path would re-root
+    /// the join, so the `xdg:` path is unanswerable and stays as written, as
+    /// an unknown kind does.
+    // Windows-only: a drive is a filename byte elsewhere, and every root the
+    // one root.
+    #[cfg(windows)]
+    #[test]
+    fn xdg_subpath_naming_a_volume_passes_through_unchanged() {
+        for input in [
+            r"xdg:config/C:\x",
+            r"xdg:config/a/C:x",
+            r"xdg:config/\\?\C:\x",
+            r"xdg:config/\\?\UNC\srv\sh",
+            r"xdg:config/\\srv\sh\x",
+            r"xdg:config/\\.\pipe\x",
+            "xdg:config///x",
+        ] {
+            assert_eq!(expand_path_prefix(input, Some(r"C:\h")), input);
+        }
     }
 }

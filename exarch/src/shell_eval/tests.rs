@@ -1862,7 +1862,7 @@ mod self_layer {
         dir: tempfile::TempDir,
         exe: String,
         link: String,
-        cwd: String,
+        cwd: std::path::PathBuf,
         extend: std::path::PathBuf,
     }
 
@@ -1882,14 +1882,14 @@ mod self_layer {
             &extend,
             format!(
                 "return [exec: [allow: [`dir `absolute {}]], fs: [read: [`absolute {root}], write: [`absolute {root}]]]\n",
-                exe.parent().expect("a directory").display()
+                ral_core::path::shown(exe.parent().expect("a directory"))
             ),
         )
         .expect("extension file");
         Some(Fixture {
             exe: exe.to_string_lossy().into_owned(),
             link: link.to_string_lossy().into_owned(),
-            cwd: root,
+            cwd: dir.path().to_path_buf(),
             extend,
             dir,
         })
@@ -1919,7 +1919,14 @@ mod self_layer {
     fn bundled_tool_runs(f: &Fixture, stack: &GrantStack) {
         let (from, to) = (f.dir.path().join("from"), f.dir.path().join("to"));
         std::fs::write(&from, "x").expect("source file");
-        let r = run(stack, &format!("mv {} {}", from.display(), to.display()));
+        let r = run(
+            stack,
+            &format!(
+                "mv {} {}",
+                ral_core::path::shown(&from),
+                ral_core::path::shown(&to)
+            ),
+        );
         assert_eq!(
             r.exit,
             0,
@@ -1951,7 +1958,7 @@ mod self_layer {
                 .expect("reasonable composes");
         let ctx = ral_core::guard::freeze::FreezeCtx {
             home: None,
-            cwd: f.cwd.clone().into(),
+            cwd: f.cwd.clone(),
         };
         let place = |label: &str, path: &str| FOValue::Variant {
             label: label.into(),

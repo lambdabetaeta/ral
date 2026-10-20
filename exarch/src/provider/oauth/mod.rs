@@ -420,7 +420,7 @@ fn read_at(path: &std::path::Path) -> (Option<String>, Vec<OAuthToken>) {
             ral_core::errln!(
                 "warning: {} names an entry as '{key}', but its own fields say '{expected}'; \
                  dropping it rather than trusting a key that disagrees with the record.",
-                path.display(),
+                ral_core::path::shown(path),
             );
             None
         })
@@ -527,7 +527,7 @@ fn write_all_at(
 ) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+            .map_err(|e| format!("could not create {}: {e}", ral_core::path::shown(parent)))?;
     }
     let store = Store {
         host: host.map(str::to_string),
@@ -544,7 +544,7 @@ fn write_all_at(
     let json = serde_json::to_string_pretty(&store)
         .map_err(|e| format!("could not serialize tokens: {e}"))?;
     write_private(path, json.as_bytes())
-        .map_err(|e| format!("could not write {}: {e}", path.display()))
+        .map_err(|e| format!("could not write {}: {e}", ral_core::path::shown(path)))
 }
 
 /// Delete the store; an absent one is not an error.
@@ -556,7 +556,10 @@ fn clear_at(path: &std::path::Path) -> Result<(), String> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("could not remove {}: {e}", path.display())),
+        Err(e) => Err(format!(
+            "could not remove {}: {e}",
+            ral_core::path::shown(path)
+        )),
     }
 }
 
@@ -1029,6 +1032,10 @@ mod tests {
     /// The key is an index into the map, not a fact to trust: an entry filed
     /// under a key its own fields disagree with is dropped, not adopted.
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] writes a mismatched token file directly"
+    )]
     fn an_entry_whose_key_disagrees_with_its_fields_is_dropped() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("oauth.json");

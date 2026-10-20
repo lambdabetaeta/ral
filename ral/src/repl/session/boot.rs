@@ -194,16 +194,10 @@ pub(super) fn setup_panic_hook() {
 /// Crash-log directory (`$XDG_STATE_HOME/ral`), resolved at hook-install
 /// time so an unset or changed `HOME` mid-session cannot redirect the
 /// crash log.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "host-env: the crash log belongs to the launching user, outside any shell overlay"
-)]
 fn crash_log_dir() -> std::path::PathBuf {
-    // A crash report must land somewhere; with no home the temp dir is the
-    // honest last resort, where writing it under the cwd would not be.
-    ral_core::host::xdg(ral_core::path::XdgKind::State)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("ral")
+    // A crash report must land somewhere: the host's, outside any shell
+    // overlay, and never under the cwd.
+    ral_core::path::app_dir_or_temp(ral_core::path::XdgKind::State, "ral")
 }
 
 /// Write the panic report both platform hooks share: `dir/crash-<unix-ts>.
@@ -221,10 +215,14 @@ fn write_crash_log(dir: &std::path::Path, info: &std::panic::PanicHookInfo<'_>) 
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    let path = dir.join(format!("crash-{ts}.log")).display().to_string();
+    let path = dir.join(format!("crash-{ts}.log"));
     let bt = std::backtrace::Backtrace::force_capture();
     let _ = std::fs::write(&path, format!("{info}\n\n{bt}"));
-    let _ = writeln!(std::io::stderr(), "ral: panic; crash log: {path}");
+    let _ = writeln!(
+        std::io::stderr(),
+        "ral: panic; crash log: {}",
+        ral_core::path::shown(&path)
+    );
 }
 
 /// Build the line-editing frontend from the resolved [`RcSettings`] —

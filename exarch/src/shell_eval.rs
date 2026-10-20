@@ -147,6 +147,7 @@ pub(crate) fn run_shell(
     let tool_start = std::time::Instant::now();
 
     use ral_core::protocol::Run;
+    use ral_core::source::SourceOrigin;
 
     let run = Run {
         caps: caps.clone(),
@@ -154,7 +155,7 @@ pub(crate) fn run_shell(
         cleanup_grace: Duration::from_secs(2),
         worker_cap: Some(LIVE_WORKER_CAP),
         worker_title: TitlePolicy::Required,
-        ..Run::captured(cmd, source)
+        ..Run::captured(cmd, SourceOrigin::named(source))
     };
 
     let report = ral_core::carrier::dispatch_to_report(transport, run, host);

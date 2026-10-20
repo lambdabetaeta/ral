@@ -5,9 +5,9 @@
 
 use super::acl::wide;
 use super::*;
+use crate::path::shown;
 use crate::process::cancel::DurableRoot;
 use std::fs;
-use std::os::windows::fs::OpenOptionsExt;
 use windows_sys::Win32::Foundation::ERROR_SUCCESS;
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::Authorization::{
@@ -133,6 +133,24 @@ fn icacls(path: &Path, flag: &str) {
     );
 }
 
+/// Give `path` a null DACL, which admits everyone to everything and so
+/// cannot take a deny without denying the host user too.
+fn set_null_dacl(path: &Path) {
+    let rc = unsafe {
+        SetNamedSecurityInfoW(
+            wide(path).as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(rc, ERROR_SUCCESS);
+    assert!(descriptor_shape(path).1);
+}
+
 fn protected(path: &Path) -> bool {
     descriptor_shape(path).0 & SE_DACL_PROTECTED != 0
 }
@@ -248,21 +266,17 @@ fn a_failed_walk_of_a_recreated_root_leaves_no_witness_and_retries() {
 
         let blocked = tree.deny.join("blocked.txt");
         fs::write(&blocked, b"").unwrap();
-        let busy = fs::OpenOptions::new()
-            .read(true)
-            .share_mode(0)
-            .open(&blocked)
-            .unwrap();
+        set_null_dacl(&blocked);
         let error = ensure_fs_grant(
             &tree.deny,
             CAP_SID,
             GrantKind::Deny,
             &DurableRoot::default().worker(),
         )
-        .expect_err("a descendant that cannot be inspected must refuse the grant");
+        .expect_err("a descendant the walk refuses must refuse the grant");
         assert!(error.to_string().contains("blocked.txt"), "{error}");
         assert!(!stamp_recorded(&stamp_key(&tree.deny, GrantKind::Deny)));
-        drop(busy);
+        fs::remove_file(&blocked).unwrap();
 
         ensure_fs_grant(
             &tree.deny,
@@ -316,19 +330,7 @@ fn a_null_dacl_is_refused_without_removing_ordinary_access() {
             let tree = DenyTree::new();
             tree.grant_and_shape();
             let path = tree.allow.join(relative);
-            let rc = unsafe {
-                SetNamedSecurityInfoW(
-                    wide(&path).as_ptr(),
-                    SE_FILE_OBJECT,
-                    DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                )
-            };
-            assert_eq!(rc, ERROR_SUCCESS);
-            assert!(descriptor_shape(&path).1);
+            set_null_dacl(&path);
             let error = ensure_fs_grant(
                 &tree.deny,
                 CAP_SID,
@@ -337,10 +339,7 @@ fn a_null_dacl_is_refused_without_removing_ordinary_access() {
             )
             .expect_err("a deny-only DACL would also deny the host user");
             assert!(error.to_string().contains("null DACL"), "{error}");
-            assert!(
-                error.to_string().contains(path.to_str().unwrap()),
-                "{error}"
-            );
+            assert!(error.to_string().contains(&shown(&path)), "{error}");
             assert!(descriptor_shape(&path).1);
             assert!(!stamp_recorded(&stamp_key(&tree.deny, GrantKind::Deny)));
         }

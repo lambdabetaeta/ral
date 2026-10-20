@@ -136,7 +136,14 @@ grant string becomes a frozen path.
 - `freeze.rs` — the one place a grant's `Place` or `Selector` becomes a
   `FrozenPath`, against one anchor: `FreezeCtx` (`FreezeCtx::of(&Shell)`, owned
   `home` and `cwd`) and its `place` (`None` is a dead grant, an `absolute`
-  payload classified on the raw string) and `selector`; the tags `absolute`,
+  payload classified on the raw string by `live_absolute`: a `Root::Malformed`
+  root refused first, though Windows reads it as absolute, then live or dead
+  by `lex::absolute_under` save that a verbatim root is a Windows grant, dead
+  under POSIX, `live_under`; a `\??\` NT object-manager head, read as
+  Win32 reads it, is refused under every tag with its own refusal) and
+  `selector`; `host_absolute`, a path the host holds classified on its
+  native text and frozen as an `absolute` grant, refused where a payload
+  would be dead, so exarch's deny layer fails closed; the tags `absolute`,
   `cwd`, `home`, `tempdir`, `gitdir` and `xdg-*`, `PolicyError`, the `gitdir`
   refusals (`From<BadPointer>`), `Selector` (`Path | Toolchain(Toolchain)`) and
   the `path` selector (`path_dirs`, over the pure `path_dirs_in`), and
@@ -145,7 +152,8 @@ grant string becomes a frozen path.
 - `toolchains.rs` — every other directory selector as one table: `enum
   Toolchain` (`system` and the package managers), each a few `Location`s of
   overrides and defaults, from one exhaustive `match`; the pure `expand_in`
-  over an injected environment, home and `exists`, its live wrapper `expand`
+  over an injected environment, home and `exists`, answering native
+  `PathBuf`s (shown only in a refusal), its live wrapper `expand`
   (what `FreezeCtx::selector` calls), and
   `FLOOR`, the four system-wide prefixes (`homebrew`, `macports`, `nix`,
   `pkgsrc`) that `fs::floor` reads through `floor` and keeps only outside the
@@ -170,8 +178,31 @@ plus `which.rs` for PATH search.
   expanded at freeze by `guard::freeze`; `git.rs` backs `gitdir` discovery, following a `.git` pointer file only to a
   git directory whose `gitdir` back-pointer or `core.worktree` names the working
   tree back; a bad pointer is a path-level `BadPointer`, phrased as a grant error by the caller), `tilde.rs` (`~` and `~/sub` only; an unset `HOME` is `None`,
-  and each caller picks its own honest answer);
-- lex — `lex.rs`: resolution and `.`/`..` folding; `identity.rs`: name identity and containment; `device.rs`: device names;
+  and each caller picks its own honest answer; `TildePath::shown` is the one
+  spelling `~`, `home` and a `~/…` command head share, and `TildePath::expand`
+  the path such a head runs). The expansion `expand_path_prefix` answers is
+  native, in the host's own spelling, for the resolver to hand on to the OS.
+  `sigil::SigilHead` is the one reading of a path's head — `Tilde`, `Xdg`, or
+  `UnknownXdg` (an `xdg:` no kind answers to, passed through literally) — that
+  expansion, `literal_relative` and a grant's refusal of a sigil all ask. An
+  `xdg:` sub-path naming a volume of its own under Windows rules — a drive
+  component, or a share or namespace head opening it — would re-root the join, so `expand_path_prefix` leaves the whole path as written: it fails
+  closed, a prefix matching nothing rather than a fabricated path, while a
+  grant refuses the gap outright in `guard::freeze`;
+- lex — `lex.rs`: resolution and `.`/`..` folding (`fold_dots_under`, one kernel under either rules from any host, `fold_dots` its host instance on a held path: the head `root` reads keeps its meaning and only the names past it fold, joined with the rules' separator, so a fold never changes a path's `Root`; under Windows rules a `Drive`, `Unc` or `Driveless` head is respelled with `\` too (`C:/a/b` folds to `C:\a\b`, `//srv/sh` to `\\srv\sh`), so such a path has one separator throughout, while every head whose kind or meaning turns on its spelling is kept as written: a `Posix` `/` (as `\` it would be `Driveless`), a slash-spelled verbatim head (`//?/` is a device path Win32 normalises, so its tail folds), and a `Malformed` or `MixedHead` path, or an exact `\\?\` verbatim path (Win32 hands its rest to the kernel uninterpreted, `/` a name byte and `.`/`..` names), all head and kept whole, `..` included; a relative path's drive-shaped first name keeps a `.\` before it; `is_unparsed_head`, a Windows path absolute to the kernel in which `std::path` finds no prefix and so would descend or climb from the current drive, which the walk and the lenient canonicaliser's ancestor climb refuse), and every judgment on a path string's head — its `Root` (drive, UNC, verbatim drive or UNC, …, `Malformed` for a two-separator head that is no well-formed UNC or verbatim root); whether it is absolute under either rules set (`absolute_under`, the kernel's rule read through `Root`: POSIX, opens with `/`; Windows, a drive root or any two-separator head, malformed ones included) and on this host (`is_absolute`, `absolute_under` the host's rules, the one absoluteness ral asks, `anchor` included; `Path::is_absolute` is banned in clippy.toml in its favour); one parser for the Windows namespace heads (`namespace_head`, answering which `Namespace` — verbatim `\\?\`, device `\\.\`, NT object `\??\` — and its tail) in two readings by who spelled the path (`Heads`): `Written`, a grant's or an access's, each separator either spelling and the two Win32 heads alone, the one reading `Root`, the Windows identity fold (with `verbatim_unc_tail`) and the discard device share; `OsReturned`, a path the OS handed back, backslashes only and all three heads, what `show` leaves unfolded and what a volume GUID path (`is_volume_guid`) opens with; whether it names a network share (`is_network`), all of which the Windows DACL backend asks rather than parsing prefixes itself; `utf8`, a path's native spelling as text or `NotUtf8` naming it, the one door for a path that must travel as a string (`--capabilities` profiles, `SourceFile`); a final component's `extension`, and whether a component is a Windows drive or stream (`is_stream_or_drive`); `relative_suffix` strips a sub-path's leading separators under the rules, and `join_under` joins a sub-path onto a base string one component at a time
+  with the separator of the given rules, on every host alike (`GuestPath::join`
+  is it under Posix rules), and refuses (`Rerooting`) a sub-path naming a volume
+  of its own under Windows rules — absolute there, or a drive at any component;
+  `join_relative` is it under the host's rules onto a host-held path, and `join_slash` is that
+  for a `/`-separated constant subpath the program spells, panicking if one
+  re-roots; `identity.rs`: name identity and containment, `windows_collision_key` naming a kernel object by an absolute path under `collision_key` per component, coarser than NTFS's own fold so a lock merges every spelling NTFS equates; `device.rs`: device names, and `win32_trimmed`, a final component with the trailing dots and blanks Win32 drops, the one copy of that rule (reserved device names, batch images);
+- complete — `complete.rs`, the path half of completing a typed word:
+  `PartialPath` splits it into the directory to list and the needle, says
+  which entries are offered, and spells a chosen one back as ral shows a path
+  (typed `~` kept, `/`-separated; expanded via `TildePath::shown` only when the
+  spelling must be quoted);
+- slug — `slug.rs`, `project_slug`: a launch cwd as one directory-name
+  component (`/Users/x/proj` → `-Users-x-proj`), for keying per-project state;
 - canonicalise — `canon.rs`, for a read by name;
 - locate — `walk.rs`, for an open: `walk` descends from the root through
   directory handles with no symlink followed by the kernel, splicing each
@@ -182,7 +213,11 @@ plus `which.rs` for PATH search.
   kernel's rule, even from a link target (the user's own path keeps its
   logical fold); names are spelled as the disk stores them on macOS
   (`getattrlistat`), so case-variant names meet their deny; the splice count
-  is bounded by `MAX_HOPS`, which `carriers::trusted_real` shares;
+  is bounded by `MAX_HOPS`; every restart, the given name and each splice
+  alike, is put to one `rooted` check, so a link target relative to a
+  drive's current directory or with an unparsed head is refused as the name
+  itself would be; `walk_vetted` is the same walk with a per-object
+  check, which `carriers::trusted_real` runs;
 - match — `identity::path_within`, the form-blind containment kernel, which takes
   an `Identity` and folds it over the alias pairs. `Stored` is bytes, or under
   Windows `windows_stored_components`, preserving stored case and unifying `/` vs
@@ -197,7 +232,8 @@ plus `which.rs` for PATH search.
   `LexicalPath::is_discard`: `/dev/null`, or on Windows exactly the
   device-namespace spelling `\\.\NUL` (either slash, any case), and no other
   path. Every other Windows path whose last component is a DOS reserved device
-  name — `NUL`, `CON`, `PRN`, `AUX`, `COM1`–`COM9`, `LPT1`–`LPT9`, any case,
+  name — `NUL`, `CON`, `PRN`, `AUX`, `COM1`–`COM9`, `LPT1`–`LPT9`, `COM¹`–`COM³`,
+  `LPT¹`–`LPT³`, any case,
   any extension, trailing dots and blanks trimmed — is *refused*, not
   excused: `device::reserved_device_refusal` phrases the error (for `NUL`, as the
   question "did you mean `\\.\NUL`?"), and `guard::check_device_name`
@@ -215,6 +251,17 @@ cannot run before lexing: the ordering is in the types, not convention.
 the host already holds, a walked entry say, and expands nothing, so a file
 named `~` stays that file and a non-UTF-8 name is never renamed by a string
 round trip.
+`Resolver::at` builds one from a `home` and a host-held `cwd`, for a caller
+outside the crate with no shell to mint one; `resolve_in_script` is
+`resolve` for a path written in a ral script, which reads it beside itself:
+it is `resolve` itself with the script's directory for the cwd, so the two
+doors agree: sigils expand first, only a still-relative result joins the
+script's directory, and an absolute one, a malformed head included, is kept
+as `resolve` keeps it, never lent the directory's drive. The directory is
+the native parent of the file's `SourceOrigin`, never a re-parsed rendering
+of it, anchored as `anchor` takes it, so a script under a directory named
+`~` stays there. A virtual source has no directory,
+and its paths resolve against the cwd.
 
 (`ral_path.rs` in the same directory owns `RAL_PATH` module search, used by `use`
 and the plugin loader, not by grant matching.)
@@ -236,14 +283,23 @@ and one no ral string can hold is refused when asked for.
 `explore-dir` all walk through it.
 
 `which.rs` is the one `PATH` walk. **Its anchor is a `SearchCwd`, minted only
-from a named provenance — `Context::search_cwd`, `Resolver::search_cwd`,
+from a named provenance — `Context::search_cwd`,
 `SearchCwd::of` for a front end already holding the shell's cwd, or
 `SearchCwd::nowhere` — so no call site can choose "here" for itself**
 ([[decisions/260731_one-walk-one-anchor|one-walk-one-anchor]]).
 
+- `names_a_path` is the one answer to "is this command name a path?": it
+  bears a separator under the host's `PathRules` (`PathRules::is_separator`:
+  `/` everywhere, `\` under Windows alone), so off Windows `a\b` is a bare
+  name for `PATH`. `names_a_path_for` takes the rules, and the lexer's
+  `Word::Path`, `ir::CommandName::of`, the walk itself and the grant decoder's
+  `` `name `` check all ask it.
 - `path_dirs` is the sole directory list behind `locate`, `commands_on_path` and
   `search`; it **drops empty `PATH` elements on every platform**, so a trailing
   `;` or `:` never means the cwd. `.` and `./bin` are honoured, as written.
+  `locate_in` is the same walk off Windows, unmemoised, over directories a
+  caller already holds (`path_dirs_absolute` for bwrap's pin), so no list is
+  re-joined into a string to be split again.
 - `search` returns `PathSearch::{Executable, FoundNotExecutable, Missing}` from
   one traversal — the executable half memoised, the presence half not — so
   `runtime::command::vet` reads a verdict rather than taking a second walk.
@@ -256,7 +312,8 @@ from a named provenance — `Context::search_cwd`, `Resolver::search_cwd`,
 A `FrozenPath` (`forms.rs`) carries its `surface` form (lexical — what
 the author wrote, kept for display) and its `real` form (symlinks
 followed), both fixed by one disk consultation at the freeze door; a guest
-prefix is minted by `from_guest` under the POSIX fold, and `refreeze`
+prefix is minted by `from_guest` from a `GuestPath` (`namespace.rs`) under the
+POSIX fold, and `refreeze`
 re-resolves an exclusion against a live `Resolver` (an allowance is never
 re-frozen), the bare root minted rather than frozen.
 [[invariants/grants-judge-objects|Every authority is judged on `real`]]:
@@ -276,11 +333,12 @@ ordered as the host identifies files; `RealPath::frozen` for an allowance,
 `RealPath::live` for an exclusion.
 
 XDG base directories resolve through one resolver, `path/basedir.rs`
-(`XdgKind`, the pure `resolve_xdg_in`; `host::resolve_xdg` and `host::xdg` read the host env): an absolute `XDG_*_HOME` override else the
+(`XdgKind`, the pure `resolve_xdg_in`; `host::resolve_xdg` and `host::xdg` read the host env; `app_dir` and `app_dir_or_temp` spell an application's own `$XDG_<kind>_HOME/<app>/` for ral and exarch alike): an absolute `XDG_*_HOME` override else the
 home-joined Linux default on every platform, and `None` where there is neither
 — a host fact answers with an `Option`, so each caller picks its own fallback
-rather than inheriting a fabricated home (the Windows sandbox ledger takes the
-temp dir, keeping itself out of the cwd). Both the `xdg-*` grant places
+rather than inheriting a fabricated home (state that must land somewhere —
+exarch's directories, ral's crash log, the Windows sandbox ledger — takes the
+temp dir through `app_dir_or_temp`, keeping itself out of the cwd). Both the `xdg-*` grant places
 (`sigil.rs`, `guard::freeze`) and the host's own config/data loaders (`host::xdg`) defer to
 it, so a grant and the rc/history/plugin paths can never name different
 directories — [[decisions/260601_xdg-resolver-consolidation|xdg-resolver-consolidation]].
@@ -501,7 +559,7 @@ device for `net` to govern; the in-process guards apply unchanged
   AppContainer backend in `windows/`: `appcontainer.rs` owns profiles and
   LowBox `SECURITY_CAPABILITIES`; `dacl/mod.rs` exposes the path-derived
   capability-SID engine; `session.rs` composes them). Within `dacl/`,
-  `stamp.rs` owns completion witnesses, `mutex.rs` per-path locks, `ledger.rs`
+  `stamp.rs` owns completion witnesses, `mutex.rs` per-path locks (named by the path's Windows collision key, folded beyond ASCII and at least as far as NTFS folds, where the witness and capability name are not: a lock errs toward merging, a witness toward splitting, and the stamp store is locked by an environment-spelled path two sessions may spell apart), `ledger.rs`
   profile recovery, and `acl.rs` queried descriptors and borrowed ACEs.
   `windows/local.rs` owns Win32 local allocations. Kernel handles use
   `OwnedHandle`; the path mutex guard stays on its acquiring thread.
@@ -548,7 +606,9 @@ per entry, and refuses an uninspectable or unmodifiable descendant by name.
 Its `deny-tree` stamp key witnesses the walk and root propagation together;
 the root probe cannot detect later changes deeper in the tree. The child's program image
 is granted read-only so a user-installed binary or the bundled-tool self image
-can load at all; and `` net: `offline `` is enforced by withholding the network
+can load at all, handed to `session::confine` as a `RealPath`, so the
+canonical form the pin and the stamp's local-prefix allow-list demand is the
+type's, not the caller's care; and `` net: `offline `` is enforced by withholding the network
 capability SIDs — a LowBox token without them cannot open a socket, so
 `net_enforced()` holds on Windows.
 

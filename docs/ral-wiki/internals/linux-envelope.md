@@ -182,7 +182,8 @@ payload's, including any `PATH` override. `Command::new("bwrap")` would let a
 any confinement.
 
 - **`sandbox::boot` pins bwrap before any shell exists** (`linux::pin_envelope`).
-  It searches the absolute entries of the `PATH` ral started with, and keeps the
+  It searches the absolute entries of the `PATH` ral started with, as directories
+  rather than a re-joined string (`path::locate_in`), and keeps the
   result as a `reexec::Pinned`, the same fd pin ral uses to re-exec itself.
 - **Every launch execs `/proc/self/fd/N`.** Neither a `PATH` override nor a
   replace-by-rename at the pinned path reaches it.

@@ -1,9 +1,14 @@
 use super::*;
-use crate::source::{FileId, SourceDb};
+use crate::source::{FileId, SourceDb, SourceFile, SourceOrigin};
 use crate::syntax::lexer::{LexErrorKind, StringForm};
 use crate::syntax::parser::{ParseError, ParseErrorKind};
 use crate::typecheck::{TypeError, TypeErrorKind};
 use crate::types::Error;
+
+/// The origin of a source read from the file `path`.
+fn file_origin(path: &str) -> SourceOrigin {
+    SourceOrigin::File(SourceFile::new(path).expect("UTF-8"))
+}
 
 fn parse_error_with(message: &str, span: Option<Span>) -> ParseError {
     ParseError {
@@ -24,7 +29,7 @@ fn parse_error_from(kind: LexErrorKind) -> ParseError {
 }
 
 fn drawn(file: &str, text: &str, err: &ParseError) -> String {
-    let src = Source::from_text(file, text);
+    let src = Source::from_text(file_origin(file), text);
     err.report(&src).render(&src)
 }
 
@@ -96,7 +101,7 @@ fn balanced_error_spells_its_delimiters_once() {
         opened: Span::new(FileId::DUMMY, 0, 1),
     };
     let err = parse_error_from(kind.clone());
-    let src = Source::from_text("t.ral", "[a");
+    let src = Source::from_text(file_origin("t.ral"), "[a");
     assert_eq!(err.report(&src).message, kind.message());
     assert_eq!(kind.message(), "unterminated `[…]`");
 }
@@ -185,7 +190,7 @@ fn touching_words_label_both_atoms() {
 
 fn db_with(name: &str, text: &str) -> (SourceDb, FileId) {
     let mut db = SourceDb::default();
-    let id = db.register(Source::from_text(name, text));
+    let id = db.register(Source::from_text(file_origin(name), text));
     (db, id)
 }
 
@@ -195,7 +200,7 @@ fn db_with(name: &str, text: &str) -> (SourceDb, FileId) {
 fn rejected_error_renders_its_compile_report() {
     let span = Span::new(FileId::DUMMY, 4, 5);
     let err = crate::compile::CompileError::Parse(parse_error_with("expected ]", Some(span)))
-        .into_error(Source::from_text("plugin.ral", "let [x"));
+        .into_error(Source::from_text(file_origin("plugin.ral"), "let [x"));
     let (db, root) = db_with("main.ral", "load-plugin plugin");
     let out = err.render(&db, Some(root));
     assert!(out.contains("P0001") && out.contains("plugin.ral"), "{out}");
@@ -233,18 +238,18 @@ fn runtime_error_ariadne_renders_hint() {
 /// `café` is 5 bytes and 4 chars; the underline must stop at the token.
 #[test]
 fn caret_width_is_the_span_for_multibyte() {
-    let src = Source::from_text("t", "café bar");
+    let src = Source::from_text(file_origin("t"), "café bar");
     assert_eq!(caret(&src, Some(Span::new(FileId::DUMMY, 0, 5))), 0..5);
 }
 
 /// A zero-width span and the end of input both stay drawable, whole chars.
 #[test]
 fn empty_and_eof_carets_widen_to_a_char() {
-    let src = Source::from_text("t", "aé");
+    let src = Source::from_text(file_origin("t"), "aé");
     assert_eq!(caret(&src, Some(Span::point(FileId::DUMMY, 0))), 0..1);
     assert_eq!(caret(&src, Some(Span::point(FileId::DUMMY, 1))), 1..3);
     assert_eq!(caret(&src, None), 1..3);
-    assert_eq!(caret(&Source::from_text("t", ""), None), 0..0);
+    assert_eq!(caret(&Source::from_text(file_origin("t"), ""), None), 0..0);
 }
 
 #[test]
@@ -260,7 +265,10 @@ fn type_error_ariadne_with_span() {
         weak: None,
         unit: None,
     };
-    let src = Source::from_text("test.ral", "if 1 { return 42 } else { return \"hello\" }");
+    let src = Source::from_text(
+        file_origin("test.ral"),
+        "if 1 { return 42 } else { return \"hello\" }",
+    );
     let output = err.report().render(&src);
     assert!(output.contains("T0010"));
     assert!(output.contains("couldn't match"));
@@ -283,7 +291,7 @@ fn type_error_ariadne_without_span_is_messageless() {
     };
     let output = err
         .report()
-        .render(&Source::from_text("test.ral", "let x = 1"));
+        .render(&Source::from_text(file_origin("test.ral"), "let x = 1"));
     assert!(output.contains("infinite row"));
     assert!(output.contains("T0002"));
 }
@@ -318,9 +326,12 @@ fn runtime_error_in_unregistered_source_is_messageless() {
 #[test]
 fn runtime_error_in_module_draws_into_module_source() {
     let mut db = SourceDb::default();
-    let _top = db.register(Source::from_text("main.ral", "use 'mod.ral'\n"));
+    let _top = db.register(Source::from_text(
+        file_origin("main.ral"),
+        "use 'mod.ral'\n",
+    ));
     let module = db.register(Source::from_text(
-        "mod.ral",
+        file_origin("mod.ral"),
         "let a = 1\nfail [status: 1, message: 'kaboom']\n",
     ));
     // Bytes 10..14 of the module are `fail`, past the top-level's end.  Strip

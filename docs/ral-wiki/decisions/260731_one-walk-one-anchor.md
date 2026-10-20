@@ -11,6 +11,18 @@ application of [[decisions/260614_structural-bug-prevention|structural-bug-preve
 shape 1 — *the path authorised ≠ the path used* — realised in
 `core/src/path/which.rs`, `core/src/runtime/command/{identity,vet}.rs`.
 
+> **Amended 2026-10-20.** `Resolver::search_cwd` is gone: a consumer already
+> minted from a context has no anchor constructor of its own any more. The
+> constructors are now `Context::search_cwd` (core runtime), `SearchCwd::of`
+> (any caller holding the shell's cwd, as `Shell::cwd` supplies it) and
+> `SearchCwd::nowhere`; a resolver or shell anchors a *path* with
+> `Resolver::anchor` / `Shell::anchor`, which is a different question from
+> where a `PATH` walk starts. A caller that already holds the directories to
+> search, with no `PATH` string and so no anchor to choose, uses
+> `which::locate_in` (the walk `locate` makes off Windows, unmemoised), as the
+> Linux sandbox does to find `bwrap`. `SearchCwd` still has no constructor from
+> a loose option.
+
 ## Context
 
 At the REPL, `cd` into a directory and name a file that lives there. It is not
@@ -100,8 +112,8 @@ what `.` means.
 [[design/grant|grant]].
 
 Cite: `core/src/path/which.rs` (`SearchCwd`, `path_dirs`, `search`,
-`PathSearch`, `windows_command_candidates`), `core/src/path/resolver.rs`
-(`Resolver::search_cwd`), `core/src/types/shell/context.rs`
+`PathSearch`, `locate_in`, `windows_command_candidates`),
+`core/src/types/shell/context.rs`
 (`Context::search_cwd`), `core/src/runtime/command/identity.rs` (`walk_path`,
 `policy_names`, `absolutize`), `core/src/runtime/command/vet.rs`
 (`check_existence`).

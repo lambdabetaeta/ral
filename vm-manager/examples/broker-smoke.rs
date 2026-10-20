@@ -39,6 +39,7 @@
     reason = "example binary: its `main` owns the process, so an `exit` unwinds nothing another owner needs"
 )]
 
+use ral_core::path::shown;
 use vm_manager::MachineSpec;
 
 fn main() {
@@ -60,7 +61,10 @@ fn main() {
     let hypervisor = match vm_manager::detect(None) {
         Ok(hypervisor) => hypervisor,
         Err(why) => {
-            eprintln!("no machine service could be asked for a guest: {why}");
+            eprintln!(
+                "no machine service could be asked for a guest: {}",
+                why.worded(|path| shown(path))
+            );
             std::process::exit(1);
         }
     };
@@ -79,7 +83,7 @@ fn main() {
     let mut machine = match hypervisor.boot(&spec) {
         Ok(machine) => machine,
         Err(err) => {
-            eprintln!("boot failed: {err}");
+            eprintln!("boot failed: {}", err.worded(|path| shown(path)));
             std::process::exit(1);
         }
     };
@@ -91,14 +95,14 @@ fn main() {
     println!(
         "booted: the guest dialled the control plane and the net wire, and reached the granted \
          folder at {}",
-        machine.workspace_path().display()
+        shown(machine.workspace_path())
     );
     drop(wires);
 
     match machine.shutdown() {
         Ok(()) => println!("stopped cleanly, and its session disk went with it"),
         Err(err) => {
-            eprintln!("shutdown failed: {err}");
+            eprintln!("shutdown failed: {}", err.worded(|path| shown(path)));
             std::process::exit(1);
         }
     }

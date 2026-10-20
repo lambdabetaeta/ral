@@ -5,13 +5,16 @@ mod common;
 
 use ral_core::protocol::Run;
 use ral_core::run::RunReport;
+use ral_core::source::SourceOrigin;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 
 fn glob(dir: &std::path::Path, pattern: &str) -> Result<(), String> {
     let mut shell = common::fresh_shell();
     let source = format!("glob '{}/{pattern}'", dir.display());
-    let RunReport::Ran { ending, .. } = shell.run(Run::captured(source, "<test>")) else {
+    let RunReport::Ran { ending, .. } =
+        shell.run(Run::captured(source, SourceOrigin::named("<test>")))
+    else {
         panic!("the glob must compile");
     };
     ending.into_result().map(drop).map_err(|b| format!("{b:?}"))

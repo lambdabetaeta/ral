@@ -12,13 +12,7 @@
 //! entry in it — [`Manifest::of_folder_via`]'s own walk, and the tests that
 //! write fixture files for it to look at. This is synod's own before/after
 //! bookkeeping, not the model's turn-time I/O, which runs inside the guest
-//! and is gated there.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: the manifest walk stats the granted folder to record its \
-              shape — synod's own bookkeeping, not the model's turn-time I/O. See the \
-              module docs."
-)]
+//! and is gated there; each call carries its own allow.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -134,6 +128,12 @@ impl Manifest {
         let mut visit =
             |key: &str, path: &Path, meta: &std::fs::Metadata| -> Result<(), WalkError> {
                 if meta.file_type().is_symlink() {
+                    #[allow(
+                        clippy::disallowed_methods,
+                        reason = "REASONED-SILENT: the manifest walk reads a link's target to \
+                                  record it — synod's own bookkeeping, not the model's turn-time \
+                                  I/O. See the module docs."
+                    )]
                     let target = match std::fs::read_link(path) {
                         Ok(target) => target,
                         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -142,15 +142,20 @@ impl Manifest {
                         Err(e) => {
                             return Err(WalkError::Other(format!(
                                 "Synod could not read the link {}: {e}.",
-                                path.display()
+                                ral_core::path::shown(path)
                             )));
                         }
                     };
+                    #[allow(
+                        clippy::disallowed_methods,
+                        reason = "native: a link target is recorded as text, so one that is not \
+                                  Unicode is refused"
+                    )]
                     let Some(target) = target.to_str() else {
                         return Err(WalkError::Other(format!(
                             "The link {} points at a name this computer cannot read; \
                          please fix or remove it first.",
-                            path.display()
+                            ral_core::path::shown(path)
                         )));
                     };
                     entries.insert(
@@ -176,7 +181,7 @@ impl Manifest {
                     return Err(WalkError::Other(format!(
                         "{} is not an ordinary file, folder, or link, so synod could not \
                      account for it; please move it out of the folder first.",
-                        path.display()
+                        ral_core::path::shown(path)
                     )));
                 }
                 Ok(())
@@ -186,7 +191,7 @@ impl Manifest {
             Err(WalkError::Vanished) => Err(format!(
                 "Synod could not find {} any more — has the folder been moved, renamed, \
                  or unplugged?",
-                root.display()
+                ral_core::path::shown(root)
             )),
             Err(WalkError::Stopped) => Err("Synod stopped reading this folder before it had \
                                             finished, so it cannot say what changed."
@@ -292,9 +297,14 @@ fn walk(
     let could_not = |e| {
         WalkError::Other(format!(
             "Synod could not look inside {}: {e}.",
-            dir.display()
+            ral_core::path::shown(dir)
         ))
     };
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "REASONED-SILENT: the manifest walk lists a folder of the granted tree — synod's \
+                  own bookkeeping, not the model's turn-time I/O. See the module docs."
+    )]
     let listing = match std::fs::read_dir(dir) {
         Ok(listing) => listing,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(WalkError::Vanished),
@@ -306,10 +316,15 @@ fn walk(
         }
         let item = item.map_err(could_not)?;
         let name = item.file_name();
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "native: an entry name is a manifest key, so one that is not Unicode is \
+                      refused"
+        )]
         let Some(name) = name.to_str() else {
             return Err(WalkError::Other(format!(
                 "A file in {} has a name this computer cannot read; please rename it first.",
-                dir.display()
+                ral_core::path::shown(dir)
             )));
         };
         let key = if rel.is_empty() {
@@ -318,6 +333,11 @@ fn walk(
             format!("{rel}/{name}")
         };
         let path = item.path();
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "REASONED-SILENT: the manifest walk stats an entry without following it — \
+                      synod's own bookkeeping, not the model's turn-time I/O. See the module docs."
+        )]
         let meta = match std::fs::symlink_metadata(&path) {
             Ok(meta) => meta,
             // Listed, then gone before it could be looked at: unread, not
@@ -329,7 +349,7 @@ fn walk(
             Err(e) => {
                 return Err(WalkError::Other(format!(
                     "Synod could not look at {}: {e}.",
-                    path.display()
+                    ral_core::path::shown(path)
                 )));
             }
         };
@@ -351,6 +371,10 @@ fn walk(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[test] the files and folders the walk is then asked to record"
+)]
 mod tests {
     use super::*;
     use crate::test_fixture::workshop;

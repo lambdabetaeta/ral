@@ -467,7 +467,7 @@ fn search_tree(
         let eol = scanned.eol.eol();
         shell.poll()?;
         if let Err(e) = searched {
-            let shown = entry.path.as_path().display();
+            let shown = ral_core::path::shown(entry.path.as_path());
             let _ = shell.write_stderr(format!("{name}: {shown}: skipped: {e}\n").as_bytes());
             continue;
         }
@@ -985,7 +985,7 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
     for root in skill::skill_roots(&cwd, &config_dir) {
         let dir = root.join(name);
         let sk_md = dir.join("SKILL.md");
-        let rp = shell.resolve(&sk_md.to_string_lossy());
+        let rp = shell.anchor(&sk_md);
         if shell.check_fs_read(&rp).is_ok() {
             // `check_fs_read` is a prefix guard, not an existence test: a path
             // under a readable prefix can still be a skill this root lacks.
@@ -996,7 +996,7 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
             let body = skill::read_skill_body(&dir).map_err(|why| {
                 sig(format!(
                     "skill: could not load '{name}' from {}: {why}",
-                    sk_md.display()
+                    ral_core::path::shown(&sk_md)
                 ))
             })?;
             // Only once the body is in hand, so the card never claims a load
@@ -1035,11 +1035,14 @@ fn builtin_skill_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
     let (mut entries, mut errors) = (Vec::new(), Vec::new());
     for (name, dir) in &all {
         let sk_md = dir.join("SKILL.md");
-        let rp = shell.resolve(&sk_md.to_string_lossy());
+        let rp = shell.anchor(&sk_md);
         if shell.check_fs_read(&rp).is_ok() {
             match skill::parse_skill(dir, name) {
                 Ok(s) => entries.push(format!("{}: {}", s.name, s.description)),
-                Err(why) => errors.push(format!("⚠ skipped {}: {why}", sk_md.display())),
+                Err(why) => errors.push(format!(
+                    "⚠ skipped {}: {why}",
+                    ral_core::path::shown(&sk_md)
+                )),
             }
         }
     }

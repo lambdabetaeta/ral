@@ -14,6 +14,7 @@ use common::fresh_shell;
 
 use ral_core::protocol::Run;
 use ral_core::run::{RunReport, StaticDiagnostics};
+use ral_core::source::SourceOrigin;
 use ral_core::types::{Break, Escape, Settled, Shell, Value};
 
 /// Run one top-level run of `source` through the public `run` door
@@ -21,7 +22,7 @@ use ral_core::types::{Break, Escape, Settled, Shell, Value};
 /// it expects to compile, so a static diagnostic is a test bug.
 fn eval(shell: &mut Shell, source: &str) -> Settled<Value> {
     shell
-        .run(Run::foreground(source, "<test>"))
+        .run(Run::foreground(source, SourceOrigin::named("<test>")))
         .expect_ran()
         .into_result()
 }
@@ -30,7 +31,7 @@ fn eval(shell: &mut Shell, source: &str) -> Settled<Value> {
 /// the diagnostics that refused it.
 fn expect_static(source: &str) -> StaticDiagnostics {
     let mut shell = fresh_shell();
-    match shell.run(Run::foreground(source, "<test>")) {
+    match shell.run(Run::foreground(source, SourceOrigin::named("<test>"))) {
         RunReport::Static { diagnostics } => diagnostics,
         RunReport::Ran { ending, .. } => {
             panic!("{source:?}: expected a static rejection, got {ending:?}")

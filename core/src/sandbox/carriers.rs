@@ -8,12 +8,13 @@
 //! program an `env` interpreter runs.  Kernel-only: the in-process guard
 //! never consults them.
 
-use crate::path::RealPath;
-use crate::path::walk::MAX_HOPS;
+use crate::path::walk::{Kind, Leaf, walk_vetted};
+use crate::path::{RealPath, is_absolute};
 use std::collections::BTreeSet;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
+use std::fs::File;
 use std::io::Read;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 /// Interpreter hops followed, as the kernel bounds them.
@@ -94,71 +95,28 @@ fn hops(program: &RealPath) -> Vec<PathBuf> {
 }
 
 /// The real path of `path` if only the system can have written it: walked
-/// from `/` one component at a time, every directory and the file itself
-/// neither owned nor writable by this euid, and every symlink not owned by
-/// it.  Root owns everything, so it trusts nothing: that fails closed.  The
-/// final object must be a regular file: a carrier is bound read-only whole, so
-/// a directory would expose its tree.
+/// from `/`, every directory and the file itself neither owned nor writable
+/// by this euid, and every symlink not owned by it.  Root owns everything, so
+/// it trusts nothing: that fails closed.  The final object must be a regular
+/// file: a carrier is bound read-only whole, so a directory would expose its
+/// tree.
 pub(crate) fn trusted_real(path: &Path) -> Option<RealPath> {
-    if !path.is_absolute() {
-        return None;
-    }
     let me = rustix::process::geteuid().as_raw();
-    let system_only = |path: &Path, uid: u32| {
-        uid != me
-            && rustix::fs::accessat(
-                rustix::fs::CWD,
-                path,
-                rustix::fs::Access::WRITE_OK,
-                rustix::fs::AtFlags::EACCESS,
-            )
-            .is_err()
+    let located = walk_vetted(path, Leaf::Resolve, |dir, name| system_only(dir, name, me)).ok()?;
+    (located.stat().ok()??.kind == Kind::File).then(|| RealPath::walked(&located))
+}
+
+/// Whether only the system can have made the entry `name` of `dir` what it
+/// is: not owned by `me`, and — unless a symlink, whose own mode the kernel
+/// ignores — not writable by it either.
+fn system_only(dir: &File, name: &OsStr, me: u32) -> bool {
+    use rustix::fs::{Access, AtFlags, FileType, accessat, statat};
+    let Ok(stat) = statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) else {
+        return false;
     };
-    let mut walked = PathBuf::from("/");
-    if !system_only(&walked, rustix::fs::stat(&walked).ok()?.st_uid) {
-        return None;
-    }
-    let mut pending: Vec<OsString> = Vec::new();
-    let push = |pending: &mut Vec<OsString>, path: &Path| {
-        pending.extend(path.components().rev().map(|c| c.as_os_str().to_owned()));
-    };
-    push(&mut pending, path);
-    let mut links = 0;
-    while let Some(name) = pending.pop() {
-        match name.as_bytes() {
-            b"/" => walked = PathBuf::from("/"),
-            b"." => {}
-            // `walked` is link-free, so `..` is lexical on it.
-            b".." => {
-                walked.pop();
-            }
-            _ => {
-                let next = walked.join(&name);
-                let stat = rustix::fs::lstat(&next).ok()?;
-                if rustix::fs::FileType::from_raw_mode(stat.st_mode).is_symlink() {
-                    links += 1;
-                    if stat.st_uid == me || links > MAX_HOPS {
-                        return None;
-                    }
-                    let target = rustix::fs::readlink(&next, Vec::new()).ok()?;
-                    if target.to_bytes().is_empty() {
-                        return None;
-                    }
-                    let target = PathBuf::from(OsString::from_vec(target.into_bytes()));
-                    push(&mut pending, &target);
-                } else if system_only(&next, stat.st_uid) {
-                    walked = next;
-                } else {
-                    return None;
-                }
-            }
-        }
-    }
-    let stat = rustix::fs::stat(&walked).ok()?;
-    rustix::fs::FileType::from_raw_mode(stat.st_mode)
-        .is_file()
-        .then(|| RealPath::of(&walked).ok())
-        .flatten()
+    stat.st_uid != me
+        && (FileType::from_raw_mode(stat.st_mode).is_symlink()
+            || accessat(dir, name, Access::WRITE_OK, AtFlags::EACCESS).is_err())
 }
 
 /// The interpreter on `path`'s `#!` line: the kernels' grammar narrowed to the
@@ -173,7 +131,7 @@ pub(crate) fn trusted_real(path: &Path) -> Option<RealPath> {
 pub(crate) fn shebang(path: &Path) -> Option<PathBuf> {
     use std::os::unix::fs::OpenOptionsExt;
     // `O_NONBLOCK` and the regular-file check: a FIFO swapped in must not stall the reader.
-    let file = std::fs::File::options()
+    let file = File::options()
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
         .open(path)
@@ -184,7 +142,7 @@ pub(crate) fn shebang(path: &Path) -> Option<PathBuf> {
         .then(|| head_shebang(file))?
 }
 
-fn head_shebang(file: std::fs::File) -> Option<PathBuf> {
+fn head_shebang(file: File) -> Option<PathBuf> {
     const LIMIT: u64 = if cfg!(target_os = "macos") { 512 } else { 256 };
     let mut head = Vec::new();
     file.take(LIMIT).read_to_end(&mut head).ok()?;
@@ -197,7 +155,7 @@ fn head_shebang(file: std::fs::File) -> Option<PathBuf> {
     let start = line.iter().position(|b| !blank(b)).unwrap_or(line.len());
     let interpreter = line[start..].split(blank).next()?;
     let interpreter = PathBuf::from(OsStr::from_bytes(interpreter));
-    interpreter.is_absolute().then_some(interpreter)
+    is_absolute(&interpreter).then_some(interpreter)
 }
 
 /// What the system's own shims forward to: `/bin/sh` to the shell
@@ -220,9 +178,8 @@ pub(super) fn shims(program: &Path) -> Vec<PathBuf> {
     ))
     .unwrap_or_else(|_| PathBuf::from("/Library/Developer/CommandLineTools"));
     vec![
-        dev.join("usr/bin").join(name),
-        dev.join("Toolchains/XcodeDefault.xctoolchain/usr/bin")
-            .join(name),
+        crate::path::join_slash(&dev, "usr/bin").join(name),
+        crate::path::join_slash(&dev, "Toolchains/XcodeDefault.xctoolchain/usr/bin").join(name),
     ]
 }
 

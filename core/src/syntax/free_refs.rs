@@ -46,7 +46,7 @@ impl FreeRefs<'_> {
             Ast::Variable(n) => self.note(n),
             Ast::Unit
             | Ast::Literal(_)
-            | Ast::Word(Word::Plain(_) | Word::Slash(_) | Word::Tilde(_))
+            | Ast::Word(Word::Plain(_) | Word::Path(_) | Word::Tilde(_))
             | Ast::Return(None) => {}
             Ast::Lambda { param, body } => {
                 self.scopes

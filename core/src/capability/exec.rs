@@ -209,7 +209,9 @@ impl Scope for ExecScope {
             }
             (Self::Tool(tool), Subject::Tool(name)) => tool == name,
             (Self::Name(key), Subject::Tool(name)) => *key == command_name_key(name),
-            (Self::Name(key), Subject::File(path)) => *key == command_name_key(&path.name()),
+            (Self::Name(key), Subject::File(path)) => path
+                .name()
+                .is_some_and(|name| *key == command_name_key(name)),
             _ => false,
         }
     }
@@ -344,21 +346,12 @@ pub(super) mod tests {
     use super::*;
     #[cfg(unix)]
     use crate::capability::Axis;
-    use crate::path::{Allow, Deny};
+    use crate::path::{Allow, Deny, test_absolute};
     #[cfg(unix)]
     use std::path::Path;
 
-    /// `p` as an absolute path on the host, which for Windows needs a drive.
-    fn host(p: &str) -> String {
-        if cfg!(windows) {
-            format!("C:{}", p.replace('/', r"\"))
-        } else {
-            p.to_string()
-        }
-    }
-
     fn real(p: &str) -> RealPath {
-        RealPath::assumed(host(p))
+        RealPath::assumed(test_absolute(p))
     }
 
     pub(crate) const ALLOW: Evidence = Evidence::ALLOW;
@@ -465,18 +458,14 @@ pub(super) mod tests {
             .collect();
         let met = a.meet(b);
         assert!(of_file(&met, "/a/B/x").permits());
-        if cfg!(not(windows)) {
-            assert_eq!(of_file(&met, "/a/b/x"), Evidence::NEITHER);
-        }
+        assert_eq!(of_file(&met, "/a/b/x"), Evidence::NEITHER);
         let a: ExecRules = std::iter::once(file("/x/T", ALLOW)).collect();
         let b: ExecRules = [file("/x/T", ALLOW), file("/x/t", ALLOW)]
             .into_iter()
             .collect();
         let met = a.meet(b);
         assert!(of_file(&met, "/x/T").permits());
-        if cfg!(not(windows)) {
-            assert_eq!(of_file(&met, "/x/t"), Evidence::NEITHER);
-        }
+        assert_eq!(of_file(&met, "/x/t"), Evidence::NEITHER);
     }
 
     /// A directory exclusion keeps its `dir` marker in a refusal, distinct
@@ -521,10 +510,8 @@ pub(super) mod tests {
         assert!(!allow(&cafe_dir, &format!("{nfd}/t")));
         assert!(deny(&cafe, nfd));
         assert!(!allow(&cafe, nfd));
-        if cfg!(not(windows)) {
-            assert!(!allow(&evil, "/x/evil/t"));
-            assert!(!allow(&tool, "/x/tool"));
-        }
+        assert!(!allow(&evil, "/x/evil/t"));
+        assert!(!allow(&tool, "/x/tool"));
     }
 
     /// a folded match is an exclusion as a stored one is: ties are Both,
@@ -570,15 +557,13 @@ pub(super) mod tests {
         let folded: ExecRules = [dir("/", ALLOW), dir("/x/Evil", DENY)]
             .into_iter()
             .collect();
-        if cfg!(not(windows)) {
-            assert_eq!(
-                folded.withheld(Subject::File(&program)),
-                Some(Withheld::Excluded {
-                    scope: ExecScope::Dir(real("/x/Evil")),
-                    respelled: true
-                })
-            );
-        }
+        assert_eq!(
+            folded.withheld(Subject::File(&program)),
+            Some(Withheld::Excluded {
+                scope: ExecScope::Dir(real("/x/Evil")),
+                respelled: true
+            })
+        );
         let both: ExecRules = [dir("/", ALLOW), dir("/x", DENY), dir("/x/Evil", DENY)]
             .into_iter()
             .collect();
@@ -804,7 +789,7 @@ pub(super) mod tests {
 
     /// A table of one dir key `/l` frozen as resolving to `/x`.
     fn linked_dir(e: Evidence) -> ExecRules {
-        let linked = FrozenPath::for_test(&host("/l"), &host("/x"));
+        let linked = FrozenPath::for_test(&test_absolute("/l"), &test_absolute("/x"));
         ExecRules::compile(&std::iter::once((ExecKey::Dir(linked), e)).collect())
     }
 

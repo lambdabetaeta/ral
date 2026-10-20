@@ -52,6 +52,12 @@ pub(crate) fn canonicalise_strict(p: &Path) -> std::io::Result<PathBuf> {
 /// gives `canon(/a)/y` and never `canon(/a)/x/y`.  Callers arriving through
 /// [`LexicalPath::canonicalise_lenient`](super::LexicalPath::canonicalise_lenient)
 /// are already folded; [`match_variants`] hands over a bare `Path`.
+///
+/// A path whose head `std::path` cannot parse
+/// ([`is_unparsed_head`](super::lex::is_unparsed_head)) has no ancestors to
+/// walk: `parent` would climb it to the current drive's root and answer for
+/// a path on that drive.  Unless the kernel resolves it whole, it is its own
+/// answer.
 #[allow(
     clippy::disallowed_methods,
     reason = "canon: the lenient canonicaliser, an ancestor walk over `realpath(3)`"
@@ -66,6 +72,9 @@ pub(crate) fn canonicalise_lenient(p: &Path) -> PathBuf {
     let p = folded.as_path();
     if let Ok(c) = std::fs::canonicalize(p) {
         return c;
+    }
+    if super::lex::is_unparsed_head(p) {
+        return folded;
     }
     let mut trail: Vec<std::ffi::OsString> = Vec::new();
     let mut cursor = p;
@@ -151,6 +160,10 @@ pub(crate) fn spelled<'a>(
                 // `{v:?}`, not `.display()`: `Display` would paper over the
                 // fault with the very U+FFFD substitution being refused.
                 #[allow(clippy::unnecessary_debug_formatting)]
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "native: the non-UTF-8 refusal this renders for Seatbelt"
+                )]
                 let s = v.to_str().ok_or_else(|| {
                     format!(
                         "ral: sandbox grant path is not valid UTF-8, refusing to render \

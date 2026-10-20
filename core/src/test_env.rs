@@ -25,12 +25,11 @@ pub(crate) fn env_guard() -> MutexGuard<'static, ()> {
     reason = "[test] serialised env mutation for tests, guarded by env_guard"
 )]
 pub(crate) fn with_var<R>(key: &str, val: Option<&str>, f: impl FnOnce() -> R) -> R {
-    let _guard = env_guard();
-    let prev = std::env::var_os(key);
+    let _lock = env_guard();
+    // Declared after `_lock`, so it drops (restores) first, before the lock is released.
+    let _restore = Restore(vec![(key.to_owned(), std::env::var_os(key))]);
     set_or_remove(key, val);
-    let out = f();
-    restore(key, prev);
-    out
+    f()
 }
 
 /// Runs `f` under [`env_guard`] with every var in `keys` removed, restoring them after.
@@ -41,17 +40,28 @@ pub(crate) fn with_var<R>(key: &str, val: Option<&str>, f: impl FnOnce() -> R) -
     reason = "[test] serialised env mutation for tests, guarded by env_guard"
 )]
 pub(crate) fn with_vars_cleared<R>(keys: &[&str], f: impl FnOnce() -> R) -> R {
-    let _guard = env_guard();
-    let saved: Vec<(&str, Option<OsString>)> =
-        keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+    let _lock = env_guard();
+    // Declared after `_lock`, so it drops (restores) first, before the lock is released.
+    let _restore = Restore(
+        keys.iter()
+            .map(|k| ((*k).to_owned(), std::env::var_os(k)))
+            .collect(),
+    );
     for k in keys {
         set_or_remove(k, None);
     }
-    let out = f();
-    for (k, prev) in saved {
-        restore(k, prev);
+    f()
+}
+
+/// Restores the saved variables on drop, so a panicking `f` still restores them.
+struct Restore(Vec<(String, Option<OsString>)>);
+
+impl Drop for Restore {
+    fn drop(&mut self) {
+        for (k, prev) in self.0.drain(..) {
+            restore(&k, prev);
+        }
     }
-    out
 }
 
 #[allow(

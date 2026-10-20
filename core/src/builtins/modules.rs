@@ -9,20 +9,22 @@
 
 use crate::evaluator::Mode;
 use crate::load::{ModuleLoad, check_source, module_phrases};
+use crate::source::{SourceFile, SourceOrigin};
 use crate::ty::Site;
-use crate::types::{Break, Error, Mooring, Settled, Shell, Value};
+use crate::types::{Break, Error, Mooring, Settled, Shell, Value, sig};
+use std::path::Path;
 use std::sync::Arc;
 
-/// Read and normalise a module's text, located and authorised as one walk
-/// (`abs_path`, the path as the caller resolved it).
+/// Read and normalise the module at `path`, located and authorised as one
+/// walk; `shown` names it in errors.
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:module-load] `use` module loading reads program text from disk, gated by `locate`. The documented reasoned-silent residual: code-loading is visible as its own statement, not turn-time model data I/O, so it raises no surface card."
 )]
-fn read_and_normalize(abs_path: &str, shell: &mut Shell) -> Settled<String> {
-    let rp = shell.resolve(abs_path);
+fn read_and_normalize(path: &Path, shown: &str, shell: &mut Shell) -> Settled<String> {
+    let rp = shell.anchor(path);
     let located = shell.locate(&rp, &crate::capability::FsOp::Read)?;
-    let what = format!("use: {abs_path}");
+    let what = format!("use: {shown}");
     let mut file = located.read().map_err(|e| Error::io(&what, &e))?;
     let mut source = String::new();
     std::io::Read::read_to_string(&mut file, &mut source).map_err(|e| Error::io(&what, &e))?;
@@ -57,22 +59,24 @@ pub(crate) fn builtin_use(
     shell: &mut Shell,
 ) -> Settled<Value> {
     let path = args[0].as_str("use")?.to_owned();
-    let resolved = resolve_relative_to_current_script(&path, shell);
-    // `use` falls back to a RAL_PATH search for a bare name.
-    let abs_path = shell
-        .resolve(&resolved.to_string_lossy())
+    let target = resolve_in_current_script(&path, shell);
+    // `use` falls back to a RAL_PATH search for a bare name, and failing
+    // both reads the target itself, to report why it cannot.
+    let file = target
         .canonicalise_strict()
         .ok()
         .or_else(|| crate::path::ral_path::find_file(&path, shell.context.env_overrides()))
-        .map_or_else(|| path.clone(), |p| crate::path::shown(&p));
+        .unwrap_or_else(|| target.into_inner());
 
-    let source = read_and_normalize(&abs_path, shell)?;
-    let top = check_source(&source, &abs_path, shell, None).map_err(tag_loader_error)?;
+    let file = SourceFile::new(file).map_err(|e| sig(format!("use: {e}")))?;
+    let source = read_and_normalize(file.path(), &crate::path::shown(file.path()), shell)?;
+    let origin = SourceOrigin::File(file);
+    let top = check_source(&source, &origin, shell, None).map_err(tag_loader_error)?;
 
     let env = shell.env.clone();
     let load = ModuleLoad {
         top: &top,
-        virtual_path: &abs_path,
+        origin: &origin,
     };
     // `Mode::Module` never writes `shell.env` (only `Session` does),
     // so the module's own top-level names die with `env` here — no save or
@@ -92,19 +96,24 @@ pub(crate) fn builtin_use(
     Ok(record)
 }
 
-/// Resolve `path` against the directory of the innermost load in flight —
-/// the top of the stack [`module_phrases`] pushes to — falling back to
-/// the run's own root source at top level, where the stack is empty.
-fn resolve_relative_to_current_script(path: &str, shell: &Shell) -> std::path::PathBuf {
-    let script = shell.context.modules.stack.last().map_or_else(
-        || {
-            shell
-                .session
-                .root_file
-                .and_then(|file| shell.session.sources.get(file))
-                .map_or("", |source| source.name())
-        },
-        String::as_str,
-    );
-    crate::path::resolve_relative_to_script(path, script)
+/// Resolve `path` as written in the innermost load in flight — the top of
+/// the stack [`module_phrases`] pushes to — falling back to the run's own
+/// root source at top level, where the stack is empty.
+///
+/// A file source reads `path` beside itself
+/// ([`crate::path::Resolver::resolve_in_script`]); a virtual one has no
+/// directory, so `path` resolves against the cwd.
+fn resolve_in_current_script(path: &str, shell: &Shell) -> crate::path::LexicalPath {
+    let origin = shell.context.modules.stack.last().or_else(|| {
+        shell
+            .session
+            .root_file
+            .and_then(|file| shell.session.sources.get(file))
+            .map(crate::source::Source::origin)
+    });
+    let resolver = shell.context.resolver();
+    match origin.and_then(SourceOrigin::file).and_then(Path::parent) {
+        Some(dir) => resolver.resolve_in_script(path, dir),
+        None => resolver.resolve(path),
+    }
 }

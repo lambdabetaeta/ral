@@ -83,7 +83,10 @@ fn wire_seat_run_round_trips_and_surfaces_a_value() {
     let host = Arc::new(SurfaceCollector(std::sync::Mutex::new(Vec::new())));
     let report = ral_core::carrier::dispatch_to_report(
         seat.transport(),
-        ral_core::protocol::Run::captured("exarch-surface `ping", "<test>"),
+        ral_core::protocol::Run::captured(
+            "exarch-surface `ping",
+            ral_core::source::SourceOrigin::named("<test>"),
+        ),
         host.clone() as Arc<dyn Host>,
     )
     .expect("the engine must answer the dispatch with a Report");
@@ -130,7 +133,10 @@ fn wire_seat_enquiry_is_answered_through_the_drain_loop() {
 
     let report = ral_core::carrier::dispatch_to_report(
         seat.transport(),
-        ral_core::protocol::Run::captured("exarch-agents `list", "<test>"),
+        ral_core::protocol::Run::captured(
+            "exarch-agents `list",
+            ral_core::source::SourceOrigin::named("<test>"),
+        ),
         host,
     )
     .expect("the engine must answer the dispatch with a Report");
@@ -174,7 +180,10 @@ fn wire_seat_install_deferred_installs_the_sink_for_a_settled_spawn_worker() {
 
     let report = ral_core::carrier::dispatch_to_report(
         seat.transport(),
-        ral_core::protocol::Run::captured("let h = spawn { /bin/sleep 1 }", "<test>"),
+        ral_core::protocol::Run::captured(
+            "let h = spawn { /bin/sleep 1 }",
+            ral_core::source::SourceOrigin::named("<test>"),
+        ),
         host,
     )
     .expect("the engine must answer the dispatch with a Report");
@@ -236,7 +245,10 @@ fn wire_reach_interrupt_settles_an_in_flight_run_promptly() {
         let dispatch = s.spawn(|| {
             ral_core::carrier::dispatch_to_report(
                 seat.transport(),
-                ral_core::protocol::Run::captured("/bin/sleep 30", "<test>"),
+                ral_core::protocol::Run::captured(
+                    "/bin/sleep 30",
+                    ral_core::source::SourceOrigin::named("<test>"),
+                ),
                 Arc::new(()) as Arc<dyn Host>,
             )
         });

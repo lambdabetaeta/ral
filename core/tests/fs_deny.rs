@@ -4,6 +4,7 @@ mod common;
 
 use ral_core::protocol::Run;
 use ral_core::run::RunReport;
+use ral_core::source::SourceOrigin;
 
 #[test]
 fn a_same_map_deny_holds_inside_a_write_prefix_at_the_shell_boundary() {
@@ -19,7 +20,9 @@ fn a_same_map_deny_holds_inside_a_write_prefix_at_the_shell_boundary() {
             secret.display(),
             path.display()
         );
-        let RunReport::Ran { ending, .. } = shell.run(Run::captured(source, "<test>")) else {
+        let RunReport::Ran { ending, .. } =
+            shell.run(Run::captured(source, SourceOrigin::named("<test>")))
+        else {
             panic!("the grant must compile");
         };
         assert_eq!(ending.into_result().is_ok(), succeeds);

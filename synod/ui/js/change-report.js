@@ -49,7 +49,7 @@ export function resetReport() {
 
 export async function refreshReport() {
   try {
-    report = await invoke("job_report", { folder: state.folder });
+    report = await invoke("job_report", { folder: state.folder?.path });
     reportError = null;
   } catch (err) {
     report = { files: [], unreadable: [] };
@@ -138,7 +138,7 @@ function groupHeading(dir) {
   const el = document.createElement("div");
   el.className = "group";
   // A card only renders once a conversation (and so state.folder) exists.
-  const folder = /** @type {string} */ (state.folder);
+  const folder = /** @type {import("./bindings/PickedFolder.ts").PickedFolder} */ (state.folder).label;
   el.textContent = dir || baseOf(folder.replace(/\/+$/, "")) + "/";
   el.title = dir || folder;
   return el;

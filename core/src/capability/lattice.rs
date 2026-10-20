@@ -150,8 +150,8 @@ impl std::fmt::Display for ExecKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Name(name) => write!(f, "`name {}", quote_word(name)),
-            Self::Path(path) => write!(f, "`absolute {}", quote_word(path.as_str())),
-            Self::Dir(dir) => write!(f, "`dir `absolute {}", quote_word(dir.as_str())),
+            Self::Path(path) => write!(f, "`absolute {}", quote_word(&path.shown())),
+            Self::Dir(dir) => write!(f, "`dir `absolute {}", quote_word(&dir.shown())),
         }
     }
 }

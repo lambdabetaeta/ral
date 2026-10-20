@@ -32,7 +32,10 @@ no job table: ral does not suspend
   refusal prints its sentence and exits 2. Stage two is the host's first
   dispatch: `Program::Hook` on the `Session "boot"` hook, the `_ral-boot`
   door, applied to `Boot {login, no-rc, recursion-limit, capabilities}`
-  (`ral/src/boot_door.rs`). `boot_door::settle` reads its `Ending`: `Settled`
+  (`ral/src/boot_door.rs`). `capabilities` holds absolute paths:
+  `Boot::profiles` anchors each argument at the invocation cwd before the
+  door runs, since the rc and earlier profiles may `cd` first, and the door
+  refuses a relative one before sourcing anything. `boot_door::settle` reads its `Ending`: `Settled`
   carries the rc's `RcSettings`, a `--capabilities` failure is `Raised`
   status 2, a profile's `exit N` is `Exited(N)`, and either ends the session
   there. The host then applies `--surface` over the rc's choice, keeps the
@@ -144,7 +147,7 @@ the REPL host, and the engine's door compiles, typechecks, and runs it against
 the live session** ([[internals/a-turn-end-to-end|a run, end to end]]).
 
 `exec.rs::step` is the per-line entry. `line_run` builds the `Run` —
-`Program::Source(line)`, `script_name: "<stdin>"`, `GrantStack::root()`,
+`Program::Source(line)`, `origin: SourceOrigin::named("<stdin>")`, `GrantStack::root()`,
 no wall, `RunIo::Inherit`, `RequestedTerminalAccess::Leased`,
 `RunStdin::Inherit` — and `ReplHost::dispatch` sends it. Around it the
 lifecycle hooks run as dispatches of their own. Before, `pre_exec` folds the

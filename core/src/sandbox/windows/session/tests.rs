@@ -78,6 +78,17 @@ fn rules(read: &[&str], write: &[&str], deny: &[&str]) -> FsRules {
     }
 }
 
+/// The process-global session, torn down when the test ends — unwinding
+/// included, so a failed test leaves no profiles, projections or ledger
+/// entries for the next one to inherit.
+struct SessionGuard;
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        super::teardown();
+    }
+}
+
 #[test]
 fn the_universal_prefix_is_refused_in_either_region() {
     for rules in [
@@ -127,6 +138,7 @@ fn a_redirected_allowance_refuses_the_launch_before_the_memo_is_consulted() {
         net: false,
         exec: ExecProjection::default(),
     };
+    let _session = SessionGuard;
     let confine = || {
         let mut launch = Launch::new(r"C:\Windows\System32\cmd.exe");
         super::confine(
@@ -150,7 +162,6 @@ fn a_redirected_allowance_refuses_the_launch_before_the_memo_is_consulted() {
         why.contains("an allowance names what it named when granted"),
         "{why}"
     );
-    super::teardown();
 }
 
 /// End-to-end proof that the kernel honors a *private, derived*
@@ -191,6 +202,7 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
         net: false,
         exec: ExecProjection::default(),
     };
+    let _session = SessionGuard;
 
     // `cmd.exe` loads via the ALL APPLICATION PACKAGES system grants, so
     // the only filesystem authority under test is the derived
@@ -213,6 +225,7 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
     // leave the same empty directory, and only the exit status tells a
     // reader on another machine which of the two it is looking at.
     let cmd = Path::new(r"C:\Windows\System32\cmd.exe");
+    let image = RealPath::of(cmd).expect("cmd.exe has a real path");
     let run_echo_to = |rel: &str| -> WaitOutcome {
         let mut launch = Launch::new(cmd);
         launch.args(["/d", "/s", "/c", &format!("echo ok>{rel}")]);
@@ -223,7 +236,7 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
         super::confine(
             &mut launch,
             &projection,
-            Some(cmd),
+            Some(&image),
             &DurableRoot::default().worker(),
         )
         .expect("confine under a derived capability SID");
@@ -250,8 +263,6 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
         "write outside the grant must be held by deny-by-default; the \
          child ended {ended_outside:?}"
     );
-
-    super::teardown();
 }
 
 #[test]
@@ -269,6 +280,7 @@ fn confined_child_denies_protected_and_explicit_descendants() {
 
     with_state(|| {
         let tree = DenyTree::new();
+        let _session = SessionGuard;
         let denied = [tree.deny.to_str().unwrap()];
         let projection = |deny: bool| SandboxProjection {
             fs: FsProjection::Restricted(rules(
@@ -279,8 +291,9 @@ fn confined_child_denies_protected_and_explicit_descendants() {
             net: false,
             exec: ExecProjection::default(),
         };
+        let cmd = Path::new(r"C:\Windows\System32\cmd.exe");
+        let image = RealPath::of(cmd).expect("cmd.exe has a real path");
         let read = |relative: &str, deny: bool, readable: bool| {
-            let cmd = Path::new(r"C:\Windows\System32\cmd.exe");
             let mut launch = Launch::new(cmd);
             launch.args(["/d", "/s", "/c", &format!("type {relative}")]);
             launch.current_dir(tree.cwd());
@@ -290,7 +303,7 @@ fn confined_child_denies_protected_and_explicit_descendants() {
             super::confine(
                 &mut launch,
                 &projection(deny),
-                Some(cmd),
+                Some(&image),
                 &DurableRoot::default().worker(),
             )
             .unwrap();
@@ -338,7 +351,6 @@ fn confined_child_denies_protected_and_explicit_descendants() {
         read(r"D\dark\key.txt", true, false);
         // Persistent denies are projection-specific.
         read(r"D\protected\key.txt", false, true);
-        super::teardown();
     });
 }
 

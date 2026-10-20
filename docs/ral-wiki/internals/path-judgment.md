@@ -36,7 +36,11 @@ exist: every write is a `locate`.
   sandbox rule that grants ancestors metadata only is enough.
 - **The kernel never follows a symlink.** The walk splices each link it meets
   into the rest of the name itself. A `..` is the kernel's and physical: it
-  climbs out of the link's target, not out of the link's place.
+  climbs out of the link's target, not out of the link's place. Every
+  restart, the given name's and each splice's, passes the one `rooted`
+  check, so a target with no root to walk from (relative to a drive's
+  current directory, or a head `std::path` cannot parse) is refused as the
+  name itself would be.
 - **The walk judges the object, then touches that object.** `check_fs_exact`
   judges `Located::real`, which is canonical by construction. The `Located`
   then does the open, stat, staging, rename or unlink relative to its directory

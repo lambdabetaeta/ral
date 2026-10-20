@@ -42,13 +42,24 @@ pub(super) fn builtin_list_dir(args: &[Value], shell: &mut Shell) -> Settled<Val
 
 /// The system temp directory, located and authorised for writing: what a
 /// fresh temp entry is created inside.
-fn writable_temp_dir(shell: &mut Shell) -> Settled<crate::path::Located> {
-    let rp = shell.resolve(&std::env::temp_dir().to_string_lossy());
-    shell.locate(&rp, &crate::capability::FsOp::Write)
+///
+/// Refused, before anything is created, unless its real path is UTF-8: the
+/// entry is kept and handed back as a string, which a name no string holds
+/// would leave naming some other path, and the entry itself unreachable.
+fn writable_temp_dir(ctx: &str, shell: &mut Shell) -> Settled<crate::path::Located> {
+    let rp = shell.anchor(&std::env::temp_dir());
+    let located = shell.locate(&rp, &crate::capability::FsOp::Write)?;
+    crate::path::utf8(located.real()).map_err(|e| {
+        sig(format!(
+            "{ctx}: the temp directory {e}, so no path made in it can be returned as text; \
+             point TMPDIR (TMP on Windows) at one that is"
+        ))
+    })?;
+    Ok(located)
 }
 
 pub(super) fn builtin_temp_dir(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let parent = writable_temp_dir(shell)?;
+    let parent = writable_temp_dir("temp-dir", shell)?;
     let path = tempfile::Builder::new()
         .prefix("ral-tmp-")
         .tempdir_in(parent.real())
@@ -58,7 +69,7 @@ pub(super) fn builtin_temp_dir(_args: &[Value], shell: &mut Shell) -> Settled<Va
 }
 
 pub(super) fn builtin_temp_file(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let parent = writable_temp_dir(shell)?;
+    let parent = writable_temp_dir("temp-file", shell)?;
     let named = tempfile::Builder::new()
         .prefix("ral-tmp-")
         .tempfile_in(parent.real())

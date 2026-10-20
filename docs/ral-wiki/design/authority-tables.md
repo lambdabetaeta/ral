@@ -546,14 +546,20 @@ stored side. *Respelled* marks a refusal that names the excluded spelling.
   spelling already, Landlock's rules being by descriptor too. The refusal says
   why:
   `… is the denied … under another spelling (case or Unicode form); a deny holds under every spelling`.
-- **A name that is not UTF-8 is its own key**; no filesystem folds one. The
-  `Stored` identity compares `&Path`s, never `to_string_lossy` forms, because
-  two distinct non-UTF-8 paths decode to one replacement-character string and
-  would compare equal
-  (`path_within_does_not_collide_distinct_non_utf8_paths`). The Windows branch
-  necessarily accepts the lossy form for an exclusion: its identity fold is
-  defined on strings, and failing closed there would make a *deny* fail open.
-  An *allowance* is the other way round: its real form is its identity, so
+- **A name that is not UTF-8 is its own key**; no filesystem folds one. Both
+  identities, and `RealPath`'s order, compare names as the host encodes them
+  (`OsStr::as_encoded_bytes`), never their `to_string_lossy` forms, because
+  two distinct names that are not Unicode (bytes off Windows, an unpaired
+  surrogate on it) decode to one replacement-character string, as does a name
+  holding a literal U+FFFD, and would compare equal
+  (`path_within_does_not_collide_distinct_non_utf8_paths`,
+  `a_non_utf8_byte_is_not_its_replacement_character`,
+  `an_unpaired_surrogate_is_not_its_replacement_character`). The Windows split
+  works on those encoded units too: separators and heads are ASCII, so they
+  are found losslessly, and a component that is not UTF-8 keys as itself. A
+  file name that is not Unicode is no command name: `RealPath::name` gives
+  none, so a `name` scope never matches it. An *allowance* is the other way
+  round: its real form is its identity, so
   freezing a grant whose real path is not Unicode is refused, lest a sibling
   whose name holds U+FFFD be granted in its place.
 
@@ -600,7 +606,12 @@ stored side. *Respelled* marks a refusal that names the excluded spelling.
   session launched from `D:` lost a `%TEMP%` on `C:` — the shape GitHub's
   Windows runners have. Folded to zero components it is the universal prefix;
   `FrozenPath::root` and `refreeze` both special-case the bare root
-  (`the_root_survives_a_re_freeze_as_the_universal_prefix`).
+  (`the_root_survives_a_re_freeze_as_the_universal_prefix`). The bare root is
+  one separator alone under the host's rules (`lex::is_bare_root`): `/`, and
+  under Windows rules `\` too, the same driveless root. Under POSIX rules `\`
+  is a relative file name, and minting it as the root would widen a relative
+  spelling to every path
+  (`a_backslash_mints_no_universal_authority_under_posix_rules`).
 
 ### Symlinks
 
@@ -625,10 +636,10 @@ stored side. *Respelled* marks a refusal that names the excluded spelling.
 ### Namespaces
 
 - **synod mints guest prefixes with the POSIX fold**
-  (`FrozenPath::from_guest`, `lex::fold_dots_posix`), because the guard
-  that matches them runs inside the machine, and on a Windows host
-  `fold_dots` rebuilt `/work` as `\work`, a relative path in the namespace it
-  claimed to name ([[decisions/260726_guest-namespace-prefixes|guest-namespace-prefixes]]).
+  (`FrozenPath::from_guest`, `lex::fold_dots_under` under Posix rules),
+  because the guard that matches them runs inside the machine, and on a
+  Windows host the host fold once rebuilt `/work` as `\work`, a relative path
+  in the namespace it claimed to name ([[decisions/260726_guest-namespace-prefixes|guest-namespace-prefixes]]).
 - **A prefix carries no namespace.** Whose machine a path names is settled by
   the door that mints it; the meet compares real forms and nothing else,
   and a guest prefix is re-frozen only by the guard that matches it, inside the
@@ -763,7 +774,8 @@ argues from.
   Windows exactly `\\.\NUL` in either slash spelling and any case — since
   nothing reaches the disk through it. **DOS reserved device names are refused
   before either** — `NUL`, `CON`, `PRN`, `AUX`, `COM1`–`COM9`, `LPT1`–`LPT9`,
-  any case, any extension, trailing dots and blanks trimmed, so `COM1.log` and
+  and `COM`/`LPT` with a superscript `¹`, `²` or `³`, which Windows reads as a
+  digit, any case, any extension, trailing dots and blanks trimmed, so `COM1.log` and
   `nul .txt` too — since they name no object to judge. For `NUL` the refusal
   asks `Did you mean \\.\NUL?`.
 - **`Guarded`** answers a write onto the boot-pinned enforcer binary, judged by

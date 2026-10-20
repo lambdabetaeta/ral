@@ -103,7 +103,7 @@ pub fn assemble(workspace: &Path, folder_name: &str, config_dir: &Path) -> Resul
     match std::fs::read_to_string(&rules) {
         Ok(text) => sections.push((Some("House rules"), text)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("{}: {e}", rules.display())),
+        Err(e) => return Err(format!("{}: {e}", ral_core::path::shown(rules))),
     }
     sections.push((
         Some("Talking to the user"),

@@ -345,7 +345,7 @@ impl Avatar {
         let Some(first) = live.next() else {
             return Err(io::Error::other(format!(
                 "cannot resume {}: no session is open there; were they all closed with /close?",
-                cfg.run_dir.display()
+                ral_core::path::shown(&cfg.run_dir)
             )));
         };
         let (fleet, first_seat) = Fleet::found(cfg, seat, &crate::INSTALLERS, AGENT_LEASE_IDLE)?;
@@ -610,6 +610,10 @@ impl Avatar {
     ///
     /// # Panics
     /// If the test process has no cwd.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] a fixture rooted at the test process's own cwd"
+    )]
     pub(crate) fn for_test_with(cfg: TestTrunk) -> io::Result<Self> {
         let TestTrunk {
             system,

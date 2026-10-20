@@ -288,9 +288,10 @@ pub fn load_seed(
 ) -> Result<Option<String>, String> {
     let seed = match (prompt, file) {
         (Some(p), _) => Some(p),
-        (None, Some(path)) => {
-            Some(std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?)
-        }
+        (None, Some(path)) => Some(
+            std::fs::read_to_string(&path)
+                .map_err(|e| format!("{}: {e}", ral_core::path::shown(&path)))?,
+        ),
         (None, None) => None,
     };
     Ok(seed.filter(|s| !s.trim().is_empty()))

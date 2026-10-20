@@ -591,7 +591,10 @@ fn a_try_in_a_stage_cannot_see_its_reader_gone_stop() {
     let src = "let spew = { |n| to-line y\n spew $n }\n\
                !{ try { spew 0 } { |err| fail [status: 7, message: x] } } | /usr/bin/head -n 1";
     let mut shell = crate::test_helper::core_shell();
-    let report = shell.run(crate::protocol::Run::captured(src, "<test>"));
+    let report = shell.run(crate::protocol::Run::captured(
+        src,
+        crate::source::SourceOrigin::named("<test>"),
+    ));
     match report {
         crate::run::RunReport::Ran {
             ending: crate::run::Ending::Settled { .. },

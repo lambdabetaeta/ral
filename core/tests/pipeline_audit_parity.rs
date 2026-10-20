@@ -20,6 +20,7 @@ use common::fresh_shell;
 
 use ral_core::protocol::Run;
 use ral_core::run::RunRequest;
+use ral_core::source::SourceOrigin;
 use ral_core::types::{Map, Observation, Settled, Value};
 use ral_core::{EventSink, SurfaceSink};
 use std::sync::{Arc, Mutex};
@@ -45,7 +46,7 @@ fn run(source: &str, sink: bool) -> (Settled<Value>, Vec<Value>) {
     let result = shell
         .run(RunRequest {
             surface: sink.then_some(recorder),
-            ..RunRequest::from(Run::foreground(source, "<test>"))
+            ..RunRequest::from(Run::foreground(source, SourceOrigin::named("<test>")))
         })
         .expect_ran()
         .into_result();

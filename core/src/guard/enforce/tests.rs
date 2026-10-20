@@ -20,7 +20,7 @@ fn stack(fs: FsPolicy) -> GrantStack {
 
 fn admits_read(grants: &GrantStack, path: &std::path::Path) -> bool {
     let resolver = Resolver::shell_less();
-    let rp = resolver.resolve(&path.to_string_lossy());
+    let rp = resolver.anchor(path);
     grants.admits_fs(&FsOp::Read, &rp)
 }
 
@@ -314,7 +314,7 @@ fn a_case_variant_spelling_meets_the_deny() {
         ..FsPolicy::default()
     });
     let resolver = Resolver::shell_less();
-    let rp = resolver.resolve(&root.join("SECRET/key").to_string_lossy());
+    let rp = resolver.anchor(&root.join("SECRET/key"));
     let located = walk(&rp, Leaf::Resolve).unwrap();
     assert_eq!(located.real(), secret.join("key"));
     assert!(!admits_read(&grants, located.real()));

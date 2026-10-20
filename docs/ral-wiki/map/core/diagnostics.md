@@ -29,6 +29,23 @@ innermost enclosing node's span as it unwinds (`Error::at_span`). Since a
 `Span` is already tagged with its `FileId`, the source identity is the
 value's own and no ambient position has to be maintained.
 
+Every registered `Source` carries its `SourceOrigin` (`source.rs`): a
+`File` by the native path it was read from, or a `Virtual` label —
+`<stdin>`, `-c`, a hook, an embedded profile — for text no file holds.
+That path is a `SourceFile`, UTF-8 by construction: an origin travels
+serialized (on a `Run`, the module stack, the `SourceDb`) and serde holds a
+path only as text, so `SourceFile::new` — the one door, through
+`path::utf8` — refuses a path that is not UTF-8, naming it, before the file
+is read, rather than letting serialization fail late. Every loader (batch
+script, startup file, plugin, `use`, capability profile, exarch's config and
+network policy) surfaces that refusal as its own error. The
+origin is the source's identity: the module stack's cycle key, the
+directory a script-relative path resolves beside, and, for a file, what
+`$SCRIPT` bakes. The display name a diagnostic draws and a `CallSite`
+carries is derived from it once, at registration: a file's path
+`path::shown`, a virtual source's label as given. A host names a run's
+root source by the `origin` on its `Run`.
+
 `SourceDb` (`source.rs`) resolves that id at render time. It is the registry
 of every source the *session* has loaded, keyed by `FileId`, living on
 `SessionState::sources`: **append-only for the session's whole life**, so a

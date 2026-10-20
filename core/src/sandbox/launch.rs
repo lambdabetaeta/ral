@@ -117,13 +117,13 @@ fn windows_sandboxed_command(
     // The LowBox token reads only the ALL APPLICATION PACKAGES system paths,
     // so a user-installed image needs `session::confine` to stamp its path RO,
     // mirroring the Linux backend binding the program path into the bwrap argv.
-    let (mut launch, image): (crate::process::Launch, Option<std::path::PathBuf>) =
+    let (mut launch, image): (crate::process::Launch, Option<crate::path::RealPath>) =
         match admitted.program() {
             Program::File { path, real } => {
                 let mut launch = crate::process::Launch::new(real.as_path());
                 launch.arg0(path);
                 launch.args(args);
-                (launch, Some(real.as_path().to_path_buf()))
+                (launch, Some(real.clone()))
             }
             Program::Tool(tool) => {
                 let mut launch = super::reexec::launch(Role::BundledTool).map_err(|e| {
@@ -138,12 +138,11 @@ fn windows_sandboxed_command(
                 let image = (super::reexec::OWN.get())
                     .map(|own| own.exec_path().to_path_buf())
                     .or_else(|| std::env::current_exe().ok())
-                    .and_then(|exe| crate::path::RealPath::of(&exe).ok())
-                    .map(|real| real.as_path().to_path_buf());
+                    .and_then(|exe| crate::path::RealPath::of(&exe).ok());
                 (launch, image)
             }
         };
-    super::windows::session::confine(&mut launch, projection, image.as_deref(), cancel)?;
+    super::windows::session::confine(&mut launch, projection, image.as_ref(), cancel)?;
     Ok(launch)
 }
 
@@ -178,6 +177,10 @@ fn linux_sandboxed_command(
 /// `Rendered`, which refuses what is not Unicode rather than approximating it.
 #[cfg(target_os = "linux")]
 #[allow(clippy::unnecessary_debug_formatting)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "native: bwrap argv takes a name only as valid UTF-8"
+)]
 fn faithful<'a>(path: &'a Path, what: &str) -> Result<&'a str, Refusal> {
     path.to_str().ok_or_else(|| {
         Refusal::Launch(format!(

@@ -23,7 +23,7 @@ use ral_core::RunIo;
 use ral_core::capability::{Capabilities, FsPolicy, GrantStack};
 use ral_core::path::FrozenPath;
 use ral_core::protocol::Run;
-use ral_core::run::RunReport;
+use ral_core::source::SourceOrigin;
 use ral_core::types::{Break, Settled, Shell, Value};
 
 /// A `Shell` matching what every front end ends up with after bootstrap:
@@ -74,7 +74,7 @@ fn top_level_under(shell: &mut Shell, caps: Capabilities, src: &str) -> Settled<
         .run(Run {
             io: RunIo::Inherit,
             caps: GrantStack::of(caps),
-            ..Run::captured(src, "<test>")
+            ..Run::captured(src, SourceOrigin::named("<test>"))
         })
         .expect_ran()
         .into_result()

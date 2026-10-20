@@ -6,6 +6,7 @@ use super::{
 use crate::card::Mark;
 use crate::provider::allowance::{Allowance, Consumption, Reading};
 use crate::tui::app::tests::{app, ctx, text};
+use std::path::Path;
 use std::time::Duration;
 
 fn replacements(line: &str) -> Vec<String> {
@@ -115,27 +116,31 @@ fn the_argument_hint_shows_but_is_never_spliced() {
 // (`/tmp/out.txt` is not absolute on Windows), so each host pins its own.
 #[cfg(unix)]
 #[test]
+#[allow(clippy::disallowed_methods, reason = "[test] fixed fixture paths")]
 fn export_path_resolves_absolute_and_relative() {
+    let cwd = Path::new("/Users/me/proj");
     assert_eq!(
-        resolve_export_path("/tmp/out.txt", "/Users/me/proj").to_str(),
-        Some("/tmp/out.txt")
+        resolve_export_path("/tmp/out.txt", cwd),
+        Path::new("/tmp/out.txt")
     );
     assert_eq!(
-        resolve_export_path("notes.md", "/Users/me/proj").to_str(),
-        Some("/Users/me/proj/notes.md")
+        resolve_export_path("notes.md", cwd),
+        Path::new("/Users/me/proj/notes.md")
     );
 }
 
 #[cfg(windows)]
 #[test]
+#[allow(clippy::disallowed_methods, reason = "[test] fixed fixture paths")]
 fn export_path_resolves_absolute_and_relative() {
+    let cwd = Path::new(r"C:\Users\me\proj");
     assert_eq!(
-        resolve_export_path(r"C:\scratch\out.txt", r"C:\Users\me\proj").to_str(),
-        Some(r"C:\scratch\out.txt")
+        resolve_export_path(r"C:\scratch\out.txt", cwd),
+        Path::new(r"C:\scratch\out.txt")
     );
     assert_eq!(
-        resolve_export_path("notes.md", r"C:\Users\me\proj").to_str(),
-        Some(r"C:\Users\me\proj\notes.md")
+        resolve_export_path("notes.md", cwd),
+        Path::new(r"C:\Users\me\proj\notes.md")
     );
 }
 
@@ -179,12 +184,13 @@ fn all_unmetered_collapses_to_one_sentence_naming_the_accounts() {
 
 /// `/export` writes a new file only; the one already there is left alone.
 #[test]
+#[allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
 fn export_refuses_to_overwrite() {
     let (mut app, _rx, root) = app();
     let dir = tempfile::tempdir().expect("a temp dir");
     let dest = dir.path().join("out.txt");
     std::fs::write(&dest, "keep me").expect("a file to protect");
-    cmd_export(&mut app, dest.to_str().expect("a utf-8 path"), ctx().info);
+    cmd_export(&mut app, &ral_core::path::shown(&dest), ctx().info);
     assert_eq!(std::fs::read_to_string(&dest).expect("it reads"), "keep me");
     let all = text(&mut app, root.id);
     assert!(all.contains("refusing to overwrite"), "{all:?}");

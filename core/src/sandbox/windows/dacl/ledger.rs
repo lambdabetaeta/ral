@@ -8,7 +8,9 @@
 // so each diffs against the one it was taken from.
 
 use super::{DaclError, stamp::STAMP_STORE_FILE_NAME};
+use crate::path::shown;
 use serde::{Deserialize, Serialize};
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Write};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -120,13 +122,13 @@ impl DaclManager {
 
 /// Reap every ledger whose owning process is gone, deleting its profiles. `session::boot_recover`
 /// runs this once at session start, before any grant is applied.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:dacl-ledger-sweep] Startup orphan sweep: lists the ledger directory, quarantines unparseable ledgers by rename, and removes fully-recovered ones. Sandbox crash-recovery infrastructure, not model data I/O."
-)]
 pub(crate) fn recover_orphaned_state() -> Result<RecoveryReport, DaclError> {
     let mut report = RecoveryReport::default();
     let dir = ledger_dir();
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[silent:dacl-ledger-sweep] Startup orphan sweep: lists the ledger directory to find ledgers whose owner is gone. Sandbox crash-recovery infrastructure, not model data I/O."
+    )]
     let entries = match fs::read_dir(&dir) {
         Ok(e) => e,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(report),
@@ -135,27 +137,27 @@ pub(crate) fn recover_orphaned_state() -> Result<RecoveryReport, DaclError> {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+        if path.extension() != Some(OsStr::new("json")) {
             continue;
         }
         // The stamp store lives beside the ledgers but is not one: it has no
         // `run_id`, so parsing it as a `Ledger` always fails. Recognizing it
         // by file name keeps the sweep from quarantining a session's
         // completion witnesses on every boot.
-        if path.file_name().and_then(|s| s.to_str()) == Some(STAMP_STORE_FILE_NAME) {
+        if path.file_name() == Some(OsStr::new(STAMP_STORE_FILE_NAME)) {
             continue;
         }
         report.files_processed += 1;
         let ledger = match read_ledger(&path) {
             Ok(s) => s,
             Err(e) => {
-                report.errors.push(format!("parse {}: {e}", path.display()));
-                let corrupt = path.with_extension("json.corrupt");
-                if let Err(e2) = fs::rename(&path, &corrupt) {
+                report.errors.push(format!("parse {}: {e}", shown(&path)));
+                let corrupt = crate::path::with_appended_suffix(&path, "corrupt");
+                if let Err(e2) = quarantine_ledger(&path, &corrupt) {
                     report.errors.push(format!(
                         "quarantine {} -> {}: {e2}",
-                        path.display(),
-                        corrupt.display(),
+                        shown(&path),
+                        shown(&corrupt),
                     ));
                 }
                 continue;
@@ -173,10 +175,8 @@ pub(crate) fn recover_orphaned_state() -> Result<RecoveryReport, DaclError> {
                 Err(e) => report.errors.push(format!("delete profile {name}: {e}")),
             }
         }
-        if let Err(e) = fs::remove_file(&path) {
-            report
-                .errors
-                .push(format!("remove {}: {e}", path.display()));
+        if let Err(e) = remove_ledger(&path) {
+            report.errors.push(format!("remove {}: {e}", shown(&path)));
         }
     }
     Ok(report)
@@ -186,19 +186,12 @@ pub(crate) fn recover_orphaned_state() -> Result<RecoveryReport, DaclError> {
 /// `XDG_STATE_HOME` relocates it — which is how the tests get a private one.
 /// With no home and no override the base is the temp dir: the ledger must land
 /// somewhere absolute, and never under the cwd.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "host-env: the sandbox ledger is process state under the host's XDG state base, not script-visible data"
-)]
 pub(super) fn ledger_dir() -> PathBuf {
-    let dir = crate::host::xdg(crate::path::XdgKind::State)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("ral")
-        .join("sandbox-dacl");
+    let dir = crate::path::app_dir_or_temp(crate::path::XdgKind::State, "ral").join("sandbox-dacl");
     debug_assert!(
-        dir.is_absolute(),
+        crate::path::is_absolute(&dir),
         "ledger dir must be absolute: {}",
-        dir.display()
+        shown(&dir)
     );
     dir
 }
@@ -237,7 +230,7 @@ pub(super) fn write_bytes_atomic(path: &Path, json: &[u8]) -> Result<(), DaclErr
         Err(e) => crate::dbg_trace!(
             "sandbox-win-dacl",
             "pre-write cleanup of {} failed ({e}); a leftover tmp may obstruct the write",
-            tmp.display()
+            shown(&tmp)
         ),
     }
     {
@@ -256,9 +249,17 @@ pub(super) fn write_bytes_atomic(path: &Path, json: &[u8]) -> Result<(), DaclErr
 }
 
 fn tmp_path_for(path: &Path) -> PathBuf {
-    let mut s = path.as_os_str().to_owned();
-    s.push(".tmp");
-    PathBuf::from(s)
+    crate::path::with_appended_suffix(path, "tmp")
+}
+
+/// Set an unparseable ledger aside as `corrupt`, so the next sweep does not
+/// meet it again and its contents stay for a human to read.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:dacl-ledger-quarantine] Renames an unparseable ledger aside during the startup orphan sweep. Sandbox crash-recovery infrastructure, not model data I/O."
+)]
+fn quarantine_ledger(path: &Path, corrupt: &Path) -> io::Result<()> {
+    fs::rename(path, corrupt)
 }
 
 fn remove_ledger_best_effort(path: &Path) {
@@ -276,20 +277,21 @@ fn remove_ledger(path: &Path) -> io::Result<()> {
 /// Retries `ERROR_SHARING_VIOLATION`/`ERROR_LOCK_VIOLATION`: a concurrent
 /// writer mid-rename, or an on-access virus scanner, holds the file for a
 /// moment, and without the retry a good ledger gets quarantined as corrupt.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:dacl-ledger-read] Reads back a persisted ledger for orphan recovery / crash-safety bookkeeping. Sandbox infrastructure, not model data I/O."
-)]
 fn read_ledger(path: &Path) -> Result<Ledger, DaclError> {
     const ERROR_SHARING_VIOLATION: i32 = 32;
     const ERROR_LOCK_VIOLATION: i32 = 33;
     const ATTEMPTS: u32 = 3;
     let mut last_err: Option<io::Error> = None;
     for i in 0..ATTEMPTS {
-        match fs::read(path) {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "[silent:dacl-ledger-read] Reads back a persisted ledger for orphan recovery / crash-safety bookkeeping. Sandbox infrastructure, not model data I/O."
+        )]
+        let read = fs::read(path);
+        match read {
             Ok(bytes) => {
                 return serde_json::from_slice(&bytes)
-                    .map_err(|e| DaclError::LedgerParse(format!("{}: {e}", path.display())));
+                    .map_err(|e| DaclError::LedgerParse(format!("{}: {e}", shown(path))));
             }
             Err(e) => {
                 let transient = matches!(
@@ -324,6 +326,10 @@ fn generate_run_id() -> String {
     format!("pid-{pid}-{h:016x}")
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "native: the image name the OS reports, compared with the one it reports for a live pid"
+)]
 fn current_image_basename() -> String {
     std::env::current_exe()
         .ok()

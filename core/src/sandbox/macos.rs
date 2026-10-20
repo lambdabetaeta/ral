@@ -136,6 +136,10 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
 
     // Ral's own file, rendered like the rest: execve presents `/tmp/x` as
     // `/private/tmp/x`.  Protected whatever the grant, never admitted by it.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "native: ral's own path, handed to Seatbelt as the profile names it"
+    )]
     let own = render_paths(&[super::reexec::own()?.exec_path().to_string_lossy()])?;
     let pinned = rendered
         .fs
@@ -864,6 +868,10 @@ mod tests {
     }
 
     /// Ral's own spellings, as the profile will name them.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] ral's own path, rendered as the profile renders it"
+    )]
     fn own_names() -> Vec<crate::path::Rendered> {
         super::super::reexec::pin_self();
         let own = super::super::reexec::own().expect("pin_self pins this test binary");

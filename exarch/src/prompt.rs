@@ -121,38 +121,21 @@ pub(crate) fn with_grant(template: &str, session: &GrantStack, ceiling: &GrantSt
 /// The `AGENTS.md` chain to inject, outermost first so the most specific
 /// file's recency dominates: the operator's `<config>/AGENTS.md` — the trusted
 /// XDG root [`crate::config`] loads `config.ral` from — then every `AGENTS.md`
-/// from the repo root down to `cwd`, the walk stopping at the first ancestor
-/// holding a `.git` entry (file or directory, so worktrees and submodules
-/// count).  Outside a repo, only `cwd/AGENTS.md`.
+/// along [`work_tree_chain`](ral_core::path::work_tree_chain), the repo root
+/// down to `cwd`.  Outside a repo, only `cwd/AGENTS.md`.
 ///
 /// The repo files sit in the agent's own writable tree, so unlike `config.ral`
 /// they are untrusted — but they add prompt text, never capabilities, and
 /// cannot widen the grant.
 fn discover_agents(cwd: &Path, config_dir: &Path) -> Vec<PathBuf> {
-    let repo_root = ral_core::path::find_git_entry(cwd)
-        .and_then(|dot_git| dot_git.parent().map(Path::to_path_buf));
-    let mut scan: Vec<PathBuf> = match repo_root {
-        Some(root) => {
-            let mut dirs: Vec<PathBuf> = cwd
-                .ancestors()
-                .take_while(|dir| *dir != root)
-                .map(Path::to_path_buf)
-                .collect();
-            dirs.push(root);
-            dirs
-        }
-        None => vec![cwd.to_path_buf()],
-    };
-    scan.reverse();
-
     let mut files = Vec::new();
     let global = config_dir.join("AGENTS.md");
-    if ral_core::path::exists(&global.to_string_lossy()) {
+    if global.exists() {
         files.push(global);
     }
-    for dir in scan {
+    for dir in ral_core::path::work_tree_chain(cwd) {
         let file = dir.join("AGENTS.md");
-        if ral_core::path::exists(&file.to_string_lossy()) {
+        if file.exists() {
             files.push(file);
         }
     }
@@ -172,7 +155,8 @@ fn read_files(files: &[PathBuf]) -> Result<String, String> {
             buf.push_str("\n\n");
         }
         buf.push_str(
-            &std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?,
+            &std::fs::read_to_string(path)
+                .map_err(|e| format!("{}: {e}", ral_core::path::shown(path)))?,
         );
     }
     Ok(buf)

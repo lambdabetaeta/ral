@@ -30,6 +30,7 @@ use crate::syntax::ast::{
 use crate::syntax::group::{RecMember, StmtGroup, group_stmts};
 use crate::syntax::parser::ParseError;
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::{Arc, LazyLock};
 
 /// State threaded through the elaboration pass.
@@ -44,9 +45,9 @@ struct Elaborator {
     /// Attached to every emitted `Comp`; narrowed and restored by `with_span`,
     /// which every traversal that knows a tighter byte range wraps its body in.
     current_span: Option<Span>,
-    /// This source's own display name, `None` where there is no self-location
-    /// to bake (the REPL, `-c`, synthetic `<...>` sources).  What `$SCRIPT`
-    /// resolves to.
+    /// The script file's path as shown, `None` where there is no
+    /// self-location to bake (the REPL, `-c`, virtual sources).  What
+    /// `$SCRIPT` resolves to.
     script: Option<String>,
     /// Elaboration's one failure path, checked by `elaborate` once the walk is
     /// done — a single slot beats threading `Result` through every traversal.
@@ -68,14 +69,14 @@ impl WithSpan for Elaborator {
 
 impl Elaborator {
     /// `bindings` are names already live in the caller (REPL definitions, say);
-    /// `name` is the source's own display name.
-    fn new_with_bindings(bindings: impl IntoIterator<Item = Name>, name: &str) -> Self {
+    /// `script` is the file the source was read from, if any.
+    fn new_with_bindings(bindings: impl IntoIterator<Item = Name>, script: Option<&Path>) -> Self {
         Self {
             counter: 0,
             prelude: prelude_scope(),
             lexical_scopes: vec![bindings.into_iter().collect()],
             current_span: None,
-            script: crate::path::lex::has_script_identity(name).then(|| name.to_string()),
+            script: script.map(crate::path::shown),
             error: None,
         }
     }
@@ -444,7 +445,7 @@ impl Elaborator {
     /// run before its parent into `binds` for the caller to `wrap_binds`.
     fn elab_expr(&mut self, ast: &Ast, binds: &mut Vec<(Pattern, Comp)>) -> Comp {
         match ast {
-            Ast::Word(Word::Plain(s) | Word::Slash(s)) => {
+            Ast::Word(Word::Plain(s) | Word::Path(s)) => {
                 comp!(self, CompKind::Return(word_val(s)))
             }
             Ast::Literal(s) => comp!(self, CompKind::Return(Val::String(s.clone().into()))),
@@ -1177,18 +1178,18 @@ pub(crate) fn word_val(s: &str) -> Val {
 /// member sharing a `Rec` group, and everything else a `Run`.
 ///
 /// `bindings` are the names already live in the calling environment (a REPL's
-/// accumulated definitions, say); the prelude is always in scope.  `name` is the
-/// source's own display name, the value `$SCRIPT` resolves to.
+/// accumulated definitions, say); the prelude is always in scope.  `script` is
+/// the file the source was read from, `None` for a virtual source; shown, it
+/// is the value `$SCRIPT` resolves to.
 ///
 /// # Errors
-/// `$SCRIPT` referenced where `name` carries no script identity, or bound by
-/// a pattern.
+/// `$SCRIPT` referenced where there is no `script`, or bound by a pattern.
 pub fn elaborate(
     ast: &[Stmt],
     bindings: impl IntoIterator<Item = Name>,
-    name: &str,
+    script: Option<&Path>,
 ) -> Result<Unchecked, ParseError> {
-    let mut elaborator = Elaborator::new_with_bindings(bindings, name);
+    let mut elaborator = Elaborator::new_with_bindings(bindings, script);
     let mut phrases = Vec::new();
     for group in group_stmts(ast) {
         match group {

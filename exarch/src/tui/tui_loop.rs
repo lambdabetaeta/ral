@@ -108,7 +108,7 @@ pub fn run(
     // rather than the alt screen.
     drop(tui);
     for dir in &logs {
-        ral_core::outln!("Session log: {}/record.jsonl", dir.display());
+        ral_core::outln!("Session log: {}/record.jsonl", ral_core::path::shown(dir));
     }
     ral_core::outln!("render one with `exarch export <dir>`");
     ral_core::outln!("{usage}");

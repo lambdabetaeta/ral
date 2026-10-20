@@ -134,7 +134,11 @@ pub(crate) fn engine(
 ) -> ral_core::carrier::IdentityTransport {
     let temp = std::env::temp_dir();
     engine_at(
-        &ral_core::protocol::Attach::new(TEST_TAG, temp.clone(), temp),
+        &ral_core::protocol::Attach::new(
+            TEST_TAG,
+            ral_core::path::EnginePath::Host(temp.clone()),
+            ral_core::path::EnginePath::Host(temp),
+        ),
         runtime,
         dress,
     )

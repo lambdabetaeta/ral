@@ -14,7 +14,7 @@
 //! is no status to distinguish, nothing to put back, and no conflict a
 //! put-back could discover.
 
-use ral_core::path::shown;
+use ral_core::path::{basename, extension, is_stream_or_drive, shown};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
@@ -146,15 +146,12 @@ const OPENABLE: &[&str] = &[
 
 /// Whether the file named `rel` is opened or only shown in its folder,
 /// judged by its final extension alone: `Invoice.pdf.lnk` is a shortcut, not
-/// a PDF.  A name carrying a colon is never opened, since on Windows that
-/// names an alternate stream of some other file rather than a file of its
-/// own.
+/// a PDF.  A name carrying a colon is never opened, on any computer: on
+/// Windows it names an alternate stream of some other file rather than a file
+/// of its own, and a report may describe a folder Windows wrote.
 pub(crate) fn open_as(rel: &str) -> OpenAs {
-    let name = rel.rsplit(['/', '\\']).next().unwrap_or(rel);
-    let openable = !name.contains(':')
-        && name
-            .rsplit_once('.')
-            .is_some_and(|(_, ext)| OPENABLE.iter().any(|ok| ok.eq_ignore_ascii_case(ext)));
+    let openable = !basename(rel).contains(':')
+        && extension(rel).is_some_and(|ext| OPENABLE.iter().any(|ok| ok.eq_ignore_ascii_case(ext)));
     if openable {
         OpenAs::Open
     } else {
@@ -183,7 +180,7 @@ fn inside(folder: &Path, rel: &str) -> Result<PathBuf, String> {
         let Component::Normal(name) = part else {
             return Err(refuse());
         };
-        if cfg!(windows) && name.to_string_lossy().contains(':') {
+        if is_stream_or_drive(name) {
             return Err(refuse());
         }
         joined.push(name);
@@ -288,8 +285,7 @@ pub(crate) fn forget(review: &Review) {
 /// when the window and the shell have drifted apart on which folder is
 /// live.
 #[tauri::command]
-pub fn job_report(review: State<'_, Review>, folder: String) -> Result<WindowReport, String> {
-    let folder = PathBuf::from(folder);
+pub fn job_report(review: State<'_, Review>, folder: PathBuf) -> Result<WindowReport, String> {
     let guard = review.0.lock_ignore_poison();
     let result = match guard.as_ref() {
         None => Err("Synod has not finished a job in this folder yet.".to_string()),

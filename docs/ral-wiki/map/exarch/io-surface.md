@@ -347,16 +347,14 @@ child-wait.
   to the handle-relative walk and every tag went with them. Enforcement rides the pre-existing
   `[workspace.lints.clippy] disallowed_methods = "deny"` table, which all ten
   crates opt into via `[lints] workspace = true`; plain `cargo clippy --workspace
-  --all-targets` is the command CI runs. A call site is then a reviewed
+  --all-targets` checks it (`scripts/ci.sh`'s `lint` step runs it on the Unix hosts, `windows.yml`'s clippy step on Windows). A call site is then a reviewed
   syscall site or a lint
   failure *in the crates that do not switch the lint off again at their own
-  root*: `exarch/src/lib.rs`, `ral-daemon/src/lib.rs` and
-  `ral-initramfs/src/lib.rs` each carry a crate-level
-  `#![allow(clippy::disallowed_methods, …)]` on the grounds of being an
-  application rather than the ral shell, so inside them the site set rests on
-  the meta-test's per-file check and on review, never on the compiler — 165
-  constructor calls, the crate that owns the model's own turn-time I/O among
-  them. synod carries none. Whether that boundary is the discipline's real edge or an artefact of
+  root*: `ral-daemon/src/lib.rs` and `ral-initramfs/src/lib.rs` each carry a
+  crate-level `#![allow(clippy::disallowed_methods, …)]` on the grounds of being
+  a guest's init rather than the ral shell, so inside them the site set rests on
+  the meta-test's per-file check and on review, never on the compiler. exarch
+  and synod carry none. Whether that boundary is the discipline's real edge or an artefact of
   which crates existed when it was drawn is open. The ADR's literal `-D
   clippy::disallowed_methods` is *not* used: a command-line `-D` escalates the
   lint onto the vendored `ral-ripgrep-core`, which deliberately opts out, and

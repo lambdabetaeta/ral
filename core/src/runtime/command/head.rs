@@ -1,7 +1,8 @@
 //! What command did the user name, and what will run?
 //!
 //! [`Head`] freezes the answer at dispatch — the spelling we show, and the
-//! [`Program`] a grant judges and the launcher runs — and is threaded down to
+//! [`Program`] a grant judges and the launcher runs, found from the head's
+//! native target and never from the spelling — and is threaded down to
 //! launch, so classification, guard and spawn see one program and `PATH` is
 //! walked once.  A head that names nothing runnable has no program: its
 //! [`Missing`] is the 127 or 126 `super::vet` reports, read off this walk
@@ -17,6 +18,12 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Head {
+    /// The command as ral names it, to the guard and in what it reports: a
+    /// bare name as written, a `~` head as
+    /// [`TildePath::shown`](crate::path::tilde::TildePath::shown) shows it.
+    /// A path head is the one shown path not folded by [`crate::path::shown`]:
+    /// it echoes the user's own word, separators as typed, since what ral
+    /// reports answers the word the user wrote.
     pub(crate) shown: String,
     pub(crate) program: Result<Program, Missing>,
 }
@@ -24,7 +31,10 @@ pub(crate) struct Head {
 /// Why a head has no program.
 #[derive(Clone, Debug)]
 pub(crate) enum Missing {
-    NotFound,
+    /// Nothing at the name: a bare name no `PATH` directory holds, or the
+    /// file a path looked for, kept so the refusal can offer the extension
+    /// it lacks.
+    NotFound(Option<PathBuf>),
     /// The file named or found, which cannot be run.
     NotExecutable(PathBuf),
 }
@@ -34,25 +44,41 @@ impl Head {
     /// its name alone, so the in-binary implementation wins over a host
     /// twin; any other bare name by the effective `PATH`; a path where the
     /// launcher's child will find it.
+    ///
+    /// A `~` head expands natively against `HOME` for its target, and is
+    /// shown as `~` shows anywhere else; with no `HOME` it names no file and
+    /// is shown as written.
     pub(crate) fn resolve(name: &CommandName, ctx: &Context) -> Self {
-        let shown = render(name, ctx);
-        let program = match name {
-            CommandName::Bare(bare) if crate::uutils::is_uutils_tool(bare) => {
-                Ok(Program::Tool(bare.to_string()))
+        match name {
+            CommandName::Bare(bare) => {
+                let shown = bare.to_string();
+                let program = if crate::uutils::is_uutils_tool(bare) {
+                    Ok(Program::Tool(shown.clone()))
+                } else {
+                    let path = ctx.env_overrides().get_or_host("PATH");
+                    match crate::path::search(&shown, path.as_deref(), ctx.search_cwd()) {
+                        PathSearch::Executable(hit) => Program::file(hit),
+                        PathSearch::FoundNotExecutable(found) => Err(Missing::NotExecutable(found)),
+                        PathSearch::Missing => Err(Missing::NotFound(None)),
+                    }
+                };
+                Self { shown, program }
             }
-            CommandName::Bare(_) => {
-                let path = ctx.env_overrides().get_or_host("PATH");
-                match crate::path::search(&shown, path.as_deref(), ctx.search_cwd()) {
-                    PathSearch::Executable(hit) => Program::file(hit),
-                    PathSearch::FoundNotExecutable(found) => Err(Missing::NotExecutable(found)),
-                    PathSearch::Missing => Err(Missing::NotFound),
-                }
-            }
-            CommandName::Path(_) | CommandName::TildePath(_) => {
-                Program::file(launch_path(&shown, ctx))
-            }
-        };
-        Self { shown, program }
+            CommandName::Path(path) => Self {
+                shown: path.clone(),
+                program: Program::file(launch_path(&PathBuf::from(path), ctx)),
+            },
+            CommandName::TildePath(path) => match ctx.home() {
+                Some(home) => Self {
+                    shown: path.shown(&home),
+                    program: Program::file(launch_path(&path.expand(&home), ctx)),
+                },
+                None => Self {
+                    shown: path.to_literal(),
+                    program: Err(Missing::NotFound(None)),
+                },
+            },
+        }
     }
 }
 
@@ -61,7 +87,7 @@ impl Program {
     /// seen as `path` by the program.
     pub(crate) fn file(path: PathBuf) -> Result<Self, Missing> {
         let real = RealPath::of(&path).map_err(|e| match e.kind() {
-            ErrorKind::NotFound | ErrorKind::NotADirectory => Missing::NotFound,
+            ErrorKind::NotFound | ErrorKind::NotADirectory => Missing::NotFound(Some(path.clone())),
             _ => Missing::NotExecutable(path.clone()),
         })?;
         if !is_executable_file(&path) {
@@ -73,11 +99,11 @@ impl Program {
 
 impl Missing {
     /// The refusal for a head named `shown` that has no program.
-    pub(crate) fn error(&self, shown: &str, ctx: &Context) -> Error {
+    pub(crate) fn error(&self, shown: &str) -> Error {
         match self {
-            Self::NotFound => {
+            Self::NotFound(looked_for) => {
                 let err = Error::spawn_failure(shown, SpawnFailure::NotFound);
-                match suffixed(shown, ctx) {
+                match looked_for.as_deref().and_then(|file| suffixed(shown, file)) {
                     Some(meant) => err.with_hint(format!("did you mean '{meant}'?")),
                     None => err,
                 }
@@ -94,7 +120,7 @@ impl Missing {
 /// cannot reach, or one carrying `+x`, is refused by the OS: permission.
 fn refusal(shown: &str, found: &Path) -> SpawnFailure {
     let not_a_program = |kind| SpawnFailure::NotAProgram {
-        found: (!shown.contains(['/', '\\'])).then(|| found.into()),
+        found: (!crate::path::names_a_path(shown)).then(|| found.into()),
         kind,
     };
     if found.is_dir() {
@@ -109,40 +135,29 @@ fn refusal(shown: &str, found: &Path) -> SpawnFailure {
 }
 
 /// On Windows, a path head written without its extension: `shown` with the
-/// first executable extension that names a file.  A bare name has already
-/// tried them all on `PATH`.
-fn suffixed(shown: &str, ctx: &Context) -> Option<String> {
-    if !cfg!(windows) || !shown.contains(['/', '\\']) {
+/// first executable extension that names a file beside `file`, the one it
+/// looked for.  A bare name has already tried them all on `PATH`.
+fn suffixed(shown: &str, file: &Path) -> Option<String> {
+    if !cfg!(windows) || !crate::path::names_a_path(shown) {
         return None;
     }
     crate::path::WINDOWS_EXEC_EXTENSIONS
         .iter()
+        .find(|ext| crate::path::with_appended_suffix(file, ext).exists())
         .map(|ext| format!("{shown}.{ext}"))
-        .find(|candidate| ctx.resolver().resolve(candidate).as_path().exists())
 }
 
-/// Where the launcher's child finds `shown`: anchored at the cwd it starts
-/// in.  Off Windows spelled as the user wrote it, the kernel walking it: a
-/// fold would judge a different file than a `..` after a link, or a trailing
-/// `/`, reaches.  Win32 folds `..` lexically itself, and an absolute path
-/// keeps `CreateProcessW` off the process cwd.
-fn launch_path(shown: &str, ctx: &Context) -> PathBuf {
+/// Where the launcher's child finds `target`, a path head's native file:
+/// anchored at the cwd it starts in, never read for a sigil again.  Off
+/// Windows as written, the kernel walking it: a fold would judge a
+/// different file than a `..` after a link, or a trailing `/`, reaches.
+/// Win32 folds `..` lexically itself, and an absolute path keeps
+/// `CreateProcessW` off the process cwd.
+fn launch_path(target: &Path, ctx: &Context) -> PathBuf {
     if cfg!(windows) {
-        return ctx.resolver().resolve(shown).into_inner();
+        return ctx.resolver().anchor(target).into_inner();
     }
-    ctx.launch_cwd().join(shown)
-}
-
-/// Surface rendering of `name`; an unexpandable `~` falls back to its
-/// spelling and fails downstream as a missing command.
-fn render(name: &CommandName, ctx: &Context) -> String {
-    match name {
-        CommandName::Bare(name) => name.to_string(),
-        CommandName::Path(path) => path.clone(),
-        CommandName::TildePath(path) => ctx
-            .home()
-            .map_or_else(|| path.to_literal(), |home| path.expand(&home)),
-    }
+    ctx.launch_cwd().join(target)
 }
 
 #[cfg(test)]
@@ -162,18 +177,16 @@ mod tests {
     }
 
     #[test]
-    fn render_expands_tilde_against_env_home() {
+    fn a_tilde_head_is_shown_expanded_against_env_home() {
         let mut shell = crate::test_helper::core_shell();
         shell.context.set_env_var("HOME", "/tmp/home");
-        assert_eq!(
-            render(
-                &CommandName::TildePath(crate::path::tilde::TildePath {
-                    suffix: Some("/.local/bin/claude".into()),
-                }),
-                &shell.context,
-            ),
-            "/tmp/home/.local/bin/claude",
+        let head = Head::resolve(
+            &CommandName::TildePath(crate::path::tilde::TildePath {
+                suffix: Some("/.local/bin/claude".into()),
+            }),
+            &shell.context,
         );
+        assert_eq!(head.shown, "/tmp/home/.local/bin/claude");
     }
 
     /// A context whose sole grant layer is `exec`.
@@ -244,7 +257,7 @@ mod tests {
         let shell = crate::test_helper::core_shell();
         let head = std::env::temp_dir().join("no-such-dir").join("configure");
         let head = Head::resolve(&path_head(&head), &shell.context);
-        assert!(matches!(head.program, Err(Missing::NotFound)));
+        assert!(matches!(head.program, Err(Missing::NotFound(_))));
     }
 
     /// The kernel refuses `file/` with ENOTDIR, so a trailing slash must not
@@ -257,7 +270,7 @@ mod tests {
         let shell = crate::test_helper::core_shell();
         let head = tmp.path().join(name).to_string_lossy().into_owned() + "/";
         let head = Head::resolve(&CommandName::Path(head), &shell.context);
-        assert!(matches!(head.program, Err(Missing::NotFound)));
+        assert!(matches!(head.program, Err(Missing::NotFound(_))));
     }
 
     #[cfg(unix)]
@@ -304,7 +317,7 @@ mod tests {
             .set_env_var("PATH", elsewhere.path().to_string_lossy().into_owned());
 
         let head = Head::resolve(&CommandName::Bare(name.into()), &shell.context);
-        assert!(matches!(head.program, Err(Missing::NotFound)));
+        assert!(matches!(head.program, Err(Missing::NotFound(_))));
     }
 
     /// The 126 case, which only a platform with an executable bit has.

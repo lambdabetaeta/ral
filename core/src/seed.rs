@@ -295,7 +295,12 @@ mod tests {
                 DefaultPolicy::denied(),
             )
             .expect("register a hook");
-        parent.install_script_context("extra.ral", "echo extra\n");
+        parent.install_script_context(
+            &crate::source::SourceOrigin::File(
+                crate::source::SourceFile::new("extra.ral").expect("UTF-8"),
+            ),
+            "echo extra\n",
+        );
         parent
             .detach_policy()
             .expect("armed")

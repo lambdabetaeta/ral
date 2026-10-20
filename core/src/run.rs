@@ -291,7 +291,7 @@ impl Shell {
                 self.local.bindings.tick();
                 self.local.workers.tick_epoch();
 
-                let (top, compact) = match compile_run(self, src, &req.run.script_name) {
+                let (top, compact) = match compile_run(self, src, &req.run.origin) {
                     Ok(parts) => parts,
                     Err(diagnostics) => {
                         return RunReport::Static {
@@ -529,7 +529,7 @@ impl Capture {
 pub(crate) fn compile_run(
     shell: &Shell,
     src: &str,
-    name: &str,
+    origin: &crate::source::SourceOrigin,
 ) -> Result<(Arc<crate::ir::Toplevel>, Option<FileId>), Box<StaticDiagnostics>> {
     crate::process::clear();
     let file = shell.session.sources.next_id();
@@ -547,7 +547,7 @@ pub(crate) fn compile_run(
 
     #[cfg(debug_assertions)]
     let t_tc = std::time::Instant::now();
-    let outcome = compile_and_typecheck(src, schemes, file, name, None);
+    let outcome = compile_and_typecheck(src, schemes, file, origin.file(), None);
     crate::dbg_trace!(
         "shell",
         "compile_and_typecheck: {n_bindings} bindings, {} src bytes in {:?}",
@@ -558,7 +558,7 @@ pub(crate) fn compile_run(
     // report: `file` was peeked, never minted, so the registry is untouched.
     let top = Arc::new(outcome.map_err(|error| {
         Box::new(StaticDiagnostics::Compile(
-            error.reject(crate::source::Source::from_text(name, src)),
+            error.reject(crate::source::Source::from_text(origin.clone(), src)),
         ))
     })?);
 
@@ -584,7 +584,7 @@ pub(crate) fn run_framed(
     // never be reclaimed — the registry is append-only for the session's life.
     let boundary = match &run.program {
         Program::Source(src) => {
-            shell.install_root_context(&run.script_name, src);
+            shell.install_root_context(&run.origin, src);
             true
         }
         Program::Hook { .. } => false,

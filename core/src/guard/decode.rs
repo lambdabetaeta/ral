@@ -13,10 +13,13 @@
 //! The runtime cannot tell a record from a map, so both are read, at every
 //! depth.  Every list denotes a set: a repeat adds nothing and is no error.
 
-use super::freeze::{Anchor, FreezeCtx, Place, PolicyError, Selector, has_drive};
+use super::freeze::{Anchor, FreezeCtx, Place, PolicyError, Selector};
 use crate::capability::{
     Capabilities, EditorVerb, Evidence, ExecGrant, ExecKey, FsPolicy, Net, ShellVerb,
 };
+use crate::path::lex::has_drive;
+use crate::path::sigil::SigilHead;
+use crate::path::{PathRules, names_a_path_for};
 use crate::syntax::quote::quote_word;
 use crate::text::{indefinite, near_names};
 use crate::typecheck::contract::{
@@ -241,13 +244,7 @@ fn decode_verbs<V: FromStr + Ord>(
 /// A name is a bare command name; a path is a place, which is judged by its
 /// own rules.
 fn bare_name(name: &str) -> Result<(), PolicyError> {
-    let path_shaped = name.is_empty()
-        || has_drive(name)
-        || name.contains(['/', '\\'])
-        || matches!(name, "." | "..")
-        || name.starts_with('~')
-        || name.starts_with("xdg:");
-    if !path_shaped {
+    if !path_shaped(name) {
         return Ok(());
     }
     Err(PolicyError::new(format!(
@@ -259,6 +256,20 @@ fn bare_name(name: &str) -> Result<(), PolicyError> {
         "for a path write `` `absolute /path `` or `` `cwd relative/path ``; \
          for a directory of programs, `` `dir `absolute /path ``",
     ))
+}
+
+/// Whether `name` reads as a place rather than a command name: empty,
+/// drive-headed, a path by [`names_a_path_for`], a dot directory, or
+/// sigil-headed.  A name is judged under Windows rules on every host, the
+/// stricter reading, so a profile refuses alike everywhere: `a\b` is a bare
+/// filename under Posix rules, but a profile that loaded on Linux must not
+/// fail on Windows.
+fn path_shaped(name: &str) -> bool {
+    name.is_empty()
+        || has_drive(name)
+        || names_a_path_for(name, PathRules::Windows)
+        || matches!(name, "." | "..")
+        || SigilHead::of_for(name, PathRules::Windows).is_some()
 }
 
 /// An unwrapped place names one executable; a directory there is a mistake
@@ -565,13 +576,15 @@ mod tests {
         for name in [
             "./tool",
             "/bin/sh",
-            "a\\b",
             "~",
             "xdg:bin",
+            r"xdg:config\x",
+            r"~\x",
             "..",
             "",
             "C:tool.exe",
             "c:x",
+            "a\\b",
         ] {
             let e = exec_refusal(exec(vec![tagged("name", name)], vec![]));
             assert!(

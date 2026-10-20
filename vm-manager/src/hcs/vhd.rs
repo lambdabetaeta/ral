@@ -46,19 +46,15 @@
 //! exists: making a session disk, wrapping the shipped rootfs into the
 //! application's own cache.  There is no `Shell` to route it through and no run
 //! to raise a card in — the same standing the macOS backend's
-//! `create_session_image` has, and for the same reason.  Hence the
-//! module-scoped allow: it describes every function here, rather than repeating
-//! one reason a dozen times.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: host-side disk plumbing before any engine exists; no shell, no \
-              run, no card. See the module docs."
-)]
+//! `create_session_image` has, and for the same reason.  Each function that
+//! makes one carries the allow, citing this.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::{Act, Error, HostFile};
 
 /// A disk's sector size, and so the footer's own length.
 const SECTOR: u64 = 512;
@@ -90,9 +86,14 @@ pub(super) const SESSION_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 /// decompressed straight into the disk that was going to be written anyway.
 ///
 /// # Errors
-/// Returns a sentence if the image cannot be read or inflated, the cache cannot
-/// be made, or the wrapped copy cannot be written.
-pub(super) fn ensure_rootfs_vhd(image: &Path, cache: &Path) -> Result<PathBuf, String> {
+/// Returns [`Error::HostFile`] if the image cannot be read or inflated, the
+/// cache cannot be made, or the wrapped copy cannot be written.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "REASONED-SILENT: host-side disk plumbing before any engine exists; no shell, no \
+              run, no card. See the module docs."
+)]
+pub(super) fn ensure_rootfs_vhd(image: &Path, cache: &Path) -> Result<PathBuf, Error> {
     if image
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("vhd"))
@@ -103,33 +104,23 @@ pub(super) fn ensure_rootfs_vhd(image: &Path, cache: &Path) -> Result<PathBuf, S
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("zst"));
 
-    let source = std::fs::metadata(image)
-        .map_err(|e| format!("the guest image {} could not be read: {e}", image.display()))?;
+    let source = std::fs::metadata(image).map_err(Error::host_file(
+        HostFile::GuestImage,
+        Act::Read,
+        image,
+    ))?;
     let wrapped = cache.join("rootfs.vhd");
     let marker = cache.join("rootfs.vhd.wrapped");
-    // What the marker records is *which* image was wrapped, not that some
-    // wrapping happened: a rebuilt rootfs has a new length or a new
-    // modification time, and must not be served from a stale wrap.
-    let stamp = format!(
-        "{}\n{}\n{}\n",
-        image.display(),
-        source.len(),
-        source
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_secs())
-    );
+    let stamp = stamp(image, &source);
     if wrapped.is_file() && std::fs::read_to_string(&marker).is_ok_and(|seen| seen == stamp) {
         return Ok(wrapped);
     }
 
-    std::fs::create_dir_all(cache).map_err(|e| {
-        format!(
-            "the guest image cache {} could not be made: {e}",
-            cache.display()
-        )
-    })?;
+    std::fs::create_dir_all(cache).map_err(Error::host_file(
+        HostFile::ImageCache,
+        Act::Make,
+        cache,
+    ))?;
 
     let bytes = if compressed {
         // No checksum verified here, and the reason is worth stating rather
@@ -147,19 +138,17 @@ pub(super) fn ensure_rootfs_vhd(image: &Path, cache: &Path) -> Result<PathBuf, S
         // interrupted launch never leaves a half-copied disk that a later
         // one would attach.
         let part = cache.join("rootfs.vhd.part");
-        let land = || -> Result<u64, String> {
-            std::fs::copy(image, &part).map_err(|e| {
-                format!(
-                    "the guest image could not be copied to {}: {e}",
-                    part.display()
-                )
-            })?;
-            std::fs::rename(&part, &wrapped).map_err(|e| {
-                format!(
-                    "the wrapped guest image could not be moved into place at {}: {e}",
-                    wrapped.display()
-                )
-            })?;
+        let land = || -> Result<u64, Error> {
+            std::fs::copy(image, &part).map_err(Error::host_file(
+                HostFile::WrappedImage,
+                Act::Write,
+                &part,
+            ))?;
+            std::fs::rename(&part, &wrapped).map_err(Error::host_file(
+                HostFile::WrappedImage,
+                Act::Place,
+                &wrapped,
+            ))?;
             Ok(source.len())
         };
         land().inspect_err(|_| {
@@ -167,21 +156,39 @@ pub(super) fn ensure_rootfs_vhd(image: &Path, cache: &Path) -> Result<PathBuf, S
         })?
     };
 
+    let unwritten = |act| Error::host_file(HostFile::WrappedImage, act, &wrapped);
     let mut file = OpenOptions::new()
         .write(true)
         .open(&wrapped)
-        .map_err(|e| format!("{} could not be opened: {e}", wrapped.display()))?;
-    let disk = pad_to_sector(&file, bytes)?;
-    append_footer(&mut file, disk)?;
+        .map_err(unwritten(Act::Open))?;
+    let disk = pad_to_sector(&file, bytes).map_err(unwritten(Act::Size))?;
+    append_footer(&mut file, disk).map_err(unwritten(Act::Write))?;
     drop(file);
 
-    std::fs::write(&marker, &stamp).map_err(|e| {
-        format!(
-            "the guest image was wrapped but its marker {} could not be written: {e}",
-            marker.display()
-        )
-    })?;
+    std::fs::write(&marker, &stamp).map_err(Error::host_file(
+        HostFile::WrapMarker,
+        Act::Write,
+        &marker,
+    ))?;
     Ok(wrapped)
+}
+
+/// What the marker beside a wrapped rootfs records: *which* image was wrapped,
+/// not that some wrapping happened.  A rebuilt rootfs has a new length or a new
+/// modification time, and must not be served from a stale wrap.  The path is
+/// recorded as its own units ([`crate::os_path::encode`]), never a lossy
+/// rendering under which two images could share one marker.
+fn stamp(image: &Path, source: &std::fs::Metadata) -> String {
+    format!(
+        "{}\n{}\n{}\n",
+        crate::os_path::encode(image),
+        source.len(),
+        source
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs())
+    )
 }
 
 /// Make one session's empty read-write disk in `dir`.
@@ -198,32 +205,28 @@ pub(super) fn ensure_rootfs_vhd(image: &Path, cache: &Path) -> Result<PathBuf, S
 /// which is the whole reason it is allowed.
 ///
 /// # Errors
-/// Returns a sentence if the disk cannot be created or written.
-pub(super) fn create_session_vhd(dir: &Path) -> Result<PathBuf, String> {
-    std::fs::create_dir_all(dir).map_err(|e| {
-        format!(
-            "the session directory {} could not be made: {e}",
-            dir.display()
-        )
-    })?;
+/// Returns [`Error::HostFile`] if the disk cannot be created or written.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "REASONED-SILENT: host-side disk plumbing before any engine exists; no shell, no \
+              run, no card. See the module docs."
+)]
+pub(super) fn create_session_vhd(dir: &Path) -> Result<PathBuf, Error> {
+    std::fs::create_dir_all(dir).map_err(Error::host_file(
+        HostFile::SessionDirectory,
+        Act::Make,
+        dir,
+    ))?;
     let path = dir.join(format!(
         "synod-session-{}-{}.vhd",
         std::process::id(),
         unix_seconds()
     ));
-    let mut file = File::create(&path).map_err(|e| {
-        format!(
-            "the session disk {} could not be created: {e}",
-            path.display()
-        )
-    })?;
+    let mut file =
+        File::create(&path).map_err(Error::host_file(HostFile::SessionDisk, Act::Create, &path))?;
     let write = |file: &mut File, bytes: &[u8]| {
-        file.write_all(bytes).map_err(|e| {
-            format!(
-                "the session disk {} could not be written: {e}",
-                path.display()
-            )
-        })
+        file.write_all(bytes)
+            .map_err(Error::host_file(HostFile::SessionDisk, Act::Write, &path))
     };
     // A dynamic disk is read from both ends: the footer appears at offset zero
     // as well as at the end of the file, so a reader that finds the file
@@ -234,12 +237,8 @@ pub(super) fn create_session_vhd(dir: &Path) -> Result<PathBuf, String> {
     // "not present yet", and an empty disk is nothing but a table of them.
     write(&mut file, &vec![0xFF; block_table_bytes(SESSION_BYTES)])?;
     write(&mut file, &footer(SESSION_BYTES, Kind::Dynamic))?;
-    file.flush().map_err(|e| {
-        format!(
-            "the session disk {} could not be flushed: {e}",
-            path.display()
-        )
-    })?;
+    file.flush()
+        .map_err(Error::host_file(HostFile::SessionDisk, Act::Flush, &path))?;
     Ok(path)
 }
 
@@ -329,24 +328,20 @@ fn dynamic_header(disk: u64) -> [u8; 1024] {
 /// this exists because a footer that describes a non-integral number of sectors
 /// is malformed, and "the image was already fine" is a fact worth enforcing
 /// rather than assuming.
-fn pad_to_sector(file: &File, len: u64) -> Result<u64, String> {
+fn pad_to_sector(file: &File, len: u64) -> std::io::Result<u64> {
     let disk = len.next_multiple_of(SECTOR);
     if disk != len {
-        file.set_len(disk)
-            .map_err(|e| format!("the wrapped guest image could not be padded: {e}"))?;
+        file.set_len(disk)?;
     }
     Ok(disk)
 }
 
 /// Write the fixed-disk footer describing `disk` bytes of data at the end of
 /// the file.
-fn append_footer(file: &mut File, disk: u64) -> Result<(), String> {
-    file.seek(SeekFrom::Start(disk))
-        .map_err(|e| format!("the disk image could not be positioned for its footer: {e}"))?;
-    file.write_all(&footer(disk, Kind::Fixed))
-        .map_err(|e| format!("the disk image's footer could not be written: {e}"))?;
+fn append_footer(file: &mut File, disk: u64) -> std::io::Result<()> {
+    file.seek(SeekFrom::Start(disk))?;
+    file.write_all(&footer(disk, Kind::Fixed))?;
     file.flush()
-        .map_err(|e| format!("the disk image's footer could not be flushed: {e}"))
 }
 
 /// The 512-byte VHD footer for a fixed disk of `disk` bytes.

@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
+
 use super::*;
 
 #[test]

@@ -42,9 +42,10 @@ fn an_absent_deny_refuses_a_case_variant_create() {
     assert_refused(&out, "a create of `secrets` under a deny on `Secrets`");
     assert!(!d.join("secrets").exists(), "the refused create landed");
     assert!(
-        out.stderr
-            .contains(&format!("the denied {}", d.join("Secrets").display()))
-            && out.stderr.contains("a deny holds under every spelling"),
+        out.stderr.contains(&format!(
+            "the denied {}",
+            ral_core::path::shown(d.join("Secrets"))
+        )) && out.stderr.contains("a deny holds under every spelling"),
         "the denial must name the deny and say why; stderr:\n{}",
         out.stderr
     );

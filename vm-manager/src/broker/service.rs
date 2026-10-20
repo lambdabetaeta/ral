@@ -55,6 +55,7 @@ use windows_sys::Win32::System::Pipes::{
 };
 
 use super::{PIPE, Reply, Request, VERSION, frame};
+use crate::hcs::{backend, document_text, plain};
 use crate::{BootArtifact, Error, Hypervisor, Machine, MachineSpec};
 
 /// Who may talk to the broker.
@@ -118,19 +119,15 @@ pub fn cache() -> PathBuf {
 /// installation, shared by every session on the computer afterwards.
 ///
 /// # Errors
-/// Returns a sentence if this executable's own location cannot be read.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "outside ral: vm-manager does not depend on ral-core"
-)]
-pub fn media() -> Result<BootArtifact, String> {
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("the machine service could not find its own program: {e}"))?;
-    let beside = exe
-        .parent()
-        .ok_or_else(|| "the machine service is not installed in a directory".to_string())?;
+/// Returns [`Error::ServiceUnlocated`] if this executable's own location cannot
+/// be read, and [`Error::NoGuestImage`] if no image is found where it should be.
+pub fn media() -> Result<BootArtifact, Error> {
+    let exe = std::env::current_exe().map_err(|cause| Error::ServiceUnlocated {
+        cause: cause.to_string(),
+    })?;
 
-    let installed = artifact(&beside.join("boot"));
+    let boot = exe.with_file_name("boot");
+    let installed = artifact(&boot);
     if installed.kernel.is_file() {
         return Ok(installed);
     }
@@ -141,31 +138,25 @@ pub fn media() -> Result<BootArtifact, String> {
     // Deliberately a *fallback*: on a user's computer the branch above always
     // wins, so a checkout on the same machine can never redirect the service to
     // media somebody happens to have lying about.
-    let mut cursor: &Path = beside;
-    while let Some(parent) = cursor.parent() {
-        if parent.file_name().is_some_and(|name| name == "target") {
-            let out = parent
-                .parent()
-                .ok_or_else(|| "this checkout has no workspace root".to_string())?
-                .join("vm-image")
-                .join("out");
-            let development = BootArtifact {
-                rootfs: rootfs_in(&out),
-                ..artifact(&out.join("boot"))
-            };
-            if development.kernel.is_file() {
-                return Ok(development);
-            }
-            break;
+    //
+    // A checkout is recognised by the `target` directory somewhere above the
+    // one this program was built into, and only the first such is asked.
+    let checkout = exe
+        .ancestors()
+        .skip(2)
+        .find(|dir| dir.file_name().is_some_and(|name| name == "target"))
+        .and_then(Path::parent);
+    if let Some(root) = checkout {
+        let out = root.join("vm-image").join("out");
+        let development = BootArtifact {
+            rootfs: rootfs_in(&out),
+            ..artifact(&out.join("boot"))
+        };
+        if development.kernel.is_file() {
+            return Ok(development);
         }
-        cursor = parent;
     }
-    Err(format!(
-        "the machine service found no guest image: it looked beside itself, in {}, and for the \
-         image pipeline's own output if this is a checkout. An installation puts the image there; \
-         a checkout builds it with `just guest-boot amd64` and `just guest-rootfs amd64`",
-        beside.join("boot").display()
-    ))
+    Err(Error::NoGuestImage { looked_in: boot })
 }
 
 /// The three files of a boot artifact, as they are named inside a `boot`
@@ -264,7 +255,7 @@ fn serve_client(pipe: OwnedHandle) {
                 folder,
                 read_only,
             } => if machine.is_some() {
-                Reply::Refused("this connection already has a machine".to_string())
+                Reply::Refused(backend("this connection already has a machine"))
             } else {
                 match boot_for(handle, &folder, read_only) {
                     Ok(booted) => {
@@ -306,10 +297,7 @@ fn serve_client(pipe: OwnedHandle) {
                 // The broker's own handles go first if the client never
                 // adopted them, so the guest sees both wires close either way.
                 drop(wires.take());
-                let outcome = match machine.take() {
-                    Some(machine) => machine.shutdown().map_err(|e| e.to_string()),
-                    None => Ok(()),
-                };
+                let outcome = machine.take().map_or(Ok(()), Machine::shutdown);
                 // Only now that the machine is gone is the folder let go.
                 drop(pinned.take());
                 let _ = frame::write(&mut stream, &Reply::Stopped(outcome));
@@ -333,10 +321,10 @@ impl Versioned for Reply {
         if spoken == VERSION {
             self
         } else {
-            Self::Refused(format!(
-                "synod and its machine service are different versions (synod speaks {spoken}, the \
-                 service speaks {VERSION}) — ask whoever administers this computer to install them together"
-            ))
+            Self::Refused(Error::VersionSkew {
+                client: spoken,
+                service: VERSION,
+            })
         }
     }
 }
@@ -354,47 +342,21 @@ struct Booted {
     net_description: Vec<u8>,
 }
 
-/// How a refused boot is worded for the client: the backend's own reason, and
-/// the folder it was asked about, spelled plainly.
-///
-/// Only what this side knows and the client does not may travel, and the
-/// hypervisor's name is not it.  [`Error::Unavailable`] renders as "Hyper-V
-/// could not start a machine: …", and `client::Brokered` wraps whatever arrives
-/// here in an `Unavailable` of its own — it has to, since a refusal that never
-/// reached a backend must still name the machine layer that refused.  So
-/// sending the rendered error said the same sentence twice, either side of a
-/// third "could not start a machine for …" added here: one failure wearing
-/// three subjects, which is what a person actually read off a stale guest
-/// image.  The reason alone crosses the pipe, and the client supplies the
-/// subject exactly once.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "outside ral: vm-manager does not depend on ral-core"
-)]
-fn refused_over(folder: &Path) -> impl FnOnce(Error) -> String {
-    // Verbatim (`\\?\C:\…`) is how a canonicalised path arrives from a client,
-    // and it is a convention of the Win32 call layer rather than anything a
-    // reader of an error message should be shown.
-    let folder = crate::hcs::plain(folder.to_path_buf());
-    move |error| match error {
-        Error::Unavailable { why, .. } => {
-            format!("{why} (the folder asked for was {})", folder.display())
-        }
-        // Every other variant is already a sentence about the request, and each
-        // one names the path it is about.
-        named => named.to_string(),
-    }
-}
-
 /// Boot one machine for the client on `pipe`, and describe its two wires for
 /// that client's process.
 ///
-/// Every check the broker makes is here, in order: the folder must be one the
-/// *caller* may use in the way the grant asks, read-only or with changes
-/// allowed, and it is the folder the caller's own handle reached rather than
-/// the name they sent; the media is this installation's; the spec is
-/// constructed, never received.
-fn boot_for(pipe: HANDLE, folder: &Path, read_only: bool) -> Result<Booted, String> {
+/// Every check the broker makes is here, in order: the folder's name must be
+/// one the machine's document can carry; the folder must be one the *caller*
+/// may use in the way the grant asks, read-only or with changes allowed, and
+/// it is the folder the caller's own handle reached rather than the name they
+/// sent; the media is this installation's; the spec is constructed, never
+/// received.
+fn boot_for(pipe: HANDLE, folder: &Path, read_only: bool) -> Result<Booted, Error> {
+    // A name that is not Unicode has no spelling in the document the compute
+    // service opens the folder by ([`crate::hcs::document_text`]), so it is
+    // refused before anything is checked or opened under it: there is no
+    // folder to authorise when the one the service would be handed is another.
+    document_text(folder)?;
     // SAFETY: `pipe` is the connected server end this thread owns.
     let granted = unsafe { open_for_client(pipe, folder, read_only) }?;
 
@@ -406,9 +368,7 @@ fn boot_for(pipe: HANDLE, folder: &Path, read_only: bool) -> Result<Booted, Stri
     spec.workspace.read_only = read_only;
 
     let hypervisor = crate::hcs::Hyperv::new(artifact, cache());
-    let mut machine = hypervisor
-        .boot(&spec)
-        .map_err(refused_over(granted.path()))?;
+    let mut machine = hypervisor.boot(&spec)?;
     // `boot` resolved the path once more, as this service, and the share was
     // made from that answer. The one change the held handle cannot prevent is
     // an empty folder being turned into a link, so it is asked again here; a
@@ -484,12 +444,8 @@ impl Granted {
     ///
     /// Only [`open_for_client`] calls this in the service, with the client's
     /// token on the thread; tests call it directly, as themselves.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "outside ral: vm-manager does not depend on ral-core"
-    )]
-    fn open(folder: &Path, read_only: bool) -> Result<Self, String> {
-        let shown = crate::hcs::plain(folder.to_path_buf());
+    fn open(folder: &Path, read_only: bool) -> Result<Self, Error> {
+        let named = plain(folder.to_path_buf());
         let wide: Vec<u16> = folder.as_os_str().encode_wide().chain(Some(0)).collect();
         // SAFETY: `wide` is a NUL-terminated wide string alive for the call; no
         // security attributes and no template are passed. Backup semantics is
@@ -508,36 +464,22 @@ impl Granted {
             )
         };
         if raw == INVALID_HANDLE_VALUE {
-            let cause = io::Error::last_os_error();
-            return Err(if read_only {
-                format!(
-                    "the folder {} cannot be opened by the account that asked for it: {cause}",
-                    shown.display()
-                )
-            } else {
-                format!(
-                    "the folder {} cannot be opened for changes by the account that asked for \
-                     it, so it cannot be granted with changes allowed: {cause}",
-                    shown.display()
-                )
+            return Err(Error::FolderForbidden {
+                path: named,
+                read_only,
+                cause: io::Error::last_os_error().to_string(),
             });
         }
         // SAFETY: a fresh handle this function owns.
         let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
 
-        let tag = attribute_tag(&handle).map_err(|cause| {
-            format!(
-                "synod's machine service could not read what kind of thing {} is: {cause}",
-                shown.display()
-            )
-        })?;
-        judge(&shown, tag)?;
-        let path = final_path(&handle).map_err(|cause| {
-            format!(
-                "synod's machine service could not tell where the folder {} really is: {cause}",
-                shown.display()
-            )
-        })?;
+        let unexamined = |cause: io::Error| Error::FolderUnexamined {
+            path: named.clone(),
+            cause: cause.to_string(),
+        };
+        let tag = attribute_tag(&handle).map_err(unexamined)?;
+        judge(&named, tag)?;
+        let path = final_path(&handle).map_err(unexamined)?;
         Ok(Self { handle, path })
     }
 
@@ -556,22 +498,11 @@ impl Granted {
     /// is asked again.
     ///
     /// # Errors
-    /// Returns the sentence to show the person who granted the folder.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "outside ral: vm-manager does not depend on ral-core"
-    )]
-    fn unchanged(&self) -> Result<(), String> {
-        let shown = crate::hcs::plain(self.path.clone());
-        let moved = || {
-            format!(
-                "the folder {} was changed into a link to somewhere else while its machine was \
-                 starting, so the machine was stopped",
-                shown.display()
-            )
-        };
+    /// Returns [`Error::FolderChanged`] if it is not.
+    fn unchanged(&self) -> Result<(), Error> {
+        let moved = || Error::FolderChanged(plain(self.path.clone()));
         let tag = attribute_tag(&self.handle).map_err(|_| moved())?;
-        judge(&shown, tag).map_err(|_| moved())?;
+        judge(&self.path, tag).map_err(|_| moved())?;
         match final_path(&self.handle) {
             Ok(now) if now == self.path => Ok(()),
             _ => Err(moved()),
@@ -594,9 +525,9 @@ impl Granted {
 /// open fails, and a failed open is never waved through.
 ///
 /// # Errors
-/// Returns the sentence to show the person who granted the folder: that it
-/// cannot be opened as the grant asks, that it is a link rather than a folder,
-/// or that the check itself could not be made.
+/// Returns the [`Error`] that says the folder cannot be opened as the grant
+/// asks, that it is a link rather than a folder, or that the check itself could
+/// not be made.
 ///
 /// # Safety
 /// `pipe` must be a live, *connected* server end of a named pipe. Impersonation
@@ -606,14 +537,14 @@ pub unsafe fn open_for_client(
     pipe: HANDLE,
     folder: &Path,
     read_only: bool,
-) -> Result<Granted, String> {
+) -> Result<Granted, Error> {
     // SAFETY: `pipe` is a connected server-end handle; impersonation lasts until
     // `RevertToSelf`, which the guard below performs on every path out.
     if unsafe { ImpersonateNamedPipeClient(pipe) } == 0 {
-        return Err(format!(
+        return Err(backend(&format!(
             "synod's machine service could not check who was asking: {}",
             io::Error::last_os_error()
-        ));
+        )));
     }
     let guard = Impersonation;
     let granted = Granted::open(folder, read_only);
@@ -630,22 +561,14 @@ pub unsafe fn open_for_client(
 /// never looked. Other reparse points are the folder's own data kept in an
 /// unusual way — a `OneDrive` folder whose files are online-only is one — and
 /// refusing them would refuse an ordinary Documents folder.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "outside ral: vm-manager does not depend on ral-core"
-)]
-fn judge(shown: &Path, tag: FILE_ATTRIBUTE_TAG_INFO) -> Result<(), String> {
+fn judge(folder: &Path, tag: FILE_ATTRIBUTE_TAG_INFO) -> Result<(), Error> {
     if tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
         && tag.ReparseTag & REPARSE_TAG_NAME_SURROGATE != 0
     {
-        return Err(format!(
-            "{} is a link to another folder (a junction or a symbolic link), and synod's machine \
-             service grants only a real folder: grant the folder it points to instead",
-            shown.display()
-        ));
+        return Err(Error::FolderIsLink(folder.to_path_buf()));
     }
     if tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
-        return Err(format!("{} is not a folder", shown.display()));
+        return Err(Error::NotAFolder(folder.to_path_buf()));
     }
     Ok(())
 }
@@ -718,14 +641,14 @@ impl Drop for Impersonation {
 
 /// The process id of the client on `pipe`, from the kernel rather than from
 /// anything the client said.
-fn client_process(pipe: HANDLE) -> Result<u32, String> {
+fn client_process(pipe: HANDLE) -> Result<u32, Error> {
     let mut pid = 0u32;
     // SAFETY: `pipe` is a connected server-end handle and `pid` a writable slot.
     if unsafe { GetNamedPipeClientProcessId(pipe, &raw mut pid) } == 0 {
-        return Err(format!(
+        return Err(backend(&format!(
             "synod's machine service could not identify the program that asked: {}",
             io::Error::last_os_error()
-        ));
+        )));
     }
     Ok(pid)
 }
@@ -734,7 +657,7 @@ fn client_process(pipe: HANDLE) -> Result<u32, String> {
 ///
 /// The description is valid for that one process and nothing else, which is what
 /// makes handing it over safe even though it travels as ordinary bytes.
-fn describe_socket(socket: BorrowedSocket<'_>, pid: u32) -> Result<Vec<u8>, String> {
+fn describe_socket(socket: BorrowedSocket<'_>, pid: u32) -> Result<Vec<u8>, Error> {
     use windows_sys::Win32::Networking::WinSock::{SOCKET_ERROR, WSAPROTOCOL_INFOW};
 
     // SAFETY: `WSAPROTOCOL_INFOW` is a plain C structure of `Copy` fields, so a
@@ -751,10 +674,10 @@ fn describe_socket(socket: BorrowedSocket<'_>, pid: u32) -> Result<Vec<u8>, Stri
         )
     };
     if duplicated == SOCKET_ERROR {
-        return Err(format!(
+        return Err(backend(&format!(
             "the machine's control plane could not be handed to synod: {}",
             io::Error::last_os_error()
-        ));
+        )));
     }
     // SAFETY: `info` is a fully initialised `WSAPROTOCOL_INFOW` with no pointers
     // or padding invariants, so its bytes are a faithful description of it.
@@ -895,13 +818,8 @@ mod tests {
                 assert_eq!(found.initramfs.file_name().unwrap(), "initramfs.img");
                 assert_eq!(found.rootfs.file_name().unwrap(), "rootfs.img");
             }
-            Err(why) => {
-                assert!(why.contains("no guest image"), "{why}");
-                assert!(
-                    why.contains("just guest-boot"),
-                    "and says how to get one: {why}"
-                );
-            }
+            Err(Error::NoGuestImage { looked_in }) => assert_eq!(looked_in, beside),
+            Err(other) => panic!("a missing image must be named where it was sought: {other:?}"),
         }
     }
 
@@ -925,9 +843,9 @@ mod tests {
     fn a_version_mismatch_is_refused_by_name() {
         let refused = Reply::Stopped(Ok(())).versioned(VERSION + 1);
         match refused {
-            Reply::Refused(why) => {
-                assert!(why.contains(&(VERSION + 1).to_string()), "{why}");
-                assert!(why.contains(&VERSION.to_string()), "{why}");
+            Reply::Refused(Error::VersionSkew { client, service }) => {
+                assert_eq!(client, VERSION + 1);
+                assert_eq!(service, VERSION);
             }
             other => panic!("a mismatch must be refused: {other:?}"),
         }
@@ -965,21 +883,24 @@ mod tests {
         const JUNCTION: u32 = 0xA000_0003;
         const SYMLINK: u32 = 0xA000_000C;
         const CLOUD: u32 = 0x9000_001A;
-        let shown = Path::new(r"C:\Users\secretary\Documents");
+        let folder = Path::new(r"C:\Users\secretary\Documents");
         let tagged = |attributes, tag| FILE_ATTRIBUTE_TAG_INFO {
             FileAttributes: attributes,
             ReparseTag: tag,
         };
         let link = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT;
         for tag in [JUNCTION, SYMLINK] {
-            let why = judge(shown, tagged(link, tag)).expect_err("a link is refused");
-            assert!(why.contains("link to another folder"), "{why}");
-            assert!(why.contains(r"C:\Users\secretary\Documents"), "{why}");
+            match judge(folder, tagged(link, tag)) {
+                Err(Error::FolderIsLink(path)) => assert_eq!(path, folder),
+                other => panic!("a link is refused as one: {other:?}"),
+            }
         }
-        judge(shown, tagged(link, CLOUD)).expect("an online-only folder is a folder");
-        judge(shown, tagged(FILE_ATTRIBUTE_DIRECTORY, 0)).expect("a plain folder");
-        let why = judge(shown, tagged(0x80, 0)).expect_err("a file is refused");
-        assert!(why.contains("is not a folder"), "{why}");
+        judge(folder, tagged(link, CLOUD)).expect("an online-only folder is a folder");
+        judge(folder, tagged(FILE_ATTRIBUTE_DIRECTORY, 0)).expect("a plain folder");
+        match judge(folder, tagged(0x80, 0)) {
+            Err(Error::NotAFolder(path)) => assert_eq!(path, folder),
+            other => panic!("a file is refused as not a folder: {other:?}"),
+        }
     }
 
     /// A folder this account made is granted either way, and the path handed
@@ -1004,10 +925,19 @@ mod tests {
         let dir = tempfile::tempdir().expect("scratch folder");
         let restricted = Restricted::to(dir.path(), "D:P(A;OICI;FRFX;;;WD)");
         Granted::open(dir.path(), true).expect("readable, so granted read-only");
-        let why = Granted::open(dir.path(), false)
+        let refused = Granted::open(dir.path(), false)
             .err()
             .expect("not writable, so refused with changes allowed");
-        assert!(why.contains("cannot be opened for changes"), "{why}");
+        assert!(
+            matches!(
+                refused,
+                Error::FolderForbidden {
+                    read_only: false,
+                    ..
+                }
+            ),
+            "{refused:?}"
+        );
         drop(restricted);
     }
 
@@ -1035,10 +965,10 @@ mod tests {
             return;
         }
         for read_only in [true, false] {
-            let why = Granted::open(&link, read_only)
+            let refused = Granted::open(&link, read_only)
                 .err()
                 .expect("a junction is refused");
-            assert!(why.contains("link to another folder"), "{why}");
+            assert!(matches!(refused, Error::FolderIsLink(_)), "{refused:?}");
         }
     }
 
@@ -1089,8 +1019,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("scratch folder");
         let file = dir.path().join("note.txt");
         std::fs::write(&file, b"hello").expect("a file");
-        let why = Granted::open(&file, true).err().expect("refused");
-        assert!(why.contains("is not a folder"), "{why}");
+        let refused = Granted::open(&file, true).err().expect("refused");
+        assert!(matches!(refused, Error::NotAFolder(_)), "{refused:?}");
     }
 
     /// Make a junction at `link` pointing at `target`, which needs no

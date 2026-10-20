@@ -4,13 +4,40 @@ status: active
 
 # A service-hosted guest's console is teed to disk and quoted in the failure
 
+> **Amended 2026-10-20.** The failure is no longer a string. vm-manager has
+> one data-only `Error` (`vm-manager/src/error.rs`): every path in it is the
+> `PathBuf` it is, it implements no `Display`, and the sentence is assembled
+> only where it is shown, by `Error::worded(spell)`, with the front-end handing
+> in its own spelling (synod passes `ral_core::path::shown`, so a path reads
+> `/`-separated on Windows too). The boot timeouts are `Error::Undialled`, which
+> carries the `GuestConsole` and words it as `console_says` did, now in that
+> file. The broker `Reply` carries the `Error` itself rather than a string, so
+> the window words it with its own spelling and not the `LocalSystem` service's;
+> that is a wire change, and `broker::VERSION` is 3. The broker-protocol bullet
+> below records the decision as first made and how this amendment overturned it.
+>
+> **Amended again 2026-10-20.** The migration is finished: `detect`,
+> `BootMedia`, `hcs::available`, `Console::create`, `Api::open` and the vz
+> internals answer `Error` too, and synod words each once at its boundary.
+> A sentence no longer names its stage: the old `Error::Unavailable` was worded
+> "could not start a machine" while carrying stop failures, broker protocol
+> faults and version skew, and synod framed it again. It is split into
+> `Backend { hypervisor, why }` (worded "{hypervisor}: {why}"), `ForcedStop`,
+> `VersionSkew` and `ServiceUnlocated`, and `NotConstructed`/`Undialled` lost
+> their "could not start a machine" prefix; synod's own frame ("could not start
+> a machine for …", "the machine did not stop cleanly: …") is the only one.
+> Every path crosses the pipe as the platform's own units (`vm-manager/src/os_path.rs`),
+> since serde's `PathBuf` fails on a path that is not Unicode and so would have
+> lost the very refusal it carried. Still `broker::VERSION` 3, never released at
+> the shape before this.
+
 **A diagnostic written to a handle that goes nowhere is not a diagnostic, so the
 guest's console pump tees — `stdout`, a bounded per-machine log in the backend's
 own cache, and a short ring of the last lines in memory — and the boot timeout
 *quotes* that ring and names that log rather than telling the reader to look
 "above", where under an installed synod there is no above.** Realised in
 `vm-manager/src/hcs/console.rs` and `vm-manager/src/hcs/mod.rs`; the broker
-protocol is deliberately untouched.
+protocol was at first deliberately untouched (see the amendment).
 
 ## Context
 
@@ -58,12 +85,14 @@ off. Nothing of it reached the person watching the host.
   itself the finding, with the log named for whoever wants to confirm the
   emptiness; or that no console could be opened, which is a fault in synod and is
   said as one rather than implying the guest was silent.
-- **The broker protocol does not change.** `broker::VERSION` stays 2: the boot
-  error string already crosses the pipe to the window as the `Reply`'s own
-  failure, so the quoted lines and the log's path arrive with no new frame, no new
-  request, and no new field. A version bump is a compatibility event between an
-  installed service and an installed window, and paying one to carry text that
-  already travels would be paying it for nothing.
+- **The broker protocol was left as it was — at first.** `broker::VERSION`
+  stayed 2: the boot error string already crossed the pipe to the window as the
+  `Reply`'s own failure, so the quoted lines and the log's path arrived with no
+  new frame, no new request, and no new field, and a version bump is a
+  compatibility event between an installed service and an installed window not
+  worth paying to carry text that already travelled. The amendment above
+  overturned this — the failure now crosses as data, not text — and that change
+  *is* a wire change, so `broker::VERSION` is 3.
 
 ## Consequences
 
@@ -101,5 +130,6 @@ and its COM-port console),
 [[map/synod|synod]] (where the console and the backend live).
 
 Cite: `vm-manager/src/hcs/console.rs` (`Console::create`, `Tail`, `open_log`,
-`sweep`, `keep_logging`), `vm-manager/src/hcs/mod.rs` (`console_says`, `quoted`,
-`Guest::dialled`), `vm-manager/src/broker/mod.rs` (`VERSION`, unchanged).
+`sweep`, `keep_logging`), `vm-manager/src/hcs/mod.rs` (`Guest::dialled`), `vm-manager/src/error.rs` (`Error::Undialled`, `console_says`, `quoted`),
+`vm-manager/src/broker/mod.rs` (`VERSION`, 3 since the amendment),
+`vm-manager/src/os_path.rs`.

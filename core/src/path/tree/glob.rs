@@ -99,6 +99,10 @@ impl Glob {
 
 fn step(c: Component<'_>) -> Result<Step, String> {
     let os = c.as_os_str();
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "native: a component that is not UTF-8 holds no wildcard"
+    )]
     let Some(s) = os.to_str().filter(|s| s.contains(['*', '?', '[', '{'])) else {
         return Ok(Step::Name(os.to_owned()));
     };

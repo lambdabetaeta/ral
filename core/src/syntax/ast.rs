@@ -14,13 +14,14 @@ use crate::source::Spanned;
 use crate::syntax::numeral::{self, Shape};
 use serde::{Deserialize, Serialize};
 
-/// Unquoted word, shaped once by the lexer. A `/`, or a `~` standing for
-/// home, marks it as a path; a path head skips name lookup entirely.
+/// Unquoted word, shaped once by the lexer. A separator under the host's
+/// path rules (`/`, and `\` under Windows), or a `~` standing for home, marks
+/// it as a path; a path head skips name lookup entirely.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Word {
     Plain(String),
-    /// `./x`, `/bin/x`
-    Slash(String),
+    /// `./x`, `/bin/x`; under Windows `.\x`, `C:\x` too.
+    Path(String),
     /// `~`, `~/x`
     Tilde(TildePath),
 }
@@ -29,7 +30,7 @@ impl Word {
     pub(crate) fn as_plain(&self) -> Option<&str> {
         match self {
             Self::Plain(s) => Some(s),
-            Self::Slash(_) | Self::Tilde(_) => None,
+            Self::Path(_) | Self::Tilde(_) => None,
         }
     }
 }
@@ -179,7 +180,7 @@ pub enum Head {
     /// `^name` — external programs only, and exempt from the reserved-word
     /// ban, so `^try` runs the program of that name.
     ExternalName(String),
-    /// `./x`, `/bin/x`
+    /// A [`Word::Path`] head: `./x`, `/bin/x`.
     Path(String),
     /// `~/x`; a lone `~` is a value head.
     TildePath(TildePath),

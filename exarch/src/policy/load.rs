@@ -43,7 +43,10 @@ pub(super) fn load_fragment_ral(
 
 fn load<T>(path: &Path, flag: &str, read: impl FnOnce() -> Result<T, Break>) -> Result<T, String> {
     if !path.exists() {
-        return Err(format!("{flag} path does not exist: {}", path.display()));
+        return Err(format!(
+            "{flag} path does not exist: {}",
+            ral_core::path::shown(path)
+        ));
     }
     read().map_err(|e| {
         let detail = match e {
@@ -53,11 +56,12 @@ fn load<T>(path: &Path, flag: &str, read: impl FnOnce() -> Result<T, Break>) -> 
                 format!("stopped: {}", cause.message())
             }
         };
-        format!("{flag} {}: {detail}", path.display())
+        format!("{flag} {}: {detail}", ral_core::path::shown(path))
     })
 }
 
-/// Resolve `p` against `cwd` unless it is already absolute.
-pub(super) fn absolute_in(cwd: &str, p: &Path) -> PathBuf {
-    path::resolve_str(Some(cwd), &p.to_string_lossy())
+/// Anchor `p`, a path the host was handed on the command line, at `cwd`
+/// unless it is already absolute: see [`path::Resolver::anchor`].
+pub(super) fn absolute_in(cwd: &Path, p: &Path) -> PathBuf {
+    path::Resolver::at(None, cwd).anchor(p).into_inner()
 }

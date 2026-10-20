@@ -147,7 +147,7 @@ fn a_family_door_refuses_a_block_in_its_argument_statically() {
             src,
             shell.session_schemes(),
             ral_core::source::FileId::DUMMY,
-            "",
+            None,
             None,
         ) {
             Ok(_) => Vec::new(),
@@ -236,6 +236,10 @@ fn the_recipe_gains_detach_and_its_budget() {
 /// the verb, and with it the budget the recipe arms in the same act.
 #[cfg(unix)]
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[test] the test process's own cwd"
+)]
 fn clear_reboots_a_shell_that_still_carries_detach() {
     let scratch = std::sync::Arc::new(
         crate::app::Scratch::for_test(crate::app::EXARCH, "detach-clear").expect("scratch dir"),
@@ -264,11 +268,12 @@ fn clear_reboots_a_shell_that_still_carries_detach() {
 #[test]
 fn help_lists_a_library_section_only_on_a_shell_that_sourced_it() {
     use ral_core::protocol::Run;
+    use ral_core::source::SourceOrigin;
 
     use ral_core::run::{RunReport, RunRequest};
 
     let run_help = |shell: &mut Shell| -> String {
-        let req = RunRequest::from(Run::captured("help", "<test>"));
+        let req = RunRequest::from(Run::captured("help", SourceOrigin::named("<test>")));
         match shell.run(req) {
             RunReport::Ran {
                 ending, captured, ..

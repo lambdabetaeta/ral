@@ -1,10 +1,15 @@
 //! How ral shows a path: `/`-separated on every host.
 
 use super::PathRules;
+use super::lex::{Heads, namespace_head};
 use std::borrow::Cow;
 use std::path::Path;
 
 /// `p` as ral shows it.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "native: the one conversion every shown path goes through"
+)]
 pub fn shown(p: impl AsRef<Path>) -> String {
     fold_for(
         &dunce::simplified(p.as_ref()).to_string_lossy(),
@@ -13,12 +18,14 @@ pub fn shown(p: impl AsRef<Path>) -> String {
     .into_owned()
 }
 
-/// The separator fold: a Windows path reads `/`-separated unless its head
-/// is verbatim or a device, where `/` is not a separator.
+/// The separator fold: a Windows path reads `/`-separated unless it opens
+/// with a [namespace head](super::lex::namespace_head) as the OS returns one,
+/// past which `/` is not a separator.
 pub(crate) fn fold_for(s: &str, rules: PathRules) -> Cow<'_, str> {
-    let literal = [r"\\?\", r"\??\", r"\\.\"].iter().any(|h| s.starts_with(h));
     match rules {
-        PathRules::Windows if !literal => Cow::Owned(s.replace('\\', "/")),
+        PathRules::Windows if namespace_head(s, Heads::OsReturned).is_none() => {
+            Cow::Owned(s.replace('\\', "/"))
+        }
         _ => Cow::Borrowed(s),
     }
 }

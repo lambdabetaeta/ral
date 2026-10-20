@@ -173,13 +173,27 @@ impl Mentions for Box<[(Name, Spanned<Val>)]> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum CommandName {
     Bare(Name),
-    /// Slash-bearing literal path: skips the lookup chain, exec'd as written.
+    /// A literal path, bearing a separator under the host's rules
+    /// ([`crate::path::names_a_path`]): skips the lookup chain, exec'd as
+    /// written.
     Path(String),
     /// `~/x`, carried unexpanded until command resolution.
     TildePath(TildePath),
 }
 
 impl CommandName {
+    /// A head named by a string at run time, classified as the lexer
+    /// classifies a source word: a path when it bears a separator under the
+    /// host's rules, else a bare name.  A `~` here is text, not home: home is
+    /// source syntax, which a string has left behind.
+    pub(crate) fn of(name: &str) -> Self {
+        if crate::path::names_a_path(name) {
+            Self::Path(name.into())
+        } else {
+            Self::Bare(name.into())
+        }
+    }
+
     /// The head as the source wrote it — what a diagnostic raised before the
     /// run can name it.  A `~` stays a `~`: expanding it wants a live `HOME`,
     /// which is command resolution's business rather than the checker's.

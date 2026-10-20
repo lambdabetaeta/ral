@@ -349,7 +349,7 @@ mod tests {
     fn annotated_lambda_node() -> Arc<Comp> {
         let src = r"let f = { |x| let y = /bin/echo $x; /bin/cat | /bin/cat }";
         let ast = crate::syntax::parser::parse(src).expect("parse");
-        let top = crate::elaborator::elaborate(&ast, [], "").expect("elaborate");
+        let top = crate::elaborator::elaborate(&ast, [], None).expect("elaborate");
         let annotated =
             crate::typecheck(&top, crate::test_helper::core_schemes(), None).expect("typecheck");
         let [phrase] = annotated.phrases.as_slice() else {
@@ -478,7 +478,7 @@ mod tests {
     fn a_thunk_ships_its_boundary_sites_under_one_unit() {
         let src = "let f = { |p|\n  let a = from-json < $p\n  let b = from-json < $p\n  return $[$a[x] < $b[x]]\n}";
         let ast = crate::syntax::parser::parse(src).expect("parse");
-        let top = crate::elaborator::elaborate(&ast, [], "").expect("elaborate");
+        let top = crate::elaborator::elaborate(&ast, [], None).expect("elaborate");
         let annotated =
             crate::typecheck(&top, crate::test_helper::core_schemes(), None).expect("typecheck");
         let [phrase] = annotated.phrases.as_slice() else {

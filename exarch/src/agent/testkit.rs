@@ -109,7 +109,11 @@ pub(crate) fn bare_transport() -> ral_core::carrier::IdentityTransport {
     let temp = std::env::temp_dir();
     ral_core::carrier::IdentityTransport::boot(
         &BARE,
-        &ral_core::protocol::Attach::new("bare", temp.clone(), temp),
+        &ral_core::protocol::Attach::new(
+            "bare",
+            ral_core::path::EnginePath::Host(temp.clone()),
+            ral_core::path::EnginePath::Host(temp),
+        ),
     )
     .expect("a bare engine boots")
 }
@@ -320,6 +324,10 @@ pub(crate) fn searchless_trunk() -> Avatar {
     .expect("searchless test trunk")
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[test] the test process's own cwd"
+)]
 fn root(trunk: Trunk, tools: Toolset) -> Avatar {
     // The run dir sits beside the scratch, which the seat below owns, so the
     // trunk's whole footprint goes when the trunk does.
@@ -355,6 +363,10 @@ fn root(trunk: Trunk, tools: Toolset) -> Avatar {
 /// the parent's shell and parks it, and the host adopts it, so the child
 /// carries the parent's whole scope and builtins — what a genesis-seated
 /// [`Avatar::fork_named`] does not.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[test] a poisoned lock is the test's own failure"
+)]
 pub(crate) fn started_child(parent: &Avatar, name: &str) -> Avatar {
     use crate::agent::seat::{Seat, SeatKind};
     use crate::enquiry::{Agents, ForkClaim, Request, Start};
@@ -362,6 +374,7 @@ pub(crate) fn started_child(parent: &Avatar, name: &str) -> Avatar {
     use ral_core::first_order::FOValue;
     use ral_core::first_order::datum::Datum as _;
     use ral_core::protocol::{EnquiryError, Run};
+    use ral_core::source::SourceOrigin;
 
     struct Adopt {
         parent: Arc<Agent>,
@@ -419,7 +432,7 @@ pub(crate) fn started_child(parent: &Avatar, name: &str) -> Avatar {
     );
     let report = ral_core::carrier::dispatch_to_report(
         &*transport,
-        Run::captured(script.as_str(), "<test>"),
+        Run::captured(script.as_str(), SourceOrigin::named("<test>")),
         host.clone(),
     )
     .expect("an identity engine never severs");

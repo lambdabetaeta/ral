@@ -242,7 +242,7 @@ fn parked_by<R: Send + 'static>(
     });
     let report = ral_core::carrier::dispatch_to_report(
         &**parent,
-        ral_core::protocol::Run::captured(source, "<test>"),
+        ral_core::protocol::Run::captured(source, ral_core::source::SourceOrigin::named("<test>")),
         host.clone(),
     )
     .expect("an identity engine never severs");

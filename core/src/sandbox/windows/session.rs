@@ -51,9 +51,9 @@ use super::dacl::{self, DaclError, DaclManager, FrozenPin, GrantKind};
 /// never stamped on disk, so it needs no SID of its own.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ProjectionKey {
-    read: Vec<String>,
-    write: Vec<String>,
-    deny: Vec<String>,
+    read: Vec<PathBuf>,
+    write: Vec<PathBuf>,
+    deny: Vec<PathBuf>,
 }
 
 /// One projection's profile, the allow `(path, kind)` pairs already ensured
@@ -183,9 +183,9 @@ fn profile_name(index: u32) -> String {
 /// takes one back. What makes this token narrower than another is only which
 /// capabilities it names.
 ///
-/// `program_image`, which must already be a real path (the guard's resolved
-/// image, never re-resolved here: a link on it is refused by the pin), is
-/// granted read+execute so the `LowBox` token can load the
+/// `program_image`, a [`RealPath`] (the guard's resolved image, never
+/// re-resolved here: a link on it is refused by the pin), is granted
+/// read+execute so the `LowBox` token can load the
 /// child's binary, mirroring the Linux backend's RO bind of the program path;
 /// `None` (a bare name the caller could not resolve) leaves that to the read
 /// projection and the `ALL APPLICATION PACKAGES` system paths. An
@@ -205,7 +205,7 @@ fn profile_name(index: u32) -> String {
 pub(crate) fn confine(
     launch: &mut Launch,
     projection: &SandboxProjection,
-    program_image: Option<&Path>,
+    program_image: Option<&RealPath>,
     cancel: &Scope,
 ) -> Result<(), Refusal> {
     // Traced in three parts, because each is a different kind of cost and only
@@ -236,9 +236,9 @@ pub(crate) fn confine(
         .map(|p| RealPath::frozen(p).as_path().to_path_buf())
         .collect();
     let key = ProjectionKey {
-        read: strings(&read),
-        write: strings(&write),
-        deny: strings(&deny),
+        read: read.clone(),
+        write: write.clone(),
+        deny: deny.clone(),
     };
     sandbox.ensure_projection(&key)?;
     crate::dbg_trace!(
@@ -262,7 +262,7 @@ pub(crate) fn confine(
         .into_iter()
         .filter(|p| !readwrite.contains(p))
         .collect();
-    if let Some(image) = program_image.map(Path::to_path_buf)
+    if let Some(image) = program_image.map(|image| image.as_path().to_path_buf())
         && !readwrite.contains(&image)
         && !readonly.contains(&image)
     {
@@ -420,7 +420,13 @@ fn ensure_denies(
 /// exclusion), since the drive it opens is stamped, or walked, whole. Run before anything is stamped, so the guard
 /// alone judges.
 fn refuse_universal_prefix(rules: &FsRules) -> Result<(), Refusal> {
-    let bare = |p: &Path| crate::path::lex::is_bare_root(&p.to_string_lossy());
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "native: a frozen real path, classified by its spelling as the OS keeps it"
+    )]
+    let bare = |p: &Path| {
+        crate::path::lex::is_bare_root(&p.to_string_lossy(), crate::path::PathRules::HOST)
+    };
     let universal = |s: &FsScope| match s {
         FsScope::Prefix(p) => p.is_root() || bare(RealPath::frozen(p).as_path()),
         FsScope::Place(r) => bare(r.as_path()),
@@ -450,13 +456,6 @@ fn real_paths(region: &[FsScope]) -> Vec<PathBuf> {
             FsScope::Prefix(p) => RealPath::frozen(p).as_path().to_path_buf(),
             FsScope::Place(r) => r.as_path().to_path_buf(),
         })
-        .collect()
-}
-
-fn strings(paths: &[PathBuf]) -> Vec<String> {
-    paths
-        .iter()
-        .map(|p| p.to_string_lossy().into_owned())
         .collect()
 }
 
@@ -535,10 +534,7 @@ pub(crate) fn teardown() {
 /// absent deny is simply skipped — a path the child creates later under a
 /// granted prefix falls within that grant's own authority anyway.
 fn existing_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
-    paths
-        .into_iter()
-        .filter(|p| crate::path::exists(&p.to_string_lossy()))
-        .collect()
+    paths.into_iter().filter(|p| p.exists()).collect()
 }
 
 /// The pure half of the grant memo, free-standing so the tests below can

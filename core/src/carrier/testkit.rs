@@ -2,7 +2,9 @@
 
 use super::IdentityTransport;
 use crate::engine::EngineInstaller;
+use crate::path::EnginePath;
 use crate::protocol::{Attach, EngineSpec, Report, Root, Run};
+use crate::source::SourceOrigin;
 use crate::terminal::TerminalState;
 use crate::types::{Runtime, Shell};
 
@@ -35,7 +37,11 @@ pub(crate) static BARE: [EngineInstaller; 1] = [installer(
 /// An attach to `installers`' first recipe, seated in the temp dir.
 pub(crate) fn attach(installers: &[EngineInstaller]) -> Attach {
     let temp = std::env::temp_dir();
-    Attach::new(installers[0].tag, temp.clone(), temp)
+    Attach::new(
+        installers[0].tag,
+        EnginePath::Host(temp.clone()),
+        EnginePath::Host(temp),
+    )
 }
 
 /// Boot `attach` in this process.
@@ -55,7 +61,7 @@ pub(crate) fn boot(installers: &'static [EngineInstaller]) -> IdentityTransport 
 pub(crate) fn eval(transport: &IdentityTransport, src: &str) -> Report {
     super::dispatch_to_report(
         transport,
-        Run::captured(src, "<test>"),
+        Run::captured(src, SourceOrigin::named("<test>")),
         std::sync::Arc::new(()),
     )
     .expect("an identity transport answers synchronously")

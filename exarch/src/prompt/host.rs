@@ -27,12 +27,16 @@ pub fn snapshot(exarch_state: &std::path::Path) -> String {
         let _ = writeln!(out, "- user: {user}");
     }
     if let Some(home) = ral_core::host::home() {
-        let _ = writeln!(out, "- home: {home}");
+        let _ = writeln!(out, "- home: {}", ral_core::path::shown(home));
     }
     if let Some(g) = git_line() {
         let _ = writeln!(out, "- git: {g}");
     }
-    let _ = writeln!(out, "- exarch logs: {}", exarch_state.display());
+    let _ = writeln!(
+        out,
+        "- exarch logs: {}",
+        ral_core::path::shown(exarch_state)
+    );
     out
 }
 

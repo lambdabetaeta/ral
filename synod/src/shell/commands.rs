@@ -17,7 +17,7 @@
 
 use ral_core::path::shown;
 use std::panic;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -138,6 +138,17 @@ impl Emitter {
     }
 }
 
+/// A folder the user picked, as the window holds it.
+#[derive(Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../ui/js/bindings/")]
+pub struct PickedFolder {
+    /// The native path, which the window hands back as it came, to
+    /// `start_conversation` and `job_report`, and never shows.
+    path: PathBuf,
+    /// The `/`-spelled name the window shows.
+    label: String,
+}
+
 /// Open the native folder picker and return the chosen folder, or `None`
 /// if the user closed the picker without choosing.
 ///
@@ -148,14 +159,17 @@ impl Emitter {
 /// user answers, and the main thread is the one that must stay free to
 /// show it.
 #[tauri::command]
-pub async fn choose_folder(app: AppHandle) -> Option<String> {
+pub async fn choose_folder(app: AppHandle) -> Option<PickedFolder> {
     use tauri_plugin_dialog::DialogExt;
     app.dialog()
         .file()
         .set_title("Choose the folder for this job")
         .blocking_pick_folder()
         .and_then(|picked| picked.into_path().ok())
-        .map(|path| path.to_string_lossy().into_owned())
+        .map(|path| PickedFolder {
+            label: shown(&path),
+            path,
+        })
 }
 
 /// The provider/model menu the window offers before starting: one entry
@@ -200,7 +214,7 @@ pub fn start_conversation(
     app: AppHandle,
     state: State<'_, Running>,
     accounts: State<'_, super::Accounts>,
-    folder: String,
+    folder: PathBuf,
     choice: Choice,
 ) -> Result<(), String> {
     accounts.resolved()?;
@@ -292,7 +306,7 @@ fn mark_from_elsewhere(path: &Path) {
     if let Err(e) = written {
         eprintln!(
             "synod: could not mark {} as from elsewhere: {e}",
-            path.display()
+            shown(path)
         );
     }
 }
@@ -378,7 +392,7 @@ pub(crate) fn end_conversation(slot: &Arc<Mutex<Option<Handle>>>) {
 fn spawn_conversation(
     app: AppHandle,
     slot: Arc<Mutex<Option<Handle>>>,
-    folder: String,
+    folder: PathBuf,
     choice: Choice,
 ) {
     static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -437,7 +451,7 @@ fn spawn_conversation(
 fn run_conversation(
     emitter: Emitter,
     superseded: Option<JoinHandle<()>>,
-    folder: String,
+    folder: PathBuf,
     choice: Choice,
     receiver: mpsc::Receiver<String>,
     baseline_stop: synod::workspace::manifest::Stop,
@@ -467,7 +481,7 @@ fn run_conversation(
 /// and shut the machine down.
 fn converse(
     emitter: &Emitter,
-    folder: &str,
+    picked: &Path,
     choice: Choice,
     receiver: &mpsc::Receiver<String>,
     baseline_stop: &synod::workspace::manifest::Stop,
@@ -486,12 +500,6 @@ fn converse(
         };
     };
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "path: lifting the folder the user picked in the window's own dialog — the \
-                  user-input adapter site clippy.toml admits, not a path built from parts"
-    )]
-    let picked = Path::new(folder);
     // Narrated because it is silent otherwise: on a large folder or a
     // network share, the baseline stat-walk is the one long minute a user
     // meets before anything else has had a chance to say something.  Owned
@@ -557,8 +565,13 @@ fn converse(
 /// a document it has already checked.
 fn open_with_default(app: &AppHandle, path: &Path) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "native: the path is handed to the system's opener"
+    )]
+    let native = path.to_string_lossy();
     app.opener()
-        .open_path(path.to_string_lossy(), None::<&str>)
+        .open_path(native, None::<&str>)
         .map_err(|e| format!("Could not open {}: {e}", shown(path)))
 }
 

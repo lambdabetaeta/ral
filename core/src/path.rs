@@ -20,36 +20,41 @@
 
 pub(crate) mod basedir;
 pub(crate) mod canon;
+pub mod complete;
 pub(crate) mod device;
 pub(crate) mod forms;
 pub mod git;
 pub(crate) mod identity;
 pub mod lex;
+mod namespace;
 pub mod ral_path;
 mod real;
 pub(crate) mod render;
 pub(crate) mod resolver;
-pub mod show;
+mod show;
 pub mod sigil;
+mod slug;
 pub(crate) mod stage;
 pub mod tilde;
 pub mod tree;
 pub(crate) mod walk;
 pub(crate) mod which;
 
-pub use basedir::XdgKind;
 pub(crate) use basedir::resolve_xdg_in;
+pub use basedir::{XdgKind, app_dir, app_dir_or_temp};
 pub use show::shown;
+pub use slug::project_slug;
 pub use tilde::abbreviate_home;
 
 pub use forms::{FrozenPath, LexicalPath};
-pub use git::find_git_entry;
+pub use git::work_tree_chain;
 pub use identity::{Allow, Deny, Polarity};
 pub(crate) use lex::proper_ancestors;
 pub use lex::{
-    PathShape, basename, exists, is_absolute, is_dir, resolve_path, resolve_relative_to_script,
-    resolve_str, shape,
+    NotUtf8, PathShape, basename, exists, extension, is_absolute, is_dir, is_stream_or_drive,
+    join_slash, shape, strip_appended_suffix, utf8, with_appended_suffix,
 };
+pub use namespace::{EnginePath, GuestPath};
 pub use real::RealPath;
 #[cfg(unix)]
 pub(crate) use render::render_real;
@@ -59,10 +64,14 @@ pub(crate) use render::rendered_ancestors;
 pub(crate) use render::{Object, Rendered, render_objects, render_paths, rendered_pins};
 pub use resolver::Resolver;
 pub use walk::Located;
+#[cfg(windows)]
+pub(crate) use which::is_batch_image;
 pub(crate) use which::is_executable_file;
-pub(crate) use which::{PathSearch, search};
-pub use which::{SearchCwd, forget_located_commands, locate, path_dirs, resolve_in_path};
-pub(crate) use which::{WINDOWS_EXEC_EXTENSIONS, command_name_key};
+#[cfg(target_os = "linux")]
+pub(crate) use which::locate_in;
+pub(crate) use which::{PathSearch, path_dirs_absolute, path_entries, search};
+pub use which::{SearchCwd, forget_located_commands, locate, path_dirs};
+pub(crate) use which::{WINDOWS_EXEC_EXTENSIONS, command_name_key, names_a_path, names_a_path_for};
 
 /// Which platform's path rules a question is asked under.
 ///
@@ -80,6 +89,12 @@ impl PathRules {
     } else {
         Self::Posix
     };
+
+    /// Whether `c` separates path components: `/` under both rules, `\`
+    /// under Windows alone; under Posix a backslash is a filename byte.
+    pub(crate) fn is_separator(self, c: char) -> bool {
+        c == '/' || (self == Self::Windows && c == '\\')
+    }
 }
 
 /// `/proc/self/fd/<raw>` as a `PathBuf`: how a binary `sandbox::reexec`
@@ -99,4 +114,18 @@ pub(crate) fn proc_fd_path(raw: std::os::fd::RawFd) -> std::path::PathBuf {
 )]
 pub(crate) fn test_cwd() -> &'static std::path::Path {
     std::path::Path::new("/")
+}
+
+/// A fixture path written POSIX-style, `/a/b`, as an absolute path on this
+/// host: on Windows a driveless `/a/b` is not absolute, and a resolver anchors
+/// it to the cwd's drive, so it gains a drive and the host's separator.  The
+/// root `/` is the universal prefix on every host, as
+/// [`FrozenPath::root`] is, and stays as written.
+#[cfg(test)]
+pub(crate) fn test_absolute(posix: &str) -> String {
+    debug_assert!(posix.starts_with('/'), "{posix:?} is not POSIX-absolute");
+    match PathRules::HOST {
+        PathRules::Windows if posix != "/" => format!("C:{}", posix.replace('/', r"\")),
+        _ => posix.to_string(),
+    }
 }

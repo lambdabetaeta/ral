@@ -9,7 +9,9 @@
     reason = "[test] test fs/process scaffolding"
 )]
 use super::*;
+use crate::path::EnginePath;
 use crate::protocol::{Ending, PROTOCOL_VERSION, Report};
+use crate::source::SourceOrigin;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -26,7 +28,11 @@ fn brisk() -> Liveness {
 /// The ticker does not start until the attach is written, so any test
 /// expecting heartbeat traffic or deadline death must call this first.
 fn attach(transport: &WireTransport) {
-    transport.attach(Attach::new("repl", PathBuf::from("/"), PathBuf::from("/")));
+    transport.attach(Attach::new(
+        "repl",
+        EnginePath::Host(PathBuf::from("/")),
+        EnginePath::Host(PathBuf::from("/")),
+    ));
 }
 
 /// The version handshake the guest engine checks before it will speak.
@@ -247,7 +253,7 @@ fn session_frame_with_no_dispatch_reaches_the_installed_sink() {
     let id = DispatchId(1);
     transport.dispatch(
         id,
-        Run::captured("$[1 + 1]", "<test>"),
+        Run::captured("$[1 + 1]", SourceOrigin::named("<test>")),
         &(Arc::new(()) as Arc<dyn Host>),
     );
 

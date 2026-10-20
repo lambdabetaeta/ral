@@ -14,12 +14,13 @@ use common::fresh_shell;
 
 use ral_core::protocol::Run;
 use ral_core::run::RunReport;
+use ral_core::source::SourceOrigin;
 
 /// Run `source`, expecting it to be rejected by the type checker before it
 /// ever runs (a `RunReport::Static`).
 fn expect_static_reject(source: &str) {
     let mut shell = fresh_shell();
-    match shell.run(Run::foreground(source, "<test>")) {
+    match shell.run(Run::foreground(source, SourceOrigin::named("<test>"))) {
         RunReport::Static { .. } => {}
         RunReport::Ran { ending, .. } => {
             panic!("{source:?}: expected a static type error, but it ran: {ending:?}")

@@ -16,16 +16,29 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  # A hung test must fail fast rather than run to GitHub's 6-hour limit.
+  # The ceiling covers the five 20-minute test steps (100) plus the cold
+  # clippy and build steps ahead of them.
   windows-check:
     runs-on: windows-latest
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v7
 
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+
+      # The only lint of Windows-only code: ci.yml's `just lint` runs on Unix
+      # hosts and never compiles the cfg(windows) paths.  No `-- -D warnings`
+      # (justfile's policy): the job-level RUSTFLAGS already denies warnings,
+      # and the flag would override vendored ral-ripgrep-core's opt-out.
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --keep-going
 
       - name: cargo build (core)
         run: cargo build -p ral-core
@@ -54,16 +67,21 @@ jobs:
       # rather than the first one.  A failed step still fails the job.
       - name: cargo test (core)
         if: ${{ !cancelled() }}
+        timeout-minutes: 20
         run: cargo test -p ral-core --no-fail-fast
       - name: cargo test (ral)
         if: ${{ !cancelled() }}
+        timeout-minutes: 20
         run: cargo test -p ral --no-fail-fast
       - name: cargo test (ral with ripgrep)
         if: ${{ !cancelled() }}
+        timeout-minutes: 20
         run: cargo test -p ral --features ripgrep --no-fail-fast
       - name: cargo test (ral with coreutils,diffutils,ripgrep)
         if: ${{ !cancelled() }}
+        timeout-minutes: 20
         run: cargo test -p ral --features coreutils,diffutils,ripgrep --no-fail-fast
       - name: cargo test (exarch)
         if: ${{ !cancelled() }}
+        timeout-minutes: 20
         run: cargo test -p exarch --no-fail-fast

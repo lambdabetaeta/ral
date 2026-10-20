@@ -310,12 +310,16 @@ fn restore_process_dirs(attach: &Attach) {
         reason = "engine cwd restore during Attach: sets engine process cwd, not Shell logical cwd"
     )]
     if let Origin::Root(Root { cwd, .. }) = &attach.origin
-        && std::env::current_dir().is_ok_and(|d| d != *cwd)
+        && let cwd = cwd.native()
+        && std::env::current_dir().is_ok_and(|d| d != cwd)
         && let Err(e) = std::env::set_current_dir(cwd)
     {
-        crate::errln!("engine: failed to set cwd to {}: {e}", cwd.display());
+        crate::errln!(
+            "engine: failed to set cwd to {}: {e}",
+            crate::path::shown(cwd)
+        );
     }
-    let home = &attach.engine.home;
+    let home = attach.engine.home.native();
     #[allow(
         clippy::disallowed_methods,
         reason = "engine HOME restore during Attach: process env, not Shell state"
@@ -764,6 +768,7 @@ mod wire_desk_tests {
 #[cfg(test)]
 mod engine_session_tests {
     use super::*;
+    use crate::path::EnginePath;
     use crate::process::cancel::REQUEST_SERIAL;
 
     const WAIT: Duration = Duration::from_secs(20);
@@ -806,8 +811,10 @@ mod engine_session_tests {
         )]
         host.send(&Frame::Attach(Attach::new(
             "test",
-            std::env::current_dir().expect("test cwd"),
-            std::env::var_os("HOME").map_or_else(|| "/".into(), std::path::PathBuf::from),
+            EnginePath::Host(std::env::current_dir().expect("test cwd")),
+            EnginePath::Host(
+                std::env::var_os("HOME").map_or_else(|| "/".into(), std::path::PathBuf::from),
+            ),
         )));
         host
     }
@@ -820,7 +827,10 @@ mod engine_session_tests {
         fn dispatch(&mut self, id: u64, src: &str) {
             self.send(&Frame::Dispatch(
                 DispatchId(id),
-                Box::new(crate::protocol::Run::captured(src, "<test>")),
+                Box::new(crate::protocol::Run::captured(
+                    src,
+                    crate::source::SourceOrigin::named("<test>"),
+                )),
             ));
         }
 

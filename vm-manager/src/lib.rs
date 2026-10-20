@@ -44,7 +44,6 @@
 //! cannot tell which one booted it; `hcs`'s own module docs carry the table of
 //! correspondences.
 
-use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -52,11 +51,15 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(windows)]
 pub mod broker;
+mod error;
 #[cfg(windows)]
 pub mod hcs;
 pub mod media;
+mod os_path;
 #[cfg(target_os = "macos")]
 pub mod vz;
+
+pub use error::{Act, Error, HostFile, MachineFiles, Spelling, Wire, Worded};
 
 /// The folder an agent is given, and where it appears to the agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,13 +116,6 @@ impl MachineSpec {
     /// Returns [`Error`] if the granted folder is missing, is not a folder,
     /// or cannot be read; if the guest mount point is not absolute; or if
     /// the resource limits are too small to boot.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "REASONED-SILENT: resolving the granted folder before a machine exists. \
-                  This runs on the host, before any engine, so there is no Shell to route \
-                  through `crate::path::canon` and no run to raise a card in; vm-manager \
-                  deliberately does not depend on ral-core."
-    )]
     pub fn resolve(&self) -> Result<PathBuf, Error> {
         if self.vcpus == 0 {
             return Err(Error::NoProcessors);
@@ -136,18 +132,26 @@ impl MachineSpec {
         // field names; on Windows `Path::is_absolute` would say otherwise
         // (nothing without a drive letter or a UNC prefix is absolute there)
         // and refuse every well-formed spec on that platform alone.
-        if !self.workspace.guest_path.to_string_lossy().starts_with('/') {
+        let guest_path = self.workspace.guest_path.as_os_str();
+        if !guest_path.as_encoded_bytes().starts_with(b"/") {
             return Err(Error::GuestPathNotAbsolute(
                 self.workspace.guest_path.clone(),
             ));
         }
 
         let path = &self.workspace.host_path;
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "REASONED-SILENT: resolving the granted folder before a machine exists. \
+                      This runs on the host, before any engine, so there is no Shell to route \
+                      through `crate::path::canon` and no run to raise a card in; vm-manager \
+                      deliberately does not depend on ral-core."
+        )]
         let root = std::fs::canonicalize(path).map_err(|cause| match cause.kind() {
             io::ErrorKind::NotFound => Error::NoSuchFolder(path.clone()),
             _ => Error::FolderUnreadable {
                 path: path.clone(),
-                cause,
+                cause: cause.to_string(),
             },
         })?;
         if root.is_dir() {
@@ -214,7 +218,7 @@ impl BootArtifact {
         let resolve_one = |path: &PathBuf| {
             std::fs::canonicalize(path).map_err(|cause| Error::MissingBootFile {
                 path: path.clone(),
-                cause,
+                cause: cause.to_string(),
             })
         };
         Ok(Self {
@@ -345,12 +349,13 @@ pub type AgentDial = std::os::windows::io::OwnedSocket;
 /// open, and an empty `tail` means the guest genuinely said nothing.  Callers
 /// must say which of those they saw rather than writing an empty file and
 /// letting a reader assume the guest was silent.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct GuestConsole {
     /// The whole console on disk, if this backend kept it somewhere the host
     /// can name.  Naming it is worth doing even when it cannot be read from
     /// here — under the broker it belongs to a `LocalSystem` service — since
     /// a path an administrator can open beats no path at all.
+    #[serde(with = "crate::os_path::option")]
     pub log: Option<PathBuf>,
     /// The guest's last lines, oldest first, as a boot failure already quotes
     /// them.  A handful, not a dump: the point is to be quotable inside a
@@ -426,26 +431,6 @@ pub trait Machine: Send {
     fn shutdown(self: Box<Self>) -> Result<(), Error>;
 }
 
-/// Shown by [`detect`] on every platform this crate has no backend for at
-/// all — anything but an Apple Silicon Mac or a Windows with the Virtual
-/// Machine Platform — whatever boot media it was given.
-#[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
-const NO_BACKEND: &str = "this computer cannot run synod's virtual machine — it starts on an \
-                          Apple Silicon Mac, or on Windows with the Virtual Machine Platform";
-
-/// Shown by [`detect`] when the platform could run a machine, but this
-/// build shipped with no boot media to start one from.
-#[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64")))]
-const NO_BOOT_MEDIA: &str = "synod could not find the virtual-machine image it ships with — \
-                              ask whoever installed synod to reinstall it";
-
-/// Shown by [`detect`] when boot media is present but this process is not
-/// signed with the entitlement Virtualization.framework demands.
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const UNENTITLED: &str = "this copy of synod is not signed with the entitlement it needs to \
-                           start a virtual machine — ask whoever installed synod for a properly \
-                           signed build";
-
 /// How a front-end readies its boot media, run only if the backend turns out
 /// to need it.
 ///
@@ -458,7 +443,7 @@ const UNENTITLED: &str = "this copy of synod is not signed with the entitlement 
 /// computer shares it.  Whether that is the case is [`detect`]'s to decide, so
 /// what it takes is the *means* of getting media rather than media itself, and
 /// the work happens on exactly the paths that use it.
-pub type BootMedia = Box<dyn FnOnce() -> Result<BootArtifact, String>>;
+pub type BootMedia = Box<dyn FnOnce() -> Result<BootArtifact, Error>>;
 
 /// Start the one backend this build can actually run, given the boot media
 /// the application ships.
@@ -472,11 +457,11 @@ pub type BootMedia = Box<dyn FnOnce() -> Result<BootArtifact, String>>;
 /// can additionally give are their own, and named in their docs.
 ///
 /// # Errors
-/// Always, with [`NO_BACKEND`].
+/// Always, with [`Error::NoBackend`].
 #[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
-pub fn detect(boot: Option<BootMedia>) -> Result<Box<dyn Hypervisor>, String> {
+pub fn detect(boot: Option<BootMedia>) -> Result<Box<dyn Hypervisor>, Error> {
     drop(boot);
-    Err(NO_BACKEND.to_string())
+    Err(Error::NoBackend)
 }
 
 /// Start the one backend this build can actually run, given the boot media
@@ -496,12 +481,12 @@ pub fn detect(boot: Option<BootMedia>) -> Result<Box<dyn Hypervisor>, String> {
 /// agreed to serve this user, so that a refusal costs no work.
 ///
 /// # Errors
-/// Returns [`NO_BOOT_MEDIA`] if there is no service and `boot` is `None`,
-/// [`hcs::available`]'s own sentence — with the service named beside it — if
-/// this Windows will not host a guest for this user directly either, or
-/// whatever `boot` itself reports when the media cannot be readied.
+/// Returns [`Error::NoBootMedia`] if there is no service and `boot` is `None`,
+/// [`hcs::available`]'s own refusal if this Windows will not host a guest for
+/// this user directly either, or whatever `boot` itself reports when the media
+/// cannot be readied.
 #[cfg(windows)]
-pub fn detect(boot: Option<BootMedia>) -> Result<Box<dyn Hypervisor>, String> {
+pub fn detect(boot: Option<BootMedia>) -> Result<Box<dyn Hypervisor>, Error> {
     // The broker first, always: an installed synod runs unprivileged, and the
     // service is what makes that possible (`broker`'s own docs carry the
     // argument).  It needs no boot media from this process — it has its own,
@@ -515,15 +500,9 @@ pub fn detect(boot: Option<BootMedia>) -> Result<Box<dyn Hypervisor>, String> {
     // creating the machine here, which works for whoever the compute service
     // already serves — a maintainer in an elevated shell, or in the group.
     let Some(media) = boot else {
-        return Err(NO_BOOT_MEDIA.to_string());
+        return Err(Error::NoBootMedia);
     };
-    hcs::available().map_err(|why| {
-        format!(
-            "{why}. (Synod's own installer avoids this entirely: it registers a service that \
-             holds that one privilege so the application does not have to. This copy of synod is \
-             running without it.)"
-        )
-    })?;
+    hcs::available()?;
     Ok(Box::new(hcs::Hyperv::new(
         media()?,
         hcs::Hyperv::default_cache(),
@@ -534,111 +513,22 @@ pub fn detect(boot: Option<BootMedia>) -> Result<Box<dyn Hypervisor>, String> {
 /// the application ships.
 ///
 /// On Apple Silicon macOS the platform check the other-platform overload
-/// makes always passes, so the only refusals left are [`NO_BOOT_MEDIA`] and
-/// [`UNENTITLED`].
+/// makes always passes, so the only refusals left are
+/// [`Error::NoBootMedia`] and [`Error::Unentitled`].
 ///
 /// # Errors
-/// Returns [`NO_BOOT_MEDIA`] if `boot` is `None`, [`UNENTITLED`] if this
-/// process is not signed with the virtualization entitlement, or whatever
-/// `boot` itself reports when the media cannot be readied.
+/// Returns [`Error::NoBootMedia`] if `boot` is `None`, [`Error::Unentitled`]
+/// if this process is not signed with the virtualization entitlement, or
+/// whatever `boot` itself reports when the media cannot be readied.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub fn detect(boot: Option<BootMedia>) -> Result<Box<dyn Hypervisor>, String> {
+pub fn detect(boot: Option<BootMedia>) -> Result<Box<dyn Hypervisor>, Error> {
     let Some(media) = boot else {
-        return Err(NO_BOOT_MEDIA.to_string());
+        return Err(Error::NoBootMedia);
     };
     if !vz::entitled() {
-        return Err(UNENTITLED.to_string());
+        return Err(Error::Unentitled);
     }
     Ok(Box::new(vz::Vz::new(media()?, std::env::temp_dir())))
-}
-
-/// Why a machine could not be started.
-///
-/// The [`Display`](fmt::Display) text is written for the person who granted
-/// the folder, not a programmer.
-#[derive(Debug)]
-pub enum Error {
-    /// The granted folder is not there.
-    NoSuchFolder(PathBuf),
-    /// The granted path exists but is a file, not a folder.
-    NotAFolder(PathBuf),
-    /// The granted folder is there but could not be read.
-    FolderUnreadable { path: PathBuf, cause: io::Error },
-    /// A file of the boot media this build ships is missing or unreadable.
-    MissingBootFile { path: PathBuf, cause: io::Error },
-    /// The workspace's mount point inside the guest is not an absolute path.
-    GuestPathNotAbsolute(PathBuf),
-    /// The spec asked for a machine with no processors.
-    NoProcessors,
-    /// The spec asked for less memory than a guest needs to boot.
-    TooLittleMemory { asked_mib: u32, least_mib: u32 },
-    /// The backend itself could not start.
-    Unavailable {
-        hypervisor: &'static str,
-        why: String,
-    },
-}
-
-impl fmt::Display for Error {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "outside ral: vm-manager does not depend on ral-core"
-    )]
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NoSuchFolder(path) => write!(
-                f,
-                "there is no folder at {}. Has it been moved or renamed?",
-                path.display()
-            ),
-            Self::NotAFolder(path) => write!(
-                f,
-                "{} is a file, not a folder. Please choose the folder that holds the documents to work on.",
-                path.display()
-            ),
-            Self::FolderUnreadable { path, cause } => write!(
-                f,
-                "the folder {} could not be opened: {cause}. Do you have permission to open it?",
-                path.display()
-            ),
-            Self::MissingBootFile { path, cause } => write!(
-                f,
-                "synod's virtual-machine image is missing a file it needs to start: {} ({cause}). \
-                 Ask whoever installed synod to reinstall it.",
-                path.display()
-            ),
-            Self::GuestPathNotAbsolute(path) => write!(
-                f,
-                "the folder has to appear inside the machine at a full path such as {}, but {} is not one",
-                MachineSpec::GUEST_WORKSPACE,
-                path.display()
-            ),
-            Self::NoProcessors => {
-                f.write_str("a machine needs at least one processor, and none were asked for")
-            }
-            Self::TooLittleMemory {
-                asked_mib,
-                least_mib,
-            } => write!(
-                f,
-                "a machine needs at least {least_mib} MB of memory to start, and only {asked_mib} MB were asked for"
-            ),
-            Self::Unavailable { hypervisor, why } => {
-                write!(f, "{hypervisor} could not start a machine: {why}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::FolderUnreadable { cause, .. } | Self::MissingBootFile { cause, .. } => {
-                Some(cause)
-            }
-            _ => None,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -698,8 +588,8 @@ mod tests {
     #[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
     #[test]
     fn without_a_backend_detect_refuses_regardless_of_media() {
-        assert!(detect(None).is_err());
-        assert!(detect(Some(media())).is_err());
+        assert!(matches!(detect(None), Err(Error::NoBackend)));
+        assert!(matches!(detect(Some(media())), Err(Error::NoBackend)));
     }
 
     /// On Windows, no media is its own refusal — asked before the compute
@@ -720,13 +610,13 @@ mod tests {
                 broker::client::Brokered::available(),
                 "nothing but a machine service can boot with no media from this process"
             ),
-            Err(message) => assert!(message.contains("could not find"), "{message}"),
+            Err(refusal) => assert!(matches!(refusal, Error::NoBootMedia), "{refusal:?}"),
         }
     }
 
     /// With media, the answer follows what this computer will actually do:
     /// a machine whose user the compute service serves gets a backend, and one
-    /// whose user it refuses gets the sentence naming the remedy. The law under
+    /// whose user it refuses gets the compute service's own refusal. The law under
     /// test is agreement between the two, not either fixed answer — a developer
     /// box outside the Hyper-V Administrators group and a deployed one inside
     /// it must both be described correctly.
@@ -755,14 +645,12 @@ mod tests {
                 "a computer the compute service refuses can only get a backend from a machine \
                  service, and no service is listening"
             ),
-            (Err(why), Err(message)) => {
-                assert!(
-                    message.starts_with(&why),
-                    "the refusal must carry the machine layer's own words: {message}"
-                );
-                assert!(
-                    message.contains("installer"),
-                    "and name the way out of it: {message}"
+            (Err(why), Err(refusal)) => {
+                let spell = |_: &Path| String::new();
+                assert_eq!(
+                    refusal.worded(spell).to_string(),
+                    why.worded(spell).to_string(),
+                    "the refusal must be the compute service's own"
                 );
             }
         }
@@ -772,8 +660,8 @@ mod tests {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn without_media_detect_refuses_by_name() {
-        let message = detect(None).err().unwrap();
-        assert!(message.contains("could not find"), "{message}");
+        let refusal = detect(None).err().unwrap();
+        assert!(matches!(refusal, Error::NoBootMedia), "{refusal:?}");
     }
 
     /// With media, the answer follows the process's own entitlement: a bare
@@ -786,8 +674,8 @@ mod tests {
         if vz::entitled() {
             assert!(detect(Some(media())).is_ok());
         } else {
-            let message = detect(Some(media())).err().unwrap();
-            assert!(message.contains("entitlement"), "{message}");
+            let refusal = detect(Some(media())).err().unwrap();
+            assert!(matches!(refusal, Error::Unentitled), "{refusal:?}");
         }
     }
 }

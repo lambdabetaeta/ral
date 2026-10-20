@@ -7,11 +7,12 @@ use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::Datum as _;
 use ral_core::protocol::{Ending, Program, Report, Run};
 use ral_core::run::StaticDiagnostics;
-use ral_core::source::{FileId, Source};
+use ral_core::source::{FileId, Source, SourceFile, SourceOrigin};
 use ral_core::syntax::parser::parse;
 use ral_core::types::{CapturePolicy, DeferredSink, Observation};
 use ral_core::{RequestedTerminalAccess, SessionSchemes, terminal};
 use ral_core::{err, errln, outln};
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -40,11 +41,18 @@ impl DeferredSink for Stdout {
     clippy::disallowed_methods,
     reason = "[silent:script-read] startup read of the script file path; not turn-time model I/O"
 )]
-pub(crate) fn run_file(path: &str, script_args: Vec<String>, opts: BatchOpts) -> ExitCode {
-    match std::fs::read_to_string(path) {
-        Ok(source) => run_source(path, source, script_args, opts),
+pub(crate) fn run_file(path: &Path, script_args: Vec<String>, opts: BatchOpts) -> ExitCode {
+    let file = match SourceFile::new(path) {
+        Ok(file) => file,
         Err(e) => {
-            terminal::cmd_error("ral", &format!("{path}: {e}"));
+            terminal::cmd_error("ral", &e.to_string());
+            return ExitCode::from(1);
+        }
+    };
+    match std::fs::read_to_string(path) {
+        Ok(source) => run_source(&SourceOrigin::File(file), source, script_args, opts),
+        Err(e) => {
+            terminal::cmd_error("ral", &format!("{}: {e}", ral_core::path::shown(path)));
             ExitCode::from(1)
         }
     }
@@ -63,7 +71,7 @@ pub(crate) fn run_stdin(run: RunOpts) -> ExitCode {
         run,
         ..BatchOpts::default()
     };
-    run_source("<stdin>", source, Vec::new(), batch)
+    run_source(&SourceOrigin::named("<stdin>"), source, Vec::new(), batch)
 }
 
 /// Serialise the run's report envelope to JSON and emit it on stderr — the
@@ -98,8 +106,8 @@ fn emit_audit_report(ending: &Ending, trail: &[ral_core::first_order::FOValue], 
     errln!("{json_str}");
 }
 
-/// Execute `source` non-interactively, under the name diagnostics will use
-/// for it: a script path, `<stdin>`, or `-c`.
+/// Execute `source`, read from `origin`, non-interactively: a script file, or
+/// the virtual `<stdin>` or `-c`.
 ///
 /// Boots a `batch` engine, dispatches its boot door, then the script; when
 /// `--audit` is active, reports the script's run as one report envelope on
@@ -108,7 +116,7 @@ fn emit_audit_report(ending: &Ending, trail: &[ral_core::first_order::FOValue], 
 /// Every batch source passes through here, so line endings are normalised
 /// here too — one door, one rule.
 pub(crate) fn run_source(
-    name: &str,
+    origin: &SourceOrigin,
     source: String,
     script_args: Vec<String>,
     opts: BatchOpts,
@@ -124,8 +132,15 @@ pub(crate) fn run_source(
         },
     } = opts;
     if let Some(halt) = halt {
-        return halted(halt, name, &source);
+        return halted(halt, origin, &source);
     }
+    let capabilities = match Boot::profiles(&capabilities) {
+        Ok(capabilities) => capabilities,
+        Err(e) => {
+            errln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
     ral_core::process::install_handlers();
     // Seeds the ANSI color gate, so `_ansi-ok` and the prelude ansi-*
     // constants work in batch too.
@@ -162,16 +177,13 @@ pub(crate) fn run_source(
     let run = |program, trail| Run {
         terminal: terminal_access,
         trail,
-        ..Run::foreground(program, name)
+        ..Run::foreground(program, origin.clone())
     };
     let boot = Boot {
         login: false,
         no_rc: true,
         recursion_limit,
-        capabilities: capabilities
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect(),
+        capabilities,
     };
     let booted = run(boot.program(), None);
     if let Err(status) = boot_door::settle(dispatch_to_report(&transport, booted, Arc::new(()))) {
@@ -221,7 +233,7 @@ fn dispatch(transport: &IdentityTransport, run: Run, audit: Option<bool>) -> i32
 }
 
 /// `--check`, `--dump-ast` and `--dump-ir`: static work on the source alone.
-fn halted(halt: Halt, name: &str, source: &str) -> ExitCode {
+fn halted(halt: Halt, origin: &SourceOrigin, source: &str) -> ExitCode {
     let outcome = match halt {
         Halt::Ast => on_compile_stack(|| {
             parse(source)
@@ -230,21 +242,22 @@ fn halted(halt: Halt, name: &str, source: &str) -> ExitCode {
         }),
         Halt::Ir => on_compile_stack(|| {
             parse(source)
-                .and_then(|ast| elaborate(&ast, [], name))
+                .and_then(|ast| elaborate(&ast, [], origin.file()))
                 .map(|phrases| errln!("{phrases:#?}"))
                 .map_err(CompileError::Parse)
         }),
         Halt::Checked => {
             let schemes =
                 SessionSchemes::from_prelude(crate::PRELUDE.comp(), batch_surface().manifest());
-            compile_and_typecheck(source, schemes, FileId::DUMMY, name, None).map(drop)
+            compile_and_typecheck(source, schemes, FileId::DUMMY, origin.file(), None).map(drop)
         }
     };
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             let (rendered, status) =
-                StaticDiagnostics::Compile(e.reject(Source::from_text(name, source))).render();
+                StaticDiagnostics::Compile(e.reject(Source::from_text(origin.clone(), source)))
+                    .render();
             err!("{rendered}");
             ExitCode::from(exit_byte(status))
         }

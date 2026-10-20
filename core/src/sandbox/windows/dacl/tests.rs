@@ -32,15 +32,38 @@ const CAP_SID: &str = "S-1-15-3-1024-1-2-3-4-5-6-7-8";
 
 #[test]
 fn ensure_local_canonical_prefix_accepts_local() {
-    assert!(ensure_local_canonical_prefix(Path::new(r"\\?\C:\tmp\foo")).is_ok());
-    assert!(
-        ensure_local_canonical_prefix(Path::new(
-            r"\\.\Volume{12345678-1234-1234-1234-123456789abc}\foo"
-        ))
-        .is_ok()
-    );
-    assert!(ensure_local_canonical_prefix(Path::new(r"\\.\C:\tmp\foo")).is_ok());
-    assert!(ensure_local_canonical_prefix(Path::new(r"C:\tmp\foo")).is_ok());
+    for local in [
+        r"\\?\C:\tmp\foo",
+        r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\foo",
+        r"\\.\Volume{12345678-1234-1234-1234-123456789abc}\foo",
+    ] {
+        assert!(
+            ensure_local_canonical_prefix(Path::new(local)).is_ok(),
+            "{local}"
+        );
+    }
+}
+
+/// An allow-list: whatever is neither a verbatim drive path nor a volume
+/// GUID path is refused, not let through for being no share.
+#[test]
+fn ensure_local_canonical_prefix_rejects_every_other_form() {
+    for other in [
+        r"C:\tmp\foo",
+        r"\\.\C:\tmp\foo",
+        r"\\.\pipe\x",
+        r"\??\C:\tmp\foo",
+        r"\\?\C:",
+        r"\tmp\foo",
+        r"tmp\foo",
+        "",
+    ] {
+        let err = ensure_local_canonical_prefix(Path::new(other));
+        assert!(
+            matches!(err, Err(DaclError::NotCanonicalLocal(_))),
+            "{other}: {err:?}"
+        );
+    }
 }
 
 #[test]

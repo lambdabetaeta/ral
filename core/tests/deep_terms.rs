@@ -13,7 +13,7 @@ const N: usize = 2_000;
 
 fn survives(src: &str) {
     let schemes = common::schemes_for(&HostSurface::default());
-    let _ = compile_and_typecheck(src, schemes, FileId::DUMMY, "deep", None);
+    let _ = compile_and_typecheck(src, schemes, FileId::DUMMY, None, None);
 }
 
 #[test]

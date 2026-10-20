@@ -32,13 +32,6 @@
 //! a silent guest.  That is the deliberate rule here: **never write a file
 //! that is silent about its own emptiness.**
 
-#![allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: writes the run directory's engine.log while a conversation is \
-              failing to start — host-side diagnostic plumbing beside a session that has no \
-              shell to route through and no run to raise a card in. See the module docs."
-)]
-
 use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -67,6 +60,12 @@ pub(super) fn capture(
     console: &vm_manager::GuestConsole,
 ) -> Option<PathBuf> {
     let path = run_dir.join(FILE);
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "REASONED-SILENT: writes the run directory's engine.log while a conversation is \
+                  failing to start — host-side diagnostic plumbing beside a session that has no \
+                  shell to route through and no run to raise a card in. See the module docs."
+    )]
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -91,7 +90,7 @@ fn render(why: &str, console: &vm_manager::GuestConsole) -> String {
                 "The guest's whole console is at {}. It belongs to whichever process ran the \
                  machine, which under an installed synod is a service running as LocalSystem, so \
                  reading it may take an administrator.\n\n",
-                path.display()
+                ral_core::path::shown(path)
             );
         }
         None => out.push_str(

@@ -58,7 +58,7 @@
 //!
 //! `validateWithError:` is called before the configuration is ever handed to
 //! a `VZVirtualMachine`, and macOS's complaint is carried into
-//! [`Error::Unavailable`] verbatim — it is the one message that says which
+//! [`Error::Backend`] verbatim — it is the one message that says which
 //! part of the configuration the framework refused.
 //!
 //! # The run loop, and why the machine lives behind a thread
@@ -114,7 +114,7 @@
 //! `com.apple.security.virtualization`), and the multicall binary inside it
 //! inherits the grant.  Without it, `VZVirtualMachine` creation and `start`
 //! are refused by the framework; the refusal surfaces as a `VZErrorDomain`
-//! error carried into [`Error::Unavailable`], and on stricter macOS releases
+//! error carried into [`Error::Backend`], and on stricter macOS releases
 //! as an abort at machine-creation time.  That failure path cannot be
 //! exercised here — this Mac's test binary is unentitled by construction — so
 //! it is documented rather than tested; the live-machine path is exercised by
@@ -145,7 +145,7 @@ use objc2_virtualization::{
     VZVirtualMachine, VZVirtualMachineConfiguration, VZVirtualMachineState,
 };
 
-use crate::{BootArtifact, Error, Hypervisor, Machine, MachineSpec};
+use crate::{Act, BootArtifact, Error, HostFile, Hypervisor, Machine, MachineSpec};
 
 /// The virtiofs tag under which the granted folder is exported to the guest.
 ///
@@ -169,6 +169,9 @@ const SESSION_IMAGE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 /// How long [`Vz::boot`] waits for the guest to dial the control plane before
 /// giving up.  Generous, because it spans a kernel boot and a userland init.
 const BOOT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The backend's name, as a person should see it.
+const HYPERVISOR: &str = "Virtualization.framework";
 
 /// How long a stop request is given to bring the machine to `Stopped` on its
 /// own before it is forced.
@@ -244,7 +247,7 @@ pub fn entitled() -> bool {
 
 impl Hypervisor for Vz {
     fn name(&self) -> &'static str {
-        "Virtualization.framework"
+        HYPERVISOR
     }
 
     /// Validate the spec, make the session disk, build and validate the
@@ -280,9 +283,10 @@ impl Hypervisor for Vz {
         let thread = thread::Builder::new()
             .name("ral-vz-machine".to_string())
             .spawn(move || run(&plan, &ready_tx, &cmd_rx))
-            .map_err(|cause| Error::Unavailable {
-                hypervisor: "Virtualization.framework",
-                why: format!("could not start the thread that would own the machine: {cause}"),
+            .map_err(|cause| {
+                backend(&format!(
+                    "could not start the thread that would own the machine: {cause}"
+                ))
             })?;
 
         match ready_rx.recv() {
@@ -300,11 +304,9 @@ impl Hypervisor for Vz {
             }
             Err(_) => {
                 let _ = thread.join();
-                Err(Error::Unavailable {
-                    hypervisor: "Virtualization.framework",
-                    why: "the machine thread ended before it reported whether the guest booted"
-                        .to_string(),
-                })
+                Err(backend(
+                    "the machine thread ended before it reported whether the guest booted",
+                ))
             }
         }
     }
@@ -338,9 +340,14 @@ struct Plan {
 /// the configuration reaches a machine.
 ///
 /// # Errors
-/// Returns [`Error::Unavailable`] carrying macOS's own words if a disk image
-/// or the shared folder cannot be opened, or if the workspace tag is rejected.
+/// Returns [`Error::NotUnicode`] if a path the configuration would name is
+/// not Unicode ([`file_url`]), [`Error::HostFile`] carrying macOS's own words
+/// if a disk image cannot be opened, and [`Error::Backend`] carrying them if
+/// the shared folder cannot be opened or the workspace tag is rejected.
 fn build_configuration(plan: &Plan) -> Result<Retained<VZVirtualMachineConfiguration>, Error> {
+    let kernel = file_url(&plan.kernel)?;
+    let initramfs = file_url(&plan.initramfs)?;
+    let folder = file_url(&plan.folder)?;
     // SAFETY (whole function): these are ordinary Objective-C object
     // constructions and property setters on Virtualization.framework
     // configuration classes.  None of them start a machine or need the
@@ -352,11 +359,8 @@ fn build_configuration(plan: &Plan) -> Result<Retained<VZVirtualMachineConfigura
 
         // Direct kernel boot: kernel + initramfs + the command line the guest
         // daemon reads its whole session from.
-        let boot = VZLinuxBootLoader::initWithKernelURL(
-            VZLinuxBootLoader::alloc(),
-            &file_url(&plan.kernel),
-        );
-        boot.setInitialRamdiskURL(Some(&file_url(&plan.initramfs)));
+        let boot = VZLinuxBootLoader::initWithKernelURL(VZLinuxBootLoader::alloc(), &kernel);
+        boot.setInitialRamdiskURL(Some(&initramfs));
         boot.setCommandLine(&NSString::from_str(&kernel_command_line(plan)));
         config.setBootLoader(Some(&boot));
 
@@ -369,7 +373,7 @@ fn build_configuration(plan: &Plan) -> Result<Retained<VZVirtualMachineConfigura
         // The granted folder, shared under the tag the daemon mounts by.
         let tag = NSString::from_str(WORKSPACE_TAG);
         VZVirtioFileSystemDeviceConfiguration::validateTag_error(&tag).map_err(|error| {
-            unavailable(&format!(
+            backend(&format!(
                 "the workspace tag was refused: {}",
                 ns_error(&error)
             ))
@@ -380,7 +384,7 @@ fn build_configuration(plan: &Plan) -> Result<Retained<VZVirtualMachineConfigura
         );
         let shared = VZSharedDirectory::initWithURL_readOnly(
             VZSharedDirectory::alloc(),
-            &file_url(&plan.folder),
+            &folder,
             plan.read_only,
         );
         let share =
@@ -427,24 +431,26 @@ fn build_configuration(plan: &Plan) -> Result<Retained<VZVirtualMachineConfigura
 /// which part of the configuration the framework refused.
 ///
 /// # Errors
-/// Returns [`Error::Unavailable`] carrying macOS's own words when the
+/// Returns [`Error::Backend`] carrying macOS's own words when the
 /// configuration is refused — for want of the entitlement, or on its merits.
 fn validate(config: &VZVirtualMachineConfiguration) -> Result<(), Error> {
     // SAFETY: `validateWithError:` inspects the configuration and reports an
     // `NSError` or nothing; it starts no machine.
-    unsafe { config.validateWithError() }.map_err(|error| unavailable(&ns_error(&error)))
+    unsafe { config.validateWithError() }.map_err(|error| backend(&ns_error(&error)))
 }
 
 /// A `VZVirtioBlockDeviceConfiguration` over a raw disk image.
 ///
 /// # Errors
-/// Returns [`Error::Unavailable`] if the image cannot be opened — most often
+/// Returns [`Error::HostFile`] if the image cannot be opened — most often
 /// because it is not there, which the tests rely on to prove the attachment
-/// really touches the file.
+/// really touches the file.  Returns [`Error::NotUnicode`] if its path is not
+/// UTF-8 ([`file_url`]).
 fn block_device(
     image: &Path,
     read_only: bool,
 ) -> Result<Retained<VZVirtioBlockDeviceConfiguration>, Error> {
+    let url = file_url(image)?;
     // SAFETY: `initWithURL:readOnly:error:` opens the image at `image` and
     // returns either the attachment or an `NSError`; the URL is a valid file
     // URL and the error is surfaced, not ignored.  Wrapping it in a block
@@ -452,22 +458,15 @@ fn block_device(
     unsafe {
         let attachment = VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_error(
             VZDiskImageStorageDeviceAttachment::alloc(),
-            &file_url(image),
+            &url,
             read_only,
         )
-        .map_err(
-            #[allow(
-                clippy::disallowed_methods,
-                reason = "outside ral: vm-manager does not depend on ral-core"
-            )]
-            |error| {
-                unavailable(&format!(
-                    "the disk image {} could not be opened: {}",
-                    image.display(),
-                    ns_error(&error)
-                ))
-            },
-        )?;
+        .map_err(|error| Error::HostFile {
+            file: HostFile::DiskImage,
+            act: Act::Open,
+            path: image.to_path_buf(),
+            cause: ns_error(&error),
+        })?;
         Ok(VZVirtioBlockDeviceConfiguration::initWithAttachment(
             VZVirtioBlockDeviceConfiguration::alloc(),
             &attachment,
@@ -526,9 +525,25 @@ fn clamp_memory(memory_mib: u32) -> u64 {
     (u64::from(memory_mib) * 1024 * 1024).clamp(least, most)
 }
 
-/// A `file:` URL for a host path.
-fn file_url(path: &Path) -> Retained<NSURL> {
-    NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()))
+/// A `file:` URL for a host path, or the refusal that it has none.
+///
+/// The URL is made from the path as text, and a path that is not UTF-8 has
+/// none: rendered lossily it would name some *other* file or folder, with
+/// U+FFFD where its own bytes were — one that may exist, and may be a link to
+/// anywhere.  So it is refused, never approximated, the same law the Windows
+/// backend's document keeps (`hcs::document_text`).
+///
+/// # Errors
+/// Returns [`Error::NotUnicode`] if `path` is not UTF-8.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "native: the path handed to Foundation as the text an `NSURL` is made from"
+)]
+fn file_url(path: &Path) -> Result<Retained<NSURL>, Error> {
+    let text = path
+        .to_str()
+        .ok_or_else(|| Error::NotUnicode(path.to_path_buf()))?;
+    Ok(NSURL::fileURLWithPath(&NSString::from_str(text)))
 }
 
 /// macOS's own words for a framework error.
@@ -536,10 +551,10 @@ fn ns_error(error: &objc2_foundation::NSError) -> String {
     error.localizedDescription().to_string()
 }
 
-/// An [`Error::Unavailable`] for this backend carrying `why`.
-fn unavailable(why: &str) -> Error {
-    Error::Unavailable {
-        hypervisor: "Virtualization.framework",
+/// An [`Error::Backend`] for this backend carrying `why`.
+fn backend(why: &str) -> Error {
+    Error::Backend {
+        hypervisor: HYPERVISOR.into(),
         why: why.to_string(),
     }
 }
@@ -555,7 +570,7 @@ fn unix_seconds() -> u64 {
 /// Make an empty per-session read-write disk of [`SESSION_IMAGE_BYTES`].
 ///
 /// # Errors
-/// Returns [`Error::Unavailable`] if the image cannot be created or sized.
+/// Returns [`Error::HostFile`] if the image cannot be created or sized.
 #[allow(
     clippy::disallowed_methods,
     reason = "REASONED-SILENT: creating the per-session disk before any engine exists. \
@@ -569,25 +584,23 @@ fn create_session_image(dir: &Path) -> Result<PathBuf, Error> {
         std::process::id(),
         unix_seconds()
     ));
-    let file = std::fs::File::create(&path).map_err(|cause| {
-        unavailable(&format!(
-            "the session disk {} could not be created: {cause}",
-            path.display()
-        ))
-    })?;
-    file.set_len(SESSION_IMAGE_BYTES).map_err(|cause| {
-        unavailable(&format!(
-            "the session disk {} could not be sized: {cause}",
-            path.display()
-        ))
-    })?;
+    let file = std::fs::File::create(&path).map_err(Error::host_file(
+        HostFile::SessionDisk,
+        Act::Create,
+        &path,
+    ))?;
+    file.set_len(SESSION_IMAGE_BYTES).map_err(Error::host_file(
+        HostFile::SessionDisk,
+        Act::Size,
+        &path,
+    ))?;
     Ok(path)
 }
 
 /// What the worker thread signals to itself while waiting for boot.
 enum Ready {
-    /// `start` finished — successfully, or with macOS's error text.
-    Started(Result<(), String>),
+    /// `start` finished — successfully, or with macOS's refusal.
+    Started(Result<(), Error>),
     /// The guest dialed one of the two ports: it booted far enough to run
     /// init and open at least one of its wires.  The `u32` is the port that
     /// was dialed ([`CONTROL_PORT`] or [`crate::NET_PORT`]) and the [`OwnedFd`] is
@@ -599,13 +612,13 @@ enum Ready {
 /// A message from a [`Guest`] to the thread that owns its machine.
 enum Command {
     /// Bring the machine down, and report whether it stopped cleanly.
-    Stop(SyncSender<Result<(), String>>),
+    Stop(SyncSender<Result<(), Error>>),
     /// Dial a port the *guest* listens on, the reverse of every wire this
     /// backend opens. The machine is `!Send` and lives on the worker thread,
     /// so a connect has to arrive as a command like a stop.
     Connect {
         port: u32,
-        reply: SyncSender<Result<OwnedFd, String>>,
+        reply: SyncSender<std::io::Result<OwnedFd>>,
     },
 }
 
@@ -660,9 +673,9 @@ fn run(plan: &Plan, ready: &SyncSender<Result<crate::Wires, Error>>, commands: &
             let _ = ready.send(Ok(wires));
             wait_for_stop(&queue, &machine, commands);
         }
-        Err(why) => {
+        Err(error) => {
             force_stop(&queue, &machine);
-            let _ = ready.send(Err(unavailable(&why)));
+            let _ = ready.send(Err(error));
         }
     }
 
@@ -683,9 +696,9 @@ fn run(plan: &Plan, ready: &SyncSender<Result<crate::Wires, Error>>, commands: &
 /// caller to keep.
 ///
 /// # Errors
-/// Returns macOS's start error, or a sentence naming whichever wire never
-/// arrived, if the machine does not start or the guest does not dial both
-/// within [`BOOT_TIMEOUT`].
+/// Returns [`Error::Backend`] carrying macOS's start error, or naming
+/// whichever wire never arrived, if the machine does not start or the guest
+/// does not dial both within [`BOOT_TIMEOUT`].
 fn boot_machine(
     queue: &DispatchQueue,
     machine: &VZVirtualMachine,
@@ -693,7 +706,7 @@ fn boot_machine(
     net_listener: &VZVirtioSocketListener,
     events_tx: &Sender<Ready>,
     events_rx: &Receiver<Ready>,
-) -> Result<crate::Wires, String> {
+) -> Result<crate::Wires, Error> {
     let machine_ptr = core::ptr::from_ref(machine);
     let control_listener_ptr = core::ptr::from_ref(control_listener);
     let net_listener_ptr = core::ptr::from_ref(net_listener);
@@ -705,7 +718,7 @@ fn boot_machine(
         let result = if error.is_null() {
             Ok(())
         } else {
-            Err(ns_error(unsafe { &*error }))
+            Err(backend(&ns_error(unsafe { &*error })))
         };
         let _ = start_tx.send(Ready::Started(result));
     });
@@ -748,10 +761,12 @@ fn boot_machine(
             Ok(Ready::Connected(CONTROL_PORT, socket)) => control = Some(socket),
             Ok(Ready::Connected(crate::NET_PORT, socket)) => net = Some(socket),
             Ok(Ready::Connected(port, _)) => {
-                return Err(format!("the guest dialed an unexpected port, {port}"));
+                return Err(backend(&format!(
+                    "the guest dialed an unexpected port, {port}"
+                )));
             }
             Ok(Ready::Started(Ok(()))) => {}
-            Ok(Ready::Started(Err(why))) => return Err(why),
+            Ok(Ready::Started(Err(error))) => return Err(error),
             Err(RecvTimeoutError::Timeout) => {
                 let missing = match (&control, &net) {
                     (None, None) => "either wire",
@@ -759,16 +774,16 @@ fn boot_machine(
                     (Some(_), None) => "the net wire",
                     (Some(_), Some(_)) => unreachable!("checked at the top of the loop"),
                 };
-                return Err(format!(
+                return Err(backend(&format!(
                     "the guest did not dial {missing} within {}s of starting: the kernel may \
                      have panicked before its init could run",
                     BOOT_TIMEOUT.as_secs()
-                ));
+                )));
             }
             Err(RecvTimeoutError::Disconnected) => {
-                return Err(
-                    "the machine's readiness channel closed before the guest connected".to_string(),
-                );
+                return Err(backend(
+                    "the machine's readiness channel closed before the guest connected",
+                ));
             }
         }
     }
@@ -812,12 +827,14 @@ fn connect_to_guest(
     queue: &DispatchQueue,
     machine: &VZVirtualMachine,
     port: u32,
-) -> Result<OwnedFd, String> {
+) -> std::io::Result<OwnedFd> {
+    use std::io::{Error as IoError, ErrorKind};
+
     let machine_ptr = core::ptr::from_ref(machine);
     // Rendezvous rather than a plain channel: the completion handler runs on
     // the machine's queue *after* `on_queue` returns, so the sender must
     // outlive this call's synchronous part.
-    let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<OwnedFd, String>>();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<std::io::Result<OwnedFd>>();
 
     on_queue(queue, move || {
         let done_tx = done_tx.clone();
@@ -829,11 +846,17 @@ fn connect_to_guest(
             let machine = &*machine_ptr;
             let devices = machine.socketDevices();
             let Some(device) = devices.firstObject() else {
-                let _ = done_tx.send(Err("the machine has no virtio socket device".to_string()));
+                let _ = done_tx.send(Err(IoError::new(
+                    ErrorKind::ConnectionRefused,
+                    "the machine has no virtio socket device",
+                )));
                 return;
             };
             let Ok(socket) = device.downcast::<VZVirtioSocketDevice>() else {
-                let _ = done_tx.send(Err("the machine's socket device is not virtio".to_string()));
+                let _ = done_tx.send(Err(IoError::new(
+                    ErrorKind::ConnectionRefused,
+                    "the machine's socket device is not virtio",
+                )));
                 return;
             };
             let completion = RcBlock::new(
@@ -843,19 +866,20 @@ fn connect_to_guest(
                     // reason: VZ may close its connection object once this
                     // handler returns.
                     let outcome = if let Some(connection) = connection.as_ref() {
-                        BorrowedFd::borrow_raw(connection.fileDescriptor())
-                            .try_clone_to_owned()
-                            .map_err(|e| format!("could not dup the guest connection: {e}"))
+                        BorrowedFd::borrow_raw(connection.fileDescriptor()).try_clone_to_owned()
                     } else if let Some(error) = error.as_ref() {
-                        Err(format!(
-                            "the guest refused the dial: {}",
-                            error.localizedDescription()
+                        Err(IoError::new(
+                            ErrorKind::ConnectionRefused,
+                            format!(
+                                "the guest refused the dial: {}",
+                                error.localizedDescription()
+                            ),
                         ))
                     } else {
-                        Err(
-                            "the connect completed with neither a connection nor an error"
-                                .to_string(),
-                        )
+                        Err(IoError::new(
+                            ErrorKind::ConnectionRefused,
+                            "the connect completed with neither a connection nor an error",
+                        ))
                     };
                     let _ = done_tx.send(outcome);
                 },
@@ -867,11 +891,14 @@ fn connect_to_guest(
     done_rx
         .recv_timeout(GUEST_DIAL_PATIENCE)
         .unwrap_or_else(|_| {
-            Err(format!(
-                "nothing in the guest answered a dial to port {port} within {}s — a guest with \
-                 nothing bound there refuses within milliseconds, so a silence this long means \
-                 the machine never delivered the dial at all",
-                GUEST_DIAL_PATIENCE.as_secs()
+            Err(IoError::new(
+                ErrorKind::TimedOut,
+                format!(
+                    "nothing in the guest answered a dial to port {port} within {}s — a guest \
+                     with nothing bound there refuses within milliseconds, so a silence this \
+                     long means the machine never delivered the dial at all",
+                    GUEST_DIAL_PATIENCE.as_secs()
+                ),
             ))
         })
 }
@@ -880,22 +907,26 @@ fn connect_to_guest(
 /// then force it — the order [`Machine::shutdown`]'s contract fixes.
 ///
 /// # Errors
-/// Returns a sentence if the machine had to be forced after the guest failed
-/// to stop within [`STOP_GRACE`].
-fn stop_gracefully(queue: &DispatchQueue, machine: &VZVirtualMachine) -> Result<(), String> {
+/// Returns [`Error::ForcedStop`] if the machine had to be forced after the
+/// guest failed to stop within [`STOP_GRACE`], and [`Error::Backend`] if it
+/// came to rest in the framework's error state.
+fn stop_gracefully(queue: &DispatchQueue, machine: &VZVirtualMachine) -> Result<(), Error> {
     request_stop(queue, machine);
     let deadline = Instant::now() + STOP_GRACE;
     while Instant::now() < deadline {
         match read_state(queue, machine) {
             VZVirtualMachineState::Stopped => return Ok(()),
             VZVirtualMachineState::Error => {
-                return Err("the machine stopped in an error state".to_string());
+                return Err(backend("the machine stopped in an error state"));
             }
             _ => thread::sleep(STOP_PULSE),
         }
     }
     force_stop(queue, machine);
-    Err("the guest did not stop within the grace period; the machine was forced".to_string())
+    Err(Error::ForcedStop {
+        hypervisor: HYPERVISOR.into(),
+        grace_secs: STOP_GRACE.as_secs(),
+    })
 }
 
 /// Send the guest a stop request over the control plane, if it will take one.
@@ -1105,12 +1136,12 @@ impl Guest {
         let Some(mut control) = self.control.take() else {
             return Ok(());
         };
-        let (answer_tx, answer_rx) = mpsc::sync_channel::<Result<(), String>>(1);
+        let (answer_tx, answer_rx) = mpsc::sync_channel::<Result<(), Error>>(1);
         // If the thread has already gone, the send fails and the join below
         // still tells us it is down; either way there is nothing to force.
         let result = if control.cmd_tx.send(Command::Stop(answer_tx)).is_ok() {
             match answer_rx.recv() {
-                Ok(Err(why)) => Err(unavailable(&why)),
+                Ok(Err(error)) => Err(error),
                 Ok(Ok(())) | Err(_) => Ok(()),
             }
         } else {
@@ -1145,9 +1176,11 @@ impl Machine for Guest {
     ///
     /// # Errors
     /// Returns [`std::io::ErrorKind::BrokenPipe`] if the machine thread is
-    /// gone, and [`std::io::ErrorKind::ConnectionRefused`] if the dial itself
+    /// gone, [`std::io::ErrorKind::ConnectionRefused`] if the dial itself
     /// failed — promptly, since a guest with nothing bound resets rather than
-    /// hangs.
+    /// hangs — [`std::io::ErrorKind::TimedOut`] if the dial was never answered
+    /// at all, and the descriptor's own error if the connection could not be
+    /// duplicated.
     fn connect_guest(&self, port: u32) -> std::io::Result<crate::AgentDial> {
         let gone = || {
             std::io::Error::new(
@@ -1164,10 +1197,7 @@ impl Machine for Guest {
                 reply: reply_tx,
             })
             .map_err(|_| gone())?;
-        reply_rx
-            .recv()
-            .map_err(|_| gone())?
-            .map_err(|why| std::io::Error::new(std::io::ErrorKind::ConnectionRefused, why))
+        reply_rx.recv().map_err(|_| gone())?
     }
 
     /// Ask the guest daemon to shut down, wait for the machine to reach the
@@ -1175,7 +1205,7 @@ impl Machine for Guest {
     /// the machine thread as its last act, after the machine is down.
     ///
     /// # Errors
-    /// Returns [`Error::Unavailable`] if the guest did not stop cleanly and
+    /// Returns [`Error::ForcedStop`] if the guest did not stop cleanly and
     /// the machine had to be forced.
     fn shutdown(mut self: Box<Self>) -> Result<(), Error> {
         self.stop()
@@ -1243,11 +1273,11 @@ mod tests {
         let config = build_configuration(&fixture.plan).expect("a well-formed plan must build");
         match validate(&config) {
             Ok(()) => {}
-            Err(Error::Unavailable { why, .. }) => assert!(
+            Err(Error::Backend { why, .. }) => assert!(
                 why.contains("entitlement"),
                 "a well-formed configuration must fail only for the entitlement, not: {why}"
             ),
-            Err(other) => panic!("validation failed for an unexpected reason: {other}"),
+            Err(other) => panic!("validation failed for an unexpected reason: {other:?}"),
         }
     }
 
@@ -1309,7 +1339,17 @@ mod tests {
     fn a_missing_disk_image_is_refused_by_the_attachment() {
         let error = block_device(Path::new("/nowhere/at/all/rootfs.img"), true)
             .expect_err("a missing image cannot attach");
-        assert!(matches!(error, Error::Unavailable { .. }), "{error}");
+        assert!(
+            matches!(
+                error,
+                Error::HostFile {
+                    file: HostFile::DiskImage,
+                    act: Act::Open,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
     }
 
     /// The command line carries the console and the session settings the

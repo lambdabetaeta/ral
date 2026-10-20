@@ -19,7 +19,7 @@ use load::{absolute_in, load_capabilities_ral, load_fragment_ral};
 use ral_core::capability::{
     Axis, Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy, GrantStack,
 };
-use ral_core::guard::freeze::{FreezeCtx, Place};
+use ral_core::guard::freeze::{FreezeCtx, host_absolute};
 use ral_core::host;
 use ral_core::path::FrozenPath;
 use ral_core::terminal::TerminalState;
@@ -51,7 +51,7 @@ use std::path::{Path, PathBuf};
     reason = "host-env: capability profiles freeze against the launching user's real home; no shell overlay exists yet"
 )]
 pub fn for_invocation(
-    cwd: &str,
+    cwd: &Path,
     base_name: &str,
     extension: Option<&Path>,
     restrict_files: &[PathBuf],
@@ -63,12 +63,12 @@ pub fn for_invocation(
 
     let ctx = FreezeCtx {
         home: host::home(),
-        cwd: PathBuf::from(cwd),
+        cwd: cwd.to_path_buf(),
     };
 
     let mut ceiling: Capabilities = resolve_base(base_name, &ctx)?;
     if let Some(path) = extension {
-        let abs = absolute_in(cwd, path);
+        let abs = absolute_in(&ctx.cwd, path);
         ceiling = ceiling.extend(load_fragment_ral(
             &ral_core::types::Mooring::adrift(),
             &mut load_shell,
@@ -81,7 +81,10 @@ pub fn for_invocation(
     let mut stack = GrantStack::root();
     stack.push(ceiling);
 
-    let restricts: Vec<PathBuf> = restrict_files.iter().map(|p| absolute_in(cwd, p)).collect();
+    let restricts: Vec<PathBuf> = restrict_files
+        .iter()
+        .map(|p| absolute_in(&ctx.cwd, p))
+        .collect();
     for path in &restricts {
         stack.push(load_capabilities_ral(
             &ral_core::types::Mooring::adrift(),
@@ -102,9 +105,9 @@ pub fn for_invocation(
     // the agent, as an `--extend` file is.
     if !stack.fs_is_top() {
         if !restricts.is_empty() {
-            stack.push(deny_layer(&restricts, &ctx)?);
+            stack.push(deny_layer(&restricts)?);
         }
-        stack.push(deny_layer(&crate::provider::credential_files(), &ctx)?);
+        stack.push(deny_layer(&crate::provider::credential_files())?);
     }
 
     // On the same footing: exec unrestricted asked not to be confined, and an
@@ -166,13 +169,12 @@ pub fn base_layer(base_name: &str, cwd: &Path) -> Result<Capabilities, String> {
 /// Only the lexical form is pushed: the in-process check in
 /// `core/src/guard/enforce.rs` and the OS sandbox profiles each expand a
 /// deny entry to its canonical and macOS-firmlink variants themselves.
-fn deny_layer(paths: &[PathBuf], ctx: &FreezeCtx) -> Result<Capabilities, String> {
+/// A path [`host_absolute`] refuses fails the layer whole: a deny that
+/// named nothing would fail open.
+fn deny_layer(paths: &[PathBuf]) -> Result<Capabilities, String> {
     let deny_paths = paths
         .iter()
-        .filter_map(|p| {
-            let place = Place::Absolute(p.to_string_lossy().into_owned());
-            ctx.place(&place).transpose()
-        })
+        .map(|p| host_absolute(p))
         .collect::<Result<BTreeSet<_>, _>>()
         .map_err(|e| e.message)?
         .into_iter()
@@ -224,12 +226,11 @@ mod tests {
 
         let cwd = std::env::temp_dir().join(format!("exarch-restrict-cwd-{}", std::process::id()));
         std::fs::create_dir_all(&cwd).unwrap();
-        let cwd = cwd.to_string_lossy().into_owned();
         let Invocation { stack, .. } =
             for_invocation(&cwd, "dangerous", None, std::slice::from_ref(&path)).unwrap();
 
         let resolver = ral_core::path::Resolver::shell_less();
-        let rp = resolver.resolve(&path.to_string_lossy());
+        let rp = resolver.anchor(&path);
         assert!(
             !stack.admits_fs(&ral_core::capability::FsOp::Write, &rp),
             "restrict file path should be write-denied"
@@ -243,8 +244,8 @@ mod tests {
     /// needs an OS sandbox: a host without bwrap still runs commands.
     #[test]
     fn a_dangerous_session_restricts_nothing() {
-        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
-        let Invocation { stack, .. } = for_invocation(&cwd, "dangerous", None, &[]).unwrap();
+        let Invocation { stack, .. } =
+            for_invocation(&std::env::temp_dir(), "dangerous", None, &[]).unwrap();
         assert!(!stack.is_restrictive(), "{stack:?}");
     }
 

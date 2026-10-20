@@ -79,6 +79,8 @@
 )]
 use serde::{Deserialize, Serialize};
 
+use crate::Error;
+
 pub mod client;
 pub mod service;
 
@@ -99,7 +101,13 @@ pub const PIPE: &str = r"\\.\pipe\synod-machine-broker";
 /// 2, since [`Reply::Booted`] grew a second socket description: an installed
 /// service still speaking 1 would answer a boot with one wire, and a client
 /// that adopted only that one would have no net wire to hand the engine.
-pub const VERSION: u32 = 2;
+///
+/// 3, since [`Reply::Refused`] and [`Reply::Stopped`] carry an [`Error`] as
+/// data rather than a sentence, to be worded by the process that shows it, and
+/// every path crosses as the platform's own units (`crate::os_path`) rather
+/// than as text.  A refusal for skew is itself an [`Error::VersionSkew`], so it
+/// stays legible across any later change that leaves that one variant alone.
+pub const VERSION: u32 = 3;
 
 /// What synod asks the broker for.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +121,7 @@ pub enum Request {
         /// The protocol version the client speaks.
         version: u32,
         /// The folder the user granted, as the *client's* path.
+        #[serde(with = "crate::os_path")]
         folder: std::path::PathBuf,
         /// Whether the agent may only read it.
         read_only: bool,
@@ -161,6 +170,7 @@ pub enum Reply {
     Booted {
         /// Where the granted folder appears inside the guest — the path the
         /// agent works at, never a host path.
+        #[serde(with = "crate::os_path")]
         workspace: std::path::PathBuf,
         /// The control-plane socket, described for this client's process by
         /// `WSADuplicateSocketW`; [`client::adopt_socket`] turns it back into a
@@ -172,22 +182,22 @@ pub enum Reply {
         /// by which arrives first.
         net: Vec<u8>,
     },
-    /// The machine stopped; `Err` carries the sentence explaining what was not
-    /// clean about it.
-    Stopped(Result<(), String>),
+    /// The machine stopped; `Err` says what was not clean about it.
+    Stopped(Result<(), Error>),
     /// What the guest said on its console — the two halves of
     /// [`crate::GuestConsole`], which this does not name directly only
     /// because the wire types in this module are plain data with no bearing on
     /// the machine layer's own vocabulary.
     Console {
         /// The service's path to the whole console log, if it kept one.
+        #[serde(with = "crate::os_path::option")]
         log: Option<std::path::PathBuf>,
         /// The guest's last lines, oldest first.
         tail: Vec<String>,
     },
-    /// The request was refused, in words fit to show the person who granted the
-    /// folder.
-    Refused(String),
+    /// The request was refused, and why — worded by the client, for the person
+    /// who granted the folder.
+    Refused(Error),
 }
 
 /// Length-prefixed JSON, the same framing the engine's own wire uses.
@@ -199,10 +209,20 @@ pub enum Reply {
 mod frame {
     use std::io::{self, Read, Write};
 
-    /// The largest frame either end will allocate for. A broker's messages are
-    /// a path and a socket description; anything above this is a fault or an
-    /// attack, and is refused before a byte is allocated.
-    const MAX: u32 = 64 * 1024;
+    /// The largest frame either end will allocate for; anything above it is a
+    /// fault or an attack, and is refused before a byte is allocated.
+    ///
+    /// Sized for the largest message a legal path can make.  The longest
+    /// Windows path is 32,767 UTF-16 units — 65,534 bytes, which
+    /// `crate::os_path` sends as 4 × ⌈65,534 / 3⌉ = 87,380 bytes of base64.
+    /// A boot request carries one path; the message carrying the most is a
+    /// refusal of [`crate::Error::NotConstructed`], which names the five files
+    /// a machine's document hands the hypervisor: 436,900 bytes of paths.
+    /// 512 KiB leaves 87,388 bytes for everything else in that refusal — the
+    /// hypervisor's own sentence and field names — and is still a bound a
+    /// privileged service can allocate for any caller without a second
+    /// thought.
+    pub(super) const MAX: u32 = 512 * 1024;
 
     /// # Errors
     /// Returns the write or encode error.
@@ -294,6 +314,59 @@ mod tests {
         assert!(error.to_string().contains("exceeds"), "{error}");
     }
 
+    /// The longest path Windows has, 32,767 UTF-16 units, one of them an
+    /// unpaired surrogate no `str` could hold.
+    fn longest_path() -> std::path::PathBuf {
+        use std::os::windows::ffi::OsStringExt;
+
+        let mut units = vec![0x6587_u16; 32_767];
+        units[..3].copy_from_slice(&[u16::from(b'C'), u16::from(b':'), u16::from(b'\\')]);
+        units[100] = 0xD800;
+        std::path::PathBuf::from(std::ffi::OsString::from_wide(&units))
+    }
+
+    /// The largest message a legal path can make fits a frame, whole: a boot
+    /// request over the longest path, and a refusal naming that path in every
+    /// one of the five places a refusal can.
+    #[test]
+    fn the_longest_paths_fit_a_frame() {
+        let longest = longest_path();
+        let mut buffer = Vec::new();
+        frame::write(
+            &mut buffer,
+            &Request::Boot {
+                version: VERSION,
+                folder: longest.clone(),
+                read_only: false,
+            },
+        )
+        .expect("a boot request over the longest path fits a frame");
+        let refused = Reply::Refused(Error::NotConstructed {
+            hypervisor: "Hyper-V".into(),
+            why: "w".repeat(4096),
+            files: Box::new(crate::MachineFiles {
+                kernel: longest.clone(),
+                initramfs: longest.clone(),
+                rootfs: longest.clone(),
+                session: longest.clone(),
+                folder: longest.clone(),
+            }),
+        });
+        frame::write(&mut buffer, &refused)
+            .expect("a refusal naming the longest path five times fits a frame");
+
+        let mut cursor = std::io::Cursor::new(buffer);
+        assert!(matches!(
+            frame::read(&mut cursor).unwrap(),
+            Some(Request::Boot { folder, .. }) if folder == longest
+        ));
+        assert!(matches!(
+            frame::read(&mut cursor).unwrap(),
+            Some(Reply::Refused(Error::NotConstructed { files, .. }))
+                if files.kernel == longest && files.folder == longest
+        ));
+    }
+
     /// The whole broker, over a real pipe, in one process: a served instance, a
     /// client that finds it, a request that crosses, the folder checked against
     /// the caller, and an answer that comes back.
@@ -345,7 +418,9 @@ mod tests {
                 machine.shutdown().expect("the machine stops cleanly");
             }
             Err(refused) => {
-                let text = refused.to_string();
+                // Every phrase sought is the machine layer's own, so no path
+                // spelling matters to it.
+                let text = refused.worded(|_| "<path>".to_string()).to_string();
                 assert!(
                     text.contains("Hyper-V Administrators")
                         || text.contains("Virtual Machine Platform")

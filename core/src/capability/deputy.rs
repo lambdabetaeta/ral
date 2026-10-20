@@ -68,10 +68,20 @@ mod tests {
     use crate::capability::{
         Axis, Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy, GrantStack,
     };
-    use crate::path::FrozenPath;
+    use crate::path::{FrozenPath, shown, test_absolute};
+
+    /// A prefix spelled `surface` that froze as `real`, both on this host.
+    fn frozen(surface: &str, real: &str) -> FrozenPath {
+        FrozenPath::for_test(&test_absolute(surface), &test_absolute(real))
+    }
 
     fn lit(p: &str) -> FrozenPath {
-        FrozenPath::for_test(p, p)
+        frozen(p, p)
+    }
+
+    /// The surfaces a finding of `paths` reports, on this host, as shown.
+    fn named(paths: &[&str]) -> Vec<String> {
+        paths.iter().map(|p| shown(test_absolute(p))).collect()
     }
 
     fn exec_dirs(dirs: &[(&str, Evidence)]) -> ExecGrant {
@@ -108,9 +118,10 @@ mod tests {
         report(&stack)
     }
 
+    /// The finding as the audit shows it.
     fn report(stack: &GrantStack) -> Vec<String> {
         (deputy_prefixes(stack).iter())
-            .map(|p| p.as_str().to_string())
+            .map(FrozenPath::shown)
             .collect()
     }
 
@@ -123,12 +134,12 @@ mod tests {
         let stack = GrantStack::of(Capabilities {
             exec: Some(exec_dirs(&[("/usr/bin", ALLOW)])),
             fs: Some(FsPolicy {
-                write_prefixes: vec![FrozenPath::for_test("/data", "/usr/bin/sub")],
+                write_prefixes: vec![frozen("/data", "/usr/bin/sub")],
                 ..FsPolicy::default()
             }),
             ..Capabilities::default()
         });
-        assert_eq!(report(&stack), ["/data"]);
+        assert_eq!(report(&stack), named(&["/data"]));
     }
 
     #[test]
@@ -161,7 +172,7 @@ mod tests {
         );
         let mut stack = GrantStack::of(layer_a);
         stack.push(layer_b);
-        assert_eq!(report(&stack), ["/usr/bin"]);
+        assert_eq!(report(&stack), named(&["/usr/bin"]));
     }
 
     #[test]
@@ -170,7 +181,7 @@ mod tests {
             exec_dirs(&[("/work/target/debug", ALLOW)]),
             fs(&["/work"], &[]),
         );
-        assert_eq!(found, ["/work/target/debug"]);
+        assert_eq!(found, named(&["/work/target/debug"]));
     }
 
     #[test]
@@ -200,7 +211,7 @@ mod tests {
             exec_dirs(&[("/work", ALLOW)]),
             fs(&["/work/a", "/work/b"], &[]),
         );
-        assert_eq!(found, ["/work/a", "/work/b"]);
+        assert_eq!(found, named(&["/work/a", "/work/b"]));
     }
 
     #[test]
@@ -214,19 +225,19 @@ mod tests {
             fs: Some(fs(&["/work/a"], &[])),
             ..Capabilities::default()
         });
-        assert_eq!(report(&stack), ["/work/a"]);
+        assert_eq!(report(&stack), named(&["/work/a"]));
     }
 
     #[test]
     fn an_every_layer_excluding_a_subdirectory_still_finds_the_write_region() {
         let found = found(every(&[("/work/private", DENY)]), fs(&["/work"], &[]));
-        assert_eq!(found, ["/work"]);
+        assert_eq!(found, named(&["/work"]));
     }
 
     #[test]
     fn an_authored_root_directory_finds_every_writable_prefix() {
         let found = found(exec_dirs(&[("/", ALLOW)]), fs(&["/a", "/b"], &[]));
-        assert_eq!(found, ["/a", "/b"]);
+        assert_eq!(found, named(&["/a", "/b"]));
     }
 
     #[test]

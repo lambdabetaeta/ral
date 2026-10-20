@@ -29,12 +29,13 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
-use super::LexicalPath;
+use super::lex::{is_absolute, is_unparsed_head};
+use super::{LexicalPath, shown};
 use crate::{label, record};
 use strum::{IntoStaticStr, VariantArray};
 
 /// `SYMLOOP_MAX`'s customary value: a name still splicing past this is a cycle.
-pub(crate) const MAX_HOPS: usize = 40;
+const MAX_HOPS: usize = 40;
 
 /// An object named exactly: the handle of its directory, its name there, and
 /// the symlink-free path the walk assembled.
@@ -140,7 +141,7 @@ impl DirEntry {
             kind, len, mtime, ..
         } = entry.stat;
         Self {
-            name: entry.name.to_string_lossy().into_owned(),
+            name: shown(&entry.name),
             kind,
             size: len,
             mtime: secs_since_epoch(mtime),
@@ -180,7 +181,7 @@ record!(typed FileInfo {
 impl FileInfo {
     pub(crate) fn of(name: &OsStr, stat: &Stat, target: Option<String>) -> Self {
         Self {
-            name: name.to_string_lossy().into_owned(),
+            name: shown(name),
             kind: stat.kind,
             size: stat.len,
             mtime: secs_since_epoch(stat.mtime),
@@ -216,14 +217,80 @@ pub(crate) enum Leaf {
 /// A missing or untraversable intermediate directory, a link cycle past
 /// [`MAX_HOPS`], or the root itself, which is nobody's leaf.
 pub(crate) fn walk(rp: &LexicalPath, leaf: Leaf) -> io::Result<Located> {
-    let mut path = rp.as_path().to_path_buf();
+    walk_vetted(rp.as_path(), leaf, |_, _| true)
+}
+
+/// [`walk`], with every object it passes put to `vet` before the walk relies
+/// on it: the root, each directory as it is entered (through its own handle),
+/// each symlink before it is spliced, and the leaf where it lands.  A splice
+/// restarts from the root, so `vet` sees a prefix again each time.
+///
+/// `vet(dir, name)` names the object relative to a handle the walk holds: the
+/// entry `name` of `dir`, or `dir` itself when `name` is `.`.
+///
+/// `path` must be absolute, and is taken as the kernel takes a name it
+/// resolves itself: its `..` physically, after the links before it.
+///
+/// # Errors
+/// [`walk`]'s; `InvalidInput` for a name with no root to walk it from
+/// ([`rooted`]), whether `path` itself or a symlink's target spliced into
+/// it; `PermissionDenied` when `vet` refuses an object.
+pub(crate) fn walk_vetted(
+    path: &Path,
+    leaf: Leaf,
+    mut vet: impl FnMut(&File, &OsStr) -> bool,
+) -> io::Result<Located> {
+    let mut path = path.to_path_buf();
     for _ in 0..=MAX_HOPS {
-        match descend(&path, leaf)? {
+        rooted(&path)?;
+        match descend(&path, leaf, &mut vet)? {
             Step::Object(located) => return Ok(located),
             Step::Link(spliced) => path = spliced,
         }
     }
     Err(io::Error::other(LOOP_MESSAGE))
+}
+
+/// Whether a walk can start `path` from a root: every name it descends, the
+/// one it was given and each a splice restarts it on, so a link's target
+/// can no more lead it off the path than the name could.
+///
+/// # Errors
+/// `InvalidInput` for a relative `path`, a Windows link target such as
+/// `C:x` that is relative to a drive's current directory included, or for
+/// one whose head `std::path` cannot parse ([`is_unparsed_head`]), which
+/// the walk would descend from the current drive's root.
+fn rooted(path: &Path) -> io::Result<()> {
+    if !is_absolute(path) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a walk starts from the root, and a relative name has none",
+        ));
+    }
+    if is_unparsed_head(path) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "no well-formed share, drive or namespace opens this path, so there is no root to walk it from",
+        ));
+    }
+    Ok(())
+}
+
+/// Put `name` in `dir` to `vet`, refusing the walk where it says no.
+fn pass(vet: &mut impl FnMut(&File, &OsStr) -> bool, dir: &File, name: &OsStr) -> io::Result<()> {
+    if vet(dir, name) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the walk passed an object its vetting refused",
+        ))
+    }
+}
+
+/// `name` for a directory judged through its own handle.
+fn itself() -> &'static OsStr {
+    OsStr::new(".")
 }
 
 /// `ELOOP`'s wording; `io::ErrorKind::FilesystemLoop` is not yet stable.
@@ -236,7 +303,11 @@ const LOOP_MESSAGE: &str = "too many levels of symbolic links";
     clippy::disallowed_methods,
     reason = "[silent:walk-descend] Opens the root and then each directory component as a search handle with FollowSymlinks::No, to reach the object a grant will judge. Path resolution, not the model's data I/O: the card belongs to the site that then opens the leaf."
 )]
-fn descend(path: &Path, leaf_mode: Leaf) -> io::Result<Step> {
+fn descend(
+    path: &Path,
+    leaf_mode: Leaf,
+    vet: &mut impl FnMut(&File, &OsStr) -> bool,
+) -> io::Result<Step> {
     let mut comps = path.components().peekable();
     let mut real = PathBuf::new();
     while let Some(c @ (Component::Prefix(_) | Component::RootDir)) = comps.peek() {
@@ -254,17 +325,22 @@ fn descend(path: &Path, leaf_mode: Leaf) -> io::Result<Step> {
         parents: Vec::new(),
         real,
     };
+    pass(vet, &at.dir, itself())?;
     for (i, name) in dirs.iter().enumerate() {
         if *name == ".." {
             at.up();
             continue;
         }
         match open_search_dir(&at.dir, name) {
-            Ok(next) => at.enter(name, next),
+            Ok(next) => {
+                pass(vet, &next, itself())?;
+                at.enter(name, next);
+            }
             Err(e) => {
                 if !is_symlink(&at.dir, name) {
                     return Err(e);
                 }
+                pass(vet, &at.dir, name)?;
                 return splice(&at.dir, &at.real, name, &names[i + 1..]).map(Step::Link);
             }
         }
@@ -283,6 +359,7 @@ fn descend(path: &Path, leaf_mode: Leaf) -> io::Result<Step> {
         dir = parents.pop().ok_or_else(root_is_no_file)?;
         name
     };
+    pass(vet, &dir, &leaf)?;
     if leaf_mode == Leaf::Resolve && is_symlink(&dir, &leaf) {
         return splice(&dir, &real, &leaf, &[]).map(Step::Link);
     }
@@ -490,13 +567,23 @@ fn is_symlink(dir: &File, name: &OsStr) -> bool {
 /// The name with `link` replaced by its target — anchored at the link's own
 /// directory when relative — and `rest` re-appended.  Left unfolded: a `..`
 /// from the target is the kernel's, physical, and [`descend`] takes it so.
+/// An empty target names nothing, as the kernel's `ENOENT` says.  A target
+/// the join cannot anchor, one relative to a drive's current directory
+/// (`C:x`), which `Path::join` lets replace the name, or one whose head
+/// `std::path` cannot parse, is refused by [`rooted`] as the walk restarts.
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:walk-link-read] Reads a symlink's target to splice into the remaining name. Path resolution, not the model's data I/O."
 )]
 fn splice(dir: &File, real: &Path, link: &OsStr, rest: &[&OsStr]) -> io::Result<PathBuf> {
     let target = read_link_contents(dir, link.as_ref())?;
-    let mut spliced = if target.is_absolute() {
+    if target.as_os_str().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "a symlink with an empty target names nothing",
+        ));
+    }
+    let mut spliced = if is_absolute(&target) {
         target
     } else {
         real.join(target)
@@ -880,6 +967,17 @@ mod tests {
         assert_eq!(located(&dir, "L").unwrap().real(), dir.join("x/f"));
     }
 
+    /// Every restart is put to [`rooted`], the given name's and each
+    /// spliced one's alike: a name with no root is refused.
+    #[test]
+    fn a_walk_starts_only_from_a_root() {
+        assert_eq!(
+            rooted(Path::new("x")).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(rooted(Path::new("/x")).is_ok());
+    }
+
     #[test]
     fn a_dotdot_through_a_missing_directory_is_not_found() {
         let tmp = tempfile::tempdir().unwrap();
@@ -910,7 +1008,7 @@ mod windows_tests {
         let resolver = Resolver::shell_less();
         for (spelled, stored) in [("file", "File"), ("new", "new")] {
             let path = tmp.path().join("storedcase").join(spelled);
-            let located = walk(&resolver.resolve(&path.to_string_lossy()), Leaf::Resolve).unwrap();
+            let located = walk(&resolver.anchor(&path), Leaf::Resolve).unwrap();
             assert!(
                 located
                     .real()
@@ -918,6 +1016,23 @@ mod windows_tests {
                 "{}",
                 located.real().display()
             );
+        }
+    }
+
+    /// What a link target may splice in, and the walk refuses on restart:
+    /// a drive-relative name, which `Path::join` lets replace the walked
+    /// prefix, and a head `std::path` reads on the current drive.
+    #[test]
+    fn a_walk_starts_only_from_a_parsed_root() {
+        for raw in ["x", "C:x", r"\x", r"\\x", r"/\x", r"\\\srv\sh"] {
+            assert_eq!(
+                rooted(Path::new(raw)).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput,
+                "{raw}"
+            );
+        }
+        for raw in [r"C:\x", r"\\srv\sh\x", r"\\?\C:\x"] {
+            assert!(rooted(Path::new(raw)).is_ok(), "{raw}");
         }
     }
 
@@ -949,7 +1064,7 @@ mod windows_tests {
             home: None,
             cwd: None,
         };
-        let located = walk(&resolver.resolve(&short.to_string_lossy()), Leaf::Resolve).unwrap();
+        let located = walk(&resolver.anchor(&short), Leaf::Resolve).unwrap();
         assert_eq!(
             located.real().file_name(),
             long.file_name(),

@@ -55,8 +55,12 @@ fn arg_items(args: &Args) -> Vec<ValListElem> {
 
 /// Elaborate one statement, unwrapped from its sole `Run` phrase — for
 /// tests over a single non-`let` statement.
-fn elaborate_one(ast: &[Stmt], bindings: impl IntoIterator<Item = Name>, name: &str) -> Arc<Comp> {
-    let top = elaborate(ast, bindings, name).expect("elaborate");
+fn elaborate_one(
+    ast: &[Stmt],
+    bindings: impl IntoIterator<Item = Name>,
+    script: Option<&Path>,
+) -> Arc<Comp> {
+    let top = elaborate(ast, bindings, script).expect("elaborate");
     let [phrase] = top.as_slice() else {
         panic!("expected one phrase, got {top:?}");
     };
@@ -69,7 +73,7 @@ fn elaborate_one(ast: &[Stmt], bindings: impl IntoIterator<Item = Name>, name: &
 #[test]
 fn tilde_path_command_head_elaborates_to_exec() {
     let ast = parse("~/.local/bin/claude update").expect("parse");
-    let comp = elaborate_one(&ast, [], "");
+    let comp = elaborate_one(&ast, [], None);
     let (name, args, _) = expect_exec_name(&comp);
     assert_eq!(
         name,
@@ -88,7 +92,7 @@ fn tilde_path_command_head_elaborates_to_exec() {
 #[test]
 fn tilde_path_command_head_without_args_elaborates_to_exec() {
     let ast = parse("~/.local/bin/claude").expect("parse");
-    let comp = elaborate_one(&ast, [], "");
+    let comp = elaborate_one(&ast, [], None);
     let (name, args, _) = expect_exec_name(&comp);
     assert_eq!(
         name,
@@ -102,7 +106,7 @@ fn tilde_path_command_head_without_args_elaborates_to_exec() {
 #[test]
 fn literal_path_head_elaborates_to_direct_exec() {
     let ast = parse("./script").expect("parse");
-    let comp = elaborate_one(&ast, [], "");
+    let comp = elaborate_one(&ast, [], None);
     let (name, args, _) = expect_exec_name(&comp);
     assert_eq!(name, &CommandName::Path("./script".into()));
     assert!(args.is_empty());
@@ -111,7 +115,7 @@ fn literal_path_head_elaborates_to_direct_exec() {
 #[test]
 fn external_name_head_elaborates_to_external_exec() {
     let ast = parse("^git status").expect("parse");
-    let comp = elaborate_one(&ast, [], "");
+    let comp = elaborate_one(&ast, [], None);
     let (name, args, caret) = expect_exec_name(&comp);
     assert_eq!(name, &CommandName::Bare("git".into()));
     assert_eq!(
@@ -129,7 +133,7 @@ fn explicit_value_head_elaborates_to_app() {
     // head position at runtime, which leaves a `<file` redirect on the
     // `App` free to bracket the body.
     let ast = parse("$map $upper ['a']").expect("parse");
-    let comp = elaborate_one(&ast, [], "");
+    let comp = elaborate_one(&ast, [], None);
     let CompKind::App { head, args } = &comp.item else {
         panic!("expected app, got {:?}", comp.item);
     };
@@ -154,7 +158,7 @@ fn explicit_value_head_elaborates_to_app() {
 #[test]
 fn command_use_before_non_thunk_let_is_exec() {
     let ast = parse("date\nlet date = 5").expect("parse");
-    let top = elaborate(&ast, [], "").expect("elaborate");
+    let top = elaborate(&ast, [], None).expect("elaborate");
     assert_eq!(top.len(), 2);
     let Phrase::Run(comp) = &top[0].item else {
         panic!("expected a Run phrase, got {:?}", top[0].item);
@@ -168,7 +172,7 @@ fn command_use_before_non_thunk_let_is_exec() {
 #[test]
 fn command_use_before_acyclic_thunk_let_is_exec() {
     let ast = parse("f\nlet f = { return 1 }").expect("parse");
-    let top = elaborate(&ast, [], "").expect("elaborate");
+    let top = elaborate(&ast, [], None).expect("elaborate");
     assert_eq!(top.len(), 2);
     let Phrase::Run(comp) = &top[0].item else {
         panic!("expected a Run phrase, got {:?}", top[0].item);
@@ -183,7 +187,7 @@ fn command_use_before_acyclic_thunk_let_is_exec() {
 #[test]
 fn command_use_before_recursive_thunk_let_is_exec() {
     let ast = parse("g 3\nlet g = { |n| g $[$n - 1] }").expect("parse");
-    let top = elaborate(&ast, [], "").expect("elaborate");
+    let top = elaborate(&ast, [], None).expect("elaborate");
     assert_eq!(top.len(), 2);
     let Phrase::Run(comp) = &top[0].item else {
         panic!("expected a Run phrase, got {:?}", top[0].item);
@@ -212,7 +216,7 @@ fn command_use_before_recursive_thunk_let_is_exec() {
 #[test]
 fn intra_group_recursion_resolves_to_binding() {
     let ast = parse("let f = { |n| f $n }\nf 5").expect("parse");
-    let top = elaborate(&ast, [], "").expect("elaborate");
+    let top = elaborate(&ast, [], None).expect("elaborate");
     assert_eq!(top.len(), 2);
     let Phrase::Define { comp: rhs, .. } = &top[0].item else {
         panic!("expected a Define, got {:?}", top[0].item);
@@ -240,7 +244,7 @@ fn intra_group_recursion_resolves_to_binding() {
 #[test]
 fn chain_arm_hoist_stays_inside_the_arm() {
     let ast = parse(r#"return ok ? echo "fallback: !{hostname}""#).expect("parse");
-    let comp = elaborate_one(&ast, [], "");
+    let comp = elaborate_one(&ast, [], None);
     assert!(
         matches!(comp.item, CompKind::Try { .. }),
         "chain arm hoist leaked into the caller: expected a bare Try, got {:?}",
@@ -255,7 +259,7 @@ fn chain_arm_hoist_stays_inside_the_arm() {
 fn a_hoisted_argument_keeps_its_own_span() {
     let src = "echo $xs[9]";
     let ast = parse(src).expect("parse");
-    let comp = elaborate_one(&ast, [], "");
+    let comp = elaborate_one(&ast, [], None);
     let CompKind::Bind { comp: rhs, .. } = &comp.item else {
         panic!(
             "expected the index to hoist into a Bind, got {:?}",
@@ -274,21 +278,19 @@ fn a_hoisted_argument_keeps_its_own_span() {
 #[test]
 fn script_bakes_to_a_string_literal() {
     let ast = parse("return $SCRIPT").expect("parse");
-    let comp = elaborate_one(&ast, [], "/repo/lib.ral");
+    let comp = elaborate_one(&ast, [], Some("/repo/lib.ral".as_ref()));
     assert_eq!(
         comp.item,
         CompKind::Return(Val::String("/repo/lib.ral".into()))
     );
 }
 
-/// Sources with no script identity — the REPL, `-c`, a preloaded `<...>`
-/// source — reject `$SCRIPT` at elaboration time.
+/// A virtual source — the REPL, `-c`, a preloaded source — has no script
+/// file, so `$SCRIPT` is refused at elaboration time.
 #[test]
 fn script_with_no_identity_is_an_elaboration_error() {
     let ast = parse("return $SCRIPT").expect("parse");
-    assert!(elaborate(&ast, [], "").is_err());
-    assert!(elaborate(&ast, [], "-c").is_err());
-    assert!(elaborate(&ast, [], "<stdin>").is_err());
+    assert!(elaborate(&ast, [], None).is_err());
 }
 
 // ── phrases and right-nested binders ─────────────────────────────────
@@ -296,7 +298,7 @@ fn script_with_no_identity_is_an_elaboration_error() {
 #[test]
 fn nested_sequence_is_wildcard_bind() {
     let stmts = parse("date\necho hi").expect("parse");
-    let mut elaborator = Elaborator::new_with_bindings([], "");
+    let mut elaborator = Elaborator::new_with_bindings([], None);
     let seq = elaborator.stmts_nested(&stmts);
     let CompKind::Bind {
         pattern,
@@ -317,7 +319,7 @@ fn nested_sequence_is_wildcard_bind() {
 #[test]
 fn script_cannot_be_bound_through_a_rest_pattern() {
     let ast = parse("let [a, ...SCRIPT] = [1, 2]").expect("parse");
-    assert!(elaborate(&ast, [], "main.ral").is_err());
+    assert!(elaborate(&ast, [], Some("main.ral".as_ref())).is_err());
 }
 
 #[test]
@@ -331,7 +333,7 @@ fn script_cannot_be_bound_through_a_recursive_knot() {
             matches!(group_stmts(&ast)[..], [StmtGroup::LetRec(_)]),
             "{src}"
         );
-        let err = elaborate(&ast, [], "main.ral").expect_err(src);
+        let err = elaborate(&ast, [], Some("main.ral".as_ref())).expect_err(src);
         let span = err.span.expect("the refusal carries the binder's span");
         let (start, end) = (span.start as usize, span.end as usize);
         assert_eq!(&src[start..end], "SCRIPT", "{src}");
@@ -356,7 +358,7 @@ fn word_val_classifies_canonical_numbers() {
 #[test]
 fn nested_let_wildcard_binds_a_fresh_name() {
     let stmts = parse("let _ = date\necho hi").expect("parse");
-    let mut elaborator = Elaborator::new_with_bindings([], "");
+    let mut elaborator = Elaborator::new_with_bindings([], None);
     let seq = elaborator.stmts_nested(&stmts);
     let CompKind::Bind { pattern, .. } = &seq.item else {
         panic!("expected a Bind, got {:?}", seq.item);
@@ -370,7 +372,7 @@ fn nested_let_wildcard_binds_a_fresh_name() {
 #[test]
 fn nested_let_right_nests_over_following_statements() {
     let stmts = parse("let x = 1\necho hi\necho bye").expect("parse");
-    let mut elaborator = Elaborator::new_with_bindings([], "");
+    let mut elaborator = Elaborator::new_with_bindings([], None);
     let seq = elaborator.stmts_nested(&stmts);
     let CompKind::Bind { pattern, rest, .. } = &seq.item else {
         panic!("expected a Bind, got {:?}", seq.item);
@@ -395,7 +397,7 @@ fn nested_let_right_nests_over_following_statements() {
 #[test]
 fn nested_block_ending_in_let_has_unit_tail() {
     let stmts = parse("let x = 1").expect("parse");
-    let mut elaborator = Elaborator::new_with_bindings([], "");
+    let mut elaborator = Elaborator::new_with_bindings([], None);
     let seq = elaborator.stmts_nested(&stmts);
     let CompKind::Bind { rest, .. } = &seq.item else {
         panic!("expected a Bind, got {:?}", seq.item);
@@ -406,7 +408,7 @@ fn nested_block_ending_in_let_has_unit_tail() {
 #[test]
 fn toplevel_phrases_classify_define_and_run() {
     let ast = parse("let x = 1\necho hi").expect("parse");
-    let top = elaborate(&ast, [], "").expect("elaborate");
+    let top = elaborate(&ast, [], None).expect("elaborate");
     assert_eq!(top.len(), 2);
     assert!(matches!(top[0].item, Phrase::Define { .. }));
     assert!(matches!(top[1].item, Phrase::Run(_)));
@@ -415,7 +417,7 @@ fn toplevel_phrases_classify_define_and_run() {
 #[test]
 fn toplevel_self_recursive_let_is_a_rec_define() {
     let ast = parse("let f = { |n| f $n }").expect("parse");
-    let top = elaborate(&ast, [], "").expect("elaborate");
+    let top = elaborate(&ast, [], None).expect("elaborate");
     assert_eq!(top.len(), 1);
     let Phrase::Define { pattern, comp, .. } = &top[0].item else {
         panic!("expected a Define, got {:?}", top[0].item);
@@ -438,7 +440,7 @@ fn toplevel_self_recursive_let_is_a_rec_define() {
 #[test]
 fn toplevel_mutual_recursion_shares_one_group_arc() {
     let ast = parse("let f = { |x| g $x }\nlet g = { |y| f $y }").expect("parse");
-    let top = elaborate(&ast, [], "").expect("elaborate");
+    let top = elaborate(&ast, [], None).expect("elaborate");
     assert_eq!(top.len(), 2);
     fn group_arc(phrase: &Phrase<()>) -> Arc<GroupNode> {
         let Phrase::Define { comp, .. } = phrase else {
@@ -482,7 +484,7 @@ fn hoisted(comp: &Comp) -> (&Comp, &Pattern, &Comp) {
 #[test]
 fn tilde_path_hoists_one_tilde() {
     let ast = parse("echo ~/x").expect("parse");
-    let comp = elaborate_one(&ast, [], "");
+    let comp = elaborate_one(&ast, [], None);
     let (rhs, _, rest) = hoisted(&comp);
     assert_eq!(
         rhs.item,
@@ -496,7 +498,7 @@ fn tilde_path_hoists_one_tilde() {
 #[test]
 fn leading_tilde_in_a_string_interpolates_the_home_tilde() {
     let ast = parse(r#""~/x""#).expect("parse");
-    let comp = elaborate_one(&ast, [], "");
+    let comp = elaborate_one(&ast, [], None);
     let (rhs, pattern, rest) = hoisted(&comp);
     assert!(is_home_tilde(rhs), "got {:?}", rhs.item);
     let Pattern::Name(tmp) = pattern else {
@@ -514,7 +516,7 @@ fn leading_tilde_in_a_string_interpolates_the_home_tilde() {
 #[test]
 fn let_of_lone_tilde_reads_rather_than_runs() {
     let ast = parse("let h = ~").expect("parse");
-    let top = elaborate(&ast, [], "").expect("elaborate");
+    let top = elaborate(&ast, [], None).expect("elaborate");
     let Phrase::Define { comp, .. } = &top[0].item else {
         panic!("expected a Define, got {:?}", top[0].item);
     };
@@ -528,7 +530,7 @@ fn let_of_lone_tilde_reads_rather_than_runs() {
 #[test]
 fn a_spread_literal_is_an_assembly_and_a_plain_one_a_value() {
     let ast = parse("return [1, $x]").expect("parse");
-    let comp = elaborate_one(&ast, [], "");
+    let comp = elaborate_one(&ast, [], None);
     assert!(
         matches!(&comp.item, CompKind::Return(Val::List(_))),
         "expected Return(Val::List(_)), got {:?}",
@@ -536,7 +538,7 @@ fn a_spread_literal_is_an_assembly_and_a_plain_one_a_value() {
     );
 
     let ast = parse("return [1, ...$xs]").expect("parse");
-    let comp = elaborate_one(&ast, [], "");
+    let comp = elaborate_one(&ast, [], None);
     let CompKind::Bind {
         comp: rhs, rest, ..
     } = &comp.item
@@ -567,7 +569,7 @@ fn an_arm_that_would_hoist_is_refused() {
         "case `a () [`a: !{mk}]",
     ] {
         let ast = parse(src).expect("parse");
-        let err = elaborate(&ast, [], "").expect_err(src);
+        let err = elaborate(&ast, [], None).expect_err(src);
         assert!(
             err.message.contains("an arm is a block"),
             "{src}: {}",
@@ -576,7 +578,7 @@ fn an_arm_that_would_hoist_is_refused() {
     }
     let ast = parse("let h = { return 1 }; if true $h else { return 2 }").expect("parse");
     assert!(
-        elaborate(&ast, [], "").is_ok(),
+        elaborate(&ast, [], None).is_ok(),
         "a name holding a block is an arm"
     );
 }
@@ -586,7 +588,7 @@ fn an_arm_that_would_hoist_is_refused() {
 #[test]
 fn arms_are_thunks_and_a_lone_arm_returns_unit() {
     let ast = parse("if true { echo hi }").expect("parse");
-    let comp = elaborate_one(&ast, [], "");
+    let comp = elaborate_one(&ast, [], None);
     let CompKind::If { then, else_, .. } = &comp.item else {
         panic!("expected an if, got {:?}", comp.item);
     };

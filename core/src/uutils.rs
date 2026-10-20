@@ -352,8 +352,8 @@ fn diff_main<I: Iterator<Item = std::ffi::OsString>>(args: I) -> i32 {
         if params.report_identical_files {
             crate::outln!(
                 "Files {} and {} are identical",
-                params.from.to_string_lossy(),
-                params.to.to_string_lossy(),
+                crate::path::shown(&params.from),
+                crate::path::shown(&params.to),
             );
         }
     };
@@ -416,8 +416,8 @@ fn diff_main<I: Iterator<Item = std::ffi::OsString>>(args: I) -> i32 {
     if params.brief && !result.is_empty() {
         crate::outln!(
             "Files {} and {} differ",
-            params.from.to_string_lossy(),
-            params.to.to_string_lossy()
+            crate::path::shown(&params.from),
+            crate::path::shown(&params.to)
         );
     } else if let Err(error) = io::stdout().write_all(&result) {
         crate::errln!("{error}");

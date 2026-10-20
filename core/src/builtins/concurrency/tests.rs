@@ -529,7 +529,7 @@ fn run_captured(
         shell,
         crate::protocol::Run {
             worker_cap,
-            ..crate::protocol::Run::captured(src, "<test>")
+            ..crate::protocol::Run::captured(src, crate::source::SourceOrigin::named("<test>"))
         }
         .into(),
     )
@@ -2374,7 +2374,7 @@ fn a_walled_gather_drains_its_children_within_the_grace() {
             wall: Some(std::time::Duration::from_millis(50)),
             ..crate::protocol::Run::captured(
                 "gather { spawn \"c\" { sleep 30 }; sleep 30 }",
-                "<test>",
+                crate::source::SourceOrigin::named("<test>"),
             )
         }
         .into(),
@@ -2488,7 +2488,7 @@ fn a_spawn_inside_a_worker_is_not_announced() {
             deferred: Some(Arc::new(RecDeferred(batches.clone()))),
             ..crate::protocol::Run::captured(
                 "audit { let h = spawn \"outer\" { spawn \"inner\" { return 1 } }; await $h }",
-                "<test>",
+                crate::source::SourceOrigin::named("<test>"),
             )
             .into()
         },

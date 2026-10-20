@@ -13,10 +13,10 @@
 use super::post::{Minted, Source, Stamped};
 use super::{Item, Next, Post, ScheduleId};
 use crate::cancel;
-use ral_core::sync::LockExt;
+use ral_core::sync::{CondvarExt, LockExt};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// How [`Inbox::next_or_idle`] should treat an empty inbox — the verdict
@@ -431,11 +431,7 @@ impl Inbox {
                 matches!(mode, ParkMode::Held | ParkMode::Engaged),
                 Ordering::Release,
             );
-            let (guard, _timeout) = self
-                .shared
-                .signal
-                .wait_timeout(q, PARK_POLL)
-                .unwrap_or_else(PoisonError::into_inner);
+            let (guard, _timeout) = self.shared.signal.wait_timeout_ignore_poison(q, PARK_POLL);
             q = guard;
         }
     }

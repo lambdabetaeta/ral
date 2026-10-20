@@ -97,7 +97,10 @@ no file on disk for the child to rewrite.
 `deny_layer(paths, ctx)` is a pure constructor, not a mutator: it returns a
 fresh `Capabilities` layer holding only those paths as `fs.deny_paths`, for the
 caller to push, rather than folding them into whatever layer already carries
-an `fs` opinion. `for_invocation` pushes two such layers, each making a kind
+an `fs` opinion. Each path is frozen by `freeze::host_absolute`, and one it
+refuses — not UTF-8, or not absolute under this host's rules — fails the
+layer whole, since a deny that named nothing would fail open.
+`for_invocation` pushes two such layers, each making a kind
 of bytes structurally unreachable: a restrict file's own path, so the agent
 cannot edit the file that shapes its authority, and — once some layer already
 holds an `fs` opinion — `provider::credential_files()`, so the agent cannot

@@ -22,7 +22,7 @@ use ral_core::test_access::{has_result_only_var, has_weak_residuals};
 
 fn defined(src: &str) -> Vec<(String, std::sync::Arc<Scheme>)> {
     let shell = common::fresh_shell();
-    let top = compile_and_typecheck(src, shell.session_schemes(), FileId::DUMMY, "", None)
+    let top = compile_and_typecheck(src, shell.session_schemes(), FileId::DUMMY, None, None)
         .unwrap_or_else(|e| panic!("{src:?} must check: {e}"));
     top.phrases
         .iter()

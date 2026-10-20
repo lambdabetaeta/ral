@@ -11,7 +11,7 @@ use clap::CommandFactory as _;
 pub(crate) enum Mode {
     Interactive(InteractiveOpts),
     Script {
-        path: String,
+        path: std::path::PathBuf,
         script_args: Vec<String>,
         batch: BatchOpts,
     },
@@ -210,7 +210,9 @@ struct Cli {
     /// Restrict the session by loading one or more ral capability profiles.
     ///
     /// Separate paths with commas or repeat this option. Ral combines the
-    /// profiles from left to right and applies them before running code. It has
+    /// profiles from left to right and applies them before running code. A
+    /// relative path names a file in the directory ral starts in, even when a
+    /// start-up file changes directory. It has
     /// no effect with `--check`, `--dump-ast` or `--dump-ir` because those modes do
     /// not start a runtime session.
     #[arg(long, value_name = "PATHS", value_delimiter = ',',
@@ -337,7 +339,7 @@ impl Cli {
             let mut it = self.rest.into_iter();
             let path = it.next().expect("rest is non-empty");
             return Mode::Script {
-                path,
+                path: path.into(),
                 script_args: it.collect(),
                 batch,
             };
@@ -480,7 +482,7 @@ mod tests {
         }
 
         match mode_of(&["-l", "script.ral"]) {
-            Mode::Script { path, .. } => assert_eq!(path, "script.ral"),
+            Mode::Script { path, .. } => assert_eq!(path, std::path::PathBuf::from("script.ral")),
             m => panic!("`-l script.ral` should be Script, got {}", mode_name(&m)),
         }
     }
@@ -503,7 +505,7 @@ mod tests {
             Mode::Script {
                 path, script_args, ..
             } => {
-                assert_eq!(path, "script.ral");
+                assert_eq!(path, std::path::PathBuf::from("script.ral"));
                 assert_eq!(script_args, vec!["arg1".to_string()]);
             }
             m => panic!("`script.ral arg1` should be Script, got {}", mode_name(&m)),

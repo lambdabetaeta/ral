@@ -32,7 +32,7 @@ export function setFacts(opening) {
 
 function resetTranscript(folder) {
   state.folder = folder;
-  $("convo-folder").textContent = folder;
+  $("convo-folder").textContent = folder.label;
   setFacts(null);
   // Nothing is outstanding until the shell says so; a restart must not
   // inherit the superseded conversation's last word.
@@ -50,7 +50,7 @@ export function enterConversation(folder, choice) {
 
 async function startAssistant(folder, choice) {
   try {
-    await invoke("start_conversation", { folder, choice });
+    await invoke("start_conversation", { folder: folder.path, choice });
     state.alive = true;
   } catch (err) {
     addSystemMessage(String(err));

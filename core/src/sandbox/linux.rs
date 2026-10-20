@@ -56,24 +56,15 @@ static ENVELOPE: OnceLock<Pinned> = OnceLock::new();
 
 /// Pin bwrap for the rest of the process's life, found on the `PATH` this
 /// process was started with — never a shell's, none exists yet — and only in
-/// its absolute entries, each valid UTF-8 or skipped: the search takes a
-/// string.  Idempotent, and silent where bwrap is absent: [`envelope`] says
-/// so at the first launch that needs it.
+/// its absolute entries.  Idempotent, and silent where bwrap is absent:
+/// [`envelope`] says so at the first launch that needs it.
 pub(super) fn pin_envelope() {
     if ENVELOPE.get().is_some() {
         return;
     }
     #[allow(clippy::disallowed_methods, reason = "PATH, not an XDG basedir")]
     let host_path = std::env::var_os("PATH").unwrap_or_default();
-    let absolute: Vec<String> = std::env::split_paths(&host_path)
-        .filter_map(|entry| entry.into_os_string().into_string().ok())
-        .filter(|entry| crate::path::is_absolute(entry))
-        .collect();
-    let located = crate::path::which::locate(
-        BWRAP,
-        Some(&absolute.join(":")),
-        crate::path::which::SearchCwd::nowhere(),
-    );
+    let located = crate::path::locate_in(BWRAP, crate::path::path_dirs_absolute(&host_path));
     if let Some(pinned) = located.and_then(Pinned::open) {
         let _ = ENVELOPE.set(pinned);
     }
@@ -641,6 +632,10 @@ fn pinned(pins: [&Pinned; 2]) -> Result<Vec<(Rendered, OwnedFd)>, String> {
             .names()
             .map_err(|e| format!("sandbox: cannot find where the pinned {what} lives now: {e}"))?;
         let Some(name) = names else { continue };
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "native: bwrap argv takes a name only as valid UTF-8"
+        )]
         let name = name.to_str().ok_or_else(|| {
             format!(
                 "sandbox: the pinned {what} now lives at {}, which is not valid UTF-8, \

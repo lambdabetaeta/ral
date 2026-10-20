@@ -40,12 +40,7 @@ pub(crate) fn detach(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    let spelled = head.to_string();
-    let name = if spelled.contains('/') {
-        CommandName::Path(spelled)
-    } else {
-        CommandName::Bare(spelled.into())
-    };
+    let name = CommandName::of(&head.to_string());
     if let CommandName::Bare(bare) = &name {
         // Every pass of the stack: a catch-all intercepts as a per-name does.
         match shell.lookup_handler(bare) {

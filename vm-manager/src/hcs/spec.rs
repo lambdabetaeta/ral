@@ -45,6 +45,9 @@ use std::path::Path;
 use ral_daemon::boot;
 use serde::Serialize;
 
+use super::document_text;
+use crate::Error;
+
 /// The schema version this document is written against.
 ///
 /// 2.1 is what Microsoft's own Linux-container host asks for, including for
@@ -149,7 +152,11 @@ fn kernel_command_line(plan: &Plan<'_>) -> String {
 }
 
 /// The whole compute system, ready to be serialised and handed to HCS.
-pub(super) fn document(plan: &Plan<'_>) -> ComputeSystem {
+///
+/// # Errors
+/// Returns [`Error::NotUnicode`] if a path the document would carry is not
+/// Unicode: the document is JSON text, which cannot spell it ([`document_text`]).
+pub(super) fn document(plan: &Plan<'_>) -> Result<ComputeSystem, Error> {
     let mut scsi = BTreeMap::new();
     scsi.insert(
         "0".to_string(),
@@ -160,7 +167,7 @@ pub(super) fn document(plan: &Plan<'_>) -> ComputeSystem {
                     "0".to_string(),
                     Attachment {
                         kind: "VirtualDisk",
-                        path: display(plan.rootfs),
+                        path: document_text(plan.rootfs)?.to_owned(),
                         read_only: true,
                     },
                 ),
@@ -169,7 +176,7 @@ pub(super) fn document(plan: &Plan<'_>) -> ComputeSystem {
                     "1".to_string(),
                     Attachment {
                         kind: "VirtualDisk",
-                        path: display(plan.session),
+                        path: document_text(plan.session)?.to_owned(),
                         read_only: false,
                     },
                 ),
@@ -182,7 +189,7 @@ pub(super) fn document(plan: &Plan<'_>) -> ComputeSystem {
         flags |= plan9_flags::READ_ONLY;
     }
 
-    ComputeSystem {
+    Ok(ComputeSystem {
         schema_version: SCHEMA,
         owner: "synod".to_string(),
         should_terminate_on_last_handle_closed: true,
@@ -190,8 +197,8 @@ pub(super) fn document(plan: &Plan<'_>) -> ComputeSystem {
             stop_on_reset: true,
             chipset: Chipset {
                 linux_kernel_direct: LinuxKernelDirect {
-                    kernel_file_path: display(plan.kernel),
-                    init_rd_path: display(plan.initramfs),
+                    kernel_file_path: document_text(plan.kernel)?.to_owned(),
+                    init_rd_path: document_text(plan.initramfs)?.to_owned(),
                     kernel_cmd_line: kernel_command_line(plan),
                 },
             },
@@ -208,7 +215,7 @@ pub(super) fn document(plan: &Plan<'_>) -> ComputeSystem {
                     shares: vec![Plan9Share {
                         name: WORKSPACE_SHARE.to_string(),
                         access_name: WORKSPACE_SHARE.to_string(),
-                        path: display(plan.folder),
+                        path: document_text(plan.folder)?.to_owned(),
                         port: PLAN9_PORT,
                         flags,
                     }],
@@ -243,17 +250,7 @@ pub(super) fn document(plan: &Plan<'_>) -> ComputeSystem {
                 )]),
             },
         },
-    }
-}
-
-/// A Windows path as the document must carry it.
-///
-/// Lossy on purpose and harmless in practice: every path in a document is one
-/// synod itself made under its own cache directory, or a folder the user picked
-/// through the platform's own picker, so a path this cannot render is a path
-/// Windows would not have given us.
-fn display(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
+    })
 }
 
 // ── The document's own shape ──────────────────────────────────────────────
@@ -420,7 +417,8 @@ mod tests {
     }
 
     fn json() -> Value {
-        serde_json::to_value(document(&plan())).expect("the document serialises")
+        serde_json::to_value(document(&plan()).expect("every path is Unicode"))
+            .expect("the document serialises")
     }
 
     /// The document carries exactly the machine the design describes: two
@@ -484,7 +482,7 @@ mod tests {
 
         let mut read_only_plan = plan();
         read_only_plan.read_only = true;
-        let doc = serde_json::to_value(document(&read_only_plan)).unwrap();
+        let doc = serde_json::to_value(document(&read_only_plan).unwrap()).unwrap();
         let flags = doc["VirtualMachine"]["Devices"]["Plan9"]["Shares"][0]["Flags"]
             .as_i64()
             .unwrap();
@@ -546,5 +544,25 @@ mod tests {
         );
         assert_eq!(doc["SchemaVersion"]["Major"], Value::from(2));
         assert_eq!(doc["SchemaVersion"]["Minor"], Value::from(1));
+    }
+
+    /// A folder whose name holds an unpaired surrogate is refused by name, not
+    /// written with U+FFFD in its place — which would be another folder's name.
+    #[test]
+    fn a_path_that_is_not_unicode_is_refused_rather_than_respelled() {
+        use std::os::windows::ffi::OsStringExt;
+
+        let mut units: Vec<u16> = r"C:\Users\secretary\Invoices".encode_utf16().collect();
+        units.push(0xD800);
+        let folder = std::path::PathBuf::from(std::ffi::OsString::from_wide(&units));
+        let refused = Plan {
+            folder: &folder,
+            ..plan()
+        };
+        match document(&refused) {
+            Err(Error::NotUnicode(path)) => assert_eq!(path, folder),
+            Err(other) => panic!("refused for the wrong reason: {other:?}"),
+            Ok(_) => panic!("a name with an unpaired surrogate must not be written"),
+        }
     }
 }

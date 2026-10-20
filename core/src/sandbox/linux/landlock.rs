@@ -398,6 +398,10 @@ fn written(fs: &RenderedFs, dir: &RealPath) -> bool {
         return true;
     };
     // A name that does not render is walked: over-listing is cost.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "native: a name that does not render is walked"
+    )]
     let Some(name) = dir.as_path().to_str() else {
         return false;
     };
@@ -481,6 +485,10 @@ fn listed(table: &ExecRules, masks: &[Rendered], d: &RealPath, walks: bool) -> b
 
 /// Whether `mask` holds `path`; a name that is not Unicode lies in no
 /// rendered one.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "native: a name that is not Unicode lies in no rendered mask"
+)]
 fn held(mask: &Rendered, path: &RealPath) -> bool {
     path.as_path().to_str().is_some_and(|name| mask.holds(name))
 }

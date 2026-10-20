@@ -18,7 +18,9 @@
 //! Windows-absolute, and a well-formed `//srv/sh/x` is both, so live on both.
 //! A UNC root, plain or verbatim (`\\?\UNC\srv\sh`), needs a server and a
 //! share; a bare `\\` or `//` is none, and no `\\?\` or `\\.\` path is
-//! read as anything but a drive path or such a root.  A
+//! read as anything but a drive path or such a root.  A head of two mixed
+//! separators, `/\x` or `\/srv/sh`, is refused on every host: Windows
+//! reads it as a UNC or device head, POSIX as something else.  A
 //! subpath is judged lexically, so that a profile fails alike everywhere.
 //! `~` and `xdg:NAME` are expanded by the resolver at run time, never in a
 //! grant, and are refused under every tag.
@@ -38,14 +40,13 @@
 
 use super::toolchains::{self, Toolchain};
 use crate::host::resolve_xdg;
-use crate::path::XdgKind;
 use crate::path::git::{BadPointer, Pointer, discover_git_dir};
 use crate::path::identity::windows_identity_components;
-use crate::path::lex::{Root, root};
-use crate::path::shown;
-use crate::path::sigil::parse_xdg_token;
-use crate::path::tilde::TildePath;
-use crate::path::{Allow, FrozenPath, PathRules};
+use crate::path::lex::{
+    Heads, Namespace, Root, absolute_under, namespace_head, relative_suffix, root,
+};
+use crate::path::sigil::SigilHead;
+use crate::path::{Allow, FrozenPath, PathRules, XdgKind, path_dirs_absolute, shown};
 use crate::syntax::quote::quote_word;
 use crate::text::code;
 use crate::types::{Break, Error, Shell};
@@ -403,13 +404,15 @@ impl FreezeCtx {
         let name = <&str>::from(kind);
         let clause = if val.is_empty() {
             format!(
-                "{var} is unset, so the default ({}) was used. Is HOME ({home}) set correctly?",
-                resolved.as_str(),
+                "{var} is unset, so the default ({}) was used. Is HOME ({}) set correctly?",
+                resolved.shown(),
+                shown(home),
             )
         } else {
             format!(
-                "{var}={val}: set it to a subpath of HOME ({home}), unset it to use the \
+                "{var}={val}: set it to a subpath of HOME ({}), unset it to use the \
                  default, or replace {} in the policy with an {} path.",
+                shown(home),
                 code(&format!("`xdg-{name}")),
                 code("`absolute"),
             )
@@ -419,13 +422,13 @@ impl FreezeCtx {
         } else {
             format!(
                 " (written '{}', which is a symbolic link)",
-                resolved.as_str()
+                resolved.shown()
             )
         };
         Err(PolicyError::new(format!(
             "{} resolves to '{}'{via}, outside HOME; refusing to widen the grant.  {clause}",
             code(&format!("`xdg-{name}")),
-            resolved.real(),
+            shown(resolved.real()),
         )))
     }
 }
@@ -441,47 +444,83 @@ fn anchored(tag: &str, frozen: FrozenPath) -> Result<FrozenPath, PolicyError> {
         "{} freezes to the relative path '{}'; an anchor must be absolute. \
          Is HOME or TMPDIR relative?",
         code(&format!("`{tag}")),
-        frozen.as_str()
+        frozen.shown()
     )))
 }
 
 /// Whether the raw `absolute` payload is a live path under `rules`, judged
 /// before any folding: host folding would read `C:/../x` on POSIX as the
-/// relative `x`.  Host first: live when absolute under `rules`, `Ok(false)`
-/// (the dead grant) when absolute only under the other platform's, refused
-/// when under neither.
+/// relative `x`.  A malformed root, or a head of two mixed separators
+/// (`/\x`, `\/x`), is refused first, though Windows would read either as
+/// absolute: the mixed head is one spelling POSIX and Windows read as
+/// different paths, and refusing it on every host keeps a profile portable.  Then host first: live when [live
+/// under](live_under) `rules`, `Ok(false)` (the dead grant) when only
+/// under the other platform's, refused when under neither.
 ///
 /// # Errors
 /// A run-time prefix, a root-relative `\x`, a malformed UNC, verbatim or
-/// device root, or a relative or drive-relative path.
+/// device root, a head of two mixed separators, or a relative or
+/// drive-relative path.
 pub(crate) fn live_absolute(raw: &str, rules: PathRules) -> Result<bool, PolicyError> {
     if let Some(err) = runtime_prefix(raw) {
         return Err(err);
     }
     let root = root(raw);
-    let absolute = |rules| match rules {
-        PathRules::Posix => raw.starts_with('/') && matches!(root, Root::Posix | Root::Unc),
-        PathRules::Windows => matches!(root, Root::Unc | Root::Verbatim | Root::Drive),
-    };
     let other = match rules {
         PathRules::Posix => PathRules::Windows,
         PathRules::Windows => PathRules::Posix,
     };
-    if root == Root::Malformed {
+    if matches!(root, Root::Malformed | Root::MixedHead) {
         Err(not_absolute(raw, root))
-    } else if absolute(rules) {
+    } else if live_under(raw, root, rules) {
         debug_assert!(
             rules != PathRules::Windows || !windows_identity_components(raw).is_empty(),
             "a live Windows root must name a component, or it prefixes every path"
         );
         Ok(true)
-    } else if absolute(other) {
+    } else if live_under(raw, root, other) {
         Ok(false)
     } else {
         Err(not_absolute(raw, root))
     }
 }
 
+/// Whether a well-formed payload, of root `root`, is a live grant under
+/// `rules`: it is absolute there, and is no verbatim root read under
+/// POSIX.  A verbatim root is a Windows grant, dead under POSIX rules
+/// whatever the kernel would make of the spelling: POSIX reads `//?/C:/x`
+/// as the rooted `/?/C:/x`, but its author named a Windows path, and a
+/// profile must not grant a different path on another host.
+fn live_under(raw: &str, root: Root, rules: PathRules) -> bool {
+    let windows_grant = matches!(root, Root::VerbatimDrive | Root::VerbatimUnc);
+    absolute_under(raw, rules) && !(windows_grant && rules == PathRules::Posix)
+}
+
+/// A path the host holds, frozen as an `absolute` grant naming it would be.
+///
+/// Classified by [`live_absolute`] under the host's rules on its native
+/// text, and frozen in its native form, never re-read through a payload
+/// string.  A held path has no other platform to be live on, so where a
+/// payload would be the dead grant this one is refused, as one absolute
+/// under neither platform's rules is: a deny that named nothing would fail
+/// open.
+///
+/// # Errors
+/// A path that is not UTF-8, a malformed root, a path not absolute under
+/// the host's rules, or one [`FrozenPath::freeze`] refuses.
+pub fn host_absolute(path: &Path) -> Result<FrozenPath, PolicyError> {
+    let text = crate::path::utf8(path)
+        .map_err(|e| PolicyError::new(format!("{e}, so ral cannot hold it as a grant")))?;
+    if live_absolute(text, PathRules::HOST)? {
+        freeze(path)
+    } else {
+        Err(not_absolute(text, root(text)))
+    }
+}
+
+/// The refusal of `raw` by its `root`: a malformed or mixed head, or one
+/// absolute under neither platform's rules; every other root is absolute
+/// under one of them.
 fn not_absolute(raw: &str, root: Root) -> PolicyError {
     let word = quote_word(raw);
     let abs = |rest: &str| code(&format!("`absolute {rest}"));
@@ -496,19 +535,48 @@ fn not_absolute(raw: &str, root: Root) -> PolicyError {
             abs("'\\\\?\\C:\\x'"),
             abs("'\\\\?\\UNC\\server\\share\\x'"),
         ),
-        _ if raw.starts_with('\\') => {
+        Root::MixedHead => format!(
+            "{} opens with two different separators, which Windows reads as a \
+             UNC or device path and POSIX does not; write {} or {}",
+            abs(&word),
+            abs("'\\\\server\\share\\x'"),
+            abs("/x"),
+        ),
+        Root::Driveless if object_manager_path(raw) => format!(
+            "{} is an NT object-manager path, not a path a grant can name; write {}",
+            abs(&word),
+            abs("'C:\\x'")
+        ),
+        Root::Driveless => {
             format!("{} names no drive; write {}", abs(&word), abs("'C:\\x'"))
         }
-        _ if has_drive(raw) => {
+        Root::DriveRelative => {
             format!("{} is drive-relative; write {}", abs(&word), abs("'C:\\…'"))
         }
-        _ => format!(
+        Root::Relative
+        | Root::Posix
+        | Root::Unc
+        | Root::VerbatimDrive
+        | Root::VerbatimUnc
+        | Root::Drive => format!(
             "{} needs an absolute path; for a path under the working \
              directory write {}",
             code("`absolute"),
             code(&format!("`cwd {word}")),
         ),
     })
+}
+
+/// Whether `raw` opens with `\??\`, the NT object manager's DOS-device
+/// directory: Win32 hands such a path to the kernel unparsed, so it is no
+/// path a grant can name, under any tag.  Read as Win32 reads the head,
+/// backslashes only, which is the [`Heads::OsReturned`] reading; `/??/` is
+/// an ordinary POSIX path.
+fn object_manager_path(raw: &str) -> bool {
+    matches!(
+        namespace_head(raw, Heads::OsReturned),
+        Some((Namespace::Object, _))
+    )
 }
 
 /// A relative subpath, judged lexically so that a profile fails alike on
@@ -521,58 +589,64 @@ fn subpath<'a>(tag: &str, s: &'a str) -> Result<&'a str, PolicyError> {
     let word = quote_word(s);
     let this = code(&format!("`{tag}"));
     let drive = code("`absolute 'C:\\…'");
-    match s.as_bytes() {
-        [] => Err(PolicyError::new(format!(
+    match root(s) {
+        Root::Relative if s.is_empty() => Err(PolicyError::new(format!(
             "{this} needs a path; write {} for the anchor itself",
             code(&format!("`{tag} ."))
         ))),
-        [b'/', ..] => Err(PolicyError::new(format!(
+        Root::Relative => Ok(s),
+        Root::Drive | Root::DriveRelative => Err(PolicyError::new(format!(
+            "{this} takes a relative path, not {word}; a drive belongs in {drive}"
+        ))),
+        Root::MixedHead => Err(PolicyError::new(format!(
+            "{this} takes a relative path, not {word}, which opens with two \
+             different separators"
+        ))),
+        _ if s.starts_with('/') => Err(PolicyError::new(format!(
             "{this} takes a relative path, not {word}; for {word} write {}",
             code(&format!("`absolute {word}"))
         ))),
-        [b'\\', ..] => Err(PolicyError::new(format!(
+        _ if object_manager_path(s) => Err(PolicyError::new(format!(
+            "{this} takes a relative path, not {word}, an NT object-manager path, \
+             which no grant can name"
+        ))),
+        _ => Err(PolicyError::new(format!(
             "{this} takes a relative path, not {word}, which names no drive; a drive \
              belongs in {drive}"
         ))),
-        _ if has_drive(s) => Err(PolicyError::new(format!(
-            "{this} takes a relative path, not {word}; a drive belongs in {drive}"
-        ))),
-        _ => Ok(s),
     }
-}
-
-pub(crate) fn has_drive(s: &str) -> bool {
-    matches!(s.as_bytes(), [d, b':', ..] if d.is_ascii_alphabetic())
 }
 
 /// `~` and `xdg:NAME` are expanded by the resolver at run time, not when a
 /// grant is decoded, so under any tag they would name a directory literally
-/// called `~`: refuse, and say which place the author meant.
+/// called `~`: refuse, and say which place the author meant.  The grant rule
+/// is judged under Windows rules on every host, so `xdg:config\x` is an
+/// `xdg:` head everywhere and the suffix is read to match.
 fn runtime_prefix(s: &str) -> Option<PolicyError> {
-    let rest = |r: &str| match r.trim_start_matches(['/', '\\']) {
+    let rest = |r: &str| match relative_suffix(r, PathRules::Windows) {
         "" => ".".to_string(),
         r => quote_word(r).into_owned(),
     };
-    if let Some(tilde) = TildePath::parse(s) {
-        return Some(PolicyError::new(format!(
+    let head = SigilHead::of_for(s, PathRules::Windows)?;
+    Some(PolicyError::new(match head {
+        SigilHead::Tilde(tilde) => format!(
             "'~' is not expanded in a grant; for a path under the home directory \
              write {}",
             code(&format!(
                 "`home {}",
                 rest(tilde.suffix.as_deref().unwrap_or_default())
             )),
-        )));
-    }
-    if let Some((kind, sub)) = parse_xdg_token(s) {
-        let name = <&str>::from(kind);
-        return Some(PolicyError::new(format!(
-            "{} is not expanded in a grant; write {}",
-            code(&format!("`xdg:{name}")),
-            code(&format!("`xdg-{name} {}", rest(sub.unwrap_or_default()))),
-        )));
-    }
-    s.starts_with("xdg:")
-        .then(|| PolicyError::new(unknown_xdg_message(s)))
+        ),
+        SigilHead::Xdg(kind, sub) => {
+            let name = <&str>::from(kind);
+            format!(
+                "{} is not expanded in a grant; write {}",
+                code(&format!("`xdg:{name}")),
+                code(&format!("`xdg-{name} {}", rest(sub.unwrap_or_default()))),
+            )
+        }
+        SigilHead::UnknownXdg => unknown_xdg_message(s),
+    }))
 }
 
 /// The one answer for a home-relative place where nothing binds `HOME`: `home`
@@ -647,17 +721,26 @@ fn path_dirs(home: Option<&str>) -> Result<Vec<FrozenPath>, PolicyError> {
     path_dirs_in(&path, home)
 }
 
-/// `path` split on the platform separator, keeping the absolute entries.  A
-/// relative entry is the environment's business, not the grant author's, so
-/// unlike a relative grant path it is dropped in silence; one naming the
-/// world is not ([`refuse_the_world`]).
+/// The absolute entries of `path` ([`path_dirs_absolute`]), each frozen as
+/// the host-held path it is ([`host_absolute`]).  A relative entry is the
+/// environment's business, not the grant author's, so unlike a relative
+/// grant path it is dropped in silence; one naming the world is not
+/// ([`refuse_the_world`]), nor one [`host_absolute`] refuses, absolute to
+/// the kernel but under a malformed or mixed head, or not UTF-8: the
+/// selector fails whole rather than freeze a path it cannot read.
 fn path_dirs_in(path: &OsStr, home: Option<&str>) -> Result<Vec<FrozenPath>, PolicyError> {
-    let dirs: Vec<_> = std::env::split_paths(path)
-        .filter(|entry| entry.is_absolute())
+    let dirs: Vec<_> = path_dirs_absolute(path)
+        .into_iter()
         .map(|entry| {
             let subject = format!("PATH holds {}", shown(&entry));
-            refuse_the_world(Selector::Path, &subject, "PATH", &entry, home)?;
-            freeze(entry)
+            let dir = host_absolute(&entry).map_err(|e| {
+                PolicyError::new(format!(
+                    "{subject}, which {} cannot hold: {}",
+                    code("`dir `path"),
+                    e.message
+                ))
+            })?;
+            refuse_the_world(Selector::Path, &subject, "PATH", &entry, home).map(|()| dir)
         })
         .collect::<Result<_, _>>()?;
     if dirs.is_empty() {
@@ -738,6 +821,29 @@ mod tests {
                      of it. Is PATH set correctly?"
                 ),
             );
+        }
+    }
+
+    /// An entry absolute to the kernel under a malformed head, or not
+    /// UTF-8, fails the selector whole rather than freeze some other path.
+    #[test]
+    fn path_entries_a_grant_cannot_hold_are_refused() {
+        let malformed = if cfg!(windows) {
+            r"C:\bin;\\\x\bin"
+        } else {
+            "/usr/bin:///x/bin"
+        };
+        let err = path_dirs_in(OsStr::new(malformed), None).unwrap_err();
+        assert!(
+            err.message.contains("no well-formed UNC"),
+            "{}",
+            err.message
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let err = path_dirs_in(OsStr::from_bytes(b"/usr/bin:/\xff"), None).unwrap_err();
+            assert!(err.message.contains("is not UTF-8"), "{}", err.message);
         }
     }
 
@@ -919,7 +1025,7 @@ mod tests {
     fn absolute_payloads_classify_on_the_raw_string() {
         use PathRules::{Posix, Windows};
         let live = |raw, rules| live_absolute(raw, rules).ok();
-        for raw in ["/x", "/", "/\\x"] {
+        for raw in ["/x", "/"] {
             assert_eq!(live(raw, Posix), Some(true), "{raw}");
             assert_eq!(live(raw, Windows), Some(false), "{raw}");
         }
@@ -954,6 +1060,7 @@ mod tests {
             r"\\?\UNC\srv",
             "//?/UNC/",
             r"\\.\C:\x",
+            r"/\x",
             "C:x",
             "src",
             "./src",
@@ -989,6 +1096,88 @@ mod tests {
         }
     }
 
+    /// Every root kind, under both rules: `absolute` classifies as it did
+    /// when POSIX absoluteness was "`/`, then a `Posix` or `Unc` root", now
+    /// that it is the kernel's "opens with `/`".  The verbatim roots spelled
+    /// with `/` stay dead on POSIX by the grant rule, the malformed ones stay
+    /// refused by the well-formedness check, and a refusal is the one its
+    /// root names.
+    #[test]
+    fn absolute_classification_survives_the_kernel_rule() {
+        use PathRules::{Posix, Windows};
+        const LIVE: Option<bool> = Some(true);
+        const DEAD: Option<bool> = Some(false);
+        const REFUSED: Option<bool> = None;
+        for (raw, posix, windows) in [
+            ("/x", LIVE, DEAD),
+            ("/", LIVE, DEAD),
+            ("//srv/sh/x", LIVE, LIVE),
+            (r"\\srv\sh", DEAD, LIVE),
+            (r"\\srv\sh\x", DEAD, LIVE),
+            (r"\\?\C:\x", DEAD, LIVE),
+            (r"\\?\C:\", DEAD, LIVE),
+            ("//?/C:/x", DEAD, LIVE),
+            (r"/\?\C:\x", DEAD, LIVE),
+            (r"\/?\C:\x", DEAD, LIVE),
+            (r"\\?\UNC\srv\sh", DEAD, LIVE),
+            (r"\\?\unc\srv\sh\x", DEAD, LIVE),
+            ("//?/UNC/srv/sh", DEAD, LIVE),
+            (r"/\?/unc\srv/sh", DEAD, LIVE),
+            (r"C:\x", DEAD, LIVE),
+            ("c:/x", DEAD, LIVE),
+            (r"\\", REFUSED, REFUSED),
+            ("//", REFUSED, REFUSED),
+            ("///x", REFUSED, REFUSED),
+            (r"\\srv", REFUSED, REFUSED),
+            (r"\\srv\", REFUSED, REFUSED),
+            ("//srv", REFUSED, REFUSED),
+            ("//srv/", REFUSED, REFUSED),
+            (r"\\\srv\sh", REFUSED, REFUSED),
+            ("///srv/sh", REFUSED, REFUSED),
+            (r"\\?\", REFUSED, REFUSED),
+            (r"\\?", REFUSED, REFUSED),
+            (r"\\?\UNC\", REFUSED, REFUSED),
+            (r"\\?\UNC\srv", REFUSED, REFUSED),
+            (r"\\?\UNC\srv\", REFUSED, REFUSED),
+            (r"\\?\UNC\?\sh", REFUSED, REFUSED),
+            (r"\\?\UNC\.\sh", REFUSED, REFUSED),
+            ("//?/UNC/", REFUSED, REFUSED),
+            ("//?/UNC/srv", REFUSED, REFUSED),
+            (r"\\?\C:", REFUSED, REFUSED),
+            (r"\\?\x", REFUSED, REFUSED),
+            ("//?/x", REFUSED, REFUSED),
+            (r"/\?\x", REFUSED, REFUSED),
+            (r"\\.\C:\x", REFUSED, REFUSED),
+            (r"\\.\pipe\x", REFUSED, REFUSED),
+            ("//./pipe/x", REFUSED, REFUSED),
+            (r"\\?\?\x", REFUSED, REFUSED),
+            (r"\x", REFUSED, REFUSED),
+            (r"\", REFUSED, REFUSED),
+            ("C:x", REFUSED, REFUSED),
+            ("C:", REFUSED, REFUSED),
+            ("x", REFUSED, REFUSED),
+            ("./x", REFUSED, REFUSED),
+            ("", REFUSED, REFUSED),
+            (r"/\x", REFUSED, REFUSED),
+            (r"/\srv\sh", REFUSED, REFUSED),
+            (r"\/srv/sh", REFUSED, REFUSED),
+            (r"\??\C:\x", REFUSED, REFUSED),
+            ("/??/C:/x", LIVE, DEAD),
+        ] {
+            for (rules, want) in [(Posix, posix), (Windows, windows)] {
+                let got = live_absolute(raw, rules);
+                assert_eq!(got.as_ref().ok().copied(), want, "{raw} {rules:?}");
+                if let Err(err) = got {
+                    assert_eq!(
+                        err.message,
+                        not_absolute(raw, root(raw)).message,
+                        "{raw} {rules:?}"
+                    );
+                }
+            }
+        }
+    }
+
     /// The anchors are the one declaration of the place tags.
     #[test]
     fn anchors_round_trip_through_their_tags() {
@@ -1006,6 +1195,27 @@ mod tests {
         assert!(ctx("/h", "/cwd").place(&abs(foreign)).unwrap().is_none());
     }
 
+    /// A path the host holds has no other platform: where a payload would
+    /// be the dead grant, it is refused, never dropped.
+    #[test]
+    fn a_held_path_absolute_only_elsewhere_is_refused() {
+        let foreign = if cfg!(windows) { "/x" } else { r"C:\x" };
+        assert!(host_absolute(Path::new(foreign)).is_err());
+        assert!(host_absolute(Path::new(r"\x")).is_err());
+    }
+
+    /// `\??\` is refused under every tag, saying what it is rather than
+    /// that it names no drive.
+    #[test]
+    fn an_object_manager_path_is_refused_as_such() {
+        let ctx = ctx("/h", "/cwd");
+        for place in [abs(r"\??\C:\x"), cwd(r"\??\C:\x")] {
+            let err = refusal(&place, &ctx);
+            assert!(err.contains("NT object-manager path"), "{place:?}: {err}");
+            assert!(!err.contains("names no drive"), "{place:?}: {err}");
+        }
+    }
+
     #[test]
     fn run_time_prefixes_are_refused_under_every_tag_naming_the_place() {
         let ctx = ctx("/h", "/cwd");
@@ -1016,6 +1226,16 @@ mod tests {
         for place in [abs("xdg:config/x"), cwd("xdg:config/x")] {
             let err = refusal(&place, &ctx);
             assert!(err.contains("`xdg-config x"), "{err}");
+        }
+    }
+
+    /// The grant rule reads a prefix under Windows rules on every host, so a
+    /// backslash ends the `xdg:` name and follows a `~` as a `/` does.
+    #[test]
+    fn a_backslash_run_time_prefix_is_refused_on_every_host() {
+        for (raw, want) in [(r"xdg:config\x", "`xdg-config x"), (r"~\x", "`home x")] {
+            let err = runtime_prefix(raw).unwrap_or_else(|| panic!("{raw} is not a prefix"));
+            assert!(err.message.contains(want), "{raw}: {}", err.message);
         }
     }
 

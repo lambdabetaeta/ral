@@ -30,7 +30,7 @@
 
 use ral_core::capability::{Capabilities, Evidence, ExecKey, FsPolicy};
 use ral_core::path::shown;
-use ral_core::path::{Allow, Deny, FrozenPath, RealPath};
+use ral_core::path::{Allow, Deny, FrozenPath, GuestPath, RealPath};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -159,7 +159,7 @@ const TOOLBOX: &[&str] = &[
 /// machine and gone when it stops.  It is the scratch the engine is
 /// told, not the parent of one it mints; the prompt names it as the place for
 /// intermediate files, so the grant admits it whole.
-pub(crate) const GUEST_SCRATCH: &str = "/tmp";
+pub(crate) const GUEST_SCRATCH: GuestPath = GuestPath::from_static("/tmp");
 
 /// One folder, opened as a session's whole authority.
 #[derive(Debug)]
@@ -310,7 +310,7 @@ impl Grant {
                 .as_path()
                 .components()
                 .nth(home.as_path().components().count())
-                .is_some_and(|first| first.as_os_str().to_string_lossy().starts_with('.'));
+                .is_some_and(|first| first.as_os_str().as_encoded_bytes().starts_with(b"."));
         if hidden {
             return Err(settings_refusal());
         }
@@ -327,10 +327,10 @@ impl Grant {
     /// Always the final component: [`Self::open`] refuses the disk root,
     /// the only canonical path without one.
     pub fn name(&self) -> String {
-        self.root.as_path().file_name().map_or_else(
-            || self.root.to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        )
+        self.root
+            .as_path()
+            .file_name()
+            .map_or_else(|| self.root.to_string(), ral_core::path::shown)
     }
 
     /// What to boot to hold this folder: the granted folder, writable, on a
@@ -407,8 +407,10 @@ impl Grant {
         // it judges a guest path absolute with `starts_with('/')`.
         let prefixes = || {
             vec![
-                FrozenPath::from_guest(vm_manager::MachineSpec::GUEST_WORKSPACE),
-                FrozenPath::from_guest(GUEST_SCRATCH),
+                FrozenPath::from_guest(&GuestPath::from_static(
+                    vm_manager::MachineSpec::GUEST_WORKSPACE,
+                )),
+                FrozenPath::from_guest(&GUEST_SCRATCH),
             ]
         };
         Capabilities {
@@ -494,7 +496,7 @@ fn settings_trees(
             ["APPDATA", "LOCALAPPDATA"]
                 .into_iter()
                 .filter_map(|name| env(name).map(PathBuf::from))
-                .filter(|p| p.is_absolute()),
+                .filter(|p| ral_core::path::is_absolute(p)),
         );
         trees.extend(home.map(|h| h.join("AppData")));
     } else if cfg!(target_os = "macos") {
@@ -652,7 +654,7 @@ mod tests {
             assert!(
                 message.contains("keep their own settings"),
                 "{} should be refused as settings: {message}",
-                root.display()
+                ral_core::path::shown(&root)
             );
         }
         judged(&home.join("Documents").join(".drafts"))
@@ -790,12 +792,12 @@ mod tests {
             // grant that admitted it would strand the agent in exactly
             // the namespace confusion the mount exists to end.
             let host = grant.root().join("letter.docx");
-            let path = sh.resolve(&host.to_string_lossy());
+            let path = sh.anchor(&host);
             assert!(
                 sh.check_fs_read(&path).is_err(),
                 "the granted folder's host path must not be readable"
             );
-            let path = sh.resolve(&host.to_string_lossy());
+            let path = sh.anchor(&host);
             assert!(
                 !sh.admits_fs_exact(&FsOp::Write, &path.canonicalise_lenient()),
                 "the granted folder's host path must not be writable"
@@ -821,7 +823,8 @@ mod tests {
             .capabilities()
             .fs
             .expect("the office grant restricts the filesystem");
-        let guest = [vm_manager::MachineSpec::GUEST_WORKSPACE, GUEST_SCRATCH];
+        let scratch = GUEST_SCRATCH;
+        let guest = [vm_manager::MachineSpec::GUEST_WORKSPACE, scratch.as_str()];
         for (which, prefixes) in [("read", &fs.read_prefixes), ("write", &fs.write_prefixes)] {
             let spelled: Vec<&str> = prefixes.iter().map(FrozenPath::as_str).collect();
             assert_eq!(
@@ -841,7 +844,7 @@ mod tests {
         };
         let mut shell = ral_core::test_helper::core_shell();
         shell.with_capabilities(grant.capabilities(), |sh| {
-            let path = sh.resolve(&format!("{home}/.ssh/id_ed25519"));
+            let path = sh.anchor(&PathBuf::from(&home).join(".ssh").join("id_ed25519"));
             assert!(
                 sh.check_fs_read(&path).is_err(),
                 "the office grant must not reach into HOME"

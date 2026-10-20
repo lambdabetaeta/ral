@@ -66,11 +66,12 @@ fn text_args(argv: Vec<OsString>) -> Result<Vec<String>, String> {
         .enumerate()
         .map(|(i, arg)| {
             arg.into_string().map_err(|arg| {
-                format!(
-                    "ral: argument {} is not UTF-8 text: {}",
-                    i + 1,
-                    arg.to_string_lossy()
-                )
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "native: argv text that is not UTF-8, quoted lossily to say so"
+                )]
+                let text = arg.to_string_lossy();
+                format!("ral: argument {} is not UTF-8 text: {text}", i + 1)
             })
         })
         .collect()

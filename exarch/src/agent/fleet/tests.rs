@@ -219,7 +219,10 @@ fn interrupt_never_poisons_the_next_run() {
         std::thread::spawn(move || {
             dispatch_to_report(
                 &*transport,
-                ral_core::protocol::Run::captured("sleep 30", "<test>"),
+                ral_core::protocol::Run::captured(
+                    "sleep 30",
+                    ral_core::source::SourceOrigin::named("<test>"),
+                ),
                 Arc::new(()),
             )
         })
@@ -240,7 +243,10 @@ fn interrupt_never_poisons_the_next_run() {
 
     let next = dispatch_to_report(
         &*transport,
-        ral_core::protocol::Run::captured("$[1 + 1]", "<test>"),
+        ral_core::protocol::Run::captured(
+            "$[1 + 1]",
+            ral_core::source::SourceOrigin::named("<test>"),
+        ),
         Arc::new(()),
     )
     .expect("identity never severs");

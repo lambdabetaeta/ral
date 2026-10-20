@@ -394,10 +394,11 @@ Some characters depend on their position:
 
 - `#` starts a comment only at the start of a word. It remains literal inside
   a word.
-- `~` at the start of a word, standing alone or followed by `/`, abbreviates
-  the current user's home directory, which `home` returns (§10.2): `~/src`
-  is `"!{home}/src"`. Anywhere else `~` is an ordinary character, so `foo~bar`
-  and `~bob/x` are plain words.
+- `~` at the start of a word, standing alone or followed by a path separator
+  (`/`, or `\` on Windows; see below), abbreviates the current user's home
+  directory, which `home` returns (§10.2): `~/src` is `"!{home}/src"`.
+  Anywhere else `~` is an ordinary character, so neither `foo~bar` nor
+  `~bob/x` names a home directory.
 - `,` separates items while `[...]` is the innermost form. Outside brackets,
   it can be part of a word, as in `--features=a,b`.
 - `:` is punctuation before whitespace, a newline, `]`, or the end of input.
@@ -430,9 +431,14 @@ attachments must touch: `^ls`, `...$xs`, `!$x`, `$h[k]`. A space after `^`,
 command's arguments: `if $c{a}`, `try{a}{b}`, and `[a'b']` are errors like
 `--prefix=$d`.
 
-Backslash has no special meaning in a bare word. For example,
-`C:\Users\name` is one bare word. A dot is also ordinary, so `.env` and
-`archive.tar` are bare words.
+Backslash escapes nothing in a bare word. For example, `C:\Users\name` is one
+bare word. A dot is also ordinary, so `.env` and `archive.tar` are bare words.
+
+A bare word containing a path separator is a path, and as a command head it
+runs that path directly (§6.2). `/` is a separator on every platform; `\` is
+one on Windows only. So on Windows `C:\Users\name` and `.\build` are paths,
+while on Linux and macOS `a\b` is an ordinary word, which as a command head is
+a bare name searched on `PATH`.
 
 ### 3.6. Names and reserved words
 
@@ -1186,11 +1192,13 @@ The spelling of the head selects one of four paths.
 | Form | Examples | Meaning |
 |---|---|---|
 | Bare head | `git status`, `map $f $xs` | Use the lookup order in §6.3. |
-| Path head | `./build`, `/usr/bin/env`, `~/bin/tool` | Run that path directly. |
+| Path head | `./build`, `/usr/bin/env`, `~/bin/tool`, `.\build` (Windows) | Run that path directly. |
 | Explicit value head | `$f 3`, `!$factory 3` | Apply the value. Never search for a program. |
 | Caret head | `^git status` | Skip value bindings, then continue through handlers and program lookup. |
 
-A path head does not consult bindings, handlers, bundled commands, or `PATH`.
+A head is a path when it contains a path separator: `/`, or on Windows also
+`\` (§3.5). A path head does not consult bindings, handlers, bundled commands,
+or `PATH`.
 ral expands `~` when it resolves the command. A relative path uses ral's current
 logical directory.
 
@@ -2380,7 +2388,7 @@ let [environment, region] = args
 echo $SCRIPT
 ```
 
-It is lexical: a reference inside a loaded module names that module, not the file that loaded it. ral fixes the value while compiling the file, so a later call from another file cannot change it.
+It is lexical: a reference inside a loaded module names that module, not the file that loaded it. ral fixes the value while compiling the file, so a later call from another file cannot change it. On Windows its path is `/`-separated (§14.4).
 
 Only real script files have this identity. Using `$SCRIPT` in the REPL, `-c`, standard-input programs, preloaded sources, or other synthetic source is a compile-time error.
 
@@ -2395,8 +2403,8 @@ The live shell is read by six nullary builtins:
 | Name | Type | Value |
 |---|---|---|
 | `env` | `F (Map String)` | Environment variables as a map of `String` to `String`. |
-| `cwd` | `F String` | The logical working directory, absolute. |
-| `home` | `F String` | `HOME`, or `USERPROFILE` where appropriate, from the effective environment; the directory `~` abbreviates. |
+| `cwd` | `F String` | The logical working directory, absolute, `/`-separated on Windows (§14.4). |
+| `home` | `F String` | `HOME`, or `USERPROFILE` where appropriate, from the effective environment, `/`-separated on Windows; the directory `~` abbreviates. |
 | `user` | `F String` | `USER`, or `USERNAME` where appropriate, from the effective environment. |
 | `nproc` | `F Int` | Available processor parallelism, never less than 1. |
 | `args` | `F [String]` | The current program's argument strings. |
@@ -2446,7 +2454,7 @@ The module’s final expression is evaluated, but `use` returns the bindings rat
 
 `use` is a checked boundary (§7.3): the record is admitted against the fields the script reads, so a read of a name the module does not export fails at the `use`, and each exported function is held to the type the script uses it at.
 
-`use` first resolves a path relative to the containing file, or relative to `cwd` when there is no containing file. If that path does not resolve, ral searches the directories in the effective `RAL_PATH`, in order. The effective value is read when `use` runs, so a dynamically scoped `within [env: [RAL_PATH: ...]]` override controls only loads in that body. `RAL_PATH` uses the platform’s normal path-list separator: `:` on Unix and `;` on Windows. Each search candidate must be a regular file; a directory with the requested name does not stop the search of later entries.
+`use` first resolves a path. A `~` or `xdg:` head expands first, as in any written path, and only a path still relative after that is read relative to the containing file, or relative to `cwd` when there is no containing file; an absolute one is resolved exactly as any written path is, never joined onto the file's directory; the containing file's own directory is never read for such a head, so a script under a directory named `~` is still found there. If that path does not resolve, ral searches the directories in the effective `RAL_PATH`, in order. The effective value is read when `use` runs, so a dynamically scoped `within [env: [RAL_PATH: ...]]` override controls only loads in that body. `RAL_PATH` uses the platform’s normal path-list separator: `:` on Unix and `;` on Windows. Each search candidate must be a regular file; a directory with the requested name does not stop the search of later entries.
 
 ### 10.4. Module freshness, cycles, and errors
 
@@ -2468,7 +2476,7 @@ use: circular dependency: a.ral -> b.ral -> a.ral
 
 The active load depth is limited to 100 files. Exceeding it is an error rather than an uncontrolled recursion.
 
-`use` checks filesystem read authority before reading. A denied load fails before the module body runs. Missing files, permission failures, parse errors, type errors, cycles, depth overflow, and failures raised by the module retain their useful status and are prefixed with `use:`. A module that does not compile is reported against its own text, with the line and column of each error, exactly as it would be were it run as a script; a `try` handler that catches the failure reads the plain message, and its `site` is the `use`.
+`use` checks filesystem read authority before reading. A denied load fails before the module body runs. A file whose resolved path is not UTF-8 is refused, naming it, before it is read: a source's path travels as text. Missing files, permission failures, parse errors, type errors, cycles, depth overflow, and failures raised by the module retain their useful status and are prefixed with `use:`. A module that does not compile is reported against its own text, with the line and column of each error, exactly as it would be were it run as a script; a `try` handler that catches the failure reads the plain message, and its `site` is the `use`.
 
 ### 10.5. Persistent sessions
 
@@ -3160,7 +3168,7 @@ A *selector* names a set of directories that the environment chooses, not a path
 
 | Selector | Denotes |
 |---|---|
-| `` `path `` | every absolute directory in the host process's `$PATH` at decode time; an error if there are none, or if an entry is the filesystem root, the home or an ancestor of the home |
+| `` `path `` | every absolute directory in the host process's `$PATH` at decode time; an error if there are none, if an entry is the filesystem root, the home or an ancestor of the home, or if an entry is one `` `absolute `` would refuse under the host's rules (a malformed or mixed two-separator head) or is not valid Unicode |
 | `` `system `` | ral's platform-defined system tool directories, without Homebrew |
 | a package manager, such as `` `rustup `` or `` `homebrew `` | the directories that manager runs programs from, where they exist; nothing if the manager is absent (§12.3) |
 
@@ -3170,6 +3178,8 @@ The payload `P` is absolute under the host's rules. The payload `S` is a relativ
 
 A payload headed by `~` or `xdg:NAME` is refused under every tag: those prefixes are expanded when a path is used, not when a grant is read, so `` `absolute ~/x `` would name a relative path. The error names the place meant, `` `home x `` or `` `xdg-config x ``.
 
+At run time, a path headed `xdg:NAME` followed by a separator (`/`, and `\` on Windows) and a subpath expands to that XDG base with the subpath joined beneath it. The subpath is everything after that one separator. A root of the current volume is dropped, so `xdg:config//etc` names `etc` under the config base, never `/etc`. `..` is joined as written and folds with the rest of the path, so it is not confined to the base: `xdg:config/../x` names `x` beside the config base. On Windows a subpath that names a volume of its own would replace the base: one with a drive component (`C:`, `C:x`), or one opening with two separators, as a share or a namespace head does (`\\srv\share`, `\\?\UNC\srv\share`, `\\.\pipe\x`, and so `xdg:config///x`). Such a path cannot be answered and is used literally, as an unknown `NAME` is. Elsewhere every root is the one root, so nothing is refused.
+
 `` `absolute `` classifies its payload on the raw string, before any folding, host first: it is live if absolute under the host's rules, dead if absolute only under the other platform's, and refused if under neither.
 
 | Raw `P` | POSIX | Windows |
@@ -3177,9 +3187,14 @@ A payload headed by `~` or `xdg:NAME` is refused under every tag: those prefixes
 | `/x`, `/` | absolute | dead |
 | `//server/share/x` (well-formed UNC) | absolute | absolute |
 | `C:\x`, `C:/x`, `\\server\share\x` | dead | absolute |
+| `\\?\C:\x`, `//?/C:/x`, `//?/UNC/server/share/x` (verbatim) | dead | absolute |
 | `\x` (root-relative) | refused | refused: it names no drive |
+| `\??\C:\x` (NT object-manager path) | refused | refused: no grant can name one |
 | `C:x` (drive-relative), anything relative | refused | refused |
 | `\\` or `//` with no server and share (malformed UNC) | refused | refused |
+| `/\x`, `/\srv\share`, `\/srv/share` (two mixed separators) | refused | refused |
+
+Absoluteness is the kernel's: under POSIX a path is absolute when it opens with `/`, under Windows when it opens with a drive root or two separators. Two grant rules stand beside it. A root opening with two separators that is no well-formed UNC or verbatim path, or that names the device namespace, is refused under both rules, though Windows would read it as absolute. So is one opening with two separators of different spellings, `/\` or `\/`, outside a verbatim head: Windows reads it as a UNC or device head, while POSIX reads `/\x` as rooted at `/` and `\/x` as relative, so the one spelling would grant different paths on the two platforms. A verbatim root is a Windows grant and is dead under POSIX, though POSIX reads `//?/C:/x` as the rooted `/?/C:/x`: its author named a Windows path, and a profile must not grant a different path on another host.
 
 A *dead grant* names no path on this host, so one profile can contain host-specific entries and load on both platforms; it matches nothing and, in a deny list, denies nothing.
 
@@ -3202,7 +3217,7 @@ exec: [
 
 A target is one of:
 
-- `` `name N `` — the bare command `N`: the file the host `PATH` finds for it, and the bundled tool of that name. A scoped `PATH` cannot change what it names. `N` must be a bare command name; a path-shaped payload is refused with a hint to use a place;
+- `` `name N `` — the bare command `N`: the file the host `PATH` finds for it, and the bundled tool of that name. A scoped `PATH` cannot change what it names. `N` must be a bare command name; a path-shaped payload is refused with a hint to use a place. Path shape is judged under Windows rules on every host, so `a\b` and a drive-headed `C:x` are refused alike everywhere;
 - a place (§12.2) — the one executable at that path, frozen to its real path when the grant is decoded. A place that is a directory is refused, with a hint to use `dir`;
 - `` `dir D `` — every executable beneath each directory `D` names, recursively, frozen to its real path, where `D` is a place or a selector. Directory scope is spelled, never inferred from a stat: `` `cwd tools/build `` names one executable, `` `dir `cwd tools `` names everything beneath `tools`.
 
@@ -3222,7 +3237,7 @@ An omitted `exec` is every program, and a host that extends a base that omits it
 
 A selector may be the payload of `dir`:
 
-- `` `path `` — every absolute directory in the current `$PATH`; an entry that is the filesystem root, the home or an ancestor of the home is a freeze error, as for an override below;
+- `` `path `` — every absolute directory in the current `$PATH`; an entry that is the filesystem root, the home or an ancestor of the home is a freeze error, as for an override below, and so is one `` `absolute `` would refuse under the host's rules, or one that is not valid Unicode;
 - `` `system `` — ral's platform-defined system tool directories, without Homebrew;
 - a package manager, such as `` `rustup ``, `` `cargo ``, `` `go ``, `` `pyenv ``, `` `homebrew `` or `` `scoop ``. The implementation holds them as one table, and the checker's refusal of an unknown selector lists every name.
 
@@ -3257,7 +3272,7 @@ fs: [
 
 The floor is the platform's fixed set of read-only system paths that any program needs to start (§12.11). Every restricted `read` admits it, whether or not the grant names it, and the in-process check and the host sandbox agree on it. No nested grant narrows it; only a `deny` removes a floor path. It admits reads alone: never writes, never execution.
 
-ral resolves the accessed path, including symlinks, before testing prefix membership. Allowance prefixes carry a symlink-resolved identity captured when the policy is decoded and keep it; exclusions are re-resolved on each check. Composition never flattens nested policies into one: each active layer keeps its own frozen prefixes, and a check folds the whole stack afresh — the allow region for a `read` or `write` is the intersection of every opining layer's admitted prefixes, the deny region is the union of every layer's carve-outs, and a denial at any layer wins over an allow admitted elsewhere in the stack. Point-of-use checks resolve the live path again. The discard device is always permitted: `/dev/null` on Unix, `\\.\NUL` on Windows. On Windows a path whose last component is a reserved DOS device name (`NUL`, `CON`, `PRN`, `AUX`, `COM1`–`COM9`, `LPT1`–`LPT9`, in any case and with any extension) is refused; `\\.\NUL` is the one device name ral accepts.
+ral resolves the accessed path, including symlinks, before testing prefix membership. Allowance prefixes carry a symlink-resolved identity captured when the policy is decoded and keep it; exclusions are re-resolved on each check. Composition never flattens nested policies into one: each active layer keeps its own frozen prefixes, and a check folds the whole stack afresh — the allow region for a `read` or `write` is the intersection of every opining layer's admitted prefixes, the deny region is the union of every layer's carve-outs, and a denial at any layer wins over an allow admitted elsewhere in the stack. Point-of-use checks resolve the live path again. The discard device is always permitted: `/dev/null` on Unix, `\\.\NUL` on Windows. On Windows a path whose last component is a reserved DOS device name (`NUL`, `CON`, `PRN`, `AUX`, `COM1`–`COM9`, `LPT1`–`LPT9`, and `COM¹`–`COM³` and `LPT¹`–`LPT³` with a superscript digit, in any case and with any extension) is refused; `\\.\NUL` is the one device name ral accepts. A path opening with two separators that is no well-formed share or verbatim path is resolved as written, `..` included: no lexical fold can tell where such a root ends, and folding across it could assemble a share or a drive the path never named. So is a verbatim path spelled `\\?\` with backslashes alone: Windows hands its rest to the kernel uninterpreted, `/` a character of a name and `.` and `..` names. One spelled with a `/` in its head, such as `//?/C:/x`, is normalised by Windows like any other path, and `.` and `..` fold past its drive or share. On Windows a file operation on one whose head names neither a share nor a namespace (`\\x`, `\\\srv\share`, `/\x`) fails, rather than reaching a path on the current drive, and so does one that reaches such a path, or one relative to a drive's current directory (`C:x`), through a symlink's target.
 
 ral checks filesystem operations that it performs itself. A spawned program’s own filesystem access is instead confined by the host sandbox where supported.
 
@@ -4120,7 +4135,20 @@ working directory without requiring the result to exist. `resolve-path`
 canonicalises through the filesystem, follows symbolic links, and requires an
 existing path. `abbreviate-home` is for display: it folds a leading home
 directory to `~`. Filesystem reads and creations are checked against the
-active filesystem grant.
+active filesystem grant. `temp-dir` and `temp-file` return the path they
+create as a string, so they refuse a temp directory whose real path is not
+valid UTF-8, before creating anything in it.
+
+On Windows, every path ral returns or prints is `/`-separated, never
+`\`-separated: `cwd`, `home`, `~`, `$SCRIPT`, `absolute-path`,
+`resolve-path`, `list-dir` and `file-info` names, `glob` matches, `temp-dir`
+and `temp-file`, and the paths named in error messages. There are two
+exceptions. A command written as a path is named in its error as the user
+wrote it, so a failed `.\missing` reports `.\missing`. A path that only the
+operating system can read literally, such as `\\?\UNC\server\share\x` or
+`\\.\pipe\name`, keeps its backslashes, because `/` is not a separator
+there; a `\\?\` prefix that can be dropped without changing the path's
+meaning is dropped, and the rest is shown with `/`.
 
 `list-dir` returns records rather than formatted columns. `file-info` uses
 link metadata and reports fields including name, type, size, timestamps,
@@ -4747,7 +4775,7 @@ ral -- task.ral --force
 ral -c '--version'
 ```
 
-Script arguments are returned by `args`. Arguments are text: one that is not UTF-8 is refused with status 2 rather than altered. `$SCRIPT` is a lexical string containing the source file’s name. It is available in script files, including sourced modules under their own names, but is rejected in the REPL, `-c`, and synthetic preloaded source.
+Script arguments are returned by `args`. Arguments are text: one that is not UTF-8 is refused with status 2 rather than altered. `$SCRIPT` is a lexical string containing the source file’s path. That path is text too: a script, module, startup file, or plugin whose path is not UTF-8 is refused, naming it, before it is read. It is available in script files, including sourced modules under their own names, but is rejected in the REPL, `-c`, and synthetic preloaded source.
 
 ### 16.2. Batch processing
 
@@ -4815,7 +4843,7 @@ application, but bindings and effects produced before a runtime failure,
 `exit`, or return-contract check are not rolled back. In every case boot
 continues to the interactive shell.
 
-`--norc`, also accepted as `--noprofile`, suppresses login profiles and the rc file. Command-line `--recursion-limit` and `--surface` values are applied after the rc and therefore override it. Session `--capabilities` profiles are also applied after startup files: startup is operator-trusted setup, and the capability profile becomes the ceiling for subsequent work.
+`--norc`, also accepted as `--noprofile`, suppresses login profiles and the rc file. Command-line `--recursion-limit` and `--surface` values are applied after the rc and therefore override it. Session `--capabilities` profiles are also applied after startup files: startup is operator-trusted setup, and the capability profile becomes the ceiling for subsequent work. A relative profile path names a file in the directory ral was started in, even when a startup file or an earlier profile changes directory.
 
 ### 16.5. Interactive surfaces
 
@@ -4861,7 +4889,7 @@ The `/bin/sh` branch forwards arguments without requiring UTF-8, and replaces th
 
 **Unix.** Terminal detection selects a bare REPL or stdin-script mode. Login-shell `argv[0]`, process-group foreground ownership, immediate resume-on-stop (§11.6), and `ral-sh` are Unix facilities. Signals are translated into cancellation and conventional process statuses; the shell restores terminal ownership after foreground children, and on exit hands the terminal back to the process group it started in.
 
-**Windows.** A bare invocation defaults to the interactive mode because the CLI does not infer stdin-script mode from Windows terminal state; use `-s` for source redirected on stdin. ral enables virtual-terminal processing where available. Unix process groups and stop signals do not exist. Direct execution refuses `.bat` and `.cmd` images because their additional `cmd.exe` quoting pass has no safe general argument encoding; invoke `cmd.exe` explicitly only if that risk is acceptable. `ral-sh` is a Unix login-shell bridge and is not a usable Windows shell dispatcher.
+**Windows.** A bare invocation defaults to the interactive mode because the CLI does not infer stdin-script mode from Windows terminal state; use `-s` for source redirected on stdin. ral enables virtual-terminal processing where available. Unix process groups and stop signals do not exist. Direct execution refuses `.bat` and `.cmd` images, named so once Windows drops trailing dots and blanks (`run.bat.`, `run.bat `), because their additional `cmd.exe` quoting pass has no safe general argument encoding; invoke `cmd.exe` explicitly only if that risk is acceptable. `ral-sh` is a Unix login-shell bridge and is not a usable Windows shell dispatcher.
 
 On every host, external commands communicate through operating-system byte
 pipes. A pipeline has no typed-value wire format: values cross only through the
@@ -5010,10 +5038,11 @@ Which lexical words are literals rather than names is the numeral grammar of
 §4.1, and the expression grammar inside `$[...]` reads numbers by that same
 rule.
 
-A plain identifier in head position enters ordinary name dispatch. A slash
-path or a `~/` path is a direct path head. `^name` requests external-name
-lookup. A literal word, a bare `~`, a `$[...]` block, and every other atom are
-value heads. With no arguments or redirects, a value head is simply its value.
+A plain identifier in head position enters ordinary name dispatch. A word
+containing a path separator (§3.5) or a `~/` path is a direct path head.
+`^name` requests external-name lookup. A literal word, a bare `~`, a `$[...]`
+block, and every other atom are value heads. With no arguments or redirects, a
+value head is simply its value.
 
 The parser curries a multi-parameter block:
 

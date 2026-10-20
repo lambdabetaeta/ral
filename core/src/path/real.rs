@@ -1,7 +1,6 @@
 //! The real path of a file: the name exec authority judges.
 
 use crate::path::shown;
-use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
@@ -11,7 +10,9 @@ use super::{FrozenPath, PathRules, Polarity};
 ///
 /// Ordered as the host identifies files: by path components off Windows, by
 /// [`windows_stored_components`](super::identity::windows_stored_components)
-/// on it — so two keys naming one file are one key in a map.
+/// on it — so two keys naming one file are one key in a map.  Either way on
+/// the names as the host encodes them, never on their lossy decodings, so a
+/// name that is not Unicode is not the name holding U+FFFD it decodes to.
 #[derive(Clone, Debug)]
 pub struct RealPath(PathBuf);
 
@@ -27,6 +28,13 @@ impl RealPath {
     /// The real path `path` has, or will have once its missing tail is created.
     pub fn lenient(path: &Path) -> Self {
         Self(super::canon::canonicalise_lenient(path))
+    }
+
+    /// Where a walk landed: real by construction, since the walk splices
+    /// every link itself and takes every `..` physically.
+    #[cfg(unix)]
+    pub(crate) fn walked(located: &super::Located) -> Self {
+        Self(located.real().to_path_buf())
     }
 
     /// The prefix's `resolved` form, as it froze: no disk access.
@@ -74,11 +82,16 @@ impl RealPath {
         &self.0
     }
 
-    /// The final component, empty for a root.
-    pub(crate) fn name(&self) -> Cow<'_, str> {
-        self.0
-            .file_name()
-            .map_or(Cow::Borrowed(""), |name| name.to_string_lossy())
+    /// The final component, which a command name can speak of: `None` for a
+    /// root, and for a name that is not Unicode, which no command name is.
+    /// Never a lossy decoding, which would make such a file the one named
+    /// with U+FFFD in its place.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "native: a final component, refused where it is not UTF-8"
+    )]
+    pub(crate) fn name(&self) -> Option<&str> {
+        self.0.file_name()?.to_str()
     }
 }
 
@@ -87,7 +100,7 @@ impl Ord for RealPath {
         match PathRules::HOST {
             PathRules::Windows => {
                 let identity =
-                    |p: &Self| super::identity::windows_stored_components(&p.0.to_string_lossy());
+                    |p: &Self| super::identity::windows_stored_components(p.0.as_os_str());
                 identity(self).cmp(&identity(other))
             }
             PathRules::Posix => self.0.cmp(&other.0),
@@ -112,5 +125,39 @@ impl Eq for RealPath {}
 impl std::fmt::Display for RealPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         shown(&self.0).fmt(f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RealPath;
+
+    /// A name that is not Unicode orders apart from the U+FFFD spelling it
+    /// decodes to, and is no command name.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_byte_is_not_its_replacement_character() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let raw = RealPath::assumed(OsStr::from_bytes(b"/opt/\xFFtool"));
+        assert_ne!(raw, RealPath::assumed("/opt/\u{FFFD}tool"));
+        assert_eq!(raw.name(), None);
+    }
+
+    /// An unpaired surrogate orders apart from the U+FFFD spelling it
+    /// decodes to, and is no command name.
+    #[cfg(windows)]
+    #[test]
+    fn an_unpaired_surrogate_is_not_its_replacement_character() {
+        use std::os::windows::ffi::OsStringExt;
+        let wide: Vec<u16> = r"C:\opt\"
+            .encode_utf16()
+            .chain([0xD800])
+            .chain("tool".encode_utf16())
+            .collect();
+        let raw = RealPath::assumed(std::ffi::OsString::from_wide(&wide));
+        assert_ne!(raw, RealPath::assumed("C:\\opt\\\u{FFFD}tool"));
+        assert_eq!(raw.name(), None);
+        assert_eq!(RealPath::assumed(r"C:\opt\tool").name(), Some("tool"));
     }
 }

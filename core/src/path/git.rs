@@ -1,5 +1,6 @@
 //! Git directory discovery, for the `gitdir:` sigil that `guard::freeze`
-//! expands at policy freeze.
+//! expands at policy freeze, and the working tree's directory chain, for the
+//! files a tool reads at every level of it.
 //!
 //! A `.git` *file* names its git directory in the working tree's own words, so
 //! following it asks the other direction too: the git directory must name this
@@ -14,11 +15,29 @@ use std::path::{Path, PathBuf};
 
 /// The first `.git` at or above `cwd` — a directory in a plain clone,
 /// a file in a worktree or submodule.
-pub fn find_git_entry(cwd: &Path) -> Option<PathBuf> {
-    cwd.ancestors().find_map(|dir| {
-        let dg = dir.join(".git");
-        if dg.exists() { Some(dg) } else { None }
-    })
+fn find_git_entry(cwd: &Path) -> Option<PathBuf> {
+    work_tree_root(cwd).map(|root| root.join(".git"))
+}
+
+/// The first ancestor of `cwd`, itself included, holding a `.git` entry —
+/// file or directory, so a worktree or submodule is a root of its own.
+fn work_tree_root(cwd: &Path) -> Option<&Path> {
+    cwd.ancestors().find(|dir| dir.join(".git").exists())
+}
+
+/// The directories from the working tree's root down to `cwd`, root first.
+/// Outside a working tree, `cwd` alone.
+pub fn work_tree_chain(cwd: &Path) -> Vec<&Path> {
+    let mut chain: Vec<&Path> = match work_tree_root(cwd) {
+        Some(root) => cwd
+            .ancestors()
+            .take_while(|dir| *dir != root)
+            .chain([root])
+            .collect(),
+        None => vec![cwd],
+    };
+    chain.reverse();
+    chain
 }
 
 /// Why a `.git` file cannot name a git directory.

@@ -148,6 +148,10 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ),
     (
         "core/src/sandbox/windows/dacl/ledger.rs",
+        "silent:dacl-ledger-quarantine",
+    ),
+    (
+        "core/src/sandbox/windows/dacl/ledger.rs",
         "silent:dacl-ledger-read",
     ),
     (
@@ -184,14 +188,19 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("guest-net/src/vet.rs", "silent:vet-resolve"),
     // ── exarch ────────────────────────────────────────────────────────────
     ("exarch/src/app.rs", "silent:log-run-dir"),
+    ("exarch/src/app.rs", "silent:resume-list"),
+    ("exarch/src/app.rs", "silent:run-lock"),
     ("exarch/src/app.rs", "silent:scratch-bootstrap"),
+    ("exarch/src/app.rs", "silent:scratch-drop"),
     ("exarch/src/app.rs", "silent:scratch-reap"),
     ("exarch/src/cli.rs", "silent:seed-file"),
     ("exarch/src/config.rs", "silent:config-load"),
     ("exarch/src/egress.rs", "silent:net-audit-open"),
     ("exarch/src/egress.rs", "silent:net-audit-rotate"),
     ("exarch/src/egress.rs", "silent:net-audit-size"),
+    ("exarch/src/record/session.rs", "silent:record-size"),
     ("exarch/src/record/session.rs", "silent:session-dir"),
+    ("exarch/src/record/session.rs", "silent:session-ids"),
     ("exarch/src/prompt/host.rs", "silent:git-launch"),
     ("exarch/src/record/log.rs", "silent:record-file-append"),
     ("exarch/src/record/log.rs", "silent:record-file-create"),

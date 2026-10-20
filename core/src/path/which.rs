@@ -1,7 +1,7 @@
 //! `PATH` search: locate a bare command name on disk.
 //!
-//! Sibling to the grant pipeline, but `$PATH` is only a colon-separated
-//! list walked in turn, so the sigil/lex/canon stages do not apply.
+//! Sibling to the grant pipeline, but `$PATH` is only a list of
+//! directories walked in turn, so the sigil/lex/canon stages do not apply.
 //! Dispatch arrives via `runtime::command::head`.
 //!
 //! The walk costs one stat per `PATH` entry, and on Windows one per
@@ -24,11 +24,9 @@ use super::PathRules;
 /// that answered the same question against two anchors is how a bare name in
 /// a `cd`'d directory once earned "permission denied" from a walk that had
 /// resolved nothing.  The constructors are therefore few and named for their
-/// provenance: `Context::search_cwd` and [`Resolver::search_cwd`] read the
-/// cell, [`SearchCwd::of`] serves a front end already holding it, and
-/// [`SearchCwd::nowhere`] says outright that there is none.
-///
-/// [`Resolver::search_cwd`]: super::Resolver::search_cwd
+/// provenance: `Context::search_cwd` reads the cell, [`SearchCwd::of`] serves
+/// a front end already holding it, and [`SearchCwd::nowhere`] says outright
+/// that there is none.
 #[derive(Clone, Copy)]
 pub struct SearchCwd<'a>(Option<&'a Path>);
 
@@ -48,16 +46,6 @@ impl<'a> SearchCwd<'a> {
     pub fn nowhere() -> Self {
         Self(None)
     }
-}
-
-/// First executable named `name` on the colon-separated `path`, with
-/// relative `PATH` entries anchored to `cwd`; `None` when `name` bears a
-/// separator, which is a path, not `PATH`'s business.
-pub fn resolve_in_path(name: &str, path: &str, cwd: SearchCwd<'_>) -> Option<String> {
-    if name_has_separator(name) {
-        return None;
-    }
-    locate(name, Some(path), cwd).map(|p| p.to_string_lossy().into_owned())
 }
 
 /// Resolve a command head to its executable on disk: a separator-bearing
@@ -82,7 +70,7 @@ fn locate_at(
     // Answered before the memo is touched: one join and one stat is no
     // amplification to amortise, and a caller naming a file usually means
     // "is it there *now*": a binary this very run built.
-    if name_has_separator(name) {
+    if names_a_path(name) {
         let candidate = anchor_to_cwd(PathBuf::from(name), cwd);
         return is_executable_file(&candidate).then_some(candidate);
     }
@@ -99,24 +87,26 @@ fn locate_at(
     if let Recalled::Remembered(answer) = recall(&key, now) {
         return answer;
     }
-    let found = 'walk: {
-        for dir in path_dirs(path_value, cwd) {
-            let candidate = dir.join(name);
-            #[cfg(windows)]
-            for c in windows_command_candidates(&candidate, &suffixes) {
-                if is_executable_file(&c) {
-                    break 'walk Some(c);
-                }
-            }
-            #[cfg(not(windows))]
-            if is_executable_file(&candidate) {
-                break 'walk Some(candidate);
-            }
-        }
-        None
-    };
+    #[cfg(windows)]
+    let found = path_dirs(path_value, cwd).into_iter().find_map(|dir| {
+        windows_command_candidates(&dir.join(name), &suffixes)
+            .into_iter()
+            .find(|c| is_executable_file(c))
+    });
+    #[cfg(not(windows))]
+    let found = locate_in(name, path_dirs(path_value, cwd));
     remember(key, found.clone(), now);
     found
+}
+
+/// The first executable file named `name` in `dirs`, in order and
+/// unmemoised: the walk [`locate`] makes off Windows, for a caller already
+/// holding the directories rather than a `PATH` string.
+#[cfg(not(windows))]
+pub(crate) fn locate_in(name: &str, dirs: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    dirs.into_iter()
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable_file(candidate))
 }
 
 /// How long a *negative* answer is trusted, inside the run that took it:
@@ -231,8 +221,16 @@ pub fn forget_located_commands() {
     GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
-fn name_has_separator(name: &str) -> bool {
-    name.contains(['/', '\\'])
+/// Whether a command name is a path rather than a name for `PATH` to find:
+/// it bears a separator under the host's rules.
+pub(crate) fn names_a_path(name: &str) -> bool {
+    names_a_path_for(name, PathRules::HOST)
+}
+
+/// [`names_a_path`] under given rules: so `a\b` is a path under Windows
+/// and a bare name, searched on `PATH`, under Posix.
+pub(crate) fn names_a_path_for(name: &str, rules: PathRules) -> bool {
+    name.contains(|c| rules.is_separator(c))
 }
 
 /// Anchor a relative entry to `cwd`, folding `.` and `..` out of the join.
@@ -243,7 +241,7 @@ fn name_has_separator(name: &str) -> bool {
 /// is covered by no `/work/bin/` the profile names.
 fn anchor_to_cwd(p: PathBuf, cwd: SearchCwd<'_>) -> PathBuf {
     let joined = match cwd.0 {
-        Some(c) if !p.is_absolute() => c.join(p),
+        Some(c) if !super::lex::is_absolute(&p) => c.join(p),
         _ => p,
     };
     super::lex::fold_dots(&joined)
@@ -261,10 +259,27 @@ fn anchor_to_cwd(p: PathBuf, cwd: SearchCwd<'_>) -> PathBuf {
 /// [`anchor_to_cwd`] honours deliberately.  The filter runs on the element as
 /// written, before anchoring turns `""` into the cwd itself.
 pub fn path_dirs(path_value: impl AsRef<OsStr>, cwd: SearchCwd<'_>) -> Vec<PathBuf> {
-    std::env::split_paths(path_value.as_ref())
+    path_entries(path_value.as_ref())
         .filter(|dir| !dir.as_os_str().is_empty())
         .map(|dir| anchor_to_cwd(dir, cwd))
         .collect()
+}
+
+/// [`path_dirs`] for a caller with no cwd to anchor to: the absolute
+/// entries alone, a relative or empty one dropped.  What a grant's `path`
+/// selector freezes and the sandbox walks for bwrap, neither of which has a
+/// shell's "here" to read a relative entry against.
+pub(crate) fn path_dirs_absolute(path_value: impl AsRef<OsStr>) -> Vec<PathBuf> {
+    path_entries(path_value.as_ref())
+        .filter(|dir| super::lex::is_absolute(dir))
+        .collect()
+}
+
+/// The entries of a `PATH`-style list, in order and as written, split on the
+/// host's separator (`:`, or `;` on Windows): the one place such a list is
+/// split.
+pub(crate) fn path_entries(path_value: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
+    std::env::split_paths(path_value)
 }
 
 #[allow(
@@ -316,15 +331,15 @@ pub(crate) enum PathSearch {
 /// same [`path_dirs`] list as the executable half, so no empty entry, no
 /// anchor and no suffix rule can differ between them.
 ///
-/// A separator-bearing name is [`PathSearch::Missing`] outright, as in
-/// [`resolve_in_path`]: it is a path, not `PATH`'s business, and the kernel
-/// gives the better diagnosis at spawn.
+/// A separator-bearing name is [`PathSearch::Missing`] outright: it is a
+/// path, not `PATH`'s business, and the kernel gives the better diagnosis at
+/// spawn.
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:which-stat-absent] `which`/PATH probe: stats a candidate to tell an unexecutable file from an absent one; an executable-probe predicate, not turn-time model data I/O, raises no surface card."
 )]
 pub(crate) fn search(name: &str, path_value: Option<&str>, cwd: SearchCwd<'_>) -> PathSearch {
-    if name_has_separator(name) {
+    if names_a_path(name) {
         return PathSearch::Missing;
     }
     if let Some(hit) = locate(name, path_value, cwd) {
@@ -351,11 +366,46 @@ pub(crate) const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
 /// refusal of the image, not of the name.
 pub(crate) const WINDOWS_EXEC_EXTENSIONS: &[&str] = &["com", "exe", "bat", "cmd"];
 
+/// The [`WINDOWS_EXEC_EXTENSIONS`] Windows runs through `cmd.exe`, which
+/// re-parses the command line by its own escaping rules.
+#[cfg(any(windows, test))]
+const WINDOWS_BATCH_EXTENSIONS: &[&str] = &["bat", "cmd"];
+
+/// Whether `program` names a batch image as Windows will run it: once
+/// [Win32 has trimmed](super::device::win32_trimmed) its trailing dots and
+/// blanks, it ends in `.` and one of [`WINDOWS_BATCH_EXTENSIONS`], in any
+/// case, so `run.bat.` and `run.bat ` are batch images too, and `.bat`
+/// alone is one, as `std`'s own check reads it.  Trimmed under a verbatim
+/// head as well, where Win32 would not: a refusal that over-reads fails
+/// closed.
+///
+/// The decode is lossy, which cannot change the answer: it replaces only
+/// ill-formed sequences, never an ASCII byte, so a trailing `.bat` survives
+/// it, and no replacement character spells one.
+#[cfg(any(windows, test))]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "native: an image name's ASCII suffix, which survives a lossy decode"
+)]
+pub(crate) fn is_batch_image(program: &OsStr) -> bool {
+    super::device::win32_trimmed(&program.to_string_lossy())
+        .rsplit_once('.')
+        .is_some_and(|(_, ext)| {
+            WINDOWS_BATCH_EXTENSIONS
+                .iter()
+                .any(|batch| ext.eq_ignore_ascii_case(batch))
+        })
+}
+
 /// A command name as a deny holds it: the host's name for it, under every
 /// spelling some filesystem takes for that.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "native: an identity key is a string, and a key folded from one is UTF-8"
+)]
 pub(crate) fn command_name_key(name: &str) -> String {
     let name = name_key_on(name, PathRules::HOST);
-    super::identity::collision_key(std::ffi::OsStr::new(name.as_ref()))
+    super::identity::collision_key(OsStr::new(name.as_ref()))
         .to_string_lossy()
         .into_owned()
 }
@@ -383,15 +433,19 @@ fn name_key_on(name: &str, rules: PathRules) -> std::borrow::Cow<'_, str> {
 /// a fresh allocation per entry and no freshness anyone could observe.  The
 /// list is also an input to [`LocateKey`], which needs it computed here anyway.
 #[cfg(windows)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "PATHEXT is the Windows resolver's suffix list, not an XDG basedir: a PATH-probe env read, allowed at the call site like the other which/PATH probes here"
-)]
 fn windows_pathext_suffixes() -> Vec<String> {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "PATHEXT is the Windows resolver's suffix list, not an XDG basedir: a PATH-probe env read, allowed at the call site like the other which/PATH probes here"
+    )]
     let pathext =
         std::env::var_os("PATHEXT").unwrap_or_else(|| OsStr::new(DEFAULT_PATHEXT).to_os_string());
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "native: an env value, split as text; a suffix that is not Unicode decodes lossily"
+    )]
+    let pathext = pathext.to_string_lossy();
     pathext
-        .to_string_lossy()
         .split(';')
         .map(str::trim)
         .filter(|e| !e.is_empty())
@@ -418,21 +472,45 @@ fn windows_command_candidates(base: &Path, suffixes: &[String]) -> Vec<PathBuf> 
     out.extend(
         suffixes
             .iter()
-            .map(|ext| with_appended_suffix(base, ext.as_str())),
+            .map(|ext| super::lex::with_appended_suffix(base, ext.as_str())),
     );
     out
 }
 
-/// `base` with `.ext` appended: `build.ps1` + `EXE` is `build.ps1.EXE`.
-///
-/// Spelled by concatenation on the `OsStr`, so there is no `with_extension`
-/// left in the candidate builder for a later reading to flip back.
-#[cfg(windows)]
-fn with_appended_suffix(base: &Path, ext: &str) -> PathBuf {
-    let mut name = base.as_os_str().to_os_string();
-    name.push(".");
-    name.push(ext);
-    PathBuf::from(name)
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+
+    #[test]
+    fn a_batch_image_is_named_by_its_extension_in_any_case() {
+        for name in ["run.bat", r"C:\x\RUN.CMD", "a.b.Bat", ".bat"] {
+            assert!(is_batch_image(OsStr::new(name)), "{name}");
+        }
+        for name in ["run.exe", "bat", "run.bat.exe", "run.batch"] {
+            assert!(!is_batch_image(OsStr::new(name)), "{name}");
+        }
+    }
+
+    /// Win32 trims trailing dots and blanks before it runs a name, so a
+    /// batch image spelled with them reaches `cmd.exe` all the same.
+    #[test]
+    fn a_batch_image_is_named_as_win32_trims_it() {
+        for name in ["run.bat.", "run.bat ", "run.CMD. .", r"C:\x\run.bat.."] {
+            assert!(is_batch_image(OsStr::new(name)), "{name:?}");
+        }
+        for name in ["run.exe.", "run.bat.exe ", "bat."] {
+            assert!(!is_batch_image(OsStr::new(name)), "{name:?}");
+        }
+    }
+
+    /// A batch image is one Windows runs by name, so the two lists may only
+    /// drift together.
+    #[test]
+    fn batch_extensions_are_exec_extensions() {
+        for ext in WINDOWS_BATCH_EXTENSIONS {
+            assert!(WINDOWS_EXEC_EXTENSIONS.contains(ext), "{ext}");
+        }
+    }
 }
 
 /// The memo's tests, on every platform — separate from the walk's `tests`
@@ -700,6 +778,36 @@ mod windows_tests {
             forget_located_commands();
             assert!(locate("build", Some(&path_value), SearchCwd::nowhere()).is_some());
         });
+    }
+}
+
+#[cfg(test)]
+mod path_name_tests {
+    use super::*;
+
+    /// `/` makes a path under both rules; `\` only under Windows, so a Posix
+    /// `a\b` is a bare name for `PATH`.
+    #[test]
+    fn a_separator_under_the_rules_makes_a_command_name_a_path() {
+        for (name, posix, windows) in [
+            ("git", false, false),
+            ("./tool", true, true),
+            ("/bin/sh", true, true),
+            (r"a\b", false, true),
+            (r".\tool", false, true),
+            (r"C:\Users\tool", false, true),
+        ] {
+            assert_eq!(
+                names_a_path_for(name, PathRules::Posix),
+                posix,
+                "{name} posix"
+            );
+            assert_eq!(
+                names_a_path_for(name, PathRules::Windows),
+                windows,
+                "{name} windows"
+            );
+        }
     }
 }
 

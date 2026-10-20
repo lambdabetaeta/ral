@@ -62,7 +62,7 @@ pub enum FsScope {
 impl std::fmt::Display for FsScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Prefix(prefix) => f.write_str(prefix.as_str()),
+            Self::Prefix(prefix) => f.write_str(&prefix.shown()),
             Self::Place(place) => place.fmt(f),
         }
     }
@@ -175,7 +175,7 @@ pub(crate) fn floor() -> &'static [FrozenPath] {
         )]
         let prefixes = toolchains::floor(crate::host::home().as_deref());
         let present = (listed.iter().map(ToString::to_string)).filter(|p| crate::path::exists(p));
-        freeze_floor(present.chain(prefixes))
+        freeze_floor(present.map(std::path::PathBuf::from).chain(prefixes))
     });
     &FLOOR
 }
@@ -278,17 +278,31 @@ impl GrantStack {
 mod tests {
     use super::*;
     use crate::capability::{Capabilities, ExecGrant, ExecKey};
-    use crate::path::{Allow, Deny};
+    use crate::path::{Allow, Deny, test_absolute};
+    use std::path::PathBuf;
 
     /// A divergent `surface`/`resolved` pair — what a symlink freezes to,
-    /// without touching disk.
+    /// without touching disk — on this host.
     fn p(surface: &str, resolved: &str) -> FrozenPath {
-        FrozenPath::for_test(surface, resolved)
+        FrozenPath::for_test(&test_absolute(surface), &test_absolute(resolved))
+    }
+
+    /// A Windows spelling taken exactly as written, both forms alike: the
+    /// `cfg(windows)` tests below judge the host's own spellings, which no
+    /// [`test_absolute`] mapping may rewrite.
+    #[cfg(windows)]
+    fn native(s: &str) -> FrozenPath {
+        FrozenPath::for_test(s, s)
     }
 
     /// The ordinary, no-symlink case: both forms coincide.
     fn lit(s: &str) -> FrozenPath {
         p(s, s)
+    }
+
+    /// An access to `path` on this host.
+    fn at(path: &str) -> PathBuf {
+        PathBuf::from(test_absolute(path))
     }
 
     fn table(allows: &[FrozenPath], denies: &[FrozenPath]) -> Region {
@@ -304,18 +318,22 @@ mod tests {
             .collect()
     }
 
-    fn live(region: &Region) -> Vec<String> {
-        region.live().map(ToString::to_string).collect()
+    fn live(region: &Region) -> Vec<FsScope> {
+        region.live().cloned().collect()
+    }
+
+    fn prefixes(paths: &[&str]) -> Vec<FsScope> {
+        paths.iter().map(|p| FsScope::Prefix(lit(p))).collect()
     }
 
     fn permits(region: &Region, path: &str) -> bool {
-        region.evidence(Path::new(path)).permits()
+        region.evidence(&at(path)).permits()
     }
 
     #[test]
     fn the_meet_keeps_the_deeper_prefix_of_each_overlapping_pair() {
         let met = table(&[lit("/a"), lit("/b")], &[]).meet(table(&[lit("/a/x"), lit("/c")], &[]));
-        assert_eq!(live(&met), ["/a/x"]);
+        assert_eq!(live(&met), prefixes(&["/a/x"]));
     }
 
     /// Security regression.  A grant that lexically nests under a shallower
@@ -333,27 +351,25 @@ mod tests {
     #[test]
     fn legitimate_nesting_survives_the_meet() {
         let met = table(&[lit("/a")], &[]).meet(table(&[lit("/a/sub")], &[]));
-        assert_eq!(live(&met), ["/a/sub"]);
+        assert_eq!(live(&met), prefixes(&["/a/sub"]));
     }
 
     /// the exclusion relation folds a spelling the allowance relation
     /// keeps apart, and a refusal by the fold names the exclusion.
     #[test]
     fn an_exclusion_holds_every_spelling_and_an_allowance_only_its_own() {
-        let access = Path::new("/d/secrets/f");
+        let access = at("/d/secrets/f");
         let region = table(&[lit("/")], &[lit("/d/Secrets")]);
         assert!(!permits(&region, "/d/secrets/f"));
         assert!(permits(&region, "/d/other"));
-        if cfg!(not(windows)) {
-            assert_eq!(
-                region.withheld(access),
-                Some(Withheld::Excluded {
-                    scope: FsScope::Prefix(lit("/d/Secrets")),
-                    respelled: true
-                })
-            );
-            assert!(!permits(&table(&[lit("/d/Secrets")], &[]), "/d/secrets/f"));
-        }
+        assert_eq!(
+            region.withheld(&access),
+            Some(Withheld::Excluded {
+                scope: FsScope::Prefix(lit("/d/Secrets")),
+                respelled: true
+            })
+        );
+        assert!(!permits(&table(&[lit("/d/Secrets")], &[]), "/d/secrets/f"));
     }
 
     /// the projection drops an allowance an exclusion holds in another
@@ -364,7 +380,7 @@ mod tests {
             &[lit("/d/secrets/f"), lit("/d/other"), lit("/e")],
             &[lit("/d/Secrets"), lit("/e/f")],
         );
-        assert_eq!(live(&region), ["/d/other", "/e"]);
+        assert_eq!(live(&region), prefixes(&["/d/other", "/e"]));
     }
 
     /// A prefix is judged by where it resolves, whatever it spells.
@@ -379,14 +395,12 @@ mod tests {
     #[test]
     fn the_witness_is_an_exclusion_that_holds_the_path() {
         let region = table(&[lit("/")], &[lit("/D"), lit("/D/Secrets"), lit("/E")]);
-        let path = Path::new("/d/secrets/f");
-        let Some(Withheld::Excluded { scope, .. }) = region.withheld(path) else {
+        let path = at("/d/secrets/f");
+        let Some(Withheld::Excluded { scope, .. }) = region.withheld(&path) else {
             panic!("an exclusion holds the path");
         };
-        if cfg!(not(windows)) {
-            assert!(scope.holds::<Deny>(path) && !scope.holds::<Allow>(path));
-        }
-        assert_eq!(region.withheld(path), region.withheld(path));
+        assert!(scope.holds::<Deny>(&path) && !scope.holds::<Allow>(&path));
+        assert_eq!(region.withheld(&path), region.withheld(&path));
     }
 
     /// The empty table is the fail-closed meet: it supports nothing, and is
@@ -394,11 +408,8 @@ mod tests {
     #[test]
     fn the_empty_table_supports_nothing() {
         let region = Region::default();
-        assert_eq!(region.evidence(Path::new("/a")), Evidence::NEITHER);
-        assert_eq!(
-            region.withheld(Path::new("/a")),
-            Some(Withheld::MissingAllowance)
-        );
+        assert_eq!(region.evidence(&at("/a")), Evidence::NEITHER);
+        assert_eq!(region.withheld(&at("/a")), Some(Withheld::MissingAllowance));
     }
 
     /// Regression: the ceiling survives a re-freeze without shrinking to a
@@ -417,7 +428,7 @@ mod tests {
             paths.extend([r"C:\Users\someone\Temp\x", r"D:\a\repo\y"]);
         }
         for path in paths {
-            assert!(permits(&region, path), "{path}");
+            assert!(region.evidence(Path::new(path)).permits(), "{path}");
         }
     }
 
@@ -505,10 +516,7 @@ mod tests {
                 .iter()
                 .all(|f| read.evidence(f.real_path()).permits())
         );
-        assert_eq!(
-            read.evidence(Path::new("/no/such/place")),
-            Evidence::NEITHER
-        );
+        assert_eq!(read.evidence(&at("/no/such/place")), Evidence::NEITHER);
     }
 
     /// Writing reads: a layer that writes a folder and does not list it for
@@ -519,9 +527,9 @@ mod tests {
             write_prefixes: vec![lit("/work")],
             ..FsPolicy::default()
         })]);
-        assert!(stack.read(Path::new("/work/f")).is_ok());
-        assert!(stack.write(Path::new("/work/f")).is_ok());
-        assert!(stack.read(Path::new("/other/f")).is_err());
+        assert!(stack.read(&at("/work/f")).is_ok());
+        assert!(stack.write(&at("/work/f")).is_ok());
+        assert!(stack.read(&at("/other/f")).is_err());
     }
 
     /// Allowances are frozen as decoded; only exclusions are re-frozen.
@@ -546,15 +554,15 @@ mod tests {
             ..FsPolicy::default()
         });
         let nested = stack_of([running(&["/opt/prog"]), reads_work]);
-        assert!(nested.read(Path::new("/opt/prog")).is_ok());
+        assert!(nested.read(&at("/opt/prog")).is_ok());
 
         // Order: a layer that reads nothing and omits exec, beneath a layer
         // that runs `s` and omits fs, refuses `s`; the other way round permits.
         let reads_nothing = layer(FsPolicy::default());
         let beneath = stack_of([reads_nothing.clone(), running(&["/opt/prog"])]);
-        assert!(beneath.read(Path::new("/opt/prog")).is_err());
+        assert!(beneath.read(&at("/opt/prog")).is_err());
         let above = stack_of([running(&["/opt/prog"]), reads_nothing]);
-        assert!(above.read(Path::new("/opt/prog")).is_ok());
+        assert!(above.read(&at("/opt/prog")).is_ok());
     }
 
     /// An fs exclusion of a run place refuses it, naming the exclusion.
@@ -568,7 +576,7 @@ mod tests {
                 ..FsPolicy::default()
             }),
         ]);
-        let why = stack.read(Path::new("/opt/prog"));
+        let why = stack.read(&at("/opt/prog"));
         assert!(matches!(why, Err(Withheld::Excluded { .. })), "{why:?}");
     }
 
@@ -591,29 +599,41 @@ mod tests {
             "/work/f",
             "/etc/zz",
         ] {
+            let path = at(path);
             assert_eq!(
-                stack.read(Path::new(path)).is_ok(),
-                full.evidence(Path::new(path)).permits(),
-                "{path}"
+                stack.read(&path).is_ok(),
+                full.evidence(&path).permits(),
+                "{path:?}"
             );
         }
     }
 
-    /// Gated because the case- and separator-folding branch of
-    /// `path_within` fires only under a real `cfg!(windows)` build.
-    #[cfg(windows)]
-    #[test]
-    fn the_meet_admits_a_windows_case_and_separator_variant() {
-        let met = table(&[lit(r"C:\work")], &[]).meet(table(&[lit("c:/WORK/sub")], &[]));
-        assert_ne!(live(&met), Vec::<String>::new());
-    }
-
-    /// Same, through the `\\?\`-verbatim spelling `std::fs::canonicalize`
-    /// returns on Windows.
+    /// The meet holds a nested allow through the `\\?\`-verbatim spelling
+    /// `std::fs::canonicalize` returns.  Gated because the head fold of
+    /// `path_within` fires only under a real `cfg!(windows)` build; the
+    /// spellings are the host's own, so no fixture maps them.
     #[cfg(windows)]
     #[test]
     fn the_meet_admits_a_windows_verbatim_prefix_variant() {
-        let met = table(&[lit(r"C:\work")], &[]).meet(table(&[lit(r"\\?\C:\work\sub")], &[]));
-        assert_ne!(live(&met), Vec::<String>::new());
+        let sub = native(r"\\?\C:\work\sub");
+        let met = table(&[native(r"C:\work")], &[]).meet(table(std::slice::from_ref(&sub), &[]));
+        assert_eq!(live(&met), [FsScope::Prefix(sub)]);
+    }
+
+    /// An allow holds a name as stored: the meet folds the separator and the
+    /// drive letter's case, as `windows_stored_components` does, and nothing
+    /// else, so `c:/work/sub` lies within `C:\work` while `C:\WORK\sub` does
+    /// not.  Gated like the verbatim test above.
+    #[cfg(windows)]
+    #[test]
+    fn the_meet_folds_a_windows_separator_and_drive_letter_but_not_other_case() {
+        let outer = || table(&[native(r"C:\work")], &[]);
+
+        let sub = native("c:/work/sub");
+        let met = outer().meet(table(std::slice::from_ref(&sub), &[]));
+        assert_eq!(live(&met), [FsScope::Prefix(sub)]);
+
+        let met = outer().meet(table(&[native(r"C:\WORK\sub")], &[]));
+        assert_eq!(live(&met), Vec::<FsScope>::new());
     }
 }

@@ -53,6 +53,10 @@ enum Target {
 pub(crate) fn serve() -> Option<ExitCode> {
     let mut argv = std::env::args_os();
     let argv0 = argv.next()?;
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "native: argv[0] is a name only as valid UTF-8"
+    )]
     let name = ral_core::path::basename(argv0.to_str()?);
     let (login, name) = match name.strip_prefix('-') {
         Some(rest) => (true, rest),
@@ -93,6 +97,10 @@ fn decide(args: &[OsString], stdin_tty: bool, stdout_tty: bool) -> Target {
 /// The letters of a single-dash cluster (`-l`, `-lc`), or `None` for `--long`
 /// options, bare `-`, and anything non-ASCII or non-letter.
 fn short_flag_cluster(arg: &OsStr) -> Option<&str> {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "native: a flag cluster is ASCII text, so anything not UTF-8 is no cluster"
+    )]
     let rest = arg.to_str()?.strip_prefix('-')?;
     (!rest.is_empty() && rest.chars().all(|c| c.is_ascii_alphabetic())).then_some(rest)
 }

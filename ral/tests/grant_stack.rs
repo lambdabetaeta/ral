@@ -57,11 +57,11 @@ fn stacked(outer: &str, inner: &str, body: &str) -> Output {
 }
 
 fn write(path: &Path) -> String {
-    format!("echo key > '{}'", path.display())
+    format!("echo key > '{}'", ral_core::path::shown(path))
 }
 
 fn read(path: &Path) -> String {
-    format!("echo !{{from-string < '{}'}}", path.display())
+    format!("echo !{{from-string < '{}'}}", ral_core::path::shown(path))
 }
 
 #[cfg(unix)]
@@ -107,16 +107,14 @@ fn an_inner_layers_deny_joins_the_stack() {
         "a write to `secrets` under an inner deny on `Secrets`",
     );
     assert!(!d.join("secrets").exists(), "the refused write landed");
-    if cfg!(not(windows)) {
-        assert!(
-            out.stderr.contains(&format!(
-                "the denied {} under another spelling",
-                d.join("Secrets").display()
-            )) && out.stderr.contains("a deny holds under every spelling"),
-            "the refusal must name the deny and say why; stderr:\n{}",
-            out.stderr
-        );
-    }
+    assert!(
+        out.stderr.contains(&format!(
+            "the denied {} under another spelling",
+            ral_core::path::shown(d.join("Secrets"))
+        )) && out.stderr.contains("a deny holds under every spelling"),
+        "the refusal must name the deny and say why; stderr:\n{}",
+        out.stderr
+    );
 
     let out = stacked(&outer, &inner, &write(&d.join("other")));
     assert_admitted(&out, "a write to `other`");
@@ -154,7 +152,10 @@ fn two_spellings_of_a_directory_meet_to_neither() {
 
     for dir in [&upper, &lower] {
         let out = stacked(&layer(&upper), &layer(&lower), &write(&dir.join("f")));
-        assert_refused(&out, &format!("a write into {}", dir.display()));
+        assert_refused(
+            &out,
+            &format!("a write into {}", ral_core::path::shown(dir)),
+        );
         assert!(!dir.join("f").exists(), "the refused write landed");
     }
 
@@ -183,7 +184,7 @@ fn a_symlinked_inner_grant_cannot_escape_the_outer_ceiling() {
 
     for path in [outside.join("f"), link.join("f")] {
         let out = stacked(&outer, &through_link, &read(&path));
-        assert_refused(&out, &format!("a read of {}", path.display()));
+        assert_refused(&out, &format!("a read of {}", ral_core::path::shown(&path)));
         assert!(!out.stdout.contains("escaped"), "stdout:\n{}", out.stdout);
     }
     let out = stacked(&outer, &nested, &read(&inner_dir.join("sub/f")));
@@ -196,7 +197,11 @@ fn a_symlinked_inner_grant_cannot_escape_the_outer_ceiling() {
         return;
     }
     let cat = |inner: &str, path: &Path| {
-        stacked(&outer, inner, &format!("sh -c 'cat {}'", path.display()))
+        stacked(
+            &outer,
+            inner,
+            &format!("sh -c 'cat {}'", ral_core::path::shown(path)),
+        )
     };
     let out = cat(&nested, &inner_dir.join("sub/f"));
     if common::refused_by_a_confined_runner(&out) {
@@ -228,7 +233,10 @@ fn disjoint_layers_meet_to_nothing() {
             &fs(&[&b], &[], &[]),
             &read(&dir.join("f")),
         );
-        assert_refused(&out, &format!("a read under {}", dir.display()));
+        assert_refused(
+            &out,
+            &format!("a read under {}", ral_core::path::shown(dir)),
+        );
     }
 
     let out = stacked(
@@ -250,19 +258,19 @@ fn a_deeper_inner_allow_does_not_lift_an_outer_exec_deny() {
     let (good, deep) = (bin.join("good/t"), bin.join("evil/deep/t"));
     common::script(&good);
     common::script(&deep);
-    let b = bin.display();
+    let b = ral_core::path::shown(&bin);
     let outer = exec(&[(&format!("{b}/"), "allow"), (&format!("{b}/evil/"), "deny")]);
     let inner = exec(&[
         (&format!("{b}/"), "allow"),
         (&format!("{b}/evil/deep/"), "allow"),
     ]);
 
-    let out = stacked(&outer, &inner, &good.display().to_string());
+    let out = stacked(&outer, &inner, &ral_core::path::shown(&good));
     if common::refused_by_a_confined_runner(&out) {
         return;
     }
     assert_ran(&out, "`good/t`");
-    let out = stacked(&outer, &inner, &deep.display().to_string());
+    let out = stacked(&outer, &inner, &ral_core::path::shown(&deep));
     assert_not_run(&out, "`evil/deep/t`");
 }
 
@@ -276,15 +284,15 @@ fn an_exact_exec_allow_does_not_reopen_a_covering_deny_dir() {
     let (tool, other) = (bin.join("tool"), bin.join("other"));
     common::script(&tool);
     common::script(&other);
-    let b = bin.display();
+    let b = ral_core::path::shown(&bin);
     let layer = exec(&[
         (&format!("{b}/"), "deny"),
-        (&tool.display().to_string(), "allow"),
+        (&ral_core::path::shown(&tool), "allow"),
     ]);
 
     for program in [&tool, &other] {
-        let out = under(&layer, &program.display().to_string());
-        assert_not_run(&out, &program.display().to_string());
+        let out = under(&layer, &ral_core::path::shown(program));
+        assert_not_run(&out, &ral_core::path::shown(program));
         assert!(
             out.stderr
                 .contains("an allowance cannot override an exclusion"),
@@ -305,16 +313,19 @@ fn a_veto_holds_every_spelling_of_the_name() {
     let (upper, longer) = (bin.join("TOOL"), bin.join("toolx"));
     common::script(&upper);
     common::script(&longer);
-    let layer = exec(&[(&format!("{}/", bin.display()), "allow"), ("tool", "deny")]);
+    let layer = exec(&[
+        (&format!("{}/", ral_core::path::shown(&bin)), "allow"),
+        ("tool", "deny"),
+    ]);
 
-    let out = under(&layer, &upper.display().to_string());
+    let out = under(&layer, &ral_core::path::shown(&upper));
     assert_not_run(&out, "`TOOL` under a veto on `tool`");
     assert!(
         !out.stderr.contains("another spelling"),
         "a veto must refuse plainly; stderr:\n{}",
         out.stderr
     );
-    let out = under(&layer, &longer.display().to_string());
+    let out = under(&layer, &ral_core::path::shown(&longer));
     assert_ran(&out, "`toolx`, a different name");
 }
 
@@ -328,21 +339,21 @@ fn two_spellings_of_an_exec_dir_meet_to_neither() {
     let (upper, lower) = (bin.join("Tools/t"), bin.join("tools/t"));
     common::script(&upper);
     common::script(&lower);
-    let layer = |dir: &str| exec(&[(&format!("{}/{dir}/", bin.display()), "allow")]);
+    let layer = |dir: &str| exec(&[(&format!("{}/{dir}/", ral_core::path::shown(&bin)), "allow")]);
 
     for program in [&upper, &lower] {
         let out = stacked(
             &layer("Tools"),
             &layer("tools"),
-            &program.display().to_string(),
+            &ral_core::path::shown(program),
         );
-        assert_not_run(&out, &program.display().to_string());
+        assert_not_run(&out, &ral_core::path::shown(program));
     }
 
     let out = stacked(
         &layer("Tools"),
         &layer("Tools"),
-        &upper.display().to_string(),
+        &ral_core::path::shown(&upper),
     );
     assert_ran(&out, "`Tools/t` admitted by both layers");
 }

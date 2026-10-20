@@ -124,8 +124,7 @@ fn recovery_leaves_the_stamp_store_unparsed_and_unquarantined() {
             "the stamp store must not be renamed away as corrupt"
         );
         assert!(
-            !stamp_path
-                .with_extension("json.corrupt")
+            !crate::path::with_appended_suffix(&stamp_path, "corrupt")
                 .try_exists()
                 .unwrap_or(false),
             "the sweep must not quarantine the stamp store"

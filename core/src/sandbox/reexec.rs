@@ -133,16 +133,16 @@ impl Pinned {
     /// so `sandbox::launch` calls this before each, to catch an executable
     /// swapped on disk since it was pinned.  Linux execs the pin itself.
     #[cfg(target_os = "macos")]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:verify-stat] sandbox respawn guard: re-stats the pinned executable and compares (dev, ino) to catch a mid-session binary swap before re-exec; a self-path stat at respawn setup, not turn-time model data I/O, raises no surface card."
-    )]
     pub(super) fn verify(&self) -> Result<(), String> {
         let arg0 = self.arg0();
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "[silent:verify-stat] sandbox respawn guard: re-stats the pinned executable and compares (dev, ino) to catch a mid-session binary swap before re-exec; a self-path stat at respawn setup, not turn-time model data I/O, raises no surface card."
+        )]
         let meta = std::fs::metadata(arg0).map_err(|e| {
             format!(
                 "sandbox eval: verify self: cannot stat {}: {e}",
-                arg0.display()
+                crate::path::shown(arg0)
             )
         })?;
         if self.is_inode(&meta) {
@@ -151,7 +151,7 @@ impl Pinned {
             Err(format!(
                 "ral binary at {} changed since startup; \
                      restart to pick up the new build",
-                arg0.display()
+                crate::path::shown(arg0)
             ))
         }
     }

@@ -26,6 +26,7 @@ use ral_core::types::{
 };
 use ral_core::{Shell, Value};
 use std::io::Write as _;
+use std::path::PathBuf;
 
 use super::errfmt::report_failed_load;
 use super::frontend::Surface;
@@ -128,9 +129,8 @@ return ()
     clippy::disallowed_methods,
     reason = "[silent:rc-write] persists the default repl config dir + rc file; not turn-time model I/O"
 )]
-pub(super) fn create_default_rc() -> Option<String> {
-    let (dir, path) = ral_core::host::xdg(ral_core::path::XdgKind::Config)
-        .map(|d| d.join("ral"))
+pub(super) fn create_default_rc() -> Option<PathBuf> {
+    let (dir, path) = ral_core::path::app_dir(ral_core::path::XdgKind::Config, "ral")
         .map(|dir| {
             let file = dir.join("rc");
             (dir, file)
@@ -146,20 +146,20 @@ pub(super) fn create_default_rc() -> Option<String> {
     if let Err(e) = std::fs::create_dir_all(&dir) {
         errln!(
             "ral: warning: could not create config directory {}: {e}",
-            dir.display()
+            ral_core::path::shown(&dir)
         );
         return None;
     }
-    let shown = path.to_string_lossy().into_owned();
+    let name = ral_core::path::shown(&path);
     match std::fs::File::create_new(&path).and_then(|mut f| f.write_all(DEFAULT_RC.as_bytes())) {
-        Ok(()) => errln!("note: created {shown}"),
+        Ok(()) => errln!("note: created {name}"),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => {
-            errln!("ral: warning: could not write {}: {e}", path.display());
+            errln!("ral: warning: could not write {name}: {e}");
             return None;
         }
     }
-    Some(shown)
+    Some(path)
 }
 
 // ── RC config: decoded, then committed ───────────────────────────────────
@@ -328,31 +328,30 @@ impl RcPlan {
 // ── Config file locations ────────────────────────────────────────────────
 
 /// Search for an existing RC file in the standard locations.
-pub(super) fn find_ralrc() -> Option<String> {
+pub(super) fn find_ralrc() -> Option<PathBuf> {
     let candidates = [
-        ral_core::host::xdg(ral_core::path::XdgKind::Config).map(|d| d.join("ral/rc")),
+        ral_core::path::app_dir(ral_core::path::XdgKind::Config, "ral").map(|d| d.join("rc")),
         ral_core::host::home_dot(".ralrc"),
     ];
-    for cand in candidates.into_iter().flatten() {
-        let s = cand.to_string_lossy();
-        if ral_core::path::exists(&s) {
-            return Some(s.into_owned());
-        }
-    }
-    None
+    candidates.into_iter().flatten().find(|path| path.exists())
 }
 
 /// Resolve the history file path, creating the config directory if needed.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:history-mkdir] ensures the repl config dir exists for the history file; not turn-time model I/O"
-)]
 pub(super) fn dirs_history() -> Option<String> {
-    if let Some(dir) = ral_core::host::xdg(ral_core::path::XdgKind::Config).map(|d| d.join("ral")) {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "native: the history path is handed to the line editor, which opens it"
+    )]
+    let native = |p: std::path::PathBuf| p.to_string_lossy().into_owned();
+    if let Some(dir) = ral_core::path::app_dir(ral_core::path::XdgKind::Config, "ral") {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "[silent:history-mkdir] ensures the repl config dir exists for the history file; not turn-time model I/O"
+        )]
         let _ = std::fs::create_dir_all(&dir);
-        return Some(dir.join("history").to_string_lossy().into_owned());
+        return Some(native(dir.join("history")));
     }
-    ral_core::host::home_dot(".ral_history").map(|p| p.to_string_lossy().into_owned())
+    ral_core::host::home_dot(".ral_history").map(native)
 }
 
 #[cfg(test)]
@@ -747,7 +746,7 @@ mod tests {
     /// seed a real prompt run uses — and return the errors.
     fn typecheck_against_session(shell: &Shell, src: &str) -> Vec<ral_core::TypeError> {
         let ast = ral_core::syntax::parser::parse(src).unwrap();
-        let comp = ral_core::elaborator::elaborate(&ast, [], "").expect("elaborate");
+        let comp = ral_core::elaborator::elaborate(&ast, [], None).expect("elaborate");
         ral_core::typecheck(&comp, shell.session_schemes(), None)
             .err()
             .unwrap_or_default()

@@ -11,13 +11,18 @@ use std::process::Command;
 
 const CAP_SID: &str = "S-1-15-3-1024-1-2-3-4-5-6-7-8";
 
-fn junction(link: &Path, target: &Path) {
-    let output = Command::new("cmd")
+/// `mklink /J link target`, as `cmd` reports it.
+fn mklink(link: &Path, target: &Path) -> std::process::Output {
+    Command::new("cmd")
         .args(["/d", "/c", "mklink", "/J"])
         .arg(link)
         .arg(target)
         .output()
-        .unwrap();
+        .unwrap()
+}
+
+fn junction(link: &Path, target: &Path) {
+    let output = mklink(link, target);
     assert!(output.status.success(), "create junction: {output:?}");
 }
 
@@ -82,34 +87,51 @@ fn a_junction_on_an_ancestor_is_refused() {
     )));
 }
 
+/// How many times the race below turns `a` into a junction and back.
+const FLIPS: usize = 100;
+
+/// Turn `a` from an empty directory into a junction to `outside` and back.
+/// The walk racing it holds `a` open at moments, so Windows may refuse any
+/// step, `a` pending deletion or its name still taken; a refused step leaves
+/// `a` as it is, for the next flip to start from.
+fn flip(a: &Path, outside: &Path) {
+    if fs::remove_dir(a).is_ok() && mklink(a, outside).status.success() {
+        let _ = fs::remove_dir(a);
+    }
+    let _ = fs::create_dir(a);
+}
+
 #[test]
 fn a_directory_converted_to_a_junction_while_its_path_is_opened_is_never_descended() {
     // `a` flips between an empty directory and a junction to `outside`, which
-    // holds `b`; only a walk that followed the junction could reach `b`.
+    // holds `b`; only a walk that followed the junction could reach `b`.  A
+    // walk that meets `a` mid-flip may also fail closed, on a name pending
+    // deletion: what it must never do is hold `b`.
     let td = tempfile::tempdir().unwrap();
     let root = real(td.path());
     let (a, outside) = (root.join("a"), root.join("outside"));
     fs::create_dir_all(outside.join("b")).unwrap();
     fs::create_dir(&a).unwrap();
-    let stop = std::sync::atomic::AtomicBool::new(false);
     std::thread::scope(|s| {
-        s.spawn(|| {
-            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                if fs::remove_dir(&a).is_ok() {
-                    junction(&a, &outside);
-                    fs::remove_dir(&a).unwrap();
-                    fs::create_dir(&a).unwrap();
-                }
+        // Bounded on its own, and the walks end when it does: a panic on
+        // either side leaves nothing for the scope to wait on forever.
+        let flipper = s.spawn(|| {
+            for _ in 0..FLIPS {
+                flip(&a, &outside);
             }
         });
-        for _ in 0..300 {
+        // Walk first, test after: a flipper that finishes before this thread
+        // is scheduled still meets one walk, so the test is never vacuous.
+        loop {
             let pinned = FrozenPin::open(&a.join("b"), GrantKind::ReadOnly);
             assert!(
-                matches!(pinned, Ok(None) | Err(DaclError::Redirected { .. })),
+                !matches!(pinned, Ok(Some(_))),
                 "descended through a converted component"
             );
+            if flipper.is_finished() {
+                break;
+            }
         }
-        stop.store(true, std::sync::atomic::Ordering::Relaxed);
     });
 }
 
@@ -191,11 +213,9 @@ fn a_volume_mount_refusal_asks_for_a_drive_letter() {
         target: Some(PathBuf::from(target)),
     };
     for t in [r"\\?\Volume{1234}\", r"\??\volume{1234}\"] {
-        assert!(super::super::volume_mount(Path::new(t)), "{t}");
         assert!(e(t).to_string().contains("drive letter"));
     }
     for t in [r"\\?\D:\x", r"\\?\VolumeX", r"D:\Volume{1}"] {
-        assert!(!super::super::volume_mount(Path::new(t)), "{t}");
         assert!(e(t).to_string().contains("is now a link to"));
     }
 }

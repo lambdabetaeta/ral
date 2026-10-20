@@ -17,6 +17,7 @@
 
 use crate::ir::{ArithOp, BinaryOp, CompareOp, EqOp, WriteMode};
 use crate::path::tilde::TildePath;
+use crate::path::{PathRules, names_a_path_for};
 use crate::source::{FileId, Span, Spanned};
 use crate::syntax::ast::Word;
 use crate::syntax::numeral;
@@ -212,7 +213,7 @@ impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Word(Word::Tilde(path)) => write!(f, "{}", path.to_literal()),
-            Self::Word(Word::Plain(s) | Word::Slash(s)) | Self::SingleQuoted(s) => {
+            Self::Word(Word::Plain(s) | Word::Path(s)) | Self::SingleQuoted(s) => {
                 write!(f, "'{s}'")
             }
             Self::DoubleQuoted(_) => write!(f, "\"...\""),
@@ -437,6 +438,12 @@ pub fn separates(tok: &Token) -> bool {
 /// An unterminated string, delimiter, or `$(…)`, or a lexical fault such as
 /// an invalid escape or an unexpected character.
 pub(crate) fn lex_with(source: &str, file: FileId) -> Result<Vec<Lexeme>, LexError> {
+    lex_for(source, file, PathRules::HOST)
+}
+
+/// [`lex_with`] under given path rules, which decide what makes a bare word
+/// a path: a `\` separates only under Windows.
+fn lex_for(source: &str, file: FileId, rules: PathRules) -> Result<Vec<Lexeme>, LexError> {
     if let Some((at, ch, name)) = source
         .char_indices()
         .find_map(|(i, ch)| bidi_control_name(ch).map(|n| (i, ch, n)))
@@ -453,7 +460,7 @@ pub(crate) fn lex_with(source: &str, file: FileId) -> Result<Vec<Lexeme>, LexErr
             ),
         ));
     }
-    let mut lexer = Lexer::new(source, file);
+    let mut lexer = Lexer::new(source, file, rules);
     let mut tokens = Vec::new();
     loop {
         let lexeme = lexer.next_token()?;
@@ -501,6 +508,8 @@ struct Lexer<'a> {
     source: &'a str,
     pos: usize,
     file: FileId,
+    /// What makes a bare word a path ([`Word::Path`], [`Word::Tilde`]).
+    rules: PathRules,
     /// Open delimiters, innermost last.  The innermost decides newline
     /// suppression, and every entry keeps its opener's span so a delimiter
     /// still open at EOF can be reported where it began.
@@ -534,12 +543,13 @@ struct OpenDelim {
 }
 
 impl<'a> Lexer<'a> {
-    fn new(source: &'a str, file: FileId) -> Self {
+    fn new(source: &'a str, file: FileId, rules: PathRules) -> Self {
         Self {
             chars: source.char_indices().collect(),
             source,
             pos: 0,
             file,
+            rules,
             delim_stack: Vec::new(),
         }
     }
@@ -972,10 +982,10 @@ impl<'a> Lexer<'a> {
         }
 
         let word = self.scan_bare_fragment();
-        let word = if let Some(path) = TildePath::parse(&word) {
+        let word = if let Some(path) = TildePath::parse_for(&word, self.rules) {
             Word::Tilde(path)
-        } else if word.contains('/') {
-            Word::Slash(word)
+        } else if names_a_path_for(&word, self.rules) {
+            Word::Path(word)
         } else {
             Word::Plain(word)
         };
@@ -1739,8 +1749,8 @@ mod tests {
         })
     }
 
-    fn slash(s: &str) -> Token {
-        Token::Word(Word::Slash(s.into()))
+    fn path_word(s: &str) -> Token {
+        Token::Word(Word::Path(s.into()))
     }
 
     fn tilde_tok(suffix: Option<&str>) -> Token {
@@ -1772,6 +1782,15 @@ mod tests {
 
     fn tok_types(source: &str) -> Vec<Token> {
         lex(source).unwrap().into_iter().map(|l| l.token).collect()
+    }
+
+    /// [`tok_types`] under given path rules, so both are pinned on every host.
+    fn tok_types_for(source: &str, rules: PathRules) -> Vec<Token> {
+        lex_for(source, FileId::DUMMY, rules)
+            .unwrap()
+            .into_iter()
+            .map(|l| l.token)
+            .collect()
     }
 
     fn lex_ok(source: &str) -> Vec<Token> {
@@ -1902,7 +1921,7 @@ mod tests {
         let toks = tok_types("ls -la /tmp");
         assert_eq!(
             toks,
-            vec![plain("ls"), plain("-la"), slash("/tmp"), Token::Eof,]
+            vec![plain("ls"), plain("-la"), path_word("/tmp"), Token::Eof,]
         );
     }
 
@@ -2194,7 +2213,7 @@ mod tests {
             toks,
             vec![
                 plain("curl"),
-                slash("http://host:8080/foo#anchor"),
+                path_word("http://host:8080/foo#anchor"),
                 Token::Eof,
             ]
         );
@@ -2540,7 +2559,7 @@ mod tests {
             tok_types("curl h/?a=1&b=2 a&&b"),
             vec![
                 plain("curl"),
-                slash("h/?a=1&b=2"),
+                path_word("h/?a=1&b=2"),
                 plain("a&&b"),
                 Token::Eof
             ]
@@ -2706,7 +2725,7 @@ mod tests {
     #[test]
     fn tilde_before_a_name_is_ordinary() {
         assert_eq!(tok_types("~bob"), vec![plain("~bob"), Token::Eof]);
-        assert_eq!(tok_types("~bob/x"), vec![slash("~bob/x"), Token::Eof]);
+        assert_eq!(tok_types("~bob/x"), vec![path_word("~bob/x"), Token::Eof]);
     }
 
     #[test]
@@ -2767,7 +2786,7 @@ mod tests {
     #[test]
     fn slash_bearing_bare_word_is_path_token() {
         let toks = tok_types("./script");
-        assert_eq!(toks, vec![slash("./script"), Token::Eof]);
+        assert_eq!(toks, vec![path_word("./script"), Token::Eof]);
     }
 
     #[test]
@@ -2791,20 +2810,49 @@ mod tests {
         );
     }
 
+    /// A backslash escapes nothing in a bare word: a lone one is a word of
+    /// its own, a path under Windows rules and plain text under Posix.
     #[test]
     fn backslash_standalone_not_special() {
-        let toks = tok_types("foo \\ bar");
+        let toks = tok_types_for(r"foo \ bar", PathRules::Posix);
         assert_eq!(
             toks,
-            vec![plain("foo"), plain("\\"), plain("bar"), Token::Eof,]
+            vec![plain("foo"), plain(r"\"), plain("bar"), Token::Eof]
+        );
+        let toks = tok_types_for(r"foo \ bar", PathRules::Windows);
+        assert_eq!(
+            toks,
+            vec![plain("foo"), path_word(r"\"), plain("bar"), Token::Eof]
         );
     }
 
+    /// One bare word, backslashes and drive colon included: a path under
+    /// Windows rules, where `\` separates.
     #[test]
-    fn windows_path_unchanged() {
-        // One bare word, backslashes and drive colon included.
-        let toks = tok_types("C:\\Users\\foo");
-        assert_eq!(toks, vec![plain("C:\\Users\\foo"), Token::Eof]);
+    fn windows_path_is_one_path_word_under_windows_rules() {
+        let toks = tok_types_for(r"C:\Users\foo", PathRules::Windows);
+        assert_eq!(toks, vec![path_word(r"C:\Users\foo"), Token::Eof]);
+    }
+
+    /// Under Posix rules a backslash is a filename byte, so the same word is
+    /// plain: a head spelled so is a bare name for `PATH`.
+    #[test]
+    fn windows_path_is_one_plain_word_under_posix_rules() {
+        let toks = tok_types_for(r"C:\Users\foo", PathRules::Posix);
+        assert_eq!(toks, vec![plain(r"C:\Users\foo"), Token::Eof]);
+    }
+
+    /// `~\` stands for home under Windows rules alone, as `\` separates.
+    #[test]
+    fn tilde_backslash_is_home_under_windows_rules_alone() {
+        assert_eq!(
+            tok_types_for(r"~\bin", PathRules::Windows),
+            vec![tilde_tok(Some(r"\bin")), Token::Eof]
+        );
+        assert_eq!(
+            tok_types_for(r"~\bin", PathRules::Posix),
+            vec![plain(r"~\bin"), Token::Eof]
+        );
     }
 
     #[test]

@@ -242,6 +242,10 @@ impl Avatar {
         let Some(scratch) = self.seat.read(|t| t.env_var("EXARCH_SCRATCH"))? else {
             return Ok(None);
         };
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "path-form: the scratch variable's value lifted to the path it names, which the engine anchors"
+        )]
         let bytes = self.seat.read(|t| t.path_bytes(Path::new(&scratch)))?;
         Ok(Some((scratch, bytes)))
     }

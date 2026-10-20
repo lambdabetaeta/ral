@@ -1,7 +1,7 @@
 //! Prompt-box slash commands — registry, routing, and handlers.
 
 use std::fmt::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::App;
 use super::app::CommandCtx;
@@ -21,7 +21,7 @@ use crate::provider::allowance::{Allowance, Reading};
 use crate::record::Memory;
 use jiff::Timestamp;
 use prompt_editor::completion::Candidate;
-use ral_core::path::sigil::expand_path_prefix;
+
 /// A command's trailing argument.
 pub(super) enum Arg {
     No,
@@ -290,9 +290,10 @@ pub(super) fn unrecognized_command(trimmed: &str) -> Option<&str> {
     clippy::disallowed_methods,
     reason = "host-env: a path the operator types at the TUI means the operator's own `~`"
 )]
-pub(super) fn resolve_export_path(arg: &str, cwd: &str) -> PathBuf {
-    let expanded = expand_path_prefix(arg, ral_core::host::home().as_deref());
-    ral_core::path::resolve_str(Some(cwd), &expanded)
+pub(super) fn resolve_export_path(arg: &str, cwd: &Path) -> PathBuf {
+    ral_core::path::Resolver::at(ral_core::host::home(), cwd)
+        .resolve(arg)
+        .into_inner()
 }
 
 /// The registry as a framed card: one `(command, gloss)` row per entry, so the
@@ -352,13 +353,22 @@ pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
     let id = app.tabs.focused();
     let dest = resolve_export_path(arg, info.cwd);
     if dest.exists() {
-        app.push_error(id, &format!("refusing to overwrite {}", dest.display()));
+        app.push_error(
+            id,
+            &format!("refusing to overwrite {}", ral_core::path::shown(&dest)),
+        );
         return;
     }
     let record = app.tabs.focused_log_dir().join("record.jsonl");
     match export_to(&record, &dest, Format::Plain) {
-        Ok(()) => app.push_note(id, &format!("[exported transcript to {}]", dest.display())),
-        Err(e) => app.push_error(id, &format!("could not write {}: {e}", dest.display())),
+        Ok(()) => app.push_note(
+            id,
+            &format!("[exported transcript to {}]", ral_core::path::shown(&dest)),
+        ),
+        Err(e) => app.push_error(
+            id,
+            &format!("could not write {}: {e}", ral_core::path::shown(&dest)),
+        ),
     }
 }
 

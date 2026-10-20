@@ -533,12 +533,7 @@ fn locate_all(name: &str, shell: &Shell) -> Vec<Where> {
 /// rule, read a second time here, so `explain` can say `denied by grant`
 /// rather than name a file the shell would refuse to exec.
 fn grant_admits(name: &str, shell: &Shell) -> bool {
-    let head = if name.contains('/') {
-        CommandName::Path(name.into())
-    } else {
-        CommandName::Bare(name.into())
-    };
-    let Ok(program) = Head::resolve(&head, &shell.context).program else {
+    let Ok(program) = Head::resolve(&CommandName::of(name), &shell.context).program else {
         return true;
     };
     shell.context.grants.admits(&program)

@@ -65,16 +65,10 @@
 //! guest has not booted yet: making the cache directory, opening this machine's
 //! log, sweeping the ones nobody kept.  There is no `Shell` to route it through
 //! and no run to raise a card in — the same standing [`super::vhd`]'s disk
-//! writing has, and hence the same module-scoped allow.
+//! writing has, and so the same allow, carried by each function making one.
 #![allow(
     clippy::disallowed_macros,
     reason = "[silent:windows-host] a host diagnostic with no ral shell to print through"
-)]
-#![allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: host-side diagnostic plumbing before any engine exists — the \
-              guest's console log and the sweep of the ones nobody kept; no shell, no run, no \
-              card. See the module docs."
 )]
 
 use std::collections::VecDeque;
@@ -84,6 +78,8 @@ use std::os::windows::io::{FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
+
+use crate::{Act, Error, HostFile};
 
 use windows_sys::Win32::Foundation::{
     ERROR_NO_DATA, ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE,
@@ -167,12 +163,12 @@ impl Console {
     /// names this pipe and the service dials it at start.
     ///
     /// # Errors
-    /// Returns a sentence if Windows would not create the *pipe*.  A console is
+    /// Returns [`Error::HostFile`] if Windows would not create the *pipe*.  A console is
     /// a diagnostic, so [`Hypervisor::boot`](crate::Hypervisor::boot) treats
     /// this as a loss to report rather than a reason to refuse a session — and
     /// a log that cannot be opened is a smaller loss again, reported on
     /// `stderr` and carried on with.
-    pub(super) fn create(id: &str, cache: &Path) -> Result<Self, String> {
+    pub(super) fn create(id: &str, cache: &Path) -> Result<Self, Error> {
         let name = format!(r"\\.\pipe\synod-console-{id}");
         let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
         // SAFETY: `wide` is a NUL-terminated pipe name alive for the call; one
@@ -191,10 +187,12 @@ impl Console {
             )
         };
         if handle == INVALID_HANDLE_VALUE || handle.is_null() {
-            return Err(format!(
-                "the guest console pipe {name} could not be created: {}",
-                std::io::Error::last_os_error()
-            ));
+            return Err(Error::HostFile {
+                file: HostFile::ConsolePipe,
+                act: Act::Create,
+                path: PathBuf::from(name),
+                cause: std::io::Error::last_os_error().to_string(),
+            });
         }
         // SAFETY: a fresh pipe handle this function owns; ownership moves to the
         // `OwnedHandle` the pump thread takes, and is closed exactly once there.
@@ -205,7 +203,10 @@ impl Console {
         let (log, file) = match open_log(cache, id) {
             Ok((path, file)) => (Some(path), Some(file)),
             Err(why) => {
-                eprintln!("synod: the guest's console will not be kept on disk: {why}");
+                eprintln!(
+                    "synod: the guest's console will not be kept on disk: {}",
+                    why.worded(super::aside_spelling)
+                );
                 (None, None)
             }
         };
@@ -229,6 +230,11 @@ impl Console {
     /// A pump that panicked mid-line poisons the lock, and its words are read
     /// out anyway: whatever the guest managed to say before the reader broke is
     /// exactly what a failing boot needs quoted.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[silent:windows-host] poison answered by hand as `lock_ignore_poison` would — \
+                  this crate has no ral-core — since the ring a panicked pump left tears nothing"
+    )]
     pub(super) fn tail(&self) -> Vec<String> {
         self.tail
             .lock()
@@ -241,6 +247,11 @@ impl Console {
     ///
     /// Best-effort, and deliberately not called on the failing path — there the
     /// error names this file, so it has a reader still to come.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "REASONED-SILENT: removing this machine's own console log once nothing is owed \
+                  to a reader; no shell, no run, no card. See the module docs."
+    )]
     pub(super) fn discard(&self) {
         if let Some(path) = &self.log {
             let _ = std::fs::remove_file(path);
@@ -345,23 +356,23 @@ impl Tail {
 /// Open this machine's console log, sweeping the ones earlier boots left.
 ///
 /// # Errors
-/// Returns a sentence if the cache cannot be made or the file cannot be
-/// created.  Its caller carries on without a log.
-fn open_log(cache: &Path, id: &str) -> Result<(PathBuf, File), String> {
-    std::fs::create_dir_all(cache).map_err(|e| {
-        format!(
-            "the machine cache {} could not be made: {e}",
-            cache.display()
-        )
-    })?;
+/// Returns [`Error::HostFile`] if the cache cannot be made or the file cannot
+/// be created.  Its caller carries on without a log.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "REASONED-SILENT: making the machine cache and this machine's console log in it; no \
+              shell, no run, no card. See the module docs."
+)]
+fn open_log(cache: &Path, id: &str) -> Result<(PathBuf, File), Error> {
+    std::fs::create_dir_all(cache).map_err(Error::host_file(
+        HostFile::MachineCache,
+        Act::Make,
+        cache,
+    ))?;
     sweep(cache);
     let path = cache.join(format!("{LOG_PREFIX}{id}{LOG_SUFFIX}"));
-    let file = File::create(&path).map_err(|e| {
-        format!(
-            "the console log {} could not be opened: {e}",
-            path.display()
-        )
-    })?;
+    let file =
+        File::create(&path).map_err(Error::host_file(HostFile::ConsoleLog, Act::Create, &path))?;
     Ok((path, file))
 }
 
@@ -370,6 +381,12 @@ fn open_log(cache: &Path, id: &str) -> Result<(PathBuf, File), String> {
 /// Only files of this module's own naming, only those older than
 /// [`LOG_LIFETIME`], and every failure ignored: a sweep is housekeeping done on
 /// the way past, and a log that will not go is a log to try again next boot.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "REASONED-SILENT: sweeping the console logs nobody kept from the machine cache; no \
+              shell, no run, no card. See the module docs. Each entry's name is read as text \
+              (native) only to match it against this module's own naming."
+)]
 fn sweep(cache: &Path) {
     let Ok(entries) = std::fs::read_dir(cache) else {
         return;
@@ -471,6 +488,12 @@ fn spawn_pump(server: OwnedHandle, log: Option<File>, tail: Arc<Mutex<Tail>>) {
                 // encoding it was built with, a chunk may end mid-character,
                 // and a replacement character in one quoted word is a far
                 // smaller loss than dropping the line it was in.
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "[silent:windows-host] poison answered by hand as \
+                              `lock_ignore_poison` would — this crate has no ral-core — since \
+                              a ring torn mid-line still holds the guest's earlier words"
+                )]
                 tail.lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .absorb(&String::from_utf8_lossy(chunk));
@@ -511,6 +534,11 @@ mod tests {
     /// two sessions never share one — and keeps its log beside the session
     /// disks, named after the same machine, so a reader can tell whose it is.
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] the log's file name compared as the ASCII text the console named it; \
+                  never shown"
+    )]
     fn each_machine_gets_its_own_pipe_and_its_own_log() {
         let dir = tempfile::tempdir().expect("a cache");
         let a = Console::create("0000-a", dir.path()).expect("a pipe is created");
@@ -541,7 +569,17 @@ mod tests {
         let dir = tempfile::tempdir().expect("a cache");
         let held = Console::create("0000-clash", dir.path()).expect("first");
         let err = Console::create("0000-clash", dir.path()).expect_err("the name is taken");
-        assert!(err.contains("could not be created"), "{err}");
+        assert!(
+            matches!(
+                err,
+                Error::HostFile {
+                    file: HostFile::ConsolePipe,
+                    act: Act::Create,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
         held.wake();
     }
 
@@ -608,6 +646,11 @@ mod tests {
     /// whole point of the tee, exercised over a real pipe by standing in for
     /// the machine's end of it.  A clean teardown then takes the log with it.
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "REASONED-SILENT: test scaffolding reads back the console log it just had \
+                  written; no shell, no run, no card."
+    )]
     fn the_guests_words_reach_both_the_log_and_the_ring() {
         let dir = tempfile::tempdir().expect("a cache");
         let console = Console::create("0000-tee", dir.path()).expect("a pipe and a log");
@@ -653,6 +696,11 @@ mod tests {
     /// Stand in for the compute service: dial this console as the machine does
     /// and say something on it.  The handle is returned so a caller can choose
     /// when the guest falls silent.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "REASONED-SILENT: test scaffolding dials the console's pipe as the machine \
+                  would; no shell, no run, no card."
+    )]
     fn speak(console: &Console, words: &[u8]) -> File {
         let mut machine = File::options()
             .write(true)

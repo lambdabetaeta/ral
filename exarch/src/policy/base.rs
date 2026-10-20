@@ -11,6 +11,7 @@
 
 use ral_core::capability::{Capabilities, ExecKey};
 use ral_core::guard::freeze::FreezeCtx;
+use ral_core::source::SourceOrigin;
 use ral_core::terminal::TerminalState;
 
 const MINIMAL_RAL: &str = include_str!("../../data/minimal.exarch.ral");
@@ -41,12 +42,12 @@ pub(super) fn resolve_base(name: &str, ctx: &FreezeCtx) -> Result<Capabilities, 
         }
     };
     let mut shell = ral_core::HostSurface::default().shell(TerminalState::default());
-    let virtual_path = format!("<built-in:{name}>");
+    let origin = SourceOrigin::named(format!("<built-in:{name}>"));
     let mut caps = ral_core::load::profile::load_capabilities_from_str(
         &ral_core::types::Mooring::adrift(),
         &mut shell,
         text,
-        &virtual_path,
+        &origin,
         ctx,
     )
     .map_err(|e| match e {
@@ -118,7 +119,7 @@ mod tests {
             &ral_core::types::Mooring::adrift(),
             &mut shell,
             text,
-            &format!("<test-base:{name}>"),
+            &SourceOrigin::named(format!("<test-base:{name}>")),
             ctx,
         )
         .unwrap_or_else(|e| panic!("base '{name}' failed to load: {e:?}"))
@@ -132,7 +133,7 @@ mod tests {
             &ral_core::types::Mooring::adrift(),
             &mut shell,
             text,
-            &format!("<test-fragment:{name}>"),
+            &SourceOrigin::named(format!("<test-fragment:{name}>")),
             ctx,
         )
         .unwrap_or_else(|e| panic!("extension '{name}' failed to load: {e:?}"))
@@ -155,22 +156,21 @@ mod tests {
         Place::Xdg(kind, sub.into())
     }
 
-    /// The real path of a file at `path`, as the in-process exec guard judges it.
+    /// The real path of the file at the host-held `path`, as the in-process
+    /// exec guard judges it.
     #[cfg(unix)]
-    fn object(path: &str) -> String {
-        ral_core::path::Resolver::shell_less()
-            .resolve(path)
-            .canonicalise_lenient()
-            .to_string_lossy()
-            .into_owned()
+    fn object(path: &Path) -> String {
+        let real = ral_core::path::Resolver::shell_less()
+            .anchor(path)
+            .canonicalise_lenient();
+        ral_core::path::shown(real)
     }
 
     /// The real path of the `name` the host `PATH` finds, if any.
     #[cfg(unix)]
     fn host_real(name: &str) -> Option<String> {
         let path = std::env::var("PATH").ok()?;
-        let hit =
-            ral_core::path::resolve_in_path(name, &path, ral_core::path::SearchCwd::nowhere())?;
+        let hit = ral_core::path::locate(name, Some(&path), ral_core::path::SearchCwd::nowhere())?;
         Some(object(&hit))
     }
 
@@ -220,7 +220,7 @@ mod tests {
     fn bakeins_parse_on_windows() {
         let home = host_home();
         let ctx = FreezeCtx {
-            home: Some(home.clone()),
+            home: Some(home),
             cwd: r"C:\work".into(),
         };
         for (name, text) in [
@@ -242,7 +242,7 @@ mod tests {
     fn minimal_drops_foreign_rooted_grants_on_windows() {
         let home = host_home();
         let ctx = FreezeCtx {
-            home: Some(home.clone()),
+            home: Some(home),
             cwd: r"C:\work".into(),
         };
         let caps = load("minimal", MINIMAL_RAL, &ctx);
@@ -450,7 +450,7 @@ mod tests {
             &ral_core::types::Mooring::adrift(),
             &mut shell,
             text,
-            "<test-base:selectors>",
+            &SourceOrigin::named("<test-base:selectors>"),
             None,
         )
         .unwrap_or_else(|e| panic!("profile failed to evaluate: {e:?}"));
@@ -646,7 +646,7 @@ mod tests {
             home: Some(home.clone()),
             cwd: "/work".into(),
         };
-        let tool = object(&format!("{home}/unlisted-tool"));
+        let tool = object(&std::path::PathBuf::from(&home).join("unlisted-tool"));
         let minimal = load("minimal", MINIMAL_RAL, &ctx);
         assert!(!admits(minimal.clone(), &tool), "{tool} is not minimal's");
         let extended = minimal.extend(fragment(
@@ -724,7 +724,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("scratch dir");
         let tool = dir.path().join("tool");
         std::fs::write(&tool, "#!/bin/sh\n").expect("write the tool");
-        let tool = object(&tool.to_string_lossy());
+        let tool = object(&tool);
         assert!(!admits(base.clone(), &tool), "{tool} is outside the reads");
         let extended = base.extend(fragment(
             "tool",

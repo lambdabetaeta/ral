@@ -35,8 +35,10 @@ use std::time::{Duration, Instant};
 
 use ral_core::capability::GrantStack;
 use ral_core::carrier::{Transport, WireTransport, dispatch_to_report};
+use ral_core::path::{EnginePath, GuestPath, shown};
 use ral_core::protocol::channel::Liveness;
 use ral_core::protocol::{Attach, EngineSpec, Program, Report, Root, Run};
+use ral_core::source::SourceOrigin;
 use ral_core::types::TitlePolicy;
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 use vm_manager::{BootArtifact, Hypervisor, Machine, MachineSpec};
@@ -153,11 +155,17 @@ fn main() {
     let mut machine = match hypervisor.boot(&MachineSpec::for_folder(folder)) {
         Ok(machine) => machine,
         Err(err) => {
-            eprintln!("boot failed: {err}");
+            eprintln!("boot failed: {}", err.worded(|path| shown(path)));
             std::process::exit(1);
         }
     };
-    let workspace = machine.workspace_path().to_path_buf();
+    let workspace = match ral_core::path::utf8(machine.workspace_path()) {
+        Ok(path) => GuestPath::new(path.to_owned()),
+        Err(err) => {
+            eprintln!("the guest's folder cannot be named inside it: {err}");
+            std::process::exit(1);
+        }
+    };
     // Held open until the wire is dropped below, because the pump ends the
     // session on EOF — nothing needs to be sent on it first.
     let wires = machine.take_wires();
@@ -178,7 +186,7 @@ fn main() {
     match machine.shutdown() {
         Ok(()) => println!("stopped cleanly"),
         Err(err) => {
-            eprintln!("shutdown failed: {err}");
+            eprintln!("shutdown failed: {}", err.worded(|path| shown(path)));
             std::process::exit(1);
         }
     }
@@ -194,7 +202,7 @@ fn main() {
 fn prove_the_host_can_dial_in(
     machine: &dyn Machine,
     control: impl Into<ral_core::protocol::channel::WireStream>,
-    workspace: std::path::PathBuf,
+    workspace: GuestPath,
 ) {
     let transport = match WireTransport::adopt(control, Liveness::default()) {
         Ok(transport) => transport,
@@ -204,14 +212,12 @@ fn prove_the_host_can_dial_in(
         }
     };
     // The guest's own tmpfs, as every seat on this wire uses for `HOME`.
-    let scratch = std::path::PathBuf::from("/tmp");
+    let scratch = GuestPath::from_static("/tmp");
     // The guest refuses an attach that does not name its scratch variable.
     let attach = Attach::root(
-        EngineSpec::new(INSTALLER_TAG, scratch.clone()),
-        Root::new(workspace).with_env(vec![(
-            SCRATCH_VAR.to_string(),
-            scratch.to_string_lossy().into_owned(),
-        )]),
+        EngineSpec::new(INSTALLER_TAG, EnginePath::Guest(scratch.clone())),
+        Root::new(EnginePath::Guest(workspace))
+            .with_env(vec![(SCRATCH_VAR.to_string(), scratch.to_string())]),
     );
     transport.attach(attach);
     if let Err(severed) = transport.await_attached() {
@@ -221,7 +227,7 @@ fn prove_the_host_can_dial_in(
 
     let run = Run {
         program: Program::Source(format!("python3 << #####'{GUEST_LISTENER}'#####\n")),
-        script_name: "<boot-smoke>".to_string(),
+        origin: SourceOrigin::named("<boot-smoke>"),
         caps: GrantStack::root(),
         wall: Some(Duration::from_secs(60)),
         cleanup_grace: Duration::from_secs(5),

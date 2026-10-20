@@ -7,6 +7,7 @@
 //! explicitly.
 
 use ral_core::first_order::FOValue;
+use ral_core::path::EnginePath;
 use ral_core::protocol::{Attach, EngineSpec, Root};
 use ral_core::terminal;
 use ral_core::terminal::{InteractiveMode, TerminalState};
@@ -34,8 +35,8 @@ pub(crate) fn local_attach(installer: &str, terminal: TerminalState, config: FOV
     let home = ral_core::host::home().unwrap_or_default();
     let cwd = ral_core::host::cwd().unwrap_or_else(|| ".".into());
     Attach::root(
-        EngineSpec::new(installer, home.into()),
-        Root::new(cwd).with_config(config),
+        EngineSpec::new(installer, EnginePath::Host(home.into())),
+        Root::new(EnginePath::Host(cwd)).with_config(config),
     )
     .with_terminal(terminal)
 }
@@ -48,8 +49,8 @@ static DEFAULT_EXIT_HINTS: &str = include_str!("../../data/exit-hints.txt");
     reason = "[silent:exit-hints-read] startup read of the optional exit-hints override file; not turn-time model I/O"
 )]
 pub(crate) fn load_exit_hints() -> ExitHints {
-    let text = ral_core::host::xdg(ral_core::path::XdgKind::Data)
-        .map(|d| d.join("ral/exit-hints.txt"))
+    let text = ral_core::path::app_dir(ral_core::path::XdgKind::Data, "ral")
+        .map(|d| d.join("exit-hints.txt"))
         .and_then(|p| std::fs::read_to_string(p).ok())
         .unwrap_or_default();
     let text = if text.is_empty() {

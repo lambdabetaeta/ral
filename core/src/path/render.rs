@@ -37,17 +37,26 @@ impl Rendered {
     /// This name as a mount of `from` shows it at `onto`; `None` where `from`
     /// does not hold it.
     #[cfg(target_os = "linux")]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "lexical: rebases one rendered name onto another"
-    )]
     pub(crate) fn rebased(&self, from: &Self, onto: &Self) -> Option<Self> {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "lexical: rebases one rendered name onto another"
+        )]
         let beneath = std::path::Path::new(&self.0).strip_prefix(&from.0).ok()?;
         if beneath.as_os_str().is_empty() {
             return Some(onto.clone());
         }
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "lexical: rebases one rendered name onto another"
+        )]
         let name = std::path::Path::new(&onto.0).join(beneath);
-        name.to_str().map(|name| Self(name.to_owned()))
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "native: a name that is not Unicode is no rendered one"
+        )]
+        let name = name.to_str();
+        name.map(|name| Self(name.to_owned()))
     }
 }
 
@@ -244,6 +253,10 @@ mod tests {
     /// engine's own refusal tests in `canon` stand in.
     #[cfg(target_os = "linux")]
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] a non-UTF-8 fixture path handed to the renderer"
+    )]
     fn rendering_refuses_a_path_whose_expansion_is_not_utf8() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;

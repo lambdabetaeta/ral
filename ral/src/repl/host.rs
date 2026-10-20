@@ -9,6 +9,7 @@ use ral_core::first_order::datum::{Datum as _, untag};
 use ral_core::process::CancelCause;
 use ral_core::protocol::probe::{WorkerRow, WorkerState};
 use ral_core::protocol::{Ending, EnquiryError, Program, Report, Run};
+use ral_core::source::SourceOrigin;
 use ral_core::sync::LockExt as _;
 use ral_core::text::plural;
 use ral_core::types::{DeferredSink, HookName};
@@ -58,7 +59,7 @@ pub(super) fn hook_run(program: Program, wall: Option<Duration>) -> Run {
     Run {
         terminal: RequestedTerminalAccess::Denied,
         wall,
-        ..Run::foreground(program, "<hook>")
+        ..Run::foreground(program, SourceOrigin::named("<hook>"))
     }
 }
 

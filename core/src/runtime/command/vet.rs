@@ -26,7 +26,7 @@ pub(crate) fn vet(head: &Head, args: &[Value], shell: &mut Shell) -> Settled<Spa
     let program = head
         .program
         .as_ref()
-        .map_err(|missing| Break::Error(missing.error(&head.shown, &shell.context)))?;
+        .map_err(|missing| Break::Error(missing.error(&head.shown)))?;
     let args = validate_argv(&head.shown, args)?;
     let admitted = shell.check_exec(&head.shown, program.clone(), args)?;
     Ok(SpawnPlan {

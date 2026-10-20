@@ -233,14 +233,17 @@ impl AgentLog {
         if !record_path.exists() {
             return Err(io::Error::other(format!(
                 "cannot resume {}: no record.jsonl was found here; was this session started with an older exarch, or is {} the right directory to resume?",
-                record_path.display(),
-                dir.display()
+                ral_core::path::shown(&record_path),
+                ral_core::path::shown(&dir)
             )));
         }
         let (context, selection) = crate::record::model::resume(&record_path).map_err(|error| {
             io::Error::new(
                 error.kind(),
-                format!("cannot resume {}: {error}", record_path.display()),
+                format!(
+                    "cannot resume {}: {error}",
+                    ral_core::path::shown(&record_path)
+                ),
             )
         })?;
         let seam = crate::record::Emitter::append_to(&record_path)?;
@@ -265,6 +268,10 @@ impl AgentLog {
         self.learned.as_ref()
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[silent:record-size] stats record.jsonl for the resumed summary; event-log infra, not turn-time data I/O"
+    )]
     pub fn resumed_summary(&self) -> Resumed {
         let bytes =
             fs::metadata(self.dir.join("record.jsonl")).map_or(0, |metadata| metadata.len());
@@ -339,6 +346,10 @@ impl AgentLog {
     ///
     /// # Errors
     /// The directory exists but cannot be read.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[silent:session-ids] lists the session directories under a run; event-log infra, not turn-time data I/O"
+    )]
     pub(crate) fn session_ids(sessions_root: &Path) -> io::Result<Vec<AgentId>> {
         let entries = match fs::read_dir(sessions_root) {
             Ok(entries) => entries,
@@ -348,7 +359,7 @@ impl AgentLog {
         let mut ids: Vec<AgentId> = entries
             .filter_map(Result::ok)
             .filter_map(|entry| {
-                let id = entry.file_name().to_str()?.parse().ok()?;
+                let id = entry.file_name().into_string().ok()?.parse().ok()?;
                 entry.file_type().ok()?.is_dir().then_some(AgentId::new(id))
             })
             .collect();

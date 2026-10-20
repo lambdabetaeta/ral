@@ -23,7 +23,7 @@ so core owns all the run machinery (compile, frame install, capture, the wall),
 and `run_shell` owns only the run it builds. Formatting is `Avatar::ral`'s,
 through `report::tool_result`, which also reports whether the run failed:
 
-- **source + `script_name: "<tool>"`.** Core's `compile_run` runs
+- **source + a virtual `origin` naming the call's turn (`turn N`).** Core's `compile_run` runs
   `compile_and_typecheck` seeded from the live session (`shell.session_schemes()`,
   the one name→scheme seed —
   [[decisions/260603_session-scheme-continuity|session-scheme-continuity]]); the

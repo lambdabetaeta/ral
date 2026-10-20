@@ -70,7 +70,7 @@ pub fn discover_metadata(
     let mut skills = Vec::new();
     for (name, dir) in discover_all(cwd, config_dir) {
         let sk_md = dir.join("SKILL.md");
-        let rp = resolver.resolve(&sk_md.to_string_lossy());
+        let rp = resolver.anchor(&sk_md);
         if !grants.admits_fs(&ral_core::capability::FsOp::Read, &rp) {
             continue;
         }
@@ -153,12 +153,14 @@ fn scan_dir(root: &Path) -> Vec<(String, PathBuf)> {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let Ok(file_name) = entry.file_name().into_string() else {
+            continue;
+        };
         if file_name.starts_with('.') || !path.is_dir() {
             continue;
         }
         if path.join("SKILL.md").is_file() {
-            skills.push((file_name.to_string(), path));
+            skills.push((file_name, path));
         }
     }
     skills

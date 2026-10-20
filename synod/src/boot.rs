@@ -13,14 +13,11 @@
 //! Every one here readies the rootfs before any guest exists: checking a
 //! prior inflate's marker, making the cache directory, and writing the
 //! marker back once the checksum verifies. Host-side one-time setup, the
-//! same standing as `vm_manager::hcs::vhd`'s own module-scoped allow.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: host-side rootfs-cache plumbing before any guest exists; \
-              no shell, no run, no card. See the module docs."
-)]
+//! same standing as `vm_manager::hcs::vhd`'s, allowed call by call.
 
 use std::path::{Path, PathBuf};
+
+use vm_manager::{Act, Error, HostFile};
 
 use crate::session::SYNOD;
 
@@ -145,9 +142,11 @@ impl BootPlan {
     /// compressed, and hand back the artifact [`vm_manager::detect`] wants.
     ///
     /// # Errors
-    /// Returns a plain sentence if the rootfs cannot be inflated, its cache
-    /// cannot be made, or the inflated image does not match its checksum.
-    pub(crate) fn realise(self) -> Result<vm_manager::BootArtifact, String> {
+    /// Returns [`Error::HostFile`] if the rootfs's checksum cannot be read, its
+    /// cache cannot be made, it cannot be inflated, or its marker cannot be
+    /// written, and [`Error::CorruptGuestImage`] if the inflated image does not
+    /// match its checksum.
+    pub(crate) fn realise(self) -> Result<vm_manager::BootArtifact, Error> {
         let rootfs = match self.rootfs {
             Rootfs::Ready(path) => path,
             Rootfs::Compressed {
@@ -177,48 +176,65 @@ fn cache_boot_dir() -> PathBuf {
 /// inflate itself always verifies, and writes to a temporary file renamed
 /// into place only on success, so an interrupted launch never leaves a
 /// half-written image that a later one would trust.
-fn ensure_inflated(archive: &Path, checksum: &Path, target: &Path) -> Result<PathBuf, String> {
+fn ensure_inflated(archive: &Path, checksum: &Path, target: &Path) -> Result<PathBuf, Error> {
     let expected = read_checksum(checksum)?;
-    let marker = target.with_extension("img.verified");
+    let marker = ral_core::path::with_appended_suffix(target, "verified");
 
-    if target.is_file()
-        && std::fs::read_to_string(&marker).is_ok_and(|seen| seen.trim() == expected)
-    {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "REASONED-SILENT: reads a prior inflate's marker — host-side rootfs-cache plumbing before any guest \
+                  exists; no shell, no run, no card. See the module docs."
+    )]
+    let verified = target.is_file()
+        && std::fs::read_to_string(&marker).is_ok_and(|seen| seen.trim() == expected);
+    if verified {
         return Ok(target.to_path_buf());
     }
 
     let boot = target
         .parent()
         .expect("the rootfs cache path always has a boot-directory parent");
-    std::fs::create_dir_all(boot).map_err(|e| {
-        format!(
-            "the guest image cache {} could not be made: {e}",
-            boot.display()
-        )
-    })?;
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "REASONED-SILENT: makes the cache directory — host-side rootfs-cache plumbing before any guest \
+                  exists; no shell, no run, no card. See the module docs."
+    )]
+    std::fs::create_dir_all(boot).map_err(Error::host_file(
+        HostFile::ImageCache,
+        Act::Make,
+        boot,
+    ))?;
 
     vm_manager::media::inflate(archive, target, Some(&expected))?;
 
-    std::fs::write(&marker, &expected).map_err(|e| {
-        format!(
-            "the guest image was unpacked but its checksum marker {} could not be written: {e}",
-            marker.display()
-        )
-    })?;
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "REASONED-SILENT: writes the marker back once the checksum verifies — host-side rootfs-cache plumbing before any guest \
+                  exists; no shell, no run, no card. See the module docs."
+    )]
+    std::fs::write(&marker, &expected).map_err(Error::host_file(
+        HostFile::UnpackMarker,
+        Act::Write,
+        &marker,
+    ))?;
     Ok(target.to_path_buf())
 }
 
 /// The hash from a `sha256sum` sidecar: the first whitespace-delimited token
 /// of its one line.
-fn read_checksum(path: &Path) -> Result<String, String> {
-    let line = std::fs::read_to_string(path).map_err(|e| {
-        format!(
-            "the guest image checksum {} could not be read: {e}",
-            path.display()
-        )
-    })?;
+fn read_checksum(path: &Path) -> Result<String, Error> {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "REASONED-SILENT: reads the shipped checksum sidecar — host-side rootfs-cache plumbing before any guest \
+                  exists; no shell, no run, no card. See the module docs."
+    )]
+    let line = std::fs::read_to_string(path).map_err(Error::host_file(
+        HostFile::ImageChecksum,
+        Act::Read,
+        path,
+    ))?;
     line.split_whitespace()
         .next()
         .map(str::to_string)
-        .ok_or_else(|| format!("the guest image checksum {} is empty", path.display()))
+        .ok_or_else(|| Error::host_file(HostFile::ImageChecksum, Act::Read, path)("it is empty"))
 }

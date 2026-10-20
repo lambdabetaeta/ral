@@ -53,7 +53,10 @@ pub(super) fn opening(card: &Card, width: u16) -> Vec<Line<'static>> {
 pub(super) fn session_card(s: &SessionInfo<'_>) -> Card {
     let mut rows = vec![
         meta_field("version", vec![CardSpan::new(Role::Strong, VERSION)]),
-        meta_field("cwd", vec![CardSpan::new(Role::Path, s.cwd)]),
+        meta_field(
+            "cwd",
+            vec![CardSpan::new(Role::Path, ral_core::path::shown(s.cwd))],
+        ),
     ];
 
     // Provider, model and context window are absent by design: the status bar
@@ -68,7 +71,7 @@ pub(super) fn session_card(s: &SessionInfo<'_>) -> Card {
     rows.push(meta_field(
         "extend",
         match s.extend {
-            Some(p) => vec![CardSpan::new(Role::Path, p.display().to_string())],
+            Some(p) => vec![CardSpan::new(Role::Path, ral_core::path::shown(p))],
             None => vec![CardSpan::new(Role::Muted, "none")],
         },
     ));
@@ -109,7 +112,7 @@ pub(super) fn meta_field(label: &str, value: Vec<CardSpan>) -> Field {
 pub(super) fn join_paths(paths: &[PathBuf]) -> String {
     paths
         .iter()
-        .map(|p| p.display().to_string())
+        .map(ral_core::path::shown)
         .collect::<Vec<_>>()
         .join(", ")
 }

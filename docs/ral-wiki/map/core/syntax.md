@@ -31,6 +31,11 @@ sees raw bytes and bare words.
   spelled short) is refused at the lexer, pointing at the `warn` builtin, and
   at `2>&1` for a program holding the direction backwards: a diagnostic is a
   verb here, not a second name for the byte channel.
+  A bare word is shaped once: `Word::Tilde` by `TildePath::parse_for`,
+  `Word::Path` when `path::names_a_path_for` finds a separator, else
+  `Word::Plain`, both under the lexer's `PathRules` — `HOST` through
+  `lex_with`, either set through `lex_for` in tests — so `C:\x` is a path
+  under Windows rules and a plain word under Posix.
   A redirect list is bound stream by stream, `Redirects::bind` refusing a second
   binding of stdin, stdout or stderr at the second redirect
   ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).

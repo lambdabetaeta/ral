@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
+
 use super::*;
 use crate::record::{Display, Forensic};
 
@@ -91,7 +93,7 @@ fn a_pre_envelope_line_is_refused_by_name() {
     assert_eq!(back.len(), 1);
     let error = back.into_iter().next().unwrap().expect_err("no envelope");
     let text = error.to_string();
-    assert!(text.contains(&path.display().to_string()), "{text}");
+    assert!(text.contains(&ral_core::path::shown(&path)), "{text}");
     assert!(text.contains("older exarch"), "{text}");
 }
 

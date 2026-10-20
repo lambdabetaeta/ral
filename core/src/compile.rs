@@ -7,6 +7,7 @@ use crate::source::{FileId, Source};
 use crate::syntax::parser::{ParseError, parse_with};
 use crate::typecheck::{ReturnContract, SessionSchemes, TypeError, typecheck};
 use crate::types::Error;
+use std::path::Path;
 
 /// Why [`compile_and_typecheck`] produced no toplevel, kept structured until
 /// it is rejected.
@@ -85,10 +86,10 @@ pub fn on_compile_stack<R: Send>(f: impl FnOnce() -> R + Send) -> R {
 ///
 /// `file` stamps every span, so pass the id `source` is registered under in
 /// the session's `SourceDb` — otherwise the spans carry the `FileId::DUMMY`
-/// placeholder and diagnostics render with no source context. `name` is that
-/// same source's display name, which the elaborator bakes into every
-/// `$SCRIPT` in the body: self-location is lexical, fixed at elaboration,
-/// never read at eval time.
+/// placeholder and diagnostics render with no source context. `script` is the
+/// file that same source was read from, `None` for a virtual source; the
+/// elaborator bakes it, shown, into every `$SCRIPT` in the body:
+/// self-location is lexical, fixed at elaboration, never read at eval time.
 ///
 /// `contract` is the form's hold on the row `source`'s last phrase returns —
 /// an rc file's top-level keys, a plugin manifest's fields.  The *inferred*
@@ -101,7 +102,7 @@ pub fn compile_and_typecheck(
     source: &str,
     schemes: SessionSchemes,
     file: FileId,
-    name: &str,
+    script: Option<&Path>,
     contract: Option<ReturnContract>,
 ) -> Result<Toplevel, CompileError> {
     on_compile_stack(|| {
@@ -109,7 +110,7 @@ pub fn compile_and_typecheck(
         let comp = elaborate(
             &ast,
             schemes.bindings.iter().map(|(n, _)| Name::from(n.as_str())),
-            name,
+            script,
         )
         .map_err(CompileError::Parse)?;
         typecheck(&comp, schemes, contract).map_err(CompileError::Types)

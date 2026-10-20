@@ -102,6 +102,7 @@ fn a_clear_keeps_the_transcript_before_it() {
 
 /// A write the process died in the middle of is not a record.
 #[test]
+#[allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
 fn a_torn_tail_is_ignored() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let (_recorder, path) = session(dir.path());

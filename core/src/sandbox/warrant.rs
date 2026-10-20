@@ -297,7 +297,7 @@ fn exec(
         .then(|| super::carriers::shebang(real))
         .flatten()
         .map(|interp| {
-            let interp = quote_word(&interp.to_string_lossy()).into_owned();
+            let interp = quote_word(&crate::path::shown(interp)).into_owned();
             match excluded {
                 Some(scope) => format!(
                     "\nhint: its interpreter {interp} is excluded by {}; an allowance \

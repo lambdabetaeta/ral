@@ -15,6 +15,7 @@ use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::untag;
 use ral_core::protocol::Run;
 use ral_core::run::RunRequest;
+use ral_core::source::SourceOrigin;
 use ral_core::terminal::TerminalState;
 use ral_core::types::{Observation, Settled, Shell, Value};
 use ral_core::{EventSink, SurfaceSink};
@@ -66,7 +67,7 @@ fn run(shell: &mut Shell, source: &str, surface: Option<SurfaceSink>) -> Settled
     shell
         .run(RunRequest {
             surface,
-            ..RunRequest::from(Run::foreground(source, "<test>"))
+            ..RunRequest::from(Run::foreground(source, SourceOrigin::named("<test>")))
         })
         .expect_ran()
         .into_result()

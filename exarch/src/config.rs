@@ -20,6 +20,7 @@ use crate::provider::identity::{adapter_for_protocol, key_var, protocol_for_adap
 use crate::provider::{Auth, Service, ServiceName, built_in};
 use ral_core::Shell;
 use ral_core::capability::Capabilities;
+use ral_core::source::{SourceFile, SourceOrigin};
 use ral_core::types::{Break, Escape, Mooring, Value};
 
 const CONFIG_FILE: &str = "config.ral";
@@ -59,20 +60,20 @@ pub fn path() -> std::path::PathBuf {
 /// "provider settings") before it says what is wrong.
 ///
 /// # Errors
-/// A present file that is unreadable, that raises, or that fails to decode is
-/// a hard error: a mistyped endpoint is a misdirected agent, not a recoverable
-/// default.
+/// A present file that is unreadable, whose path is not UTF-8, that raises,
+/// or that fails to decode is a hard error: a mistyped endpoint is a
+/// misdirected agent, not a recoverable default.
 pub fn load_declared(path: &std::path::Path, label: &str) -> Result<Vec<Service>, String> {
     let Some(source) = read_optional_file(path, label)? else {
         return Ok(Vec::new());
     };
     let source = ral_core::source::normalize_source_text(source);
-    let display = path.to_string_lossy().into_owned();
+    let origin = SourceOrigin::File(SourceFile::new(path).map_err(|e| format!("{label} {e}"))?);
     let mut shell =
         ral_core::HostSurface::default().shell(ral_core::terminal::TerminalState::default());
     decode(
-        evaluate_no_authority(&mut shell, &source, &display, label)?,
-        &display,
+        evaluate_no_authority(&mut shell, &source, &origin, label)?,
+        &origin.to_string(),
         label,
     )
 }
@@ -129,9 +130,10 @@ pub fn save_declared(
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|e| format!("could not make {}: {e}", parent.display()))?;
+            .map_err(|e| format!("could not make {}: {e}", ral_core::path::shown(parent)))?;
     }
-    std::fs::write(path, source).map_err(|e| format!("could not write {}: {e}", path.display()))
+    std::fs::write(path, source)
+        .map_err(|e| format!("could not write {}: {e}", ral_core::path::shown(path)))
 }
 
 const PREAMBLE: &str = "\
@@ -176,7 +178,7 @@ pub(crate) fn read_optional_file(
     match std::fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("{label} {}: {e}", path.display())),
+        Err(e) => Err(format!("{label} {}: {e}", ral_core::path::shown(path))),
     }
 }
 
@@ -185,7 +187,7 @@ pub(crate) fn read_optional_file(
 pub(crate) fn evaluate_no_authority(
     shell: &mut Shell,
     source: &str,
-    display: &str,
+    origin: &SourceOrigin,
     label: &str,
 ) -> Result<Value, String> {
     // No run is in hand — a throwaway shell computing a value — so nothing is
@@ -193,15 +195,15 @@ pub(crate) fn evaluate_no_authority(
     let mooring = Mooring::adrift();
     shell
         .with_capabilities(Capabilities::deny_all(), |sh| {
-            ral_core::load::evaluate_source(&mooring, sh, source, display, None)
+            ral_core::load::evaluate_source(&mooring, sh, source, origin, None)
         })
         .map_err(|e| match e {
-            Break::Error(err) => format!("{label} {display}: {}", err.message),
+            Break::Error(err) => format!("{label} {origin}: {}", err.message),
             Break::Escape(Escape::Stopped { cause, .. }) => {
-                format!("{label} {display}: stopped: {}", cause.message())
+                format!("{label} {origin}: stopped: {}", cause.message())
             }
             Break::Escape(Escape::Exit(code)) => format!(
-                "{label} {display}: the config called exit {code}, but a config file is \
+                "{label} {origin}: the config called exit {code}, but a config file is \
                  read for its declarations, not run to completion: is that really what it \
                  should do?"
             ),
@@ -295,7 +297,12 @@ mod tests {
         let mut shell = ral_core::test_helper::core_shell();
         let source = ral_core::source::normalize_source_text(source.to_string());
         decode(
-            evaluate_no_authority(&mut shell, &source, "<test:config>", LABEL)?,
+            evaluate_no_authority(
+                &mut shell,
+                &source,
+                &SourceOrigin::named("<test:config>"),
+                LABEL,
+            )?,
             "<test:config>",
             LABEL,
         )
@@ -304,6 +311,7 @@ mod tests {
     /// What a window writes, the decoder reads back — the same three fields,
     /// the same protocol, and a keyless entry still keyless.
     #[test]
+    #[allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
     fn declarations_round_trip_through_the_file() {
         let dir = std::env::temp_dir().join(format!(
             "exarch-declared-{}-{:?}",
@@ -337,6 +345,7 @@ mod tests {
     /// An absent file is no providers, not a failure — the state every
     /// computer starts in.
     #[test]
+    #[allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
     fn an_absent_file_declares_nothing() {
         let path = std::env::temp_dir().join("exarch-declared-absent-none.ral");
         std::fs::remove_file(&path).ok();
@@ -466,8 +475,8 @@ mod tests {
     fn no_authority_grant_denies_the_current_executable() {
         let exe = std::env::current_exe().expect("the test binary has a path");
         for call in [
-            format!("{}", exe.display()),
-            format!("{} --ral-bundled-tool echo", exe.display()),
+            ral_core::path::shown(&exe),
+            format!("{} --ral-bundled-tool echo", ral_core::path::shown(&exe)),
         ] {
             let err = parse(&format!("{call}\nreturn []")).unwrap_err();
             assert!(

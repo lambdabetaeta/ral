@@ -10,6 +10,7 @@ use ral_core::carrier::Transport;
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::Datum as _;
 use ral_core::protocol::{Ending, Report, Run};
+use ral_core::source::SourceOrigin;
 use ral_core::{HookName, Value, builtins};
 use ral_core::{err, errln, outln};
 use std::sync::Arc;
@@ -61,7 +62,7 @@ fn record(entries: Vec<(&str, FOValue)>) -> FOValue {
 
 /// An input line's run: the terminal leased, as a foreground command has it.
 pub(super) fn line_run(src: &str) -> Run {
-    Run::foreground(src, "<stdin>")
+    Run::foreground(src, SourceOrigin::named("<stdin>"))
 }
 
 /// Fire lifecycle `event` on every plugin that registers it.  Every
@@ -172,7 +173,7 @@ pub(super) fn step(
     if let (Some(old), Ok(new)) = (before, t.cwd())
         && old != new
     {
-        let path = |p: std::path::PathBuf| p.to_string_lossy().into_owned().encode();
+        let path = |p: std::path::PathBuf| ral_core::path::shown(p).encode();
         fire(
             t,
             host,
@@ -322,11 +323,14 @@ mod tests {
         std::fs::create_dir_all(root.join("d").join("x")).unwrap();
         let (t, host, sink) =
             dressed(&[("p", HookEvent::Chpwd, "{ |ev| record $ev[old] $ev[new] }")]);
-        run(&format!("cd '{}'", root.display()), &t, &host);
+        run(&format!("cd '{}'", ral_core::path::shown(root)), &t, &host);
         sink.lock().unwrap().clear();
 
         run(
-            &format!("within [dir: '{}'] {{ cd x }}", root.join("d").display()),
+            &format!(
+                "within [dir: '{}'] {{ cd x }}",
+                ral_core::path::shown(root.join("d"))
+            ),
             &t,
             &host,
         );
@@ -336,8 +340,8 @@ mod tests {
         assert_eq!(
             *sink.lock().unwrap(),
             vec![
-                Value::string(root.display().to_string()),
-                Value::string(root.join("d").display().to_string()),
+                Value::string(ral_core::path::shown(root)),
+                Value::string(ral_core::path::shown(root.join("d"))),
             ]
         );
     }

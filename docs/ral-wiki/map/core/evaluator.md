@@ -198,7 +198,8 @@ Internals:
   `call_body` demands. A builtin application is no observation; the fan-out
   is `types::audit::door`.
 - A `~`-path (`CompKind::Tilde`, [[map/core/ir|ir]]) is read in `machine.rs`
-  through `Context::home_dir`. The six ambient reads (`cwd`, `env`,
+  through `Context::require_home` and shown by `TildePath::shown`
+  (the one spelling `~`, `home` and a `~/…` command head share). The six ambient reads (`cwd`, `env`,
   `args`, `user`, `home`, `nproc`) are natives in `builtins/ambient.rs`
   ([[decisions/261005_ambient-reads-are-builtins|ambient-reads-are-builtins]]).
   `$SCRIPT` is neither — the elaborator bakes it to a literal.

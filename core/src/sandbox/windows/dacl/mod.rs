@@ -57,6 +57,7 @@
 //! [`recover_orphaned_state`] sweeps a crashed session's ledger at the next
 //! boot, deleting its registered profiles.
 
+use crate::path::lex::{Root, is_network, is_volume_guid, root};
 use crate::path::shown;
 use crate::process::cancel::{CancelCause, Scope};
 use std::fmt::Write as _;
@@ -156,6 +157,9 @@ const _: () = {
 #[derive(Debug)]
 pub(crate) enum DaclError {
     NetworkPathRejected(PathBuf),
+    /// Neither a verbatim drive path nor a volume GUID path: no canonical
+    /// local spelling.
+    NotCanonicalLocal(PathBuf),
     PathNotFound(PathBuf),
     /// A frozen allowance whose path now meets a reparse point at `at`,
     /// which is `granted` itself or an ancestor of it.
@@ -185,16 +189,6 @@ pub(crate) enum DaclError {
     Cancelled(CancelCause),
 }
 
-/// Whether a reparse target is a volume GUID path, as a mount point's is.
-fn volume_mount(target: &Path) -> bool {
-    let t = target.to_string_lossy();
-    ["\\??\\", "\\\\?\\"].iter().any(|p| {
-        t.strip_prefix(p)
-            .and_then(|r| r.get(..7))
-            .is_some_and(|v| v.eq_ignore_ascii_case("Volume{"))
-    })
-}
-
 impl std::fmt::Display for DaclError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -203,12 +197,18 @@ impl std::fmt::Display for DaclError {
                 "path is not local (network/UNC paths not supported): {}",
                 shown(p)
             ),
+            Self::NotCanonicalLocal(p) => write!(
+                f,
+                "path is not a canonical local path (a verbatim drive path or a \
+                 volume GUID path): {}",
+                shown(p)
+            ),
             Self::PathNotFound(p) => write!(f, "path does not exist: {}", shown(p)),
             Self::Redirected {
                 granted,
                 at,
                 target: Some(t),
-            } if volume_mount(t) => write!(
+            } if is_volume_guid(t) => write!(
                 f,
                 "'{}' was granted by its real path, but '{}' is where a volume is mounted; \
                  a volume mounted in a folder cannot be granted on Windows (it cannot be \
@@ -286,6 +286,10 @@ pub(crate) fn canonicalize_grant_target(path: &Path) -> Result<PathBuf, DaclErro
 /// spelling per object, and folding would merge two genuinely distinct names
 /// in an NTFS case-sensitive directory into one authority.
 pub(crate) fn fs_capability_name(canonical: &Path, kind: GrantKind) -> String {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "native: the canonical spelling the OS returned, hashed as-is into a capability name"
+    )]
     let key = canonical.to_string_lossy();
     let digest = <sha2::Sha256 as sha2::Digest>::digest(key.as_bytes());
     let mut name = format!("ral.fs.{}.", kind.tag());
@@ -407,29 +411,25 @@ fn capability_ace_present<'a>(
     }
 }
 
-/// `canonicalise_strict` emits `\\?\X:\...` for a local drive and
-/// `\\?\UNC\server\share\...` for a share; a caller may also hand us a
-/// `\\.\Volume{GUID}\...` DOS-device path, local too though canonicalisation
-/// never produces it.
+/// An allow-list of the local canonical forms: `canonicalise_strict` emits
+/// `\\?\X:\...` for a local drive, and a caller may also hand us a volume
+/// GUID path, `\\?\Volume{GUID}\...` or its `\\.\` spelling, local too
+/// though canonicalisation never produces it.  Everything else is refused: a
+/// share, `\\?\UNC\server\share\...`, has no DACL we may write, and any
+/// other spelling is no canonical path a stamp could key.
 fn ensure_local_canonical_prefix(canonical: &Path) -> Result<(), DaclError> {
-    let s = canonical.to_string_lossy();
-    let bytes = s.as_bytes();
-    if bytes.len() >= 8
-        && &bytes[..4] == b"\\\\?\\"
-        && bytes[4].eq_ignore_ascii_case(&b'U')
-        && bytes[5].eq_ignore_ascii_case(&b'N')
-        && bytes[6].eq_ignore_ascii_case(&b'C')
-        && bytes[7] == b'\\'
-    {
+    if is_network(canonical) {
         return Err(DaclError::NetworkPathRejected(canonical.to_path_buf()));
     }
-    if s.starts_with(r"\\?\") || s.starts_with(r"\\.\") {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "native: a path the OS spelled, classified by its head, which is ASCII and so survives a lossy decode"
+    )]
+    let verbatim_drive = root(&canonical.to_string_lossy()) == Root::VerbatimDrive;
+    if verbatim_drive || is_volume_guid(canonical) {
         return Ok(());
     }
-    if s.starts_with(r"\\") {
-        return Err(DaclError::NetworkPathRejected(canonical.to_path_buf()));
-    }
-    Ok(())
+    Err(DaclError::NotCanonicalLocal(canonical.to_path_buf()))
 }
 
 fn canonicalize_local(path: &Path) -> Result<PathBuf, DaclError> {

@@ -340,7 +340,7 @@ pub fn bwrap_functional() -> bool {
             "bwrap_probe",
             &format!(
                 "grant [fs: [read: [`absolute '{t}'], write: [`absolute '{t}']]] {{ /bin/echo ok }}",
-                t = tmp.display()
+                t = ral_core::path::shown(tmp)
             ),
         );
         out.status == 0 || !out.stderr.contains("bwrap")
@@ -350,7 +350,7 @@ pub fn bwrap_functional() -> bool {
 /// `paths` as a ral list body: each an `absolute` place, comma-separated.
 pub fn places(paths: &[&Path]) -> String {
     (paths.iter())
-        .map(|p| format!("`absolute '{}'", p.display()))
+        .map(|p| format!("`absolute '{}'", ral_core::path::shown(p)))
         .collect::<Vec<_>>()
         .join(", ")
 }

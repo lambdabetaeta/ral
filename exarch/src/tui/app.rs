@@ -154,9 +154,10 @@ impl App {
         opening: Card,
         jobs: mpsc::Sender<Job>,
     ) -> Self {
-        let cwd_basename = std::env::current_dir()
-            .ok()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        // The launch directory's name for the tab title, read where no shell
+        // speaks for it.
+        let cwd_basename = ral_core::host::cwd()
+            .and_then(|p| p.file_name().map(ral_core::path::shown))
             .unwrap_or_else(|| "?".into());
         let mut app = Self {
             tabs: Tabs::new(first, born, fleet, Some(opening.clone())),

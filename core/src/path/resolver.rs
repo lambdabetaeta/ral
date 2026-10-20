@@ -20,7 +20,7 @@ pub struct Resolver<'a> {
     pub cwd: Option<&'a Path>,
 }
 
-impl Resolver<'_> {
+impl<'a> Resolver<'a> {
     /// A resolver for callers with no shell — the `RAL_PATH` walker, the
     /// plugin loader, exarch's skill scan — who already hold an absolute
     /// candidate.  Safe only for those: with no `home`, `~/x` resolves to
@@ -32,9 +32,18 @@ impl Resolver<'_> {
         }
     }
 
+    /// A resolver against `home` and the host-held `cwd`, for a caller
+    /// outside the crate with no shell to mint one.
+    pub fn at(home: Option<String>, cwd: &'a Path) -> Self {
+        Resolver {
+            home,
+            cwd: Some(cwd),
+        }
+    }
+
     /// Whether `raw` resolves against `cwd`: no sigil head, and relative.
     pub fn is_relative(&self, raw: &str) -> bool {
-        !lex::is_absolute(&sigil::expand_path_prefix(raw, self.home.as_deref()))
+        !lex::is_absolute(sigil::expand_path_prefix(raw, self.home.as_deref()))
     }
 
     /// Stages 1 and 2: expand `~`/`xdg:`, then anchor and fold against `cwd`.
@@ -49,6 +58,26 @@ impl Resolver<'_> {
     /// and no string round trip may rename it.
     pub fn anchor(&self, path: &Path) -> LexicalPath {
         LexicalPath::from_lexed(lex::anchor(self.cwd, path))
+    }
+
+    /// [`Self::resolve`] for a path written in a ral script file in `dir`,
+    /// which reads it beside itself: `raw` resolved as [`Self::resolve`]
+    /// resolves it, with `dir` for the cwd.
+    ///
+    /// Sigils come first: `raw` is ral source, so a `~`/`xdg:` head expands
+    /// as in any written path, and only a still-relative result joins `dir`;
+    /// an absolute one, a malformed head included, is kept as `resolve`
+    /// keeps it, never joined onto `dir`, which could lend it a drive.  The
+    /// directory is host-held, so it is anchored as [`Self::anchor`] takes
+    /// one — never read for sigils, a script under a directory named `~`
+    /// staying there.
+    pub(crate) fn resolve_in_script(&self, raw: &str, dir: &Path) -> LexicalPath {
+        let dir = self.anchor(dir);
+        let beside = Resolver {
+            home: self.home.clone(),
+            cwd: Some(dir.as_path()),
+        };
+        beside.resolve(raw)
     }
 
     /// The whole pipeline: [`Self::resolve`], then canonicalise leniently —
@@ -97,6 +126,58 @@ mod tests {
             cwd: Some(cwd),
         };
         assert_eq!(r.resolve("src/lib.rs").as_path(), cwd.join("src/lib.rs"));
+    }
+
+    /// A script's path resolves as an ordinary one with the script's
+    /// directory for the cwd, row by row: a relative path joins it, and an
+    /// absolute one, a malformed or mixed head included, is kept as
+    /// `resolve` keeps it rather than lent the directory's drive.
+    #[test]
+    fn a_script_path_resolves_as_an_ordinary_one_beside_the_script() {
+        let dir = if cfg!(windows) {
+            Path::new(r"C:\work\proj")
+        } else {
+            Path::new("/work/proj")
+        };
+        let r = Resolver {
+            home: Some("/h".into()),
+            cwd: None,
+        };
+        let beside = Resolver {
+            home: Some("/h".into()),
+            cwd: Some(dir),
+        };
+        for raw in [
+            "lib.ral",
+            "../x/./y",
+            "/abs/x",
+            r"\x\y",
+            "C:x",
+            r"C:\x\..\y",
+            r"\\x",
+            "//x/../y",
+            r"\\\srv\sh",
+            r"/\x\..\y",
+            r"\/srv/sh",
+            r"\\?\x",
+            r"\\.\pipe\x",
+            r"\\srv\sh\x",
+            "~/x",
+        ] {
+            let in_script = r.resolve_in_script(raw, dir);
+            assert_eq!(
+                in_script.as_path(),
+                beside.resolve(raw).as_path(),
+                "{raw:?}"
+            );
+            if lex::is_absolute(raw) {
+                assert_eq!(
+                    in_script.as_path(),
+                    lex::fold_dots(Path::new(raw)),
+                    "{raw:?}"
+                );
+            }
+        }
     }
 
     /// A child of `/tmp` gives the ancestor walk something that always

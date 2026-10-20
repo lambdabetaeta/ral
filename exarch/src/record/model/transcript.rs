@@ -237,7 +237,7 @@ pub(super) fn read_seeds(turns: &[Linked]) -> Result<Vec<Vec<Recorded<Protocol>>
                 Refusal::Unreadable(io::Error::other(format!(
                     "turn {} was inherited from {}, which no longer reads back ({error}); was that session's directory moved, copied or edited?",
                     row.id,
-                    at.source.display()
+                    ral_core::path::shown(&at.source)
                 )))
             })?;
             let mut records: Vec<_> = at
@@ -551,6 +551,6 @@ fn transcript_custom(custom: &CustomPart) -> TranscriptPart {
 fn read_back_refusal(turn: u64, path: &Path, error: &io::Error) -> String {
     format!(
         "turn {turn} could not be read back from {}: {error}",
-        path.display()
+        ral_core::path::shown(path)
     )
 }

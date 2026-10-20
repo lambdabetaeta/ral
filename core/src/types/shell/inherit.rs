@@ -195,7 +195,12 @@ mod tests {
     #[test]
     fn spawned_worker_renders_errors_against_the_parents_source() {
         let mut parent = crate::test_helper::core_shell();
-        let file = parent.install_script_context("worker.ral", "one\ntwo\nbad\n");
+        let file = parent.install_script_context(
+            &crate::source::SourceOrigin::File(
+                crate::source::SourceFile::new("worker.ral").expect("UTF-8"),
+            ),
+            "one\ntwo\nbad\n",
+        );
         let span = crate::source::Span::new(file, 8, 11);
         let join = parent
             .spawn_thread(Mooring::adrift(), "test-worker", move |_, child| {
@@ -220,7 +225,12 @@ mod tests {
     #[test]
     fn spawned_worker_inherits_the_root_file() {
         let mut parent = crate::test_helper::core_shell();
-        parent.install_root_context("main.ral", "");
+        parent.install_root_context(
+            &crate::source::SourceOrigin::File(
+                crate::source::SourceFile::new("main.ral").expect("UTF-8"),
+            ),
+            "",
+        );
         let root_file = parent.session.root_file;
         let join = parent
             .spawn_thread(Mooring::adrift(), "test-worker", |_, child| {

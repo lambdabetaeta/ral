@@ -192,6 +192,7 @@ mod tests {
     use crate::path::shown;
     use crate::protocol::Run;
     use crate::run::RunReport;
+    use crate::source::SourceOrigin;
     use crate::types::Mooring;
     use crate::types::{BuiltinBody, BuiltinEntry};
 
@@ -233,7 +234,7 @@ mod tests {
         let cmd = shell
             .run(Run::captured(
                 r#"try { sh -c "exit 1"; return 'unreached' } { |e| return $e[cmd] }"#,
-                "<test>",
+                SourceOrigin::named("<test>"),
             ))
             .expect_ran()
             .into_result()
@@ -274,7 +275,10 @@ mod tests {
             ..crate::HostSurface::default()
         }
         .shell(crate::terminal::TerminalState::default());
-        match shell.run(Run::captured("audit { core-panic-now }", "<test>")) {
+        match shell.run(Run::captured(
+            "audit { core-panic-now }",
+            SourceOrigin::named("<test>"),
+        )) {
             RunReport::Faulted { .. } => {}
             RunReport::Static { .. } | RunReport::Ran { .. } => {
                 panic!("a panicking body must report Faulted")
@@ -304,7 +308,7 @@ mod tests {
 
         match shell.run(Run::captured(
             format!("let checkpoint_leak = 1\ncd '{tmp}'\ncore-panic-now"),
-            "<test>",
+            SourceOrigin::named("<test>"),
         )) {
             RunReport::Faulted { .. } => {}
             RunReport::Static { .. } | RunReport::Ran { .. } => {
@@ -332,7 +336,7 @@ mod tests {
         let mut shell = crate::test_helper::core_shell();
         let report = shell.run(Run::captured(
             "audit { /bin/echo one; try { /bin/echo two } { |_e| return () }; /bin/echo three }",
-            "<test>",
+            SourceOrigin::named("<test>"),
         )).expect_ran().into_result().expect("audit body must succeed");
         assert_eq!(
             command_argv0s(&report),
@@ -349,7 +353,7 @@ mod tests {
         let report = shell
             .run(Run::captured(
                 "audit { echo one; length [1, 2]; /bin/echo two }",
-                "<test>",
+                SourceOrigin::named("<test>"),
             ))
             .expect_ran()
             .into_result()
@@ -364,7 +368,10 @@ mod tests {
     fn audit_reports_ok_over_its_trail() {
         let mut shell = crate::test_helper::core_shell();
         let report = shell
-            .run(Run::captured("audit { /bin/echo hi }", "<test>"))
+            .run(Run::captured(
+                "audit { /bin/echo hi }",
+                SourceOrigin::named("<test>"),
+            ))
             .expect_ran()
             .into_result()
             .expect("audit { echo hi } must succeed");

@@ -1,6 +1,12 @@
 use super::*;
 use crate::capability::GrantStack;
+use crate::source::SourceOrigin;
 use std::sync::{Arc, Mutex};
+
+/// The origin every test run is attributed to.
+fn test_origin() -> SourceOrigin {
+    SourceOrigin::named("<test>")
+}
 
 /// Install `name`, a builtin running `act` inside whichever run calls it,
 /// with that run's mooring — how a test acts mid-run, as an engine-side
@@ -50,7 +56,9 @@ fn strike(cause: crate::process::CancelCause) -> impl Fn(&Mooring, &mut Shell) +
 #[test]
 fn clean_run_settles_with_zero_status() {
     let mut shell = crate::test_helper::core_shell();
-    let ending = shell.run(Run::captured("$[1 + 1]", "<test>")).expect_ran();
+    let ending = shell
+        .run(Run::captured("$[1 + 1]", test_origin()))
+        .expect_ran();
     assert_eq!(ending.status(), 0);
     let result = ending.into_result();
     assert!(result.is_ok(), "expected Ok, got {result:?}");
@@ -59,7 +67,7 @@ fn clean_run_settles_with_zero_status() {
 #[test]
 fn parse_failure_is_static() {
     let mut shell = crate::test_helper::core_shell();
-    match shell.run(Run::captured("let = ", "<test>")) {
+    match shell.run(Run::captured("let = ", test_origin())) {
         RunReport::Static { diagnostics } => {
             assert!(
                 matches!(
@@ -82,7 +90,7 @@ fn parse_failure_is_static() {
 #[test]
 fn a_hook_run_registers_no_source() {
     let mut shell = crate::test_helper::core_shell();
-    shell.run(Run::captured("let body = { 1 }", "<test>"));
+    shell.run(Run::captured("let body = { 1 }", test_origin()));
     let thunk = shell
         .scope_lookup("body")
         .cloned()
@@ -100,7 +108,7 @@ fn a_hook_run_registers_no_source() {
     let before = shell.sources().next_id();
     let report = shell.run(Run {
         program: Program::Hook { name, args: vec![] },
-        ..Run::captured("", "<test>")
+        ..Run::captured("", test_origin())
     });
     assert!(
         matches!(report, RunReport::Ran { .. }),
@@ -120,7 +128,10 @@ fn run_block_hook(
     src: &str,
     policy: crate::types::DefaultPolicy,
 ) -> Ending {
-    shell.run(Run::captured(format!("let hook_body = {src}"), "<test>"));
+    shell.run(Run::captured(
+        format!("let hook_body = {src}"),
+        test_origin(),
+    ));
     let body = shell
         .scope_lookup("hook_body")
         .cloned()
@@ -130,7 +141,7 @@ fn run_block_hook(
         .expect("register the hook");
     let RunReport::Ran { ending, .. } = shell.run(Run {
         program: Program::Hook { name, args: vec![] },
-        ..Run::captured("", "<test>")
+        ..Run::captured("", test_origin())
     }) else {
         panic!("the registered hook must run");
     };
@@ -178,7 +189,7 @@ fn an_aside_hook_leaves_the_session_where_it_was() {
 #[test]
 fn type_failure_is_static() {
     let mut shell = crate::test_helper::core_shell();
-    match shell.run(Run::captured("$[1 + true]", "<test>")) {
+    match shell.run(Run::captured("$[1 + true]", test_origin())) {
         RunReport::Static { diagnostics } => {
             assert!(
                 matches!(
@@ -197,7 +208,9 @@ fn type_failure_is_static() {
 #[test]
 fn exit_escape_reports_code() {
     let mut shell = crate::test_helper::core_shell();
-    let ending = shell.run(Run::captured("exit 3", "<test>")).expect_ran();
+    let ending = shell
+        .run(Run::captured("exit 3", test_origin()))
+        .expect_ran();
     assert_eq!(ending.status(), 3);
     let result = ending.into_result();
     assert!(
@@ -209,7 +222,7 @@ fn exit_escape_reports_code() {
 #[test]
 fn capture_returns_stdout_bytes() {
     let mut shell = crate::test_helper::core_shell();
-    match shell.run(Run::captured("echo hi", "<test>")) {
+    match shell.run(Run::captured("echo hi", test_origin())) {
         RunReport::Ran { captured, .. } => {
             let captured = captured.expect("Capture must return buffers");
             assert!(
@@ -233,7 +246,7 @@ fn a_settled_run_leaves_the_anchor_untouched() {
 
     let _ = shell.run(RunRequest {
         surface: Some(Arc::new(())),
-        ..RunRequest::from(Run::captured("$[1 + 1]", "<test>"))
+        ..RunRequest::from(Run::captured("$[1 + 1]", test_origin()))
     });
 
     assert!(
@@ -270,7 +283,7 @@ fn assert_nursery_emptied(panic: bool) {
 
     let _ = shell.run(RunRequest {
         fork: Some(crate::types::Fork::Park(nursery.clone())),
-        ..RunRequest::from(Run::captured("park-fork", "<test>"))
+        ..RunRequest::from(Run::captured("park-fork", test_origin()))
     });
 
     let id = parked_id
@@ -296,7 +309,7 @@ fn nursery_is_emptied_at_run_teardown() {
 fn ready_boundary_notice_surfaces_a_pending_retention_reap() {
     let mut shell = crate::test_helper::core_shell();
     shell.arm_worker_retention(1);
-    let _ = shell.run(Run::captured("spawn { return 1 }", "<test>"));
+    let _ = shell.run(Run::captured("spawn { return 1 }", test_origin()));
 
     crate::test_helper::eventually(std::time::Duration::from_secs(2), || {
         shell
@@ -307,7 +320,7 @@ fn ready_boundary_notice_surfaces_a_pending_retention_reap() {
     })
     .expect("the worker must settle within the budget");
 
-    let _ = shell.run(Run::captured("$[1 + 1]", "<test>"));
+    let _ = shell.run(Run::captured("$[1 + 1]", test_origin()));
     let notices = surfaced_notices(&mut shell, "$[1 + 1]");
     assert!(
         matches!(
@@ -356,7 +369,7 @@ fn surfaced_notices(shell: &mut Shell, src: &str) -> Vec<crate::types::Notice> {
     let captured: Arc<Mutex<Vec<crate::first_order::FOValue>>> = Arc::new(Mutex::new(Vec::new()));
     let _ = shell.run(RunRequest {
         surface: Some(Arc::new(CapturingSink(captured.clone()))),
-        ..RunRequest::from(Run::captured(src, "<test>"))
+        ..RunRequest::from(Run::captured(src, test_origin()))
     });
     let events = captured.lock().unwrap().clone();
     events
@@ -379,7 +392,7 @@ fn an_interrupt_mid_run_unwinds_the_eval() {
     let ending = shell
         .run(Run::captured(
             "interrupt\nlet rpv = 42\nreturn $rpv",
-            "<test>",
+            test_origin(),
         ))
         .expect_ran();
     assert_eq!(
@@ -413,7 +426,7 @@ fn a_try_handler_cannot_settle_a_cancelled_run() {
     let ending = shell
         .run(Run::captured(
             "try { interrupt\nlet x = ()\nreturn $x } { |_| return () }",
-            "<test>",
+            test_origin(),
         ))
         .expect_ran();
     assert_eq!(
@@ -453,7 +466,7 @@ fn an_aside_cannot_absorb_its_callers_interrupt() {
             .unwrap()
             .as_mut()
             .expect("the aside is joined before the run")
-            .run(Run::captured("let y = 1\nreturn $y", "<test>"));
+            .run(Run::captured("let y = 1\nreturn $y", test_origin()));
         let ending = report.expect_ran();
         *status.lock().unwrap() = Some(ending.status());
     });
@@ -462,7 +475,7 @@ fn an_aside_cannot_absorb_its_callers_interrupt() {
     let ending = shell
         .run(Run::captured(
             "interrupt-then-aside\nlet rpv = 42\nreturn $rpv",
-            "<test>",
+            test_origin(),
         ))
         .expect_ran();
     assert_eq!(
@@ -490,7 +503,10 @@ fn an_aside_unwinds_on_an_interrupt_raised_while_it_runs() {
     let shell = Shell::root(runtime.into());
     let mut aside = shell.join_session();
     let ending = aside
-        .run(Run::captured("interrupt\nlet y = 1\nreturn $y", "<test>"))
+        .run(Run::captured(
+            "interrupt\nlet y = 1\nreturn $y",
+            test_origin(),
+        ))
         .expect_ran();
     assert_eq!(
         ending.status(),
@@ -512,7 +528,7 @@ fn cancelling_a_session_by_handle_reaches_its_aside() {
         .cancel(crate::process::CancelCause::Cancelled);
 
     let ending = aside
-        .run(Run::captured("let y = 1\nreturn $y", "<test>"))
+        .run(Run::captured("let y = 1\nreturn $y", test_origin()))
         .expect_ran();
     assert_eq!(
         ending.status(),
@@ -543,7 +559,10 @@ fn a_session_is_deaf_to_the_ambient_causes() {
         crate::process::request_root_cancel(crate::process::CancelCause::Aborted);
     });
     let mut shell = Shell::root(runtime.into());
-    let report = shell.run(Run::captured("raise\nlet rpv = 42\nreturn $rpv", "<test>"));
+    let report = shell.run(Run::captured(
+        "raise\nlet rpv = 42\nreturn $rpv",
+        test_origin(),
+    ));
     crate::process::cancel::clear_root_request();
     let ending = report.expect_ran();
     assert_eq!(
@@ -568,7 +587,7 @@ fn a_walled_run_ends_stopped_timed_out() {
     let ending = shell
         .run(Run {
             wall: Some(std::time::Duration::from_secs(30)),
-            ..Run::captured("expire\nlet rpv = 42\nreturn $rpv", "<test>")
+            ..Run::captured("expire\nlet rpv = 42\nreturn $rpv", test_origin())
         })
         .expect_ran();
     assert!(
@@ -596,7 +615,10 @@ fn mid_script_wall_keeps_the_bindings_that_landed() {
     let ending = shell
         .run(Run {
             wall: Some(std::time::Duration::from_millis(500)),
-            ..Run::captured("let pre_wall = 1\nsleep 30\nlet post_wall = 2", "<test>")
+            ..Run::captured(
+                "let pre_wall = 1\nsleep 30\nlet post_wall = 2",
+                test_origin(),
+            )
         })
         .expect_ran();
     assert!(
@@ -630,7 +652,7 @@ fn inherit_leaves_session_streams_untouched() {
 
     let _ = shell.run(Run {
         io: RunIo::Inherit,
-        ..Run::captured("echo hi", "<test>")
+        ..Run::captured("echo hi", test_origin())
     });
 
     assert!(
@@ -690,11 +712,14 @@ fn panicking_run_reports_failed_and_rolls_back() {
     let mut shell = panicking_shell();
 
     let ending = shell
-        .run(Run::captured("let pre_panic = 1", "<test>"))
+        .run(Run::captured("let pre_panic = 1", test_origin()))
         .expect_ran();
     assert!(matches!(ending, Ending::Settled { .. }));
 
-    match shell.run(Run::captured("let mid_panic = 2\ncore-panic-now", "<test>")) {
+    match shell.run(Run::captured(
+        "let mid_panic = 2\ncore-panic-now",
+        test_origin(),
+    )) {
         RunReport::Faulted { error: e } => {
             assert!(
                 e.message.contains("run panicked"),
@@ -720,7 +745,7 @@ fn panicking_run_reports_failed_and_rolls_back() {
     );
 
     let ending = shell
-        .run(Run::captured("$pre_panic", "<test>"))
+        .run(Run::captured("$pre_panic", test_origin()))
         .expect_ran();
     assert!(
         matches!(ending, Ending::Settled { .. }),
@@ -751,7 +776,7 @@ fn desk_handler_panic_is_caught_at_the_door() {
 
     match shell.run(RunRequest {
         desk: Some(Arc::new(PanickingDesk)),
-        ..RunRequest::from(Run::captured("let desk_panic = 4\nenquire", "<test>"))
+        ..RunRequest::from(Run::captured("let desk_panic = 4\nenquire", test_origin()))
     }) {
         RunReport::Faulted { error: e } => assert!(e.message.contains("run panicked")),
         _ => panic!("a desk-handler panic must report Faulted"),
@@ -766,7 +791,9 @@ fn desk_handler_panic_is_caught_at_the_door() {
 
 /// The rendered runtime error of a run that must fault.
 fn rendered_fault(shell: &mut Shell, src: &str) -> String {
-    let report = shell.run(Run::captured(src, "<test>")).into_report(shell);
+    let report = shell
+        .run(Run::captured(src, test_origin()))
+        .into_report(shell);
     let crate::protocol::Report::Ran { ending, .. } = report else {
         panic!("{src:?} must reach evaluation");
     };
@@ -793,7 +820,9 @@ fn a_result_that_is_not_data_says_what_it_holds() {
         ),
         ("[k: { echo hi }]", "the result holds a block", "!{ … }"),
     ] {
-        let report = shell.run(Run::captured(src, "<test>")).into_report(&shell);
+        let report = shell
+            .run(Run::captured(src, test_origin()))
+            .into_report(&shell);
         let crate::protocol::Report::Ran { ending, .. } = report else {
             panic!("{src:?} must reach evaluation");
         };
@@ -858,7 +887,7 @@ fn assert_ceiling_survives(mut shell: Shell, narrow: Run) {
     let RunReport::Ran {
         ending: Ending::Settled { value, .. },
         ..
-    } = shell.run(Run::captured("_narrowed", "<test>"))
+    } = shell.run(Run::captured("_narrowed", test_origin()))
     else {
         panic!("the probe run must settle");
     };
@@ -877,7 +906,7 @@ fn a_session_ceiling_pushed_in_a_run_outlives_it() {
         shell: Some([crate::capability::ShellVerb::Chdir].into()),
         ..crate::capability::Capabilities::root()
     });
-    let mut narrow = Run::captured("_narrow", "<test>");
+    let mut narrow = Run::captured("_narrow", test_origin());
     narrow.caps = caps;
     assert_ceiling_survives(narrowing_shell(), narrow);
 }
@@ -888,7 +917,7 @@ fn a_session_ceiling_pushed_in_a_run_outlives_it() {
 fn a_session_ceiling_pushed_in_a_grant_block_outlives_it() {
     assert_ceiling_survives(
         narrowing_shell(),
-        Run::captured("grant [net: `offline] { _narrow }", "<test>"),
+        Run::captured("grant [net: `offline] { _narrow }", test_origin()),
     );
 }
 
@@ -901,7 +930,7 @@ fn a_lambda_faults_against_the_run_that_compiled_it() {
     assert!(matches!(
         shell.run(Run::captured(
             "let boom = { |x| fail [status: 1, message: nope] }",
-            "<test>"
+            test_origin()
         )),
         RunReport::Ran {
             ending: Ending::Settled { .. },
@@ -935,7 +964,7 @@ fn single_command_still_reports_the_input_shape() {
         ("no-such-command-xyz", true),
         ("no-such-command-xyz; true", false),
     ] {
-        match shell.run(Run::captured(src, "<test>")) {
+        match shell.run(Run::captured(src, test_origin())) {
             RunReport::Ran {
                 ending: Ending::Raised { compact, .. },
                 ..
@@ -959,7 +988,7 @@ fn a_dispatch_trail_projects_and_round_trips_through_the_wire() {
     let mut shell = crate::test_helper::core_shell();
     let report = shell.run(Run {
         trail: Some(crate::types::CapturePolicy::Off),
-        ..Run::captured("/bin/echo hi", "<test>")
+        ..Run::captured("/bin/echo hi", test_origin())
     });
     let crate::protocol::Report::Ran { trail, .. } = report.into_report(&shell) else {
         panic!("valid source must reach evaluation");
@@ -989,7 +1018,7 @@ fn a_dispatch_trail_projects_and_round_trips_through_the_wire() {
 #[test]
 fn a_dispatch_asking_no_trail_reports_none() {
     let mut shell = crate::test_helper::core_shell();
-    match shell.run(Run::captured("$[1 + 1]", "<test>")) {
+    match shell.run(Run::captured("$[1 + 1]", test_origin())) {
         RunReport::Ran { trail, .. } => assert!(
             trail.is_empty(),
             "an unasked dispatch must report no trail at all"
@@ -1010,7 +1039,7 @@ fn a_panicked_dispatch_reports_faulted_and_leaves_the_next_trail_empty() {
 
     match shell.run(Run {
         trail: Some(crate::types::CapturePolicy::Off),
-        ..Run::captured("core-panic-now", "<test>")
+        ..Run::captured("core-panic-now", test_origin())
     }) {
         RunReport::Faulted { error: e } => assert!(e.message.contains("run panicked")),
         _ => panic!("a panicking dispatch must report Faulted"),
@@ -1018,7 +1047,7 @@ fn a_panicked_dispatch_reports_faulted_and_leaves_the_next_trail_empty() {
 
     match shell.run(Run {
         trail: Some(crate::types::CapturePolicy::Off),
-        ..Run::captured("$[1 + 1]", "<test>")
+        ..Run::captured("$[1 + 1]", test_origin())
     }) {
         RunReport::Ran { trail, .. } => assert!(
             trail.is_empty(),
@@ -1048,7 +1077,7 @@ fn ran(runtime: crate::Runtime, run: Run) -> (Ending, String) {
 fn captured_with_grace(src: &str, grace: std::time::Duration) -> Run {
     Run {
         cleanup_grace: grace,
-        ..Run::captured(src, "<test>")
+        ..Run::captured(src, test_origin())
     }
 }
 
@@ -1085,7 +1114,7 @@ fn a_try_cannot_see_a_stop() {
         unstruck_runtime(),
         Run::captured(
             "try { stop-unstruck\necho after } { |e| echo handled }",
-            "<test>",
+            test_origin(),
         ),
     );
     assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
@@ -1099,7 +1128,7 @@ fn a_try_cannot_see_a_stop() {
 fn an_audit_passes_a_stop() {
     let (ending, out) = ran(
         unstruck_runtime(),
-        Run::captured("audit { stop-unstruck\necho after }", "<test>"),
+        Run::captured("audit { stop-unstruck\necho after }", test_origin()),
     );
     assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
     assert!(!out.contains("after"), "{out:?}");
@@ -1111,7 +1140,7 @@ fn a_fallback_passes_a_stop() {
         unstruck_runtime(),
         Run::captured(
             "!{ stop-unstruck\nfail [status: 1, message: x] } ? echo fallback",
-            "<test>",
+            test_origin(),
         ),
     );
     assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
@@ -1125,7 +1154,7 @@ fn a_run_ending_in_an_error_under_a_stop_ends_stopped() {
         mooring.home.cancel(CancelCause::Interrupted);
         crate::types::sig("x")
     });
-    let (ending, _) = ran(runtime, Run::captured("strike-then-fail", "<test>"));
+    let (ending, _) = ran(runtime, Run::captured("strike-then-fail", test_origin()));
     assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
 }
 
@@ -1134,7 +1163,7 @@ fn a_cleanup_runs_shielded_and_the_stop_follows() {
     let (runtime, marked) = marking_runtime();
     let (ending, _) = ran(
         runtime,
-        Run::captured("guard { strike } { sleep 0.2\nmark }", "<test>"),
+        Run::captured("guard { strike } { sleep 0.2\nmark }", test_origin()),
     );
     assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
     assert!(
@@ -1148,7 +1177,10 @@ fn a_cleanup_under_a_value_is_shielded_too() {
     let (runtime, marked) = marking_runtime();
     let (ending, _) = ran(
         runtime,
-        Run::captured("guard { return 1 } { strike\nsleep 0.2\nmark }", "<test>"),
+        Run::captured(
+            "guard { return 1 } { strike\nsleep 0.2\nmark }",
+            test_origin(),
+        ),
     );
     assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
     assert!(*marked.lock().unwrap());
@@ -1192,7 +1224,7 @@ fn an_abort_passes_a_cleanup() {
     let started = std::time::Instant::now();
     let (ending, _) = ran(
         runtime,
-        Run::captured("guard { strike-aborted } { sleep 5\nmark }", "<test>"),
+        Run::captured("guard { strike-aborted } { sleep 5\nmark }", test_origin()),
     );
     assert!(started.elapsed() < std::time::Duration::from_secs(3));
     assert!(is_stopped(&ending, CancelCause::Aborted), "{ending:?}");
@@ -1213,7 +1245,7 @@ fn a_signalled_child_under_a_shield_is_a_failure() {
         runtime,
         Run::captured(
             "guard { strike } { try { /bin/sh -c 'kill -INT $$' } { |e| mark } }",
-            "<test>",
+            test_origin(),
         ),
     );
     assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
@@ -1230,7 +1262,7 @@ fn the_scope_comes_back_after_a_cleanup() {
         "try { guard { fail [status: 1, message: x] } { echo in } } { |e|\nstrike\necho after }",
     ] {
         let (runtime, _) = marking_runtime();
-        let (ending, out) = ran(runtime, Run::captured(src, "<test>"));
+        let (ending, out) = ran(runtime, Run::captured(src, test_origin()));
         assert!(
             is_stopped(&ending, CancelCause::Interrupted),
             "{src}: {ending:?}"
@@ -1283,14 +1315,14 @@ fn an_exit_outranks_the_closing_poll() {
         mooring.home.cancel(CancelCause::Interrupted);
         Break::Escape(Escape::Exit(3))
     });
-    let (ending, _) = ran(runtime, Run::captured("strike-then-exit", "<test>"));
+    let (ending, _) = ran(runtime, Run::captured("strike-then-exit", test_origin()));
     assert!(matches!(ending, Ending::Exited(3)), "{ending:?}");
 }
 
 #[test]
 fn a_stop_before_an_exit_wins() {
     let (runtime, _) = marking_runtime();
-    let (ending, _) = ran(runtime, Run::captured("strike\nexit 3", "<test>"));
+    let (ending, _) = ran(runtime, Run::captured("strike\nexit 3", test_origin()));
     assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
 }
 
@@ -1303,14 +1335,14 @@ fn a_stronger_cause_lands_at_the_closing_poll() {
         mooring.home.cancel(CancelCause::Aborted);
         stop
     });
-    let (ending, _) = ran(runtime, Run::captured("strike-twice", "<test>"));
+    let (ending, _) = ran(runtime, Run::captured("strike-twice", test_origin()));
     assert!(is_stopped(&ending, CancelCause::Aborted), "{ending:?}");
 }
 
 #[test]
 fn the_closing_poll_keeps_a_located_stop() {
     let (runtime, _) = marking_runtime();
-    let (ending, _) = ran(runtime, Run::captured("strike\necho x", "<test>"));
+    let (ending, _) = ran(runtime, Run::captured("strike\necho x", test_origin()));
     assert!(
         matches!(ending, Ending::Stopped { at: Some(_), .. }),
         "{ending:?}"
@@ -1324,7 +1356,7 @@ fn a_stage_panic_stops_its_siblings_and_is_reraised() {
     let started = std::time::Instant::now();
     let report = Shell::root(runtime.into()).run(Run::captured(
         "!{ each { |i| echo $i } !{range 1 1000000} } | !{ boom }",
-        "<test>",
+        test_origin(),
     ));
     assert!(started.elapsed() < std::time::Duration::from_secs(3));
     match report {

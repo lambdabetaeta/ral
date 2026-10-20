@@ -189,7 +189,7 @@ mod tests {
             src,
             crate::test_helper::core_schemes(),
             crate::source::FileId::DUMMY,
-            "",
+            None,
             None,
         )
         .expect("compile lambda");

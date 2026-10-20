@@ -9,8 +9,12 @@
 //! XDG everywhere: the Linux defaults (`.config`, `.local/share`, …) apply on
 //! every platform, macOS included.  An `XDG_*_HOME` override counts only when
 //! it is absolute, per the spec's rule that relative values are ignored.
+//!
+//! An application's own directory under a base, `$XDG_<kind>_HOME/<app>/`, is
+//! [`app_dir`], the one spelling of that convention ral and exarch share.
 
-use std::path::{Path, PathBuf};
+use super::lex::{is_absolute, join_slash};
+use std::path::PathBuf;
 use strum::{EnumString, IntoStaticStr, VariantArray};
 
 /// An XDG basedir role.  `Bin` is outside the spec, but `XDG_BIN_HOME` is
@@ -61,10 +65,6 @@ impl XdgKind {
 /// absolute override to stand in for one.  An unknown home is thus not the
 /// same question as an absolute `XDG_CONFIG_HOME` — that one is still
 /// answerable, and answered.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "path-form: lifts the caller's `home` to join the spec's default suffix under it"
-)]
 pub(crate) fn resolve_xdg_in(
     env: impl Fn(&str) -> Option<String>,
     kind: XdgKind,
@@ -73,17 +73,27 @@ pub(crate) fn resolve_xdg_in(
     // The spec ignores a relative override.
     env(kind.env_var())
         .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| {
-            // `default_suffix()` is spelled with the spec's `/`, so join it
-            // component-by-component rather than as one literal — otherwise the
-            // result mixes native separators with a stray `/` on Windows.
-            Some(
-                kind.default_suffix()
-                    .split('/')
-                    .fold(Path::new(home?).to_path_buf(), |acc, part| acc.join(part)),
-            )
-        })
+        .filter(|p| is_absolute(p))
+        // `default_suffix()` is spelled with the spec's `/`.
+        .or_else(|| Some(join_slash(home?, kind.default_suffix())))
+}
+
+/// `app`'s own directory under the host's `kind` base:
+/// `$XDG_<kind>_HOME/<app>/`.  `None` where [`crate::host::xdg`] is, leaving
+/// the caller its own fallback.
+pub fn app_dir(kind: XdgKind, app: &str) -> Option<PathBuf> {
+    crate::host::xdg(kind).map(|base| base.join(app))
+}
+
+/// [`app_dir`], under the temp dir when the host has no base.
+///
+/// For state that must land somewhere absolute: a run still records and
+/// configures, losing that state on reboot, where defaulting under the cwd
+/// would scatter it through the working tree a sandboxed agent is editing.
+pub fn app_dir_or_temp(kind: XdgKind, app: &str) -> PathBuf {
+    crate::host::xdg(kind)
+        .unwrap_or_else(std::env::temp_dir)
+        .join(app)
 }
 
 // Unix-only: the resolver is platform-agnostic, the asserted literals are not.

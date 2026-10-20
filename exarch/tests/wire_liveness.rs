@@ -26,8 +26,10 @@ use std::time::{Duration, Instant};
 mod test_helper;
 
 use ral_core::carrier::{Host, Transport, WireTransport, dispatch_to_report};
+use ral_core::path::EnginePath;
 use ral_core::protocol::channel::Liveness;
 use ral_core::protocol::{Attach, DispatchId, EngineSpec, Event, Report, Root, Run};
+use ral_core::source::SourceOrigin;
 
 // Mirror the binary's pre-`main` re-exec dispatch: the `--engine` re-exec is
 // served here, before libtest sees a flag it would reject, so a re-exec'd
@@ -60,9 +62,9 @@ fn attach(transport: &WireTransport) -> tempfile::TempDir {
     let attach = Attach::root(
         EngineSpec::new(
             exarch::shell_eval::builtins::INSTALLER_TAG,
-            dir.path().to_path_buf(),
+            EnginePath::Host(dir.path().to_path_buf()),
         ),
-        Root::new(dir.path().to_path_buf()).with_env(vec![(
+        Root::new(EnginePath::Host(dir.path().to_path_buf())).with_env(vec![(
             exarch::app::EXARCH.scratch_var(),
             dir.path().to_string_lossy().into_owned(),
         )]),
@@ -89,7 +91,7 @@ fn an_idle_session_stays_alive_on_the_heartbeat_alone() {
 
     let report = dispatch_to_report(
         &transport,
-        Run::captured("$[1 + 1]", "<test>"),
+        Run::captured("$[1 + 1]", SourceOrigin::named("<test>")),
         Arc::new(()),
     )
     .expect("the engine must answer the dispatch with a Report");
@@ -133,7 +135,7 @@ fn a_cancel_that_overtakes_its_dispatch_still_stops_the_run() {
     let started = Instant::now();
     transport.dispatch(
         id,
-        Run::captured("/bin/sleep 30", "<test>"),
+        Run::captured("/bin/sleep 30", SourceOrigin::named("<test>")),
         &(Arc::new(()) as Arc<dyn Host>),
     );
 
@@ -178,7 +180,7 @@ fn a_dead_peer_fails_the_in_flight_run_as_cancelled() {
     // A literal id suffices — nothing here correlates a reply.
     transport.dispatch(
         DispatchId(1),
-        Run::captured("/bin/sleep 30", "<test>"),
+        Run::captured("/bin/sleep 30", SourceOrigin::named("<test>")),
         &(Arc::new(()) as Arc<dyn Host>),
     );
 

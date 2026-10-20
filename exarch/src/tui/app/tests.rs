@@ -28,14 +28,17 @@ pub(in crate::tui) fn app() -> (App, BusReceiver, Arc<Agent>) {
 /// A scripted bureau and a bare session: the handles a command is serviced against.
 pub(in crate::tui) fn ctx() -> CommandCtx<'static> {
     static BUREAU: Bureau = Bureau::Scripted;
-    static INFO: SessionInfo<'static> = SessionInfo {
-        system_size: 0,
-        system_files: &[],
-        base: "",
-        extend: None,
-        restrict_files: &[],
-        cwd: "/",
-    };
+    // Lazy, as `Path::new` is no `const fn`.
+    #[allow(clippy::disallowed_methods, reason = "[test] a fixed fixture path")]
+    static INFO: std::sync::LazyLock<SessionInfo<'static>> =
+        std::sync::LazyLock::new(|| SessionInfo {
+            system_size: 0,
+            system_files: &[],
+            base: "",
+            extend: None,
+            restrict_files: &[],
+            cwd: std::path::Path::new("/"),
+        });
     CommandCtx {
         bureau: &BUREAU,
         info: &INFO,

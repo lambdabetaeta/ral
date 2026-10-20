@@ -23,14 +23,27 @@
 //! [`RealPath::frozen`](super::RealPath::frozen) for exec, and no other:
 //! `surface` leaves the type only as a `String`, for rendering.
 
-use super::PathRules;
 use super::identity::{Polarity, path_within};
+use super::lex::is_absolute;
+use super::{GuestPath, PathRules};
 use crate::path::shown;
 use serde::{Deserialize, Serialize};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 /// A lexically-resolved path: absolute, `.`/`..`-collapsed, anchored
 /// against the logical cwd.
+///
+/// Collapsed means a fixed point of [`fold_dots`](super::lex::fold_dots):
+/// no `.` or `..` past the root it opens with, and on Windows one
+/// separator throughout, `\`, but in a head whose kind or meaning turns on
+/// its spelling (a verbatim `//?/` head, say), which is kept as written.  A
+/// malformed or mixed head
+/// ([`Root::Malformed`](super::lex::Root::Malformed),
+/// [`Root::MixedHead`](super::lex::Root::MixedHead)) is all head, so such a
+/// path is carried as written, `..` and all, for the kernel to read: a fold
+/// across it could assemble a share or a drive it never named, and the walk
+/// refuses what `std::path` cannot parse
+/// ([`is_unparsed_head`](super::lex::is_unparsed_head)).
 ///
 /// Reified so that canonicalisation can only follow resolution — there is
 /// no way to `realpath` a path that has not first been anchored.
@@ -43,14 +56,12 @@ impl LexicalPath {
     /// here.  The public door is [`super::Resolver::resolve`].
     pub(super) fn from_lexed(path: PathBuf) -> Self {
         debug_assert!(
-            path.is_absolute(),
+            is_absolute(&path),
             "LexicalPath must be absolute, got {}",
             shown(&path)
         );
         debug_assert!(
-            !path
-                .components()
-                .any(|c| matches!(c, Component::CurDir | Component::ParentDir)),
+            super::lex::fold_dots(&path) == path,
             "LexicalPath must be `.`/`..`-collapsed, got {}",
             shown(&path)
         );
@@ -86,7 +97,12 @@ impl LexicalPath {
     /// it no *mutation* — nothing changed in the world, so nothing is
     /// reported.
     pub(crate) fn is_discard(&self) -> bool {
-        super::device::is_discard_device(&self.0.to_string_lossy(), PathRules::HOST)
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "native: the host-spelled name the device tables match"
+        )]
+        let name = self.0.to_string_lossy();
+        super::device::is_discard_device(&name, PathRules::HOST)
     }
 
     /// The refusal owed this path if, on Windows, its last component is a DOS
@@ -94,7 +110,12 @@ impl LexicalPath {
     /// everywhere else.  The fs doors ask it of every name they are about to
     /// act on, as they ask [`is_discard`](Self::is_discard).
     pub(crate) fn reserved_device_refusal(&self) -> Option<String> {
-        super::device::reserved_device_refusal(&self.0.to_string_lossy(), PathRules::HOST)
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "native: the host-spelled name the device tables match"
+        )]
+        let name = self.0.to_string_lossy();
+        super::device::reserved_device_refusal(&name, PathRules::HOST)
     }
 
     /// Strict `realpath(3)`.  The input is already absolute and folded, so
@@ -115,8 +136,11 @@ impl LexicalPath {
     }
 }
 
-/// A frozen grant prefix: `surface` as the author wrote it (absolute and
-/// `.`/`..`-collapsed, the normal form a [`LexicalPath`] also carries).
+/// A frozen grant prefix: `surface` as the author wrote it, in the normal
+/// form a [`LexicalPath`] also carries.
+///
+/// That form is absolute, `.`/`..`-collapsed, and on Windows spelled with
+/// `\` wherever its head allows (`C:/a/b` is frozen as `C:\a\b`).
 ///
 /// `real` is that same path with symlinks followed.
 ///
@@ -169,6 +193,10 @@ impl FrozenPath {
         })
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "native: the one door from a native path to the stored string forms; a form that is not UTF-8 is refused by `freeze`"
+    )]
     fn mint(path: &Path) -> Result<Self, Unicode> {
         let folded = super::lex::fold_dots(path);
         // The root is the one path `realpath` must not be asked about.  It
@@ -178,7 +206,7 @@ impl FrozenPath {
         // ran from a drive its data was not on.  Folded to zero components it
         // matches everything, which is what naming the root in a grant has
         // always meant.
-        if super::lex::is_bare_root(&folded.to_string_lossy()) {
+        if super::lex::is_bare_root(&folded.to_string_lossy(), PathRules::HOST) {
             return Ok(Self {
                 surface: "/".into(),
                 real: "/".into(),
@@ -222,20 +250,20 @@ impl FrozenPath {
     /// mints it.
     ///
     /// The in-process guard that matches it runs *inside* the machine, so the
-    /// normaliser that must agree with the access side is Linux's
-    /// ([`fold_dots_posix`](super::lex::fold_dots_posix)), not this
-    /// process's — hence a `&str` here where
+    /// fold that must agree with the access side is the one under Linux's
+    /// rules ([`fold_dots_under`](super::lex::fold_dots_under)), not this
+    /// process's — hence a [`GuestPath`] here where
     /// [`from_surface`](Self::from_surface), for prefixes matched on
     /// *this* computer, takes an `AsRef<Path>`.  There is no `realpath(3)`
     /// on this host for another machine's path, so `real` is `surface`
     /// again.
     #[must_use]
-    pub fn from_guest(path: &str) -> Self {
+    pub fn from_guest(path: &GuestPath) -> Self {
         debug_assert!(
-            path.starts_with('/'),
+            path.is_absolute(),
             "a guest prefix must be absolute in the guest's namespace, got {path}"
         );
-        let folded = super::lex::fold_dots_posix(path);
+        let folded = super::lex::fold_dots_under(path.as_str(), PathRules::Posix);
         Self {
             surface: folded.clone(),
             real: folded,
@@ -260,6 +288,11 @@ impl FrozenPath {
     /// The surface form, for the OS sandbox renderer and overlap keys.
     pub fn as_str(&self) -> &str {
         &self.surface
+    }
+
+    /// The surface form as ral shows it, for grant spellings and refusals.
+    pub(crate) fn shown(&self) -> String {
+        shown(&self.surface)
     }
 
     /// The symlink-followed form as a `Path`, for containment matching
@@ -295,15 +328,20 @@ impl FrozenPath {
     /// surface is kept: it is absolute and folded, as the freeze guarantees.
     pub(crate) fn live(&self) -> Self {
         debug_assert!(self.is_root() || self.is_absolute(), "{:?}", self.surface);
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "native: the stored real form, re-resolved"
+        )]
+        let real = self.live_real().to_string_lossy().into_owned();
         Self {
             surface: self.surface.clone(),
-            real: self.live_real().to_string_lossy().into_owned(),
+            real,
         }
     }
 
     /// Whether this is the universal prefix, [`root`](Self::root).
     pub fn is_root(&self) -> bool {
-        super::lex::is_bare_root(&self.surface)
+        super::lex::is_bare_root(&self.surface, PathRules::HOST)
     }
 
     /// Whether this prefix holds every path: it is the root, or a spelling
@@ -329,7 +367,7 @@ impl FrozenPath {
     /// True iff this prefix is absolute; `guard::freeze` rejects a
     /// frozen entry that is not.
     pub fn is_absolute(&self) -> bool {
-        self.surface_path().is_absolute()
+        is_absolute(self.surface_path())
     }
 
     /// Mint a divergent `surface`/`real` pair — the shape a real
@@ -370,7 +408,7 @@ impl PartialEq<String> for FrozenPath {
 
 #[cfg(test)]
 mod tests {
-    use super::FrozenPath;
+    use super::{FrozenPath, GuestPath};
 
     /// The ceiling covers every path, on whatever drive.
     ///
@@ -397,16 +435,52 @@ mod tests {
         }
     }
 
+    /// The universal prefix is one separator alone, read by the rules: `\`
+    /// is a root only where it is a separator.
+    #[test]
+    fn a_bare_root_is_a_lone_separator_under_the_rules() {
+        use crate::path::PathRules::{Posix, Windows};
+        use crate::path::lex::is_bare_root;
+        for (path, posix, windows) in [
+            ("/", true, true),
+            ("\\", false, true),
+            ("", false, false),
+            ("//", false, false),
+            ("\\\\", false, false),
+            ("/x", false, false),
+            ("C:\\", false, false),
+        ] {
+            assert_eq!(is_bare_root(path, Posix), posix, "{path:?} under POSIX");
+            assert_eq!(
+                is_bare_root(path, Windows),
+                windows,
+                "{path:?} under Windows"
+            );
+        }
+    }
+
+    /// Under POSIX rules `\` is a relative file name: a home of `\` joined
+    /// with `.` folds back to it, and must mint no universal authority.
+    #[cfg(unix)]
+    #[test]
+    fn a_backslash_mints_no_universal_authority_under_posix_rules() {
+        let prefix = FrozenPath::from_surface(std::path::PathBuf::from("\\").join("."));
+        assert!(!prefix.is_root(), "{prefix:?}");
+        assert!(!prefix.is_universal(), "{prefix:?}");
+        assert_eq!(prefix.as_str(), "\\");
+    }
+
     /// Asserting on the *bytes* is deliberate: a test that instead checked
     /// admission of `/work/letter.docx` would pass on Windows even with
     /// both sides mangled, since the access side folds with the same host
     /// kernel.  Only the spelling crosses to the guest.
     #[test]
     fn a_guest_prefix_is_spelled_the_guests_way_on_every_host() {
-        assert_eq!(FrozenPath::from_guest("/work").as_str(), "/work");
-        assert_eq!(FrozenPath::from_guest("/tmp").as_str(), "/tmp");
+        let guest = |path| FrozenPath::from_guest(&GuestPath::from_static(path));
+        assert_eq!(guest("/work").as_str(), "/work");
+        assert_eq!(guest("/tmp").as_str(), "/tmp");
         assert_eq!(
-            FrozenPath::from_guest("/work/./letters/../letters").as_str(),
+            guest("/work/./letters/../letters").as_str(),
             "/work/letters",
             "the folding is still done, only in the right namespace"
         );

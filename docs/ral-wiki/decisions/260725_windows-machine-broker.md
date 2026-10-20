@@ -88,7 +88,10 @@ make a broker dangerous is client-controlled:
   than the computer;
 - the **frame** is bounded before a byte is allocated for it, because the one
   thing a hostile client on a privileged service's pipe could otherwise ask for
-  is that service's memory;
+  is that service's memory. The bound (512 KiB) is sized for the largest legal
+  message: a refusal naming the five files of a machine's document, each the
+  longest Windows path (32,767 UTF-16 units, 87,380 bytes as `os_path`'s
+  base64);
 - the **folder** is the one thing the client does supply, and it is checked
   rather than trusted.
 
@@ -107,6 +110,21 @@ inverted: a service running as `LocalSystem` can read everything, so checking as
 itself would let one user have another user's documents mounted into their own
 guest. That is a worse hole than the one the service exists to close, and it is
 the hole a broker gets wrong by default.
+
+**A folder whose name the machine's document cannot spell is refused before it
+is checked.** The compute service opens the share by the name in a JSON
+document, and JSON text cannot carry a Windows name holding an unpaired
+surrogate. Spelled lossily, the name the service opened — as `LocalSystem`,
+after the check — would have U+FFFD in the surrogate's place: a different,
+legal name, which a client could make a sibling junction to anywhere, while the
+held handle went on proving the folder that was checked. So `boot_for` refuses
+such a folder with `Error::NotUnicode` before it impersonates anyone, and
+`hcs::document_text` — the one conversion from a path to the document's text —
+refuses again for every path the document carries, so a name that resolves to
+one through a link above it is refused too. `hcs::plain` strips the verbatim
+prefix from the UTF-16 units themselves, so nothing before that conversion is
+lossy either. macOS keeps the same law where its `NSURL`s are made
+(`vz::file_url`).
 
 **The control socket crosses to the client by description, targeted at the
 kernel's answer to who is asking.** The broker accepts the guest's control-plane

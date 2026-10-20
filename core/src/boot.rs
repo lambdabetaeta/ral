@@ -113,7 +113,7 @@ impl BakedPrelude {
 fn bake() -> Toplevel {
     let ast = crate::syntax::parser::parse(include_str!("prelude.ral"))
         .unwrap_or_else(|e| panic!("prelude parse error: {e}"));
-    let top = crate::elaborator::elaborate(&ast, [], "")
+    let top = crate::elaborator::elaborate(&ast, [], None)
         .unwrap_or_else(|e| panic!("prelude elaborate error: {e}"));
     let annotated = crate::bake_prelude(&top, &HostSurface::default().manifest());
     validate_prelude_shape(&annotated);
@@ -414,7 +414,7 @@ mod tests {
     /// test can hand `seat` a prelude the real bake would refuse.
     fn baked(src: &str) -> BakedPrelude {
         let ast = crate::syntax::parser::parse(src).expect("parse");
-        let top = crate::elaborator::elaborate(&ast, [], "").expect("elaborate");
+        let top = crate::elaborator::elaborate(&ast, [], None).expect("elaborate");
         let this = BakedPrelude::from_blob(&[]);
         let annotated = crate::bake_prelude(&top, &HostSurface::default().manifest());
         let _ = this.comp.set(Arc::new(annotated));
@@ -452,7 +452,7 @@ mod tests {
         let ast =
             crate::syntax::parser::parse("let x = if !{_ansi-ok} { return 1 } else { return 2 }")
                 .expect("parse");
-        let top = crate::elaborator::elaborate(&ast, [], "").expect("elaborate");
+        let top = crate::elaborator::elaborate(&ast, [], None).expect("elaborate");
         let annotated = crate::bake_prelude(&top, &HostSurface::default().manifest());
         validate_prelude_shape(&annotated);
     }
@@ -463,7 +463,7 @@ mod tests {
     fn return_prelude_binding_passes_the_bake() {
         let ast =
             crate::syntax::parser::parse("let x = 1\nlet f = { |y| return $y }").expect("parse");
-        let top = crate::elaborator::elaborate(&ast, [], "").expect("elaborate");
+        let top = crate::elaborator::elaborate(&ast, [], None).expect("elaborate");
         let annotated = crate::bake_prelude(&top, &HostSurface::default().manifest());
         validate_prelude_shape(&annotated);
     }
