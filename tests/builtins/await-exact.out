@@ -1,11 +1,14 @@
 hi
 out
 4
-out
-4
+await: this worker's result was already claimed
 partial
 status=7
 [hi]
+polled
+3
+cancelled-nothing
+await: this worker's result was already claimed
 2
 to-out
 to-err

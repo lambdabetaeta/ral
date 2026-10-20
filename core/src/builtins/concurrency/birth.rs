@@ -1,13 +1,13 @@
 //! A worker's birth: the one door `spawn`, `watch` and the combinators share.
 
-use super::await_handle;
+use super::join;
 use crate::fact::Worker;
 use crate::io::{Sink, new_buffer};
 use crate::process::{DurableRoot, Scope, WorkerStop};
 use crate::types::{
-    Break, Brood, CapReached, Cradle, DeferredSurface, Done, Error, Escape, FlushGuard,
-    HandleInner, Mooring, Observed, Owner, Settled, Shell, SurfaceSink, ThreadEnd, Value,
-    WatchEvent, WorkerEntry, WorkerId, final_poll, sig,
+    Break, Brood, CapReached, Cradle, DeferredSurface, Done, Error, Escape, HandleInner, Mooring,
+    Observed, Owner, Settled, Shell, SurfaceSink, ThreadEnd, Value, WatchEvent, WorkerEntry,
+    WorkerId, final_poll, sig,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -67,8 +67,6 @@ where
                     birth.verb()
                 ))
             })?;
-
-    let (tx, rx) = std::sync::mpsc::channel();
 
     let (stdout_sink, stdout_buf) = new_buffer();
     let (stderr_sink, stderr_buf) = new_buffer();
@@ -140,31 +138,23 @@ where
     };
 
     let id = WorkerId::mint();
-    // Minted before the thread so the worker can hold a clone and set its
-    // exit mark.
-    let handle = HandleInner {
-        stdout_buf,
-        stderr_buf,
-        ..HandleInner::new(id, title.as_str(), node, Some(rx))
-    };
-    let worker = handle.clone();
+    let (handle, settler) = HandleInner::new(id, title.as_str(), node, stdout_buf, stderr_buf);
     shell
         .spawn_thread(worker_mooring, "ral spawn worker", move |mooring, child| {
             // A birth inside this worker hangs under it and is settled by it:
             // I4, I5.
             let brood = Brood::new(id);
             child.local.cradle = Cradle::of_worker(&mooring.home, brood.clone());
-            // A worker's stdout is its handle buffer: nobody is watching it
-            // until `await` drains one.
+            // A worker's stdout is its handle buffer, drained as it settles.
             child.io.stdout = stdout;
             child.io.stderr = stderr;
-
-            let guard = FlushGuard::new(worker_surface, worker.clone());
+            // Armed in the thread: a thread that never starts flushes nothing.
+            let settler = settler.flushing(worker_surface);
 
             let end = match ThreadEnd::of(|| {
                 let settled = work(mooring, child).and_then(|v| settle(&brood, child).map(|()| v));
                 if settled.is_err() {
-                    brood.end(child, mooring.cleanup_grace);
+                    brood.end(mooring.cleanup_grace);
                 }
                 settled
             }) {
@@ -175,17 +165,14 @@ where
                 )),
                 panicked @ ThreadEnd::Panicked(_) => {
                     // The panic path: no wait.
-                    brood.end(child, Duration::ZERO);
+                    brood.end(Duration::ZERO);
                     panicked
                 }
             };
             child.io.stdout.flush_pending();
             child.io.stderr.flush_pending();
-            guard.settle(Done::of(&end, child));
-            let _ = tx.send(end);
-            // Strictly *after* the send, so `Completed` always implies an
-            // outcome already in the channel.
-            worker.complete();
+            let done = Done::of(&end, child);
+            settler.settle(end, done);
         })
         .map_err(|e| sig(format!("could not start a worker thread: {e}")))?;
 
@@ -232,15 +219,13 @@ pub(super) fn convert_own_stop(result: Settled<Value>, root: &DurableRoot) -> Se
     stop.map_or(result, |stop| Err(Error::worker_stopped(stop).into()))
 }
 
-/// The return rule (I4): await each unclaimed child exactly, in birth order,
-/// stopping at the first failure.  `Err` is that failure or the stop that cut
-/// the wait.
+/// The return rule (I4): claim each child in birth order and await it
+/// exactly, stopping at the first failure.  A child another claimer has is not
+/// this worker's to join.  `Err` is that failure or the stop that cut the
+/// wait.
 fn settle(brood: &Brood, shell: &mut Shell) -> Settled<()> {
-    for child in brood.unclaimed() {
-        // Narrows, does not close, the window in which `worker <id>` claims it first.
-        if !child.is_claimed() {
-            await_handle(&child, shell)?;
-        }
+    for child in brood.children() {
+        join(&child, shell)?;
     }
     Ok(())
 }

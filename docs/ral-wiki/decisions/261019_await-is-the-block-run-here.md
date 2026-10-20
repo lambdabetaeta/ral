@@ -1,11 +1,27 @@
 ---
 status: active
 generated_at_commit: fe9cd32d
-verified_at_commit: fe9cd32d
-anchors: [await_handle, take_settled, settle_of, Cradle, Brood, Litter, Birth, convert_own_stop, TitlePolicy, Stamp, Owner, WorkerRow, builtin_worker, builtin_par, all_form, spawn_form]
+verified_at_commit: 8826b170
+anchors: [await_handle, join, claim_first, claim_settled, claim_and_stop, Settler, Cradle, Brood, Litter, Birth, convert_own_stop, TitlePolicy, Stamp, Owner, WorkerRow, builtin_worker, builtin_par, all_form, spawn_form]
 ---
 
 # `await` is the block run here, and a worker ends with its children
+
+> **Amended 2026-10-20.** A handle's result is claimed once. `await`, `race`
+> (its winner and every loser), `cancel` and the handle's owner each *claim* it.
+> A handle is one lock over `HandleState` — `Running`, `Settled`, `Claimed` —
+> and a claim is one transition on it, so of two claimers exactly one
+> succeeds, and the claimer moves the result out of the handle instead of
+> copying it from a cache every `await` could read. A second `await` of a
+> claimed handle fails with `<verb>: this worker's result was already
+> claimed`, an ordinary error, `race` skips a claimed handle and fails so only
+> when every handle it was given is claimed, and a second `cancel` does
+> nothing. `poll` is a pure
+> observation: it claims nothing on either arm, so a settled poll leaves the
+> handle to be awaited and its entry in the registry, and it fails as `await`
+> does on a claimed handle, as `is-done` then does. A worker's join claims
+> only the children it wins, so an outside `await !{worker <id>}` and the join
+> never both replay a child. The check is at run time; types are unchanged.
 
 **`await $h` behaves as if `h`'s block had run at the `await`: the bytes it
 wrote are written to the awaiter's own streams, and it ends as the block
@@ -26,21 +42,24 @@ Ten invariants, each named so a test and a page can cite it.
   would have run with the same environment, `await $h` is observationally
   `!$B` run at the `await`: the same value or the same raise, and the bytes
   `B` wrote to its stdout and its stderr written, in that order, to the
-  awaiter's current stdout and stderr sinks. Awaiting again replays the same
-  bytes and the same ending
+  awaiter's current stdout and stderr sinks. The `await` claims the handle's
+  result, which is claimed once: a second `await` fails and replays nothing
   ([[invariants/await-is-the-block-run-here|await-is-the-block-run-here]]).
-- **I2, one data observation.** `poll` is the only total, data-valued
-  observation: `` `pending [stdout, stderr, elapsed] `` or
-  `` `settled [stdout, stderr, elapsed, outcome] ``. It never writes and never
-  raises for an ordinary failure, a cancel or a timeout; an `exit`, a foreign
-  stop and a panic re-raise through it.
+- **I2, one data observation.** `poll` is the only data-valued observation,
+  and it is total on an unclaimed handle: `` `pending [stdout, stderr,
+  elapsed] `` or `` `settled [stdout, stderr, elapsed, outcome] ``. It never
+  writes, never claims, and never raises for an ordinary failure; a block
+  stopped by its scope settles as `` `err ``. An `exit`, a foreign stop and a
+  panic re-raise through it, and a handle `cancel` or `await` claimed fails
+  it.
 - **I3, three owners.** Every concurrent block has exactly one owner, fixed
   at birth: the *calling expression* (`par`, `all`, `race`: ended before the
   call returns), the *session* (`spawn`, `watch`: ended by completion,
   `cancel`, or the session's end), or *nobody* (`detach`). There is no fourth
   owner and no lease.
-- **I4, a worker ends with its children.** A worker's body ends, then its
-  unclaimed children are awaited in birth order with I1's semantics; the first
+- **I4, a worker ends with its children.** A worker's body ends, then each
+  child still unclaimed is claimed and awaited in birth order with I1's
+  semantics, a child another claimer won being skipped; the first
   failure among them is the worker's, and the rest are cancelled and drained
   within the cleanup grace. A body that halts cancels and drains them too
   ([[invariants/a-worker-ends-with-its-children|a-worker-ends-with-its-children]]).
@@ -99,9 +118,9 @@ notice.
 
 `await $h`:
 
-1. waits, cancel-aware, for `$h` to settle; the wait polls the awaiter's
-   scope, so an interrupt or a wall unwinds the wait and leaves the worker to
-   be observed later;
+1. waits, cancel-aware, for `$h` to settle, then claims its result; the wait
+   polls the awaiter's scope, so an interrupt or a wall unwinds the wait,
+   claims nothing, and leaves the worker to be awaited later;
 2. writes the worker's stdout bytes to the awaiter's current stdout sink,
    then its stderr bytes to the current stderr sink — inside a capture,
    `let x = await $h` captures them; inside a worker they land in that
@@ -111,9 +130,13 @@ notice.
    stands, span and command included, an `exit` exits the awaiting run, a
    stop is re-raised, a panic resumed.
 
-A cancelled handle has no cached ending: `await` writes the bytes written so
-far and raises `worker was cancelled` (status 143, `` `cancelled ``). A second
-`await` repeats steps 2 and 3 from the cache.
+The claim moves the result out of the handle: an `await` of a handle already
+claimed, by an earlier `await`, by `race` or by `cancel`, writes nothing and
+fails with `await: this worker's result was already claimed`. A worker stopped
+from elsewhere, by its parent's cancel or a wall, ends with its own
+`worker was cancelled` (status 143, `` `cancelled ``), which the `await` that
+claims it raises. A cancelled parent's halt claims its children, so an outside
+`await` of one meets that ending only if it claimed the child first.
 
 **The handle carries the block's grade.** `spawn [T] B : F (Handle^ε α)` for
 `B : U(F^ε α)`, and `await : Handle^ε α → F^ε α`, so `await` of
@@ -155,23 +178,25 @@ session's end.
 
 **A call-owned child is a stage of the call, not an errand of the session.**
 `par` and `all` share a `Litter` of the children the call owns in birth order;
-each child is taken with `await_handle`, the exact `await` (claiming it), and
-`Litter::end` is `end_unclaimed`, which stops every unclaimed child, claims it,
-and waits for its thread up to the grace. `race` claims its winner and runs
+each child is claimed with `await_handle`, the exact `await`, and `Litter::end`
+is `end_unclaimed`, which claims every child not yet claimed, stops it, and
+waits for its thread up to the grace. `race` claims its winner and runs
 `end_unclaimed` over every handle on every exit path.
 
 - **`par f items jobs`** keeps at most `jobs` children running (`jobs <= 0`:
-  one per item), taking the oldest whenever the window is full and the rest
+  one per item), claiming the oldest whenever the window is full and the rest
   in order at the end. Any failure, `exit`, stop or panic ends the litter
   before it leaves. The result is in input order, and each child's bytes
-  replay as it is taken, so item 1's output precedes item 2's whatever order
+  replay as it is claimed, so item 1's output precedes item 2's whatever order
   they finished in.
-- **`all [k: B_k, …]`** births each task, titled by its label, then takes
+- **`all [k: B_k, …]`** births each task, titled by its label, then claims
   each in declaration order into `[k: v_k]`; the same failure path. Each block
   is demanded as a value, as a function argument is, so a command's value is
   its output.
-- **`race hs`** waits for the first to settle, takes it exactly, then stops,
-  claims and drains every loser. An empty list is `race`'s own error. It
+- **`race hs`** waits for the first to settle, claims it exactly, then claims,
+  stops and drains every loser. A handle another caller claimed is skipped;
+  with every handle claimed, at entry or mid-wait, `race` fails as `await`
+  does. An empty list is `race`'s own error. It
   starts nothing, so "owned by the call" means that when `race` returns, every
   handle it was given has ended or is cancelled and draining.
 
@@ -187,16 +212,17 @@ A run's cradle hangs at the session root and answers for nothing; a pipeline
 stage shares its parent's, so a `spawn` in a stage inside a worker belongs to
 that worker. The worker's base applies, after the body:
 
-- **the return rule** (the body returned `v`): await each unclaimed child in
-  birth order with I1's semantics — its bytes land in the parent's buffers,
+- **the return rule** (the body returned `v`): claim and await each child no
+  one has claimed, in birth order, with I1's semantics, skipping one another
+  claimer wins first — its bytes land in the parent's buffers,
   its failure becomes the parent's, as if the parent had written the `await`
   on its last line. The first failure stops the rest;
 - **the halt rule** (the body raised or escaped, a child failed under the
-  return rule, or a stop cut its wait): stop every unclaimed running child,
-  claim it, and wait for its thread up to the cleanup grace *without polling*,
+  return rule, or a stop cut its wait): claim every child not yet claimed, stop
+  it, and wait for its thread up to the cleanup grace *without polling*,
   since the parent's own scope may be what was cancelled; then propagate the
   halt;
-- **the panic path**: stop every unclaimed child; no drain.
+- **the panic path**: claim and stop every child not yet claimed; no drain.
 
 **The normal return waits rather than cancels.** A model that writes
 `spawn "all" { spawn "a" {…}; spawn "b" {…} }` has written something natural;
@@ -270,8 +296,8 @@ only settled results nobody claimed (never one a running parent will still
 join).
 
 What the leases kept that I9 needs became the handle's clock: `Stamp { mono,
-wall }`, a birth stamp set at `HandleInner::new` and an end stamp set by
-`complete` on every exit path of the worker thread, from which `elapsed` (a
+wall }`, a birth stamp set at `HandleInner::new` and an end stamp set by the
+worker's `Settler` on every exit path of its thread, from which `elapsed` (a
 running worker's age, a settled one's run time) and `settled_at` are derived,
 each in one place. `poll`, `workers`, the `` `done `` event and the notice
 read them and nothing else.
@@ -336,8 +362,9 @@ code renders anything.
 - `await` raises by default again, in a host that pays a turn for a raise.
   Decided: the notice says the truth, and `poll`'s settled arm is the one way
   to read a failed worker's output without `try`.
-- Replay briefly doubles memory for a 16 MiB handle buffer written into a
-  capture; the capture's cap applies as to any command.
+- The claim moves a worker's bytes out of its handle, so a 16 MiB buffer
+  written into a capture is held twice only while it is written; the
+  capture's cap applies as to any command.
 - `spawn` and `all` are reserved: a script that bound either fails to parse,
   naming the keyword.
 - The row rule reaches every uniform record list a host shows. Intended.
@@ -349,8 +376,9 @@ code renders anything.
 
 ## Where
 
-`await_handle`, `take_settled`, `settle_of`, `builtin_worker` in
-`core/src/builtins/concurrency/eliminate.rs`; `Birth`, `convert_own_stop` in
+`await_handle`, `join`, `builtin_worker` in
+`core/src/builtins/concurrency/eliminate.rs`; `HandleState`, `Sample`,
+`Settler` in `core/src/types/handle.rs`; `Birth`, `convert_own_stop` in
 `core/src/builtins/concurrency/birth.rs`; `spawn_form` in
 `core/src/builtins/concurrency.rs`; `Litter`, `builtin_par`, `all_form` in
 `core/src/builtins/concurrency/combinators.rs`; `Cradle`, `Brood` in

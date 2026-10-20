@@ -374,7 +374,7 @@ mod chokepoint_tests {
     use crate::protocol::{Program, Run};
     use crate::run::RunReport;
     use crate::test_helper::eventually;
-    use crate::types::{HandleState, Settled, Shell, Value};
+    use crate::types::{Sample, Settled, Shell, Value};
     use std::time::Duration;
 
     use super::BindingLease;
@@ -458,9 +458,9 @@ mod chokepoint_tests {
         }
     }
 
-    fn handle_state(shell: &Shell, name: &str) -> HandleState {
+    fn handle_state(shell: &Shell, name: &str) -> Sample<()> {
         match shell.scope_lookup(name) {
-            Some(Value::Handle(h)) => h.state(),
+            Some(Value::Handle(h)) => h.sample(),
             other => panic!("{name} is not a handle: {other:?}"),
         }
     }
@@ -761,13 +761,13 @@ mod chokepoint_tests {
 
     /// A running worker pins its name: the first prune, with `sleep` still
     /// running, yields no notice and leaves the entry alone. Cancelling
-    /// settles the handle, and the second prune takes it like any scratch.
+    /// claims the handle, and the second prune takes it like any scratch.
     #[test]
     fn running_handle_pins_name_then_settles_then_prunes() {
         let mut shell = armed_shell(2);
         top_level(&mut shell, "let h_pin = !{spawn { sleep 10 }}").expect("spawn");
         idle_spin(&mut shell, 2);
-        assert_eq!(handle_state(&shell, "h_pin"), HandleState::Running);
+        assert_eq!(handle_state(&shell, "h_pin"), Sample::Pending);
 
         assert!(
             shell.local.bindings.prune(&mut shell.env).is_empty(),
@@ -777,7 +777,7 @@ mod chokepoint_tests {
 
         top_level(&mut shell, "cancel $h_pin").expect("cancel");
         eventually(Duration::from_secs(5), || {
-            (handle_state(&shell, "h_pin") != HandleState::Running).then_some(())
+            (handle_state(&shell, "h_pin") != Sample::Pending).then_some(())
         })
         .expect("the cancelled worker must settle within the budget");
         // The `cancel $h_pin` run referenced, and so renewed, h_pin.
@@ -794,7 +794,7 @@ mod chokepoint_tests {
         let mut shell = armed_shell(2);
         top_level(&mut shell, "let h_settled = !{spawn { return 1 }}").expect("spawn");
         eventually(Duration::from_secs(5), || {
-            (handle_state(&shell, "h_settled") != HandleState::Running).then_some(())
+            (handle_state(&shell, "h_settled") != Sample::Pending).then_some(())
         })
         .expect("the instant worker must settle within the budget");
         idle_spin(&mut shell, 2);

@@ -3,10 +3,11 @@
 //! bookkeeping, never a policy itself.
 //!
 //! `spawn_child` in `builtins::concurrency` files an entry as it mints the
-//! handle. The entry leaves when the worker is *claimed*: observed settled
-//! (`await`, `race`'s winner and its cancelled losers, `poll`'s settled arm),
-//! `cancel`led, or ended by its owner's halt — and only from the claiming
-//! shell's own registry; a handle minted elsewhere lingers where it lives.
+//! handle. The entry is gone once the worker's result is *claimed*, which
+//! happens once: by `await`, by `race` (its winner and its cancelled losers),
+//! by `cancel`, or by its owner's join or halt. Every locked read drops
+//! claimed entries first, so a claim made from any shell removes the worker
+//! here. `poll` claims nothing, on either arm.
 //! One policy also removes entries: [`WorkerRegistry::sweep_retention`]. It
 //! leaves a [`ReapNotice`] the host drains at its ready boundaries, so a
 //! vanished job still has an answer in the transcript.
@@ -26,7 +27,7 @@ use crate::types::{Break, ErrorRecord, Escape, HandleInner, Shell, ThreadEnd};
 use crate::{label, record, variant};
 use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use strum::{IntoStaticStr, VariantArray};
 
@@ -166,8 +167,8 @@ impl WatchEvent {
 /// What a reap leaves for the transcript event, minus the handle it
 /// deliberately does not keep alive.
 ///
-/// Recorded only for an entry present at reap time, so a worker an
-/// eliminator observed away first leaves none.
+/// Recorded only for an entry present at reap time, so a worker a claimer
+/// removed first leaves none.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReapNotice {
     pub id: WorkerId,
@@ -310,8 +311,8 @@ impl WorkerRegistry {
     /// Measure admission and hold a seat in one locked step, so a birth that
     /// registers only later — after a thread spawn and a handle construction —
     /// cannot be raced by a sibling reading the same free seat. The measure is
-    /// running entries (each `state` briefly locked under the registry lock —
-    /// see [`HandleInner::state`]'s doc for the order) plus seats reserved.
+    /// running entries (each handle briefly locked under the registry lock,
+    /// the order [`HandleInner`] documents) plus seats reserved.
     pub(crate) fn reserve(&self, cap: Option<usize>) -> Result<Reservation, CapReached> {
         let mut inner = self.0.lock_ignore_poison();
         if let Some(cap) = cap {
@@ -342,14 +343,12 @@ impl WorkerRegistry {
         inner.entries.push(entry);
     }
 
-    /// Remove the entry carrying `handle`, matched by [`HandleInner`]'s own
-    /// [`PartialEq`] (`Arc::ptr_eq` on its result channel). A no-op when the
-    /// handle was registered in a different shell's registry.
-    pub(crate) fn remove(&self, handle: &HandleInner) {
-        self.0
-            .lock_ignore_poison()
-            .entries
-            .retain(|entry| entry.handle != *handle);
+    /// The registry locked, every claimed entry gone: a claim made anywhere
+    /// removes the worker here, under this lock.
+    fn unclaimed(&self) -> MutexGuard<'_, RegistryInner> {
+        let mut inner = self.0.lock_ignore_poison();
+        inner.entries.retain(|entry| !entry.handle.is_claimed());
+        inner
     }
 
     pub(crate) fn retention(&self) -> Option<u64> {
@@ -371,12 +370,13 @@ impl WorkerRegistry {
     /// Expire settled entries against the armed retention; a no-op unarmed. An
     /// entry is stamped the first sweep that finds it settled and removed with
     /// a [`ReapCause::Retention`] notice `retention` calls later, so retention
-    /// never runs retroactively over a quiet period. The eliminators already
-    /// take an entry the moment its result is observed; this catches the rest.
+    /// never runs retroactively over a quiet period. A claimed entry is gone
+    /// under the same lock, so it is never reaped; this catches the rest,
+    /// polled or not.
     /// A settled child of a running worker, or of a call, is left alone: its
     /// owner joins it.
     pub(crate) fn sweep_retention(&self) {
-        let mut inner = self.0.lock_ignore_poison();
+        let mut inner = self.unclaimed();
         let Some(retention) = inner.retention else {
             return;
         };
@@ -433,13 +433,12 @@ impl WorkerRegistry {
 
     /// Clone out every entry for listing; a pure read.
     pub(crate) fn snapshot(&self) -> Vec<WorkerEntry> {
-        self.0.lock_ignore_poison().entries.clone()
+        self.unclaimed().entries.clone()
     }
 
     /// Clone out the entry named by `id`; a pure read like [`Self::snapshot`].
     pub(crate) fn lookup(&self, id: WorkerId) -> Option<WorkerEntry> {
-        self.0
-            .lock_ignore_poison()
+        self.unclaimed()
             .entries
             .iter()
             .find(|entry| entry.handle.id == id)
@@ -447,7 +446,7 @@ impl WorkerRegistry {
     }
 
     pub(crate) fn count(&self) -> usize {
-        self.0.lock_ignore_poison().entries.len()
+        self.unclaimed().entries.len()
     }
 
     /// A live-thread ticket, held by the worker thread's own frame for as long
@@ -478,7 +477,7 @@ impl WorkerRegistry {
     /// roster when it was signalled, not when its child died.
     pub(crate) fn cancel_all(&self) -> usize {
         let (entries, _notices) = {
-            let mut inner = self.0.lock_ignore_poison();
+            let mut inner = self.unclaimed();
             // The armed retention and the epoch clock are configuration, not
             // roster, and survive the wipe.
             (

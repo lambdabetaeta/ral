@@ -12,7 +12,7 @@ use crate::capability::GrantStack;
 use crate::first_order::datum::{Datum, tag, untag};
 use crate::first_order::{Bytes, FOValue, Finite};
 use crate::ty::{Ty, Typed, closed_record};
-use crate::types::{Done, HandleState, Owner, Value};
+use crate::types::{Done, Owner, Sample, Value};
 use crate::{record, variant};
 
 /// One read of session state: the payload of `Frame::Probe`.
@@ -130,7 +130,7 @@ record!(BindingRow {
 /// A bound worker handle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandleRow {
-    pub state: HandleState,
+    pub state: Sample<()>,
     pub title: String,
 }
 
@@ -139,23 +139,23 @@ record!(HandleRow {
     title: "title",
 });
 
-impl Datum for HandleState {
+impl Datum for Sample<()> {
     fn encode(self) -> FOValue {
         let label = match self {
-            Self::Running => "running",
-            Self::Completed => "completed",
-            Self::Cancelled => "cancelled",
+            Self::Pending => "pending",
+            Self::Settled(()) => "settled",
+            Self::Claimed => "claimed",
         };
         tag(label, None)
     }
 
     fn decode(v: &FOValue) -> Result<Self, String> {
         match untag(v) {
-            Some(("running", None)) => Ok(Self::Running),
-            Some(("completed", None)) => Ok(Self::Completed),
-            Some(("cancelled", None)) => Ok(Self::Cancelled),
+            Some(("pending", None)) => Ok(Self::Pending),
+            Some(("settled", None)) => Ok(Self::Settled(())),
+            Some(("claimed", None)) => Ok(Self::Claimed),
             _ => Err(format!(
-                "expected `running, `completed or `cancelled, got {}",
+                "expected `pending, `settled or `claimed, got {}",
                 v.shape()
             )),
         }
@@ -257,7 +257,7 @@ mod tests {
             scheme: Some("Int".into()),
             preview: "1".into(),
             handle: Some(HandleRow {
-                state: HandleState::Cancelled,
+                state: Sample::Claimed,
                 title: "block".into(),
             }),
         };

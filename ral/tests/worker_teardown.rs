@@ -162,10 +162,10 @@ fn a_cancel_the_host_immediately_outruns_still_reaps_the_child() {
     nothing_survives("cancel $job");
 }
 
-/// `cancel` strikes the worker's own node, and `await` converts that stop
-/// into the awaiter's error: 143, the cancellation's own status.
+/// `cancel` claims the handle, so an `await` after it fails at once, an
+/// ordinary error rather than a stop.
 #[test]
-fn a_cancelled_workers_await_reports_143() {
+fn a_cancelled_workers_await_finds_it_claimed() {
     let out = run_with_timeout(
         "ral_worker_teardown",
         &[],
@@ -173,7 +173,13 @@ fn a_cancelled_workers_await_reports_143() {
         GATE_TIMEOUT,
     )
     .expect("await of a cancelled worker hung");
-    assert_eq!(out.status, 143, "stderr: {}", out.stderr);
+    assert_eq!(out.status, 1, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("await: this worker's result was already claimed"),
+        "stderr: {}",
+        out.stderr
+    );
 }
 
 /// A worker's `exit` is the host's: it reaches the run that observes the

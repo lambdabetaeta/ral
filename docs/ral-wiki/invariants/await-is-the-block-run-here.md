@@ -3,8 +3,10 @@
 **For a handle `h` born by `spawn [T] B`, `await $h` is observationally `!$B`
 run at the `await`: the same value or the same raise, and the bytes `B` wrote
 to its stdout and its stderr written, in that order, to the awaiter's current
-stdout and stderr sinks. Awaiting again replays the same bytes and the same
-ending.** The sinks are the awaiter's: inside a capture `let x = await $h`
+stdout and stderr sinks. The `await` claims the handle's result, which is
+claimed once: a second `await`, or one after `race` or `cancel` claimed it,
+fails as an ordinary error and replays nothing.** The sinks are the awaiter's:
+inside a capture `let x = await $h`
 binds the output as `let x = { … }` would, under `2> f` the stderr goes to
 `f`, and inside a worker the bytes land in that worker's buffers. The ending
 is the block's: a value returned, an error raised as it stands, an `exit` or
@@ -28,10 +30,11 @@ concurrently, in the worker's own shell, and the equation does not hold for:
 - *`exit`*, which ends the run that awaits, possibly a later one than the run
   that spawned it.
 
-`poll` is the one observation that returns the bytes as data instead, and it
-never writes. Do not add a second data-valued eliminator, or an `await` that
-returns a record: the eliminators are this equation and its one data
-projection.
+`poll` is the one observation that returns the bytes as data instead: it
+never writes and never claims, so a settled poll leaves the handle to the one
+`await` that replays it. Do not add a second data-valued eliminator, or an
+`await` that returns a record: the eliminators are this equation and its one
+data projection.
 
 See [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]
 (I1, I2) and `docs/SPEC.md` §11.2.

@@ -8,11 +8,11 @@ await $h1
 echo marker-after
 # Expected: from-child, then marker-after
 
-# A repeated await replays the same bytes both times
+# The result is claimed once: a second await replays nothing
 let h2 = spawn { echo just-once }
 await $h2
-await $h2
-# Expected: just-once twice
+try { await $h2 } { |_| echo claimed }
+# Expected: just-once, then claimed
 
 # Spawns nobody awaits leak nothing to the caller's stdout
 let lost1 = spawn { echo alpha }

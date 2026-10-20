@@ -4,7 +4,6 @@ use super::HandleInner;
 use crate::fact::WorkerId;
 use crate::process::{Scope, ScopeNode};
 use crate::sync::LockExt as _;
-use crate::types::Shell;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -52,38 +51,25 @@ impl Brood {
         children.push(handle);
     }
 
-    /// Every child no eliminator has claimed, in birth order.
-    pub(crate) fn unclaimed(&self) -> Vec<HandleInner> {
-        self.children
-            .lock_ignore_poison()
-            .iter()
-            .filter(|child| !child.is_claimed())
-            .cloned()
-            .collect()
+    /// Every child, in birth order.
+    pub(crate) fn children(&self) -> Vec<HandleInner> {
+        self.children.lock_ignore_poison().clone()
     }
 
     /// The halt rule: [`end_unclaimed`] over this brood.
-    pub(crate) fn end(&self, shell: &Shell, grace: Duration) {
-        end_unclaimed(&self.unclaimed(), shell, grace);
+    pub(crate) fn end(&self, grace: Duration) {
+        end_unclaimed(&self.children(), grace);
     }
 }
 
-/// An eliminator has settled `handle`: its entry leaves the registry, and no
-/// brood or litter answers for it.
-pub(crate) fn claim(handle: &HandleInner, shell: &Shell) {
-    handle.claim();
-    shell.local.workers.remove(handle);
-}
-
-/// Stop and claim every unclaimed handle, then wait for their threads to end
-/// up to `grace`.
-pub(crate) fn end_unclaimed(handles: &[HandleInner], shell: &Shell, grace: Duration) {
-    let unclaimed: Vec<&HandleInner> = handles.iter().filter(|h| !h.is_claimed()).collect();
-    for handle in &unclaimed {
-        handle.stop();
-        claim(handle, shell);
-    }
-    wait_ended(&unclaimed, grace);
+/// Claim and stop every handle no one has claimed, then wait for their
+/// threads to end up to `grace`.
+pub(crate) fn end_unclaimed<'a>(
+    handles: impl IntoIterator<Item = &'a HandleInner>,
+    grace: Duration,
+) {
+    let claimed: Vec<&HandleInner> = handles.into_iter().filter(|h| h.claim_and_stop()).collect();
+    wait_ended(&claimed, grace);
 }
 
 /// Wait for every handle's thread to end, up to `grace`.  Never polls: the

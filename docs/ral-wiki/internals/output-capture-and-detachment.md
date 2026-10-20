@@ -107,8 +107,8 @@ another worker hangs under that worker): the *handle* is its evidence
   milliseconds.
 - The worker's output goes to its *own* per-handle buffer — `spawn_child` wires the
   child's `stdout`/`stderr` to fresh `new_buffer()` sinks
-  (`core/src/builtins/concurrency/birth.rs`), drained into the handle's cache only when it
-  settles. There is no run-owned pipe for it to hold open, so the run cannot
+  (`core/src/builtins/concurrency/birth.rs`), drained into the handle's result only
+  when the worker settles it. There is no run-owned pipe for it to hold open, so the run cannot
   stall on it.
 
 ## A chatty server is bounded, not unbounded
@@ -173,9 +173,9 @@ run, and teardown cancels the rest.
   which is not ground, so it crosses the engine protocol as any record does;
   the row type is the `` `workers `` probe's, less the host's
   `retention-left`.
-- A settled worker lingers in the registry as an unclaimed result until an
-  eliminator claims it or retention expires it — the one policy that removes
-  an entry: 256 idle ral calls under exarch (`SETTLED_WORKER_RETENTION`),
+- A settled worker lingers in the registry as an unclaimed result, `poll`ed or
+  not, until it is claimed or retention expires it — the one policy that
+  removes an entry: 256 idle ral calls under exarch (`SETTLED_WORKER_RETENTION`),
   swept by `WorkerRegistry::sweep_retention` on the host's ral-call epoch.
 - A retention reap is atomic with a `ReapNotice` recording what fell and
   why. The engine drains its ledger at each run's own ready boundary
@@ -189,7 +189,7 @@ run, and teardown cancels the rest.
 ## Reading a spawned server's output (the exarch caveat)
 
 - A server never settles, so `await $h` would block to the wall and unwind —
-  sparing the session's worker, via the cancel-aware `wait_first_settled`. But
+  sparing the session's worker, via the cancel-aware `wait_first_ready`. But
   `poll $h` is a pull-based read of a *running* worker: its `` `pending `` arm
   carries a `{stdout, stderr, elapsed}` snapshot of the bytes buffered so far
   and the seconds run, the bytes cloned

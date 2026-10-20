@@ -1,8 +1,9 @@
 # Test: spawn and await carry values, closures, and deep recursion
 
-# A second await replays the same ending
+# A worker's value comes back through await as itself
 let h1 = !{spawn { return 99 }}
-echo $[!{await $h1} + !{await $h1}]
+let v1 = await $h1
+echo $[$v1 + $v1]
 # Expected: 198
 
 # A closure returned from a worker keeps its captured bindings
@@ -12,7 +13,7 @@ let add-secret = await $h2
 echo !{add-secret 8}
 # Expected: 50
 
-# Cancelling a finished worker changes nothing
+# Cancelling an awaited worker changes nothing: its result was claimed
 let h3 = !{spawn { return 7 }}
 let r3 = await $h3
 cancel $h3

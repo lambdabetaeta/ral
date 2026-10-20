@@ -22,7 +22,7 @@ use crate::types::{Closure, Mooring, Settled, Shell, TitlePolicy, Value, sig, si
 use birth::{Birth, spawn_child};
 pub(crate) use combinators::all_form;
 pub(super) use combinators::builtin_par;
-use eliminate::await_handle;
+use eliminate::{await_handle, join};
 pub(super) use eliminate::{
     builtin_await, builtin_cancel, builtin_poll, builtin_race, builtin_worker, builtin_workers,
 };

@@ -10,8 +10,8 @@ use crate::io::new_buffer;
 use crate::process::{CancelCause, DurableRoot, Scope, ScopeNode, WorkerStop};
 use crate::ty::{Grade, Ty};
 use crate::types::{
-    Break, CompletedHandle, DeferredSink, Error, Escape, HandleInner, HandleState, Map, Owner,
-    ReapCause, Status, ThreadEnd, WatchEvent, WorkerId,
+    Break, DeferredSink, Error, Escape, HandleInner, Map, Owner, ReapCause, Sample, Status,
+    ThreadEnd, WatchEvent, WorkerId,
 };
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -22,6 +22,18 @@ fn status(b: Break) -> i32 {
     }
 }
 
+/// `verb`'s refusal of a handle whose result was already claimed: an ordinary
+/// error, not a stop.
+fn expect_claimed(b: Break, verb: &str) {
+    match b {
+        Break::Error(e) => assert_eq!(
+            e.message,
+            format!("{verb}: this worker's result was already claimed")
+        ),
+        other @ Break::Escape(_) => panic!("expected the already-claimed error, got {other:?}"),
+    }
+}
+
 /// A titled spawn's birth.
 fn spawned(title: &str) -> Birth {
     Birth::Spawn {
@@ -29,23 +41,20 @@ fn spawned(title: &str) -> Birth {
     }
 }
 
-fn handle_over(rx: mpsc::Receiver<ThreadEnd>) -> HandleInner {
-    HandleInner::new(
+/// A handle whose worker dropped its settler unsettled, modelling a panic.
+/// The buffers are pre-seeded so a settled outcome can be checked for them.
+fn handle_with_panicked_worker(stdout: &[u8], stderr: &[u8]) -> HandleInner {
+    let (_, out) = new_buffer();
+    let (_, err) = new_buffer();
+    out.append(stdout);
+    err.append(stderr);
+    let (handle, _) = HandleInner::new(
         WorkerId::mint(),
         "<test>",
         DurableRoot::default().worker(),
-        Some(rx),
-    )
-}
-
-/// A handle whose worker dropped its `Sender` unsent, modelling a panic.
-/// The buffers are pre-seeded so a settled outcome can be checked for them.
-fn handle_with_disconnected_worker(stdout: &[u8], stderr: &[u8]) -> HandleInner {
-    let (tx, rx) = mpsc::channel::<ThreadEnd>();
-    drop(tx);
-    let handle = handle_over(rx);
-    handle.stdout_buf.append(stdout);
-    handle.stderr_buf.append(stderr);
+        out,
+        err,
+    );
     handle
 }
 
@@ -77,17 +86,16 @@ fn fo_expect_variant<'a>(v: &'a FOValue, label: &str) -> &'a FOValue {
     }
 }
 
-/// A panicked worker's `Disconnected` receiver must settle as a panic,
-/// not `None` — else `poll` reads `pending` forever and `race` spins.
+/// A worker whose settler is dropped unsettled settles as a panic, not
+/// `pending` — else `poll` reads `pending` forever and `race` spins.
 #[test]
-fn try_settle_reports_disconnected_worker_as_panicked() {
-    let handle = handle_with_disconnected_worker(b"", b"");
-    match handle.try_settle() {
-        Some(CompletedHandle {
-            end: ThreadEnd::Panicked(text),
-            ..
-        }) => assert!(text.contains("spawned thread panicked")),
-        other => panic!("expected Some(panicked end), got {other:?}"),
+fn a_dropped_settler_settles_as_panicked() {
+    let handle = handle_with_panicked_worker(b"", b"");
+    match handle.observe(|completed| completed.end.clone()) {
+        Sample::Settled(ThreadEnd::Panicked(text)) => {
+            assert!(text.contains("spawned thread panicked"));
+        }
+        other => panic!("expected a settled panic, got {other:?}"),
     }
 }
 
@@ -96,7 +104,7 @@ fn try_settle_reports_disconnected_worker_as_panicked() {
 #[test]
 fn a_polled_panic_is_reraised() {
     let shell = crate::test_helper::core_shell();
-    let handle = handle_with_disconnected_worker(b"out", b"err");
+    let handle = handle_with_panicked_worker(b"out", b"err");
     let args = [Value::Handle(Box::new(handle))];
     let raised =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| builtin_poll(&args, &shell)));
@@ -107,9 +115,9 @@ fn a_polled_panic_is_reraised() {
 #[test]
 fn an_awaited_panic_is_reraised() {
     let mut shell = crate::test_helper::core_shell();
-    let handle = handle_with_disconnected_worker(b"", b"");
+    let handle = handle_with_panicked_worker(b"", b"");
     let raised = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        await_handle(&handle, &mut shell)
+        await_handle(&handle, "await", &mut shell)
     }));
     assert!(raised.is_err(), "await must re-raise a worker's panic");
 }
@@ -118,7 +126,7 @@ fn an_awaited_panic_is_reraised() {
 #[test]
 fn a_raced_panic_is_reraised() {
     let mut shell = crate::test_helper::core_shell();
-    let handle = handle_with_disconnected_worker(b"", b"");
+    let handle = handle_with_panicked_worker(b"", b"");
     let args = [Value::list(vec![Value::Handle(Box::new(handle))])];
     let raised = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         builtin_race(&args, &Mooring::adrift(), &mut shell)
@@ -126,21 +134,17 @@ fn a_raced_panic_is_reraised() {
     assert!(raised.is_err(), "race must re-raise a worker's panic");
 }
 
-/// `poll` over a handle `cancel` abandoned settles with the owner's record.
+/// `cancel` claims the handle: a later `poll` finds nothing left to observe.
 #[test]
-fn a_cancelled_handle_polls_settled() {
+fn a_cancelled_handle_is_claimed() {
     let mut shell = crate::test_helper::core_shell();
     let m = Mooring::adrift();
     let handle = spawn_child(&m, &mut shell, spawned("<test>"), check_loop).unwrap();
     let args = [Value::Handle(Box::new(handle))];
-    builtin_cancel(&args, &shell).unwrap();
-    let polled = builtin_poll(&args, &shell).expect("poll is total");
-    let fields = expect_map(expect_variant(&polled, "settled"));
-    let outcome = fields.get("outcome");
-    let err = expect_variant(outcome.as_deref().expect("outcome field"), "err");
-    assert_eq!(
-        expect_map(err).get("status").as_deref(),
-        Some(&Value::Int(143))
+    builtin_cancel(&args).unwrap();
+    expect_claimed(
+        builtin_poll(&args, &shell).expect_err("cancel claimed the handle"),
+        "poll",
     );
 }
 
@@ -234,24 +238,25 @@ fn foreground_cancel_spares_worker() {
 fn await_unwinds_on_foreground_cancel_sparing_the_worker() {
     let mut shell = crate::test_helper::core_shell();
 
-    // A still-running worker, root-parented as a real `spawn`'s is.  Its
-    // `Sender` stays alive, so the receiver reports `Empty`, not `Disconnected`.
-    let (_tx, rx) = mpsc::channel::<ThreadEnd>();
+    // A still-running worker, root-parented as a real `spawn`'s is: its
+    // settler stays alive, unsettled.
     let (_sink, stdout_buf) = new_buffer();
     let (_sink2, stderr_buf) = new_buffer();
     let worker_scope = shell.session.root.worker();
-    let handle = HandleInner {
+    let (handle, _settler) = HandleInner::new(
+        WorkerId::mint(),
+        "<test>",
+        worker_scope.clone(),
         stdout_buf,
         stderr_buf,
-        ..HandleInner::new(WorkerId::mint(), "<test>", worker_scope.clone(), Some(rx))
-    };
+    );
 
     // Cancel the foreground (run deadline / interrupt), not the root.
     let m = Mooring::adrift();
     shell.scope = Scope::clone(&m.home);
     m.home.cancel(crate::process::CancelCause::Interrupted);
 
-    let err = await_handle(&handle, &mut shell)
+    let err = await_handle(&handle, "await", &mut shell)
         .expect_err("await must unwind on a foreground cancel, not block");
     assert!(matches!(err, Break::Escape(Escape::Stopped { .. })));
     assert!(
@@ -269,15 +274,15 @@ fn check_loop(_mooring: &Mooring, child: &mut Shell) -> Settled<Value> {
     }
 }
 
-/// Block until `handle`'s worker has marked itself `Completed` at exit.
+/// Block until `handle`'s worker has settled it at exit.
 fn wait_settled(handle: &HandleInner) {
     for _ in 0..500 {
-        if handle.state() == HandleState::Completed {
+        if handle.sample() == Sample::Settled(()) {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
-    panic!("worker never marked itself Completed");
+    panic!("worker never settled");
 }
 
 struct EchoDesk;
@@ -348,7 +353,7 @@ fn cancel_through_the_handle_ends_a_titled_worker() {
     let handle =
         spawn_child(&m, &mut shell, spawned("<serve>"), check_loop).expect("spawn must succeed");
 
-    builtin_cancel(&[Value::Handle(Box::new(handle.clone()))], &shell)
+    builtin_cancel(&[Value::Handle(Box::new(handle.clone()))])
         .expect("cancel must succeed on a running worker");
 
     assert!(
@@ -409,7 +414,28 @@ fn worker_reacquires_a_settled_but_unclaimed_worker() {
     .unwrap();
     wait_settled(&handle);
     let again = reacquire(&mut shell, handle.id, Ty::Int).expect("a retained worker resolves");
-    let awaited = await_handle(&again, &mut shell).expect("the retained result is delivered");
+    let awaited =
+        await_handle(&again, "await", &mut shell).expect("the retained result is delivered");
+    assert_eq!(awaited, Value::Int(42));
+}
+
+/// A settled `poll` claims nothing: the polled worker still resolves by its
+/// id, and `await` claims it there.
+#[test]
+fn worker_reacquires_a_polled_worker() {
+    let mut shell = crate::test_helper::core_shell();
+    let m = Mooring::adrift();
+    let handle = spawn_child(&m, &mut shell, spawned("<answer>"), |_, _| {
+        Ok(Value::Int(42))
+    })
+    .unwrap();
+    wait_settled(&handle);
+    let polled = builtin_poll(&[Value::Handle(Box::new(handle.clone()))], &shell)
+        .expect("a settled poll observes");
+    expect_variant(&polled, "settled");
+    let again = reacquire(&mut shell, handle.id, Ty::Int).expect("a polled worker resolves");
+    let awaited =
+        await_handle(&again, "await", &mut shell).expect("the polled result is delivered");
     assert_eq!(awaited, Value::Int(42));
 }
 
@@ -464,9 +490,9 @@ fn workers_lists_each_entry_as_data() {
     gated.cancel.cancel(CancelCause::Cancelled);
 }
 
-/// Two `worker` calls on one worker are two sites, and each `await` admits
-/// the worker's value against its own: what one script decides about the
-/// answer is not what another decides.
+/// Two `worker` calls on one worker are two sites, and each observation
+/// admits the worker's value against its own: what one script decides about
+/// the answer is not what another decides.
 #[test]
 fn worker_twice_on_one_worker_admits_at_each_site() {
     let mut shell = crate::test_helper::core_shell();
@@ -478,9 +504,9 @@ fn worker_twice_on_one_worker_admits_at_each_site() {
     wait_settled(&handle);
     let as_number = reacquire(&mut shell, handle.id, Ty::Int).expect("resolves");
     let as_text = reacquire(&mut shell, handle.id, Ty::String).expect("resolves");
-    await_handle(&as_number, &mut shell)
+    builtin_poll(&[Value::Handle(Box::new(as_number))], &shell)
         .expect("the answer is a number, as the first site uses it");
-    let refused = match await_handle(&as_text, &mut shell) {
+    let refused = match await_handle(&as_text, "await", &mut shell) {
         Err(Break::Error(e)) => e,
         other => panic!("the second site uses the answer as text, got {other:?}"),
     };
@@ -653,19 +679,83 @@ fn a_worker_uses_a_module_against_its_creators_session() {
 // ── `await` is the block run here ────────────────────────────────────
 
 /// `await` writes what the worker wrote to the awaiter's own streams, then
-/// returns its value; a second `await` replays the same ending.
+/// returns its value.
 #[test]
 fn await_replays_the_workers_bytes_then_returns_its_value() {
     let mut shell = crate::test_helper::core_shell();
     let (ended, stdout) = run_captured(
         &mut shell,
         "let h = spawn { echo out; warn err; return 4 }\n\
-         let v = await $h\necho $v\n\
-         let w = await $h\necho $w",
+         let v = await $h\necho $v",
         None,
     );
     ended.expect("the block returned");
-    assert_eq!(String::from_utf8_lossy(&stdout), "out\n4\nout\n4\n");
+    assert_eq!(String::from_utf8_lossy(&stdout), "out\n4\n");
+}
+
+/// A handle's result is claimed once: a second `await` replays nothing and
+/// fails, as an ordinary error.
+#[test]
+fn a_second_await_finds_the_result_claimed() {
+    let mut shell = crate::test_helper::core_shell();
+    let (ended, stdout) = run_captured(
+        &mut shell,
+        "let h = spawn { echo out; return 4 }\n\
+         let v = await $h\necho $v\n\
+         try { let _ = await $h } { |e| echo $e[message] }",
+        None,
+    );
+    ended.expect("the second await's failure is caught");
+    assert_eq!(
+        String::from_utf8_lossy(&stdout),
+        "out\n4\nawait: this worker's result was already claimed\n"
+    );
+}
+
+/// A settled `poll` claims nothing: the handle stays awaitable, and the one
+/// `await` replays its bytes once.
+#[test]
+fn a_settled_poll_leaves_the_handle_to_await() {
+    let mut shell = crate::test_helper::core_shell();
+    let (ended, stdout) = run_captured(
+        &mut shell,
+        "let h = spawn { echo out; return 4 }\n\
+         let settle = { |h| case !{poll $h} [\n\
+             `settled: { |s| return $s[outcome] },\n\
+             `pending: { |_| sleep 0.01; settle $h }\n\
+         ] }\n\
+         let first = settle $h\n\
+         let again = settle $h\n\
+         await $h",
+        None,
+    );
+    assert_eq!(ended.expect("the polled handle is awaited"), Value::Int(4));
+    assert_eq!(String::from_utf8_lossy(&stdout), "out\n");
+}
+
+/// `cancel` after `await` is nothing: the result is claimed, so there is no
+/// worker left for it to stop.
+#[test]
+fn cancel_after_await_is_nothing() {
+    let mut shell = crate::test_helper::core_shell();
+    let handle = spawn_child(
+        &Mooring::adrift(),
+        &mut shell,
+        spawned("<answer>"),
+        |_, _| Ok(Value::Int(42)),
+    )
+    .unwrap();
+    assert_eq!(
+        await_handle(&handle, "await", &mut shell).expect("awaited"),
+        Value::Int(42)
+    );
+    let cancelled = builtin_cancel(&[Value::Handle(Box::new(handle.clone()))])
+        .expect("cancel of a claimed handle succeeds");
+    assert_eq!(cancelled, Value::Unit);
+    assert!(
+        !handle.cancel.is_cancelled(),
+        "a claimed handle's worker is not stopped"
+    );
 }
 
 /// A failed block's bytes are replayed before its failure is raised, as
@@ -714,6 +804,75 @@ fn poll_reports_elapsed_on_both_arms() {
         (elapsed(&settled, "settled") - ran).abs() < 0.05,
         "a settled poll reports the handle's run time, {ran}s"
     );
+}
+
+/// `race` skips a handle another caller claimed and races the rest.
+#[test]
+fn race_skips_a_claimed_handle() {
+    let mut shell = crate::test_helper::core_shell();
+    let m = Mooring::adrift();
+    let claimed = spawn_child(&m, &mut shell, spawned("<claimed>"), |_, _| {
+        Ok(Value::Int(1))
+    })
+    .unwrap();
+    await_handle(&claimed, "await", &mut shell).expect("awaited");
+    let live = spawn_child(&m, &mut shell, spawned("<live>"), |_, _| Ok(Value::Int(2))).unwrap();
+    let args = [Value::list(vec![
+        Value::Handle(Box::new(claimed)),
+        Value::Handle(Box::new(live)),
+    ])];
+    assert_eq!(
+        builtin_race(&args, &m, &mut shell).expect("the live handle wins"),
+        Value::Int(2)
+    );
+}
+
+/// `race` over handles every one of which is claimed fails, stopping nothing.
+#[test]
+fn race_fails_when_every_handle_is_claimed() {
+    let mut shell = crate::test_helper::core_shell();
+    let m = Mooring::adrift();
+    let awaited = spawn_child(&m, &mut shell, spawned("<awaited>"), |_, _| {
+        Ok(Value::Int(1))
+    })
+    .unwrap();
+    await_handle(&awaited, "await", &mut shell).expect("awaited");
+    let cancelled = spawn_child(&m, &mut shell, spawned("<cancelled>"), check_loop).unwrap();
+    builtin_cancel(&[Value::Handle(Box::new(cancelled.clone()))]).unwrap();
+    let args = [Value::list(vec![
+        Value::Handle(Box::new(awaited)),
+        Value::Handle(Box::new(cancelled)),
+    ])];
+    expect_claimed(
+        builtin_race(&args, &m, &mut shell).expect_err("every handle is claimed"),
+        "race",
+    );
+}
+
+/// A handle claimed mid-wait is skipped; once the last pending one is
+/// claimed too, `race` fails rather than wait on nothing.
+#[test]
+fn race_fails_when_every_handle_is_claimed_mid_wait() {
+    let mut shell = crate::test_helper::core_shell();
+    let m = Mooring::adrift();
+    let a = spawn_child(&m, &mut shell, spawned("<a>"), check_loop).unwrap();
+    let b = spawn_child(&m, &mut shell, spawned("<b>"), check_loop).unwrap();
+    let (outsider_a, outsider_b) = (a.clone(), b.clone());
+    let outsider = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        outsider_a.claim_and_stop();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        outsider_b.claim_and_stop();
+    });
+    let args = [Value::list(vec![
+        Value::Handle(Box::new(a)),
+        Value::Handle(Box::new(b)),
+    ])];
+    expect_claimed(
+        builtin_race(&args, &m, &mut shell).expect_err("both were claimed mid-wait"),
+        "race",
+    );
+    outsider.join().unwrap();
 }
 
 #[test]
@@ -949,7 +1108,7 @@ fn watched_lines_surface_one_by_one() {
         Ok(Value::Unit)
     })
     .unwrap();
-    await_handle(&handle, &mut shell).expect("await ok");
+    await_handle(&handle, "await", &mut shell).expect("await ok");
     let lines: Vec<(String, String)> = batches
         .lock()
         .unwrap()
@@ -1002,11 +1161,8 @@ fn deferred_batch_carries_body_surface_before_done() {
     );
     assert_eq!(done_outcome_label(&batch[1]), "panic");
 
-    match handle.try_settle() {
-        Some(CompletedHandle {
-            end: ThreadEnd::Panicked(_),
-            ..
-        }) => {}
+    match handle.observe(|completed| completed.end.clone()) {
+        Sample::Settled(ThreadEnd::Panicked(_)) => {}
         other => panic!("expected a panicked end, got {other:?}"),
     }
 }
@@ -1023,7 +1179,7 @@ fn no_deferred_sink_means_no_delivery() {
     })
     .unwrap();
 
-    await_handle(&handle, &mut shell).expect("await ok");
+    await_handle(&handle, "await", &mut shell).expect("await ok");
 }
 
 // ── worker registry (pure bookkeeping, no policy) ────────────────────
@@ -1054,38 +1210,36 @@ fn spawn_child_registers_one_entry_with_matching_handle() {
     );
 }
 
-/// Every eliminator that observes a settled worker removes its entry, while a
-/// `` `pending `` `poll` leaves it: only observation may mutate the registry.
+/// Every claimer removes the worker's entry, while `poll`, on either arm,
+/// leaves it: an entry leaves the registry when its result is claimed.
 #[test]
-fn eliminators_remove_the_entry_except_a_pending_poll() {
+fn claimers_remove_the_entry_and_poll_never_does() {
     let mut shell = crate::test_helper::core_shell();
     let m = Mooring::adrift();
 
     // `await` removes.
     let h1 = spawn_child(&m, &mut shell, spawned("<a>"), |_, _c| Ok(Value::Unit)).unwrap();
-    await_handle(&h1, &mut shell).expect("await ok");
+    await_handle(&h1, "await", &mut shell).expect("await ok");
     assert_eq!(shell.local.workers.count(), 0, "await removes its entry");
 
     // `cancel` removes.
     let h2 = spawn_child(&m, &mut shell, spawned("<b>"), |_, _c| Ok(Value::Unit)).unwrap();
     assert_eq!(shell.local.workers.count(), 1);
-    builtin_cancel(&[Value::Handle(Box::new(h2))], &shell).expect("cancel ok");
+    builtin_cancel(&[Value::Handle(Box::new(h2))]).expect("cancel ok");
     assert_eq!(shell.local.workers.count(), 0, "cancel removes its entry");
 
-    // A settled `poll` removes.
+    // A settled `poll` leaves it; the `await` after it removes.
     let h3 = spawn_child(&m, &mut shell, spawned("<c>"), |_, _c| Ok(Value::Unit)).unwrap();
-    loop {
-        let polled = builtin_poll(&[Value::Handle(Box::new(h3.clone()))], &shell).unwrap();
-        if matches!(&polled, Value::Variant { label, .. } if label.as_ref() == "settled") {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
+    wait_settled(&h3);
+    let polled = builtin_poll(&[Value::Handle(Box::new(h3.clone()))], &shell).unwrap();
+    expect_variant(&polled, "settled");
     assert_eq!(
         shell.local.workers.count(),
-        0,
-        "a settled poll removes its entry"
+        1,
+        "a settled poll leaves its entry"
     );
+    await_handle(&h3, "await", &mut shell).expect("await ok");
+    assert_eq!(shell.local.workers.count(), 0, "the await after it removes");
 
     // Block the worker on its own channel so the sample is deterministically
     // `` `pending ``, with no timing guess.
@@ -1107,7 +1261,7 @@ fn eliminators_remove_the_entry_except_a_pending_poll() {
         "a pending poll must not touch the registry"
     );
     unblock_tx.send(()).unwrap();
-    await_handle(&h4, &mut shell).expect("await ok");
+    await_handle(&h4, "await", &mut shell).expect("await ok");
 }
 
 /// `race` removes the winner and every cancelled loser: nothing lingers in
@@ -1299,10 +1453,10 @@ fn unarmed_sweep_retains_settled_entries_indefinitely() {
     );
 }
 
-/// Observation beats retention: a stamped entry is removed the moment a
-/// settled `poll` claims it, so a later sweep finds nothing to expire.
+/// Claiming beats retention: a stamped entry is removed the moment `await`
+/// claims it, so a later sweep finds nothing to expire.
 #[test]
-fn observation_beats_retention() {
+fn claiming_beats_retention() {
     let mut shell = crate::test_helper::core_shell();
     let m = Mooring::adrift();
     let handle = spawn_child(&m, &mut shell, spawned("<claimed>"), |_, _child| {
@@ -1316,12 +1470,8 @@ fn observation_beats_retention() {
     shell.local.workers.sweep_retention();
     assert_eq!(shell.local.workers.snapshot()[0].settled_epoch, Some(1));
 
-    builtin_poll(&[Value::Handle(Box::new(handle))], &shell).expect("poll ok");
-    assert_eq!(
-        shell.local.workers.count(),
-        0,
-        "a settled poll claims the entry"
-    );
+    await_handle(&handle, "await", &mut shell).expect("await ok");
+    assert_eq!(shell.local.workers.count(), 0, "await claims the entry");
 
     tick(&shell, 400);
     shell.local.workers.sweep_retention();
@@ -1329,6 +1479,58 @@ fn observation_beats_retention() {
         shell.take_worker_reap_notices().is_empty(),
         "a claimed result leaves no retention notice"
     );
+}
+
+/// A claim made from another shell, whose registry never held the entry,
+/// still keeps retention from reaping it: the sweep drops claimed entries
+/// under its own lock.
+#[test]
+fn a_claimed_entry_is_never_reaped() {
+    let mut shell = crate::test_helper::core_shell();
+    let mut elsewhere = crate::test_helper::core_shell();
+    let m = Mooring::adrift();
+    let handle = spawn_child(&m, &mut shell, spawned("<claimed>"), |_, _child| {
+        Ok(Value::Unit)
+    })
+    .expect("spawn must succeed");
+    wait_settled(&handle);
+
+    shell.arm_worker_retention(2);
+    tick(&shell, 1);
+    shell.local.workers.sweep_retention();
+    await_handle(&handle, "await", &mut elsewhere).expect("await ok");
+
+    tick(&shell, 2);
+    shell.local.workers.sweep_retention();
+    assert!(
+        shell.take_worker_reap_notices().is_empty(),
+        "a claimed result leaves no retention notice"
+    );
+    assert_eq!(shell.local.workers.count(), 0, "the claimed entry is gone");
+}
+
+/// A settled `poll` claims nothing, so a polled entry is retention's as any
+/// unclaimed settled entry is.
+#[test]
+fn retention_reaps_a_polled_entry() {
+    let mut shell = crate::test_helper::core_shell();
+    let m = Mooring::adrift();
+    let handle = spawn_child(&m, &mut shell, spawned("<polled>"), |_, _child| {
+        Ok(Value::Unit)
+    })
+    .expect("spawn must succeed");
+    wait_settled(&handle);
+
+    shell.arm_worker_retention(2);
+    tick(&shell, 1);
+    shell.local.workers.sweep_retention();
+    builtin_poll(&[Value::Handle(Box::new(handle))], &shell).expect("poll ok");
+    assert_eq!(shell.local.workers.count(), 1, "a settled poll leaves it");
+
+    tick(&shell, 2);
+    shell.local.workers.sweep_retention();
+    assert_eq!(shell.local.workers.count(), 0, "retention reaps it");
+    assert_eq!(shell.take_worker_reap_notices().len(), 1);
 }
 
 /// Retention bounds a settled entry, never live work: a running entry is never stamped or expired, at retention 0 or any epoch.
@@ -1360,7 +1562,7 @@ fn running_entries_are_never_stamped_or_expired() {
     );
 
     gate_tx.send(()).unwrap();
-    await_handle(&handle, &mut shell).expect("await after the gate opens");
+    await_handle(&handle, "await", &mut shell).expect("await after the gate opens");
 }
 
 // ── the admission cap ────────────────────────────────────────────────
@@ -1405,7 +1607,7 @@ fn worker_cap_rejects_at_the_door_and_frees_on_cancel() {
         "a refused birth registers nothing"
     );
 
-    builtin_cancel(&[Value::Handle(Box::new(handles[0].clone()))], &shell).expect("cancel ok");
+    builtin_cancel(&[Value::Handle(Box::new(handles[0].clone()))]).expect("cancel ok");
     spawn_child(&m, &mut shell, spawned("<after>"), |_, _c| Ok(Value::Unit))
         .expect("cancelling one frees a seat");
 
@@ -1480,32 +1682,43 @@ fn expect_worker_stop(e: &Error, stop: WorkerStop) {
     assert_eq!(reason, want);
 }
 
-/// `cancel` then `await`: the stop is this run's own, so it is the awaiter's error.
+/// `cancel` then `await`: `cancel` claimed the handle, so `await` finds it claimed.
 #[test]
-fn awaiting_a_cancelled_worker_is_the_awaiters_error() {
+fn awaiting_a_cancelled_worker_finds_it_claimed() {
     let mut shell = crate::test_helper::core_shell();
     let m = Mooring::adrift();
     let handle = spawn_child(&m, &mut shell, spawned("<test>"), check_loop).unwrap();
-    builtin_cancel(&[Value::Handle(Box::new(handle.clone()))], &shell).unwrap();
-    let err = await_handle(&handle, &mut shell).expect_err("a cancelled worker has no value");
-    expect_worker_stop(&stopped_error(err), WorkerStop::Cancelled);
+    builtin_cancel(&[Value::Handle(Box::new(handle.clone()))]).unwrap();
+    let err = await_handle(&handle, "await", &mut shell).expect_err("cancel claimed it");
+    expect_claimed(err, "await");
 }
 
-/// A `cancel` from another thread while `await` is blocked is the awaiter's error.
+/// A `cancel` from another thread while `await` is blocked claims the handle
+/// from under the awaiter, which stops waiting and finds it claimed.
 #[test]
-fn a_cancel_during_await_is_the_awaiters_error() {
+fn a_cancel_during_await_claims_it_from_the_awaiter() {
     let mut shell = crate::test_helper::core_shell();
     let m = Mooring::adrift();
     let handle = spawn_child(&m, &mut shell, spawned("<test>"), check_loop).unwrap();
     let canceller = handle.clone();
     let join = std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(20));
-        if canceller.detach() {
-            canceller.cancel.cancel(CancelCause::Cancelled);
-        }
+        canceller.claim_and_stop();
     });
-    let err = await_handle(&handle, &mut shell).expect_err("cancelled while awaited");
+    let err = await_handle(&handle, "await", &mut shell).expect_err("cancelled while awaited");
     join.join().unwrap();
+    expect_claimed(err, "await");
+}
+
+/// A worker whose node is struck from elsewhere, with no claimer, ends with
+/// its own `worker was cancelled`, and the `await` that claims it raises it.
+#[test]
+fn a_worker_stopped_unclaimed_is_its_awaiters_error() {
+    let mut shell = crate::test_helper::core_shell();
+    let m = Mooring::adrift();
+    let handle = spawn_child(&m, &mut shell, spawned("<test>"), check_loop).unwrap();
+    handle.cancel.cancel(CancelCause::Cancelled);
+    let err = await_handle(&handle, "await", &mut shell).expect_err("stopped from elsewhere");
     expect_worker_stop(&stopped_error(err), WorkerStop::Cancelled);
 }
 
@@ -1522,7 +1735,7 @@ fn exiting_worker(shell: &mut Shell) -> HandleInner {
 fn awaiting_an_exited_worker_exits() {
     let mut shell = crate::test_helper::core_shell();
     let handle = exiting_worker(&mut shell);
-    let err = await_handle(&handle, &mut shell).expect_err("exit passes");
+    let err = await_handle(&handle, "await", &mut shell).expect_err("exit passes");
     assert!(matches!(err, Break::Escape(Escape::Exit(3))), "{err:?}");
 }
 
@@ -1548,7 +1761,7 @@ fn a_foreign_stop_is_reraised_by_await_and_poll() {
         ))
     };
     let awaited = spawn_child(&m, &mut shell, spawned("<a>"), body.clone()).unwrap();
-    let err = await_handle(&awaited, &mut shell).expect_err("a foreign stop passes");
+    let err = await_handle(&awaited, "await", &mut shell).expect_err("a foreign stop passes");
     assert!(
         matches!(
             err,
@@ -1694,10 +1907,78 @@ fn cancelling_a_worker_cancels_its_children() {
     let inner = inner_rx.recv().unwrap();
     let entry = shell.local.workers.lookup(inner.id).expect("registered");
     assert_eq!(entry.owner, Owner::Worker(outer.id));
-    builtin_cancel(&[Value::Handle(Box::new(outer))], &shell).unwrap();
+    builtin_cancel(&[Value::Handle(Box::new(outer))]).unwrap();
     assert!(within(2, || inner.cancel.cause()
         == Some(CancelCause::Cancelled)
         && shell.local.workers.count() == 0));
+}
+
+/// A worker that polled its failing child still fails with it: `poll` claims
+/// nothing, so the return rule joins the child and raises its failure.
+#[test]
+fn a_polled_childs_failure_is_still_its_parents() {
+    let mut shell = crate::test_helper::core_shell();
+    let (ended, _) = run_captured(
+        &mut shell,
+        "let h = spawn \"outer\" {\n\
+             let c = spawn \"inner\" { fail [status: 7, message: inner] }\n\
+             let settle = { |h| case !{poll $h} [\n\
+                 `settled: { |_| return () },\n\
+                 `pending: { |_| sleep 0.01; settle $h }\n\
+             ] }\n\
+             settle $c\n\
+             return 1\n\
+         }\n\
+         await $h",
+        None,
+    );
+    assert_eq!(status(ended.expect_err("the polled child failed")), 7);
+}
+
+/// An outside `await` of a child, through `worker <id>`, and its parent's
+/// join are mutually exclusive: exactly one of them claims the child, so its
+/// bytes are replayed exactly once.  Which of them wins is left to the race,
+/// not forced: the test asserts the invariant over whichever outcome occurs.
+#[test]
+fn an_outside_claim_and_the_parents_join_replay_once() {
+    let mut shell = crate::test_helper::core_shell();
+    let (sink, out) = new_buffer();
+    shell.io.stdout = sink;
+    let (inner_tx, inner_rx) = mpsc::channel();
+    let (gate_tx, gate_rx) = mpsc::channel::<()>();
+    let outer = spawn_child(
+        &Mooring::adrift(),
+        &mut shell,
+        spawned("<outer>"),
+        move |mooring, child| {
+            let inner = spawn_child(mooring, child, spawned("<inner>"), move |_, inner| {
+                gate_rx.recv().unwrap();
+                inner.write_stdout(b"c")?;
+                Ok(Value::Unit)
+            })?;
+            inner_tx.send(inner.id).unwrap();
+            Ok(Value::Unit)
+        },
+    )
+    .unwrap();
+    let inner = reacquire(&mut shell, inner_rx.recv().unwrap(), Ty::Unit)
+        .expect("the waiting child resolves");
+    let opener = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        gate_tx.send(()).unwrap();
+    });
+    let outside = await_handle(&inner, "await", &mut shell);
+    opener.join().unwrap();
+    let by_outside = out.take();
+    await_handle(&outer, "await", &mut shell).expect("the parent returns");
+    let by_parent = out.take();
+    match outside {
+        Ok(_) => assert_eq!((&by_outside[..], &by_parent[..]), (&b"c"[..], &b""[..])),
+        Err(e) => {
+            expect_claimed(e, "await");
+            assert_eq!((&by_outside[..], &by_parent[..]), (&b""[..], &b"c"[..]));
+        }
+    }
 }
 
 #[test]
@@ -1938,7 +2219,7 @@ fn call_owned_children_are_registered_but_not_announced() {
         .find(|e| e.owner == Owner::Session)
         .expect("the spawn is registered")
         .handle;
-    builtin_cancel(&[Value::Handle(Box::new(gate))], &shell).unwrap();
+    builtin_cancel(&[Value::Handle(Box::new(gate))]).unwrap();
     assert!(within(2, || shell.local.workers.count() == 0));
 }
 
@@ -1975,7 +2256,7 @@ fn retention_spares_a_running_workers_settled_child() {
     );
 
     gate_tx.send(()).unwrap();
-    await_handle(&outer, &mut shell).expect("the parent joins its child");
+    await_handle(&outer, "await", &mut shell).expect("the parent joins its child");
     assert_eq!(shell.local.workers.count(), 0);
 }
 
@@ -2004,6 +2285,6 @@ fn retention_spares_a_calls_settled_child() {
         "nothing is reaped"
     );
 
-    await_handle(&child, &mut shell).expect("the call claims its child");
+    await_handle(&child, "par", &mut shell).expect("the call claims its child");
     assert_eq!(shell.local.workers.count(), 0);
 }

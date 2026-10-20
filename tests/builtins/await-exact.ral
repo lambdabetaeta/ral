@@ -5,13 +5,13 @@ let h = spawn { echo hi }
 await $h
 # Expected: hi
 
-# Its bytes, then its value; a second await replays the same ending
+# Its bytes, then its value; the result is claimed once, so a second await
+# replays nothing and fails
 let v = spawn { echo out; return 4 }
 let n = await $v
 echo $n
-let m = await $v
-echo $m
-# Expected: out, 4, out, 4
+try { let _ = await $v } { |e| echo $e[message] }
+# Expected: out, 4, await: this worker's result was already claimed
 
 # A failed block's bytes replay before its failure is raised
 let f = spawn { echo partial; fail [status: 7, message: boom] }
@@ -19,9 +19,36 @@ try { await $f } { |e| echo "status=$e[status]" }
 # Expected: partial, status=7
 
 # Inside a capture, the replay is what is captured
-let s = await $h
+let c = spawn { echo hi }
+let s = await $c
 echo "[$s]"
 # Expected: [hi]
+
+# A settled poll claims nothing: the handle stays awaitable, and the one
+# await replays its bytes once
+let p = spawn { echo polled; return 3 }
+let settle = { |h|
+    case !{poll $h} [
+        `settled: { |_| return () },
+        `pending: { |_| sleep 0.01; settle $h }
+    ]
+}
+settle $p
+settle $p
+let r = await $p
+echo $r
+# Expected: polled, 3
+
+# cancel after await is nothing: the result was already claimed
+cancel $v
+echo cancelled-nothing
+# Expected: cancelled-nothing
+
+# cancel claims the handle, so an await after it finds the result claimed
+let z = spawn { sleep 30 }
+cancel $z
+try { await $z } { |e| echo $e[message] }
+# Expected: await: this worker's result was already claimed
 
 # A value block's await is its value
 let k = spawn { 1 }

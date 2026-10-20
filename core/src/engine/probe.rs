@@ -39,7 +39,7 @@ pub(crate) fn answer(shell: &Shell, probe: &Probe) -> FOValue {
         Probe::Workers => shell
             .workers()
             .iter()
-            .map(|entry| shell.worker_row(entry))
+            .filter_map(|entry| shell.worker_row(entry))
             .collect::<Vec<_>>()
             .encode(),
         Probe::SessionEnded => shell
@@ -63,7 +63,7 @@ fn binding_rows(shell: &Shell) -> Vec<BindingRow> {
         .fold_union(&shell.sig, |b| {
             let handle = match &b.value {
                 Value::Handle(h) => Some(HandleRow {
-                    state: h.state(),
+                    state: h.sample(),
                     title: h.title.clone(),
                 }),
                 _ => None,

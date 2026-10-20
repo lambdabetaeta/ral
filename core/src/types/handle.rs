@@ -7,11 +7,11 @@ use crate::fact::WorkerId;
 use crate::io::ByteBuffer;
 use crate::process::ScopeNode;
 use crate::sync::LockExt as _;
+use crate::types::Done;
 use std::ops::ControlFlow;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
+use surface::DeferredSurface;
 
 pub(crate) mod brood;
 pub(crate) mod surface;
@@ -53,20 +53,24 @@ pub(crate) fn pins_running_work(v: &Value) -> bool {
     }
 }
 
-/// Lifecycle of a spawned computation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HandleState {
+/// A worker's result, claimed once: running until its worker settles it,
+/// then held until one caller claims it.
+#[derive(Debug)]
+enum HandleState {
     Running,
-    Completed,
-    Cancelled,
+    Settled(CompletedHandle),
+    Claimed,
 }
 
-/// A finished block's outcome, cached on completion: bytes drained from the
-/// handle's buffers exactly once, paired with its result.
-///
-/// Every eliminator (`await`, `race`, `poll`) projects this rather than
-/// re-reading the live buffers, so repeat observations agree and a failed
-/// block's bytes survive.
+/// What an observer finds in a handle, its settled result lent as `R`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sample<R> {
+    Pending,
+    Settled(R),
+    Claimed,
+}
+
+/// A finished block's outcome: the bytes it wrote, paired with its result.
 #[derive(Debug, Clone)]
 pub struct CompletedHandle {
     pub stdout: Vec<u8>,
@@ -76,32 +80,20 @@ pub struct CompletedHandle {
 
 /// Shared handle to a spawned computation.
 #[derive(Debug, Clone)]
-#[allow(clippy::type_complexity)]
 pub struct HandleInner {
-    /// Result channel.  The worker's body is its own closed machine run
-    /// (`machine::evaluate`), already settled before it reaches the
-    /// channel — nothing to absorb crossing the thread boundary.
-    pub result: Arc<Mutex<Option<Receiver<ThreadEnd>>>>,
-    /// Filled once, when the block completes and the buffers drain into it;
-    /// every later observation reads it instead of the channel.
-    pub cached: Arc<Mutex<Option<CompletedHandle>>>,
-    /// Lock order: the worker registry lock may take this lock (a brief read
-    /// in `WorkerRegistry::reserve` and `WorkerRegistry::sweep_retention`),
-    /// never the reverse.
-    pub state: StateCell,
-    /// Buffered stdout, drained into `cached` on completion.  Empty for a
-    /// watched handle, whose lines surface live through `Sink::Watch`.
-    pub stdout_buf: ByteBuffer,
-    pub stderr_buf: ByteBuffer,
+    /// Lock order: the worker registry lock may take this lock, never the
+    /// reverse.
+    state: Arc<Mutex<HandleState>>,
+    /// Drained into the result when the worker settles.  Empty for a watched
+    /// handle, whose lines surface live through `Sink::Watch`.
+    stdout_buf: ByteBuffer,
+    stderr_buf: ByteBuffer,
     pub id: WorkerId,
     /// What the work is, for people; nothing looks a worker up by it.
     pub title: String,
     pub started: Stamp,
-    /// Set once, when the worker thread ends.
-    pub(crate) ended: Arc<OnceLock<Stamp>>,
-    /// An eliminator settled this handle; a brood or litter answers for the
-    /// complement.
-    pub(crate) claimed: Arc<AtomicBool>,
+    /// Set once, when the worker thread ends, claimed or not.
+    ended: Arc<OnceLock<Stamp>>,
     /// Where an observer checks the value the worker settles with, set by
     /// `worker`: what the worker returns was decided by another unit, so the
     /// unit that reacquires its handle admits it against the type it uses it
@@ -114,50 +106,51 @@ pub struct HandleInner {
     pub cancel: ScopeNode,
 }
 
-/// A handle's lifecycle, read and transitioned only through [`HandleInner`]'s
-/// methods: a guard born in a caller's expression lives to the end of that
-/// expression — long enough to re-enter this lock, or to take the registry's
-/// against the documented order — so none is ever handed out.
-#[derive(Debug, Clone)]
-pub struct StateCell(Arc<Mutex<HandleState>>);
-
 impl PartialEq for HandleInner {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.result, &other.result)
+        Arc::ptr_eq(&self.state, &other.state)
     }
 }
 
 impl HandleInner {
-    /// A running handle, born now, whose worker (if any) settles through
-    /// `result`; its buffers start empty.
-    pub fn new(
+    /// A running handle, born now over the buffers its worker writes, and the
+    /// one [`Settler`] that worker settles it with.
+    pub(crate) fn new(
         id: WorkerId,
         title: impl Into<String>,
         cancel: ScopeNode,
-        result: Option<Receiver<ThreadEnd>>,
-    ) -> Self {
-        Self {
-            result: Arc::new(Mutex::new(result)),
-            cached: Arc::new(Mutex::new(None)),
-            state: StateCell(Arc::new(Mutex::new(HandleState::Running))),
-            stdout_buf: ByteBuffer::default(),
-            stderr_buf: ByteBuffer::default(),
+        stdout_buf: ByteBuffer,
+        stderr_buf: ByteBuffer,
+    ) -> (Self, Settler) {
+        let handle = Self {
+            state: Arc::new(Mutex::new(HandleState::Running)),
+            stdout_buf,
+            stderr_buf,
             id,
             title: title.into(),
             started: Stamp::now(),
             ended: Arc::default(),
-            claimed: Arc::default(),
             site: None,
             cancel,
-        }
+        };
+        let settler = Settler {
+            handle: handle.clone(),
+            surface: None,
+            settled: false,
+        };
+        (handle, settler)
     }
 
-    pub fn state(&self) -> HandleState {
-        *self.state.0.lock_ignore_poison()
+    pub fn sample(&self) -> Sample<()> {
+        self.observe(|_| ())
     }
 
     pub(crate) fn is_running(&self) -> bool {
-        self.state() == HandleState::Running
+        self.sample() == Sample::Pending
+    }
+
+    pub(crate) fn is_claimed(&self) -> bool {
+        self.sample() == Sample::Claimed
     }
 
     /// A running worker's age so far, a settled worker's run time.
@@ -173,111 +166,116 @@ impl HandleInner {
         self.ended.get().map(|e| e.wall)
     }
 
-    pub(crate) fn claim(&self) {
-        self.claimed.store(true, Ordering::Release);
-    }
-
-    pub(crate) fn is_claimed(&self) -> bool {
-        self.claimed.load(Ordering::Acquire)
-    }
-
     /// Whether the worker thread has ended, whatever any eliminator saw.
     pub(crate) fn has_ended(&self) -> bool {
         self.ended.get().is_some()
     }
 
-    /// Stop the worker: the policy `cancel`, a halting parent and `race`'s
-    /// losers share.  An already-completed handle keeps its cached outcome,
-    /// so a finished worker's value is never destroyed by a stop that lost the
-    /// toss; [`Self::detach`]'s guard spans the test and the transition.
-    pub(crate) fn stop(&self) {
-        if self.detach() {
-            self.cancel.cancel(crate::process::CancelCause::Cancelled);
+    /// What the worker has written so far, without draining it.
+    pub(crate) fn written(&self) -> (Vec<u8>, Vec<u8>) {
+        (self.stdout_buf.peek(), self.stderr_buf.peek())
+    }
+
+    /// Observe without claiming.  `f` runs under the handle's lock and must
+    /// not touch the handle.
+    pub(crate) fn observe<R>(&self, f: impl FnOnce(&CompletedHandle) -> R) -> Sample<R> {
+        match &*self.state.lock_ignore_poison() {
+            HandleState::Running => Sample::Pending,
+            HandleState::Settled(completed) => Sample::Settled(f(completed)),
+            HandleState::Claimed => Sample::Claimed,
         }
     }
 
-    /// The worker's exit mark.  Guarded: an eliminator may have won the
-    /// transition, and a `cancel`'s `Cancelled` must not be undone.
-    pub(crate) fn complete(&self) {
-        let _ = self.ended.set(Stamp::now());
-        let mut state = self.state.0.lock_ignore_poison();
-        if *state == HandleState::Running {
-            *state = HandleState::Completed;
-        }
-    }
-
-    /// `cancel`'s transition: release the receiver and the cache with the
-    /// state, as one step.  `false` if the worker had already completed, whose
-    /// outcome is left alone.
-    #[allow(
-        clippy::significant_drop_tightening,
-        reason = "the guard's span is the point: dropping it earlier reopens the window in which a worker completes between the test and the transition and loses its outcome"
-    )]
-    pub(crate) fn detach(&self) -> bool {
-        let mut state = self.state.0.lock_ignore_poison();
-        if *state == HandleState::Completed {
-            return false;
-        }
-        *state = HandleState::Cancelled;
-        self.result.lock_ignore_poison().take();
-        *self.cached.lock_ignore_poison() = None;
-        true
-    }
-
-    /// Non-blocking settle: `Some` if the handle has an outcome to observe now
-    /// (the cache, or a just-arrived channel message drained into it), `None`
-    /// while the worker runs.  A `Disconnected` receiver means the worker
-    /// dropped its `Sender` unsent — it panicked — so it settles as a failure
-    /// rather than a `None` that `poll` and `race` would read as still-running.
-    ///
-    /// Settling is once-only, and a transition: `state` is held across the
-    /// cache read, `try_recv` and the cache write, so a second awaiter either
-    /// sees the first's cached outcome or blocks, and a concurrent `cancel`
-    /// waits its turn.  Draining on the error path too captures a failed
-    /// block's bytes.
-    #[allow(
-        clippy::significant_drop_tightening,
-        reason = "the guard must span the whole transition, or a second awaiter observes a bare Disconnected"
-    )]
-    pub(crate) fn try_settle(&self) -> Option<CompletedHandle> {
-        let mut state = self.state.0.lock_ignore_poison();
-        let cached = self.cached.lock_ignore_poison().clone();
-        if let Some(completed) = cached {
-            return Some(completed);
-        }
-        let mut rx_guard = self.result.lock_ignore_poison();
-        let rx = rx_guard.as_ref()?;
-        let end = match rx.try_recv() {
-            Ok(end) => end,
-            // The worker names itself: the eliminator that found the corpse is
-            // not what panicked, and `await`, `poll` and `race` all arrive here.
-            Err(TryRecvError::Disconnected) => {
-                ThreadEnd::Panicked(format!("{}: spawned thread panicked", self.title))
+    /// Claim a settled result, moving it out.
+    pub(crate) fn claim_settled(&self) -> Sample<CompletedHandle> {
+        let mut state = self.state.lock_ignore_poison();
+        match std::mem::replace(&mut *state, HandleState::Claimed) {
+            HandleState::Running => {
+                *state = HandleState::Running;
+                Sample::Pending
             }
-            Err(TryRecvError::Empty) => return None,
-        };
-        rx_guard.take();
-        drop(rx_guard);
-        if *state == HandleState::Running {
-            *state = HandleState::Completed;
+            HandleState::Settled(completed) => Sample::Settled(completed),
+            HandleState::Claimed => Sample::Claimed,
         }
-        let completed = CompletedHandle {
-            stdout: self.stdout_buf.take(),
-            stderr: self.stderr_buf.take(),
-            end,
-        };
-        *self.cached.lock_ignore_poison() = Some(completed.clone());
-        Some(completed)
+    }
+
+    /// Claim whatever the handle holds, stopping a running worker and
+    /// discarding a settled result.  `false` if it was already claimed.
+    pub(crate) fn claim_and_stop(&self) -> bool {
+        let was = std::mem::replace(&mut *self.state.lock_ignore_poison(), HandleState::Claimed);
+        match was {
+            HandleState::Running => {
+                self.cancel.cancel(crate::process::CancelCause::Cancelled);
+                true
+            }
+            HandleState::Settled(_) => true,
+            HandleState::Claimed => false,
+        }
+    }
+
+    /// The worker's end: a claimed handle's result is dropped.
+    fn complete(&self, end: ThreadEnd) {
+        let _ = self.ended.set(Stamp::now());
+        let mut state = self.state.lock_ignore_poison();
+        if matches!(*state, HandleState::Running) {
+            *state = HandleState::Settled(CompletedHandle {
+                stdout: self.stdout_buf.take(),
+                stderr: self.stderr_buf.take(),
+                end,
+            });
+        }
     }
 }
 
-/// A running handle with no worker behind it.
+/// The worker's end of its handle: settles it once, flushing the worker's
+/// deferred surface first.  Dropped unsettled, by a panic, it settles the
+/// handle as one.
+pub(crate) struct Settler {
+    handle: HandleInner,
+    surface: Option<Arc<DeferredSurface>>,
+    settled: bool,
+}
+
+impl Settler {
+    /// Flush `surface` as the worker settles.
+    pub(crate) fn flushing(mut self, surface: Option<Arc<DeferredSurface>>) -> Self {
+        self.surface = surface;
+        self
+    }
+
+    pub(crate) fn settle(mut self, end: ThreadEnd, done: Done) {
+        self.finish(end, done);
+    }
+
+    fn finish(&mut self, end: ThreadEnd, done: Done) {
+        self.settled = true;
+        if let Some(surface) = &self.surface {
+            surface.flush(&self.handle, done);
+        }
+        self.handle.complete(end);
+    }
+}
+
+impl Drop for Settler {
+    fn drop(&mut self) {
+        if !self.settled {
+            let end =
+                ThreadEnd::Panicked(format!("{}: spawned thread panicked", self.handle.title));
+            self.finish(end, Done::Panic("spawned thread panicked".into()));
+        }
+    }
+}
+
+/// A handle whose worker never ran, settled as a panic: for tests that only
+/// carry one.
 #[cfg(test)]
 pub(crate) fn idle_handle() -> Value {
-    Value::Handle(Box::new(HandleInner::new(
+    let (handle, _) = HandleInner::new(
         WorkerId::mint(),
         "<test>",
         crate::process::DurableRoot::default().worker(),
-        None,
-    )))
+        ByteBuffer::default(),
+        ByteBuffer::default(),
+    );
+    Value::Handle(Box::new(handle))
 }

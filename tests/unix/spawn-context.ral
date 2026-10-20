@@ -42,13 +42,16 @@ let hp = !{spawn { sleep 30 }}
 echo !{case !{poll $hp} [`settled: { |_| return false }, `pending: { |_| return true }]}
 echo !{is-done $hp}
 cancel $hp
+# A settled poll claims nothing: the handle is still awaited after it, while a
+# handle cancel claimed has nothing left to poll
 let hs = !{spawn { return 7 }}
-let awaited = await $hs
-let sampled = poll $hs
-echo !{case $sampled [`settled: { |s| case $s[outcome] [`ok: { |v| return $v }, `err: { |_| return -2 }] }, `pending: { |_| return -1 }]}
+let settled = { |h| case !{poll $h} [`settled: { |s| return $s }, `pending: { |_| sleep 0.01; settled $h }] }
+let sampled = settled $hs
+echo !{case $sampled[outcome] [`ok: { |v| return $v }, `err: { |_| return -2 }]}
 echo !{is-done $hs}
+echo !{await $hs}
 let hc = !{spawn { sleep 30 }}
 cancel $hc
-echo !{case !{poll $hc} [`settled: { |_| return true }, `pending: { |_| return false }]}
+try { let _ = poll $hc } { |e| echo $e[message] }
 
 echo 'spawn context tests done'

@@ -571,13 +571,14 @@ title out, `spawn { cargo test -q }`; an agent host requires it. There is no
 trailing `&`: a POSIX `&` makes a job for `fg`/`bg`, while `spawn` makes a
 worker you `await`, so ral asks you to say which you meant.
 
-Handles cache how their block ended: awaiting again replays the same output
-and the same result, without running the block again. `poll` checks without
-blocking or printing: it returns `` `pending `` with the output so far and the
+A handle's result is claimed once: a second `await` of it fails, as does an
+`await` after `race` or `cancel` claimed it. `poll` checks without blocking,
+printing or claiming: it returns `` `pending `` with the output so far and the
 seconds elapsed, or `` `settled `` with the output, the time it took, and an
-`` `ok `` / `` `err `` outcome. `cancel $tests` stops a worker, and everything
-it started. A `spawn` inside a spawned block belongs to that block, which
-finishes only after it has, its output and failure folded into its own.
+`` `ok `` / `` `err `` outcome, and the handle can still be awaited after it.
+`cancel $tests` stops a worker, and everything it started. A `spawn` inside
+a spawned block belongs to that block, which finishes only after it has, its
+output and failure folded into its own.
 
 Every worker has a numeric id beside its title. `workers` lists them, one
 record each with its id, title, owner, state and timing; it is data, not
@@ -595,7 +596,7 @@ spawns:
 
 `par` is a bounded parallel `map` that keeps input order, output included.
 `all` runs several blocks at once and returns a record of their values,
-`[tests: …, lint: …]`. `race` takes the first handle to finish and cancels the
+`[tests: …, lint: …]`. `race` claims the first handle to finish and cancels the
 rest. None leaves anything running when it returns: the first failure cancels
 the others and is raised, and Ctrl-C cancels them all.
 

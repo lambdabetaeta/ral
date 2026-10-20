@@ -348,7 +348,7 @@ boundary of the run that produced them
 [[map/exarch/shell-eval|shell-eval]]'s `decode_surface` into `Surface::Notice`
 and recorded from there. A reap notice names a worker removed by policy — the
 retention sweep expiring a settled entry's unclaimed result, the one policy
-that removes an entry — rather than one an eliminator observed away. It is recorded as `Forensic::Reap` and drawn nowhere — a
+that removes an entry — rather than one a claimer removed first. It is recorded as `Forensic::Reap` and drawn nowhere — a
 worker nobody watched is not news — and never model-facing, since delivery of
 a reap to the model itself is deferred.
 `attend`'s top runs nothing else; the disk ceiling is weighed at the tool

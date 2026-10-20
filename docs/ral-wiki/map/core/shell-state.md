@@ -22,8 +22,9 @@ everything `crate::types::*`.
   debug-asserting the body agrees), and `handle.rs` (the concurrency
   substrate behind `Value::Handle`: `HandleInner`, which carries its
   worker's `WorkerId`, title and clock — a birth `Stamp` and an end `Stamp`,
-  each one instant on a monotonic and a wall clock — beside `CompletedHandle`
-  and `SurfaceBuffer`).
+  each one instant on a monotonic and a wall clock — and one lock over its
+  `HandleState` (`Running`, `Settled`, `Claimed`), beside `CompletedHandle`,
+  the worker's `Settler` and its `DeferredSurface`).
   Handlers are deep and self-masking, with no
   `resume` ([[design/effects-handlers|effects-handlers]], [[decisions/260530_handlers-deep-self-masking|handlers-deep-self-masking]]).
   A *handler* or alias arm is always a lambda: `HandlerEntry` carries its
@@ -334,9 +335,9 @@ with `Observation::to_surface`, tagged `` `observed `` so a host dispatches on
 the tag alone without re-encoding a `Value` it never had. Run-scoped, not
 a persistent capability — a run door installs it, so a clone of it has no
 liveness role and can never decide a run is over. A worker does not receive the live sink: its surface is a
-`DeferredSurface` (`types/handle/surface.rs`) that buffers and, under a
-`FlushGuard`, delivers the batch once to the session's `DeferredSink` when the
-worker settles, before its result is sent; a mooring without that sink gives
+`DeferredSurface` (`types/handle/surface.rs`) that buffers and, through the
+worker's `Settler` on every exit, delivers the batch once to the session's
+`DeferredSink` as the worker settles, before its handle does; a mooring without that sink gives
 its workers no surface
 ([[decisions/260622_surface-delivers-itself|surface-delivers-itself]]).
 

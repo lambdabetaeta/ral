@@ -127,7 +127,8 @@ throughout.
 ## Where it sits in the decay ladder
 
 Abandonment decays in layers, each with its own bound and its own log line: a
-worker's settled registry entry expires after 256 unclaimed calls; and a name holding a settled handle — settled handles
+worker's settled registry entry expires after 256 calls unclaimed; and a name
+holding a settled handle — settled handles
 are ordinary scratch, and the worker registry retains the handle itself, so
 no name is ever load-bearing for rediscovery — prunes after 256 idle calls.
 The model's later "where did my job go?", at every layer, has an answer in

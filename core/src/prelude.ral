@@ -152,10 +152,10 @@ let retry = { |n body|
 # one call-owned birth path (`core/src/builtins/concurrency/combinators.rs`).
 
 ## True once a handle has settled, false while its block is still running.
-## Total over a finished handle: a `settled` block (whether it returned or
-## failed) reports `true`, only a still-running (`pending`) block reports
-## `false`.  Non-blocking: `poll` samples without waiting.  Total, as `poll`
-## is: a cancelled handle has settled.
+## A `settled` block (whether it returned or failed) reports `true`, only a
+## still-running (`pending`) block reports `false`.  Non-blocking, and claims
+## nothing: `poll` samples without waiting, and fails, as `poll` does, on a
+## handle whose result was already claimed.
 let is-done = { |h|
     let polled = poll $h
     case $polled [

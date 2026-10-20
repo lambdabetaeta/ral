@@ -238,7 +238,7 @@ fn race_first_wins() {
 
 #[test]
 fn race_cancelled_await() {
-    // After race, awaiting the loser returns an error (cancelled).
+    // After race, awaiting the loser fails: race claimed it.
     must_fail(
         r"
         let fast = !{spawn { return ok }}

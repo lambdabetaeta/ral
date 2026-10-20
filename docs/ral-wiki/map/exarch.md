@@ -232,9 +232,9 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   work or the end of the turn, a host notice when the worker ends, then
   `await`, which behaves as the block run on that line — its output written
   there, its value returned, its failure raised, so `try` recovers it — and
-  replays the same ending on every later `await`. `worker <id>` recovers a
+  claims the result once, so a second `await` fails. `worker <id>` recovers a
   lost handle, `workers` lists every worker, `poll` samples a long-running
-  server without waiting, a block's own spawns finish before it does, and
+  server without waiting or claiming, a block's own spawns finish before it does, and
   fan-out that must leave nothing behind is `par`, `all` or `race`. A worker
   lives as long as the session; `detach` is for a process that must outlive
   it.

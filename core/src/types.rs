@@ -30,12 +30,12 @@ pub(crate) use handler::{
 
 // The shared state behind `Value::Handle`.
 mod handle;
-pub(crate) use handle::brood::{Brood, Cradle, claim, end_unclaimed};
+pub(crate) use handle::brood::{Brood, Cradle, end_unclaimed};
 #[cfg(test)]
 pub(crate) use handle::idle_handle;
 pub(crate) use handle::pins_running_work;
-pub(crate) use handle::surface::{DeferredSurface, FlushGuard};
-pub use handle::{CompletedHandle, HandleInner, HandleState, Stamp};
+pub(crate) use handle::surface::DeferredSurface;
+pub use handle::{CompletedHandle, HandleInner, Sample, Stamp};
 
 // A boundary's checked type, and what a door admits against it.
 mod admit;

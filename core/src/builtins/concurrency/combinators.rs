@@ -9,8 +9,8 @@ use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::time::Duration;
 
-/// The children a calling expression owns, in birth order.  A call takes
-/// each with [`await_handle`] (exact, claiming); [`Self::end`] ends the rest.
+/// The children a calling expression owns, in birth order.  A call claims
+/// each with [`await_handle`] (exact); [`Self::end`] ends the rest.
 #[derive(Default)]
 pub(super) struct Litter {
     children: Vec<HandleInner>,
@@ -26,8 +26,8 @@ impl Litter {
     ) -> Settled<Value> {
         let mut litter = Self::default();
         let ended = catch_unwind(AssertUnwindSafe(|| call(&mut litter, shell)));
-        // A no-op once the call has taken every child.
-        litter.end(shell, mooring.cleanup_grace);
+        // A no-op once the call has claimed every child.
+        litter.end(mooring.cleanup_grace);
         ended.unwrap_or_else(|panic| resume_unwind(panic))
     }
 
@@ -47,14 +47,14 @@ impl Litter {
     }
 
     /// The halt rule: [`end_unclaimed`] over this litter.
-    fn end(&self, shell: &Shell, grace: Duration) {
-        end_unclaimed(&self.children, shell, grace);
+    fn end(&self, grace: Duration) {
+        end_unclaimed(&self.children, grace);
     }
 }
 
 /// `par <f> <items> <jobs>` -- map `f` over `items` on at most `jobs` workers
 /// at once (`jobs <= 0`: one per item), owned by this call.  Each child is
-/// taken in input order, so its output is replayed in that order too.
+/// claimed in input order, so its output is replayed in that order too.
 pub(crate) fn builtin_par(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let items = args[1].as_list("par")?;
     let Value::Int(jobs) = args[2] else {
@@ -74,7 +74,7 @@ pub(crate) fn builtin_par(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
             if running.len() == limit
                 && let Some(oldest) = running.pop_front()
             {
-                values.push(await_handle(&oldest, shell)?);
+                values.push(await_handle(&oldest, "par", shell)?);
             }
             let (f, x) = (args[0].clone(), x.into_owned());
             let work = move |mooring: &Mooring, child: &mut Shell| {
@@ -83,14 +83,14 @@ pub(crate) fn builtin_par(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
             running.push_back(litter.bear(mooring, shell, "par", format!("par #{i}"), work)?);
         }
         for child in running {
-            values.push(await_handle(&child, shell)?);
+            values.push(await_handle(&child, "par", shell)?);
         }
         Ok(Value::list(values))
     })
 }
 
 /// `all [k: BODY, …]` -- run every task at once, owned by this expression, and
-/// return the record of their values, taken in the order written.
+/// return the record of their values, claimed in the order written.
 pub(crate) fn all_form(
     tasks: Vec<(String, Value)>,
     mooring: &Mooring,
@@ -105,7 +105,7 @@ pub(crate) fn all_form(
         }
         let fields = born
             .into_iter()
-            .map(|(label, child)| Ok((label, await_handle(&child, shell)?)))
+            .map(|(label, child)| Ok((label, await_handle(&child, "all", shell)?)))
             .collect::<Settled<Vec<_>>>()?;
         Ok(Value::map(fields))
     })

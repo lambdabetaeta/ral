@@ -309,18 +309,18 @@ Do not use `sh -c`, as e.g. `sh -c #'a; b; c'#` payload throws away what `ral` w
 
 You need not wait for it: end the turn when nothing else remains, and the host wakes you when it finishes, naming its id, title, how long it ran and how it ended. Do not poll for completion.
 
-`await $h` behaves exactly as if the block had run on that line: whatever it printed appears on your stdout and stderr, its value is returned, and a failure in it fails your script there, so `try` around `await` is how you recover. Awaiting again, even turns later, replays the same ending; it does not run the block again. An `exit` inside the block exits the turn that awaits it.
+`await $h` behaves exactly as if the block had run on that line: whatever it printed appears on your stdout and stderr, its value is returned, and a failure in it fails your script there, so `try` around `await` is how you recover. A handle's result is claimed once: you may await it turns later, but a second `await` of it, or one after `cancel` or `race` claimed it, fails. An `exit` inside the block exits the turn that awaits it.
 
     let out = await $h          # a command's output, as `let out = { … }` would bind it
-    try { await $h } { |e| echo "failed: $e[message]" }
+    try { await $h } { |e| echo "failed: $e[message]" }    # or this instead, to recover
 
 If the binding is gone, the notice's id brings the handle back: `await !{worker 7}`. `workers` lists every worker with its id, title, owner, state and timing. `cancel $h` stops a block that is no longer needed, and everything it started.
 
 A block may `spawn` inside itself: those workers belong to it, and it finishes only after they have, their output and failures folded into its own.
 
-`poll $h` samples without waiting or printing: `pending` with the output so far and the seconds elapsed, or `settled` with the output, the time it took and `ok`/`err`. Use it to read a long-running server's output; to wait, `sleep 30; poll $h`.
+`poll $h` samples without waiting, printing or claiming: `pending` with the output so far and the seconds elapsed, or `settled` with the output, the time it took and `ok`/`err`, after which `await $h` still works. Use it to read a long-running server's output; to wait, `sleep 30; poll $h`.
 
-Fan-out that must leave nothing behind is a combinator, not a set of spawns: `par f items jobs` maps in parallel and keeps input order; `all [build: { cargo build }, lint: { cargo clippy }]` runs several blocks and returns a record of their values; `race [$a, $b]` takes the first to finish and cancels the rest. Each ends every worker it started before it returns, and the first failure cancels the others and is raised.
+Fan-out that must leave nothing behind is a combinator, not a set of spawns: `par f items jobs` maps in parallel and keeps input order; `all [build: { cargo build }, lint: { cargo clippy }]` runs several blocks and returns a record of their values; `race [$a, $b]` claims the first to finish and cancels the rest. Each ends every worker it started before it returns, and the first failure cancels the others and is raised.
 
 <CRITICAL>A worker lives as long as this session. Nothing but its own completion, `cancel`, or the session's end stops it.</CRITICAL>
 

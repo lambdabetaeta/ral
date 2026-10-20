@@ -467,6 +467,20 @@ mod probe_tests {
         assert!(names.bindings.iter().any(|n| n == "probe_row"));
     }
 
+    /// A bound handle's row says whether its result is still to be claimed.
+    #[test]
+    fn a_bound_handle_row_shows_it_claimed() {
+        let transport = fresh();
+        eval(
+            &transport,
+            "let probe_h = !{spawn { return 1 }}\nawait $probe_h",
+        );
+        let rows = transport.bindings().expect("a reading");
+        let row = rows.iter().find(|r| r.name == "probe_h").expect("the row");
+        let handle = row.handle.as_ref().expect("a handle row");
+        assert_eq!(handle.state, crate::types::Sample::Claimed);
+    }
+
     #[test]
     fn path_entries_lists_under_the_engine_cwd() {
         let dir = tempfile::tempdir().expect("a tempdir");

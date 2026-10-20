@@ -131,10 +131,12 @@ discipline ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]):
   the root and answers for nothing; a worker's is its own node and its
   `Brood`, the handles of every `spawn` or `watch` born inside it; a stage
   shares its parent's. The worker's base settles the brood: on return it
-  awaits each unclaimed child in birth order, the first failure being its
-  own; on a halt it cancels every unclaimed child and waits for its thread up
-  to the cleanup grace without polling, since its own scope may be the one
-  cancelled. A `par` or `all` owns its children as a `Litter` and ends it the
+  claims and awaits each child no one has claimed, in birth order, the first
+  failure being its own; on a halt it claims and cancels every such child and
+  waits for its thread up to the cleanup grace without polling, since its own
+  scope may be the one cancelled. Claiming is one transition under the handle's lock, so a child
+  claimed elsewhere first is skipped, and the join and that claimer never both
+  replay it. A `par` or `all` owns its children as a `Litter` and ends it the
   same way before the call returns; `race` drains its losers likewise. So
   `cancel $h` reaches everything `$h` started
   ([[invariants/a-worker-ends-with-its-children|a-worker-ends-with-its-children]]).
