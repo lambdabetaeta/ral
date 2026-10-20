@@ -443,7 +443,7 @@ These words cannot be binding names or block parameters:
 
 ```text
 if  elsif  else  let  return  case
-within  grant  try  guard  audit
+within  grant  try  guard  audit  spawn  all
 true  false
 ```
 
@@ -1090,8 +1090,8 @@ After this failed top-level run, `before` remains bound in the session and
 `after` does not exist.
 
 Forced plain blocks are local bodies. The bodies used by `within`, `grant`,
-`try`, `guard`, and `audit` follow the same local rule. Their bindings do not
-become top-level session bindings.
+`try`, `guard`, `audit`, `spawn`, and `all` follow the same local rule. Their
+bindings do not become top-level session bindings.
 
 ### 5.7. Recursion and forward references
 
@@ -1219,8 +1219,8 @@ active capabilities. It is, in this respect, the same as a path head such as
 For example, `^echo` is the operating system's `echo`, not ral's — a handler
 for `echo`, and ral's own base `echo` handler, are both skipped.
 
-The bare names `within`, `grant`, `try`, `guard`, and `audit` are reserved
-control forms. A caret form such as `^try` uses caret lookup instead.
+The bare names `within`, `grant`, `try`, `guard`, `audit`, `spawn`, and
+`all` are reserved control forms. A caret form such as `^try` uses caret lookup instead.
 
 ### 6.3. Bare-head lookup
 
@@ -1618,7 +1618,7 @@ from-json: the value at `/size` is text (`'12kB'`), but this script uses it as a
 
 A mismatch names an RFC 6901 pointer into the value, what was found, what the script uses it as, and the line of the use. An open record (the fields the script reads) admits extra fields; a closed record literal refuses them. Two decodes the program compares with `<` agree on numbers or on text, and are refused at the second decode otherwise. A JSON number keeps its kind: `3` is an `Int` and `2.5` a `Float`, so a position used as a `Float` refuses `3`, and `float` at the use accepts both. A decoder never converts a value to fit its type.
 
-The same discipline admits what `use` (§10.3), an awaited `service-handle`, and the exarch host's answers (`exarch-agents`, `exarch-pins`, `exarch-transcript`) let in.
+The same discipline admits what `use` (§10.3), an awaited `worker` (§11.4), and the exarch host's answers (`exarch-agents`, `exarch-pins`, `exarch-transcript`) let in.
 
 A decoder is a legal pipeline tail:
 
@@ -1958,7 +1958,7 @@ Reason = `exited Int | `signaled Int | `cancelled | `timed-out
 | `` `exited n `` | an external command exited with nonzero `n` | `n` |
 | `` `signaled s `` | an external command died of signal `s`, not by a cancellation (§8.10) | 128 + `s` |
 | `` `cancelled `` | a worker this run cancelled, observed by `await` or `poll` | 143 |
-| `` `timed-out `` | a worker whose lease expired, observed likewise | 124 |
+| `` `timed-out `` | a worker reached by a timeout on an enclosing scope, observed likewise | 124 |
 | `` `not-found `` | no command of that name exists | 127 |
 | `` `not-runnable `` | the command exists but could not be started | 126 |
 | `` `raised `` | `fail`, or a runtime operation that could not complete | the raised status |
@@ -1983,8 +1983,8 @@ required — its `` `err `` outcome carries this same record (§13.3).
 A handler that succeeds recovers the failure and leaves status 0. `exit`,
 internal tail-call control, and a stop (§8.10) bypass the handler: a stop is
 not a failure, and `try` never sees one. The one stop a handler can meet is
-the error `await` or `poll` reports for a worker this run cancelled or whose
-lease expired, which is the awaiting run's own failure.
+the error `await` or `poll` reports for a worker this run cancelled or a
+timeout on an enclosing scope reached, which is the awaiting run's own failure.
 
 ### 8.7. Cleanup with `guard`
 
@@ -2066,8 +2066,9 @@ and reaped before control returns.
 A stop is an escape, not a failure: it carries a cause, no `reason`, and no
 `try` catches it; the run it reaches ends stopped, with the cause's status.
 Two boundaries within a program own stops: a worker's boundary owns
-`cancelled` and `timed out` on its own handle, which `await` and `poll` report
-as the awaiter's failure (§8.6); a pipeline owns the stops naming its own
+`cancelled` and `timed out` struck anywhere inside the session — on its own
+handle, on a worker that started it, or on the call that owns it (§11.1,
+§11.3) — which `await` and `poll` report as the awaiter's failure (§8.6); a pipeline owns the stops naming its own
 stages, the reader-gone stop of one whose reader left and the teardown it runs
 for a sibling's escape, and forgives them (§7.6). Every other stop is the
 host's and reaches the top of the run uninterpreted, as `exit` does. A stop in
@@ -2119,8 +2120,8 @@ before ral's own interrupt lands and report the signal rather than the
 interrupt; the run stops regardless.
 
 A foreground interrupt affects the work that was running when the interrupt
-arrived, including nested runs, but not a worker and not a later
-prompt. Nothing a worker starts sits where the terminal reaches it:
+arrived, including nested runs and the workers of a `par` or `all` in flight
+(§11.3), but not a session worker and not a later prompt. Nothing a worker starts sits where the terminal reaches it:
 on Unix its external commands lead sessions of their own and its pipelines a
 group the terminal never holds, and on Windows its processes lead console
 groups ral never sends a console event. A terminal gesture reaches a worker
@@ -2501,36 +2502,54 @@ configuration, hooks, and startup behavior likewise belong to that session.
 
 ## 11. Concurrency and process lifetime
 
-ral distinguishes concurrent work by who still owns it:
+ral distinguishes concurrent work by who owns it. Every concurrent block has
+exactly one owner, fixed at birth:
 
-- an ordinary command belongs to the current run;
-- `spawn` and `watch` create a worker owned by the session;
-- `service` creates a session-owned worker exempt from ordinary worker leases;
-- `detach` gives an operating-system process away, so the session no longer
-  owns or controls it.
+- the *calling expression*: `par`, `all` and `race` end every worker they start
+  or are given before the call returns;
+- the *session*: `spawn` and `watch` create a worker that ends by completing,
+  by `cancel`, or with the session;
+- *nobody*: `detach` gives an operating-system process away, so the session no
+  longer owns or controls it.
+
+There is no fourth owner. An ordinary command is not concurrent: it belongs to
+the current run.
 
 This distinction is visible in the result type. Session-owned work returns a
 `Handle`. Surrendered work returns only a receipt.
 
 ### 11.1. Spawning work
 
-`spawn` starts a block concurrently and returns immediately:
+`spawn [TITLE] BODY` starts a block concurrently and returns its handle at
+once:
 
 ```ral
-let build = spawn {
+let build = spawn 'build' {
     cargo build
     return 'built'
 }
 
 echo 'the build is running'
 let result = await $build
-echo $result[value]
+echo $result
 ```
+
+`await` writes what `cargo build` printed, then binds `'built'` (§11.2).
+
+`spawn` is a control form, not a function (§3.6). `BODY` is a block; `TITLE`,
+written before it, is a `String` naming the work to people: it is the name the worker is
+born under, reported in the audit trail (§13.3), in the host's notices, and in
+the worker registry (§11.4). It must be non-empty and on one line. The title
+may be left out, `spawn { cargo build }`, and the worker is then named by its
+source location, `block at <script>, line N`. Whether a title is required is
+the host's policy, checked when the form runs, before any worker is born: the
+`ral` hosts accept an untitled `spawn`, and the exarch agent host refuses one,
+naming the fix. A `spawn` with no operand or with three is a parse error.
 
 A pipeline is spawned by naming it in the block:
 
 ```ral
-let filtered = spawn { cat large.log | grep error }
+let filtered = spawn 'errors' { cat large.log | grep error }
 ```
 
 ral has no backgrounding operator. A trailing `&` is a parse error naming
@@ -2543,7 +2562,18 @@ The worker receives the lexical environment captured by its block. Values are
 immutable, so concurrent workers do not share mutable lexical bindings. Each
 worker has its own shell state: changes such as `cd`, environment overrides,
 or status changes in the worker do not mutate the spawning thread's shell
-state. A nested `spawn` remains owned by the same session.
+state.
+
+A nested `spawn` is owned by the worker that spawned it: cancelling a worker
+cancels its tree, and a worker finishes only after its children have. When
+the worker's block returns, every child it started that no eliminator has
+claimed is awaited in the order the children were born, as `await` would
+(§11.2): the child's output joins the worker's own, and the first child
+failure is the worker's failure, the remaining children being cancelled. When
+the block fails, exits, or is stopped, every unclaimed child is cancelled, and
+the worker waits for them to end, at most the host's cleanup grace (§8.7). A
+`spawn` inside a pipeline stage of a worker belongs to that worker. A `spawn`
+in a run, outside any worker, is owned by the session.
 
 A worker is not part of the foreground run. Interrupting or timing out the run
 that created it does not cancel the worker. The worker's standard input is
@@ -2554,103 +2584,13 @@ Pipelines inside a worker still use byte pipes between stages. Value-style
 composition remains ordinary application and bind. Concurrency changes
 lifetime, not the typing of a pipeline.
 
-### 11.2. Handles and eliminators
-
-A handle is a process-local capability for one worker. The core eliminators
-are `await`, `poll`, `race`, and `cancel`.
-
-#### `await`
-
-`await handle` blocks until the worker settles. On success it returns:
-
-```text
-[
-    value:  A,
-    stdout: Bytes,
-    stderr: Bytes,
-]
-```
-
-`A` is the return type of the spawned block. The type of the handle and the
-type of `value` are linked, so a consumer cannot assume a different result
-type.
-
-If the worker fails, exits, or panics, `await` raises that failure rather than
-returning the record. Use `try` when failure is expected:
-
-```ral
-try {
-    let result = await $build
-    use $result[value]
-} { |error|
-    echo "build failed with status $error[status]"
-}
-```
-
-The settled result is cached. Repeating `await` on a completed handle returns
-the same value and bytes. A foreground interruption of `await` interrupts the
-wait, not the durable worker; the handle may be observed later.
-
-#### `poll`
-
-`poll handle` never waits. It returns one of two variants:
-
-```text
-`pending [stdout: Bytes, stderr: Bytes]
-
-`settled [
-    stdout: Bytes,
-    stderr: Bytes,
-    outcome: <`ok A | `err ErrorRecord>,
-]
-```
-
-The pending bytes are a cumulative, non-destructive snapshot. Polling does not
-consume them, so a later poll or `await` still sees the complete buffered
-output. Repeated pending polls may therefore return progressively longer byte
-sequences.
-
-The settled arm reports worker failure as `outcome: `err ...`; it does not
-raise that failure. Thus `poll` itself succeeds and leaves status zero when it
-successfully samples either arm. The prelude function `is-done handle` returns
-`false` for `pending` and `true` for either settled outcome.
-
-#### `race`
-
-`race handles` waits until it observes one handle settle, returns the same
-record as `await`, and cancels every remaining live handle:
-
-```ral
-let a = spawn { fetch 'https://a.example/data' }
-let b = spawn { fetch 'https://b.example/data' }
-let first = race [$a, $b]
-```
-
-If several handles are already settled when inspected, list order breaks the
-tie. A failed winner is re-raised after the losers have been cancelled. An
-empty list, or a list with no live or settled handle left to observe, is an
-error.
-
-#### `cancel`
-
-`cancel handle` requests explicit cancellation and removes the worker from the
-owning registry. Cancellation is cooperative for ral computation and is
-propagated to external child process groups by the process runtime. A worker
-may take a short bounded interval to tear its process tree down.
-
-Cancellation has no result. `await` on a cancelled handle fails with
-`worker was cancelled`, reason `` `cancelled ``, status 143: the awaiting run's
-own failure, which `try` can recover (§8.6). `poll` settles it as that same
-error record. A worker whose lease expired reports `worker's lease expired`,
-reason `` `timed-out ``, status 124, likewise. Cancelling a handle that has
-already completed does not destroy its cached outcome.
-
-### 11.3. Buffered output and `par`
+#### Buffered output
 
 Each ordinary worker has independent stdout and stderr byte buffers. Its bytes
-do not appear on the spawning run's output while it executes. `await` and
-settled `poll` return them as `Bytes`; pending `poll` exposes the bytes written
-so far.
+do not appear on the spawning run's output while it executes. `await` writes
+the bytes to the awaiter's streams (§11.2); `poll` returns them as data, as
+`Bytes`: those written so far while the worker runs, all of them once it has
+settled.
 
 Each buffer is capped at 16 MiB. At the cap ral appends one truncation marker,
 continues draining the writer, and discards later bytes. Draining continues so
@@ -2659,13 +2599,148 @@ bounded. Redirect high-volume output inside the spawned block when the full
 stream matters:
 
 ```ral
-let server = spawn {
+let server = spawn 'docs server' {
     python -m http.server > server.log 2> server.err
 }
 ```
 
 Explicit redirects bypass the corresponding handle buffer. A watched worker
-also has empty completion buffers because its bytes were streamed live.
+also has empty completion buffers because its bytes were streamed live, so
+`await` of it writes nothing.
+
+### 11.2. Handles and eliminators
+
+A handle is a process-local capability for one worker. The core eliminators
+are `await`, `poll`, `race`, and `cancel`.
+
+#### `await`
+
+`await handle` behaves as if the handle's block had run at the `await`. It:
+
+1. waits until the worker settles;
+2. writes the bytes the worker wrote to its stdout to the awaiter's current
+   stdout, then the bytes it wrote to its stderr to the awaiter's current
+   stderr;
+3. ends as the block ended: it returns the block's value, raises its failure
+   as it stands (status, message and command included), re-raises its `exit`
+   or its stop, and resumes its panic.
+
+The sinks are the awaiter's at the `await`: inside a capture,
+`let out = await $h` captures the bytes; under `2> f`, the worker's stderr
+goes to `f`; inside another worker, they land in that worker's own buffers. A
+failure is the awaiting run's, so `try` recovers it:
+
+```ral
+try { await $build } { |error|
+    echo "build failed with status $error[status]"
+}
+```
+
+A handle carries its block's type, grade included (§17.3): `spawn` of a block
+of type `F_ε A` returns a `Handle_ε A`, printed `Handle (Returns A)`,
+`Handle Command`, or, with the grade a variable, `Handle (ν A)`; and
+`await : Handle_ε A -> F_ε A`. So `await` of `spawn { echo hi }` is a command,
+and `let x = await $h` binds `"hi"` as `let x = { echo hi }` would; `await` of
+`spawn { echo pre; return 5 }` writes `pre` and returns `5`, as the block
+would inline. Replaying bytes changes nothing about the grade, which says how
+a result is produced, not whether anything is written.
+
+The equation holds for the value or failure and for the bytes on the two
+standard streams; the block's effects happened earlier, concurrently, in the
+worker's own shell. It does not hold for:
+
+- shell state: `cd`, environment overrides and the status set inside the
+  block do not reach the awaiter (§11.1);
+- the interleaving of the two streams: all of the worker's stdout is written,
+  then all of its stderr, so a block that alternates `echo` and `warn` replays
+  as its stdout followed by its stderr;
+- a block that spawns: run inline in a run, its inner `spawn` would be a
+  session worker, while as a worker it awaits that child before it settles
+  (§11.1), so the awaiter sees the child's output and failure too;
+- a cancelled or timed-out worker, which ends with `worker was cancelled` or
+  `worker timed out` (below), an ending the block run inline could not have;
+- `exit`: an `exit` in the block ends the run that awaits it, which may be a
+  later run than the one that spawned it.
+
+The ending is cached. Awaiting again writes the same bytes and ends the same
+way; the block is not run again. A foreground interruption of `await`
+interrupts the wait, not the worker; the handle may be observed later.
+
+#### `poll`
+
+`poll handle` never waits and never writes. It is the one observation that
+returns a worker's bytes as data, one of two variants:
+
+```text
+`pending [stdout: Bytes, stderr: Bytes, elapsed: Float]
+
+`settled [
+    stdout: Bytes,
+    stderr: Bytes,
+    elapsed: Float,
+    outcome: <`ok A | `err ErrorRecord>,
+]
+```
+
+`elapsed` is in seconds on a monotonic clock: how long the worker has run so
+far, or, once it has settled, how long it ran.
+
+The pending bytes are a cumulative, non-destructive snapshot. Polling does not
+consume them, so a later poll or `await` still sees the complete buffered
+output. Repeated pending polls may therefore return progressively longer byte
+sequences.
+
+The settled arm reports worker failure, including a cancel or a timeout, as
+`outcome: `err ...`; it does not raise that failure. Thus `poll` itself
+succeeds and leaves status zero when it successfully samples either arm. A
+worker's `exit`, a foreign stop and a panic are re-raised, as `await`
+re-raises them. The prelude function `is-done handle` returns `false` for
+`pending` and `true` for either settled outcome.
+
+#### `race`
+
+`race handles` waits until it observes one handle settle, then behaves as
+`await` on the winner: it writes the winner's bytes and ends as the winner's
+block ended. Every other handle is cancelled and drained before `race`
+returns, however the winner ended (§11.3).
+
+```ral
+let a = spawn 'mirror a' { fetch 'https://a.example/data' }
+let b = spawn 'mirror b' { fetch 'https://b.example/data' }
+let first = race [$a, $b]
+```
+
+If several handles are already settled when inspected, list order breaks the
+tie. A cancelled handle counts as settled, with the `worker was cancelled`
+ending. An empty list is an error.
+
+#### `cancel`
+
+`cancel handle` requests explicit cancellation and removes the worker from the
+owning registry. Cancellation is cooperative for ral computation and is
+propagated to external child process groups by the process runtime. A worker
+may take a short bounded interval to tear its process tree down.
+
+Cancellation has no result. `await` on a cancelled handle writes the bytes
+the worker wrote before the cancel, then fails with
+`worker was cancelled`, reason `` `cancelled ``, status 143: the awaiting run's
+own failure, which `try` can recover (§8.6). `poll` settles it as that same
+error record. A worker reached by a timeout on an enclosing scope reports
+`worker timed out`, reason `` `timed-out ``, status 124, likewise. Cancelling a
+worker cancels every worker it started (§11.1), and each of those reports
+`worker was cancelled` in turn. Cancelling a handle that has already completed
+does not destroy its cached outcome.
+
+### 11.3. Structured fan-out: `par`, `all`, `race`
+
+Fan-out that must leave nothing behind is a call, not a set of spawns. `par`
+and `all` own the workers they start, and `race` the handles it is given:
+before the call returns, every one of them has ended or has been cancelled and
+drained. Such a worker is a stage of the call rather than an errand of the
+session. Its output goes to the call's own streams as the call takes it, no
+birth or completion of it is announced, and it is registered (§11.4), so the
+host's worker cap bounds the fan-out and the registry shows the worker as
+owned by a call.
 
 `par function items jobs` is the standard parallel map:
 
@@ -2674,62 +2749,124 @@ let converted = par { |path| convert-one $path } $paths 4
 ```
 
 At most `jobs` workers run at once. A non-positive limit permits one worker per
-item. Results preserve input order even when workers finish out of order.
-`par` unwraps each await record and returns only the list of `value` fields;
-use explicit `spawn` and `await` when stdout or stderr is needed. If an item
-fails, `par` cancels every remaining sibling before re-raising the original
-failure. A stop, an `exit` or a panic passes `par`, and the remaining siblings
-run on, detached.
+item. `par` awaits the items in input order (§11.2), so each item's output is
+written in that order and the result is the list of their values in input
+order, whatever order the workers finished in.
 
-### 11.4. Registry, leases, and shutdown
+`all [name: block, ...]` runs several blocks at once and returns the record of
+their values:
 
-Every `spawn`, `watch`, and `service` birth is registered at once
-in the owning shell. A registry entry has a stable `wN` identity, description,
-start time, lifetime class, state, and the live handle. Nested workers share
-the owning shell's registry.
+```ral
+let checks = all [build: { cargo build -q }, lint: { cargo clippy -q }]
+echo $checks[lint]
+```
+
+`all` is a control form. Each task's block is demanded as a value, as a
+function argument is, so a command's value is its output (§17.5). The tasks
+are awaited in the order written, so their output appears in that order. A
+label written twice is a parse error.
+
+The first failure among the workers of a `par` or an `all` cancels the others,
+which are drained before the failure is raised. An `exit`, a panic, or a stop
+of the calling run, such as an interrupt or a timeout, cancels and drains them
+too. `race` (§11.2) cancels and drains its losers however the winner ended.
+
+Draining is bounded by the host's cleanup grace (§8.7): the call waits at most
+that long for its cancelled workers to end. Cancellation is cooperative
+(§8.10), so a worker that ignores it past the grace runs on after the call
+returns, no longer registered.
+
+### 11.4. Registry and shutdown
+
+Every worker birth — by `spawn`, `watch`, `par`, or `all` — is registered at
+once in the owning shell. A registry entry holds the worker's id, its title,
+its owner (the session, the worker it was born inside, or a call), its state, its
+birth stamps (one on a monotonic clock, one on the wall clock, and an end stamp
+once its thread ends), and the live handle. Nested workers share the owning
+shell's registry.
+
+The id is the worker's identity; the title is for people. `worker id` returns
+the handle of any worker still in the registry, running or with a retained
+result, whatever started it. It is a boundary (§7.3): the value the worker
+settles with is admitted, when awaited, against the type the script uses it
+at. It composes with an eliminator in the same call, `await !{worker 3}`. An
+id that names no entry is an error. Nothing looks a worker up by title.
+
+`workers` lists the registry as data: one record per entry, running or with a
+retained result, in ascending id order:
+
+```text
+[
+    id: Int,
+    title: String,
+    owner: <`session | `worker Int | `call>,
+    state: <`running | `done Done>,
+    started: Int,
+    elapsed: Float,
+    settled: <`some Int | `none>,
+]
+```
+
+where
+
+```text
+Done = `ok | `err ErrorRecord | `exited Int | `stopped Cause | `panic String
+Cause = `reader-gone | `interrupted | `cancelled | `timed-out
+      | `terminated | `aborted
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | the worker's id, the one `worker` takes |
+| `title` | the `spawn`'s title or `block at` name, a `watch`'s label, an `all` task's label, or `par #i` for the item at index `i` of a `par` |
+| `owner` | `` `session `` for a worker born in a run, `` `worker n `` for one born inside worker `n`, `` `call `` for one a `par` or `all` owns |
+| `state` | `` `running ``, or `` `done `` with how the block ended: it returned, failed with an error record (§8.6), ran `exit` with a status, was stopped with a cause (§8.10), or panicked |
+| `started` | when the worker was born, in Unix seconds |
+| `elapsed` | seconds on a monotonic clock: how long it has run so far, or how long it ran |
+| `settled` | `` `some `` the Unix second its thread ended, `` `none `` while it runs |
+
+A listing is a pure read: it claims no result, removes no entry, and holds no
+handle, so a `workers` result crosses every boundary a value does (§11.7).
+`worker id` is the one way back from a row to its handle.
 
 An entry leaves when:
 
-- `await`, settled `poll`, or `race` observes its result;
-- `cancel` removes it;
-- a host worker lease reaps it; or
+- `await`, settled `poll`, or `race` observes its result, or the worker or
+  call that owns it settles it (§11.1, §11.3);
+- `cancel` removes it; or
 - a host retention policy reaps an unclaimed settled result.
 
-A pending poll leaves the entry in place. Listing workers is also a pure
-observation and renews nothing.
+A pending poll leaves the entry in place.
 
-Hosts may give ordinary workers an idle-observation lease with an absolute
-backstop. `poll`, `await`, and `race` renew the idle clock whenever they name a
-handle; continuous waiting renews it on every sweep. Observation can postpone
-idle reaping but never the absolute backstop. A lease reap cancels the worker
-and records a notice explaining whether the idle bound or backstop fired.
+A worker lives as long as its owner: nothing but `cancel`, its own
+completion, its owner's end — a parent worker's halt, a call's return — or the
+session's end stops it. No policy reaps a running worker.
 
-Hosts may also cap live workers. Admission reserves a seat before the thread
-is created, so concurrent births cannot overshoot the cap. Only running or
+Hosts may cap live workers. Admission reserves a seat before the thread is
+created, so concurrent births cannot overshoot the cap. Only running or
 being-born workers occupy seats; settled results retained for observation do
-not. A refused birth reports the cap and suggests awaiting or cancelling a
-worker.
+not. A refused birth reports the cap, suggests awaiting or cancelling a
+worker, and points at `workers` to list them.
 
 These bounds are host policy, not core constants. The `ral` interactive and
-batch hosts arm no worker lease, retention bound, or worker cap. The exarch
-agent host currently grants ordinary workers a one-hour idle bound, a 24-hour
-absolute backstop, a cap of 64 live workers, and retention of 256 ral calls for
-unclaimed settled entries.
+batch hosts arm no retention bound or worker cap. The exarch agent host
+currently caps live workers at 64 and retains unclaimed settled entries for
+256 ral calls.
 
-All worker classes remain owned by the session and are cancelled when that
-session is destroyed. Teardown then waits briefly and boundedly for worker
-threads to act on cancellation and tear down their children. The interactive
-shell first warns once with the identities of workers still running. Workers
-do not survive process exit; use `detach` when survival is the requirement.
+Every session worker is cancelled when its session is destroyed. Teardown then
+waits briefly and boundedly for worker threads to act on cancellation and tear
+down their children. The interactive shell first warns once with the ids and
+titles of workers still running. Workers do not survive process exit; use
+`detach` when survival is the requirement.
 
 ### 11.5. Host-installed worker forms
 
-The core language provides `spawn`, `await`, `poll`, `race`, and `cancel`.
-`watch`, `service`, and `detach` are optional host commands: `watch` and
-`service` are builtins, and `detach` is a base handler taking an argument list.
-If a host does not install one, its name is absent from that shell's base scope
-(`watch`, `service`) or its base frames (`detach`), and is checked and resolved
-like any other unknown command.
+The core language provides the `spawn` and `all` forms and the builtins
+`await`, `poll`, `race`, `cancel`, `par`, `worker`, and `workers`. `watch` and `detach`
+are optional host commands: `watch` is a builtin, and `detach` is a base handler taking an argument list. If a host
+does not install one, its name is absent from that shell's base scope
+(`watch`) or its base frames (`detach`), and is checked and resolved like any
+other unknown command.
 
 #### Live output with `watch`
 
@@ -2751,29 +2888,6 @@ have already been sent to the durable output sink. Programs run through the
 `ral` executable, in interactive and batch modes, install `watch`. A host whose
 output capture ends with each run, including exarch, omits it because a worker
 cannot safely retain that run's sink.
-
-#### Durable session work with `service`
-
-`service description block` creates a buffered worker with no idle lease and
-no absolute backstop:
-
-```ral
-let server = service 'local documentation server' {
-    python -m http.server 8000
-}
-```
-
-The description must be a non-empty, single-line `String`. It is the service's
-stable explanation in host listings. A service still occupies a live-worker
-seat and still ends on explicit `cancel`, session destruction, or process
-exit. “Durable” means exempt from neglect-based reaping, not independent of
-the host process.
-
-Agent hosts with ordinary worker leases may install `service`; exarch does.
-The `ral` executable omits it because its ordinary workers already have no
-idle lease or backstop. A host may provide an id-based way to recover service
-handles; exarch exposes its live services in a host-owned register and provides
-`service-handle id`.
 
 #### Work that survives with `detach`
 
@@ -2837,10 +2951,11 @@ waiting and `cancel` for termination; Ctrl-C ends what Ctrl-Z used to park.
 
 | Facility | Core / portable | `ral` interactive | `ral` batch | exarch agent host |
 |---|---:|---:|---:|---:|
-| `spawn`, `await`, `poll`, `race`, `cancel` | yes | yes | yes | yes |
-| `par`, `is-done` from the standard prelude | when that prelude is installed | yes | yes | yes |
+| `spawn`, `all` (forms) | yes | yes | yes | yes |
+| `await`, `poll`, `race`, `cancel`, `par` | yes | yes | yes | yes |
+| `worker`, `workers` | yes | yes | yes | yes |
+| `is-done` from the standard prelude | when that prelude is installed | yes | yes | yes |
 | `watch` | optional | yes | yes | no |
-| `service` | optional | no | no | yes |
 | `detach` | optional, Unix only | no | no | Unix sessions that enable it |
 
 Handles are local runtime values. They may be stored, passed to functions, and
@@ -3071,7 +3186,7 @@ If the host cannot enforce `` `offline ``, ral refuses the confined launch rathe
 
 ```ral
 grant [shell: [`chdir]] {
-    # detach is refused; spawn and service remain session-owned alternatives
+    # detach is refused; spawn remains the session-owned alternative
 }
 ```
 
@@ -3493,7 +3608,7 @@ what: `command [argv: [String], status: Int, origin: <`external | `detached>,
     | `grep    [scope: String, pattern: String]
     | `check   [resource: <`exec | `fs | `deputy>, decision: <`denied | `flagged>,
                 fields: Map String]
-    | `worker  [id: Int, cmd: String, class: <`worker | `durable>]
+    | `worker  [id: Int, title: String]
     | `act     [verb: String, subject: <`some String | `none>,
                 payload: String, refused: Bool]
 ```
@@ -3547,8 +3662,7 @@ A `` `worker `` observation records a worker's birth:
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | `Int` | the worker's registry identifier |
-| `cmd` | `String` | what it was born to run |
-| `class` | `` `worker \| `durable `` | the lease class the worker registered under |
+| `title` | `String` | the title it was born under |
 
 An `` `act `` observation records an act the host committed:
 
@@ -3577,7 +3691,7 @@ A `detach` birth, a direct-spawn pipeline stage, or a command running without
 byte capture (`CapturePolicy::Off`) has empty bytes and total 0.
 Neither stream is privileged. These are retention rules, not I/O limits:
 every byte still streams to its ordinary destination. Ordinary value capture
-(§7) and worker buffers (§11.3) retain their separate 16 MiB limit.
+(§7) and worker buffers (§11.1) retain their separate 16 MiB limit.
 
 Command observations cover external commands, bundled commands, pipeline
 stages, and `detach` births. Arguments are recorded after evaluation and
@@ -4006,9 +4120,9 @@ surface sink; without one, it safely produces no visible event. `ask` reads from
 the controlling terminal rather than redirected standard input and fails on
 end-of-file.
 
-Concurrency primitives are `spawn`, `await`, `poll`, `race`, and `cancel`.
-They operate on typed handles. The prelude adds `par`, `is-done`, `attempt`,
-`succeeds`, and `defer`. Exact ownership, cancellation, output capture, and
+Concurrency primitives are the `spawn` and `all` forms and `await`, `poll`,
+`race`, `cancel`, `par`, `worker`, and `workers`. The prelude adds `is-done`, `attempt`,
+and `succeeds`. Exact ownership, cancellation, output capture, and
 lifetime rules are specified with concurrency.
 
 ### 14.7. Host and build additions
@@ -4022,8 +4136,8 @@ plugin-lifecycle commands and private editor interfaces. A plugin may install
 validated aliases, hooks, and keybindings; those are session
 extensions, not portable standard names.
 
-Exarch installs its agent operations, the durable `service` operation, and a
-documented ral helper library. It does not provide `watch`. On supported Unix
+Exarch installs its agent operations and a documented ral helper library. It
+does not provide `watch`. On supported Unix
 hosts it may also provide `detach`, whose process deliberately outlives ral and
 cannot be awaited or cancelled through a handle. These host-owned names must
 not be assumed in a portable ral script.
@@ -4084,7 +4198,10 @@ pipeline operator.
 
 After a successful run, `Unit` prints nothing and `Bytes` are written without a
 prefix. Other values are displayed with the REPL renderer. Lists and maps use
-the bounded pretty-printer; other values use their ordinary display form. The
+the bounded pretty-printer; other values use their ordinary display form. A
+list of two or more records sharing one field sequence prints one record per
+line, each field padded to its column's width, so a `workers` result reads as a
+table and still pastes back as the same list. The
 default prefix is `=> ` and the default value colour is yellow where colour is
 supported.
 
@@ -4555,8 +4672,9 @@ in settlement order. `` `command `` observations exist only for external or
 bundled command executions and `detach` births; a builtin application records
 nothing of its own, its effects landing through the write, read, and worker
 doors (§13.3). Function application, control forms such as `if`, `case`,
-`try`, `guard`, `within`, `grant`, and `audit`, and loop iterations record
-nothing of their own either; the commands executed inside them land in the
+`try`, `guard`, `within`, `grant`, `audit`, `spawn`, and `all`, and loop
+iterations record nothing of their own either (a `spawn`'s birth lands through
+the worker door); the commands executed inside them land in the
 open trail directly. Each observation carries its evaluated arguments, status,
 source location, timing, and principal, plus the bytes it captured.
 
@@ -4710,6 +4828,8 @@ scope-form    ::= "try" atom atom
                 | "within" options atom
                 | "grant" options atom
                 | "audit" atom
+                | "spawn" atom? atom
+                | "all" options
 options       ::= "[" "]"
                 | "[" option ("," option)* ","? "]"
 option        ::= identifier ":" atom
@@ -4859,12 +4979,14 @@ M ::= return v
     | decode v
 
 op ::= try v1 v2 | guard v1 v2 | within v1 v2 | grant v1 v2 | audit v
+     | spawn [v1] v2 | all {l1 = v1, ..., ln = vn}
      | redirect M redirects
 ```
 
 `T`, `E` and each `Hi` are values, thunks the form forces when it chooses one.
 Every scope op but the last takes its body as a thunk, because a scope installs
-an effect before the body runs and a value is what can be held unrun. `redirect`
+an effect before the body runs, `spawn` and `all` run theirs on workers of
+their own, and a value is what can be held unrun. `redirect`
 takes the computation itself: its body is an application or a nested scope,
 neither of which can fuse its own redirects the way `exec` does.
 
@@ -4893,7 +5015,7 @@ Value and computation types are:
 ```text
 A, B ::= Unit | Bool | Int | Float | String | Bytes
        | List A | Map A | Record ρ | Variant ρ
-       | U C | Handle A | α
+       | U C | Handle_ε A | α
 
 ρ ::= · | l : A, ρ | r
 
@@ -4917,7 +5039,9 @@ grade says whether a computation's result is its output, not whether it writes.
 A computation of grade `w` has value type `Unit`. A grade is atomic: a grade
 variable is bound to `p` or `w` and to nothing else, so grades are quantified
 like any variable but are never weak and need no occurs check. A type `Command A`
-does not exist.
+does not exist. `Handle_ε A` is a suspended producer: `await` of it is an
+`F_ε A`, and it prints as the producer it suspends, `Handle (Returns A)` or
+`Handle Command` (§11.2).
 
 The checker is Hindley-Milner with value-, computation-, and row-level
 unification variables. Let-bound names are generalized against the current
@@ -4928,7 +5052,7 @@ every use of the name shares one type for it. There is no value restriction. A
 scheme that leaves a weak variable unquantified keeps it weak in later runs, where
 it is re-seeded as a fresh weak variable. A *boundary* — a door through which a
 value of a shape the program did not decide enters typed code: the decoders,
-`use`, `service-handle`, the exarch host's answers, `_ed-state` — makes the
+`use`, `worker`, the exarch host's answers, `_ed-state` — makes the
 variables of its result weak and records the result type on the call. Once the
 unit is solved that type is frozen as a *site* on the call, which the door
 admits the value against: each position's head, each free variable's kind, and
@@ -5033,9 +5157,11 @@ A row's scheme says what it produces. The rows that write — the encoders
 end in `Command`, and a row that writes only when applied at its full arity:
 `to-json` alone is a function, and `to-json $x` is a command. The rest end in
 `Returns A`, with `warn` among them, since standard error is not the byte
-channel. A few rows are polymorphic in the grade: `each`, `fold`, `fold-lines`,
-`spawn`, `watch`, `service` and `audit` run a body of either grade, stream its
-output and keep its value; `fail`, `exit` and `diverges` inhabit every grade. A
+channel. A few rows are polymorphic in the grade: `each`, `fold`, `fold-lines`
+and `audit` run a body of either grade, stream its output and keep its value;
+`watch`, like the `spawn` form, keeps the body's grade in the `Handle_ε A` it
+returns, and `await` and `race` give it back (§11.2); `fail`, `exit` and `diverges` inhabit
+every grade. A
 handler does not change the answer, since an arm stands in for the head it names
 and keeps that head's class; an arm for the name of a value row is never
 reached, because builtins resolve first.
@@ -5211,9 +5337,11 @@ echo note; echo body }` binds `"note\nbody"`.
 
 `audit` absorbs its body: `audit { grep -c ERROR app.log }` has type
 `F_p Report(Unit)` and outcome `` `ok () ``, while the bytes its body wrote sit
-in the trail's observations. `each`, `fold`, `fold-lines`, `spawn`, `watch`,
-`service` and `defer` absorb a command body likewise: they run it, stream its
-output, and keep its value, which for a command is `()`.
+in the trail's observations. `each`, `fold` and `fold-lines` absorb a command
+body likewise: they run it, stream its output, and keep its value, which for a
+command is `()`. `spawn` and `watch` do not absorb: the handle keeps the body's
+grade, so `let x = await $h` binds what a command block wrote, as
+`let x = { … }` would.
 
 ### 17.6. Branch and variant rules
 
@@ -5301,7 +5429,19 @@ guard body cleanup : F_ε A
 body : U (F_ε A)
 ------------------------------ Audit
 audit body : F_p {outcome : <`ok A | `err Error>, trail : List Observation}
+
+title : String    body : U (F_ε A)
+------------------------------ Spawn
+spawn [title] body : F_p (Handle_ε A)
+
+body_1 : U (F_p A_1)  ...  body_n : U (F_p A_n)
+------------------------------ All
+all [l1: body_1, ..., ln: body_n] : F_p {l1 : A_1, ..., ln : A_n}
 ```
+
+`spawn`'s title is optional; the handle keeps the body's grade (§11.2). Each
+`all` task is demanded as a value, as an argument is, so a command's task is
+captured at the binding boundary (§17.5).
 
 `try` is §17.6's rule. `within`, `grant` and `guard` have their body's type,
 grade included.

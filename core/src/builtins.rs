@@ -353,21 +353,24 @@ builtin_registry! {
     Str { names: ["str"], ty: scheme::str_parse,
         doc: "str <val>  — convert a value to its string representation.",
         call: |args, _mooring, _shell| Ok(strings::builtin_to_string(args)), },
-    Spawn { names: ["spawn"], ty: scheme::spawn,
-        doc: "spawn <thunk>  — spawn a concurrent block on a worker thread, return a handle.",
-        call: |args, mooring, shell| concurrency::builtin_spawn(args, mooring, shell), },
     Await { names: ["await"], ty: scheme::await_op,
-        doc: "await <handle>  — wait for a concurrent block to complete, returning {value, stdout, stderr}; re-raises a failed block.",
+        doc: "await <handle>  — wait for a concurrent block and behave as if it had run here: its stdout and stderr are written to yours, its value is returned, and a failure, an exit or a stop is raised as it was. Awaiting again replays the same ending.",
         call: |args, _mooring, shell| concurrency::builtin_await(args, shell), },
     Poll { names: ["poll"], ty: scheme::poll,
-        doc: "poll <handle>  — non-blocking sample of a concurrent block: `settled with {stdout, stderr, outcome: `ok/`err} once it finishes, or `pending while still running. Never re-raises.",
+        doc: "poll <handle>  — sample a concurrent block without waiting or writing: `pending [stdout, stderr, elapsed] with everything written so far, or `settled [stdout, stderr, elapsed, outcome: `ok value | `err error]. Total: a failed or cancelled block settles as `err data; an exit, a foreign stop and a panic are re-raised.",
         call: |args, _mooring, shell| concurrency::builtin_poll(args, shell), },
     Race { names: ["race"], ty: scheme::race,
-        doc: "race <handles>  — wait for the first of several concurrent blocks to finish, returning {value, stdout, stderr}; re-raises a failed winner.",
-        call: |args, _mooring, shell| concurrency::builtin_race(args, shell), },
+        doc: "race <handles>  — wait for the first of several concurrent blocks to finish, then behave as `await` on it; the rest are cancelled and drained before `race` returns.",
+        call: |args, mooring, shell| concurrency::builtin_race(args, mooring, shell), },
     Cancel { names: ["cancel"], ty: scheme::cancel_op,
         doc: "cancel <handle>  — cancel a running concurrent block.",
         call: |args, _mooring, shell| concurrency::builtin_cancel(args, shell), },
+    Par { names: ["par"], ty: scheme::par_op,
+        doc: "par <f> <items> <jobs>  — parallel map: run `f` over `items` on at most `jobs` workers at once (`jobs <= 0`: one per item), owned by this call. Results keep input order, and each item's output appears in that order. The first failure cancels the remaining items, which are drained before it is raised; a stop, an exit or a panic cancels them too. Nothing started by `par` outlives the call.",
+        call: |args, mooring, shell| concurrency::builtin_par(args, mooring, shell), },
+    Workers { names: ["workers"], ty: scheme::workers_op,
+        doc: "workers  — every worker this session registered, running or with a retained result, as one record each: `id`, `title`, `owner` (`session, `worker id, or `call for one a `par`/`all` owns), `state` (`running, or `done with how it ended), `started` (unix seconds), `elapsed` (seconds, so far or in total), `settled` (`some unix seconds, or `none). Data only: `worker <id>` gives the handle back.",
+        call: |_args, _mooring, shell| Ok(concurrency::builtin_workers(shell)), },
     // The bundled uutils tools (cat, yes, head, wc, …) are deliberately absent:
     // `runtime::command` runs each as a `ral --ral-bundled-tool <tool>` child, so
     // they cross the same wait / signal / exit-code boundary as a system binary.
@@ -403,7 +406,7 @@ pub(crate) static CORE_BASE_FRAMES: &[BuiltinEntry] = &CORE_BASE_FRAMES_ARR;
 /// did not decide enters typed code.  Each is handed the [`Site`] the checker
 /// solved at its call and admits what it lets in against it; they sit apart
 /// from [`CORE_BUILTINS`] because their bodies take that site.
-static BOUNDARY_BUILTINS_ARR: [BuiltinEntry; 4] = [
+static BOUNDARY_BUILTINS_ARR: [BuiltinEntry; 5] = [
     BuiltinEntry::boundary(
         Cow::Borrowed("from-json"),
         scheme::from_json,
@@ -431,6 +434,12 @@ static BOUNDARY_BUILTINS_ARR: [BuiltinEntry; 4] = [
         "use <file>  — load a .ral module, returning its bindings as a record; its functions are checked against the types the script uses them at.",
         modules::builtin_use,
     ),
+    BuiltinEntry::boundary(
+        Cow::Borrowed("worker"),
+        scheme::worker_op,
+        "worker <id>  — re-acquire a worker's Handle by its id, whatever started it and whether it is running or its result is retained, so a lost binding is no lost job. Compose with an eliminator in the same call: `await !{worker 3}`, `cancel !{worker 3}`. `workers` lists the ids.",
+        concurrency::builtin_worker,
+    ),
 ];
 pub static BOUNDARY_BUILTINS: &[BuiltinEntry] = &BOUNDARY_BUILTINS_ARR;
 
@@ -447,8 +456,7 @@ pub(crate) static CORE_SETS: [&[BuiltinEntry]; 3] =
 /// The lines ride the session's deferred sink, which outlives the run, so only
 /// a host that installs a deferred sink installs this; elsewhere naming `watch`
 /// is an unknown-name diagnostic at compile time rather than a builtin that
-/// resolves and then refuses.  [`SERVICE_BUILTIN`] is the same shape for a
-/// host with a lease frame.
+/// resolves and then refuses.
 static WATCH_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
     Cow::Borrowed("watch"),
     scheme::watch,
@@ -456,22 +464,6 @@ static WATCH_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
     BuiltinBody::Static(concurrency::builtin_watch),
 )];
 pub static WATCH_BUILTIN: &[BuiltinEntry] = &WATCH_BUILTIN_ARR;
-
-/// `service` — an ordinary buffered spawn registered under the durable lease
-/// class: no idle reap, no absolute backstop, bounded instead by the description
-/// its birth requires.
-///
-/// Only a host with a lease frame has anything to exempt a worker from, so
-/// exarch installs it while the ral hosts — whose spawns already live until
-/// cancel or exit — leave it out, making the name a compile-time unknown there
-/// rather than a call-time refusal.
-static SERVICE_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
-    Cow::Borrowed("service"),
-    scheme::service,
-    "service <desc> <thunk>  — birth a durable worker: like spawn, but never idle-reaped and exempt from the 24 h backstop. <desc> is a required, single-line, non-empty description of what it's for; a durable service's only bound is legibility, so the host tracks it by this description rather than a lease. Dies only by `cancel` through its handle, /clear, or process exit. It does not outlive this process: work that must still be running after this process exits needs `detach`.",
-    BuiltinBody::Static(concurrency::builtin_service),
-)];
-pub static SERVICE_BUILTIN: &[BuiltinEntry] = &SERVICE_BUILTIN_ARR;
 
 /// `surface` — forward a tagged variant event to the host's structured-event
 /// sink; the identity when no host is installed. Kept out of [`CORE_BUILTINS`]

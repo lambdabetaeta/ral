@@ -188,8 +188,7 @@ fn external_write_outside_grant_denied_in_spawn_body() {
     let mut shell = boot();
     let src = format!(
         "let h = !{{spawn {{ sh -c 'echo x > {denied_s}' }}}}\n\
-         let r = await $h\n\
-         return $r[value]"
+         return !{{await $h}}"
     );
     let result = top_level_under(&mut shell, restrict_to(&work_s), &src);
     match result {

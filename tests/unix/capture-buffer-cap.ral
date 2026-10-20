@@ -1,4 +1,4 @@
-# Test: the 16 MiB buffer cap — a capture refuses, a detached worker truncates
+# Test: the 16 MiB buffer cap — a capture refuses, a spawned worker truncates
 
 # 20 MB down a capture sink. The bytes captured *are* the value, so a prefix
 # is not a smaller answer but a wrong one, and the truncation marker would be
@@ -20,11 +20,18 @@ echo $refusal
 let small = yes ral | head -c 1000
 echo !{length $small}
 
-# A detached worker is the other side of the same cap: its bytes arrive with
+# A spawned worker is the other side of the same cap: its bytes arrive with
 # nobody to refuse them, so the buffer stays bounded and says where it stopped
-# — the first 16 MiB, then the truncation marker once, then nothing.
+# — the first 16 MiB, then the truncation marker once, then nothing.  `poll`
+# reads the buffer as data once the worker has settled.
 let h = spawn { yes ral | head -c 20000000 }
-let res = await $h
+let settle = { |h|
+    case !{poll $h} [
+        `settled: { |s| return $s },
+        `pending: { |_| sleep 0.05; settle $h }
+    ]
+}
+let res = settle $h
 echo !{length $res[stdout]}
 
 # Audit retains this smaller stderr stream in full

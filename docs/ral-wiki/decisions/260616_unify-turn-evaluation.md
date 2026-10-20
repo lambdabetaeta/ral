@@ -4,6 +4,15 @@ status: active
 
 # Unify the two turn evaluators; lift "a turn" into `ral_core`
 
+> Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]: `par`
+> is no longer prelude sugar over `spawn` that parents its fan-out at the
+> durable root. It is a Rust builtin, and with `all` and `race` it owns the
+> children it starts or is given, hangs them under the call's own scope, and
+> cancels and drains them on every exit before the call returns, so a
+> cancelled `par` orphans nothing. A `spawn` or `watch` in a run still hangs
+> under the durable root, as below; one born inside a worker hangs under that
+> worker's node instead, and `spawn` is a control operator, not a builtin.
+
 **One persistent `Shell` was driven by two near-duplicate top-level
 evaluators, and the divergence between them was a latent scope bug.** The fix
 is a single `eval_turn(shell, src, frame) -> TurnOutcome` in `ral_core`,

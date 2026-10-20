@@ -30,7 +30,8 @@ pub enum Surface {
     Notice(Notice),
     Done {
         id: Option<u64>,
-        cmd: String,
+        title: String,
+        elapsed: Option<std::time::Duration>,
         outcome: crate::card::DoneOutcome,
     },
     Pin {
@@ -84,10 +85,11 @@ pub fn decode_surface(ev: &FOValue) -> Decoded {
         Decoded::Surface(Surface::Notice(notice))
     } else if let Some(card) = value_to_card(ev) {
         Decoded::Surface(Surface::Card(card))
-    } else if let Some((id, cmd, outcome)) = value_to_done(ev) {
+    } else if let Some((id, title, elapsed, outcome)) = value_to_done(ev) {
         Decoded::Surface(Surface::Done {
             id: Some(id),
-            cmd,
+            title,
+            elapsed: Some(elapsed),
             outcome,
         })
     } else {
@@ -185,13 +187,19 @@ pub(crate) fn record(recorder: &Emitter, surface: &Surface) {
             change: change.clone(),
         }),
         Surface::Card(card) => recorder.emit_or_report(Display::Card { card: card.clone() }),
-        Surface::Done { id, cmd, outcome } => recorder.emit_or_report(Display::Done {
+        Surface::Done {
+            id,
+            title,
+            elapsed,
+            outcome,
+        } => recorder.emit_or_report(Display::Done {
             id: *id,
-            cmd: cmd.clone(),
+            title: title.clone(),
+            elapsed_ms: elapsed.map(|e| u64::try_from(e.as_millis()).unwrap_or(u64::MAX)),
             outcome: outcome.clone(),
         }),
         Surface::Notice(Notice::Reap(reap)) => recorder.emit_or_report(Forensic::Reap {
-            cmd: reap.cmd.clone(),
+            title: reap.title.clone(),
             cause: <&str>::from(reap.cause).to_string(),
         }),
         Surface::Notice(Notice::Prune(pruned)) => recorder.emit_or_report(Forensic::Prune {

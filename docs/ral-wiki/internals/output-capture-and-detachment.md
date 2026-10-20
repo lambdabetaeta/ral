@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 1776d222
 verified_at_date: 2026-09-30
-anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::deadline, WorkerLease, WorkerRegistry, LeaseChain, spawn_detached, Survivor, DetachPolicy, Capture, decode_utf8_strict, write_sink, CapturedBytes::overflowed]
+anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::deadline, WorkerRegistry, Stamp, Owner, builtin_worker, builtin_workers, WorkerRow, spawn_detached, Survivor, DetachPolicy, Capture, decode_utf8_strict, write_sink, CapturedBytes::overflowed]
 ---
 
 # Output capture and detachment
@@ -9,10 +9,10 @@ anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::New
 **A run captures a child's output by draining its stdout/stderr pipe to
 end-of-file, so a process that never closes that pipe is foreground work the run
 must wait on to its wall — and `spawn` is the construct that moves such work off
-the run onto a root-parented, byte-bounded, lease-bound worker.** A long-running
-server is the canonical instance: run inline it stalls the call to the deadline
-and is killed with its tree; spawned it returns instantly and survives, reaped
-only for neglect — or never, if born a `service`.
+the run onto a session-owned, byte-bounded worker that lives as long as its
+owner.** A long-running server is the canonical instance: run inline it stalls
+the call to the deadline and is killed with its tree; spawned it returns
+instantly and survives until it completes, is cancelled, or the session ends.
 
 ## The capture frame: a computation's own bytes
 
@@ -94,7 +94,8 @@ A captured stream is a `Sink::Buffer` fed by a *pump* — see [[map/core/io-proc
 
 ## `spawn` moves the work off the run
 
-A worker hangs off the durable root, not the run: the *handle* is its evidence
+A worker born in a run hangs off the durable root, not the run (one born inside
+another worker hangs under that worker): the *handle* is its evidence
 ([[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]).
 
 - `spawn { … }` reifies a `Value::Handle` and runs the body on a worker thread
@@ -132,71 +133,66 @@ A worker hangs off the durable root, not the run: the *handle* is its evidence
   without a marker and count every observed byte. Each stream
   pairs its prefix with its total; a larger total means truncation ([[design/audit|audit]]).
 
-## Workers decay by neglect, not by age
+## A worker lives as long as its owner
 
-- Every worker — `spawn`, `watch`, `service` — files a `WorkerEntry` in
-  its shell's `WorkerRegistry` the instant it starts (`core/src/types/shell/workers.rs`):
-  a per-shell directory holding the handle itself, not a second by-id control
-  plane. All three classes are meant to end with the host process, and `detach`
-  files nothing here because it is not a worker at all — it is meant to outlive
-  the host ([[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]).
-  `poll`, `await`, `race`, and `cancel` stay the only verbs that touch a
-  worker, and there is no model-facing listing over the registry at all — the
-  `workers` builtin was retired, since a listing carrying live `Value::Handle`s
-  can never cross the engine protocol. Rediscovery instead splits by class: an
-  ordinary `spawn`/`watch` worker (`LeaseClass::Worker`) is rediscovered
-  through the binding lease, never by id; a `service`-born worker
-  (`LeaseClass::Durable`) is rediscovered by the id its birth trail card
-  named (`worker #id cmd durable`) — the pin register once carried a
-  host-owned `services` listing for this, deleted with the rest of the
-  protected-pin mechanism
-  ([[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]'s
-  2026-08-27 amendment) — and
-  `service-handle <id>` (`exarch/src/shell_eval/builtins.rs`) takes the handle back
-  by that id to resume the ordinary eliminator idiom
-  ([[map/exarch/builtins|builtins]]).
-- An ordinary `spawn`/`watch` worker (`LeaseClass::Worker`) is governed by the
-  frame's `WorkerLease`: an idle bound on the *observation* clock, under an
-  absolute backstop. It is reaped once unobserved — no `poll`/`await`/`race`
-  has named its handle — for `idle`, or once older than `backstop` regardless
-  of observation. exarch grants one hour idle / 24 hour backstop
-  (`WORKER_IDLE_CEILING`, `WORKER_BACKSTOP`,
-  `exarch/src/shell_eval.rs`); the REPL grants none, so its spawns never reap.
-  Age alone no longer kills a worker: a build babysat every run via `poll`
-  renews indefinitely, up to the backstop.
-- The mechanism is the deadline scheduler's own re-arming `Run` entry
-  (`process::arm_callback`, `LeaseChain::fire` in `core/src/types/shell/workers.rs`):
-  each firing asks `WorkerLease::verdict` — a pure function of the worker's age
-  and of the idle time off the handle's shared last-observed cell: the backstop
-  first, then the idle bound — and either reaps or re-arms itself for the sooner
-  of the two remaining margins. A worker that has already settled (not
-  `Running`) ends the chain silently — it lingers in the registry as an
-  unclaimed result under its own, separate retention lease (256 idle ral
-  calls, `SETTLED_WORKER_RETENTION`), swept by `WorkerRegistry::sweep_retention`
-  on the host's ral-call epoch.
-- `service <desc> { … }` births a worker whose registry entry carries the
-  durable class (`LeaseClass::Durable`): no idle bound, no backstop ever arms
-  for it — legibility is the whole bound, structural now that `desc` is a
-  mandatory single-line description: the host's `services` pin lists it by
-  id and description, `service-handle <id>` retakes its handle, and it dies by
-  `/clear`, an explicit `cancel`, or — by intent rather than by construction,
-  since teardown's cancel flag races the exiting main thread — with the host
-  process.
-- Every reap — idle, backstop, or settled-retention — is atomic with a
-  `ReapNotice` recording what fell and why. The engine drains its ledger at
-  each run's own ready boundary (`Shell::emit_ready_boundary_notices`, called
-  from `run_framed` just before the frame tears down) and pushes it through
-  that run's surface sink as a `` `notice `` value, beside the binding-lease's
-  idle-prune notice; exarch decodes it back (`card::value_to_notice`) into a
-  `Forensic::Reap` record that no printer draws. The model's later "where did my job go?" always has an
-  answer in the log.
+**Every concurrent block has exactly one owner, fixed at birth, and only its
+owner ends it: no policy reaps a running worker for neglect or age**
+([[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]).
+
+- A *calling expression* — `par`, `all`, `race` — owns the children it
+  starts or is given, and has ended every one before the call returns.
+- The *session* owns a `spawn` or `watch` worker, which ends by completing,
+  by `cancel`, or with the session: dropping the shell cancels every
+  registered worker through `Roster`'s `Drop`.
+- *Nobody* owns a `detach`ed process: it files nothing here, because it is not
+  a worker at all — it is meant to outlive the host
+  ([[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]).
+
+What bounds a forgotten session worker is the session alone: the admission
+cap (`Mooring::worker_cap`; exarch's is 64) refuses a birth while `cap` workers
+run, and teardown cancels the rest.
+
+- Every worker files a `WorkerEntry` in its shell's `WorkerRegistry` the
+  instant it starts (`core/src/types/shell/workers.rs`): the handle itself
+  and its `Owner` — the session, the worker it was born inside, or the calling
+  expression that birthed it. The handle carries the rest: its `WorkerId`,
+  its title, and its clock — a birth `Stamp` (one instant on the monotonic
+  clock durations are measured on and the wall clock a reader is shown), and
+  an end `Stamp` set once its thread ends. Every report of time reads those
+  two cells.
+- **Identity is the id; the title is for people.** `worker <id>`
+  (`builtin_worker`, a core boundary in `core/src/builtins/concurrency/eliminate.rs`)
+  takes back the handle of any registered worker, running or with a
+  retained result, by the id its birth card and completion notice carry,
+  composed with an eliminator in the same call: `await !{worker 3}`. Nothing
+  looks a worker up by title, since titles are not unique.
+- **A listing is data; `worker <id>` is the door.** `workers`
+  (`builtin_workers`) returns one `WorkerRow` per entry, running or retained:
+  its id, title, owner, state, birth time, elapsed seconds and settle time,
+  read off the handle without claiming it. It never holds a `Value::Handle`,
+  which is not ground, so it crosses the engine protocol as any record does;
+  the row type is the `` `workers `` probe's, less the host's
+  `retention-left`.
+- A settled worker lingers in the registry as an unclaimed result until an
+  eliminator claims it or retention expires it — the one policy that removes
+  an entry: 256 idle ral calls under exarch (`SETTLED_WORKER_RETENTION`),
+  swept by `WorkerRegistry::sweep_retention` on the host's ral-call epoch.
+- A retention reap is atomic with a `ReapNotice` recording what fell and
+  why. The engine drains its ledger at each run's own ready boundary
+  (`Shell::emit_ready_boundary_notices`, called from `run_framed` just before
+  the frame tears down) and pushes it through that run's surface sink as a
+  `` `notice `` value, beside the binding-lease's idle-prune notice; exarch
+  decodes it back (`card::value_to_notice`) into a `Forensic::Reap` record
+  that no printer draws. The model's later "where did my result go?" always
+  has an answer in the log.
 
 ## Reading a spawned server's output (the exarch caveat)
 
 - A server never settles, so `await $h` would block to the wall and unwind —
-  sparing the root-parented worker, via the cancel-aware `wait_first_settled`. But
+  sparing the session's worker, via the cancel-aware `wait_first_settled`. But
   `poll $h` is a pull-based read of a *running* worker: its `` `pending `` arm
-  carries a `{stdout, stderr}` snapshot of the bytes buffered so far, cloned
+  carries a `{stdout, stderr, elapsed}` snapshot of the bytes buffered so far
+  and the seconds run, the bytes cloned
   non-destructively (`CapturedBytes::peek`, not the completion `take`), so the buffer
   is left intact and a later `await`/`` `settled `` `poll` still sees everything
   ([[decisions/260702_partial-poll-pending-output|partial-poll-pending-output]]).
@@ -211,21 +207,18 @@ A worker hangs off the durable root, not the run: the *handle* is its evidence
   is exarch's substitute: not a live stream, but a poll-driven read exarch can
   drive from its own runs.
 - So under exarch a server is *fire-and-`poll`-and-`cancel`*: `spawn` it, read its
-  accumulated output with `poll $h` on later runs, `cancel $h` when done. `poll`
-  is also what keeps a plain `spawn`ed server alive past an hour of inattention
-  — it renews the idle-observation lease. A server known at birth to go long
-  stretches unpolled wants `service <desc> { … }` instead: born with no idle bound and
-  no backstop, it never reaps for inattention, only by `/clear`, `cancel`, or
-  the host's own exit — and a server that must still be answering *after* that
-  exit is not a worker at all, but a `detach` (below). To keep a full,
+  accumulated output with `poll $h` on later runs, `cancel $h` when done.
+  Polled or not, it runs until `cancel`, `/clear`, or the host's own exit — and
+  a server that must still be answering *after* that exit is not a worker at
+  all, but a `detach` (below). To keep a full,
   unbounded log past the 16 MiB cap, still
-  redirect inside the block to a file — `spawn { python3 -m http.server >
-  srv.log 2>&1 }` — and read the file on later runs.
+  redirect inside the block to a file — `spawn "docs server" { python3 -m
+  http.server > srv.log 2>&1 }` — and read the file on later runs.
 
 ## `detach` leaves the machine, not just the run
 
-**Every mechanism above is in-process: the pump, the buffer cap, the lease, the
-registry all presuppose a thread the session can still reach.** `detach` gives
+**Every mechanism above is in-process: the pump, the buffer cap, the registry
+all presuppose a thread the session can still reach.** `detach` gives
 that up — the thing to escape is not the session but the parent's *observation*
 of the child's pgid.
 
@@ -246,8 +239,8 @@ of the child's pgid.
   drain-to-EOF story above applies, and no `SINK_BUFFER_CAP` — there is nothing
   to buffer.
 - What comes back is a **receipt** — `{ pid, desc }`, an `F [pid: Int, desc: String]`
-  record rather than a `Value::Handle` — and nothing is written anywhere. So there is nothing for a
-  `LeaseClass` to grade, nothing for `cancel_all` to reach, and no exit status:
+  record rather than a `Value::Handle` — and nothing is written anywhere. So there is no
+  registry entry, nothing for `cancel_all` to reach, and no exit status:
   the session never waited and cannot. The survivor is *mute*: a program worth
   outliving a session keeps its own log, and the only way to learn whether it is
   still alive is to probe what it serves.
@@ -282,11 +275,9 @@ See also
 [[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]
 (the verb, the race it replaces, and why the type change earns the name),
 [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]
-(why a handle marks a worker, and the doctrine
-leases-and-budgets retired: not
-"workers are unmanaged by design" but unmanaged by default),
+(why a handle marks a worker),
 [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] (the root/foreground
 split and the reaper), [[map/exarch/shell-eval|shell-eval]] (the frame that arms the
 wall and captures the bytes), [[internals/binding-leases|binding-leases]] (the
-lease idiom applied to scratch names, the same page's sibling story),
-[[map/core/io-process|io-process]], and `docs/SPEC.md` §11.2, §11.5.
+scratch-name ledger on the same ral-call clock as retention),
+[[map/core/io-process|io-process]], and `docs/SPEC.md` §11.2, §11.4, §11.5.

@@ -1,17 +1,14 @@
 # Test: spawn and await carry values, closures, and deep recursion
 
-# A second await returns the cached record
+# A second await replays the same ending
 let h1 = !{spawn { return 99 }}
-let first = await $h1
-let again = await $h1
-echo $[$first[value] + $again[value]]
+echo $[!{await $h1} + !{await $h1}]
 # Expected: 198
 
 # A closure returned from a worker keeps its captured bindings
 let secret = 42
 let h2 = !{spawn { return { |x| return $[$x + $secret] } }}
-let r2 = await $h2
-let add-secret = $r2[value]
+let add-secret = await $h2
 echo !{add-secret 8}
 # Expected: 50
 
@@ -19,7 +16,7 @@ echo !{add-secret 8}
 let h3 = !{spawn { return 7 }}
 let r3 = await $h3
 cancel $h3
-echo $r3[value]
+echo $r3
 # Expected: 7
 
 # A tail-recursive body runs in constant stack inside a worker
@@ -29,8 +26,7 @@ let h4 = !{spawn {
     }
     let total = count 10000 0; return $total
 }}
-let r4 = await $h4
-echo $r4[value]
+echo !{await $h4}
 # Expected: 50005000
 
 echo 'spawn value tests done'

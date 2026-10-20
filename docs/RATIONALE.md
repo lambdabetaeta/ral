@@ -333,9 +333,11 @@ when both of these are true:
 1. ordinary Hindley–Milner typing cannot express its rule;
 2. a function taking thunks cannot implement its runtime scope honestly.
 
-Exactly five control operators qualify: `within`, `grant`, `try`, `guard`, and
-`audit`. Each manipulates a dynamic frame, failure continuation, or audit
-ownership which no ordinary value can observe. `if`, `case`, and `?` remain
+Exactly seven control operators qualify: `within`, `grant`, `try`, `guard`,
+`audit`, `spawn`, and `all`. Each manipulates a dynamic frame, failure
+continuation, audit ownership, or the ownership of concurrent work which no
+ordinary value can observe; `spawn` also carries the one operand, its title,
+that the syntax may leave out, since no value's signature may. `if`, `case`, and `?` remain
 syntax for their branching shape, but do not enlarge the primitive dynamic
 machinery.
 

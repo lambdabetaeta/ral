@@ -13,7 +13,7 @@ Give the child a bounded task and an explicit reply shape. Use `amnemon` when yo
       model: `inherit
     ]
 
-Do independent work while the child runs. Do not poll: if nothing remains, end your turn and wait for its notice. Then bind the reply and inspect the fields you need. Their presence and types are checked at `read`:
+Do independent work while the child runs. Do not poll: if nothing remains, end your turn and wait for its notice, as for a `spawn`ed worker. Then bind the reply and inspect the fields you need. Their presence and types are checked at `read`:
 
     let review = exarch-agents `read #'plan-review'#
     [verdict: $review[reply][verdict], issues: $review[reply][issues]]

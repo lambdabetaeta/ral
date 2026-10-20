@@ -462,7 +462,7 @@ pub(crate) fn drive_peer(child: &mut Avatar, provider: Arc<Provider>) -> AgentOu
     settled
 }
 
-// ── worker registry: `/clear` cascade, lease-reap drain ───────────────
+// ── worker registry: `/clear` cascade ─────────────────────────────────
 
 /// Named apart from `shell_eval/builtins.rs`'s `test-block-forever`, since one
 /// test binary installs both.

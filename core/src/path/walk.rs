@@ -115,8 +115,7 @@ pub(crate) struct Entry {
 
 /// Seconds since the epoch, or 0 when the field is unrecorded or pre-epoch.
 fn secs_since_epoch(t: Option<SystemTime>) -> i64 {
-    t.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+    t.map_or(0, crate::fact::unix_secs)
 }
 
 /// What `list-dir` reports of one entry.

@@ -1,20 +1,27 @@
 use super::*;
 use ral_core::first_order::FOValue;
+use ral_core::first_order::Finite;
 use ral_core::process::CancelCause;
-use ral_core::types::LeaseClass;
+use ral_core::protocol::probe::WorkerState;
+use ral_core::types::{Done, Owner};
 
 fn born(ids: &[u64]) -> HashSet<u64> {
     ids.iter().copied().collect()
 }
 
-fn worker_row(id: u64, cmd: &str, running: bool) -> WorkerRow {
+fn worker_row(id: u64, title: &str, running: bool) -> WorkerRow {
     WorkerRow {
         id,
-        cmd: cmd.to_string(),
-        class: LeaseClass::Worker,
-        running,
-        up_secs: 0,
-        idle_secs: 0,
+        title: title.to_string(),
+        owner: Owner::Session,
+        state: if running {
+            WorkerState::Running
+        } else {
+            WorkerState::Done(Done::Ok)
+        },
+        started: 0,
+        elapsed: Finite::from(0),
+        settled: (!running).then_some(0),
         retention_left: (!running).then_some(0),
     }
 }
@@ -99,7 +106,7 @@ fn exit_ending_widens_to_name_a_live_orphan() {
     let (out, exit) = render(&ending, &births, None, &workers, 5);
     assert_eq!(exit, 1);
     assert!(
-        out.contains("`spawn body`"),
+        out.contains("#9 (spawn body)"),
         "a non-zero exit names a live orphan too, not just the wall: {out:?}"
     );
 }
@@ -124,7 +131,7 @@ fn an_unreturnable_result_says_its_handle_was_lost_with_it() {
         record: FOValue::Unit,
     };
     let births = born(&[4]);
-    let workers = vec![worker_row(4, "block at turn 1, line 1", true)];
+    let workers = vec![worker_row(4, "block at <test>, line 1", true)];
     let (out, exit) = render(&ending, &births, None, &workers, 5);
     assert_eq!(exit, 1);
     assert!(out.starts_with("error: the result is a handle"), "{out:?}");
@@ -196,7 +203,7 @@ fn ending_matrix_gates_audit_and_orphan_on_unshown_effects() {
                     "{name}/{births_label}/{acts_label} audit mismatch: {out:?}"
                 );
                 assert_eq!(
-                    out.contains("`job`"),
+                    out.contains("#3 (job)"),
                     effects_unshown && births_label == "present",
                     "{name}/{births_label}/{acts_label} orphan mismatch: {out:?}"
                 );

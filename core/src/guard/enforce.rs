@@ -315,7 +315,7 @@ pub(crate) fn check_flag(ctx: &Context, flag: Flag, who: &str) -> Settled<()> {
     Err(sig(match flag {
         Flag::Shell(ShellVerb::Detach) => format!(
             "{who}: an active grant withholds it, so nothing here may outlive this session. \
-             Would `spawn` or `service` do, since both end when the session does?"
+             Would `spawn` do, since it ends when the session does?"
         ),
         _ => format!("denied: {who} requires {}", flag.key()),
     }))

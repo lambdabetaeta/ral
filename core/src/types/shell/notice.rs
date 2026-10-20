@@ -1,5 +1,5 @@
-//! What a settled run's ready boundary tells its host: a worker the lease
-//! chain reaped, or idle top-level bindings the ledger pruned.  Both are
+//! What a settled run's ready boundary tells its host: a settled worker whose
+//! retention expired, or idle top-level bindings the ledger pruned.  Both are
 //! recorded, neither drawn.
 
 use super::bindings::Pruned;
@@ -8,7 +8,7 @@ use crate::first_order::FOValue;
 use crate::first_order::datum::{Datum, tag, untag};
 use crate::variant;
 
-/// A `` `notice `` event's body: `` `reap [id, cmd, class, cause] `` or
+/// A `` `notice `` event's body: `` `reap [id, title, cause] `` or
 /// `` `prune [[name, idle-calls, kind], ...] ``, one prune per boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Notice {
@@ -43,15 +43,14 @@ impl Notice {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{LeaseClass, ReapCause, WorkerId};
+    use crate::types::{ReapCause, WorkerId};
 
     #[test]
     fn a_notice_round_trips_through_the_surface() {
         let reap = Notice::Reap(ReapNotice {
             id: WorkerId(3),
-            cmd: "watch build".into(),
-            class: LeaseClass::Worker,
-            cause: ReapCause::Idle,
+            title: "watch build".into(),
+            cause: ReapCause::Retention,
         });
         let prune = Notice::Prune(vec![Pruned {
             name: "scratch".into(),

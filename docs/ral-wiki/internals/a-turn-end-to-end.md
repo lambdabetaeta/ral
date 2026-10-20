@@ -53,9 +53,10 @@ is exactly the places hosts differ:
 - **Capabilities** — the `GrantStack` ceiling pushed for the run's dynamic
   extent, every layer of it (`GrantStack::root()` for the ral hosts, a grant
   profile for exarch).
-- **Limits** — `wall` (the foreground deadline) and `deferred_lease` /
-  `worker_cap` (the idle/backstop lease and the concurrency cap governing
-  workers the run defers at the durable root).
+- **Limits** — `wall` (the foreground deadline), `worker_cap` (the cap on
+  concurrently running workers), `cleanup_grace` (how long a halting worker or
+  combinator waits for the children it cancels), and `worker_title` (whether
+  a `spawn` must carry a title).
 - **Surface** — an optional run-local `SurfaceSink` (`Arc<dyn EventSink>`),
   installed only for this run; `None` is the identity.
 - **Trail** — `trail: Option<CapturePolicy>` ([[design/audit|audit]]). `Some`
@@ -95,7 +96,7 @@ module's framed scaffold:
 - `run_built` materialises the IO regime — `Capture` mints the buffers it reads
   back, `Inherit` leaves the ambient streams to flow — then assembles the run's
   frame **in two halves, split by mutability**. What the run fixes once (the
-  `surface` sink, the deferred rail with its `deferred_lease` and `worker_cap`,
+  `surface` sink, the deferred rail with its `worker_cap`, `cleanup_grace` and `worker_title`,
   the desk, the `Fork` arm, the foreground scope, and the run's terminal
   authority) is a `Mooring`, an owned local on `run_built`'s own Rust stack
   frame; the surface has no liveness role, so a clone of it can never define
@@ -176,9 +177,9 @@ module's framed scaffold:
   `Program::Hook` runs of hooks registered by name, through the same door
   ([[map/repl/loop|loop]]).
 - exarch's `run_shell` (`exarch/src/shell_eval.rs`) supplies `script_name:
-  "<tool>"`, its session grant profile, a per-tool `wall` and a 1 h idle
-  `deferred_lease` under a 24 h backstop, plus a `worker_cap` on concurrently
-  running workers, `RunIo::Capture`, `RequestedTerminalAccess::Denied`,
+  "<tool>"`, its session grant profile, a per-tool `wall`, a `worker_cap` on
+  concurrently running workers, a 2 s `cleanup_grace`, a required
+  `worker_title`, `RunIo::Capture`, `RequestedTerminalAccess::Denied`,
   `RunStdin::Empty`, `trail: Some(CapturePolicy::Off)`; it builds a
   `Program::Source` `Run` and drains it through
   `protocol::dispatch_to_report` against its call's `RunHost` — one `Host`

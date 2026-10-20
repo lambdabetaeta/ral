@@ -64,11 +64,14 @@ The core entries group by what they compute:
   `resolve-path` `absolute-path` `abbreviate-home` `temp-dir` / `temp-file`.
 - **Codecs** — the `from-X` / `to-X` pairs and the streaming `fold-lines`: the
   typed byte↔value crossing, given its own page ([[design/codecs|codecs]]).
-- **Concurrency** — `spawn` `watch` `await` `poll` `race` `cancel`: a worker
-  scheduler and the `Handle α` values only the host runtime can mint. `poll` is the
-  non-blocking probe of a handle — total over a finished block, reporting completion
-  or failure as one settle variant rather than blocking or re-raising
-  ([[decisions/260615_poll-total-failed-arm|the settle decision]]).
+- **Concurrency** — `await` `poll` `race` `cancel` `par` `worker` `workers`
+  and the host's `watch`, beside the `spawn` and `all` control operators: a
+  worker scheduler and the graded `Handle^ε α` values only the host runtime can
+  mint. `await` behaves as the block run where it is written; `poll` is the
+  non-blocking probe of a handle — total over a finished block, reporting
+  completion or failure as one settle variant rather than blocking or
+  re-raising ([[decisions/260615_poll-total-failed-arm|the settle decision]],
+  [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]).
 - **Writes** — `echo`: every argument rendered through the total `to-string`,
   single-space intercalation, a trailing newline, typed `List String -> Command`:
   its value is its output, like every command. Mixed argument types

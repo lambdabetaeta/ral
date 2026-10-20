@@ -50,7 +50,6 @@ const RESOURCE_BACKED: &[(&str, &str)] = &[
     ("from-line", "reads the byte channel"),
     ("from-lines", "reads the byte channel"),
     ("from-csv", "reads the byte channel"),
-    ("spawn", "forks a concurrent worker"),
     ("await", "needs a live Handle"),
     ("race", "needs live Handles"),
     ("cancel", "needs a live Handle"),
@@ -96,7 +95,7 @@ fn inhabits(value: &Value, ty: &Ty) -> bool {
         | (Ty::Float, Value::Float(_) | Value::Int(_))
         | (Ty::String, Value::String(_))
         | (Ty::Bytes, Value::Bytes(_))
-        | (Ty::Handle(_), Value::Handle(_))
+        | (Ty::Handle(..), Value::Handle(_))
         // Record/Variant returns carry a row; a Map/Variant runtime value is
         // the honest first-order witness and the dedicated builtin tests
         // check the field shapes.
@@ -168,7 +167,7 @@ fn every_scheme_reducer_inhabits_its_return_type() {
     }
 }
 
-/// Every `Return` reachable in `ty`, as `(grade, value)`.
+/// Every producer reachable in `ty`, a `Return` or a handle, as `(grade, value)`.
 fn producers(ty: &Ty, out: &mut Vec<(Grade, Ty)>) {
     match ty {
         Ty::Thunk(cty) => {
@@ -182,7 +181,11 @@ fn producers(ty: &Ty, out: &mut Vec<(Grade, Ty)>) {
                 producers(value, out);
             }
         }
-        Ty::List(a) | Ty::Map(a) | Ty::Handle(a) => producers(a, out),
+        Ty::Handle(grade, value) => {
+            out.push((*grade, (**value).clone()));
+            producers(value, out);
+        }
+        Ty::List(a) | Ty::Map(a) => producers(a, out),
         Ty::Record(row) | Ty::Variant(row) => {
             let mut cur = row;
             while let Row::Extend(_, field, rest) = cur {

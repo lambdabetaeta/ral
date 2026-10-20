@@ -4,7 +4,6 @@
 
 use super::flow::Settled;
 use super::shell::Bequest;
-use super::shell::workers::WorkerLease;
 use super::value::Value;
 use crate::process::{DurableRoot, ScopeNode};
 use crate::sync::LockExt as _;
@@ -162,6 +161,14 @@ pub(crate) enum TerminalAccess {
     ExplicitLoan,
 }
 
+/// Whether a `spawn` must name its work: a host's legibility policy, refused
+/// at the spawn step before any birth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TitlePolicy {
+    Optional,
+    Required,
+}
+
 /// The run-invariant half of the frame a run installs: where its events go,
 /// who answers it, what stops it, and its terminal-foreground authority.
 ///
@@ -194,10 +201,10 @@ pub struct Mooring {
     /// What a `guard` cleanup gets, from the strike, before the stop ends
     /// it: the host's policy, as `wall` is.
     pub(crate) cleanup_grace: Duration,
-    pub(crate) deferred_lease: Option<WorkerLease>,
     /// Admission cap enforced at the spawn door, counting only *running*
     /// entries — settled ones lingering under retention never block a birth.
     pub(crate) worker_cap: Option<usize>,
+    pub(crate) worker_title: TitlePolicy,
     pub(crate) terminal_access: TerminalAccess,
 }
 
@@ -205,10 +212,11 @@ impl Mooring {
     /// The mooring a worker runs under: a rebuild, not a share.
     ///
     /// `parent`'s node would let a foreground cancel reach a worker that must
-    /// outlive the run, and desk and fork are barred to one; rail, lease, and
-    /// cap carry over, so a nested `spawn` is governed alike.  `node` is the
-    /// caller's [`worker`](DurableRoot::worker) of the session root: a SIGTERM
-    /// reaches it, a Ctrl-C does not.
+    /// outlive the run, and desk and fork are barred to one; rail, cap and
+    /// title policy carry over, so a nested `spawn` is governed alike.  `node`
+    /// is the caller's child of its cradle: a worker's own node inside a
+    /// worker, the session root in a run; a SIGTERM reaches it, a Ctrl-C does
+    /// not.
     pub(crate) fn for_worker(parent: &Self, node: ScopeNode, surface: Option<SurfaceSink>) -> Self {
         Self {
             surface,
@@ -217,17 +225,17 @@ impl Mooring {
             fork: None,
             home: node,
             cleanup_grace: parent.cleanup_grace,
-            deferred_lease: parent.deferred_lease,
             worker_cap: parent.worker_cap,
+            worker_title: parent.worker_title,
             terminal_access: TerminalAccess::Denied,
         }
     }
 
-    /// The mooring a stage thread runs under: the node's own surface and
-    /// deferred sink carry over — a stage's audit and `spawn` deliveries are
-    /// the pipeline's, not a worker's own — but no desk, no fork, and no
-    /// terminal authority, since only the node itself may claim the
-    /// foreground.  `node` is the stage's own, minted by its launcher under
+    /// The mooring a stage thread, or a combinator's child, runs under: the
+    /// node's own surface and deferred sink carry over — a stage's audit and
+    /// `spawn` deliveries are the pipeline's, not a worker's own — but no
+    /// desk, no fork, and no terminal authority, since only the node itself
+    /// may claim the foreground.  `node` is the stage's own, minted by its launcher under
     /// the current scope, so a pipeline-wide cancel reaches every stage.
     pub(crate) fn for_stage_thread(parent: &Self, node: ScopeNode) -> Self {
         Self {
@@ -237,8 +245,8 @@ impl Mooring {
             fork: None,
             home: node,
             cleanup_grace: parent.cleanup_grace,
-            deferred_lease: parent.deferred_lease,
             worker_cap: parent.worker_cap,
+            worker_title: parent.worker_title,
             terminal_access: TerminalAccess::Denied,
         }
     }
@@ -255,8 +263,8 @@ impl Mooring {
             fork: None,
             home: DurableRoot::default().worker(),
             cleanup_grace: Duration::from_secs(5),
-            deferred_lease: None,
             worker_cap: None,
+            worker_title: TitlePolicy::Optional,
             terminal_access: TerminalAccess::Denied,
         }
     }
@@ -305,8 +313,8 @@ impl Mooring {
             fork: self.fork.clone(),
             home: self.home.clone(),
             cleanup_grace: self.cleanup_grace,
-            deferred_lease: self.deferred_lease,
             worker_cap: self.worker_cap,
+            worker_title: self.worker_title,
             terminal_access: TerminalAccess::ExplicitLoan,
         })
     }

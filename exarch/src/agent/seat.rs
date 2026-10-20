@@ -162,7 +162,7 @@ impl Seat {
 
     /// `/clear`'s engine half: boot afresh from the same Attach, onto the same
     /// target.  Replacing the transport drops the outgoing engine, whose
-    /// teardown cancels its workers: `/clear` outranks leases.
+    /// teardown cancels its workers: a worker lives no longer than its session.
     ///
     /// # Errors
     /// A seat with no recipe to reboot from, or the recipe's refusal.

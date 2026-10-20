@@ -16,9 +16,9 @@ let ntxt = length $txt
 echo "txt files: $ntxt"
 
 # * — match all in directory
-let all = glob "$tmpdir/*"
-let nall = length $all
-echo "all entries: $nall"
+let entries = glob "$tmpdir/*"
+let nentries = length $entries
+echo "all entries: $nentries"
 
 # ? — single character wildcard
 let q = glob "$tmpdir/?????.txt"

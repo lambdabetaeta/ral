@@ -94,8 +94,8 @@ pub fn arm_lifetime(node: ScopeNode, after: Duration) -> Deadline {
 /// Invoke `run` once `after` has elapsed from now.
 ///
 /// The closure runs on the daemon thread with the heap lock released, so it may
-/// re-arm itself — how a worker's lease chain and a scheduled wakeup get their
-/// recurrence.  It must not block: a slow closure stalls every later entry.
+/// re-arm itself — how a lease and a scheduled wakeup get their recurrence.
+/// It must not block: a slow closure stalls every later entry.
 pub fn arm_callback(after: Duration, run: impl FnOnce() + Send + 'static) -> Deadline {
     arm(Action::Run(Box::new(run)), after)
 }
@@ -314,7 +314,7 @@ mod tests {
         );
     }
 
-    /// The recurrence a lease chain rides: were actions fired under the heap
+    /// The recurrence a re-arming callback rides: were actions fired under the heap
     /// lock, the re-arm inside the closure would deadlock instead of counting
     /// to three.
     #[test]

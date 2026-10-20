@@ -1,33 +1,68 @@
 //! The eliminators `await`, `poll`, `race` and `cancel`: how a worker's handle
-//! is observed, settled and stopped.
+//! is observed, settled and stopped; `workers`, the listing, which is data;
+//! and `worker`, the door back from it to a handle.
+//!
+//! `await` behaves as if the block had run where it is awaited: the bytes the
+//! worker wrote are written to the awaiter's own streams, then it ends as the
+//! block ended, with its value, its failure, its exit or its stop.  `race` is
+//! `await` on the first to settle, the rest stopped and drained.  Each of
+//! these claims what it settles.  `poll` is the one observation that returns
+//! data instead: it writes nothing and raises no ordinary failure.
 
 use crate::fact::Io;
 use crate::process::WorkerStop;
+use crate::ty::Site;
 use crate::types::{
-    Break, CompletedHandle, Error, ErrorRecord, HandleInner, HandleState, Settled, Shell,
-    ThreadEnd, Value, outcome_value, sig,
+    Break, CompletedHandle, Error, HandleInner, HandleState, Mooring, Settled, Shell, ThreadEnd,
+    Value, WorkerId, claim, end_unclaimed, outcome_value, sig,
 };
+use std::sync::Arc;
 
-/// Stop a handle: the policy `cancel` and `race`'s loser cleanup share.  An
-/// already-completed handle keeps its cached outcome, so a finished worker's
-/// value is never destroyed by a losing `race` or a `cancel` that lost the toss.
-///
-/// The `state` guard spans the test and the transition, so there is no window
-/// for a worker to finish in between and have its outcome torn out from under
-/// it: every transition holds this lock, and takes `result` and `cached` under
-/// it, never the other way round.
-fn stop_handle(handle: &HandleInner) {
-    if handle.detach() {
-        handle.cancel.cancel(crate::process::CancelCause::Cancelled);
-    }
-}
-
-/// `cancel <handle>` -- mark a running concurrent block as cancelled.
+/// `cancel <handle>` -- stop a running concurrent block and everything it started.
 pub(crate) fn builtin_cancel(args: &[Value], shell: &Shell) -> Settled<Value> {
     let handle = args[0].expect_handle("cancel")?;
-    stop_handle(handle);
-    shell.local.workers.remove(handle);
+    handle.stop();
+    claim(handle, shell);
     Ok(Value::Unit)
+}
+
+/// `workers` -- every registered worker, running or retained, as a row of
+/// data: never a handle, so the list crosses to a host whole.
+pub(crate) fn builtin_workers(shell: &Shell) -> Value {
+    Value::list(
+        shell
+            .workers()
+            .iter()
+            .map(|e| shell.worker_row(e).ral_value())
+            .collect(),
+    )
+}
+
+/// `worker <id>` -- the handle of any worker this session registered, by the
+/// id its birth, its listing and its completion notice carry.  A boundary:
+/// the value the worker settles with is admitted at this site when awaited.
+pub(crate) fn builtin_worker(
+    args: &[Value],
+    site: &Arc<Site>,
+    _: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
+    let id = match args[0].as_int() {
+        Some(n) => u64::try_from(n).map_err(|_| n.to_string()),
+        None => Err(args[0].type_name().to_string()),
+    }
+    .map(WorkerId)
+    .map_err(|got| sig(format!("worker: expected a non-negative Int id, got {got}")))?;
+    let entry = shell.worker_by_id(id).ok_or_else(|| {
+        sig(format!(
+            "worker: no worker has id {} in this session; it was never born here, \
+             or its result was claimed or has expired (see workers)",
+            id.0
+        ))
+    })?;
+    let mut handle = entry.handle;
+    handle.site = Some(Arc::clone(site));
+    Ok(Value::Handle(Box::new(handle)))
 }
 
 /// Admit the value a worker settled with against the site its handle was
@@ -37,143 +72,120 @@ fn admit_handled(handle: &HandleInner, value: &Value, shell: &Shell) -> Settled<
     match &handle.site {
         Some(site) => site
             .admit_handled(value, shell.fixings())
-            .map_err(|mismatch| mismatch.refusal("service-handle", shell)),
+            .map_err(|mismatch| mismatch.refusal("worker", shell)),
         None => Ok(()),
     }
 }
 
-/// Project a finished block's outcome to the `await`/`race` record, re-raising
-/// an `Err` verbatim.
-fn project_completed(
-    completed: CompletedHandle,
-    handle: &HandleInner,
-    shell: &Shell,
-) -> Settled<Value> {
-    let value = match completed.end {
+/// Replay what the worker wrote, in the awaiter's own sinks: stdout, then
+/// stderr.  A broken pipe is the stop it always is.
+fn replay(stdout: &[u8], stderr: &[u8], shell: &mut Shell) -> Settled<()> {
+    shell.write_stdout(stdout)?;
+    shell.write_stderr(stderr)
+}
+
+/// The settle a handle has now: a cancelled handle's is the bytes written so
+/// far and `worker was cancelled`; a completed one's is its cache; a running
+/// one's is `None`.
+fn settle_of(handle: &HandleInner) -> Option<CompletedHandle> {
+    match handle.state() {
+        HandleState::Cancelled => Some(CompletedHandle {
+            stdout: handle.stdout_buf.peek(),
+            stderr: handle.stderr_buf.peek(),
+            end: ThreadEnd::Settled(Err(Error::worker_stopped(WorkerStop::Cancelled).into())),
+        }),
+        HandleState::Running | HandleState::Completed => handle.try_settle(),
+    }
+}
+
+/// End as the block ended: its value, admitted at the handle's site, or its
+/// failure, exit or stop raised as it stands, or its panic resumed.
+fn conclude(end: ThreadEnd, handle: &HandleInner, shell: &Shell) -> Settled<Value> {
+    let value = match end {
         ThreadEnd::Settled(settled) => settled?,
         ThreadEnd::Panicked(text) => std::panic::resume_unwind(Box::new(text)),
     };
     admit_handled(handle, &value, shell)?;
-    Ok(awaited(value, Io::of(completed.stdout, completed.stderr)))
+    Ok(value)
 }
 
-/// The `{value, stdout, stderr}` record `await` and `race` return; the
-/// checker's `await_record` is its type.
-fn awaited(value: Value, io: Io) -> Value {
-    beside(io, "value", value)
-}
-
-/// `io` as a record with one more field, the shape `Ty::extend` gives its type.
-fn beside(io: Io, key: &str, v: Value) -> Value {
-    let Value::Map(m) = Value::from_datum(io) else {
-        unreachable!("an Io encodes as a record");
-    };
-    let fields = m.iter().map(|(k, v)| (k.to_string(), v.into_owned()));
-    Value::map(fields.chain([(key.to_string(), v)]).collect())
+/// Exact await of a handle that has settled: replay, then conclude.
+pub(crate) fn take_settled(
+    settle: CompletedHandle,
+    handle: &HandleInner,
+    shell: &mut Shell,
+) -> Settled<Value> {
+    replay(&settle.stdout, &settle.stderr, shell)?;
+    conclude(settle.end, handle, shell)
 }
 
 /// One cancel-aware foreground wait, shared by `await` and `race`: sweep until
-/// a handle settles.  Between sweeps it polls the shell, so a foreground
-/// cancel unwinds the wait — but the workers hang at the durable root, so a
-/// cut-short wait leaves them observable later.  A set of cancelled handles
-/// is the awaiter's own error: the cancel this run made.
+/// a handle settles, a cancelled one at once.  Between sweeps it polls the
+/// shell, so a foreground cancel unwinds the wait, and a loose worker, which
+/// does not hang under the awaiter's scope, stays observable later.
 fn wait_first_settled<'a>(
     handles: &[&'a HandleInner],
     shell: &Shell,
 ) -> Settled<(&'a HandleInner, CompletedHandle)> {
     loop {
-        let mut saw_running = false;
-        for &handle in handles {
-            // A blocked wait is continuous observation: each sweep renews
-            // every named handle's idle lease, so none is reaped mid-wait.
-            handle.renew();
-            match handle.state() {
-                HandleState::Cancelled => continue,
-                HandleState::Running => saw_running = true,
-                HandleState::Completed => {}
-            }
-            if let Some(completed) = handle.try_settle() {
-                return Ok((handle, completed));
-            }
-        }
-        if !saw_running {
-            return Err(if handles.is_empty() {
-                sig("no live handles to wait for")
-            } else {
-                Error::worker_stopped(WorkerStop::Cancelled).into()
-            });
+        if let Some(settled) = handles
+            .iter()
+            .find_map(|&handle| settle_of(handle).map(|settle| (handle, settle)))
+        {
+            return Ok(settled);
         }
         shell.poll()?;
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
 
-/// Block in the foreground until `handle` completes and return its result
-/// record, re-raising a failed block.
-pub(super) fn await_handle(handle: &HandleInner, shell: &Shell) -> Settled<Value> {
-    let (_, completed) = wait_first_settled(&[handle], shell)?;
-    shell.local.workers.remove(handle);
-    project_completed(completed, handle, shell)
+/// Block until `handle` settles, then take it exactly.  Claims it.
+pub(crate) fn await_handle(handle: &HandleInner, shell: &mut Shell) -> Settled<Value> {
+    let (_, settle) = wait_first_settled(&[handle], shell)?;
+    claim(handle, shell);
+    take_settled(settle, handle, shell)
 }
 
-/// `await <handle>` -- wait for a concurrent block to complete and return its result record.
-pub(crate) fn builtin_await(args: &[Value], shell: &Shell) -> Settled<Value> {
+/// `await <handle>` -- wait for a concurrent block and behave as if it had run here.
+pub(crate) fn builtin_await(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let handle = args[0].expect_handle("await")?;
     await_handle(handle, shell)
 }
 
 /// `poll <handle>` -- non-blocking, total sample of a concurrent block:
-/// `` `settled `` `{stdout, stderr, outcome}` once it has finished (returned,
-/// raised, or panicked), `` `pending `` `{stdout, stderr}` while it runs.
+/// `` `settled `` `{stdout, stderr, elapsed, outcome}` once it has finished
+/// (returned, raised, panicked or been cancelled), `` `pending ``
+/// `{stdout, stderr, elapsed}` while it runs.
 ///
 /// The pending bytes are a cumulative, non-destructive snapshot
-/// ([`CapturedBytes::peek`], not [`CapturedBytes::take`]), so a partial poll never steals bytes
-/// the one-shot completion drain must still see — and repeated pending polls
-/// are therefore non-idempotent.  A watched handle's
-/// buffers stay empty, so a pending poll on one reports nothing.
+/// ([`crate::io::ByteBuffer::peek`]), so a partial poll never steals bytes the
+/// one-shot completion drain must still see.  A watched handle's buffers stay
+/// empty, so a poll on one reports no bytes.
 ///
-/// Total over every handle: a cancelled one settles with the owner's record;
-/// a failed one as data; an `exit`, a foreign stop and a panic are re-raised,
-/// as `await` re-raises them.
+/// A failure, and the worker's own stop, settle as `` `err ``; an `exit`, a
+/// foreign stop and a panic are re-raised, as `await` raises them.
 pub(crate) fn builtin_poll(args: &[Value], shell: &Shell) -> Settled<Value> {
     let handle = args[0].expect_handle("poll")?;
-    handle.renew();
-    let result = if handle.state() == HandleState::Cancelled {
-        // `cancel` abandoned the outcome; the owner's return clause is the record.
+    let elapsed = ("elapsed", Value::Float(handle.elapsed().into()));
+    let Some(settle) = settle_of(handle) else {
         let io = Io::of(handle.stdout_buf.peek(), handle.stderr_buf.peek());
-        Value::variant(
-            "settled",
-            Some(settled(
-                io,
-                Err(Error::worker_stopped(WorkerStop::Cancelled).record(shell)),
-            )),
-        )
-    } else if let Some(completed) = handle.try_settle() {
-        // A settled poll observes as `await` does, so it removes the entry too.
-        shell.local.workers.remove(handle);
-        let outcome = match completed.end {
-            ThreadEnd::Settled(Ok(value)) => {
-                admit_handled(handle, &value, shell)?;
-                Ok(value)
-            }
-            ThreadEnd::Settled(Err(Break::Error(e))) => Err(e.record(shell)),
-            ThreadEnd::Settled(Err(escape)) => return Err(escape),
-            ThreadEnd::Panicked(text) => std::panic::resume_unwind(Box::new(text)),
-        };
-        Value::variant(
-            "settled",
-            Some(settled(Io::of(completed.stdout, completed.stderr), outcome)),
-        )
-    } else {
-        let pending = Io::of(handle.stdout_buf.peek(), handle.stderr_buf.peek());
-        Value::variant("pending", Some(Value::from_datum(pending)))
+        return Ok(Value::variant("pending", Some(beside(io, [elapsed]))));
     };
-    Ok(result)
+    // A settled poll observes as `await` does, so it claims the handle too.
+    claim(handle, shell);
+    let outcome = match settle.end {
+        ThreadEnd::Settled(Err(Break::Error(e))) => Err(e.record(shell)),
+        end => Ok(conclude(end, handle, shell)?),
+    };
+    let io = Io::of(settle.stdout, settle.stderr);
+    let fields = [elapsed, ("outcome", outcome_value(outcome))];
+    Ok(Value::variant("settled", Some(beside(io, fields))))
 }
 
-/// `race <handles>` -- wait for the first of several blocks to finish, stopping
-/// the rest, then project the winner's outcome as `await` does.
-pub(crate) fn builtin_race(args: &[Value], shell: &Shell) -> Settled<Value> {
+/// `race <handles>` -- wait for the first of several blocks to settle, stop
+/// the rest and drain them within the grace, then take the winner as `await`
+/// does: when `race` returns, nothing it was given still runs on.
+pub(crate) fn builtin_race(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let values: Vec<Value> = args[0]
         .as_list("race")?
         .iter()
@@ -183,20 +195,28 @@ pub(crate) fn builtin_race(args: &[Value], shell: &Shell) -> Settled<Value> {
         .iter()
         .map(|v| v.expect_handle("race"))
         .collect::<Result<Vec<_>, _>>()?;
-
-    let (winner, completed) = wait_first_settled(&handles, shell)?;
-    shell.local.workers.remove(winner);
-    for &h in &handles {
-        if h != winner {
-            stop_handle(h);
-            shell.local.workers.remove(h);
-        }
+    if handles.is_empty() {
+        return Err(sig("race: no handles to wait for"));
     }
-    project_completed(completed, winner, shell)
+
+    let first = wait_first_settled(&handles, shell);
+    if let Ok((winner, _)) = &first {
+        claim(winner, shell);
+    }
+    // Whatever ends the wait, nothing given to `race` runs on past it.
+    let given: Vec<HandleInner> = handles.iter().map(|&h| h.clone()).collect();
+    end_unclaimed(&given, shell, mooring.cleanup_grace);
+    let (winner, settle) = first?;
+    take_settled(settle, winner, shell)
 }
 
-/// `poll`'s `` `settled `` payload: the streams and how the block ended; the
-/// checker's `settle_record` is its type.
-fn settled(io: Io, outcome: Result<Value, ErrorRecord>) -> Value {
-    beside(io, "outcome", outcome_value(outcome))
+/// `io` as a record with more fields, the shape `Ty::extend` gives `poll`'s
+/// records: the checker's `poll_variant` is their type.
+fn beside<const N: usize>(io: Io, more: [(&str, Value); N]) -> Value {
+    let Value::Map(m) = Value::from_datum(io) else {
+        unreachable!("an Io encodes as a record");
+    };
+    let fields = m.iter().map(|(k, v)| (k.to_string(), v.into_owned()));
+    let more = more.into_iter().map(|(k, v)| (k.to_string(), v));
+    Value::map(fields.chain(more).collect())
 }

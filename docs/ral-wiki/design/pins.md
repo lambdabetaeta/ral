@@ -34,11 +34,10 @@ The register once carried one host-owned exception, a `services` slot the
 host reconciled and ordinary `exarch-surface` writes could not touch
 (`reject_protected_pin`); that mechanism is deleted outright, on no
 technical rationale beyond the operator's own — protected pins should not
-exist. Durable [[design/residency|services]] lose the register as a
-legibility channel with it: what a `service <desc> <thunk>` birth still
-shows is the same worker-birth trail card an ordinary `spawn` gets
-(`worker #id cmd durable`, [[map/exarch/builtins|builtins]]) plus an
-aggregate running count on `/resources` — no per-service listing survives.
+exist. Workers are legible without it: every birth shows a trail card
+(`errand #id started · title`), `workers` lists them as data
+([[map/exarch/builtins|builtins]]), and `/resources` counts the running
+ones.
 See [[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]'s
 2026-08-27 amendment.
 
@@ -49,7 +48,7 @@ it is the register's only door: `` `set ``/`` `clear `` write it,
 "Set" says a pin overwrites a slot, "clear" says it empties — not
 "add"/"remove", which would say the register is a collection rather than one
 card per key. The family is foreground-only, like `exarch-agents` and `exarch-context`: a
-call inside `spawn { … }` errors rather than degrading.
+call inside `spawn "…" { … }` errors rather than degrading.
 
 So a kit holding evolving state pins one rollup and overwrites it, rather than
 marching `tasks 0/3`, `tasks 1/3`, … down the scrollback — the streaming the rail

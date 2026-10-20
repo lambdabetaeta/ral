@@ -13,7 +13,7 @@ use super::workers::Roster;
 use super::{LocalState, Mooring, SessionState, Shell};
 use crate::io::{Io, Source};
 use crate::process::{DurableRoot, Scope};
-use crate::types::Audit;
+use crate::types::{Audit, Cradle};
 use std::sync::Arc;
 
 /// What the three kinds of child differ in.
@@ -63,6 +63,7 @@ impl Shell {
             local: LocalState {
                 audit: Audit::dispatched_from(self.local.audit.call_site),
                 workers,
+                cradle: self.local.cradle.clone(),
                 bindings: BindingLedger::default(),
                 detach: self.local.detach.clone(),
                 machine_depth: 0,
@@ -82,11 +83,14 @@ impl Shell {
     pub fn join_session(&self) -> Self {
         let root = self.session.root.clone();
         let scope = Scope::clone(&root.worker());
-        self.child(Holding {
+        let cradle = Cradle::loose(Scope::clone(&root));
+        let mut aside = self.child(Holding {
             root,
             scope,
             workers: self.local.workers.fresh(),
-        })
+        });
+        aside.local.cradle = cradle;
+        aside
     }
 
     /// The one and only thread-spawn primitive: `f` runs on a fresh OS thread
@@ -96,7 +100,8 @@ impl Shell {
     ///
     /// The worker registry is `Arc`-shared, not copied, so a nested `spawn`
     /// registers alongside its parent, and the worker's shell dropping cancels
-    /// nothing of the parent's.
+    /// nothing of the parent's.  The cradle is the parent's too: a stage keeps
+    /// it, a worker's base replaces it with its own.
     ///
     /// # Errors
     /// Returns `Err` if the OS refuses to start the thread.
@@ -208,7 +213,7 @@ mod tests {
     }
 
     /// `session.root_file` must ride into a spawned worker's shell alongside
-    /// `sources`, else a bare `source`/`use` in a `defer`/`spawn` body or a
+    /// `sources`, else a bare `source`/`use` in a `spawn` body or a
     /// pipeline stage — which starts no load of its own — falls back through
     /// a missing registry entry to cwd-relative resolution instead of the
     /// run's own root, and can silently load the wrong file.

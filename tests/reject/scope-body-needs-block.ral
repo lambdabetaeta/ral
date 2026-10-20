@@ -1,2 +1,2 @@
-# contains: `within`, `grant`, `try`, `guard` and `audit` each run a block
+# contains: `within`, `grant`, `try`, `guard`, `audit` and `spawn` each run a block
 within [dir: "x"] 5

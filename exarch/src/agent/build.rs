@@ -534,7 +534,7 @@ impl Avatar {
         // silence — the queue holds no record of what it dropped.
         self.inbox.clear();
         // Rebooting the seat drops the outgoing shell, whose teardown cancels
-        // its registered workers — `/clear` outranks every lease. First of
+        // its registered workers — `/clear` ends them whatever their owner. First of
         // the rest, so a seat that cannot reboot refuses before anything goes.
         self.seat.clear().map_err(io::Error::other)?;
         // `/clear` ends the subtree; this agent itself stays live.

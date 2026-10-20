@@ -16,8 +16,8 @@
 
 mod common;
 
-use common::{fresh_tmp_path, run_with_timeout};
-use std::path::Path;
+use common::{Output, fresh_tmp_path, run_with_timeout};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Generous: it bounds a hang, and only a fixture that never reaches the gate
@@ -45,84 +45,106 @@ fn mkfifo(path: &Path) {
     );
 }
 
-/// Run `watch`ed external work whose tree — a shell and a background `sleep`
-/// under it — outlasts any test, then `tail` (the rest of the script), and
-/// assert nothing of that tree is left once `ral` has exited.
-fn nothing_survives(tail: &str) {
-    let pidfile = fresh_tmp_path("ral_worker_teardown", "pids");
-    let gate = fresh_tmp_path("ral_worker_teardown", "gate");
-    let fixture = fresh_tmp_path("ral_worker_teardown", "sh");
-    mkfifo(&gate);
-    std::fs::write(
-        &fixture,
-        format!(
-            "#!/bin/sh\nsleep 300 &\necho \"$$ $!\" > {}\n: > {}\nwait\n",
-            pidfile.display(),
-            gate.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(
-        &fixture,
-        std::os::unix::fs::PermissionsExt::from_mode(0o755),
-    )
-    .unwrap();
+/// External work whose tree — a shell and a background `sleep` under it —
+/// outlasts any test.  The fixture publishes both pids, then opens the gate.
+struct Tree {
+    pidfile: PathBuf,
+    gate: PathBuf,
+    fixture: PathBuf,
+}
 
+impl Tree {
+    fn new() -> Self {
+        let tree = Self {
+            pidfile: fresh_tmp_path("ral_worker_teardown", "pids"),
+            gate: fresh_tmp_path("ral_worker_teardown", "gate"),
+            fixture: fresh_tmp_path("ral_worker_teardown", "sh"),
+        };
+        mkfifo(&tree.gate);
+        std::fs::write(
+            &tree.fixture,
+            format!(
+                "#!/bin/sh\nsleep 300 &\necho \"$$ $!\" > {}\n: > {}\nwait\n",
+                tree.pidfile.display(),
+                tree.gate.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &tree.fixture,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        tree
+    }
+
+    /// Assert `ral` exited cleanly with `out` and left nothing of the tree.
+    fn assert_gone(self, out: Option<Output>) -> Output {
+        // Read before removing, and remove whatever the run reached, so a
+        // failure below leaves no fixture, gate, or pid file behind for the
+        // next run.
+        let recorded = std::fs::read_to_string(&self.pidfile);
+        let _ = std::fs::remove_file(&self.fixture);
+        let _ = std::fs::remove_file(&self.gate);
+        let _ = std::fs::remove_file(&self.pidfile);
+        let pids: Vec<i32> = recorded
+            .iter()
+            .flat_map(|text| text.split_whitespace())
+            .map(|p| p.parse().expect("a pid"))
+            .collect();
+        // Nothing below can leave the tree running, whichever assertion fires.
+        let sweep = || {
+            for pid in &pids {
+                unsafe { libc::kill(*pid, libc::SIGKILL) };
+            }
+        };
+
+        let Some(out) = out else {
+            sweep();
+            panic!("ral never exited: the worker's child never opened the gate");
+        };
+        if out.status != 0 {
+            sweep();
+            panic!("ral exited {}, stderr: {}", out.status, out.stderr);
+        }
+        // The gate opened, so the fixture had already published both pids.
+        assert!(
+            recorded.is_ok(),
+            "the gate opened without the pids being published"
+        );
+
+        // The drain runs before the host exits, so the tree is already gone;
+        // the margin is for a loaded machine's scheduling, not for a second
+        // teardown.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && pids.iter().copied().any(alive) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let survivors: Vec<i32> = pids.iter().copied().filter(|p| alive(*p)).collect();
+        sweep();
+        assert!(
+            survivors.is_empty(),
+            "the host exited and left {survivors:?} running"
+        );
+        out
+    }
+}
+
+/// Run `watch`ed external work, then `tail` (the rest of the script), and
+/// assert nothing of its tree is left once `ral` has exited.
+fn nothing_survives(tail: &str) {
+    let tree = Tree::new();
     let out = run_with_timeout(
         "ral_worker_teardown",
         &[],
         &format!(
             "let job = watch \"tests\" {{ {} ; return `done }}\ncat {}\n{tail}\n",
-            fixture.display(),
-            gate.display()
+            tree.fixture.display(),
+            tree.gate.display()
         ),
         GATE_TIMEOUT,
     );
-
-    // Read before removing, and remove whatever the run reached, so a failure
-    // below leaves no fixture, gate, or pid file behind for the next run.
-    let recorded = std::fs::read_to_string(&pidfile);
-    let _ = std::fs::remove_file(&fixture);
-    let _ = std::fs::remove_file(&gate);
-    let _ = std::fs::remove_file(&pidfile);
-    let pids: Vec<i32> = recorded
-        .iter()
-        .flat_map(|text| text.split_whitespace())
-        .map(|p| p.parse().expect("a pid"))
-        .collect();
-    // Nothing below can leave the tree running, whichever assertion fires.
-    let sweep = || {
-        for pid in &pids {
-            unsafe { libc::kill(*pid, libc::SIGKILL) };
-        }
-    };
-
-    let Some(out) = out else {
-        sweep();
-        panic!("ral never exited: the worker's child never opened the gate");
-    };
-    if out.status != 0 {
-        sweep();
-        panic!("ral exited {}, stderr: {}", out.status, out.stderr);
-    }
-    // The gate opened, so the fixture had already published both pids.
-    assert!(
-        recorded.is_ok(),
-        "the gate opened without the pids being published"
-    );
-
-    // The drain runs before the host exits, so the tree is already gone; the
-    // margin is for a loaded machine's scheduling, not for a second teardown.
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline && pids.iter().copied().any(alive) {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let survivors: Vec<i32> = pids.iter().copied().filter(|p| alive(*p)).collect();
-    sweep();
-    assert!(
-        survivors.is_empty(),
-        "the host exited and left {survivors:?} running"
-    );
+    tree.assert_gone(out);
 }
 
 /// Falling off the end of the script is the plain case: the session's shell
@@ -180,4 +202,25 @@ fn a_poll_of_an_exited_worker_ends_the_run() {
     .expect("poll of an exited worker hung");
     assert_eq!(out.status, 3, "stderr: {}", out.stderr);
     assert!(!out.stdout.contains("after"), "stdout: {}", out.stdout);
+}
+
+/// A `par` whose first item fails ends its sibling before the failure
+/// reaches the `try`: the sibling's external tree dies with the call.  Item 0
+/// fails only once item 1's tree is up, so the sibling is established.
+#[test]
+fn a_par_childs_external_dies_with_the_call() {
+    let tree = Tree::new();
+    let out = run_with_timeout(
+        "ral_worker_teardown",
+        &[],
+        &format!(
+            "try {{ par {{ |x| if $[$x == 0] {{ cat {}; fail [status: 1, message: x] }} \
+             else {{ {} }} }} [0, 1] 2 }} {{ |_| echo caught; return [] }}\n",
+            tree.gate.display(),
+            tree.fixture.display()
+        ),
+        GATE_TIMEOUT,
+    );
+    let out = tree.assert_gone(out);
+    assert_eq!(out.stdout, "caught\n");
 }

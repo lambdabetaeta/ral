@@ -12,17 +12,15 @@ use ral_core::capability::FsOp;
 use ral_core::fact::{Grep, Read};
 use ral_core::path::tree::walk::Walk;
 use ral_core::text::rank;
-use ral_core::ty::Site;
 use ral_core::ty::{Scheme, Ty, closed_record};
 use ral_core::typecheck::Unifier;
-use ral_core::typecheck::builtins::{fun, mk_plain_scheme, mk_scheme as scheme, pure, thunk};
+use ral_core::typecheck::builtins::{fun, mk_scheme as scheme, pure, thunk};
 use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Mooring, Observed, Settled, sig};
 use ral_core::{HostSurface, Shell, Value};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Read as _;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 pub(crate) mod harness;
 
@@ -32,19 +30,11 @@ pub(crate) mod harness;
 pub const INSTALLER_TAG: &str = "exarch-agent";
 
 /// The agent host's builtin surface over core's `CORE_BUILTINS`: exarch's own
-/// sets plus core's [`ral_core::builtins::SERVICE_BUILTIN`].
-///
-/// Core withholds it from `CORE_BUILTINS` so `service` reaches only a host
-/// under whose worker lease a durable birth means anything.  The prompt's
-/// builtin index ([`crate::prompt`]) reads the booted shell's names back off
-/// this, so the two cannot drift.
+/// sets.  The prompt's builtin index ([`crate::prompt`]) reads the booted
+/// shell's names back off this, so the two cannot drift.
 pub fn host_surface() -> HostSurface {
     HostSurface {
-        statics: vec![
-            EXARCH_BUILTINS,
-            harness::HARNESS_BUILTINS,
-            ral_core::builtins::SERVICE_BUILTIN,
-        ],
+        statics: vec![EXARCH_BUILTINS, harness::HARNESS_BUILTINS],
         captured: Vec::new(),
     }
 }
@@ -1068,60 +1058,9 @@ fn builtin_skill_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
     Settled::Ok(Value::string(sections.join("\n\n")))
 }
 
-/// `service-handle :: ∀α. Int → F (Handle α)` — the per-call-site α instantiation
-/// `race :: [Handle α] → …` already accepts.
-fn scheme_service_handle(u: &mut Unifier) -> Scheme {
-    let av = u.fresh_tyvar();
-    let a = Ty::Var(av);
-    mk_plain_scheme(
-        &[av],
-        &[],
-        thunk(fun(Ty::Int, pure(Ty::Handle(Box::new(a))))),
-    )
-}
-
-/// `service-handle ID` — re-acquire a durable service's live `Handle`, looked up
-/// among this shell's `LeaseClass::Durable` entries alone and handed back bare so
-/// the ordinary eliminators resume.  An ephemeral `spawn`/`watch` id is refused
-/// like an unknown one: those are lease-bounded and rediscovered through their
-/// binding, so by-id re-acquisition stays carved out for services rather than
-/// becoming a control plane over every worker.
-fn builtin_service_handle(
-    args: &[Value],
-    site: &Arc<Site>,
-    _mooring: &Mooring,
-    shell: &mut Shell,
-) -> Settled<Value> {
-    let id = match args[0].as_int() {
-        Some(n) if n >= 0 => {
-            #[allow(clippy::cast_sign_loss, reason = "guarded n >= 0")]
-            let id = n as u64;
-            ral_core::types::WorkerId(id)
-        }
-        _ => {
-            return Err(sig(format!(
-                "service-handle: expected a non-negative Int id, got {}",
-                args[0].type_name()
-            )));
-        }
-    };
-    match shell.worker_by_id(id) {
-        Some(entry) if entry.class == ral_core::types::LeaseClass::Durable => {
-            let mut handle = entry.handle;
-            handle.site = Some(Arc::clone(site));
-            Ok(Value::Handle(Box::new(handle)))
-        }
-        _ => Err(sig(format!(
-            "service-handle: no durable service registered with id {}; an ephemeral \
-             spawn/watch worker is not reacquired by id, only by the binding that named it",
-            id.0
-        ))),
-    }
-}
-
 // A named array, not a promoted temporary: rustc refuses promotion once an
 // entry carries `BuiltinEntry`'s interior-mutable arity cache.
-static EXARCH_BUILTINS_ARR: [BuiltinEntry; 12] = [
+static EXARCH_BUILTINS_ARR: [BuiltinEntry; 11] = [
     BuiltinEntry::new(
         Cow::Borrowed("exarch-surface"),
         ral_core::typecheck::builtins::scheme::surface_op,
@@ -1191,12 +1130,6 @@ static EXARCH_BUILTINS_ARR: [BuiltinEntry; 12] = [
             ", as [String]; each is named as view-text takes it. The walk skips hidden and ignored entries beneath PATH, as grep-files does."
         ),
         BuiltinBody::Static(builtin_find_files),
-    ),
-    BuiltinEntry::boundary(
-        Cow::Borrowed("service-handle"),
-        scheme_service_handle,
-        "service-handle <id>  — re-acquire a durable service's live Handle by id (durable services only; an ephemeral spawn/watch id is refused). Compose with an eliminator: `await (service-handle 3)`, `cancel (service-handle 3)`.",
-        builtin_service_handle,
     ),
 ];
 pub static EXARCH_BUILTINS: &[BuiltinEntry] = &EXARCH_BUILTINS_ARR;

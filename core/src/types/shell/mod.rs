@@ -47,6 +47,7 @@ use crate::capability::GrantStack;
 use crate::io::{Io, WriteStopped};
 use crate::process::{CancelCause, DurableRoot, Scope};
 use crate::source::{CallSite, FileId, Source, SourceDb, Span};
+use crate::types::Cradle;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -93,9 +94,8 @@ pub(crate) struct Context<H = HandlerStack> {
 
 /// State that outlives every run's teardown.
 pub struct SessionState {
-    /// workers (`spawn`, `watch`, `par`) parent here, not under the
-    /// run's swappable foreground scope, so a foreground cancel never reaches
-    /// them.
+    /// A run's loose workers (`spawn`, `watch`) hang here, not under its
+    /// swappable foreground scope, so a foreground cancel never reaches them.
     pub(crate) root: DurableRoot,
     /// The scope a run entered through [`Shell::run`](crate::Shell::run) nests
     /// its foreground frame under.
@@ -136,18 +136,21 @@ pub struct SessionState {
 
 /// Host-local scratch whose members each carry their own flow rule — not a
 /// lifetime category, the residue left once run and session state are named.
-#[derive(Default)]
 pub struct LocalState {
     /// The in-flight audit trail and its byte-capture policy.  `grant`,
     /// `within`, `guard`, `try`, and `audit` are collection boundaries, not
     /// observations; the dispatcher posts one observation per real command
     /// through `types::audit::door`.
     pub(crate) audit: Audit,
-    /// Every worker (`spawn`, `watch`, `service`) spawned from this shell.
+    /// Every worker (`spawn`, `watch`) spawned from this shell.
     /// [`Shell::spawn_thread`] shares the registry into the worker's own shell,
     /// so a nested `spawn` registers alongside its parent; a sub-agent fork
     /// starts fresh, one registry per agent.
     pub(crate) workers: Roster,
+    /// Where a loose birth hangs and who settles it: loose under the root for
+    /// a run and an aside, a worker's own node and brood inside a worker.  A
+    /// stage shares its parent's.
+    pub(crate) cradle: Cradle,
     /// Inert until a host arms it, then ages every non-baseline top-level name
     /// so long-unused scratch can be pruned.  Unlike [`Self::workers`] it needs
     /// no lock: its one writer is the thread owning `&mut Shell` for every run,
@@ -220,8 +223,8 @@ impl Shell {
     }
 
     /// A call's span becomes the dispatch site, unless it lies outside the
-    /// session's sources — the baked prelude's — so that `defer`'s inner
-    /// `spawn` is stamped where the user wrote `defer`.
+    /// session's sources — the baked prelude's — so a prelude function's
+    /// inner command is stamped where the user called the function.
     pub(crate) fn stamp_call_site(&mut self, span: Option<Span>) {
         if let Some(span) = span
             && self.session.sources.get(span.file).is_some()

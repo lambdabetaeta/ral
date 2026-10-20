@@ -212,7 +212,9 @@ agent, so a root, identity fork, and wire child each receive their own surface.
 - **Persona** (`data/system.md`, unheaded — it sets the tone, not a topic) frames
   the session as *one continuing shell script*: definitions, working directory,
   and worker threads persist across turns. It teaches selective binding, bounded
-  inspection, batching known steps, and deferring independent work.
+  inspection, batching known steps, and spawning independent long-running
+  work under a title, then `await`ing its handle — or `await !{worker <id>}`
+  from the completion notice — when the result is needed.
 - **`Ral`** (`data/ral.md`) is the language and tool reference. The CBPV
   introduction leads into values, computations, capture, and forcing, followed
   by help and exploration. String arguments remain intact; list spreading and
@@ -225,9 +227,17 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   `explain within`, `explain return`, `explain grant`, `explain try`,
   `explain await`, `explain poll`, and `explain detach`; the prompt keeps
   common forms and examples.
-  Failure guidance separates recovery, inspection, and deliberate suppression;
-  deferred work is independent until its result is awaited and inspected.
-  Repeated awaits read the same result; another `defer` starts another execution.
+  Failure guidance separates recovery, inspection, and deliberate suppression.
+  The concurrency section teaches one pattern: `spawn "title" { … }`, other
+  work or the end of the turn, a host notice when the worker ends, then
+  `await`, which behaves as the block run on that line — its output written
+  there, its value returned, its failure raised, so `try` recovers it — and
+  replays the same ending on every later `await`. `worker <id>` recovers a
+  lost handle, `workers` lists every worker, `poll` samples a long-running
+  server without waiting, a block's own spawns finish before it does, and
+  fan-out that must leave nothing behind is `par`, `all` or `race`. A worker
+  lives as long as the session; `detach` is for a process that must outlive
+  it.
   The audit example distinguishes an expected nonzero exit from an error;
   independent calls use individual `attempt`s so one failure does not skip the
   rest, then inspect each command's status rather than the enclosing audit's

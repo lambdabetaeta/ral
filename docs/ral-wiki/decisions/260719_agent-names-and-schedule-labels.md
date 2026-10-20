@@ -4,6 +4,11 @@ status: active
 
 # One `agent` verb by record; names and schedule labels are identity; commitments retired
 
+> Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]: the
+> durable-service legibility fallback recorded under the 2026-08-27 amendment
+> is gone with what it described. `service` is deleted and every worker is a
+> titled `spawn`; a birth's trail card and `workers` name it by its title.
+
 **The agent surface collapses to a single record-spec `agent` verb, and the
 model addresses what it started by the *name* it gave, not a numeric id — while
 the protected-commitment machinery is deleted whole.** Three changes land

@@ -8,6 +8,7 @@
 //! model could evade.
 
 pub mod builtins;
+pub(crate) mod clip;
 pub(crate) mod report;
 pub mod surface;
 
@@ -17,23 +18,13 @@ use base64::Engine;
 use ral_core::Shell;
 use ral_core::Value as RalValue;
 use ral_core::first_order::FOValue;
-use ral_core::types::DeferredSink;
+use ral_core::types::{DeferredSink, TitlePolicy};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Idle bound of the lease armed on every `spawn` worker, renewed by
-/// any `poll`/`await`/`race`: an abandoned worker is reaped, a babysat one
-/// lives.  `pub(crate)` so the `/resources` fold reads the same constant its
-/// lease rows describe.
-pub(crate) const WORKER_IDLE_CEILING: Duration = Duration::from_hours(1);
-
-/// Absolute backstop of the same lease, measured from spawn: observation
-/// renews idleness, never age.
-pub(crate) const WORKER_BACKSTOP: Duration = Duration::from_hours(24);
-
 /// Admission cap on concurrently *running* workers per agent, enforced by core
-/// at the spawn door.  A durable service holds a seat; a settled entry
-/// lingering under retention does not.
+/// at the spawn door.  A settled entry lingering under retention holds no
+/// seat.
 pub(crate) const LIVE_WORKER_CAP: usize = 64;
 
 /// Birth budget on `detach` per session shell.
@@ -161,11 +152,8 @@ pub(crate) fn run_shell(
         caps: caps.clone(),
         wall: Some(Duration::from_secs(timeout_secs)),
         cleanup_grace: Duration::from_secs(2),
-        deferred_lease: Some(ral_core::types::WorkerLease {
-            idle: WORKER_IDLE_CEILING,
-            backstop: WORKER_BACKSTOP,
-        }),
         worker_cap: Some(LIVE_WORKER_CAP),
+        worker_title: TitlePolicy::Required,
         ..Run::captured(cmd, source)
     };
 

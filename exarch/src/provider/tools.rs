@@ -87,8 +87,8 @@ fn ral_schema() -> Value {
                 "type": "integer",
                 "minimum": 1,
                 "description": "Wall-clock limit in seconds; default 60. \
-        Raise it for a command known to run long, rather than defer-then-wait. \
-        Keep defer for work you can overlap.",
+        Raise it for a command known to run long, rather than spawn-then-wait. \
+        Keep `spawn` for work you can overlap.",
             },
         },
         "required": [COMMAND, "description"],

@@ -399,8 +399,8 @@ impl Shell {
             fork,
             home: foreground,
             cleanup_grace: run.cleanup_grace,
-            deferred_lease: run.deferred_lease,
             worker_cap: run.worker_cap,
+            worker_title: run.worker_title,
             terminal_access,
         };
         let next = build_run(self, capture.as_ref(), stdin);

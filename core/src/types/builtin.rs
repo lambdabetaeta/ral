@@ -281,8 +281,7 @@ pub(crate) fn native_value(entry: &BuiltinEntry) -> Value {
 mod tests {
     use super::*;
     use crate::builtins::{
-        BOUNDARY_BUILTINS, CORE_BASE_FRAMES, CORE_BUILTINS, SERVICE_BUILTIN, SURFACE_BUILTIN,
-        WATCH_BUILTIN,
+        BOUNDARY_BUILTINS, CORE_BASE_FRAMES, CORE_BUILTINS, SURFACE_BUILTIN, WATCH_BUILTIN,
     };
     use crate::typecheck::Unifier;
 
@@ -298,12 +297,11 @@ mod tests {
     #[test]
     fn a_result_only_variable_is_a_boundary_or_divergence() {
         const DIVERGENT: [&str; 3] = ["fail", "exit", "quit"];
-        let sets: [&[BuiltinEntry]; 6] = [
+        let sets: [&[BuiltinEntry]; 5] = [
             CORE_BUILTINS,
             BOUNDARY_BUILTINS,
             CORE_BASE_FRAMES,
             WATCH_BUILTIN,
-            SERVICE_BUILTIN,
             SURFACE_BUILTIN,
         ];
         #[cfg(unix)]
@@ -329,12 +327,15 @@ mod tests {
     /// Every boundary says so in its scheme: marked boundaries are exactly the
     /// core rows whose result the program did not decide.
     #[test]
-    fn the_core_boundaries_are_the_decoders_and_use() {
+    fn the_core_boundaries_are_the_decoders_use_and_worker() {
         let names: Vec<&str> = BOUNDARY_BUILTINS
             .iter()
             .map(|e| e.decl.name.as_ref())
             .collect();
-        assert_eq!(names, ["from-json", "from-jsonl", "from-json-at", "use"]);
+        assert_eq!(
+            names,
+            ["from-json", "from-jsonl", "from-json-at", "use", "worker"]
+        );
         assert!(CORE_BUILTINS.iter().all(|e| !e.decl.is_boundary()));
     }
 }

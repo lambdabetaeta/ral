@@ -119,10 +119,6 @@ fn prelude_schemes_carry_their_grades() {
     assert_eq!(shown("succeeds"), "∀α ν. {ν α} → Returns Bool");
     assert_eq!(shown("for"), "∀α β ν. [α] → {α → ν β} → Returns Unit");
     assert_eq!(
-        shown("par"),
-        "∀α β. {α → Returns β} → [α] → Integer → Returns [β]"
-    );
-    assert_eq!(
         shown("map-lines"),
         "∀α. {String → Returns α} → Returns Unit"
     );
@@ -132,23 +128,18 @@ fn prelude_schemes_carry_their_grades() {
     );
     assert_eq!(shown("each-line"), "∀α ν. {String → ν α} → Returns Unit");
     assert_eq!(shown("bytes-to-string"), "Bytes → Returns String");
-    assert!(
-        shown("defer").starts_with("∀α ν. {ν α} → Returns Handle [outcome: [`ok: α | `err: "),
-        "{}",
-        shown("defer")
-    );
 }
 
 /// The builtin rows the design grades: writers are commands, the runners of
-/// blocks absorb any grade, `map` demands a value, `fail` inhabits every
-/// producer type.
+/// blocks absorb any grade, a handle carries its block's grade and `await`
+/// returns it, `map` demands a value, `fail` inhabits every producer type.
 #[test]
 fn builtin_schemes_carry_their_grades() {
     let table = common::manifest(&ral_core::HostSurface::default());
     let shown = |name: &str| ral_core::typecheck::builtin_type_hint(&table, name).unwrap();
     assert_eq!(shown("echo"), "[String] → Command");
     assert_eq!(shown("to-json"), "∀α:data. α → Command");
-    assert_eq!(shown("spawn"), "∀α ν. {ν α} → Returns Handle α");
+    assert_eq!(shown("await"), "∀α ν. Handle (ν α) → ν α");
     assert_eq!(shown("each"), "∀α β ν. {α → ν β} → [α] → Returns Unit");
     assert_eq!(shown("map"), "∀α β. {α → Returns β} → [α] → Returns [β]");
     assert_eq!(

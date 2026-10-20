@@ -308,7 +308,7 @@ impl Inferencer<'_> {
     /// the pipeline stage forcer wants its own hint, not the generic one —
     /// and keeping the grade.  A variable opens at a fresh grade: only the
     /// bind rule decides `p`.
-    fn force_return_shape(&mut self, cty: &CompTy, why: Reason) -> Producer {
+    pub(super) fn force_return_shape(&mut self, cty: &CompTy, why: Reason) -> Producer {
         if let Some(producer) = Producer::of(&self.ctx.unifier.resolve_comp_ty(cty)) {
             return producer;
         }
@@ -461,12 +461,6 @@ impl Inferencer<'_> {
         // A block argument, its body held back until the whole spine is
         // unified, so a parameter a *later* argument determines — the element
         // type in `map { |x| … } $xs` — is known by the time the body reads it.
-        struct Deferred<'a> {
-            block: &'a Val,
-            body: &'a Comp,
-            wanted: CompTy,
-            pos: Option<Span>,
-        }
         let mut deferred = Vec::new();
         for (i, arg) in positional.into_iter().enumerate() {
             if i >= cap {
@@ -474,17 +468,13 @@ impl Inferencer<'_> {
                 continue;
             }
             cty = self.autoderef_thunk_return(cty);
+            let slot = args[i].slot();
             // Underline the offending argument, not the whole call.  A
             // synthetic entry carries no span, and `with_span` leaves pos alone.
-            cty = self.with_span(args[i].slot().span, |this| {
-                if let Val::Thunk(body) = arg {
+            cty = self.with_span(slot.span, |this| {
+                if let Val::Thunk(_) = arg {
                     let wanted = this.ctx.unifier.fresh_comp_ty();
-                    deferred.push(Deferred {
-                        block: arg,
-                        body: body.shape(),
-                        wanted: wanted.clone(),
-                        pos: this.ctx.pos,
-                    });
+                    deferred.push((slot, wanted.clone()));
                     this.apply_to(&cty, Ty::Thunk(Box::new(wanted)))
                 } else {
                     let ty = this.infer_val(arg);
@@ -492,22 +482,31 @@ impl Inferencer<'_> {
                 }
             });
         }
-        for Deferred {
-            block,
-            body,
-            wanted,
-            pos,
-        } in deferred
-        {
-            self.with_span(pos, |this| {
-                let given = this.with_scope(|this| this.check_comp(body, &wanted));
-                match this.adapt(&given, &wanted) {
-                    Some(how) => this.coerce(block, &given, how, &wanted, &Reason::Argument),
-                    None => this.ctx.unify_comp_ty(&given, &wanted, Reason::Argument),
-                }
-            });
+        for (slot, wanted) in deferred {
+            self.demand_block(slot, wanted);
         }
         cty
+    }
+
+    /// `arg` demanded as a block running as `wanted`, as an argument is: a
+    /// block written out is checked against it, one in hand adapted to it.
+    pub(super) fn demand_block(&mut self, arg: &Spanned<Val>, wanted: CompTy) {
+        self.with_span(arg.span, |this| match &arg.item {
+            Val::Thunk(body) => {
+                let given = this.with_scope(|this| this.check_comp(body.shape(), &wanted));
+                match this.adapt(&given, &wanted) {
+                    Some(how) => this.coerce(&arg.item, &given, how, &wanted, &Reason::Argument),
+                    None => this.ctx.unify_comp_ty(&given, &wanted, Reason::Argument),
+                }
+            }
+            held => {
+                let ty = this.infer_val(held);
+                if !this.adapt_in_hand(held, &ty, &wanted) {
+                    this.ctx
+                        .unify_ty(&ty, &Ty::Thunk(Box::new(wanted)), Reason::Argument);
+                }
+            }
+        });
     }
 
     /// `callee` applied to an argument of type `ty`: the residual computation.
@@ -522,14 +521,25 @@ impl Inferencer<'_> {
     /// parameter's demand meets it there, η-wrapped at its arity if captured.
     fn apply_in_hand(&mut self, callee: &CompTy, arg: &Val, ty: Ty) -> CompTy {
         if let CompTy::Fun(param, body) = self.ctx.unifier.resolve_comp_ty(callee)
-            && let Ty::Thunk(given) = self.ctx.unifier.resolve_ty(&ty)
             && let Ty::Thunk(wanted) = self.ctx.unifier.resolve_ty(&param)
-            && let Some(how) = self.adapt(&given, &wanted)
+            && self.adapt_in_hand(arg, &ty, &wanted)
         {
-            self.coerce(arg, &given, how, &wanted, &Reason::Argument);
             return *body;
         }
         self.apply_to(callee, ty)
+    }
+
+    /// Coerce `arg : ty`, a block in hand, to run as `wanted`, when it must
+    /// adapt to; false when it is no block or need not.
+    fn adapt_in_hand(&mut self, arg: &Val, ty: &Ty, wanted: &CompTy) -> bool {
+        let Ty::Thunk(given) = self.ctx.unifier.resolve_ty(ty) else {
+            return false;
+        };
+        let Some(how) = self.adapt(&given, wanted) else {
+            return false;
+        };
+        self.coerce(arg, &given, how, wanted, &Reason::Argument);
+        true
     }
 
     /// One application path for every registered builtin, `Scheme` and `Sig`
@@ -1945,6 +1955,8 @@ impl Inferencer<'_> {
             CompKind::Try { body, handler } => self.infer_try(body, handler),
             CompKind::Guard { body, cleanup } => self.infer_guard(body, cleanup),
             CompKind::Audit { body } => self.infer_audit(body),
+            CompKind::Spawn { title, body } => self.infer_spawn(title.as_ref(), body),
+            CompKind::All { tasks } => self.infer_all(tasks),
             // Installs fds, not its own type; carries the body as an
             // `Arc<Comp>` rather than a thunk-shaped `Val` like the scope
             // forms above, so infer it directly.  A stdout redirect takes a

@@ -487,7 +487,7 @@ impl SubstMap {
             }
             Ty::List(a) => Ty::list(self.ty(a)),
             Ty::Map(a) => Ty::map(self.ty(a)),
-            Ty::Handle(a) => Ty::Handle(Box::new(self.ty(a))),
+            Ty::Handle(g, a) => Ty::Handle(self.grade(*g), Box::new(self.ty(a))),
             Ty::Record(r) => Ty::Record(self.row(r)),
             Ty::Variant(r) => Ty::Variant(self.row(r)),
             Ty::Thunk(b) => Ty::Thunk(Box::new(self.comp(b))),

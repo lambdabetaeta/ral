@@ -6,6 +6,14 @@ supersedes: decisions/260930_capture-is-decided-by-syntax
 
 # A command's value is its output: `F` carries a grade
 
+> Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]: `Handle` carries
+> its block's grade, `Handle^ε α` (printed `Handle (Returns α)`,
+> `Handle Command` or `Handle (ν α)`), and `await : ∀ε α. Handle^ε α → F^ε α`.
+> So `spawn` and `watch` no longer absorb their body's grade: `await` of
+> `spawn { echo hi }` is a `Command`, and `let x = await $h` binds `"hi"`.
+> `service` and `defer` are deleted, and with them their rows in the absorbing
+> list; `each`, `fold`, `fold-lines` and `audit` still absorb.
+
 **`F` carries a grade. `F^p A` produces a value `A` (printed `Returns A`);
 `F^w Unit` produces output and nothing else (printed `Command`). Where a value is
 demanded of a command, the command is captured and its output decoded as a

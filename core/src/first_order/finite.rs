@@ -61,6 +61,13 @@ impl From<i64> for Finite {
     }
 }
 
+/// A duration's seconds, finite because a `Duration` is bounded.
+impl From<std::time::Duration> for Finite {
+    fn from(d: std::time::Duration) -> Self {
+        Self(d.as_secs_f64())
+    }
+}
+
 impl std::ops::Neg for Finite {
     type Output = Self;
 

@@ -241,6 +241,14 @@ pub enum ScopeAst {
     Grant { caps: Options, body: Box<Ast> },
     /// `audit BODY` — run `body` while recording an audit subtree.
     Audit { body: Box<Ast> },
+    /// `spawn [TITLE] BODY` — run `body` on a worker of its own; the title
+    /// names it to people.
+    Spawn {
+        title: Option<Box<Spanned<Ast>>>,
+        body: Box<Ast>,
+    },
+    /// `all [k: BODY, …]` — run every task concurrently, owned by this form.
+    All { tasks: Options },
 }
 
 /// A form's written options: each label is syntax, each value a term.
@@ -340,6 +348,12 @@ impl ScopeAst {
                 ops
             }
             Self::Audit { body } => vec![body],
+            Self::Spawn { title, body } => {
+                let mut ops: Vec<&Ast> = title.iter().map(|t| &t.item).collect();
+                ops.push(body);
+                ops
+            }
+            Self::All { tasks } => tasks.iter().map(|(_, v)| &v.item).collect(),
         }
     }
 }

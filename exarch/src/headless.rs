@@ -306,7 +306,7 @@ impl Headless<'_> {
                 elapsed_ms,
             } => {
                 let took =
-                    crate::bus::elapsed_phrase(std::time::Duration::from_millis(*elapsed_ms));
+                    crate::card::elapsed_phrase(std::time::Duration::from_millis(*elapsed_ms));
                 let _ = match outcome {
                     Settlement::Finished => {
                         writeln!(self.err, "[agent {name} finished after {took}]")
@@ -333,8 +333,18 @@ impl Headless<'_> {
             K::Observation { value } => self.print_observation(value),
             K::Change { change } => self.print_card(&card::change_card(change)),
             K::Card { card } => self.print_card(card),
-            K::Done { id, cmd, outcome } => {
-                let _ = writeln!(self.err, "{}", card::settled_text(*id, cmd, outcome));
+            K::Done {
+                id,
+                title,
+                elapsed_ms,
+                outcome,
+            } => {
+                let elapsed = elapsed_ms.map(std::time::Duration::from_millis);
+                let _ = writeln!(
+                    self.err,
+                    "{}",
+                    card::settled_text(*id, title, elapsed, outcome)
+                );
             }
             K::Context { rows } => {
                 self.print_card(&record::context_rows_card(rows));

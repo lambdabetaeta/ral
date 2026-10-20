@@ -65,9 +65,9 @@ pub enum Ty {
     /// refuses a row that mixes the two.
     Variant(Row),
     Thunk(Box<CompTy>),
-    /// A running concurrent block; `await` of a `Handle α` gives a record with
-    /// a `value: α` field.
-    Handle(Box<Self>),
+    /// A suspended producer of grade `ε` and value `α`: `await` of a
+    /// `Handle^ε α` is an `F^ε α`.
+    Handle(Grade, Box<Self>),
     Var(TyVar),
 }
 
@@ -249,7 +249,7 @@ impl<'a> Term<'a> {
     /// The immediate sub-terms, in the order the types print.
     pub(crate) fn children(self) -> impl Iterator<Item = Term<'a>> {
         let (first, second) = match self {
-            Self::Ty(Ty::List(a) | Ty::Map(a) | Ty::Handle(a))
+            Self::Ty(Ty::List(a) | Ty::Map(a) | Ty::Handle(_, a))
             | Self::Comp(CompTy::Return(_, a)) => (Some(Self::Ty(a)), None),
             Self::Ty(Ty::Record(r) | Ty::Variant(r)) => (Some(Self::Row(r)), None),
             Self::Ty(Ty::Thunk(b)) => (Some(Self::Comp(b)), None),
@@ -264,6 +264,14 @@ impl<'a> Term<'a> {
             | Self::Row(Row::Empty | Row::Var(_)) => (None, None),
         };
         first.into_iter().chain(second)
+    }
+
+    /// The grade this node carries: an `F`'s, or a handle's.
+    pub(crate) const fn grade(self) -> Option<Grade> {
+        match self {
+            Self::Ty(Ty::Handle(g, _)) | Self::Comp(CompTy::Return(g, _)) => Some(*g),
+            _ => None,
+        }
     }
 }
 

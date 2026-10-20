@@ -5,6 +5,9 @@ generated_at_commit: 39934600
 
 # The envelope is a process namespace
 
+> Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]: `service`
+> is deleted, so `spawn` and `detach` are the verbs for outliving a command.
+
 **A grant's envelope confines process identity and lifetime, not only the
 filesystem and network — on every projection, wherever the host can build the
 namespace, and it says when it cannot.** What `grant` means for `ps`, `kill`,

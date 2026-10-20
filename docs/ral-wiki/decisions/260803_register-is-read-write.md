@@ -4,6 +4,9 @@ status: proposed
 
 # The register is read/write: a pin stays a card, and `pin-read` reads it back
 
+> Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]: `service-handle`
+> is deleted; core's `worker <id>` re-acquires the handle of every worker.
+
 **[[decisions/260622_surface-pins-state|surface-pins-state]] gave a kit
 somewhere to put what is currently true, and made it write-only. A drafted
 revision — `` `pin `` carries a datum, a view in a typed *register handle*

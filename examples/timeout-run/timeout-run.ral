@@ -10,7 +10,7 @@ let [secs, target] = args
 let job = watch "tests" { within [dir: $target] { ./run-tests } ; return `finished }
 let alarm = spawn { sleep !{int $secs} ; return `expired }
 
-let outcome = try { return !{race [$job, $alarm]}[value] } { |e| return `failed $e[status] }
+let outcome = try { return !{race [$job, $alarm]} } { |e| return `failed $e[status] }
 
 case $outcome [
     `finished: { |_| echo "tests passed" },

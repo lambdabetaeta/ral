@@ -41,7 +41,7 @@ mod tests {
     use crate::first_order::{Bytes, FOValue};
     use crate::ir::WriteMode;
     use crate::types::AuditIo;
-    use crate::types::{LeaseClass, Map, Value, WorkerId};
+    use crate::types::{Map, Value, WorkerId};
     use std::collections::BTreeMap;
 
     fn site() -> CallSite {
@@ -117,13 +117,7 @@ mod tests {
             )),
             Observed::Worker(Worker {
                 id: WorkerId(7),
-                cmd: "watch build".into(),
-                class: LeaseClass::Worker,
-            }),
-            Observed::Worker(Worker {
-                id: WorkerId(8),
-                cmd: "service tail".into(),
-                class: LeaseClass::Durable,
+                title: "watch build".into(),
             }),
             Observed::Act(Act {
                 verb: "spawn".into(),

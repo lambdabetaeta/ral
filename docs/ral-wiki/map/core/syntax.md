@@ -35,7 +35,7 @@ sees raw bytes and bare words.
   binding of stdin, stdout or stderr at the second redirect
   ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
 - `syntax.rs` — the module root: `CONTROL_OPERATORS` (`try`, `guard`,
-  `within`, `grant`, `audit`) and `FLOW_KEYWORDS` (`if`, `elsif`, `else`,
+  `within`, `grant`, `audit`, `spawn`, `all`) and `FLOW_KEYWORDS` (`if`, `elsif`, `else`,
   `let`, `return`, `case`), read by the parser and, through
   `is_control_operator` / `is_keyword`, by the checker, highlighters, and the
   [[map/core/builtins|help registry's]] documentation-completeness test;
@@ -119,6 +119,7 @@ governs both stages.
   sub-expressions bottom out here), patterns through `parse_pattern` (list and
   map patterns recurse back through it per element).
 
-The five reserved [[design/control-operators|control operators]] are recognised
-at this layer; everything else is a library binding. See `docs/SPEC.md` §3,
+The seven reserved [[design/control-operators|control operators]] are recognised
+at this layer, `spawn`'s arity elastic (one operand, or a title and the body)
+and `all`'s labels refused when written twice; everything else is a library binding. See `docs/SPEC.md` §3,
 §17.1 for the grammar.

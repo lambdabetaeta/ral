@@ -16,6 +16,10 @@ status: 'superseded in part by [[decisions/260911_an-external-is-a-byte-operatio
 
 # Exarch leases agent scratch bindings; ral bindings do not expire
 
+> Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]: the
+> worker idle-observation lease is retired, so a worker lives as long as its
+> owner. The binding lease this page sets stands.
+
 > leases-and-budgets answered this
 > page's host-pins question: durable jobs need no pins at all — the worker
 > registry retains the handle itself, so pruning a top-level name never

@@ -335,7 +335,7 @@ impl fmt::Display for Value {
             Self::Native { entry, applied } => {
                 write!(f, "{}", fmt_native(&entry.decl.name, applied))
             }
-            Self::Handle(h) => write!(f, "<handle:{}>", h.cmd),
+            Self::Handle(h) => write!(f, "<handle:{}>", h.title),
         }
     }
 }

@@ -8,8 +8,8 @@
 //! [`rejection`], for a refusal before evaluation, and [`fault`], for an
 //! engine that could not say what became of it.
 
+use super::clip::clip;
 use super::{ToolResult, ral_value_to_text};
-use crate::agent::digest::{OPAQUE_CAP, clip};
 use ral_core::process::CancelCause;
 use ral_core::protocol::Ending;
 use ral_core::protocol::probe::WorkerRow;
@@ -18,6 +18,13 @@ use std::collections::HashSet;
 /// Enough of one call's fan-out to name without crowding the stderr it rides
 /// on; the rest is counted aloud, never dropped in silence.
 const NAMED: usize = 5;
+
+/// Cap for a `Report::Static` or `Report::Faulted` blob.
+///
+/// The model reads a parse / type error or an engine fault whole and cannot
+/// query it, so the cap sits well under the section caps: a diagnostic past a
+/// few KB is noise.
+const OPAQUE_CAP: usize = 3000;
 
 /// What a rejection means, said after its diagnostic: the refusal came before
 /// evaluation, so nothing stands and the whole call is resent corrected.
@@ -135,10 +142,9 @@ fn timeout_tip(timeout_secs: u64) -> String {
          rather than replaying this call.\n\
          recovery: if the command is simply slow and there is nothing to overlap it \
          with, retry with a higher `timeout_secs`. If other work can run alongside it, \
-         defer it instead (`let h = defer {{ … }}`) and let the run return: the host \
-         notifies you at the next exchange boundary when it settles and renders its \
-         output on the rail, and `await $h` gives you its value record: you need not \
-         poll.\n"
+         spawn it instead (`let h = spawn \"title\" {{ … }}`) and let the run return: \
+         the host notifies you when it settles, and `await $h`, or `await !{{worker <id>}}` \
+         from the notice, behaves as if the block had run there.\n"
     )
 }
 
@@ -171,7 +177,7 @@ fn orphan_note(ending: &Ending, births: &HashSet<u64>, workers: &[WorkerRow]) ->
     let mut cmds: Vec<String> = workers
         .iter()
         .filter(|w| births.contains(&w.id))
-        .map(|w| format!("`{}`", w.cmd))
+        .map(|w| format!("#{} ({})", w.id, w.title))
         .collect();
     if cmds.is_empty() {
         return None;
@@ -186,12 +192,13 @@ fn orphan_note(ending: &Ending, births: &HashSet<u64>, workers: &[WorkerRow]) ->
     let fate = match ending {
         Ending::Unreturnable { .. } => {
             "A handle this call bound with `let` is still bound: `await $h` reaches it; \
-             one it only returned was lost with the result, so that work is orphaned."
+             one it only returned was lost with the result. `await !{worker N}` reaches it \
+             either way."
         }
         _ => {
             "A handle bound by a step that completed before the failure is still bound: \
-             `await $h` reaches it; one the failing step would have bound never landed, so \
-             that work is orphaned."
+             `await $h` reaches it; one the failing step would have bound never landed. \
+             `await !{worker N}` reaches it either way."
         }
     };
     Some(format!(

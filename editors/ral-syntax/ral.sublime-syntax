@@ -262,7 +262,7 @@ contexts:
       scope: constant.language.unit.ral
 
   control-name:
-    - match: '\b(if|for|try|case|while|spawn|await|race|use|source|grant|within|map|filter|fold|reduce)\b'
+    - match: '\b(if|for|try|case|while|spawn|all|await|race|use|source|grant|within|map|filter|fold|reduce)\b'
       scope: keyword.control.ral
 
   block:

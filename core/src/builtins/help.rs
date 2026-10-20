@@ -21,6 +21,12 @@ use std::path::PathBuf;
 /// `LANGUAGE_CONSTANTS`; the test below makes drift loud.
 static LANGUAGE_DOCS: &[(&str, &str)] = &[
     (
+        "all",
+        "all [name: { body }, ...]  — run several blocks at once, owned by this expression, and return a record of their values.\n\n\
+         Each task runs on a worker of its own and is awaited in the order written, so their output appears in that order. A task's block is demanded as a value, as a function argument is: a command's value is its output. The first task to fail cancels the others, which are drained before the failure is raised; a stop, an exit or a panic cancels them too. Nothing started by `all` outlives the call.\n\n\
+         Example:\n  let r = all [build: { cargo build -q }, lint: { cargo clippy -q }]\n  $r[lint]",
+    ),
+    (
         "audit",
         "audit { body }  — run a block and return its outcome and a structured trail instead of failing.\n\n\
          The result is `[outcome: `ok value | `err error, trail: observations]`. The trail records commands, reads, writes, workers, host acts, and denied capability checks performed by the body. Each command observation keeps `argv`, `status`, `stdout`, `stderr`, and total byte counts; each stream retains at most 1 MiB.\n\n\
@@ -84,6 +90,12 @@ static LANGUAGE_DOCS: &[(&str, &str)] = &[
          `return` constructs a successful computation; it does not exit the process and does not escape an enclosing function early. A block's result is the final computation it runs, so `return` is most useful when lifting data explicitly or returning unit from an otherwise empty path.\n\n\
          In an rc file, plugin manifest, or capability profile whose terminal result a host checks against a fixed keyset, return a record: `return [edit-mode: 'vi']`. A misspelled key is a type error before the file runs. `return [\"edit-mode\": 'vi']` is a map, and `[]` is a list; neither is a configuration record. A file with nothing to set returns `()`.\n\n\
          Example:\n  let twice = { |n| return $[$n * 2] }",
+    ),
+    (
+        "spawn",
+        "spawn \"title\" { body }  — run a block on a worker thread and return its handle at once.\n\n\
+         The title names the work to people: it appears in `workers`, in the birth and completion notices, and is required by the exarch host (the interactive shell accepts `spawn { body }`, naming the worker by its line). The worker is owned by the session, or by the worker it was started inside: it lives until it finishes, is cancelled, or the session ends, and a worker finishes only after every worker it started has. `await $h` behaves as if the block had run there; `poll $h` samples it; `cancel $h` stops it and everything it started; `worker <id>` recovers a handle whose binding is gone.\n\n\
+         Example:\n  let h = spawn \"sort the log\" { sort huge.log > sorted.log }\n  …\n  await $h",
     ),
     (
         "true",
@@ -551,8 +563,8 @@ mod tests {
         assert_eq!(documented, expected);
     }
 
-    /// `build.rs` scrapes these summaries out of `prelude.ral`; the two rules
-    /// worth pinning are how a wrapped doc joins and where one stops.
+    /// `build.rs` scrapes these summaries out of `prelude.ral`; the rule worth
+    /// pinning is how a wrapped doc joins.
     #[test]
     fn multiline_doc_summary_joins_first_paragraph() {
         let doc = prelude_doc("extension").expect("extension has a doc comment");
@@ -563,15 +575,6 @@ mod tests {
         assert!(
             doc.contains("`a.tar.gz` has `` `some 'gz'``, while"),
             "the wrapped sentence is joined in full, got {doc:?}"
-        );
-    }
-
-    #[test]
-    fn blank_doc_line_ends_the_summary() {
-        let par_doc = prelude_doc("par").expect("par has a doc comment");
-        assert_eq!(
-            par_doc, "Parallel map over `items` with at most `jobs` concurrent blocks.",
-            "only the lead paragraph is the summary, got {par_doc:?}"
         );
     }
 

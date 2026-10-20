@@ -56,29 +56,25 @@ scope, and the base frames all come from the manifest the shell was booted with
 — there is no process-global registry, and every path that builds or hydrates a
 shell must be built over a `Runtime` that carries them or re-link a native by name.
 `register` clones the baked prelude's bindings into each fresh environment.
-`BOUNDARY_BUILTINS` (`from-json`, `from-jsonl`, `from-json-at`, `use`) also sits
+`BOUNDARY_BUILTINS` (`from-json`, `from-jsonl`, `from-json-at`, `use`, `worker`) also sits
 outside it, for a different reason: each row is a `BuiltinEntry::boundary`, whose
 body takes the `Site` the checker solved at the call and admits the value it
 lets in against it ([[decisions/260930_a-boundary-is-checked-against-its-type|a-boundary-is-checked-against-its-type]]).
-Four entries sit *outside* the macro, implemented in core but installed by a
-host. Two are a pair with the hosts swapped: the public `WATCH_BUILTIN`
+Three entries sit *outside* the macro, implemented in core but installed by a
+host. The public `WATCH_BUILTIN`
 (`&[BuiltinEntry]`) wraps the still-private `concurrency::builtin_watch` /
 `scheme::watch` — a watched worker's lines leave as `` `watch [label, line] ``
 surfaces through the session's deferred sink (`Sink::Watch`), which outlives
 the run — so only a host with a deferred sink installs it, and elsewhere
 `watch` is an unknown-name diagnostic rather than a runtime refusal
-([[decisions/260617_watch-repl-builtin|watch-repl-builtin]]); its mirror
-`SERVICE_BUILTIN` wraps `concurrency::builtin_service` / `scheme::service` so
-the agent host (exarch), whose lease frame reaps ordinary workers, installs
-the durable-birth verb while the ral hosts — which grant no lease, so every
-spawn of theirs already lives until cancel or exit — omit it. The third,
+([[decisions/260617_watch-repl-builtin|watch-repl-builtin]]). The second,
 `DETACH_BUILTIN` (`cfg(unix)`, over `concurrency::builtin_detach`), is the
 base-frame manifest's second row — typed `List String -> F Any`, no arity to it
 — and is carried by a host that arms a detach policy: installing the verb and
 arming the budget (`Shell::arm_detach`) are one act, so absence is an
 unknown-name diagnostic rather than a veto, while
 whether a given call may spend it is the live grant stack's question
-(`GrantStack::permits(Flag::Detach)`). The fourth, `SURFACE_BUILTIN`, wraps
+(`GrantStack::permits(Flag::Detach)`). The third, `SURFACE_BUILTIN`, wraps
 `misc::builtin_surface` / `scheme::surface_op` under the bare name `surface`;
 exarch declares its own entry over the same body under `exarch-surface`, with
 its own doc, so no host's name enters core's vocabulary. `builtin_surface` is
@@ -110,17 +106,23 @@ Bodies are grouped by concern, one submodule each:
   own terms: `json_to_value`'s `OutOfRange`, `value_to_json`'s
   `Unrepresentable`, which `to-jsonl` prefixes with the element's index;
 - `shell.rs` — `cd`, `alias` / `unalias`;
-- `concurrency.rs` — `spawn` / `watch` / `service` / `detach` and the handle
-  verbs
-  `await` / `poll` / `race` / `cancel`, split by concern: the root keeps the
+- `concurrency.rs` — the `spawn` form's door (`spawn_form`), `watch` /
+  `detach`, the handle verbs
+  `await` / `poll` / `race` / `cancel` / `worker`, and the `workers` listing
+  (`builtin_workers`), split by concern: the root keeps the
   verbs of birth, `concurrency/birth.rs` the `Birth` door (`spawn_child`),
-  `concurrency/eliminate.rs` the eliminators, `concurrency/tests.rs` the
-  tests; the worker's deferred surface and its `FlushGuard` live in
-  `types/handle/surface.rs` (builtins under their bare names; `par`
-  and the `is-done` predicate are prelude code over them, not builtins). All
-  but the host-installed three seed through `CORE_BUILTINS`; those live here
-  too but reach a session via `WATCH_BUILTIN` / `SERVICE_BUILTIN` /
-  `DETACH_BUILTIN`, not core. `builtin_detach` is the surface discipline
+  `concurrency/eliminate.rs` the eliminators and `worker`,
+  `concurrency/combinators.rs` the structured fan-out — `par` (`builtin_par`,
+  a Rust builtin), the `all` form's door (`all_form`) and the `Litter` they
+  share (`race` ends its losers through `end_unclaimed`) — and `concurrency/tests.rs` the tests; the worker's
+  deferred surface and its `FlushGuard` live in `types/handle/surface.rs`, its
+  cradle and brood in `types/handle/brood.rs` (builtins under their bare
+  names; the `is-done` predicate is prelude code over them). `spawn` and
+  `all` are control operators, not rows: the machine forms their operands and
+  calls the two doors ([[map/core/evaluator|evaluator]]). All
+  but `worker` and the host-installed two seed through `CORE_BUILTINS`;
+  `worker` seeds through `BOUNDARY_BUILTINS`, and the other two live here
+  too but reach a session via `WATCH_BUILTIN` / `DETACH_BUILTIN`, not core. `builtin_detach` is the surface discipline
   alone — the birth itself is the ordinary external-command machinery down to
   the double-fork in `runtime/command/detach.rs`
   ([[map/core/runtime|runtime]]), and it yields a `{pid, desc}` receipt, not a
@@ -133,19 +135,29 @@ Bodies are grouped by concern, one submodule each:
   eliminator found it, so `poll`/`race` see a finished block rather than
   spinning).  A handle's `state` is its transition lock, and `types/handle.rs`
   seals it: `StateCell` hands out no guard, so the worker's exit mark
-  (`complete`), settling (`try_settle`) and stopping (`detach`, under
-  `stop_handle`) are the only transitions, each holding the lock across both
+  (`complete`), settling (`try_settle`) and stopping (`stop`, through
+  `detach`) are the only transitions, each holding the lock across both
   the test and the transition, taking `result` and `cached` under it and never
   the other way round.  That is what makes the promise good that a finished
   worker's value is never destroyed by a losing `race` or a `cancel` — a worker
   that completes cannot slip between `detach`'s test and its transition,
   because there is no window between them — and what keeps a reader from
   holding `state` across a registry call, the one order the registry's own lock
-  documents. `await`/`race` `project_completed` the
-  outcome to `{value, stdout, stderr}`, re-raising `` `err ``; `poll` is total,
-  wrapping it as `` `settled `` `{stdout, stderr, outcome: `ok/`err}` (the `` `err ``
+  documents. `settle_of` is the one projection of a handle's settle: its
+  cache, or, for a cancelled handle, the bytes peeked so far and
+  `worker was cancelled`. `await` is exact: after `wait_first_settled`,
+  `take_settled` `replay`s the stdout bytes, then the stderr bytes, into the
+  awaiter's own sinks and `conclude`s as the block ended — the value (admitted
+  by `admit_handled`), the failure as it stands, an `exit` or a stop
+  re-raised, a panic resumed — so `await` of a block is that block run there,
+  and a second `await` replays the same ending from the cache. `race` takes
+  its winner the same way and stops, claims and drains its losers before it
+  returns; an empty list is its own error. The handle carries its block's grade (`Ty::Handle(Grade, Ty)`, printed
+  `Handle (Returns α)` / `Handle Command`), so `await` returns the grade the
+  block had. `poll` is total and never writes,
+  reporting the settle as `` `settled `` `{stdout, stderr, elapsed, outcome: `ok/`err}` (the `` `err ``
   payload built through `Error::record`, the record
-  `try` hands its handler) or `` `pending `` `{stdout, stderr}` (a *cumulative,
+  `try` hands its handler) or `` `pending `` `{stdout, stderr, elapsed}` (a *cumulative,
   non-destructive* `CapturedBytes::peek` snapshot of the running worker's output — the
   buffers are left for the one-shot completion `CapturedBytes::take`, so a partial poll
   never steals bytes) — the block's outcome is data, not a status. `poll` is
@@ -154,53 +166,55 @@ Bodies are grouped by concern, one submodule each:
   re-raises them ([[decisions/261016_delimiters-are-handlers-for-poll|delimiters-are-handlers-for-poll]],
   [[decisions/260615_poll-total-failed-arm|the settle decision]],
   [[decisions/260702_partial-poll-pending-output|partial-poll-pending-output]]).
-  A worker hangs under the durable session root, not the run's
-  foreground scope, so a foreground cancel never reaps it; `await` shares
-  `race`'s cancel-aware wait loop (`wait_first_settled`), so a deadline unwinds
-  the wait while the root-scoped worker survives
-  ([[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]).
-  Under a frame that grants a `WorkerLease`, `spawn` fires a `LeaseChain`
-  (`types/shell/workers.rs`) — a self-re-arming `process::deadline` callback
-  deciding by `WorkerLease::verdict`, a pure function of the worker's age and
-  idleness, so the first delay is already the sooner bound — the idle-observation lease chain: a
-  still-running worker unobserved for `idle` is reaped, where every `poll`
-  and every `await`/`race` sweep renews the handle's `last_observed` cell,
-  under an absolute `backstop` no polling extends; a worker that finished
-  ends the chain silently, its entry lingering as an unclaimed result. A
-  reap removes the registry entry, records a `ReapNotice` the engine
-  pushes at the next settled run's ready boundary as a `` `notice ``
-  surface event (`emit_ready_boundary_notices`; exarch decodes it back via
-  `card::value_to_notice`), and cancels the worker's scope with
-  `Deadline` — never discarding the handle, so a later `poll`/`await` still
-  observes the partial output and failure. The class decides the chain at
-  the spawn door: `spawn_child` takes a `Birth` — which of `spawn`, `watch`
-  and `service` is being served, and so the verb a refusal names, the lease
-  class registered and how the child's bytes are wired — and only a `Worker`
-  birth arms it — `service` registers `Durable` and arms nothing, so no
-  reaper entry ever exists for it; the absent chain *is* the durable
-  policy, whose only bounds are the handle's own `cancel`, the host's
-  `/clear`, and process exit. A birth's `cmd` — the name every eliminator's
-  error, the trail, and the workers listing use — comes from the birth
-  itself: a watch's label, a service's description, and for a plain `spawn`
-  or a prelude `defer` over it, `shell.call_site()` — `block at <script>,
-  line N`. Completion events carry the same worker ID as the birth and registry entry,
-  including on failure and panic.
+  A `spawn` or `watch` worker hangs under its shell's cradle, not the run's
+  foreground scope: under the durable session root in a run, so a foreground
+  cancel never reaps it, and under its parent worker's node inside a worker,
+  whose base settles it (`Brood`: awaited on return, cancelled and drained on
+  a halt), so `cancel` of a worker reaches its tree. A `par` or `all` child
+  hangs under the call's current scope and is the call's to end (`Litter`).
+  `await` shares `race`'s cancel-aware wait loop (`wait_first_settled`), so a
+  deadline unwinds the wait while a session worker survives
+  ([[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]).
+  The spawn door is `spawn_child`, which takes a `Birth` — `Spawn`, `Watch`
+  or a calling expression's `Call` — and so the verb a refusal names, where
+  the child's node hangs, its `Owner`, whether its birth is announced, and how
+  its bytes are wired: a `Call` child writes to the call's live sink, as a
+  pipeline stage does, and flushes no `` `done ``. It mints the worker's `WorkerId` first and builds
+  the handle around it: `HandleInner` carries the `id`, the `title`, and the
+  worker's clock, a birth `Stamp` and an end `Stamp` that `complete` sets on
+  every exit path of the worker thread, from which `elapsed` and `settled_at`
+  are derived, each in one place. The registry entry adds only the `Owner`.
+  A birth's `title` — the name every eliminator's error, the trail, and the
+  completion event use — comes from the birth itself: a `spawn`'s title
+  (non-empty and one line, `legible_title`), else `shell.call_site()` —
+  `block at <script>, line N` — which the run's `TitlePolicy` may refuse
+  before any birth; a watch's label; a `par` child's `par #i`, an `all`
+  child's label. The completion event (`DoneEvent`) carries
+  the handle's id, title and elapsed time beside its outcome, including on
+  failure and panic. No policy reaps a running worker: it ends by
+  completing, by `cancel`, or with its session. `worker <id>`
+  (`builtin_worker`, a boundary row) takes back the handle of any worker
+  still in the registry, running or settled, by that id; the value it
+  settles with is admitted at the `await` site (`admit_handled`).
   The spawn door also enforces the frame's admission cap
-  (`Mooring::worker_cap`): a birth of any class *reserves* its seat at
+  (`Mooring::worker_cap`): a birth *reserves* its seat at
   the door (`WorkerRegistry::reserve`) — refused while `cap` workers are
   running or reserved, with an error naming the verb the caller actually
   wrote and `await`/`cancel` as the remedies, the reservation held across thread spawn and released into the
   registered entry, so a racing sibling birth never sees a filling seat as
-  free (there is no `workers` listing — [[map/exarch/builtins|builtins]]); settled
+  free; settled
   entries lingering under retention hold no seat. A
-  settled entry's own lease is retention, armed once at boot
+  settled entry's one bound is retention, armed once at boot
   (`Shell::arm_worker_retention`, beside the binding lease): the registry
   keeps its own clock — one `tick_epoch` per source dispatch — and the
   engine sweeps at each settled run's ready boundary (`sweep_retention`,
   engine housekeeping), stamping an entry at the first sweep that
-  observes it settled and expiring it — a `Retention`-cause `ReapNotice` on
-  the same drain — once its unclaimed result has sat stamped a full
-  retention of ral calls. An unarmed registry (the REPL) retains settled
+  observes it settled and expiring it once its unclaimed result has sat
+  stamped a full retention of ral calls. The expiry records a
+  `Retention`-cause `ReapNotice`, which the engine pushes at the next settled
+  run's ready boundary as a `` `notice `` surface event
+  (`emit_ready_boundary_notices`; exarch decodes it back via
+  `card::value_to_notice`). An unarmed registry (the REPL) retains settled
   entries indefinitely; the eliminators still remove entries the moment a
   result is claimed, so the sweep only catches what nobody claimed.
   A worker runs its thunk on a fresh
@@ -216,9 +230,20 @@ Bodies are grouped by concern, one submodule each:
   `spawn_child` also files the freshly-minted handle on `shell.local.workers`
   — a per-shell registry, host-independent and carrying no policy
   ([[map/core/shell-state|shell-state]]); `await`, `race`'s winner and
-  its cancelled losers, and a settled `poll` remove the entry from whichever
-  shell observes it, an explicit `cancel` removes it too, and a pending
-  `poll` or a bare listing never touches the registry. A `Handle` is
+  its cancelled losers, and a settled `poll` claim the handle (so no brood or
+  litter answers for it) and remove the entry from whichever
+  shell observes it, an explicit `cancel` does both too, and a pending
+  `poll` or a `workers` listing never touches the registry. **A listing is
+  data; `worker <id>` is the door.** `workers` maps every entry, running or
+  retained, ids ascending, through `worker_row` (`types/shell/host.rs`, shared
+  with the `` `workers `` probe) to a seven-field record — `id`, `title`,
+  `owner` (`` `session ``, `` `worker id ``, `` `call ``), `state`
+  (`` `running `` or `` `done `` with the `Done` ending), `started` (Unix
+  seconds), `elapsed` (seconds, off the handle's `Stamp`s), `settled`
+  (`` `some `` Unix seconds or `` `none ``) — reading the state with
+  `try_settle`, which caches but claims nothing (`WorkerRow::ral_value`; the
+  probe's eighth field, `retention-left`, is the host's alone). It holds no
+  handle, so a top-level `workers` crosses the engine protocol. A `Handle` is
   process-local: `Shell::bequeath` scrubs it from every fork, and a run
   whose result is or holds one ends `Unreturnable` (`core/src/run/report.rs`);
 - `modules.rs` — the cacheless `use` loader (a boundary: it builds the export
@@ -269,7 +294,13 @@ Bodies are grouped by concern, one submodule each:
   readers differ in window, quote fence, and absorbable bytes — and in whether a
   nested string is capped at all: the REPL cuts at a terminal row, exarch's
   `VALUE` section cuts nothing, since a payload's text is the identity a later
-  `edit-hash` matches;
+  `edit-hash` matches. One layout rule belongs to the printer, not to any
+  value: a list of two or more non-empty records sharing one key sequence
+  prints one record per line, each `label: value` cell padded to its column's
+  widest, still pasteable surface syntax (`rows`); a cell that would break a
+  line, or a list past the depth limit, keeps the ordinary layout. So a
+  `workers` result reads as a table in the REPL and in exarch's `VALUE`
+  alike, and no worker-specific code renders anything;
 - `util.rs` — shared helpers. `read_lines` is the one line reader
   ([[design/codecs|codecs]]' line rule), generic over its byte source and
   leaving each line undecoded, since decoding is each caller's policy;

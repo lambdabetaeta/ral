@@ -256,6 +256,13 @@ fn strip_scope(op: ScopeAst) -> ScopeAst {
             body: s(body),
         },
         ScopeAst::Audit { body } => ScopeAst::Audit { body: s(body) },
+        ScopeAst::Spawn { title, body } => ScopeAst::Spawn {
+            title: title.map(|t| Box::new(Spanned::synthetic(strip_one(t.item)))),
+            body: s(body),
+        },
+        ScopeAst::All { tasks } => ScopeAst::All {
+            tasks: strip_opts(tasks),
+        },
     }
 }
 
@@ -2170,7 +2177,7 @@ fn else_and_elsif_are_refused_as_stage_heads() {
     }
 }
 
-// ── Control operators (try / guard / within / grant / audit) ────────
+// ── Control operators (try / guard / within / grant / audit / spawn / all)
 
 fn unwrap_single_scope(ast: Vec<Stmt>) -> ScopeAst {
     let stripped: Vec<_> = ast.into_iter().map(|s| s.item).collect();
@@ -2482,12 +2489,74 @@ fn parse_audit_with_trailing_redirect() {
     assert!(redirects.stdout.is_some());
 }
 
+#[test]
+fn parse_spawn_body_only() {
+    let op = unwrap_single_scope(parse("spawn { body }").unwrap());
+    assert!(
+        matches!(&op, ScopeAst::Spawn { title: None, body } if matches!(**body, Ast::Block(_))),
+        "got {op:?}"
+    );
+}
+
+#[test]
+fn parse_spawn_title_and_body() {
+    let (op, redirects) = redirected_scope("spawn 'sort the log' { body } > out");
+    let ScopeAst::Spawn {
+        title: Some(title),
+        body,
+    } = op
+    else {
+        panic!("expected a titled spawn, got {op:?}");
+    };
+    assert_eq!(title.item, Ast::Literal("sort the log".into()));
+    assert!(title.span.is_some(), "the title keeps its span");
+    assert!(matches!(*body, Ast::Block(_)));
+    assert!(redirects.stdout.is_some());
+}
+
+#[test]
+fn parse_spawn_three_operands_is_error() {
+    let err = parse("spawn 'a' 'b' { c }").unwrap_err();
+    assert!(
+        err.message.contains("spawn requires 1 or 2 arguments") && err.message.contains("got 3"),
+        "msg: {err}"
+    );
+    let err = parse("spawn").unwrap_err();
+    assert!(
+        err.message.contains("1 or 2 arguments") && err.message.contains("got 0"),
+        "msg: {err}"
+    );
+}
+
+#[test]
+fn parse_all_tasks() {
+    let op = unwrap_single_scope(parse("all [build: { cargo build }, lint: $l]").unwrap());
+    let ScopeAst::All { tasks } = op else {
+        panic!("expected ScopeAst::All, got {op:?}");
+    };
+    let labels: Vec<&str> = tasks.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(labels, ["build", "lint"]);
+    let err = parse("all [build: { a }, build: { b }]").unwrap_err();
+    assert!(
+        err.message.contains("`build` is written twice"),
+        "msg: {err}"
+    );
+}
+
 // ── Reserved-name binding rejection ─────────────────────────────────
 
 #[test]
 fn parse_let_try_rejected() {
     let err = parse("let try = 1").unwrap_err();
     assert!(err.message.contains("'try'"), "msg: {err}");
+}
+
+#[test]
+fn parse_let_spawn_rejected() {
+    for word in ["spawn", "all"] {
+        let err = parse(&format!("let {word} = 1")).unwrap_err();
+        assert!(err.message.contains(&format!("'{word}'")), "msg: {err}");
+    }
 }
 
 #[test]

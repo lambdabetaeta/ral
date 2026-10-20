@@ -223,7 +223,7 @@ pub(super) fn subagent_header(
         Span::styled("agent ", dim),
         agent_name(name, ink),
         Span::styled(
-            format!(" {verb}  · {}", crate::bus::elapsed_phrase(elapsed)),
+            format!(" {verb}  · {}", crate::card::elapsed_phrase(elapsed)),
             dim,
         ),
     ];

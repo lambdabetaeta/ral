@@ -31,7 +31,7 @@ pub(crate) enum Shape {
     String,
     List(Id),
     Map(Id),
-    Handle(Id),
+    Handle(GradeShape, Id),
     Record(Fields),
     Variant(Fields),
     Thunk(Id),

@@ -3,15 +3,35 @@
 
 use super::flow::ThreadEnd;
 use super::value::Value;
+use crate::fact::WorkerId;
 use crate::io::ByteBuffer;
 use crate::process::ScopeNode;
 use crate::sync::LockExt as _;
 use std::ops::ControlFlow;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime};
 
+pub(crate) mod brood;
 pub(crate) mod surface;
+
+/// One instant on both clocks: the monotonic one durations are measured on,
+/// the wall one a reader is shown.
+#[derive(Clone, Copy, Debug)]
+pub struct Stamp {
+    pub mono: Instant,
+    pub wall: SystemTime,
+}
+
+impl Stamp {
+    pub fn now() -> Self {
+        Self {
+            mono: Instant::now(),
+            wall: SystemTime::now(),
+        }
+    }
+}
 
 /// Whether `v` structurally reaches a running handle — the binding-lease
 /// reaper's pin check, so a name still holding live work is never pruned.
@@ -73,20 +93,24 @@ pub struct HandleInner {
     /// watched handle, whose lines surface live through `Sink::Watch`.
     pub stdout_buf: ByteBuffer,
     pub stderr_buf: ByteBuffer,
-    /// When an eliminator last named this handle: renewed by `poll` and by
-    /// every `await`/`race` sweep, read by the idle lease chain in
-    /// `builtins::concurrency`.  Cancelling or listing never renews it.
-    pub last_observed: Observed,
-    pub cmd: std::string::String,
+    pub id: WorkerId,
+    /// What the work is, for people; nothing looks a worker up by it.
+    pub title: String,
+    pub started: Stamp,
+    /// Set once, when the worker thread ends.
+    pub(crate) ended: Arc<OnceLock<Stamp>>,
+    /// An eliminator settled this handle; a brood or litter answers for the
+    /// complement.
+    pub(crate) claimed: Arc<AtomicBool>,
     /// Where an observer checks the value the worker settles with, set by
-    /// `service-handle`: what the worker returns was decided by another unit,
-    /// so the unit that reacquires its handle admits it against the type it
-    /// uses it at.  Each `service-handle` call is a site of its own.
+    /// `worker`: what the worker returns was decided by another unit, so the
+    /// unit that reacquires its handle admits it against the type it uses it
+    /// at.  Each `worker` call is a site of its own.
     pub site: Option<Arc<crate::ty::Site>>,
-    /// The worker's own scope — a `DurableRoot::worker()` child of the
-    /// *session* root, not of the spawning run, so a foreground interrupt
-    /// cannot collaterally kill it.  `cancel` and `race`'s losers fire it, and
-    /// the worker stops at its next poll rather than running on.
+    /// The worker's own node: a child of its cradle's for a loose birth (the
+    /// session root in a run, the parent worker's node inside one), of the
+    /// call's scope for a combinator's child.  `cancel`, a halting parent and
+    /// `race`'s losers fire it, and the worker stops at its next poll.
     pub cancel: ScopeNode,
 }
 
@@ -97,10 +121,6 @@ pub struct HandleInner {
 #[derive(Debug, Clone)]
 pub struct StateCell(Arc<Mutex<HandleState>>);
 
-/// When a handle was last named by an eliminator; sealed as [`StateCell`] is.
-#[derive(Debug, Clone)]
-pub struct Observed(Arc<Mutex<Instant>>);
-
 impl PartialEq for HandleInner {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.result, &other.result)
@@ -108,10 +128,11 @@ impl PartialEq for HandleInner {
 }
 
 impl HandleInner {
-    /// A running handle, observed now, whose worker (if any) settles through
+    /// A running handle, born now, whose worker (if any) settles through
     /// `result`; its buffers start empty.
     pub fn new(
-        cmd: impl Into<std::string::String>,
+        id: WorkerId,
+        title: impl Into<String>,
         cancel: ScopeNode,
         result: Option<Receiver<ThreadEnd>>,
     ) -> Self {
@@ -121,8 +142,11 @@ impl HandleInner {
             state: StateCell(Arc::new(Mutex::new(HandleState::Running))),
             stdout_buf: ByteBuffer::default(),
             stderr_buf: ByteBuffer::default(),
-            last_observed: Observed(Arc::new(Mutex::new(Instant::now()))),
-            cmd: cmd.into(),
+            id,
+            title: title.into(),
+            started: Stamp::now(),
+            ended: Arc::default(),
+            claimed: Arc::default(),
             site: None,
             cancel,
         }
@@ -136,18 +160,46 @@ impl HandleInner {
         self.state() == HandleState::Running
     }
 
-    pub fn last_observed(&self) -> Instant {
-        *self.last_observed.0.lock_ignore_poison()
+    /// A running worker's age so far, a settled worker's run time.
+    pub fn elapsed(&self) -> Duration {
+        self.ended
+            .get()
+            .map_or_else(Instant::now, |e| e.mono)
+            .saturating_duration_since(self.started.mono)
     }
 
-    /// An eliminator named this handle.
-    pub(crate) fn renew(&self) {
-        *self.last_observed.0.lock_ignore_poison() = Instant::now();
+    /// When the worker thread ended, on the wall clock.
+    pub fn settled_at(&self) -> Option<SystemTime> {
+        self.ended.get().map(|e| e.wall)
+    }
+
+    pub(crate) fn claim(&self) {
+        self.claimed.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn is_claimed(&self) -> bool {
+        self.claimed.load(Ordering::Acquire)
+    }
+
+    /// Whether the worker thread has ended, whatever any eliminator saw.
+    pub(crate) fn has_ended(&self) -> bool {
+        self.ended.get().is_some()
+    }
+
+    /// Stop the worker: the policy `cancel`, a halting parent and `race`'s
+    /// losers share.  An already-completed handle keeps its cached outcome,
+    /// so a finished worker's value is never destroyed by a stop that lost the
+    /// toss; [`Self::detach`]'s guard spans the test and the transition.
+    pub(crate) fn stop(&self) {
+        if self.detach() {
+            self.cancel.cancel(crate::process::CancelCause::Cancelled);
+        }
     }
 
     /// The worker's exit mark.  Guarded: an eliminator may have won the
     /// transition, and a `cancel`'s `Cancelled` must not be undone.
     pub(crate) fn complete(&self) {
+        let _ = self.ended.set(Stamp::now());
         let mut state = self.state.0.lock_ignore_poison();
         if *state == HandleState::Running {
             *state = HandleState::Completed;
@@ -200,7 +252,7 @@ impl HandleInner {
             // The worker names itself: the eliminator that found the corpse is
             // not what panicked, and `await`, `poll` and `race` all arrive here.
             Err(TryRecvError::Disconnected) => {
-                ThreadEnd::Panicked(format!("{}: spawned thread panicked", self.cmd))
+                ThreadEnd::Panicked(format!("{}: spawned thread panicked", self.title))
             }
             Err(TryRecvError::Empty) => return None,
         };
@@ -223,6 +275,7 @@ impl HandleInner {
 #[cfg(test)]
 pub(crate) fn idle_handle() -> Value {
     Value::Handle(Box::new(HandleInner::new(
+        WorkerId::mint(),
         "<test>",
         crate::process::DurableRoot::default().worker(),
         None,

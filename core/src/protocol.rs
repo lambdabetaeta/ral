@@ -20,7 +20,7 @@ pub mod probe;
 /// The frame algebra's generation, checked at `Attach` and refused on
 /// mismatch.  Public because a build has to compare it against the engine
 /// sitting in the guest media beside it: see [`check_media`].
-pub const PROTOCOL_VERSION: u32 = 24;
+pub const PROTOCOL_VERSION: u32 = 25;
 
 /// The key `vm-image/build-boot.sh` records [`PROTOCOL_VERSION`] under in the
 /// boot media's manifest, `vm-image/out/boot/boot-manifest.txt`.
@@ -277,15 +277,12 @@ pub struct Run {
     /// What a `guard` cleanup gets, from the strike, before the stop ends
     /// it: the host's policy, as `wall` is.
     pub cleanup_grace: std::time::Duration,
-    /// For workers deferred at the durable root. `None` keeps one until
-    /// `cancel`, root abort, or session exit; `Some` reaps a still-running one
-    /// unobserved for `lease.idle` — renewed by every `poll`/`await`/`race`
-    /// naming its handle — under `lease.backstop`.
-    pub deferred_lease: Option<crate::types::WorkerLease>,
     /// Enforced at the spawn door: `Some(cap)` refuses a spawn while `cap`
-    /// workers of any class still run. Settled entries lingering under
+    /// workers still run. Settled entries lingering under
     /// retention never block admission.
     pub worker_cap: Option<usize>,
+    /// Whether a `spawn` must name its work, checked at the spawn step.
+    pub worker_title: crate::types::TitlePolicy,
     pub io: RunIo,
     pub terminal: RequestedTerminalAccess,
     pub stdin: RunStdin,
@@ -317,8 +314,8 @@ impl Run {
             caps: crate::capability::GrantStack::root(),
             wall: None,
             cleanup_grace: std::time::Duration::from_secs(5),
-            deferred_lease: None,
             worker_cap: None,
+            worker_title: crate::types::TitlePolicy::Optional,
             io: RunIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
             stdin: RunStdin::Inherit,

@@ -143,6 +143,13 @@ fn referenced_names_walks_every_variant() {
     let scope_audit = Spanned::synthetic(CompKind::Audit {
         body: var("r_audit_body"),
     });
+    let scope_spawn = Spanned::synthetic(CompKind::Spawn {
+        title: Some(svar("r_spawn_title")),
+        body: var("r_spawn_body"),
+    });
+    let scope_all = Spanned::synthetic(CompKind::All {
+        tasks: vec![("build".into(), svar("r_all_task"))].into(),
+    });
     let scope_redirect = Spanned::synthetic(CompKind::Redirect {
         body: ret("r_scope_redirect_body"),
         redirects: Redirects {
@@ -220,6 +227,8 @@ fn referenced_names_walks_every_variant() {
         Arc::new(scope_within),
         Arc::new(scope_grant),
         Arc::new(scope_audit),
+        Arc::new(scope_spawn),
+        Arc::new(scope_all),
         Arc::new(scope_redirect),
         Arc::new(val_list),
         Arc::new(val_record),
@@ -281,6 +290,9 @@ fn referenced_names_walks_every_variant() {
         "r_grant_caps",
         "r_grant_body",
         "r_audit_body",
+        "r_spawn_title",
+        "r_spawn_body",
+        "r_all_task",
         "r_scope_redirect_body",
         "r_scope_redirect_target",
         "r_list_single",

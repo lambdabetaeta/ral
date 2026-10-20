@@ -61,9 +61,11 @@ builtin row that writes, or a handler arm standing in for one. It is `F^w Unit`.
 The writing builtins are `echo`, `to-json`, `to-string`, `to-line`, `to-lines`,
 `to-jsonl`, `to-csv`, `to-bytes`, `ints-to-bytes`, `help`, `explain`, `clear` and
 `reset`. `warn` is `Returns Unit`: stderr is not the byte channel. `each`,
-`fold`, `fold-lines`, `spawn`, `watch`, `service` and `audit` are polymorphic in
-the grade of their body (`∀ε α. … U(F^ε α) …`), run it, stream its output and
-keep its value; `fail`, `exit` and `diverges` are `F^ε α` for every ε. `map`,
+`fold`, `fold-lines` and `audit` are polymorphic in the grade of their body
+(`∀ε α. … U(F^ε α) …`), run it, stream its output and keep its value; `spawn`
+and `watch` keep the grade in the handle they return, `Handle^ε α`, and
+`await` gives it back as `F^ε α`; `fail`, `exit` and `diverges` are `F^ε α`
+for every ε. `map`,
 `filter` and `sort-list-by` demand a value.
 
 **Invariant.** `F^w A ⇒ A = Unit`. Every rule that introduces `w` does so at

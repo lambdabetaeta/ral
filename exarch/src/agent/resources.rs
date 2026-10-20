@@ -15,6 +15,7 @@ use crate::agent::gauge::{EVICT_THRESHOLD, eviction_trigger};
 use crate::card::{Card, Field, FieldVal, Mark, Role, Span};
 use crate::shell_eval;
 use ral_core::carrier::Severed;
+use ral_core::protocol::probe::WorkerState;
 use std::fmt;
 
 /// How an accumulator is kept bounded — or that it is not.  Stated even where
@@ -179,28 +180,12 @@ impl Avatar {
         let mut rows = Vec::new();
 
         let entries = self.seat.read(|t| t.workers())?;
-        let mut running_worker = 0u64;
-        let mut running_durable = 0u64;
+        let mut running = 0u64;
         let mut settled = 0u64;
-        let mut nearest_reap: Option<std::time::Duration> = None;
         let mut nearest_expiry: Option<u64> = None;
         for entry in &entries {
-            if entry.running {
-                match entry.class {
-                    ral_core::types::LeaseClass::Worker => {
-                        running_worker += 1;
-                        // The nearer of the entry's two margins: idle off the
-                        // shared last-observed cell, backstop off its
-                        // (display-only, close enough here) wall-clock start.
-                        let idle_left = shell_eval::WORKER_IDLE_CEILING
-                            .saturating_sub(std::time::Duration::from_secs(entry.idle_secs));
-                        let age = std::time::Duration::from_secs(entry.up_secs);
-                        let backstop_left = shell_eval::WORKER_BACKSTOP.saturating_sub(age);
-                        let left = idle_left.min(backstop_left);
-                        nearest_reap = Some(nearest_reap.map_or(left, |m| m.min(left)));
-                    }
-                    ral_core::types::LeaseClass::Durable => running_durable += 1,
-                }
+            if matches!(entry.state, WorkerState::Running) {
+                running += 1;
             } else {
                 settled += 1;
                 // The engine's own figure, on its own clock.
@@ -211,24 +196,10 @@ impl Avatar {
         }
         rows.push(ProbeRow::new(
             "workers.running",
-            running_worker + running_durable,
+            running,
             Some(shell_eval::LIVE_WORKER_CAP as u64),
             Policy::Reject,
             None,
-        ));
-        rows.push(ProbeRow::new(
-            "workers.running[worker]",
-            running_worker,
-            None,
-            Policy::Reap,
-            nearest_reap.map(|d| format!("nearest reap in {}", crate::clock::hms(d.as_secs()))),
-        ));
-        rows.push(ProbeRow::new(
-            "workers.running[durable]",
-            running_durable,
-            None,
-            Policy::Unbounded,
-            Some("durable: dies by cancel, /clear, or process exit".to_string()),
         ));
         rows.push(ProbeRow::new(
             "workers.settled",

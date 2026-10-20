@@ -1,42 +1,43 @@
-//! A worker's birth: the one door `spawn`, `watch` and `service` share.
+//! A worker's birth: the one door `spawn`, `watch` and the combinators share.
 
+use super::await_handle;
 use crate::fact::Worker;
 use crate::io::{Sink, new_buffer};
-use crate::process::{Scope, WorkerStop};
+use crate::process::{DurableRoot, Scope, WorkerStop};
 use crate::types::{
-    Break, CapReached, DeferredSurface, Done, Error, Escape, FlushGuard, HandleInner, LeaseChain,
-    LeaseClass, Mooring, Observed, Settled, Shell, SurfaceSink, ThreadEnd, Value, WatchEvent,
-    WorkerEntry, WorkerId, final_poll, sig,
+    Break, Brood, CapReached, Cradle, DeferredSurface, Done, Error, Escape, FlushGuard,
+    HandleInner, Mooring, Observed, Owner, Settled, Shell, SurfaceSink, ThreadEnd, Value,
+    WatchEvent, WorkerEntry, WorkerId, final_poll, sig,
 };
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::Duration;
 
-/// Which birth [`spawn_child`] is serving.  One door carries three surface
-/// verbs, and everything that varies between them — the verb a refusal must
-/// name, the lease class the worker registers under, how its bytes are wired —
-/// is read off this rather than passed alongside it.
+/// Which birth [`spawn_child`] is serving.  Everything that varies between
+/// them — the title, the node's parent, the owner, how the bytes and the
+/// surface are wired — is read off this rather than passed alongside it.
 pub(super) enum Birth {
-    Spawn,
+    /// `spawn [TITLE] BODY`: loose, session- or worker-owned, announced,
+    /// flushed with a `done`.
+    Spawn { title: Option<String> },
+    /// `watch LABEL BODY`: as `Spawn`, its lines streamed live.
     Watch { label: String },
-    Service,
+    /// A calling expression's child: hangs under `under`, registered for the
+    /// cap, not announced, surfaces on the call's live sink, no `done`.
+    /// `verb` is the combinator's, for a refusal to name.
+    Call {
+        under: Scope,
+        title: String,
+        verb: &'static str,
+    },
 }
 
 impl Birth {
     /// The verb the user wrote, for an error that must not name another.
     fn verb(&self) -> &'static str {
         match self {
-            Self::Spawn => "spawn",
+            Self::Spawn { .. } => "spawn",
             Self::Watch { .. } => "watch",
-            Self::Service => "service",
-        }
-    }
-
-    /// A durable worker escapes the lease chain; the absent chain *is* the
-    /// durable policy.
-    fn class(&self) -> LeaseClass {
-        match self {
-            Self::Spawn | Self::Watch { .. } => LeaseClass::Worker,
-            Self::Service => LeaseClass::Durable,
+            Self::Call { verb, .. } => verb,
         }
     }
 }
@@ -45,21 +46,16 @@ impl Birth {
 ///
 /// Under a frame with a `worker_cap` the seat is reserved before any thread or
 /// entry exists and released only into the `register` below, so a sibling birth
-/// racing on another thread never sees a seat mid-fill as free.  A
-/// [`LeaseClass::Worker`] birth under a frame supplying a [`WorkerLease`] then
-/// arms the idle-observation chain ([`LeaseChain::fire`]); a [`LeaseClass::Durable`]
-/// one arms nothing — the absent chain *is* the durable policy.
+/// racing on another thread never sees a seat mid-fill as free.
 pub(super) fn spawn_child<F>(
     mooring: &Mooring,
     shell: &mut Shell,
     birth: Birth,
-    cmd: &str,
     work: F,
 ) -> Settled<HandleInner>
 where
     F: FnOnce(&Mooring, &mut Shell) -> Settled<Value> + Send + 'static,
 {
-    let class = birth.class();
     let reservation =
         shell
             .local
@@ -67,7 +63,7 @@ where
             .reserve(mooring.worker_cap)
             .map_err(|CapReached(cap)| {
                 sig(format!(
-                    "{}: {cap} workers already live on this agent; await or cancel one",
+                    "{}: {cap} workers already live on this agent; `await` or `cancel` one (`workers` lists them)",
                     birth.verb()
                 ))
             })?;
@@ -76,15 +72,46 @@ where
 
     let (stdout_sink, stdout_buf) = new_buffer();
     let (stderr_sink, stderr_buf) = new_buffer();
+    let cradle = &shell.local.cradle;
+    let (title, node, owner, watched) = match birth {
+        Birth::Spawn { title } => (
+            title.unwrap_or_else(|| {
+                shell
+                    .call_site()
+                    .map_or_else(|| "block".into(), |site| format!("block at {site}"))
+            }),
+            cradle.under.child(),
+            loose_owner(cradle),
+            None,
+        ),
+        Birth::Watch { label } => (
+            label.clone(),
+            cradle.under.child(),
+            loose_owner(cradle),
+            Some(label),
+        ),
+        Birth::Call { under, title, .. } => (title, under.child(), Owner::Call, None),
+    };
+    let loose = owner != Owner::Call;
     // Taken from the spawning run's mooring, so the destination outlives that
-    // run's teardown.
+    // run's teardown.  A call's child surfaces live, as a stage does.
     let worker_surface = mooring
         .deferred
         .clone()
+        .filter(|_| loose)
         .map(|d| Arc::new(DeferredSurface::new(d)));
-    let (stdout, stderr) = match birth {
-        Birth::Spawn | Birth::Service => (stdout_sink, stderr_sink),
-        Birth::Watch { label } => {
+    let worker_mooring = if loose {
+        Mooring::for_worker(
+            mooring,
+            node.clone(),
+            worker_surface.clone().map(|s| s as SurfaceSink),
+        )
+    } else {
+        Mooring::for_stage_thread(mooring, node.clone())
+    };
+    let (stdout, stderr) = match watched {
+        None => (stdout_sink, stderr_sink),
+        Some(label) => {
             if mooring.deferred.is_none() {
                 let _ = shell.write_stderr(
                     format!(
@@ -107,44 +134,50 @@ where
                     pending: Vec::new(),
                 }
             };
-            (watch(label.clone()), watch(format!("{label}:err")))
+            let err = format!("{label}:err");
+            (watch(label), watch(err))
         }
     };
 
     let id = WorkerId::mint();
-    let cmd = cmd.to_string();
-    let worker_cmd = cmd.clone();
-
-    let node = shell.session.root.worker();
-    let worker_mooring = Mooring::for_worker(
-        mooring,
-        node.clone(),
-        worker_surface.clone().map(|s| s as SurfaceSink),
-    );
-    // Minted before the thread so the worker can hold a clone: its exit mark is
-    // what ends the lease chain silently on a finished worker.
+    // Minted before the thread so the worker can hold a clone and set its
+    // exit mark.
     let handle = HandleInner {
         stdout_buf,
         stderr_buf,
-        ..HandleInner::new(cmd.clone(), node, Some(rx))
+        ..HandleInner::new(id, title.as_str(), node, Some(rx))
     };
     let worker = handle.clone();
     shell
         .spawn_thread(worker_mooring, "ral spawn worker", move |mooring, child| {
+            // A birth inside this worker hangs under it and is settled by it:
+            // I4, I5.
+            let brood = Brood::new(id);
+            child.local.cradle = Cradle::of_worker(&mooring.home, brood.clone());
             // A worker's stdout is its handle buffer: nobody is watching it
             // until `await` drains one.
             child.io.stdout = stdout;
             child.io.stderr = stderr;
 
-            let guard = FlushGuard::new(worker_surface, id, worker_cmd);
+            let guard = FlushGuard::new(worker_surface, worker.clone());
 
-            let end = match ThreadEnd::of(|| work(mooring, child)) {
+            let end = match ThreadEnd::of(|| {
+                let settled = work(mooring, child).and_then(|v| settle(&brood, child).map(|()| v));
+                if settled.is_err() {
+                    brood.end(child, mooring.cleanup_grace);
+                }
+                settled
+            }) {
                 // The base's return clause: the closing poll, then the switch.
                 ThreadEnd::Settled(result) => ThreadEnd::Settled(convert_own_stop(
                     final_poll(result, &mooring.home),
-                    &mooring.home,
+                    &child.session.root,
                 )),
-                panicked @ ThreadEnd::Panicked(_) => panicked,
+                panicked @ ThreadEnd::Panicked(_) => {
+                    // The panic path: no wait.
+                    brood.end(child, Duration::ZERO);
+                    panicked
+                }
             };
             child.io.stdout.flush_pending();
             child.io.stderr.flush_pending();
@@ -159,48 +192,55 @@ where
     shell.local.workers.register(
         reservation,
         WorkerEntry {
-            id,
-            cmd: cmd.clone(),
-            started: std::time::SystemTime::now(),
-            class,
+            owner,
             settled_epoch: None,
             handle: handle.clone(),
         },
     );
-    // After the reservation, never before: a cap-refused spawn observes no
-    // birth, so no phantom worker reaches an orphan join.
-    shell.observe(mooring, Observed::Worker(Worker { id, cmd, class }));
-
-    // Armed after `register`, so the id the chain reaps always names an entry
-    // that existed.  `keep()`-ed: the worker outlives this call.
-    if class == LeaseClass::Worker
-        && let Some(lease) = mooring.deferred_lease
-    {
-        LeaseChain {
-            handle: handle.clone(),
-            started: Instant::now(),
-            lease,
-            registry: shell.local.workers.clone(),
-            id,
+    if loose {
+        if let Some(brood) = &shell.local.cradle.brood {
+            brood.enrol(handle.clone());
         }
-        .fire();
+        // After the reservation, never before: a cap-refused spawn observes no
+        // birth, so no phantom worker reaches an orphan join.
+        shell.observe(mooring, Observed::Worker(Worker { id, title }));
     }
     Ok(handle)
 }
 
-/// The boundary's switch: a stop naming this worker's own node, and only
-/// that, becomes the handle's error, carrying the stop's cause.  Any other
-/// stop passes through as the escape it is.
-pub(super) fn convert_own_stop(result: Settled<Value>, own: &Scope) -> Settled<Value> {
-    match result {
+/// A loose birth's owner: the worker whose cradle it is born in, else the
+/// session.
+fn loose_owner(cradle: &Cradle) -> Owner {
+    cradle
+        .brood
+        .as_ref()
+        .map_or(Owner::Session, |brood| Owner::Worker(brood.worker))
+}
+
+/// The boundary's switch (I6): a cancel or a timeout raised anywhere inside
+/// the session becomes the handle's error, carrying the stop's cause.  A stop
+/// the host owns (a root cause, an interrupt) passes as the escape it is.
+pub(super) fn convert_own_stop(result: Settled<Value>, root: &DurableRoot) -> Settled<Value> {
+    let stop = match &result {
         Err(Break::Escape(Escape::Stopped {
             cause,
             owner: Some(owner),
             ..
-        })) if owner == own.id() => Err(WorkerStop::of(cause).map_or_else(
-            || Break::stopped(cause, Some(owner)),
-            |o| Error::worker_stopped(o).into(),
-        )),
-        other => other,
+        })) if *owner != root.id() => WorkerStop::of(*cause),
+        _ => None,
+    };
+    stop.map_or(result, |stop| Err(Error::worker_stopped(stop).into()))
+}
+
+/// The return rule (I4): await each unclaimed child exactly, in birth order,
+/// stopping at the first failure.  `Err` is that failure or the stop that cut
+/// the wait.
+fn settle(brood: &Brood, shell: &mut Shell) -> Settled<()> {
+    for child in brood.unclaimed() {
+        // Narrows, does not close, the window in which `worker <id>` claims it first.
+        if !child.is_claimed() {
+            await_handle(&child, shell)?;
+        }
     }
+    Ok(())
 }

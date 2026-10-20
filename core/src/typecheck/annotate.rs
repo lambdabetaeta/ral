@@ -265,6 +265,17 @@ impl Annotate<'_> {
             CompKind::Audit { body } => CompKind::Audit {
                 body: self.val(body),
             },
+            CompKind::Spawn { title, body } => CompKind::Spawn {
+                title: title.as_ref().map(|t| self.spanned_val(t)),
+                body: self.val(body),
+            },
+            // A task is demanded as an argument is, so it is written back as one.
+            CompKind::All { tasks } => CompKind::All {
+                tasks: tasks
+                    .iter()
+                    .map(|(k, v)| (k.clone(), self.spanned_val(v)))
+                    .collect(),
+            },
             CompKind::Redirect { body, redirects } => CompKind::Redirect {
                 body: Arc::new(self.comp(body)),
                 redirects: redirects.map(|v| self.val(v)),

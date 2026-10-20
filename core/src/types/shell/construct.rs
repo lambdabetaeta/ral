@@ -16,7 +16,7 @@ use crate::terminal::TerminalState;
 use crate::ty::Fixings;
 use crate::types::handler::{HandlerFrame, HandlerStack};
 use crate::types::{
-    Audit, BuiltinEntry, BuiltinTable, Convention, Env, ExitHints, Set, Signature, Value,
+    Audit, BuiltinEntry, BuiltinTable, Convention, Cradle, Env, ExitHints, Set, Signature, Value,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -219,6 +219,7 @@ impl Shell {
             bindings.arm(lease, baseline);
         }
         let anchor = Scope::clone(&durable.worker());
+        let cradle = Cradle::loose(Scope::clone(&durable));
         Self {
             env,
             sig,
@@ -245,6 +246,7 @@ impl Shell {
             local: LocalState {
                 audit: Audit::default(),
                 workers,
+                cradle,
                 bindings,
                 detach: detach_budget.map(|budget| Arc::new(DetachPolicy::new(budget))),
                 machine_depth: 0,

@@ -32,11 +32,11 @@ fold's own emission and never in `record.jsonl`.
 Two laws bound what a probe may do:
 
 - **Probing never mutates and never renews.** Enumeration is not
-  observation — the same rule that keeps the `services` pin's reconciliation
-  from renewing a service's own state. If probing renewed, the operator's own
-  diagnostics would immortalise every zombie they exist to reveal.
-- **Residents and accumulators are both probed; only residents are listed,
-  cancelled, and leased.** The line is the capability
+  observation — the same rule that keeps a `workers` listing from claiming a
+  worker's result. If probing renewed, the operator's own diagnostics would
+  immortalise every zombie they exist to reveal.
+- **Residents and accumulators are both probed; only residents are listed
+  and cancelled.** The line is the capability
   ([[decisions/260705_session-ledger|session-ledger]]): a resident (a
   worker, an agent, a schedule) can be reached and controlled by id; a mere
   accumulator (a scrollback, the bus, an inbox) can only be measured and
@@ -49,6 +49,6 @@ accumulator behaves under pressure — even when the enforcement ships later.
 See also [[decisions/260705_session-ledger|session-ledger]] (the
 resident/accumulator line; the probe as one of a resident's four facets),
 [[map/exarch/agent|agent]] (the agent half of the fold),
-[[map/exarch/builtins|builtins]] (the `services` pin, the same
-enumeration-is-not-observation law — `workers` itself was since retired as a
-model-facing listing, legibility now split by lease class).
+[[map/core/builtins|builtins]] (`workers`, the same
+enumeration-is-not-observation law: a listing is data, it claims nothing, and
+`worker <id>` is the door back to a handle).

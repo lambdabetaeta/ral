@@ -24,8 +24,8 @@ echo $custom[host]
 # Spread in lists
 let xs = [1, 2]
 let ys = [3, 4]
-let all = [...$xs, ...$ys, 5]
-echo !{length $all}
+let spread = [...$xs, ...$ys, 5]
+echo !{length $spread}
 
 # Empty collections
 let empty_list = []

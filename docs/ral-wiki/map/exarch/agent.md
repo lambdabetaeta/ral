@@ -346,10 +346,9 @@ core's own engine pushes both as `` `notice `` surface classes at the ready
 boundary of the run that produced them
 ([[map/core/engine-protocol|engine-protocol]]), decoded by
 [[map/exarch/shell-eval|shell-eval]]'s `decode_surface` into `Surface::Notice`
-and recorded from there. A reap notice names a worker removed by policy — the lease
-chain's idle or backstop bound on a running worker, or the retention sweep
-expiring a settled entry's unclaimed result — rather than one an eliminator
-observed away. It is recorded as `Forensic::Reap` and drawn nowhere — a
+and recorded from there. A reap notice names a worker removed by policy — the
+retention sweep expiring a settled entry's unclaimed result, the one policy
+that removes an entry — rather than one an eliminator observed away. It is recorded as `Forensic::Reap` and drawn nowhere — a
 worker nobody watched is not news — and never model-facing, since delivery of
 a reap to the model itself is deferred.
 `attend`'s top runs nothing else; the disk ceiling is weighed at the tool
@@ -386,7 +385,7 @@ panic rollback can never resurrect a name a pass just pruned.
 next boundary, tool or exchange, and run by `Avatar::read` on the attend
 thread that owns the agent —
 `Avatar::resource_rows` surveys what this thread may legally read — the worker
-registry's running/settled split with the nearest time-to-reap and the
+registry's running/settled split with the nearest retention expiry and the
 binding-ledger figures read as *data* over the transport's probe rail
 (`Frame::Probe`, through core's typed `Transport` probe doors and `Seat::read`,
 which severs the seat on a refused answer,
@@ -769,8 +768,8 @@ Clear then rebirths the avatar's `Readings` whole, a rebuilt context having been
 measured and told nothing. It touches no process-wide state: a `/clear` on
 one tab is that tab's. Replacing the
 transport drops the outgoing shell, whose `LocalState` teardown cancels
-every worker still registered on it — explicit destruction outranks every
-lease, the durable class included, with no host call site to forget
+every worker still registered on it — explicit destruction ends a worker
+whatever owns it, with no host call site to forget
 ([[map/core/shell-state|shell-state]]). A worker settling after the cancel still tries to flush
 its deferred `done` batch through the boundary it captured before the clear;
 the same pop-time epoch fence ([[map/exarch/shell-eval|shell-eval]]) that
@@ -1039,10 +1038,12 @@ A session fork snapshots scope, context, *and* the builtin table as part of the
 flow matrix, so the decision lives in one place and the table cannot be
 silently severed at this call site.
 
-`digest.rs` holds `clip` and the fixed per-section byte caps for what the
+`digest.rs` holds the fixed per-section byte caps for what the
 *model* sees in history: each tool-result section has its own cap
-(`VALUE_CAP` 20 KiB, `STDOUT_CAP`/`STDERR_CAP` 10 KiB), alongside a separate cap
-for opaque error blobs (`OPAQUE_CAP`); `clip` measures what a terminal would
+(`VALUE_CAP` 20 KiB, `STDOUT_CAP`/`STDERR_CAP` 10 KiB), applied with `clip` from
+`shell_eval/clip.rs`; the separate cap for opaque error blobs (`OPAQUE_CAP`)
+lives with `shell_eval/report.rs`, whose rejection/fault composition uses it.
+`clip` measures what a terminal would
 show (`ral_core::ansi::visible`, replaying `\r` and backspace beside the
 escape strip). The whole-history gauges — the `EVICT_THRESHOLD` byte
 fallback, `forced_eviction_due`/`eviction_trigger` (the reserve line and the token

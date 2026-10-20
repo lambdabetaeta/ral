@@ -3,7 +3,7 @@
 
 use crate::first_order::FOValue;
 use crate::sync::LockExt as _;
-use crate::types::{DeferredSink, Done, DoneEvent, EventSink, WorkerId};
+use crate::types::{DeferredSink, Done, DoneEvent, EventSink, HandleInner};
 use std::sync::{Arc, Mutex};
 
 /// Cap on a worker's deferred surface: past it one `surface-overflow`
@@ -28,10 +28,15 @@ impl DeferredSurface {
     }
 
     /// Deliver the buffer plus a final [`DoneEvent`] as one batch.
-    fn flush(&self, id: WorkerId, cmd: &str, outcome: Done) {
+    fn flush(&self, handle: &HandleInner, outcome: Done) {
         let mut batch = std::mem::take(&mut *self.buf.lock_ignore_poison());
-        let cmd = cmd.into();
-        batch.push(DoneEvent { id, cmd, outcome }.to_surface());
+        let done = DoneEvent {
+            id: handle.id,
+            title: handle.title.clone(),
+            elapsed_ms: u64::try_from(handle.elapsed().as_millis()).unwrap_or(u64::MAX),
+            outcome,
+        };
+        batch.push(done.to_surface());
         self.deferred.deliver(batch);
     }
 }
@@ -53,8 +58,7 @@ impl EventSink for DeferredSurface {
 /// What a [`FlushGuard`] still owes: the flush of one worker's surface.
 struct Pending {
     surface: Arc<DeferredSurface>,
-    id: WorkerId,
-    cmd: String,
+    handle: HandleInner,
 }
 
 /// Flushes the worker's deferred surface on *every* exit path.  The clean path
@@ -65,8 +69,8 @@ struct Pending {
 pub(crate) struct FlushGuard(Option<Pending>);
 
 impl FlushGuard {
-    pub(crate) fn new(surface: Option<Arc<DeferredSurface>>, id: WorkerId, cmd: String) -> Self {
-        Self(surface.map(|surface| Pending { surface, id, cmd }))
+    pub(crate) fn new(surface: Option<Arc<DeferredSurface>>, handle: HandleInner) -> Self {
+        Self(surface.map(|surface| Pending { surface, handle }))
     }
 
     /// Disarm and flush `outcome`.
@@ -75,8 +79,8 @@ impl FlushGuard {
     }
 
     fn flush(&mut self, outcome: Done) {
-        if let Some(Pending { surface, id, cmd }) = self.0.take() {
-            surface.flush(id, &cmd, outcome);
+        if let Some(Pending { surface, handle }) = self.0.take() {
+            surface.flush(&handle, outcome);
         }
     }
 }

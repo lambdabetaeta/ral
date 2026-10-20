@@ -72,7 +72,7 @@ fn context_survey_records_a_display_commit() {
 }
 
 /// The agent half surveys what this thread owns: the worker registry's
-/// running/settled split with its time-to-reap notes, the binding count,
+/// running/settled split with its retention note, the binding count,
 /// the inbox depths (counted, never drained), and the idle lease's
 /// fallback when nothing has forked.
 #[test]
@@ -81,15 +81,15 @@ fn resource_rows_survey_the_agents_accumulators() {
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
-    session.ral("spawn { test-clear-block-forever }", 30, &emit);
-    session.ral("spawn { return 7 }", 30, &emit);
+    session.ral("spawn \"blocker\" { test-clear-block-forever }", 30, &emit);
+    session.ral("spawn \"seven\" { return 7 }", 30, &emit);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while !session
         .seat
         .read(|t| t.workers())
         .expect("an identity seat never severs")
         .iter()
-        .any(|w| !w.running)
+        .any(|w| !matches!(w.state, WorkerState::Running))
     {
         assert!(
             std::time::Instant::now() < deadline,
@@ -121,15 +121,6 @@ fn resource_rows_survey_the_agents_accumulators() {
         running.cap,
         Some(shell_eval::LIVE_WORKER_CAP as u64),
         "the admission cap is armed"
-    );
-    let running_worker = row(&rows, "workers.running[worker]");
-    assert_eq!(running_worker.current, 1);
-    assert!(
-        running_worker
-            .note
-            .as_deref()
-            .is_some_and(|n| n.starts_with("nearest reap in ")),
-        "a running worker carries its time-to-reap"
     );
     let settled = row(&rows, "workers.settled");
     assert_eq!(settled.current, 1);
@@ -189,32 +180,6 @@ fn resource_rows_survey_the_agents_accumulators() {
             .cancel
             .cancel(ral_core::process::CancelCause::Cancelled);
     }
-}
-
-/// Probing renews nothing: assembling the rows reads a running worker's
-/// `last_observed` cell without touching it.
-#[test]
-fn resource_rows_renew_no_lease() {
-    let session = dressed_trunk(|runtime| runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
-    let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
-    session.ral("spawn { test-clear-block-forever }", 30, &emit);
-
-    let entry = workers(&session)
-        .pop()
-        .expect("the spawn registered its worker");
-    let before = entry.handle.last_observed();
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    let _ = session
-        .resource_rows()
-        .expect("an identity seat never severs");
-    let after = entry.handle.last_observed();
-    assert_eq!(after, before, "the probe must not renew the lease");
-
-    entry
-        .handle
-        .cancel
-        .cancel(ral_core::process::CancelCause::Cancelled);
 }
 
 /// The scripted test provider's model has no pricing-catalog entry (the

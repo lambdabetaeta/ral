@@ -103,7 +103,9 @@ impl Site {
                         Shape::String => Ty::String,
                         Shape::List(e) => Ty::list(ty(*e)),
                         Shape::Map(e) => Ty::map(ty(*e)),
-                        Shape::Handle(e) => Ty::Handle(Box::new(ty(*e))),
+                        Shape::Handle(grade, e) => {
+                            Ty::Handle(grade.instantiate(u), Box::new(ty(*e)))
+                        }
                         Shape::Thunk(c) => Ty::Thunk(Box::new(comp(*c))),
                         Shape::Record(fields) => Ty::Record(row_of(u, fields, &ty, Label::Field)),
                         Shape::Variant(fields) => Ty::Variant(row_of(u, fields, &ty, Label::Case)),
@@ -240,7 +242,10 @@ impl Build<'_> {
             Ty::String => (Shape::String, None),
             Ty::List(a) => (Shape::List(self.ty(a)), None),
             Ty::Map(a) => (Shape::Map(self.ty(a)), None),
-            Ty::Handle(a) => (Shape::Handle(self.ty(a)), None),
+            Ty::Handle(grade, a) => (
+                Shape::Handle(GradeShape::of(u.resolve_grade(*grade)), self.ty(a)),
+                None,
+            ),
             Ty::Record(r) => (Shape::Record(self.fields(r)), None),
             Ty::Variant(r) => (Shape::Variant(self.fields(r)), None),
             Ty::Thunk(c) => (Shape::Thunk(self.comp(c)), None),

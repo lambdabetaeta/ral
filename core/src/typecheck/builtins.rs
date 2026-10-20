@@ -13,6 +13,7 @@ use super::generalize::{FreeVars, generalize};
 use super::unify::Unifier;
 use crate::fact::{ErrorRecord, Io, Observation, Receipt};
 use crate::path::walk::{DirEntry, FileInfo};
+use crate::protocol::probe::WorkerRow;
 use crate::ty::{
     CachedFreeVars, CompTy, Grade, GradeVar, Kind, Label, Row, RowVar, Scheme, Ty, TyVar, Typed,
     WeakVars, closed_record, closed_variant,
@@ -355,28 +356,25 @@ pub(crate) fn outcome_ty(value_ty: Ty) -> Ty {
     closed_variant(&[("ok", value_ty), ("err", ErrorRecord::ty())])
 }
 
-/// The `{value, stdout, stderr}` record `await` and `race` return.  Failure
-/// raises rather than setting a flag, so there is no status field here; a
-/// failed block's status lives inside `poll`'s `` `err `` outcome.
-pub(crate) fn await_record(value_ty: Ty) -> Ty {
-    Io::ty().extend("value", value_ty)
-}
-
-/// The `{stdout, stderr, outcome}` record `poll` carries in its `` `settled ``
-/// arm.  The `` `err `` payload is the very record `try` hands its handler,
-/// so the block's status lives inside it.
+/// The `{stdout, stderr, elapsed, outcome}` record `poll` carries in its
+/// `` `settled `` arm.  The `` `err `` payload is the very record `try` hands
+/// its handler, so the block's status lives inside it.
 fn settle_record(value_ty: Ty) -> Ty {
-    Io::ty().extend("outcome", outcome_ty(value_ty))
+    Io::ty()
+        .extend("elapsed", Ty::Float)
+        .extend("outcome", outcome_ty(value_ty))
 }
 
-/// The variant `poll` returns: [`settle_record`] once the block has finished —
-/// by returning, raising, or panicking — and what it has written so far while
-/// it runs (a cumulative, non-destructive snapshot).  Being `await`'s
-/// non-blocking dual, `poll` reports a failure inside the settled outcome
-/// rather than re-raising it: a panic, an `exit` and a foreign stop are
-/// re-raised; a failure, and the worker's own stop, settle inside `` `err ``.
+/// The variant `poll` returns: [`settle_record`] once the block has finished,
+/// and what it has written so far while it runs (a cumulative, non-destructive
+/// snapshot), each with the seconds it has run.  `poll` is the one data
+/// observation: a failure and the worker's own stop settle inside `` `err ``;
+/// a panic, an `exit` and a foreign stop are re-raised.
 pub(crate) fn poll_variant(value_ty: Ty) -> Ty {
-    closed_variant(&[("pending", Io::ty()), ("settled", settle_record(value_ty))])
+    closed_variant(&[
+        ("pending", Io::ty().extend("elapsed", Ty::Float)),
+        ("settled", settle_record(value_ty)),
+    ])
 }
 
 /// Per-builtin scheme factories, one function per registered *shape*: entries
@@ -385,7 +383,7 @@ pub(crate) fn poll_variant(value_ty: Ty) -> Ty {
 pub mod scheme {
     use super::{
         CompTy, DirEntry, FileInfo, FreeVars, Grade, GradeVar, Kind, Receipt, Row, Scheme, Ty,
-        TyEnv, TyVar, Unifier, await_record, command, error_record_shape, fun, generalize, graded,
+        TyEnv, TyVar, Unifier, WorkerRow, command, error_record_shape, fun, generalize, graded,
         mk_plain_scheme, mk_scheme, poll_variant, pure, thunk,
     };
     use crate::ty::Typed as _;
@@ -522,83 +520,62 @@ pub mod scheme {
 
     // ── Concurrency ──────────────────────────────────────────────────────
 
-    /// `∀ε α. U(F^ε α) → F (Handle α)`, behind `prefix` leading parameters:
-    /// the block runs in a worker, its output streamed, whatever it produces.
-    fn runs_block(u: &mut Unifier, prefix: &[Ty]) -> Scheme {
+    /// `∀ε α. body(Handle^ε α, F^ε α, α)`: a scheme over one handle, its
+    /// grade and value quantified.
+    fn on_handle(u: &mut Unifier, body: impl FnOnce(Ty, CompTy, Ty) -> CompTy) -> Scheme {
         let (av, ev) = (u.fresh_tyvar(), u.fresh_grade_var());
         let a = Ty::Var(av);
-        let body = CompTy::Return(Grade::Var(ev), Box::new(a.clone()));
-        let run = fun(thunk(body), pure(Ty::Handle(Box::new(a))));
-        let spine = prefix
-            .iter()
-            .rev()
-            .fold(run, |body, p| fun(p.clone(), body));
-        graded(&[ev], mk_plain_scheme(&[av], &[], thunk(spine)))
+        let handle = Ty::Handle(Grade::Var(ev), Box::new(a.clone()));
+        let produce = CompTy::Return(Grade::Var(ev), Box::new(a.clone()));
+        graded(
+            &[ev],
+            mk_plain_scheme(&[av], &[], thunk(body(handle, produce, a))),
+        )
     }
 
-    /// `spawn :: ∀ε α. U(F^ε α) → F (Handle α)`
-    pub fn spawn(u: &mut Unifier) -> Scheme {
-        runs_block(u, &[])
-    }
-
-    /// `watch :: ∀ε α. String → U(F^ε α) → F (Handle α)`
+    /// `watch :: ∀ε α. String → U(F^ε α) → F (Handle^ε α)`: the block runs
+    /// in a worker, its lines streamed, whatever it produces.
     pub(crate) fn watch(u: &mut Unifier) -> Scheme {
-        runs_block(u, &[Ty::String])
+        on_handle(u, |handle, body, _| {
+            fun(Ty::String, fun(thunk(body), pure(handle)))
+        })
     }
 
-    /// `service :: ∀ε α. String → U(F^ε α) → F (Handle α)` — `watch`'s
-    /// scheme, the leading `String` being the mandatory birth description.
-    ///
-    /// The durable lease class is a runtime fact, invisible to the types.
-    pub(crate) fn service(u: &mut Unifier) -> Scheme {
-        runs_block(u, &[Ty::String])
+    /// `worker :: ∀ε α. Int → F (Handle^ε α)`: instantiated per call site, as
+    /// `race :: [Handle^ε α] → …` is.
+    pub(crate) fn worker_op(u: &mut Unifier) -> Scheme {
+        on_handle(u, |handle, _, _| fun(Ty::Int, pure(handle)))
     }
 
-    /// `await :: ∀α. Handle α → F {value, stdout, stderr}`
+    /// `await :: ∀ε α. Handle^ε α → F^ε α`: the block, run here.
     pub(crate) fn await_op(u: &mut Unifier) -> Scheme {
-        let av = u.fresh_tyvar();
-        let a = Ty::Var(av);
-        mk_plain_scheme(
-            &[av],
-            &[],
-            thunk(fun(Ty::Handle(Box::new(a.clone())), pure(await_record(a)))),
-        )
+        on_handle(u, |handle, body, _| fun(handle, body))
     }
 
-    /// `poll :: ∀α. Handle α → F <pending: {stdout, stderr} | settled: {stdout, stderr, outcome: <ok: α | err: ErrRecord>}>`
+    /// `poll :: ∀ε α. Handle^ε α → F <pending: {stdout, stderr, elapsed} | settled: {stdout, stderr, elapsed, outcome: <ok: α | err: ErrRecord>}>`
     pub(crate) fn poll(u: &mut Unifier) -> Scheme {
-        let av = u.fresh_tyvar();
-        let a = Ty::Var(av);
-        mk_plain_scheme(
-            &[av],
-            &[],
-            thunk(fun(Ty::Handle(Box::new(a.clone())), pure(poll_variant(a)))),
-        )
+        on_handle(u, |handle, _, a| fun(handle, pure(poll_variant(a))))
     }
 
-    /// `race :: ∀α. [Handle α] → F {value, stdout, stderr}`
+    /// `race :: ∀ε α. [Handle^ε α] → F^ε α`: the winner, run here.
     pub(crate) fn race(u: &mut Unifier) -> Scheme {
-        let av = u.fresh_tyvar();
-        let a = Ty::Var(av);
-        mk_plain_scheme(
-            &[av],
-            &[],
-            thunk(fun(
-                Ty::list(Ty::Handle(Box::new(a.clone()))),
-                pure(await_record(a)),
-            )),
-        )
+        on_handle(u, |handle, body, _| fun(Ty::list(handle), body))
     }
 
-    /// `cancel :: ∀α. Handle α → F Unit`
+    /// `cancel :: ∀ε α. Handle^ε α → F Unit`
     pub(crate) fn cancel_op(u: &mut Unifier) -> Scheme {
-        let av = u.fresh_tyvar();
-        mk_plain_scheme(
-            &[av],
-            &[],
-            thunk(fun(Ty::Handle(Box::new(Ty::Var(av))), pure(Ty::Unit))),
-        )
+        on_handle(u, |handle, _, _| fun(handle, pure(Ty::Unit)))
     }
+
+    // par :: ∀α β. U(α → F β) → [α] → Int → F [β]
+    scheme!(par_op<av: Kind::ANY, bv: Kind::ANY>: [
+        thunk(fun(Ty::Var(av), pure(Ty::Var(bv)))),
+        Ty::list(Ty::Var(av)),
+        Ty::Int
+    ] -> Ty::list(Ty::Var(bv)));
+
+    // workers :: F [WorkerRow]
+    scheme!(workers_op: pure Ty::list(WorkerRow::ty()));
 
     // ── Base frames ──────────────────────────────────────────────────────
 

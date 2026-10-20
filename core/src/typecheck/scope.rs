@@ -1,6 +1,6 @@
-//! Typing rules for the `within`, `grant`, `try`, `guard` and `audit` scope
-//! nodes.  The sixth scope node, `CompKind::Redirect`, is typed inline in
-//! `infer.rs`.
+//! Typing rules for the `within`, `grant`, `try`, `guard`, `audit`, `spawn`
+//! and `all` scope nodes.  The eighth scope node, `CompKind::Redirect`, is
+//! typed inline in `infer.rs`.
 //!
 //! A form's options are syntax: the parser owns the bracket's shape and this
 //! module owns its names.  Each written option is looked up in the table the
@@ -29,9 +29,9 @@ use super::grade::JoinArm;
 use super::infer::Inferencer;
 use crate::fact::ErrorRecord;
 use crate::ir::{HandlerArmV, OptionsV, Val};
-use crate::source::WithSpan;
+use crate::source::{Spanned, WithSpan};
 use crate::ty::Typed as _;
-use crate::ty::{CompTy, Scheme, Ty};
+use crate::ty::{CompTy, Producer, Scheme, Ty, closed_record};
 
 impl Inferencer<'_> {
     /// Hold each written option to what `table` says of its label, each
@@ -177,6 +177,33 @@ impl Inferencer<'_> {
         let body_cty = self.scope_body(body);
         let alpha = self.extract_return(&body_cty);
         CompTy::pure(audit_record(alpha))
+    }
+
+    /// `spawn [T] B : F (Handle^ε α)` for `B : U(F^ε α)`; `T : String`.
+    pub(super) fn infer_spawn(&mut self, title: Option<&Spanned<Val>>, body: &Val) -> CompTy {
+        if let Some(title) = title {
+            self.with_span(title.span, |this| {
+                let ty = this.infer_val(&title.item);
+                this.ctx.unify_ty(&ty, &Ty::String, Reason::SpawnTitle);
+            });
+        }
+        let body_cty = self.scope_body(body);
+        let Producer { grade, ty } = self.force_return_shape(&body_cty, Reason::ReturnShape);
+        CompTy::pure(Ty::Handle(grade, Box::new(ty)))
+    }
+
+    /// `all [k: B_k] : F [k: α_k]`: each task demands a value, `U(F α_k)`,
+    /// coerced as an argument is.
+    pub(super) fn infer_all(&mut self, tasks: &OptionsV) -> CompTy {
+        let fields: Vec<(&str, Ty)> = tasks
+            .iter()
+            .map(|(label, task)| {
+                let alpha = self.ctx.unifier.fresh_ty();
+                self.demand_block(task, CompTy::pure(alpha.clone()));
+                (label.as_ref(), alpha)
+            })
+            .collect();
+        CompTy::pure(closed_record(&fields))
     }
 
     /// Constrain `body` to a thunk of a computation ready to run, and return

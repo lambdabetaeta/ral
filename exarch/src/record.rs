@@ -326,7 +326,8 @@ pub enum Display {
     },
     Done {
         id: Option<u64>,
-        cmd: String,
+        title: String,
+        elapsed_ms: Option<u64>,
         outcome: DoneOutcome,
     },
     Context {
@@ -434,10 +435,10 @@ pub enum Forensic {
     Unpin {
         key: String,
     },
-    /// A worker policy removed after nobody observed it; `cause` is one of
-    /// `ReapCause`'s spellings (`idle`, `backstop`, `retention`).
+    /// A worker policy removed after nobody observed it; `cause` is
+    /// `retention`, the one policy left.
     Reap {
-        cmd: String,
+        title: String,
         cause: String,
     },
     /// Idle top-level bindings the ledger unset at a ready boundary;

@@ -229,7 +229,7 @@ fn race_first_wins() {
             let fast = !{spawn { return winner }}
             let slow = !{spawn { sleep 10; return loser }}
             let r = race [$fast, $slow]
-            return $r[value]
+            return $r
         "
         ),
         Value::string("winner")

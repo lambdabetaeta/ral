@@ -5,8 +5,8 @@
 use super::Engine;
 use crate::first_order::FOValue;
 use crate::first_order::datum::Datum;
-use crate::protocol::probe::{BindingRow, CompletionNames, HandleRow, Probe, WorkerRow};
-use crate::types::{Shell, Value, WorkerEntry};
+use crate::protocol::probe::{BindingRow, CompletionNames, HandleRow, Probe};
+use crate::types::{Shell, Value};
 
 mod fs;
 
@@ -39,7 +39,7 @@ pub(crate) fn answer(shell: &Shell, probe: &Probe) -> FOValue {
         Probe::Workers => shell
             .workers()
             .iter()
-            .map(|entry| worker_row(shell, entry))
+            .map(|entry| shell.worker_row(entry))
             .collect::<Vec<_>>()
             .encode(),
         Probe::SessionEnded => shell
@@ -56,18 +56,6 @@ pub(crate) fn answer(shell: &Shell, probe: &Probe) -> FOValue {
     }
 }
 
-fn worker_row(shell: &Shell, entry: &WorkerEntry) -> WorkerRow {
-    WorkerRow {
-        id: entry.id.0,
-        cmd: entry.cmd.clone(),
-        class: entry.class,
-        running: entry.handle.is_running(),
-        up_secs: entry.started.elapsed().unwrap_or_default().as_secs(),
-        idle_secs: entry.handle.last_observed().elapsed().as_secs(),
-        retention_left: shell.worker_retention_left(entry),
-    }
-}
-
 /// Every binding in scope, a shadowed name once.
 fn binding_rows(shell: &Shell) -> Vec<BindingRow> {
     shell
@@ -76,7 +64,7 @@ fn binding_rows(shell: &Shell) -> Vec<BindingRow> {
             let handle = match &b.value {
                 Value::Handle(h) => Some(HandleRow {
                     state: h.state(),
-                    cmd: h.cmd.clone(),
+                    title: h.title.clone(),
                 }),
                 _ => None,
             };

@@ -30,11 +30,12 @@ pub(crate) use handler::{
 
 // The shared state behind `Value::Handle`.
 mod handle;
+pub(crate) use handle::brood::{Brood, Cradle, claim, end_unclaimed};
 #[cfg(test)]
 pub(crate) use handle::idle_handle;
 pub(crate) use handle::pins_running_work;
 pub(crate) use handle::surface::{DeferredSurface, FlushGuard};
-pub use handle::{CompletedHandle, HandleInner, HandleState};
+pub use handle::{CompletedHandle, HandleInner, HandleState, Stamp};
 
 // A boundary's checked type, and what a door admits against it.
 mod admit;
@@ -87,8 +88,8 @@ pub use audit::{
 
 // Here because the session speaks them: the records `fact` declares.
 pub use crate::fact::{
-    Check, CommandOrigin, Decision, ErrorRecord, LeaseClass, Observation, Observed, Reason,
-    Resource, WorkerId, WriteOutcome,
+    Check, CommandOrigin, Decision, ErrorRecord, Observation, Observed, Reason, Resource, WorkerId,
+    WriteOutcome,
 };
 
 // Here because every observation carries one.
@@ -97,7 +98,7 @@ pub use crate::source::CallSite;
 mod mooring;
 pub use mooring::{
     DeferredSink, Desk, EnquiryDesk, EventSink, Fork, Mooring, NO_DESK, NO_DESK_HINT,
-    NO_DESK_STATUS, Nursery, NurseryId, SurfaceSink,
+    NO_DESK_STATUS, Nursery, NurseryId, SurfaceSink, TitlePolicy,
 };
 pub(crate) use mooring::{NurseryGuard, TerminalAccess};
 
@@ -109,10 +110,8 @@ pub use shell::hooks::{
 pub use shell::{Bequest, DEFAULT_STACK_LIMIT, LocalState, Runtime, SessionState, Shell};
 pub(crate) use shell::{Image, Terms};
 
-pub(crate) use shell::workers::{CapReached, LeaseChain};
-pub use shell::workers::{
-    Done, DoneEvent, ReapCause, ReapNotice, WatchEvent, WorkerEntry, WorkerLease,
-};
+pub(crate) use shell::workers::CapReached;
+pub use shell::workers::{Done, DoneEvent, Owner, ReapCause, ReapNotice, WatchEvent, WorkerEntry};
 
 pub use shell::bindings::{BindingLease, Pruned};
 pub use shell::notice::Notice;

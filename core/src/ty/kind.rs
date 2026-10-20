@@ -56,7 +56,7 @@ impl Head {
             Ty::Record(_) => Self::Record,
             Ty::Variant(_) => Self::Variant,
             Ty::Thunk(_) => Self::Thunk,
-            Ty::Handle(_) => Self::Handle,
+            Ty::Handle(..) => Self::Handle,
         })
     }
 

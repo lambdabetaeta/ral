@@ -124,8 +124,10 @@ Internals:
   `CompKind::Pipeline` launches and joins a `PipeNode` in one rule
   ([[map/core/runtime|runtime]]).
 - `scope.rs` — dynamic-frame installation implementing [[design/scoping|scoping]]
-  and the five [[design/control-operators|control operators]] (`WithinScope`; a failed `try`/`guard`/`audit`
-  body becomes an `ErrorRecord` through `Error::record`). The
+  and the frame-installing [[design/control-operators|control operators]] (`WithinScope`; a failed `try`/`guard`/`audit`
+  body becomes an `ErrorRecord` through `Error::record`). `spawn` and `all`
+  install no frame: `machine.rs` forms their operands and hands them to
+  `concurrency::spawn_form` / `all_form` ([[map/core/builtins|builtins]]). The
   `within` form installs command handlers: a per-name handler and every alias
   must be a unary lambda `{ |args| ... }`, the catch-all a binary lambda `{
   |name args| ... }`; the calling convention is fixed by the surface form and

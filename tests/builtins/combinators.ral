@@ -1,0 +1,24 @@
+# Test: the structured combinators `par`, `all` and `race`.  Each owns what
+# it starts: nothing outlives the call, and output keeps the written order.
+
+# par keeps input order, in its output and its value, whatever finishes first.
+let xs = par { |x| sleep $x; echo "item $x"; return $x } [0.2, 0.01] 2
+echo ...$xs
+# Expected: item 0.2 / item 0.01 / 0.2 0.01
+
+# The first failure is raised; its sibling is cancelled, not waited for.
+try {
+    par { |x| if $[$x == 1] { fail [status: 3, message: boom] } else { sleep 30 } } [1, 2] 2
+} { |e| echo "par failed status=$e[status]"; return [] }
+# Expected: par failed status=3
+
+# all returns a record of its tasks' values; a command's value is its output.
+let r = all [greeting: { echo hi }, answer: { return 42 }]
+echo $r[greeting] $r[answer]
+# Expected: hi 42
+
+# race behaves as `await` on the first to finish, and ends the rest.
+let slow = spawn "slow" { sleep 30; return slow }
+let fast = spawn "fast" { return fast }
+echo !{race [$slow, $fast]}
+# Expected: fast

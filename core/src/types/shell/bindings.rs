@@ -7,10 +7,9 @@
 //! [`LocalState`](super::LocalState): every touch arrives through
 //! `&mut Shell` on the one thread driving that `Agent`'s attend loop — slash
 //! commands included, since they reach it as posts handled inside that loop
-//! rather than on exarch's render thread — and the daemon thread firing a
-//! worker's idle lease takes only the worker registry's own lock. Let a
-//! second thread ever reach `&mut Shell` for a live agent and this unlocked
-//! design is the first thing that must change.
+//! rather than on exarch's render thread. Let a second thread ever reach
+//! `&mut Shell` for a live agent and this unlocked design is the first thing
+//! that must change.
 
 use crate::record;
 use crate::types::{Env, pins_running_work};

@@ -1,20 +1,15 @@
+from-child
 marker-after
 just-once
-
 just-once
-
 only-this
-diag
-
-[hi
-]
-5 []
+after-diag
+[hi]
+6
 7
 handled
-
 handled handled
 true
 child-handler
-
 parent: no handler
 spawn io tests done

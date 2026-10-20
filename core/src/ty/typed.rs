@@ -2,8 +2,8 @@
 //! the [`Typed`] types that derive theirs from their own fields.
 
 use super::{Label, Row, RowVar, Ty};
-use crate::first_order::Bytes;
 use crate::first_order::datum::Datum;
+use crate::first_order::{Bytes, Finite};
 use crate::record;
 use crate::source::CallSite;
 use std::collections::BTreeMap;
@@ -93,6 +93,7 @@ leaf! {
     u32 => Ty::Int,
     u64 => Ty::Int,
     usize => Ty::Int,
+    Finite => Ty::Float,
 }
 
 impl Typed for Bytes {

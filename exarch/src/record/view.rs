@@ -62,7 +62,8 @@ pub enum BlockKind {
     },
     Done {
         id: Option<u64>,
-        cmd: String,
+        title: String,
+        elapsed_ms: Option<u64>,
         outcome: DoneOutcome,
     },
     Context {
@@ -391,9 +392,20 @@ impl Blocks {
             Display::Observation { value } => self.push(seq, BlockKind::Observation { value }),
             Display::Change { change } => self.push(seq, BlockKind::Change { change }),
             Display::Card { card } => self.push(seq, BlockKind::Card { card }),
-            Display::Done { id, cmd, outcome } => {
-                self.push(seq, BlockKind::Done { id, cmd, outcome })
-            }
+            Display::Done {
+                id,
+                title,
+                elapsed_ms,
+                outcome,
+            } => self.push(
+                seq,
+                BlockKind::Done {
+                    id,
+                    title,
+                    elapsed_ms,
+                    outcome,
+                },
+            ),
             Display::Context { rows } => self.push(seq, BlockKind::Context { rows }),
         }
     }

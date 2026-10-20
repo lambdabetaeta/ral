@@ -67,8 +67,8 @@ adds a scope at which signals wait.**
 
 ## What ral could borrow
 
-- **Interrupt handlers for long-lived workers.** A `service` that must react to
-  its host mid-flight now has no way to hear it; an Æff-style handler is the
+- **Interrupt handlers for long-lived workers.** A long-lived worker that must
+  react to its host mid-flight now has no way to hear it; an Æff-style handler is the
   principled shape, should that need arrive.
 - **The session scope as a handler in the calculus.** Æff gives signals and
   interrupts an operational semantics; a boundary-flushed handler would give the

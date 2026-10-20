@@ -1,26 +1,31 @@
-//! Concurrency: the births `spawn`, `watch`, `service`, `detach`, and the
+//! Concurrency: the births `spawn`, `watch`, `detach`, the combinators `par`
+//! and `all`, the listing `workers` and the reacquisition `worker`, and the
 //! eliminators `await`, `poll`, `race`, `cancel`.
 //!
-//! A spawned block runs on its own OS thread with a cloned environment, parked
-//! under the durable session root rather than the foreground scope, so a run
-//! deadline or interrupt cannot reach it.  Its bytes are buffered per handle
-//! (surfaced live line by line, for `watch`) and projected out of one cached
-//! [`CompletedHandle`]; its `surface` events are buffered too — the spawning
-//! run may be over — and delivered once, at completion, to the session's
-//! deferred sink.
+//! Every worker has one owner, fixed at birth: the calling expression (`par`,
+//! `all`, `race`), which ends it before returning, on the call's live sink;
+//! the session or the worker it was born inside (`spawn`, `watch`), which it
+//! hangs under, buffering its surface until one `done` on the deferred sink;
+//! or nobody (`detach`).  A worker's bytes are buffered per handle and
+//! replayed by `await`.
 
 mod birth;
+mod combinators;
 mod eliminate;
 #[cfg(test)]
 mod tests;
 
-use crate::evaluator::machine;
-use crate::types::{Closure, Mooring, Settled, Shell, Value, sig};
-use birth::{Birth, spawn_child};
-pub(super) use eliminate::{builtin_await, builtin_cancel, builtin_poll, builtin_race};
-
 #[cfg(unix)]
 use super::util::check_arity;
+use crate::evaluator::machine;
+use crate::types::{Closure, Mooring, Settled, Shell, TitlePolicy, Value, sig, sig_hint};
+use birth::{Birth, spawn_child};
+pub(crate) use combinators::all_form;
+pub(super) use combinators::builtin_par;
+use eliminate::await_handle;
+pub(super) use eliminate::{
+    builtin_await, builtin_cancel, builtin_poll, builtin_race, builtin_worker, builtin_workers,
+};
 
 // ── spawn ────────────────────────────────────────────────────────────────
 
@@ -34,28 +39,60 @@ fn worker_body(
     move |mooring, child| machine::force(Value::Thunk(closure), mooring, child)
 }
 
-/// `spawn <thunk>` -- spawn a concurrent block on a worker thread, return a handle.
+/// `spawn [TITLE] BODY` -- run `body` on a worker of its own and return its
+/// handle; the title names it to people.
 ///
-/// Buffered: stdout/stderr accumulate in per-handle buffers and come back as
-/// the `stdout`/`stderr` fields of `await`'s record.  The worker's own `Shell` is the only one the
-/// body touches, so "blocks discard their state" falls out of the thread's
-/// lifecycle with no boundary ceremony.
-pub(crate) fn builtin_spawn(
-    args: &[Value],
+/// Buffered: stdout/stderr accumulate in per-handle buffers, which `await`
+/// replays to the awaiter's own streams.  The worker's own `Shell` is the only
+/// one the body touches, so "blocks discard their state" falls out of the
+/// thread's lifecycle with no boundary ceremony.
+pub(crate) fn spawn_form(
+    title: Option<String>,
+    body: &Value,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    let closure = args[0].expect_thunk("spawn")?;
-    let name = shell
-        .call_site()
-        .map_or_else(|| "block".into(), |site| format!("block at {site}"));
+    if title.is_none() && mooring.worker_title == TitlePolicy::Required {
+        return Err(sig(
+            "spawn: this host requires a title: spawn \"what it does\" { … }",
+        ));
+    }
+    let closure = body.expect_thunk("spawn")?;
     Ok(Value::Handle(Box::new(spawn_child(
         mooring,
         shell,
-        Birth::Spawn,
-        &name,
+        Birth::Spawn { title },
         worker_body(closure),
     )?)))
+}
+
+/// A worker's title or a detached process's description: non-empty and one
+/// line, since it is all a person reading a listing or a `ps` has to go on.
+pub(crate) fn legible_title(arg: &Value, verb: &str) -> Settled<String> {
+    let Value::String(s) = arg else {
+        return Err(sig(format!(
+            "{verb}: the title must be a String, got {}",
+            arg.type_name()
+        )));
+    };
+    let title = s.trim();
+    let hint = "say what the work is in a few words, on one line: \"build the docs\"";
+    if title.is_empty() {
+        return Err(sig_hint(
+            format!("{verb}: the title must be a non-empty single line, got an empty one"),
+            hint,
+        ));
+    }
+    if title.contains('\n') {
+        return Err(sig_hint(
+            format!(
+                "{verb}: the title must be a non-empty single line, got {} lines",
+                title.lines().count()
+            ),
+            hint,
+        ));
+    }
+    Ok(title.to_string())
 }
 
 // ── watch ────────────────────────────────────────────────────────────────
@@ -79,60 +116,11 @@ pub(super) fn builtin_watch(
 ) -> Settled<Value> {
     let label = args[0].as_str("watch")?.to_owned();
     let closure = args[1].expect_thunk("watch")?;
-    let name = label.clone();
     Ok(Value::Handle(Box::new(spawn_child(
         mooring,
         shell,
         Birth::Watch { label },
-        &name,
         worker_body(closure),
-    )?)))
-}
-
-// ── service ──────────────────────────────────────────────────────────────
-
-/// The legibility bound the two births that escape the lease chain carry: a
-/// non-empty, single-line description.  For `detach` it is the only thing that
-/// later says what a surviving pid was for — there is no handle left to ask.
-fn one_line_desc(arg: &Value, verb: &str) -> Settled<String> {
-    let Value::String(s) = arg else {
-        return Err(sig(format!(
-            "{verb}: description must be a String, got {}",
-            arg.type_name()
-        )));
-    };
-    let desc = s.trim();
-    if desc.is_empty() {
-        return Err(sig(format!("{verb}: description must be non-empty")));
-    }
-    if desc.contains('\n') {
-        return Err(sig(format!(
-            "{verb}: description must be a single line (no newlines)"
-        )));
-    }
-    Ok(desc.to_string())
-}
-
-/// `service <desc> <thunk>` -- birth a durable worker: an ordinary buffered
-/// spawn but for its [`LeaseClass::Durable`] registration — no idle reap, no
-/// backstop, and `desc` (the registry `cmd`) as the bound standing in for time.
-///
-/// Host-wise the mirror image of `watch`: only an agent host, whose lease frame
-/// would otherwise reap long work, installs
-/// [`crate::builtins::SERVICE_BUILTIN`] — grant no lease and a durable class
-/// would distinguish nothing.
-pub(super) fn builtin_service(
-    args: &[Value],
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Settled<Value> {
-    let desc = one_line_desc(&args[0], "service")?;
-    Ok(Value::Handle(Box::new(spawn_child(
-        mooring,
-        shell,
-        Birth::Service,
-        &desc,
-        worker_body(args[1].expect_thunk("service")?),
     )?)))
 }
 
@@ -155,6 +143,6 @@ pub(super) fn builtin_detach(
     shell: &mut Shell,
 ) -> Settled<Value> {
     check_arity(args, 2, "detach")?;
-    let desc = one_line_desc(&args[0], "detach")?;
+    let desc = legible_title(&args[0], "detach")?;
     crate::runtime::command::detach(&desc, &args[1], &args[2..], mooring, shell)
 }

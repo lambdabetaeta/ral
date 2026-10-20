@@ -15,7 +15,7 @@ mod sink;
 pub use channel::{BusReceiver, BusSender, channel};
 pub use emitter::Emitter;
 pub use inbox::Mailbox;
-pub use post::{AgentOutcome, ScheduleId, elapsed_phrase};
+pub use post::{AgentOutcome, ScheduleId};
 pub use signal::Signal;
 pub use sink::Sink;
 

@@ -37,7 +37,8 @@ a zero `status` on `fail` wants `return`. Everything a type can state is in the
 scheme — including whether a row writes, which is its result grade (`Command`),
 not a facet ([[decisions/260930_graded-f|graded-f]]). Bodies are grouped by concern
 (`strings.rs`, `collections.rs`, `predicates.rs`, `fs.rs`, `codecs.rs`,
-`concurrency.rs` for `spawn` / `watch`, `modules.rs` for `use`, `misc.rs` for
+`concurrency/` for the eliminators, `par`, `workers`, `worker` and `watch`
+(`spawn` and `all` are control operators), `modules.rs` for `use`, `misc.rs` for
 the ones with no cluster — `fail`, `exit`, `surface`, `warn`, `ask` — …).
 
 **The two halves are the two argument conventions, and the choice is visible in
@@ -81,11 +82,10 @@ core and core never inspects them
 ([[decisions/260514_repl-builtins-stay-in-repl|repl-builtins-stay-in-repl]]), and
 they seed through the same two installs, so a host contributes natives as well
 as base frames: the REPL's `_ed-*` family and `load-plugin`/`unload-plugin`
-are natives; `detach` is a base frame on a host that arms the policy. Three core-implemented entries
-register this way too — `WATCH_BUILTIN`, `SERVICE_BUILTIN`, and
-`DETACH_BUILTIN`, each a public one-entry wrapper over a private body — so a
-host whose streams are capture buffers, or whose leases reap ordinary workers,
-simply lacks the verb it cannot honour
+are natives; `detach` is a base frame on a host that arms the policy. Two core-implemented entries
+register this way too — `WATCH_BUILTIN` and `DETACH_BUILTIN`, each a public
+one-entry wrapper over a private body — so a host whose streams are capture
+buffers, or that arms no detach budget, simply lacks the verb it cannot honour
 ([[decisions/260617_watch-repl-builtin|watch-repl-builtin]],
 [[map/core/builtins|builtins]]).
 

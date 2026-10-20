@@ -590,6 +590,13 @@ impl Mentions for Comp {
                 body.mentions(out);
             }
             CompKind::Audit { body } => body.mentions(out),
+            CompKind::Spawn { title, body } => {
+                if let Some(t) = title {
+                    t.item.mentions(out);
+                }
+                body.mentions(out);
+            }
+            CompKind::All { tasks } => tasks.mentions(out),
             CompKind::Redirect { body, redirects } => {
                 body.mentions(out);
                 redirects.mentions(out);
@@ -765,6 +772,16 @@ pub enum CompKind {
     },
     /// `grant CAPS BODY` — attenuate the active capability set across `body`.
     Grant { caps: OptionsV, body: Val },
+    /// `spawn [TITLE] BODY` — run `body` on a worker of its own and return its
+    /// handle; the title names it to people.
+    Spawn {
+        title: Option<Spanned<Val>>,
+        body: Val,
+    },
+    /// `all [k: BODY, …]` — run every task concurrently, owned by this
+    /// expression, and return the record of their values; the first failure
+    /// cancels the rest and is raised.
+    All { tasks: OptionsV },
     /// Redirect frame for a body that cannot fuse its own redirects — a
     /// CBPV `App`, or a nested effect frame.  `body` is an `Arc<Comp>` and
     /// not a thunk-shaped `Val`, so the invoke arm needs no runtime fallback.

@@ -45,9 +45,11 @@ or a demand that resolves only later, is an ordinary mismatch of `Command`
 against `Returns A`, and its hint names the fix.
 
 **What does not capture.** A *tail* `Run` is never coerced: a turn's last
-command prints and reports its value. `each`, `fold`, `fold-lines`, `spawn`,
-`watch`, `service`, `audit` and `defer` absorb a command body: they run it,
-stream its output and keep its value, which for a command is `()`. `warn` is
+command prints and reports its value. `each`, `fold`, `fold-lines` and `audit`
+absorb a command body: they run it, stream its output and keep its value, which
+for a command is `()`. `spawn` and `watch` do not: the handle keeps the body's
+grade, `Handle^ε α`, and `await` of it is an `F^ε α`, so `let x = await $h`
+binds what a command block wrote, as `let x = { … }` would. `warn` is
 `Returns Unit`, since stderr is not the byte channel. A stdout redirect
 *discharges* the grade, `M > f : F^p A`, so `let x = to-json 1 > f` binds `()`.
 A `()`-producer where a command is demanded is a command by a zero-cost upcast

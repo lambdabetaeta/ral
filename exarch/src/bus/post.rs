@@ -2,11 +2,11 @@
 //! boundary yields a [`Next`] — an [`Item`] for the model, or a command for
 //! the attend loop.  The queue itself is `bus::inbox`.
 
-use jiff::fmt::friendly::{Designator, Spacing, SpanPrinter};
 use ral_core::first_order::FOValue;
 use std::fmt;
 use std::time::Duration;
 
+use crate::card::elapsed_phrase;
 use crate::record::{AgentId, Memory, Settlement, Voice};
 
 /// A schedule's id: monotonic, and never reused, not even across `/clear`.
@@ -28,16 +28,6 @@ impl fmt::Display for ScheduleId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&self.0, f)
     }
-}
-
-/// How long something took, in prose: `47 secs`, `1 min 12 secs`, `1 hr 3 mins`.
-/// Whole seconds — a child's runtime is not a stopwatch reading — and jiff
-/// balances the units up to hours on its own.
-pub fn elapsed_phrase(elapsed: Duration) -> String {
-    static PRINTER: SpanPrinter = SpanPrinter::new()
-        .designator(Designator::Short)
-        .spacing(Spacing::BetweenUnitsAndDesignators);
-    PRINTER.unsigned_duration_to_string(&Duration::from_secs(elapsed.as_secs()))
 }
 
 /// A session command that reads the context or opens another session from
@@ -327,15 +317,20 @@ impl Post {
 /// The notice [`Item::Surface`] wakes the model with.  The cards already reached
 /// the rail through `Avatar::arrive`, so this only names the outcome.
 fn surface_notice(values: &[FOValue]) -> String {
-    let settled = values
+    values
         .iter()
         .rev()
         .find_map(crate::card::value_to_done)
         .map_or_else(
-            || "errand finished".to_string(),
-            |(id, cmd, outcome)| crate::card::settled_text(Some(id), &cmd, &outcome),
-        );
-    format!("{settled}. Await its handle for the value.")
+            || "errand finished.".to_string(),
+            |(id, title, elapsed, outcome)| {
+                let settled = crate::card::settled_text(Some(id), &title, Some(elapsed), &outcome);
+                format!(
+                    "{settled}. `await !{{worker {id}}}` replays its output and returns its value; \
+                     `workers` lists every worker."
+                )
+            },
+        )
 }
 
 /// What a pull from the inbox yields at a boundary.
@@ -417,26 +412,6 @@ impl Item {
 mod tests {
     use super::*;
 
-    /// The one duration prose every subagent line shares: whole seconds,
-    /// balanced up to hours, no unit that would read as zero.
-    #[test]
-    fn elapsed_reads_as_prose() {
-        let phrase = |secs| elapsed_phrase(Duration::from_secs(secs));
-        assert_eq!(phrase(0), "0 secs");
-        assert_eq!(phrase(1), "1 sec");
-        assert_eq!(phrase(47), "47 secs");
-        assert_eq!(phrase(72), "1 min 12 secs");
-        assert_eq!(phrase(120), "2 mins");
-        assert_eq!(phrase(3780), "1 hr 3 mins");
-    }
-
-    /// Sub-second precision is noise in a breadcrumb: a child that ran for
-    /// 12.7s reports the seconds, not the stopwatch.
-    #[test]
-    fn elapsed_truncates_below_the_second() {
-        assert_eq!(elapsed_phrase(Duration::from_millis(12_700)), "12 secs");
-    }
-
     /// The parent's own context carries how long the child ran, and a reply
     /// still quotes the fetch command rather than any payload.
     #[test]
@@ -449,6 +424,28 @@ mod tests {
         assert_eq!(
             AgentOutcome::Failed("boom".into()).marked_item("helper", took),
             "[agent 'helper' failed after 1 min 12 secs: boom]"
+        );
+    }
+
+    #[test]
+    fn a_completion_notice_names_the_worker_to_await() {
+        use ral_core::types::{Done, DoneEvent, ErrorRecord, Status, WorkerId};
+        let done = DoneEvent {
+            id: WorkerId(7),
+            title: "building".into(),
+            elapsed_ms: 192_000,
+            outcome: Done::Err(ErrorRecord::new(
+                "<runtime>",
+                &Status::Raised(101),
+                "build failed",
+                None,
+            )),
+        };
+        assert_eq!(
+            surface_notice(&[done.to_surface()]),
+            "errand #7 (building) finished after 3 mins 12 secs (exit 101): build failed. \
+             `await !{worker 7}` replays its output and returns its value; `workers` lists \
+             every worker."
         );
     }
 }

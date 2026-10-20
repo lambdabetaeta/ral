@@ -4,6 +4,12 @@ status: superseded
 
 # Long-running work is born, not promoted
 
+> Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]: worker
+> leases are retired and `service` is deleted with its durable class: every
+> worker lives as long as its session, so no work need be born durable within
+> one. `worker <id>` re-acquires the handle of every worker by its id,
+> replacing `service-handle`.
+
 > Superseded by leases-and-budgets: the
 > open regime question is answered as Regime 1, delivered as the durable lease
 > class of a universal worker registry; the verb is spelled `service`, now

@@ -5,6 +5,10 @@ generated_at_commit: 2ded530f
 
 # A closure keeps only what it mentions
 
+> Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]: `service`
+> is deleted, so the workers that start from their creator's session are `spawn`,
+> `watch`, `par`/`all` children and a pipeline stage.
+
 **A thunk value is ⟨M, ρ|occ(M)⟩: its computation over just the session
 bindings its body mentions.** The law holds by construction: `Closure`'s
 fields are private and `Closure::new` is its one constructor, which narrows

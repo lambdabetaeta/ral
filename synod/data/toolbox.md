@@ -83,7 +83,7 @@ Always check an extracted table against a total printed in the PDF itself. A `-l
     ocrmypdf --language eng --rotate-pages scan.pdf scan-ocr.pdf
     pdftotext -layout scan-ocr.pdf -
 
-OCR is slow — a hundred pages is minutes. `defer` it and raise `timeout_secs`. OCR output is never certain: a name or a figure recovered from a scan should be shown to the user, not quietly filed.
+OCR is slow — a hundred pages is minutes. `spawn` it and raise `timeout_secs`. OCR output is never certain: a name or a figure recovered from a scan should be shown to the user, not quietly filed.
 
 Split, merge, rotate, and unlock with qpdf:
 

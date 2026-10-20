@@ -4,6 +4,20 @@ status: active
 
 # A handle is the evidence of detachment
 
+> Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]: worker
+> leases are retired, so a worker lives until it completes, is cancelled, or
+> its session ends, and no policy reaps it. `service` is deleted, and
+> `worker <id>` re-acquires the handle of every worker by its id.
+>
+> Parenting now follows the shell's *cradle*: a `spawn` or `watch` in a run
+> hangs under the session root as below, but one inside a worker hangs under
+> that worker's node and is settled by it, which awaits it on return and
+> cancels it on a halt. `par`, `all` and `race` are structured: each owns its
+> children and ends every one before the call returns, on success, failure,
+> stop, `exit` or panic alike, so the orphan window this page accepts is
+> closed. `par` is no longer prelude code over `spawn`, and `spawn` is a
+> control operator, not a builtin.
+
 > Amended by leases-and-budgets: the
 > death-clock's creation-age ceiling becomes an idle-observation lease over a
 > universal worker registry, and "detached workers are unmanaged by design" is

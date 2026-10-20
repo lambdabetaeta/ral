@@ -2,9 +2,9 @@
 # Footgun: a bash "fastest mirror" race backgrounds every curl and takes
 # `wait -n`, but the losing downloads keep running and burning bandwidth
 # until the script exits, and reaping their PIDs is manual and racy.
-# `race` returns the first handle to finish and cancels the rest for you.
+# `race` behaves as the first to finish, as if it had run here, and cancels
+# the rest for you.
 
 let [path, ...mirrors] = args
 let handles = map { |m| return !{spawn { curl -fsSL --max-time 20 "$m/$path" }} } $mirrors
-let winner = race $handles
-echo $winner[stdout]
+race $handles

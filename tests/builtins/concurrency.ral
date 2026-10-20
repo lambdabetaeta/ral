@@ -1,29 +1,25 @@
 # Test: spawn, await, par, race
 #
-# `await h` resolves a `Handle α` to a record
-# `{ value: α, stdout: Bytes, stderr: Bytes }`.
-# Bytes are not auto-replayed — they sit in the record until the user reads them.
+# `await h` behaves as the block run here: its bytes are written to the
+# awaiter's streams and its value returned.
 
-# Basic spawn/await: command-style block (returns Unit, prints to stdout).
+# Basic spawn/await: command-style block, its output replayed.
 let h = spawn { echo from-child }
-let res = await $h
-echo !{to-bytes $res[stdout] | from-string}
+await $h
 # Expected: from-child
 
-# Value-returning block: bytes still land in stdout, value is the int.
+# Value-returning block: its bytes replay, its value is the int.
 let h = spawn { echo middle ; 42 }
-let res = await $h
-echo "value=$res[value]"
-echo !{to-bytes $res[stdout] | from-string}
-# Expected: value=42 / middle
+let v = await $h
+echo "value=$v"
+# Expected: middle / value=42
 
 # Multiple spawns
 let a = spawn { echo alpha }
 let beta_h = spawn { echo beta }
-let ra = await $a
-let rb = await $beta_h
-echo !{to-bytes $ra[stdout] | from-string} !{to-bytes $rb[stdout] | from-string}
-# Expected: alpha beta
+await $a
+await $beta_h
+# Expected: alpha / beta
 
 # Spawn with error: await re-raises; `try` dispatches to the handler.
 let h = spawn { /bin/false }
@@ -34,6 +30,6 @@ try { await $h; echo "child ok=true" } { |e|
 
 # Handles are values — store in a list, then await each.
 let handles = map { |x| spawn { $x } } [1, 2, 3]
-let values = map { |h| let res = await $h ; $res[value] } $handles
+let values = map { |h| await $h } $handles
 echo $values
 # Expected: [1, 2, 3]

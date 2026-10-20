@@ -8,7 +8,7 @@
 //! as `` `observed <record> `` ([`Observation::to_surface`]).  The checker
 //! reads its type off the declaration (`Observation::ty`).
 
-use super::{LeaseClass, WorkerId};
+use super::WorkerId;
 use crate::first_order::datum::{Datum, field, tag, untag};
 use crate::first_order::{Bytes, FOValue};
 use crate::ir::WriteMode;
@@ -263,14 +263,12 @@ label!(typed Decision);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Worker {
     pub id: WorkerId,
-    pub cmd: String,
-    pub class: LeaseClass,
+    pub title: String,
 }
 
 record!(typed Worker {
     id: "id",
-    cmd: "cmd",
-    class: "class",
+    title: "title",
 });
 
 /// A harness act, authored host-side at the arm where its outcome is known,

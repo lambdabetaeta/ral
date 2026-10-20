@@ -112,7 +112,8 @@ fn deeper(depth: u32) -> Result<u32, TypeErrorKind> {
 
 /// Fingerprint of a value type: the non-variable half of a one-sided obligation.
 /// A variable collapses to its root and the walk stops, so the key stays finite
-/// even over a root bound to a cyclic structure.
+/// even over a root bound to a cyclic structure.  A handle's grade is stored
+/// resolved, as a `Return`'s is.
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum TyKey {
     Unit,
@@ -126,7 +127,7 @@ enum TyKey {
     Record(RowKey),
     Variant(RowKey),
     Thunk(Box<CompTyKey>),
-    Handle(Box<Self>),
+    Handle(Grade, Box<Self>),
     Var(TyVar),
 }
 
@@ -608,7 +609,7 @@ impl Unifier {
             Ty::Unit | Ty::Bool | Ty::Int | Ty::Float | Ty::String | Ty::Bytes => {}
             Ty::List(a) | Ty::Map(a) => self.data_ty(a, witness, seen, owed, depth)?,
             Ty::Record(r) | Ty::Variant(r) => self.data_row(r, witness, seen, owed, depth)?,
-            found @ (Ty::Thunk(_) | Ty::Handle(_)) => {
+            found @ (Ty::Thunk(_) | Ty::Handle(..)) => {
                 return Err(self.kind_error(found, Kind::DATA, witness));
             }
         }
@@ -782,8 +783,8 @@ impl Unifier {
         seen: &mut Visited,
         visit: &mut impl FnMut(Var) -> ControlFlow<B>,
     ) -> ControlFlow<B> {
-        if let Term::Comp(CompTy::Return(grade, _)) = term
-            && let Grade::Var(v) = self.resolve_grade(*grade)
+        if let Some(grade) = term.grade()
+            && let Grade::Var(v) = self.resolve_grade(grade)
         {
             visit(Var::Grade(v))?;
         }
@@ -989,7 +990,10 @@ impl Unifier {
         let out = match &*resolved {
             Ty::List(a) => Ty::list(self.apply_ty_inner(a, visited)),
             Ty::Map(a) => Ty::map(self.apply_ty_inner(a, visited)),
-            Ty::Handle(a) => Ty::Handle(Box::new(self.apply_ty_inner(a, visited))),
+            Ty::Handle(g, a) => Ty::Handle(
+                self.resolve_grade(*g),
+                Box::new(self.apply_ty_inner(a, visited)),
+            ),
             Ty::Record(r) => Ty::Record(self.apply_row_inner(r, visited)),
             Ty::Variant(r) => Ty::Variant(self.apply_row_inner(r, visited)),
             Ty::Thunk(b) => Ty::Thunk(Box::new(self.apply_comp_ty_inner(b, visited))),
@@ -1125,7 +1129,7 @@ impl Unifier {
             return Ok(false);
         }
         match &*self.head_ty(ty) {
-            Ty::List(a) | Ty::Map(a) | Ty::Handle(a) => {
+            Ty::List(a) | Ty::Map(a) | Ty::Handle(_, a) => {
                 self.ty_occurs_row(v, a, visited, deeper(depth)?)
             }
             Ty::Record(r) | Ty::Variant(r) => self.row_occurs_inner(v, r, visited, deeper(depth)?),
@@ -1180,7 +1184,10 @@ impl Unifier {
             Ty::Record(r) => TyKey::Record(self.row_key(r, deeper(depth)?)?),
             Ty::Variant(r) => TyKey::Variant(self.row_key(r, deeper(depth)?)?),
             Ty::Thunk(c) => TyKey::Thunk(Box::new(self.comp_key(c, deeper(depth)?)?)),
-            Ty::Handle(a) => TyKey::Handle(Box::new(self.ty_key(a, deeper(depth)?)?)),
+            Ty::Handle(g, a) => TyKey::Handle(
+                self.resolve_grade(*g),
+                Box::new(self.ty_key(a, deeper(depth)?)?),
+            ),
             Ty::Var(i) => TyKey::Var(self.tys.find(*i)),
         })
     }
@@ -1275,9 +1282,18 @@ impl Unifier {
             | (Ty::Float, Ty::Float)
             | (Ty::String, Ty::String)
             | (Ty::Bytes, Ty::Bytes) => Ok(()),
-            (Ty::List(a1), Ty::List(b1))
-            | (Ty::Map(a1), Ty::Map(b1))
-            | (Ty::Handle(a1), Ty::Handle(b1)) => self.unify_ty_inner(&a1, &b1, pairs, depth),
+            (Ty::List(a1), Ty::List(b1)) | (Ty::Map(a1), Ty::Map(b1)) => {
+                self.unify_ty_inner(&a1, &b1, pairs, depth)
+            }
+            (Ty::Handle(ga, a1), Ty::Handle(gb, b1)) => {
+                if !self.unify_grade(ga, gb) {
+                    return Err(TypeErrorKind::TyMismatch {
+                        expected: Box::new(self.apply_ty(&Ty::Handle(ga, a1))),
+                        actual: Box::new(self.apply_ty(&Ty::Handle(gb, b1))),
+                    });
+                }
+                self.unify_ty_inner(&a1, &b1, pairs, depth)
+            }
             (Ty::Record(r1), Ty::Record(r2)) | (Ty::Variant(r1), Ty::Variant(r2)) => {
                 let r = self.unify_row_inner(&r1, &r2, pairs, depth);
                 self.name_alternatives(&r1, &r2, r)
@@ -1298,7 +1314,7 @@ impl Unifier {
                 | Ty::Record(_)
                 | Ty::Variant(_)
                 | Ty::Thunk(_)
-                | Ty::Handle(_)
+                | Ty::Handle(..)
                 | Ty::Var(_)),
                 b,
             ) => Err(TypeErrorKind::TyMismatch {
@@ -1381,7 +1397,7 @@ impl Unifier {
         }
         match &*self.head_ty(ty) {
             Ty::Thunk(c) => self.comp_reaches(anchor, c, via, visited, deeper(depth)?),
-            Ty::Handle(a) => self.ty_reaches(anchor, a, via, visited, deeper(depth)?),
+            Ty::Handle(_, a) => self.ty_reaches(anchor, a, via, visited, deeper(depth)?),
             Ty::List(_) | Ty::Map(_) | Ty::Record(_) | Ty::Variant(_) => Ok(None),
             Ty::Var(_) | Ty::Unit | Ty::Bytes | Ty::Bool | Ty::Int | Ty::Float | Ty::String => {
                 Ok(None)

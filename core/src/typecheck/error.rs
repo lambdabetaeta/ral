@@ -60,6 +60,8 @@ pub enum Reason {
     TryHandler,
     /// A scope form's body against the thunk shape every control wrapper expects.
     ScopeBody,
+    /// A `spawn`'s title against `String`.
+    SpawnTitle,
     /// An arm's bound payload against the scrutinee's payload at that tag.
     CaseArmPayload,
     /// The handler an arm names, against the function of the payload it must be.

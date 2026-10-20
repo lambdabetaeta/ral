@@ -4,7 +4,7 @@
 operator runs its body and returns a **report** — how the body settled, beside
 the trail of what happened: commands, redirect reads and writes, capability
 denials, worker births — so a run can be inspected after the fact. It is one of
-the five [[design/control-operators|control operators]] for the same reason as
+the seven [[design/control-operators|control operators]] for the same reason as
 the others: the trail it threads lives in `Shell` state, not in any value the
 body could construct. Every fact is one vocabulary, `Observation`
 (`core/src/types/audit/observation.rs`) — the same one the surface rail and

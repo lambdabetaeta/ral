@@ -1,7 +1,7 @@
 ---
 verified_at_commit: e4025de9
 verified_at_date: 2026-10-17
-anchors: [Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, Break::code, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, CancelCause::code, Signal::status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending]
+anchors: [Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, Break::code, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, CancelCause::code, Signal::status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, Litter]
 ---
 
 # Cancellation
@@ -79,18 +79,21 @@ A scope node is `{ flag, cancelled_at, parent, shield }` in a tree of
   first. A `ScopeId` (pointer identity) is that name; a stop carries it for its
   owner. A cause the collector writes on a stage that an ancestor already
   carries therefore renames nothing.
-- **Six minting points**, each a frame or a base: the session root
-  (`DurableRoot::new`); a worker's node and the session anchor
-  (`DurableRoot::worker`); a host's dispatch scope (`run_cancel_handle`, the
-  anchor's child); a run's node (`dispatch`, the base of a run); a stage's node
-  (`launch_thread_stage`, a child of the *current* scope, so a pipeline inside
-  a cleanup is masked with it); a cleanup's shield (`Frame::Cleanup`,
-  `shielded(grace)`).
+- **Seven minting points**, each a frame or a base: the session root
+  (`DurableRoot::new`); the session anchor (`DurableRoot::worker`); a
+  worker's node, minted under its shell's *cradle* (`Cradle`) — the session
+  root in a run, the parent worker's own node inside a worker — or, for a
+  child of `par` or `all`, under the calling expression's *current* scope; a
+  host's dispatch scope (`run_cancel_handle`, the anchor's child); a run's
+  node (`dispatch`, the base of a run); a stage's node (`launch_thread_stage`,
+  a child of the *current* scope, so a pipeline inside a cleanup is masked
+  with it); a cleanup's shield (`Frame::Cleanup`, `shielded(grace)`).
 - **One writer per node.** The root by SIGTERM/SIGHUP/Ctrl-`\`; the dispatch
   scope by the host's interrupt; a run's node by its wall and by the key its
-  terminal tenant heard; a worker's by `cancel`, a `race` loss, its lease, the
-  session wipe; a stage's by its **collector alone**, with the cause of
-  whatever teardown it runs (`ReaderGone` for a reader that left, `Aborted`
+  terminal tenant heard; a worker's by `cancel`, a `race` loss, its parent's
+  halt rule (`Brood`), a combinator's end (`Litter`), the session wipe; a
+  stage's by its **collector alone**, with the cause of whatever teardown it
+  runs (`ReaderGone` for a reader that left, `Aborted`
   for a panic, `Cancelled` for a sibling's `exit`, `Terminated` for the
   anchor's death or the collector's own drop, the cause it is tearing down
   for otherwise); a shield by nobody.
@@ -100,8 +103,8 @@ A scope node is `{ flag, cancelled_at, parent, shield }` in a tree of
   |---|---|---|---|
   | `ReaderGone` | 1 | a pipeline stage's reader has ended | the pipeline collector |
   | `Interrupted` | 2 | user asked the foreground to stop | Ctrl-C / Esc / batch SIGINT |
-  | `Cancelled` | 3 | a targeted worker teardown | `cancel <handle>`, `race` loser |
-  | `TimedOut` | 4 | a wall-clock / lifetime ceiling expired | `process::deadline` |
+  | `Cancelled` | 3 | a targeted worker teardown | `cancel <handle>`, `race` loser, a parent's halt rule, a combinator's end |
+  | `TimedOut` | 4 | a wall-clock deadline expired | `process::deadline` |
   | `Terminated` | 5 | the process was asked to shut down | SIGTERM / SIGHUP |
   | `Aborted` | 6 | the session root is being reaped | Ctrl-`\` |
 
@@ -117,12 +120,24 @@ discipline ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]):
 
 - **`DurableRoot`** (`shell.session.root`) is minted once per `Shell`, is the
   only free root, and never yields its own node, so every node descends from
-  one and none is installed as a home. Detached
-  workers — `spawn`, `watch` — parent under it, so a *foreground* cancel
-  never reaches them ([[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]).
-- `DurableRoot::worker` mints the scopes beside a run: shell init's anchor and
-  `spawn_thread`'s worker. A run's frame nests under the anchor, so
-  cancelling it never reaches a worker, while cancelling the root reaches both.
+  one and none is installed as a home. A loose worker born in a run —
+  `spawn`, `watch` — hangs under it, so a *foreground* cancel never reaches
+  it ([[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]).
+- `DurableRoot::worker` mints the session anchor, beside a run's own
+  extent. A run's frame nests under the anchor, so cancelling it never
+  reaches a session worker, while cancelling the root reaches both.
+- **A worker is a scope over its births.** A shell's `LocalState::cradle`
+  says where a loose birth hangs and who settles it: a run's is loose under
+  the root and answers for nothing; a worker's is its own node and its
+  `Brood`, the handles of every `spawn` or `watch` born inside it; a stage
+  shares its parent's. The worker's base settles the brood: on return it
+  awaits each unclaimed child in birth order, the first failure being its
+  own; on a halt it cancels every unclaimed child and waits for its thread up
+  to the cleanup grace without polling, since its own scope may be the one
+  cancelled. A `par` or `all` owns its children as a `Litter` and ends it the
+  same way before the call returns; `race` drains its losers likewise. So
+  `cancel $h` reaches everything `$h` started
+  ([[invariants/a-worker-ends-with-its-children|a-worker-ends-with-its-children]]).
 - **The tree is the runs' dynamic extent.** `Shell::dispatch` nests each entry
   under the frame the run door displaces, not beside it under the root, so a
   nested run observes what encloses it — its outer run's interrupt, and its
@@ -184,8 +199,10 @@ signal context. The two are different kinds of proposition.
 - **Sharing, not shadowing.** A nested run nests under the frame the
   interrupt strikes, so a Ctrl-C mid-nest unwinds the whole nest, as a POSIX
   shell's does.
-- **A worker hears only the root**: `Terminated` reaches it, an
-  interrupt, striking a run's frame, cannot.
+- **A loose worker in a run hears the root; a worker inside a worker hears
+  its parent; a call child hears the call.** `Terminated` reaches every one;
+  an interrupt or a wall, striking a run's frame, reaches the run's call
+  children and no session worker.
 - **A forked session** (`Shell::bequeath` and `Shell::child_of` — exarch's sub-agents) hears no
   signal at all, and its host cancels it through a clonable handle on its
   durable root (`Shell::cancel_handle`)
@@ -252,18 +269,22 @@ the contract is *cooperative*.
 The **owner's node** is the base of a machine's tree — a run's, a worker's, a
 stage's — and is run-invariant, so it lives on `Mooring::home`, a `ScopeNode`. It is what
 *writes* aim at: the key a terminal tenant heard, a stage's group membership,
-a lease and a `cancel`. The **current scope** is a descendant swapped by
+and a `cancel`. The **current scope** is a descendant swapped by
 frames; it lives on `Shell::scope`, a `Scope`, which has no write, and is what *reads* consult: `poll`, every
 sliced wait, a child's attribution, the collector's loop. At a base the two
 coincide; inside a cleanup the scope is a shield under the node. A write never
 aims at the current scope. A shield is minted as a `Scope` alone, so no
 `ScopeNode` of it exists and nothing can write it.
 
-A stop at a base is consumed iff it names that owner's node: a worker turns a
-stop naming its own node into the handle's `WorkerStopped` error; a collector
-forgives every stop naming one of its stages' nodes; every other node is the
-host's, and a stop naming one reaches the top uninterpreted, read as
-`Ending::Stopped`.
+A collector consumes a stop iff it names one of its stages' nodes, forgiving
+it. A worker consumes every `Cancelled` or `TimedOut` stop whose owner is a
+node of the session other than its root — its own, an ancestor worker's, the
+call it is a child of — into the handle's `WorkerStopped` error, so a cancel
+made inside the session is the awaiter's failure, never a foreign stop that
+ends its run (`convert_own_stop`). The root's causes (`Terminated`,
+`Aborted`), `Interrupted` and an unnamed stop pass every base and reach the
+top uninterpreted, read as `Ending::Stopped`
+([[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]).
 
 ### The shield
 
@@ -353,9 +374,9 @@ and hints:
     Status         = Raised(i32) | WorkerStopped(WorkerStop) | Process(CommandFailure)
     CommandFailure = ExitCode(i32) | Signal(Signal) | Spawn(SpawnFailure)
 
-`WorkerStopped` is the one stop that becomes an error: a worker's own boundary
-converts a stop naming its node, and `await`/`poll` report it as the awaiter's
-failure. Each fact owns its code (`CancelCause::code`, `SpawnFailure::code`,
+`WorkerStopped` is the one stop that becomes an error: a worker's boundary
+converts a `Cancelled` or `TimedOut` stop owned inside the session, and
+`await`/`poll` report it as the awaiter's failure. Each fact owns its code (`CancelCause::code`, `SpawnFailure::code`,
 `CommandFailure::code`, `Signal::status`/`Signal::of_status` for `128 + n`);
 a signal handler's `_exit` reads `CancelCause::code` directly:
 
@@ -497,7 +518,7 @@ child gets them back in `reset_child_signals`:
   the tty to the pgid the terminal is lent to; the anchor reports it and the
   pipeline's loan hears it as the key, so teardown does not re-send it.
   Raised while idle, it strikes only the settled run's dead scope, so the
-  next run never sees it — and a worker, off every run's chain, is
+  next run never sees it — and a session worker, off every run's chain, is
   spared outright.
 - **SIGQUIT → `sigquit_handler`**, the louder "reap everything" gesture
   ([[decisions/260629_agent-binding-reaping|agent-binding-reaping]] keeps it as

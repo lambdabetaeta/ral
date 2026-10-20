@@ -1,20 +1,17 @@
-# Test: what a spawned block writes stays in its handle's record, and a
-# spawned block runs in the dynamic context of its spawner
+# Test: `await` replays what a spawned block wrote, as if the block had run
+# where it is awaited, and a spawned block runs in the dynamic context of
+# its spawner
 
-let text = { |bytes| to-bytes $bytes | from-string }
-
-# await does not replay the block's bytes: they sit in the record until read
+# await replays the block's bytes before the next statement
 let h1 = spawn { echo from-child }
-let r1 = await $h1
+await $h1
 echo marker-after
-# Expected: marker-after only
+# Expected: from-child, then marker-after
 
-# Reading twice from a repeated await gives the same bytes both times
+# A repeated await replays the same bytes both times
 let h2 = spawn { echo just-once }
-let again1 = await $h2
-let again2 = await $h2
-echo !{text $again1[stdout]}
-echo !{text $again2[stdout]}
+await $h2
+await $h2
 # Expected: just-once twice
 
 # Spawns nobody awaits leak nothing to the caller's stdout
@@ -23,30 +20,28 @@ let lost2 = spawn { echo bravo }
 sleep 0.1
 echo only-this
 
-# The block's stderr lives in the record too
+# The block's stderr replays to the awaiter's stderr, here a redirect: none
+# of it reaches stdout
 let h3 = spawn { warn 'diag' }
-let r3 = await $h3
-echo !{text $r3[stderr]}
+await $h3 2> /dev/null
+echo after-diag
 
-# A spawn forwards its body's route: a byte-routed body's payload is its
-# stdout, a value-routed body's is its return
+# A spawned command awaited where a value is wanted is captured, as the bind
+# rule decodes it; a value block's value is returned
 let h4 = spawn { echo hi }
-let r4 = await $h4
-echo "[!{bytes-to-string $r4[stdout]}]"
+echo "[!{await $h4}]"
 let h5 = spawn { return 5 }
-let r5 = await $h5
-echo "$r5[value] [!{bytes-to-string $r5[stdout]}]"
+echo "$[!{await $h5} + 1]"
 
 # A pipeline stage can close over a handle from outside and await it in place
 let h6 = spawn { return 7 }
 let r6 = echo x | !{ await $h6 }
-echo $r6[value]
+echo $r6
 
 # Handlers installed by `within` reach spawned and parallel blocks ...
 within [handlers: [mycmd: { |args| echo "handled" }]] {
     let h7 = spawn { mycmd }
-    let r7 = await $h7
-    echo !{text $r7[stdout]}
+    await $h7
     let res = par { |x| let r = mycmd $x; return $r } [a, b] 0
     echo ...$res
 }
@@ -55,8 +50,7 @@ within [handlers: [mycmd: { |args| echo "handled" }]] {
 let target = temp-dir
 within [dir: $target] {
     let h8 = spawn { cwd }
-    let r8 = await $h8
-    echo $[$r8[value] == $target]
+    echo $[!{await $h8} == $target]
 }
 rm -rf $target
 
@@ -64,8 +58,7 @@ rm -rf $target
 let h9 = spawn {
     within [handlers: [localcmd: { |args| echo "child-handler" }]] { localcmd }
 }
-let r9 = await $h9
-echo !{text $r9[stdout]}
+await $h9
 try { localcmd } { |_| echo "parent: no handler" }
 
 echo 'spawn io tests done'

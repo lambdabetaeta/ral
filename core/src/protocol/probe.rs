@@ -10,9 +10,10 @@ use std::path::PathBuf;
 
 use crate::capability::GrantStack;
 use crate::first_order::datum::{Datum, tag, untag};
-use crate::first_order::{Bytes, FOValue};
-use crate::record;
-use crate::types::{HandleState, LeaseClass};
+use crate::first_order::{Bytes, FOValue, Finite};
+use crate::ty::{Ty, Typed, closed_record};
+use crate::types::{Done, HandleState, Owner, Value};
+use crate::{record, variant};
 
 /// One read of session state: the payload of `Frame::Probe`.
 ///
@@ -42,29 +43,72 @@ pub enum Probe {
     WorkerCount,
 }
 
-/// One row of the worker table.
+/// Where a listed worker is: running, or how it ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkerState {
+    Running,
+    Done(Done),
+}
+
+variant!(typed WorkerState {
+    Running: "running",
+    Done(Done): "done",
+});
+
+/// One row of the worker table: data, never a handle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerRow {
     pub id: u64,
-    pub cmd: String,
-    pub class: LeaseClass,
-    pub running: bool,
-    pub up_secs: u64,
-    pub idle_secs: u64,
+    pub title: String,
+    pub owner: Owner,
+    pub state: WorkerState,
+    /// Unix seconds.
+    pub started: i64,
+    /// Seconds, so far or in total.
+    pub elapsed: Finite,
+    /// Unix seconds.
+    pub settled: Option<i64>,
     /// Ral calls until a settled row's retention expires; `None` while it
-    /// runs, or with no retention armed.
+    /// runs, or with no retention armed.  A host figure: the probe's only.
     pub retention_left: Option<u64>,
 }
 
 record!(WorkerRow {
     id: "id",
-    cmd: "cmd",
-    class: "class",
-    running: "running",
-    up_secs: "up-secs",
-    idle_secs: "idle-secs",
+    title: "title",
+    owner: "owner",
+    state: "state",
+    started: "started",
+    elapsed: "elapsed",
+    settled: "settled",
     retention_left: "retention-left",
 });
+
+/// The ral record [`WorkerRow::ral_value`] builds, not the probe's encoding.
+impl Typed for WorkerRow {
+    fn ty() -> Ty {
+        closed_record(&[
+            ("id", u64::ty()),
+            ("title", String::ty()),
+            ("owner", Owner::ty()),
+            ("state", WorkerState::ty()),
+            ("started", i64::ty()),
+            ("elapsed", Finite::ty()),
+            ("settled", Option::<i64>::ty()),
+        ])
+    }
+}
+
+impl WorkerRow {
+    /// The row as ral reads it: every field but the host's `retention_left`.
+    pub fn ral_value(&self) -> Value {
+        let FOValue::Map { mut entries } = self.clone().encode() else {
+            unreachable!("a record encodes as a map");
+        };
+        entries.retain(|(k, _)| k != "retention-left");
+        Value::from(FOValue::Map { entries })
+    }
+}
 
 /// One binding in scope, rendered.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,12 +131,12 @@ record!(BindingRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandleRow {
     pub state: HandleState,
-    pub cmd: String,
+    pub title: String,
 }
 
 record!(HandleRow {
     state: "state",
-    cmd: "cmd",
+    title: "title",
 });
 
 impl Datum for HandleState {
@@ -186,7 +230,7 @@ mod tests {
             entries: vec![("id".into(), FOValue::Int { value: 1 })],
         })
         .expect_err("a row with only an id");
-        assert!(why.contains("`cmd"), "{why}");
+        assert!(why.contains("`title"), "{why}");
     }
 
     /// A grant stack crosses a probe layer for layer, exec keys and all.
@@ -214,7 +258,7 @@ mod tests {
             preview: "1".into(),
             handle: Some(HandleRow {
                 state: HandleState::Cancelled,
-                cmd: "block".into(),
+                title: "block".into(),
             }),
         };
         assert_eq!(BindingRow::decode(&row.clone().encode()), Ok(row));

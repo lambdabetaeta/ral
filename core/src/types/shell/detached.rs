@@ -105,7 +105,6 @@ impl Drop for Reservation<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::LocalState;
     use std::sync::Arc;
 
     #[test]
@@ -128,10 +127,9 @@ mod tests {
             births: AtomicU64::new(0),
         });
         policy.admit().expect("first admission").commit();
-        drop(LocalState {
-            detach: Some(policy.clone()),
-            ..LocalState::default()
-        });
+        let mut shell = crate::test_helper::core_shell();
+        shell.local.detach = Some(policy.clone());
+        drop(shell);
         policy.admit().expect("second admission").commit();
         assert_eq!(policy.admit().map(drop), Err(2));
     }

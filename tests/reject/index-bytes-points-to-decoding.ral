@@ -1,5 +1,5 @@
 # codes: T0062
 # contains: decode bytes first: `bytes-to-string $b`
 let h = spawn { printf hi }
-let b = !{await $h}[stdout]
+let b = case !{poll $h} [`settled: { |s| return $s[stdout] }, `pending: { |p| return $p[stdout] }]
 return $b[0]

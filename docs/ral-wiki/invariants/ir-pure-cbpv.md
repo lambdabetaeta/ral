@@ -2,7 +2,7 @@
 
 The intermediate representation is structurally pure
 [[design/cbpv|call-by-push-value]]: values, computations, force and thunk, and
-the dedicated nodes for the five [[design/control-operators|control operators]].
+the dedicated nodes for the seven [[design/control-operators|control operators]].
 **A surface convenience whose unfolding is purely syntactic does not survive
 into the IR** — it unfolds at elaboration into the existing primitives:
 

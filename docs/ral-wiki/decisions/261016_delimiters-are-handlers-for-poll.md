@@ -7,6 +7,21 @@ anchors: [Escape::Stopped, Break::stopped, Break::of_child, final_poll, ThreadEn
 
 # Delimiters are handlers for `poll`
 
+> Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]:
+> a worker's base consumes every `Cancelled` or `TimedOut` stop whose owner
+> is not the session root, not only one naming its own node, so "consumed iff
+> it names that owner's node" (the Decision's owners bullet, law 9) no longer
+> holds for workers; root causes and `Interrupted` still pass. In the
+> construct table, `await h` and `race` behave as the block run here: they
+> replay its bytes, then end as it ended, so the row's re-raises stand, "own"
+> in its stop column now means any such in-session stop, and `race` drains
+> its losers before it returns. The `par` row is replaced: `par` and `all` are builtins that own their children,
+> and on a failure, an `exit`, a stop or a panic they cancel and drain every
+> sibling before re-raising. "`par` stays prelude code" is retired, and with
+> it the rejection of `par` as a Rust builtin and the consequence that `par`
+> no longer cancels its siblings on Ctrl-C or a wall: the nursery this page
+> deferred is the call-owned birth path.
+
 **A stop is an escape with an owner, not a catchable error.** A computation
 ends in `return V` or `halt σ`, and a signal σ has two sorts, told apart by
 who may consume it: an *error* is unlabelled and the nearest `try` takes it;

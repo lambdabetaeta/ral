@@ -6,12 +6,16 @@ covers_paths: [core/src/types/audit/observation.rs, exarch/src/tui/group.rs, cor
 
 # Map: exarch / io surface
 
-The transcript calls shell workers **errands**: `errand #N started · description`
-and `errand #N finished (exit S) · description`, with failure reasons preserved.
-Birth and completion share the registry ID; descriptions come from existing
-call-site labels or explicit `watch`/`service` descriptions. Saved completion
-records without an ID remain readable and omit it. `spawn` and `defer` retain
-their existing signatures.
+The transcript calls shell workers **errands**: `errand #7 started · building`
+at birth (`card/observation.rs`) and
+`errand #7 (building) finished after 3 mins 12 secs (exit 101): build failed`
+at completion (`card/done.rs`). Birth and completion share the worker's id
+and title, the title exarch's policy requires of every `spawn`; the run time
+is read off the worker's own clock, and the outcome is its real ending — a
+status with the error's message, an `exit`, a stop's cause, or a panic. The
+model's wake-up notice (`surface_notice`, `bus/post.rs`) is that completion
+line followed by a sentence naming the one call that gets the result back:
+`` `await !{worker 7}` replays its output and returns its value; `workers` lists every worker.``
 
 
 Every redirect read (`<`), every redirect write (`>` family), every external
@@ -152,7 +156,7 @@ what: `read    [path]
       `command [argv:[prog, …args], status, origin:`external|`detached, stdout, stderr, error]   # error `some or `none
       `grep    [scope, pattern]                        # emitted by the grep builtin
       `check   [resource:`exec|`fs|`deputy, decision:`denied|`flagged, fields]   # decision is the resource's own
-      `worker  [id, cmd, class:`worker|`durable]
+      `worker  [id, title]
       `act     [verb, subject, payload, refused]       # authored host-side by the desk
 ```
 

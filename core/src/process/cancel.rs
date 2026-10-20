@@ -249,11 +249,11 @@ impl WorkerStop {
         }
     }
 
-    /// `worker was cancelled` (143), `worker's lease expired` (124).
+    /// `worker was cancelled` (143), `worker timed out` (124).
     pub fn message(self) -> &'static str {
         match self {
             Self::Cancelled => "worker was cancelled",
-            Self::TimedOut => "worker's lease expired",
+            Self::TimedOut => "worker timed out",
         }
     }
 }
@@ -439,7 +439,7 @@ impl ScopeNode {
 /// descends from one.  Its own node is never handed out, so it is never a
 /// run's home.
 ///
-/// Workers (`spawn`, `watch`, `par`) hang under it beside the anchor a run's
+/// A loose worker born in a run hangs under it, beside the anchor a run's
 /// frame nests under: a foreground cancel never reaches one; a cancel on the
 /// root, or on the worker's own node, does.
 #[derive(Debug, Clone)]

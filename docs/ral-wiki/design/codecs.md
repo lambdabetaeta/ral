@@ -33,7 +33,7 @@ call runs (`` `from-json` takes no argument — it reads the byte channel ``).
 The error's hint names the fix: apply the matching encoder, then send its bytes
 through the pipeline so the decoder has a channel to read —
 `to-string $s | from-json` for JSON in a `String`, `to-bytes $b | from-string`
-for a `Bytes` value (for example `$r[stdout]` from `await`). The decoders:
+for a `Bytes` value (for example `$s[stdout]` from a `poll` result). The decoders:
 
 - `from-bytes` → `Bytes`; the bytes pass through with no decode;
 - `from-string` → `String`, **strict** UTF-8;

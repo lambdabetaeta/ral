@@ -205,7 +205,7 @@ fn a_non_zero_exit_carries_the_audit_of_what_already_stands() {
     );
 }
 
-/// A worker `defer`red before the wall outlives it — moored to the session
+/// A worker spawned before the wall outlives it — moored to the session
 /// root, out of the foreground cancel's reach — while the handle binding
 /// that named it is gone with the unwind.  The timeout stderr must say so,
 /// naming the work by joining this dispatch's own trail births against the
@@ -220,7 +220,7 @@ fn the_wall_names_the_workers_that_survived_it() {
 
     let result = session
         .ral(
-            "let deferred = defer { /bin/sleep 20 }\n/bin/sleep 20",
+            "let sleeper = spawn \"sleeper\" { /bin/sleep 20 }\n/bin/sleep 20",
             2,
             &emit,
         )
@@ -231,8 +231,8 @@ fn the_wall_names_the_workers_that_survived_it() {
         "the wall exits 124; content was: {result}"
     );
     assert!(
-        result.contains("`block at tool call, line 1`"),
-        "the surviving worker is named by the line that deferred it; content was: {result}"
+        result.contains("(sleeper)"),
+        "the surviving worker is named by its title; content was: {result}"
     );
 }
 
@@ -244,10 +244,12 @@ fn a_call_that_returns_says_nothing_about_its_workers() {
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
-    let result = session.ral("let ok = defer { return 1 }", 10, &emit).text;
+    let result = session
+        .ral("let ok = spawn \"ok\" { return 1 }", 10, &emit)
+        .text;
 
     assert!(
-        !result.contains("`block at tool call, line 1`"),
+        !result.contains("(ok)"),
         "a call that returned holds its own handle; content was: {result}"
     );
 }
@@ -264,7 +266,7 @@ fn a_non_zero_exit_with_a_live_birth_names_the_orphan() {
 
     let result = session
         .ral(
-            "let deferred = defer { /bin/sleep 20 }\n/bin/sh -c 'exit 3'",
+            "let sleeper = spawn \"sleeper\" { /bin/sleep 20 }\n/bin/sh -c 'exit 3'",
             10,
             &emit,
         )
@@ -275,7 +277,7 @@ fn a_non_zero_exit_with_a_live_birth_names_the_orphan() {
         "the command's own exit is the tool exit; content was: {result}"
     );
     assert!(
-        result.contains("`block at tool call, line 1`"),
+        result.contains("(sleeper)"),
         "a non-zero exit leaves a live birth standing exactly as the wall does; content was: {result}"
     );
 }

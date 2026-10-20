@@ -4,6 +4,16 @@ status: active
 
 # A session is a ledger of residents
 
+> Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]: the
+> durable grade is gone from the order. `service` is deleted and worker leases
+> are retired, so a worker's lifetime is its owner's: a `spawn`ed worker
+> leaves grade 2 by completion, `cancel`, or the session's end, never by a
+> lease reap. `service-handle` is replaced by `worker <id>`, which re-acquires
+> the handle of every worker by its id. The worker chapter's model-facing
+> listing returns as `workers`, data only — ids, titles, owners, states and
+> times, never a handle — so it crosses the engine protocol, and `worker <id>`
+> is the door from a row back to its handle.
+
 > Amended, 2026-07-06 — decided, not yet built: the worker chapter's
 > model-facing listing (`workers`) is retired, split by lease class instead.
 > The ledger's shape is unaffected: the worker chapter still

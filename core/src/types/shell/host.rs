@@ -8,13 +8,15 @@ use super::Shell;
 use super::TerminalAccess;
 use super::bindings::BindingLease;
 use super::detached::DetachPolicy;
+use crate::fact::unix_secs;
 use crate::io::Sink;
-use crate::process::{DurableRoot, ScopeNode, TerminalLease};
+use crate::process::{CancelCause, DurableRoot, ScopeNode, TerminalLease};
+use crate::protocol::probe::{WorkerRow, WorkerState};
 use crate::source::SourceDb;
 use crate::terminal::TerminalState;
 use crate::ty::Fixings;
 use crate::types::ExitHints;
-use crate::types::{BuiltinEntry, ReapNotice, WorkerEntry, WorkerId};
+use crate::types::{BuiltinEntry, Done, HandleState, ReapNotice, WorkerEntry, WorkerId};
 use std::sync::Arc;
 
 impl Shell {
@@ -89,12 +91,31 @@ impl Shell {
         self.session.runtime.builtins.get(name)
     }
 
-    /// Every worker (`spawn`, `watch`, `service`) here, settled or running.
-    /// There is no by-id control plane: the listing hands back the handle
-    /// itself, so a rediscovered worker resumes `poll`/`await`/`race`/`cancel`
-    /// as usual.  Enumeration is not observation, so it renews no lease.
+    /// Every worker here, settled or running; a pure read.
     pub fn workers(&self) -> Vec<WorkerEntry> {
         self.local.workers.snapshot()
+    }
+
+    /// One entry as data: the row `workers` and the probe both answer in.
+    /// Reads the state without claiming it.
+    pub(crate) fn worker_row(&self, entry: &WorkerEntry) -> WorkerRow {
+        let h = &entry.handle;
+        let state = match h.state() {
+            HandleState::Cancelled => WorkerState::Done(Done::Stopped(CancelCause::Cancelled)),
+            _ => h.try_settle().map_or(WorkerState::Running, |c| {
+                WorkerState::Done(Done::of(&c.end, self))
+            }),
+        };
+        WorkerRow {
+            id: h.id.0,
+            title: h.title.clone(),
+            owner: entry.owner,
+            state,
+            started: unix_secs(h.started.wall),
+            elapsed: h.elapsed().into(),
+            settled: h.settled_at().map(unix_secs),
+            retention_left: self.worker_retention_left(entry),
+        }
     }
 
     /// Ral calls until a settled worker's retention expires; `None` while it
@@ -103,8 +124,8 @@ impl Shell {
         self.local.workers.retention_left(entry)
     }
 
-    /// Re-acquire one entry by an id the host learned elsewhere — a pure read
-    /// like [`Self::workers`], renewing no lease.
+    /// Re-acquire one entry by an id learned elsewhere; a pure read like
+    /// [`Self::workers`].
     pub fn worker_by_id(&self, id: WorkerId) -> Option<WorkerEntry> {
         self.local.workers.lookup(id)
     }
@@ -124,8 +145,8 @@ impl Shell {
         self.local.workers.count()
     }
 
-    /// One notice per entry removed by policy — idle bound, backstop, retention
-    /// expiry — never one an eliminator observed away first.
+    /// One notice per entry removed by policy, retention expiry, never one an
+    /// eliminator observed away first.
     pub(crate) fn take_worker_reap_notices(&self) -> Vec<ReapNotice> {
         self.local.workers.take_reap_notices()
     }

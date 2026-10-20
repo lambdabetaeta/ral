@@ -202,8 +202,8 @@ fn a_closed_root_is_not_resumable() {
     assert_eq!(AgentLog::live_roots(&sessions).unwrap(), vec![]);
 }
 
-/// `/clear` cancels every registered worker, the durable class included,
-/// and the rebuilt shell starts empty.  A worker settling *after* the
+/// `/clear` cancels every registered worker, and the rebuilt shell starts
+/// empty.  A worker settling *after* the
 /// clear still flushes its batch to the inbox, stamped with its birth
 /// epoch, and the inbox's own pop is the edge that rejects it.  The
 /// workers stay deaf until `CLEAR_RELEASE` so they settle past the inbox
@@ -219,20 +219,16 @@ fn clear_cancels_registered_workers_and_drops_their_late_surface() {
     // below to mean anything.
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
-    let _ = session.ral("spawn { test-clear-block-until-released }", 30, &emit);
-    let _ = session.ral(
-        r#"service "clear-test" { test-clear-block-until-released }"#,
-        30,
-        &emit,
-    );
+    for _ in 0..2 {
+        let _ = session.ral(
+            "spawn \"held\" { test-clear-block-until-released }",
+            30,
+            &emit,
+        );
+    }
 
     let entries = workers(&session);
-    assert_eq!(entries.len(), 2, "one ordinary worker, one service");
-    let durable = entries
-        .iter()
-        .find(|e| e.class == ral_core::types::LeaseClass::Durable)
-        .expect("the service must register under the durable class");
-    assert_eq!(durable.cmd, "clear-test");
+    assert_eq!(entries.len(), 2, "two plain workers");
     for entry in &entries {
         assert!(
             !entry.handle.cancel.is_cancelled(),
@@ -245,8 +241,8 @@ fn clear_cancels_registered_workers_and_drops_their_late_surface() {
     for entry in &entries {
         assert!(
             entry.handle.cancel.is_cancelled(),
-            "/clear must cancel every registered worker, the durable class included ({})",
-            entry.cmd
+            "/clear must cancel every registered worker ({})",
+            entry.handle.title
         );
     }
     assert_eq!(
@@ -334,7 +330,7 @@ fn agent_drop_cancels_its_own_unclosed_workers() {
 
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::with_mailbox(tx, avatar.agent.id, avatar.inbox.mailbox());
-    let _ = avatar.ral("spawn { test-clear-block-forever }", 30, &emit);
+    let _ = avatar.ral("spawn \"blocker\" { test-clear-block-forever }", 30, &emit);
 
     let entries = workers(&avatar);
     assert_eq!(entries.len(), 1, "the agent's own spawn must register");

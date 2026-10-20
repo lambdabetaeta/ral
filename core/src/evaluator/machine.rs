@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use crate::builtins::concurrency::{self, legible_title};
 use crate::guard::decode_capability_map;
 use crate::guard::freeze::FreezeCtx;
 use crate::io::{self, Sink};
@@ -698,6 +699,28 @@ impl Machine {
                 let slot = self.reserve(shell)?;
                 slot.push(Frame::Audit(shell.local.audit.open(CapturePolicy::Bytes)));
                 Self::force(body, mooring, shell)?
+            }
+
+            CompKind::Spawn { title, body } => {
+                shell.stamp_call_site(comp.span);
+                let title = title
+                    .as_ref()
+                    .map(|t| legible_title(&form(&t.item, &env, &shell.sig)?, "spawn"))
+                    .transpose()?;
+                let body = form(body, &env, &shell.sig)?;
+                Focus::Return(Terminal::Value(concurrency::spawn_form(
+                    title, &body, mooring, shell,
+                )?))
+            }
+
+            CompKind::All { tasks } => {
+                let formed = tasks
+                    .iter()
+                    .map(|(k, v)| Ok((k.to_string(), form(&v.item, &env, &shell.sig)?)))
+                    .collect::<Settled<Vec<_>>>()?;
+                Focus::Return(Terminal::Value(concurrency::all_form(
+                    formed, mooring, shell,
+                )?))
             }
         })
     }

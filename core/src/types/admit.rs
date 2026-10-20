@@ -253,7 +253,7 @@ impl Site {
     /// As [`Self::admit`].
     pub fn admit_handled(&self, value: &Value, fixings: &Fixings) -> Result<(), Mismatch> {
         match self.nodes[self.root].shape {
-            Shape::Handle(inner) => self.walk(inner, value, fixings),
+            Shape::Handle(_, inner) => self.walk(inner, value, fixings),
             _ => Ok(()),
         }
     }
@@ -362,7 +362,7 @@ impl Walk<'_> {
             | (Shape::Float, Value::Float(_))
             | (Shape::String, Value::String(_))
             | (Shape::Bytes, Value::Bytes(_))
-            | (Shape::Handle(_), Value::Handle(_))
+            | (Shape::Handle(..), Value::Handle(_))
             | (Shape::Thunk(_), Value::Thunk(_) | Value::Native { .. }) => Ok(()),
             (Shape::List(elem), Value::List(items)) => {
                 for (index, item) in items.iter().enumerate() {
@@ -531,7 +531,7 @@ fn expected(shape: &Shape) -> String {
         Shape::Record(_) => "a record".into(),
         Shape::Variant(_) => "a variant".into(),
         Shape::Thunk(_) => "a block".into(),
-        Shape::Handle(_) => "a handle".into(),
+        Shape::Handle(..) => "a handle".into(),
         Shape::Free { kind, .. } => kind_phrase(*kind),
         Shape::Return(..) | Shape::Fun(..) | Shape::FreeComp => {
             unreachable!("a value position is never a computation")

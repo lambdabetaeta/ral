@@ -68,7 +68,10 @@ fail e ↦ pass; stop ν c ↦ if ν = me then R′ c else pass; poll k ↦ if j
 then stop ν j else k () }`, every other operation forwarded. Its return clause
 opens with a *closing poll* (`final_poll`): the node is read once more after
 the body settled, so a stop that landed after the last poll is not lost. A
-worker consumes a stop naming its own node into the handle's error; a stage
+worker's `stop` clause is invariant I6
+([[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]):
+it converts a `Cancelled` or `TimedOut` stop owned by any node but the session
+root into the handle's error, and a root cause or an interrupt passes; a stage
 forwards everything, and its collector consumes every stop naming that
 stage's node; the top names no node of its own, so `exit` and the host's
 stops are **top-level effects** no frame of the program interprets, read off

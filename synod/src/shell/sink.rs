@@ -722,8 +722,7 @@ mod tests {
         let observation = Record::Display(Display::Observation {
             value: observation_wire(Observed::Worker(Worker {
                 id: ral_core::types::WorkerId(1),
-                cmd: "watch build".to_string(),
-                class: ral_core::types::LeaseClass::Worker,
+                title: "watch build".to_string(),
             })),
         });
         for record in [context, observation] {
@@ -741,7 +740,8 @@ mod tests {
         assert!(
             project(&Record::Display(Display::Done {
                 id: None,
-                cmd: "block at turn 1, line 1".into(),
+                title: "building".into(),
+                elapsed_ms: None,
                 outcome: DoneOutcome::Ok,
             }))
             .is_none()

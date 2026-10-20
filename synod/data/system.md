@@ -21,7 +21,7 @@ When a job is really many independent documents — a hundred letters to fill, a
 
 Most steps are routine. Decide quickly and let the result correct you; a wrong guess costs one cheap turn.
 
-Each turn gets 60 seconds of runtime by default. Conversions, OCR, and anything driving LibreOffice need more: raise `timeout_secs` rather than cutting the work in half. `defer` a long conversion and spend the wait preparing the next step; never submit a script that only waits.
+Each turn gets 60 seconds of runtime by default. Conversions, OCR, and anything driving LibreOffice need more: raise `timeout_secs` rather than cutting the work in half. `spawn` a long conversion and spend the wait preparing the next step; never submit a script that only waits.
 
 Ask the user when the answer lives in their head and nowhere else — which spelling of a name is right, what the letter should say, whether last year's file still counts. Do not ask what the documents can tell you.
 

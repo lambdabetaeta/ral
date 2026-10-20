@@ -23,7 +23,7 @@ The prelude holds the *library-level* surface: higher-order list and string
 combinators (`for`, `reduce`, `take-while`, `drop-while`, `take`, `drop`,
 `enumerate`, `flat-map`, `zip`, `cross`, `nub`, `group-by`, `median-by`,
 `words`, `from-words`, `indent`, `repeat`, `pad-left`, `pad-right`,
-`extension`, `max`, `min`, `maximum`, `minimum`, `map-lines`, `defer`, `commands` (an `audit`
+`extension`, `max`, `min`, `maximum`, `minimum`, `map-lines`, `commands` (an `audit`
 report's `` `command `` facts, in trail order), `succeeded` (an `audit`
 report's outcome as a `Bool`), …) layered over the directly-registered Rust
 builtins (`each`, `map`, `filter`, `fold`, …). These are ordinary
@@ -35,7 +35,7 @@ ordinary lambdas such as `{ |a b| $[$a == $b] }`.
 The branching and exception forms `if`, `case`, and `try` are *not* prelude
 bindings — they are IR primitives (`CompKind::If` / `Case` / `Try`, see
 [[map/core/ir|ir]]) introduced by [[map/core/elaboration|elaboration]], alongside
-the five reserved [[design/control-operators|control operators]]. The prelude
+the seven reserved [[design/control-operators|control operators]]. The prelude
 adds the iteration and collection vocabulary on top of that primitive core.
 
 `docs/SPEC.md` §14 lists the prelude exports; a command name's head is classified once

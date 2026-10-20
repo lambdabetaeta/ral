@@ -17,9 +17,9 @@ pub use observation::{
 
 use crate::first_order::Bytes;
 use crate::first_order::datum::Datum;
+use crate::record;
 use crate::ty::{Ty, Typed};
-use crate::{label, record};
-use strum::{IntoStaticStr, VariantArray};
+use std::time::SystemTime;
 
 /// Stable identifier for a registered worker, minted from a process-global
 /// counter rather than a per-registry one, so ids never collide across
@@ -45,22 +45,15 @@ impl Typed for WorkerId {
     }
 }
 
-/// Which reaping policy governs a worker, declared at birth by the spawning
-/// door.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, IntoStaticStr, VariantArray)]
-#[strum(serialize_all = "kebab-case")]
-pub enum LeaseClass {
-    /// Governed by the frame's `WorkerLease` when one is supplied.
-    Worker,
-    /// A `service`-born worker: the lease chain is never armed for it, so it
-    /// dies only by cancel, `/clear`, or process exit.
-    Durable,
+/// Seconds since the epoch, or 0 for a pre-epoch instant: how a record
+/// carries a wall-clock time.
+pub(crate) fn unix_secs(t: SystemTime) -> i64 {
+    t.duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
-label!(typed LeaseClass);
-
-/// What a worker wrote while it ran: `poll`'s `` `pending `` payload, and the
-/// streams every settled record carries.
+/// What a worker wrote while it ran: the streams both of `poll`'s records
+/// carry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Io {
     pub stdout: Bytes,

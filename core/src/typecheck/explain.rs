@@ -332,7 +332,7 @@ fn describe(ty: &Ty) -> String {
         Ty::Record(_) => "a record",
         Ty::Variant(_) => "a tagged value",
         Ty::Thunk(_) => "a block",
-        Ty::Handle(_) => "a handle",
+        Ty::Handle(..) => "a handle",
         Ty::Var(_) => "a value of unknown type",
     }
     .into()
@@ -418,7 +418,7 @@ fn kind_hint(found: &KindFound, required: Kind, reason: Option<&Reason>) -> Opti
         (_, Ty::Thunk(_)) if required == Kind::DATA => {
             Some("a block has no equality and no encoding: use what it computes, `!$f`")
         }
-        (_, Ty::Handle(_)) if required == Kind::DATA => {
+        (_, Ty::Handle(..)) if required == Kind::DATA => {
             Some("a handle has no equality and no encoding: use what `await` gives")
         }
         _ => None,
@@ -1013,10 +1013,13 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
                 .to_string(),
         ),
         Reason::ScopeBody => Some(
-            "`within`, `grant`, `try`, `guard` and `audit` each run a block: the body \
-             has to be a block value (something built with `{ ... }`), not data"
+            "`within`, `grant`, `try`, `guard`, `audit` and `spawn` each run a block: the \
+             body has to be a block value (something built with `{ ... }`), not data"
                 .to_string(),
         ),
+        Reason::SpawnTitle => {
+            Some("a spawn's title is a String naming the work to people".to_string())
+        }
         Reason::TryHandler => Some(
             "a `try` handler is given the error the body raised, so it has to be a \
              block of one argument: `try { … } { |e| … }`"
@@ -1207,7 +1210,7 @@ fn index_hint(ty: &Ty, label: Option<&str>) -> Option<String> {
     Some(match ty {
         Ty::String => "text cannot be indexed; use `slice $s 0 80` or `lines $s`".into(),
         Ty::Bytes => "decode bytes first: `bytes-to-string $b`".into(),
-        Ty::Handle(_) => "await the handle first: `await $h`".into(),
+        Ty::Handle(..) => "await the handle first: `await $h`".into(),
         Ty::List(_) => {
             let (lo, hi) = label?.split_once("..")?;
             let (lo, hi) = (lo.parse::<u32>().ok()?, hi.parse::<u32>().ok()?);

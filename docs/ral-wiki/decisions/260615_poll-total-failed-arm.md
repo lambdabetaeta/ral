@@ -4,6 +4,11 @@ status: active
 
 # A finished handle has one settle; the eliminators project it
 
+> Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]: `await` and
+> `race` no longer unwrap a settle record; they behave as the block run here,
+> writing its stdout then its stderr to the awaiter's streams and ending as it
+> ended. `poll` is the one data observation and now carries `elapsed`.
+
 **A finished concurrent block has a single observable *settle* — the bytes it
 wrote plus its outcome, `` <ok: α | err> `` — and every eliminator projects that
 one cached value. `await`/`race` unwrap it to the value (re-raising `err`); `poll`

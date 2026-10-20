@@ -37,6 +37,7 @@ use ral_core::capability::GrantStack;
 use ral_core::carrier::{Transport, WireTransport, dispatch_to_report};
 use ral_core::protocol::channel::Liveness;
 use ral_core::protocol::{Attach, EngineSpec, Program, Report, Root, Run};
+use ral_core::types::TitlePolicy;
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 use vm_manager::{BootArtifact, Hypervisor, Machine, MachineSpec};
 
@@ -224,8 +225,8 @@ fn prove_the_host_can_dial_in(
         caps: GrantStack::root(),
         wall: Some(Duration::from_secs(60)),
         cleanup_grace: Duration::from_secs(5),
-        deferred_lease: None,
         worker_cap: None,
+        worker_title: TitlePolicy::Optional,
         io: RunIo::Capture,
         terminal: RequestedTerminalAccess::Denied,
         stdin: RunStdin::Empty,

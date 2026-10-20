@@ -552,52 +552,60 @@ stderr; add `--pretty` for indented JSON.
 
 ## 9  Concurrency
 
-`spawn` runs a block on another thread and returns a handle:
+`spawn` runs a block on another thread and returns a handle at once. The
+string before the block is its title, which says what the work is:
 
-    let tests = spawn { cargo test -q }
-    let lint  = spawn { cargo clippy -q }
+    let tests = spawn "tests" { cargo test -q }
+    let lint  = spawn "lint" { cargo clippy -q }
 
     # do other work
 
-    let test-result = await $tests
-    let lint-result = await $lint
+    await $tests
+    await $lint
 
-There is no trailing `&`: a POSIX `&` makes a job for `fg`/`bg`, while `spawn`
-makes a worker you `await`, so ral asks you to say which you meant. `await`
-returns a record with `value`, `stdout: Bytes`, and `stderr: Bytes` fields. A
-worker's failure is re-raised at `await`, so put the `await` inside `try` to
-recover.
+`await` behaves as if the block had run on that line: its output appears
+here, its value is returned, and its failure is raised here, so put the
+`await` inside `try` to recover. `let log = await $tests` binds the output, as
+`let log = { cargo test -q }` would. The interactive shell lets you leave the
+title out, `spawn { cargo test -q }`; an agent host requires it. There is no
+trailing `&`: a POSIX `&` makes a job for `fg`/`bg`, while `spawn` makes a
+worker you `await`, so ral asks you to say which you meant.
 
-`defer` is the prelude form for long work whose failure should be data. It
-spawns `audit { … }`, so the awaited `value` is an audit report:
+Handles cache how their block ended: awaiting again replays the same output
+and the same result, without running the block again. `poll` checks without
+blocking or printing: it returns `` `pending `` with the output so far and the
+seconds elapsed, or `` `settled `` with the output, the time it took, and an
+`` `ok `` / `` `err `` outcome. `cancel $tests` stops a worker, and everything
+it started. A `spawn` inside a spawned block belongs to that block, which
+finishes only after it has, its output and failure folded into its own.
 
-    let suite = defer { cargo test -q }
+Every worker has a numeric id beside its title. `workers` lists them, one
+record each with its id, title, owner, state and timing; it is data, not
+handles. When a binding is gone, `worker` takes the id back to the handle:
 
-    # make progress elsewhere
+    workers
+    await !{worker 7}
 
-    let result = await $suite
-    let report = $result[value]
+Fan-out that must leave nothing running is a call rather than a set of
+spawns:
 
-    if !{succeeded $report} { echo passed } else { echo failed }
-
-Handles cache their result and may be awaited again. `poll` checks without
-blocking: it returns `` `pending `` with output so far, or `` `settled `` with
-output and an `` `ok `` / `` `err `` outcome.
-
-The other concurrency tools use the same handles:
-
-    race [$first, $second]   # first result; cancel the rest
-    cancel $handle
     par { |file| convert $file } $files !{nproc}
-    watch build { make -j !{nproc} }
+    all [tests: { cargo test -q }, lint: { cargo clippy -q }]
+    race [$first, $second]
 
-`par` is a bounded parallel `map` and preserves input order. `watch` streams
-labelled output. Spawned blocks inherit immutable values, so there is no shared
-mutable state or data race.
+`par` is a bounded parallel `map` that keeps input order, output included.
+`all` runs several blocks at once and returns a record of their values,
+`[tests: …, lint: …]`. `race` takes the first handle to finish and cancels the
+rest. None leaves anything running when it returns: the first failure cancels
+the others and is raised, and Ctrl-C cancels them all.
 
-Some agent hosts also provide `service` for work lasting the session and
-`detach` for an OS process that may outlive it. They are absent when the host
-cannot provide those semantics; ask `explain` before relying on them.
+`watch build { make -j !{nproc} }` is a spawn that streams labelled output.
+Spawned blocks inherit immutable values, so there is no shared mutable state
+or data race.
+
+Some agent hosts also provide `detach` for an OS process that may outlive the
+session. It is absent when the host cannot provide those semantics; ask
+`explain` before relying on it.
 
 ## 10  Reinterpreting commands
 

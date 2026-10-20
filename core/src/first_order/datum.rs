@@ -3,7 +3,7 @@
 //! A [`Datum`] encodes to an [`FOValue`] and decodes back strictly, naming
 //! whatever arrived ill-shaped; every protocol payload is typed through it.
 
-use crate::first_order::FOValue;
+use crate::first_order::{FOValue, Finite};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -315,6 +315,19 @@ impl Datum for i64 {
 
     fn decode(v: &FOValue) -> Result<Self, String> {
         v.as_int().ok_or_else(|| expected("an Int", v))
+    }
+}
+
+impl Datum for Finite {
+    fn encode(self) -> FOValue {
+        FOValue::Float { value: self }
+    }
+
+    fn decode(v: &FOValue) -> Result<Self, String> {
+        match v {
+            FOValue::Float { value } => Ok(*value),
+            _ => Err(expected("a Float", v)),
+        }
     }
 }
 

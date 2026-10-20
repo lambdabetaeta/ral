@@ -10,8 +10,14 @@
 //! head and tail around a marker, and a spent budget names how many children it
 //! dropped. A bare count is the rendering of last resort, for the floor beneath
 //! the depth limit, where there is no room left to say anything else.
+//!
+//! **Rows.** A list of two or more records sharing one key sequence prints one
+//! record per line, each `label: value` cell padded to its column's widest, so
+//! the records read as a table and still paste back as the same list.  A cell
+//! that would break across lines leaves the list to the ordinary layout.
 
-use crate::types::Value;
+use crate::types::{List, Value};
+use std::borrow::Cow;
 use std::cell::Cell;
 
 /// Tuning knobs for [`pretty_print`].
@@ -65,16 +71,21 @@ fn full(val: &Value, indent: usize, params: &PrintParams, budget: &Cell<usize>) 
         Value::Bytes(b) if indent == 0 && params.quote_bytes => {
             quote_string(&String::from_utf8_lossy(b), params)
         }
-        Value::List(items) if !items.is_empty() => {
-            let parts = budgeted(items.len(), items.iter(), budget, |v| {
-                child(&v, indent, params, budget)
-            });
-            bracketed(&parts, indent, params)
-        }
+        Value::List(items) if !items.is_empty() => rows(items, indent, params, budget)
+            .unwrap_or_else(|| {
+                let (mut parts, more) =
+                    budgeted(items.len(), items.iter(), budget, String::len, |v| {
+                        child(&v, indent, params, budget)
+                    });
+                parts.extend(more);
+                bracketed(&parts, indent, params)
+            }),
         Value::Map(pairs) if !pairs.is_empty() => {
-            let parts = budgeted(pairs.len(), pairs.iter(), budget, |(k, v)| {
-                format!("{k}: {}", child(&v, indent, params, budget))
-            });
+            let (mut parts, more) =
+                budgeted(pairs.len(), pairs.iter(), budget, String::len, |(k, v)| {
+                    format!("{k}: {}", child(&v, indent, params, budget))
+                });
+            parts.extend(more);
             bracketed(&parts, indent, params)
         }
         Value::Variant {
@@ -83,6 +94,60 @@ fn full(val: &Value, indent: usize, params: &PrintParams, budget: &Cell<usize>) 
         } => format!("`{label} {}", full(p, indent, params, budget)),
         other => shallow(other, params),
     }
+}
+
+/// The rows layout (see the module doc): `None` unless `items` are two or more
+/// records with one key sequence, rendered in full at this depth, and every
+/// cell stays on one line.  A refused layout refunds what it charged.
+fn rows(items: &List, indent: usize, params: &PrintParams, budget: &Cell<usize>) -> Option<String> {
+    if items.len() < 2 || indent >= params.max_depth {
+        return None;
+    }
+    let items: Vec<Cow<'_, Value>> = items.iter().collect();
+    let records = items
+        .iter()
+        .map(|v| match &**v {
+            Value::Map(m) if !m.is_empty() => Some(m),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if records.iter().any(|m| !m.keys().eq(records[0].keys())) {
+        return None;
+    }
+    let before = budget.get();
+    let (rows, more) = budgeted(
+        records.len(),
+        records.into_iter(),
+        budget,
+        |cells: &Vec<String>| cells.iter().map(String::len).sum(),
+        |m| {
+            m.iter()
+                .map(|(k, v)| format!("{k}: {}", child(&v, indent + 1, params, budget)))
+                .collect()
+        },
+    );
+    if rows.iter().flatten().any(|cell| cell.contains('\n')) {
+        budget.set(before);
+        return None;
+    }
+    let widths: Vec<usize> = (0..rows[0].len())
+        .map(|j| rows.iter().map(|r| r[j].chars().count()).max().unwrap_or(0))
+        .collect();
+    let mut lines: Vec<String> = rows
+        .iter()
+        .map(|cells| {
+            let (last, init) = cells.split_last().expect("a record has a key");
+            let padded: Vec<String> = init
+                .iter()
+                .zip(&widths)
+                .map(|(cell, &w)| format!("{:<w$}", format!("{cell},"), w = w + 1))
+                .chain([last.clone()])
+                .collect();
+            format!("[{}]", padded.join(" "))
+        })
+        .collect();
+    lines.extend(more);
+    Some(stacked(&lines, indent))
 }
 
 /// A container's child: full one level deeper, or shallow once `max_depth` is
@@ -121,29 +186,30 @@ fn shallow(val: &Value, params: &PrintParams) -> String {
     }
 }
 
-/// Render `count` children, stopping at `…N more` once `budget` is spent — but
-/// never before the first, since a marker alone tells the reader nothing.
-/// Charging a finished part against the budget as it stood *before* rendering
-/// unwinds whatever its own children charged, so every byte is paid for once,
-/// by the outermost container that owns it.
-fn budgeted<T>(
+/// Render `count` children, stopping once `budget` is spent — but never before
+/// the first, since a marker alone tells the reader nothing — and return them
+/// with the `…N more` marker for the rest, if any.  Charging a finished part's
+/// `size` against the budget as it stood *before* rendering unwinds whatever
+/// its own children charged, so every byte is paid for once, by the outermost
+/// container that owns it.
+fn budgeted<T, P>(
     count: usize,
     items: impl Iterator<Item = T>,
     budget: &Cell<usize>,
-    mut render: impl FnMut(T) -> String,
-) -> Vec<String> {
+    size: impl Fn(&P) -> usize,
+    mut render: impl FnMut(T) -> P,
+) -> (Vec<P>, Option<String>) {
     let mut parts = Vec::with_capacity(count);
     for (i, item) in items.enumerate() {
         if i > 0 && budget.get() == 0 {
-            parts.push(format!("…{} more", count - i));
-            break;
+            return (parts, Some(format!("…{} more", count - i)));
         }
         let before = budget.get();
         let part = render(item);
-        budget.set(before.saturating_sub(part.len()));
+        budget.set(before.saturating_sub(size(&part)));
         parts.push(part);
     }
-    parts
+    (parts, None)
 }
 
 fn quote_string(body: &str, params: &PrintParams) -> String {
@@ -196,6 +262,11 @@ fn bracketed(parts: &[String], indent: usize, params: &PrintParams) -> String {
     if inline.chars().count() <= params.max_width && !inline.contains('\n') {
         return inline;
     }
+    stacked(parts, indent)
+}
+
+/// One part per line, a level deeper than the brackets.
+fn stacked(parts: &[String], indent: usize) -> String {
     let pad = "  ".repeat(indent + 1);
     let end_pad = "  ".repeat(indent);
     format!("[\n{pad}{}\n{end_pad}]", parts.join(&format!(",\n{pad}")))
@@ -210,4 +281,54 @@ fn quote_bump_level(body: &str) -> usize {
         .map(|after| after.bytes().take_while(|&b| b == b'#').count() + 1)
         .max()
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(fields: &[(&str, Value)]) -> Value {
+        Value::Map(
+            fields
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), v.clone()))
+                .collect(),
+        )
+    }
+
+    fn print(v: &Value) -> String {
+        pretty_print(v, 0, &REPL_PRINT_PARAMS)
+    }
+
+    #[test]
+    fn uniform_records_print_as_rows() {
+        let row = |id, title: &str| {
+            record(&[
+                ("id", Value::Int(id)),
+                ("title", Value::String(title.into())),
+            ])
+        };
+        assert_eq!(
+            print(&Value::list(vec![
+                row(7, "build"),
+                row(12, "lint the tree")
+            ])),
+            "[\n  [id: 7,  title: 'build'],\n  [id: 12, title: 'lint the tree']\n]"
+        );
+    }
+
+    /// Keys that differ, a lone record, and a cell that breaks a line all
+    /// keep the ordinary layout.
+    #[test]
+    fn mixed_records_print_as_before() {
+        let a = record(&[("a", Value::Int(1))]);
+        let b = record(&[("b", Value::Int(2))]);
+        assert_eq!(print(&Value::list(vec![a.clone(), b])), "[[a: 1], [b: 2]]");
+        assert_eq!(print(&Value::list(vec![a])), "[[a: 1]]");
+        let s = |text: &str| record(&[("s", Value::String(text.into()))]);
+        assert_eq!(
+            print(&Value::list(vec![s("a\nb"), s("c")])),
+            "[\n  [\n    s: 'a\nb'\n  ],\n  [s: 'c']\n]"
+        );
+    }
 }

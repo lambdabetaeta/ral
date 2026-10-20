@@ -5,6 +5,11 @@ superseded_by: decisions/260826_the-evaluator-steps-closures
 
 # A same-thread thunk body runs in the caller's session, not a reconstructed one
 
+> Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]: the
+> spawned workers that keep an owned `Shell` are those of the `spawn` and
+> `all` control operators, `watch`, and the Rust builtin `par`; `par` no
+> longer reaches `spawn_thread` through `spawn`.
+
 **Eliminating a thunk on the same thread — forcing a block or applying a lambda
 — is one step over one threaded store; the runtime must run the body *in* the
 caller's `Shell`, sharing the session by identity, never build a fresh `Shell`

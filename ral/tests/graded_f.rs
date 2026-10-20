@@ -153,9 +153,10 @@ fn a_block_ending_in_a_value_streams_what_it_wrote_before() {
 #[test]
 fn spawn_and_audit_absorb_a_command() {
     assert_eq!(
-        out("let x = spawn { echo host }\nlet r = await $x\nto-json $r[value]"),
-        "null"
+        out("let x = spawn { echo host }\nlet r = await $x\nto-json $r"),
+        r#""host""#
     );
+    assert_eq!(out("let x = spawn { echo host }\nawait $x"), "host");
     let script = "let d = temp-dir\necho ERROR > \"$d/log\"\nlet r = audit { grep -c ERROR \"$d/log\" }\ncase $r[outcome] [`ok: { |v| to-json $v }, `err: { |_| echo failed }]";
     assert_eq!(out(script), "1\nnull");
 }

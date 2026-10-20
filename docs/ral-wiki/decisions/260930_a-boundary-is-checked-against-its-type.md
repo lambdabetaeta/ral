@@ -3,6 +3,11 @@ status: accepted
 generated_at_commit: 8d868e18
 ---
 
+> Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]: in the
+> closed set, `service-handle` is replaced by core's `worker <id>`, which
+> re-acquires the handle of any worker by its id and admits the value it
+> settles with at the `await` site.
+
 > **Amended 2026-10-13.** `Fixings` is session state, not one per unit: one
 > table per session keyed by `(UnitId, var)`, shared by the session's threads
 > and snapshotted into a fork, so a unit's sites still share their fixings

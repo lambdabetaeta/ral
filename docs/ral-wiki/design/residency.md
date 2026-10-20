@@ -25,8 +25,9 @@ independently, the wart this dissolves, why the deep fusion is refused — is
   a binding. Capabilities are deliberately not unified — they are the honest
   variance between chapters, never flattened into one value.
 - **Lease** — a clock, an idle bound, a renewal signal, an optional
-  backstop — including the degenerate case "none; legibility is the
-  bound" (a `service`).
+  backstop — including the degenerate case "none; the owner is the bound"
+  (a worker, which lives as long as the session, worker or call that owns
+  it).
   leases-and-budgets is where the
   lease machinery itself lives; residency is the frame it sits inside.
 - **Probe** — what the resident costs now, for the `/resources` fold.
@@ -40,8 +41,8 @@ defect, the resident-shaped completion of the probe convention
 The line between a resident and a mere *accumulator* (a scrollback, the bus,
 an inbox) is the capability: a resident can be reached and controlled by
 id; an accumulator can only be measured and bounded. Both are probed — the
-`/resources` fold spans both kinds — but only residents are listed,
-cancelled, and leased. A scrollback has no capability, and pretending it does
+`/resources` fold spans both kinds — but only residents are listed and
+cancelled. A scrollback has no capability, and pretending it does
 to buy uniformity would buy it at the price of a lie.
 
 The accumulator's contents have a second characterisation, exact in scope:
@@ -65,12 +66,12 @@ whoever waits on it rather than parked as a resident of its own
 | grade | state | population | entered by | left by |
 |---|---|---|---|---|
 | 0 | foreground | the run in progress | evaluation | completion, the wall, interrupt |
-| 1 | background | worker handles (`spawn`) | birth | completion, `cancel`, lease reap, exit |
-| 2 | durable | `service` workers | birth | completion, `cancel`, `/clear`, process exit |
-| 3 | survives exit | `detach`ed processes | birth | outside the session's story |
+| 1 | background | worker handles (`spawn`) | birth | completion, `cancel`, its owner's end, `/clear`, exit |
+| 2 | survives exit | `detach`ed processes | birth | outside the session's story |
 
-Leases are the downward pressure — everything drifts toward reclamation
-unless renewed.
+Leases are the downward pressure on the residents that carry one — a binding,
+a parked sub-agent drifts toward reclamation unless renewed; a worker carries
+none, and its owner's end is its bound.
 
 ## Two traversal disciplines, one order
 
@@ -79,7 +80,7 @@ unless renewed.
   REPL user reaches for `spawn` once that becomes clear, or Ctrl-C and
   re-runs under `spawn` for work that was already in the foreground.
 - **Agent work declares its lifetime.** A model states intent at birth —
-  `spawn` is born at grade 1, `service` at grade 2 — and mid-flight movement
+  `spawn` is born at grade 1, `detach` at grade 2 — and mid-flight movement
   (`promote`) stays deferred until a concrete need.
 
 *Birth, not promote* is not a universal law; it is the declaration
@@ -100,8 +101,8 @@ row, state label, cancel — a convention each chapter's fold writes by hand
 against it:
 
 - **list** — project a set of chapters into one table, marked by kind in a
-  designator namespace of its own (`[wN]`) so different chapters can never
-  collide.
+  designator namespace of its own (a worker's `#N`) so different chapters
+  can never collide.
 - **warn** — the exit story: what survives, what is named. Shell exit
   names any worker handle still running first — it dies with the process,
   so naming it is its only farewell.

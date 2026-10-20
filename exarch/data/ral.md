@@ -4,7 +4,7 @@ Like every shell, `ral` runs commands:
     cat foo.txt | wc -l
     echo "hello" > /tmp/out
 
-Commands are sequenced by newlines or `;`. An uncaught failure aborts the whole script: `mkdir out; cp notes.txt out/` runs `cp` only when `mkdir` succeeds. `?` runs the second command when the first failed: `cat VERSION ? #'unversioned'#`. `&&` and `||` are Boolean operators, used inside `$[…]`. There is no trailing `&` either: background work is `defer { … }`, below.
+Commands are sequenced by newlines or `;`. An uncaught failure aborts the whole script: `mkdir out; cp notes.txt out/` runs `cp` only when `mkdir` succeeds. `?` runs the second command when the first failed: `cat VERSION ? #'unversioned'#`. `&&` and `||` are Boolean operators, used inside `$[…]`. There is no trailing `&` either: background work is `spawn "title" { … }`, below.
 
 A string argument stays one argument: its contents are never implicitly split, globbed, or interpreted as source. Spread a list explicitly with `...$args`; expand a glob with `...!{glob #'*.txt'#}`. A `&` inside a word is ordinary, so `curl https://h/?a=1&b=2` needs no quotes. Outside double quotes, `\` is ordinary too: `C:\Users\me` is one word.
 
@@ -97,7 +97,7 @@ Pass blocks to higher-order functions:
 
 Omitting the `$` in `$in-src` makes `in-src` just a string argument in the above.
 
-Bindings are immutable but shadowable. Blocks capture lexically: earlier blocks keep the bindings they captured, so shadowing a helper does not change those blocks. A block is a scope: a `let` inside it ends with the block. The bodies of `if`, `for` and `within` are blocks, so a value leaves them only by being returned: `let h = within [dir: #'/app'#] { defer { … } }`.
+Bindings are immutable but shadowable. Blocks capture lexically: earlier blocks keep the bindings they captured, so shadowing a helper does not change those blocks. A block is a scope: a `let` inside it ends with the block. The bodies of `if`, `for` and `within` are blocks, so a value leaves them only by being returned: `let h = within [dir: #'/app'#] { spawn "build" { … } }`.
 
 ## Strings
 
@@ -303,38 +303,28 @@ Do not use `sh -c`, as e.g. `sh -c #'a; b; c'#` payload throws away what `ral` w
 
 ## Concurrency
 
-`defer { … }` runs its block on a new thread, returning a handle at once. Defer independent long work, then await and inspect its result before taking dependent actions:
+`spawn "title" { … }` runs its block on a new thread and returns a handle at once. The title says what the work is; it is required here. Spawn long work, keep the handle, and do other things while it runs:
 
-    let b = { sort huge.txt > sorted.txt }
-    let h = defer $b        # keep the handle!
-    ##'sort started'##
+    let h = spawn "sort the log" { sort huge.txt > sorted.txt }
 
-While it runs, do other independent work. When you need its result, `await` the handle with a suitable tool timeout.
+You need not wait for it: end the turn when nothing else remains, and the host wakes you when it finishes, naming its id, title, how long it ran and how it ended. Do not poll for completion.
 
-`await` returns a record whose `stdout` and `stderr` are the thread's whole output, already merged across every command in it, and whose `value` is an `audit` report on the block, which you can examine to find what ran.
+`await $h` behaves exactly as if the block had run on that line: whatever it printed appears on your stdout and stderr, its value is returned, and a failure in it fails your script there, so `try` around `await` is how you recover. Awaiting again, even turns later, replays the same ending; it does not run the block again. An `exit` inside the block exits the turn that awaits it.
 
-    let r = await $h
-    let ok         = !{succeeded $r[value]}                             # did the block succeed?
-    let thread_out = bytes-to-string $r[stdout]                         # everything the thread printed
-    let cmd_stdout = bytes-to-string !{commands $r[value]}[0][stdout]   # stdout of first command
-    case $r[value][outcome] [                                           # the block's own return value
-      `ok:  { |v| $v },
-      `err: { |e| fail $e },
-    ]
+    let out = await $h          # a command's output, as `let out = { … }` would bind it
+    try { await $h } { |e| echo "failed: $e[message]" }
 
-Like `audit`, deferred blocks turn recoverable failures into data. Awaiting the same handle again, even across turns, reads its completed result; it does not run the block again. Calling `defer` again starts another execution. Call `explain await` and `explain poll` for cancellation, exit, and polling behavior.
+If the binding is gone, the notice's id brings the handle back: `await !{worker 7}`. `workers` lists every worker with its id, title, owner, state and timing. `cancel $h` stops a block that is no longer needed, and everything it started.
 
-Use `cancel $h` to stop a thread that is no longer required.
+A block may `spawn` inside itself: those workers belong to it, and it finishes only after they have, their output and failures folded into its own.
 
-`service` keeps work running for as long as this session lasts:
+`poll $h` samples without waiting or printing: `pending` with the output so far and the seconds elapsed, or `settled` with the output, the time it took and `ok`/`err`. Use it to read a long-running server's output; to wait, `sleep 30; poll $h`.
 
-    let h = service #'watch the log file'# { tail -f app.log }
+Fan-out that must leave nothing behind is a combinator, not a set of spawns: `par f items jobs` maps in parallel and keeps input order; `all [build: { cargo build }, lint: { cargo clippy }]` runs several blocks and returns a record of their values; `race [$a, $b]` takes the first to finish and cancels the rest. Each ends every worker it started before it returns, and the first failure cancels the others and is raised.
 
-The first argument is a description of the task; the second is a block to run as a server. `service-handle ID` can be used to acquire a durable worker's handle by its id, so you can `await` or `cancel` it if you have forgotten the binding.
+<CRITICAL>A worker lives as long as this session. Nothing but its own completion, `cancel`, or the session's end stops it.</CRITICAL>
 
-<CRITICAL>The lifetime of a `defer` or `service` ends when the session ends.</CRITICAL>
-
-Should you wish for a service that runs *after* the session is over, use `detach`:
+Should you wish for a process that runs *after* the session is over, use `detach`:
 
     let d = within [dir: #'/data'#] { detach #'background export job'# python3 export.py }
 

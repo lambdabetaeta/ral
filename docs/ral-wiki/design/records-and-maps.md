@@ -215,10 +215,11 @@ Neither type subsumes the other, so collapsing to one loses something real.
 - **"Just maps" loses heterogeneity.** Under one `Map<α>` every field is `α`, so
   `[host: String, port: Int]` could not distinguish `$r[host] : String` from
   `$r[port] : Int`, and the shell's own control-flow records would be untypable:
-  `try`'s `[status: Int, cmd: String, message: String, …]`, `await`'s
-  `[value: α, stdout: Bytes, stderr: Bytes]`, the `audit` node
-  (`core/src/typecheck/builtins.rs`). `await`'s `value: α` is polymorphic in the
-  block's return type *beside* `stdout: Bytes` — no `Map<?>` types that.
+  `try`'s `[status: Int, cmd: String, message: String, …]`, `poll`'s settled
+  `[stdout: Bytes, stderr: Bytes, elapsed: Float, outcome: <ok: α | err: …>]`,
+  the `audit` node (`core/src/typecheck/builtins.rs`). `poll`'s `outcome` is
+  polymorphic in the block's return type *beside* `stdout: Bytes` — no
+  `Map<?>` types that.
 
 These are exactly the two shapes a shell handles: the structured result of a
 known command has a fixed heterogeneous form (a record — the

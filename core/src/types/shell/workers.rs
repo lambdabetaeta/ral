@@ -1,16 +1,15 @@
 //! The worker registry: a per-[`Shell`](super::Shell) directory of every
-//! worker (`spawn`, `watch`, `service`) spawned from it. Pure
-//! bookkeeping — the directory the lease policies read, never a policy itself.
+//! worker (`spawn`, `watch`, and `par`/`all` children) spawned from it. Pure
+//! bookkeeping, never a policy itself.
 //!
 //! `spawn_child` in `builtins::concurrency` files an entry as it mints the
-//! handle. The entry leaves when the worker is *observed* settled (`await`,
-//! `race`'s winner and its cancelled losers, `poll`'s settled arm) or is
-//! `cancel`led, and only from the observing shell's own registry — a handle
-//! minted elsewhere lingers where it lives. Two policies also remove entries:
-//! the [`LeaseChain`], against a [`WorkerLease`], and
-//! [`WorkerRegistry::sweep_retention`]. Both leave a [`ReapNotice`] the host
-//! drains at its ready boundaries, so a vanished job still has an answer in
-//! the transcript.
+//! handle. The entry leaves when the worker is *claimed*: observed settled
+//! (`await`, `race`'s winner and its cancelled losers, `poll`'s settled arm),
+//! `cancel`led, or ended by its owner's halt — and only from the claiming
+//! shell's own registry; a handle minted elsewhere lingers where it lives.
+//! One policy also removes entries: [`WorkerRegistry::sweep_retention`]. It
+//! leaves a [`ReapNotice`] the host drains at its ready boundaries, so a
+//! vanished job still has an answer in the transcript.
 //!
 //! **Flow rule.** [`Shell::spawn_thread`](super::Shell::spawn_thread)
 //! `Arc`-shares the registry into a worker's own `Shell`, so a nested `spawn`
@@ -18,18 +17,17 @@
 //! [`Shell::child`](super::Shell::child) do not, and a sub-agent fork starts
 //! empty.
 
-use crate::fact::{LeaseClass, WorkerId};
+use crate::fact::WorkerId;
 use crate::first_order::FOValue;
 use crate::first_order::datum::{Datum, tag, untag};
 use crate::process::CancelCause;
 use crate::sync::LockExt as _;
 use crate::types::{Break, ErrorRecord, Escape, HandleInner, Shell, ThreadEnd};
 use crate::{label, record, variant};
-use serde::{Deserialize, Serialize};
-use std::ops::{ControlFlow, Deref};
+use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::Duration;
 use strum::{IntoStaticStr, VariantArray};
 
 /// How long a wipe waits for cancelled workers to end: the cleanup grace a
@@ -45,100 +43,30 @@ impl WorkerId {
     }
 }
 
-/// The lifetime a frame grants the workers its runs detach: an idle bound on
-/// the observation clock under an absolute backstop.
-///
-/// A lease, not a death-clock: a worker is reaped when *unobserved* for
-/// `idle`, and every eliminator naming its handle renews it. The bounds travel
-/// as one value, so a frame grants the whole lease or — the interactive REPL —
-/// none, never a ceiling without a backstop.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkerLease {
-    /// Reap once the handle has gone this long unnamed by an eliminator.
-    pub idle: Duration,
-    /// From spawn: no observation extends a worker past this age, so ritual
-    /// polling cannot manufacture immortality.
-    pub backstop: Duration,
-}
-
-impl WorkerLease {
-    /// The lease's decision at a worker's `age` since spawn and `idle` since an
-    /// eliminator last named it: the cause to reap for, or how long until the
-    /// sooner bound can next bite.  The backstop outranks idleness.
-    pub fn verdict(self, age: Duration, idle: Duration) -> ControlFlow<ReapCause, Duration> {
-        if age >= self.backstop {
-            ControlFlow::Break(ReapCause::Backstop)
-        } else if idle >= self.idle {
-            ControlFlow::Break(ReapCause::Idle)
-        } else {
-            ControlFlow::Continue(
-                self.idle
-                    .saturating_sub(idle)
-                    .min(self.backstop.saturating_sub(age)),
-            )
-        }
-    }
-}
-
-/// Everything one firing of a worker's lease chain needs, cloned forward into
-/// each re-arm.  The whole handle, not its picked-apart cells: cheap to clone
-/// (all `Arc`s and a `Copy` scope) and cheap to run on the reaper daemon
-/// thread, and it is what lets [`Self::fire`] ask [`HandleInner::is_running`]
-/// rather than lock `state` itself.
-#[derive(Clone)]
-pub(crate) struct LeaseChain {
-    pub(crate) handle: HandleInner,
-    /// The backstop's clock; the registry entry's `SystemTime` is display-only.
-    pub(crate) started: Instant,
-    pub(crate) lease: WorkerLease,
-    pub(crate) registry: WorkerRegistry,
-    pub(crate) id: WorkerId,
-}
-
-impl LeaseChain {
-    /// One firing, the chain's one door: a worker no longer `Running` ends the
-    /// chain silently; else the lease's verdict reaps it or re-arms for the
-    /// margin it names.  A reap does the bookkeeping *before* firing the scope,
-    /// so the ledger never lags an observable cancellation, and deliberately
-    /// leaves the handle attached: the body settles as an error, so a later
-    /// `poll`/`await` still observes the partial output and the failure.
-    ///
-    /// Called on the reaper daemon thread, and once at birth for the first delay.
-    pub(crate) fn fire(self) {
-        if !self.handle.is_running() {
-            return;
-        }
-        let age = self.started.elapsed();
-        match self
-            .lease
-            .verdict(age, self.handle.last_observed().elapsed())
-        {
-            ControlFlow::Break(cause) => {
-                self.registry.reap(self.id, cause);
-                self.handle
-                    .cancel
-                    .cancel(crate::process::CancelCause::TimedOut);
-            }
-            ControlFlow::Continue(after) => {
-                crate::process::arm_callback(after, move || self.fire()).keep();
-            }
-        }
-    }
-}
-
-/// Why policy removed a worker's entry.
+/// Why policy removed a worker's entry: the one policy left.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, IntoStaticStr, VariantArray)]
 #[strum(serialize_all = "kebab-case")]
 pub enum ReapCause {
-    /// Unobserved for the lease's `idle` bound.
-    Idle,
-    /// Older than the lease's `backstop`, observation notwithstanding.
-    Backstop,
     /// A settled entry whose unclaimed result outlived the retention bound.
     Retention,
 }
 
 label!(ReapCause);
+
+/// Who settles a worker: the session, the worker it was born inside, or the
+/// calling expression that birthed it (`par`, `all`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Owner {
+    Session,
+    Worker(WorkerId),
+    Call,
+}
+
+variant!(typed Owner {
+    Session: "session",
+    Worker(WorkerId): "worker",
+    Call: "call",
+});
 
 /// How a worker ended, as its `` `done `` event says: no return
 /// value, which only `await` hands over.
@@ -151,7 +79,7 @@ pub enum Done {
     Panic(String),
 }
 
-variant!(Done {
+variant!(typed Done {
     Ok: "ok",
     Err(ErrorRecord): "err",
     Exited(i32): "exited",
@@ -177,13 +105,15 @@ impl Done {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DoneEvent {
     pub id: WorkerId,
-    pub cmd: String,
+    pub title: String,
+    pub elapsed_ms: u64,
     pub outcome: Done,
 }
 
 record!(DoneEvent {
     id: "id",
-    cmd: "cmd",
+    title: "title",
+    elapsed_ms: "elapsed-ms",
     outcome: "outcome",
 });
 
@@ -241,15 +171,13 @@ impl WatchEvent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReapNotice {
     pub id: WorkerId,
-    pub cmd: String,
-    pub class: LeaseClass,
+    pub title: String,
     pub cause: ReapCause,
 }
 
 record!(ReapNotice {
     id: "id",
-    cmd: "cmd",
-    class: "class",
+    title: "title",
     cause: "cause",
 });
 
@@ -258,14 +186,10 @@ record!(ReapNotice {
 ///
 /// Storing the handle rather than a second by-id control plane keeps `poll`,
 /// `await`, `race`, and `cancel` the only verbs that touch a worker:
-/// rediscovery is list, then take the handle back.
+/// rediscovery is `worker <id>`, which hands this handle back.
 #[derive(Clone, Debug)]
 pub struct WorkerEntry {
-    pub id: WorkerId,
-    pub cmd: String,
-    /// Wall-clock start, display-only: lease math keeps its own clocks.
-    pub started: SystemTime,
-    pub class: LeaseClass,
+    pub owner: Owner,
     /// The ral-call epoch at which [`WorkerRegistry::sweep_retention`] first
     /// observed this entry settled — `None` while it runs, so retention starts
     /// at the next call rather than retroactively.
@@ -303,8 +227,7 @@ struct RegistryInner {
 ///
 /// A newtype over `Arc<Mutex<RegistryInner>>`: cloning shares the store, which
 /// is how the flow rule above lets a nested `spawn` register into its owning
-/// shell's registry, and how the lease chain, on the reaper daemon thread,
-/// reaps into the store the shell reads. Every operation locks, acts, and
+/// shell's registry. Every operation locks, acts, and
 /// unlocks — none ever calls out while holding the lock, [`Self::reserve`] and
 /// [`Self::register`] included: the [`Reservation`] bridging those two locked
 /// steps holds its seat from the instant admission is granted.
@@ -429,24 +352,6 @@ impl WorkerRegistry {
             .retain(|entry| entry.handle != *handle);
     }
 
-    /// Remove the entry carrying `id` and, only if it was present, record a
-    /// [`ReapNotice`]. One locked operation, so the reap-vs-observation race
-    /// is benign: an entry an eliminator observed away first is simply absent,
-    /// and the reap is silent rather than a notice for a claimed result.
-    pub(crate) fn reap(&self, id: WorkerId, cause: ReapCause) {
-        let mut inner = self.0.lock_ignore_poison();
-        let Some(at) = inner.entries.iter().position(|entry| entry.id == id) else {
-            return;
-        };
-        let entry = inner.entries.remove(at);
-        inner.reap_notices.push(ReapNotice {
-            id: entry.id,
-            cmd: entry.cmd,
-            class: entry.class,
-            cause,
-        });
-    }
-
     pub(crate) fn retention(&self) -> Option<u64> {
         self.0.lock_ignore_poison().retention
     }
@@ -468,17 +373,27 @@ impl WorkerRegistry {
     /// a [`ReapCause::Retention`] notice `retention` calls later, so retention
     /// never runs retroactively over a quiet period. The eliminators already
     /// take an entry the moment its result is observed; this catches the rest.
-    ///
+    /// A settled child of a running worker, or of a call, is left alone: its
+    /// owner joins it.
     pub(crate) fn sweep_retention(&self) {
         let mut inner = self.0.lock_ignore_poison();
         let Some(retention) = inner.retention else {
             return;
         };
         let epoch = inner.epoch;
+        let running: Vec<WorkerId> = inner
+            .entries
+            .iter()
+            .filter(|entry| entry.handle.is_running())
+            .map(|entry| entry.handle.id)
+            .collect();
         let mut i = 0;
         while i < inner.entries.len() {
-            let running = inner.entries[i].handle.is_running();
-            match (running, inner.entries[i].settled_epoch) {
+            let entry = &inner.entries[i];
+            let held = running.contains(&entry.handle.id)
+                || entry.owner == Owner::Call
+                || matches!(entry.owner, Owner::Worker(parent) if running.contains(&parent));
+            match (held, entry.settled_epoch) {
                 (false, None) => {
                     inner.entries[i].settled_epoch = Some(epoch);
                     i += 1;
@@ -486,9 +401,8 @@ impl WorkerRegistry {
                 (false, Some(s)) if epoch.saturating_sub(s) >= retention => {
                     let entry = inner.entries.remove(i);
                     inner.reap_notices.push(ReapNotice {
-                        id: entry.id,
-                        cmd: entry.cmd,
-                        class: entry.class,
+                        id: entry.handle.id,
+                        title: entry.handle.title,
                         cause: ReapCause::Retention,
                     });
                 }
@@ -517,20 +431,18 @@ impl WorkerRegistry {
         std::mem::take(&mut self.0.lock_ignore_poison().reap_notices)
     }
 
-    /// Clone out every entry for listing. Enumeration is not observation: it
-    /// renews no lease.
+    /// Clone out every entry for listing; a pure read.
     pub(crate) fn snapshot(&self) -> Vec<WorkerEntry> {
         self.0.lock_ignore_poison().entries.clone()
     }
 
-    /// Clone out the entry named by `id`. A pure read like [`Self::snapshot`]:
-    /// renews no lease.
+    /// Clone out the entry named by `id`; a pure read like [`Self::snapshot`].
     pub(crate) fn lookup(&self, id: WorkerId) -> Option<WorkerEntry> {
         self.0
             .lock_ignore_poison()
             .entries
             .iter()
-            .find(|entry| entry.id == id)
+            .find(|entry| entry.handle.id == id)
             .cloned()
     }
 
@@ -560,9 +472,7 @@ impl WorkerRegistry {
 
     /// Destruction — `/clear`'s arm and the session teardown's: cancel every
     /// entry's scope, reset the roster, pending notices included, then wait for
-    /// the cancels to land. Explicit destruction outranks every lease, the
-    /// durable class included, so nothing here consults [`LeaseClass`]. The
-    /// cancels fire only after the guard drops.
+    /// the cancels to land. The cancels fire only after the guard drops.
     ///
     /// An empty roster still drains: a worker `cancel`led moments ago left the
     /// roster when it was signalled, not when its child died.
@@ -590,25 +500,6 @@ impl WorkerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_lease_reaps_at_its_backstop_then_its_idle_bound_else_waits_the_sooner_margin() {
-        use ControlFlow::{Break, Continue};
-        let ms = Duration::from_millis;
-        let lease = WorkerLease {
-            idle: ms(100),
-            backstop: ms(500),
-        };
-        assert_eq!(lease.verdict(ms(0), ms(0)), Continue(ms(100)));
-        assert_eq!(lease.verdict(ms(450), ms(30)), Continue(ms(50)));
-        assert_eq!(lease.verdict(ms(200), ms(100)), Break(ReapCause::Idle));
-        assert_eq!(lease.verdict(ms(500), ms(0)), Break(ReapCause::Backstop));
-        let tight = WorkerLease {
-            idle: ms(100),
-            backstop: ms(40),
-        };
-        assert_eq!(tight.verdict(ms(0), ms(0)), Continue(ms(40)));
-    }
 
     // ── reservation (the admission/registration TOCTOU close) ───────────
 

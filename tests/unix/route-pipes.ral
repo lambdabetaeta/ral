@@ -63,8 +63,7 @@ let rec = [a: 1]
 let blk = { return hi }
 /bin/echo !{!$blk}
 let hd = spawn { return 1 }
-let res = await $hd
-/bin/echo $res[value]
+/bin/echo !{await $hd}
 let raw = !{echo hi | from-bytes}
 to-bytes $raw | /bin/cat
 

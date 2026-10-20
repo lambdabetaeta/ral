@@ -865,7 +865,7 @@ fn cancel_cascade_reaches_a_cancelled_sub_agents_workers() {
 
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::with_mailbox(tx, child.agent.id, child.inbox.mailbox());
-    let _ = child.ral("spawn { test-clear-block-forever }", 30, &emit);
+    let _ = child.ral("spawn \"blocker\" { test-clear-block-forever }", 30, &emit);
 
     let entries = workers(&child);
     assert_eq!(entries.len(), 1, "the child's own spawn must register");

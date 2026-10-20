@@ -15,7 +15,7 @@ let probe = { |interval|
 let waiter = spawn { probe 1 }
 let alarm = spawn { sleep !{int $secs} ; return `late }
 
-case !{race [$waiter, $alarm]}[value] [
+case !{race [$waiter, $alarm]} [
     `up:   { |_| echo "$target:$port is up" },
     `late: { |_|
         warn "$target:$port never came up within $(secs)s"

@@ -94,19 +94,101 @@ fn fmt_scheme_binds_cyclic_comp_roots_by_mu() {
     assert_eq!(rendered, "μϕ. Returns [{ϕ}]");
 }
 
+/// The idiom `worker`'s doc advertises, put to the checker on the bare core
+/// table: call sites eliminated at different value types.  A monomorphic
+/// `Handle` fails the first, an under-generalised one the second.
 #[test]
-fn service_is_external_on_a_bare_core_table() {
-    // `service` is exarch's own surface (`SERVICE_BUILTIN`), never installed
-    // into a core-only table.  The call resolves as an external command —
-    // `String`, not the builtin's `Handle` return — so binding its result
-    // where a `Handle` is expected is a static mismatch: the checker is
-    // honest about what this session can actually run, not hard-coding the
-    // name.  The positive half — the same call typechecking once a shell
-    // installs `SERVICE_BUILTIN` — lives in exarch's suite.
-    has_error(
-        r#"let h = service "birth" { return 1 }; cancel $h"#,
-        "couldn't match",
+fn worker_typechecks_under_its_documented_eliminators() {
+    let errs = errors(
+        "let a = await !{worker 3}\n\
+         let n = $[$a + 1]\n\
+         let b = await !{worker 4}\n\
+         let s = string-replace 'x' 'y' $b\n\
+         cancel !{worker 5}",
     );
+    assert!(
+        errs.is_empty(),
+        "`worker`'s ∀α Handle must instantiate per call site, got: {errs:?}"
+    );
+}
+
+/// `workers` is data: a row's fields read at their documented types, and its
+/// id is what `worker` takes back.
+#[test]
+fn workers_lists_rows_whose_id_reacquires() {
+    let errs = errors(
+        "let w = workers\n\
+         let t = string-replace 'x' 'y' $w[0][title]\n\
+         let e = $[$w[0][elapsed] + 1.0]\n\
+         cancel !{worker $w[0][id]}",
+    );
+    assert!(
+        errs.is_empty(),
+        "a `workers` row must read at its documented types, got: {errs:?}"
+    );
+}
+
+/// `await` produces what its handle's block produces: a command block's
+/// handle awaits as a command, whose bind captures its output, and a value
+/// block's as its value.
+#[test]
+fn await_has_its_handles_grade() {
+    let top = toplevel_ok(
+        "let h = spawn { echo hi }\n\
+         let c = { await $h }\n\
+         let x = await $h\n\
+         return ()",
+    );
+    assert_eq!(scheme_at(&top, 0), "Handle Command");
+    assert_eq!(scheme_at(&top, 1), "Command");
+    assert_eq!(scheme_at(&top, 2), "String");
+    let top = toplevel_ok("let h = spawn { 1 }\nlet n = await $h\nreturn ()");
+    assert_eq!(scheme_at(&top, 0), "Handle (Returns Integer)");
+    assert_eq!(scheme_at(&top, 1), "Integer");
+}
+
+/// `spawn`'s handle carries its body's producer, titled or not, and its
+/// title is a String.
+#[test]
+fn spawn_is_typed_by_its_body() {
+    let top = toplevel_ok("let a = spawn { echo hi }\nlet b = spawn \"t\" { 1 }\nreturn ()");
+    assert_eq!(scheme_at(&top, 0), "Handle Command");
+    assert_eq!(scheme_at(&top, 1), "Handle (Returns Integer)");
+    let errs = raw_errors("spawn 1 { 1 }");
+    assert!(
+        errs.iter().any(|e| e
+            .hint()
+            .is_some_and(|h| h.contains("a spawn's title is a String"))),
+        "expected a title mismatch, got: {:?}",
+        errs.iter()
+            .map(|e| e.kind.render_message())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// `all` demands a value of each task, as an argument is demanded: a command
+/// task's field is its output.
+#[test]
+fn all_is_typed_field_by_field() {
+    let top = toplevel_ok("let r = { all [a: { echo hi }, b: { 1 }] }\nreturn ()");
+    assert_eq!(scheme_at(&top, 0), "Returns [a: String, b: Integer]");
+    assert!(
+        parse("all [a: { 1 }, a: { 2 }]").is_err(),
+        "a repeated task label is a parse error"
+    );
+}
+
+/// `par` is a builtin demanding a value of its callback, so a command's
+/// output is what each item maps to.
+#[test]
+fn par_demands_a_value_and_returns_a_list() {
+    let table = common::manifest(&ral_core::HostSurface::default());
+    assert_eq!(
+        ral_core::typecheck::builtin_type_hint(&table, "par").as_deref(),
+        Some("∀α β. {α → Returns β} → [α] → Integer → Returns [β]")
+    );
+    let top = toplevel_ok("let xs = par { |x| echo $x } [1, 2] 2\nreturn ()");
+    assert_eq!(scheme_at(&top, 0), "[String]");
 }
 
 /// A base frame takes an argv, and `...` is exactly its notation.  `detach` is

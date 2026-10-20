@@ -363,9 +363,17 @@ impl Mirror {
             // holds however it settled: `╳` is the turn's own failure (a
             // provider error, a stall), never a nonzero exit, which reads as a
             // red status in the row here just as it does on an exec.
-            K::Done { id, cmd, outcome } => {
-                chrome(Chrome::Settled(card::settled_spans(*id, cmd, outcome)))
-            }
+            K::Done {
+                id,
+                title,
+                elapsed_ms,
+                outcome,
+            } => chrome(Chrome::Settled(card::settled_spans(
+                *id,
+                title,
+                elapsed_ms.map(Duration::from_millis),
+                outcome,
+            ))),
             K::Context { rows } => {
                 vec![surfaced(record::context_rows_card(rows))]
             }

@@ -29,7 +29,7 @@ pub(crate) struct Io {
     /// Where the running computation writes.
     pub stdout: Sink,
     /// `spawn` installs a buffer sink here, so a worker's errors are held in
-    /// its handle and drained on `await`, never interleaved with the parent's.
+    /// its handle and replayed by `await`, never interleaved with the parent's.
     pub stderr: Sink,
     /// Running as an interactive REPL — not merely attached to a tty.
     pub(crate) interactive: bool,

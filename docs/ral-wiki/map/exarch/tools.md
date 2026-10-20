@@ -37,12 +37,13 @@ can see what it sent.
   [[map/exarch/frontend|rail]]; the full `command` opens in the collapsible
   tool-call block; oversize descriptions are truncated, never rejected). An
   optional `timeout_secs` bounds the call, defaulting to `CALL_TIMEOUT_SECS`
-  (60s) — a default, not a cap: raise it for known-long work, or `spawn` what
-  should outlive the run. A call the wall cuts short loses its bindings and
-  keeps its acts, so its stderr carries the engine's span, the remedy, an audit
-  of what already stands, and the `defer`red workers still running past the wall
-  with nothing left to `await` them by
-  ([[map/exarch/shell-eval|shell-eval]]).
+  (60s) — a default, not a cap: raise it for a command known to run long,
+  rather than spawn-then-wait, and keep `spawn` for work the model can
+  overlap. A call the wall cuts short keeps what landed before it, so its
+  stderr carries the engine's span, the remedy, an audit of what already
+  stands, and the `spawn`ed workers still running past the wall, each named
+  `#id (title)` so `await !{worker N}` reaches it whether or not its binding
+  landed ([[map/exarch/shell-eval|shell-eval]]).
   Every accepted or malformed call emits a `Display::ToolCall` followed by a
   `Display::Verdict` addressed by the call's `BlockId`, so a verdict never has to
   search backward for its tool row. `Verdict::of(content, failed)` is the result's

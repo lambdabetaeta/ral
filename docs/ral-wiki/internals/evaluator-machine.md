@@ -180,8 +180,11 @@ takes a `Mode` — `Session`, `Local`, `Module`, `Prelude` — which alone
 decides leases.
 
 **Boundaries.** Three things start a fresh machine over the empty stack: a
-run-door phrase, a worker thread (`spawn`/`watch`/`service`), and a pipeline
-stage thread (`runtime/pipeline/thread.rs`). A native that applies a user function — the
+run-door phrase, a worker thread (a `spawn` or `watch`, or a child of `par` or
+`all`), and a pipeline stage thread (`runtime/pipeline/thread.rs`). The
+`spawn` and `all` forms push no frame: their rule forms the operands and
+births the workers in one step (`spawn_form`, `all_form`), and `all` awaits
+its children inside that step. A native that applies a user function — the
 collection combinators, hook dispatch — runs a *nested*
 machine on the host stack through `machine::apply`; `NESTED_MACHINE_LIMIT`
 (calibrated by `nested_machines_fit_a_worker_stack` on a 2 MiB thread, a

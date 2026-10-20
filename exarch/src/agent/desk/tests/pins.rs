@@ -151,7 +151,8 @@ fn live_surfaces_record_their_seam_twins() {
     applier.surface(
         &ral_core::types::DoneEvent {
             id: ral_core::types::WorkerId(7),
-            cmd: "<block>".into(),
+            title: "<block>".into(),
+            elapsed_ms: 0,
             outcome: ral_core::types::Done::Ok,
         }
         .to_surface(),
@@ -159,9 +160,8 @@ fn live_surfaces_record_their_seam_twins() {
     applier.surface(
         &ral_core::types::Notice::Reap(ral_core::types::ReapNotice {
             id: ral_core::types::WorkerId(1),
-            cmd: "sleep 10".into(),
-            class: ral_core::types::LeaseClass::Worker,
-            cause: ral_core::types::ReapCause::Idle,
+            title: "sleep 10".into(),
+            cause: ral_core::types::ReapCause::Retention,
         })
         .to_surface(),
     );
@@ -181,7 +181,7 @@ fn live_surfaces_record_their_seam_twins() {
                     outcome: crate::card::DoneOutcome::Ok,
                     ..
                 }) => "done",
-                Record::Forensic(Forensic::Reap { cause, .. }) if cause == "idle" => "notice",
+                Record::Forensic(Forensic::Reap { cause, .. }) if cause == "retention" => "notice",
                 Record::Forensic(Forensic::Pin { key }) if key == "tasks" => "pin",
                 Record::Forensic(Forensic::Unpin { key }) if key == "tasks" => "unpin",
                 _ => continue,

@@ -9,7 +9,7 @@
 use std::borrow::Cow;
 
 use ral_core::fact::{Check, Command, Grep, Read, Worker};
-use ral_core::types::{Decision, LeaseClass, Observed, WorkerId};
+use ral_core::types::{Decision, Observed, WorkerId};
 use std::collections::BTreeMap;
 
 use super::{Card, Mark, Role, Span};
@@ -63,7 +63,7 @@ pub(crate) fn observation_spans(what: &Landed) -> Vec<Span> {
         }
         Landed::Effect(Effect::Grep(g)) => greps_listing(&[g]).spans(),
         Landed::Surfaced(check) => capability_spans(check),
-        Landed::Announced(w) => worker_spans(w.id, &w.cmd, w.class),
+        Landed::Announced(w) => worker_spans(w.id, &w.title),
     }
 }
 
@@ -172,22 +172,15 @@ fn capability_spans(check: &Check) -> Vec<Span> {
     spans
 }
 
-/// A worker birth's heading, `errand #id started · cmd` — a mark of its own,
-/// never `spawn`'s `$ cmd → status` row, so a birth reads as what it is
+/// A worker birth's heading, `errand #id started · title` — a mark of its
+/// own, never `spawn`'s `$ cmd → status` row, so a birth reads as what it is
 /// rather than as another exec.
-fn worker_spans(id: WorkerId, cmd: &str, class: LeaseClass) -> Vec<Span> {
+fn worker_spans(id: WorkerId, title: &str) -> Vec<Span> {
     vec![
         Span::new(Role::Muted, "errand "),
         Span::new(Role::Path, format!("#{}", id.0)),
         Span::new(Role::Muted, " started · "),
-        Span::new(Role::Code, cmd.strip_prefix("block at ").unwrap_or(cmd)),
-        Span::new(
-            Role::Muted,
-            match class {
-                LeaseClass::Worker => "",
-                LeaseClass::Durable => " · durable",
-            },
-        ),
+        Span::new(Role::Code, title),
     ]
 }
 

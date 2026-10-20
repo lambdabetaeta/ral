@@ -48,7 +48,7 @@ pub(crate) use observation::{Listing, exec_listing, greps_listing, reads_listing
 
 /// A settlement is a line on the rail, so `done` exports spans and their
 /// flattening rather than a [`Card`] nothing would draw.
-pub use done::{settled_spans, settled_text};
+pub use done::{elapsed_phrase, settled_spans, settled_text};
 
 /// The closed nominal role set — the identity channel a [`Span`] may carry.
 /// An unrecognised tag degrades to plain ink rather than dropping the span.

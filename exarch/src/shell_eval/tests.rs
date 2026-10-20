@@ -18,8 +18,8 @@ use ral_core::fact::Read;
 use ral_core::first_order::datum::Datum as _;
 use ral_core::types::WriteOutcome;
 use ral_core::types::{
-    CallSite, Done, DoneEvent, LeaseClass, Notice, Observation, Observed, Pruned, ReapCause,
-    ReapNotice, WorkerId,
+    CallSite, Done, DoneEvent, Notice, Observation, Observed, Pruned, ReapCause, ReapNotice,
+    WorkerId,
 };
 
 /// Render a path without a trailing separator.  Some hosts return
@@ -626,9 +626,8 @@ fn decode_surface_round_trips_each_class() {
     ));
     let reap = Notice::Reap(ReapNotice {
         id: WorkerId(1),
-        cmd: "sleep 10".into(),
-        class: LeaseClass::Worker,
-        cause: ReapCause::Idle,
+        title: "sleep 10".into(),
+        cause: ReapCause::Retention,
     });
     assert!(matches!(
         decode_surface(&reap.to_surface()),
@@ -650,16 +649,18 @@ fn decode_surface_round_trips_each_class() {
     ));
     let done = DoneEvent {
         id: ral_core::types::WorkerId(7),
-        cmd: "block at turn 1, line 1".into(),
+        title: "building".into(),
+        elapsed_ms: 1_500,
         outcome: Done::Ok,
     };
     assert!(matches!(
         decode_surface(&done.to_surface()),
         Decoded::Surface(Surface::Done {
             id: Some(7),
-            cmd,
+            title,
+            elapsed: Some(elapsed),
             outcome: crate::card::DoneOutcome::Ok,
-        }) if cmd == "block at turn 1, line 1"
+        }) if title == "building" && elapsed == std::time::Duration::from_millis(1_500)
     ));
     assert!(matches!(decode_surface(&s("nope")), Decoded::Unknown));
 }
@@ -703,6 +704,40 @@ fn inbox_deferred_always_pushes_stamped_with_its_birth_epoch() {
         inbox.next_item().is_none(),
         "its stale birth epoch is refused at the pop"
     );
+}
+
+/// A failed worker wakes the model with how it really ended, never `exit 0`,
+/// and with the call that gets its result back.
+#[test]
+fn a_failed_spawn_wakes_the_model_with_its_status() {
+    let session = crate::agent::Avatar::for_test("system").unwrap();
+    let inbox = Inbox::new();
+    let (tx, _rx) = channel();
+    let emit = Emitter::with_mailbox(tx, session.agent.id, inbox.mailbox());
+    let _ = session.ral(
+        "let h = spawn \"boom\" { fail [status: 5, message: 'boom'] }",
+        10,
+        &emit,
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let text = loop {
+        match inbox.next_item() {
+            Some(crate::bus::Next::Item(item @ crate::bus::Item::Surface { .. })) => {
+                break item.text();
+            }
+            Some(_) => {}
+            None => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the failed worker never surfaced"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    };
+    for part in ["(exit 5)", "(boom)", "worker"] {
+        assert!(text.contains(part), "the notice names {part}: {text:?}");
+    }
 }
 
 /// `boot::seed_no_color`'s suppression reaches spawned commands

@@ -74,8 +74,8 @@ impl RefusedArg {
                  gives, as in `{cmd} !{{!$b}}`"
             ),
             Self::Handle => format!(
-                "await the concurrent block first (`let r = await $h`), then pass a \
-                 field of the result, as in `{cmd} $r[value]`"
+                "await the concurrent block first (`let r = await $h`), then pass \
+                 what it returned, as in `{cmd} $r`"
             ),
             Self::Bytes => {
                 "pipe binary data via stdin with to-bytes, or decode to string first".to_string()

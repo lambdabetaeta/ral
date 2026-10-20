@@ -558,6 +558,19 @@ impl Elaborator {
                         body: self.to_val(body, binds),
                     }
                 ),
+                ScopeAst::Spawn { title, body } => comp!(
+                    self,
+                    CompKind::Spawn {
+                        title: title.as_deref().map(|t| self.spanned_val(t, binds)),
+                        body: self.to_val(body, binds),
+                    }
+                ),
+                ScopeAst::All { tasks } => comp!(
+                    self,
+                    CompKind::All {
+                        tasks: self.lower_options(tasks, binds),
+                    }
+                ),
             },
 
             // `return` with no value and `()` name the same value.

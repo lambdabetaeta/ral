@@ -20,8 +20,10 @@ everything `crate::types::*`.
   at `Unit` has its answer coerced to `Unit` regardless of what the body returns,
   `Decl::settles_at_unit` reading the curry spine to decide and
   debug-asserting the body agrees), and `handle.rs` (the concurrency
-  substrate behind `Value::Handle`: `HandleInner`, `CompletedHandle`,
-  `SurfaceBuffer`).
+  substrate behind `Value::Handle`: `HandleInner`, which carries its
+  worker's `WorkerId`, title and clock — a birth `Stamp` and an end `Stamp`,
+  each one instant on a monotonic and a wall clock — beside `CompletedHandle`
+  and `SurfaceBuffer`).
   Handlers are deep and self-masking, with no
   `resume` ([[design/effects-handlers|effects-handlers]], [[decisions/260530_handlers-deep-self-masking|handlers-deep-self-masking]]).
   A *handler* or alias arm is always a lambda: `HandlerEntry` carries its
@@ -137,7 +139,7 @@ checkpoint, since a run never writes it.
   `Mooring::home`, a `ScopeNode`
   ([[decisions/261016_delimiters-are-handlers-for-poll|delimiters-are-handlers-for-poll]]).
 - **`SessionState`** — what survives every run's teardown: the durable cancel
-  `root` that workers parent under (`Shell::join_session` *shares*
+  `root` that a run's loose workers parent under (`Shell::join_session` *shares*
   it, for a second
   `Shell` the engine runs beside that session — an aside hook,
   [[decisions/260726_cancel-is-a-join|cancel-is-a-join]]), the
@@ -155,10 +157,19 @@ checkpoint, since a run never writes it.
   the `hooks` table (a worker or a stage dispatches none; a hook registered by a run that then panics is not rolled back with the `(env, context)` checkpoint).
 - **`LocalState`** — host-local scratch carrying its own flow rules (audit
   trail, REPL scratch, the `workers` registry, the `bindings` ledger, the
-  `detach` budget); the
-  residue once run and session state are named. The worker registry
+  `detach` budget, the `cradle`); the
+  residue once run and session state are named. The `cradle`
+  (`types/handle/brood.rs`) says where a loose birth hangs and who settles
+  it: loose under the root, answering for nothing, for a run and an aside
+  (`Shell::construct`, `Shell::join_session`); a worker's own node and its
+  `Brood`, the handles of every `spawn`/`watch` born inside it, set first
+  thing in the worker closure; a stage shares its parent's, so a `spawn` in a
+  stage inside a worker is that worker's
+  ([[invariants/a-worker-ends-with-its-children|a-worker-ends-with-its-children]]). The worker registry
   (`shell/workers.rs`) is a per-`Shell` directory of every `spawn`/`watch`ed
-  `HandleInner`, one per agent; `Shell::spawn_thread` shares it by `Arc` into
+  worker, one per agent: a `WorkerEntry` is the `HandleInner` and its
+  `Owner` (the session, the worker it was born inside, or a calling
+  expression), the id, title and clock being the handle's own; `Shell::spawn_thread` shares it by `Arc` into
   a spawned worker's or a pipeline stage's own shell (so a nested `spawn`
   registers alongside its parent), but a sub-agent fork or an aside starts
   with a fresh, empty one carrying the parent's retention. Beside the entries it keeps the `ReapNotice` ledger the reap policies
@@ -181,8 +192,8 @@ checkpoint, since a run never writes it.
   indefinitely. Worker teardown is structural: dropping the shell cancels
   every registered worker's scope through the `Drop` of `Roster`, so a
   session's workers die with its store — a host's `/clear`, which replaces
-  the outgoing shell wholesale, needs no cancel call site, and explicit
-  destruction outranks every lease, the durable class included. The
+  the outgoing shell wholesale, needs no cancel call site, and no worker
+  outlives its session's store. The
   `Roster::Owned`/`Roster::Shared` split is what keeps that edge honest: a
   `spawn_thread` child holds a `Shared` roster over its *parent's* registry,
   so its own drop must not reap the parent's.
@@ -247,7 +258,7 @@ values, and enumeration renews nothing.
 
 ### The mooring
 
-What a run *fixes* is not on the `Shell` at all. The nine run-invariant
+What a run *fixes* is not on the `Shell` at all. The eight run-invariant
 members are a **`Mooring`**: the `surface` sink, the `deferred` sink (a
 worker's completion delivery — `None` outside an agent host), the
 `desk` answering the run's enquiries
@@ -255,11 +266,10 @@ worker's completion delivery — `None` outside an agent host), the
 naming how a forked session reaches the desk that adopts it (`None` outside a
 host that installs one; like `desk`, never given to a deferred worker), the
 owner's node `home` (the base of the run's scope tree: what a heard key, a
-wall, a lease or a `cancel` strikes, never what is polled), the
+wall or a `cancel` strikes, never what is polled), the
 `cleanup_grace` a `guard` cleanup's shield gets from the strike (the host's
-policy, from `Run::cleanup_grace`), the deferred-worker `WorkerLease` (`deferred_lease` — the idle
-bound and absolute backstop travel as one value; `None` never reaps), the
-`worker_cap` admission bound (`Some(cap)` refuses a spawn of any class while
+policy, from `Run::cleanup_grace`), the
+`worker_cap` admission bound (`Some(cap)` refuses a spawn while
 `cap` workers still run; `None` admits freely), and the run's
 `terminal_access`. It is an owned local on the run
 door's own Rust stack frame, and reaches every callee as an explicit
@@ -304,7 +314,7 @@ run (no surface, no rail, no desk, no fork door, and a scope under a root
 nothing else holds, so cancelling it is how such a caller drives the body's poll points).
 
 A worker *rebuilds* rather than sharing (`Mooring::for_worker`): it keeps the
-deferred rail, lease, and cap, takes its own buffering surface, and gets
+deferred rail and cap, takes its own buffering surface, and gets
 neither desk nor fork door — both barred to something that outlives its run's
 Report — under a `worker` scope of the durable root, so a SIGTERM reaches it
 and a Ctrl-C does not.
@@ -423,16 +433,18 @@ registry, root file, call site and exit hints. The kinds differ only in their
 `Holding` — cancel root and anchor, roster, lease ledger, detach budget,
 fixings:
 
-- `spawn_thread` — a spawned worker (`spawn`, `par`, the worker
-  helper) *and* a ral-written pipeline stage
+- `spawn_thread` — a spawned worker (`spawn`, `watch`, a `par` or `all`
+  child) *and* a ral-written pipeline stage
   ([[map/core/runtime|runtime]]'s `pipeline/thread.rs`) — a pipeline never
   rides a re-exec'd child — on a fresh OS thread that owns its own IO, seeded
   from the spawning shell's session, built on the spawning thread; the body's
   capture rides in its closure, and nothing flows back. A worker's mooring is rebuilt by `Mooring::for_worker` on the
   calling thread (so the door can hand the caller the worker's scope) and moved
-  into the thread, which is why it runs under a child of the durable root
-  rather than the foreground scope, and a run timeout or Esc does not reach
-  it; a stage thread instead gets `Mooring::for_stage_thread`, a child of the
+  into the thread, which is why it runs under a child of its cradle — the
+  durable root in a run, the parent worker's node inside a worker — rather
+  than the foreground scope, and a run timeout or Esc does not reach it (a
+  `par` or `all` child hangs under the call's current scope instead, so they
+  do); a stage thread instead gets `Mooring::for_stage_thread`, a child of the
   *node's own* cancel scope, so a pipeline-wide cancel reaches every stage
   transitively and the pipeline's own surface/deferred rail carries over
   rather than a worker's fresh one. It shares the session's root, roster,

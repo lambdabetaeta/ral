@@ -114,9 +114,9 @@ let musl_arm     = 'messense/rust-musl-cross:aarch64-musl'
 let pull_images  = [$musl_x86, $musl_arm]
 
 # Feature sets spread into `cargo build` via `...$feats`.  `plain` is an
-# empty list (passes no extra flags); `all` adds the bundled utilities.
-let plain = []
-let all   = ['--features', 'coreutils,diffutils,ripgrep']
+# empty list (passes no extra flags); `allutils` adds the bundled utilities.
+let plain    = []
+let allutils = ['--features', 'coreutils,diffutils,ripgrep']
 
 # Host-cargo build: shared between --local and --macos.  Identifiers in
 # ral contain dashes, so "$os-$arch" would parse as looking up $os-;
@@ -135,7 +135,7 @@ let host_build = { |target pkg name feats sign|
 }
 let host_variants_ral = { |target os arch sign|
     host_build $target 'ral' !{intercalate '-' ['ral', $os, $arch]}             $plain $sign
-    host_build $target 'ral' !{intercalate '-' ['ral', $os, $arch, 'allutils']} $all   $sign
+    host_build $target 'ral' !{intercalate '-' ['ral', $os, $arch, 'allutils']} $allutils $sign
 }
 # exarch has no allutils variant — `coreutils,diffutils,ripgrep` are ral
 # features.  Single binary per (os, arch).
@@ -187,9 +187,9 @@ let main = {
     # each other; the registry is shared.
     let matrix = [
         [include: $build_linux,   pkg: 'ral',    img: $musl_x86, triple: 'x86_64-unknown-linux-musl',  bin: 'ral',     out: 'ral-linux-x86_64',           feats: $plain],
-        [include: $build_linux,   pkg: 'ral',    img: $musl_x86, triple: 'x86_64-unknown-linux-musl',  bin: 'ral',     out: 'ral-linux-x86_64-allutils',  feats: $all],
+        [include: $build_linux,   pkg: 'ral',    img: $musl_x86, triple: 'x86_64-unknown-linux-musl',  bin: 'ral',     out: 'ral-linux-x86_64-allutils',  feats: $allutils],
         [include: $build_linux,   pkg: 'ral',    img: $musl_arm, triple: 'aarch64-unknown-linux-musl', bin: 'ral',     out: 'ral-linux-arm64',            feats: $plain],
-        [include: $build_linux,   pkg: 'ral',    img: $musl_arm, triple: 'aarch64-unknown-linux-musl', bin: 'ral',     out: 'ral-linux-arm64-allutils',   feats: $all],
+        [include: $build_linux,   pkg: 'ral',    img: $musl_arm, triple: 'aarch64-unknown-linux-musl', bin: 'ral',     out: 'ral-linux-arm64-allutils',   feats: $allutils],
         [include: $build_linux,   pkg: 'exarch', img: $musl_x86, triple: 'x86_64-unknown-linux-musl',  bin: 'exarch',  out: 'exarch-linux-x86_64',        feats: $plain],
         [include: $build_linux,   pkg: 'exarch', img: $musl_arm, triple: 'aarch64-unknown-linux-musl', bin: 'exarch',  out: 'exarch-linux-arm64',         feats: $plain],
     ]

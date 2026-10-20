@@ -89,9 +89,8 @@ impl Cycles {
         match (a, b) {
             (Ty::Var(v), _) if let Some(a) = self.ty_binding(*v) => self.ty_eq(a, b, seen),
             (_, Ty::Var(v)) if let Some(b) = self.ty_binding(*v) => self.ty_eq(a, b, seen),
-            (Ty::List(x), Ty::List(y))
-            | (Ty::Map(x), Ty::Map(y))
-            | (Ty::Handle(x), Ty::Handle(y)) => self.ty_eq(x, y, seen),
+            (Ty::List(x), Ty::List(y)) | (Ty::Map(x), Ty::Map(y)) => self.ty_eq(x, y, seen),
+            (Ty::Handle(g, x), Ty::Handle(h, y)) => g == h && self.ty_eq(x, y, seen),
             (Ty::Record(x), Ty::Record(y)) | (Ty::Variant(x), Ty::Variant(y)) => {
                 self.row_eq(x, y, seen)
             }
@@ -191,6 +190,12 @@ impl FmtCtx {
 
     /// Name every variable under `term` not yet named, pre-order.
     fn absorb(&mut self, term: Term<'_>) {
+        if let Some(Grade::Var(v)) = term.grade() {
+            let idx = self.grade_names.len();
+            self.grade_names
+                .entry(v)
+                .or_insert_with(|| pick(GRADE_LETTERS, idx));
+        }
         match term {
             Term::Ty(Ty::Var(v)) => {
                 let idx = self.ty_names.len();
@@ -203,12 +208,6 @@ impl FmtCtx {
                 self.comp_names
                     .entry(*v)
                     .or_insert_with(|| pick(COMP_LETTERS, idx));
-            }
-            Term::Comp(CompTy::Return(Grade::Var(v), _)) => {
-                let idx = self.grade_names.len();
-                self.grade_names
-                    .entry(*v)
-                    .or_insert_with(|| pick(GRADE_LETTERS, idx));
             }
             Term::Row(Row::Var(v)) => {
                 let idx = self.row_names.len();
@@ -258,7 +257,14 @@ fn fmt_ty_node(ty: &Ty, ctx: &FmtCtx, open: &mut Vec<Open>) -> String {
         Ty::Int => "Integer".into(),
         Ty::Float => "Float".into(),
         Ty::String => "String".into(),
-        Ty::Handle(a) => format!("Handle {}", fmt_ty_in(a, ctx, open)),
+        Ty::Handle(g, a) => {
+            let producer = fmt_producer(*g, a, ctx, open);
+            if producer.contains(' ') {
+                format!("Handle ({producer})")
+            } else {
+                format!("Handle {producer}")
+            }
+        }
         Ty::Var(v) => ctx.ty_name(*v),
         Ty::List(a) => format!("[{}]", fmt_ty_in(a, ctx, open)),
         Ty::Map(a) => format!("Map {}", fmt_ty_in(a, ctx, open)),
@@ -333,11 +339,16 @@ fn fmt_comp_ty_node(cty: &CompTy, ctx: &FmtCtx, open: &mut Vec<Open>) -> String 
             fmt_ty_in(a, ctx, open),
             fmt_comp_ty_in(b, ctx, open)
         ),
-        CompTy::Return(Grade::Output, _) => "Command".into(),
-        CompTy::Return(Grade::Value, a) => format!("Returns {}", fmt_ty_in(a, ctx, open)),
-        CompTy::Return(Grade::Var(v), a) => {
-            format!("{} {}", ctx.grade_name(*v), fmt_ty_in(a, ctx, open))
-        }
+        CompTy::Return(g, a) => fmt_producer(*g, a, ctx, open),
+    }
+}
+
+/// An `F` under its grade: what a `Return` prints as, and what a handle holds.
+fn fmt_producer(grade: Grade, a: &Ty, ctx: &FmtCtx, open: &mut Vec<Open>) -> String {
+    match grade {
+        Grade::Output => "Command".into(),
+        Grade::Value => format!("Returns {}", fmt_ty_in(a, ctx, open)),
+        Grade::Var(v) => format!("{} {}", ctx.grade_name(v), fmt_ty_in(a, ctx, open)),
     }
 }
 

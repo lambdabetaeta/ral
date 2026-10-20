@@ -102,7 +102,7 @@ oh-my-pi) without a prose fallback at all.
   the scrape gone, the cap bounds exactly the reply payload — a curated report, not
   a scraped tail. The first explorer's good brief was 5787 against a 6000 cap: too
   close. Raise the cap so a deliberate report fits, and keep middle-elision (with
-  `clip`'s inline truncation marker, `digest.rs`) only as the hard backstop, not
+  `clip`'s inline truncation marker, `shell_eval/clip.rs`) only as the hard backstop, not
   the common outcome.
 
 - **A no-reply finish is nudged once, then returns empty — no scrape.** A child

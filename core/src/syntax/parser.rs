@@ -237,30 +237,41 @@ impl Bracketed {
 }
 
 /// A control operator's operands for the arity message: how many it takes,
-/// what they are, and how many have been read.
+/// from `min` to `arity`, what they are, and how many have been read.
 #[derive(Clone, Copy)]
 struct Form {
     name: &'static str,
     desc: &'static str,
+    min: usize,
     arity: usize,
     seen: usize,
 }
 
 impl Form {
     fn new(name: &'static str, desc: &'static str, arity: usize) -> Self {
+        Self::elastic(name, desc, arity, arity)
+    }
+
+    /// A form taking `min` to `arity` operands, as `spawn [TITLE] BODY` does.
+    fn elastic(name: &'static str, desc: &'static str, min: usize, arity: usize) -> Self {
         Self {
             name,
             desc,
+            min,
             arity,
             seen: 0,
         }
     }
 
     fn arity_error(self, got: usize) -> String {
+        let args = if self.min == self.arity {
+            plural(self.arity, "argument")
+        } else {
+            format!("{} or {} arguments", self.min, self.arity)
+        };
         format!(
             "{name} requires {args} ({desc}); got {got}",
             name = self.name,
-            args = plural(self.arity, "argument"),
             desc = self.desc,
         )
     }
@@ -668,6 +679,29 @@ impl Parser {
                 let body = Box::new(self.operand(&mut form)?);
                 self.no_more_operands(form)?;
                 ScopeAst::Audit { body }
+            }
+            "spawn" => {
+                let mut form = Form::elastic("spawn", "a body, or a title and the body", 1, 2);
+                self.operand_slot(&mut form)?;
+                let (span, first) = self.capture_span(Self::parse_atom)?;
+                let (title, body) = if self.at_cmd_end() || self.at_redirect() {
+                    (None, first)
+                } else {
+                    let title = Box::new(Spanned::new(span, first));
+                    (Some(title), self.operand(&mut form)?)
+                };
+                self.no_more_operands(form)?;
+                ScopeAst::Spawn {
+                    title,
+                    body: Box::new(body),
+                }
+            }
+            "all" => {
+                let mut form = Form::new("all", "tasks", 1);
+                self.operand_slot(&mut form)?;
+                let (tasks, _) = self.parse_options(form, false, "build: { cargo build }")?;
+                self.no_more_operands(form)?;
+                ScopeAst::All { tasks }
             }
             _ => unreachable!("parse_stage admits only CONTROL_OPERATORS"),
         };

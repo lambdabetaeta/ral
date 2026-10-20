@@ -32,8 +32,8 @@ fn not_data(NotData { leaf, nested }: NotData, shell: &Shell) -> Ending {
     let (verb, hint) = match (leaf, nested) {
         (Opaque::Handle, false) => (
             "is",
-            "did you mean to keep it? bind it (`let h = defer { … }`) and `await $h` \
-             when you need its value",
+            "did you mean to keep it? bind it (`let h = spawn \"title\" { … }`) and \
+             `await $h` when you need its value",
         ),
         (Opaque::Block, false) => ("is", "did you mean to run it? force it with `!{ … }`"),
         (Opaque::Function, false) => ("is", "did you mean to apply it? pass it its arguments"),

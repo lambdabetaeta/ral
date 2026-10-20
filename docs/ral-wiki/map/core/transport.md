@@ -63,8 +63,8 @@ typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
   declared once yields both its encoding and its ral type; the
   records ral reads back live in `fact` (`ErrorRecord`, `Observation`, `Io`,
   `Receipt`, ...), below the checker, which reads their types off the
-  declarations (`ErrorRecord::ty()`); `await`'s and `poll`'s polymorphic shapes
-  are `Io::ty().extend(..)` over them. The doors that mint them sit above
+  declarations (`ErrorRecord::ty()`); `poll`'s polymorphic shape is
+  `Io::ty().extend(..)` over them. The doors that mint them sit above
   (`types::error`, `types::audit`).
 - `first_order/byte_encoding.rs` — byte strings serialize to base64 in JSON
   and native bytes in binary codecs. Binary decoding copies or takes the

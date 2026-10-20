@@ -1,0 +1,40 @@
+# Test: `await` behaves as the block run where it is awaited
+
+# A command block's output is replayed where it is awaited
+let h = spawn { echo hi }
+await $h
+# Expected: hi
+
+# Its bytes, then its value; a second await replays the same ending
+let v = spawn { echo out; return 4 }
+let n = await $v
+echo $n
+let m = await $v
+echo $m
+# Expected: out, 4, out, 4
+
+# A failed block's bytes replay before its failure is raised
+let f = spawn { echo partial; fail [status: 7, message: boom] }
+try { await $f } { |e| echo "status=$e[status]" }
+# Expected: partial, status=7
+
+# Inside a capture, the replay is what is captured
+let s = await $h
+echo "[$s]"
+# Expected: [hi]
+
+# A value block's await is its value
+let k = spawn { 1 }
+let i = await $k
+echo $[$i + 1]
+# Expected: 2
+
+# Under `2> f`, stderr replays to f while stdout stays here
+let d = temp-dir
+let w = spawn { echo to-out; warn to-err }
+await $w 2> "$d/err"
+cat "$d/err"
+rm -rf $d
+# Expected: to-out, to-err
+
+echo 'await exact tests done'

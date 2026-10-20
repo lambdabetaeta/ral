@@ -30,7 +30,7 @@ prefix keeps the witness un-lexable as an integer, so a hash never elaborates to
 
 `EXARCH_BUILTINS` is the largest set on `builtins::host_surface()` — the one
 `HostSurface` value declaring exarch's builtins beyond core's, alongside the
-harness verbs and core's host-selected `SERVICE_BUILTIN`. Core's `boot_shell`
+harness verbs. Core's `boot_shell`
 takes the surface and installs it at construction (a half-dressed production
 shell is unrepresentable), and the wire engine boots the same dressing
 through its `EngineInstaller`'s two halves
@@ -114,59 +114,26 @@ Reads resolve through `checked_read_path` / `check_fs_read`; the edit writes go
 through core's atomic write site under the run's pushed [[design/grant|grant]]
 frame ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]).
 
-## Legibility by lease class — `service`, `service-handle`
+## Listing and reacquisition: `workers`, `worker`
 
-There is no model-facing listing over the worker registry at all: a listing
-carrying live `Value::Handle`s cannot cross
-the engine protocol (`SerialValue`'s decoder rejects them), and returning the
-registry as a language value was mislayered in the first place — enumeration,
-reaping, and caps belong to the host and the lease layer, never this door.
-Legibility
-splits by class instead:
+**A listing is data; `worker <id>` is the door.** Both verbs are core's,
+present in every host ([[map/core/builtins|map: core builtins]]), so exarch
+declares nothing of its own here. Every worker is legible by its id: the
+birth trail card (`errand #7 started · building`) and the completion notice
+name it ([[map/exarch/shell-eval|shell-eval]]), and `/resources` counts the
+running ones.
 
-- An ordinary `spawn`-born worker (`class: Worker`) gets no listing at all.
-  Its idle-observation lease already bounds a forgotten spawn's harm to at
-  most an hour of one seat out of the cap, so a rail card at birth and a
-  reap card at death are the whole story
-  ([[map/exarch/shell-eval|shell-eval]]).
-- A `service`-born worker (`class: Durable`) is bound only by legibility, and
-  that bound is the same one an ordinary worker gets, plus one aggregate:
-  the birth trail card (`worker #id cmd durable`,
-  [[map/exarch/shell-eval|shell-eval]]) shown at the moment of the `service`
-  call, and `/resources`' `workers.running[durable]` count. The register
-  carries no host-reconciled `services` pin, because protected pins should
-  not exist
-  ([[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]'s
-  2026-08-27 amendment). There is no per-service listing; a durable
-  worker's id must be read off its birth card or kept from the `Handle` the
-  `service` call returned.
-
-`service <desc> <thunk>` → `Handle`. The durable-birth verb: an ordinary
-buffered spawn registered under the durable class, which arms no lease chain
-— no idle reap, no 24 h backstop. `desc` is a mandatory, non-empty,
-single-line `String` — the whole legibility bound a durable birth declares,
-so it cannot be absent — and lands verbatim (trimmed) as the registry
-entry's `cmd`, which is what the `services` pin renders. Cancellable through
-its handle, dead with `/clear` or the process. Length is declared at birth,
-never promoted into after the fact. The atom itself lives in core
-(`SERVICE_BUILTIN`, the `watch` mechanism with the hosts swapped —
-[[map/core/builtins|map: core builtins]]); exarch is the host that installs
-it, because only under exarch's lease frame does a durable birth distinguish
-anything.
-
-`service-handle <id>` → `Handle`. The one narrow door back to a never-bound
-service's handle: looked up among this shell's `LeaseClass::Durable` entries
-only, by the id its birth trail card named. An id naming an ephemeral
-`spawn`/`watch` worker is refused exactly like an unknown one — an ephemeral
-worker's rediscovery path is the binding lease, not enumeration by id. A bare
-top-level `service-handle N` result cannot cross the engine protocol (a `Handle` is
-not ground) — it exists to be composed with an eliminator in the same run:
-`await (service-handle 3)`, `cancel (service-handle 3)`.
-
-Carried only on `builtins::host_surface()`, alongside the search/edit
-atoms above: a bare REPL shell, whose boot never carries `EXARCH_BUILTINS` (nor
-`SERVICE_BUILTIN`), has neither `service` nor `service-handle`; background
-work there is `spawn`, as everywhere else.
+- `workers` → `[WorkerRow]`. The registry as records — `id`, `title`,
+  `owner`, `state`, `started`, `elapsed`, `settled` — one per worker, running
+  or with a retained result, and never a handle, so a top-level `workers`
+  crosses the engine protocol and the `VALUE` section prints it as aligned
+  rows, by the printer's own rule. Reading it claims nothing.
+- `worker <id>` → `Handle`. The one door back to a worker's handle, whatever
+  started it, running or with a retained result, by the id its row, birth
+  card or completion notice carries; nothing looks a worker up by title. A
+  bare top-level `worker N` result cannot cross the engine protocol (a
+  `Handle` is not ground): it exists to be composed with an eliminator in the
+  same run, `await !{worker 3}`, `cancel !{worker 3}`.
 
 ## ral helpers — `agent.ral`
 
@@ -481,7 +448,7 @@ its one-hour follow-up lease; working time is outside that lease
   register: `` `set ``/`` `clear `` write it, `` `read ``/`` `list `` read it
   back, and it is the register's only door — with the same
   foreground-only discipline `exarch-agents` and `exarch-context` already have: a call
-  inside `spawn { … }` errors rather than degrading.
+  inside `spawn "…" { … }` errors rather than degrading.
   - `` `set [key: Str, body: Card] `` → `Unit`.
   - `` `clear <key> `` → `Unit`.
   - `` `read <key> `` → `∀α. F α`. `` `some `` the card pinned at `key`, canonically

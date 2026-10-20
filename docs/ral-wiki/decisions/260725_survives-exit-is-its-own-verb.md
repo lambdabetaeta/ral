@@ -4,6 +4,12 @@ status: active
 
 # Durable inside the process is not durable across it: work you stop owning is `detach`, born by double-fork
 
+> Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]: `service`
+> is deleted. With worker leases retired, a worker lives as long as its session
+> whatever bore it, so the time axis `service` varied no longer exists and a
+> `service` is a titled `spawn`. `detach` stands, on the axis this page names:
+> who owns the process.
+
 **`service` is durable *within a session* and cannot be made durable *beyond*
 one, because its child's process group is recorded by the parent at birth and
 signalled at teardown. A task whose grader runs after exarch exits is therefore

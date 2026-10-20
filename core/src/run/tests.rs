@@ -289,37 +289,32 @@ fn nursery_is_emptied_at_run_teardown() {
     assert_nursery_emptied(true);
 }
 
-/// A worker the lease chain reaps *between* runs has no live sink until the
-/// next run installs one, so its reap surfaces as a `` `notice `` there,
-/// ordered before that run's own settling.
-#[cfg_attr(
-    ctor_without_argv,
-    ignore = "a test binary serves bundled tools before main, where musl gives std no argv"
-)]
+/// A settled worker whose result outlives the retention bound is reaped at a
+/// run door, and its reap surfaces as a `` `notice `` at the next ready
+/// boundary.
 #[test]
-fn ready_boundary_notice_surfaces_a_pending_worker_reap() {
+fn ready_boundary_notice_surfaces_a_pending_retention_reap() {
     let mut shell = crate::test_helper::core_shell();
-
-    // Never polled, under a millisecond-scale idle lease, so the background
-    // lease chain reaps it quickly.
-    let mut req = Run::captured("spawn { sleep 10 }", "<test>");
-    req.deferred_lease = Some(crate::types::WorkerLease {
-        idle: std::time::Duration::from_millis(20),
-        backstop: std::time::Duration::from_secs(10),
-    });
-    let _ = shell.run(req);
+    shell.arm_worker_retention(1);
+    let _ = shell.run(Run::captured("spawn { return 1 }", "<test>"));
 
     crate::test_helper::eventually(std::time::Duration::from_secs(2), || {
-        (shell.worker_count() == 0).then_some(())
+        shell
+            .workers()
+            .iter()
+            .all(|e| !e.handle.is_running())
+            .then_some(())
     })
-    .expect("the unpolled worker must be reaped within the budget");
+    .expect("the worker must settle within the budget");
 
-    // The first live sink of the session: until this run, the pending reap
-    // has nowhere to push through.
+    let _ = shell.run(Run::captured("$[1 + 1]", "<test>"));
     let notices = surfaced_notices(&mut shell, "$[1 + 1]");
     assert!(
-        matches!(notices.as_slice(), [crate::types::Notice::Reap(_)]),
-        "the settled run must surface the pending reap as a `notice`, got {notices:?}"
+        matches!(
+            notices.as_slice(),
+            [crate::types::Notice::Reap(r)] if r.cause == crate::types::ReapCause::Retention
+        ),
+        "the second call must surface the retention reap as a `notice`, got {notices:?}"
     );
 }
 
@@ -700,9 +695,7 @@ fn panicking_run_reports_failed_and_rolls_back() {
     assert!(matches!(ending, Ending::Settled { .. }));
 
     match shell.run(Run::captured("let mid_panic = 2\ncore-panic-now", "<test>")) {
-        RunReport::Static {
-            diagnostics: StaticDiagnostics::Host(e),
-        } => {
+        RunReport::Faulted { error: e } => {
             assert!(
                 e.message.contains("run panicked"),
                 "the report must name the panic, got {:?}",
@@ -714,7 +707,7 @@ fn panicking_run_reports_failed_and_rolls_back() {
                 e.message
             );
         }
-        _ => panic!("a panicking run must report Static{{Host}}"),
+        _ => panic!("a panicking run must report Faulted"),
     }
 
     assert!(
@@ -760,10 +753,8 @@ fn desk_handler_panic_is_caught_at_the_door() {
         desk: Some(Arc::new(PanickingDesk)),
         ..RunRequest::from(Run::captured("let desk_panic = 4\nenquire", "<test>"))
     }) {
-        RunReport::Static {
-            diagnostics: StaticDiagnostics::Host(e),
-        } => assert!(e.message.contains("run panicked")),
-        _ => panic!("a desk-handler panic must report Static{{Host}}"),
+        RunReport::Faulted { error: e } => assert!(e.message.contains("run panicked")),
+        _ => panic!("a desk-handler panic must report Faulted"),
     }
     assert!(
         shell.scope_lookup("desk_panic").is_none(),
@@ -1009,22 +1000,20 @@ fn a_dispatch_asking_no_trail_reports_none() {
 }
 
 /// A panicked dispatch is excluded from the trail law by declaration: it
-/// reports `Static`, and the scope `enter` held — outside the
+/// reports `Faulted`, and the scope `enter` held — outside the
 /// `catch_unwind` the panic escapes through — still drains and closes,
 /// discarded rather than attached. The next dispatch that asks opens a
 /// fresh scope and sees nothing left over.
 #[test]
-fn a_panicked_dispatch_reports_static_and_leaves_the_next_trail_empty() {
+fn a_panicked_dispatch_reports_faulted_and_leaves_the_next_trail_empty() {
     let mut shell = panicking_shell();
 
     match shell.run(Run {
         trail: Some(crate::types::CapturePolicy::Off),
         ..Run::captured("core-panic-now", "<test>")
     }) {
-        RunReport::Static {
-            diagnostics: StaticDiagnostics::Host(e),
-        } => assert!(e.message.contains("run panicked")),
-        _ => panic!("a panicking dispatch must report Static{{Host}}"),
+        RunReport::Faulted { error: e } => assert!(e.message.contains("run panicked")),
+        _ => panic!("a panicking dispatch must report Faulted"),
     }
 
     match shell.run(Run {
@@ -1339,9 +1328,9 @@ fn a_stage_panic_stops_its_siblings_and_is_reraised() {
     ));
     assert!(started.elapsed() < std::time::Duration::from_secs(3));
     match report {
-        RunReport::Static {
-            diagnostics: StaticDiagnostics::Host(e),
-        } => assert!(e.message.contains("run panicked"), "{:?}", e.message),
-        _ => panic!("a stage panic must report Static{{Host}}"),
+        RunReport::Faulted { error: e } => {
+            assert!(e.message.contains("run panicked"), "{:?}", e.message);
+        }
+        _ => panic!("a stage panic must report Faulted"),
     }
 }
