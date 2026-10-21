@@ -1,11 +1,41 @@
 ---
 status: active
 generated_at_commit: fe9cd32d
-verified_at_commit: 8826b170
-anchors: [await_handle, join, claim_first, claim_settled, claim_and_stop, Settler, Cradle, Brood, Birth, convert_own_stop, TitlePolicy, Stamp, Owner, WorkerRow, builtin_worker, spawn_form]
+verified_at_commit: 61c288f
+verified_at_date: 2026-10-21
+anchors: [await_handle, join, claim_first, claim_ready, claim_and_stop, CompletionPermit, Cradle, Brood, ScopeOwner, Birth, convert_own_stop, TitlePolicy, Stamp, Owner, WorkerRow, spawn_form]
 ---
 
 # `await` is the block run here, and a worker ends with its children
+
+> Amended 2026-10-21:
+> - **Four-state handle lifecycle (`running` → `stopping` → `ready` → `consumed`).**
+>   `cancel` on a `running` worker moves it to `stopping` (in-flight teardown);
+>   when the worker thread finishes, `CompletionPermit` transitions `running` →
+>   `ready` or `stopping` → `consumed` and sets the end `Stamp` before flushing
+>   its deferred surface. `await`, `race`, or `cancel` on a `ready` worker moves
+>   it to `consumed`. The admission cap (`worker_cap`) counts `running +
+>   stopping + reserved births`, and the binding lease pins both `running` and
+>   `stopping` handles (`pins_live_work`). Retention stamps only `ready` entries
+>   whose parent worker is not still live (`running` or `stopping`).
+> - **Three data observations (`poll`, `is-done`, `first-settled`).** `poll` is a
+>   4-arm total observation over `running`, `stopping`, `ready` and `consumed`,
+>   so it never fails because a handle was cancelled or already claimed; `is-done`
+>   is a native builtin returning `true` for `ready` or `consumed` and `false`
+>   for `running` or `stopping` without raising; `first-settled` returns the
+>   index of the first `ready` handle, skipping `stopping` and `consumed`
+>   handles and failing only when none is `running` or `ready`.
+> - **Sweep-start cancellation.** `await`, `race`, and `first-settled` poll the
+>   caller's cancel scope before inspecting any handle, so a pending stop is
+>   never lost to an already-`ready` worker; `race` also drains any argument
+>   already in `stopping` within the single cleanup grace.
+> - **`worker <id>` is deleted.** A worker handle is a capability held only in
+>   the lexical bindings that received it from `spawn` or `watch`; `workers`
+>   lists `running`, `stopping`, and `ready` entries as data from a single
+>   consistent snapshot per handle (`Consumed` entries are omitted), and the
+>   completion notice names the worker and its outcome without a handle-lookup
+>   door (`Avatar::arrive` filters out redundant model wakeups for workers
+>   already claimed during the turn).
 
 > Amended 2026-10-20 by [[decisions/261020_gather|gather]]: there is one
 > ownership mechanism, the brood, and `gather { … }` is its syntax; a worker's
@@ -408,13 +438,13 @@ code renders anything.
 
 ## Where
 
-`await_handle`, `join`, `builtin_worker` in
+`await_handle`, `join`, `claim_first`, `builtin_poll`, `builtin_is_done` in
 `core/src/builtins/concurrency/eliminate.rs`; `HandleState`, `Sample`,
-`Settler` in `core/src/types/handle.rs`; `Birth`, `convert_own_stop` in
-`core/src/builtins/concurrency/birth.rs`; `spawn_form` in
-`core/src/builtins/concurrency.rs`; `Cradle`, `Brood` in
-`core/src/types/handle/brood.rs`; `Stamp` in `core/src/types/handle.rs`;
-`Owner` in `core/src/types/shell/workers.rs`; `TitlePolicy` in
+`CompletionPermit`, `Stamp` in `core/src/types/handle.rs`; `Birth`,
+`convert_own_stop`, `exit_brood` in `core/src/builtins/concurrency/birth.rs`;
+`spawn_form` in `core/src/builtins/concurrency.rs`; `Cradle`, `Brood`,
+`ScopeOwner` in `core/src/types/handle/brood.rs`; `Owner` in
+`core/src/types/shell/workers.rs`; `TitlePolicy` in
 `core/src/types/mooring.rs`; `WorkerRow` in `core/src/protocol/probe.rs`. The
 runtime narrative is [[internals/cancellation|cancellation]] and
 [[internals/output-capture-and-detachment|output-capture-and-detachment]];

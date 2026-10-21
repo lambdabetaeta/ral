@@ -357,7 +357,7 @@ pub(crate) fn outcome_ty(value_ty: Ty) -> Ty {
 }
 
 /// The `{stdout, stderr, elapsed, outcome}` record `poll` carries in its
-/// `` `settled `` arm.  The `` `err `` payload is the very record `try` hands
+/// `` `ready `` arm.  The `` `err `` payload is the very record `try` hands
 /// its handler, so the block's status lives inside it.
 fn settle_record(value_ty: Ty) -> Ty {
     Io::ty()
@@ -365,15 +365,18 @@ fn settle_record(value_ty: Ty) -> Ty {
         .extend("outcome", outcome_ty(value_ty))
 }
 
-/// The variant `poll` returns: [`settle_record`] once the block has finished,
-/// and what it has written so far while it runs (a cumulative, non-destructive
-/// snapshot), each with the seconds it has run.  `poll` is the one data
-/// observation: a failure and the worker's own stop settle inside `` `err ``;
-/// a panic, an `exit` and a foreign stop are re-raised.
+/// The variant `poll` returns: [`settle_record`] in `` `ready `` once the block
+/// has finished with an unclaimed result, what it has written so far while it
+/// runs in `` `running `` (a cumulative, non-destructive snapshot), and
+/// `[elapsed: Float]` in `` `stopping `` or `` `consumed `` once its result has
+/// been claimed.  In `` `ready ``, an ordinary failure or scope stop settles
+/// inside `` `err ``; a panic, an `exit` and a foreign stop are re-raised.
 pub(crate) fn poll_variant(value_ty: Ty) -> Ty {
     closed_variant(&[
-        ("pending", Io::ty().extend("elapsed", Ty::Float)),
-        ("settled", settle_record(value_ty)),
+        ("running", Io::ty().extend("elapsed", Ty::Float)),
+        ("stopping", closed_record(&[("elapsed", Ty::Float)])),
+        ("ready", settle_record(value_ty)),
+        ("consumed", closed_record(&[("elapsed", Ty::Float)])),
     ])
 }
 
@@ -541,10 +544,9 @@ pub mod scheme {
         })
     }
 
-    /// `worker :: ∀ε α. Int → F (Handle^ε α)`: instantiated per call site, as
-    /// `race :: [Handle^ε α] → …` is.
-    pub(crate) fn worker_op(u: &mut Unifier) -> Scheme {
-        on_handle(u, |handle, _, _| fun(Ty::Int, pure(handle)))
+    /// `is-done :: ∀ε α. Handle^ε α → F Bool`: whether execution has ended.
+    pub(crate) fn is_done(u: &mut Unifier) -> Scheme {
+        on_handle(u, |handle, _, _| fun(handle, pure(Ty::Bool)))
     }
 
     /// `await :: ∀ε α. Handle^ε α → F^ε α`: the block, run here.
@@ -552,7 +554,7 @@ pub mod scheme {
         on_handle(u, |handle, body, _| fun(handle, body))
     }
 
-    /// `poll :: ∀ε α. Handle^ε α → F <pending: {stdout, stderr, elapsed} | settled: {stdout, stderr, elapsed, outcome: <ok: α | err: ErrRecord>}>`
+    /// `poll :: ∀ε α. Handle^ε α → F <running: {stdout, stderr, elapsed} | stopping: {elapsed} | ready: {stdout, stderr, elapsed, outcome: <ok: α | err: ErrRecord>} | consumed: {elapsed}>`
     pub(crate) fn poll(u: &mut Unifier) -> Scheme {
         on_handle(u, |handle, _, a| fun(handle, pure(poll_variant(a))))
     }

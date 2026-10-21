@@ -1,5 +1,5 @@
-//! Concurrency: the births `spawn`, `watch`, `detach`, the listing `workers`
-//! and the reacquisition `worker`, and the eliminators `await`, `poll`,
+//! Concurrency: the births `spawn`, `watch`, `detach`, the listing `workers`,
+//! and the eliminators and observations `await`, `poll`, `is-done`,
 //! `first-settled`, `race`, `cancel`.
 //!
 //! Every worker has one owner, fixed at birth: the gather it was born inside
@@ -20,8 +20,8 @@ pub(crate) use birth::exit_brood;
 use birth::{Birth, spawn_child};
 use eliminate::join;
 pub(super) use eliminate::{
-    builtin_await, builtin_cancel, builtin_first_settled, builtin_poll, builtin_race,
-    builtin_worker, builtin_workers,
+    builtin_await, builtin_cancel, builtin_first_settled, builtin_is_done, builtin_poll,
+    builtin_race, builtin_workers,
 };
 
 // ── spawn ────────────────────────────────────────────────────────────────

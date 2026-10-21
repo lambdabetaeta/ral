@@ -27,8 +27,10 @@ echo !{length $small}
 let h = spawn { yes ral | head -c 20000000 }
 let settle = { |h|
     case !{poll $h} [
-        `settled: { |s| return $s },
-        `pending: { |_| sleep 0.05; settle $h }
+        `ready: { |s| return $s },
+        `running: { |_| sleep 0.05; settle $h },
+        `stopping: { |_| fail [status: 1, message: "unexpected stopping"] },
+        `consumed: { |_| fail [status: 1, message: "unexpected consumed"] }
     ]
 }
 let res = settle $h

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f56fff48
+generated_at_commit: 61c288f
 generated_at_date: 2026-10-21
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
@@ -23,8 +23,8 @@ everything `crate::types::*`.
   substrate behind `Value::Handle`: `HandleInner`, which carries its
   worker's `WorkerId`, title and clock — a birth `Stamp` and an end `Stamp`,
   each one instant on a monotonic and a wall clock — and one lock over its
-  `HandleState` (`Running`, `Settled`, `Claimed`), beside `CompletedHandle`,
-  the worker's `Settler` and its `DeferredSurface`).
+  `HandleState` (`Running`, `Stopping`, `Ready`, `Consumed`), beside `CompletedHandle`,
+  the worker's `CompletionPermit` and its `DeferredSurface`).
   Handlers are deep and self-masking, with no
   `resume` ([[design/effects-handlers|effects-handlers]], [[decisions/260530_handlers-deep-self-masking|handlers-deep-self-masking]]).
   A *handler* or alias arm is always a lambda: `HandlerEntry` carries its
@@ -163,11 +163,11 @@ checkpoint, since a run never writes it.
   (`types/handle/brood.rs`) says where a loose birth hangs and who settles
   it: loose under the root, answering for nothing, for a run and an aside
   (`Shell::construct`, `Shell::join_session`); inside a gather, its entry
-  scope and its `Brood`, the handles of every `spawn`/`watch` born inside it
-  (`Cradle::owning`) — set first thing in the worker closure for a worker's
-  body, and by `Frame::Gather` for the extent of a `gather { … }`; a stage
-  shares its parent's, so a `spawn` in a stage inside a gather is that
-  gather's
+  scope and its `Brood`, paired with a unique `ScopeOwner` holding the handles
+  of every `spawn`/`watch` born inside it (`Cradle::owning`) — set first thing
+  in the worker closure for a worker's body, and by `Frame::Gather` for the
+  extent of a `gather { … }`; a stage shares its parent's, so a `spawn` in a
+  stage inside a gather is that gather's
   ([[invariants/a-worker-ends-with-its-children|a-worker-ends-with-its-children]]). The worker registry
   (`shell/workers.rs`) is a per-`Shell` directory of every `spawn`/`watch`ed
   worker, one per agent: a `WorkerEntry` is the `HandleInner` and its
@@ -184,14 +184,15 @@ checkpoint, since a run never writes it.
   dispatch is not the registry's question to answer — a `spawn` observes its
   birth into the dispatch's own trail ([[map/exarch/shell-eval|shell-eval]]),
   and a reader joins that trail against the registry (or the `` `workers ``
-  probe, whose rows carry the same `id`) to ask what became of it. A settled
+  probe, whose rows carry the same `id`) to ask what became of it. A `Ready`
   entry carries a `settled_epoch` stamp too: retention is armed once at boot
   (`Shell::arm_worker_retention`, beside the binding lease), the
   registry's own clock ticks once per source dispatch (`tick_epoch`), and
   the ready-boundary sweep (`sweep_retention`) stamps an entry at the
-  first sweep that observes it settled and expires it (a `Retention`
+  first sweep that observes it `Ready` while its parent worker (if any) is no
+  longer live (`Running` or `Stopping`) and expires it (a `Retention`
   notice) once its unclaimed result has sat a full retention of ral calls
-  — a host that never arms (the REPL) retains settled entries
+  — a host that never arms (the REPL) retains `Ready` entries
   indefinitely. Worker teardown is structural: dropping the shell cancels
   every registered worker's scope through the `Drop` of `Roster`, so a
   session's workers die with its store — a host's `/clear`, which replaces
@@ -273,7 +274,7 @@ wall or a `cancel` strikes, never what is polled), the
 `cleanup_grace` a `guard` cleanup's shield gets from the strike (the host's
 policy, from `Run::cleanup_grace`), the
 `worker_cap` admission bound (`Some(cap)` refuses a spawn while
-`cap` workers still run; `None` admits freely), and the run's
+`cap` workers are `running`, `stopping`, or reserved; `None` admits freely), and the run's
 `terminal_access`. It is an owned local on the run
 door's own Rust stack frame, and reaches every callee as an explicit
 `&Mooring`, placed immediately before the `&Shell` / `&mut Shell` in every
@@ -316,11 +317,12 @@ core only `home`, `Mooring::surface`, `Mooring::lend_terminal`,
 run (no surface, no rail, no desk, no fork door, and a scope under a root
 nothing else holds, so cancelling it is how such a caller drives the body's poll points).
 
-A worker *rebuilds* rather than sharing (`Mooring::for_worker`): it keeps the
-deferred rail and cap, takes its own buffering surface, and gets
-neither desk nor fork door — both barred to something that outlives its run's
-Report — under a `worker` scope of the durable root, so a SIGTERM reaches it
-and a Ctrl-C does not.
+A worker or stage thread *rebuilds* rather than sharing
+(`Mooring::for_thread(home, surface)`): it keeps the deferred rail, cleanup
+grace and worker cap, takes the thread's own `home` scope node and `surface`
+(a buffering `DeferredSurface` for a session worker, the parent's live surface
+for a gather-owned worker or a pipeline stage thread), and gets neither desk
+nor fork door — both barred to a child thread.
 
 ### Surface
 
@@ -336,11 +338,11 @@ already holds the wire form: `Shell::observe_stamped` (`types/audit/door.rs`) re
 with `Observation::to_surface`, tagged `` `observed `` so a host dispatches on
 the tag alone without re-encoding a `Value` it never had. Run-scoped, not
 a persistent capability — a run door installs it, so a clone of it has no
-liveness role and can never decide a run is over. A worker does not receive the live sink: its surface is a
+liveness role and can never decide a run is over. A session worker does not receive the live sink: its surface is a
 `DeferredSurface` (`types/handle/surface.rs`) that buffers and, through the
-worker's `Settler` on every exit, delivers the batch once to the session's
-`DeferredSink` as the worker settles, before its handle does; a mooring without that sink gives
-its workers no surface
+worker's `CompletionPermit` on every exit after the handle reaches its terminal
+state (`Ready` or `Consumed`), delivers the batch once to the session's
+`DeferredSink`; a mooring without that sink gives its workers no surface
 ([[decisions/260622_surface-delivers-itself|surface-delivers-itself]]).
 
 ### Terminal handoff
@@ -440,15 +442,17 @@ fixings:
   ([[map/core/runtime|runtime]]'s `pipeline/thread.rs`) — a pipeline never
   rides a re-exec'd child — on a fresh OS thread that owns its own IO, seeded
   from the spawning shell's session, built on the spawning thread; the body's
-  capture rides in its closure, and nothing flows back. A worker's mooring is rebuilt by `Mooring::for_worker` on the
-  calling thread (so the door can hand the caller the worker's scope) and moved
-  into the thread, which is why it runs under a child of its cradle — the
-  durable root in a run, so a run timeout or Esc does not reach it; inside a
-  gather its entry scope, the parent worker's node inside a worker or the
-  run's scope at a `gather`, which they do reach; a stage thread instead gets `Mooring::for_stage_thread`, a child of the
-  *node's own* cancel scope, so a pipeline-wide cancel reaches every stage
-  transitively and the pipeline's own surface/deferred rail carries over
-  rather than a worker's fresh one. It shares the session's root, roster,
+  capture rides in its closure, and nothing flows back. Both rebuild their
+  mooring through `Mooring::for_thread(home, surface)` on the calling thread
+  (so the door can hand the caller the child's scope) and move it into the
+  thread: a worker's `home` is a child of its cradle — the durable root in a
+  run, so a run timeout or Esc does not reach it; inside a gather its entry
+  scope, the parent worker's node inside a worker or the run's scope at a
+  `gather`, which they do reach — and its `surface` is a fresh
+  `DeferredSurface` for a session worker or the parent's live surface inside a
+  gather; a stage thread's `home` is a child of the *node's own* cancel scope,
+  so a pipeline-wide cancel reaches every stage transitively, and its `surface`
+  is the pipeline's own. It shares the session's root, roster,
   detach budget and fixings; its lease ledger is unarmed.
 - `join_session` — an aside: an independent sibling that clones the parent's
   `context`, source cursor, builtin table, and Σ (`sig`, by `Arc` clone)

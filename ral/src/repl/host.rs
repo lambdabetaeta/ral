@@ -220,7 +220,7 @@ impl DeferredSink for ReplHost {
 pub(crate) fn teardown_notice(workers: &[WorkerRow]) -> Option<String> {
     let running: Vec<String> = workers
         .iter()
-        .filter(|row| matches!(row.state, WorkerState::Running))
+        .filter(|row| matches!(row.state, WorkerState::Running | WorkerState::Stopping))
         .map(|row| format!("#{} ({})", row.id, row.title))
         .collect();
     if running.is_empty() {
@@ -237,25 +237,34 @@ pub(crate) fn teardown_notice(workers: &[WorkerRow]) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn row(id: u64, title: &str, running: bool) -> WorkerRow {
+    fn row_state(id: u64, title: &str, state: WorkerState) -> WorkerRow {
+        let settled = matches!(state, WorkerState::Ready(_)).then_some(0);
         WorkerRow {
             id,
             title: title.to_string(),
             owner: ral_core::types::Owner::Session,
-            state: if running {
-                WorkerState::Running
-            } else {
-                WorkerState::Done(ral_core::types::Done::Ok)
-            },
+            state,
             started: 0,
             elapsed: ral_core::first_order::Finite::from(0),
-            settled: (!running).then_some(0),
+            settled,
             retention_left: None,
         }
     }
 
-    /// `teardown_notice` names every still-running worker in one line and is
-    /// `None` when the table holds none.
+    fn row(id: u64, title: &str, running: bool) -> WorkerRow {
+        row_state(
+            id,
+            title,
+            if running {
+                WorkerState::Running
+            } else {
+                WorkerState::Ready(ral_core::types::Done::Ok)
+            },
+        )
+    }
+
+    /// `teardown_notice` names every still-live (`Running` or `Stopping`)
+    /// worker in one line and is `None` when the table holds none.
     #[test]
     fn teardown_notice_names_running_workers_only() {
         assert_eq!(
@@ -266,19 +275,19 @@ mod tests {
         assert_eq!(
             teardown_notice(&[row(1, "done", false)]),
             None,
-            "a settled-but-unclaimed worker is nothing to take down"
+            "a ready-but-unclaimed worker is nothing to take down"
         );
 
         let mixed = [
             row(2, "still going", true),
-            row(9, "serving", true),
+            row_state(9, "serving", WorkerState::Stopping),
             row(1, "done", false),
         ];
-        let notice = teardown_notice(&mixed).expect("two running workers must be named");
+        let notice = teardown_notice(&mixed).expect("live workers must be named");
         assert!(notice.contains("2 workers still running"), "got: {notice}");
         assert!(notice.contains("#2 (still going)"), "got: {notice}");
         assert!(notice.contains("#9 (serving)"), "got: {notice}");
-        assert!(!notice.contains("#1"), "the settled worker is not named");
+        assert!(!notice.contains("#1"), "the ready worker is not named");
     }
 
     /// A prompt fault prints when it changes: once while it repeats, again

@@ -307,18 +307,20 @@ Do not use `sh -c`, as e.g. `sh -c #'a; b; c'#` payload throws away what `ral` w
 
     let h = spawn "sort the log" { sort huge.txt > sorted.txt }
 
-You need not wait for it: end the turn when nothing else remains, and the host wakes you when it finishes, naming its id, title, how long it ran and how it ended. Do not poll for completion.
+You need not wait for it: end the turn when nothing else remains, and if its result is still unclaimed when it finishes, the host wakes you naming its id, title, how long it ran and how it ended. Do not poll for completion or to keep a worker alive.
 
 `await $h` behaves exactly as if the block had run on that line: whatever it printed appears on your stdout and stderr, its value is returned, and a failure in it fails your script there, so `try` around `await` is how you recover. A handle's result is claimed once: you may await it turns later, but a second `await` of it, or one after `cancel` or `race` claimed it, fails. An `exit` inside the block exits the turn that awaits it.
 
     let out = await $h          # a command's output, as `let out = { … }` would bind it
     try { await $h } { |e| echo "failed: $e[message]" }    # or this instead, to recover
 
-If the binding is gone, the notice's id brings the handle back: `await !{worker 7}`. `workers` lists every worker with its id, title, owner, state and timing. `cancel $h` stops a block that is no longer needed, and everything it started.
+Retain the handle returned by `spawn` (or `watch`) whenever you will need its result or individual cancellation; a worker ID in `workers` or a completion notice is for observation only and cannot recover a handle.
+
+Every worker moves through one four-state lifecycle: `running` (executing, result unclaimed), `stopping` (cancellation requested, still executing, result claimed by cancel), `ready` (execution ended, result unclaimed), and `consumed` (execution ended and result claimed or discarded). `workers` lists `running`, `stopping`, and retained `ready` workers with their id, title, owner, state and timing; `stopping` is still live and counts against the admission cap until execution ends. `cancel $h` stops a block that is no longer needed, and everything it started. `is-done $h` is `true` in `ready` or `consumed`, without copying output or raising.
 
 A block may `spawn` inside itself: those workers belong to it, and it finishes only after they have, their output and failures folded into its own.
 
-`poll $h` samples without waiting, printing or claiming: `pending` with the output so far and the seconds elapsed, or `settled` with the output, the time it took and `ok`/`err`, after which `await $h` still works. Use it to read a long-running server's output; to wait, `sleep 30; poll $h`.
+`poll $h` samples without waiting, printing or claiming: `running` with `[stdout, stderr, elapsed]`, `stopping` with `[elapsed]`, `ready` with `[stdout, stderr, elapsed, outcome]` (`ok`/`err`, after which `await $h` still works), or `consumed` with `[elapsed]`. Use it to read a long-running server's output; to wait, `sleep 30; poll $h`.
 
 Fan-out that must leave nothing behind is a `gather`, not a set of loose spawns:
 

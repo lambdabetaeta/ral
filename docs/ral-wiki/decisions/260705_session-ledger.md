@@ -4,6 +4,11 @@ status: active
 
 # A session is a ledger of residents
 
+> Amended 2026-10-21: `worker <id>` is deleted. `workers` remains the
+> model-facing data listing of `running`, `stopping`, and `ready` entries, while
+> the handle capability is held only in the bindings that received it from
+> `spawn` or `watch`.
+>
 > Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]: the
 > durable grade is gone from the order. `service` is deleted and worker leases
 > are retired, so a worker's lifetime is its owner's: a `spawn`ed worker

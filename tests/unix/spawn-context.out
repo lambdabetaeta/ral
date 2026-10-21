@@ -10,5 +10,5 @@ false
 7
 true
 7
-poll: this worker's result was already claimed
+claimed-by-cancel
 spawn context tests done

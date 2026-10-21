@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d834a9da
-generated_at_date: 2026-10-19
+generated_at_commit: 61c288f
+generated_at_date: 2026-10-21
 covers_paths: [core/src/prelude.ral]
 ---
 
@@ -28,8 +28,8 @@ report's `` `command `` facts, in trail order), `succeeded` (an `audit`
 report's outcome as a `Bool`), …) layered over the directly-registered Rust
 builtins (`each`, `map`, `filter`, `fold`, …), and the structured fan-out
 over the `gather` and `spawn` control operators: `par` (a bounded parallel
-map that keeps input order in bytes and values), `both` and `first-of`, beside
-`is-done` ([[decisions/261020_gather|gather]]). These are ordinary
+map that keeps input order in bytes and values), `both` and `first-of`
+([[decisions/261020_gather|gather]]). These are ordinary
 [[design/cbpv|values]] of fixed arity ([[invariants/fixed-arity|fixed-arity]]).
 
 Structural equality is the `==` / `!=` expression operator; callbacks use

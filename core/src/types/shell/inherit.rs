@@ -115,7 +115,7 @@ impl Shell {
         F: FnOnce(&Mooring, &mut Self) -> R + Send + 'static,
         R: Send + 'static,
     {
-        let mut child = self.child(Holding {
+        let child = self.child(Holding {
             root: self.session.root.clone(),
             scope: Scope::clone(&mooring.home),
             workers: self.local.workers.share(),
@@ -125,12 +125,16 @@ impl Shell {
             .name(name.into())
             .stack_size(8 << 20)
             .spawn(move || {
-                let out = f(&mooring, &mut child);
-                // The ticket goes last, after the body and its shell, so a
-                // teardown's drain outlasts this frame's children rather than
-                // merely seeing the cancel land.
-                drop((child, live));
-                out
+                // Held across the inner block so reverse local destruction order
+                // releases `child` and `mooring` before `live` on both normal
+                // return and unwind.
+                let result = {
+                    let mooring = mooring;
+                    let mut child = child;
+                    f(&mooring, &mut child)
+                };
+                drop(live);
+                result
             })?;
         Ok(handle)
     }
@@ -284,5 +288,125 @@ mod tests {
         let parent = crate::test_helper::core_shell();
         let aside = parent.join_session();
         assert!(Arc::ptr_eq(&parent.session.fixings, &aside.session.fixings));
+    }
+
+    /// The live-thread ticket must outlive both `child` and `mooring` teardown
+    /// on normal return and when `f` unwinds (such as a completion-delivery panic).
+    #[test]
+    fn live_ticket_outlives_child_and_mooring_teardown_on_return_and_unwind() {
+        use crate::first_order::FOValue;
+        use crate::io::Sink;
+        use crate::sync::LockExt as _;
+        use crate::types::EventSink;
+        use std::sync::Mutex;
+        use std::sync::mpsc::{self, Receiver, SyncSender};
+        use std::time::Duration;
+
+        struct Gate {
+            entered: SyncSender<()>,
+            release: Mutex<Receiver<()>>,
+        }
+
+        impl Gate {
+            fn pair() -> (Arc<Self>, Receiver<()>, SyncSender<()>) {
+                let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+                let (release_tx, release_rx) = mpsc::sync_channel(1);
+                (
+                    Arc::new(Self {
+                        entered: entered_tx,
+                        release: Mutex::new(release_rx),
+                    }),
+                    entered_rx,
+                    release_tx,
+                )
+            }
+
+            fn wait(&self) {
+                let _ = self.entered.send(());
+                let _ = self.release.lock_ignore_poison().recv();
+            }
+        }
+
+        struct GatedDrop(Arc<Gate>);
+        impl Drop for GatedDrop {
+            fn drop(&mut self) {
+                self.0.wait();
+            }
+        }
+
+        struct GatedSurface(Arc<Gate>);
+        impl EventSink for GatedSurface {
+            fn emit(&self, _: &FOValue) {}
+        }
+        impl Drop for GatedSurface {
+            fn drop(&mut self) {
+                self.0.wait();
+            }
+        }
+
+        struct ReleaseOnDrop(Vec<SyncSender<()>>);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                for tx in &self.0 {
+                    let _ = tx.try_send(());
+                }
+            }
+        }
+
+        for should_panic in [false, true] {
+            let parent = crate::test_helper::core_shell();
+            let probe = parent.local.workers.live_ticket();
+            // `parent` holds 1, `probe` holds 1 -> baseline strong_count is 2.
+            let baseline = Arc::strong_count(&probe);
+
+            let (child_gate, child_entered, child_release) = Gate::pair();
+            let (mooring_gate, mooring_entered, mooring_release) = Gate::pair();
+            let _guard = ReleaseOnDrop(vec![child_release.clone(), mooring_release.clone()]);
+
+            let mut mooring = Mooring::adrift();
+            mooring.surface = Some(Arc::new(GatedSurface(mooring_gate)));
+
+            let join = parent
+                .spawn_thread(mooring, "test-teardown", move |_, child| {
+                    let on_drop = GatedDrop(child_gate);
+                    child.io.stdout = Sink::Watch {
+                        line: Arc::new(move |_| {
+                            let _keep = &on_drop;
+                        }),
+                        pending: Vec::new(),
+                    };
+                    assert!(!should_panic, "simulated completion delivery panic");
+                    42usize
+                })
+                .expect("spawn_thread");
+
+            child_entered
+                .recv_timeout(Duration::from_secs(2))
+                .expect("child destructor must enter");
+            assert!(
+                Arc::strong_count(&probe) > baseline,
+                "live ticket must still be held while child shell is dropping (panic={should_panic})"
+            );
+            child_release.send(()).expect("release child destructor");
+
+            mooring_entered
+                .recv_timeout(Duration::from_secs(2))
+                .expect("mooring destructor must enter");
+            assert!(
+                Arc::strong_count(&probe) > baseline,
+                "live ticket must still be held while mooring is dropping (panic={should_panic})"
+            );
+            mooring_release
+                .send(())
+                .expect("release mooring destructor");
+
+            let res = join.join();
+            assert_eq!(res.is_err(), should_panic);
+            assert_eq!(
+                Arc::strong_count(&probe),
+                baseline,
+                "live ticket must be released once thread exits (panic={should_panic})"
+            );
+        }
     }
 }

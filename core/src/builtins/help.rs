@@ -94,7 +94,7 @@ static LANGUAGE_DOCS: &[(&str, &str)] = &[
     (
         "spawn",
         "spawn \"title\" { body }  — run a block on a worker thread and return its handle at once.\n\n\
-         The title names the work to people: it appears in `workers`, in the birth and completion notices, and is required by the exarch host (the interactive shell accepts `spawn { body }`, naming the worker by its line). The worker is owned by the `gather` or the worker it was started inside, else by the session: it lives until it finishes, is cancelled, or the session ends, and a worker finishes only after every worker it started has. `await $h` behaves as if the block had run there; `poll $h` samples it; `cancel $h` stops it and everything it started; `worker <id>` recovers a handle whose binding is gone.\n\n\
+         The title names the work to people: it appears in `workers`, in the birth and completion notices, and is required by the exarch host (the interactive shell accepts `spawn { body }`, naming the worker by its line). The worker is owned by the `gather` or the worker it was started inside, else by the session: it lives until it finishes, is cancelled, or the session ends, and a worker finishes only after every worker it started has. `await $h` behaves as if the block had run there; `is-done $h` checks whether its execution has ended; `poll $h` samples it; `cancel $h` stops it and everything it started.\n\n\
          Example:\n  let h = spawn \"sort the log\" { sort huge.log > sorted.log }\n  …\n  await $h",
     ),
     (

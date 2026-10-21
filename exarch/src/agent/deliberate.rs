@@ -267,11 +267,12 @@ impl Avatar {
             match next {
                 Next::Read(read) => self.read(&read, emit),
                 Next::Item(item) => {
-                    self.arrive(&item);
-                    self.log
-                        .borrow_mut()
-                        .append_steering(item.text(), item.voice())
-                        .map_err(Fault::Log)?;
+                    if self.arrive(&item)? {
+                        self.log
+                            .borrow_mut()
+                            .append_steering(item.text(), item.voice())
+                            .map_err(Fault::Log)?;
+                    }
                 }
                 Next::Rewrite(_) => unreachable!("the mid-exchange drain holds at a rewrite"),
             }

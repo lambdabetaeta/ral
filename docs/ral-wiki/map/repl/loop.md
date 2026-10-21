@@ -1,6 +1,6 @@
 ---
-generated_at_commit: dad6a1b3
-generated_at_date: 2026-10-17
+generated_at_commit: 61c288f
+generated_at_date: 2026-10-21
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/host.rs, ral/src/repl/enquiry.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/config/, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/boot_door.rs, ral/src/surface.rs]
 ---
 
@@ -63,7 +63,7 @@ no job table: ral does not suspend
 - `eval` runs one trimmed line through `exec::step`, recording an `exit` code
   so `run` breaks cleanly.
 - Teardown — the `workers` reading, transport detach, history flush, a
-  one-time notice naming any worker still running
+  one-time notice naming any worker still `running` or `stopping`
   (`host::teardown_notice`, over `WorkerRow`s), and
   `ral_core::sandbox::teardown_session` (deletes the session's
   per-projection AppContainer profiles on Windows; a no-op elsewhere) — lives

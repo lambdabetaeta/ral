@@ -326,8 +326,9 @@ fn surface_notice(values: &[FOValue]) -> String {
             |(id, title, elapsed, outcome)| {
                 let settled = crate::card::settled_text(Some(id), &title, Some(elapsed), &outcome);
                 format!(
-                    "{settled}. `await !{{worker {id}}}` replays its output and returns its value; \
-                     `workers` lists every worker."
+                    "{settled}. If you kept its handle and the result is still unclaimed, \
+                     `await $h` replays its output and returns its result. `workers` shows \
+                     current status; an ID cannot recover a handle."
                 )
             },
         )
@@ -444,8 +445,9 @@ mod tests {
         assert_eq!(
             surface_notice(&[done.to_surface()]),
             "errand #7 (building) finished after 3 mins 12 secs (exit 101): build failed. \
-             `await !{worker 7}` replays its output and returns its value; `workers` lists \
-             every worker."
+             If you kept its handle and the result is still unclaimed, `await $h` replays \
+             its output and returns its result. `workers` shows current status; an ID \
+             cannot recover a handle."
         );
     }
 }

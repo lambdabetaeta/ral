@@ -37,21 +37,36 @@ grant [fs: [read: [`absolute /], write: [`absolute /]]] {
     echo !{await $hg}
 }
 
-# poll samples a handle without blocking; is-done reports settledness
+# poll samples a handle without blocking; is-done reports whether execution ended
 let hp = !{spawn { sleep 30 }}
-echo !{case !{poll $hp} [`settled: { |_| return false }, `pending: { |_| return true }]}
+echo !{case !{poll $hp} [
+    `running: { |_| return true },
+    `stopping: { |_| return false },
+    `ready: { |_| return false },
+    `consumed: { |_| return false }
+]}
 echo !{is-done $hp}
 cancel $hp
-# A settled poll claims nothing: the handle is still awaited after it, while a
-# handle cancel claimed has nothing left to poll
+# A ready poll claims nothing: the handle is still awaited after it, while a
+# handle cancel claimed polls as `stopping or `consumed without failing
 let hs = !{spawn { return 7 }}
-let settled = { |h| case !{poll $h} [`settled: { |s| return $s }, `pending: { |_| sleep 0.01; settled $h }] }
+let settled = { |h| case !{poll $h} [
+    `ready: { |s| return $s },
+    `running: { |_| sleep 0.01; settled $h },
+    `stopping: { |_| fail [status: 1, message: "unexpected stopping"] },
+    `consumed: { |_| fail [status: 1, message: "unexpected consumed"] }
+] }
 let sampled = settled $hs
 echo !{case $sampled[outcome] [`ok: { |v| return $v }, `err: { |_| return -2 }]}
 echo !{is-done $hs}
 echo !{await $hs}
 let hc = !{spawn { sleep 30 }}
 cancel $hc
-try { let _ = poll $hc } { |e| echo $e[message] }
+echo !{case !{poll $hc} [
+    `stopping: { |_| return "claimed-by-cancel" },
+    `consumed: { |_| return "claimed-by-cancel" },
+    `running: { |_| return "running" },
+    `ready: { |_| return "ready" }
+]}
 
 echo 'spawn context tests done'

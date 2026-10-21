@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 11950445365e2a5381b0bc988f6b6142ae16bb52
-generated_at_date: 2026-10-19
+generated_at_commit: 61c288f
+generated_at_date: 2026-10-21
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/skill.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/src/enquiry.rs, exarch/src/library.rs, exarch/data/agent.ral]
 ---
 
@@ -114,26 +114,21 @@ Reads resolve through `checked_read_path` / `check_fs_read`; the edit writes go
 through core's atomic write site under the run's pushed [[design/grant|grant]]
 frame ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]).
 
-## Listing and reacquisition: `workers`, `worker`
+## Listing workers: `workers`
 
-**A listing is data; `worker <id>` is the door.** Both verbs are core's,
-present in every host ([[map/core/builtins|map: core builtins]]), so exarch
-declares nothing of its own here. Every worker is legible by its id: the
-birth trail card (`errand #7 started · building`) and the completion notice
-name it ([[map/exarch/shell-eval|shell-eval]]), and `/resources` counts the
-running ones.
+**A listing is data; capabilities are lexical values.** `workers` is core's
+verb, present in every host ([[map/core/builtins|map: core builtins]]), so
+exarch declares nothing of its own here. Every worker is legible by its id:
+the birth trail card (`errand #7 started · building`) and the completion
+notice name it ([[map/exarch/shell-eval|shell-eval]]), and `/resources`
+counts the `running`, `stopping`, and `ready` entries.
 
 - `workers` → `[WorkerRow]`. The registry as records — `id`, `title`,
-  `owner`, `state`, `started`, `elapsed`, `settled` — one per worker, running
-  or with a retained result, and never a handle, so a top-level `workers`
-  crosses the engine protocol and the `VALUE` section prints it as aligned
-  rows, by the printer's own rule. Reading it claims nothing.
-- `worker <id>` → `Handle`. The one door back to a worker's handle, whatever
-  started it, running or with a retained result, by the id its row, birth
-  card or completion notice carries; nothing looks a worker up by title. A
-  bare top-level `worker N` result cannot cross the engine protocol (a
-  `Handle` is not ground): it exists to be composed with an eliminator in the
-  same run, `await !{worker 3}`, `cancel !{worker 3}`.
+  `owner`, `state`, `started`, `elapsed`, `settled` — one per worker
+  (`running`, `stopping`, or `ready`), and never a handle, so a top-level
+  `workers` crosses the engine protocol and the `VALUE` section prints it as
+  aligned rows, by the printer's own rule. Reading it claims nothing; no
+  builtin mints a `Handle` from an id.
 
 ## ral helpers — `agent.ral`
 

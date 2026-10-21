@@ -388,4 +388,177 @@ fn only_a_resuming_trunk_arms_a_resume_and_only_past_the_in_place_wait() {
     assert!(!armed(true, Duration::from_secs(5)));
 }
 
+/// A queued `DoneEvent` for a worker already claimed by `await` must not
+/// open a new exchange in `take_up`: it replays cards to the scrollback,
+/// skips the provider, and leaves exchange latches, token, and queued nudges
+/// untouched.
+#[test]
+fn take_up_suppresses_already_awaited_done_event_without_resetting_exchange() {
+    use crate::bus::Stamped;
+    use crate::card::testkit::card_value;
+    use crate::record::Display;
+    use ral_core::types::{Done, DoneEvent, WorkerId};
+
+    let mut session = Avatar::for_test("system").unwrap();
+    let (tx, rx) = crate::bus::channel();
+    let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
+    session.couple(&emit);
+
+    session.ral("let h = spawn \"claimed\" { 7 }\nawait $h", 10, &emit);
+    while session.inbox.next_item().is_some() {}
+    let _ = crate::bus::drain_records(&rx);
+
+    let done = DoneEvent {
+        id: WorkerId(1),
+        title: "claimed".into(),
+        elapsed_ms: 10,
+        outcome: Done::Ok,
+    }
+    .to_surface();
+    session.inbox.mailbox().stamp().post(Stamped::Surface {
+        id: session.agent.id,
+        values: vec![card_value(vec![]), done],
+    });
+    session.inbox.push(Post::Nudge {
+        prompt: 1,
+        text: "continue exchange".into(),
+    });
+    session
+        .agent
+        .token
+        .cancel(ral_core::process::CancelCause::Interrupted);
+    session.agent.provider.swap(scripted(
+        "test-model",
+        Script::new().then(Reply::panicking()),
+    ));
+
+    let surface_next = session.inbox.next_item().expect("queued surface batch");
+    let step = session
+        .take_up(&surface_next, &emit)
+        .expect("an identity seat never severs");
+    assert!(
+        step.settled.is_none(),
+        "a suppressed completion settles nothing"
+    );
+    assert!(
+        session.rendered_messages().is_empty(),
+        "the provider must not be called and no message may enter context"
+    );
+    assert!(
+        session.agent.token.is_cancelled(),
+        "a suppressed completion must not reset the exchange token"
+    );
+    assert!(
+        matches!(
+            session.inbox.next_item(),
+            Some(Next::Item(Item::Nudge { ref text, .. })) if text == "continue exchange"
+        ),
+        "a suppressed completion must not drop queued nudges"
+    );
+    let records = crate::bus::drain_records(&rx);
+    assert!(
+        records
+            .iter()
+            .any(|r| matches!(r, Record::Display(Display::Card { .. }))),
+        "cards in the suppressed batch still replay: {records:?}"
+    );
+    assert!(
+        records
+            .iter()
+            .any(|r| matches!(r, Record::Display(Display::Done { id: Some(1), .. }))),
+        "the done display line still replays: {records:?}"
+    );
+}
+
+/// An unclaimed `Ready` worker's completion notice and a `Surface` batch
+/// without a `DoneEvent` both wake the model in `take_up`, while a severed
+/// `workers()` probe propagates `Severed` and a `/clear` fences stale batches.
+#[test]
+fn take_up_delivers_unclaimed_ready_and_non_done_surfaces_and_propagates_severed() {
+    use crate::bus::Stamped;
+    use crate::card::testkit::card_value;
+    use ral_core::protocol::probe::WorkerState;
+    use ral_core::types::{Done, DoneEvent, WorkerId};
+
+    let mut session = Avatar::for_test("system").unwrap();
+    let (tx, _rx) = crate::bus::channel();
+    let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
+    session.couple(&emit);
+
+    // 1. `/clear` epoch fence: stamped before clear is rejected at inbox pop.
+    let stale_stamp = session.inbox.mailbox().stamp();
+    session.clear().unwrap();
+    stale_stamp.post(Stamped::Surface {
+        id: session.agent.id,
+        values: vec![card_value(vec![])],
+    });
+    assert!(
+        session.inbox.next_item().is_none(),
+        "stale epoch batch is dropped at pop"
+    );
+
+    // 2. Genuine unclaimed Ready worker wakes the model.
+    session.ral("let h = spawn \"ready-job\" { 42 }", 10, &emit);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let next = loop {
+        let rows = session.seat.read(|t| t.workers()).unwrap();
+        if rows
+            .iter()
+            .any(|r| matches!(r.state, WorkerState::Ready(_)))
+            && let Some(next) = session.inbox.next_item()
+        {
+            break next;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker did not settle"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    session.agent.provider.swap(scripted(
+        "test-model",
+        Script::new()
+            .then(Reply::text("acknowledged ready"))
+            .then(Reply::text("acknowledged card")),
+    ));
+    let step = session.take_up(&next, &emit).unwrap();
+    assert!(step.settled.is_some());
+    let view = serde_json::to_string(&session.rendered_messages()).unwrap();
+    assert!(
+        view.contains("If you kept its handle and the result is still unclaimed, `await $h`"),
+        "the unclaimed completion notice must enter model context: {view}"
+    );
+
+    // 3. Surface batch without a DoneEvent also wakes the model.
+    session.inbox.mailbox().stamp().post(Stamped::Surface {
+        id: session.agent.id,
+        values: vec![card_value(vec![])],
+    });
+    let card_only = session.inbox.next_item().expect("card-only surface");
+    let step = session.take_up(&card_only, &emit).unwrap();
+    assert!(step.settled.is_some());
+    let view = serde_json::to_string(&session.rendered_messages()).unwrap();
+    assert!(
+        view.contains("errand finished."),
+        "a non-done surface batch enters context: {view}"
+    );
+
+    // 4. Severed `workers()` probe propagates `Severed`.
+    let cause = Severed::Closed("engine lost".into());
+    session.seat.transport().sever(cause.clone());
+    let severed_done = DoneEvent {
+        id: WorkerId(1),
+        title: "ready-job".into(),
+        elapsed_ms: 5,
+        outcome: Done::Ok,
+    }
+    .to_surface();
+    session.inbox.mailbox().stamp().post(Stamped::Surface {
+        id: session.agent.id,
+        values: vec![severed_done],
+    });
+    let severed_next = session.inbox.next_item().expect("severed surface");
+    assert!(matches!(session.take_up(&severed_next, &emit), Err(c) if c == cause));
+}
+
 mod lifecycle;

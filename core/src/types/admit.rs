@@ -247,17 +247,6 @@ impl Site {
         self.walk(self.root, value, fixings)
     }
 
-    /// [`Self::admit`] for the value a `Handle α` site's worker settles with.
-    ///
-    /// # Errors
-    /// As [`Self::admit`].
-    pub fn admit_handled(&self, value: &Value, fixings: &Fixings) -> Result<(), Mismatch> {
-        match self.nodes[self.root].shape {
-            Shape::Handle(_, inner) => self.walk(inner, value, fixings),
-            _ => Ok(()),
-        }
-    }
-
     /// [`Self::admit`] for a module's export record, whose closures are also
     /// held to the schemes the module was checked at: each export's scheme is
     /// instantiated in one scratch unifier that covers the whole record, since

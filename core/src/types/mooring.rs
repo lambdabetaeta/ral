@@ -209,37 +209,17 @@ pub struct Mooring {
 }
 
 impl Mooring {
-    /// The mooring a worker runs under: a rebuild, not a share.
+    /// The mooring a child thread (a spawned worker or a pipeline stage) runs
+    /// under: a rebuild, not a share.
     ///
-    /// `parent`'s node would let a foreground cancel reach a worker that must
-    /// outlive the run, and desk and fork are barred to one; rail, cap and
-    /// title policy carry over, so a nested `spawn` is governed alike.  `node`
-    /// is the caller's child of its cradle: a worker's own node inside a
-    /// worker, the session root in a run; a SIGTERM reaches it, a Ctrl-C does
-    /// not.
-    pub(crate) fn for_worker(parent: &Self, node: ScopeNode, surface: Option<SurfaceSink>) -> Self {
+    /// `node` is the child's own scope node; `surface` is selected explicitly
+    /// by the caller (a session worker's buffered surface, or the parent's live
+    /// surface for a gather child or pipeline stage).  The session's deferred
+    /// sink, cleanup grace, worker cap and title policy carry over, while desk,
+    /// fork and terminal authority are denied.
+    pub(crate) fn for_thread(parent: &Self, node: ScopeNode, surface: Option<SurfaceSink>) -> Self {
         Self {
             surface,
-            deferred: parent.deferred.clone(),
-            desk: None,
-            fork: None,
-            home: node,
-            cleanup_grace: parent.cleanup_grace,
-            worker_cap: parent.worker_cap,
-            worker_title: parent.worker_title,
-            terminal_access: TerminalAccess::Denied,
-        }
-    }
-
-    /// The mooring a stage thread, or a gather's child, runs under: the
-    /// node's own surface and deferred sink carry over — a stage's audit and
-    /// `spawn` deliveries are the pipeline's, not a worker's own — but no
-    /// desk, no fork, and no terminal authority, since only the node itself
-    /// may claim the foreground.  `node` is the stage's own, minted by its launcher under
-    /// the current scope, so a pipeline-wide cancel reaches every stage.
-    pub(crate) fn for_stage_thread(parent: &Self, node: ScopeNode) -> Self {
-        Self {
-            surface: parent.surface.clone(),
             deferred: parent.deferred.clone(),
             desk: None,
             fork: None,

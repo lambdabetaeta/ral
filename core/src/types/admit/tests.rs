@@ -1,6 +1,6 @@
 use super::*;
 use crate::source::FileId;
-use crate::ty::{Grade, Ty, UnitId};
+use crate::ty::{Ty, UnitId};
 use crate::ty::{closed_record, closed_variant, open_record};
 use crate::typecheck::Unifier;
 
@@ -215,20 +215,6 @@ fn a_variant_site_needs_a_tag_of_its_row() {
     };
     assert!(refusal(&s, &other).contains("one of the tags `none`, `some`"));
     assert!(refusal(&s, &map(&[])).contains("uses it as a variant"));
-}
-
-#[test]
-fn a_handle_site_admits_the_value_the_worker_settled_with() {
-    let s = ground(&Ty::Handle(Grade::Value, Box::new(Ty::Int)));
-    assert!(s.admit_handled(&Value::Int(1), &Fixings::default()).is_ok());
-    assert!(
-        refusal_of(s.admit_handled(&Value::string("x"), &Fixings::default()))
-            .contains("uses it as an Int")
-    );
-}
-
-fn refusal_of(result: Result<(), Mismatch>) -> String {
-    result.expect_err("the value must be refused").to_string()
 }
 
 #[test]

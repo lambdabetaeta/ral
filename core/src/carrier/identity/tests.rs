@@ -488,7 +488,7 @@ mod probe_tests {
         let rows = transport.bindings().expect("a reading");
         let row = rows.iter().find(|r| r.name == "probe_h").expect("the row");
         let handle = row.handle.as_ref().expect("a handle row");
-        assert_eq!(handle.state, crate::types::Sample::Claimed);
+        assert_eq!(handle.state, crate::types::Sample::Consumed);
     }
 
     #[test]

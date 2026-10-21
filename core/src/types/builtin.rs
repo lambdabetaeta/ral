@@ -327,15 +327,12 @@ mod tests {
     /// Every boundary says so in its scheme: marked boundaries are exactly the
     /// core rows whose result the program did not decide.
     #[test]
-    fn the_core_boundaries_are_the_decoders_use_and_worker() {
+    fn the_core_boundaries_are_the_decoders_and_use() {
         let names: Vec<&str> = BOUNDARY_BUILTINS
             .iter()
             .map(|e| e.decl.name.as_ref())
             .collect();
-        assert_eq!(
-            names,
-            ["from-json", "from-jsonl", "from-json-at", "use", "worker"]
-        );
+        assert_eq!(names, ["from-json", "from-jsonl", "from-json-at", "use"]);
         assert!(CORE_BUILTINS.iter().all(|e| !e.decl.is_boundary()));
     }
 }

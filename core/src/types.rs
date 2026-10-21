@@ -30,12 +30,16 @@ pub(crate) use handler::{
 
 // The shared state behind `Value::Handle`.
 mod handle;
-pub(crate) use handle::brood::{Brood, BroodOwner, Cradle, end_unclaimed};
+#[allow(unused_imports)]
+pub(crate) use handle::brood::{
+    Brood, BroodOwner, Cradle, EnrolClosed, ScopeOwner, stop_and_drain,
+};
 #[cfg(test)]
 pub(crate) use handle::idle_handle;
-pub(crate) use handle::pins_running_work;
 pub(crate) use handle::surface::DeferredSurface;
 pub use handle::{CompletedHandle, HandleInner, Sample, Stamp};
+#[allow(unused_imports)]
+pub(crate) use handle::{CompletionPermit, Snapshot, pins_live_work};
 
 // A boundary's checked type, and what a door admits against it.
 mod admit;
@@ -108,7 +112,6 @@ pub use shell::hooks::{
 pub use shell::{Bequest, DEFAULT_STACK_LIMIT, LocalState, Runtime, SessionState, Shell};
 pub(crate) use shell::{Image, Terms};
 
-pub(crate) use shell::workers::CapReached;
 pub use shell::workers::{Done, DoneEvent, Owner, ReapCause, ReapNotice, WatchEvent, WorkerEntry};
 
 pub use shell::bindings::{BindingLease, Pruned};

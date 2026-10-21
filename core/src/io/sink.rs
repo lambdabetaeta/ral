@@ -349,11 +349,12 @@ impl Sink {
                 stage,
             } => write_sliced(writer, edge, stage, scope, bytes),
             Self::Watch { line, pending } => {
-                pending.extend_from_slice(bytes);
-                while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
-                    let whole = &pending[..=pos];
-                    line(&whole[..whole.len() - terminator_len(whole)]);
-                    pending.drain(..=pos);
+                for segment in bytes.split_inclusive(|&b| b == b'\n') {
+                    pending.extend_from_slice(segment);
+                    if segment.last() == Some(&b'\n') {
+                        let whole = std::mem::take(pending);
+                        line(&whole[..whole.len() - terminator_len(&whole)]);
+                    }
                 }
                 Ok(())
             }
@@ -833,13 +834,69 @@ mod tests {
             line: Arc::new(move |line| log.lock().unwrap().push(line.to_vec())),
             pending: Vec::new(),
         };
+        // Empty flush before any bytes is a no-op.
+        sink.flush_pending();
         sink.write_under(&DurableRoot::default().worker(), b"one\r\ntw")
             .unwrap();
-        sink.write_under(&DurableRoot::default().worker(), b"o\nthree")
+        sink.write_under(&DurableRoot::default().worker(), b"o\nthree\nfour\r\nfive")
             .unwrap();
         sink.flush_pending();
+        // Second flush after tail was already taken is a no-op.
+        sink.flush_pending();
         let seen = seen.lock().unwrap();
-        assert_eq!(*seen, [b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]);
+        assert_eq!(
+            *seen,
+            [
+                b"one".to_vec(),
+                b"two".to_vec(),
+                b"three".to_vec(),
+                b"four".to_vec(),
+                b"five".to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_watch_callback_panic_discards_remaining_segments_and_does_not_retry() {
+        let seen = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let log = seen.clone();
+        let mut sink = Sink::Watch {
+            line: Arc::new(move |line| {
+                log.lock().unwrap().push(line.to_vec());
+                assert!(line != b"a", "watch line panic");
+            }),
+            pending: Vec::new(),
+        };
+        let node = DurableRoot::default().worker();
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sink.write_under(&node, b"a\nb\nc")
+        }));
+        assert!(res.is_err(), "the first line's callback must panic");
+        // Final flushing must neither retry `a` nor deliver `b\nc` as a tail.
+        sink.flush_pending();
+        assert_eq!(*seen.lock().unwrap(), [b"a".to_vec()]);
+    }
+
+    #[test]
+    fn a_watch_partial_tail_panic_does_not_retry_on_second_flush() {
+        let seen = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let log = seen.clone();
+        let mut sink = Sink::Watch {
+            line: Arc::new(move |line| {
+                log.lock().unwrap().push(line.to_vec());
+                panic!("watch tail panic");
+            }),
+            pending: Vec::new(),
+        };
+        let node = DurableRoot::default().worker();
+        sink.write_under(&node, b"tail").unwrap();
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sink.flush_pending();
+        }));
+        assert!(res.is_err(), "tail flush must panic");
+        // The pending buffer was taken before the callback, so a second flush is a no-op.
+        sink.flush_pending();
+        assert_eq!(*seen.lock().unwrap(), [b"tail".to_vec()]);
     }
 
     #[test]

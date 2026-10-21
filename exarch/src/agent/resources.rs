@@ -184,13 +184,16 @@ impl Avatar {
         let mut settled = 0u64;
         let mut nearest_expiry: Option<u64> = None;
         for entry in &entries {
-            if matches!(entry.state, WorkerState::Running) {
-                running += 1;
-            } else {
-                settled += 1;
-                // The engine's own figure, on its own clock.
-                if let Some(left) = entry.retention_left {
-                    nearest_expiry = Some(nearest_expiry.map_or(left, |m| m.min(left)));
+            match entry.state {
+                WorkerState::Running | WorkerState::Stopping => {
+                    running += 1;
+                }
+                WorkerState::Ready(_) => {
+                    settled += 1;
+                    // The engine's own figure, on its own clock.
+                    if let Some(left) = entry.retention_left {
+                        nearest_expiry = Some(nearest_expiry.map_or(left, |m| m.min(left)));
+                    }
                 }
             }
         }

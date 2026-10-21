@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 1776d222
-verified_at_date: 2026-09-30
-anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::deadline, WorkerRegistry, Stamp, Owner, builtin_worker, builtin_workers, WorkerRow, spawn_detached, Survivor, DetachPolicy, Capture, decode_utf8_strict, write_sink, CapturedBytes::overflowed]
+verified_at_commit: 61c288f
+verified_at_date: 2026-10-21
+anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::deadline, WorkerRegistry, Stamp, Owner, builtin_workers, WorkerRow, spawn_detached, Survivor, DetachPolicy, Capture, decode_utf8_strict, write_sink, CapturedBytes::overflowed]
 ---
 
 # Output capture and detachment
@@ -151,7 +151,8 @@ owner ends it: no policy reaps a running worker for neglect or age**
 
 What bounds a forgotten session worker is the session alone: the admission
 cap (`Mooring::worker_cap`; exarch's is 64) refuses a birth while `cap` workers
-run, and teardown cancels the rest.
+are `running`, `stopping`, or reserved at the spawn door, and teardown cancels
+the rest.
 
 - Every worker files a `WorkerEntry` in its shell's `WorkerRegistry` the
   instant it starts (`core/src/types/shell/workers.rs`): the handle itself
@@ -159,25 +160,28 @@ run, and teardown cancels the rest.
   `gather` that owns it. The handle carries the rest: its `WorkerId`,
   its title, and its clock — a birth `Stamp` (one instant on the monotonic
   clock durations are measured on and the wall clock a reader is shown), and
-  an end `Stamp` set once its thread ends. Every report of time reads those
-  two cells.
-- **Identity is the id; the title is for people.** `worker <id>`
-  (`builtin_worker`, a core boundary in `core/src/builtins/concurrency/eliminate.rs`)
-  takes back the handle of any registered worker, running or with a
-  retained result, by the id its birth card and completion notice carry,
-  composed with an eliminator in the same call: `await !{worker 3}`. Nothing
-  looks a worker up by title, since titles are not unique.
-- **A listing is data; `worker <id>` is the door.** `workers`
-  (`builtin_workers`) returns one `WorkerRow` per entry, running or retained:
-  its id, title, owner, state, birth time, elapsed seconds and settle time,
-  read off the handle without claiming it. It never holds a `Value::Handle`,
-  which is not ground, so it crosses the engine protocol as any record does;
-  the row type is the `` `workers `` probe's, less the host's
-  `retention-left`.
-- A settled worker lingers in the registry as an unclaimed result, `poll`ed or
-  not, until it is claimed or retention expires it — the one policy that
-  removes an entry: 256 idle ral calls under exarch (`SETTLED_WORKER_RETENTION`),
-  swept by `WorkerRegistry::sweep_retention` on the host's ral-call epoch.
+  an end `Stamp` set by `CompletionPermit::finish` once its thread reaches a
+  terminal state (`Ready` or `Consumed`), before flushing its deferred surface.
+  Every report of time reads those two cells.
+- **Identity is the id; the handle is the capability.** A worker's `Handle` is
+  held only in the lexical bindings that received it from `spawn` or `watch`
+  (pinned against idle pruning by `pins_live_work` while the worker is
+  `running` or `stopping`); there is no handle-lookup builtin by id or title.
+- **A listing is data.** `workers` (`builtin_workers`) returns one `WorkerRow`
+  per `running`, `stopping`, or `ready` entry (`Consumed` entries are omitted):
+  its id, title, owner, state (`` `running ``, `` `stopping ``, or `` `ready ``),
+  birth time, elapsed seconds and settle time (`settled` is `` `some `` iff
+  `state` is `` `ready ``), all derived from a single consistent snapshot per
+  handle without claiming it. It never holds a `Value::Handle`, which is not
+  ground, so it crosses the engine protocol as any record does; the row type is
+  the `` `workers `` probe's, less the host's `retention-left`.
+- A finished worker lingers in the registry in `Ready` state, `poll`ed or not,
+  until it is claimed (`Consumed`) or retention expires it — the one policy
+  that removes an entry: 256 idle ral calls under exarch
+  (`SETTLED_WORKER_RETENTION`), swept by `WorkerRegistry::sweep_retention` on
+  the host's ral-call epoch. The sweep stamps a `Ready` entry only once any
+  owning parent worker is no longer live (`Running` or `Stopping`), so a child
+  whose parent is still running cannot expire before the parent joins it.
 - A retention reap is atomic with a `ReapNotice` recording what fell and
   why. The engine drains its ledger at each run's own ready boundary
   (`Shell::emit_ready_boundary_notices`, called from `run_framed` just before
@@ -190,12 +194,12 @@ run, and teardown cancels the rest.
 ## Reading a spawned server's output (the exarch caveat)
 
 - A server never settles, so `await $h` would block to the wall and unwind —
-  sparing the session's worker, via the cancel-aware `wait_first_ready`. But
-  `poll $h` is a pull-based read of a *running* worker: its `` `pending `` arm
-  carries a `{stdout, stderr, elapsed}` snapshot of the bytes buffered so far
-  and the seconds run, the bytes cloned
+  sparing the session's worker, via the cancel-aware `first_ready`. But
+  `poll $h` is a pull-based read of a *running* (or *stopping*) worker: its
+  `` `running `` and `` `stopping `` arms carry a `{stdout, stderr, elapsed}`
+  snapshot of the bytes buffered so far and the seconds run, the bytes cloned
   non-destructively (`CapturedBytes::peek`, not the completion `take`), so the buffer
-  is left intact and a later `await`/`` `settled `` `poll` still sees everything
+  is left intact and a later `await`/`` `ready `` `poll` still sees everything
   ([[decisions/260702_partial-poll-pending-output|partial-poll-pending-output]]).
   The snapshot is cumulative — each poll of a live worker reports monotonically more
   — and it is capped by `SINK_BUFFER_CAP` like every capture buffer.

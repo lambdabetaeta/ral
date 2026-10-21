@@ -16,7 +16,7 @@ use crate::source::SourceDb;
 use crate::terminal::TerminalState;
 use crate::ty::Fixings;
 use crate::types::ExitHints;
-use crate::types::{BuiltinEntry, Done, ReapNotice, Sample, WorkerEntry, WorkerId};
+use crate::types::{BuiltinEntry, Done, ReapNotice, Sample, WorkerEntry};
 use std::sync::Arc;
 
 impl Shell {
@@ -91,20 +91,25 @@ impl Shell {
         self.session.runtime.builtins.get(name)
     }
 
-    /// Every worker here, settled or running; a pure read.
+    /// Every non-consumed worker here; a pure read.
     pub fn workers(&self) -> Vec<WorkerEntry> {
         self.local.workers.snapshot()
     }
 
     /// One entry as data: the row `workers` and the probe both answer in,
-    /// `None` for one claimed since it was listed.  Reads the state without
-    /// claiming it.
+    /// `None` for one claimed since it was listed.  Reads a single coherent
+    /// snapshot without claiming the handle.
     pub(crate) fn worker_row(&self, entry: &WorkerEntry) -> Option<WorkerRow> {
         let h = &entry.handle;
-        let state = match h.observe(|c| Done::of(&c.end, self)) {
-            Sample::Pending => WorkerState::Running,
-            Sample::Settled(done) => WorkerState::Done(done),
-            Sample::Claimed => return None,
+        let snap = h.snapshot(|c| Done::of(&c.end, self));
+        let (state, retention_left) = match snap.state {
+            Sample::Running(()) => (WorkerState::Running, None),
+            Sample::Stopping => (WorkerState::Stopping, None),
+            Sample::Ready(done) => (
+                WorkerState::Ready(done),
+                self.local.workers.retention_left(entry.settled_epoch),
+            ),
+            Sample::Consumed => return None,
         };
         Some(WorkerRow {
             id: h.id.0,
@@ -112,22 +117,10 @@ impl Shell {
             owner: entry.owner,
             state,
             started: unix_secs(h.started.wall),
-            elapsed: h.elapsed().into(),
-            settled: h.settled_at().map(unix_secs),
-            retention_left: self.worker_retention_left(entry),
+            elapsed: snap.elapsed.into(),
+            settled: snap.ended.map(|s| unix_secs(s.wall)),
+            retention_left,
         })
-    }
-
-    /// Ral calls until a settled worker's retention expires; `None` while it
-    /// runs, or with no retention armed.
-    pub fn worker_retention_left(&self, entry: &WorkerEntry) -> Option<u64> {
-        self.local.workers.retention_left(entry)
-    }
-
-    /// Re-acquire one entry by an id learned elsewhere; a pure read like
-    /// [`Self::workers`].
-    pub fn worker_by_id(&self, id: WorkerId) -> Option<WorkerEntry> {
-        self.local.workers.lookup(id)
     }
 
     /// Arm the `detach` authority: processes this session may birth over its
@@ -304,5 +297,78 @@ mod tests {
         assert_eq!(leased.terminal_access, TerminalAccess::Leased);
         assert!(with(TerminalAccess::Denied).lend_terminal().is_none());
         assert!(loan.lend_terminal().is_none());
+    }
+
+    /// `worker_row` derives `state`, `elapsed`, `settled`, and `retention_left`
+    /// from a single handle snapshot so mid-read state transitions cannot
+    /// produce mixed rows.
+    #[test]
+    fn worker_row_is_coherent_across_running_stopping_ready_and_consumed() {
+        use crate::io::ByteBuffer;
+        use crate::types::{HandleInner, Owner, ThreadEnd, Value, WorkerId};
+
+        let mut shell = crate::test_helper::core_shell();
+        shell.arm_worker_retention(4);
+
+        let make = |id: u64, title: &str| {
+            HandleInner::new(
+                WorkerId(id),
+                title,
+                DurableRoot::default().worker(),
+                ByteBuffer::default(),
+                ByteBuffer::default(),
+            )
+        };
+
+        // 1. Running: settled is None, retention_left is None.
+        let (running_h, running_permit) = make(1, "running");
+        let running_entry = WorkerEntry {
+            handle: running_h,
+            owner: Owner::Session,
+            settled_epoch: Some(0),
+        };
+        let row = shell
+            .worker_row(&running_entry)
+            .expect("running produces row");
+        assert_eq!(row.state, WorkerState::Running);
+        assert_eq!(row.settled, None);
+        assert_eq!(row.retention_left, None);
+        let _ = running_permit.finish(ThreadEnd::Settled(Ok(Value::Unit)));
+
+        // 2. Stopping: settled is None, retention_left is None even if settled_epoch is Some.
+        let (stopping_h, stopping_permit) = make(2, "stopping");
+        assert!(stopping_h.claim_and_stop());
+        let stopping_entry = WorkerEntry {
+            handle: stopping_h,
+            owner: Owner::Session,
+            settled_epoch: Some(0),
+        };
+        let row = shell
+            .worker_row(&stopping_entry)
+            .expect("stopping produces row");
+        assert_eq!(row.state, WorkerState::Stopping);
+        assert_eq!(row.settled, None);
+        assert_eq!(row.retention_left, None);
+
+        // Once stopping finishes, it becomes Consumed and worker_row returns None.
+        let _ = stopping_permit.finish(ThreadEnd::Settled(Ok(Value::Unit)));
+        assert!(shell.worker_row(&stopping_entry).is_none());
+
+        // 3. Ready: settled is Some, retention_left reflects settled_epoch countdown.
+        let (ready_h, ready_permit) = make(3, "ready");
+        let _ = ready_permit.finish(ThreadEnd::Settled(Ok(Value::Int(7))));
+        let ready_entry = WorkerEntry {
+            handle: ready_h.clone(),
+            owner: Owner::Session,
+            settled_epoch: Some(0),
+        };
+        let row = shell.worker_row(&ready_entry).expect("ready produces row");
+        assert_eq!(row.state, WorkerState::Ready(Done::Ok));
+        assert!(row.settled.is_some());
+        assert_eq!(row.retention_left, Some(4));
+
+        // 4. Claiming a ready handle transitions it to Consumed; worker_row returns None.
+        assert!(matches!(ready_h.claim_ready(), Sample::Ready(_)));
+        assert!(shell.worker_row(&ready_entry).is_none());
     }
 }

@@ -24,13 +24,15 @@ let s = await $c
 echo "[$s]"
 # Expected: [hi]
 
-# A settled poll claims nothing: the handle stays awaitable, and the one
+# A ready poll claims nothing: the handle stays awaitable, and the one
 # await replays its bytes once
 let p = spawn { echo polled; return 3 }
 let settle = { |h|
     case !{poll $h} [
-        `settled: { |_| return () },
-        `pending: { |_| sleep 0.01; settle $h }
+        `ready: { |_| return () },
+        `running: { |_| sleep 0.01; settle $h },
+        `stopping: { |_| fail [status: 1, message: "unexpected stopping"] },
+        `consumed: { |_| fail [status: 1, message: "unexpected consumed"] }
     ]
 }
 settle $p

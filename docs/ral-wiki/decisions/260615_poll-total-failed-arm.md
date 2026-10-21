@@ -13,6 +13,16 @@ status: active
 > result is claimed once, by `await`, `race`, `cancel` or its owner, and the
 > claimer moves the settle out of the cache. `poll` reads the cache without
 > claiming it, and fails, as `is-done` then does, on a handle already claimed.
+>
+> Amended 2026-10-21: `poll` is a 4-arm total observation over the handle's four
+> states — `` `running [stdout, stderr, elapsed] ``,
+> `` `stopping [stdout, stderr, elapsed] ``,
+> `` `ready [stdout, stderr, elapsed, outcome: <ok: α | err: ErrorRecord>] ``,
+> and `` `consumed [elapsed] `` — so it never fails because a handle was
+> cancelled or already claimed (only an `exit`, foreign stop, or panic on a
+> `ready` handle re-raises through it). `is-done` is a native builtin returning
+> `true` for `ready` or `consumed` and `false` for `running` or `stopping`
+> without raising.
 
 **A finished concurrent block has a single observable *settle* — the bytes it
 wrote plus its outcome, `` <ok: α | err> `` — and every eliminator projects that

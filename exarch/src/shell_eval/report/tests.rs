@@ -9,21 +9,30 @@ fn born(ids: &[u64]) -> HashSet<u64> {
     ids.iter().copied().collect()
 }
 
-fn worker_row(id: u64, title: &str, running: bool) -> WorkerRow {
+fn worker_row_state(id: u64, title: &str, state: WorkerState) -> WorkerRow {
+    let is_ready = matches!(state, WorkerState::Ready(_));
     WorkerRow {
         id,
         title: title.to_string(),
         owner: Owner::Session,
-        state: if running {
-            WorkerState::Running
-        } else {
-            WorkerState::Done(Done::Ok)
-        },
+        state,
         started: 0,
         elapsed: Finite::from(0),
-        settled: (!running).then_some(0),
-        retention_left: (!running).then_some(0),
+        settled: is_ready.then_some(0),
+        retention_left: is_ready.then_some(0),
     }
+}
+
+fn worker_row(id: u64, title: &str, running: bool) -> WorkerRow {
+    worker_row_state(
+        id,
+        title,
+        if running {
+            WorkerState::Running
+        } else {
+            WorkerState::Ready(Done::Ok)
+        },
+    )
 }
 
 const AUDIT: &str = "audit: this call had already replied; that work stands; do not repeat it.\n";
@@ -114,11 +123,22 @@ fn exit_ending_widens_to_name_a_live_orphan() {
 #[test]
 fn a_consumed_worker_is_nobodys_orphan() {
     let ending = Ending::Exited(1);
-    let births = born(&[9]);
+    let births = born(&[9, 10]);
     let (out, _) = render(&ending, &births, None, &[], 5);
     assert!(
-        !out.contains("spawn body"),
-        "absent from the probe means already consumed: {out:?}"
+        !out.contains("spawn body") && !out.contains("claimed"),
+        "absent from the probe means already claimed: {out:?}"
+    );
+
+    let stopping = [worker_row_state(9, "stopping body", WorkerState::Stopping)];
+    let (out, _) = render(&ending, &births, None, &stopping, 5);
+    assert!(
+        out.contains("#9 (stopping body)"),
+        "a stopping worker still outlived the call and is named: {out:?}"
+    );
+    assert!(
+        !out.contains("!{worker"),
+        "orphan guidance must not advertise ID-based handle recovery: {out:?}"
     );
 }
 
@@ -136,6 +156,10 @@ fn an_unreturnable_result_says_its_handle_was_lost_with_it() {
     assert_eq!(exit, 1);
     assert!(out.starts_with("error: the result is a handle"), "{out:?}");
     assert!(out.contains("lost with the result"), "{out:?}");
+    assert!(
+        out.contains("an ID cannot recover a handle") && !out.contains("!{worker"),
+        "{out:?}"
+    );
     assert!(!out.contains("failing step"), "nothing failed: {out:?}");
 }
 

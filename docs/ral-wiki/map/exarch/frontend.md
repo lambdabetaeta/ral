@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 62f8f2a9
-generated_at_date: 2026-10-19
+generated_at_commit: 61c288f
+generated_at_date: 2026-10-21
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/record/session.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/boot.rs, exarch/src/agent/seat.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -14,8 +14,9 @@ and title, the title exarch's policy requires of every `spawn`; the run time
 is read off the worker's own clock, and the outcome is its real ending — a
 status with the error's message, an `exit`, a stop's cause, or a panic. The
 model's wake-up notice (`surface_notice`, `bus/post.rs`) is that completion
-line followed by a sentence naming the one call that gets the result back:
-`` `await !{worker 7}` replays its output and returns its value; `workers` lists every worker.``
+line followed by a sentence naming how the bound handle and registry inspect it
+(filtered by `Avatar::arrive` if the worker was already claimed during the turn):
+`` `await` on its bound handle replays its output and returns its value; `workers` lists every worker.``
 
 
 The agent core and the user interface meet at **one outbound event stream and

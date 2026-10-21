@@ -3,13 +3,13 @@
 //! it. Pure bookkeeping, never a policy itself.
 //!
 //! `spawn_child` in `builtins::concurrency` files an entry as it mints the
-//! handle. The entry is gone once the worker's result is *claimed*, which
-//! happens once: by `await`, by `race` (its winner and its cancelled losers),
-//! by `cancel`, or by its owner's join or halt. Every locked read drops
-//! claimed entries first, so a claim made from any shell removes the worker
-//! here. `poll` claims nothing, on either arm.
-//! One policy also removes entries: [`WorkerRegistry::sweep_retention`]. It
-//! leaves a [`ReapNotice`] the host drains at its ready boundaries, so a
+//! handle. An entry remains in the directory while it is `running`, `stopping`,
+//! or `ready`, and is pruned once it reaches `consumed` (its result has been
+//! claimed and its execution has ended). Directory reads prune consumed entries
+//! eagerly, while uncapped admission compacts them lazily on an amortized
+//! threshold.
+//! One policy also removes `ready` entries: [`WorkerRegistry::sweep_retention`].
+//! It leaves a [`ReapNotice`] the host drains at its ready boundaries, so a
 //! vanished job still has an answer in the transcript.
 //!
 //! **Flow rule.** [`Shell::spawn_thread`](super::Shell::spawn_thread)
@@ -23,8 +23,10 @@ use crate::first_order::FOValue;
 use crate::first_order::datum::{Datum, tag, untag};
 use crate::process::CancelCause;
 use crate::sync::LockExt as _;
-use crate::types::{Break, ErrorRecord, Escape, HandleInner, Shell, ThreadEnd};
+use crate::types::handle::compacting::Compacting;
+use crate::types::{Break, ErrorRecord, Escape, HandleInner, Sample, Shell, ThreadEnd};
 use crate::{label, record, variant};
+use std::collections::HashSet;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -186,41 +188,57 @@ record!(ReapNotice {
 /// it through.
 ///
 /// Storing the handle rather than a second by-id control plane keeps `poll`,
-/// `await`, `race`, and `cancel` the only verbs that touch a worker:
-/// rediscovery is `worker <id>`, which hands this handle back.
+/// `is-done`, `await`, `race`, and `cancel` the only verbs that touch a worker;
+/// listing an entry returns data projections, never a reconstructed handle.
 #[derive(Clone, Debug)]
 pub struct WorkerEntry {
     pub owner: Owner,
     /// The ral-call epoch at which [`WorkerRegistry::sweep_retention`] first
-    /// observed this entry settled — `None` while it runs, so retention starts
-    /// at the next call rather than retroactively.
+    /// observed this entry `ready` — `None` while it is live, so retention
+    /// starts at the next call rather than retroactively.
     pub settled_epoch: Option<u64>,
     pub handle: HandleInner,
 }
 
-/// The three ledgers behind [`WorkerRegistry`]'s one lock: live entries, reap
-/// notices awaiting the host's drain, and seats held for a birth in flight.
-/// One lock for all three is what makes a reap atomic — entry and notice move
-/// in the same critical section — and admission honest.
-#[derive(Default)]
+impl AsRef<HandleInner> for WorkerEntry {
+    fn as_ref(&self) -> &HandleInner {
+        &self.handle
+    }
+}
+
+/// The three ledgers behind [`WorkerRegistry`]'s one lock: retained entries,
+/// reap notices awaiting the host's drain, and seats held for a birth in
+/// flight. One lock for all three is what makes a reap atomic — entry and
+/// notice move in the same critical section — and admission honest.
 struct RegistryInner {
-    entries: Vec<WorkerEntry>,
+    entries: Compacting<WorkerEntry>,
     reap_notices: Vec<ReapNotice>,
     /// Seats held by a [`Reservation`] not yet filed or released, counted
-    /// alongside running entries in [`WorkerRegistry::reserve`]'s measure.
+    /// alongside live entries in [`WorkerRegistry::reserve`]'s measure.
     reserved: usize,
     /// One tick per source dispatch, the cadence the binding-lease ledger
     /// keeps.
     epoch: u64,
-    /// The armed settled-entry retention, in ral calls. `None` — no host armed
-    /// it, as in the REPL — retains settled entries indefinitely.
+    /// The armed ready-entry retention, in ral calls. `None` — no host armed
+    /// it, as in the REPL — retains ready entries indefinitely.
     retention: Option<u64>,
     /// One clone per live worker thread, each held by the thread itself for its
     /// whole life; the strong count is therefore the session's live-thread
     /// census and the only thing [`WorkerRegistry::drain`] can honestly wait on.
-    /// The roster cannot serve: `cancel` takes an entry out the instant it
-    /// signals, while the thread it signalled is still tearing its child down.
     live: Arc<()>,
+}
+
+impl Default for RegistryInner {
+    fn default() -> Self {
+        Self {
+            entries: Compacting::default(),
+            reap_notices: Vec::new(),
+            reserved: 0,
+            epoch: 0,
+            retention: None,
+            live: Arc::new(()),
+        }
+    }
 }
 
 /// Cheap-clonable, per-[`Shell`](super::Shell) directory of every worker
@@ -286,7 +304,18 @@ impl Drop for Roster {
 
 /// Refusal from [`WorkerRegistry::reserve`], carrying the cap it was refused
 /// against so the caller's remedy message need not re-derive the number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CapReached(pub(crate) usize);
+
+impl std::fmt::Display for CapReached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} workers are still executing or stopping; wait for one to end (`workers` lists them), or cancel work you no longer need",
+            self.0
+        )
+    }
+}
 
 /// A seat held between [`WorkerRegistry::reserve`] granting admission and
 /// [`WorkerRegistry::register`] filing the entry, across the thread spawn and
@@ -311,17 +340,17 @@ impl WorkerRegistry {
     /// Measure admission and hold a seat in one locked step, so a birth that
     /// registers only later — after a thread spawn and a handle construction —
     /// cannot be raced by a sibling reading the same free seat. The measure is
-    /// running entries (each handle briefly locked under the registry lock,
-    /// the order [`HandleInner`] documents) plus seats reserved.
+    /// live (`running` or `stopping`) entries (each handle briefly locked under
+    /// the registry lock, the order [`HandleInner`] documents) plus seats
+    /// reserved.
     pub(crate) fn reserve(&self, cap: Option<usize>) -> Result<Reservation, CapReached> {
         let mut inner = self.0.lock_ignore_poison();
         if let Some(cap) = cap {
-            let running = inner
+            let mut live = 0;
+            inner
                 .entries
-                .iter()
-                .filter(|entry| entry.handle.is_running())
-                .count();
-            if running + inner.reserved >= cap {
+                .prune_observing(|sample| live += usize::from(sample.is_live()));
+            if live + inner.reserved >= cap {
                 return Err(CapReached(cap));
             }
         }
@@ -340,14 +369,16 @@ impl WorkerRegistry {
         reservation.armed = false;
         let mut inner = self.0.lock_ignore_poison();
         inner.reserved = inner.reserved.saturating_sub(1);
-        inner.entries.push(entry);
+        if !matches!(entry.handle.sample(), Sample::Consumed) {
+            inner.entries.push(entry);
+        }
     }
 
-    /// The registry locked, every claimed entry gone: a claim made anywhere
-    /// removes the worker here, under this lock.
-    fn unclaimed(&self) -> MutexGuard<'_, RegistryInner> {
+    /// The registry locked, every consumed entry gone: a completed claim made
+    /// anywhere removes the worker here, under this lock.
+    fn retained(&self) -> MutexGuard<'_, RegistryInner> {
         let mut inner = self.0.lock_ignore_poison();
-        inner.entries.retain(|entry| !entry.handle.is_claimed());
+        inner.entries.prune();
         inner
     }
 
@@ -355,7 +386,20 @@ impl WorkerRegistry {
         self.0.lock_ignore_poison().retention
     }
 
-    /// Arm the settled-entry retention bound, in ral calls. Idempotent by
+    /// Ral calls until a `ready` entry stamped `settled_epoch` (see
+    /// [`WorkerEntry::settled_epoch`]) expires: the whole bound for one not
+    /// yet stamped, `None` with no retention armed.
+    pub(crate) fn retention_left(&self, settled_epoch: Option<u64>) -> Option<u64> {
+        let (epoch, retention) = {
+            let inner = self.0.lock_ignore_poison();
+            (inner.epoch, inner.retention?)
+        };
+        Some(settled_epoch.map_or(retention, |stamped| {
+            retention.saturating_sub(epoch.saturating_sub(stamped))
+        }))
+    }
+
+    /// Arm the ready-entry retention bound, in ral calls. Idempotent by
     /// replacement: already-stamped entries are measured against the new one.
     pub(crate) fn arm_retention(&self, retention: u64) {
         self.0.lock_ignore_poison().retention = Some(retention);
@@ -367,86 +411,80 @@ impl WorkerRegistry {
         self.0.lock_ignore_poison().epoch += 1;
     }
 
-    /// Expire settled entries against the armed retention; a no-op unarmed. An
-    /// entry is stamped the first sweep that finds it settled and removed with
+    /// Expire `ready` entries against the armed retention; a no-op unarmed. An
+    /// entry is stamped the first sweep that finds it `ready` and removed with
     /// a [`ReapCause::Retention`] notice `retention` calls later, so retention
-    /// never runs retroactively over a quiet period. A claimed entry is gone
-    /// under the same lock, so it is never reaped; this catches the rest,
-    /// polled or not.
-    /// A settled child of a running worker, or of a gather, is left alone: its
-    /// owner joins it.
+    /// never runs retroactively over a quiet period. A consumed entry is gone
+    /// under the same lock, so it is never reaped; live (`running` or
+    /// `stopping`) entries are never retention candidates.
+    /// A ready child of a live (`running` or `stopping`) worker, or of a
+    /// gather, is left alone: its owner joins or drains it.
     pub(crate) fn sweep_retention(&self) {
-        let mut inner = self.unclaimed();
+        let mut inner = self.retained();
         let Some(retention) = inner.retention else {
             return;
         };
         let epoch = inner.epoch;
-        let running: Vec<WorkerId> = inner
+        // Each handle sampled once, so every entry's verdict reads one moment.
+        let (mut live, mut ready) = (HashSet::new(), HashSet::new());
+        for entry in inner.entries.iter() {
+            match entry.handle.sample() {
+                Sample::Ready(()) => ready.insert(entry.handle.id),
+                sample if sample.is_live() => live.insert(entry.handle.id),
+                _ => false,
+            };
+        }
+        let reaped: Vec<WorkerEntry> = inner
             .entries
-            .iter()
-            .filter(|entry| entry.handle.is_running())
-            .map(|entry| entry.handle.id)
+            .extract_if(|entry| {
+                let held = !ready.contains(&entry.handle.id)
+                    || entry.owner == Owner::Gather
+                    || matches!(entry.owner, Owner::Worker(parent) if live.contains(&parent));
+                match entry.settled_epoch {
+                    _ if held => false,
+                    None => {
+                        entry.settled_epoch = Some(epoch);
+                        false
+                    }
+                    Some(stamped) => epoch.saturating_sub(stamped) >= retention,
+                }
+            })
             .collect();
-        let mut i = 0;
-        while i < inner.entries.len() {
-            let entry = &inner.entries[i];
-            let held = running.contains(&entry.handle.id)
-                || entry.owner == Owner::Gather
-                || matches!(entry.owner, Owner::Worker(parent) if running.contains(&parent));
-            match (held, entry.settled_epoch) {
-                (false, None) => {
-                    inner.entries[i].settled_epoch = Some(epoch);
-                    i += 1;
-                }
-                (false, Some(s)) if epoch.saturating_sub(s) >= retention => {
-                    let entry = inner.entries.remove(i);
-                    inner.reap_notices.push(ReapNotice {
-                        id: entry.handle.id,
-                        title: entry.handle.title,
-                        cause: ReapCause::Retention,
-                    });
-                }
-                _ => i += 1,
-            }
-        }
+        inner
+            .reap_notices
+            .extend(reaped.iter().map(|entry| ReapNotice {
+                id: entry.handle.id,
+                title: entry.handle.title.clone(),
+                cause: ReapCause::Retention,
+            }));
         drop(inner);
-    }
-
-    /// Ral calls until a settled `entry`'s retention expires: the whole bound
-    /// for one not yet stamped, `None` while it runs or with none armed.
-    pub(crate) fn retention_left(&self, entry: &WorkerEntry) -> Option<u64> {
-        if entry.handle.is_running() {
-            return None;
-        }
-        let (epoch, retention) = {
-            let inner = self.0.lock_ignore_poison();
-            (inner.epoch, inner.retention?)
-        };
-        Some(entry.settled_epoch.map_or(retention, |stamped| {
-            retention.saturating_sub(epoch.saturating_sub(stamped))
-        }))
+        drop(reaped);
     }
 
     pub(crate) fn take_reap_notices(&self) -> Vec<ReapNotice> {
         std::mem::take(&mut self.0.lock_ignore_poison().reap_notices)
     }
 
-    /// Clone out every entry for listing; a pure read.
+    /// Clone out every retained entry for listing, sorted by [`WorkerId`]; a
+    /// pure read.
     pub(crate) fn snapshot(&self) -> Vec<WorkerEntry> {
-        self.unclaimed().entries.clone()
-    }
-
-    /// Clone out the entry named by `id`; a pure read like [`Self::snapshot`].
-    pub(crate) fn lookup(&self, id: WorkerId) -> Option<WorkerEntry> {
-        self.unclaimed()
-            .entries
-            .iter()
-            .find(|entry| entry.handle.id == id)
-            .cloned()
+        let mut entries = self.retained().entries.to_vec();
+        entries.sort_by_key(|entry| entry.handle.id.0);
+        entries
     }
 
     pub(crate) fn count(&self) -> usize {
-        self.unclaimed().entries.len()
+        self.retained().entries.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn raw_entry_count(&self) -> usize {
+        self.0.lock_ignore_poison().entries.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn compaction_visits(&self) -> usize {
+        self.0.lock_ignore_poison().entries.visits()
     }
 
     /// A live-thread ticket, held by the worker thread's own frame for as long
@@ -469,27 +507,20 @@ impl WorkerRegistry {
         }
     }
 
-    /// Destruction — `/clear`'s arm and the session teardown's: cancel every
-    /// entry's scope, reset the roster, pending notices included, then wait for
-    /// the cancels to land. The cancels fire only after the guard drops.
-    ///
-    /// An empty roster still drains: a worker `cancel`led moments ago left the
-    /// roster when it was signalled, not when its child died.
+    /// Destruction — `/clear`'s arm and the session teardown's: claim and stop
+    /// every entry, reset the roster, pending notices included, then wait for
+    /// live worker threads to end. The cancels fire only after the guard drops.
     pub(crate) fn cancel_all(&self) -> usize {
-        let (entries, _notices) = {
-            let mut inner = self.unclaimed();
+        let entries = {
+            let mut inner = self.0.lock_ignore_poison();
             // The armed retention and the epoch clock are configuration, not
             // roster, and survive the wipe.
-            (
-                std::mem::take(&mut inner.entries),
-                std::mem::take(&mut inner.reap_notices),
-            )
+            inner.entries.prune();
+            inner.reap_notices.clear();
+            std::mem::take(&mut inner.entries).into_vec()
         };
         for entry in &entries {
-            entry
-                .handle
-                .cancel
-                .cancel(crate::process::CancelCause::Cancelled);
+            entry.handle.claim_and_stop();
         }
         self.drain();
         entries.len()
@@ -499,6 +530,43 @@ impl WorkerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::ByteBuffer;
+    use crate::process::DurableRoot;
+    use crate::types::Value;
+    use crate::types::handle::compacting::MIN_SWEEP_AT;
+
+    fn test_handle(id: u64, title: &str) -> (HandleInner, impl FnOnce()) {
+        let (handle, permit) = HandleInner::new(
+            WorkerId(id),
+            title,
+            DurableRoot::default().worker(),
+            ByteBuffer::default(),
+            ByteBuffer::default(),
+        );
+        (handle, move || {
+            let _ = permit.finish(ThreadEnd::Settled(Ok(Value::Unit)));
+        })
+    }
+
+    fn ready_handle(id: u64, title: &str) -> HandleInner {
+        let (handle, finish) = test_handle(id, title);
+        finish();
+        handle
+    }
+
+    fn consumed_handle(id: u64, title: &str) -> HandleInner {
+        let handle = ready_handle(id, title);
+        let _ = handle.claim_ready();
+        handle
+    }
+
+    fn entry_of(owner: Owner, handle: HandleInner) -> WorkerEntry {
+        WorkerEntry {
+            owner,
+            settled_epoch: None,
+            handle,
+        }
+    }
 
     // ── reservation (the admission/registration TOCTOU close) ───────────
 
@@ -556,5 +624,211 @@ mod tests {
             registry.reserve(Some(1)).is_ok(),
             "dropping the unconsumed reservation must free the slot"
         );
+    }
+
+    /// N uncapped live births followed by registration perform amortized O(N)
+    /// compaction visits, not two full scans per birth.
+    #[test]
+    fn uncapped_live_births_have_amortized_linear_compaction_visits() {
+        let registry = WorkerRegistry::default();
+        let n = 200usize;
+        let mut permits = Vec::with_capacity(n);
+        for i in 0..n {
+            let res = registry.reserve(None).expect("uncapped reserve");
+            let (handle, permit) = test_handle(i as u64, "live");
+            registry.register(res, entry_of(Owner::Session, handle));
+            permits.push(permit);
+        }
+        assert_eq!(registry.raw_entry_count(), n);
+        let visits = registry.compaction_visits();
+        assert!(
+            visits <= 4 * n,
+            "expected amortized O(N) compaction visits for {n} live births, got {visits}"
+        );
+        for permit in permits {
+            permit();
+        }
+    }
+
+    /// Repeated uncapped spawn/await in one invocation, without directory reads,
+    /// leaves only a bounded batch of stale consumed entries.
+    #[test]
+    fn repeated_uncapped_births_and_claims_bound_stale_consumed_entries() {
+        let registry = WorkerRegistry::default();
+        for i in 0..200u64 {
+            let res = registry.reserve(None).expect("uncapped reserve");
+            let (handle, permit) = test_handle(i, "ephemeral");
+            registry.register(res, entry_of(Owner::Session, handle.clone()));
+            permit();
+            assert!(matches!(handle.claim_ready(), Sample::Ready(_)));
+        }
+        assert!(
+            registry.raw_entry_count() <= MIN_SWEEP_AT,
+            "stale consumed entries must stay bounded by MIN_SWEEP_AT, got {}",
+            registry.raw_entry_count()
+        );
+        assert_eq!(registry.count(), 0);
+        assert_eq!(registry.raw_entry_count(), 0);
+    }
+
+    /// Capped reserve prunes consumed entries and counts live (`running` +
+    /// `stopping`) entries in a single pass.
+    #[test]
+    fn capped_reserve_prunes_and_counts_in_one_pass_including_stopping() {
+        let registry = WorkerRegistry::default();
+        let (running_h, running_permit) = test_handle(1, "running");
+        let (stopping_h, stopping_permit) = test_handle(2, "stopping");
+        assert!(stopping_h.claim_and_stop());
+        let ready_h = ready_handle(3, "ready");
+        let consumed_1 = consumed_handle(4, "consumed-1");
+        let consumed_2 = consumed_handle(5, "consumed-2");
+
+        for h in [
+            running_h,
+            stopping_h.clone(),
+            ready_h,
+            consumed_1,
+            consumed_2,
+        ] {
+            let res = registry.reserve(None).expect("uncapped seed");
+            registry.register(res, entry_of(Owner::Session, h));
+        }
+        // Register two handles while ready, then claim them so they sit in `entries` as Consumed.
+        let late_1 = ready_handle(6, "late-1");
+        let late_2 = ready_handle(7, "late-2");
+        for h in [late_1.clone(), late_2.clone()] {
+            let res = registry.reserve(None).expect("uncapped seed");
+            registry.register(res, entry_of(Owner::Session, h));
+        }
+        let _ = late_1.claim_ready();
+        let _ = late_2.claim_ready();
+
+        assert_eq!(
+            registry.raw_entry_count(),
+            5,
+            "running, stopping, ready, and two post-registration consumed entries"
+        );
+        assert_eq!(registry.compaction_visits(), 0);
+
+        // Cap 2 must be refused because `running` (1) + `stopping` (1) == 2 live workers.
+        assert_eq!(registry.reserve(Some(2)).err(), Some(CapReached(2)));
+        assert_eq!(
+            registry.compaction_visits(),
+            5,
+            "capped reserve must prune and count in a single pass over the 5 entries"
+        );
+        assert_eq!(
+            registry.raw_entry_count(),
+            3,
+            "consumed entries must be pruned during capped reserve"
+        );
+
+        // Once the stopping worker finishes execution, it becomes Consumed and frees its slot.
+        stopping_permit();
+        assert_eq!(stopping_h.sample(), Sample::Consumed);
+        let admitted = registry
+            .reserve(Some(2))
+            .expect("finishing a stopping worker frees its capacity slot");
+        drop(admitted);
+        assert_eq!(registry.raw_entry_count(), 2);
+
+        running_permit();
+    }
+
+    /// Retention never stamps or reaps `running` or `stopping`; only `ready`
+    /// expires; children of `stopping` parents and gather children are exempt;
+    /// consumed entries produce no reap notice.
+    #[test]
+    fn retention_only_stamps_and_expires_ready_and_exempts_stopping_parent_children() {
+        let registry = WorkerRegistry::default();
+        registry.arm_retention(2);
+
+        let (running_h, running_permit) = test_handle(1, "running");
+        let (stopping_parent_h, stopping_parent_permit) = test_handle(2, "stopping-parent");
+        assert!(stopping_parent_h.claim_and_stop());
+        let child_of_stopping = ready_handle(3, "child-of-stopping");
+        let gather_child = ready_handle(4, "gather-child");
+        let ready_session = ready_handle(5, "ready-session");
+        let consumed_session = ready_handle(6, "consumed-session");
+
+        for (owner, h) in [
+            (Owner::Session, running_h),
+            (Owner::Session, stopping_parent_h),
+            (Owner::Worker(WorkerId(2)), child_of_stopping),
+            (Owner::Gather, gather_child),
+            (Owner::Session, ready_session),
+            (Owner::Session, consumed_session.clone()),
+        ] {
+            let res = registry.reserve(None).unwrap();
+            registry.register(res, entry_of(owner, h));
+        }
+        let _ = consumed_session.claim_ready();
+
+        // First sweep at epoch 0: prunes consumed_session silently, stamps only ready_session.
+        registry.sweep_retention();
+        assert_eq!(registry.take_reap_notices().len(), 0);
+        let snap = registry.snapshot();
+        assert_eq!(snap.len(), 5);
+        for entry in &snap {
+            let expected = (entry.handle.id == WorkerId(5)).then_some(0);
+            assert_eq!(
+                entry.settled_epoch, expected,
+                "unexpected settled_epoch for worker {:?}",
+                entry.handle.id
+            );
+        }
+
+        // Advance two epochs and sweep: only ready_session expires.
+        registry.tick_epoch();
+        registry.tick_epoch();
+        registry.sweep_retention();
+        assert_eq!(
+            registry.take_reap_notices(),
+            vec![ReapNotice {
+                id: WorkerId(5),
+                title: "ready-session".into(),
+                cause: ReapCause::Retention,
+            }]
+        );
+
+        // Once the stopping parent finishes, its ready child becomes eligible on the next sweep.
+        stopping_parent_permit();
+        registry.sweep_retention();
+        let snap = registry.snapshot();
+        let child_entry = snap
+            .iter()
+            .find(|e| e.handle.id == WorkerId(3))
+            .expect("child-of-stopping still present");
+        assert_eq!(child_entry.settled_epoch, Some(2));
+
+        registry.tick_epoch();
+        registry.tick_epoch();
+        registry.sweep_retention();
+        assert_eq!(
+            registry.take_reap_notices(),
+            vec![ReapNotice {
+                id: WorkerId(3),
+                title: "child-of-stopping".into(),
+                cause: ReapCause::Retention,
+            }]
+        );
+
+        running_permit();
+    }
+
+    /// Snapshot returns entries sorted by `WorkerId` even when registered out of order.
+    #[test]
+    fn snapshot_sorts_entries_by_worker_id() {
+        let registry = WorkerRegistry::default();
+        for id in [30, 10, 20] {
+            let res = registry.reserve(None).unwrap();
+            registry.register(res, entry_of(Owner::Session, ready_handle(id, "w")));
+        }
+        let ids: Vec<WorkerId> = registry
+            .snapshot()
+            .into_iter()
+            .map(|e| e.handle.id)
+            .collect();
+        assert_eq!(ids, vec![WorkerId(10), WorkerId(20), WorkerId(30)]);
     }
 }

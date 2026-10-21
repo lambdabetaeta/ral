@@ -171,6 +171,9 @@ impl Avatar {
             Next::Rewrite(cmd) => return Ok(Step::command(self.rewrite(cmd, emit))),
             Next::Item(item) => item,
         };
+        if !self.arrive(item)? {
+            return Ok(Step::command(ControlFlow::Continue(())));
+        }
         // Only a genuine boundary clears the latches, a prior exchange's Esc,
         // and any nudge still queued behind it — that nudge continued the
         // exchange this one closes.  A self-nudge is the same exchange
@@ -180,7 +183,6 @@ impl Avatar {
             self.agent.token.reset();
             self.inbox.drop_nudges();
         }
-        self.arrive(item);
         let outcome = match self.attempt(item, emit) {
             Ok(outcome) => Ok(outcome),
             Err(Fault::Provider(error)) => {

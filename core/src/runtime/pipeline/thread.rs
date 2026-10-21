@@ -109,7 +109,7 @@ pub(super) fn launch_thread_stage(
 ) -> Settled<ThreadStage> {
     let node = cx.shell.scope.child();
     let stdin = super::launch::stage_stdin(stdin, cx.shell, &node)?;
-    let mooring = Mooring::for_stage_thread(cx.mooring, node.clone());
+    let mooring = Mooring::for_thread(cx.mooring, node.clone(), cx.mooring.surface.clone());
 
     let stdout = match stdout {
         ByteOut::Downstream(w, edge) => Sink::Pipe {
@@ -312,7 +312,11 @@ mod tests {
             "precondition: the outer mooring holds a lease"
         );
 
-        let stage_mooring = Mooring::for_stage_thread(&outer, DurableRoot::default().worker());
+        let stage_mooring = Mooring::for_thread(
+            &outer,
+            DurableRoot::default().worker(),
+            outer.surface.clone(),
+        );
         assert!(
             parent.terminal_lease(&stage_mooring).is_none(),
             "a stage thread's mooring denies terminal access outright"

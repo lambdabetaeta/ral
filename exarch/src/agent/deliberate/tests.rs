@@ -881,3 +881,296 @@ fn cancel_cascade_reaches_a_cancelled_sub_agents_workers() {
          workers through its shell's durable root"
     );
 }
+
+static DELIBERATE_STOP_ENTERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static DELIBERATE_STOP_RELEASE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+struct DeliberateReleaseGuard(&'static std::sync::atomic::AtomicBool);
+impl Drop for DeliberateReleaseGuard {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+fn builtin_deliberate_hold_until_released(
+    _args: &[Value],
+    _mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
+    DELIBERATE_STOP_ENTERED.store(true, std::sync::atomic::Ordering::Release);
+    while !DELIBERATE_STOP_RELEASE.load(std::sync::atomic::Ordering::Acquire) {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    shell.poll()?;
+    Ok(Value::Unit)
+}
+
+static DELIBERATE_HOLD_BUILTINS: [BuiltinEntry; 1] = [BuiltinEntry::new(
+    Cow::Borrowed("test-deliberate-hold"),
+    scheme_t2_cancel_now,
+    "test-only: hold until DELIBERATE_STOP_RELEASE, then poll.",
+    BuiltinBody::Static(builtin_deliberate_hold_until_released),
+)];
+
+/// Mid-exchange `answer` suppresses steering for a `DoneEvent` whose worker
+/// was already claimed by `await` or `cancel` (`Stopping`), while still
+/// replaying its cards to the scrollback.
+#[test]
+fn answer_suppresses_awaited_and_stopping_done_events_while_replaying_cards() {
+    use crate::card::testkit::card_value;
+    use crate::record::{Display, Record};
+    use ral_core::protocol::probe::WorkerState;
+    use ral_core::types::{Done, DoneEvent, WorkerId};
+
+    DELIBERATE_STOP_ENTERED.store(false, std::sync::atomic::Ordering::Release);
+    DELIBERATE_STOP_RELEASE.store(false, std::sync::atomic::Ordering::Release);
+    let _release = DeliberateReleaseGuard(&DELIBERATE_STOP_RELEASE);
+    let mut session = dressed_trunk(|runtime| runtime.install_builtins(&DELIBERATE_HOLD_BUILTINS));
+    let (tx, rx) = crate::bus::channel();
+    let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
+
+    // Pre-create one Stopping worker (#1) and one Consumed worker (#2).
+    session.ral(
+        "let h_stop = spawn \"stopping\" { test-deliberate-hold }",
+        10,
+        &emit,
+    );
+    while !DELIBERATE_STOP_ENTERED.load(std::sync::atomic::Ordering::Acquire) {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    session.ral(
+        "cancel $h_stop\n\
+         let h_claimed = spawn \"claimed\" { 7 }\n\
+         await $h_claimed",
+        10,
+        &emit,
+    );
+    while session.inbox.next_item().is_some() {}
+    let rows = session.seat.read(|t| t.workers()).unwrap();
+    assert!(
+        matches!(rows.as_slice(), [row] if matches!(row.state, WorkerState::Stopping)),
+        "expected only the stopping worker to remain in the table, got {rows:?}"
+    );
+    let stop_id = rows[0].id;
+    let _ = crate::bus::drain_records(&rx);
+
+    // Queue a DoneEvent for the Consumed worker and one for the Stopping worker,
+    // each paired with a card that must still replay.
+    for (id, title) in [(stop_id + 1, "claimed"), (stop_id, "stopping")] {
+        let done = DoneEvent {
+            id: WorkerId(id),
+            title: title.into(),
+            elapsed_ms: 15,
+            outcome: Done::Ok,
+        }
+        .to_surface();
+        session.inbox.mailbox().stamp().post(Stamped::Surface {
+            id: session.agent.id,
+            values: vec![card_value(vec![]), done],
+        });
+    }
+
+    let provider = scripted(
+        "test-model",
+        Script::new()
+            .then(Reply::tool_calls(vec![ral_call("c1", "1")]))
+            .then(Reply::text("done")),
+    );
+    let outcome = session.deliberate(&provider, Some(("go".into(), Voice::Human)), None, &emit);
+    assert!(matches!(outcome, Ok(Outcome::Complete)), "got {outcome:?}");
+
+    let ms = session.rendered_messages();
+    assert_eq!(
+        ms.iter().map(|m| m.role.clone()).collect::<Vec<_>>(),
+        vec![
+            ChatRole::User,
+            ChatRole::Assistant,
+            ChatRole::Tool,
+            ChatRole::Assistant
+        ],
+        "neither suppressed completion may insert a steering turn: {ms:?}"
+    );
+    let records = crate::bus::drain_records(&rx);
+    let cards = records
+        .iter()
+        .filter(|r| matches!(r, Record::Display(Display::Card { .. })))
+        .count();
+    assert_eq!(
+        cards, 2,
+        "both batches must still replay their cards: {records:?}"
+    );
+}
+
+/// Mid-exchange `answer` delivers an unclaimed `Ready` worker's completion
+/// notice and a `Surface` batch without a `DoneEvent` as steering, while
+/// dropping a stale-epoch surface batch fenced by `/clear`.
+#[test]
+fn answer_delivers_unclaimed_ready_and_non_done_surfaces_and_fences_stale_epoch() {
+    use crate::card::testkit::card_value;
+    use ral_core::protocol::probe::WorkerState;
+
+    let mut session = Avatar::for_test("system").unwrap();
+    let (tx, _rx) = crate::bus::channel();
+    let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
+
+    let stale_stamp = session.inbox.mailbox().stamp();
+    session.clear().unwrap();
+    // Stale-epoch surface queued before the batch must be dropped at mid-exchange pop.
+    stale_stamp.post(Stamped::Surface {
+        id: session.agent.id,
+        values: vec![card_value(vec![])],
+    });
+
+    // Spawn an unclaimed worker and wait for its genuine DoneEvent surface in the inbox.
+    session.ral("let h = spawn \"ready-worker\" { 99 }", 10, &emit);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !session
+        .seat
+        .read(|t| t.workers())
+        .unwrap()
+        .iter()
+        .any(|r| matches!(r.state, WorkerState::Ready(_)))
+        || session.inbox.is_empty()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker did not settle"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // Also queue a surface batch without a DoneEvent.
+    session.inbox.mailbox().stamp().post(Stamped::Surface {
+        id: session.agent.id,
+        values: vec![card_value(vec![])],
+    });
+
+    let provider = scripted(
+        "test-model",
+        Script::new()
+            .then(Reply::tool_calls(vec![ral_call("c1", "1")]))
+            .then(Reply::text("done")),
+    );
+    let outcome = session.deliberate(&provider, Some(("go".into(), Voice::Human)), None, &emit);
+    assert!(matches!(outcome, Ok(Outcome::Complete)), "got {outcome:?}");
+
+    let ms = session.rendered_messages();
+    assert_eq!(
+        ms.iter().map(|m| m.role.clone()).collect::<Vec<_>>(),
+        vec![
+            ChatRole::User,
+            ChatRole::Assistant,
+            ChatRole::Tool,
+            ChatRole::User,
+            ChatRole::User,
+            ChatRole::Assistant,
+        ],
+        "the unclaimed Ready completion and non-done batch enter as steering"
+    );
+    let first_steering = ms[3].content.first_text().expect("first steering text");
+    assert!(
+        first_steering.contains("ready-worker")
+            && first_steering
+                .contains("If you kept its handle and the result is still unclaimed, `await $h`"),
+        "expected unclaimed completion notice in first steering, got: {first_steering}"
+    );
+    let second_steering = ms[4].content.first_text().expect("second steering text");
+    assert!(
+        second_steering.contains("errand finished."),
+        "expected non-done surface notice in second steering, got: {second_steering}"
+    );
+}
+
+/// If the `workers()` probe inside `answer`'s mid-exchange arrival drain sees
+/// a severed seat, `answer` propagates `Fault::Severed`.
+#[test]
+fn answer_propagates_severed_from_arrival_worker_probe() {
+    use crate::card::testkit::card_value;
+    use crate::record::{Display, Publish, Record, Recorded, Transient};
+    use ral_core::carrier::Severed;
+    use ral_core::types::{Done, DoneEvent, WorkerId};
+
+    struct SeverOnCard {
+        transport: Arc<ral_core::carrier::IdentityTransport>,
+        cause: Severed,
+    }
+    impl Publish for SeverOnCard {
+        fn fact(&self, recorded: Recorded<Record>) {
+            if matches!(recorded.value(), Record::Display(Display::Card { .. })) {
+                use ral_core::carrier::Transport as _;
+                self.transport.sever(self.cause.clone());
+            }
+        }
+        fn transient(&self, _transient: Transient) {}
+    }
+
+    static ARM_SEVER: std::sync::Mutex<Option<(crate::record::Emitter, SeverOnCard)>> =
+        std::sync::Mutex::new(None);
+
+    #[allow(clippy::unnecessary_wraps)]
+    fn builtin_arm_sever(
+        _args: &[Value],
+        _mooring: &Mooring,
+        _shell: &mut Shell,
+    ) -> Settled<Value> {
+        use ral_core::sync::LockExt as _;
+        let armed = ARM_SEVER.lock_ignore_poison().take();
+        if let Some((recorder, sink)) = armed {
+            recorder.attach(Box::new(sink));
+        }
+        Ok(Value::Unit)
+    }
+
+    static ARM_SEVER_BUILTINS: [BuiltinEntry; 1] = [BuiltinEntry::new(
+        Cow::Borrowed("test-arm-sever-on-card"),
+        scheme_t2_cancel_now,
+        "test-only: attach SeverOnCard after ral() couples the session.",
+        BuiltinBody::Static(builtin_arm_sever),
+    )];
+
+    let mut session = dressed_trunk(|runtime| runtime.install_builtins(&ARM_SEVER_BUILTINS));
+    let crate::agent::seat::SeatKind::Identity(transport) = session.seat.kind() else {
+        panic!("identity seat");
+    };
+    let cause = Severed::Closed("probe severed".into());
+    {
+        use ral_core::sync::LockExt as _;
+        *ARM_SEVER.lock_ignore_poison() = Some((
+            session.recorder(),
+            SeverOnCard {
+                transport,
+                cause: cause.clone(),
+            },
+        ));
+    }
+
+    let done = DoneEvent {
+        id: WorkerId(1),
+        title: "boom".into(),
+        elapsed_ms: 10,
+        outcome: Done::Ok,
+    }
+    .to_surface();
+    session.inbox.mailbox().stamp().post(Stamped::Surface {
+        id: session.agent.id,
+        values: vec![card_value(vec![]), done],
+    });
+
+    let provider = scripted(
+        "test-model",
+        Script::new()
+            .then(Reply::tool_calls(vec![ral_call(
+                "c1",
+                "test-arm-sever-on-card",
+            )]))
+            .then(Reply::text("unreachable")),
+    );
+    let (tx, _rx) = crate::bus::channel();
+    let emit = Emitter::new(tx, session.agent.id);
+    let outcome = session.deliberate(&provider, Some(("go".into(), Voice::Human)), None, &emit);
+    assert!(
+        matches!(outcome, Err(Fault::Severed(ref c)) if *c == cause),
+        "expected Fault::Severed from arrival worker probe, got {outcome:?}"
+    );
+}

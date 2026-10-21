@@ -3,7 +3,7 @@
 
 use crate::first_order::FOValue;
 use crate::sync::LockExt as _;
-use crate::types::{DeferredSink, Done, DoneEvent, EventSink, HandleInner};
+use crate::types::{DeferredSink, DoneEvent, EventSink};
 use std::sync::{Arc, Mutex};
 
 /// Cap on a worker's deferred surface: past it one `surface-overflow`
@@ -12,8 +12,8 @@ const DEFERRED_SURFACE_CAP: usize = 4096;
 
 /// A worker's surface: it may outlive the run that spawned it, so it
 /// buffers into a bounded vector rather than hold that run's live sink.  The
-/// buffer leaves once, when the worker's [`Settler`](super::Settler) settles,
-/// through [`Self::flush`] to the [`DeferredSink`].
+/// buffer leaves once, after the worker's [`CompletionPermit`](super::CompletionPermit)
+/// publishes its terminal state, through [`Self::flush`] to the [`DeferredSink`].
 pub(crate) struct DeferredSurface {
     buf: Mutex<Vec<FOValue>>,
     deferred: Arc<dyn DeferredSink>,
@@ -28,14 +28,8 @@ impl DeferredSurface {
     }
 
     /// Deliver the buffer plus a final [`DoneEvent`] as one batch.
-    pub(super) fn flush(&self, handle: &HandleInner, outcome: Done) {
+    pub(crate) fn flush(&self, done: DoneEvent) {
         let mut batch = std::mem::take(&mut *self.buf.lock_ignore_poison());
-        let done = DoneEvent {
-            id: handle.id,
-            title: handle.title.clone(),
-            elapsed_ms: u64::try_from(handle.elapsed().as_millis()).unwrap_or(u64::MAX),
-            outcome,
-        };
         batch.push(done.to_surface());
         self.deferred.deliver(batch);
     }

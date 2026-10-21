@@ -54,6 +54,10 @@ fn bake_returns_top_level_let_bindings() {
             "expected baked prelude schemes to include {expected:?}, got {names:?}"
         );
     }
+    assert!(
+        !names.contains("is-done"),
+        "is-done is a native builtin and must not remain in the baked prelude"
+    );
 }
 
 /// A prelude binding sharing a native's name seeds and shadows, so the
@@ -149,6 +153,7 @@ fn builtin_schemes_carry_their_grades() {
     assert_eq!(shown("echo"), "[String] → Command");
     assert_eq!(shown("to-json"), "∀α:data. α → Command");
     assert_eq!(shown("await"), "∀α ν. Handle (ν α) → ν α");
+    assert_eq!(shown("is-done"), "∀α ν. Handle (ν α) → Returns Bool");
     assert_eq!(shown("each"), "∀α β ν. {α → ν β} → [α] → Returns Unit");
     assert_eq!(shown("map"), "∀α β. {α → Returns β} → [α] → Returns [β]");
     assert_eq!(

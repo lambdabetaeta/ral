@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f56fff48
+generated_at_commit: 61c288f
 generated_at_date: 2026-10-21
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
@@ -56,7 +56,7 @@ scope, and the base frames all come from the manifest the shell was booted with
 — there is no process-global registry, and every path that builds or hydrates a
 shell must be built over a `Runtime` that carries them or re-link a native by name.
 `register` clones the baked prelude's bindings into each fresh environment.
-`BOUNDARY_BUILTINS` (`from-json`, `from-jsonl`, `from-json-at`, `use`, `worker`) also sits
+`BOUNDARY_BUILTINS` (`from-json`, `from-jsonl`, `from-json-at`, `use`) also sits
 outside it, for a different reason: each row is a `BuiltinEntry::boundary`, whose
 body takes the `Site` the checker solved at the call and admits the value it
 lets in against it ([[decisions/260930_a-boundary-is-checked-against-its-type|a-boundary-is-checked-against-its-type]]).
@@ -108,71 +108,87 @@ Bodies are grouped by concern, one submodule each:
 - `shell.rs` — `cd`, `alias` / `unalias`;
 - `concurrency.rs` — the `spawn` form's door (`spawn_form`), `watch` /
   `detach`, the handle verbs
-  `await` / `poll` / `first-settled` / `race` / `cancel` / `worker`, and the
+  `await` / `poll` / `is-done` / `first-settled` / `race` / `cancel`, and the
   `workers` listing (`builtin_workers`), split by concern: the root keeps the
   verbs of birth, `concurrency/birth.rs` the `Birth` door (`spawn_child`) and
   the one exit rule a gather and a worker's base share (`exit_brood`),
-  `concurrency/eliminate.rs` the eliminators, `worker`, and the one
+  `concurrency/eliminate.rs` the eliminators, observations (`builtin_poll`,
+  `builtin_is_done`, `builtin_first_settled`), and the one
   cancel-aware sweep (`first_ready`) under `await`, `race`, a gather's join and
-  `first-settled` (`builtin_first_settled`; `race` ends its losers through
-  `end_unclaimed`), and `concurrency/tests.rs` the tests; the worker's
-  deferred surface lives in `types/handle/surface.rs`, its
-  cradle and brood in `types/handle/brood.rs` (builtins under their bare
-  names; `is-done`, `par`, `both` and `first-of` are prelude code over them,
+  `first-settled` (`race` ends its losers and drains any already-`stopping`
+  handles through `end_unclaimed`), and `concurrency/tests.rs` the tests; the
+  worker's deferred surface lives in `types/handle/surface.rs`, its
+  cradle, brood and `ScopeOwner` in `types/handle/brood.rs` (builtins under their bare
+  names; `par`, `both` and `first-of` are prelude code over them,
   [[map/core/prelude|prelude]]). `spawn` and `gather` are control operators,
   not rows: the machine forms `spawn`'s operands and calls its door, and runs
-  `gather` as a frame (`Frame::Gather`) that settles its brood by
-  `exit_brood` ([[map/core/evaluator|evaluator]]). All
-  but `worker` and the host-installed two seed through `CORE_BUILTINS`;
-  `worker` seeds through `BOUNDARY_BUILTINS`, and the other two live here
+  `gather` as a frame (`Frame::Gather`) that settles its `ScopeOwner` by
+  `exit_brood` on return, `ScopeOwner::end` on halt, and `ScopeOwner::stop` on
+  `abandon`/`Drop` ([[map/core/evaluator|evaluator]]). All
+  but the host-installed two seed through `CORE_BUILTINS`;
+  the other two live here
   too but reach a session via `WATCH_BUILTIN` / `DETACH_BUILTIN`, not core. `builtin_detach` is the surface discipline
   alone — the birth itself is the ordinary external-command machinery down to
   the double-fork in `runtime/command/detach.rs`
   ([[map/core/runtime|runtime]]), and it yields a `{pid, desc}` receipt, not a
   `Handle`, so none of the eliminators below apply to it. A handle is one
-  private lock over a `HandleState`: `Running`, `Settled(CompletedHandle {
-  stdout, stderr, end })`, or `Claimed`. `HandleInner::new` returns the handle
-  with its one `Settler`, which the worker thread owns: `Settler::settle`
-  flushes the worker's deferred surface, then `complete` drains the buffers
-  into `Settled` (or drops the end of a handle already `Claimed`) and sets the
-  end `Stamp`; a `Settler` dropped unsettled — a panic — settles the handle
-  as a panic naming the worker, so `poll`/`race` see a finished block rather
-  than spinning. Observers read a `Sample` — `Pending`, `Settled(R)` or
-  `Claimed` — and the only transitions are `complete`, `observe` (a read that
-  lends the result to a closure under the lock), `claim_settled` (moves a
-  settled result out and leaves `Claimed`, in one step) and `claim_and_stop`
-  (the only way from `Running` to `Claimed`: it fires the worker's node, and
-  discards a settled result). So a result is *claimed* exactly once, by
-  construction. The registry lock may take a handle's lock, never the
-  reverse. `await` is exact: `join` waits (`claim_first`) until it claims the
-  handle's settled result or finds it claimed by another; `exact` `replay`s the
-  stdout bytes, then the stderr bytes, into the awaiter's own sinks and
-  `conclude`s as the block ended — the value (admitted by `admit_handled`),
+  private lock over a four-state `HandleState`: `Running`,
+  `Stopping { cancelled_at }` (cancellation requested while `Running`, worker
+  thread still unwinding), `Ready(CompletedHandle { stdout, stderr, end })`
+  (worker thread finished, result unclaimed), or `Consumed` (result claimed or
+  cancelled worker finished). `HandleInner::new` returns the handle with its one
+  `CompletionPermit`, which the worker thread owns: `CompletionPermit::finish`
+  drains the buffers, transitions `Running` → `Ready` or `Stopping` →
+  `Consumed`, and sets the end `Stamp` *before* calling
+  `DeferredSurface::flush(DoneEvent)`, so a host woken by the deferred batch
+  never observes the handle still non-terminal; a `CompletionPermit` dropped
+  unfinished — a panic — completes the handle as a panic naming the worker and
+  flushes its deferred surface, so `poll`/`race` see a finished block rather
+  than spinning. Observers read a `Sample` — `Running { elapsed }`,
+  `Stopping { elapsed }`, `Ready { completed, elapsed }`, or
+  `Consumed { elapsed }` — or a single consistent `HandleSnapshot` for
+  `workers`/probe rows, and the transitions are `complete` (via
+  `CompletionPermit::finish`), `observe` (a read that lends the state to a
+  closure under the lock), `claim_ready` (moves a `Ready` result out and leaves
+  `Consumed`, in one step) and `claim_and_stop` (`Running` → `Stopping` firing
+  the worker's node, or `Ready` → `Consumed` discarding the settled result;
+  idempotent on `Stopping` and `Consumed`). So a result is *claimed* at most
+  once, by construction. The registry lock may take a handle's lock, never the
+  reverse. `await` is exact: `first_ready` polls the caller's cancel scope
+  first, before inspecting any handle (so a pending cancellation is never lost
+  to an already-`Ready` handle), then `join` waits (`claim_first`) until it
+  claims the handle's `Ready` result or finds it already claimed (`Stopping` or
+  `Consumed`); `exact` `replay`s the stdout bytes, then the stderr bytes, into
+  the awaiter's own sinks and `conclude`s as the block ended — the value,
   the failure as it stands, an `exit` or a stop re-raised, a panic resumed —
-  so `await` of a block is that block run there. A handle another claimer has
-  fails `await_handle` with `<verb>: this worker's result was already
+  so `await` of a block is that block run there. A handle in `Stopping` or
+  `Consumed` fails `await_handle` with `<verb>: this worker's result was already
   claimed`, an ordinary error, and `join` returns `None` for it, which a
-  worker's return rule skips. `race` claims the first handle it finds
-  settled, in list order, skipping any another caller claimed, and fails as
-  `await` does only once every handle is claimed, at entry or mid-wait; it
-  then claims, stops and drains its losers before it returns. An empty list
-  is its own error.
-  `cancel` claims the handle and stops it, and is nothing on one already
-  claimed. The handle carries its block's grade (`Ty::Handle(Grade, Ty)`,
-  printed `Handle (Returns α)` / `Handle Command`), so `await` returns the
-  grade the block had. `poll` never writes and never claims, reporting the
-  settle as `` `settled `` `{stdout, stderr, elapsed, outcome: `ok/`err}` (the
-  `` `err `` payload built through `Error::record`, the record `try` hands its
-  handler) or `` `pending `` `{stdout, stderr, elapsed}` (a *cumulative,
-  non-destructive* `CapturedBytes::peek` snapshot of the running worker's
-  output, peeked before the handle is observed — the buffers are left for the
-  worker's one-shot `CapturedBytes::take` as it settles, so a partial poll
-  never steals bytes) — the block's
-  outcome is data, not a status. A worker stopped from elsewhere settles with
-  its own `WorkerStopped` record, an `exit`, a foreign stop or a panic is
-  re-raised, as `await` re-raises them: `poll` is total on an unclaimed
-  handle, and a handle `cancel` or `await` claimed fails as it does for
-  `await`
+  gather's return rule skips. `race` skips `Stopping` and `Consumed` handles
+  when choosing a winner, failing as `await` does only when no handle is
+  `Running` or `Ready` (at entry or mid-wait), claims the first `Ready` winner
+  in list order, and then claims, stops and drains every remaining `Running` or
+  already-`Stopping` handle within one shared cleanup grace before it returns.
+  An empty list is its own error.
+  `cancel` calls `claim_and_stop` (`Running` → `Stopping`, `Ready` →
+  `Consumed`, and a no-op on `Stopping` or `Consumed`). The handle carries its
+  block's grade (`Ty::Handle(Grade, Ty)`, printed `Handle (Returns α)` /
+  `Handle Command`), so `await` returns the grade the block had. `poll` never
+  writes and never claims, reporting all four states as data:
+  `` `running [stdout, stderr, elapsed] ``,
+  `` `stopping [stdout, stderr, elapsed] `` (both carrying a *cumulative,
+  non-destructive* `CapturedBytes::peek` snapshot of the worker's output so
+  far, peeked before the handle is observed so the buffers stay intact for the
+  worker's one-shot `CapturedBytes::take` at completion),
+  `` `ready [stdout, stderr, elapsed, outcome: <ok: α | err: ErrorRecord>] ``
+  (the `` `err `` payload built through `Error::record`, the record `try` hands
+  its handler), or `` `consumed [elapsed] ``. A worker stopped from elsewhere
+  settles with its own `WorkerStopped` record; on a `Ready` handle an `exit`, a
+  foreign stop or a panic is re-raised, as `await` re-raises them, while `poll`
+  never fails because a handle is `Stopping` or `Consumed`. `is-done`
+  (`builtin_is_done`) is the boolean predicate over the same states, returning
+  `true` for `Ready` or `Consumed` and `false` for `Running` or `Stopping`
+  without raising
   ([[decisions/261016_delimiters-are-handlers-for-poll|delimiters-are-handlers-for-poll]],
   [[decisions/260615_poll-total-failed-arm|the settle decision]],
   [[decisions/260702_partial-poll-pending-output|partial-poll-pending-output]]).
@@ -180,10 +196,14 @@ Bodies are grouped by concern, one submodule each:
   foreground scope: under the durable session root in a run outside any
   gather, so a foreground cancel never reaps it, and inside a gather — a
   worker's body or a `gather { … }` — under the gather's entry scope, enrolled
-  in its `Brood` (`Cradle::owning`): each child awaited on return, cancelled
-  and drained on a halt, a child another claimer has skipped, and every
-  cancelled child waited for within the grace (`Brood::wait_cancelled`), so
-  `cancel` of a worker reaches its tree. `await` shares `race`'s
+  in its `Brood` (`Cradle::owning` paired with a unique `ScopeOwner`): when the
+  gather exits it closes membership first (rejecting and cancelling any late
+  birth from a stage thread still unwinding against that cradle), awaits each
+  unclaimed child on return, cancels them on a halt (`ScopeOwner::end`), and on
+  every normal or halting exit waits within one shared grace for every child it
+  accepted to reach a terminal state (`Ready` or `Consumed`)
+  (`ScopeOwner::drain`), so `cancel` of a worker reaches its tree and nothing a
+  gather started outlives it by more than the grace. `await` shares `race`'s
   cancel-aware wait loop (`claim_first`, over `first_ready`), so a deadline
   unwinds the wait while a session worker survives
   ([[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]],
@@ -191,13 +211,16 @@ Bodies are grouped by concern, one submodule each:
   The spawn door is `spawn_child`, which takes a `Birth` — `Spawn` or
   `Watch` — and reads the owner off the cradle: with a brood in scope the
   child is the brood's (`Owner::Gather` or `Owner::Worker`, from its
-  `BroodOwner`), enrolled, writing to the run's live sink as a pipeline stage
-  does, unannounced and flushing no `` `done ``; with none it is the
-  session's, announced, its surface deferred. It mints the worker's
+  `BroodOwner`), enrolled (or cancelled and rejected with `the enclosing gather
+  has ended; the new worker was cancelled` if the enclosing gather has already
+  closed), writing to the run's live sink as
+  a pipeline stage does, unannounced and flushing no `` `done ``; with none it
+  is the session's, announced, its surface deferred. It mints the worker's
   `WorkerId` first and builds the handle around it: `HandleInner` carries the
   `id`, the `title`, and the worker's clock, a birth `Stamp` and an end
-  `Stamp` that its `Settler` sets on every exit path of the worker thread, from
-  which `elapsed` and `settled_at` are derived, each in one place. The
+  `Stamp` that its `CompletionPermit` sets on every exit path of the worker
+  thread before flushing its deferred surface, from which `elapsed` and
+  `settled_at` are derived, each in one place. The
   registry entry adds only the `Owner`. A birth's `title` — the name every
   eliminator's error, the trail, and the completion event use — comes from the
   birth itself: a `spawn`'s title (non-empty and one line, `legible_title`),
@@ -206,29 +229,29 @@ Bodies are grouped by concern, one submodule each:
   event (`DoneEvent`) carries
   the handle's id, title and elapsed time beside its outcome, including on
   failure and panic. No policy reaps a running worker: it ends by completing,
-  by `cancel`, or with its owner. `worker <id>` (`builtin_worker`, a
-  boundary row) takes back the handle of any worker still in the registry,
-  running or settled, by that id; the value it settles with is admitted at the
-  `await` site (`admit_handled`). The spawn door also enforces the frame's
+  by `cancel`, or with its owner, and its handle capability is held only in the
+  bindings that received it at birth (there is no `worker <id>` lookup builtin).
+  The spawn door also enforces the frame's
   admission cap (`Mooring::worker_cap`): a birth *reserves* its seat at the
-  door (`WorkerRegistry::reserve`) — refused while `cap` workers are running
-  or reserved, with an error naming the verb the caller actually wrote and
-  `await`/`cancel` as the remedies, the reservation held across thread spawn
-  and released into the registered entry, so a racing sibling birth never sees
-  a filling seat as free; settled entries lingering under retention hold no
-  seat. A settled entry's one bound is retention, armed once at boot
+  door (`WorkerRegistry::reserve`) — refused while `cap` workers are `Running`,
+  `Stopping`, or reserved, with an error naming the verb the caller actually
+  wrote and `await`/`cancel` as the remedies, the reservation held across thread
+  spawn and released into the registered entry, so a racing sibling birth never
+  sees a filling seat as free; `Ready` and `Consumed` entries hold no
+  seat. A `Ready` entry's one bound is retention, armed once at boot
   (`Shell::arm_worker_retention`, beside the binding lease): the registry
   keeps its own clock — one `tick_epoch` per source dispatch — and the engine
   sweeps at each settled run's ready boundary (`sweep_retention`, engine
-  housekeeping), stamping an entry at the first sweep that observes it settled
+  housekeeping), stamping an entry at the first sweep that observes it `Ready`
+  while its parent worker (if any) is no longer live (`Running` or `Stopping`)
   and expiring it once its unclaimed result has sat stamped a full retention
   of ral calls. The expiry records a `Retention`-cause `ReapNotice`, which the
   engine pushes at the next settled run's ready boundary as a `` `notice ``
   surface event (`emit_ready_boundary_notices`; exarch decodes it back via
-  `card::value_to_notice`). An unarmed registry (the REPL) retains settled
-  entries indefinitely; a claimer still removes an entry the moment it claims
-  the result, so the sweep only catches what nobody claimed. A worker runs its
-  thunk on a fresh `std::thread` via `Shell::spawn_thread`
+  `card::value_to_notice`). An unarmed registry (the REPL) retains `Ready`
+  entries indefinitely; a claimer removes an entry when it transitions to
+  `Consumed`, so the sweep only catches `Ready` results nobody claimed. A worker
+  runs its thunk on a fresh `std::thread` via `Shell::spawn_thread`
   ([[map/core/shell-state|shell-state]]), seeded from the parent's session;
   `worker_body` hands the thunk, its capture riding in its closure, straight
   to `machine::force` ([[map/core/evaluator|evaluator]]), deliberately
@@ -239,19 +262,16 @@ Bodies are grouped by concern, one submodule each:
   confined per-command — a `spawn` under a `grant` cannot escape it. Every
   `spawn_child` also files the freshly-minted handle on `shell.local.workers`
   — a per-shell registry, host-independent and carrying no policy
-  ([[map/core/shell-state|shell-state]]); `await`, `race`'s winner and its
-  cancelled losers, `cancel`, and a brood's join or end claim the handle
-  (so no other brood answers for it) and remove the entry from
-  whichever shell claims it, and `poll`, on either arm, or a `workers` listing
-  never touches the registry. **A listing is data; `worker <id>` is the
-  door.** `workers` maps every entry, running or retained, ids ascending,
-  through `worker_row` (`types/shell/host.rs`, shared with the `` `workers ``
-  probe) to a seven-field record — `id`, `title`, `owner` (`` `session ``, ``
-  `worker id ``, `` `gather ``), `state` (`` `running `` or `` `done `` with the
-  `Done` ending), `started` (Unix seconds), `elapsed` (seconds, off the
-  handle's `Stamp`s), `settled` (`` `some `` Unix seconds or `` `none ``) —
-  reading the state with `settled`, which caches but claims nothing, and
-  omitting a handle claimed since the entry was read (`WorkerRow::ral_value`;
+  ([[map/core/shell-state|shell-state]]). **A listing is data.** `workers` maps
+  every `Running`, `Stopping`, or `Ready` entry (`Consumed` entries are
+  omitted), ids ascending, through `worker_row` (`types/shell/host.rs`, shared
+  with the `` `workers `` probe) to a seven-field record — `id`, `title`,
+  `owner` (`` `session ``, `` `worker id ``, `` `gather ``), `state`
+  (`` `running ``, `` `stopping ``, or `` `ready `` with the `Done` ending),
+  `started` (Unix seconds), `elapsed` (seconds, off the handle's `Stamp`s),
+  `settled` (`` `some `` Unix seconds iff `state` is `` `ready ``, else
+  `` `none ``) — derived from a single consistent snapshot per handle
+  (`HandleInner::snapshot`) without claiming it (`WorkerRow::ral_value`;
   the probe's eighth field, `retention-left`, is the host's alone). It holds
   no handle, so a top-level `workers` crosses the engine protocol. A `Handle`
   is process-local: `Shell::bequeath` scrubs it from every fork, and a run

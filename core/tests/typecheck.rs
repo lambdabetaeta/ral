@@ -94,37 +94,66 @@ fn fmt_scheme_binds_cyclic_comp_roots_by_mu() {
     assert_eq!(rendered, "μϕ. Returns [{ϕ}]");
 }
 
-/// The idiom `worker`'s doc advertises, put to the checker on the bare core
-/// table: call sites eliminated at different value types.  A monomorphic
-/// `Handle` fails the first, an under-generalised one the second.
+/// `workers` is data: a row's fields read at their documented types, including
+/// the three-state `state` variant (a consumed worker is never listed), and neither `worker` nor `worker-command`
+/// exists in the builtin manifest.
 #[test]
-fn worker_typechecks_under_its_documented_eliminators() {
-    let errs = errors(
-        "let a = await !{worker 3}\n\
-         let n = $[$a + 1]\n\
-         let b = await !{worker 4}\n\
-         let s = string-replace 'x' 'y' $b\n\
-         cancel !{worker 5}",
-    );
-    assert!(
-        errs.is_empty(),
-        "`worker`'s ∀α Handle must instantiate per call site, got: {errs:?}"
-    );
-}
-
-/// `workers` is data: a row's fields read at their documented types, and its
-/// id is what `worker` takes back.
-#[test]
-fn workers_lists_rows_whose_id_reacquires() {
+fn workers_lists_rows_at_their_documented_types_and_no_recovery_builtin_exists() {
     let errs = errors(
         "let w = workers\n\
+         let id = $[$w[0][id] + 1]\n\
          let t = string-replace 'x' 'y' $w[0][title]\n\
          let e = $[$w[0][elapsed] + 1.0]\n\
-         cancel !{worker $w[0][id]}",
+         let s = case $w[0][state] [\n\
+             `running: { |_| return 'run' },\n\
+             `stopping: { |_| return 'stop' },\n\
+             `ready: { |_| return 'ready' }\n\
+         ]",
     );
     assert!(
         errs.is_empty(),
         "a `workers` row must read at its documented types, got: {errs:?}"
+    );
+    let manifest = common::manifest(&ral_core::HostSurface::default());
+    assert!(manifest.get("worker").is_none());
+    assert!(manifest.get("worker-command").is_none());
+}
+
+/// `poll` returns the four-arm lifecycle variant (`running`, `stopping`,
+/// `ready`, `consumed`), and a two-arm `pending`/`settled` case is rejected.
+#[test]
+fn poll_requires_four_lifecycle_arms_and_rejects_old_two_arm_tags() {
+    let errs = errors(
+        "let h = spawn { return 1 }\n\
+         let _ = !{is-done $h}\n\
+         let n = case !{poll $h} [\n\
+             `running: { |r| let _ = $[$r[elapsed] + 1.0]; return !{length $r[stdout]} },\n\
+             `stopping: { |s| let _ = $[$s[elapsed] + 1.0]; return -1 },\n\
+             `ready: { |d| let _ = $[$d[elapsed] + 1.0]; case $d[outcome] [`ok: { |v| return $v }, `err: { |_| return -2 }] },\n\
+             `consumed: { |c| let _ = $[$c[elapsed] + 1.0]; return -3 }\n\
+         ]",
+    );
+    assert!(
+        errs.is_empty(),
+        "four-arm `poll` must typecheck cleanly, got: {errs:?}"
+    );
+
+    let old_two_arm = "let h = spawn { return 1 }\n\
+                       case !{poll $h} [`settled: { |_| return 1 }, `pending: { |_| return 0 }]";
+    assert!(
+        !raw_errors(old_two_arm).is_empty(),
+        "old two-arm `pending`/`settled` poll case must be rejected"
+    );
+
+    let missing_stopping = "let h = spawn { return 1 }\n\
+                            case !{poll $h} [\n\
+                                `running: { |_| return 0 },\n\
+                                `ready: { |_| return 1 },\n\
+                                `consumed: { |_| return 2 }\n\
+                            ]";
+    assert!(
+        !raw_errors(missing_stopping).is_empty(),
+        "omitting `stopping` from `poll` case must fail exhaustiveness"
     );
 }
 

@@ -143,8 +143,8 @@ fn timeout_tip(timeout_secs: u64) -> String {
          recovery: if the command is simply slow and there is nothing to overlap it \
          with, retry with a higher `timeout_secs`. If other work can run alongside it, \
          spawn it instead (`let h = spawn \"title\" {{ … }}`) and let the run return: \
-         the host notifies you when it settles, and `await $h`, or `await !{{worker <id>}}` \
-         from the notice, behaves as if the block had run there.\n"
+         the host notifies you when it settles, and `await $h` \
+         behaves as if the block had run there.\n"
     )
 }
 
@@ -169,8 +169,8 @@ fn exit_tip(single_command: bool) -> String {
 }
 
 /// The sentence a failed ending owes the model about work that outlived it: a
-/// birth this dispatch made, still present in the registry — running or
-/// settled-unclaimed — is joined against `workers` by id.  A consumed worker
+/// birth this dispatch made, still present in the registry — running, stopping,
+/// or ready-unclaimed — is joined against `workers` by id.  A consumed worker
 /// has already left the registry and is nobody's orphan.  `None` when this
 /// dispatch spawned nothing still present — silence is then the whole truth.
 fn orphan_note(ending: &Ending, births: &HashSet<u64>, workers: &[WorkerRow]) -> Option<String> {
@@ -192,13 +192,13 @@ fn orphan_note(ending: &Ending, births: &HashSet<u64>, workers: &[WorkerRow]) ->
     let fate = match ending {
         Ending::Unreturnable { .. } => {
             "A handle this call bound with `let` is still bound: `await $h` reaches it; \
-             one it only returned was lost with the result. `await !{worker N}` reaches it \
-             either way."
+             one it only returned was lost with the result (`workers` shows status; an ID \
+             cannot recover a handle)."
         }
         _ => {
             "A handle bound by a step that completed before the failure is still bound: \
-             `await $h` reaches it; one the failing step would have bound never landed. \
-             `await !{worker N}` reaches it either way."
+             `await $h` reaches it; one the failing step would have bound never landed \
+             (`workers` shows status; an ID cannot recover a handle)."
         }
     };
     Some(format!(

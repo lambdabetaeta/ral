@@ -43,16 +43,19 @@ pub enum Probe {
     WorkerCount,
 }
 
-/// Where a listed worker is: running, or how it ended.
+/// Where a listed worker is in its lifecycle: a consumed worker has left the
+/// registry, so no row names one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerState {
     Running,
-    Done(Done),
+    Stopping,
+    Ready(Done),
 }
 
 variant!(typed WorkerState {
     Running: "running",
-    Done(Done): "done",
+    Stopping: "stopping",
+    Ready(Done): "ready",
 });
 
 /// One row of the worker table: data, never a handle.
@@ -142,20 +145,22 @@ record!(HandleRow {
 impl Datum for Sample<()> {
     fn encode(self) -> FOValue {
         let label = match self {
-            Self::Pending => "pending",
-            Self::Settled(()) => "settled",
-            Self::Claimed => "claimed",
+            Self::Running(()) => "running",
+            Self::Stopping => "stopping",
+            Self::Ready(()) => "ready",
+            Self::Consumed => "consumed",
         };
         tag(label, None)
     }
 
     fn decode(v: &FOValue) -> Result<Self, String> {
         match untag(v) {
-            Some(("pending", None)) => Ok(Self::Pending),
-            Some(("settled", None)) => Ok(Self::Settled(())),
-            Some(("claimed", None)) => Ok(Self::Claimed),
+            Some(("running", None)) => Ok(Self::Running(())),
+            Some(("stopping", None)) => Ok(Self::Stopping),
+            Some(("ready", None)) => Ok(Self::Ready(())),
+            Some(("consumed", None)) => Ok(Self::Consumed),
             _ => Err(format!(
-                "expected `pending, `settled or `claimed, got {}",
+                "expected `running, `stopping, `ready or `consumed, got {}",
                 v.shape()
             )),
         }
@@ -252,15 +257,39 @@ mod tests {
     /// Every row a new reading answers in survives its own round trip.
     #[test]
     fn rows_round_trip() {
-        let row = BindingRow {
-            name: "h".into(),
-            scheme: Some("Int".into()),
-            preview: "1".into(),
-            handle: Some(HandleRow {
-                state: Sample::Claimed,
-                title: "block".into(),
-            }),
-        };
-        assert_eq!(BindingRow::decode(&row.clone().encode()), Ok(row));
+        for state in [
+            Sample::Running(()),
+            Sample::Stopping,
+            Sample::Ready(()),
+            Sample::Consumed,
+        ] {
+            let row = BindingRow {
+                name: "h".into(),
+                scheme: Some("Int".into()),
+                preview: "1".into(),
+                handle: Some(HandleRow {
+                    state,
+                    title: "block".into(),
+                }),
+            };
+            assert_eq!(BindingRow::decode(&row.clone().encode()), Ok(row));
+        }
+        for state in [
+            WorkerState::Running,
+            WorkerState::Stopping,
+            WorkerState::Ready(Done::Ok),
+        ] {
+            let row = WorkerRow {
+                id: 1,
+                title: "job".into(),
+                owner: Owner::Session,
+                state,
+                started: 100,
+                elapsed: Finite::new(0.5).unwrap(),
+                settled: Some(101),
+                retention_left: Some(2),
+            };
+            assert_eq!(WorkerRow::decode(&row.clone().encode()), Ok(row));
+        }
     }
 }

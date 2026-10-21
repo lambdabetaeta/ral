@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 62f8f2a9
-generated_at_date: 2026-10-19
+generated_at_commit: 61c288f
+generated_at_date: 2026-10-21
 covers_paths: [exarch/src/agent/tools.rs, exarch/src/agent/tools/, exarch/src/provider/tools.rs, exarch/src/agent/spawn.rs]
 ---
 
@@ -41,9 +41,8 @@ can see what it sent.
   rather than spawn-then-wait, and keep `spawn` for work the model can
   overlap. A call the wall cuts short keeps what landed before it, so its
   stderr carries the engine's span, the remedy, an audit of what already
-  stands, and the `spawn`ed workers still running past the wall, each named
-  `#id (title)` so `await !{worker N}` reaches it whether or not its binding
-  landed ([[map/exarch/shell-eval|shell-eval]]).
+  stands, and the `spawn`ed workers still present in the registry past the wall, each named
+  `#id (title)` ([[map/exarch/shell-eval|shell-eval]]).
   Every accepted or malformed call emits a `Display::ToolCall` followed by a
   `Display::Verdict` addressed by the call's `BlockId`, so a verdict never has to
   search backward for its tool row. `Verdict::of(content, failed)` is the result's

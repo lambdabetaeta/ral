@@ -1626,7 +1626,7 @@ from-json: the value at `/size` is text (`'12kB'`), but this script uses it as a
 
 A mismatch names an RFC 6901 pointer into the value, what was found, what the script uses it as, and the line of the use. An open record (the fields the script reads) admits extra fields; a closed record literal refuses them. Two decodes the program compares with `<` agree on numbers or on text, and are refused at the second decode otherwise. A JSON number keeps its kind: `3` is an `Int` and `2.5` a `Float`, so a position used as a `Float` refuses `3`, and `float` at the use accepts both. A decoder never converts a value to fit its type.
 
-The same discipline admits what `use` (§10.3), an awaited `worker` (§11.4), and the exarch host's answers (`exarch-agents`, `exarch-pins`, `exarch-transcript`) let in.
+The same discipline admits what `use` (§10.3) and the exarch host's answers (`exarch-agents`, `exarch-pins`, `exarch-transcript`) let in.
 
 A decoder is a legal pipeline tail:
 
@@ -2609,8 +2609,9 @@ lifetime, not the typing of a pipeline.
 Each ordinary worker has independent stdout and stderr byte buffers. Its bytes
 do not appear on the spawning run's output while it executes. `await` writes
 the bytes to the awaiter's streams (§11.2); `poll` returns them as data, as
-`Bytes`: those written so far while the worker runs, all of them once it has
-settled.
+`Bytes`: those written so far while the worker is `` `running ``, all of them
+once it is `` `ready ``. When a worker is `` `stopping `` or `` `consumed ``,
+its result has been claimed and no buffered output is retained or exposed.
 
 Each buffer is capped at 16 MiB. At the cap ral appends one truncation marker,
 continues draining the writer, and discards later bytes. Draining continues so
@@ -2630,24 +2631,41 @@ also has empty completion buffers because its bytes were streamed live, so
 
 ### 11.2. Handles and eliminators
 
-A handle is a process-local capability for one worker. The core eliminators
-are `await`, `race`, and `cancel`; `poll` and `first-settled` are its two
-observations.
+A handle is a process-local capability for one worker. Typed handles are the
+only capabilities for retrieving a result, observing a handle directly, or
+cancelling an individual worker: `await`, `race`, and `cancel` are the core
+eliminators, and `poll`, `is-done`, and `first-settled` are the observations.
 
-A worker's result is *claimed* exactly once: by `await`, by `race`, by `cancel`,
+Every worker moves monotonically through a four-state public lifecycle that
+separates execution liveness from result availability and claim state:
+
+| State | Execution | Result ownership | Counts against admission | Listed by `workers` |
+|---|---|---|---|---|
+| `` `running `` | Not ended | Unclaimed | Yes | Yes |
+| `` `stopping `` | Not ended | Claimed through cancellation | Yes | Yes |
+| `` `ready `` | Ended | Unclaimed | No | Yes, until claimed or reaped |
+| `` `consumed `` | Ended | Claimed | No | No; observable through an existing handle |
+
+Here *execution ended* means the worker's computation, its child gather exit
+(§11.3), and its final stream flushes have completed. `` `stopping `` means the
+worker itself was claimed by cancellation (`running -> stopping -> consumed`),
+not merely that an enclosing scope was cancelled: a worker reached by its
+parent's cancellation, but not itself claimed, remains `` `running `` until it
+publishes its cancellation error as `` `ready ``.
+
+A worker's result is *claimed* at most once: by `await`, by `race`, by `cancel`,
 or by the gather that owns the worker as it exits (§11.3). Claiming is atomic,
-so of two callers trying at once exactly one succeeds. `poll` and
-`first-settled` observe without claiming: they return data, never write, and
-never claim. Both treat a claimed handle as `await` does: `poll` of one fails,
-and `first-settled` skips it, failing only when every handle it was given is
-claimed. Whether a handle has been claimed is checked at run time; its type
-does not record it.
+so of two callers trying at once on copies of a handle, at most one claims the
+`` `ready `` result. `poll`, `is-done`, and `first-settled` observe without
+claiming: they return data, never write, and never claim. Whether a handle has
+been claimed is checked at run time; its type does not record it.
 
 #### `await`
 
 `await handle` behaves as if the handle's block had run at the `await`. It:
 
-1. waits until the worker settles, then claims its result;
+1. waits while the worker is `` `running ``, then atomically claims its
+   `` `ready `` result (moving the handle to `` `consumed ``);
 2. writes the bytes the worker wrote to its stdout to the awaiter's current
    stdout, then the bytes it wrote to its stderr to the awaiter's current
    stderr;
@@ -2692,59 +2710,77 @@ worker's own shell. It does not hold for:
 - `exit`: an `exit` in the block ends the run that awaits it, which may be a
   later run than the one that spawned it.
 
-A result is claimed once. `await` of a handle whose result is already claimed,
-by an earlier `await`, by `race`, or by `cancel`, writes nothing and fails with
+A result is claimed once. `await` of a handle in `` `stopping `` or
+`` `consumed `` — claimed by an earlier `await`, by `race`, by `cancel`, or by
+an enclosing gather — writes nothing and fails with
 `await: this worker's result was already claimed`, an ordinary failure that
-`try` recovers; the block is not run again. A foreground interruption of
-`await` interrupts the wait, not the worker, and claims nothing; the handle may
-be awaited later.
+`try` recovers; the block is not run again. `await` polls for caller
+cancellation at the start of each availability sweep before inspecting the
+handle, so a foreground cancellation already pending at the sweep boundary
+unwinds the wait without claiming an already-`` `ready `` result. An
+interrupted `await` interrupts the wait, not the worker, and claims nothing;
+the handle may be awaited later.
 
-#### `poll`
+#### `poll` and `is-done`
 
-`poll handle` never waits and never writes. It is the observation that
-returns one worker's bytes as data, one of two variants:
+`poll handle` (`forall ε A. Handle_ε A -> F_p …`) never waits, never writes, and
+never claims. It samples the handle's lifecycle, elapsed time, and available
+result under one lock and returns one of four variants:
 
 ```text
-`pending [stdout: Bytes, stderr: Bytes, elapsed: Float]
+`running  [stdout: Bytes, stderr: Bytes, elapsed: Float]
 
-`settled [
+`stopping [elapsed: Float]
+
+`ready    [
     stdout: Bytes,
     stderr: Bytes,
     elapsed: Float,
     outcome: <`ok A | `err ErrorRecord>,
 ]
+
+`consumed [elapsed: Float]
 ```
 
 `elapsed` is in seconds on a monotonic clock: how long the worker has run so
-far, or, once it has settled, how long it ran.
+far while `` `running `` or `` `stopping ``, or, once execution has ended
+(`` `ready `` or `` `consumed ``), how long it ran, frozen at its single
+completion stamp.
 
-The pending bytes are a cumulative, non-destructive snapshot. Polling does not
-consume them, so a later poll or `await` still sees the complete buffered
-output. Repeated pending polls may therefore return progressively longer byte
-sequences.
+The `` `running `` bytes are a cumulative, non-destructive snapshot sampled from
+the worker's stream buffers. Polling does not consume them, so a later poll or
+`await` still sees the complete buffered output. Repeated `` `running `` polls
+may therefore return progressively longer byte sequences.
 
-`poll` claims nothing, on either arm. A settled poll leaves the handle to be
-awaited and its entry in the registry (§11.4), so a script may poll until the
-worker settles and then `await` it, its bytes written once. A handle whose
-result is already claimed has nothing left to observe: `poll` of it fails with
-`poll: this worker's result was already claimed`.
+`poll` claims nothing on any arm, and **never errors merely because a result
+was claimed**: a handle claimed by `cancel`, `await`, `race`, or a gather
+returns `` `stopping [elapsed: …] `` while still executing and
+`` `consumed [elapsed: …] `` once execution has ended, with no output or
+outcome fields. A `` `ready `` poll leaves the handle unclaimed and its entry in
+the registry (§11.4), so a script may poll until the worker is `` `ready `` and
+then `await` it, its bytes written once.
 
-`poll` is total on an unclaimed handle. The settled arm reports worker
-failure, including a block stopped by its scope through a cancel or a timeout,
-as `outcome: `err ...`; it does not raise that failure. Thus `poll` itself
-succeeds and leaves status zero when it successfully samples either arm. A
-handle `cancel` or `await` claimed fails, as above. A
-worker's `exit`, a foreign stop and a panic are re-raised, as `await`
-re-raises them. The prelude function `is-done handle` returns `false` for
-`pending` and `true` for either settled outcome, and fails as `poll` does on a
-handle already claimed.
+`poll` is total over ordinary worker failures and claimed states. The `` `ready ``
+arm reports an ordinary worker failure, including a block stopped by its scope
+through a parent cancel or a timeout, as `outcome: `err ...`; it does not raise
+that failure, and leaves status zero. Special non-value endings in `` `ready ``
+preserve the `await` rule: a worker's `exit`, a foreign stop, or a worker panic
+is re-raised when polled in `` `ready ``.
+
+`is-done handle` (`forall ε A. Handle_ε A -> F_p Bool`) is a core builtin that
+tests only whether the worker's execution has ended: it returns `false` for
+`` `running `` and `` `stopping `` and `true` for `` `ready `` and
+`` `consumed ``. Unlike `poll`, `is-done` never copies stream buffers, never
+constructs an outcome record, and never re-raises a completed `exit`, foreign
+stop, or panic.
 
 #### `first-settled`
 
-`first-settled handles` waits until it observes one handle settle and returns
-its 0-based index in the list, an `Int`. It is the observation of several
-handles as `poll` is of one: it writes nothing and claims nothing, so the
-handle it names is still there to `await` or `poll`.
+`first-settled handles` waits until it observes a `` `ready `` handle and
+returns its 0-based index in the list, an `Int`. It is the availability
+observation of several handles: it writes nothing and claims nothing, so the
+handle it names remains `` `ready `` for a subsequent `await` or `poll` (though
+an observation does not reserve the claim against concurrent callers).
 
 ```ral
 let mirrors = [$a, $b]
@@ -2752,19 +2788,30 @@ let k = first-settled $mirrors
 let first = await $mirrors[$k]
 ```
 
-The wait is cancel-aware, as `await`'s is: a foreground interruption ends the
-wait and claims nothing. If several handles are already settled when
-inspected, list order breaks the tie. A handle another caller has claimed is
-skipped; if every handle given is claimed, `first-settled` fails with
-`first-settled: this worker's result was already claimed`. An empty list is
-an error.
+Each availability sweep polls for caller cancellation first, then scans the
+list in order:
+
+- the first `` `ready `` handle wins (list order breaks ties);
+- `` `stopping `` and `` `consumed `` handles are skipped;
+- if no handle is `` `ready `` and at least one is `` `running ``,
+  `first-settled` waits and sweeps again;
+- if every handle is `` `stopping `` or `` `consumed `` so none can ever
+  provide a result, `first-settled` fails with
+  `first-settled: this worker's result was already claimed`.
+
+An empty list is an error.
 
 #### `race`
 
-`race handles` waits until it observes one handle settle, then claims the
-winner and behaves as `await` on it: it writes the winner's bytes and ends as
-the winner's block ended. Every other handle is claimed, cancelled and drained
-before `race` returns, however the winner ended (§11.3).
+`race handles` uses the same cancel-aware availability sweep as `first-settled`
+to claim the first `` `ready `` handle: it skips `` `stopping `` and
+`` `consumed `` handles, waits while at least one handle is `` `running ``, and
+fails with `race: this worker's result was already claimed` if no handle can
+provide a result. Once it atomically claims a `` `ready `` winner, it claims and
+cancels every remaining unclaimed handle and drains all non-terminal losers —
+including arguments that were already `` `stopping `` — within a single host
+cleanup-grace deadline (§11.3), then writes the winner's bytes and ends as the
+winner's block ended. Losers' bytes are never written.
 
 ```ral
 let a = spawn 'mirror a' { fetch 'https://a.example/data' }
@@ -2772,36 +2819,44 @@ let b = spawn 'mirror b' { fetch 'https://b.example/data' }
 let first = race [$a, $b]
 ```
 
-If several handles are already settled when inspected, list order breaks the
-tie. A worker stopped from elsewhere counts as settled, with the
-`worker was cancelled` ending. A handle another caller has claimed is skipped.
-If every handle given is claimed, whether before `race` starts or while it
-waits, `race` fails with `race: this worker's result was already claimed`. An
+If several handles are `` `ready `` when inspected, list order breaks the tie;
+a pending caller cancellation at the start of the sweep unwinds before any
+`` `ready `` handle is claimed. A worker stopped by an enclosing scope (without
+being directly claimed by `cancel`) publishes `` `ready `` with the
+`worker was cancelled` or `worker timed out` ending and can win the race. An
 empty list is an error.
 
 #### `cancel`
 
-`cancel handle` claims the handle, requests explicit cancellation, and removes
-the worker from the owning registry. Cancellation is cooperative for ral
-computation and is propagated to external child process groups by the process
-runtime. A worker may take a short bounded interval to tear its process tree
-down. A worker that has already completed is not stopped; its result is
-discarded.
+`cancel handle` claims the worker's result and ensures the worker stops:
 
-Cancellation has no result. `cancel` of a handle whose result is already claimed
-does nothing and returns `()`. Since `cancel` claims the handle, a later
-`await`, `poll` or `race` of it fails as already claimed.
+- on `` `running ``, it atomically signals cancellation and transitions the
+  handle to `` `stopping `` under the state lock; when the worker's execution
+  later ends, its output buffers and ending are drained and discarded as it
+  transitions to `` `consumed ``;
+- on `` `ready ``, it transitions the handle to `` `consumed `` at once and
+  discards the buffered output and outcome outside the lock;
+- on `` `stopping `` or `` `consumed ``, it is a no-op.
 
-A worker stopped by anything but its own `cancel` ends as its own failure:
-cancelling a worker cancels every worker it started (§11.1), each of which
-ends with `worker was cancelled`, reason `` `cancelled ``, status 143, and a
-worker reached by a timeout on an enclosing scope ends with
+Cancellation is cooperative for ral computation and is propagated to external
+child process groups by the process runtime. A `` `stopping `` worker remains
+live — listed by `workers` and counted against the host's admission cap — until
+its execution actually ends (§11.4).
+
+Cancellation returns `()`. Since `cancel` claims the handle, a later `await` or
+`race` of it fails as already claimed, while `poll` observes `` `stopping `` or
+`` `consumed `` and `is-done` returns `false` then `true`.
+
+A worker stopped by anything but its own `cancel` ends as its own `` `ready ``
+failure: cancelling a worker cancels every worker it started (§11.1), each of
+which ends with `worker was cancelled`, reason `` `cancelled ``, status 143, and
+a worker reached by a timeout on an enclosing scope ends with
 `worker timed out`, reason `` `timed-out ``, status 124. An `await` that claims
-such a worker raises that ending as the awaiting run's own failure, which
-`try` can recover (§8.6), and `poll` reports it as that error record. A
-cancelled worker's halt claims the workers it started (§11.3), so an `await` of
-one of them from outside meets that ending only if it claimed the worker first;
-otherwise it fails as already claimed.
+such a worker raises that ending as the awaiting run's own failure, which `try`
+can recover (§8.6), and `poll` reports it as that error record in `` `ready ``.
+A cancelled worker's halt claims the workers it started (§11.3), so an `await`
+of one of them from outside meets that ending only if it claimed the worker
+first; otherwise it fails as already claimed.
 
 ### 11.3. Structured fan-out: `gather`, `par`, `race`
 
@@ -2825,30 +2880,44 @@ the gather was entered, so an interrupt or a timeout on the run reaches it.
 A `within` inside the body does not move it. A worker's body is a gather of its
 own, and the rules below are the rules a worker applies to its children.
 
-- **Return.** When the body returns, each child no one has claimed is claimed
-  and awaited in birth order, as `await` would (§11.2): its output joins the
-  gather's own, and the first failure among them is the gather's, the rest
-  being cancelled and drained. A child another caller claimed first is
-  skipped. A normal return joins its children; it never cancels them.
-- **Halt.** When the body fails, exits, or is stopped, every child no one has
-  claimed is claimed and cancelled, and the gather waits for them to end
+Each gather has a unique scope owner that survives frame pops and unwinding:
+
+- **Close.** As soon as the body finishes (whether normally, by failure or
+  escape, or by panic), enrolment in the gather is closed monotonically. Any
+  late `spawn` or `watch` that attempts to enrol in the closed gather (for
+  example from a concurrent pipeline stage) is rejected and cancelled before
+  enrolment returns, failing with
+  `spawn: the enclosing gather has ended; the new worker was cancelled` (or
+  `watch: …`).
+- **Return.** When the body returns, each accepted child still `` `running ``
+  or `` `ready `` is claimed and awaited in birth order, as `await` would
+  (§11.2): its output joins the gather's own, and the first failure, escape, or
+  panic among them is the gather's, the rest being claimed, cancelled, and
+  drained. If a child join resumes a panic after the gather frame has popped,
+  the scope owner's drop still closes and stops every remaining child. A child
+  already `` `stopping `` or `` `consumed `` is skipped for result retrieval. A
+  normal return joins its unclaimed children; it never cancels them.
+- **Halt.** When the body fails, exits, or is stopped, every child not yet
+  claimed is claimed and cancelled, and the gather drains all accepted children
   before it propagates the halt.
-- **Drain.** On every exit the gather also waits for each child it started
-  whose worker was cancelled and has not yet ended, however it came to be
-  cancelled: by the halt rule, by a `cancel` in the body, or by a `cancel`
-  through `worker id` (§11.4). A child another caller claimed and is still
-  awaiting, uncancelled, is left to that caller.
+- **Drain.** On every non-unwinding exit (both Return and Halt), the gather
+  waits under a single cleanup-grace deadline for every accepted child to reach
+  a terminal state (`` `ready `` or `` `consumed ``), including children that
+  were already `` `stopping `` because of an earlier `cancel` inside or outside
+  the body.
 
 Draining is bounded by the host's cleanup grace (§8.7): a gather waits at most
-that long for its cancelled workers to end. Cancellation is cooperative
-(§8.10), so a worker that ignores it past the grace runs on after the gather
-returns, no longer registered.
+one grace interval across its child set for non-terminal children to finish.
+Cancellation is cooperative (§8.10), so a non-cooperative worker that ignores
+cancellation past the grace remains in `` `stopping `` after the gather returns:
+it stays listed in `workers` and continues to occupy a seat under the host's
+admission cap until its execution actually ends (§11.4).
 
 A handle may leave its gather as a value, but the gather claims its worker at
-exit, so a later `await` of it fails as already claimed (§11.2). A `spawn` or
-`watch` meant to outlive the expression goes outside any gather, where the
-session owns it (§11.1). A gather is synchronous: it ends before the run that
-entered it does.
+exit, so a later `await` of it fails as already claimed while `poll` and
+`is-done` still observe its lifecycle (§11.2). A `spawn` or `watch` meant to
+outlive the expression goes outside any gather, where the session owns it
+(§11.1). A gather is synchronous: it ends before the run that entered it does.
 
 Three standard-prelude functions are written over `gather`:
 
@@ -2879,33 +2948,35 @@ Each worker these start is titled: `par #i` for item `i` of a `par`,
 
 `race handles` (§11.2) is the form for handles already held, which no gather
 of the caller's owns: it claims the winner and cancels and drains every loser
-however the winner ended. `first-of` is the form for fresh blocks.
+(including any argument already `` `stopping ``) however the winner ended.
+`first-of` is the form for fresh blocks.
 
 ### 11.4. Registry and shutdown
 
 Every worker birth — by `spawn` or `watch` — is registered at once in the
 owning shell. A registry entry holds the worker's id, its title, its owner
-(the session, the worker whose body it was born in, or a `gather`), its state, its
-birth stamps (one on a monotonic clock, one on the wall clock, and an end stamp
-once its thread ends), and the live handle. Nested workers share the owning
-shell's registry.
+(the session, the worker whose body it was born in, or a `gather`), its birth
+stamps (one on a monotonic clock and one on the wall clock), and the handle
+(whose state carries the single completion stamp once execution ends). Nested
+workers share the owning shell's registry.
 
-The id is the worker's identity; the title is for people. `worker id` returns
-the handle of any worker still in the registry, running or with a retained
-result, whatever started it. It is a boundary (§7.3): the value the worker
-settles with is admitted, when awaited, against the type the script uses it
-at. It composes with an eliminator in the same call, `await !{worker 3}`. An
-id that names no entry is an error. Nothing looks a worker up by title.
+The id is a read-only identifier for observation in `workers`, audit trails, and
+host notices; the title is for people. **A worker id is not a capability and
+cannot reconstruct a `Handle`:** there is no lookup builtin from an id back to
+a handle, and nothing looks a worker up by title. Callers must retain the typed
+`Handle` returned by `spawn` or `watch` in a binding or data structure if they
+need to `await`, `poll`, `is-done`, `race`, or `cancel` that worker.
 
-`workers` lists the registry as data: one record per entry, running or with a
-retained result, in ascending id order:
+`workers` lists the non-consumed entries in the registry as data: one record
+per `` `running ``, `` `stopping ``, or unclaimed `` `ready `` worker, in
+ascending id order:
 
 ```text
 [
     id: Int,
     title: String,
     owner: <`session | `worker Int | `gather>,
-    state: <`running | `done Done>,
+    state: <`running | `stopping | `ready Done>,
     started: Int,
     elapsed: Float,
     settled: <`some Int | `none>,
@@ -2922,51 +2993,62 @@ Cause = `reader-gone | `interrupted | `cancelled | `timed-out
 
 | Field | Meaning |
 |---|---|
-| `id` | the worker's id, the one `worker` takes |
+| `id` | the worker's numeric identifier in the registry |
 | `title` | the `spawn`'s title or `block at` name, or a `watch`'s label (a `par` titles the worker for item `i` `par #i`, §11.3) |
 | `owner` | `` `session `` for a worker born in a run outside any gather, `` `worker n `` for one born in the body of worker `n`, `` `gather `` for one a `gather` form owns |
-| `state` | `` `running ``, or `` `done `` with how the block ended: it returned, failed with an error record (§8.6), ran `exit` with a status, was stopped with a cause (§8.10), or panicked |
+| `state` | `` `running `` while executing unclaimed, `` `stopping `` while executing after `cancel` claimed it, or `` `ready `` with how the block ended: it returned, failed with an error record (§8.6), ran `exit` with a status, was stopped with a cause (§8.10), or panicked |
 | `started` | when the worker was born, in Unix seconds |
-| `elapsed` | seconds on a monotonic clock: how long it has run so far, or how long it ran |
-| `settled` | `` `some `` the Unix second its thread ended, `` `none `` while it runs |
+| `elapsed` | seconds on a monotonic clock: how long it has run so far (`` `running `` or `` `stopping ``), or how long it ran (`` `ready ``) |
+| `settled` | `` `some `` the Unix second its execution ended when `` `ready ``, `` `none `` while `` `running `` or `` `stopping `` |
 
-A listing is a pure read: it claims no result, removes no entry, and holds no
-handle, so a `workers` result crosses every boundary a value does (§11.7).
-`worker id` is the one way back from a row to its handle.
+Each row's `state`, `elapsed`, `settled`, and retention eligibility are derived
+from a single lifecycle snapshot so a concurrent transition cannot produce
+contradictory fields. A listing claims no result and holds no handle, so a
+`workers` result crosses every boundary a value does (§11.7).
 
-An entry leaves when:
+An entry stays in the registry while `` `running ``, `` `stopping ``, or
+unclaimed `` `ready ``, and leaves when:
 
-- its result is claimed: by `await`, `race` or `cancel` (§11.2), or by the
-  gather that owns it (§11.3); or
-- a host retention policy reaps a settled result no one has claimed.
+- it reaches `` `consumed `` — either when an unclaimed `` `ready `` result is
+  claimed by `await`, `race`, `cancel`, or its owning gather, or when a
+  `` `stopping `` worker finishes execution (`consumed` entries are pruned
+  eagerly on directory scans and lazily on amortized admission sweeps, without
+  reap notices); or
+- a host retention policy expires an unclaimed `` `ready `` entry.
 
-`poll`, pending or settled, leaves the entry in place.
+`poll` and `is-done` leave the entry in place.
 
 A worker lives as long as its owner: nothing but `cancel`, its own
 completion, its owner's end — a gather's exit, a parent worker's included — or
-the session's end stops it. No policy reaps a running worker.
+the session's end stops it. Retention applies only to unclaimed `` `ready ``
+entries whose parent owner is no longer live (neither `` `running `` nor
+`` `stopping ``); no policy reaps a `` `running `` or `` `stopping `` worker.
 
 Hosts may cap live workers. Admission reserves a seat before the thread is
-created, so concurrent births cannot overshoot the cap. Only running or
-being-born workers occupy seats; settled results retained for observation do
-not. A refused birth reports the cap, suggests awaiting or cancelling a
-worker, and points at `workers` to list them.
+created, so concurrent births cannot overshoot the cap. The admission count is
+`running + stopping + reserved births`: a `cancel` request transitions a live
+worker to `` `stopping `` and **does not** free its seat until execution
+actually ends, while `` `ready `` and `` `consumed `` workers occupy no seat.
+A refused birth reports that workers are still executing or stopping, suggests
+waiting for one to end or cancelling work no longer needed, and points at
+`workers` to list them.
 
 These bounds are host policy, not core constants. The `ral` interactive and
 batch hosts arm no retention bound or worker cap. The exarch agent host
-currently caps live workers at 64 and retains unclaimed settled entries for
-256 ral calls.
+currently caps live workers (`running` + `stopping`) at 64 and retains
+unclaimed `` `ready `` entries for 256 ral calls.
 
-Every session worker is cancelled when its session is destroyed. Teardown then
-waits briefly and boundedly for worker threads to act on cancellation and tear
-down their children. The interactive shell first warns once with the ids and
-titles of workers still running. Workers do not survive process exit; use
-`detach` when survival is the requirement.
+Every session worker is cancelled when its session is destroyed. Teardown
+claims and stops remaining workers and waits briefly and boundedly for live
+worker threads (both `` `running `` and `` `stopping ``) to finish execution and
+tear down their children. The interactive shell first warns once with the ids
+and titles of workers still live (`` `running `` or `` `stopping ``). Workers do
+not survive process exit; use `detach` when survival is the requirement.
 
 ### 11.5. Host-installed worker forms
 
 The core language provides the `spawn` and `gather` forms and the builtins
-`await`, `poll`, `first-settled`, `race`, `cancel`, `worker`, and `workers`;
+`await`, `poll`, `is-done`, `first-settled`, `race`, `cancel`, and `workers`;
 the standard prelude adds `par`, `both`, and `first-of` over them. `watch` and `detach`
 are optional host commands: `watch` is a builtin, and `detach` is a base handler taking an argument list. If a host
 does not install one, its name is absent from that shell's base scope
@@ -2985,14 +3067,14 @@ await $build
 
 Each stdout line is prefixed `[build] ` and each stderr line `[build:err] `.
 Sibling watchers serialize complete framed lines, though their lines may
-interleave. A partial final line is flushed when the worker settles.
+interleave. A partial final line is flushed when the worker finishes execution.
 
-The returned value is an ordinary handle, so `await`, `poll`, `race`, and
-`cancel` apply. Its stdout and stderr buffers remain empty because those bytes
-have already been sent to the durable output sink. Programs run through the
-`ral` executable, in interactive and batch modes, install `watch`. A host whose
-output capture ends with each run, including exarch, omits it because a worker
-cannot safely retain that run's sink.
+The returned value is an ordinary handle, so `await`, `poll`, `is-done`,
+`race`, and `cancel` apply. Its stdout and stderr buffers remain empty because
+those bytes have already been sent to the durable output sink. Programs run
+through the `ral` executable, in interactive and batch modes, install `watch`.
+A host whose output capture ends with each run, including exarch, omits it
+because a worker cannot safely retain that run's sink.
 
 #### Work that survives with `detach`
 
@@ -3015,9 +3097,9 @@ The description must be a non-empty, single-line `String`. The result is:
 [pid: Int, desc: String]
 ```
 
-This record is a receipt, not a handle. `await`, `poll`, `race`, and `cancel`
-do not apply. The pid is the process's number at birth, not an enduring
-capability; operating systems may later recycle it.
+This record is a receipt, not a handle. `await`, `poll`, `is-done`, `race`, and
+`cancel` do not apply. The pid is the process's number at birth, not an
+enduring capability; operating systems may later recycle it.
 
 The surviving process has standard input, standard output, and standard error
 connected to the null device. It has no buffered result and its exit status is
@@ -3057,9 +3139,8 @@ waiting and `cancel` for termination; Ctrl-C ends what Ctrl-Z used to park.
 | Facility | Core / portable | `ral` interactive | `ral` batch | exarch agent host |
 |---|---:|---:|---:|---:|
 | `spawn`, `gather` (forms) | yes | yes | yes | yes |
-| `await`, `poll`, `first-settled`, `race`, `cancel` | yes | yes | yes | yes |
-| `worker`, `workers` | yes | yes | yes | yes |
-| `is-done`, `par`, `both`, `first-of` from the standard prelude | when that prelude is installed | yes | yes | yes |
+| `await`, `poll`, `is-done`, `first-settled`, `race`, `cancel`, `workers` | yes | yes | yes | yes |
+| `par`, `both`, `first-of` from the standard prelude | when that prelude is installed | yes | yes | yes |
 | `watch` | optional | yes | yes | no |
 | `detach` | optional, Unix only | no | no | Unix sessions that enable it |
 
@@ -3537,7 +3618,7 @@ coordinates, or is `` `none `` when no position is available. The record deliber
 contains no output bytes. The failed command's raw fd 1 and fd 2 bytes have
 already followed their ordinary destinations; use `audit` when those bytes must
 also be retained as evidence. This is the record `audit`'s `` `err `` outcome
-and `poll`'s settled `` `err `` outcome carry, so failure reads the same
+and `poll`'s `` `ready `` `` `err `` outcome carry, so failure reads the same
 wherever it is met.
 
 Static checking rejects a literal zero `status`. A dynamically computed
@@ -4263,8 +4344,8 @@ the controlling terminal rather than redirected standard input and fails on
 end-of-file.
 
 Concurrency primitives are the `spawn` and `gather` forms and `await`, `poll`,
-`first-settled`, `race`, `cancel`, `worker`, and `workers`. The prelude adds
-`is-done`, `par`, `both`, `first-of`, `attempt`, and `succeeds`. Exact ownership, cancellation, output capture, and
+`is-done`, `first-settled`, `race`, `cancel`, and `workers`. The prelude adds
+`par`, `both`, `first-of`, `attempt`, and `succeeds`. Exact ownership, cancellation, output capture, and
 lifetime rules are specified with concurrency.
 
 ### 14.7. Host and build additions
@@ -5195,7 +5276,7 @@ every use of the name shares one type for it. There is no value restriction. A
 scheme that leaves a weak variable unquantified keeps it weak in later runs, where
 it is re-seeded as a fresh weak variable. A *boundary* — a door through which a
 value of a shape the program did not decide enters typed code: the decoders,
-`use`, `worker`, the exarch host's answers, `_ed-state` — makes the
+`use`, the exarch host's answers, `_ed-state` — makes the
 variables of its result weak and records the result type on the call. Once the
 unit is solved that type is frozen as a *site* on the call, which the door
 admits the value against: each position's head, each free variable's kind, and

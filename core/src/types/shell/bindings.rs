@@ -12,7 +12,7 @@
 //! that must change.
 
 use crate::record;
-use crate::types::{Env, pins_running_work};
+use crate::types::{Env, pins_live_work};
 use std::collections::{HashMap, HashSet};
 
 /// Host-stated per-agent policy.
@@ -211,7 +211,8 @@ impl BindingLedger {
     ///
     /// One pass in sorted order: a name absent from `env` had its install
     /// rolled back, so the orphan drops silently; a value that structurally
-    /// reaches a running handle is pinned and re-examined next boundary; the
+    /// reaches a live (`running` or `stopping`) handle is pinned and
+    /// re-examined next boundary; the
     /// rest are unset, scheme and all, since a `Binding` couples both.  The
     /// adoption sweep afterwards runs even on a pass that prunes nothing, so a
     /// name a missed install path left untracked is leased late, not immortal.
@@ -225,7 +226,7 @@ impl BindingLedger {
                 // Orphaned by a rollback: nothing to prune.
                 None => self.drop_entry(&name),
                 // Pinned: leave the entry exactly as it is.
-                Some(value) if pins_running_work(value) => {}
+                Some(value) if pins_live_work(value) => {}
                 Some(value) => {
                     let kind = value.type_name().to_string();
                     env.unset(&name);
@@ -768,15 +769,16 @@ mod chokepoint_tests {
         }
     }
 
-    /// A running worker pins its name: the first prune, with `sleep` still
-    /// running, yields no notice and leaves the entry alone. Cancelling
-    /// claims the handle, and the second prune takes it like any scratch.
+    /// A live (`running` or `stopping`) worker pins its name: the first prune,
+    /// with `sleep` still running, yields no notice and leaves the entry alone.
+    /// Cancelling claims and finishes the handle, and the second prune takes it
+    /// like any scratch.
     #[test]
     fn running_handle_pins_name_then_settles_then_prunes() {
         let mut shell = armed_shell(2);
         top_level(&mut shell, "let h_pin = !{spawn { sleep 10 }}").expect("spawn");
         idle_spin(&mut shell, 2);
-        assert_eq!(handle_state(&shell, "h_pin"), Sample::Pending);
+        assert_eq!(handle_state(&shell, "h_pin"), Sample::Running(()));
 
         assert!(
             shell.local.bindings.prune(&mut shell.env).is_empty(),
@@ -786,14 +788,52 @@ mod chokepoint_tests {
 
         top_level(&mut shell, "cancel $h_pin").expect("cancel");
         eventually(Duration::from_secs(5), || {
-            (handle_state(&shell, "h_pin") != Sample::Pending).then_some(())
+            handle_state(&shell, "h_pin").has_ended().then_some(())
         })
-        .expect("the cancelled worker must settle within the budget");
+        .expect("the cancelled worker must finish within the budget");
         // The `cancel $h_pin` run referenced, and so renewed, h_pin.
         idle_spin(&mut shell, 2);
 
         let notices = shell.local.bindings.prune(&mut shell.env);
-        assert_eq!(notices[0].name, "h_pin", "a settled handle must now prune");
+        assert_eq!(notices[0].name, "h_pin", "a finished handle must now prune");
+    }
+
+    /// A `stopping` handle also pins its binding until its execution ends
+    /// (`consumed`), at which point pruning drops it.
+    #[test]
+    fn stopping_handle_pins_name_until_consumed() {
+        use crate::io::ByteBuffer;
+        use crate::process::DurableRoot;
+        use crate::types::{HandleInner, ThreadEnd, WorkerId};
+
+        let mut shell = armed_shell(2);
+        let (handle, permit) = HandleInner::new(
+            WorkerId(99),
+            "stopping-pin",
+            DurableRoot::default().worker(),
+            ByteBuffer::default(),
+            ByteBuffer::default(),
+        );
+        assert!(handle.claim_and_stop());
+        assert_eq!(handle.sample(), Sample::Stopping);
+
+        shell.set_var("h_stopping".into(), Value::Handle(Box::new(handle.clone())));
+        shell.local.bindings.note_install("h_stopping");
+        idle_spin(&mut shell, 2);
+
+        assert!(
+            shell.local.bindings.prune(&mut shell.env).is_empty(),
+            "a stopping handle is still live and must pin its binding"
+        );
+        assert!(shell.scope_lookup("h_stopping").is_some());
+
+        let _ = permit.finish(ThreadEnd::Settled(Ok(Value::Unit)));
+        assert_eq!(handle.sample(), Sample::Consumed);
+
+        let notices = shell.local.bindings.prune(&mut shell.env);
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].name, "h_stopping");
+        assert!(shell.scope_lookup("h_stopping").is_none());
     }
 
     /// A handle that settles on its own is ordinary scratch once idle — no
@@ -803,7 +843,7 @@ mod chokepoint_tests {
         let mut shell = armed_shell(2);
         top_level(&mut shell, "let h_settled = !{spawn { return 1 }}").expect("spawn");
         eventually(Duration::from_secs(5), || {
-            (handle_state(&shell, "h_settled") != Sample::Pending).then_some(())
+            handle_state(&shell, "h_settled").has_ended().then_some(())
         })
         .expect("the instant worker must settle within the budget");
         idle_spin(&mut shell, 2);

@@ -6,9 +6,9 @@ use crate::fact::Worker;
 use crate::io::{Sink, new_buffer};
 use crate::process::{DurableRoot, Scope, WorkerStop};
 use crate::types::{
-    Break, Brood, BroodOwner, CapReached, Cradle, DeferredSurface, Done, Error, Escape,
-    HandleInner, Mooring, Observed, Owner, Settled, Shell, SurfaceSink, ThreadEnd, Value,
-    WatchEvent, WorkerEntry, WorkerId, final_poll, sig,
+    Break, BroodOwner, Cradle, DeferredSurface, Done, DoneEvent, EnrolClosed, Error, Escape,
+    HandleInner, Mooring, Observed, Owner, ScopeOwner, Settled, Shell, SurfaceSink, ThreadEnd,
+    Value, WatchEvent, WorkerEntry, WorkerId, final_poll, sig,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,20 +38,15 @@ pub(super) fn spawn_child<F>(
 where
     F: FnOnce(&Mooring, &mut Shell) -> Settled<Value> + Send + 'static,
 {
-    let reservation =
-        shell
-            .local
-            .workers
-            .reserve(mooring.worker_cap)
-            .map_err(|CapReached(cap)| {
-                let verb = match birth {
-                    Birth::Spawn { .. } => "spawn",
-                    Birth::Watch { .. } => "watch",
-                };
-                sig(format!(
-                    "{verb}: {cap} workers already live on this agent; `await` or `cancel` one (`workers` lists them)"
-                ))
-            })?;
+    let verb = match birth {
+        Birth::Spawn { .. } => "spawn",
+        Birth::Watch { .. } => "watch",
+    };
+    let reservation = shell
+        .local
+        .workers
+        .reserve(mooring.worker_cap)
+        .map_err(|err| sig(format!("{verb}: {err}")))?;
 
     let (stdout_sink, stdout_buf) = new_buffer();
     let (stderr_sink, stderr_buf) = new_buffer();
@@ -73,7 +68,7 @@ where
     // surface is taken from the spawning run's mooring, so the destination
     // outlives that run's teardown.
     let (owner, worker_mooring, worker_surface) = if let Some(brood) = &brood {
-        let mooring = Mooring::for_stage_thread(mooring, node.clone());
+        let mooring = Mooring::for_thread(mooring, node.clone(), mooring.surface.clone());
         (brood.owner.into(), mooring, None)
     } else {
         let surface = mooring
@@ -81,7 +76,7 @@ where
             .clone()
             .map(|d| Arc::new(DeferredSurface::new(d)));
         let sink = surface.clone().map(|s| s as SurfaceSink);
-        let mooring = Mooring::for_worker(mooring, node.clone(), sink);
+        let mooring = Mooring::for_thread(mooring, node.clone(), sink);
         (Owner::Session, mooring, surface)
     };
     let (stdout, stderr) = match watched {
@@ -115,37 +110,47 @@ where
     };
 
     let id = WorkerId::mint();
-    let (handle, settler) = HandleInner::new(id, title.as_str(), node, stdout_buf, stderr_buf);
+    let (handle, permit) = HandleInner::new(id, title.as_str(), node, stdout_buf, stderr_buf);
+    let receipt = worker_surface.map(|surface| (handle.started, title.clone(), surface));
     shell
         .spawn_thread(worker_mooring, "ral spawn worker", move |mooring, child| {
-            // A birth inside this worker hangs under it and is settled by it:
-            // I4, I5.
-            let brood = Brood::new(BroodOwner::Worker(id));
-            child.local.cradle = Cradle::owning(Scope::clone(&mooring.home), brood.clone());
             // A worker's stdout is its handle buffer, drained as it settles.
             child.io.stdout = stdout;
             child.io.stderr = stderr;
-            // Armed in the thread: a thread that never starts flushes nothing.
-            let settler = settler.flushing(worker_surface);
 
             let end = match ThreadEnd::of(|| {
-                exit_brood(&brood, work(mooring, child), mooring.cleanup_grace, child)
+                // A birth inside this worker hangs under it and is settled by
+                // it: I4, I5.  Constructed inside the catch so a body or join
+                // panic drops the owner and stops accepted children.
+                let owner = ScopeOwner::new(BroodOwner::Worker(id));
+                child.local.cradle = Cradle::owning(Scope::clone(&mooring.home), owner.brood());
+                let body = work(mooring, child);
+                exit_brood(&owner, body, mooring.cleanup_grace, child)
             }) {
                 // The base's return clause: the closing poll, then the switch.
                 ThreadEnd::Settled(result) => ThreadEnd::Settled(convert_own_stop(
                     final_poll(result, &mooring.home),
                     &child.session.root,
                 )),
-                panicked @ ThreadEnd::Panicked(_) => {
-                    // The panic path: stop everything, wait for nothing.
-                    brood.end(Duration::ZERO);
-                    panicked
-                }
+                panicked @ ThreadEnd::Panicked(_) => panicked,
             };
-            child.io.stdout.flush_pending();
-            child.io.stderr.flush_pending();
-            let done = Done::of(&end, child);
-            settler.settle(end, done);
+            let end = flush_worker_stream(end, &mut child.io.stdout);
+            let end = flush_worker_stream(end, &mut child.io.stderr);
+            let receipt = receipt.map(|(started, title, surface)| {
+                let outcome = Done::of(&end, child);
+                (started, title, outcome, surface)
+            });
+            let ended = permit.finish(end);
+            if let Some((started, title, outcome, surface)) = receipt {
+                let elapsed = ended.mono.saturating_duration_since(started.mono);
+                let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+                surface.flush(DoneEvent {
+                    id,
+                    title,
+                    elapsed_ms,
+                    outcome,
+                });
+            }
         })
         .map_err(|e| sig(format!("could not start a worker thread: {e}")))?;
 
@@ -158,12 +163,27 @@ where
         },
     );
     match &brood {
-        Some(brood) => brood.enrol(handle.clone()),
+        Some(brood) => brood.enrol(handle.clone()).map_err(|EnrolClosed| {
+            Break::Error(Error::new(format!(
+                "{verb}: the enclosing gather has ended; the new worker was cancelled"
+            )))
+        })?,
         // After the reservation, never before: a cap-refused spawn observes no
         // birth, so no phantom worker reaches an orphan join.
         None => shell.observe(mooring, Observed::Worker(Worker { id, title })),
     }
     Ok(handle)
+}
+
+fn flush_worker_stream(end: ThreadEnd, sink: &mut Sink) -> ThreadEnd {
+    let flushed = ThreadEnd::of(|| {
+        sink.flush_pending();
+        Ok(Value::Unit)
+    });
+    match (end, flushed) {
+        (panic @ ThreadEnd::Panicked(_), _) | (_, panic @ ThreadEnd::Panicked(_)) => panic,
+        (end, ThreadEnd::Settled(_)) => end,
+    }
 }
 
 /// The boundary's switch (I6): a cancel or a timeout raised anywhere inside
@@ -183,31 +203,26 @@ pub(super) fn convert_own_stop(result: Settled<Value>, root: &DurableRoot) -> Se
 
 /// The exit rule a worker's base and a `gather` share (I4, I4′): a body
 /// that returned joins each unclaimed child in birth order, then waits for
-/// the cancelled ones to end; a body that halted, or a child that failed
-/// under the join, ends them all.  The `Err` is the body's, the child's, or
-/// the stop that cut the join.
+/// every accepted child to reach a terminal state; a body that halted, or a
+/// child that failed under the join, stops and drains them all.  The `Err` is
+/// the body's, the child's, or the stop that cut the join.
 pub(crate) fn exit_brood(
-    brood: &Brood,
+    owner: &ScopeOwner,
     body: Settled<Value>,
     grace: Duration,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    let settled = body.and_then(|v| settle(brood, shell).map(|()| v));
-    if settled.is_ok() {
-        brood.wait_cancelled(grace);
+    owner.close();
+    let result = body.and_then(|value| {
+        for child in owner.children() {
+            join(&child, shell)?;
+        }
+        Ok(value)
+    });
+    if result.is_err() {
+        owner.end(grace);
     } else {
-        brood.end(grace);
+        owner.drain(grace);
     }
-    settled
-}
-
-/// The return rule (I4): claim each child in birth order and await it
-/// exactly, stopping at the first failure.  A child another claimer won is not
-/// the gather's to join.  `Err` is that failure or the stop that cut the
-/// wait.
-fn settle(brood: &Brood, shell: &mut Shell) -> Settled<()> {
-    for child in brood.children() {
-        join(&child, shell)?;
-    }
-    Ok(())
+    result
 }

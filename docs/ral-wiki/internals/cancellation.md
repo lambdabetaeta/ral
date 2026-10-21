@@ -1,7 +1,7 @@
 ---
-verified_at_commit: e4025de9
-verified_at_date: 2026-10-17
-anchors: [Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, Break::code, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, CancelCause::code, Signal::status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, Frame::Gather, exit_brood, Brood::wait_cancelled]
+verified_at_commit: 61c288f
+verified_at_date: 2026-10-21
+anchors: [Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, Break::code, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, CancelCause::code, Signal::status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, ScopeOwner, Frame::Gather, exit_brood]
 ---
 
 # Cancellation
@@ -130,19 +130,28 @@ discipline ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]):
   says where a birth hangs and who settles it: a run's is loose under the
   root and answers for nothing; inside a *gather* — a worker's body, or a
   `gather { … }` (`Frame::Gather`, which swaps the cradle for its body's
-  extent) — it is the gather's entry scope and its `Brood`, the handles of
-  every `spawn` or `watch` born inside it; a stage shares its parent's. One
-  exit rule, `exit_brood`, settles the brood for both: on return it claims
-  and awaits each child no one has claimed, in birth order, the first failure
-  being the gather's; on a halt (`Brood::end`) it claims and cancels every
-  such child. Either way it then waits, up to the cleanup grace and without
-  polling, for every cancelled child whose thread has not ended
-  (`Brood::wait_cancelled`), since its own scope may be the one cancelled.
+  extent) — it is the gather's entry scope and its `Brood`, owned by a unique
+  `ScopeOwner` that holds the handles of every `spawn` or `watch` born inside
+  it; a stage shares its parent's. When a gather begins exiting, it closes
+  membership first (`ScopeOwner::close`), so any late birth from a pipeline
+  stage thread still unwinding against that cradle is immediately cancelled and
+  rejected before it can start. One exit rule, `exit_brood`, settles the gather
+  for both: on return it closes membership and claims and awaits each unclaimed
+  child in birth order, the first failure being the gather's; on a halt
+  (`ScopeOwner::end`) it closes membership and claims and cancels every such
+  child; on an unwinding panic or frame drop (`ScopeOwner::stop`, also called
+  by `Frame::Gather`'s `Drop`) it closes membership and cancels every remaining
+  child without waiting. On every normal or halting exit it then waits, up to
+  one shared cleanup grace and without polling, for **every** child accepted
+  into the gather to reach a terminal state (`Ready` or `Consumed`)
+  (`ScopeOwner::drain`), including children cancelled earlier by `cancel $h`
+  inside the body (`Stopping`), since its own scope may be the one cancelled.
   Claiming is one transition under the handle's lock, so a child claimed
   elsewhere first is skipped, and the join and that claimer never both replay
-  it. `race` drains its losers by the same claim-and-stop. So `cancel $h`
-  reaches everything `$h` started, and nothing a gather started outlives it by
-  more than the grace
+  it. `race` drains its losers — and any argument already in `Stopping` —
+  within one shared grace by the same claim-and-stop. So `cancel $h` reaches
+  everything `$h` started, and nothing a gather started outlives it by more
+  than the grace
   ([[invariants/a-worker-ends-with-its-children|a-worker-ends-with-its-children]]).
 - **The tree is the runs' dynamic extent.** `Shell::dispatch` nests each entry
   under the frame the run door displaces, not beside it under the root, so a
@@ -257,7 +266,9 @@ always-ready stream still polls once per chunk: a pipe write
 (`Sink::write_under`) and read (`read_interruptible`), a child's wait
 (`RunningChild::wait`) and its pumps' drain (`WaitedChild::settle`,
 `Pumps::join_under`), the collector's `recv`, the enquiry park, and the
-`await` sweep. The slice is the sampling period, not an end-to-end bound: the
+`await`/`race`/`first-settled` sweep (`first_ready`, which polls the caller's
+scope at the start of the sweep before inspecting any handle, so a pending
+cancellation is never lost to an already-`ready` worker). The slice is the sampling period, not an end-to-end bound: the
 latency to a stop is the slice plus the step in progress plus the scheduler.
 There is no watch table and no wake. Windows pipes cannot be waited on with a
 timeout, so there a blocked thread stage or pump is interrupted

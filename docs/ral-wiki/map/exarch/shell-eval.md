@@ -1,6 +1,6 @@
 ---
-generated_at_commit: dad6a1b3
-generated_at_date: 2026-10-17
+generated_at_commit: 61c288f
+generated_at_date: 2026-10-21
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/surface.rs, exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/clip.rs, exarch/src/shell_eval/report.rs, exarch/data/agent.ral]
 ---
 
@@ -70,7 +70,7 @@ through `report::tool_result`, which also reports whether the run failed:
   ordinary process-group / cancel-scope path;
 - **`worker_cap`** — `LIVE_WORKER_CAP` (64), the admission bound core
   enforces at the spawn door: the 65th spawn is refused (the error names
-  `await`/`cancel`) while 64 workers still run; settled
+  `await`/`cancel`) while 64 workers are active (`running`, `stopping`, or reserved births); `ready`
   entries lingering under retention hold no seat. Its sibling
   constant `SETTLED_WORKER_RETENTION` (256 ral calls, matching the binding
   lease's scratch expiry) is not on the request at all — it is armed once
@@ -145,7 +145,7 @@ order, and exits 124:
    raise `timeout_secs` for work that
    is simply slow, or `let h = spawn "title" { … }` and let the run return,
    since the host notifies at the next exchange boundary when it settles, and
-   `await $h`, or `await !{worker <id>}` from the notice, then behaves as the
+   `await $h` then behaves as the
    block run there, without polling;
 3. **an audit of what already stands**, when there is any — and not the wall's
    alone: *every* ending whose transcript does not otherwise show what landed
@@ -178,7 +178,7 @@ order, and exits 124:
    rail's `verb` column — one word per act, so `evict` and not the family and
    tag it is reached by — and the audit's past tense.
 4. **the workers that outlived the call**, named. A `spawn`ed worker is
-   moored by `Mooring::for_worker` onto the session root precisely so a
+   moored by `Mooring::for_thread` onto the session root precisely so a
    foreground cancel cannot reach it, so a raise, the wall, or an `exit`
    leaves the work running. What the sentence reports is reachability. A
    handle bound by a step that *completed* before the failure is still bound,
@@ -186,9 +186,8 @@ order, and exits 124:
    landed — `pattern::destructure` is all-or-nothing. An
    `Ending::Unreturnable` — the run settled on a handle, block, or function,
    which the wire cannot carry — failed no step, so there the sentence says
-   instead that a handle only *returned* was lost with the result. Either way
-   the id still reaches the work: the sentence ends with
-   `await !{worker N}`, so no survivor is orphaned. Which workers outlived the call
+   instead that a handle only *returned* was lost with the result, and
+   `workers` still lists every survivor. Which workers outlived the call
    is a different fact from a committed act, so it is its own sentence and the
    desk grows no worker view to hold it. Which workers are *this* dispatch's is not arithmetic
    across the seam: every birth its extent gave reaches the host as an
@@ -197,7 +196,7 @@ order, and exits 124:
    joins them against the `` `workers `` probe, decoded into core's
    `WorkerRow` by `Transport::workers` at the run boundary — legal there on a wire seat
    exactly as on the identity seat, since the registry never crosses. A birth
-   still present in the registry, running or settled-unclaimed, is named
+   still present in the registry — `running`, `stopping`, or `ready` — is named
    ([[map/core/shell-state|shell-state]]); one already claimed has left the
    registry and is nobody's orphan. The sentence names each survivor as
    `#id (title)`, the title being the one the `worker_title` policy required
@@ -248,9 +247,9 @@ never by the decoder or by the seam that records it (`surface::record`):
 - the `` `done `` completion event a worker flushes at the end of its
   batch decodes to `Surface::Done` — its id, title, run time and real ending
   — which the inbox also words as the model's wake-up notice
-  (`surface_notice`, [[map/exarch/frontend|frontend]]), ending in the one call
-  that gets the result back:
-  ``errand #7 (building) finished after 3 mins 12 secs (exit 101): build failed. `await !{worker 7}` replays its output and returns its value; `workers` lists every worker.``;
+  (`surface_notice`, [[map/exarch/frontend|frontend]]), ending in how the
+  bound handle and registry inspect it:
+  ``errand #7 (building) finished after 3 mins 12 secs (exit 101): build failed. `await` on its bound handle replays its output and returns its value; `workers` lists every worker.``;
 - a value that is none of these is `Decoded::Unknown`: `decode_loudly` records
   a `Forensic::SystemNote` naming the shape it dropped, the extension law's
   loud unknown class.

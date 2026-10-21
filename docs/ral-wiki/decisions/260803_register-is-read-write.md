@@ -4,6 +4,9 @@ status: proposed
 
 # The register is read/write: a pin stays a card, and `pin-read` reads it back
 
+> Amended 2026-10-21: `worker <id>` is deleted too; a worker's handle is held
+> in the bindings that received it from `spawn` or `watch`.
+>
 > Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]: `service-handle`
 > is deleted; core's `worker <id>` re-acquires the handle of every worker.
 

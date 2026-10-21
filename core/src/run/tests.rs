@@ -318,7 +318,7 @@ fn ready_boundary_notice_surfaces_a_pending_retention_reap() {
         shell
             .workers()
             .iter()
-            .all(|e| !e.handle.is_running())
+            .all(|e| e.handle.sample().has_ended())
             .then_some(())
     })
     .expect("the worker must settle within the budget");

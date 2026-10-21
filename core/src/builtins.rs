@@ -356,20 +356,23 @@ builtin_registry! {
     Await { names: ["await"], ty: scheme::await_op,
         doc: "await <handle>  — wait for a concurrent block, claim its result, and behave as if it had run here: its stdout and stderr are written to yours, its value is returned, and a failure, an exit or a stop is raised as it was. A result is claimed once: a handle already awaited, raced or cancelled fails.",
         call: |args, _mooring, shell| concurrency::builtin_await(args, shell), },
+    IsDone { names: ["is-done"], ty: scheme::is_done,
+        doc: "is-done <handle>  — true once a worker's execution has ended (`ready or `consumed), false while it is `running or `stopping. Claims nothing and copies no buffers.",
+        call: |args, _mooring, _shell| concurrency::builtin_is_done(args), },
     Poll { names: ["poll"], ty: scheme::poll,
-        doc: "poll <handle>  — sample a concurrent block without waiting or writing: `pending [stdout, stderr, elapsed] with everything written so far, or `settled [stdout, stderr, elapsed, outcome: `ok value | `err error]. Total on an unclaimed handle: a failed block, or one stopped by its scope, settles as `err data; an exit, a foreign stop and a panic are re-raised; a handle `cancel` or `await` claimed fails. Claims nothing, so a settled handle can still be awaited.",
+        doc: "poll <handle>  — sample a concurrent block without waiting or writing: `running [stdout, stderr, elapsed], `stopping [elapsed], `ready [stdout, stderr, elapsed, outcome: `ok value | `err error], or `consumed [elapsed]. Claims nothing: a failed block, or one stopped by its scope, settles as `err data in `ready; an exit, a foreign stop and a panic are re-raised when sampling `ready; `stopping and `consumed return data without failing.",
         call: |args, _mooring, shell| concurrency::builtin_poll(args, shell), },
     Race { names: ["race"], ty: scheme::race,
         doc: "race <handles>  — wait for the first of several concurrent blocks to finish, then claim it and behave as `await` on it; the rest are claimed, cancelled and drained before `race` returns. A handle another caller claimed is skipped; if every handle is claimed, `race` fails.",
         call: |args, mooring, shell| concurrency::builtin_race(args, mooring, shell), },
     FirstSettled { names: ["first-settled"], ty: scheme::first_settled,
-        doc: "first-settled <handles>  — the index of the first of several concurrent blocks to finish, without claiming it: a pure observation like `poll`, so `await` of the one it names still works. Cancel-aware. A handle another caller claimed is skipped; if every handle is claimed, or the list is empty, it fails.",
+        doc: "first-settled <handles>  — the index of the first of several concurrent blocks to reach `ready, without claiming it: a pure observation like `poll`, so `await` of the one it names still works. Cancel-aware. A `stopping or `consumed handle is skipped; if no handle is `running or `ready, or the list is empty, it fails.",
         call: |args, _mooring, shell| concurrency::builtin_first_settled(args, shell), },
     Cancel { names: ["cancel"], ty: scheme::cancel_op,
         doc: "cancel <handle>  — claim a concurrent block and cancel it; nothing if its result was already claimed.",
         call: |args, _mooring, _shell| concurrency::builtin_cancel(args), },
     Workers { names: ["workers"], ty: scheme::workers_op,
-        doc: "workers  — every worker this session registered, running or with a retained result, as one record each: `id`, `title`, `owner` (`session, `worker id, or `gather for one a `gather` owns), `state` (`running, or `done with how it ended), `started` (unix seconds), `elapsed` (seconds, so far or in total), `settled` (`some unix seconds, or `none). Data only: `worker <id>` gives the handle back.",
+        doc: "workers  — every non-consumed worker this session registered, as one record each: `id`, `title`, `owner` (`session, `worker id, or `gather for one a `gather` owns), `state` (`running, `stopping, or `ready with how it ended), `started` (unix seconds), `elapsed` (seconds, so far or in total), `settled` (`some unix seconds, or `none). Pure observation.",
         call: |_args, _mooring, shell| Ok(concurrency::builtin_workers(shell)), },
     // The bundled uutils tools (cat, yes, head, wc, …) are deliberately absent:
     // `runtime::command` runs each as a `ral --ral-bundled-tool <tool>` child, so
@@ -406,7 +409,7 @@ pub(crate) static CORE_BASE_FRAMES: &[BuiltinEntry] = &CORE_BASE_FRAMES_ARR;
 /// did not decide enters typed code.  Each is handed the [`Site`] the checker
 /// solved at its call and admits what it lets in against it; they sit apart
 /// from [`CORE_BUILTINS`] because their bodies take that site.
-static BOUNDARY_BUILTINS_ARR: [BuiltinEntry; 5] = [
+static BOUNDARY_BUILTINS_ARR: [BuiltinEntry; 4] = [
     BuiltinEntry::boundary(
         Cow::Borrowed("from-json"),
         scheme::from_json,
@@ -433,12 +436,6 @@ static BOUNDARY_BUILTINS_ARR: [BuiltinEntry; 5] = [
         scheme::use_op,
         "use <file>  — load a .ral module, returning its bindings as a record; its functions are checked against the types the script uses them at.",
         modules::builtin_use,
-    ),
-    BuiltinEntry::boundary(
-        Cow::Borrowed("worker"),
-        scheme::worker_op,
-        "worker <id>  — re-acquire a worker's Handle by its id, whatever started it and whether it is running or its result is retained, so a lost binding is no lost job. Compose with an eliminator in the same call: `await !{worker 3}`, `cancel !{worker 3}`. `workers` lists the ids.",
-        concurrency::builtin_worker,
     ),
 ];
 pub static BOUNDARY_BUILTINS: &[BuiltinEntry] = &BOUNDARY_BUILTINS_ARR;

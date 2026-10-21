@@ -50,5 +50,5 @@ See also [[decisions/260705_session-ledger|session-ledger]] (the
 resident/accumulator line; the probe as one of a resident's four facets),
 [[map/exarch/agent|agent]] (the agent half of the fold),
 [[map/core/builtins|builtins]] (`workers`, the same
-enumeration-is-not-observation law: a listing is data, it claims nothing, and
-`worker <id>` is the door back to a handle).
+enumeration-is-not-observation law: a listing is data and claims nothing, while
+the handle returned at birth is the capability that controls the worker).

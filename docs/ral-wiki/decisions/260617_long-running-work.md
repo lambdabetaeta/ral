@@ -4,6 +4,9 @@ status: superseded
 
 # Long-running work is born, not promoted
 
+> Amended 2026-10-21: `worker <id>` is deleted too; a worker's handle is held
+> only in the bindings that received it from `spawn` or `watch`.
+>
 > Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]: worker
 > leases are retired and `service` is deleted with its durable class: every
 > worker lives as long as its session, so no work need be born durable within

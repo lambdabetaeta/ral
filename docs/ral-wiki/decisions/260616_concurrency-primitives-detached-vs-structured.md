@@ -4,6 +4,12 @@ status: active
 
 # A handle is the evidence of detachment
 
+> Amended 2026-10-21: `worker <id>` is deleted; a worker's handle is a
+> capability held only in the bindings that received it from `spawn` or `watch`.
+> A gather owns its children through a `ScopeOwner` (`Frame::Gather` or a
+> worker's base) that closes membership on exit and drains all accepted
+> children to a terminal state (`ready` or `consumed`) within the cleanup grace.
+>
 > Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]: worker
 > leases are retired, so a worker lives until it completes, is cancelled, or
 > its session ends, and no policy reaps it. `service` is deleted, and

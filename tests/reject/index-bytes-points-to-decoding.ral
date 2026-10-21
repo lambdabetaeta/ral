@@ -1,5 +1,10 @@
 # codes: T0062
 # contains: decode bytes first: `bytes-to-string $b`
 let h = spawn { printf hi }
-let b = case !{poll $h} [`settled: { |s| return $s[stdout] }, `pending: { |p| return $p[stdout] }]
+let b = case !{poll $h} [
+    `ready: { |s| return $s[stdout] },
+    `running: { |p| return $p[stdout] },
+    `stopping: { |_| return !{ints-to-bytes [] | from-bytes} },
+    `consumed: { |_| return !{ints-to-bytes [] | from-bytes} }
+]
 return $b[0]

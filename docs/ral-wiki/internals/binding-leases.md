@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 6c9047b6
-verified_at_date: 2026-10-08
-anchors: [BindingLedger, arm_binding_lease, note_define, referenced_names, Mentions, Closure::new, BindingLedger::prune, pins_running_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS]
+verified_at_commit: 61c288f
+verified_at_date: 2026-10-21
+anchors: [BindingLedger, arm_binding_lease, note_define, referenced_names, Mentions, Closure::new, BindingLedger::prune, pins_live_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS]
 ---
 
 # Binding leases
@@ -70,8 +70,8 @@ beside the worker-reap drain (`take_worker_reap_notices`), both only when a
 surface sink is installed — absent one the ledgers are left untouched, so the
 notices wait for a run that has one. Every entry idle
 past the bound is examined: a name whose value still structurally reaches a
-*running* worker handle is pinned and re-checked next boundary
-(`pins_running_work` — it recurses lists, maps, and variant payloads, and
+live (`running` or `stopping`) worker handle is pinned and re-checked next
+boundary (`pins_live_work` — it recurses lists, maps, and variant payloads, and
 deliberately never looks inside a closure's captured environment);
 everything else is unset — value and type-scheme seed
 in one act — and one `Notice::Prune` surfaces to the host, which records it as a
@@ -127,10 +127,10 @@ throughout.
 ## Where it sits in the decay ladder
 
 Abandonment decays in layers, each with its own bound and its own log line: a
-worker's settled registry entry expires after 256 calls unclaimed; and a name
-holding a settled handle — settled handles
-are ordinary scratch, and the worker registry retains the handle itself, so
-no name is ever load-bearing for rediscovery — prunes after 256 idle calls.
+worker's `ready` registry entry expires after 256 calls unclaimed; and a name
+holding a finished (`ready` or `consumed`) handle — live (`running` or
+`stopping`) handles stay pinned by `pins_live_work`, while finished handles are
+ordinary scratch — prunes after 256 idle calls on the same clock.
 The model's later "where did my job go?", at every layer, has an answer in
 the log.
 

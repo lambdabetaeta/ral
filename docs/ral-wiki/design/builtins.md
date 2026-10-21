@@ -64,14 +64,16 @@ The core entries group by what they compute:
   `resolve-path` `absolute-path` `abbreviate-home` `temp-dir` / `temp-file`.
 - **Codecs** — the `from-X` / `to-X` pairs and the streaming `fold-lines`: the
   typed byte↔value crossing, given its own page ([[design/codecs|codecs]]).
-- **Concurrency** — `await` `poll` `first-settled` `race` `cancel` `worker`
+- **Concurrency** — `await` `poll` `is-done` `first-settled` `race` `cancel`
   `workers` and the host's `watch`, beside the `spawn` and `gather` control
   operators (`par`, `both` and `first-of` are prelude code over them): a
   worker scheduler and the graded `Handle^ε α` values only the host runtime can
   mint. `await` behaves as the block run where it is written; `poll` is the
-  non-blocking probe of a handle — total over a finished block, reporting
-  completion or failure as one settle variant rather than blocking or
-  re-raising ([[decisions/260615_poll-total-failed-arm|the settle decision]],
+  non-blocking 4-state probe of a handle (`running`, `stopping`, `ready`,
+  `consumed`) — total over every handle state, reporting completion or failure
+  on `ready` as one outcome variant rather than blocking or re-raising, and
+  `is-done` is the boolean completion predicate over the same states
+  ([[decisions/260615_poll-total-failed-arm|the settle decision]],
   [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]).
 - **Writes** — `echo`: every argument rendered through the total `to-string`,
   single-space intercalation, a trailing newline, typed `List String -> Command`:

@@ -258,7 +258,7 @@ fn clear_cancels_registered_workers_and_drops_their_late_surface() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     for entry in &entries {
         loop {
-            if entry.handle.sample() != ral_core::types::Sample::Pending {
+            if entry.handle.sample().has_ended() {
                 break;
             }
             assert!(

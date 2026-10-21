@@ -3,6 +3,11 @@ status: accepted
 generated_at_commit: 8d868e18
 ---
 
+> Amended 2026-10-21: `worker <id>` and `Site::admit_handled` are deleted; a
+> worker handle is a capability held only in the bindings that received it from
+> `spawn` or `watch`, so its type is known at birth and no worker boundary
+> exists in `BOUNDARY_BUILTINS`.
+>
 > Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]: in the
 > closed set, `service-handle` is replaced by core's `worker <id>`, which
 > re-acquires the handle of any worker by its id and admits the value it

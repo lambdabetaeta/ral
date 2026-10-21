@@ -724,9 +724,13 @@ fn a_failed_spawn_wakes_the_model_with_its_status() {
             }
         }
     };
-    for part in ["(exit 5)", "(boom)", "worker"] {
+    for part in ["(exit 5)", "(boom)", "await $h", "workers"] {
         assert!(text.contains(part), "the notice names {part}: {text:?}");
     }
+    assert!(
+        !text.contains("!{worker"),
+        "the notice must not advertise ID-based handle recovery: {text:?}"
+    );
 }
 
 /// `boot::seed_no_color`'s suppression reaches spawned commands

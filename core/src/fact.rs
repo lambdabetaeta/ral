@@ -26,7 +26,7 @@ use std::time::SystemTime;
 /// shells.
 ///
 /// A fleet listing folds several agents' registries together.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct WorkerId(pub u64);
 
 impl Datum for WorkerId {

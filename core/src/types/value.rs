@@ -233,7 +233,7 @@ impl Value {
     /// `List`/`Map`/`Variant`, so a large collection of small values is
     /// counted honestly. `Lambda`, `Block`, and `Handle` are never descended:
     /// chasing a closure's captured `Env` or a handle's buffers is the retained-size
-    /// walk this design refuses throughout, `pins_running_work` in
+    /// walk this design refuses throughout, `pins_live_work` in
     /// `types/handle.rs` refusing it identically. A nudge, then, not an
     /// account — structure shared under `Arc` counts twice, captures not at all.
     pub(crate) fn shallow_size(&self) -> usize {

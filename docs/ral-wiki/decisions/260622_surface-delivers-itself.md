@@ -1,11 +1,31 @@
 ---
 status: active
-verified_at_commit: 62f8f2a9
-verified_at_date: 2026-10-19
-anchors: [DeferredSink, DeferredSurface, FlushGuard, DoneEvent, SessionEvent::DeferredSurface, Mooring::for_worker, InboxDeferred, Stamped::Surface]
+verified_at_commit: 61c288f
+verified_at_date: 2026-10-21
+anchors: [DeferredSink, DeferredSurface, CompletionPermit, DoneEvent, SessionEvent::DeferredSurface, Mooring::for_thread, InboxDeferred, Stamped::Surface, Avatar::arrive]
 ---
 
 # A worker's `surface` is a second channel, scoped to the session
+
+> Amended 2026-10-21:
+> - **Terminal publication precedes deferred flush (`CompletionPermit`).**
+>   Every worker thread owns a single `CompletionPermit`. On exit (normal,
+>   failed, or panic via `Drop`), `CompletionPermit::finish` transitions the
+>   handle to its terminal state (`Running` → `Ready`, `Stopping` → `Consumed`),
+>   drains its byte buffers, and records the end `Stamp` *before* calling
+>   `DeferredSurface::flush(DoneEvent)`, so a host woken by the deferred batch
+>   can never observe the worker still non-terminal (`Running` or `Stopping`).
+>   `FlushGuard` is deleted.
+> - **One thread mooring constructor (`Mooring::for_thread`).** `Mooring::for_worker`
+>   and `Mooring::for_stage_thread` are unified into `Mooring::for_thread(home,
+>   surface)`.
+> - **Redundant completion wakeups are filtered on arrival.** In exarch,
+>   `Avatar::arrive` records the display/forensic completion cards from a
+>   `Stamped::Surface` batch as usual, but adds the model-facing completion
+>   notice to the exchange prompt/steering only if the worker is still unclaimed
+>   (`ready` in the `` `workers `` probe) when the batch arrives — so a worker
+>   already `await`ed, `race`d, or `cancel`led during the turn does not wake the
+>   model a second time.
 
 **`surface` speaks on two channels, told apart by the one thing a value's class
 cannot carry — the *lifetime* of whoever receives it. A foreground run surfaces
@@ -89,11 +109,10 @@ a new scope makes a new channel ([[design/engine-protocol|engine-protocol]],
 
 ## Where
 
-- `core/src/types/mooring.rs` — `DeferredSink`, `Mooring::for_worker`.
-- `core/src/types/handle/surface.rs` — `DeferredSurface`, `FlushGuard`.
+- `core/src/types/mooring.rs` — `DeferredSink`, `Mooring::for_thread`.
+- `core/src/types/handle.rs` — `CompletionPermit`; `core/src/types/handle/surface.rs` — `DeferredSurface`.
 - `core/src/types/shell/workers.rs` — `DoneEvent`.
-- `core/src/builtins/concurrency/birth.rs` — `spawn_child`, the flush-then-send
-  order.
+- `core/src/builtins/concurrency/birth.rs` — `spawn_child`, `CompletionPermit::finish` publishing terminal state before `DeferredSurface::flush`.
 - `core/src/protocol.rs` — `SessionEvent::DeferredSurface`; carried by
   `core/src/carrier/wire/{serve,front}.rs`.
 - `exarch/src/shell_eval.rs` — `InboxDeferred`; `exarch/src/agent/arrival.rs`

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 11950445365e2a5381b0bc988f6b6142ae16bb52
-generated_at_date: 2026-10-19
+generated_at_commit: 61c288f
+generated_at_date: 2026-10-21
 covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/signals.rs, exarch/src/cancel.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
@@ -245,7 +245,10 @@ Three nested loops, the same for root and child alike:
   is left is the exchange-boundary latch reset, a session command's run
   (`Avatar::read`, `Avatar::rewrite`), the item's `arrive` (booked against
   the park verdict and announced, `agent/arrival.rs`, the same door a
-  mid-exchange arrival takes), its `attempt` (`deliberate` under
+  mid-exchange arrival takes; `Avatar::arrive` filters redundant completion
+  wakeups for workers already claimed during the turn, consulting the
+  `workers` probe so the model is woken only for entries still `ready` in the
+  registry), its `attempt` (`deliberate` under
   `catch_unwind`, the log quiesced however it ended), `record_failure` (a
   provider error recorded, a refusal's resume armed), and the nudge reaction,
   `follow_up`. A genuine exchange boundary resets the nudge budget and
@@ -361,7 +364,7 @@ boundary ([[map/core/shell-state|shell-state]]), armed with
 [[map/exarch/shell-eval|shell-eval]]'s `SETTLED_WORKER_RETENTION`. The
 agent keeps no mirror of that drum: the engine answers the question itself,
 each `WorkerRow` the `` `workers `` probe returns carrying `retention_left` —
-the calls until a settled entry expires, on the engine's own clock — which
+the calls until an unparented `ready` entry expires, on the engine's own clock — which
 `/resources` renders as the nearest expiry. Retention notices need no
 plumbing of their own: they ride the same drain above.
 
@@ -385,7 +388,7 @@ panic rollback can never resurrect a name a pass just pruned.
 next boundary, tool or exchange, and run by `Avatar::read` on the attend
 thread that owns the agent —
 `Avatar::resource_rows` surveys what this thread may legally read — the worker
-registry's running/settled split with the nearest retention expiry and the
+registry's `running`/`stopping`/`ready` split with the nearest retention expiry and the
 binding-ledger figures read as *data* over the transport's probe rail
 (`Frame::Probe`, through core's typed `Transport` probe doors and `Seat::read`,
 which severs the seat on a refused answer,

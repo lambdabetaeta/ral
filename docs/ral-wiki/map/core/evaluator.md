@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-10-06
+generated_at_commit: 61c288f
+generated_at_date: 2026-10-21
 covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 ---
 
@@ -129,8 +129,8 @@ Internals:
   frame: `machine.rs` forms its operands and hands them to
   `concurrency::spawn_form` ([[map/core/builtins|builtins]]). `gather` is
   `Frame::Gather` in `machine.rs`: it swaps the shell's cradle for one owning a
-  fresh `Brood` (`Cradle::owning`), and on exit restores it and settles the
-  brood by `concurrency::exit_brood` on return, `Brood::end` on a halt. The
+  fresh `ScopeOwner` (`Cradle::owning`), and on exit restores it and settles the
+  scope by `concurrency::exit_brood` (`ScopeOwner::end`) on return, `ScopeOwner::stop` on a halt. The
   `within` form installs command handlers: a per-name handler and every alias
   must be a unary lambda `{ |args| ... }`, the catch-all a binary lambda `{
   |name args| ... }`; the calling convention is fixed by the surface form and

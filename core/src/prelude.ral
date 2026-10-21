@@ -147,40 +147,30 @@ let retry = { |n body|
 }
 
 # Concurrency, cleanup, observability — `spawn`, `gather` and `watch` are
-# control forms; `await`, `poll`, `race`, `first-settled`, `cancel`,
-# `workers` and `worker` are builtins (see `core/src/builtins.rs`).  `par`,
-# `both` and `first-of` are library code over `gather`.
-
-## True once a handle has settled, false while its block is still running.
-## A `settled` block (whether it returned or failed) reports `true`, only a
-## still-running (`pending`) block reports `false`.  Non-blocking, and claims
-## nothing: `poll` samples without waiting, and fails, as `poll` does, on a
-## handle whose result was already claimed.
-let is-done = { |h|
-    let polled = poll $h
-    case $polled [
-        `settled: { |_| return true },
-        `pending: { |_| return false }
-    ]
-}
+# control forms; `await`, `is-done`, `poll`, `race`, `first-settled`, `cancel`
+# and `workers` are builtins (see `core/src/builtins.rs`).  `par`, `both` and
+# `first-of` are library code over `gather`.
 
 ## par <f> <items> <jobs>  — parallel map: run `f` over `items` on at most
 ## `jobs` workers at once (`jobs <= 0`: one per item), owned by this call.
 ## Values and output keep input order, whatever order the items finish in.
 ## A new worker starts as soon as any running one settles.  The first failure
 ## in time is raised at once, and the rest are cancelled and drained.  Nothing
-## started by `par` outlives the call.  Quadratic in `items`: `born` is
-## rebuilt per start.
+## started by `par` outlives the call.
 let par = { |f items jobs|
     let limit = if $[$jobs <= 0] { length $items } else { return $jobs }
     gather {
-        ## A settled child that failed is awaited now: its bytes replay and its
+        ## A ready child that failed is awaited now: its bytes replay and its
         ## failure is raised here, and the gather ends the rest.  A success
-        ## keeps its result for the ordered pass below.
+        ## keeps its result for the ordered pass below; an already-claimed
+        ## child fails honestly.
+        let _claimed = { |_| fail [status: 1, message: "par: this worker's result was already claimed"] }
         let _raise-if-failed = { |h|
             case !{poll $h} [
-                `settled: { |s| case $s[outcome] [`err: { |_| await $h; return () }, `ok: { |_| return () }] },
-                `pending: { |_| return () }
+                `ready: { |s| case $s[outcome] [`err: { |_| await $h; return () }, `ok: { |_| return () }] },
+                `running: { |_| return () },
+                `stopping: $_claimed,
+                `consumed: $_claimed
             ]
         }
         ## `running`: the children holding a slot; `pending`: the unstarted

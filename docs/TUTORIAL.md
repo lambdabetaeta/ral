@@ -573,19 +573,26 @@ worker you `await`, so ral asks you to say which you meant.
 
 A handle's result is claimed once: a second `await` of it fails, as does an
 `await` after `race` or `cancel` claimed it. `poll` checks without blocking,
-printing or claiming: it returns `` `pending `` with the output so far and the
-seconds elapsed, or `` `settled `` with the output, the time it took, and an
-`` `ok `` / `` `err `` outcome, and the handle can still be awaited after it.
-`cancel $tests` stops a worker, and everything it started. A `spawn` inside
-a spawned block belongs to that block, which finishes only after it has, its
-output and failure folded into its own.
+printing or claiming, and never fails merely because the result was claimed:
+it returns `` `running `` with the output so far and the seconds elapsed,
+`` `stopping `` with the elapsed time while a cancelled worker finishes,
+`` `ready `` with the output, the time it took, and an `` `ok `` / `` `err ``
+outcome, or `` `consumed `` with the time it took after the result was claimed.
+A `` `ready `` handle can still be awaited after `poll`. `is-done $tests`
+returns `false` while `` `running `` or `` `stopping `` and `true` once
+`` `ready `` or `` `consumed ``. `cancel $tests` stops a worker, and everything
+it started. A `spawn` inside a spawned block belongs to that block, which
+finishes only after it has, its output and failure folded into its own.
 
-Every worker has a numeric id beside its title. `workers` lists them, one
-record each with its id, title, owner, state and timing; it is data, not
-handles. When a binding is gone, `worker` takes the id back to the handle:
+Every worker has a numeric id beside its title. `workers` lists the live and
+unclaimed ready workers, one record each with its id, title, owner, state and
+timing:
 
     workers
-    await !{worker 7}
+
+`workers` is status data, not handles: an id cannot reconstruct a handle, so
+keep the handle returned by `spawn` or `watch` in a binding when you need to
+`await`, `poll`, `is-done`, or `cancel` that worker.
 
 Fan-out that must leave nothing running is a `gather`, a block that owns
 the workers spawned inside it:

@@ -71,26 +71,77 @@ fn context_survey_records_a_display_commit() {
     );
 }
 
+static RESOURCES_STOP_ENTERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static RESOURCES_STOP_RELEASE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+struct ResourcesReleaseGuard(&'static std::sync::atomic::AtomicBool);
+impl Drop for ResourcesReleaseGuard {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+fn builtin_resources_hold_until_released(
+    _args: &[ral_core::Value],
+    _mooring: &ral_core::types::Mooring,
+    shell: &mut ral_core::Shell,
+) -> ral_core::types::Settled<ral_core::Value> {
+    RESOURCES_STOP_ENTERED.store(true, std::sync::atomic::Ordering::Release);
+    while !RESOURCES_STOP_RELEASE.load(std::sync::atomic::Ordering::Acquire) {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    shell.poll()?;
+    Ok(ral_core::Value::Unit)
+}
+
+static RESOURCES_TEST_BUILTINS: [ral_core::types::BuiltinEntry; 1] =
+    [ral_core::types::BuiltinEntry::new(
+        std::borrow::Cow::Borrowed("test-resources-hold"),
+        scheme_test_clear_block_forever,
+        "test-only: hold until RESOURCES_STOP_RELEASE, then poll.",
+        ral_core::types::BuiltinBody::Static(builtin_resources_hold_until_released),
+    )];
+
 /// The agent half surveys what this thread owns: the worker registry's
-/// running/settled split with its retention note, the binding count,
+/// running/settled split (counting `Stopping` against the running cap and
+/// `Ready` under settled with its retention note), the binding count,
 /// the inbox depths (counted, never drained), and the idle lease's
 /// fallback when nothing has forked.
 #[test]
 fn resource_rows_survey_the_agents_accumulators() {
-    let session = dressed_trunk(|runtime| runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
+    RESOURCES_STOP_ENTERED.store(false, std::sync::atomic::Ordering::Release);
+    RESOURCES_STOP_RELEASE.store(false, std::sync::atomic::Ordering::Release);
+    let _release = ResourcesReleaseGuard(&RESOURCES_STOP_RELEASE);
+    let session = dressed_trunk(|runtime| {
+        runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+        runtime.install_builtins(&RESOURCES_TEST_BUILTINS);
+    });
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
     session.ral("spawn \"blocker\" { test-clear-block-forever }", 30, &emit);
+    session.ral(
+        "let h_stop = spawn \"stopping\" { test-resources-hold }",
+        30,
+        &emit,
+    );
+    while !RESOURCES_STOP_ENTERED.load(std::sync::atomic::Ordering::Acquire) {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    session.ral("cancel $h_stop", 30, &emit);
     session.ral("spawn \"seven\" { return 7 }", 30, &emit);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    while !session
-        .seat
-        .read(|t| t.workers())
-        .expect("an identity seat never severs")
-        .iter()
-        .any(|w| !matches!(w.state, WorkerState::Running))
-    {
+    while !{
+        let ws = session
+            .seat
+            .read(|t| t.workers())
+            .expect("an identity seat never severs");
+        ws.iter().any(|w| matches!(w.state, WorkerState::Running))
+            && ws.iter().any(|w| matches!(w.state, WorkerState::Stopping))
+            && ws.iter().any(|w| matches!(w.state, WorkerState::Ready(_)))
+    } {
         assert!(
             std::time::Instant::now() < deadline,
             "the instant worker must settle within the budget"
@@ -116,7 +167,10 @@ fn resource_rows_survey_the_agents_accumulators() {
     );
 
     let running = row(&rows, "workers.running");
-    assert_eq!(running.current, 1);
+    assert_eq!(
+        running.current, 2,
+        "both Running and Stopping count against LIVE_WORKER_CAP"
+    );
     assert_eq!(
         running.cap,
         Some(shell_eval::LIVE_WORKER_CAP as u64),

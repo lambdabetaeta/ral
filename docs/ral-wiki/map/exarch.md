@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 11950445
-generated_at_date: 2026-10-19
+generated_at_commit: 61c288f
+generated_at_date: 2026-10-21
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/roles.md, exarch/data/ral.md, exarch/data/context.md]
 ---
 
@@ -219,8 +219,7 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   the session as *one continuing shell script*: definitions, working directory,
   and worker threads persist across turns. It teaches selective binding, bounded
   inspection, batching known steps, and spawning independent long-running
-  work under a title, then `await`ing its handle — or `await !{worker <id>}`
-  from the completion notice — when the result is needed.
+  work under a title, binding its handle, and `await`ing that handle when the result is needed.
 - **`Ral`** (`data/ral.md`) is the language and tool reference. The CBPV
   introduction leads into values, computations, capture, and forcing, followed
   by help and exploration. String arguments remain intact; list spreading and
@@ -234,13 +233,14 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   `explain await`, `explain poll`, and `explain detach`; the prompt keeps
   common forms and examples.
   Failure guidance separates recovery, inspection, and deliberate suppression.
-  The concurrency section teaches one pattern: `spawn "title" { … }`, other
+  The concurrency section teaches one pattern: `let h = spawn "title" { … }`, other
   work or the end of the turn, a host notice when the worker ends, then
   `await`, which behaves as the block run on that line — its output written
   there, its value returned, its failure raised, so `try` recovers it — and
-  claims the result once, so a second `await` fails. `worker <id>` recovers a
-  lost handle, `workers` lists every worker, `poll` samples a long-running
-  server without waiting or claiming, a block's own spawns finish before it does, and
+  claims the result once, so a second `await` fails. `workers` lists every
+  worker (`running`, `stopping`, or `ready`), `poll` and `is-done` are total
+  four-state probes over `running`, `stopping`, `ready`, and `consumed` that
+  never wait or claim, a block's own spawns finish before it does, and
   fan-out that must leave nothing behind is a `gather { … }`, with `par`,
   `both`, `first-of` over it and `race` for handles already held; a `gather`
   is synchronous, so work that should outlive the turn is a loose `spawn`

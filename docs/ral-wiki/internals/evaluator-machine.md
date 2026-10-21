@@ -1,7 +1,7 @@
 ---
-verified_at_commit: dad6a1b3
-verified_at_date: 2026-10-17
-anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, EngineSeed, NESTED_MACHINE_LIMIT, force, force_val, launch_thread_stage, Assemble, Frame::Gather, exit_brood]
+verified_at_commit: 61c288f
+verified_at_date: 2026-10-21
+anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, EngineSeed, NESTED_MACHINE_LIMIT, force, force_val, launch_thread_stage, Assemble, Frame::Gather, ScopeOwner, exit_brood]
 ---
 
 # The evaluator: a CEK machine over computation closures
@@ -93,7 +93,9 @@ any effect, and returns the `Slot` that holds the stack's only `push`; a rule
 cannot push without having asked. `Frame::abandon` is the one undo for the
 frames whose effect is only undone (`Unmask`, `Within`, `Grant`, and `Audit`
 on an escape), used by the rules and by the panic walk alike; on `Gather` it
-restores the cradle and stops the brood without waiting.
+restores the cradle and closes and stops the `ScopeOwner` without waiting
+(`ScopeOwner::stop`), and `Frame::Gather`'s `Drop` does the same if the frame
+is dropped before `exit_brood` or `ScopeOwner::end` takes the owner.
 
 **`To` holds its environment, which is what makes extent structural.** `M to
 x. N` pushes `To { bind, env: E }` *before* M runs; when M
@@ -112,10 +114,12 @@ write is observed when the body settles, carrying its target before and after),
 `Within(WithinUndo)` restores env overrides, the whole cwd cell and handlers, `Grant` pops
 the capability stack, `Unmask` restores the masked handler, `Audit`
 closes its trail scope and restores the capture policy; `Try` holds only its
-handler. `Gather { brood, prev }` holds the brood its body's births enrol in
-and the cradle it displaced: on return it restores the cradle and settles the
-brood by `exit_brood` — the exit rule a worker's base shares — and on a halt
-it restores the cradle and ends the brood within the cleanup grace
+handler. `Gather` holds the `ScopeOwner` its body's births enrol in and the
+cradle it displaced: on return it takes the owner, restores the cradle, and
+settles the brood by `exit_brood` — the exit rule a worker's base shares,
+closing membership, joining unclaimed children, and draining all accepted
+children to a terminal state within the grace — and on a halt it takes the
+owner, restores the cradle, and runs `ScopeOwner::end` within the cleanup grace
 ([[invariants/a-worker-ends-with-its-children|a-worker-ends-with-its-children]]). `Frame` is at most 128 bytes (asserted at compile
 time; `Redirect` and `Unmask` are boxed).
 

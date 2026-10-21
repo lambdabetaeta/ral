@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e4025de9
-generated_at_date: 2026-10-17
+generated_at_commit: 61c288f
+generated_at_date: 2026-10-21
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/run/report.rs, core/src/seed.rs, core/src/guard/grant.rs]
 ---
 
