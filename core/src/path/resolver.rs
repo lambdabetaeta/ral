@@ -8,35 +8,42 @@
 use std::path::{Path, PathBuf};
 
 use super::{CwdPath, LexicalPath, NotACwd, lex, sigil};
+use crate::types::EnvVars;
 
-/// The `HOME` and logical cwd one resolution runs against; `home` is `None`
-/// where nothing binds one, and a `~` then resolves to itself.
+/// The environment and logical cwd one resolution runs against: `~` reads
+/// `env.home()`, `xdg:` the `XDG_*_HOME` of `env`, each overlay before the
+/// host, and a `~` with no home resolves to itself.
 ///
-/// Field-for-field [`FreezeCtx`](crate::guard::freeze::FreezeCtx): a freeze
+/// The pair a [`FreezeCtx`](crate::guard::freeze::FreezeCtx) owns: a freeze
 /// resolves `cwd:` against its cwd once and for good, a runtime resolution
 /// against this one each time it is asked.  The cwd is a [`CwdPath`], checked
 /// where it was minted, so every path read against it has an absolute answer.
 pub struct Resolver<'a> {
-    pub home: Option<String>,
-    pub cwd: &'a CwdPath,
+    env: &'a EnvVars,
+    cwd: &'a CwdPath,
 }
 
 impl<'a> Resolver<'a> {
-    /// A resolver against `home` and `cwd`, for a caller outside the crate
-    /// with no shell to mint one.
-    pub fn at(home: Option<String>, cwd: &'a CwdPath) -> Self {
-        Resolver { home, cwd }
+    /// A resolver against `env` and `cwd`, for a caller with no shell to
+    /// mint one; an empty `env` reads the host.
+    pub fn at(env: &'a EnvVars, cwd: &'a CwdPath) -> Self {
+        Resolver { env, cwd }
+    }
+
+    /// `HOME` as this resolver's `~` reads it.
+    pub fn home(&self) -> Option<String> {
+        self.env.home()
     }
 
     /// Whether `raw` resolves against `cwd`: no sigil head, and relative.
     pub fn is_relative(&self, raw: &str) -> bool {
-        !lex::is_absolute(sigil::expand_path_prefix(raw, self.home.as_deref()))
+        !lex::is_absolute(sigil::expand_path_prefix(raw, self.env))
     }
 
-    /// Stages 1 and 2: expand `~`/`xdg:`, then anchor and fold against `cwd`.
-    /// No filesystem access.
+    /// Stages 1 and 2: expand `~`/`xdg:`, then anchor against `cwd`.  No
+    /// filesystem access, and no fold ([`LexicalPath::folded`]).
     pub fn resolve(&self, raw: &str) -> LexicalPath {
-        let expanded = sigil::expand_path_prefix(raw, self.home.as_deref());
+        let expanded = sigil::expand_path_prefix(raw, self.env);
         LexicalPath::from_lexed(lex::resolve_path(self.cwd, &expanded))
     }
 
@@ -64,11 +71,7 @@ impl<'a> Resolver<'a> {
     /// against which no path can be read.
     pub(crate) fn resolve_in_script(&self, raw: &str, dir: &Path) -> Result<LexicalPath, NotACwd> {
         let dir = self.anchor(dir).into_cwd()?;
-        let beside = Resolver {
-            home: self.home.clone(),
-            cwd: &dir,
-        };
-        Ok(beside.resolve(raw))
+        Ok(Resolver::at(self.env, &dir).resolve(raw))
     }
 
     /// The whole pipeline: [`Self::resolve`], then canonicalise leniently —
@@ -106,9 +109,10 @@ mod tests {
     #[test]
     fn resolve_expands_tilde_and_normalises() {
         let elsewhere = elsewhere();
-        let r = Resolver::at(Some("/h".into()), &elsewhere);
+        let env = std::iter::once(("HOME", "/h")).collect::<EnvVars>();
+        let r = Resolver::at(&env, &elsewhere);
         assert_eq!(
-            r.resolve("~/foo/./bar/../baz").as_path(),
+            r.resolve("~/foo/./bar/../baz").folded().as_path(),
             Path::new("/h/foo/baz")
         );
     }
@@ -123,7 +127,8 @@ mod tests {
         } else {
             "/work/proj"
         });
-        let r = Resolver::at(Some("/h".into()), &cwd);
+        let env = std::iter::once(("HOME", "/h")).collect::<EnvVars>();
+        let r = Resolver::at(&env, &cwd);
         assert_eq!(
             r.resolve("src/lib.rs").as_path(),
             cwd.as_path().join("src").join("lib.rs")
@@ -186,12 +191,12 @@ mod tests {
             (r"\\?\C:\work", "C:x", r"\\?\C:\work\x"),
         ] {
             let dir = cwd(dir);
-            let got = Resolver::at(None, &dir).resolve(raw);
+            let got = Resolver::at(&EnvVars::new(), &dir).resolve(raw).folded();
             assert_eq!(got.as_path(), Path::new(want), "{raw:?} in {dir:?}");
         }
         let dir = cwd(r"\\srv\sh\work");
         for raw in [r"Q:x\y", "Q:"] {
-            let got = Resolver::at(None, &dir).resolve(raw);
+            let got = Resolver::at(&EnvVars::new(), &dir).resolve(raw);
             let text = got.as_path().to_str().expect("a fixture is UTF-8");
             assert!(lex::is_absolute(got.as_path()), "{raw:?} -> {text:?}");
             assert!(
@@ -214,8 +219,9 @@ mod tests {
             Path::new("/work/proj")
         };
         let (elsewhere, here) = (elsewhere(), cwd(dir.to_str().expect("UTF-8")));
-        let r = Resolver::at(Some("/h".into()), &elsewhere);
-        let beside = Resolver::at(Some("/h".into()), &here);
+        let env = std::iter::once(("HOME", "/h")).collect::<EnvVars>();
+        let r = Resolver::at(&env, &elsewhere);
+        let beside = Resolver::at(&env, &here);
         for raw in [
             "lib.ral",
             "../x/./y",
@@ -243,7 +249,7 @@ mod tests {
             );
             if lex::is_absolute(raw) {
                 assert_eq!(
-                    in_script.as_path(),
+                    in_script.folded().as_path(),
                     lex::fold_dots(Path::new(raw)),
                     "{raw:?}"
                 );
@@ -256,7 +262,8 @@ mod tests {
     #[test]
     fn check_resolves_partial_paths_against_existing_ancestor() {
         let here = crate::host::cwd().expect("the test process has a cwd");
-        let r = Resolver::at(Some("/h".into()), &here);
+        let env = std::iter::once(("HOME", "/h")).collect::<EnvVars>();
+        let r = Resolver::at(&env, &here);
         let suffix = format!("ral-resolver-probe-{}/leaf", std::process::id());
         let probe = format!("/tmp/{suffix}");
         let out = r.check(&probe);
@@ -276,7 +283,8 @@ mod tests {
         let prev = std::env::var_os("XDG_DATA_HOME");
         unsafe { std::env::remove_var("XDG_DATA_HOME") };
         let elsewhere = elsewhere();
-        let r = Resolver::at(Some("/h".into()), &elsewhere);
+        let env = std::iter::once(("HOME", "/h")).collect::<EnvVars>();
+        let r = Resolver::at(&env, &elsewhere);
         let out = r.check("xdg:data/agda");
         match prev {
             Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
@@ -292,7 +300,8 @@ mod tests {
     #[test]
     fn ordinary_absolute_path_is_a_fixed_point() {
         let elsewhere = elsewhere();
-        let r = Resolver::at(Some("/h".into()), &elsewhere);
+        let env = std::iter::once(("HOME", "/h")).collect::<EnvVars>();
+        let r = Resolver::at(&env, &elsewhere);
         assert_eq!(
             r.resolve("/etc/hostname").as_path(),
             Path::new("/etc/hostname")

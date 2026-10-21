@@ -77,6 +77,16 @@ const ROSETTA: &str = "/Library/Apple/usr";
 /// no place is negative.
 pub(crate) type Region = Table<FsScope>;
 
+impl FsScope {
+    /// The real form this scope judges.
+    pub(crate) fn real(&self) -> &RealPath {
+        match self {
+            Self::Prefix(prefix) => prefix.real(),
+            Self::Place(place) => place,
+        }
+    }
+}
+
 impl Scope for FsScope {
     type Subject<'a> = &'a Path;
 
@@ -85,17 +95,11 @@ impl Scope for FsScope {
     }
 
     fn holds<P: Polarity>(&self, path: &Path) -> bool {
-        match self {
-            Self::Prefix(prefix) => prefix.contains::<P>(path),
-            Self::Place(place) => place.contains::<P>(path),
-        }
+        self.real().contains::<P>(path)
     }
 
     fn own(&self) -> &Path {
-        match self {
-            Self::Prefix(prefix) => prefix.real_path(),
-            Self::Place(place) => place.as_path(),
-        }
+        self.real().as_path()
     }
 }
 
@@ -104,7 +108,7 @@ impl Scope for FsScope {
 fn freeze_floor(paths: impl IntoIterator<Item = impl AsRef<Path>>) -> Vec<FrozenPath> {
     paths
         .into_iter()
-        .filter_map(|p| FrozenPath::freeze(p).ok())
+        .filter_map(|p| FrozenPath::freeze(p.as_ref()).ok())
         .collect()
 }
 
@@ -420,7 +424,7 @@ mod tests {
     #[test]
     fn the_root_survives_a_re_freeze_as_the_universal_prefix() {
         let root = FrozenPath::root().live();
-        assert_eq!(root.real_path(), Path::new("/"), "got {root:?}");
+        assert_eq!(root.real().as_path(), Path::new("/"), "got {root:?}");
         let region = table(&[root], &[]);
         // A drive spelling is a path only on Windows.
         let mut paths = vec!["/etc/hosts"];
@@ -444,7 +448,10 @@ mod tests {
         let fine = dir.path().join("fine");
         std::fs::create_dir(&fine).unwrap();
         let kept = freeze_floor([odd, fine.clone()]);
-        assert_eq!(kept, [FrozenPath::from_surface(fine)]);
+        assert_eq!(
+            kept,
+            [FrozenPath::from_surface(crate::path::utf8(&fine).unwrap())]
+        );
     }
 
     fn layer(fs: FsPolicy) -> Capabilities {
@@ -485,7 +492,7 @@ mod tests {
     fn the_read_region_admits_the_floor_a_layer_never_named() {
         let read = region_of(&FsOp::Read, &[lit("/work")], &[]);
         for f in floor() {
-            assert!(read.evidence(f.real_path()).permits(), "{f:?}");
+            assert!(read.evidence(f.real().as_path()).permits(), "{f:?}");
         }
     }
 
@@ -493,9 +500,9 @@ mod tests {
     fn an_exclusion_refuses_a_floor_path() {
         let f = floor().first().expect("a host has a floor");
         let read = region_of(&FsOp::Read, &[lit("/work")], std::slice::from_ref(f));
-        assert_eq!(read.evidence(f.real_path()), Evidence::BOTH);
+        assert_eq!(read.evidence(f.real().as_path()), Evidence::BOTH);
         assert!(matches!(
-            read.withheld(f.real_path()),
+            read.withheld(f.real().as_path()),
             Some(Withheld::Excluded { .. })
         ));
     }
@@ -504,7 +511,7 @@ mod tests {
     fn the_write_region_admits_no_floor_path() {
         let write = region_of(&FsOp::Write, &[lit("/work")], &[]);
         for f in floor() {
-            assert!(!write.evidence(f.real_path()).permits(), "{f:?}");
+            assert!(!write.evidence(f.real().as_path()).permits(), "{f:?}");
         }
     }
 
@@ -514,7 +521,7 @@ mod tests {
         assert!(
             floor()
                 .iter()
-                .all(|f| read.evidence(f.real_path()).permits())
+                .all(|f| read.evidence(f.real().as_path()).permits())
         );
         assert_eq!(read.evidence(&at("/no/such/place")), Evidence::NEITHER);
     }

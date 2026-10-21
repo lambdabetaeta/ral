@@ -12,7 +12,7 @@
 use super::fs::FsScope;
 use super::table::{Scope, Table, Withheld};
 use super::{Evidence, ExecGrant, ExecKey, GrantStack, Join, Meet};
-use crate::path::{FrozenPath, Polarity, RealPath, SearchCwd, command_name_key};
+use crate::path::{FrozenPath, Polarity, RealPath, command_name_key};
 use crate::syntax::quote::quote_word;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -253,7 +253,7 @@ impl ExecRules {
             ExecKey::Name(name) => {
                 let tool =
                     crate::uutils::is_uutils_tool(name).then(|| ExecScope::Tool(name.clone()));
-                let file = crate::path::locate(name, host_path.as_deref(), SearchCwd::nowhere())
+                let file = crate::path::locate(name, host_path.as_deref(), None)
                     .and_then(|hit| RealPath::of(&hit).ok())
                     .map(|path| ExecScope::File {
                         path,
@@ -327,8 +327,8 @@ fn frozen_and_live(
     evidence: Evidence,
     scope: fn(RealPath) -> ExecScope,
 ) -> Vec<(ExecScope, Evidence)> {
-    let allow = (evidence.positive).then(|| (scope(RealPath::frozen(path)), Evidence::ALLOW));
-    let deny = (evidence.negative).then(|| (scope(RealPath::live(path)), Evidence::DENY));
+    let allow = (evidence.positive).then(|| (scope(path.real().clone()), Evidence::ALLOW));
+    let deny = (evidence.negative).then(|| (scope(path.live_real()), Evidence::DENY));
     allow.into_iter().chain(deny).collect()
 }
 
@@ -778,8 +778,16 @@ pub(super) mod tests {
         let link = tmp.path().join("a");
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let grant: ExecGrant = [
-            (ExecKey::Path(FrozenPath::from_surface(&link)), DENY),
-            (ExecKey::Path(FrozenPath::from_surface(&target)), ALLOW),
+            (
+                ExecKey::Path(FrozenPath::from_surface(crate::path::utf8(&link).unwrap())),
+                DENY,
+            ),
+            (
+                ExecKey::Path(FrozenPath::from_surface(
+                    crate::path::utf8(&target).unwrap(),
+                )),
+                ALLOW,
+            ),
         ]
         .into_iter()
         .collect();
@@ -808,9 +816,14 @@ pub(super) mod tests {
         std::fs::create_dir_all(target.join("sub")).unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let grant: ExecGrant = [
-            (ExecKey::Dir(FrozenPath::from_surface(&link)), DENY),
             (
-                ExecKey::Dir(FrozenPath::from_surface(target.join("sub"))),
+                ExecKey::Dir(FrozenPath::from_surface(crate::path::utf8(&link).unwrap())),
+                DENY,
+            ),
+            (
+                ExecKey::Dir(FrozenPath::from_surface(
+                    crate::path::utf8(&target.join("sub")).unwrap(),
+                )),
                 ALLOW,
             ),
         ]
@@ -836,8 +849,8 @@ pub(super) mod tests {
         std::fs::create_dir_all(&tools).unwrap();
         std::fs::write(tools.join("prog"), "").unwrap();
         let (excluded, allowed) = (
-            FrozenPath::from_surface(&blocked),
-            FrozenPath::from_surface(&blocked),
+            FrozenPath::from_surface(crate::path::utf8(&blocked).unwrap()),
+            FrozenPath::from_surface(crate::path::utf8(&blocked).unwrap()),
         );
         std::fs::remove_dir(&blocked).unwrap();
         std::os::unix::fs::symlink(&tools, &blocked).unwrap();

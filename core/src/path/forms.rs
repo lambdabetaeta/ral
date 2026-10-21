@@ -1,6 +1,6 @@
-//! The two normal-form path types the grant pipeline trusts:
-//! [`LexicalPath`] on the access side, [`FrozenPath`] on the grant
-//! side.
+//! The normal-form path types the grant pipeline trusts: [`LexicalPath`] on
+//! the access side, [`FrozenPath`] on the grant side, and [`RealPath`], the
+//! symlink-followed form a prefix carries and exec authority judges.
 //!
 //! A prefix carries its symlink-followed `real` form on the value, so
 //! the meet of two policies is a total pure function of them: the disk is
@@ -8,9 +8,9 @@
 //! against the live filesystem — the algebra speaks about the policy,
 //! enforcement about the world.
 //!
-//! Both types have private fields, and every door runs the one
-//! `.`/`..`-folding kernel [`fold_dots`](super::lex::fold_dots), so an
-//! access-side path and a grant-side prefix compare like-for-like under
+//! The grant types have private fields.  A prefix is a logical spelling, folded
+//! and then resolved; an access is resolved as the kernel resolves it,
+//! unfolded; the two meet on their real forms under
 //! [`path_within`](super::identity::path_within).  There is no `From<&str>`
 //! sugar: a `From` impl cannot consult the disk oracle `real` needs,
 //! so it would be a door for fabricating one.
@@ -18,16 +18,16 @@
 //! A prefix's two forms are not a normal form and a spelling of it: fs and
 //! exec alike are judged over *objects*, on `real`; `surface` is the
 //! author's spelling, kept for display and for the order of a set.  Hence
-//! the containment doors, [`contains`](FrozenPath::contains) and
-//! [`real_path`](FrozenPath::real_path) for fs and
-//! [`RealPath::frozen`](super::RealPath::frozen) for exec, and no other:
-//! `surface` leaves the type only as a `String`, for rendering.
+//! the containment door, [`contains`](FrozenPath::contains), and
+//! [`real`](FrozenPath::real), the one door from a prefix to its real form,
+//! and no other: `surface` leaves the type only as a `String`, for rendering.
 
 use super::identity::{Polarity, path_within};
-use super::lex::{is_absolute, is_working_directory};
+use super::lex::{is_absolute, is_working_directory, utf8};
 use super::{GuestPath, PathRules};
 use crate::path::shown;
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
 /// A working directory as ral holds one: a path a relative one is read
@@ -113,18 +113,14 @@ impl std::fmt::Display for NotACwd {
 
 impl std::error::Error for NotACwd {}
 
-/// A lexically-resolved path: absolute, `.`/`..`-collapsed, anchored
-/// against the logical cwd.
+/// A lexically-resolved path: absolute, sigils expanded, anchored against
+/// the logical cwd, its `.`, `..` and any trailing separator kept as
+/// written.  No disk is consulted to make one.
 ///
-/// Collapsed means a fixed point of [`fold_dots`](super::lex::fold_dots):
-/// no `.` or `..` past the root it opens with, and on Windows one
-/// separator throughout, `\`, but in a head whose kind or meaning turns on
-/// its spelling (a verbatim `//?/` head, say), which is kept as written.  A
-/// malformed or mixed head
-/// ([`HeadKind::Malformed`](super::lex::HeadKind::Malformed)) is all head, so
-/// such a path is carried as written, `..` and all, for the kernel to read: a
-/// fold across it could assemble a share or a drive it never named, and the
-/// walk refuses what `std::path` cannot parse
+/// What reaches the disk takes it unfolded, for the physical resolvers to
+/// read as the kernel does; a logical consumer (`cd`, `absolute-path`, a
+/// display base) asks for [`folded`](Self::folded).  The walk refuses what
+/// `std::path` cannot parse
 /// ([`is_unparsed_head`](super::lex::is_unparsed_head)).
 ///
 /// Reified so that canonicalisation can only follow resolution — there is
@@ -140,10 +136,8 @@ impl LexicalPath {
     ///
     /// Asserted rather than checked, because the kernel is total on what it
     /// is given: an absolute input it keeps, and every other it reads against
-    /// a [`CwdPath`], whose root each reading keeps, so the join is absolute;
-    /// the fold keeps the root it reads and is its own fixed point; and an
-    /// absolute path, folded, still has its root, so it is not empty.  A
-    /// check here would have no refusal to give a caller.
+    /// a [`CwdPath`], whose root each reading keeps, so the join is absolute,
+    /// hence not empty.  A check here would have no refusal to give a caller.
     pub(super) fn from_lexed(path: PathBuf) -> Self {
         debug_assert!(
             is_absolute(&path),
@@ -151,15 +145,23 @@ impl LexicalPath {
             shown(&path)
         );
         debug_assert!(
-            super::lex::fold_dots(&path) == path,
-            "LexicalPath must be `.`/`..`-collapsed, got {}",
-            shown(&path)
-        );
-        debug_assert!(
             !path.as_os_str().is_empty(),
             "LexicalPath must be non-empty",
         );
         Self(path)
+    }
+
+    /// The lexical fold, a fixed point of [`fold_dots`](super::lex::fold_dots):
+    /// no `.` or `..` past the root, no trailing separator, and on Windows one
+    /// separator throughout, `\`, but in a head whose kind or meaning turns on
+    /// its spelling, which is kept as written.  A malformed or mixed head
+    /// ([`HeadKind::Malformed`](super::lex::HeadKind::Malformed)) is all head,
+    /// and comes back as written: a fold across it could assemble a share or
+    /// a drive it never named.
+    #[must_use]
+    pub fn folded(self) -> Self {
+        let folded = super::lex::fold_dots(&self.0);
+        Self::from_lexed(folded)
     }
 
     /// A borrow, for the disk operation the check authorised.
@@ -172,14 +174,14 @@ impl LexicalPath {
         self.0
     }
 
-    /// This path as a working directory, for `cd`, `within [dir: …]`, or a
-    /// script's own directory.
+    /// This path, [folded](Self::folded), as a working directory, for `cd`,
+    /// `within [dir: …]`, or a script's own directory.
     ///
     /// # Errors
     /// [`CwdPath::new`]'s: a lexical path may be on a malformed or mixed
     /// head, which no working directory is.
     pub fn into_cwd(self) -> Result<CwdPath, NotACwd> {
-        CwdPath::new(self.0)
+        CwdPath::new(self.folded().0)
     }
 
     /// For audit fields and denial messages.
@@ -197,12 +199,7 @@ impl LexicalPath {
     /// it no *mutation* — nothing changed in the world, so nothing is
     /// reported.
     pub(crate) fn is_discard(&self) -> bool {
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "native: the host-spelled name the device tables match"
-        )]
-        let name = self.0.to_string_lossy();
-        super::device::is_discard_device(&name, PathRules::HOST)
+        super::device::is_discard_device(&self.folded_name(), PathRules::HOST)
     }
 
     /// The refusal owed this path if, on Windows, its last component is a DOS
@@ -210,16 +207,22 @@ impl LexicalPath {
     /// everywhere else.  The fs doors ask it of every name they are about to
     /// act on, as they ask [`is_discard`](Self::is_discard).
     pub(crate) fn reserved_device_refusal(&self) -> Option<String> {
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "native: the host-spelled name the device tables match"
-        )]
-        let name = self.0.to_string_lossy();
-        super::device::reserved_device_refusal(&name, PathRules::HOST)
+        super::device::reserved_device_refusal(&self.folded_name(), PathRules::HOST)
     }
 
-    /// Strict `realpath(3)`.  The input is already absolute and folded, so
-    /// nothing here can anchor against the *process* cwd.
+    /// The folded name as the device tables match it: a device is a name.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "native: the host-spelled name the device tables match"
+    )]
+    fn folded_name(&self) -> String {
+        super::lex::fold_dots(&self.0)
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// Strict `realpath(3)`.  The input is already absolute, so nothing here
+    /// can anchor against the *process* cwd.
     ///
     /// # Errors
     /// Returns `Err` if the path or any intermediate component does not
@@ -229,20 +232,22 @@ impl LexicalPath {
         super::canon::canonicalise_strict(&self.0)
     }
 
-    /// Lenient canonicalisation: resolve the longest existing prefix and
-    /// re-append the unresolved tail.  Infallible.
+    /// Lenient canonicalisation: the physical walk, its missing tail
+    /// appended lexically.  Infallible.
     pub fn canonicalise_lenient(&self) -> PathBuf {
         super::canon::canonicalise_lenient(&self.0)
     }
 }
 
 /// A frozen grant prefix: `surface` as the author wrote it, in the normal
-/// form a [`LexicalPath`] also carries.
+/// form [`LexicalPath::folded`] gives.
 ///
 /// That form is absolute, `.`/`..`-collapsed, and on Windows spelled with
 /// `\` wherever its head allows (`C:/a/b` is frozen as `C:\a\b`).
 ///
-/// `real` is that same path with symlinks followed.
+/// `real` is that same path with symlinks followed, as native as the host
+/// names it: nothing here decodes it to a `String`.  A surface is UTF-8 by
+/// type, being authored text that is rendered into OS rules.
 ///
 /// Field order is load-bearing: the derived `Ord` sorts by `surface`
 /// first, so a `BTreeSet` dedups two spellings of one directory by the
@@ -252,53 +257,21 @@ impl LexicalPath {
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct FrozenPath {
     surface: String,
-    real: String,
-}
-
-/// A path that holds no faithful `String` form, with the lossy one.
-struct Unicode {
-    lossy: FrozenPath,
-    surface: PathBuf,
-    real: PathBuf,
+    real: RealPath,
 }
 
 impl FrozenPath {
-    /// Mint a prefix from a surface form: fold `path`, follow its symlinks,
-    /// and wrap both forms.  The one disk consultation this type ever makes,
-    /// done here at the door so authorised form and matched form are one
-    /// normal form, and the one minting door, whose grant-side caller is the
-    /// freeze pass in `guard::freeze`.  Idempotent on a form already normal,
-    /// such as the OS-sandbox renderer emits.
-    pub fn from_surface(path: impl AsRef<Path>) -> Self {
-        match Self::mint(path.as_ref()) {
-            Ok(frozen) | Err(Unicode { lossy: frozen, .. }) => frozen,
-        }
-    }
-
-    /// [`from_surface`](Self::from_surface) for a grant, an identity that is
-    /// kept for good: `Err` when the surface or the real path it follows is not
-    /// valid Unicode, since the lossy `String` form would then name another
-    /// object, a sibling holding U+FFFD, in its place.
+    /// Mint a prefix from a surface form: fold it, follow its symlinks, and
+    /// hold both forms.  A prefix is a logical spelling, folded and then
+    /// resolved, so `cwd link/../x` names `<cwd>/x`; an access is resolved
+    /// physically, and the two meet on their real forms.
     ///
-    /// # Errors
-    /// The refusal to hold `path` as a grant, saying why.
-    pub fn freeze(path: impl AsRef<Path>) -> Result<Self, String> {
-        Self::mint(path.as_ref()).map_err(|Unicode { surface, real, .. }| {
-            format!(
-                "ral cannot hold '{}' as a grant: it resolves to '{}', which is not valid \
-                 Unicode; grant a path that is, or one that does not pass through it",
-                shown(&surface),
-                shown(&real)
-            )
-        })
-    }
-
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "native: the one door from a native path to the stored string forms; a form that is not UTF-8 is refused by `freeze`"
-    )]
-    fn mint(path: &Path) -> Result<Self, Unicode> {
-        let folded = super::lex::fold_dots(path);
+    /// The one disk consultation this type ever makes, done here at the door,
+    /// and the one minting door, whose grant-side caller is the freeze pass in
+    /// `guard::freeze`.  Idempotent on a form already normal, such as the
+    /// OS-sandbox renderer emits.
+    pub fn from_surface(surface: &str) -> Self {
+        let folded = super::lex::fold_dots_under(surface, PathRules::HOST);
         // The root is the one path `realpath` must not be asked about.  It
         // answers with a *drive* on Windows — the process's own — so a
         // ceiling frozen here covered one volume and denied every other, and
@@ -308,24 +281,46 @@ impl FrozenPath {
         // [`Self::root`] means (an authored `absolute /` is a POSIX grant and
         // dead on Windows).
         if super::lex::is_bare_root(&folded, PathRules::HOST) {
-            return Ok(Self {
+            return Self {
                 surface: "/".into(),
-                real: "/".into(),
-            });
+                real: RealPath("/".into()),
+            };
         }
-        let real = super::canon::canonicalise_lenient(&folded);
-        let lossy = Self {
-            surface: folded.to_string_lossy().into_owned(),
-            real: real.to_string_lossy().into_owned(),
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "lexical Path::new over a folded surface: no I/O behind it"
+        )]
+        let real = RealPath::lenient(Path::new(&folded));
+        Self {
+            surface: folded,
+            real,
+        }
+    }
+
+    /// [`from_surface`](Self::from_surface) for a grant, an identity that is
+    /// kept for good: `Err` when the surface or the real path it follows is not
+    /// valid Unicode, since a grant is serialized as text.
+    ///
+    /// # Errors
+    /// The refusal to hold `path` as a grant, saying why.
+    pub fn freeze(path: &Path) -> Result<Self, String> {
+        let refusal = |real: &dyn std::fmt::Display| {
+            format!(
+                "ral cannot hold '{}' as a grant: it resolves to '{real}', which is not valid \
+                 Unicode; grant a path that is, or one that does not pass through it",
+                shown(path),
+            )
         };
-        if folded.to_str().is_some() && real.to_str().is_some() {
-            Ok(lossy)
+        let frozen = Self::from_surface(utf8(path).map_err(|_| refusal(&shown(path)))?);
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "native: a real form that is not UTF-8 is refused as a grant"
+        )]
+        let unicode = frozen.real.as_path().to_str().is_some();
+        if unicode {
+            Ok(frozen)
         } else {
-            Err(Unicode {
-                lossy,
-                surface: folded,
-                real,
-            })
+            Err(refusal(&frozen.real))
         }
     }
 
@@ -367,14 +362,14 @@ impl FrozenPath {
         let folded = super::lex::fold_dots_under(path.as_str(), PathRules::Posix);
         Self {
             surface: folded.clone(),
-            real: folded,
+            real: RealPath(folded.into()),
         }
     }
 
     /// The surface form as a `Path` — the author's spelling.
     ///
     /// Private, and staying so: authority is judged on the real form
-    /// ([`real_path`](Self::real_path)), so the choice of form is
+    /// ([`real`](Self::real)), so the choice of form is
     /// made here — never by a caller holding a `&Path`.  The `xdg:` freeze
     /// guard made that choice for itself once, and read a symlink out of
     /// `HOME` as contained.
@@ -396,25 +391,17 @@ impl FrozenPath {
         shown(&self.surface)
     }
 
-    /// The symlink-followed form as a `Path`, for containment matching
-    /// against an access path that has itself been canonicalised.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "lexical Path::new over a real form already in normal form: no I/O behind it"
-    )]
-    pub(crate) fn real_path(&self) -> &Path {
-        Path::new(&self.real)
-    }
-
-    /// The symlink-followed form, for messages.
-    pub(crate) fn real(&self) -> &str {
+    /// The symlink-followed form: the one door from a prefix to its real
+    /// form, for containment matching against an access path that has itself
+    /// been resolved.
+    pub(crate) fn real(&self) -> &RealPath {
         &self.real
     }
 
     /// Whether `path` lies within this prefix as a rule of polarity `P`
     /// reads names.
     pub(crate) fn contains<P: Polarity>(&self, path: &Path) -> bool {
-        path_within(path, self.real_path(), P::IDENTITY)
+        path_within(path, self.real.as_path(), P::IDENTITY)
     }
 
     /// `self` unless it is the root, which is never re-resolved:
@@ -429,14 +416,9 @@ impl FrozenPath {
     /// surface is kept: it is absolute and folded, as the freeze guarantees.
     pub(crate) fn live(&self) -> Self {
         debug_assert!(self.is_root() || self.is_absolute(), "{:?}", self.surface);
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "native: the stored real form, re-resolved"
-        )]
-        let real = self.live_real().to_string_lossy().into_owned();
         Self {
             surface: self.surface.clone(),
-            real,
+            real: self.live_real(),
         }
     }
 
@@ -448,14 +430,14 @@ impl FrozenPath {
     /// Whether this prefix holds every path: it is the root, or a spelling
     /// whose frozen real form is.
     pub fn is_universal(&self) -> bool {
-        self.contains::<super::Allow>(Self::root().real_path())
+        self.contains::<super::Allow>(Self::root().real.as_path())
     }
 
     /// The real form of this prefix's surface against the live disk.
-    fn live_real(&self) -> PathBuf {
+    pub(crate) fn live_real(&self) -> RealPath {
         self.off_root().map_or_else(
-            || self.real_path().to_path_buf(),
-            |p| super::canon::canonicalise_lenient(p.surface_path()),
+            || self.real.clone(),
+            |p| RealPath::lenient(p.surface_path()),
         )
     }
 
@@ -478,7 +460,7 @@ impl FrozenPath {
     pub(crate) fn for_test(surface: &str, real: &str) -> Self {
         Self {
             surface: surface.to_string(),
-            real: real.to_string(),
+            real: RealPath::assumed(real),
         }
     }
 }
@@ -507,9 +489,151 @@ impl PartialEq<String> for FrozenPath {
     }
 }
 
+/// A path with no symlink, `.` or `..`, as `realpath(3)` gives it.
+///
+/// Ordered as the host identifies files: by path components off Windows, by
+/// [`windows_stored_components`](super::identity::windows_stored_components)
+/// on it — so two keys naming one file are one key in a map.  Either way on
+/// the names as the host encodes them, never on their lossy decodings, so a
+/// name that is not Unicode is not the name holding U+FFFD it decodes to.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RealPath(PathBuf);
+
+impl RealPath {
+    /// `realpath(3)` of `path`, which must exist.
+    ///
+    /// # Errors
+    /// The `io::Error` of the failed resolution, e.g. `NotFound`.
+    pub fn of(path: &Path) -> std::io::Result<Self> {
+        super::canon::canonicalise_strict(path).map(Self)
+    }
+
+    /// The real path `path` has, or will have once its missing tail is created.
+    pub fn lenient(path: &Path) -> Self {
+        Self(super::canon::canonicalise_lenient(path))
+    }
+
+    /// Where a walk landed: real by construction, since the walk splices
+    /// every link itself and takes every `..` physically.
+    #[cfg(unix)]
+    pub(crate) fn walked(located: &super::Located) -> Self {
+        Self(located.real().to_path_buf())
+    }
+
+    /// A rendered object: already the frozen real path, so no lookup.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn rendered(object: &super::Rendered) -> Self {
+        Self(object.as_str().into())
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn assumed(path: impl Into<PathBuf>) -> Self {
+        Self(path.into())
+    }
+
+    /// Whether this path lies inside `dir`, modulo firmlink aliases, as a
+    /// rule of polarity `P` reads names.
+    pub fn within<P: Polarity>(&self, dir: &Self) -> bool {
+        super::identity::path_within(&self.0, &dir.0, P::IDENTITY)
+    }
+
+    /// Whether `path` lies inside this one, as a rule of polarity `P` reads
+    /// names; an fs access against a run place.
+    pub(crate) fn contains<P: Polarity>(&self, path: &Path) -> bool {
+        super::identity::path_within(path, &self.0, P::IDENTITY)
+    }
+
+    /// The entry `name` of this directory: real by construction, since a
+    /// directory entry of a real directory opened without following is.
+    #[cfg(any(target_os = "linux", windows, test))]
+    pub(crate) fn entry(&self, name: &std::ffi::OsStr) -> Self {
+        Self(self.0.join(name))
+    }
+
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+
+    /// The final component, which a command name can speak of: `None` for a
+    /// root, and for a name that is not Unicode, which no command name is.
+    /// Never a lossy decoding, which would make such a file the one named
+    /// with U+FFFD in its place.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "native: a final component, refused where it is not UTF-8"
+    )]
+    pub(crate) fn name(&self) -> Option<&str> {
+        self.0.file_name()?.to_str()
+    }
+}
+
+impl Ord for RealPath {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match PathRules::HOST {
+            PathRules::Windows => {
+                let identity =
+                    |p: &Self| super::identity::windows_stored_components(p.0.as_os_str());
+                identity(self).cmp(&identity(other))
+            }
+            PathRules::Posix => self.0.cmp(&other.0),
+        }
+    }
+}
+
+impl PartialOrd for RealPath {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for RealPath {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for RealPath {}
+
+impl std::fmt::Display for RealPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        shown(&self.0).fmt(f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{FrozenPath, GuestPath};
+    use super::{FrozenPath, GuestPath, RealPath};
+    #[cfg(unix)]
+    use crate::path::utf8;
+
+    /// An exclusion's live real form keeps a name that is not Unicode
+    /// byte-exact, so it holds that name and not the U+FFFD sibling.
+    #[cfg(unix)]
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] a real link is retargeted at a name that is not UTF-8"
+    )]
+    fn a_live_exclusion_holds_a_target_that_is_not_unicode() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = RealPath::of(tmp.path()).unwrap();
+        let link = dir.as_path().join("dlink");
+        std::os::unix::fs::symlink(dir.as_path().join("tgt"), &link).unwrap();
+        let prefix = FrozenPath::from_surface(utf8(&link).unwrap());
+
+        let target = dir.as_path().join(OsStr::from_bytes(b"tgt\xFF"));
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let live = prefix.live();
+
+        assert_eq!(live.real().as_path(), target);
+        assert!(live.contains::<crate::path::Deny>(&target.join("child")));
+        let lossy = dir.as_path().join("tgt\u{FFFD}");
+        assert!(!live.contains::<crate::path::Deny>(&lossy.join("child")));
+        assert!(!prefix.contains::<crate::path::Deny>(&target.join("child")));
+    }
 
     /// The ceiling covers every path, on whatever drive.
     ///
@@ -530,7 +654,7 @@ mod tests {
         ] {
             let p = FrozenPath::from_surface(path);
             assert!(
-                root.contains::<crate::path::Allow>(p.real_path()),
+                root.contains::<crate::path::Allow>(p.real().as_path()),
                 "the ceiling must cover {path}"
             );
         }
@@ -565,7 +689,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_backslash_mints_no_universal_authority_under_posix_rules() {
-        let prefix = FrozenPath::from_surface(std::path::PathBuf::from("\\").join("."));
+        let prefix = FrozenPath::from_surface("\\/.");
         assert!(!prefix.is_root(), "{prefix:?}");
         assert!(!prefix.is_universal(), "{prefix:?}");
         assert_eq!(prefix.as_str(), "\\");
@@ -585,5 +709,34 @@ mod tests {
             "/work/letters",
             "the folding is still done, only in the right namespace"
         );
+    }
+
+    /// A name that is not Unicode orders apart from the U+FFFD spelling it
+    /// decodes to, and is no command name.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_byte_is_not_its_replacement_character() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let raw = RealPath::assumed(OsStr::from_bytes(b"/opt/\xFFtool"));
+        assert_ne!(raw, RealPath::assumed("/opt/\u{FFFD}tool"));
+        assert_eq!(raw.name(), None);
+    }
+
+    /// An unpaired surrogate orders apart from the U+FFFD spelling it
+    /// decodes to, and is no command name.
+    #[cfg(windows)]
+    #[test]
+    fn an_unpaired_surrogate_is_not_its_replacement_character() {
+        use std::os::windows::ffi::OsStringExt;
+        let wide: Vec<u16> = r"C:\opt\"
+            .encode_utf16()
+            .chain([0xD800])
+            .chain("tool".encode_utf16())
+            .collect();
+        let raw = RealPath::assumed(std::ffi::OsString::from_wide(&wide));
+        assert_ne!(raw, RealPath::assumed("C:\\opt\\\u{FFFD}tool"));
+        assert_eq!(raw.name(), None);
+        assert_eq!(RealPath::assumed(r"C:\opt\tool").name(), Some("tool"));
     }
 }

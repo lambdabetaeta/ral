@@ -57,7 +57,7 @@ fn at(p: &str) -> std::path::PathBuf {
 /// A prefix witness for the fixtures that build `FsPolicy`/`ExecGrant`
 /// directly rather than through `decode_capability_map`.
 fn nprefix(s: &str) -> crate::path::FrozenPath {
-    crate::path::FrozenPath::from_surface(at(s))
+    crate::path::FrozenPath::from_surface(crate::path::utf8(&at(s)).unwrap())
 }
 
 fn break_msg(e: PolicyError) -> String {
@@ -544,10 +544,12 @@ fn decode_errors_when_there_is_no_home() {
         "fs",
         map(vec![("read", Value::list(vec![tagged("home", "x")]))]),
     )]);
-    for ctx in [test_ctx(""), no_home_ctx()] {
-        let err = break_msg(decode_capability_map(&v, "test", &ctx).unwrap_err());
-        assert!(err.contains("HOME"), "got {err}");
-    }
+    crate::test_env::with_vars_cleared(&crate::host::HOME_VARS, || {
+        for ctx in [test_ctx(""), no_home_ctx()] {
+            let err = break_msg(decode_capability_map(&v, "test", &ctx).unwrap_err());
+            assert!(err.contains("HOME"), "got {err}");
+        }
+    });
 }
 
 /// A bare relative path would anchor to the live cwd at check time, so the
@@ -652,17 +654,19 @@ fn decode_accepts_verb_lists_and_offline() {
 }
 
 fn test_ctx(home: &str) -> FreezeCtx {
-    FreezeCtx {
-        home: Some(home.into()),
-        cwd: crate::path::test_cwd().into(),
-    }
+    FreezeCtx::at(
+        std::iter::once(("HOME", home)).collect::<crate::types::EnvVars>(),
+        test_cwd_path(),
+    )
 }
 
+/// No `HOME` in the overlay; tests using it clear the host's.
 fn no_home_ctx() -> FreezeCtx {
-    FreezeCtx {
-        home: None,
-        cwd: crate::path::test_cwd().into(),
-    }
+    FreezeCtx::at(crate::types::EnvVars::new(), test_cwd_path())
+}
+
+fn test_cwd_path() -> crate::path::CwdPath {
+    crate::path::CwdPath::new(crate::path::test_cwd().into()).expect("a fixture cwd is absolute")
 }
 
 // ── Evidence ──────────────────────────────────────────────────────────────
@@ -1297,8 +1301,10 @@ fn a_bundled_tool_reads_ral_s_binary() {
         })
     };
     let tool = |s: &GrantStack| s.admit(Program::Tool("ls".into()), vec![]).is_ok();
-    let own_file = crate::path::FrozenPath::from_surface(own.as_path());
-    let own_dir = crate::path::FrozenPath::from_surface(own.as_path().parent().unwrap());
+    let own_file = crate::path::FrozenPath::from_surface(crate::path::utf8(own.as_path()).unwrap());
+    let own_dir = crate::path::FrozenPath::from_surface(
+        crate::path::utf8(own.as_path().parent().unwrap()).unwrap(),
+    );
     let excluding = stack(FsPolicy {
         read_prefixes: vec![crate::path::FrozenPath::root()],
         deny_paths: vec![own_dir.clone()],

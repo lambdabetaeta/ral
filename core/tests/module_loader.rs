@@ -85,3 +85,22 @@ fn use_falls_through_to_ral_path_and_the_cwd_wins_when_it_can() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// A relative `RAL_PATH` entry is read against the logical cwd, not the
+/// process's: `modules/` exists only under `sub`.
+#[test]
+fn a_relative_ral_path_entry_is_read_against_the_logical_cwd() {
+    let root = scratch("relative");
+    let sub = root.join("sub");
+    std::fs::create_dir_all(sub.join("modules")).unwrap();
+    std::fs::write(sub.join("modules/m.ral"), "let answer = 9\n").unwrap();
+
+    let source = format!(
+        "within [dir: '{}', env: [RAL_PATH: 'modules']] {{ use 'm.ral' }}",
+        sub.display()
+    );
+    let found = top_level(&mut fresh_shell(), &source).expect("the entry is read under `sub`");
+    assert_eq!(answer_of(&found), 9);
+
+    std::fs::remove_dir_all(&root).ok();
+}

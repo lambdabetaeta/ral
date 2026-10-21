@@ -13,6 +13,8 @@
 //! rather than a wider grant.
 
 use ral_core::guard::freeze::{FreezeCtx, Place, PolicyError};
+use ral_core::path::CwdPath;
+use ral_core::types::EnvVars;
 use std::path::{Path, PathBuf};
 
 fn root(tag: &str) -> PathBuf {
@@ -23,16 +25,14 @@ fn root(tag: &str) -> PathBuf {
 }
 
 fn freeze(cwd: &Path) -> Result<String, PolicyError> {
-    FreezeCtx {
-        home: Some("/h".into()),
-        cwd: cwd.into(),
-    }
-    .place(&Place::Gitdir(".".into()))
-    .map(|p| {
-        p.expect("a gitdir place is never dead")
-            .as_str()
-            .to_string()
-    })
+    let cwd = CwdPath::new(cwd.to_path_buf()).expect("a tempdir is absolute");
+    FreezeCtx::at(EnvVars::new(), cwd)
+        .place(&Place::Gitdir(".".into()))
+        .map(|p| {
+            p.expect("a gitdir place is never dead")
+                .as_str()
+                .to_string()
+        })
 }
 
 fn frozen(cwd: &Path) -> String {

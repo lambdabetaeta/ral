@@ -6,7 +6,7 @@
 //! `env_overrides`; the canonical directory lives on `context.cwd`.
 
 use super::Context;
-use crate::path::{CwdPath, Resolver, SearchCwd};
+use crate::path::{CwdPath, Resolver};
 use crate::types::EnvVars;
 use std::path::PathBuf;
 
@@ -64,7 +64,7 @@ impl Context {
 
     /// The cwd cell's directory.
     pub(crate) fn cwd(&self) -> &CwdPath {
-        &self.cwd.0
+        &self.cwd
     }
 
     /// Where a child launched from this context starts: the cell's directory.
@@ -72,19 +72,10 @@ impl Context {
         self.cwd().as_path().to_path_buf()
     }
 
-    /// The anchor a `PATH` walk made from this context runs against: the
-    /// [`Self::cwd`] every other consumer of "here" reads.
-    pub(crate) fn search_cwd(&self) -> SearchCwd<'_> {
-        SearchCwd::of(self.cwd().as_path())
-    }
-
-    /// A [`Resolver`] bound to this layer's home and cwd — grant-prefix
+    /// A [`Resolver`] bound to this layer's environment and cwd — grant-prefix
     /// resolution, deny-path canonicalisation, and the fs guards all mint one here.
     pub(crate) fn resolver(&self) -> Resolver<'_> {
-        Resolver {
-            home: self.home(),
-            cwd: self.cwd(),
-        }
+        Resolver::at(&self.env_overrides, self.cwd())
     }
 }
 
@@ -95,7 +86,7 @@ impl Context {
     pub(crate) fn under_grants(grants: crate::capability::GrantStack) -> Self {
         Self {
             env_overrides: EnvVars::default(),
-            cwd: super::Cwd(crate::test_helper::process_cwd()),
+            cwd: crate::test_helper::process_cwd(),
             grants,
             handlers: super::HandlerStack::default(),
             args: Vec::new(),

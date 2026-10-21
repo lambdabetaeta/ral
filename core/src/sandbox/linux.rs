@@ -493,7 +493,11 @@ impl Shown {
         let floor = floor();
         let tolerated = (rules.read.iter())
             .map(|object| &object.real)
-            .filter(|real| floor.iter().any(|f| f.real() == real.as_str()))
+            .filter(|real| {
+                floor
+                    .iter()
+                    .any(|f| f.real().as_path().as_os_str() == std::ffi::OsStr::new(real.as_str()))
+            })
             .cloned()
             .collect();
         let mut names: Vec<_> = binds(&rules.read, Access::ReadOnly)
@@ -1144,8 +1148,12 @@ mod tests {
         write: &[&std::path::Path],
         deny: &[&std::path::Path],
     ) -> SandboxProjection {
-        let frozen =
-            |paths: &[&std::path::Path]| paths.iter().map(FrozenPath::from_surface).collect();
+        let frozen = |paths: &[&std::path::Path]| {
+            paths
+                .iter()
+                .map(|p| FrozenPath::from_surface(crate::path::utf8(p).unwrap()))
+                .collect()
+        };
         let fs = FsPolicy {
             read_prefixes: frozen(read),
             write_prefixes: frozen(write),
@@ -3298,7 +3306,7 @@ mod tests {
     ) -> (SandboxProjection, Admitted) {
         use crate::capability::ExecKey;
         let key = |p: &std::path::Path| {
-            let frozen = FrozenPath::from_surface(p);
+            let frozen = FrozenPath::from_surface(crate::path::utf8(p).unwrap());
             if p.is_dir() {
                 ExecKey::Dir(frozen)
             } else {
@@ -3367,7 +3375,9 @@ mod tests {
         };
         let sh = std::path::Path::new("/bin/sh");
         let fs = |deny: Vec<FrozenPath>| FsPolicy {
-            read_prefixes: vec![FrozenPath::from_surface(std::path::Path::new("/"))],
+            read_prefixes: vec![FrozenPath::from_surface(
+                crate::path::utf8(std::path::Path::new("/")).unwrap(),
+            )],
             write_prefixes: Vec::new(),
             deny_paths: deny,
         };
@@ -3376,7 +3386,9 @@ mod tests {
             exec_files(&open).contains(&linker),
             "support admits the linker unless excluded: {linker}"
         );
-        let denied = fs(vec![FrozenPath::from_surface(linker.as_path())]);
+        let denied = fs(vec![FrozenPath::from_surface(
+            crate::path::utf8(linker.as_path()).unwrap(),
+        )]);
         let (shut, _) = folded(Some((&[], &[])), Some(denied), sh, &[]);
         assert!(
             !exec_files(&shut).contains(&linker),
@@ -3397,7 +3409,9 @@ mod tests {
             .and_then(|interp| crate::sandbox::carriers::trusted_real(&interp))
             .expect("a trusted script has a trusted interpreter");
         let reads = || FsPolicy {
-            read_prefixes: vec![FrozenPath::from_surface(std::env::temp_dir())],
+            read_prefixes: vec![FrozenPath::from_surface(
+                crate::path::utf8(&std::env::temp_dir()).unwrap(),
+            )],
             write_prefixes: Vec::new(),
             deny_paths: Vec::new(),
         };
@@ -3441,9 +3455,11 @@ mod tests {
         let dir = std::fs::canonicalize(&dir).expect("the work dir is real");
         let (script, interp) = scripted(&dir);
         let fs = FsPolicy {
-            read_prefixes: vec![FrozenPath::from_surface(&dir)],
+            read_prefixes: vec![FrozenPath::from_surface(crate::path::utf8(&dir).unwrap())],
             write_prefixes: Vec::new(),
-            deny_paths: vec![FrozenPath::from_surface(&interp)],
+            deny_paths: vec![FrozenPath::from_surface(
+                crate::path::utf8(&interp).unwrap(),
+            )],
         };
         for (axis, exec, fs) in [
             (
@@ -3477,8 +3493,11 @@ mod tests {
     /// A system-written script whose interpreter is system-written too,
     /// preferring one whose interpreter lies beyond the floor.
     fn trusted_script() -> Option<std::path::PathBuf> {
-        let beyond_floor =
-            |interp: &std::path::Path| !floor().iter().any(|f| interp.starts_with(f.real_path()));
+        let beyond_floor = |interp: &std::path::Path| {
+            !floor()
+                .iter()
+                .any(|f| interp.starts_with(f.real().as_path()))
+        };
         let scripts: Vec<_> = std::fs::read_dir("/usr/bin")
             .ok()?
             .flatten()
@@ -3511,7 +3530,7 @@ mod tests {
         };
         let dir = workdir("trusted-script");
         let reads = || FsPolicy {
-            read_prefixes: vec![FrozenPath::from_surface(&dir)],
+            read_prefixes: vec![FrozenPath::from_surface(crate::path::utf8(&dir).unwrap())],
             write_prefixes: Vec::new(),
             deny_paths: Vec::new(),
         };
@@ -3930,8 +3949,7 @@ mod tests {
 
     fn on_path(tool: &str) -> bool {
         let path = std::env::var("PATH").unwrap_or_default();
-        crate::path::which::locate(tool, Some(&path), crate::path::which::SearchCwd::nowhere())
-            .is_some()
+        crate::path::which::locate(tool, Some(&path), None).is_some()
     }
 
     /// `RC=159` is `128 + SIGSYS`: an `EPERM` here (`RC=32`, the errno for a

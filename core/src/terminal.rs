@@ -125,7 +125,7 @@ impl TerminalState {
     /// frontend.
     #[allow(
         clippy::disallowed_methods,
-        reason = "RAL_INTERACTIVE_MODE selects a mode; it names no directory, so the XDG rule `crate::host::resolve_xdg` enforces has nothing to say about it"
+        reason = "RAL_INTERACTIVE_MODE selects a mode; it names no directory, so the XDG rule `crate::path::resolve_xdg_in` enforces has nothing to say about it"
     )]
     pub fn probe_from_env() -> (InteractiveMode, Self, Option<String>) {
         let raw = std::env::var("RAL_INTERACTIVE_MODE").ok();

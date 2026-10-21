@@ -50,7 +50,7 @@ impl Shell {
 
     /// Check an fs read *by name* — a predicate, a listing, a module load.
     /// `path` comes from `Shell::resolve`, so the guard's sole input is
-    /// already cwd-anchored and `.`/`..`-collapsed.  Anything that opens the
+    /// already cwd-anchored; its `..` is read physically.  Anything that opens the
     /// name, for reading or writing, takes [`Self::locate`] instead.
     ///
     /// # Errors

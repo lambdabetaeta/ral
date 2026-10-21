@@ -33,11 +33,6 @@ fn host_var(key: &str) -> Option<String> {
     std::env::var(key).ok()
 }
 
-/// [`resolve_xdg_in`] over the host process environment.
-pub(crate) fn resolve_xdg(kind: XdgKind, home: Option<&str>) -> Option<PathBuf> {
-    resolve_xdg_in(host_var, kind, home)
-}
-
 /// Process working directory, for callers with no shell to ask and for the
 /// shell a front end boots.
 ///
@@ -75,7 +70,7 @@ pub fn user() -> Option<String> {
     reason = "ral's own config/data live where the tool is installed: a script's env overlay must not relocate them"
 )]
 pub fn xdg(kind: XdgKind) -> Option<PathBuf> {
-    resolve_xdg(kind, home().as_deref()).filter(|p| is_absolute(p))
+    resolve_xdg_in(host_var, kind, home().as_deref()).filter(|p| is_absolute(p))
 }
 
 /// `~/<name>` (e.g. `home_dot(".ralrc")`), the single-file convention rc

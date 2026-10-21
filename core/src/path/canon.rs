@@ -1,8 +1,9 @@
 //! Stage 3 of path resolution: `realpath(3)`, in two flavours named by what
 //! they do when the path does not exist.
 //!
-//! [`canonicalise_strict`] errors, [`canonicalise_lenient`] resolves the
-//! longest existing ancestor and re-appends the tail.  Every module needing
+//! [`canonicalise_strict`] errors, [`canonicalise_lenient`] is the walk under
+//! [`Missing::Tolerate`](super::walk::Missing): it resolves what exists and
+//! appends the missing tail lexically.  Every module needing
 //! canonicalisation comes through one of them, so the choice is visible at
 //! the call site.  [`match_variants`] is the sandbox-side companion: the
 //! several names one VFS object answers to.
@@ -41,64 +42,20 @@ pub(crate) fn canonicalise_strict(p: &Path) -> std::io::Result<PathBuf> {
     Ok(real)
 }
 
-/// Resolves the longest existing prefix of `p` and re-appends the unresolved
-/// tail, falling back to `p` itself when no ancestor resolves.  Grant prefixes
-/// need this: a `fs.write` grant may name a build output that does not exist
-/// yet, and a grant authored `/tmp/foo` must still match an access that
-/// resolves through the symlink to `/private/tmp/foo`.
+/// The real path of `p`, or the one it will have once its missing tail is
+/// created: the walk under [`Missing::Tolerate`](super::walk::Missing), so a
+/// policy names objects by the code that locates them.  Grant prefixes need
+/// this: a `fs.write` grant may name a build output that does not exist yet,
+/// and a grant authored `/tmp/foo` must still match an access that resolves
+/// through the symlink to `/private/tmp/foo`.
 ///
-/// The `fold_dots` first step is load-bearing, not tidiness: it stops a `..`
-/// in the unresolved tail from smuggling past the ancestor walk, so `/a/x/../y`
-/// gives `canon(/a)/y` and never `canon(/a)/x/y`.  Callers arriving through
-/// [`LexicalPath::canonicalise_lenient`](super::LexicalPath::canonicalise_lenient)
-/// are already folded; [`match_variants`] hands over a bare `Path`.
-///
-/// A path whose head `std::path` cannot parse
-/// ([`is_unparsed_head`](super::lex::is_unparsed_head)) has no ancestors to
-/// walk: `parent` would climb it to the current drive's root and answer for
-/// a path on that drive.  Unless the kernel resolves it whole, it is its own
-/// answer.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "canon: the lenient canonicaliser, an ancestor walk over `realpath(3)`"
-)]
+/// `p` is read as the kernel reads it: each `..` physically, after the
+/// links before it, a dangling link at its target.  A name no walk can start
+/// (relative, or with a head `std::path` cannot parse,
+/// [`is_unparsed_head`](super::lex::is_unparsed_head)) is its own lexical
+/// fold.
 pub(crate) fn canonicalise_lenient(p: &Path) -> PathBuf {
-    let folded = super::lex::fold_dots(p);
-    let folded = if folded.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        folded
-    };
-    let p = folded.as_path();
-    if let Ok(c) = std::fs::canonicalize(p) {
-        return c;
-    }
-    if super::lex::is_unparsed_head(p) {
-        return folded;
-    }
-    let mut trail: Vec<std::ffi::OsString> = Vec::new();
-    let mut cursor = p;
-    loop {
-        if let Ok(c) = std::fs::canonicalize(cursor) {
-            let mut resolved = c;
-            for seg in trail.iter().rev() {
-                resolved.push(seg);
-            }
-            return resolved;
-        }
-        match cursor.parent() {
-            Some(parent) => {
-                if let Some(name) = cursor.file_name() {
-                    trail.push(name.to_os_string());
-                }
-                if parent.as_os_str().is_empty() {
-                    return p.to_path_buf();
-                }
-                cursor = parent;
-            }
-            None => return p.to_path_buf(),
-        }
-    }
+    super::walk::resolve_lenient(p)
 }
 
 /// Every path string by which a kernel sandbox MAC hook might present the same
@@ -254,6 +211,87 @@ mod tests {
         let probe = Path::new("/tmp").join(suffix);
         let out = canonicalise_lenient(&probe);
         assert!(out.ends_with(suffix), "got {out:?}");
+    }
+
+    /// A tempdir fixture as the walk resolves it, and a name under it.
+    #[cfg(unix)]
+    fn fixture() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir_all(dir.join("deep/dir")).unwrap();
+        std::fs::write(dir.join("file"), "").unwrap();
+        std::os::unix::fs::symlink("file", dir.join("to_file")).unwrap();
+        std::os::unix::fs::symlink("deep/dir", dir.join("link")).unwrap();
+        std::os::unix::fs::symlink("absent", dir.join("dangling")).unwrap();
+        (tmp, dir)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lenient_resolves_a_dangling_leaf_link_to_its_target() {
+        let (_tmp, dir) = fixture();
+        assert_eq!(
+            canonicalise_lenient(&dir.join("dangling")),
+            dir.join("absent")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lenient_takes_dotdot_physically_and_folds_a_missing_tail() {
+        let (_tmp, dir) = fixture();
+        assert_eq!(
+            canonicalise_lenient(&dir.join("link/../x")),
+            dir.join("deep/x")
+        );
+        assert_eq!(
+            canonicalise_lenient(&dir.join("missing/../x")),
+            dir.join("x")
+        );
+    }
+
+    /// A link cycle is its own fold.
+    #[cfg(unix)]
+    #[test]
+    fn lenient_folds_a_link_cycle() {
+        let (_tmp, dir) = fixture();
+        std::os::unix::fs::symlink("b", dir.join("a")).unwrap();
+        std::os::unix::fs::symlink("a", dir.join("b")).unwrap();
+        assert_eq!(canonicalise_lenient(&dir.join("a")), dir.join("a"));
+    }
+
+    /// A `..` in a missing tail never pops the walked prefix.
+    #[cfg(unix)]
+    #[test]
+    fn lenient_dotdot_in_a_missing_tail_keeps_the_walked_prefix() {
+        let (_tmp, dir) = fixture();
+        assert_eq!(
+            canonicalise_lenient(&dir.join("missing/../../x")),
+            dir.join("x")
+        );
+    }
+
+    /// Policy matching and access resolve a name by the same code.
+    #[cfg(unix)]
+    #[test]
+    fn lenient_agrees_with_the_walk() {
+        use crate::path::walk::{Leaf, walk};
+        let (_tmp, dir) = fixture();
+        let cwd = crate::path::CwdPath::new(dir.clone()).unwrap();
+        let env = crate::types::EnvVars::new();
+        let resolver = crate::path::Resolver::at(&env, &cwd);
+        for rel in [
+            "file",
+            "to_file",
+            "link/x",
+            "dangling",
+            "link/../file",
+            "deep/dir/..",
+        ] {
+            let p = dir.join(rel);
+            let walked = walk(&resolver.anchor(&p), Leaf::Resolve).unwrap();
+            assert_eq!(canonicalise_lenient(&p), walked.real(), "{rel}");
+        }
     }
 
     #[test]

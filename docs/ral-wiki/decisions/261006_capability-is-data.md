@@ -61,10 +61,10 @@ that took a `Context`.
   check, with no `Mooring`, so on the trail alone. A head admission passes
   its `Mooring` to the same door and so broadcasts.
 - **A grant string becomes a `FrozenPath` in `guard::freeze`**, against one
-  `FreezeCtx` (`FreezeCtx::of(&Shell)`, owned `home` and `cwd`): `path`,
+  `FreezeCtx` (`FreezeCtx::of(&Shell)`, owned `env` and `cwd`): `path`,
   `paths`, `absolute`. `FrozenPath::from_surface` is the one minting door, and
   the `xdg:` escape guard asks the fs guard's own question,
-  `from_surface(home).contains::<Allow>(resolved.real_path())`. `PolicyError`
+  `from_surface(home).contains::<Allow>(resolved.real().as_path())`. `PolicyError`
   and the `gitdir:` refusals live there, `decode` and `SpawnGrant` beside it.
 
 ### Rejected

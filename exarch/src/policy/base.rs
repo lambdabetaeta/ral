@@ -41,8 +41,8 @@ pub(super) fn resolve_base(name: &str, ctx: &FreezeCtx) -> Result<Capabilities, 
             ));
         }
     };
-    let cwd = ral_core::path::CwdPath::new(ctx.cwd.clone()).map_err(|e| e.to_string())?;
-    let mut shell = ral_core::HostSurface::default().shell(TerminalState::default(), cwd);
+    let mut shell =
+        ral_core::HostSurface::default().shell(TerminalState::default(), ctx.cwd().clone());
     let origin = SourceOrigin::named(format!("<built-in:{name}>"));
     let mut caps = ral_core::load::profile::load_capabilities_from_str(
         &ral_core::types::Mooring::adrift(),
@@ -112,6 +112,16 @@ mod tests {
     #[cfg(unix)]
     use std::path::Path;
 
+    /// A freeze anchor whose overlay binds `HOME` alone, at `cwd`.
+    fn ctx_at(home: &str, cwd: impl AsRef<std::path::Path>) -> FreezeCtx {
+        let cwd = ral_core::path::CwdPath::new(cwd.as_ref().to_path_buf())
+            .expect("a fixture cwd is absolute");
+        FreezeCtx::at(
+            std::iter::once(("HOME", home)).collect::<ral_core::types::EnvVars>(),
+            cwd,
+        )
+    }
+
     /// Parse *and* freeze a bake-in: the loader resolves places, so a failure
     /// here is malformed source, a refused payload, or an xdg escape.
     fn load(name: &str, text: &str, ctx: &FreezeCtx) -> Capabilities {
@@ -162,7 +172,7 @@ mod tests {
     #[cfg(unix)]
     fn object(path: &Path) -> String {
         let cwd = ral_core::test_helper::process_cwd();
-        let real = ral_core::path::Resolver::at(None, &cwd)
+        let real = ral_core::path::Resolver::at(&ral_core::types::EnvVars::new(), &cwd)
             .anchor(path)
             .canonicalise_lenient();
         ral_core::path::shown(real)
@@ -172,7 +182,7 @@ mod tests {
     #[cfg(unix)]
     fn host_real(name: &str) -> Option<String> {
         let path = std::env::var("PATH").ok()?;
-        let hit = ral_core::path::locate(name, Some(&path), ral_core::path::SearchCwd::nowhere())?;
+        let hit = ral_core::path::locate(name, Some(&path), None)?;
         Some(object(&hit))
     }
 
@@ -196,10 +206,7 @@ mod tests {
     #[test]
     fn bakeins_parse() {
         let home = host_home();
-        let ctx = FreezeCtx {
-            home: Some(home),
-            cwd: "/".into(),
-        };
+        let ctx = ctx_at(&home, "/");
         for (name, text) in [
             ("minimal", MINIMAL_RAL),
             ("reasonable", REASONABLE_RAL),
@@ -221,10 +228,7 @@ mod tests {
     #[test]
     fn bakeins_parse_on_windows() {
         let home = host_home();
-        let ctx = FreezeCtx {
-            home: Some(home),
-            cwd: r"C:\work".into(),
-        };
+        let ctx = ctx_at(&home, r"C:\work");
         for (name, text) in [
             ("minimal", MINIMAL_RAL),
             ("reasonable", REASONABLE_RAL),
@@ -243,10 +247,7 @@ mod tests {
     #[test]
     fn minimal_drops_foreign_rooted_grants_on_windows() {
         let home = host_home();
-        let ctx = FreezeCtx {
-            home: Some(home),
-            cwd: r"C:\work".into(),
-        };
+        let ctx = ctx_at(&home, r"C:\work");
         let caps = load("minimal", MINIMAL_RAL, &ctx);
         let fs = caps.fs.as_ref().expect("minimal declares fs");
         assert!(
@@ -266,10 +267,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn confined_is_offline_subpath_only_no_home_reads() {
-        let ctx = FreezeCtx {
-            home: Some("/h".into()),
-            cwd: "/work/proj".into(),
-        };
+        let ctx = ctx_at("/h", "/work/proj");
         let caps = load("confined", CONFINED_RAL, &ctx);
         assert_eq!(caps.net, Some(Net::Offline), "confined must have net off");
         let exec = caps.exec.as_ref().expect("confined declares exec");
@@ -302,10 +300,7 @@ mod tests {
     #[test]
     fn read_only_does_not_write_cwd() {
         let home = host_home();
-        let ctx = FreezeCtx {
-            home: Some(home),
-            cwd: "/work/proj".into(),
-        };
+        let ctx = ctx_at(&home, "/work/proj");
         let caps = load("read-only", READ_ONLY_RAL, &ctx);
         let fs = caps.fs.as_ref().expect("read-only declares fs");
         assert!(
@@ -320,10 +315,7 @@ mod tests {
 
     #[test]
     fn dangerous_is_root() {
-        let ctx = FreezeCtx {
-            home: Some("/h".into()),
-            cwd: "/".into(),
-        };
+        let ctx = ctx_at("/h", "/");
         assert_eq!(
             load("dangerous", DANGEROUS_RAL, &ctx),
             Capabilities::default()
@@ -336,10 +328,7 @@ mod tests {
     #[test]
     fn reasonable_carries_xdg_bin_subpath_in_exec() {
         let home = host_home();
-        let ctx = FreezeCtx {
-            home: Some(home),
-            cwd: "/".into(),
-        };
+        let ctx = ctx_at(&home, "/");
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
         let exec = caps.exec.as_ref().expect("reasonable should declare exec");
         let xdg_bin = frozen(&xdg(XdgKind::Bin, "."), &ctx);
@@ -358,10 +347,7 @@ mod tests {
     fn minimal_and_reasonable_carry_cwd_and_tempdir_sigils() {
         let home = host_home();
         let cwd = Path::new("/work/proj");
-        let ctx = FreezeCtx {
-            home: Some(home),
-            cwd: cwd.to_path_buf(),
-        };
+        let ctx = ctx_at(&home, cwd);
         // Freeze folds away the trailing separator macOS `$TMPDIR` carries, so
         // compare in the same normal form the frozen keys hold.
         let normal = |p: &str| ral_core::path::FrozenPath::from_surface(p).into_string();
@@ -403,10 +389,7 @@ mod tests {
     fn freeze_admits_relative_exec_under_cwd_sigil() {
         let work = std::path::Path::new("/work/proj");
         let home = host_home();
-        let ctx = FreezeCtx {
-            home: Some(home),
-            cwd: work.to_path_buf(),
-        };
+        let ctx = ctx_at(&home, work);
         let caps = load("minimal", MINIMAL_RAL, &ctx);
 
         assert!(
@@ -426,10 +409,7 @@ mod tests {
             return;
         }
         let home = host_home();
-        let ctx = FreezeCtx {
-            home: Some(home),
-            cwd: "/".into(),
-        };
+        let ctx = ctx_at(&home, "/");
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
         assert!(
             caps.exec
@@ -498,10 +478,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reasonable_and_minimal_write_no_user_cache() {
-        let ctx = FreezeCtx {
-            home: Some(host_home()),
-            cwd: "/".into(),
-        };
+        let ctx = ctx_at(&host_home(), "/");
         let cache = frozen(&xdg(XdgKind::Cache, "."), &ctx);
         for (name, text) in [("minimal", MINIMAL_RAL), ("reasonable", REASONABLE_RAL)] {
             let fs = load(name, text, &ctx).fs.expect("declares fs");
@@ -521,10 +498,7 @@ mod tests {
     #[test]
     fn reasonable_and_read_only_admit_git() {
         let home = host_home();
-        let ctx = FreezeCtx {
-            home: Some(home),
-            cwd: "/".into(),
-        };
+        let ctx = ctx_at(&home, "/");
         let gitconfig = frozen(&Place::Home(".gitconfig".into()), &ctx);
         for (name, text) in [("reasonable", REASONABLE_RAL), ("read-only", READ_ONLY_RAL)] {
             let caps = load(name, text, &ctx);
@@ -551,10 +525,7 @@ mod tests {
     #[test]
     fn minimal_admits_system_git_not_homebrew() {
         let home = host_home();
-        let ctx = FreezeCtx {
-            home: Some(home),
-            cwd: "/work".into(),
-        };
+        let ctx = ctx_at(&home, "/work");
         assert!(
             admits(load("minimal", MINIMAL_RAL, &ctx), "/usr/bin/git"),
             "minimal admits the system git via the /usr/bin/ subpath"
@@ -589,10 +560,7 @@ mod tests {
     #[test]
     fn git_extension_extends_into_git_capable_profile() {
         let home = host_home();
-        let ctx = FreezeCtx {
-            home: Some(home),
-            cwd: "/".into(),
-        };
+        let ctx = ctx_at(&home, "/");
         let gitconfig = frozen(&Place::Home(".gitconfig".into()), &ctx);
         let xdg_config_git = frozen(&xdg(XdgKind::Config, "git"), &ctx);
 
@@ -644,10 +612,7 @@ mod tests {
     #[test]
     fn a_positive_extension_of_an_unlisted_target_is_admitted() {
         let home = host_home();
-        let ctx = FreezeCtx {
-            home: Some(home.clone()),
-            cwd: "/work".into(),
-        };
+        let ctx = ctx_at(&home, "/work");
         let tool = object(&std::path::PathBuf::from(&home).join("unlisted-tool"));
         let minimal = load("minimal", MINIMAL_RAL, &ctx);
         assert!(!admits(minimal.clone(), &tool), "{tool} is not minimal's");
@@ -667,10 +632,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn neither_an_exact_file_nor_a_deeper_directory_reopens_an_exclusion() {
-        let ctx = FreezeCtx {
-            home: Some(host_home()),
-            cwd: "/work".into(),
-        };
+        let ctx = ctx_at(&host_home(), "/work");
         for source in [
             "return [exec: [allow: [`absolute /usr/bin/bash]]]",
             "return [exec: [allow: [`dir `absolute /usr/bin]]]",
@@ -690,10 +652,7 @@ mod tests {
     #[test]
     fn verbs_join_by_union() {
         use ral_core::capability::ShellVerb;
-        let ctx = FreezeCtx {
-            home: Some(host_home()),
-            cwd: "/work".into(),
-        };
+        let ctx = ctx_at(&host_home(), "/work");
         let base = Capabilities {
             shell: Some([ShellVerb::Chdir].into()),
             ..Capabilities::default()
@@ -712,10 +671,7 @@ mod tests {
     #[test]
     #[allow(clippy::disallowed_methods, reason = "[test] scratch executable")]
     fn a_run_allowance_beside_every_is_readable_under_an_fs_only_base() {
-        let ctx = FreezeCtx {
-            home: Some(host_home()),
-            cwd: "/work".into(),
-        };
+        let ctx = ctx_at(&host_home(), "/work");
         let base = Capabilities {
             fs: Some(ral_core::capability::FsPolicy {
                 read_prefixes: vec![frozen(&Place::Absolute("/work".into()), &ctx)],
@@ -746,13 +702,10 @@ mod tests {
         // Absolute on every platform, unlike the `/work` literal the
         // `cfg(unix)`-gated tests use — Windows reads that as rootless.
         let cwd = std::env::temp_dir();
-        let ctx = FreezeCtx {
-            home: Some(home),
-            cwd,
-        };
+        let ctx = ctx_at(&home, cwd);
         let roots = ral_core::guard::toolchains::expand(
             ral_core::guard::toolchains::Toolchain::System,
-            ctx.home.as_deref(),
+            Some(&home),
         )
         .expect("the system roots expand");
         for (name, text) in [
@@ -768,7 +721,9 @@ mod tests {
                 .as_ref()
                 .unwrap_or_else(|| panic!("{name} should declare exec"));
             for root in &roots {
-                let normalized = ral_core::path::FrozenPath::from_surface(root).into_string();
+                let normalized =
+                    ral_core::path::FrozenPath::from_surface(ral_core::path::utf8(root).unwrap())
+                        .into_string();
                 assert!(
                     dirs(exec).any(|(p, v)| p == normalized && v),
                     "{name} should allow the live system tool root {normalized}"
@@ -789,10 +744,7 @@ mod tests {
     fn every_grantable_base_settles_the_bundled_tools() {
         let home = host_home();
         let cwd = std::env::temp_dir();
-        let ctx = FreezeCtx {
-            home: Some(home),
-            cwd,
-        };
+        let ctx = ctx_at(&home, cwd);
         for (name, text) in [
             ("reasonable", REASONABLE_RAL),
             ("edit-only", EDIT_ONLY_RAL),
@@ -823,10 +775,7 @@ mod tests {
     #[test]
     fn reasonable_drops_unix_only_bundled_tool_grants_off_unix() {
         let home = host_home();
-        let ctx = FreezeCtx {
-            home: Some(home),
-            cwd: "/".into(),
-        };
+        let ctx = ctx_at(&home, "/");
         let mut caps = load("reasonable", REASONABLE_RAL, &ctx);
         {
             let exec = caps.exec.as_ref().expect("reasonable declares exec");

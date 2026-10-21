@@ -162,10 +162,10 @@ mod tests {
     }
 
     fn ctx() -> FreezeCtx {
-        FreezeCtx {
-            home: Some("/h".into()),
-            cwd: "/".into(),
-        }
+        FreezeCtx::at(
+            std::iter::once(("HOME", "/h")).collect::<crate::types::EnvVars>(),
+            crate::path::CwdPath::new("/".into()).expect("a fixture cwd is absolute"),
+        )
     }
 
     #[test]

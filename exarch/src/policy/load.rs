@@ -63,5 +63,7 @@ fn load<T>(path: &Path, flag: &str, read: impl FnOnce() -> Result<T, Break>) -> 
 /// Anchor `p`, a path the host was handed on the command line, at `cwd`
 /// unless it is already absolute: see [`path::Resolver::anchor`].
 pub(super) fn absolute_in(cwd: &path::CwdPath, p: &Path) -> PathBuf {
-    path::Resolver::at(None, cwd).anchor(p).into_inner()
+    path::Resolver::at(&ral_core::types::EnvVars::new(), cwd)
+        .anchor(p)
+        .into_inner()
 }

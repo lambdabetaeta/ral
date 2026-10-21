@@ -20,9 +20,9 @@ use ral_core::capability::{
     Axis, Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy, GrantStack,
 };
 use ral_core::guard::freeze::{FreezeCtx, host_absolute};
-use ral_core::host;
 use ral_core::path::FrozenPath;
 use ral_core::terminal::TerminalState;
+use ral_core::types::EnvVars;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -46,10 +46,6 @@ use std::path::{Path, PathBuf};
 /// # Errors
 /// Unknown `base_name`, a profile that fails to load, or an exarch binary
 /// that cannot be named.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "host-env: capability profiles freeze against the launching user's real home; no shell overlay exists yet"
-)]
 pub fn for_invocation(
     cwd: &Path,
     base_name: &str,
@@ -63,10 +59,7 @@ pub fn for_invocation(
     let mut load_shell =
         ral_core::HostSurface::default().shell(TerminalState::default(), anchor.clone());
 
-    let ctx = FreezeCtx {
-        home: host::home(),
-        cwd: cwd.to_path_buf(),
-    };
+    let ctx = FreezeCtx::at(EnvVars::new(), anchor.clone());
 
     let mut ceiling: Capabilities = resolve_base(base_name, &ctx)?;
     if let Some(path) = extension {
@@ -152,16 +145,9 @@ pub(crate) const SPAWN_BASES: [&str; 4] = ["confined", "read-only", "edit-only",
 ///
 /// # Errors
 /// Unknown `base_name`.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "host-env: the child's base freezes against the launching user's real home, like for_invocation's"
-)]
 pub fn base_layer(base_name: &str, cwd: &Path) -> Result<Capabilities, String> {
-    let ctx = FreezeCtx {
-        home: host::home(),
-        cwd: cwd.to_path_buf(),
-    };
-    resolve_base(base_name, &ctx)
+    let anchor = ral_core::path::CwdPath::new(cwd.to_path_buf()).map_err(|e| e.to_string())?;
+    resolve_base(base_name, &FreezeCtx::at(EnvVars::new(), anchor))
 }
 
 /// A deny layer carving `paths` out of an otherwise-unrestricted fs policy:
@@ -232,7 +218,7 @@ mod tests {
             for_invocation(&cwd, "dangerous", None, std::slice::from_ref(&path)).unwrap();
 
         let here = ral_core::test_helper::process_cwd();
-        let rp = ral_core::path::Resolver::at(None, &here).anchor(&path);
+        let rp = ral_core::path::Resolver::at(&EnvVars::new(), &here).anchor(&path);
         assert!(
             !stack.admits_fs(&ral_core::capability::FsOp::Write, &rp),
             "restrict file path should be write-denied"

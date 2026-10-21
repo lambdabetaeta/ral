@@ -398,7 +398,7 @@ clauses after the positive ones.
   and, for negative evidence alone, a `Name` veto; a path key a `File`, a dir key
   a `Dir`; `every` the scope `Any`. A path key splits its polarities: the
   positive bit at the real path frozen at decode, the negative at the one its
-  surface reaches now (`RealPath::live`); a key with Both yields both entries,
+  surface reaches now (`FrozenPath::live_real`); a key with Both yields both entries,
 possibly at different paths. The veto carries only the negative bit, since a
 positive one would assert support for every executable sharing the basename: an
 allowance by name leaves no veto entry at all, and Both leaves exactly Deny, the
@@ -648,7 +648,7 @@ stored side. *Respelled* marks a refusal that names the excluded spelling.
 ### Exec identities
 
 - **A bare key is the file the *host* `PATH` finds plus the bundled tool of
-  that name**, walked with `SearchCwd::nowhere` on the process's own `PATH`,
+  that name**, walked with no cwd (`None`) on the process's own `PATH`,
   never a scoped override: a planted `/tmp/evil/rg` inherits nothing from
   `rg: allow`, and `git: allow` admits `/usr/bin/git` typed as a path.
 - **A bare exclusion is also a veto on its `command_name_key`**, so it stops an absolute `/bin/bash` and a link to it alike.

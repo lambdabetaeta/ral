@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 28d06d78
-generated_at_date: 2026-10-11
+generated_at_commit: f56fff48
+generated_at_date: 2026-10-21
 covers_paths: [ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/keybinding.rs, ral/src/repl/enquiry.rs]
 ---
 

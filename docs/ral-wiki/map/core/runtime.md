@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 3bf43d16fc35212e3a3b354a91ffa2fcac136724
-generated_at_date: 2026-10-19
+generated_at_commit: f56fff48
+generated_at_date: 2026-10-21
 covers_paths: [core/src/runtime.rs, core/src/runtime/]
 ---
 
@@ -37,7 +37,7 @@ evaluator item; the evaluator reaches it at
   ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
 - `redirect.rs` — the doors that open a redirect target (`open_write`,
   `open_read`, `install_stdin_redirect`, and `Shell::atomic_write`, which
-  every host write below the redirect frame shares), over `path::stage`'s pure
+  every host write below the redirect frame shares), over `redirect/stage.rs`'s pure
   `PendingWrite` and `Located::stage`/`preview`: staging a write is the path's,
   judging and committing it the shell's. `redirect/scope.rs` is the
   `RedirectState` lifecycle (open, route fd 1/2 through the shell's sinks,
@@ -59,8 +59,8 @@ evaluator item; the evaluator reaches it at
   for [[map/core/builtins|bundled coreutils]]. `foreground.rs` decides once:
   `ForegroundDecision(PgidPolicy)`, `NewLeader` being exactly the foreground.
   - **The program and the 126/127 verdict are two projections of one `PATH`
-    walk.** `Head::resolve` calls `path::search` once, anchored through
-    `Context::search_cwd`, the shell's one cwd cell; a miss is
+    walk.** `Head::resolve` calls `path::search` once, anchored at
+    `Context::cwd`, the shell's one cwd cell; a miss is
     `Missing::NotFound` (keeping the file a path looked for, so the refusal
     can offer the extension it lacks), a hit lacking `+x`
     `Missing::NotExecutable`, and

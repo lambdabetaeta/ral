@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 002c654a
-verified_at_date: 2026-10-13
-anchors: [locate, walk, Located, check_fs_exact, collision_key, is_discard, check_device_name, admits_fs, FsRefusal, pinned_binary]
+verified_at_commit: f56fff48
+verified_at_date: 2026-10-21
+anchors: [locate, walk, resolve_lenient, Missing, Located, LexicalPath::folded, check_fs_exact, collision_key, is_discard, check_device_name, admits_fs, FsRefusal, pinned_binary]
 ---
 
 # Path judgment: what ral checks when it touches a file
@@ -16,13 +16,23 @@ for the filesystem. The code is `core/src/path/` and `core/src/guard/`.
 **A path is matched by a fixed rule:**
 
 1. expand sigils and `~`;
-2. lex;
-3. canonicalise, resolving symlinks;
+2. anchor against the logical cwd, `.`, `..` and a trailing separator kept;
+3. canonicalise leniently: the walk under `Missing::Tolerate`;
 4. match by prefix (`path_within`).
 
 Because ral canonicalises *before* it matches, a symlink or a `..` cannot lead
 out of a directory a grant scopes. This rule serves a read *by name*: a
 predicate, a listing, a module load.
+
+- **Anchoring is not folding.** A logical consumer (`cd`, `within [dir: …]`,
+  `absolute-path`, a display base) folds `.` and `..` explicitly
+  (`LexicalPath::folded`). What reaches the disk is handed unfolded
+  ([[decisions/261021_access-is-physical|access-is-physical]]).
+- **Stage 3 is the walk, tolerant of a missing tail.** It resolves each `..`
+  physically, after the links before it, and a dangling link at its target;
+  at the first name it cannot enter it appends the rest lexically. So a policy
+  and an open resolve a name by the same code, and a deny on a dangling link
+  names what a write through it creates.
 
 ## An open: a fifth stage, the walk
 
@@ -47,6 +57,10 @@ exist: every write is a `locate`.
   handle, with `FollowSymlinks::No`. So what was judged is what is touched: a
   dangling link is judged at its target, and a component swapped after the
   judgment is never followed.
+- **A directory is an object too.** The root, a name ending in a separator and
+  a trailing `..` locate the directory itself, through its own handle. A
+  separator demands a directory, a link's target carrying the demand, so
+  `file/` is the kernel's `ENOTDIR`; a write to a directory is its `EISDIR`.
 
 ## An allowance is frozen; an exclusion re-resolves
 

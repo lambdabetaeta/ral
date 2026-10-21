@@ -15,10 +15,15 @@ consultation and offers containment on the real form alone:
   (`walk.rs`) before the question is asked, so a link planted inside a granted
   region is matched where it lands
   ([[decisions/260906_object-not-name|object-not-name]]).
-- **exec — `RealPath::frozen`**, the one door from a prefix to the exec
-  table: path and dir keys enter `ExecRules` as their real forms, judged
+- **exec — `FrozenPath::real`**, the one door from a prefix to its real
+  form: path and dir keys enter `ExecRules` as their real forms, judged
   against a head's `realpath(3)` by `RealPath::within::<P>`, the rule's
   polarity choosing the identity.
+- **identity — native.** Both forms are native paths: a name that is not
+  Unicode is its own name under every identity, never the U+FFFD sibling it
+  decodes to. An allowance whose real form is not Unicode is refused at
+  freeze, since it is serialized and kept for good; an exclusion's live real
+  form is kept byte-exact, and holds.
 - **composition — `Table::meet`**, which joins exclusions and keeps an
   allowance where both layers support its own subject, judges the same real
   forms the in-process guard does. No sweep evicts an allowance: an exclusion

@@ -4133,11 +4133,14 @@ text output of `ls` or `stat`:
 `absolute-path` is lexical: it resolves `~`, `.`, and `..` against the logical
 working directory without requiring the result to exist. `resolve-path`
 canonicalises through the filesystem, follows symbolic links, and requires an
-existing path. `abbreviate-home` is for display: it folds a leading home
-directory to `~`. Filesystem reads and creations are checked against the
-active filesystem grant. `temp-dir` and `temp-file` return the path they
-create as a string, so they refuse a temp directory whose real path is not
-valid UTF-8, before creating anything in it.
+existing path. `resolve-path` reads `..` as the filesystem does, after the
+symbolic links before it; a path ending in a separator names a directory, and a
+file or a link to a file under that name is refused, as the operating system
+refuses it; `/` is a directory every query may ask about. `abbreviate-home` is
+for display: it folds a leading home directory to `~`. Filesystem reads and
+creations are checked against the active filesystem grant. `temp-dir` and
+`temp-file` return the path they create as a string, so they refuse a temp
+directory whose real path is not valid UTF-8, before creating anything in it.
 
 A relative path is read against the working directory, which is always an
 absolute path, and on Windows one on a drive or a share: `cd` and
@@ -4147,6 +4150,10 @@ reads them. `\x` and `/x` name `x` at the root of the working directory's
 drive or share. `C:x` names `x` in the working directory when that is on
 `C:`, and otherwise in the current directory Windows keeps for `C:` in the ral
 process, or at `C:\` when it keeps none.
+
+A relative `RAL_PATH` entry is read against the working directory, and `xdg:`
+reads the `XDG_*_HOME` of the effective environment, `within [env: …]`
+included.
 
 On Windows, every path ral returns or prints is `/`-separated, never
 `\`-separated: `cwd`, `home`, `~`, `$SCRIPT`, `absolute-path`,

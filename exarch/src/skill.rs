@@ -66,7 +66,8 @@ pub fn discover_metadata(
 ) -> Vec<Skill> {
     // No shell: every candidate is `cwd`/`config_dir` joined, and so the
     // resolver's home is never consulted.
-    let resolver = ral_core::path::Resolver::at(None, cwd);
+    let env = ral_core::types::EnvVars::new();
+    let resolver = ral_core::path::Resolver::at(&env, cwd);
     let mut skills = Vec::new();
     for (name, dir) in discover_all(cwd.as_path(), config_dir) {
         let sk_md = dir.join("SKILL.md");

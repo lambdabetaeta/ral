@@ -246,7 +246,7 @@ pub(crate) fn confine(
     // ALL APPLICATION PACKAGES grants.
     let rules = projection.fs.rules().cloned().unwrap_or_default();
     refuse_universal_prefix(&rules)?;
-    let denied: Vec<RealPath> = rules.deny.iter().map(RealPath::frozen).collect();
+    let denied: Vec<RealPath> = rules.deny.iter().map(|p| p.real().clone()).collect();
     let readwrite: Vec<RealPath> = rules.write.iter().map(real_path).collect();
     let readonly: Vec<RealPath> = rules
         .read
@@ -369,7 +369,7 @@ pub(crate) fn confine(
     if !rules.deny.is_empty() {
         let access = dacl::ContainerAccess::of(profile_sid, &capabilities)?;
         for denied in &rules.deny {
-            dacl::ensure_unreachable(RealPath::frozen(denied).as_path(), &access, cancel)?;
+            dacl::ensure_unreachable(denied.real().as_path(), &access, cancel)?;
         }
     }
     crate::dbg_trace!(
@@ -441,10 +441,10 @@ fn ensure_allows(
 fn refuse_universal_prefix(rules: &FsRules) -> Result<(), Refusal> {
     let bare = |p: &Path| crate::path::lex::is_bare_root(p, crate::path::PathRules::HOST);
     let universal = |s: &FsScope| match s {
-        FsScope::Prefix(p) => p.is_root() || bare(RealPath::frozen(p).as_path()),
+        FsScope::Prefix(p) => p.is_root() || bare(p.real().as_path()),
         FsScope::Place(r) => bare(r.as_path()),
     };
-    let excluded = |p: &FrozenPath| p.is_root() || bare(RealPath::frozen(p).as_path());
+    let excluded = |p: &FrozenPath| p.is_root() || bare(p.real().as_path());
     if !rules.read.iter().chain(&rules.write).any(universal) && !rules.deny.iter().any(excluded) {
         return Ok(());
     }
@@ -532,10 +532,7 @@ fn listing(dir: &RealPath) -> Result<Listing, Refusal> {
 /// A scope's frozen real path, which the stamps and capability names key on,
 /// never re-resolved.
 fn real_path(scope: &FsScope) -> RealPath {
-    match scope {
-        FsScope::Prefix(p) => RealPath::frozen(p),
-        FsScope::Place(r) => r.clone(),
-    }
+    scope.real().clone()
 }
 
 /// A region's frozen real paths.

@@ -23,7 +23,6 @@
 use ral_core::carrier::Transport;
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::{Datum, exact_keys, field};
-use ral_core::path::SearchCwd;
 use ral_core::path::complete::{PartialPath, Tilde, spell_entry};
 use ral_core::protocol::probe::PathEntry;
 use ral_core::record;
@@ -105,7 +104,7 @@ impl Sources<'_> {
                 .path
                 .as_deref()
                 .map(|path| {
-                    ral_core::path::path_dirs(path, SearchCwd::nowhere())
+                    ral_core::path::path_dirs(path, None)
                         .into_iter()
                         .flat_map(|dir| entries(self.engine, &dir))
                         .filter_map(|e| e.exec.then_some(e.name))

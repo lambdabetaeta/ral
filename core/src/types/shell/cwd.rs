@@ -1,6 +1,6 @@
 //! Logical working directory and path-resolution verbs.
 //!
-//! `cd` moves the shell-owned [`Cwd`] on `context.cwd`, never the process cwd:
+//! `cd` moves the shell-owned [`CwdPath`] on `context.cwd`, never the process cwd:
 //! that one is OS-global, and a worker (`spawn`, `watch`) or a pipeline
 //! stage would see a sibling's `cd` as a sudden reorder.  Children still land right —
 //! `apply_env` in `core/src/runtime/command/process.rs` passes [`Shell::cwd`]
@@ -9,18 +9,7 @@
 use super::Shell;
 use crate::path::CwdPath;
 use crate::types::Error;
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-
-/// The working directory, one state cell: `cd` sets it, [`Shell::cwd`] gets
-/// it, and `within [dir: …]` is its local-state handler, restoring the cell on
-/// every exit.
-///
-/// It keeps no previous directory, hence no `OLDPWD`.  Never empty: a root
-/// shell is constructed at one ([`Shell::root`]), and a child inherits its
-/// parent's.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Cwd(pub(in crate::types::shell) CwdPath);
 
 impl Shell {
     /// The logical cwd, [`Context::launch_cwd`](super::Context::launch_cwd).
@@ -34,18 +23,18 @@ impl Shell {
     /// State the logical cwd outright, overriding the one the shell was
     /// constructed at, for a host that never `chdir`s the process.
     pub fn seed_cwd(&mut self, cwd: CwdPath) {
-        self.context.cwd = Cwd(cwd);
+        self.context.cwd = cwd;
     }
 
     /// `within [dir: …]`'s entry: the cell becomes `dir`, and the prior cell
     /// comes back for [`Self::restore_cwd`].  Not a `cd`, so no `chdir`
     /// authority is asked.
-    pub(crate) fn enter_cwd(&mut self, dir: CwdPath) -> Cwd {
-        std::mem::replace(&mut self.context.cwd, Cwd(dir))
+    pub(crate) fn enter_cwd(&mut self, dir: CwdPath) -> CwdPath {
+        std::mem::replace(&mut self.context.cwd, dir)
     }
 
     /// Put back a cell [`Self::enter_cwd`] saved, undoing every `cd` since.
-    pub(crate) fn restore_cwd(&mut self, saved: Cwd) {
+    pub(crate) fn restore_cwd(&mut self, saved: CwdPath) {
         self.context.cwd = saved;
     }
 
@@ -61,14 +50,14 @@ impl Shell {
         reason = "[silent:cwd-stat] `cd`: stats the resolved target to confirm it is a directory before updating the logical cwd; a directory-existence check, not turn-time model data I/O, raises no surface card."
     )]
     pub(crate) fn apply_chdir(&mut self, target: &str) -> Result<(), Error> {
-        let resolved = self.resolve(target);
+        let resolved = self.resolve(target).folded();
         let meta = std::fs::metadata(resolved.as_path())
             .map_err(|e| Error::new(format!("{}: {e}", resolved.shown())))?;
         if !meta.is_dir() {
             return Err(Error::new(format!("{}: not a directory", resolved.shown())));
         }
         let resolved = resolved.into_cwd().map_err(|e| Error::new(e.to_string()))?;
-        self.context.cwd = Cwd(resolved);
+        self.context.cwd = resolved;
         Ok(())
     }
 
@@ -93,11 +82,6 @@ impl Shell {
     /// the two to tell denied-but-installed from absent.
     pub(crate) fn locate_command(&self, name: &str) -> Option<PathBuf> {
         let env_path = self.context.env_overrides.get_or_host("PATH");
-        let cwd = self.cwd();
-        crate::path::locate(
-            name,
-            env_path.as_deref(),
-            crate::path::SearchCwd::of(cwd.as_path()),
-        )
+        crate::path::locate(name, env_path.as_deref(), Some(self.context.cwd()))
     }
 }

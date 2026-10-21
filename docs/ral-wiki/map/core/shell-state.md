@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e4025de9
-generated_at_date: 2026-10-17
+generated_at_commit: f56fff48
+generated_at_date: 2026-10-21
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
 
@@ -390,7 +390,7 @@ Methods on `Shell` live by concern, one submodule each:
 - `checks.rs` — forwarders to the
   [[map/core/capabilities|`capability::check_*(&Context, …)`]] decisions,
   splitting the disjoint context/audit borrow for the audit-bearing checks;
-- `cwd.rs` (`Cwd`, the one working-directory cell: `cd` sets it,
+- `cwd.rs` (the one working-directory cell, a `CwdPath` on `Context`: `cd` sets it,
   `enter_cwd`/`restore_cwd` save and restore it whole for `within [dir:]`, and
   `seed_cwd` lets an in-process front end whose working directory is not the
   process cwd state it directly), `inherit.rs` (the

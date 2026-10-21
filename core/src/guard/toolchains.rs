@@ -12,7 +12,7 @@
 //! [`expand`] is its live wrapper, which the freeze and the fs floor read.
 
 use super::freeze::{PolicyError, Selector, refuse_the_world};
-use crate::path::{Allow, FrozenPath, is_absolute, join_slash, path_entries, shown};
+use crate::path::{Allow, FrozenPath, is_absolute, join_slash, path_entries, shown, utf8};
 use crate::path::{XdgKind, resolve_xdg_in};
 use std::path::{Path, PathBuf};
 use strum::{EnumString, IntoStaticStr, VariantArray};
@@ -437,9 +437,13 @@ pub(crate) fn floor_in(
     exists: impl Fn(&Path) -> bool,
 ) -> Vec<PathBuf> {
     let held = home.map(FrozenPath::from_surface);
+    // A name that is not Unicode cannot be a grant, so it is no floor.
     let outside = |dir: &PathBuf| {
-        held.as_ref()
-            .is_none_or(|h| !h.contains::<Allow>(FrozenPath::from_surface(dir).real_path()))
+        utf8(dir).is_ok_and(|dir| {
+            held.as_ref().is_none_or(|h| {
+                !h.contains::<Allow>(FrozenPath::from_surface(dir).real().as_path())
+            })
+        })
     };
     FLOOR
         .into_iter()
@@ -885,7 +889,7 @@ mod tests {
         assert!(
             roots
                 .iter()
-                .any(|r| FrozenPath::from_surface(r).contains::<Allow>(cargo.real_path())),
+                .any(|r| FrozenPath::from_surface(r).contains::<Allow>(cargo.real().as_path())),
             "{roots:?}"
         );
     }

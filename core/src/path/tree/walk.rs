@@ -123,7 +123,7 @@ impl Walk {
             .context
             .resolver()
             .is_relative(named)
-            .then(|| shell.resolve(".").into_inner());
+            .then(|| shell.resolve(".").folded().into_inner());
         Admitted {
             sightings: self.sightings(shell.scope.clone()),
             base,

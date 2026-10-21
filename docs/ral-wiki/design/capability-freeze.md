@@ -81,7 +81,7 @@ Enforcement then re-asks the world.
   fs prefix or exec `Path`/`Dir` key, keeps the real path it was frozen to and
   is never re-frozen, so a symlink put in its place later redirects nothing. An
   exclusion re-freezes against the live disk on every question
-  (`FrozenPath::refreeze`; `RealPath::live` for exec), so it holds its object
+  (`FrozenPath::refreeze`; `FrozenPath::live_real` for exec), so it holds its object
   under any new spelling the moment one exists. A bare program name resolves
   afresh at each run.
 - **Freezing refuses a real path that is not Unicode**, since the frozen real

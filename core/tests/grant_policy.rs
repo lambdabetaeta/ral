@@ -36,13 +36,13 @@ fn names(entries: &[(&str, Evidence)]) -> impl Iterator<Item = (ExecKey, Evidenc
 fn paths(entries: &[(&str, Evidence)]) -> impl Iterator<Item = (ExecKey, Evidence)> {
     entries
         .iter()
-        .map(|(path, v)| (ExecKey::Path(FrozenPath::from_surface(host(path))), *v))
+        .map(|(path, v)| (ExecKey::Path(FrozenPath::from_surface(&host(path))), *v))
 }
 
 fn dirs(entries: &[(&str, bool)]) -> impl Iterator<Item = (ExecKey, Evidence)> {
     entries.iter().map(|(dir, v)| {
         (
-            ExecKey::Dir(FrozenPath::from_surface(host(dir))),
+            ExecKey::Dir(FrozenPath::from_surface(&host(dir))),
             if *v { Evidence::ALLOW } else { Evidence::DENY },
         )
     })
@@ -137,9 +137,7 @@ fn sandbox_projection_does_not_leak_outer_raw_prefix() {
     let mut shell = ral_core::test_helper::core_shell();
     let outer = Capabilities {
         fs: Some(FsPolicy {
-            read_prefixes: vec![FrozenPath::from_surface(
-                link.to_string_lossy().into_owned(),
-            )],
+            read_prefixes: vec![FrozenPath::from_surface(&link.to_string_lossy())],
             write_prefixes: Vec::new(),
             deny_paths: Vec::new(),
         }),
@@ -147,9 +145,7 @@ fn sandbox_projection_does_not_leak_outer_raw_prefix() {
     };
     let inner = Capabilities {
         fs: Some(FsPolicy {
-            read_prefixes: vec![FrozenPath::from_surface(
-                inner_dir.to_string_lossy().into_owned(),
-            )],
+            read_prefixes: vec![FrozenPath::from_surface(&inner_dir.to_string_lossy())],
             write_prefixes: Vec::new(),
             deny_paths: Vec::new(),
         }),

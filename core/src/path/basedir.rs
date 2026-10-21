@@ -2,9 +2,9 @@
 //!
 //! Everything that asks where the user keeps their config/data/… goes
 //! through [`resolve_xdg_in`], which is pure: it reads variables through a closure.
-//! [`crate::host::resolve_xdg`] closes it over the process environment, for
-//! [`crate::host::xdg`] (the host's own bases) and the `xdg:` grant sigil in
-//! [`crate::path::sigil`] with the overlay's home.
+//! [`crate::host::xdg`] closes it over the process environment (the host's own
+//! bases), and the `xdg:` sigil in [`crate::path::sigil`] and the freeze close it
+//! over an [`EnvVars`](crate::types::EnvVars).
 //!
 //! XDG everywhere: the Linux defaults (`.config`, `.local/share`, …) apply on
 //! every platform, macOS included.  An `XDG_*_HOME` override counts only when
@@ -58,8 +58,7 @@ impl XdgKind {
 ///
 /// `home` is the caller's, never a process-level `HOME` lookup, so a
 /// shell-scoped `HOME=` reaches here exactly as it reaches tilde expansion.
-/// The `XDG_*_HOME` vars themselves come from `env`: the process environment
-/// for [`crate::host::resolve_xdg`].
+/// The `XDG_*_HOME` vars themselves come from `env`.
 ///
 /// `None` when nothing absolute resolves: no home to default under, and no
 /// absolute override to stand in for one.  An unknown home is thus not the

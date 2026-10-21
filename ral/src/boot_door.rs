@@ -14,8 +14,8 @@ use ral_core::ty::{Row, Scheme, Ty, Typed as _};
 use ral_core::typecheck::Unifier;
 use ral_core::typecheck::builtins::{fun, mk_scheme, pure, thunk};
 use ral_core::types::{
-    Break, BuiltinBody, BuiltinEntry, DefaultPolicy, HookName, HookSig, Mooring, Settled, Status,
-    sig,
+    Break, BuiltinBody, BuiltinEntry, DefaultPolicy, EnvVars, HookName, HookSig, Mooring, Settled,
+    Status, sig,
 };
 use ral_core::{Shell, Value};
 use ral_core::{err, errln};
@@ -108,7 +108,7 @@ impl Boot {
             .iter()
             .map(|path| {
                 let anchored = match &cwd {
-                    Some(cwd) => Resolver::at(None, cwd).anchor(path).into_inner(),
+                    Some(cwd) => Resolver::at(&EnvVars::new(), cwd).anchor(path).into_inner(),
                     None if is_absolute(path) => path.clone(),
                     None => {
                         return Err(format!(

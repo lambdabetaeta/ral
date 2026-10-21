@@ -7,10 +7,11 @@
 //! XDG uses the Linux defaults on every platform, macOS included
 //! ([`crate::host`]).
 
-use crate::host::resolve_xdg;
+use crate::path::basedir::resolve_xdg_in;
 use crate::path::lex::join_relative;
 use crate::path::tilde::TildePath;
 use crate::path::{PathRules, XdgKind};
+use crate::types::EnvVars;
 
 /// Parse `xdg:NAME[/sub]` under `rules`, the name ending at a separator as
 /// `~` does: `/`, or `\` under Windows.  The subpath is everything after
@@ -73,8 +74,10 @@ pub(crate) fn literal_relative(name: &str) -> String {
 }
 
 /// Expand a `~` or `xdg:` head, or return `input` unchanged.  The runtime half
-/// of expansion: no filesystem access, and `home` is both the tilde root and the
-/// fallback when an XDG env var is unset.
+/// of expansion: no filesystem access.
+///
+/// `env.home()` is both the tilde root and the fallback when an `XDG_*_HOME`
+/// is unset; both read `env`, then the host.
 ///
 /// The expansion is native, in the host's own spelling, for the resolver to
 /// hand on to the OS: `~` as [`TildePath::expand`] expands it, and the `xdg:`
@@ -91,11 +94,14 @@ pub(crate) fn literal_relative(name: &str) -> String {
 /// The unexpanded literal is then anchored against `cwd` (`<cwd>/~/x`) rather
 /// than fabricating a root-anchored `/.gitconfig`.  A grant refuses the gap
 /// instead, in `guard::freeze::FreezeCtx::place`.
-pub fn expand_path_prefix(input: &str, home: Option<&str>) -> String {
+pub fn expand_path_prefix(input: &str, env: &EnvVars) -> String {
+    let home = || env.home();
     let expanded = match SigilHead::of(input) {
-        Some(SigilHead::Xdg(kind, sub)) => resolve_xdg(kind, home)
-            .and_then(|base| join_relative(base, sub.unwrap_or_default()).ok()),
-        Some(SigilHead::Tilde(t)) => home.map(|home| t.expand(home)),
+        Some(SigilHead::Xdg(kind, sub)) => {
+            resolve_xdg_in(|k| env.get_or_host(k), kind, home().as_deref())
+                .and_then(|base| join_relative(base, sub.unwrap_or_default()).ok())
+        }
+        Some(SigilHead::Tilde(t)) => home().map(|home| t.expand(&home)),
         Some(SigilHead::UnknownXdg) | None => None,
     };
     expanded
@@ -163,19 +169,32 @@ mod tests {
 
     #[test]
     fn tilde_expands_against_home() {
-        assert_eq!(expand_path_prefix("~/foo", Some("/h")), "/h/foo");
+        let env = std::iter::once(("HOME", "/h")).collect::<EnvVars>();
+        assert_eq!(expand_path_prefix("~/foo", &env), "/h/foo");
     }
 
     #[test]
     fn unknown_xdg_token_passes_through_unchanged() {
         // Runtime is permissive: the freeze turns a typo into an error; here
         // it only must not be silently rewritten.
-        assert_eq!(expand_path_prefix("xdg:cofnig", Some("/h")), "xdg:cofnig");
+        assert_eq!(
+            expand_path_prefix(
+                "xdg:cofnig",
+                &std::iter::once(("HOME", "/h")).collect::<EnvVars>()
+            ),
+            "xdg:cofnig"
+        );
     }
 
     #[test]
     fn ordinary_path_passes_through_unchanged() {
-        assert_eq!(expand_path_prefix("/abs/path", Some("/h")), "/abs/path");
+        assert_eq!(
+            expand_path_prefix(
+                "/abs/path",
+                &std::iter::once(("HOME", "/h")).collect::<EnvVars>()
+            ),
+            "/abs/path"
+        );
     }
 
     // Unix-only: the join yields `\h\.cache\foo` on Windows, so the `/foo` tail
@@ -183,9 +202,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn xdg_subpath_is_appended() {
-        // Only the tail is asserted: the base moves with `XDG_CACHE_HOME`.
-        let out = expand_path_prefix("xdg:cache/foo", Some("/h"));
-        assert!(out.ends_with("/foo"), "got {out}");
+        let env = [("HOME", "/h"), ("XDG_CACHE_HOME", "/c")]
+            .into_iter()
+            .collect::<EnvVars>();
+        assert_eq!(expand_path_prefix("xdg:cache/foo", &env), "/c/foo");
     }
 
     /// A drive, a share or a namespace head in the sub-path would re-root
@@ -205,7 +225,13 @@ mod tests {
             r"xdg:config/\\.\pipe\x",
             "xdg:config///x",
         ] {
-            assert_eq!(expand_path_prefix(input, Some(r"C:\h")), input);
+            assert_eq!(
+                expand_path_prefix(
+                    input,
+                    &std::iter::once(("HOME", r"C:\h")).collect::<EnvVars>()
+                ),
+                input
+            );
         }
     }
 }

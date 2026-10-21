@@ -5,16 +5,17 @@
 //! No open lives here.  Every one goes through [`Shell::locate`] into
 //! `path::walk`, so the object authorised is the object the handle then
 //! names — the door never re-walks a string the guard has already judged.
-//! Staging the write is pure and lives with the path (`path::stage`).
+//! Staging the write is pure and lives beside it (`stage`).
 
 pub(crate) mod scope;
+mod stage;
 
 use crate::capability::FsOp;
 use crate::fact::Read;
 use crate::ir::{StdinSource, WriteMode};
-use crate::path::stage::PendingWrite;
 use crate::path::{Located, walk::Kind};
 use crate::types::{Break, Error, Mooring, Observed, Settled, Shell};
+use stage::PendingWrite;
 use std::fs::File;
 
 /// A write redirect's target as opened, held until its frame settles so the

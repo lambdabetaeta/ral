@@ -265,6 +265,5 @@ program as stored.
 `Subject`, `holds`, `GrantStack::admit`/`admits`, `Admitted`),
 `core/src/guard/enforce.rs` (`check_exec`),
 `core/src/runtime/command/head.rs` (`Head`, `Missing`),
-`core/src/path/real.rs` (`RealPath`, `within::<P>`),
-`core/src/path/forms.rs` (`evicts`),
+`core/src/path/forms.rs` (`RealPath`, `within::<P>`, `evicts`),
 `core/src/path/which.rs` (`command_name_key`).

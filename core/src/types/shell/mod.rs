@@ -31,7 +31,6 @@ pub(crate) mod workers;
 use self::bindings::BindingLedger;
 pub use self::construct::{Bequest, Runtime};
 pub(crate) use self::construct::{Image, Terms};
-use self::cwd::Cwd;
 use self::detached::DetachPolicy;
 use self::modules::Modules;
 use self::workers::Roster;
@@ -45,6 +44,7 @@ use super::mooring::{Mooring, TerminalAccess};
 use super::sig;
 use crate::capability::GrantStack;
 use crate::io::{Io, WriteStopped};
+use crate::path::CwdPath;
 use crate::process::{CancelCause, DurableRoot, Scope};
 use crate::source::{CallSite, FileId, Source, SourceDb, SourceOrigin, Span};
 use crate::types::Cradle;
@@ -76,7 +76,7 @@ pub(crate) struct Context<H = HandlerStack> {
     /// The working-directory cell.  A fork copies it; a same-thread body
     /// shares it, so a `cd` there persists unless a `within [dir: …]` around
     /// it restores the cell.
-    cwd: Cwd,
+    cwd: CwdPath,
     /// Capability restrictions, innermost last.
     pub(crate) grants: GrantStack,
     /// `within [handlers: …, handler: …]` effect-handler stack, innermost last.

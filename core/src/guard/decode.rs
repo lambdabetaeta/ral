@@ -466,10 +466,10 @@ mod tests {
         } else {
             ("/h", "/work")
         };
-        FreezeCtx {
-            home: Some(home.into()),
-            cwd: cwd.into(),
-        }
+        FreezeCtx::at(
+            std::iter::once(("HOME", home)).collect::<crate::types::EnvVars>(),
+            crate::path::CwdPath::new(cwd.into()).expect("a fixture cwd is absolute"),
+        )
     }
 
     fn decode(value: &Value) -> Result<Capabilities, PolicyError> {

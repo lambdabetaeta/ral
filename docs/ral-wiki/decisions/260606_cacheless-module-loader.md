@@ -50,7 +50,7 @@ verbs), differing only in two intentional axes:
   routes through `evaluate_source`, and projects the top scope into a Map
   (dropping `_`-prefixed names).
 - *Path policy.* `use` resolves a module *by name* — script-relative, then a
-  `RAL_PATH` `find_file` fallback; `source` runs a *file by path*,
+  `RAL_PATH` fallback (`find_on_ral_path`); `source` runs a *file by path*,
   script-relative only. The distinction is the point and stays split.
 
 Folding `use` onto `evaluate_source` also retired its duplicated cycle guard,

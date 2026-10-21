@@ -47,7 +47,7 @@ impl SpawnGrant {
     pub fn layer(&self, narrow: GrantNarrower, ctx: &FreezeCtx) -> Result<Capabilities, String> {
         match self {
             Self::Inherit => Ok(Capabilities::root()),
-            Self::Base(name) => narrow(name, &ctx.cwd),
+            Self::Base(name) => narrow(name, ctx.cwd().as_path()),
             Self::Restrict(record) => {
                 decode_capability_map(&Value::from(record.clone()), "grant", ctx).map_err(|e| {
                     match e.hint {
@@ -93,10 +93,10 @@ mod tests {
     }
 
     fn cwd(cwd: &str) -> FreezeCtx {
-        FreezeCtx {
-            home: None,
-            cwd: cwd.into(),
-        }
+        FreezeCtx::at(
+            crate::types::EnvVars::new(),
+            crate::path::CwdPath::new(cwd.into()).expect("a fixture cwd is absolute"),
+        )
     }
 
     fn restrict(record: &Value) -> SpawnGrant {

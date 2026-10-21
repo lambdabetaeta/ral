@@ -175,7 +175,7 @@ What the kernel now reports:
 
 ## Where
 
-`core/src/capability/exec.rs` (`Program`), `core/src/path/real.rs`,
+`core/src/capability/exec.rs` (`Program`), `core/src/path/forms.rs`,
 `core/src/runtime/command/{head,process}.rs` (`Program::file`, `build_launch`),
 `core/src/process/launch.rs` (`Launch::new`), `core/src/sandbox/launch.rs`,
 `core/src/sandbox/warrant.rs` (`Slot`, `Confined`, `Warrant::confine`),

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d4741109
-generated_at_date: 2026-10-17
+generated_at_commit: f56fff48
+generated_at_date: 2026-10-21
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
 

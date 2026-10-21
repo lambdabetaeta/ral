@@ -1956,10 +1956,10 @@ mod self_layer {
         let crate::policy::Invocation { stack: parent, .. } =
             crate::policy::for_invocation(&f.cwd, "reasonable", Some(&f.extend), &[])
                 .expect("reasonable composes");
-        let ctx = ral_core::guard::freeze::FreezeCtx {
-            home: None,
-            cwd: f.cwd.clone(),
-        };
+        let ctx = ral_core::guard::freeze::FreezeCtx::at(
+            ral_core::types::EnvVars::new(),
+            ral_core::path::CwdPath::new(f.cwd.clone()).expect("the fixture cwd is absolute"),
+        );
         let place = |label: &str, path: &str| FOValue::Variant {
             label: label.into(),
             payload: Some(Box::new(FOValue::String { value: path.into() })),

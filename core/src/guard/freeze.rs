@@ -42,18 +42,20 @@
 //! given, `TMPDIR` being the launching user's to set.
 
 use super::toolchains::{self, Toolchain};
-use crate::host::resolve_xdg;
 use crate::path::git::{BadPointer, Pointer, discover_git_dir};
 use crate::path::identity::windows_identity_components;
-use crate::path::lex::{HeadKind, parse_bytes, relative_suffix};
+use crate::path::lex::relative_suffix;
 use crate::path::sigil::SigilHead;
-use crate::path::{Allow, FrozenPath, PathRules, XdgKind, path_dirs_absolute, shown};
+use crate::path::{
+    Allow, CwdPath, FrozenPath, GrantRefusal, PathRules, Resolver, SubpathRefusal, XdgKind,
+    classify_subpath, grant_eligibility, path_dirs_absolute, resolve_xdg_in, shown,
+};
 use crate::syntax::quote::quote_word;
 use crate::text::code;
-use crate::types::{Break, Error, Shell};
+use crate::types::{Break, EnvVars, Error, Shell};
 use std::borrow::Cow;
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::str::FromStr;
 use strum::VariantArray;
 
@@ -293,35 +295,46 @@ fn unreadable_message(dot_git: &Path, error: &std::io::Error) -> PolicyError {
     )
 }
 
-/// The anchor a grant is frozen against: `xdg-*` and `tempdir` read the
-/// process environment, and `gitdir` walks the filesystem from `cwd`.
+/// The anchor a grant is frozen against: the [`Resolver`] pair.
 ///
-/// `home` is `None` where nothing binds one, so a policy naming a
-/// home-relative place there is refused rather than resolved against a
-/// stand-in.  The `cwd` is not optional, unlike
-/// [`Resolver`](crate::path::Resolver)'s otherwise identical pair: a grant is
-/// frozen once, so "here" must be settled now rather than re-asked per access.
+/// `home` and `xdg-*` read the environment (overlay, then host), `tempdir`
+/// the host's, and `gitdir` walks the filesystem from `cwd`.
+///
+/// No `HOME` in the environment means a policy naming a home-relative place
+/// is refused rather than resolved against a stand-in.  A grant is frozen
+/// once, so "here" is settled now rather than re-asked per access.
 #[derive(Debug, Clone)]
 pub struct FreezeCtx {
-    pub home: Option<String>,
-    pub cwd: PathBuf,
+    env: EnvVars,
+    cwd: CwdPath,
 }
 
 impl FreezeCtx {
-    /// The shell's own anchor: the home its override chain binds and its
-    /// logical cwd, so every freeze of one session agrees.
+    /// The shell's own anchor: the environment its override chain binds and
+    /// its logical cwd, so every freeze of one session agrees.
     pub fn of(shell: &Shell) -> Self {
-        Self {
-            home: shell.context.home(),
-            cwd: shell.cwd(),
-        }
+        Self::at(
+            shell.context.env_overrides().clone(),
+            shell.context.cwd().clone(),
+        )
     }
 
-    /// The home to freeze against, an empty one read as none: the field is
-    /// public, and this is the door where a `Some("")` would root `home x`
-    /// at `/x`, a grant nobody wrote.
-    fn home(&self) -> Option<&str> {
-        self.home.as_deref().filter(|h| !h.is_empty())
+    /// An anchor at `env` and `cwd`, for a caller with no shell.
+    pub fn at(env: EnvVars, cwd: CwdPath) -> Self {
+        Self { env, cwd }
+    }
+
+    /// The directory `cwd` and `gitdir` places anchor to.
+    pub fn cwd(&self) -> &CwdPath {
+        &self.cwd
+    }
+
+    fn resolver(&self) -> Resolver<'_> {
+        Resolver::at(&self.env, &self.cwd)
+    }
+
+    fn home(&self) -> Option<String> {
+        self.resolver().home()
     }
 
     /// Freeze one place: validate its payload, resolve its anchor, then fold
@@ -345,11 +358,12 @@ impl FreezeCtx {
                     .then(|| freeze(raw))
                     .transpose();
             }
-            Place::Cwd(s) => join_sub(&self.cwd, sub(s)?)?,
+            Place::Cwd(s) => join_sub(self.cwd.as_path(), sub(s)?)?,
             Place::Tempdir(s) => join_sub(std::env::temp_dir(), sub(s)?)?,
             Place::Gitdir(s) => {
                 let sub = sub(s)?;
-                let base = discover_git_dir(&self.cwd)?.unwrap_or_else(|| self.cwd.clone());
+                let cwd = self.cwd.as_path();
+                let base = discover_git_dir(cwd)?.unwrap_or_else(|| cwd.to_path_buf());
                 join_sub(base, sub)?
             }
             Place::Home(s) => {
@@ -370,8 +384,8 @@ impl FreezeCtx {
     /// toolchain override that names the filesystem root or the home.
     pub fn selector(&self, selector: Selector) -> Result<Vec<FrozenPath>, PolicyError> {
         match selector {
-            Selector::Path => path_dirs(self.home()),
-            Selector::Toolchain(t) => toolchains::expand(t, self.home())?
+            Selector::Path => path_dirs(self.home().as_deref()),
+            Selector::Toolchain(t) => toolchains::expand(t, self.home().as_deref())?
                 .iter()
                 .map(freeze)
                 .collect(),
@@ -393,15 +407,19 @@ impl FreezeCtx {
     /// `xdg-*` grant unanswerable, an absolute `XDG_*_HOME` included, since
     /// there would then be nothing to contain it.
     fn xdg(&self, kind: XdgKind, sub: &str) -> Result<FrozenPath, PolicyError> {
-        let (Some(home), Some(base)) = (self.home(), resolve_xdg(kind, self.home())) else {
+        let home = self.home();
+        let (Some(home), Some(base)) = (
+            home.as_deref(),
+            resolve_xdg_in(|k| self.env.get_or_host(k), kind, home.as_deref()),
+        ) else {
             return Err(home_unknown());
         };
         let resolved = join_sub(base, sub)?;
-        if FrozenPath::from_surface(home).contains::<Allow>(resolved.real_path()) {
+        if FrozenPath::from_surface(home).contains::<Allow>(resolved.real().as_path()) {
             return Ok(resolved);
         }
         let var = kind.env_var();
-        let val = std::env::var(var).unwrap_or_default();
+        let val = self.env.get_or_host(var).unwrap_or_default();
         let name = <&str>::from(kind);
         let clause = if val.is_empty() {
             format!(
@@ -418,18 +436,19 @@ impl FreezeCtx {
                 code("`absolute"),
             )
         };
-        let via = if resolved.real() == resolved.as_str() {
-            String::new()
-        } else {
-            format!(
-                " (written '{}', which is a symbolic link)",
-                resolved.shown()
-            )
-        };
+        let via =
+            if resolved.real().as_path().as_os_str() == std::ffi::OsStr::new(resolved.as_str()) {
+                String::new()
+            } else {
+                format!(
+                    " (written '{}', which is a symbolic link)",
+                    resolved.shown()
+                )
+            };
         Err(PolicyError::new(format!(
             "{} resolves to '{}'{via}, outside HOME; refusing to widen the grant.  {clause}",
             code(&format!("`xdg-{name}")),
-            shown(resolved.real()),
+            resolved.real(),
         )))
     }
 }
@@ -447,57 +466,6 @@ fn anchored(tag: &str, frozen: FrozenPath) -> Result<FrozenPath, PolicyError> {
         code(&format!("`{tag}")),
         frozen.shown()
     )))
-}
-
-/// Which platforms' rules admit a raw `absolute` payload as a live grant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EligibleOn {
-    Posix,
-    Windows,
-    Both,
-}
-
-impl EligibleOn {
-    fn admits(self, rules: PathRules) -> bool {
-        match rules {
-            PathRules::Posix => matches!(self, Self::Posix | Self::Both),
-            PathRules::Windows => matches!(self, Self::Windows | Self::Both),
-        }
-    }
-}
-
-/// Why a raw `absolute` payload is refused on every platform.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GrantRefusal {
-    Malformed,
-    MixedHead,
-    NtObject,
-    Driveless,
-    DriveRelative,
-    /// Relative under both platforms' rules, or (in [`host_absolute`]) a held
-    /// path whose head is live only on the other platform.
-    ForeignOrRelative,
-}
-
-/// Classify a raw `absolute` payload from one [`parse_bytes`] call under
-/// Windows rules into the platforms it is live on or the refusal it raises.
-fn grant_eligibility(raw: &str) -> Result<EligibleOn, GrantRefusal> {
-    let parsed = parse_bytes(raw.as_bytes(), PathRules::Windows);
-    match parsed.kind {
-        HeadKind::Posix => Ok(EligibleOn::Posix),
-        HeadKind::Unc { .. }
-            if parsed.spelling.namespace.is_none() && parsed.spelling.opens_with_slash =>
-        {
-            Ok(EligibleOn::Both)
-        }
-        HeadKind::Drive { .. } | HeadKind::Unc { .. } => Ok(EligibleOn::Windows),
-        _ if parsed.is_mixed_head() => Err(GrantRefusal::MixedHead),
-        HeadKind::Device | HeadKind::Malformed => Err(GrantRefusal::Malformed),
-        _ if parsed.is_nt_object() => Err(GrantRefusal::NtObject),
-        HeadKind::Driveless => Err(GrantRefusal::Driveless),
-        HeadKind::DriveRelative { .. } => Err(GrantRefusal::DriveRelative),
-        HeadKind::Relative => Err(GrantRefusal::ForeignOrRelative),
-    }
 }
 
 /// Whether the raw `absolute` payload is a live path under `rules`, judged
@@ -603,36 +571,36 @@ fn subpath<'a>(tag: &str, s: &'a str) -> Result<&'a str, PolicyError> {
     if let Some(err) = runtime_prefix(s) {
         return Err(err);
     }
-    let word = quote_word(s);
-    let this = code(&format!("`{tag}"));
-    let drive = code("`absolute 'C:\\…'");
-    let parsed = parse_bytes(s.as_bytes(), PathRules::Windows);
-    match parsed.kind {
-        HeadKind::Relative if s.is_empty() => Err(PolicyError::new(format!(
-            "{this} needs a path; write {} for the anchor itself",
-            code(&format!("`{tag} ."))
-        ))),
-        HeadKind::Relative => Ok(s),
-        _ if parsed.has_drive() => Err(PolicyError::new(format!(
-            "{this} takes a relative path, not {word}; a drive belongs in {drive}"
-        ))),
-        _ if parsed.is_mixed_head() => Err(PolicyError::new(format!(
-            "{this} takes a relative path, not {word}, which opens with two \
-             different separators"
-        ))),
-        _ if parsed.spelling.opens_with_slash => Err(PolicyError::new(format!(
-            "{this} takes a relative path, not {word}; for {word} write {}",
-            code(&format!("`absolute {word}"))
-        ))),
-        _ if parsed.is_nt_object() => Err(PolicyError::new(format!(
-            "{this} takes a relative path, not {word}, an NT object-manager path, \
-             which no grant can name"
-        ))),
-        _ => Err(PolicyError::new(format!(
-            "{this} takes a relative path, not {word}, which names no drive; a drive \
-             belongs in {drive}"
-        ))),
-    }
+    classify_subpath(s).map(|()| s).map_err(|why| {
+        let word = quote_word(s);
+        let this = code(&format!("`{tag}"));
+        let drive = code("`absolute 'C:\\…'");
+        PolicyError::new(match why {
+            SubpathRefusal::Empty => format!(
+                "{this} needs a path; write {} for the anchor itself",
+                code(&format!("`{tag} ."))
+            ),
+            SubpathRefusal::Drive => {
+                format!("{this} takes a relative path, not {word}; a drive belongs in {drive}")
+            }
+            SubpathRefusal::MixedHead => format!(
+                "{this} takes a relative path, not {word}, which opens with two \
+                 different separators"
+            ),
+            SubpathRefusal::Rooted => format!(
+                "{this} takes a relative path, not {word}; for {word} write {}",
+                code(&format!("`absolute {word}"))
+            ),
+            SubpathRefusal::NtObject => format!(
+                "{this} takes a relative path, not {word}, an NT object-manager path, \
+                 which no grant can name"
+            ),
+            SubpathRefusal::Driveless => format!(
+                "{this} takes a relative path, not {word}, which names no drive; a drive \
+                 belongs in {drive}"
+            ),
+        })
+    })
 }
 
 /// `~` and `xdg:NAME` are expanded by the resolver at run time, not when a
@@ -699,7 +667,7 @@ fn join_sub(base: impl AsRef<Path>, sub: &str) -> Result<FrozenPath, PolicyError
 /// The grant door of [`FrozenPath`]: an allowance keeps the real path it is
 /// frozen to for good, so one that is not Unicode is refused here.
 fn freeze(path: impl AsRef<Path>) -> Result<FrozenPath, PolicyError> {
-    FrozenPath::freeze(path).map_err(PolicyError::new)
+    FrozenPath::freeze(path.as_ref()).map_err(PolicyError::new)
 }
 
 /// A directory chosen for `selector` that is the root, the home or an
@@ -714,11 +682,16 @@ pub(super) fn refuse_the_world(
     selector: Selector,
     subject: &str,
     var: &str,
-    dir: impl AsRef<Path>,
+    dir: &Path,
     home: Option<&str>,
 ) -> Result<(), PolicyError> {
+    // A name that is not Unicode cannot be frozen, and is refused there.
+    let Ok(dir) = crate::path::utf8(dir) else {
+        return Ok(());
+    };
     let dir = FrozenPath::from_surface(dir);
-    let holds = |outer: &FrozenPath, inner: &FrozenPath| outer.contains::<Allow>(inner.real_path());
+    let holds =
+        |outer: &FrozenPath, inner: &FrozenPath| outer.contains::<Allow>(inner.real().as_path());
     let home = home.map(FrozenPath::from_surface);
     let what = match &home {
         _ if dir.is_universal() => "the filesystem root",
@@ -781,20 +754,22 @@ mod tests {
     use crate::path::lex::fold_dots;
     use crate::path::sigil::expand_path_prefix;
 
-    fn ctx(home: &str, cwd: &str) -> FreezeCtx {
-        FreezeCtx {
-            home: Some(home.into()),
-            cwd: cwd.into(),
-        }
+    fn cwd_at(cwd: &str) -> CwdPath {
+        CwdPath::new(cwd.into()).expect("a fixture cwd is absolute")
     }
 
-    /// A context where nothing binds `HOME`: the shape every home-relative
-    /// place must refuse.
+    fn ctx(home: &str, cwd: &str) -> FreezeCtx {
+        FreezeCtx::at(
+            std::iter::once(("HOME", home)).collect::<EnvVars>(),
+            cwd_at(cwd),
+        )
+    }
+
+    /// A context whose overlay binds no `HOME`: the shape every home-relative
+    /// place must refuse, under a host that binds none either
+    /// ([`HOME_VARS`](crate::host::HOME_VARS) cleared).
     fn homeless_ctx(cwd: &str) -> FreezeCtx {
-        FreezeCtx {
-            home: None,
-            cwd: cwd.into(),
-        }
+        FreezeCtx::at(EnvVars::new(), cwd_at(cwd))
     }
 
     /// The live places among `places`, frozen; a dead grant is dropped.
@@ -958,6 +933,23 @@ mod tests {
         });
     }
 
+    /// The overlay is the environment a freeze reads: its `XDG_CONFIG_HOME`
+    /// inside its `HOME` is where `xdg-config` lands, whatever the host binds.
+    // Unix-only: `/tmp`-style fixture paths.
+    #[cfg(unix)]
+    #[test]
+    fn freeze_reads_xdg_from_the_overlay() {
+        let home = tempfile::tempdir().unwrap();
+        let (home, cfg) = (home.path().to_str().unwrap(), home.path().join("cfg"));
+        let cfg = cfg.to_str().unwrap();
+        let env = [("HOME", home), ("XDG_CONFIG_HOME", cfg)]
+            .into_iter()
+            .collect::<EnvVars>();
+        let ctx = FreezeCtx::at(env, cwd_at("/cwd"));
+        let paths = frozen(&[xdg(XdgKind::Config, "probe")], &ctx).unwrap();
+        assert_eq!(paths, [format!("{cfg}/probe")]);
+    }
+
     /// A HOME of a drive root contains every XDG base on it, as the fs guard
     /// reads a prefix: the freeze asks its question, not a lexical twin.  The
     /// bare `\` is drive-relative, so no longer a root to contain anything.
@@ -987,7 +979,10 @@ mod tests {
             let err = refusal(&xdg(XdgKind::Config, "/etc"), &ctx("/h", "/cwd"));
             assert!(err.contains("absolute"), "{err}");
             assert_eq!(
-                expand_path_prefix("xdg:config//etc", Some("/h")),
+                expand_path_prefix(
+                    "xdg:config//etc",
+                    &std::iter::once(("HOME", "/h")).collect::<EnvVars>()
+                ),
                 "/h/.config/etc"
             );
         });
@@ -1278,14 +1273,17 @@ mod tests {
     /// fabricates `/.gitconfig`.
     #[test]
     fn freeze_rejects_home_relative_places_without_home() {
-        for place in [
-            Place::Home(".gitconfig".into()),
-            xdg(XdgKind::Config, "git"),
-        ] {
-            let err = refusal(&place, &homeless_ctx("/cwd"));
-            assert!(err.contains("HOME is unset"), "{place:?}: {err}");
-        }
-        assert_eq!(expand_path_prefix("~/.gitconfig", None), "~/.gitconfig");
-        assert_eq!(expand_path_prefix("xdg:config/git", None), "xdg:config/git");
+        crate::test_env::with_vars_cleared(&crate::host::HOME_VARS, || {
+            for place in [
+                Place::Home(".gitconfig".into()),
+                xdg(XdgKind::Config, "git"),
+            ] {
+                let err = refusal(&place, &homeless_ctx("/cwd"));
+                assert!(err.contains("HOME is unset"), "{place:?}: {err}");
+            }
+            let env = EnvVars::new();
+            assert_eq!(expand_path_prefix("~/.gitconfig", &env), "~/.gitconfig");
+            assert_eq!(expand_path_prefix("xdg:config/git", &env), "xdg:config/git");
+        });
     }
 }

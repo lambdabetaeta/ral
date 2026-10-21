@@ -20,7 +20,7 @@ fn stack(fs: FsPolicy) -> GrantStack {
 
 fn admits_read(grants: &GrantStack, path: &std::path::Path) -> bool {
     let cwd = crate::test_helper::process_cwd();
-    let rp = Resolver::at(None, &cwd).anchor(path);
+    let rp = Resolver::at(&crate::types::EnvVars::new(), &cwd).anchor(path);
     grants.admits_fs(&FsOp::Read, &rp)
 }
 
@@ -34,7 +34,7 @@ fn a_symlink_spelled_read_prefix_admits_its_target() {
     std::os::unix::fs::symlink(&real, &link).unwrap();
 
     let grants = stack(FsPolicy {
-        read_prefixes: vec![FrozenPath::from_surface(&link)],
+        read_prefixes: vec![FrozenPath::from_surface(crate::path::utf8(&link).unwrap())],
         ..FsPolicy::default()
     });
     assert!(
@@ -94,8 +94,8 @@ fn a_symlink_spelled_deny_covers_its_target() {
     std::os::unix::fs::symlink(&secret, &link).unwrap();
 
     let grants = stack(FsPolicy {
-        read_prefixes: vec![FrozenPath::from_surface(&real)],
-        deny_paths: vec![FrozenPath::from_surface(&link)],
+        read_prefixes: vec![FrozenPath::from_surface(crate::path::utf8(&real).unwrap())],
+        deny_paths: vec![FrozenPath::from_surface(crate::path::utf8(&link).unwrap())],
         ..FsPolicy::default()
     });
     assert!(
@@ -118,9 +118,9 @@ fn a_deny_holding_the_stored_name_refuses_plainly() {
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let under = |denies: &[&str]| {
         stack(FsPolicy {
-            read_prefixes: vec![FrozenPath::from_surface(&root)],
+            read_prefixes: vec![FrozenPath::from_surface(crate::path::utf8(&root).unwrap())],
             deny_paths: (denies.iter())
-                .map(|d| FrozenPath::from_surface(root.join(d)))
+                .map(|d| FrozenPath::from_surface(crate::path::utf8(&root.join(d)).unwrap()))
                 .collect(),
             ..FsPolicy::default()
         })
@@ -140,7 +140,7 @@ mod words {
     use super::*;
     use crate::capability::{Evidence, ExecGrant, ExecKey, Program};
     use crate::guard::enforce::{check_exec, check_fs_exact};
-    use crate::path::{RealPath, SearchCwd};
+    use crate::path::RealPath;
     use crate::types::Context;
 
     fn ctx(layers: impl IntoIterator<Item = Capabilities>) -> Context {
@@ -211,12 +211,8 @@ mod words {
     /// A name deny is cited as the author wrote it, not as the file it found.
     #[test]
     fn a_name_deny_is_named_as_written() {
-        let path = crate::path::locate(
-            "sh",
-            std::env::var("PATH").ok().as_deref(),
-            SearchCwd::nowhere(),
-        )
-        .expect("sh on PATH");
+        let path = crate::path::locate("sh", std::env::var("PATH").ok().as_deref(), None)
+            .expect("sh on PATH");
         let real = RealPath::of(&path).unwrap();
         let deny = exec(&[
             (ExecKey::Name("sh".into()), Evidence::ALLOW),
@@ -258,7 +254,9 @@ mod words {
         let excluding = Capabilities {
             fs: Some(FsPolicy {
                 read_prefixes: vec![FrozenPath::from_surface("/")],
-                deny_paths: vec![FrozenPath::from_surface(own.parent().unwrap())],
+                deny_paths: vec![FrozenPath::from_surface(
+                    crate::path::utf8(own.parent().unwrap()).unwrap(),
+                )],
                 ..FsPolicy::default()
             }),
             ..Capabilities::default()
@@ -313,7 +311,7 @@ fn a_case_variant_spelling_meets_the_deny() {
         ..FsPolicy::default()
     });
     let cwd = crate::test_helper::process_cwd();
-    let rp = Resolver::at(None, &cwd).anchor(&root.join("SECRET/key"));
+    let rp = Resolver::at(&crate::types::EnvVars::new(), &cwd).anchor(&root.join("SECRET/key"));
     let located = walk(&rp, Leaf::Resolve).unwrap();
     assert_eq!(located.real(), secret.join("key"));
     assert!(!admits_read(&grants, located.real()));

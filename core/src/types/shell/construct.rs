@@ -3,7 +3,6 @@
 //! itself, made inside [`Shell::construct`].
 
 use super::bindings::{BindingLease, BindingLedger};
-use super::cwd::Cwd;
 use super::detached::DetachPolicy;
 use super::hooks::HookTable;
 use super::modules::Modules;
@@ -178,7 +177,7 @@ impl Image {
             env: Env::new(),
             context: Context {
                 env_overrides: EnvVars::default(),
-                cwd: Cwd(cwd),
+                cwd,
                 grants: GrantStack::root(),
                 handlers: Vec::new(),
                 args: Vec::new(),

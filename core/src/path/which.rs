@@ -15,38 +15,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use super::PathRules;
-
-/// The directory a `PATH` walk anchors its relative entries to.
-///
-/// A newtype rather than an `Option<&Path>` because "here" is the shell's cwd
-/// cell, and a loose option lets each call site improvise another.  Two walks
-/// that answered the same question against two anchors is how a bare name in
-/// a `cd`'d directory once earned "permission denied" from a walk that had
-/// resolved nothing.  The constructors are therefore few and named for their
-/// provenance: `Context::search_cwd` reads the cell, [`SearchCwd::of`] serves
-/// a front end already holding it, and [`SearchCwd::nowhere`] says outright
-/// that there is none.
-#[derive(Clone, Copy)]
-pub struct SearchCwd<'a>(Option<&'a Path>);
-
-impl<'a> SearchCwd<'a> {
-    /// For a caller already holding the shell's cwd — `Shell::cwd`, which
-    /// adds the process-cwd fallback, and the REPL's completion scan.  Core
-    /// runtime code goes through `Context::search_cwd` instead.
-    #[must_use]
-    pub fn of(cwd: &'a Path) -> Self {
-        Self(Some(cwd))
-    }
-
-    /// No anchor: a shell-less caller, or a test that names absolute entries.
-    /// What it costs is that a relative `PATH` entry stats against the
-    /// *process* cwd, which no `cd` of ral's ever moves.
-    #[must_use]
-    pub fn nowhere() -> Self {
-        Self(None)
-    }
-}
+use super::{CwdPath, PathRules};
+use crate::types::EnvVars;
 
 /// Resolve a command head to its executable on disk: a separator-bearing
 /// name is a path anchored against `cwd`, a bare name is walked against
@@ -55,7 +25,7 @@ impl<'a> SearchCwd<'a> {
 /// `Some` only for a regular file carrying the executable bit — the check
 /// the OS would apply at spawn.  A bare name's answer is memoised for the
 /// current run ([`LOCATED`]).
-pub fn locate(name: &str, path_value: Option<&str>, cwd: SearchCwd<'_>) -> Option<PathBuf> {
+pub fn locate(name: &str, path_value: Option<&str>, cwd: Option<&CwdPath>) -> Option<PathBuf> {
     locate_at(name, path_value, cwd, Instant::now())
 }
 
@@ -64,7 +34,7 @@ pub fn locate(name: &str, path_value: Option<&str>, cwd: SearchCwd<'_>) -> Optio
 fn locate_at(
     name: &str,
     path_value: Option<&str>,
-    cwd: SearchCwd<'_>,
+    cwd: Option<&CwdPath>,
     now: Instant,
 ) -> Option<PathBuf> {
     // Answered before the memo is touched: one join and one stat is no
@@ -80,7 +50,7 @@ fn locate_at(
     let key = LocateKey {
         name: name.to_owned(),
         path_value: path_value.to_owned(),
-        cwd: cwd.0.map(Path::to_path_buf),
+        cwd: cwd.map(|c| c.as_path().to_path_buf()),
         #[cfg(windows)]
         pathext: suffixes.join(";"),
     };
@@ -239,9 +209,9 @@ pub(crate) fn names_a_path_for(name: &str, rules: PathRules) -> bool {
 /// profile via [`SandboxProjection::of`](crate::sandbox::SandboxProjection::of), which
 /// matches literally, and the `/work/./bin/git` an unfolded `./bin` yields
 /// is covered by no `/work/bin/` the profile names.
-fn anchor_to_cwd(p: PathBuf, cwd: SearchCwd<'_>) -> PathBuf {
-    let joined = match cwd.0 {
-        Some(c) if !super::lex::is_absolute(&p) => c.join(p),
+fn anchor_to_cwd(p: PathBuf, cwd: Option<&CwdPath>) -> PathBuf {
+    let joined = match cwd {
+        Some(c) if !super::lex::is_absolute(&p) => c.as_path().join(p),
         _ => p,
     };
     super::lex::fold_dots(&joined)
@@ -258,11 +228,19 @@ fn anchor_to_cwd(p: PathBuf, cwd: SearchCwd<'_>) -> PathBuf {
 /// outright.  A user who wants the cwd searched writes `.`, which
 /// [`anchor_to_cwd`] honours deliberately.  The filter runs on the element as
 /// written, before anchoring turns `""` into the cwd itself.
-pub fn path_dirs(path_value: impl AsRef<OsStr>, cwd: SearchCwd<'_>) -> Vec<PathBuf> {
+pub fn path_dirs(path_value: impl AsRef<OsStr>, cwd: Option<&CwdPath>) -> Vec<PathBuf> {
     path_entries(path_value.as_ref())
         .filter(|dir| !dir.as_os_str().is_empty())
         .map(|dir| anchor_to_cwd(dir, cwd))
         .collect()
+}
+
+/// The `RAL_PATH` directories in declaration order, as written; empty when
+/// unset.  A PATH-style list: `env` before the host, the overlay-on-process
+/// rule `within [env: …]` obeys.
+pub fn ral_path_entries(env: &EnvVars) -> Vec<PathBuf> {
+    let raw = env.get_or_host("RAL_PATH").unwrap_or_default();
+    path_entries(OsStr::new(&raw)).collect()
 }
 
 /// [`path_dirs`] for a caller with no cwd to anchor to: the absolute
@@ -338,7 +316,7 @@ pub(crate) enum PathSearch {
     clippy::disallowed_methods,
     reason = "[silent:which-stat-absent] `which`/PATH probe: stats a candidate to tell an unexecutable file from an absent one; an executable-probe predicate, not turn-time model data I/O, raises no surface card."
 )]
-pub(crate) fn search(name: &str, path_value: Option<&str>, cwd: SearchCwd<'_>) -> PathSearch {
+pub(crate) fn search(name: &str, path_value: Option<&str>, cwd: Option<&CwdPath>) -> PathSearch {
     if names_a_path(name) {
         return PathSearch::Missing;
     }
@@ -525,6 +503,10 @@ mod memo_tests {
     use crate::sync::LockExt as _;
     use std::sync::{Mutex, MutexGuard};
 
+    fn cwd_at(dir: &Path) -> CwdPath {
+        CwdPath::new(dir.to_path_buf()).expect("a fixture cwd is absolute")
+    }
+
     /// [`GENERATION`] is process-global, so a concurrent sibling's
     /// [`forget_located_commands`] would clear the memo a test is asserting
     /// about.  Poison-tolerant, so a failure does not wedge the rest.
@@ -574,14 +556,10 @@ mod memo_tests {
         let planted = plant(tmp.path(), "runme");
         let path_value = as_path_value(tmp.path());
 
-        let first = locate("runme", Some(&path_value), SearchCwd::nowhere())
-            .expect("planted binary must resolve");
+        let first = locate("runme", Some(&path_value), None).expect("planted binary must resolve");
         std::fs::remove_file(&planted).unwrap();
         // The file is gone, so a second walk could only answer `None`.
-        assert_eq!(
-            locate("runme", Some(&path_value), SearchCwd::nowhere()),
-            Some(first)
-        );
+        assert_eq!(locate("runme", Some(&path_value), None), Some(first));
     }
 
     #[test]
@@ -591,13 +569,10 @@ mod memo_tests {
         let planted = plant(tmp.path(), "runme");
         let path_value = as_path_value(tmp.path());
 
-        assert!(locate("runme", Some(&path_value), SearchCwd::nowhere()).is_some());
+        assert!(locate("runme", Some(&path_value), None).is_some());
         std::fs::remove_file(&planted).unwrap();
         forget_located_commands();
-        assert_eq!(
-            locate("runme", Some(&path_value), SearchCwd::nowhere()),
-            None
-        );
+        assert_eq!(locate("runme", Some(&path_value), None), None);
     }
 
     #[test]
@@ -608,13 +583,10 @@ mod memo_tests {
 
         // A remembered miss must not outlive the run door's forget, or
         // `cargo install foo` then `foo` still says "not found".
-        assert_eq!(
-            locate("runme", Some(&path_value), SearchCwd::nowhere()),
-            None
-        );
+        assert_eq!(locate("runme", Some(&path_value), None), None);
         plant(tmp.path(), "runme");
         forget_located_commands();
-        assert!(locate("runme", Some(&path_value), SearchCwd::nowhere()).is_some());
+        assert!(locate("runme", Some(&path_value), None).is_some());
     }
 
     #[test]
@@ -624,24 +596,15 @@ mod memo_tests {
         let path_value = as_path_value(tmp.path());
         let probed = Instant::now();
 
-        assert_eq!(
-            locate_at("runme", Some(&path_value), SearchCwd::nowhere(), probed),
-            None
-        );
+        assert_eq!(locate_at("runme", Some(&path_value), None, probed), None);
         plant(tmp.path(), "runme");
         assert_eq!(
-            locate_at("runme", Some(&path_value), SearchCwd::nowhere(), probed),
+            locate_at("runme", Some(&path_value), None, probed),
             None,
             "inside the TTL the remembered miss stands"
         );
         assert!(
-            locate_at(
-                "runme",
-                Some(&path_value),
-                SearchCwd::nowhere(),
-                probed + NEGATIVE_TTL
-            )
-            .is_some(),
+            locate_at("runme", Some(&path_value), None, probed + NEGATIVE_TTL).is_some(),
             "past it the walk runs again"
         );
     }
@@ -654,18 +617,8 @@ mod memo_tests {
         plant(a.path(), "runme");
         plant(b.path(), "runme");
 
-        let from_a = locate(
-            "runme",
-            Some(&as_path_value(a.path())),
-            SearchCwd::nowhere(),
-        )
-        .unwrap();
-        let from_b = locate(
-            "runme",
-            Some(&as_path_value(b.path())),
-            SearchCwd::nowhere(),
-        )
-        .unwrap();
+        let from_a = locate("runme", Some(&as_path_value(a.path())), None).unwrap();
+        let from_b = locate("runme", Some(&as_path_value(b.path())), None).unwrap();
         assert!(from_a.starts_with(a.path()), "got {from_a:?}");
         // A `within [shell: PATH=…]` block cannot be handed the enclosing
         // scope's answer.
@@ -681,10 +634,10 @@ mod memo_tests {
         std::fs::create_dir(&bin).unwrap();
         plant(&bin, "runme");
 
-        assert!(locate("runme", Some("./bin"), SearchCwd::of(a.path())).is_some());
+        assert!(locate("runme", Some("./bin"), Some(&cwd_at(a.path()))).is_some());
         // Same name and same `PATH`; only the anchor differs.
         assert_eq!(
-            locate("runme", Some("./bin"), SearchCwd::of(b.path())),
+            locate("runme", Some("./bin"), Some(&cwd_at(b.path()))),
             None
         );
     }
@@ -699,10 +652,10 @@ mod memo_tests {
 
         // No `forget` between the two: `%PATHEXT%` is in the key itself.
         let without = crate::test_env::with_var("PATHEXT", Some(".EXE"), || {
-            locate("runme", Some(&path_value), SearchCwd::nowhere())
+            locate("runme", Some(&path_value), None)
         });
         let with = crate::test_env::with_var("PATHEXT", Some(".BAT"), || {
-            locate("runme", Some(&path_value), SearchCwd::nowhere())
+            locate("runme", Some(&path_value), None)
         });
         assert_eq!(without, None);
         assert!(with.is_some(), "got {with:?}");
@@ -715,10 +668,10 @@ mod memo_tests {
         let planted = tmp.path().join("runme");
         make_executable(&planted);
 
-        assert!(locate("./runme", None, SearchCwd::of(tmp.path())).is_some());
+        assert!(locate("./runme", None, Some(&cwd_at(tmp.path()))).is_some());
         std::fs::remove_file(&planted).unwrap();
         // No `forget`, and still a fresh answer.
-        assert_eq!(locate("./runme", None, SearchCwd::of(tmp.path())), None);
+        assert_eq!(locate("./runme", None, Some(&cwd_at(tmp.path()))), None);
     }
 }
 
@@ -771,12 +724,12 @@ mod windows_tests {
 
         crate::test_env::with_var("PATHEXT", Some(".EXE"), || {
             assert_eq!(
-                locate("build.ps1", Some(&path_value), SearchCwd::nowhere()),
+                locate("build.ps1", Some(&path_value), None),
                 None,
                 "`build.ps1` names a PowerShell script, not whatever build.exe is first on PATH",
             );
             forget_located_commands();
-            assert!(locate("build", Some(&path_value), SearchCwd::nowhere()).is_some());
+            assert!(locate("build", Some(&path_value), None).is_some());
         });
     }
 }
@@ -853,6 +806,10 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    fn cwd_at(dir: &Path) -> CwdPath {
+        CwdPath::new(dir.to_path_buf()).expect("a fixture cwd is absolute")
+    }
+
     fn touch(p: &Path, mode: u32) {
         std::fs::write(p, b"#!/bin/sh\n").unwrap();
         let mut perms = std::fs::metadata(p).unwrap().permissions();
@@ -866,13 +823,13 @@ mod tests {
         touch(&tmp.path().join("runme"), 0o755);
         // Folded, not merely joined: the answer is what the OS sandbox
         // profile matches literally, and `/tmp/x/./runme` is not `/tmp/x/runme`.
-        let hit = locate("./runme", None, SearchCwd::of(tmp.path())).unwrap();
+        let hit = locate("./runme", None, Some(&cwd_at(tmp.path()))).unwrap();
         assert_eq!(hit, tmp.path().join("runme"));
     }
 
     #[test]
     fn path_dirs_drops_empties_anchors_relatives_and_keeps_absolutes() {
-        let dirs = path_dirs("/usr/bin::./a/../b:/abs", SearchCwd::of(Path::new("/w")));
+        let dirs = path_dirs("/usr/bin::./a/../b:/abs", Some(&cwd_at(Path::new("/w"))));
         assert_eq!(
             dirs,
             [Path::new("/usr/bin"), Path::new("/w/b"), Path::new("/abs")]
@@ -888,11 +845,8 @@ mod tests {
         touch(&tmp.path().join("noexec"), 0o644);
         let path_value = tmp.path().to_str().unwrap();
 
-        assert_eq!(
-            locate("noexec", Some(path_value), SearchCwd::nowhere()),
-            None
-        );
-        match search("noexec", Some(path_value), SearchCwd::nowhere()) {
+        assert_eq!(locate("noexec", Some(path_value), None), None);
+        match search("noexec", Some(path_value), None) {
             PathSearch::FoundNotExecutable(p) => assert_eq!(p, tmp.path().join("noexec")),
             other => panic!("expected FoundNotExecutable, got {other:?}"),
         }

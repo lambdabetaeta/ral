@@ -286,7 +286,7 @@ impl SandboxProjection {
 #[cfg(unix)]
 fn objects(scopes: &[FsScope]) -> Result<Vec<Object>, String> {
     let named = scopes.iter().map(|scope| match scope {
-        FsScope::Prefix(prefix) => (RealPath::frozen(prefix), Some(prefix)),
+        FsScope::Prefix(prefix) => (prefix.real().clone(), Some(prefix)),
         FsScope::Place(place) => (place.clone(), None),
     });
     render_objects(named)

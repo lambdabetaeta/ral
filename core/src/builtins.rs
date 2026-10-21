@@ -19,7 +19,7 @@ pub(crate) mod ambient;
 mod codecs;
 mod collections;
 pub(crate) mod concurrency;
-mod fs;
+pub(crate) mod fs;
 pub mod help;
 mod math;
 mod misc;

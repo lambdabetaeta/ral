@@ -1,6 +1,6 @@
-//! Staging an atomic `>`: a temp file beside the target, renamed over it on
-//! commit.  Pure of the shell: judging the write and reporting it belong to
-//! `runtime::redirect`.
+//! Staging an atomic `>`, which lives with the redirect that uses it: a temp
+//! file beside the target, renamed over it on commit.  Pure of the shell:
+//! judging the write and reporting it belong to `runtime::redirect`.
 //!
 //! Staging, commit and rollback all act relative to the directory handle the
 //! door located, so nothing between the judgment and the rename can rename
@@ -9,8 +9,8 @@
 //! fall to kernel inheritance.  Concurrent writers race as usual: this buys
 //! crash safety, not exclusion.
 
-use super::Located;
-use super::walk::{Kind, Stat};
+use crate::path::Located;
+use crate::path::walk::{Kind, Stat};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read as _};

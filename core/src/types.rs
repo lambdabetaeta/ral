@@ -77,8 +77,6 @@ pub use coerce::{settings_map, sig};
 
 pub use shell::modules::Modules;
 
-pub use shell::cwd::Cwd;
-
 pub mod audit;
 pub(crate) use audit::AuditStart;
 pub use audit::{

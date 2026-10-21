@@ -1,16 +1,16 @@
 //! Path resolution for grant matching.
 //!
 //! Five stages: sigil expansion of `~`/`xdg:` at the head (`sigil`),
-//! cwd-anchoring and `.`/`..` folding (`lex`), `realpath` with an
-//! ancestor-walk fallback (`canon`), alias-aware containment
+//! cwd-anchoring, and the `.`/`..` fold a logical consumer asks for (`lex`),
+//! `realpath` or the walk's lenient form (`canon`), alias-aware containment
 //! (`identity::path_within`), and — only where a name is about to be *written
 //! through* — symlink-free location of the object itself (`walk`), so the
 //! guard judges what the kernel will touch.  Beside the stages, `tree`
 //! enumerates a directory tree, judging each entry by its own path.
 //!
-//! Stage 2 mints a [`LexicalPath`]; the grant side mints a
-//! [`FrozenPath`] through the same folding kernel, so an access-side
-//! path and a grant-side prefix compare like-for-like.
+//! Stage 2 mints a [`LexicalPath`], which the disk reads unfolded; the grant
+//! side mints a [`FrozenPath`] from a folded spelling, and the two meet on
+//! their real forms.
 //!
 //! `identity::path_within` and its string twin are `pub(super)` here, so the
 //! containment kernel does not leave this module: a prefix carries two
@@ -27,14 +27,11 @@ pub mod git;
 pub(crate) mod identity;
 pub mod lex;
 mod namespace;
-pub mod ral_path;
-mod real;
 pub(crate) mod render;
 pub(crate) mod resolver;
 mod show;
 pub mod sigil;
 mod slug;
-pub(crate) mod stage;
 pub mod tilde;
 pub mod tree;
 pub(crate) mod walk;
@@ -46,16 +43,17 @@ pub use show::shown;
 pub use slug::project_slug;
 pub use tilde::abbreviate_home;
 
-pub use forms::{CwdPath, FrozenPath, LexicalPath, NotACwd};
+pub use forms::{CwdPath, FrozenPath, LexicalPath, NotACwd, RealPath};
 pub use git::work_tree_chain;
 pub use identity::{Allow, Deny, Polarity};
-pub(crate) use lex::proper_ancestors;
+pub(crate) use lex::{
+    GrantRefusal, SubpathRefusal, classify_subpath, grant_eligibility, proper_ancestors,
+};
 pub use lex::{
     NotUtf8, PathShape, basename, exists, extension, is_absolute, is_dir, is_stream_or_drive,
     join_slash, shape, strip_appended_suffix, utf8, with_appended_suffix,
 };
 pub use namespace::{EnginePath, GuestPath};
-pub use real::RealPath;
 #[cfg(unix)]
 pub(crate) use render::render_real;
 #[cfg(target_os = "macos")]
@@ -70,8 +68,8 @@ pub(crate) use which::is_executable_file;
 #[cfg(target_os = "linux")]
 pub(crate) use which::locate_in;
 pub(crate) use which::{PathSearch, path_dirs_absolute, path_entries, search};
-pub use which::{SearchCwd, forget_located_commands, locate, path_dirs};
 pub(crate) use which::{WINDOWS_EXEC_EXTENSIONS, command_name_key, names_a_path, names_a_path_for};
+pub use which::{forget_located_commands, locate, path_dirs, ral_path_entries};
 
 /// Which platform's path rules a question is asked under.
 ///

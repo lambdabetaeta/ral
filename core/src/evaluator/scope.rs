@@ -3,8 +3,8 @@
 //! parsing and installing `within`'s options.
 
 use crate::types::{
-    Cwd, Env, EnvVars, FrameHandle, HandlerEntry, HandlerRole, Map, Settled, Shell, Value,
-    refused_arm, sig, validate_handler_arity,
+    Env, EnvVars, FrameHandle, HandlerEntry, HandlerRole, Map, Settled, Shell, Value, refused_arm,
+    sig, validate_handler_arity,
 };
 
 use crate::path::CwdPath;
@@ -168,7 +168,7 @@ fn parse_catch_all(v: &Value, env: &Env, shell: &Shell) -> Settled<Value> {
 pub(crate) struct WithinUndo {
     saved_env: Option<EnvVars>,
     /// The whole cell, so a `cd` in the body is undone with the entry.
-    saved_cwd: Option<Cwd>,
+    saved_cwd: Option<CwdPath>,
     handlers: Option<FrameHandle>,
 }
 

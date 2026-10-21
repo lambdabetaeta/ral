@@ -17,7 +17,7 @@ use exarch::policy::{Invocation, for_invocation};
 use ral_core::capability::FsOp;
 use ral_core::capability::GrantStack;
 use ral_core::path::XdgKind;
-use ral_core::path::{Resolver, SearchCwd, locate};
+use ral_core::path::{Resolver, locate};
 use ral_core::test_access::check_file;
 use ral_core::types::{Break, Settled, Shell};
 use std::path::PathBuf;
@@ -55,11 +55,13 @@ fn own_binary() -> String {
 /// rustup put it, so the fixture asks `PATH` rather than naming a directory.
 fn on_path(name: &str) -> String {
     let path = std::env::var("PATH").expect("PATH is set");
-    let hit = locate(name, Some(&path), SearchCwd::nowhere()).unwrap_or_else(|| {
+    let hit = locate(name, Some(&path), None).unwrap_or_else(|| {
         panic!("no executable '{name}' on this host's PATH, so the fixture has no real path for it:\n{path}")
     });
     let cwd = ral_core::test_helper::process_cwd();
-    let object = Resolver::at(None, &cwd).anchor(&hit).canonicalise_strict();
+    let object = Resolver::at(&ral_core::types::EnvVars::new(), &cwd)
+        .anchor(&hit)
+        .canonicalise_strict();
     ral_core::path::shown(object.expect("a PATH hit exists"))
 }
 
@@ -509,7 +511,7 @@ fn a_missing_restrict_file_is_reported_by_its_absolute_path() {
 #[test]
 fn an_extend_union_keeps_what_the_base_admitted() {
     let path = std::env::var("PATH").expect("PATH is set");
-    if locate("rustc", Some(&path), SearchCwd::nowhere()).is_none() {
+    if locate("rustc", Some(&path), None).is_none() {
         return;
     }
     let dir = Scratch::for_test(EXARCH, "extend-union").expect("scratch dir");

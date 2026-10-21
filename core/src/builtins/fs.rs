@@ -10,12 +10,94 @@
 use crate::capability::FsOp;
 use crate::path::shown;
 use crate::path::tree::glob::Glob;
-use crate::path::walk::{DirEntry, FileInfo, Kind, Leaf, Stat};
+use crate::path::walk::{Entry, Kind, Leaf, Stat};
+use crate::record;
 use crate::types::{Break, Settled, Shell, Value, sig};
+use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use super::util::checked_read_path;
+
+/// Seconds since the epoch, or 0 when the field is unrecorded or pre-epoch.
+fn secs_since_epoch(t: Option<SystemTime>) -> i64 {
+    t.map_or(0, crate::fact::unix_secs)
+}
+
+/// What `list-dir` reports of one entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DirEntry {
+    name: String,
+    kind: Kind,
+    size: u64,
+    mtime: i64,
+}
+
+record!(typed DirEntry {
+    name: "name",
+    kind: "type",
+    size: "size",
+    mtime: "mtime",
+});
+
+impl DirEntry {
+    pub(crate) fn of(entry: &Entry) -> Self {
+        let Stat {
+            kind, len, mtime, ..
+        } = entry.stat;
+        Self {
+            name: shown(&entry.name),
+            kind,
+            size: len,
+            mtime: secs_since_epoch(mtime),
+        }
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// What `file-info` reports of one path: a [`DirEntry`]'s fields, access and
+/// birth times, the readonly bit, and the symlink `target` when it is one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FileInfo {
+    name: String,
+    kind: Kind,
+    size: u64,
+    mtime: i64,
+    atime: i64,
+    btime: i64,
+    readonly: bool,
+    target: Option<String>,
+}
+
+record!(typed FileInfo {
+    name: "name",
+    kind: "type",
+    size: "size",
+    mtime: "mtime",
+    atime: "atime",
+    btime: "btime",
+    readonly: "readonly",
+    target: "target",
+});
+
+impl FileInfo {
+    pub(crate) fn of(name: &OsStr, stat: &Stat, target: Option<String>) -> Self {
+        Self {
+            name: shown(name),
+            kind: stat.kind,
+            size: stat.len,
+            mtime: secs_since_epoch(stat.mtime),
+            atime: secs_since_epoch(stat.atime),
+            btime: secs_since_epoch(stat.btime),
+            readonly: stat.readonly,
+            target,
+        }
+    }
+}
 
 pub(super) fn builtin_list_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let rp = shell.resolve(args[0].as_str("list-dir")?);
@@ -132,11 +214,12 @@ pub(super) fn builtin_resolve_path(args: &[Value], shell: &mut Shell) -> Settled
     Ok(Value::string(shown(&resolved)))
 }
 
-/// Lexical sibling of `resolve-path`: same anchoring, no
-/// `canonicalise_strict`, so symlinks stand and the path need not exist —
-/// and no `check_fs_read`, since that guard covers a stat this never does.
+/// Lexical sibling of `resolve-path`: same anchoring, then the lexical fold
+/// where `resolve-path` reads the disk, so symlinks stand and the path need
+/// not exist — and no `check_fs_read`, since that guard covers a stat this
+/// never does.
 pub(super) fn builtin_absolute_path(args: &[Value], shell: &Shell) -> Settled<Value> {
-    let resolved = shell.resolve(args[0].as_str("absolute-path")?);
+    let resolved = shell.resolve(args[0].as_str("absolute-path")?).folded();
     Ok(Value::string(shown(resolved.as_path())))
 }
 

@@ -12,7 +12,7 @@ use crate::load::{ModuleLoad, check_source, module_phrases};
 use crate::source::{SourceFile, SourceOrigin};
 use crate::ty::Site;
 use crate::types::{Break, Error, Mooring, Settled, Shell, Value, sig};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Read and normalise the module at `path`, located and authorised as one
@@ -65,7 +65,7 @@ pub(crate) fn builtin_use(
     let file = target
         .canonicalise_strict()
         .ok()
-        .or_else(|| crate::path::ral_path::find_file(&path, shell.context.env_overrides()))
+        .or_else(|| find_on_ral_path(&path, shell))
         .unwrap_or_else(|| target.into_inner());
 
     let file = SourceFile::new(file).map_err(|e| sig(format!("use: {e}")))?;
@@ -94,6 +94,22 @@ pub(crate) fn builtin_use(
     site.admit_module(&record, &top.exported_schemes(), shell.fixings())
         .map_err(|mismatch| mismatch.refusal("use", shell))?;
     Ok(record)
+}
+
+/// The first `$dir/$name` over `RAL_PATH`, canonical, that is a regular file;
+/// relative entries read against the shell's cwd.  A directory of that name
+/// does not end the walk, or it would shadow a real file further down.
+fn find_on_ral_path(name: &str, shell: &Shell) -> Option<PathBuf> {
+    let resolver = shell.context.resolver();
+    crate::path::ral_path_entries(shell.context.env_overrides())
+        .into_iter()
+        .find_map(|dir| {
+            resolver
+                .anchor(&dir.join(name))
+                .canonicalise_strict()
+                .ok()
+                .filter(|p| p.is_file())
+        })
 }
 
 /// Resolve `path` as written in the innermost load in flight — the top of

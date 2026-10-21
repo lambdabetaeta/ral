@@ -22,9 +22,9 @@ The two disagreed on the edges:
 So a grant naming `xdg:config` and the rc loader could point a user at two
 different directories.
 
-Resolution: a single resolver, `path::basedir` (`XdgKind`, `resolve_xdg`), owns
+Resolution: a single resolver, `path::basedir` (`XdgKind`, `resolve_xdg_in`), owns
 the rule. `XdgKind::default_suffix` makes each kind carry its own Linux default;
-`resolve_xdg` reads the override only when absolute, else joins the default onto
+`resolve_xdg_in` reads the override only when absolute, else joins the default onto
 `home`. `path::sigil` and `path::config` both defer to it — `config_base` /
 `data_base` / `xdg_config_subpath` / `xdg_data_subpath` are now thin wrappers
 that keep a base only when it resolves to an absolute path. The policy is

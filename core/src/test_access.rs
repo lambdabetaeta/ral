@@ -89,10 +89,7 @@ pub trait ReadName {
 
 impl ReadName for FsScope {
     fn real_name(&self) -> String {
-        match self {
-            Self::Prefix(prefix) => prefix.real().to_owned(),
-            Self::Place(place) => place.to_string(),
-        }
+        self.real().to_string()
     }
 }
 

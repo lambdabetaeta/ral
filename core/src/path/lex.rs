@@ -1,5 +1,6 @@
-//! Lexical path resolution: a sigil-expanded string becomes an absolute,
-//! `.`/`..`-free path against a scoped cwd, with no filesystem access.
+//! Lexical path resolution: a sigil-expanded string becomes an absolute path
+//! against a scoped cwd, with no filesystem access, and a fold of `.`/`..`
+//! for the consumers that want a logical name.
 //!
 //! Containment and name identity live in [`super::identity`]; device names in
 //! [`super::device`].
@@ -63,7 +64,7 @@ pub(crate) fn is_volume_guid(path: impl AsRef<OsStr>) -> bool {
 /// Win32 normalises device paths and hands exact `\\?\` paths to the kernel
 /// uninterpreted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Namespace {
+pub(super) enum Namespace {
     /// `\\?\` (any `/` or `\` separator spelling): verbatim prefix.
     /// `exact` is true when all three separator bytes are `b'\\'`.
     Verbatim { exact: bool },
@@ -87,7 +88,7 @@ impl Namespace {
 /// Separator and namespace spelling of a parsed head, recorded once from the
 /// opening bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct HeadSpelling {
+pub(super) struct HeadSpelling {
     /// Present when the path opens with a 4-byte namespace prefix (`\\?\`,
     /// `\\.\`, `\??\`) under `PathRules::Windows`. Always `None` under
     /// `PathRules::Posix`.
@@ -100,7 +101,7 @@ pub(crate) struct HeadSpelling {
 
 /// Structural head classification under a given [`PathRules`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HeadKind<'a> {
+pub(super) enum HeadKind<'a> {
     /// `/x` or `/`: any path starting with `/` under `PathRules::Posix`, or a
     /// single leading `/` under `PathRules::Windows`.
     Posix,
@@ -129,7 +130,7 @@ pub(crate) enum HeadKind<'a> {
 
 /// A path slice parsed once under `rules`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Parsed<'a> {
+pub(super) struct Parsed<'a> {
     pub(crate) raw: &'a [u8],
     pub(crate) rules: PathRules,
     pub(crate) kind: HeadKind<'a>,
@@ -140,7 +141,7 @@ pub(crate) struct Parsed<'a> {
 }
 
 /// Parse `raw`'s head and separator spelling once under `rules`.
-pub(crate) fn parse_bytes(raw: &[u8], rules: PathRules) -> Parsed<'_> {
+pub(super) fn parse_bytes(raw: &[u8], rules: PathRules) -> Parsed<'_> {
     let (kind, spelling) = match rules {
         PathRules::Posix => parse_posix(raw),
         PathRules::Windows => parse_windows(raw),
@@ -445,15 +446,91 @@ impl<'a> Parsed<'a> {
     }
 }
 
-/// Resolve `path` against `cwd`, folding `.` and `..`: [`anchor`] on a
-/// string.
+/// Which platforms' rules admit a raw `absolute` payload as a live grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EligibleOn {
+    Posix,
+    Windows,
+    Both,
+}
+
+impl EligibleOn {
+    pub(crate) fn admits(self, rules: PathRules) -> bool {
+        match rules {
+            PathRules::Posix => matches!(self, Self::Posix | Self::Both),
+            PathRules::Windows => matches!(self, Self::Windows | Self::Both),
+        }
+    }
+}
+
+/// Why a raw `absolute` payload is refused on every platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GrantRefusal {
+    Malformed,
+    MixedHead,
+    NtObject,
+    Driveless,
+    DriveRelative,
+    /// Relative under both platforms' rules, or (in `guard::freeze::host_absolute`) a held
+    /// path whose head is live only on the other platform.
+    ForeignOrRelative,
+}
+
+/// Classify a raw `absolute` payload from one [`parse_bytes`] call under
+/// Windows rules into the platforms it is live on or the refusal it raises.
+pub(crate) fn grant_eligibility(raw: &str) -> Result<EligibleOn, GrantRefusal> {
+    let parsed = parse_bytes(raw.as_bytes(), PathRules::Windows);
+    match parsed.kind {
+        HeadKind::Posix => Ok(EligibleOn::Posix),
+        HeadKind::Unc { .. }
+            if parsed.spelling.namespace.is_none() && parsed.spelling.opens_with_slash =>
+        {
+            Ok(EligibleOn::Both)
+        }
+        HeadKind::Drive { .. } | HeadKind::Unc { .. } => Ok(EligibleOn::Windows),
+        _ if parsed.is_mixed_head() => Err(GrantRefusal::MixedHead),
+        HeadKind::Device | HeadKind::Malformed => Err(GrantRefusal::Malformed),
+        _ if parsed.is_nt_object() => Err(GrantRefusal::NtObject),
+        HeadKind::Driveless => Err(GrantRefusal::Driveless),
+        HeadKind::DriveRelative { .. } => Err(GrantRefusal::DriveRelative),
+        HeadKind::Relative => Err(GrantRefusal::ForeignOrRelative),
+    }
+}
+
+/// Why a relative `subpath` payload is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubpathRefusal {
+    Empty,
+    Drive,
+    MixedHead,
+    Rooted,
+    NtObject,
+    Driveless,
+}
+
+/// Classify a relative `subpath` payload, judged under Windows rules so a
+/// profile fails alike on every platform.
+pub(crate) fn classify_subpath(s: &str) -> Result<(), SubpathRefusal> {
+    let parsed = parse_bytes(s.as_bytes(), PathRules::Windows);
+    match parsed.kind {
+        HeadKind::Relative if s.is_empty() => Err(SubpathRefusal::Empty),
+        HeadKind::Relative => Ok(()),
+        _ if parsed.has_drive() => Err(SubpathRefusal::Drive),
+        _ if parsed.is_mixed_head() => Err(SubpathRefusal::MixedHead),
+        _ if parsed.spelling.opens_with_slash => Err(SubpathRefusal::Rooted),
+        _ if parsed.is_nt_object() => Err(SubpathRefusal::NtObject),
+        _ => Err(SubpathRefusal::Driveless),
+    }
+}
+
+/// Resolve `path` against `cwd`: [`anchor`] on a string.
 pub(crate) fn resolve_path(cwd: &CwdPath, path: &str) -> PathBuf {
     anchor(cwd, &PathBuf::from(path))
 }
 
-/// `input` made absolute against `cwd` as the host reads it, then folded.
-/// Purely lexical — no symlink resolution — so the answer can differ from
-/// `canonicalize`.
+/// `input` made absolute against `cwd` as the host reads it.  Unfolded: a
+/// `..` or a trailing separator is the kernel's to read, after the links
+/// before it ([`fold_dots`] is the logical reading).
 ///
 /// An absolute `input` is kept, and a relative one joins `cwd`.  Under
 /// Windows rules two more spellings are relative to less than a whole path,
@@ -469,15 +546,14 @@ pub(crate) fn resolve_path(cwd: &CwdPath, path: &str) -> PathBuf {
 ///   `=D:` is unset.
 ///
 /// `cwd` is on a well-formed root ([`CwdPath`]), and each reading keeps it,
-/// so the result is absolute, and the fold, which keeps the root it reads,
-/// keeps it so: what [`LexicalPath`](super::LexicalPath) asserts.
+/// so the result is absolute: what [`LexicalPath`](super::LexicalPath)
+/// asserts.
 pub(crate) fn anchor(cwd: &CwdPath, input: &Path) -> PathBuf {
-    let joined = if is_absolute(input) {
+    if is_absolute(input) {
         input.to_path_buf()
     } else {
         against(cwd, input)
-    };
-    fold_dots(&joined)
+    }
 }
 
 /// `input`, relative under the host's rules, read against `cwd` as
@@ -577,7 +653,8 @@ pub(crate) fn is_bare_root(path: impl AsRef<OsStr>, rules: PathRules) -> bool {
 
 /// Fold `.`/`..` lexically under the host's rules, touching neither
 /// filesystem nor cwd: [`fold_dots_under`] on a path the host holds.  The
-/// kernel [`resolve_path`] and [`super::canon::canonicalise_lenient`] share.
+/// logical reading of a name, which [`LexicalPath::folded`](super::LexicalPath::folded)
+/// gives its consumers.
 pub(crate) fn fold_dots(path: &Path) -> PathBuf {
     let folded = fold_bytes(path.as_os_str().as_encoded_bytes(), PathRules::HOST);
     // SAFETY: `folded` is `path`'s head, its ASCII separators perhaps
@@ -704,6 +781,16 @@ fn share_end(path: &[u8], server: usize) -> usize {
             .map_or(path.len(), |i| from + i)
     };
     next_separator(next_separator(server) + 1)
+}
+
+/// Whether `path` is spelled as a directory: it ends in a separator, or in
+/// one and `.`, which `Path::components` does not show.
+pub(crate) fn names_a_dir(path: &Path) -> bool {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    let bytes = bytes.strip_suffix(b".").unwrap_or(bytes);
+    bytes
+        .last()
+        .is_some_and(|&b| is_sep_byte(PathRules::HOST, b))
 }
 
 /// Whether `path` is absolute to the host's kernel, yet `std::path` finds no
@@ -2621,6 +2708,18 @@ mod tests {
         let raw = Path::new(OsStr::from_bytes(b"/a/\xff/./b/../c"));
         let want = Path::new(OsStr::from_bytes(b"/a/\xff/c"));
         assert_eq!(fold_dots(raw), want);
+    }
+
+    #[test]
+    fn a_fold_is_its_own_fixed_point() {
+        for raw in ["/a/./b/../c", "/a/b/", "/..", "../x", "/"] {
+            let once = fold_dots(Path::new(raw));
+            assert_eq!(fold_dots(&once), once, "{raw}");
+        }
+        for raw in [r"C:/a\..\b", r"C:\a\.\b\", r"C:\..", r"\\srv\sh\a\..\.."] {
+            let once = fold_dots_under(raw, PathRules::Windows);
+            assert_eq!(fold_dots_under(&once, PathRules::Windows), once, "{raw}");
+        }
     }
 
     /// `std::path` finds no prefix in a doubled-separator head that is no

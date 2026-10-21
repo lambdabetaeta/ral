@@ -270,7 +270,7 @@ fn resolve_plugin_path(name_or_path: &str, shell: &Shell) -> Result<PathBuf, Err
     let plugin_file = format!("{name_or_path}.ral");
     let config_candidate = ral_core::path::app_dir(ral_core::path::XdgKind::Config, "ral")
         .map(|dir| dir.join("plugins").join(&plugin_file));
-    let ral_path_candidates = ral_core::path::ral_path::entries(shell.env_overrides())
+    let ral_path_candidates = ral_core::path::ral_path_entries(shell.env_overrides())
         .into_iter()
         .map(|dir| dir.join(&plugin_file));
     // The directories above are the host's, so their candidates are taken as

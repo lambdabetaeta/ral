@@ -56,7 +56,7 @@ impl Head {
                     Ok(Program::Tool(shown.clone()))
                 } else {
                     let path = ctx.env_overrides().get_or_host("PATH");
-                    match crate::path::search(&shown, path.as_deref(), ctx.search_cwd()) {
+                    match crate::path::search(&shown, path.as_deref(), Some(ctx.cwd())) {
                         PathSearch::Executable(hit) => Program::file(hit),
                         PathSearch::FoundNotExecutable(found) => Err(Missing::NotExecutable(found)),
                         PathSearch::Missing => Err(Missing::NotFound(None)),
@@ -390,7 +390,10 @@ mod tests {
     }
 
     fn dir_allow(dir: &Path) -> (ExecKey, Evidence) {
-        (ExecKey::Dir(FrozenPath::from_surface(dir)), Evidence::ALLOW)
+        (
+            ExecKey::Dir(FrozenPath::from_surface(crate::path::utf8(dir).unwrap())),
+            Evidence::ALLOW,
+        )
     }
 
     /// A policy that denies `bash` by bare name yet allows all of its bin
@@ -456,7 +459,10 @@ mod tests {
         let ctx = under(
             [
                 dir_allow(&planted),
-                (ExecKey::Dir(FrozenPath::from_surface(&bin)), Evidence::DENY),
+                (
+                    ExecKey::Dir(FrozenPath::from_surface(crate::path::utf8(&bin).unwrap())),
+                    Evidence::DENY,
+                ),
             ]
             .into_iter()
             .collect(),
@@ -474,7 +480,9 @@ mod tests {
         let (bin, _planted, link) = planted_symlink(tmp.path());
         let ctx = under(
             std::iter::once((
-                ExecKey::Path(FrozenPath::from_surface(bin.join("bash"))),
+                ExecKey::Path(FrozenPath::from_surface(
+                    crate::path::utf8(&bin.join("bash")).unwrap(),
+                )),
                 Evidence::ALLOW,
             ))
             .collect(),

@@ -23,6 +23,11 @@ shape 1 — *the path authorised ≠ the path used* — realised in
 > Linux sandbox does to find `bwrap`. `SearchCwd` still has no constructor from
 > a loose option.
 
+> **Amended 2026-10-21.** The anchor is an `Option<&CwdPath>`: `SearchCwd`,
+> `Context::search_cwd` and the constructors named here are gone. The structural
+> guarantee the newtype gave, that no loose `Option<&Path>` typechecks, is
+> carried by `CwdPath` having one door.
+
 ## Context
 
 At the REPL, `cd` into a directory and name a file that lives there. It is not
@@ -111,7 +116,7 @@ what `.` means.
 [[map/core/capabilities|capabilities]], [[map/core/runtime|runtime]],
 [[design/grant|grant]].
 
-Cite: `core/src/path/which.rs` (`SearchCwd`, `path_dirs`, `search`,
+Cite: `core/src/path/which.rs` (`path_dirs`, `search`,
 `PathSearch`, `locate_in`, `windows_command_candidates`),
 `core/src/types/shell/context.rs`
 (`Context::search_cwd`), `core/src/runtime/command/identity.rs` (`walk_path`,
