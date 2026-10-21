@@ -27,9 +27,12 @@ use super::{FsPolicy, GrantLayer, GrantStack, Join, Meet};
 use crate::guard::freeze::PolicyError;
 use crate::guard::toolchains;
 use crate::path::{
-    Depth, Excluded, FrozenPath, LeafMode, MatchedBy, RealPath, Subject, Trace, walk_lenient,
+    Depth, Dir, DirEntry, Excluded, FrozenPath, Judged, LeafMode, LexicalPath, Listed, Located,
+    MatchedBy, Op, Reading, RealPath, Subject, Trace, walk, walk_lenient,
 };
 use serde::{Deserialize, Serialize};
+use std::io;
+use std::marker::PhantomData;
 use strum::IntoStaticStr;
 
 /// Which fs table a check consults: the read or the write one.
@@ -39,6 +42,11 @@ pub enum FsOp {
     Read,
     Write,
 }
+
+/// The grant stack's say-so for the op `O`: what turns an unjudged handle into
+/// a judged one.  Its field is private to this module, so [`GrantStack::judge`]
+/// and [`ReadRegion`] alone make one, and this is the construction to audit.
+pub(crate) struct Verdict<O: Op>(PhantomData<O>);
 
 /// An allowance of an fs table: a prefix as the author wrote it and resolved,
 /// or a place exec runs.  Both are positions, so a place reads as a prefix
@@ -397,25 +405,141 @@ fn fold(grants: &GrantStack, op: &FsOp, places: bool, floor: &Floor) -> Option<F
     })
 }
 
-impl GrantStack {
-    /// The read judgment: may the access `trace` be read?  Two folds: a permit
-    /// or an exclusion of the first, which holds no run places, is final with
-    /// the same witness; only a missing allowance asks again with the run
-    /// places, which add positive evidence alone.
-    pub(crate) fn read(&self, floor: &Floor, trace: &Trace) -> Result<(), Withheld<FsDeny>> {
-        let access = Subject::Access(trace);
-        let Some(region) = region(self, &FsOp::Read, floor) else {
+/// The read and running regions folded once, for a walk that judges many
+/// objects.  A permit or an exclusion of the first, which holds no run
+/// places, is final with the same witness; only a missing allowance asks the
+/// second, whose run places add positive evidence alone.
+pub(crate) struct ReadRegion {
+    plain: Option<FsRules>,
+    placed: Option<FsRules>,
+}
+
+impl ReadRegion {
+    fn withheld(&self, access: Subject<'_>) -> Result<(), Withheld<FsDeny>> {
+        let Some(plain) = &self.plain else {
             return Ok(());
         };
-        match region.withheld(access) {
+        match plain.withheld(access) {
             None => Ok(()),
             Some(Withheld::MissingAllowance) => {
-                let placed =
-                    running_region(self, floor).expect("a region held an fs opinion before");
+                let placed = (self.placed.as_ref()).expect("a region held an fs opinion before");
                 placed.withheld(access).map_or(Ok(()), Err)
             }
             Some(excluded) => Err(excluded),
         }
+    }
+
+    /// Judge the directory `d` for reading.
+    ///
+    /// # Errors
+    /// What withholds it.
+    pub(crate) fn judge(&self, d: Dir) -> Result<Dir<Judged<Reading>>, Withheld<FsDeny>> {
+        self.withheld(Subject::Access(d.trace()))?;
+        Ok(d.judged(Verdict(PhantomData)))
+    }
+
+    /// Judge the object `l` for reading.
+    ///
+    /// # Errors
+    /// What withholds it.
+    pub(crate) fn judge_file(
+        &self,
+        l: Located,
+    ) -> Result<Located<Judged<Reading>>, Withheld<FsDeny>> {
+        self.withheld(Subject::Access(l.trace()))?;
+        Ok(l.judged(Verdict(PhantomData)))
+    }
+
+    /// A name a listing shows, judged by what the listing saw of it.
+    pub(crate) fn admits_listed(&self, l: &Listed<'_>) -> bool {
+        self.withheld(Subject::Listed(l)).is_ok()
+    }
+
+    /// A listing entry that was not seen: its position is all it has.  Takes
+    /// the entry, not a position, so no caller can judge an object it holds
+    /// by position alone.
+    pub(crate) fn admits_unseen(&self, e: &DirEntry<'_>) -> bool {
+        self.withheld(Subject::Position(&e.real())).is_ok()
+    }
+}
+
+/// Why a judgment refused.  `Guarded` is the pinned-binary veto: a write onto
+/// ral's own image or bwrap's, refused before the stack is consulted and
+/// under an unrestricted stack too; `Withheld` is the stack's.
+#[derive(Debug)]
+pub enum Refused {
+    Guarded(&'static str),
+    Withheld(Withheld<FsDeny>),
+}
+
+/// Why a [`GrantStack::locate`] gave no handle: the walk failed, or the stack
+/// refused what it found.
+#[derive(Debug)]
+pub enum LocateError {
+    Io(io::Error),
+    Refused(Refused),
+}
+
+impl GrantStack {
+    /// The read judgment: may the access `trace` be read?
+    pub(crate) fn read(&self, floor: &Floor, trace: &Trace) -> Result<(), Withheld<FsDeny>> {
+        self.read_region(floor).withheld(Subject::Access(trace))
+    }
+
+    /// The read and running regions, folded now.
+    pub(crate) fn read_region(&self, floor: &Floor) -> ReadRegion {
+        ReadRegion {
+            plain: region(self, &FsOp::Read, floor),
+            placed: running_region(self, floor),
+        }
+    }
+
+    /// The fold for `op` on the access `trace`.
+    pub(crate) fn fold_fs(
+        &self,
+        floor: &Floor,
+        op: &FsOp,
+        trace: &Trace,
+    ) -> Result<(), Withheld<FsDeny>> {
+        match op {
+            FsOp::Read => self.read(floor, trace),
+            FsOp::Write => self.write(floor, trace),
+        }
+    }
+
+    /// Judge `l` for `O`: under `Writing`, first the pinned-binary veto, then
+    /// the fold for `O::FS`; then, admitted, the handle vouched for.  The one
+    /// door from evidence to authority, with [`ReadRegion`].
+    ///
+    /// # Errors
+    /// [`Refused`], the veto's or the stack's.
+    pub fn judge<O: Op>(&self, floor: &Floor, l: Located) -> Result<Located<Judged<O>>, Refused> {
+        crate::guard::fs_judge(self, floor, l.trace(), &O::FS)?;
+        Ok(l.judged(Verdict(PhantomData)))
+    }
+
+    /// [`judge`](Self::judge) for a directory, which no veto guards: nothing
+    /// writes a directory's bytes.
+    ///
+    /// # Errors
+    /// What withholds it.
+    pub fn judge_dir<O: Op>(&self, floor: &Floor, d: Dir) -> Result<Dir<Judged<O>>, Refused> {
+        self.fold_fs(floor, &O::FS, d.trace())
+            .map_err(Refused::Withheld)?;
+        Ok(d.judged(Verdict(PhantomData)))
+    }
+
+    /// A caller with no `Shell`: the walk, then [`judge`](Self::judge).
+    ///
+    /// # Errors
+    /// [`LocateError`], keeping the walk's failure apart from the judgment's.
+    pub fn locate<O: Op>(
+        &self,
+        floor: &Floor,
+        rp: &LexicalPath,
+    ) -> Result<Located<Judged<O>>, LocateError> {
+        let located = walk(rp, LeafMode::Follow).map_err(LocateError::Io)?;
+        self.judge(floor, located).map_err(LocateError::Refused)
     }
 
     /// The write judgment: may the access `trace` be written?
@@ -988,5 +1112,74 @@ mod tests {
 
         let met = outer().meet(table(&[native(r"C:\WORK\sub")], &[]));
         assert_eq!(live(&met), Vec::<FsAllow>::new());
+    }
+
+    /// A stack that reads under `root` but for the `denied` names of it.
+    fn reading_all_but(root: &Path, denied: &[&str]) -> GrantStack {
+        stack([layer(Capabilities {
+            fs: Some(FsPolicy {
+                read_prefixes: vec![spelled(root)],
+                deny_paths: denied
+                    .iter()
+                    .map(|name| spelled(&root.join(name)))
+                    .collect(),
+                ..FsPolicy::default()
+            }),
+            ..Capabilities::default()
+        })])
+    }
+
+    fn held_dir(path: &Path) -> Dir {
+        let spelling = LexicalPath::absolute(path).expect("a temp path is absolute");
+        crate::path::walk_dir(&spelling).unwrap()
+    }
+
+    #[test]
+    fn a_read_region_refuses_a_denied_directory() {
+        let (_tmp, root) = tmp();
+        let (open, secret) = (made(&root, "open"), made(&root, "secret"));
+        let region = reading_all_but(&root, &["secret"]).read_region(&Floor::default());
+        assert!(region.judge(held_dir(&open)).is_ok());
+        assert!(matches!(
+            region.judge(held_dir(&secret)),
+            Err(Withheld::Excluded { .. })
+        ));
+    }
+
+    /// A listing is judged by what it saw of each entry; an entry it could not
+    /// state, gone since the names were read, has only its position.
+    #[test]
+    fn a_listing_is_judged_by_what_it_saw_and_an_entry_gone_by_its_position() {
+        let (_tmp, root) = tmp();
+        for name in ["ok", "secret", "gone", "secret-gone"] {
+            std::fs::write(root.join(name), b"x").unwrap();
+        }
+        let region =
+            reading_all_but(&root, &["secret", "secret-gone"]).read_region(&Floor::default());
+        let Ok(dir) = region.judge(held_dir(&root)) else {
+            panic!("the root is readable");
+        };
+        let listing = dir.read_dir().unwrap();
+        std::fs::remove_file(root.join("gone")).unwrap();
+        std::fs::remove_file(root.join("secret-gone")).unwrap();
+        let judged: Vec<_> = listing
+            .map(|entry| {
+                let name = entry.name().as_os_str().to_str().unwrap().to_owned();
+                match entry.listed() {
+                    Some(listed) => (name, true, region.admits_listed(&listed)),
+                    None => (name, false, region.admits_unseen(&entry)),
+                }
+            })
+            .collect();
+        let expected = [
+            ("gone", false, true),
+            ("ok", true, true),
+            ("secret", true, false),
+            ("secret-gone", false, false),
+        ];
+        assert_eq!(
+            judged,
+            expected.map(|(name, seen, admitted)| (name.to_owned(), seen, admitted))
+        );
     }
 }

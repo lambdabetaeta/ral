@@ -13,7 +13,8 @@ mod stage;
 use crate::capability::FsOp;
 use crate::fact::Read;
 use crate::ir::{StdinSource, WriteMode};
-use crate::path::{Located, walk::Kind};
+use crate::path::walk::Kind;
+use crate::path::{Judged, Located, Reading, Writing};
 use crate::types::{Break, Error, Mooring, Observed, Settled, Shell};
 use stage::PendingWrite;
 use std::fs::File;
@@ -24,11 +25,11 @@ pub(crate) enum OpenedWrite {
     /// `>` onto a regular file, staged beside it until commit.
     Atomic(PendingWrite),
     /// Every other shape: bytes land as they are written.
-    Stream(Located),
+    Stream(Located<Judged<Writing>>),
 }
 
 impl OpenedWrite {
-    fn target(&self) -> Option<&Located> {
+    fn target(&self) -> Option<&Located<Judged<Writing>>> {
         match self {
             Self::Atomic(pending) => pending.target(),
             Self::Stream(target) => Some(target),
@@ -52,7 +53,7 @@ impl OpenedWrite {
 
 /// A target's [`Located::preview`], where it is ours to read under the live
 /// grant.
-fn snapshot(target: &Located, shell: &Shell) -> Option<Vec<u8>> {
+fn snapshot(target: &Located<Judged<Writing>>, shell: &Shell) -> Option<Vec<u8>> {
     shell
         .admits_fs(&FsOp::Read, target.trace())
         .then(|| target.preview())
@@ -74,7 +75,7 @@ pub(crate) fn open_write(
     if rp.is_discard() {
         return opened(crate::path::open_discard()).map(|f| (f, None));
     }
-    let target = shell.locate(&rp, &FsOp::Write)?;
+    let target = shell.locate::<Writing>(&rp)?;
     let stream = |file, target| opened(file).map(|f| (f, Some(OpenedWrite::Stream(target))));
     match mode {
         WriteMode::Append => stream(target.append(), target),
@@ -98,7 +99,7 @@ fn open_read(path: &str, shell: &mut Shell) -> Settled<File> {
     let opened = if rp.is_discard() {
         crate::path::open_discard()
     } else {
-        shell.locate(&rp, &FsOp::Read)?.read()
+        shell.locate::<Reading>(&rp)?.read()
     };
     Ok(opened.map_err(|e| Error::io(path, &e))?)
 }

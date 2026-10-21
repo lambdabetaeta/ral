@@ -48,37 +48,50 @@ fn a_symlink_spelled_read_prefix_admits_its_target() {
 
 /// The threat is a stack with no `fs` opinion at all — the one shape
 /// the fold answers `Ok` before consulting anything — so the
-/// guard is tested on exactly that stack, and by inode: a hard link is
-/// the same file under another name.
+/// guard is tested on exactly that stack, through the typed door, and by
+/// inode: a hard link is the same file under another name.
 #[test]
 fn a_write_onto_a_pinned_binary_is_guarded_before_any_grant_is_consulted() {
-    use super::{FsRefusal, fs_judge};
+    use crate::capability::Refused;
+    use crate::path::{LeafMode, LexicalPath, Reading, Writing, walk};
     crate::sandbox::pin();
-    let open = crate::test_helper::stack([layer(Capabilities::default())]);
+    let (open, floor) = (GrantStack::root(), Floor::default());
+    let held = |path: &std::path::Path| {
+        let spelling = LexicalPath::absolute(path).expect("a test names an absolute path");
+        walk(&spelling, LeafMode::Follow).expect("a test path walks")
+    };
     let own = std::env::current_exe().expect("own path");
-    let verdict =
-        |path: &std::path::Path, op: &FsOp| fs_judge(&open, &Floor::default(), &trace(path), op);
 
     assert!(
-        matches!(verdict(&own, &FsOp::Write), Err(FsRefusal::Guarded("ral"))),
+        matches!(
+            open.judge::<Writing>(&floor, held(&own)),
+            Err(Refused::Guarded("ral"))
+        ),
         "a write onto the pinned executable must be guarded under an open stack"
     );
     assert!(
-        verdict(&own, &FsOp::Read).is_ok(),
+        open.judge::<Reading>(&floor, held(&own)).is_ok(),
         "the guard is over rewriting, not reading"
     );
     let tmp = tempfile::tempdir().unwrap();
     let other = tmp.path().join("other");
     std::fs::write(&other, "x").unwrap();
     assert!(
-        verdict(&other, &FsOp::Write).is_ok(),
+        open.judge::<Writing>(&floor, held(&other)).is_ok(),
         "an unpinned file is the stack's to decide"
     );
     let link = tmp.path().join("link-to-own");
     if std::fs::hard_link(&own, &link).is_ok() {
         assert!(
-            matches!(verdict(&link, &FsOp::Write), Err(FsRefusal::Guarded("ral"))),
+            matches!(
+                open.judge::<Writing>(&floor, held(&link)),
+                Err(Refused::Guarded("ral"))
+            ),
             "a hard link names the pinned inode too"
+        );
+        assert!(
+            open.judge::<Reading>(&floor, held(&link)).is_ok(),
+            "a hard link to the executable is as readable as the executable"
         );
     }
 }
@@ -112,7 +125,7 @@ fn a_symlink_spelled_deny_covers_its_target() {
 /// stored, though the deepest deny holds it only by a fold.
 #[test]
 fn a_deny_holding_the_stored_name_refuses_plainly() {
-    use super::{FsRefusal, fs_judge};
+    use super::{Refused, fs_judge};
     use crate::capability::Withheld;
     use crate::path::MatchedBy;
     let tmp = tempfile::tempdir().unwrap();
@@ -129,7 +142,7 @@ fn a_deny_holding_the_stored_name_refuses_plainly() {
     let matched_by = |grants: &GrantStack| {
         let access = root.join("d/secrets/f");
         match fs_judge(grants, &Floor::default(), &trace(&access), &FsOp::Read) {
-            Err(FsRefusal::Withheld(Withheld::Excluded { matched_by, .. })) => matched_by,
+            Err(Refused::Withheld(Withheld::Excluded { matched_by, .. })) => matched_by,
             _ => panic!("an exclusion holds the access"),
         }
     };

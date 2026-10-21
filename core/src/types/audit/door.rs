@@ -45,7 +45,7 @@ impl Shell {
     /// A redirect onto the [discard device](crate::path::LexicalPath::is_discard)
     /// left the world as it found it, so there is nothing to report: no card,
     /// no rail barrier, and no trail line claiming a file was written.  The
-    /// predicate `Shell::check_fs_read` asks, of the same resolver, is
+    /// predicate `Shell::locate` asks, of the same resolver, is
     /// asked here, at the one door every seam passes through.
     pub(crate) fn observe_stamped(&mut self, mooring: Option<&Mooring>, obs: Observation) {
         if let Observed::Write(w) = &obs.what

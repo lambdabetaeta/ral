@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/markers/located_has_no_clone.rs:6:5
+  |
+5 | fn twice(located: &Located) -> Located {
+  |                                ------- expected `Located` because of return type
+6 |     located.clone()
+  |     ^^^^^^^^^^^^^^^ expected `Located`, found `&Located`
+  |
+  = note: expected struct `Located`
+          found reference `&Located`
+note: `Located` does not implement `Clone`, so `&Located` was cloned instead
+ --> tests/markers/located_has_no_clone.rs:6:5
+  |
+6 |     located.clone()
+  |     ^^^^^^^

@@ -9,21 +9,20 @@
 
 use crate::evaluator::Mode;
 use crate::load::{ModuleLoad, check_source, module_phrases};
+use crate::path::{Judged, Kind, LeafMode, Located, Reading, walk};
 use crate::source::{SourceFile, SourceOrigin};
 use crate::ty::Site;
 use crate::types::{Break, Error, Mooring, Settled, Shell, Value, sig};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
-/// Read and normalise the module at `path`, located and authorised as one
-/// walk; `shown` names it in errors.
+/// Read and normalise the module `located` holds, which the grant judged for
+/// reading; `shown` names it in errors.
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:module-load] `use` module loading reads program text from disk, gated by `locate`. The documented reasoned-silent residual: code-loading is visible as its own statement, not turn-time model data I/O, so it raises no surface card."
 )]
-fn read_and_normalize(path: &Path, shown: &str, shell: &mut Shell) -> Settled<String> {
-    let rp = shell.anchor(path);
-    let located = shell.locate(&rp, &crate::capability::FsOp::Read)?;
+fn read_and_normalize(located: &Located<Judged<Reading>>, shown: &str) -> Settled<String> {
     let what = format!("use: {shown}");
     let mut file = located.read().map_err(|e| Error::io(&what, &e))?;
     let mut source = String::new();
@@ -62,14 +61,17 @@ pub(crate) fn builtin_use(
     let target = resolve_in_current_script(&path, shell)?;
     // `use` falls back to a RAL_PATH search for a bare name, and failing
     // both reads the target itself, to report why it cannot.
-    let file = target
-        .canonicalise_strict()
-        .ok()
-        .or_else(|| find_on_ral_path(&path, shell))
-        .unwrap_or_else(|| target.into_inner());
+    let located = match shell.locate_existing::<Reading>(&target, LeafMode::Follow)? {
+        Some(found) if found.stat().is_some() => found,
+        _ => match find_on_ral_path(&path, shell)? {
+            Some(found) => found,
+            None => shell.locate::<Reading>(&target)?,
+        },
+    };
 
-    let file = SourceFile::new(file).map_err(|e| sig(format!("use: {e}")))?;
-    let source = read_and_normalize(file.path(), &crate::path::shown(file.path()), shell)?;
+    let file = SourceFile::new(located.real().as_path().to_path_buf())
+        .map_err(|e| sig(format!("use: {e}")))?;
+    let source = read_and_normalize(&located, &crate::path::shown(file.path()))?;
     let origin = SourceOrigin::File(file);
     let top = check_source(&source, &origin, shell, None).map_err(tag_loader_error)?;
 
@@ -96,20 +98,37 @@ pub(crate) fn builtin_use(
     Ok(record)
 }
 
-/// The first `$dir/$name` over `RAL_PATH`, canonical, that is a regular file;
-/// relative entries read against the shell's cwd.  A directory of that name
-/// does not end the walk, or it would shadow a real file further down.
-fn find_on_ral_path(name: &str, shell: &Shell) -> Option<PathBuf> {
+/// The first `$dir/$name` over `RAL_PATH` that is a regular file the grant
+/// lets be read, held; relative entries read against the shell's cwd.  A
+/// directory of that name does not end the walk, or it would shadow a real
+/// file further down; nor does a file the grant refuses, as with `execvp`:
+/// the search goes on, and the first refusal is the error if nothing is
+/// admitted.  `None` where no candidate is a file.
+///
+/// # Errors
+/// The first candidate's refusal, where none was admitted.
+fn find_on_ral_path(name: &str, shell: &mut Shell) -> Settled<Option<Located<Judged<Reading>>>> {
     let resolver = shell.context.resolver();
-    crate::path::ral_path_entries(shell.context.env_overrides())
+    let candidates: Vec<_> = crate::path::ral_path_entries(shell.context.env_overrides())
         .into_iter()
-        .find_map(|dir| {
-            resolver
-                .anchor(&dir.join(name))
-                .canonicalise_strict()
-                .ok()
-                .filter(|p| p.is_file())
-        })
+        .map(|dir| resolver.anchor(&dir.join(name)))
+        .collect();
+    let mut first_denial = None;
+    for cand in &candidates {
+        let Ok(located) = walk(cand, LeafMode::Follow) else {
+            continue;
+        };
+        if located.trace().kind() != Some(Kind::File) {
+            continue;
+        }
+        match shell.judge::<Reading>(located) {
+            Ok(found) => return Ok(Some(found)),
+            Err(denial) => {
+                first_denial.get_or_insert(denial);
+            }
+        }
+    }
+    first_denial.map_or(Ok(None), Err)
 }
 
 /// Resolve `path` as written in the innermost load in flight — the top of

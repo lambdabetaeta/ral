@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/markers/dir_has_no_clone.rs:6:5
+  |
+5 | fn twice(dir: &Dir) -> Dir {
+  |                        --- expected `ral_core::path::Dir` because of return type
+6 |     dir.clone()
+  |     ^^^^^^^^^^^ expected `Dir`, found `&Dir`
+  |
+  = note: expected struct `Dir`
+          found reference `&Dir`
+note: `ral_core::path::Dir` does not implement `Clone`, so `&ral_core::path::Dir` was cloned instead
+ --> tests/markers/dir_has_no_clone.rs:6:5
+  |
+6 |     dir.clone()
+  |     ^^^

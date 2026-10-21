@@ -5,7 +5,7 @@
 //! `decisions/260617_sandbox-external-children` §"Safety invariant".
 //!
 //! Under an fs-restricting `grant`, every filesystem effect is either
-//! ral-owned (checked in process by `Shell::check_fs_read`),
+//! ral-owned (judged in process by `Shell::locate`),
 //! child-owned (launched as a process under the effective
 //! `SandboxProjection`), or outside the grant effect surface. This file
 //! drives the **child-owned** path end-to-end through the public eval

@@ -6,6 +6,7 @@
 )]
 
 use super::super::*;
+use super::{writable, writing};
 use crate::path::Resolver;
 use std::io::{Read, Write};
 use windows_sys::Wdk::Storage::FileSystem::SYMLINK_FLAG_RELATIVE;
@@ -21,7 +22,17 @@ fn spelled(path: &Path) -> LexicalPath {
     Resolver::at(&crate::types::EnvVars::new(), &cwd).anchor(path)
 }
 
-fn walked(path: &Path) -> Located {
+/// [`walk`] and [`walk_dir`] as these tests ask them: what they hold is
+/// retagged as judged for writing, since the tests judge nothing.
+fn walk(rp: &LexicalPath, mode: LeafMode) -> io::Result<Located<Judged<Writing>>> {
+    super::super::walk(rp, mode).map(writing)
+}
+
+fn walk_dir(rp: &LexicalPath) -> io::Result<Dir<Judged<Writing>>> {
+    super::super::walk_dir(rp).map(writable)
+}
+
+fn walked(path: &Path) -> Located<Judged<Writing>> {
     walk(&spelled(path), LeafMode::Follow).unwrap()
 }
 

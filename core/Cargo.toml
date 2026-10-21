@@ -54,7 +54,6 @@ rustc-hash    = { workspace = true }
 regex         = "1"
 shlex         = { workspace = true }
 ignore        = "0.4"
-tempfile      = "3.27"
 fastrand      = { workspace = true }
 getrandom     = "0.4"
 cap-primitives = { workspace = true }
@@ -126,6 +125,9 @@ uu_whoami    = { version = "0.12", optional = true }
 
 [dev-dependencies]
 ctor = "1"
+tempfile = "3.27"
+# The authority markers' compile-fail cases: `tests/markers.rs`.
+trybuild = "1.0.122"
 # cargo's idiom for "this feature is on whenever my own tests build": the
 # tests are targets of this package, so they cannot select it through a
 # dependency line of their own.  Without it a bare `cargo test -p ral-core`

@@ -92,7 +92,7 @@ impl Program {
             ErrorKind::NotFound | ErrorKind::NotADirectory => missing(),
             _ => Missing::NotExecutable(path.clone()),
         })?;
-        if located.stat().is_none() {
+        if located.trace().kind().is_none() {
             return Err(missing());
         }
         if !is_executable_file(&path) {

@@ -14,9 +14,9 @@
 
 use exarch::app::{EXARCH, SYNOD, Scratch};
 use exarch::policy::{Invocation, for_invocation};
-use ral_core::capability::{FsOp, GrantLayer, GrantStack};
+use ral_core::capability::{GrantLayer, GrantStack};
 use ral_core::path::XdgKind;
-use ral_core::path::{Resolver, locate};
+use ral_core::path::{LeafMode, Reading, Resolver, Writing, locate};
 use ral_core::test_access::check_file;
 use ral_core::types::{Break, Settled, Shell};
 use std::path::PathBuf;
@@ -210,7 +210,7 @@ fn a_restrict_file_is_refused_by_the_fs_guard_under_either_spelling() {
     install(&mut shell, &stack);
     for spelling in [&restrict, &canonical] {
         let path = shell.anchor(spelling);
-        let message = refusal(shell.locate(&path, &FsOp::Write).map(|_| ()));
+        let message = refusal(shell.locate::<Writing>(&path).map(|_| ()));
         assert!(
             message.contains("denied by grant"),
             "{} should be refused by the grant, got: {message}",
@@ -220,7 +220,7 @@ fn a_restrict_file_is_refused_by_the_fs_guard_under_either_spelling() {
     let path = shell.anchor(&sibling);
     drop(
         shell
-            .locate(&path, &FsOp::Write)
+            .locate::<Writing>(&path)
             .expect("the deny is targeted: a sibling file stays writable"),
     );
 }
@@ -260,7 +260,11 @@ fn no_attenuated_base_can_read_a_credential_file() {
                 ral_core::path::shown(secret)
             );
             let path = shell.anchor(secret);
-            let message = refusal(shell.check_fs_read(&path));
+            let message = refusal(
+                shell
+                    .locate_existing::<Reading>(&path, LeafMode::Follow)
+                    .map(|_| ()),
+            );
             assert!(
                 message.contains("denied by grant"),
                 "{base} should refuse to read {}, got: {message}",
@@ -330,7 +334,7 @@ fn only_an_fs_restricting_restrict_file_is_excluded() {
     let mut shell = ral_core::test_helper::core_shell();
     install(&mut shell, &stack);
     let path = shell.anchor(&with_fs);
-    let message = refusal(shell.locate(&path, &FsOp::Write).map(|_| ()));
+    let message = refusal(shell.locate::<Writing>(&path).map(|_| ()));
     assert!(message.contains("denied by grant"), "{message}");
 }
 

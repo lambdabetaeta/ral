@@ -104,7 +104,7 @@ fn hops(program: &RealPath) -> Vec<PathBuf> {
 pub(crate) fn trusted_real(path: &Path) -> Option<RealPath> {
     let me = rustix::process::geteuid().as_raw();
     let located = walk_with(&spelled(path)?, LeafMode::Follow, |v| system_only(v, me)).ok()?;
-    (located.kind() == Some(Kind::File)).then(|| located.real().clone())
+    (located.trace().kind() == Some(Kind::File)).then(|| located.real().clone())
 }
 
 /// `path`, which is absolute, as the spelling a walk takes: anchored on `/`,

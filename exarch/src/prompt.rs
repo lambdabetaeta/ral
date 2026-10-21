@@ -5,7 +5,11 @@ pub mod host;
 
 use crate::policy::Invocation;
 use crate::skill;
-use ral_core::capability::{ExecSummary, GrantSummary, LayerSummary};
+use ral_core::capability::{
+    ExecSummary, Floor, GrantStack, GrantSummary, LayerSummary, LocateError,
+};
+use ral_core::path::{CwdPath, Reading, Resolver};
+use ral_core::types::EnvVars;
 use std::collections::BTreeSet;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -36,7 +40,8 @@ pub enum EditScheme {
 /// resolved as an agent is constructed, once its own bits and grants exist.
 ///
 /// # Errors
-/// If reading a `--system` file or a discovered `AGENTS.md` fails.
+/// If reading a `--system` file or a discovered `AGENTS.md` fails, or the
+/// stack refuses a `--system` file.
 #[allow(
     clippy::too_many_arguments,
     reason = "the prompt's inputs are the launch's, each read once; the launch has no struct for them"
@@ -44,13 +49,15 @@ pub enum EditScheme {
 pub fn assemble(
     files: &[PathBuf],
     invocation: &Invocation,
-    floor: &ral_core::capability::Floor,
+    floor: &Floor,
     app: crate::app::App,
-    cwd: &ral_core::path::CwdPath,
+    cwd: &CwdPath,
     config_dir: &Path,
     interactive: bool,
     edit: EditScheme,
 ) -> Result<String, String> {
+    let env = EnvVars::new();
+    let reader = Reader::new(&invocation.stack, floor, &env, cwd);
     let mut sections: Vec<(Option<&str>, String)> = Vec::new();
     // Persona is the only section `--system` replaces; the rest stand.
     sections.push((
@@ -58,7 +65,7 @@ pub fn assemble(
         if files.is_empty() {
             include_str!("../data/system.md").into()
         } else {
-            read_files(files)?
+            read_files(files, &reader)?
         },
     ));
     sections.push((Some("Ral"), include_str!("../data/ral.md").into()));
@@ -76,9 +83,9 @@ pub fn assemble(
         include_str!("../data/context.md").into(),
     ));
     sections.push((Some("Host"), host_section(app)));
-    let agents = discover_agents(cwd.as_path(), config_dir);
+    let agents = read_agents(cwd.as_path(), config_dir, &reader)?;
     if !agents.is_empty() {
-        sections.push((Some("Workspace"), read_files(&agents)?));
+        sections.push((Some("Workspace"), agents));
     }
     let skills = skill::discover_metadata(cwd, config_dir, &invocation.stack, floor);
     if !skills.is_empty() {
@@ -121,48 +128,82 @@ pub(crate) fn with_grant(template: &str, session: &GrantSummary, ceiling: &Grant
     template.replace(GRANT_PLACEHOLDER, &grant_summary(layers))
 }
 
-/// The `AGENTS.md` chain to inject, outermost first so the most specific
-/// file's recency dominates: the operator's `<config>/AGENTS.md` — the trusted
-/// XDG root [`crate::config`] loads `config.ral` from — then every `AGENTS.md`
+/// Reads the boot's files for the prompt through handles `stack` judges for
+/// reading, with the floor of the runtime the boot built, as every other read
+/// of the boot is.
+struct Reader<'a> {
+    stack: &'a GrantStack,
+    floor: &'a Floor,
+    resolver: Resolver<'a>,
+}
+
+impl<'a> Reader<'a> {
+    /// `env` is empty: there is no shell, and a candidate is `cwd` or
+    /// `config_dir` joined, or a path the operator wrote, so the resolver's
+    /// home is never consulted.
+    fn new(stack: &'a GrantStack, floor: &'a Floor, env: &'a EnvVars, cwd: &'a CwdPath) -> Self {
+        Self {
+            stack,
+            floor,
+            resolver: Resolver::at(env, cwd),
+        }
+    }
+
+    /// The whole of the file `path` names.
+    fn read(&self, path: &Path) -> Result<String, LocateError> {
+        let held = self
+            .stack
+            .locate::<Reading>(self.floor, &self.resolver.anchor(path))?;
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut held.read().map_err(LocateError::Io)?, &mut text)
+            .map_err(LocateError::Io)?;
+        Ok(text)
+    }
+}
+
+/// The `AGENTS.md` chain's text, outermost first so the most specific file's
+/// recency dominates: the operator's `<config>/AGENTS.md` — the trusted XDG
+/// root [`crate::config`] loads `config.ral` from — then every `AGENTS.md`
 /// along [`work_tree_chain`](ral_core::path::work_tree_chain), the repo root
 /// down to `cwd`.  Outside a repo, only `cwd/AGENTS.md`.
 ///
 /// The repo files sit in the agent's own writable tree, so unlike `config.ral`
-/// they are untrusted — but they add prompt text, never capabilities, and
-/// cannot widen the grant.
-fn discover_agents(cwd: &Path, config_dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let global = config_dir.join("AGENTS.md");
-    if global.exists() {
-        files.push(global);
-    }
-    for dir in ral_core::path::work_tree_chain(cwd) {
-        let file = dir.join("AGENTS.md");
-        if file.exists() {
-            files.push(file);
+/// they are untrusted: each is a read the stack judges, and one it refuses is
+/// skipped and said so, never an error — prompt text is a convenience, as an
+/// ignore file is.  They add prompt text, never capabilities, and cannot widen
+/// the grant.
+///
+/// # Errors
+/// A file that exists and cannot be read.
+fn read_agents(cwd: &Path, config_dir: &Path, reader: &Reader<'_>) -> Result<String, String> {
+    let chain = std::iter::once(config_dir).chain(ral_core::path::work_tree_chain(cwd));
+    let mut texts = Vec::new();
+    for file in chain.map(|dir| dir.join("AGENTS.md")) {
+        match reader.read(&file) {
+            Ok(text) => texts.push(text),
+            Err(LocateError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(LocateError::Refused(refused)) => {
+                ral_core::errln!(
+                    "exarch: skipped {}: {refused}",
+                    ral_core::path::shown(&file)
+                );
+            }
+            Err(e) => return Err(format!("{}: {e}", ral_core::path::shown(&file))),
         }
     }
-    files
+    Ok(texts.join("\n\n"))
 }
 
-/// Concatenate files into one section body, blank-line separated; the caller
-/// fixes the order.  Serves both `--system FILE...` and [`discover_agents`].
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:system-prompt-files] reads the --system prompt files and the discovered AGENTS.md chain (the repo/cwd ones untrusted, from the agent's own tree) into the system prompt at load time; not turn-time I/O"
-)]
-fn read_files(files: &[PathBuf]) -> Result<String, String> {
-    let mut buf = String::new();
-    for path in files {
-        if !buf.is_empty() {
-            buf.push_str("\n\n");
-        }
-        buf.push_str(
-            &std::fs::read_to_string(path)
-                .map_err(|e| format!("{}: {e}", ral_core::path::shown(path)))?,
-        );
-    }
-    Ok(buf)
+/// Concatenate the `--system` files into one section body, blank-line
+/// separated in the order given.
+fn read_files(files: &[PathBuf], reader: &Reader<'_>) -> Result<String, String> {
+    let texts: Result<Vec<_>, _> = files
+        .iter()
+        .map(|path| {
+            (reader.read(path)).map_err(|e| format!("{}: {e}", ral_core::path::shown(path)))
+        })
+        .collect();
+    Ok(texts?.join("\n\n"))
 }
 
 /// Join the sections one blank line apart, headed ones under a `# heading`.
@@ -387,5 +428,47 @@ mod tests {
 - net: deny
 ";
         assert!(shown.ends_with(lines), "{shown}");
+    }
+
+    /// The `AGENTS.md` chain is read through the stack: a link to a file the
+    /// stack refuses is skipped, the same link under an allowance is read.
+    #[cfg(unix)]
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] fixtures build the tree the chain is read from"
+    )]
+    fn an_agents_link_to_a_denied_file_is_skipped_and_one_under_an_allowance_is_read() {
+        use ral_core::capability::{Capabilities, FsPolicy};
+        use ral_core::path::{FrozenPath, utf8};
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let work = root.join("work");
+        std::fs::create_dir(&work).unwrap();
+        std::fs::write(root.join("notes.md"), "linked text").unwrap();
+        std::os::unix::fs::symlink(root.join("notes.md"), work.join("AGENTS.md")).unwrap();
+        let (floor, env) = (Floor::default(), EnvVars::new());
+        let cwd = CwdPath::new(work.clone()).unwrap();
+        let frozen = |path: &Path| FrozenPath::from_surface(utf8(path).unwrap());
+        let reading = |deny: Vec<FrozenPath>| {
+            ral_core::test_helper::stack([ral_core::test_helper::layer(Capabilities {
+                fs: Some(FsPolicy {
+                    read_prefixes: vec![frozen(&root)],
+                    deny_paths: deny,
+                    ..FsPolicy::default()
+                }),
+                ..Capabilities::default()
+            })])
+        };
+        let agents = |stack: &GrantStack| {
+            let reader = Reader::new(stack, &floor, &env, &cwd);
+            read_agents(&work, &root.join("config"), &reader)
+        };
+        assert_eq!(agents(&reading(Vec::new())), Ok("linked text".to_owned()));
+        assert_eq!(
+            agents(&reading(vec![frozen(&root.join("notes.md"))])),
+            Ok(String::new()),
+            "a refused file is skipped, not an error"
+        );
     }
 }

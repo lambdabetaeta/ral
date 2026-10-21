@@ -2,7 +2,7 @@
 //! entry name, none of which resolves a path.  A host module re-exports these
 //! beside the primitives it writes itself (see the seam in `walk.rs`).
 
-use super::{Access, EntryName, Seen, Stat, host};
+use super::{Access, EntryName, Seen, Stat, Visibility, host};
 use rustix::fs::{Access as Amode, AtFlags, Mode, OFlags, RawMode};
 use std::ffi::OsStr;
 use std::fs::File;
@@ -46,13 +46,22 @@ fn opened(fd: rustix::io::Result<rustix::fd::OwnedFd>) -> io::Result<File> {
     clippy::disallowed_methods,
     reason = "[surface:walk-create] Creates an absent leaf exclusively beside the directory the walk holds, so a file that appeared since the walk is refused, never written.  The write that follows surfaces it."
 )]
-pub(super) fn create(dir: &File, name: &EntryName, access: Access) -> io::Result<File> {
+pub(super) fn create(
+    dir: &File,
+    name: &EntryName,
+    access: Access,
+    visibility: Visibility,
+) -> io::Result<File> {
     let flags = oflags(access) | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mode = match visibility {
+        Visibility::Public => 0o666,
+        Visibility::Private => 0o600,
+    };
     opened(rustix::fs::openat(
         dir,
         name.as_os_str(),
         flags,
-        Mode::from_bits_truncate(0o666),
+        Mode::from_bits_truncate(mode),
     ))
 }
 
@@ -90,11 +99,15 @@ pub(super) fn open_named(dir: &File, name: &EntryName, access: Access) -> io::Re
     clippy::disallowed_methods,
     reason = "[silent:walk-mkdir] Makes an absent entry of a held directory, which the caller judged as the absent leaf it is; the directory is then stepped onto."
 )]
-pub(super) fn mkdir(dir: &File, name: &EntryName) -> io::Result<()> {
+pub(super) fn mkdir(dir: &File, name: &EntryName, visibility: Visibility) -> io::Result<()> {
+    let mode = match visibility {
+        Visibility::Public => 0o777,
+        Visibility::Private => 0o700,
+    };
     Ok(rustix::fs::mkdirat(
         dir,
         name.as_os_str(),
-        Mode::from_bits_truncate(0o777),
+        Mode::from_bits_truncate(mode),
     )?)
 }
 

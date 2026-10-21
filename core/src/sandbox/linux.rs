@@ -34,8 +34,9 @@ use super::warrant::{Handoff, Slot, nul_terminated, parcel};
 use super::{FsProjection, RenderedProjection};
 use crate::Role;
 use crate::capability::Floor;
-use crate::path::{Object, PathShape, RealPath, Rendered, render_real};
-use rustix::fs::OFlags;
+use crate::path::{
+    Dir, Installing, Located, Object, PathShape, RealPath, Rendered, is_loop, render_real,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -43,7 +44,6 @@ use std::io;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
-use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -393,20 +393,22 @@ impl Binds {
         let mut opened = BTreeMap::new();
         for Bind { object, .. } in &planned {
             if !opened.contains_key(object) {
-                let handle = open_object(object, tolerated.contains(object))?;
-                opened.insert(object.clone(), handle);
+                let held = open_object(object, tolerated.contains(object))?;
+                opened.insert(object.clone(), held);
             }
         }
         let (mut binds, mut handles) = (Vec::new(), Vec::new());
         for bind in planned {
             // Absent: a name that shows nothing binds nothing.
-            if let Some(Some(handle)) = opened.get(&bind.object) {
-                handles.push(handle.try_clone().map_err(|e| {
+            if let Some(Some(held)) = opened.get(&bind.object) {
+                let copy = |why: &dyn fmt::Display| {
                     format!(
-                        "sandbox: cannot copy the handle on {}: {e}",
+                        "sandbox: cannot copy the handle on {}: {why}",
                         bind.object.as_str()
                     )
-                })?);
+                };
+                let source = leaf_fd(held).map_err(|e| copy(&e))?;
+                handles.push(source.try_clone_to_owned().map_err(|e| copy(&e))?);
                 binds.push(bind);
             }
         }
@@ -543,10 +545,10 @@ fn object(name: &str) -> Result<Option<Rendered>, String> {
     }
 }
 
-/// `object`, opened in the host to be mounted; `None` where it names
-/// nothing, or is `optional` and kept from this user.
-fn open_object(object: &Rendered, optional: bool) -> Result<Option<OwnedFd>, String> {
-    match open_real(object.as_str().as_ref(), OFlags::empty()) {
+/// `object`, held in the host to be mounted; `None` where it names nothing,
+/// or is `optional` and kept from this user.
+fn open_object(object: &Rendered, optional: bool) -> Result<Option<Located<Installing>>, String> {
+    match open_nofollow(&RealPath::rendered(object)) {
         Err(OpenError::Failed { source, .. })
             if optional && source.kind() == io::ErrorKind::PermissionDenied =>
         {
@@ -556,25 +558,28 @@ fn open_object(object: &Rendered, optional: bool) -> Result<Option<OwnedFd>, Str
     }
 }
 
-/// `name`, opened in the host never through a symlink, so a mount or a
+/// `real`, held in the host never through a symlink, so a mount or a
 /// Landlock rule attaches to the inode the grant rendered; `None` where it
-/// names nothing, or not the shape `flags` asks for.
-fn open_real(name: &Path, flags: OFlags) -> Result<Option<OwnedFd>, OpenError> {
-    use rustix::fs::{CWD, Mode, ResolveFlags, openat2};
-    use rustix::io::Errno;
-    let flags = OFlags::PATH | OFlags::CLOEXEC | flags;
-    match openat2(CWD, name, flags, Mode::empty(), ResolveFlags::NO_SYMLINKS) {
-        Ok(fd) => Ok(Some(fd)),
-        Err(Errno::NOENT | Errno::NOTDIR) => Ok(None),
-        Err(Errno::LOOP) => Err(OpenError::Linked(crate::path::shown(name))),
-        Err(errno) => Err(OpenError::Failed {
-            name: crate::path::shown(name),
-            source: errno.into(),
-        }),
-    }
+/// names nothing.
+fn open_nofollow(real: &RealPath) -> Result<Option<Located<Installing>>, OpenError> {
+    real.open_nofollow(&super::TOKEN)
+        .map_err(|source| OpenError::of(real, source))
 }
 
-/// Why [`open_real`] refused.
+/// The descriptor `held` lends, which every position held on Linux has.
+fn leaf_fd(held: &Located<Installing>) -> io::Result<std::os::fd::BorrowedFd<'_>> {
+    held.leaf_fd()
+        .ok_or_else(|| io::Error::other("the object is not held"))
+}
+
+/// [`open_nofollow`] where `real` must be a directory: `None` also where it
+/// is not one.
+fn open_dir_nofollow(real: &RealPath) -> Result<Option<Dir<Installing>>, OpenError> {
+    real.open_dir_nofollow(&super::TOKEN)
+        .map_err(|source| OpenError::of(real, source))
+}
+
+/// Why [`open_nofollow`] refused.
 #[derive(Debug)]
 enum OpenError {
     /// A component is a symlink now, which the grant did not render.
@@ -583,6 +588,17 @@ enum OpenError {
         name: String,
         source: io::Error,
     },
+}
+
+impl OpenError {
+    fn of(real: &RealPath, source: io::Error) -> Self {
+        let name = crate::path::shown(real.as_path());
+        if is_loop(&source) {
+            Self::Linked(name)
+        } else {
+            Self::Failed { name, source }
+        }
+    }
 }
 
 impl fmt::Display for OpenError {

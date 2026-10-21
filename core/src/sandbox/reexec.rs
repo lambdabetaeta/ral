@@ -16,6 +16,7 @@
 //! `argv[0]`; bwrap execs the trampoline as `/proc/self/fd/<slot>`.
 
 use crate::Role;
+use crate::path::ObjectId;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -98,29 +99,27 @@ impl Pinned {
     #[cfg(all(test, target_os = "linux"))]
     pub(super) fn lifted(&self, from: std::ffi::c_int) -> Self {
         use std::os::fd::AsRawFd;
-        let Pin::Fd { dev, ino, .. } = self.pin;
+        let Pin::Fd { id, .. } = self.pin;
         let fd = rustix::io::fcntl_dupfd_cloexec(self.fd(), from).expect("a free descriptor");
         Self {
             exec_path: crate::path::proc_fd_path(fd.as_raw_fd()),
-            pin: Pin::Fd { fd, dev, ino },
+            pin: Pin::Fd { fd, id },
             arg0: self.arg0.clone(),
         }
     }
 
-    /// Whether `meta` is the pinned inode, under whatever name — a hard link
+    /// Whether `id` is the pinned object, under whatever name — a hard link
     /// names it too.  Never on Windows, where nothing is pinned.
     #[cfg_attr(windows, allow(unused_variables))]
-    pub(super) fn is_inode(&self, meta: &std::fs::Metadata) -> bool {
+    pub(super) fn is_object_id(&self, id: ObjectId) -> bool {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt;
-            let (dev, ino) = match &self.pin {
+            match &self.pin {
                 #[cfg(target_os = "linux")]
-                Pin::Fd { dev, ino, .. } => (*dev, *ino),
+                Pin::Fd { id: pinned, .. } => *pinned == id,
                 #[cfg(not(target_os = "linux"))]
-                Pin::Stat { dev, ino } => (*dev, *ino),
-            };
-            meta.dev() == dev && meta.ino() == ino
+                Pin::Stat { id: pinned } => *pinned == id,
+            }
         }
         #[cfg(windows)]
         {
@@ -145,7 +144,7 @@ impl Pinned {
                 crate::path::shown(arg0)
             )
         })?;
-        if self.is_inode(&meta) {
+        if self.is_object_id(ObjectId::from(&meta)) {
             Ok(())
         } else {
             Err(format!(
@@ -160,18 +159,17 @@ impl Pinned {
 /// How `exec_path` stays bound to the binary we pinned.
 enum Pin {
     /// Never dropped, so `/proc/self/fd/<N>` keeps naming the boot inode;
-    /// `(dev, ino)` is that inode's identity for [`Pinned::is_inode`].
+    /// `id` is that inode's identity for [`Pinned::is_object_id`].
     /// Close-on-exec, so no child inherits it: `execve` opens the target
     /// before closing the fd, which suffices for an ELF, never a `#!` script.
     #[cfg(target_os = "linux")]
     Fd {
         fd: std::os::fd::OwnedFd,
-        dev: u64,
-        ino: u64,
+        id: ObjectId,
     },
     /// Compared against a fresh stat before each spawn.
     #[cfg(all(unix, not(target_os = "linux")))]
-    Stat { dev: u64, ino: u64 },
+    Stat { id: ObjectId },
     /// Nothing to guard where confinement happens at the parent's spawn; the
     /// variant only gives `build_pin` one shape on every platform.
     #[cfg(windows)]
@@ -254,18 +252,12 @@ pub(super) fn pin_self() {
 )]
 fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
     use std::os::fd::{AsRawFd, OwnedFd};
-    use std::os::unix::fs::MetadataExt;
 
     let file = std::fs::File::open(arg0).ok()?;
-    let meta = file.metadata().ok()?;
+    let id = ObjectId::of(&file).ok()?;
     let fd: OwnedFd = file.into();
     let exec_path = crate::path::proc_fd_path(fd.as_raw_fd());
-    let pin = Pin::Fd {
-        fd,
-        dev: meta.dev(),
-        ino: meta.ino(),
-    };
-    Some((pin, exec_path))
+    Some((Pin::Fd { fd, id }, exec_path))
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
@@ -274,14 +266,13 @@ fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
     reason = "[silent:pin-stat] sandbox respawn exe-pinning: stats the running executable to capture (dev, ino) so a mid-session binary swap is detectable; a self-path stat at respawn setup, not turn-time model data I/O, raises no surface card."
 )]
 fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
-    use std::os::unix::fs::MetadataExt;
-
     let meta = std::fs::metadata(arg0).ok()?;
-    let pin = Pin::Stat {
-        dev: meta.dev(),
-        ino: meta.ino(),
-    };
-    Some((pin, arg0.to_path_buf()))
+    Some((
+        Pin::Stat {
+            id: ObjectId::from(&meta),
+        },
+        arg0.to_path_buf(),
+    ))
 }
 
 /// Windows pinning cannot fail because it does nothing: no fd to open, no

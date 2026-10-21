@@ -14,10 +14,13 @@
 //! bookkeeping, not the model's turn-time I/O, which runs inside the guest
 //! and is gated there; each call carries its own allow.
 
+use crate::grant::spelled;
+use ral_core::capability::{Floor, GrantStack};
+use ral_core::path::{LeafMode, Reading};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -128,13 +131,7 @@ impl Manifest {
         let mut visit =
             |key: &str, path: &Path, meta: &std::fs::Metadata| -> Result<(), WalkError> {
                 if meta.file_type().is_symlink() {
-                    #[allow(
-                        clippy::disallowed_methods,
-                        reason = "REASONED-SILENT: the manifest walk reads a link's target to \
-                                  record it — synod's own bookkeeping, not the model's turn-time \
-                                  I/O. See the module docs."
-                    )]
-                    let target = match std::fs::read_link(path) {
+                    let target = match link_target(path) {
                         Ok(target) => target,
                         Err(e) if e.kind() == io::ErrorKind::NotFound => {
                             return Err(WalkError::Vanished);
@@ -199,6 +196,20 @@ impl Manifest {
             Err(WalkError::Other(message)) => Err(message),
         }
     }
+}
+
+/// The target of the link at `path`, read through the held leaf.  The root
+/// stack judges it: the folder is the user's own, and the manifest is synod's
+/// bookkeeping, not the model's I/O.
+fn link_target(path: &Path) -> io::Result<PathBuf> {
+    let held = ral_core::path::walk(
+        &spelled(path).map_err(io::Error::other)?,
+        LeafMode::NoFollow,
+    )?;
+    GrantStack::root()
+        .judge::<Reading>(&Floor::default(), held)
+        .expect("the root stack withholds nothing")
+        .read_link()
 }
 
 /// A file's Unix permission bits; `0` on a host with no such notion.

@@ -28,9 +28,12 @@
 //! path names nothing.  One substitution, in one function, which is why
 //! the construction lives here and is not scattered across the session.
 
-use ral_core::capability::{Capabilities, Evidence, ExecKey, FsPolicy};
-use ral_core::path::shown;
-use ral_core::path::{Allow, Deny, FrozenPath, GuestPath, RealPath};
+use ral_core::capability::{Capabilities, Evidence, ExecKey, Floor, FsPolicy, GrantStack};
+use ral_core::path::{
+    FrozenPath, GuestPath, LeafMode, LexicalPath, Reading, RealPath, Resolver, shown, walk_dir,
+    walk_lenient,
+};
+use ral_core::types::EnvVars;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -188,7 +191,7 @@ impl Grant {
     /// intention.  Every refusal says what to pick instead.
     pub fn open(folder: &Path) -> Result<Self, String> {
         let shown = shown(folder);
-        let root = RealPath::of_path(folder).map_err(|e| match e.kind() {
+        let dir = walk_dir(&spelled(folder)?).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => format!(
                 "There is nothing at {shown}. Check the name, \
                  or choose the folder again from the picker."
@@ -197,32 +200,32 @@ impl Grant {
                 "This computer will not let synod open {shown}. \
                  Ask whoever administers this computer for access to it, or choose a folder you can open yourself."
             ),
-            _ => format!("Synod could not open {shown}: {e}. Please choose another folder."),
-        })?;
-
-        if !root.as_path().is_dir() {
-            return Err(format!(
+            std::io::ErrorKind::NotADirectory => format!(
                 "{shown} is a single file, not a folder. \
                  Choose the folder that holds it, and synod will work on everything inside."
-            ));
-        }
+            ),
+            _ => format!("Synod could not open {shown}: {e}. Please choose another folder."),
+        })?;
+        let root = dir.real().clone();
 
         // Readability is a separate question from existence: a folder can
         // sit on a share the user can see but not list.  Ask now, plainly,
         // rather than let the first exchange fail halfway through the work.
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "REASONED-SILENT: checking the folder is listable before minting \
-                      the grant, before any model runs"
-        )]
-        std::fs::read_dir(root.as_path()).map_err(|e| {
-            format!(
-                "Synod cannot see what is inside {root} ({e}). \
-                 Ask whoever administers this computer whether you have permission to open this folder.",
-            )
-        })?;
+        // The root stack, whose judgment is floor-independent: no grant
+        // exists yet, and the question is the user's own permission, which
+        // the handle answers.
+        GrantStack::root()
+            .judge_dir::<Reading>(&Floor::default(), dir)
+            .expect("the root stack withholds nothing")
+            .read_dir()
+            .map_err(|e| {
+                format!(
+                    "Synod cannot see what is inside {root} ({e}). \
+                     Ask whoever administers this computer whether you have permission to open this folder.",
+                )
+            })?;
 
-        Self::refuse_too_much(&root, &Territory::of_this_host())?;
+        Self::refuse_too_much(&root, &Territory::of_this_host()?)?;
         Ok(Self { root })
     }
 
@@ -250,7 +253,7 @@ impl Grant {
     /// local `AppData`, but it holds no settings and runs nothing at sign-in,
     /// and it is where a document opened from an email attachment lands.
     fn refuse_too_much(root: &RealPath, territory: &Territory) -> Result<(), String> {
-        if root.as_path().parent().is_none() {
+        if root.is_root() {
             return Err(format!(
                 "{root} is the whole disk — every file on this computer. \
                  Choose the one folder that holds the documents for this job."
@@ -260,8 +263,8 @@ impl Grant {
         let Some(home) = territory.home.as_ref() else {
             return Ok(()); // No home to contain: nothing for either law to say.
         };
-        if home.within::<Deny>(root) {
-            return Err(if root.within::<Deny>(home) {
+        if root.contains_folded(home) {
+            return Err(if home.contains_folded(root) {
                 format!(
                     "{} is your whole home folder — your entire computer's worth of files. \
                      Choose the one folder that holds the documents for this job, \
@@ -280,7 +283,7 @@ impl Grant {
         let in_scratch = territory
             .scratch
             .as_ref()
-            .is_some_and(|tmp| root.within::<Allow>(tmp) && root != tmp);
+            .is_some_and(|tmp| tmp.contains(root) && root != tmp);
         if in_scratch {
             return Ok(());
         }
@@ -294,10 +297,10 @@ impl Grant {
             )
         };
         for tree in &territory.settings {
-            if root.within::<Deny>(tree) {
+            if tree.contains_folded(root) {
                 return Err(settings_refusal());
             }
-            if tree.within::<Deny>(root) {
+            if root.contains_folded(tree) {
                 return Err(format!(
                     "{root} holds {tree}, where the programs on this computer keep their own settings, \
                      and some of what is kept there runs by itself the next time you sign in. \
@@ -305,12 +308,8 @@ impl Grant {
                 ));
             }
         }
-        let hidden = root.within::<Deny>(home)
-            && root
-                .as_path()
-                .components()
-                .nth(home.as_path().components().count())
-                .is_some_and(|first| first.as_os_str().as_encoded_bytes().starts_with(b"."));
+        let hidden = (root.relative_to(home).unwrap_or_default().first())
+            .is_some_and(|first| first.as_os_str().as_encoded_bytes().starts_with(b"."));
         if hidden {
             return Err(settings_refusal());
         }
@@ -457,20 +456,57 @@ impl Territory {
         reason = "host-env: the territory being protected is the launching user's real home and \
                   application-data folders, read from this process's own environment"
     )]
-    fn of_this_host() -> Self {
-        // Lenient: a settings tree not created yet is still refused.
+    fn of_this_host() -> Result<Self, String> {
         let home = ral_core::host::home().map(PathBuf::from);
-        let settings = settings_trees(home.as_deref(), |name| std::env::var_os(name))
-            .iter()
-            .map(|p| RealPath::lenient(p))
-            .collect();
-        let home = home.map(|h| RealPath::lenient(&h));
-        Self {
-            home,
-            settings,
-            scratch: Some(RealPath::lenient(&std::env::temp_dir())),
-        }
+        Self::of(
+            home.as_deref(),
+            |name| std::env::var_os(name),
+            &std::env::temp_dir(),
+        )
     }
+
+    /// The territory of a user with this `home` and environment, whose temp
+    /// folder is `temp`: each place walked, so one not created yet is still
+    /// refused.
+    fn of(
+        home: Option<&Path>,
+        env: impl Fn(&str) -> Option<std::ffi::OsString>,
+        temp: &Path,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            home: home.map(position).transpose()?,
+            settings: settings_trees(home, env)
+                .iter()
+                .map(|p| position(p))
+                .collect::<Result<_, _>>()?,
+            scratch: Some(position(temp)?),
+        })
+    }
+}
+
+/// `path` as a spelling a walk takes: a relative one is read against the
+/// process's working folder.
+///
+/// # Errors
+/// A sentence for the person at the window when the process has no working
+/// folder to read it against.
+pub fn spelled(path: &Path) -> Result<LexicalPath, String> {
+    let cwd = ral_core::host::cwd().ok_or_else(|| {
+        format!(
+            "Synod cannot tell which folder it is running in, so it cannot find {}.",
+            shown(path)
+        )
+    })?;
+    Ok(Resolver::at(&EnvVars::new(), &cwd).anchor(path))
+}
+
+/// Where `path` is, or will be once its missing tail is made: lenient, so a
+/// settings tree not created yet is still refused.  Failing closed: a place
+/// that cannot be looked up cannot be protected.
+fn position(path: &Path) -> Result<RealPath, String> {
+    walk_lenient(&spelled(path)?, LeafMode::Follow)
+        .map(|trace| trace.real().clone())
+        .map_err(|e| format!("Synod could not look up {}: {e}.", shown(path)))
 }
 
 /// The per-user application-data trees for this platform, from the home
@@ -518,6 +554,12 @@ mod tests {
     use crate::test_fixture::workshop;
     #[cfg(unix)]
     use ral_core::capability::FsOp;
+
+    /// Whether `sh` admits a write at `path`, walked leniently as a name.
+    #[cfg(unix)]
+    fn writable(sh: &ral_core::Shell, path: &LexicalPath) -> bool {
+        walk_lenient(path, LeafMode::Follow).is_ok_and(|trace| sh.admits_fs(&FsOp::Write, &trace))
+    }
 
     fn refusal(folder: &Path) -> String {
         Grant::open(folder).expect_err("this folder must be refused")
@@ -604,6 +646,27 @@ mod tests {
 
     fn judged(root: &Path) -> Result<(), String> {
         Grant::refuse_too_much(&RealPath::assumed(root), &fake_territory())
+    }
+
+    /// A settings tree not created yet is still refused: the territory is
+    /// walked leniently, so a folder inside an absent `~/.config` (or the
+    /// platform's tree) lies in it.
+    #[test]
+    fn a_folder_inside_an_absent_settings_tree_is_refused() {
+        let dir = workshop("grant-absent-settings");
+        let home = dir.path().join("ada");
+        std::fs::create_dir(&home).expect("home fixture");
+        let territory = Territory::of(Some(&home), |_| None, &dir.path().join("tmp"))
+            .expect("the territory resolves");
+        let tree = settings_trees(Some(&home), |_| None).remove(0);
+        assert!(!tree.exists(), "the settings tree must be absent: {tree:?}");
+        let root = position(&tree.join("autostart")).expect("an absent folder resolves");
+        let message = Grant::refuse_too_much(&root, &territory)
+            .expect_err("a folder inside an absent settings tree must be refused");
+        assert!(
+            message.contains("keep their own settings"),
+            "the refusal should say why: {message}"
+        );
     }
 
     /// The finding this law answers: the Startup folder runs what it holds
@@ -723,16 +786,48 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn this_hosts_startup_folder_is_refused() {
-        let territory = Territory::of_this_host();
+        let territory = Territory::of_this_host().expect("the host's territory resolves");
         let Some(roaming) = std::env::var_os("APPDATA").map(PathBuf::from) else {
             return; // Nothing names a roaming AppData here; nothing to assert.
         };
-        let startup =
-            RealPath::lenient(&roaming.join(r"Microsoft\Windows\Start Menu\Programs\Startup"));
+        let startup = position(&roaming.join(r"Microsoft\Windows\Start Menu\Programs\Startup"))
+            .expect("the Startup folder resolves");
         Grant::refuse_too_much(&startup, &territory).expect_err("the real Startup folder");
         let (_dir, grant) = granted("grant-real-temp");
-        Grant::refuse_too_much(&RealPath::assumed(grant.root()), &territory)
-            .expect("a folder inside temp");
+        Grant::refuse_too_much(
+            &position(grant.root()).expect("the grant resolves"),
+            &territory,
+        )
+        .expect("a folder inside temp");
+    }
+
+    /// A folder the user can see but not list is refused in the user's
+    /// words, naming the folder and the reason.  Skipped where permissions
+    /// do not bind the process: it lists anything.
+    #[cfg(unix)]
+    #[test]
+    fn an_unlistable_folder_is_refused_with_the_listing_sentence() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = workshop("grant-unlistable");
+        let locked = dir.path().join("Admissions");
+        std::fs::create_dir(&locked).expect("fixture folder");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o311))
+            .expect("lock the fixture");
+        let message = if std::fs::read_dir(&locked).is_ok() {
+            None
+        } else {
+            Some(refusal(&locked))
+        };
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+            .expect("unlock the fixture");
+        if let Some(message) = message {
+            assert!(
+                message.contains("Synod cannot see what is inside")
+                    && message.contains("Admissions")
+                    && message.contains("whether you have permission"),
+                "an unlistable folder should be refused with the listing sentence: {message}"
+            );
+        }
     }
 
     /// An ordinary folder opens, and `root` is the resolved form — the
@@ -778,19 +873,15 @@ mod tests {
         let layer = ral_core::test_helper::layer(grant.capabilities());
 
         let mut shell = ral_core::test_helper::core_shell();
-        // Read asks the guard, write asks the stack directly: the write door
-        // is `locate`, which walks the name first and would fail on these
-        // paths for not existing, long before it reached the grant.
+        // Read asks the probe door, write asks the stack directly: the write
+        // door is `locate`, which walks the name first and would fail on
+        // these paths for not existing, long before it reached the grant.
         shell.with_layer(layer, |sh| {
             for admitted in ["/work/letter.docx", "/tmp/draft.docx"] {
                 let path = sh.resolve(admitted);
-                sh.check_fs_read(&path)
+                sh.locate_existing::<Reading>(&path, LeafMode::Follow)
                     .unwrap_or_else(|_| panic!("{admitted} must be readable"));
-                let path = sh.resolve(admitted);
-                assert!(
-                    sh.admits_named(&FsOp::Write, &path),
-                    "{admitted} must be writable"
-                );
+                assert!(writable(sh, &path), "{admitted} must be writable");
             }
             // The folder's host path names nothing inside the guest; a
             // grant that admitted it would strand the agent in exactly
@@ -798,12 +889,12 @@ mod tests {
             let host = grant.root().join("letter.docx");
             let path = sh.anchor(&host);
             assert!(
-                sh.check_fs_read(&path).is_err(),
+                sh.locate_existing::<Reading>(&path, LeafMode::Follow)
+                    .is_err(),
                 "the granted folder's host path must not be readable"
             );
-            let path = sh.anchor(&host);
             assert!(
-                !sh.admits_named(&FsOp::Write, &path),
+                !writable(sh, &path),
                 "the granted folder's host path must not be writable"
             );
         });
@@ -852,7 +943,8 @@ mod tests {
         shell.with_layer(ral_core::test_helper::layer(grant.capabilities()), |sh| {
             let path = sh.anchor(&PathBuf::from(&home).join(".ssh").join("id_ed25519"));
             assert!(
-                sh.check_fs_read(&path).is_err(),
+                sh.locate_existing::<Reading>(&path, LeafMode::Follow)
+                    .is_err(),
                 "the office grant must not reach into HOME"
             );
         });

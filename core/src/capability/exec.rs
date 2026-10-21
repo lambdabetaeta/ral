@@ -87,7 +87,7 @@ impl GrantStack {
         args: Vec<String>,
     ) -> Result<Admitted, Box<Refused>> {
         let rules = rules(self);
-        match self.judge(floor, rules.as_ref(), &program) {
+        match self.judge_run(floor, rules.as_ref(), &program) {
             None => Ok(Admitted {
                 program,
                 args,
@@ -104,13 +104,13 @@ impl GrantStack {
 
     /// Why a head is refused, for a refusal raised before [`GrantStack::admit`].
     pub(crate) fn refusal(&self, floor: &Floor, program: &Program) -> Option<ExecDenial> {
-        self.judge(floor, rules(self).as_ref(), program)
+        self.judge_run(floor, rules(self).as_ref(), program)
     }
 
     /// `↓run = ↓exec ∧ ↓read` (law 7): a supplied exec table must support the
     /// program, then what running it reads must be readable.  A bundled tool
     /// runs ral's image, which only an fs exclusion withholds.
-    fn judge(
+    fn judge_run(
         &self,
         floor: &Floor,
         rules: Option<&ExecRules>,

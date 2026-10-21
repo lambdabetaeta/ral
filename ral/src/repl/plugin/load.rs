@@ -10,6 +10,7 @@
 //! untouched.  Unloading is the exact inverse.
 
 use ral_core::first_order::datum::Datum as _;
+use ral_core::path::{Judged, Located, Reading};
 use ral_core::source::{SourceFile, SourceOrigin};
 use ral_core::typecheck::builtins::scheme;
 use ral_core::types::{
@@ -18,7 +19,6 @@ use ral_core::types::{
 };
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
-use std::path::PathBuf;
 
 use super::super::enquiry::{Enquiry, PluginNote};
 use super::load_err;
@@ -70,17 +70,13 @@ pub(crate) fn load_plugin(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<()> {
-    let file = SourceFile::new(resolve_plugin_path(name_or_path, shell)?).map_err(load_err)?;
-    let path = file.path();
-    let rp = shell.anchor(path);
-    shell.check_fs_read(&rp)?;
-    let name = ral_core::path::shown(path);
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:plugin-read] reads plugin source for loading; not turn-time model I/O"
-    )]
-    let source =
-        std::fs::read_to_string(rp.as_path()).map_err(|e| load_err(format!("{name}: {e}")))?;
+    let located = resolve_plugin_path(name_or_path, shell)?;
+    let file = SourceFile::new(located.real().as_path().to_path_buf()).map_err(load_err)?;
+    let name = ral_core::path::shown(file.path());
+    let source = located
+        .read()
+        .and_then(std::io::read_to_string)
+        .map_err(|e| load_err(format!("{name}: {e}")))?;
     let source = ral_core::source::normalize_source_text(source);
     // Core's module loader owns cycle detection, the recursion guard, and the
     // source registration; the plugin policy adds only the fresh frame —
@@ -262,11 +258,17 @@ fn check_is_manifest(val: &Value) -> Result<(), Error> {
     }
 }
 
-/// Resolve a plugin name or path to a canonical absolute path.  Searches:
+/// Locate a plugin name or path: the first of these that is a file and the
+/// grant lets be read, held.  A file the grant refuses is passed over, as
+/// `execvp` does, and the first refusal is the error if none is admitted.
+/// Searches:
 /// 1. `<config>/ral/plugins/<name>.ral`
 /// 2. Each directory in `RAL_PATH`: `$dir/<name>.ral`
 /// 3. The literal path, then `<name>.ral`
-fn resolve_plugin_path(name_or_path: &str, shell: &Shell) -> Result<PathBuf, Error> {
+///
+/// # Errors
+/// The first candidate's refusal, where none was admitted; else `not found`.
+fn resolve_plugin_path(name_or_path: &str, shell: &mut Shell) -> Settled<Located<Judged<Reading>>> {
     let plugin_file = format!("{name_or_path}.ral");
     let config_candidate = ral_core::path::app_dir(ral_core::path::XdgKind::Config, "ral")
         .map(|dir| dir.join("plugins").join(&plugin_file));
@@ -280,13 +282,30 @@ fn resolve_plugin_path(name_or_path: &str, shell: &Shell) -> Result<PathBuf, Err
     let written = [name_or_path, &plugin_file]
         .into_iter()
         .map(|cand| shell.resolve(cand));
-    config_candidate
+    let candidates: Vec<_> = config_candidate
         .into_iter()
         .chain(ral_path_candidates)
         .map(|cand| shell.anchor(&cand))
         .chain(written)
-        .find_map(|cand| cand.canonicalise_strict().ok())
-        .ok_or_else(|| load_err("not found; is it in <config>/ral/plugins or RAL_PATH?"))
+        .collect();
+    let mut first_denial = None;
+    for cand in &candidates {
+        let Ok(located) = ral_core::path::walk(cand, ral_core::path::LeafMode::Follow) else {
+            continue;
+        };
+        if located.trace().kind() != Some(ral_core::path::Kind::File) {
+            continue;
+        }
+        match shell.judge::<Reading>(located) {
+            Ok(found) => return Ok(found),
+            Err(denial) => {
+                first_denial.get_or_insert(denial);
+            }
+        }
+    }
+    Err(first_denial.unwrap_or_else(|| {
+        load_err("not found; is it in <config>/ral/plugins or RAL_PATH?").into()
+    }))
 }
 
 #[cfg(test)]
@@ -342,6 +361,54 @@ mod tests {
             "error should name the hook and the arity mismatch, got: {}",
             err.message
         );
+    }
+
+    /// The candidate search takes the first candidate the grant lets be read:
+    /// one it refuses is passed over for the next, and where every one is
+    /// refused the plugin is not found.
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] fixtures build the candidates the search is made over"
+    )]
+    fn the_candidate_search_passes_over_what_the_grant_refuses() {
+        use ral_core::capability::{Capabilities, FsPolicy};
+        use ral_core::path::{FrozenPath, utf8};
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::write(root.join("p"), "bare").unwrap();
+        std::fs::write(root.join("p.ral"), "suffixed").unwrap();
+        let name = utf8(&root.join("p")).unwrap().to_owned();
+        let frozen = |path: &std::path::Path| FrozenPath::from_surface(utf8(path).unwrap());
+        let found = |denied: &[&str]| {
+            let layer = ral_core::test_helper::layer(Capabilities {
+                fs: Some(FsPolicy {
+                    read_prefixes: vec![frozen(&root)],
+                    deny_paths: denied.iter().map(|n| frozen(&root.join(n))).collect(),
+                    ..FsPolicy::default()
+                }),
+                ..Capabilities::default()
+            });
+            let mut shell = ral_core::test_helper::core_shell();
+            shell
+                .with_layer(layer, |sh| resolve_plugin_path(&name, sh))
+                .map(|located| located.real().as_path().to_path_buf())
+        };
+        assert_eq!(found(&["p.ral"]).unwrap(), root.join("p"));
+        assert_eq!(found(&["p"]).unwrap(), root.join("p.ral"));
+        let refused = found(&["p", "p.ral"]).unwrap_err().to_string();
+        assert!(!refused.contains("not found"), "{refused}");
+        assert!(
+            refused.contains(utf8(&root.join("p")).unwrap()),
+            "{refused}"
+        );
+        let absent = ral_core::test_helper::core_shell()
+            .with_layer(
+                ral_core::test_helper::layer(Capabilities::default()),
+                |sh| resolve_plugin_path(&format!("{name}-missing"), sh),
+            )
+            .map(|located| located.real().as_path().to_path_buf());
+        assert!(absent.unwrap_err().to_string().contains("not found"));
     }
 }
 

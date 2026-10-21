@@ -8,9 +8,9 @@
 //! cannot blank a listing, and no error names a withheld path.
 
 use crate::capability::FsOp;
-use crate::path::LexicalPath;
 use crate::path::shown;
 use crate::path::sigil::literal_relative;
+use crate::path::{LeafMode, LexicalPath, walk_lenient};
 use crate::process::Scope;
 use crate::types::{Settled, Shell, sig};
 use ignore::WalkBuilder;
@@ -184,7 +184,9 @@ impl<I: Iterator<Item = Settled<Sighting>>> Admitted<I> {
         for sighting in self.sightings.by_ref() {
             let Sighting { path, depth, kind } = sighting?;
             let anchored = shell.anchor(&path);
-            if !shell.admits_named(&FsOp::Read, &anchored) {
+            let admitted = walk_lenient(&anchored, LeafMode::Follow)
+                .is_ok_and(|trace| shell.admits_fs(&FsOp::Read, &trace));
+            if !admitted {
                 continue;
             }
             let shown = match self

@@ -7,7 +7,7 @@ use crate::types::{
     sig, validate_handler_arity,
 };
 
-use crate::path::CwdPath;
+use crate::path::{CwdPath, Reading};
 use std::collections::HashMap;
 
 /// Parsed `within [...]` options; each key becomes a `Shell::with_*` scope.
@@ -113,18 +113,16 @@ fn parse_env(v: &Value) -> Settled<HashMap<String, String>> {
 
 /// `dir:` — resolved, permission-checked, and required to exist as a
 /// directory, and to be one a path can be read against ([`CwdPath`]), before
-/// the body runs rather than at the first command.
+/// the body runs rather than at the first command.  The cwd is where the
+/// directory is.
 fn parse_dir(v: &Value, shell: &mut Shell) -> Settled<CwdPath> {
     let path = v.to_string();
     if path.is_empty() {
         return Err(sig("within dir: path cannot be empty"));
     }
     let rp = shell.resolve(&path);
-    shell.check_fs_read(&rp)?;
-    if !rp.as_path().is_dir() {
-        return Err(sig(format!("within dir: {path}: not a directory")));
-    }
-    rp.into_cwd().map_err(|e| sig(format!("within dir: {e}")))
+    let dir = shell.locate_dir::<Reading>(&rp)?;
+    CwdPath::new(dir.real().as_path().to_path_buf()).map_err(|e| sig(format!("within dir: {e}")))
 }
 
 /// What a handler body is typechecked against: the `within`'s own lexical

@@ -197,7 +197,7 @@ impl LexicalPath {
     /// tables).
     ///
     /// The one question two doors ask about such a write: the in-process
-    /// guard (`Shell::check_fs_read`), which calls it no *access*, and the
+    /// guard (`Shell::locate`), which calls it no *access*, and the
     /// observation fan-out (`Shell::observe_stamped`), which calls
     /// it no *mutation* — nothing changed in the world, so nothing is
     /// reported.

@@ -19,9 +19,9 @@
 
 use super::super::Refusal;
 use super::super::warrant::Slot;
-use super::{DenyMask, OpenError, open_real};
+use super::{DenyMask, OpenError, leaf_fd, open_dir_nofollow, open_nofollow};
 use crate::capability::{ExecDeny, ExecRules, Subject};
-use crate::path::{Allow, Deny, Object, RealPath, Rendered, Trace};
+use crate::path::{Allow, Deny, Kind, Object, RealPath, Rendered, Trace};
 use crate::sandbox::{ExecProjection, RenderedFs};
 use libc::{c_int, c_uint};
 use rustix::fs::{FileType, Mode, OFlags};
@@ -255,7 +255,7 @@ impl Landlocked {
         let at = Slot::Ruleset;
         let ruleset = Ruleset(at.take().ok_or_else(|| Error::Missing(at.fd()))?);
         if self.refer_root {
-            let root = open_real("/".as_ref(), OFlags::empty())?
+            let root = open_dir_nofollow(&RealPath::universal())?
                 .ok_or("landlock: the envelope has no root to admit")?;
             (ruleset.admit(root.as_fd(), Access::REFER)).map_err(|e| Error::admit("/", e))?;
         }
@@ -359,16 +359,16 @@ fn admit_exec(
 ) -> Result<(), String> {
     for file in table.allowed_files() {
         let name = file.as_path();
-        let Some(fd) = open_real(name, OFlags::empty())? else {
+        let Some(held) = open_nofollow(file)? else {
             continue;
         };
         // A file admit names that file alone, never what a directory since
         // put there holds.
-        if shape(&fd).map_err(|e| Error::admit(crate::path::shown(name), e))? == FileType::Directory
-        {
+        if held.kind() == Some(Kind::Dir) {
             continue;
         }
-        (ruleset.admit(fd.as_fd(), Access::EXECUTE))
+        let fd = leaf_fd(&held).map_err(|e| Error::admit(crate::path::shown(name), e))?;
+        (ruleset.admit(fd, Access::EXECUTE))
             .map_err(|source| Error::admit(crate::path::shown(name), source))?;
     }
     let walks = vetoes_walk(table, fs);
@@ -461,8 +461,9 @@ fn expand(
         spine: Vec::new(),
     };
     for root in lowered(table, roots) {
-        if let Some(fd) = open_real(root.as_path(), OFlags::empty())? {
-            walk.object(&root, fd.as_fd())?;
+        if let Some(held) = open_nofollow(&root)? {
+            let fd = leaf_fd(&held).map_err(|e| Error::admit(&root, e))?;
+            walk.object(&root, fd)?;
         }
     }
     Ok(())

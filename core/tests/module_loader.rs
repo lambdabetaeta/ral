@@ -104,3 +104,45 @@ fn a_relative_ral_path_entry_is_read_against_the_logical_cwd() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// A `RAL_PATH` candidate is read through the grant, as the cwd's is: one the
+/// grant refuses is passed over for the next, and where it refuses every one
+/// the load fails, never reading the entry ambiently.
+#[test]
+fn ral_path_candidates_are_judged_for_reading() {
+    let root = scratch("judged");
+    let (d1, d2, here) = (root.join("d1"), root.join("d2"), root.join("here"));
+    for dir in [&d1, &d2, &here] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(d1.join("m.ral"), "let answer = 1\n").unwrap();
+    std::fs::write(d2.join("m.ral"), "let answer = 2\n").unwrap();
+    let ral_path = std::env::join_paths([&d1, &d2])
+        .expect("two ordinary scratch paths form RAL_PATH")
+        .to_string_lossy()
+        .into_owned();
+    let under = |fs: String| {
+        format!(
+            "grant [fs: [{fs}]] {{ within [dir: '{}', env: [RAL_PATH: '{ral_path}']] {{ use 'm.ral' }} }}",
+            here.display()
+        )
+    };
+    let mut shell = fresh_shell();
+
+    let denied = under(format!(
+        "read: [`absolute '{}'], deny: [`absolute '{}']",
+        root.display(),
+        d1.join("m.ral").display()
+    ));
+    let found = top_level(&mut shell, &denied).expect("the next candidate is read");
+    assert_eq!(answer_of(&found), 2, "a refused candidate is passed over");
+
+    let narrow = under(format!("read: [`absolute '{}']", here.display()));
+    let refused = top_level(&mut shell, &narrow).expect_err("a grant that reads neither entry");
+    assert!(
+        refused.to_string().contains(&d1.display().to_string()),
+        "the error is the first candidate's refusal, not an absence: {refused}"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}

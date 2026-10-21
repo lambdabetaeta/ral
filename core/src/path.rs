@@ -12,6 +12,10 @@
 //! side mints a [`FrozenPath`] from a folded spelling, and the two meet on
 //! their real forms.
 //!
+//! `walk` imports `Verdict` (`capability/fs.rs`) and `InstallToken`
+//! (`sandbox.rs`): two inverted edges, each a token whose field only its own
+//! module can make, so neither constructor may be widened to straighten them.
+//!
 //! `identity::path_within` and its string twin are `pub(super)` here, so the
 //! containment kernel does not leave this module: a prefix carries two
 //! forms, and *which* one a question is asked of is settled here, not by a
@@ -62,11 +66,16 @@ pub(crate) use render::rendered_ancestors;
 #[cfg(unix)]
 pub(crate) use render::{Object, Rendered, render_objects, render_paths, rendered_pins};
 pub use resolver::Resolver;
-pub(crate) use walk::open_discard;
+#[expect(unused_imports, reason = "used from step 6")]
+pub(crate) use walk::Streaming;
+#[cfg(target_os = "linux")]
+pub(crate) use walk::is_loop;
 pub use walk::{
-    Dir, DirEntry, EntryName, Excluded, Hold, Kind, LeafMode, Located, NotAnEntryName, ObjectId,
-    RealPath, RootName, Step, Trace, Walked, walk, walk_dir, walk_lenient,
+    Authority, Dir, DirEntry, EntryName, Excluded, Hold, Installing, Judged, Kind, LeafMode,
+    Listing, Lists, Located, NotAnEntryName, ObjectId, Op, Peeks, Reading, Reads, RealPath,
+    RootName, Stat, Step, Trace, Unjudged, Walked, Writing, walk, walk_dir, walk_lenient,
 };
+pub(crate) use walk::{Listed, Visibility, open_discard};
 #[cfg(windows)]
 pub(crate) use which::is_batch_image;
 pub(crate) use which::is_executable_file;

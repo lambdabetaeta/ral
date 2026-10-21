@@ -17,6 +17,8 @@
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 compile_error!("ral's sandbox has backends for Linux, macOS and Windows only");
 
+use crate::path::ObjectId;
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod carriers;
 #[cfg(any(windows, test))]
@@ -129,28 +131,33 @@ pub(crate) fn projection_enforceable(projection: &SandboxProjection) -> Result<(
     Ok(())
 }
 
-/// The boot-pinned binary `path` names — `"bwrap"` for the Linux envelope,
-/// `"ral"` for our own executable: or `None`.  Judged by inode, so a hard
-/// link or a rename since boot still answers; a name with nothing on disk
-/// under it names no pin.  `guard::enforce::fs_judge` asks this of every write
-/// ral itself dispatches: the enforcer's inode is not the body's to rewrite,
-/// whatever the grant admits ([`launch`] binds it read-only for the confined
-/// child, and this is the same fact for the in-process half).
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:pin-identity] stats a write's resolved target to compare its inode against the boot pins; a predicate stat for the fs guard's own verdict, not the model's data I/O"
-)]
-pub(crate) fn pinned_binary(path: &std::path::Path) -> Option<&'static str> {
-    let meta = std::fs::metadata(path).ok()?;
+/// The boot-pinned binary the object `id` is — `"bwrap"` for the Linux
+/// envelope, `"ral"` for our own executable: or `None`.  Judged by identity,
+/// so a hard link or a rename since boot still answers.  `guard::fs_judge`
+/// asks this of the leaf of every write ral itself dispatches: the enforcer's
+/// inode is not the body's to rewrite, whatever the grant admits ([`launch`]
+/// binds it read-only for the confined child, and this is the same fact for
+/// the in-process half).
+pub(crate) fn pinned_binary(id: ObjectId) -> Option<&'static str> {
     #[cfg(target_os = "linux")]
-    if linux::envelope().is_ok_and(|envelope| envelope.is_inode(&meta)) {
+    if linux::envelope().is_ok_and(|envelope| envelope.is_object_id(id)) {
         return Some(linux::BWRAP);
     }
     reexec::OWN
         .get()
-        .is_some_and(|own| own.is_inode(&meta))
+        .is_some_and(|own| own.is_object_id(id))
         .then_some("ral")
 }
+
+/// The sandbox side's proof that it is the sandbox side: what
+/// `RealPath::open_nofollow` and `open_dir_nofollow` ask for before they hold
+/// a position as `Installing`.  The field is private to this module and its
+/// children, and the one `static` below is its one construction site: a
+/// renderer lends it, and nothing outside `sandbox` can name it.
+pub(crate) struct InstallToken(());
+
+#[cfg_attr(target_os = "macos", expect(dead_code, reason = "used from step 7"))]
+static TOKEN: InstallToken = InstallToken(());
 
 /// Whether this host builds a `Restricted` envelope at all.
 ///
@@ -270,5 +277,124 @@ mod tests {
             projection_enforceable(&p_net_false).is_ok(),
             "net: false must be enforceable on Windows via the AppContainer backend"
         );
+    }
+
+    /// `RealPath::open_nofollow` and `open_dir_nofollow`, which only the sandbox
+    /// side may call: it holds the token, so these tests lend it.
+    #[cfg(any(target_os = "linux", windows))]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] fixtures build the tree the positions are held in"
+    )]
+    mod nofollow {
+        use crate::path::{Dir, Installing, Kind, Located, ObjectId, RealPath};
+        use crate::sandbox::TOKEN;
+        use std::ffi::OsStr;
+        use std::fs::File;
+        use std::io;
+
+        #[cfg(target_os = "linux")]
+        const ELOOP: &str = "too many levels of symbolic links";
+
+        fn real(path: &std::path::Path) -> RealPath {
+            RealPath::of_path(path).expect("a fixture exists")
+        }
+
+        fn at(parent: &RealPath, name: &str) -> RealPath {
+            parent.entry(OsStr::new(name))
+        }
+
+        fn hold(position: &RealPath) -> io::Result<Option<Located<Installing>>> {
+            position.open_nofollow(&TOKEN)
+        }
+
+        fn hold_dir(position: &RealPath) -> io::Result<Option<Dir<Installing>>> {
+            position.open_dir_nofollow(&TOKEN)
+        }
+
+        /// A directory with a file `f` and a directory `d` in it.
+        fn fixture() -> (tempfile::TempDir, RealPath) {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::write(tmp.path().join("f"), b"held").unwrap();
+            std::fs::create_dir(tmp.path().join("d")).unwrap();
+            let root = real(tmp.path());
+            (tmp, root)
+        }
+
+        #[test]
+        fn an_absent_position_is_none() {
+            let (_tmp, root) = fixture();
+            for position in [at(&root, "absent"), at(&at(&root, "absent"), "f")] {
+                assert!(hold(&position).unwrap().is_none());
+                assert!(hold_dir(&position).unwrap().is_none());
+            }
+        }
+
+        #[test]
+        fn a_file_asked_as_a_directory_is_none() {
+            let (_tmp, root) = fixture();
+            assert!(hold_dir(&at(&root, "f")).unwrap().is_none());
+            assert!(hold_dir(&at(&at(&root, "f"), "g")).unwrap().is_none());
+        }
+
+        #[test]
+        fn a_directory_is_held_as_an_installing_directory() {
+            let (_tmp, root) = fixture();
+            let dir = hold_dir(&at(&root, "d")).unwrap().expect("a directory");
+            assert_eq!(dir.real(), &at(&root, "d"));
+            assert_eq!(dir.trace().kind(), Some(Kind::Dir));
+        }
+
+        /// The file is held as an `Installing` object of kind `File` that lends
+        /// its descriptor; that it reads nothing is `path::walk::tests::markers`'.
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_file_is_held_as_an_installing_object_lending_its_leaf_fd() {
+            let (_tmp, root) = fixture();
+            let located = hold(&at(&root, "f")).unwrap().expect("a file");
+            assert_eq!(located.trace().kind(), Some(Kind::File));
+            let fd = located.leaf_fd().expect("a held leaf lends its descriptor");
+            let lent = File::from(rustix::io::fcntl_dupfd_cloexec(fd, 0).unwrap());
+            assert_eq!(
+                ObjectId::of(&lent).unwrap(),
+                located.trace().last_id(),
+                "the descriptor is of the object the walk found"
+            );
+        }
+
+        /// A directory removed and made again at its name is the new object.
+        #[test]
+        fn a_recreated_directory_is_its_new_object() {
+            let (tmp, root) = fixture();
+            let position = at(&root, "d");
+            let first = hold_dir(&position).unwrap().expect("a directory");
+            std::fs::rename(tmp.path().join("d"), tmp.path().join("old")).unwrap();
+            std::fs::create_dir(tmp.path().join("d")).unwrap();
+            let second = hold_dir(&position).unwrap().expect("the new directory");
+            assert_ne!(first.trace().last_id(), second.trace().last_id());
+            let made = File::open(tmp.path().join("d")).unwrap();
+            assert_eq!(second.trace().last_id(), ObjectId::of(&made).unwrap());
+        }
+
+        /// A position whose last component became a link, or with a link on
+        /// the way, is refused as `ELOOP` is, not followed and not absent.
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_link_in_a_position_refuses_with_eloops_wording() {
+            let (tmp, root) = fixture();
+            std::os::unix::fs::symlink(tmp.path().join("f"), tmp.path().join("link")).unwrap();
+            std::os::unix::fs::symlink(tmp.path().join("d"), tmp.path().join("via")).unwrap();
+            std::fs::write(tmp.path().join("d").join("g"), b"x").unwrap();
+            for position in [
+                at(&root, "link"),
+                at(&at(&root, "via"), "g"),
+                at(&root, "via"),
+            ] {
+                let held = hold(&position).err().expect("a link refuses");
+                assert_eq!(held.to_string(), ELOOP);
+                let held = hold_dir(&position).err().expect("a link refuses");
+                assert_eq!(held.to_string(), ELOOP);
+            }
+        }
     }
 }

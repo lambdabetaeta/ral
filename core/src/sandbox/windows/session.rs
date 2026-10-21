@@ -40,7 +40,7 @@ use windows_sys::Win32::Security::{PSID, SID_AND_ATTRIBUTES};
 use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
 
 use crate::capability::{Extent, FsAllow};
-use crate::path::{Deny, FrozenPath, RealPath, shown};
+use crate::path::{Deny, FrozenPath, Kind, RealPath, shown};
 use crate::process::Launch;
 use crate::process::cancel::Scope;
 use crate::sandbox::Refusal;
@@ -488,40 +488,38 @@ fn refuse_deny_meeting_grant(granted: &[&RealPath], denied: &[RealPath]) -> Resu
     Ok(())
 }
 
-/// The listing [`carve::carve`] asks for, read without following links: a name
-/// surrogate (a symlink, a junction) is a link, any other reparse point (a
-/// cloud placeholder) the object it is.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:carve-list] Lists a directory an allowance is carved around, to grant its entries less the excluded ones. Sandbox setup, not model data I/O."
-)]
+/// The listing [`carve::carve`] asks for, held through the sandbox side's own
+/// doors and read without following links: a name surrogate (a symlink, a
+/// junction) is a link, any other reparse point (a cloud placeholder) the
+/// object it is.
 fn listing(dir: &RealPath) -> Result<Listing, Refusal> {
-    let unlisted = |e: std::io::Error| {
+    let unlisted = |e: &std::io::Error| {
         Refusal::Launch(format!(
             "sandbox: cannot list '{}' to grant around an exclusion in it: {e}",
             shown(dir.as_path())
         ))
     };
-    let entries = match std::fs::read_dir(dir.as_path()) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Listing::Missing),
-        Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => {
-            return Ok(Listing::NotDirectory);
+    let held = match dir.open_dir_nofollow(&crate::sandbox::TOKEN) {
+        Ok(Some(held)) => held,
+        Ok(None) => {
+            return match dir.open_nofollow(&crate::sandbox::TOKEN) {
+                Ok(None) => Ok(Listing::Missing),
+                Ok(Some(_)) => Ok(Listing::NotDirectory),
+                Err(e) => Err(unlisted(&e)),
+            };
         }
-        Err(e) => return Err(unlisted(e)),
+        Err(e) => return Err(unlisted(&e)),
     };
-    entries
+    held.read_dir()
+        .map_err(|e| unlisted(&e))?
         .map(|entry| {
-            let entry = entry.map_err(unlisted)?;
-            let kind = entry.file_type().map_err(unlisted)?;
+            let seen = entry.seen().map_err(unlisted)?;
             Ok(carve::Entry {
-                name: entry.file_name(),
-                kind: if kind.is_symlink() {
-                    EntryKind::Link
-                } else if kind.is_dir() {
-                    EntryKind::Directory
-                } else {
-                    EntryKind::Other
+                name: entry.name().as_os_str().to_owned(),
+                kind: match seen.stat.kind {
+                    Kind::Symlink => EntryKind::Link,
+                    Kind::Dir => EntryKind::Directory,
+                    _ => EntryKind::Other,
                 },
             })
         })

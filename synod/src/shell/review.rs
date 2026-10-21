@@ -18,9 +18,11 @@ use ral_core::path::{basename, extension, is_stream_or_drive, shown};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
-use ral_core::path::{Allow, RealPath};
+use ral_core::capability::{Floor, GrantStack};
+use ral_core::path::{Kind, LeafMode, Reading, Stat, walk, walk_dir};
 use ral_core::sync::LockExt;
 use serde::Serialize;
+use synod::grant::spelled;
 use synod::workspace::{Change, JobReport};
 use tauri::State;
 
@@ -228,47 +230,50 @@ pub(crate) fn file_to_open(review: &Review, index: usize, shown: &str) -> Result
     };
     let path = inside(&folder, &rel)?;
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:open-link-check] a stat of the file a change card names, without \
-                  following it, to refuse a link before anything hands it to the system"
-    )]
-    let meta = std::fs::symlink_metadata(&path)
-        .map_err(|e| format!("Synod could not find {rel} in your folder ({e})."))?;
-    if meta.file_type().is_symlink() || is_reparse_point(&meta) {
+    // The root stack: this is the user's own folder, and what the handle
+    // answers is the kind of object the name is.
+    let (stack, floor) = (GrantStack::root(), Floor::default());
+    let missing =
+        |e: &dyn std::fmt::Display| format!("Synod could not find {rel} in your folder ({e}).");
+    let dir = walk_dir(&spelled(&folder)?).map_err(|e| missing(&e))?;
+    let dir = stack
+        .judge_dir::<Reading>(&floor, dir)
+        .expect("the root stack withholds nothing");
+    let located = walk(&spelled(&path)?, LeafMode::NoFollow).map_err(|e| missing(&e))?;
+    let located = stack
+        .judge::<Reading>(&floor, located)
+        .expect("the root stack withholds nothing");
+    let stat = located
+        .stat()
+        .ok_or_else(|| missing(&std::io::ErrorKind::NotFound))?;
+    if stat.kind == Kind::Symlink || is_reparse_point(stat) {
         return Err(format!(
             "{rel} is a link to somewhere else, not a file of its own, so synod will not open it."
         ));
     }
-    if !meta.is_file() {
+    if stat.kind != Kind::File {
         return Err(format!("{rel} is not a file, so there is nothing to open."));
     }
-
-    let (root, real) = (RealPath::of_path(&folder), RealPath::of_path(&path));
-    match (root, real) {
-        (Ok(root), Ok(real)) if real.within::<Allow>(&root) => Ok(Target { path, how }),
-        (Ok(_), Ok(_)) => Err(format!(
+    if !dir.real().contains(located.real()) {
+        return Err(format!(
             "{rel} leads outside your folder, so synod will not open it."
-        )),
-        (Err(e), _) | (_, Err(e)) => {
-            Err(format!("Synod could not find {rel} in your folder ({e})."))
-        }
+        ));
     }
+    Ok(Target { path, how })
 }
 
-/// Whether the file is a Windows reparse point: a junction, a symbolic link,
-/// or anything else the file system redirects rather than reads.
+/// Whether the object is a Windows reparse point: a junction, a symbolic
+/// link, or anything else the file system redirects rather than reads, a
+/// cloud placeholder included.
 #[cfg(windows)]
-fn is_reparse_point(meta: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-    meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+fn is_reparse_point(stat: &Stat) -> bool {
+    stat.reparse_tag.is_some()
 }
 
-/// Elsewhere a link is the only redirection, and `is_symlink` has already
+/// Elsewhere a link is the only redirection, and its kind has already
 /// answered for it.
 #[cfg(not(windows))]
-fn is_reparse_point(_meta: &std::fs::Metadata) -> bool {
+fn is_reparse_point(_: &Stat) -> bool {
     false
 }
 
@@ -438,6 +443,29 @@ mod tests {
         let review = holding(dir.path(), &["link.pdf", "away/secret.pdf"]);
         assert!(file_to_open(&review, 0, "link.pdf").is_err());
         assert!(file_to_open(&review, 1, "away/secret.pdf").is_err());
+    }
+
+    /// A cloud placeholder presents as a file but carries a reparse tag, which
+    /// the walk reports and `file_to_open` refuses as it refuses a link.
+    #[cfg(windows)]
+    #[test]
+    fn a_placeholder_is_a_reparse_point_though_it_presents_as_a_file() {
+        const CLOUD: u32 = 0x9000_001A;
+        let placeholder = Stat {
+            kind: Kind::File,
+            len: 0,
+            readonly: false,
+            mtime: None,
+            atime: None,
+            btime: None,
+            reparse_tag: Some(CLOUD),
+            hidden: false,
+        };
+        assert!(is_reparse_point(&placeholder));
+        assert!(!is_reparse_point(&Stat {
+            reparse_tag: None,
+            ..placeholder
+        }));
     }
 
     #[cfg(windows)]

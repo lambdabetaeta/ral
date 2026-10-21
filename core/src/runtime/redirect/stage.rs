@@ -9,8 +9,8 @@
 //! fall to kernel inheritance.  Concurrent writers race as usual: this buys
 //! crash safety, not exclusion.
 
-use crate::path::Located;
 use crate::path::walk::{Kind, Stat};
+use crate::path::{Judged, Located, Writing};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read as _};
@@ -29,7 +29,7 @@ const PREVIEW_CAP: u64 = 64 * 1024;
 pub(crate) struct PendingWrite(Option<Staged>);
 
 struct Staged {
-    target: Located,
+    target: Located<Judged<Writing>>,
     tmp: OsString,
 }
 
@@ -53,7 +53,7 @@ impl PendingWrite {
     }
 
     /// The target the write is staged beside.
-    pub(crate) fn target(&self) -> Option<&Located> {
+    pub(crate) fn target(&self) -> Option<&Located<Judged<Writing>>> {
         self.0.as_ref().map(|staged| &staged.target)
     }
 
@@ -108,7 +108,7 @@ fn read_capped(mut file: File) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-impl Located {
+impl Located<Judged<Writing>> {
     /// Stage an atomic `>` beside this target.  `existing` is its stat when it
     /// exists: its mode is carried onto the staged file, since a redirect must
     /// not silently narrow a 0644 file; a new file keeps what its create gave

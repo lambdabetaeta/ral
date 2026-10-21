@@ -176,3 +176,94 @@ fn glob_climbs_only_before_a_wildcard() {
     assert!(e.to_string().contains("'..'"), "{e}");
     assert_eq!(shown(&dir.join("deep/dir"), "glob '../*.rs'"), "[../b.rs]");
 }
+
+/// A deny on a name that is not there refuses the question and the read alike,
+/// so a denied absent name never reads as merely absent: the grant judges the
+/// create-target object the walk finds, and where an intermediate directory is
+/// absent too, `exists` and `file-info` judge the name itself.
+#[cfg(unix)]
+#[test]
+fn a_denied_absent_name_is_refused_not_reported_absent() {
+    let (_tmp, dir) = fixture();
+    let refused = |deny: &str, body: &str| {
+        let body = format!("grant [fs: [read: [`absolute /], deny: [`cwd {deny}]]] {{ {body} }}");
+        let message = run_in(&dir, &body).expect_err("a denied name must be refused");
+        let message = format!("{message:?}");
+        assert!(
+            message.contains("denied by grant"),
+            "{body} must be refused by the grant, got: {message}"
+        );
+    };
+    for body in ["exists deep/.env", "file-info deep/.env", "cat < deep/.env"] {
+        refused("deep/.env", body);
+    }
+    for body in ["exists gone/x", "file-info gone/x"] {
+        refused("gone", body);
+    }
+}
+
+/// `within [dir: d]` enters the directory `d` is: refused where a deny holds
+/// it, however spelled, and under an allowance the cwd is its real position.
+#[cfg(unix)]
+#[test]
+fn within_dir_is_refused_under_a_deny_and_enters_the_real_position_under_an_allowance() {
+    let (_tmp, dir) = fixture();
+    std::os::unix::fs::symlink("deep/dir", dir.join("link")).unwrap();
+    for spelling in ["deep/dir", "link"] {
+        let body = format!(
+            "grant [fs: [read: [`absolute /], deny: [`cwd deep/dir]]] \
+             {{ within [dir: {spelling}] {{ cwd }} }}"
+        );
+        assert!(run_in(&dir, &body).is_err(), "{spelling} must be refused");
+    }
+    let body = "grant [fs: [read: [`cwd deep]]] { within [dir: link] { cwd } }";
+    assert_eq!(
+        shown(&dir, body),
+        dir.join("deep/dir").display().to_string()
+    );
+}
+
+/// `list-dir` judges each entry as the listing saw it: a link is a link,
+/// whatever it leads to, so a deny on its target does not drop it and a deny
+/// on the link does.
+#[cfg(unix)]
+#[test]
+fn list_dir_judges_a_linked_entry_as_the_link() {
+    let (_tmp, dir) = fixture();
+    std::fs::write(dir.join("secret"), "s").unwrap();
+    std::os::unix::fs::symlink("../secret", dir.join("deep/link")).unwrap();
+    let under = |deny: &str, body: &str| {
+        let body = format!("grant [fs: [read: [`absolute /], deny: [`cwd {deny}]]] {{ {body} }}");
+        shown(&dir, &body)
+    };
+    assert_eq!(under("secret", "length !{list-dir deep}"), "2");
+    assert_eq!(under("secret", "!{list-dir deep}[1][type]"), "`symlink");
+    assert_eq!(under("deep/link", "length !{list-dir deep}"), "1");
+}
+
+/// The discard device is opened by its fixed name, never by a spelling: a
+/// redirect to one that folds to `/dev/null` and leads, through a link, to a
+/// regular file writes the device and leaves the file be.
+#[cfg(unix)]
+#[test]
+fn a_redirect_through_a_link_spelling_that_folds_to_the_device_writes_the_device() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = std::fs::canonicalize(tmp.path()).unwrap();
+    // `link`, then enough `..` to fold away `link` and every name of `dir`,
+    // and, since the link leads that many levels below `p`, to climb back to
+    // `p` through it.
+    let ups = dir.components().count();
+    let mut deep = dir.join("p");
+    deep.extend((0..ups).map(|level| format!("c{level}")));
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::create_dir_all(dir.join("p/dev")).unwrap();
+    std::fs::write(dir.join("p/dev/null"), b"").unwrap();
+    std::os::unix::fs::symlink(&deep, dir.join("link")).unwrap();
+    let mut spelling = dir.join("link");
+    spelling.extend(std::iter::repeat_n("..", ups));
+    spelling.push("dev/null");
+
+    let body = format!("echo swallowed > '{}'", spelling.display());
+    run_in(&dir, &body).expect("the device swallows the write");
+    assert_eq!(std::fs::read(dir.join("p/dev/null")).unwrap(), b"");
+}

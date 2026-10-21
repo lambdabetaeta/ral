@@ -1,0 +1,13 @@
+error[E0624]: method `open_nofollow` is private
+ --> tests/markers/open_nofollow_needs_a_token.rs:7:22
+  |
+7 |       let _ = position.open_nofollow();
+  |                        ^^^^^^^^^^^^^ private method
+  |
+ ::: src/path/walk.rs
+  |
+  | /     pub(crate) fn open_nofollow(
+  | |         &self,
+  | |         _: &InstallToken,
+  | |     ) -> io::Result<Option<Located<Installing>>> {
+  | |________________________________________________- private method defined here

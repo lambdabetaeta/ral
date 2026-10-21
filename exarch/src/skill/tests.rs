@@ -2,6 +2,35 @@
 
 use super::*;
 
+/// The doors the boot reads by, under a stack that restricts nothing, so a
+/// fixture is judged by the real door and refused by none.
+fn boot<'a>(
+    grants: &'a GrantStack,
+    floor: &'a Floor,
+    env: &'a EnvVars,
+    cwd: &'a CwdPath,
+) -> Boot<'a> {
+    Boot {
+        grants,
+        floor,
+        resolver: Resolver::at(env, cwd),
+    }
+}
+
+/// The skill whose directory is `dir`, found as the boot finds one.
+fn found(dir: &Path) -> Found {
+    let (grants, floor, env) = (GrantStack::root(), Floor::default(), EnvVars::new());
+    let cwd = CwdPath::new(dir.to_path_buf()).unwrap();
+    let mut doors = boot(&grants, &floor, &env, &cwd);
+    let file = doors.file(&doors.anchor(&dir.join("SKILL.md"))).unwrap();
+    let name = dir.file_name().unwrap().to_str().unwrap().to_owned();
+    Found {
+        name,
+        dir: dir.to_path_buf(),
+        file,
+    }
+}
+
 #[test]
 fn valid_names() {
     assert!(valid_skill_name("pdf"));
@@ -31,7 +60,7 @@ fn parse_valid_skill() {
         "---\nname: my-skill\ndescription: does things\n---\n\n# Body\ncontent\n",
     )
     .unwrap();
-    let skill = parse_skill(&skill_dir, "my-skill").unwrap();
+    let skill = parse_skill(&found(&skill_dir)).unwrap();
     assert_eq!(skill.name, "my-skill");
     assert_eq!(skill.description, "does things");
 }
@@ -46,7 +75,7 @@ fn name_must_match_dir() {
         "---\nname: wrong-name\ndescription: x\n---\n",
     )
     .unwrap();
-    assert!(parse_skill(&skill_dir, "my-skill").is_err());
+    assert!(parse_skill(&found(&skill_dir)).is_err());
 }
 
 #[test]
@@ -66,7 +95,7 @@ fn read_body_after_frontmatter() {
         "---\nname: my-skill\ndescription: d\n---\n\n# Hello\nworld\n",
     )
     .unwrap();
-    let body = read_skill_body(&skill_dir).unwrap();
+    let body = read_skill_body(&found(&skill_dir)).unwrap();
     assert_eq!(body, "# Hello\nworld");
 }
 
@@ -81,11 +110,50 @@ fn local_overrides_global() {
     std::fs::write(local.join("SKILL.md"), "---\nname: dup\n---\n").unwrap();
     std::fs::write(global.join("SKILL.md"), "---\nname: dup\n---\n").unwrap();
 
-    let found = discover_all(cwd.path(), config.path());
-    let dup: Vec<_> = found.iter().filter(|(n, _)| n == "dup").collect();
+    let (grants, floor, env) = (GrantStack::root(), Floor::default(), EnvVars::new());
+    let at = CwdPath::new(cwd.path().to_path_buf()).unwrap();
+    let all = discover_all(
+        cwd.path(),
+        config.path(),
+        &mut boot(&grants, &floor, &env, &at),
+    );
+    let dup: Vec<_> = all.iter().filter(|found| found.name == "dup").collect();
     assert_eq!(dup.len(), 1, "duplicate name should collapse to one entry");
     assert_eq!(
-        dup[0].1, local,
+        dup[0].dir, local,
         "the local skill must shadow the global one"
     );
+}
+
+/// Discovery is judged by the stack the agent runs under: a skill directory
+/// it refuses, and a root it does not read, are not found.
+#[test]
+fn discovery_under_a_restricted_stack_finds_only_what_it_may_read() {
+    use ral_core::capability::{Capabilities, FsPolicy};
+    use ral_core::path::{FrozenPath, utf8};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let (work, config) = (root.join("work"), root.join("config"));
+    for dir in [
+        work.join(".exarch/skills/alpha"),
+        work.join(".exarch/skills/beta"),
+        config.join("skills/gamma"),
+    ] {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "---\ndescription: d\n---\n").unwrap();
+    }
+    let frozen = |path: &Path| FrozenPath::from_surface(utf8(path).unwrap());
+    let grants = ral_core::test_helper::stack([ral_core::test_helper::layer(Capabilities {
+        fs: Some(FsPolicy {
+            read_prefixes: vec![frozen(&work)],
+            deny_paths: vec![frozen(&work.join(".exarch/skills/beta"))],
+            ..FsPolicy::default()
+        }),
+        ..Capabilities::default()
+    })]);
+    let (floor, env) = (Floor::default(), EnvVars::new());
+    let at = CwdPath::new(work.clone()).unwrap();
+    let all = discover_all(&work, &config, &mut boot(&grants, &floor, &env, &at));
+    let names: Vec<_> = all.iter().map(|found| found.name.as_str()).collect();
+    assert_eq!(names, ["alpha"]);
 }

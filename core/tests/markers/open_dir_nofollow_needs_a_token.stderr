@@ -1,0 +1,13 @@
+error[E0624]: method `open_dir_nofollow` is private
+ --> tests/markers/open_dir_nofollow_needs_a_token.rs:7:22
+  |
+7 |       let _ = position.open_dir_nofollow();
+  |                        ^^^^^^^^^^^^^^^^^ private method
+  |
+ ::: src/path/walk.rs
+  |
+  | /     pub(crate) fn open_dir_nofollow(
+  | |         &self,
+  | |         token: &InstallToken,
+  | |     ) -> io::Result<Option<Dir<Installing>>> {
+  | |____________________________________________- private method defined here

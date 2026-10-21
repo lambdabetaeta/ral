@@ -6,6 +6,7 @@
 )]
 
 use super::super::*;
+use super::{writable, writing};
 use crate::path::{CwdPath, Resolver};
 use crate::types::EnvVars;
 use serde::de::DeserializeOwned;
@@ -18,11 +19,21 @@ pub(super) fn spelled(path: &Path) -> LexicalPath {
     Resolver::at(&EnvVars::new(), &cwd).anchor(path)
 }
 
-fn located(path: &Path) -> io::Result<Located> {
+/// [`walk`] and [`walk_dir`] as these tests ask them: what they hold is
+/// retagged as judged for writing, since the tests judge nothing.
+fn walk(rp: &LexicalPath, mode: LeafMode) -> io::Result<Located<Judged<Writing>>> {
+    super::super::walk(rp, mode).map(writing)
+}
+
+fn walk_dir(rp: &LexicalPath) -> io::Result<Dir<Judged<Writing>>> {
+    super::super::walk_dir(rp).map(writable)
+}
+
+fn located(path: &Path) -> io::Result<Located<Judged<Writing>>> {
     located_with(path, LeafMode::Follow)
 }
 
-pub(super) fn located_with(path: &Path, mode: LeafMode) -> io::Result<Located> {
+pub(super) fn located_with(path: &Path, mode: LeafMode) -> io::Result<Located<Judged<Writing>>> {
     walk(&spelled(path), mode)
 }
 
@@ -780,7 +791,7 @@ fn a_relative_target_continues_from_the_held_directory() {
     let entered = held.open_dir_via_link(&name("l"), &[]).unwrap();
     assert_eq!(ObjectId::of(&entered.handle.file).unwrap(), wanted);
     assert_eq!(entered.trace().real().as_path(), dir.join("d/original"));
-    assert_eq!(entered.stat().kind, Kind::Dir);
+    assert_eq!(writable(entered).stat().kind, Kind::Dir);
 }
 
 /// A `..` in the target pops the chain of directories the caller entered, and
@@ -794,7 +805,7 @@ fn a_dotdot_in_a_target_pops_the_chain_and_stops_at_its_end() {
     symlink("../c", dir.join("a/b/up")).unwrap();
     symlink("../../a/c", dir.join("a/b/far")).unwrap();
     let above = walk_dir(&spelled(&dir.join("a"))).unwrap();
-    let below = above.open_dir(&name("b")).unwrap();
+    let below = writable(above.open_dir(&name("b")).unwrap());
 
     let entered = below.open_dir_via_link(&name("up"), &[&above]).unwrap();
     assert_eq!(entered.real().as_path(), dir.join("a/c"));
@@ -851,7 +862,7 @@ fn locate_holds_an_entry_by_its_mode() {
     let followed = held.locate(&name("l"), LeafMode::Follow).unwrap();
     assert_eq!(followed.real().as_path(), dir.join("f"));
     let link = held.locate(&name("l"), LeafMode::NoFollow).unwrap();
-    assert_eq!(link.read_link().unwrap(), Path::new("f"));
+    assert_eq!(writing(link).read_link().unwrap(), Path::new("f"));
     let Err(err) = held.locate(&name("missing"), LeafMode::Follow) else {
         panic!("nothing is there");
     };
@@ -942,36 +953,6 @@ fn listing_a_search_only_directory_fails_at_the_reopen_not_at_the_walk() {
         listed.unwrap(),
         Some(io::ErrorKind::PermissionDenied),
         "the walk entered it, the listing refused"
-    );
-}
-
-/// The bridge listing is the same one: sorted, stated without following.
-#[test]
-fn a_located_directory_lists_as_a_directory_does() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = root(&tmp);
-    std::fs::write(dir.join("b"), b"").unwrap();
-    std::fs::write(dir.join("a"), b"").unwrap();
-    symlink("a", dir.join("l")).unwrap();
-    let names: Vec<_> = located(&dir)
-        .unwrap()
-        .read_dir()
-        .unwrap()
-        .into_iter()
-        .map(|e| (e.name, e.stat.kind))
-        .collect();
-    assert_eq!(
-        names,
-        [
-            ("a".into(), Kind::File),
-            ("b".into(), Kind::File),
-            ("l".into(), Kind::Symlink)
-        ]
-    );
-    let file = located(&dir.join("a")).unwrap();
-    assert_eq!(
-        file.read_dir().err().unwrap().kind(),
-        io::ErrorKind::NotADirectory
     );
 }
 
@@ -1190,16 +1171,16 @@ fn an_absent_entry_is_made_in_the_directory_held() {
     let held = walk_dir(&spelled(&dir.join("d"))).unwrap();
     std::fs::rename(dir.join("d"), dir.join("moved")).unwrap();
 
-    let target = held.absent(name("sub")).unwrap();
+    let target = writing(held.absent(name("sub")).unwrap());
     assert_eq!(target.trace().tail(), [name("sub")]);
     assert!(target.stat().is_none());
-    let made = target.create_dir().unwrap();
+    let made = target.create_dir(Visibility::Public).unwrap();
     assert!(dir.join("moved/sub").is_dir());
     assert!(!dir.join("d").exists());
     assert_eq!(made.real().as_path(), dir.join("d/sub"));
     assert_eq!(made.trace().tail(), []);
 
-    let file = held.absent(name("f")).unwrap();
+    let file = writing(held.absent(name("f")).unwrap());
     file.open_streaming(Streaming::Append)
         .unwrap()
         .file()
@@ -1207,7 +1188,10 @@ fn an_absent_entry_is_made_in_the_directory_held() {
         .unwrap();
     assert_eq!(std::fs::read(dir.join("moved/f")).unwrap(), b"x");
 
-    let Err(err) = located(&dir.join("moved/sub")).unwrap().create_dir() else {
+    let Err(err) = located(&dir.join("moved/sub"))
+        .unwrap()
+        .create_dir(Visibility::Public)
+    else {
         panic!("a present leaf is not made");
     };
     assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);

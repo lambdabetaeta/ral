@@ -45,18 +45,6 @@ pub(crate) fn as_byte_list(val: &Value, ctx: &str) -> Settled<Vec<u8>> {
     Ok(out)
 }
 
-/// Resolve `path` against the `within [dir: …]` scoped cwd and capability-check
-/// it for read — the move every fs query builtin opens with, so probing never
-/// falls back to the OS cwd.
-///
-/// # Errors
-/// Returns `Err` if the read capability check denies the resolved path.
-pub fn checked_read_path(shell: &mut Shell, path: &str) -> Settled<crate::path::LexicalPath> {
-    let rp = shell.resolve(path);
-    shell.check_fs_read(&rp)?;
-    Ok(rp)
-}
-
 /// The one stdin policy every reading builtin shares: an installed `Source`
 /// (pipeline pipe or `<` redirect) if there is one; else a refusal when startup
 /// stdin was a terminal, since these builtins want bytes and not a prompt; else

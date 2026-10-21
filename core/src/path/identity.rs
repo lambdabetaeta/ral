@@ -77,7 +77,6 @@ pub enum MatchedBy {
 #[derive(Clone, Copy)]
 pub(crate) enum Subject<'a> {
     Access(&'a Trace),
-    #[expect(dead_code, reason = "used from step 4")]
     Listed(&'a Listed<'a>),
     Position(&'a RealPath),
     Everywhere,

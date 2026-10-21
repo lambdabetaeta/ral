@@ -10,14 +10,14 @@
 //! so the two cannot drift.
 
 use crate::capability::{
-    Admitted, ExecDenial, Flag, Floor, FsDeny, FsOp, GrantStack, Program, Refused, ShellVerb,
-    Withheld, ral_binary,
+    Admitted, ExecDenial, ExecRefused, Flag, Floor, FsDeny, FsOp, GrantStack, LocateError, Program,
+    Refused, ShellVerb, Withheld, ral_binary,
 };
 use crate::path::shown;
-use crate::path::{LexicalPath, MatchedBy, Trace};
+use crate::path::{LexicalPath, MatchedBy, RealPath, Trace};
 use crate::text::code;
 use crate::types::{Check, Context, Error, Resource, Settled, sig};
-use std::fmt::Display;
+use std::fmt::{self, Display};
 
 /// A refused exec or fs check: the fact the trail keeps, and the error the
 /// caller raises.  An admitted check is never recorded: a trail of every
@@ -49,17 +49,49 @@ impl Denial {
 const NESTED: &str = "an enclosing grant may be the one that withholds it, and a nested grant \
                       cannot add authority its caller withholds";
 
-/// The exclusion half of a refusal, which no allowance overrides.
-fn excluded(subject: impl Display, scope: impl Display, matched_by: MatchedBy) -> String {
+/// What an exclusion says of its subject, which no allowance overrides.
+fn excluded_tail(scope: impl Display, matched_by: MatchedBy) -> String {
     match matched_by {
         MatchedBy::Name => {
-            format!("{subject} is excluded by {scope}; an allowance cannot override an exclusion")
+            format!("is excluded by {scope}; an allowance cannot override an exclusion")
         }
         MatchedBy::FoldedName => format!(
-            "{subject} is the denied {scope} under another spelling \
+            "is the denied {scope} under another spelling \
              (case or Unicode form); a deny holds under every spelling"
         ),
-        MatchedBy::Identity => format!("{subject} is the denied object {scope} under another name"),
+        MatchedBy::Identity => format!("is the denied object {scope} under another name"),
+    }
+}
+
+/// The exclusion half of a refusal, which no allowance overrides.
+fn excluded(subject: impl Display, scope: impl Display, matched_by: MatchedBy) -> String {
+    format!("{subject} {}", excluded_tail(scope, matched_by))
+}
+
+/// What a refusal says of its object, which the caller names ahead of it.
+impl Display for Refused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Guarded(pinned) => write!(
+                f,
+                "it is the {pinned} binary ral pinned at startup, which ral never writes into"
+            ),
+            Self::Withheld(Withheld::MissingAllowance) => {
+                f.write_str("no allowance of the active grant covers it")
+            }
+            Self::Withheld(Withheld::Excluded { scope, matched_by }) => {
+                write!(f, "it {}", excluded_tail(scope, *matched_by))
+            }
+        }
+    }
+}
+
+impl Display for LocateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(e) => e.fmt(f),
+            Self::Refused(refused) => refused.fmt(f),
+        }
     }
 }
 
@@ -75,7 +107,7 @@ pub(crate) fn check_exec(
     args: Vec<String>,
 ) -> Result<Admitted, Box<Denial>> {
     ctx.grants.admit(floor, program, args).map_err(|refused| {
-        let Refused { program, args, why } = *refused;
+        let ExecRefused { program, args, why } = *refused;
         let error = exec_error(&ctx.grants, shown, &program, &why);
         Box::new(exec_denial(shown, &program, &why, Some(&args), error))
     })
@@ -182,38 +214,29 @@ pub(crate) fn deny_head(
     exec_denial(shown, program, why, None, error)
 }
 
-/// Why the fs guard refuses: `Guarded` is the one refusal no grant decides, a
-/// write onto a binary the sandbox pinned at boot, made before the stack is
-/// consulted, the twin of the discard device, which is admitted before it is.
-pub(super) enum FsRefusal {
-    Guarded(&'static str),
-    Withheld(Withheld<FsDeny>),
-}
-
 /// Judge the access `trace` by `op`'s table: an exclusion beats every
 /// allowance, and a path no allowance supports is withheld.  `Ok` exactly when
 /// no layer held an `fs` opinion or some allowance supports the path alone.
+/// A write onto a binary the sandbox pinned at boot is [`Refused::Guarded`]
+/// first, no grant deciding it, the twin of the discard device, which is
+/// admitted before the stack is.
 ///
 /// The exclusions this decides against are the ones their walks held; the
 /// sandbox's projection folds the same tables once, at spawn, because that is
 /// when the OS profile is written.
-pub(super) fn fs_judge(
+pub(crate) fn fs_judge(
     grants: &GrantStack,
     floor: &Floor,
     trace: &Trace,
     op: &FsOp,
-) -> Result<(), FsRefusal> {
+) -> Result<(), Refused> {
     // Before the stack: an empty stack is exactly the case it must catch.
     if matches!(op, FsOp::Write)
-        && let Some(pinned) = crate::sandbox::pinned_binary(trace.real().as_path())
+        && let Some(pinned) = trace.leaf_id().and_then(crate::sandbox::pinned_binary)
     {
-        return Err(FsRefusal::Guarded(pinned));
+        return Err(Refused::Guarded(pinned));
     }
-    match op {
-        FsOp::Read => grants.read(floor, trace),
-        FsOp::Write => grants.write(floor, trace),
-    }
-    .map_err(FsRefusal::Withheld)
+    grants.fold_fs(floor, op, trace).map_err(Refused::Withheld)
 }
 
 impl GrantStack {
@@ -236,22 +259,29 @@ pub(crate) fn check_device_name(path: &LexicalPath) -> Settled<()> {
 }
 
 /// Decide an `op` on the access a walk found: [`fs_judge`] is the decision,
-/// this the wording and the fact around it.
+/// [`fs_denial`] the wording and the fact around it.
 pub(crate) fn check_fs_exact(
     ctx: &Context,
     floor: &Floor,
     trace: &Trace,
     op: &FsOp,
 ) -> Result<(), Box<Denial>> {
+    fs_judge(&ctx.grants, floor, trace, op)
+        .map_err(|refused| fs_denial(ctx, refused, op, trace.real()))
+}
+
+/// The denial of `refused`, an `op` on the object at `real`.
+pub(crate) fn fs_denial(
+    ctx: &Context,
+    refused: Refused,
+    op: &FsOp,
+    real: &RealPath,
+) -> Box<Denial> {
     let name = <&str>::from(op);
-    let path = shown(trace.real().as_path());
+    let path = shown(real.as_path());
     let layers = ctx.grants.fs().count();
-    let refusal = match fs_judge(&ctx.grants, floor, trace, op) {
-        Ok(()) => return Ok(()),
-        Err(refusal) => refusal,
-    };
-    let (detail, error) = match refusal {
-        FsRefusal::Withheld(Withheld::MissingAllowance) => {
+    let (detail, error) = match refused {
+        Refused::Withheld(Withheld::MissingAllowance) => {
             let permission = match op {
                 FsOp::Read => "reading",
                 FsOp::Write => "writing",
@@ -272,7 +302,7 @@ pub(crate) fn check_fs_exact(
             };
             (None, error.with_hint(hint))
         }
-        FsRefusal::Withheld(Withheld::Excluded { scope, matched_by }) => (
+        Refused::Withheld(Withheld::Excluded { scope, matched_by }) => (
             Some(("deny", scope.to_string())),
             Error::new(format!(
                 "fs {name} denied by grant: {}",
@@ -280,7 +310,7 @@ pub(crate) fn check_fs_exact(
             ))
             .with_hint(EXCLUSION_HINT),
         ),
-        FsRefusal::Guarded(pinned) => (
+        Refused::Guarded(pinned) => (
             Some(("pinned", pinned.to_string())),
             Error::new(format!(
                 "fs write refused: {path} is the {pinned} binary ral pinned at startup, which \
@@ -296,7 +326,7 @@ pub(crate) fn check_fs_exact(
     let fields = [("op", name.to_string()), ("path", path)]
         .into_iter()
         .chain(detail);
-    Err(Box::new(Denial::new(Resource::Fs, fields, error)))
+    Box::new(Denial::new(Resource::Fs, fields, error))
 }
 
 /// Refuse a verb or builtin some layer of the stack withholds; `who` names it

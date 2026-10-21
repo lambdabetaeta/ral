@@ -25,14 +25,15 @@ pub(crate) use exec::ExecDeny;
 #[cfg(unix)]
 pub(crate) use exec::Subject;
 pub(crate) use exec::{
-    Admitted, ExecDenial, ExecRules, Keyed, Program, Refused, Rule, name_rules, ral_binary, rules,
+    Admitted, ExecDenial, ExecRules, Keyed, Program, Refused as ExecRefused, Rule, name_rules,
+    ral_binary, rules,
 };
-pub use fs::{Floor, FsOp};
-pub(crate) use fs::{FsAllow, FsDeny, FsLayer, FsRules, region, running_region};
+pub use fs::{Floor, FsDeny, FsOp, LocateError, Refused};
+pub(crate) use fs::{FsAllow, FsLayer, FsRules, ReadRegion, Verdict, region, running_region};
 pub(crate) use lattice::Axis;
 pub use lattice::{
     Capabilities, EditorVerb, Evidence, ExecGrant, ExecKey, ExecSummary, Extent, Flag, Fragment,
     FsPolicy, FsSummary, GrantLayer, GrantPath, GrantStack, GrantSummary, Join, LayerSummary, Meet,
     Net, ShellVerb,
 };
-pub(crate) use table::Withheld;
+pub use table::Withheld;

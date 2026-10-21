@@ -9,11 +9,15 @@
 
 use std::path::Path;
 
-use crate::capability::{Fragment, GrantLayer};
+use crate::capability::{Fragment, GrantLayer, LocateError};
 use crate::guard::decode_capability_map;
 use crate::guard::freeze::FreezeCtx;
+use crate::path::Reading;
 use crate::source::{SourceFile, SourceOrigin};
 use crate::types::{Break, Mooring, Settled, Shell, sig};
+
+/// How a profile file that is not there is said to be, ahead of its name.
+pub const NOT_FOUND: &str = "path does not exist";
 
 /// Evaluate `source` and decode its terminal value into a resolved
 /// [`GrantLayer`], walking places against `ctx`.
@@ -41,19 +45,15 @@ pub fn load_capabilities_from_str(
 }
 
 /// Read `path` and forward to [`load_capabilities_from_str`], keyed by its
-/// canonical form so two spellings of one file share a cycle-stack entry.
+/// real path so two spellings of one file share a cycle-stack entry.
 ///
 /// `path` is anchored against the shell's cwd, not the process's, and the
-/// bytes are read through the very path the source is keyed by, so the
-/// identity and the text are one file.
+/// bytes are read through the very file the source is keyed by, judged for
+/// reading under the shell's stack, so the identity and the text are one file.
 ///
 /// # Errors
-/// Its canonical path is not UTF-8, the file cannot be read, or any failure
-/// of [`load_capabilities_from_str`].
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:cap-load] reads a capability-policy file from disk to configure the sandbox; policy/configuration loading at setup, not turn-time model data I/O, raises no surface card."
-)]
+/// Its real path is not UTF-8, the grant refuses the file, it cannot be read,
+/// or any failure of [`load_capabilities_from_str`].
 pub fn load_capabilities_from_path(
     mooring: &Mooring,
     shell: &mut Shell,
@@ -61,18 +61,20 @@ pub fn load_capabilities_from_path(
     ctx: &FreezeCtx,
 ) -> Settled<GrantLayer> {
     let display = crate::path::shown(path);
-    let anchored = shell.anchor(path);
-    let located = anchored
-        .canonicalise_strict()
-        .unwrap_or_else(|_| anchored.into_inner());
-    let file = SourceFile::new(located).map_err(|e| sig(format!("capability file {e}")))?;
-    let source = std::fs::read_to_string(file.path()).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            sig(format!("file not found: {display}"))
-        } else {
-            sig(format!("capability file {display}: {e}"))
-        }
-    })?;
+    let failed = |e: &dyn std::fmt::Display| sig(format!("capability file {display}: {e}"));
+    let unread = |e: &std::io::Error| match e.kind() {
+        std::io::ErrorKind::NotFound => sig(format!("{NOT_FOUND}: {display}")),
+        _ => failed(e),
+    };
+    let located = (shell.context.grants)
+        .locate::<Reading>(shell.floor(), &shell.anchor(path))
+        .map_err(|e| match &e {
+            LocateError::Io(io) => unread(io),
+            LocateError::Refused(refused) => failed(refused),
+        })?;
+    let file = SourceFile::new(located.real().as_path().to_path_buf())
+        .map_err(|e| sig(format!("capability file {e}")))?;
+    let source = (located.read().and_then(std::io::read_to_string)).map_err(|e| unread(&e))?;
     let source = crate::source::normalize_source_text(source);
     load_capabilities_from_str(mooring, shell, &source, &SourceOrigin::File(file), ctx)
 }

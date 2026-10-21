@@ -1,0 +1,11 @@
+error[E0603]: struct `InstallToken` is private
+ --> tests/markers/install_token_is_private.rs:3:24
+  |
+3 | use ral_core::sandbox::InstallToken;
+  |                        ^^^^^^^^^^^^ private struct
+  |
+note: the struct `InstallToken` is defined here
+ --> src/sandbox.rs
+  |
+  | pub(crate) struct InstallToken(());
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

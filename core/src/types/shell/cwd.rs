@@ -7,8 +7,9 @@
 //! as `Command::current_dir` and exports it as `PWD`.
 
 use super::Shell;
-use crate::path::CwdPath;
+use crate::path::{CwdPath, walk_dir};
 use crate::types::Error;
+use std::io::ErrorKind;
 use std::path::PathBuf;
 
 impl Shell {
@@ -38,26 +39,24 @@ impl Shell {
         self.context.cwd = saved;
     }
 
-    /// Move the logical cwd to `target`, resolved as every path builtin
-    /// resolves (see [`Self::resolve`]).  A relative one folds lexically, so
-    /// symlinks survive as under bash's default `cd -L`.
+    /// Move the cwd to the directory `target` names, resolved as every path
+    /// builtin resolves (see [`Self::resolve`]): the cwd is where the walk of
+    /// it lands.
     ///
     /// # Errors
-    /// If the resolved target cannot be stat'd, is not a directory, or is no
+    /// If the resolved target cannot be walked, is not a directory, or is no
     /// working directory ([`CwdPath`]).
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:cwd-stat] `cd`: stats the resolved target to confirm it is a directory before updating the logical cwd; a directory-existence check, not turn-time model data I/O, raises no surface card."
-    )]
     pub(crate) fn apply_chdir(&mut self, target: &str) -> Result<(), Error> {
         let resolved = self.resolve(target).folded();
-        let meta = std::fs::metadata(resolved.as_path())
-            .map_err(|e| Error::new(format!("{}: {e}", resolved.shown())))?;
-        if !meta.is_dir() {
-            return Err(Error::new(format!("{}: not a directory", resolved.shown())));
-        }
-        let resolved = resolved.into_cwd().map_err(|e| Error::new(e.to_string()))?;
-        self.context.cwd = resolved;
+        let dir = walk_dir(&resolved).map_err(|e| match e.kind() {
+            ErrorKind::NotADirectory => {
+                Error::new(format!("{}: not a directory", resolved.shown()))
+            }
+            _ => Error::io(resolved.shown(), &e),
+        })?;
+        let cwd = CwdPath::new(dir.real().as_path().to_path_buf())
+            .map_err(|e| Error::new(e.to_string()))?;
+        self.context.cwd = cwd;
         Ok(())
     }
 

@@ -1,0 +1,11 @@
+error[E0603]: module `fs` is private
+ --> tests/markers/verdict_is_private.rs:5:27
+  |
+5 | use ral_core::capability::fs::Verdict;
+  |                           ^^ private module
+  |
+note: the module `fs` is defined here
+ --> src/capability.rs
+  |
+  | mod fs;
+  | ^^^^^^

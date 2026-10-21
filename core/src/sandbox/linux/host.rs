@@ -7,9 +7,9 @@
 
 use super::landlock::Landlock;
 use crate::Role;
+use crate::path::RealPath;
 use crate::sandbox::reexec::Pinned;
 use crate::sandbox::warrant::{Handoff, Slot};
-use rustix::fs::OFlags;
 use std::os::fd::AsFd;
 use std::process::Stdio;
 use std::sync::OnceLock;
@@ -72,7 +72,7 @@ impl Builds {
             // Leaked once: the probe runs once a process, and keeps the fact `Copy`.
             return Self::Nothing(why.leak());
         }
-        let Ok(Some(root)) = super::open_real("/".as_ref(), OFlags::empty()) else {
+        let Ok(Some(root)) = super::open_dir_nofollow(&RealPath::universal()) else {
             return Self::Nothing("ral cannot open / to lend bwrap a descriptor");
         };
         let mut handoff = Handoff::default();

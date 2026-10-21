@@ -5,7 +5,9 @@
 //! the one the walk recorded when it opened it, and the stored name of a
 //! child, which is read from the child, is checked against that path.
 
-use super::{Access, Child, EntryName, Held, Kind, ObjectId, RootName, Seen, Sharing, Stat, Step};
+use super::{
+    Access, Child, EntryName, Held, Kind, ObjectId, RootName, Seen, Sharing, Stat, Step, Visibility,
+};
 use crate::path::shown;
 use cap_fs_ext::OpenOptionsFollowExt;
 use cap_primitives::fs::{FollowSymlinks, OpenOptions, OpenOptionsExt};
@@ -33,8 +35,9 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FILE_WRITE_DATA, FileAttributeTagInfo,
     FileBasicInfo, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
     FileIdExtdDirectoryInfo, FileIdExtdDirectoryRestartInfo, FileIdInfo, FileNormalizedNameInfo,
-    FileRenameInfoEx, FileStandardInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
-    MAXIMUM_REPARSE_DATA_BUFFER_SIZE, ReOpenFile, SetFileInformationByHandle,
+    FileRenameInfoEx, FileStandardInfo, GetDriveTypeW, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, GetFinalPathNameByHandleW, MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
+    ReOpenFile, SetFileInformationByHandle, VOLUME_NAME_GUID,
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
@@ -42,7 +45,7 @@ use windows_sys::Win32::System::SystemServices::{
     IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK,
 };
 use windows_sys::Win32::System::WindowsProgramming::{
-    FILE_RENAME_FLAG_POSIX_SEMANTICS, FILE_RENAME_FLAG_REPLACE_IF_EXISTS,
+    DRIVE_FIXED, FILE_RENAME_FLAG_POSIX_SEMANTICS, FILE_RENAME_FLAG_REPLACE_IF_EXISTS,
 };
 
 /// What the host records of a directory as it opens it: its normalized path
@@ -149,6 +152,59 @@ fn reopen(f: &File, rights: u32, share: u32, flags: u32) -> io::Result<File> {
     }
     // SAFETY: `handle` is a fresh handle this call owns.
     Ok(unsafe { File::from_raw_handle(handle) })
+}
+
+/// A new handle on the object `f` holds with `access`, sharing read, write
+/// and delete: what a DACL stamp needs beyond the attributes a held handle
+/// asks.  Derived from the held handle, so no name is resolved again, and a
+/// reparse point is the object it is, never followed.
+#[expect(dead_code, reason = "used from step 7")]
+pub(super) fn reopen_shared(f: &File, access: u32) -> io::Result<File> {
+    reopen(
+        f,
+        access,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+    )
+}
+
+/// Whether the object `f` holds is on a local fixed volume: the volume's GUID
+/// path asked of the handle, then that volume's drive type.  A share has no
+/// GUID path, so it is not local, nor is a volume that cannot be named.
+#[expect(dead_code, reason = "used from step 7")]
+pub(super) fn is_local(f: &File) -> io::Result<bool> {
+    let mut path = vec![0u16; 512];
+    let len = loop {
+        let capacity = u32::try_from(path.len()).expect("a path buffer is under four gibibytes");
+        // SAFETY: `f` is a live handle, and `path` is `capacity` units long.
+        let len = unsafe {
+            GetFinalPathNameByHandleW(
+                f.as_raw_handle(),
+                path.as_mut_ptr(),
+                capacity,
+                VOLUME_NAME_GUID,
+            )
+        } as usize;
+        match len {
+            0 => return Ok(false),
+            n if n >= path.len() => path.resize(n + 1, 0),
+            n => break n,
+        }
+    };
+    // `\\?\Volume{GUID}\…`: the volume's root runs through the fourth separator.
+    let root_len = path[..len]
+        .iter()
+        .enumerate()
+        .filter(|&(_, &unit)| unit == SEPARATOR)
+        .nth(3)
+        .map(|(at, _)| at + 1);
+    let Some(root_len) = root_len else {
+        return Ok(false);
+    };
+    let mut root = path[..root_len].to_vec();
+    root.push(0);
+    // SAFETY: `root` is a NUL-terminated wide string that outlives the call.
+    Ok(unsafe { GetDriveTypeW(root.as_ptr()) } == DRIVE_FIXED)
 }
 
 /// The root a walk descends from, held without delete sharing, with its own
@@ -529,7 +585,12 @@ fn data_options(access: Access) -> OpenOptions {
     clippy::disallowed_methods,
     reason = "[surface:walk-create] Creates an absent leaf exclusively beside the directory the walk holds, so a file that appeared since the walk is refused, never written.  The write that follows surfaces it."
 )]
-pub(super) fn create(dir: &File, name: &EntryName, access: Access) -> io::Result<File> {
+pub(super) fn create(
+    dir: &File,
+    name: &EntryName,
+    access: Access,
+    _visibility: Visibility,
+) -> io::Result<File> {
     let mut options = data_options(access);
     options.create_new(true);
     cap_primitives::fs::open(dir, name.as_os_str().as_ref(), &options)
@@ -576,7 +637,7 @@ pub(super) fn open_named(dir: &File, name: &EntryName, access: Access) -> io::Re
     clippy::disallowed_methods,
     reason = "[silent:walk-mkdir] Makes an absent entry of a held directory, which the caller judged as the absent leaf it is; the directory is then stepped onto."
 )]
-pub(super) fn mkdir(dir: &File, name: &EntryName) -> io::Result<()> {
+pub(super) fn mkdir(dir: &File, name: &EntryName, _visibility: Visibility) -> io::Result<()> {
     cap_primitives::fs::create_dir(
         dir,
         name.as_os_str().as_ref(),

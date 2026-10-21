@@ -3,14 +3,14 @@
 //! surface core itself should not own.
 
 use crate::card::{Diff, encode_edit};
-use crate::skill;
+use crate::skill::{self, Doors as _};
 use grep::matcher::LineTerminator;
 use grep::regex::RegexMatcherBuilder;
 use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
-use ral_core::builtins::util::{checked_read_path, regex_err};
-use ral_core::capability::FsOp;
+use ral_core::builtins::util::regex_err;
 use ral_core::fact::{Grep, Read};
 use ral_core::path::tree::walk::Walk;
+use ral_core::path::{LeafMode, Reading};
 use ral_core::text::rank;
 use ral_core::ty::{Scheme, Ty, closed_record};
 use ral_core::typecheck::Unifier;
@@ -449,7 +449,7 @@ fn search_tree(
             continue;
         }
         let Some(file) = shell
-            .locate_if_admitted(&entry.path, &FsOp::Read)
+            .locate_if_admitted::<Reading>(&entry.path)
             .and_then(|located| located.read().ok())
         else {
             continue;
@@ -687,7 +687,7 @@ fn surface_edit(mooring: &Mooring, path: &str, old: &str, new: &str) {
 /// text comes back decoded through its [`Eol`], which the writer re-encodes.
 fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<(Eol, String)> {
     let rp = shell.resolve(path);
-    let located = shell.locate(&rp, &FsOp::Read)?;
+    let located = shell.locate::<Reading>(&rp)?;
     let mut file = located.read().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             sig(format!(
@@ -872,13 +872,16 @@ fn builtin_find_files(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> 
 
 /// The grant-checked root of a walk; a missing one is an error, not an empty walk.
 fn walk_root(shell: &mut Shell, who: &str, path: &str) -> Settled<PathBuf> {
-    let root = checked_read_path(shell, path)?.into_inner();
-    if !root.exists() {
+    let root = shell.resolve(path);
+    let found = shell
+        .locate_existing::<Reading>(&root, LeafMode::Follow)?
+        .is_some_and(|held| held.stat().is_some());
+    if !found {
         return Err(sig(format!(
             "{who}: {path} does not exist; the path is a file or directory, relative to the cwd or absolute."
         )));
     }
-    Ok(root)
+    Ok(root.into_inner())
 }
 
 fn scheme_grep_files(_u: &mut Unifier) -> Scheme {
@@ -985,33 +988,31 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
     for root in skill::skill_roots(&cwd, &config_dir) {
         let dir = root.join(name);
         let sk_md = dir.join("SKILL.md");
-        let rp = shell.anchor(&sk_md);
-        if shell.check_fs_read(&rp).is_ok() {
-            // `check_fs_read` is a prefix guard, not an existence test: a path
-            // under a readable prefix can still be a skill this root lacks.
-            // Missing here is not a miss for the name — walk to the next root.
-            if !sk_md.is_file() {
-                continue;
-            }
-            let body = skill::read_skill_body(&dir).map_err(|why| {
-                sig(format!(
-                    "skill: could not load '{name}' from {}: {why}",
-                    ral_core::path::shown(&sk_md)
-                ))
-            })?;
-            // Only once the body is in hand, so the card never claims a load
-            // that did not happen.
-            mooring.surface(&Value::map(vec![
-                ("io".into(), Value::string("skill")),
-                ("name".into(), Value::string(name)),
-                ("dir".into(), Value::string(ral_core::path::shown(&dir))),
-            ]));
-            return Ok(Value::string(format!(
-                "// skill root: {}\n\n{}",
-                ral_core::path::shown(&dir),
-                body
-            )));
-        }
+        // A root that lacks the skill, or may not be read, is not a miss for
+        // the name: walk to the next.
+        let Some(file) = shell.file(&shell.anchor(&sk_md)) else {
+            continue;
+        };
+        let found = skill::Found {
+            name: name.to_owned(),
+            dir,
+            file,
+        };
+        let body = skill::read_skill_body(&found).map_err(|why| {
+            sig(format!(
+                "skill: could not load '{name}' from {}: {why}",
+                ral_core::path::shown(&sk_md)
+            ))
+        })?;
+        // Only once the body is in hand, so the card never claims a load
+        // that did not happen.
+        let dir = ral_core::path::shown(&found.dir);
+        mooring.surface(&Value::map(vec![
+            ("io".into(), Value::string("skill")),
+            ("name".into(), Value::string(name)),
+            ("dir".into(), Value::string(dir.clone())),
+        ]));
+        return Ok(Value::string(format!("// skill root: {dir}\n\n{body}")));
     }
     Err(sig(format!(
         "skill: no skill named '{name}'; did you mean one that `skill-list` shows?"
@@ -1031,19 +1032,14 @@ fn scheme_skill_list(_u: &mut Unifier) -> Scheme {
 fn builtin_skill_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let cwd = shell.cwd();
     let config_dir = crate::app::EXARCH.xdg_dir(ral_core::path::XdgKind::Config);
-    let all = skill::discover_all(&cwd, &config_dir);
     let (mut entries, mut errors) = (Vec::new(), Vec::new());
-    for (name, dir) in &all {
-        let sk_md = dir.join("SKILL.md");
-        let rp = shell.anchor(&sk_md);
-        if shell.check_fs_read(&rp).is_ok() {
-            match skill::parse_skill(dir, name) {
-                Ok(s) => entries.push(format!("{}: {}", s.name, s.description)),
-                Err(why) => errors.push(format!(
-                    "⚠ skipped {}: {why}",
-                    ral_core::path::shown(&sk_md)
-                )),
-            }
+    for found in skill::discover_all(&cwd, &config_dir, shell) {
+        match skill::parse_skill(&found) {
+            Ok(s) => entries.push(format!("{}: {}", s.name, s.description)),
+            Err(why) => errors.push(format!(
+                "⚠ skipped {}: {why}",
+                ral_core::path::shown(found.dir.join("SKILL.md"))
+            )),
         }
     }
     mooring.surface(&Value::map(vec![

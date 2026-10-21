@@ -61,5 +61,16 @@ the resolved exec and fs rules, `FreezeCtx`'s home walk, the floor's walk of
 `SystemRoot` and `ProgramFiles` — were cross-compiled only, and the layer
 tests it ports run on those hosts under the same first green run.
 
+Step 4 (who vouched, part a) is likewise cross-compiled only where it is not
+Linux: on Windows, `windows/session.rs::listing`, the carving lister, now
+holds each directory by `RealPath::open_dir_nofollow` as `Installing` and
+lists it through `Dir::read_dir`, and the host's `reopen_shared` and
+`is_local` (`GetFinalPathNameByHandleW` and `GetDriveTypeW`) behind the
+`Installing` doors `reopen` and `is_local` are written and unused until the
+sandbox's step; on macOS, the pin of ral's own binary (`reexec.rs`) is by
+`ObjectId`, which `From<&std::fs::Metadata>` makes of the by-name stat
+`verify` compares.  `dacl/frozen.rs` and `dacl/deny.rs` open by name as
+before.  Their tests run on those hosts under the same first green run.
+
 The first green macOS `ci.yml` and `windows.yml` run on the landing commit
 discharges them; it is recorded here when it comes.

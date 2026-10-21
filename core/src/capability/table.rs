@@ -44,7 +44,7 @@ pub(crate) trait Denies<A: Allows>: Ord + Clone + Debug {
 
 /// Why a supplied table refuses a subject.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Withheld<D> {
+pub enum Withheld<D> {
     /// No allowance contains it.
     MissingAllowance,
     /// An exclusion matches it, `matched_by` the least way any does.  Boxed:

@@ -77,7 +77,6 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("core/src/builtins/modules.rs", "silent:module-load"),
     ("core/build.rs", "silent:prelude-bake-build"),
     ("core/src/invocation.rs", "silent:argv-before-main"),
-    ("core/src/load/profile.rs", "silent:cap-load"),
     ("core/src/path/tree/walk.rs", "silent:tree-walk"),
     ("core/src/boot.rs", "silent:prelude-bake"),
     // The fs sites: `path/walk/` is the one place that opens a model-named
@@ -132,10 +131,8 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ),
     ("core/src/process/spawn_lock.rs", "silent:spawn-door"),
     ("core/src/path/tree.rs", "silent:tree-bytes"),
-    ("core/src/engine/probe/fs.rs", "silent:probe-path-entries"),
     ("core/src/sandbox/reexec.rs", "silent:self-reexec-windows"),
     ("core/src/sandbox.rs", "silent:restricted-envelope-probe"),
-    ("core/src/sandbox.rs", "silent:pin-identity"),
     ("core/src/sandbox/reexec.rs", "silent:self-reexec"),
     ("core/src/sandbox/carriers.rs", "silent:carrier-shebang"),
     ("core/src/process/tree.rs", "silent:ps-sample"),
@@ -150,7 +147,6 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("core/src/sandbox/reexec.rs", "silent:verify-stat"),
     ("core/src/sandbox/warrant.rs", "silent:respawn-exec"),
     ("core/src/sandbox/warrant.rs", "silent:respawn-spawn"),
-    ("core/src/sandbox/windows/session.rs", "silent:carve-list"),
     ("core/src/sandbox/windows/dacl/acl.rs", "silent:dacl-apply"),
     (
         "core/src/sandbox/windows/dacl/deny.rs",
@@ -202,7 +198,6 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ),
     ("core/src/frame.rs", "silent:frame-dump"),
     ("core/src/frame.rs", "silent:frame-dump-nonunix"),
-    ("core/src/types/shell/cwd.rs", "silent:cwd-stat"),
     ("core/src/uutils.rs", "silent:diff-read"),
     ("core/src/protocol/channel.rs", "silent:wire-pair-windows"),
     // ── guest-net ─────────────────────────────────────────────────────────
@@ -276,11 +271,6 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("core/src/path/git.rs", "silent:git-dir-discovery"),
     ("core/src/path/git.rs", "silent:git-dir-pointer"),
     ("core/src/path/lex.rs", "silent:mount-shape"),
-    ("exarch/src/prompt.rs", "silent:system-prompt-files"),
-    ("exarch/src/skill.rs", "silent:skill-list-dir"),
-    ("exarch/src/skill.rs", "silent:skill-metadata"),
-    ("exarch/src/skill.rs", "surface:skill-body"),
-    ("exarch/src/skill.rs", "surface:skill-list"),
     ("exarch/src/provider/state.rs", "silent:state-read"),
     ("exarch/src/provider/state.rs", "silent:state-write"),
     ("exarch/src/tui/terminal.rs", "silent:editor-compose"),
@@ -295,7 +285,6 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("ral/src/repl/config.rs", "silent:history-mkdir"),
     ("ral/src/repl/config.rs", "silent:rc-write"),
     ("ral/src/repl/config/source.rs", "silent:config-read"),
-    ("ral/src/repl/plugin/load.rs", "silent:plugin-read"),
     ("ral/src/repl/session/boot.rs", "silent:crashlog-write"),
 ];
 

@@ -1,0 +1,13 @@
+error[E0599]: the method `read_dir` exists for reference `&ral_core::path::Dir`, but its trait bounds were not satisfied
+ --> tests/markers/unjudged_dir_has_no_read_dir.rs:6:17
+  |
+6 |     let _ = dir.read_dir();
+  |                 ^^^^^^^^ method cannot be called on `&ral_core::path::Dir` due to unsatisfied trait bounds
+  |
+ ::: src/path/walk.rs
+  |
+  | pub enum Unjudged {}
+  | ----------------- doesn't satisfy `Unjudged: Lists`
+  |
+  = note: the following trait bounds were not satisfied:
+          `Unjudged: Lists`

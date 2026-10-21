@@ -1461,11 +1461,10 @@ fn skill_name_validation_confines_the_join_to_the_skills_root() {
     }
 }
 
-/// `check_fs_read` is a prefix guard, not an existence test, so a root that
-/// simply lacks the skill passes the guard for a missing file. The loop must
-/// keep walking to later roots rather than reporting the first `ENOENT` as
-/// "could not read": otherwise a skill living only in the config root is
-/// shadowed by the empty local root.
+/// A root that simply lacks the skill finds nothing, which is no failure. The
+/// loop must keep walking to later roots rather than reporting the first
+/// `ENOENT` as "could not read": otherwise a skill living only in the config
+/// root is shadowed by the empty local root.
 #[test]
 fn absent_skill_is_not_found_not_unreadable() {
     let engine = fresh();
@@ -1478,6 +1477,40 @@ fn absent_skill_is_not_found_not_unreadable() {
     assert!(
         r.exit != 0 && err.contains("no skill named 'nowhere'"),
         "a skill missing from every root is not-found, never could-not-read, got: {err}"
+    );
+}
+
+/// A walk's root that is absent is an error, not an empty walk, said by the
+/// judgment's `NotFound`; where the stack refuses its name, the refusal is
+/// what is said, so a denied path that does not exist reads as denied.
+#[test]
+fn an_absent_walk_root_is_not_found_unless_its_name_is_denied() {
+    let engine = fresh();
+    let tmp = scratch_dir("walk-root-absent");
+    let missing = format!("{}/absent", shown(tmp.path()));
+    let find = format!("find-files 'q' '{missing}'");
+
+    let r = run_once(&engine, &find);
+    let err = String::from_utf8_lossy(&r.stderr);
+    assert!(
+        r.exit != 0 && err.contains("does not exist"),
+        "an absent root is not-found, got: {err}"
+    );
+
+    let denying = ral_core::capability::FsPolicy {
+        read_prefixes: vec![ral_core::path::FrozenPath::root()],
+        write_prefixes: Vec::new(),
+        deny_paths: vec![ral_core::path::FrozenPath::from_surface(&missing)],
+    };
+    let stack = ral_core::test_helper::stack([ral_core::test_helper::layer(Capabilities {
+        fs: Some(denying),
+        ..Capabilities::default()
+    })]);
+    let r = run_shell_under(&engine, &stack, &find, 30, &crate::record::Emitter::none());
+    let err = String::from_utf8_lossy(&r.stderr);
+    assert!(
+        r.exit != 0 && !err.contains("does not exist"),
+        "a denied absent root reads as denied, not absent, got: {err}"
     );
 }
 

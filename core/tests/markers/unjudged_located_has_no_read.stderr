@@ -1,0 +1,13 @@
+error[E0599]: the method `read` exists for struct `Located`, but its trait bounds were not satisfied
+ --> tests/markers/unjudged_located_has_no_read.rs:6:55
+  |
+6 |     let _ = walk(spelling, LeafMode::Follow).unwrap().read();
+  |                                                       ^^^^
+  |
+ ::: src/path/walk.rs
+  |
+  | pub enum Unjudged {}
+  | ----------------- doesn't satisfy `Unjudged: Reads`
+  |
+  = note: the following trait bounds were not satisfied:
+          `Unjudged: Reads`
