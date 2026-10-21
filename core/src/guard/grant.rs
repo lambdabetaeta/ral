@@ -3,17 +3,17 @@
 //! A restriction record crosses unfrozen: a `cwd` place in a grant names the
 //! cwd of the shell that grant governs — the child's, never the spawn site's —
 //! so the freeze belongs where the child's cwd is.  Hence a record here and
-//! not a [`Capabilities`], whose paths are resolved by construction.
+//! not a [`GrantLayer`], whose spellings are resolved by construction.
 
 use serde::{Deserialize, Serialize};
 
 use super::decode::decode_capability_map;
 use super::freeze::FreezeCtx;
-use crate::capability::Capabilities;
+use crate::capability::GrantLayer;
 use crate::first_order::FOValue;
 use crate::types::{Shell, Value};
 
-/// A base tag and the cwd in, one [`Capabilities`] layer out.
+/// A base tag and the cwd in, one [`GrantLayer`] out.
 ///
 /// Pushed onto the spawned shell's stack rather than folded against what it
 /// already carries: the stack itself is the meet, so the child's own ceiling
@@ -23,7 +23,7 @@ use crate::types::{Shell, Value};
 /// an installer is chosen at `Attach`, before a seed is applied or a fork
 /// adopted, so the policy can be demanded of every host that dresses an engine
 /// instead of left in a slot one of them might forget to fill.
-pub type GrantNarrower = fn(&str, &std::path::Path) -> Result<Capabilities, String>;
+pub type GrantNarrower = fn(&str, &std::path::Path) -> Result<GrantLayer, String>;
 
 /// A spawn's grant, as it crosses to a child that has not yet resolved it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -44,9 +44,9 @@ impl SpawnGrant {
     /// # Errors
     /// Whatever `narrow` refuses a base with, or the capability decoder's own
     /// sentence for a restriction record it will not read.
-    pub fn layer(&self, narrow: GrantNarrower, ctx: &FreezeCtx) -> Result<Capabilities, String> {
+    pub fn layer(&self, narrow: GrantNarrower, ctx: &FreezeCtx) -> Result<GrantLayer, String> {
         match self {
-            Self::Inherit => Ok(Capabilities::root()),
+            Self::Inherit => Ok(GrantLayer::root()),
             Self::Base(name) => narrow(name, ctx.cwd().as_path()),
             Self::Restrict(record) => {
                 decode_capability_map(&Value::from(record.clone()), "grant", ctx).map_err(|e| {
@@ -83,12 +83,12 @@ impl SpawnGrant {
 )]
 mod tests {
     use super::*;
-    use crate::path::FrozenPath;
+    use crate::capability::{FsAllow, FsOp};
     use std::path::Path;
 
     /// A narrower no test here may reach: only [`SpawnGrant::Base`] consults
     /// one, and these cases are the other two arms.
-    fn unreachable_narrower(_grant: &str, _cwd: &Path) -> Result<Capabilities, String> {
+    fn unreachable_narrower(_grant: &str, _cwd: &Path) -> Result<GrantLayer, String> {
         panic!("only a Base grant consults the narrower")
     }
 
@@ -126,9 +126,15 @@ mod tests {
         let layer = restrict(&record)
             .layer(unreachable_narrower, &cwd("/work/proj"))
             .expect("a well-formed restriction record");
-        let read = layer.fs.expect("an fs policy").read_prefixes;
+        let fs = layer.fs().expect("an fs policy");
+        let read: Vec<_> = (fs.table(&FsOp::Read).allows())
+            .map(|allow| match allow {
+                FsAllow::Prefix(gp) => gp.written.as_str(),
+                FsAllow::RunPlace(_) => panic!("a restriction names no run place"),
+            })
+            .collect();
         assert_eq!(
-            read.iter().map(FrozenPath::as_str).collect::<Vec<_>>(),
+            read,
             vec!["/work/proj"],
             "`cwd .` must name the cwd the layer is frozen against, not the process's"
         );

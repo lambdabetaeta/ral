@@ -27,7 +27,7 @@ table, then what running reads (below).
   directory ([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]).
 - **`every` is a flag, not a key.** It compiles to `ExecScope::Any`, positive
   for every program, bundled tools included, and has no negative form.
-- **A bare key** means the file the host `PATH` finds. So a planted
+- **A bare key** means the file the decoding env's `PATH` finds. So a planted
   `/tmp/evil/rg` does not inherit ``allow: [`name rg]``.
 - **A bare exclusion** also vetoes the name wherever it resolves. It stops an
   absolute `/bin/bash` and a symlink to it alike.

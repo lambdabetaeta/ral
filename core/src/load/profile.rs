@@ -9,14 +9,14 @@
 
 use std::path::Path;
 
-use crate::capability::{Capabilities, Fragment};
+use crate::capability::{Fragment, GrantLayer};
 use crate::guard::decode_capability_map;
 use crate::guard::freeze::FreezeCtx;
 use crate::source::{SourceFile, SourceOrigin};
 use crate::types::{Break, Mooring, Settled, Shell, sig};
 
-/// Evaluate `source` and decode its terminal value into a frozen
-/// [`Capabilities`], resolving places against `ctx`.
+/// Evaluate `source` and decode its terminal value into a resolved
+/// [`GrantLayer`], walking places against `ctx`.
 ///
 /// `origin` names the file in errors and keys the cycle stack — virtual
 /// (`<built-in:NAME>`) for embedded profiles.
@@ -30,7 +30,7 @@ pub fn load_capabilities_from_str(
     source: &str,
     origin: &SourceOrigin,
     ctx: &FreezeCtx,
-) -> Settled<Capabilities> {
+) -> Settled<GrantLayer> {
     // A profile's dimensions are `grant`'s own options, so the file's returned
     // row is held to the same table the form is.
     let contract = crate::typecheck::contract::declared(crate::typecheck::Form::Grant);
@@ -59,7 +59,7 @@ pub fn load_capabilities_from_path(
     shell: &mut Shell,
     path: &Path,
     ctx: &FreezeCtx,
-) -> Settled<Capabilities> {
+) -> Settled<GrantLayer> {
     let display = crate::path::shown(path);
     let anchored = shell.anchor(path);
     let located = anchored
@@ -155,7 +155,7 @@ fn wrap(origin: &SourceOrigin, e: Break) -> Break {
 )]
 mod tests {
     use super::*;
-    use crate::capability::{Evidence, ExecKey};
+    use crate::capability::{ExecAllow, ExecDeny, FsAllow, FsOp};
 
     fn shell() -> Shell {
         crate::test_helper::core_shell()
@@ -171,7 +171,7 @@ mod tests {
     #[test]
     fn loads_minimal_exec_only_profile() {
         let mut shell = shell();
-        let caps = load_capabilities_from_str(
+        let layer = load_capabilities_from_str(
             &Mooring::adrift(),
             &mut shell,
             "return [exec: [allow: [`name ls]]]",
@@ -179,24 +179,31 @@ mod tests {
             &ctx(),
         )
         .unwrap();
-        let exec = caps.exec.expect("exec dimension present");
-        assert_eq!(
-            exec.get(&ExecKey::Name("ls".into())),
-            Some(&Evidence::ALLOW)
-        );
-        // `None` is no opinion, so an unmentioned dimension inherits the caller.
+        let exec = layer.exec().expect("exec dimension present");
         assert!(
-            caps.fs.is_none()
-                && caps.net.is_none()
-                && caps.editor.is_none()
-                && caps.shell.is_none()
+            exec.allows().any(|a| matches!(
+                a,
+                ExecAllow::Tool(name) | ExecAllow::File { found_as: Some(name), .. } if name == "ls"
+            )),
+            "{exec:?}"
+        );
+        assert!(exec.denies().next().is_none(), "{exec:?}");
+        // `None` is no opinion, so an unmentioned dimension inherits the caller.
+        let summary = layer
+            .summary()
+            .expect("an exec that runs `ls` shows itself");
+        assert!(
+            summary.fs.is_none()
+                && summary.net.is_none()
+                && summary.editor.is_none()
+                && summary.shell.is_none()
         );
     }
 
     #[test]
     fn deny_target_produces_sticky_deny_policy() {
         let mut shell = shell();
-        let caps = load_capabilities_from_str(
+        let layer = load_capabilities_from_str(
             &Mooring::adrift(),
             &mut shell,
             "return [exec: [deny: [`name bash]]]",
@@ -204,10 +211,12 @@ mod tests {
             &ctx(),
         )
         .unwrap();
-        assert_eq!(
-            caps.exec.unwrap().get(&ExecKey::Name("bash".into())),
-            Some(&Evidence::DENY)
+        let exec = layer.exec().unwrap();
+        assert!(
+            exec.denies().any(|d| *d == ExecDeny::Name("bash".into())),
+            "{exec:?}"
         );
+        assert!(exec.allows().next().is_none(), "{exec:?}");
     }
 
     /// A fragment extends a base that omits an axis to every request less its
@@ -225,11 +234,15 @@ mod tests {
             )
             .unwrap()
         };
-        let positive = Capabilities::default().extend(load("return [exec: [allow: [`name ls]]]"));
+        let positive = GrantLayer::root().extend(load("return [exec: [allow: [`name ls]]]"));
         assert!(!positive.is_restrictive(), "{positive:?}");
-        let excluding = Capabilities::default().extend(load("return [exec: [deny: [`name rm]]]"));
+        let excluding = GrantLayer::root().extend(load("return [exec: [deny: [`name rm]]]"));
         assert!(excluding.is_restrictive(), "{excluding:?}");
-        assert!(excluding.exec.is_some_and(|e| e.every()));
+        assert!(
+            excluding
+                .exec()
+                .is_some_and(|e| e.allows().any(|a| matches!(a, ExecAllow::Any)))
+        );
     }
 
     #[test]
@@ -285,7 +298,7 @@ mod tests {
     #[test]
     fn a_profile_returning_unit_is_the_empty_profile() {
         let mut shell = shell();
-        let caps = load_capabilities_from_str(
+        let layer = load_capabilities_from_str(
             &Mooring::adrift(),
             &mut shell,
             "return ()",
@@ -293,7 +306,7 @@ mod tests {
             &ctx(),
         )
         .unwrap();
-        assert_eq!(caps, Capabilities::default());
+        assert_eq!(layer, GrantLayer::root());
     }
 
     #[test]
@@ -329,16 +342,10 @@ mod tests {
         apply_session_profiles(&Mooring::adrift(), &mut shell, &[profile_path]).unwrap();
 
         let expected = home.path().join("data");
-        let pushed = shell.context.grants.iter().last().unwrap();
-        let read_prefixes = &pushed
-            .fs
-            .as_ref()
-            .expect("fs dimension present")
-            .read_prefixes;
-        assert!(
-            read_prefixes
-                .iter()
-                .any(|p| Path::new(p.as_str()) == expected)
-        );
+        let pushed = shell.context.grants.layers().last().unwrap();
+        let fs = pushed.fs().expect("fs dimension present");
+        assert!(fs.table(&FsOp::Read).allows().any(
+            |a| matches!(a, FsAllow::Prefix(gp) if Path::new(gp.written.as_str()) == expected)
+        ));
     }
 }

@@ -39,7 +39,7 @@ use std::sync::{LazyLock, Mutex};
 use windows_sys::Win32::Security::{PSID, SID_AND_ATTRIBUTES};
 use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
 
-use crate::capability::FsAllow;
+use crate::capability::{Extent, FsAllow};
 use crate::path::{Deny, FrozenPath, RealPath, shown};
 use crate::process::Launch;
 use crate::process::cancel::Scope;
@@ -441,7 +441,7 @@ fn ensure_allows(
 fn refuse_universal_prefix(rules: &FsRules) -> Result<(), Refusal> {
     let bare = |p: &Path| crate::path::lex::is_bare_root(p, crate::path::PathRules::HOST);
     let universal = |s: &FsAllow| match s {
-        FsAllow::Prefix(p) => p.is_root() || bare(p.real().as_path()),
+        FsAllow::Prefix(p) => p.real == Extent::Everywhere,
         FsAllow::RunPlace(r) => bare(r.as_path()),
     };
     let excluded = |p: &FrozenPath| p.is_root() || bare(p.real().as_path());
@@ -532,7 +532,7 @@ fn listing(dir: &RealPath) -> Result<Listing, Refusal> {
 /// A scope's frozen real path, which the stamps and capability names key on,
 /// never re-resolved.
 fn real_path(scope: &FsAllow) -> RealPath {
-    scope.real().clone()
+    scope.real()
 }
 
 /// A region's frozen real paths.

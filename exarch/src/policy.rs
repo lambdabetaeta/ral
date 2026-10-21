@@ -17,7 +17,7 @@ mod load;
 use base::resolve_base;
 use load::{absolute_in, load_capabilities_ral, load_fragment_ral};
 use ral_core::capability::{
-    Axis, Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy, GrantStack,
+    Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy, GrantLayer, GrantStack,
 };
 use ral_core::guard::freeze::{FreezeCtx, host_absolute};
 use ral_core::path::FrozenPath;
@@ -56,12 +56,13 @@ pub fn for_invocation(
     // scaffolding: the caller builds the session's real shell separately, from
     // the frozen GrantStack returned here.
     let anchor = ral_core::path::CwdPath::new(cwd.to_path_buf()).map_err(|e| e.to_string())?;
-    let mut load_shell =
-        ral_core::HostSurface::default().shell(TerminalState::default(), anchor.clone());
+    let mut load_shell = ral_core::HostSurface::default()
+        .shell(TerminalState::default(), anchor.clone())
+        .map_err(|e| format!("the capability loader cannot start: {e}"))?;
 
     let ctx = FreezeCtx::at(EnvVars::new(), anchor.clone());
 
-    let mut ceiling: Capabilities = resolve_base(base_name, &ctx)?;
+    let mut ceiling: GrantLayer = resolve_base(base_name, &ctx)?;
     if let Some(path) = extension {
         let abs = absolute_in(&anchor, path);
         ceiling = ceiling.extend(load_fragment_ral(
@@ -145,53 +146,62 @@ pub(crate) const SPAWN_BASES: [&str; 4] = ["confined", "read-only", "edit-only",
 ///
 /// # Errors
 /// Unknown `base_name`.
-pub fn base_layer(base_name: &str, cwd: &Path) -> Result<Capabilities, String> {
+pub fn base_layer(base_name: &str, cwd: &Path) -> Result<GrantLayer, String> {
     let anchor = ral_core::path::CwdPath::new(cwd.to_path_buf()).map_err(|e| e.to_string())?;
     resolve_base(base_name, &FreezeCtx::at(EnvVars::new(), anchor))
 }
 
 /// A deny layer carving `paths` out of an otherwise-unrestricted fs policy:
-/// `t ⊕ (f if X)`.  A constructor, not a mutator, since composition is the
-/// stack: each caller pushes the layer this returns.
+/// `t ⊕ (f if X)`, written as everywhere less `paths`.  A constructor, not a
+/// mutator, since composition is the stack: each caller pushes the layer this
+/// returns.
 ///
-/// Only the lexical form is pushed: the in-process check in
-/// `core/src/guard/enforce.rs` and the OS sandbox profiles each expand a
-/// deny entry to its canonical and macOS-firmlink variants themselves.
-/// A path [`host_absolute`] refuses fails the layer whole: a deny that
-/// named nothing would fail open.
-fn deny_layer(paths: &[PathBuf]) -> Result<Capabilities, String> {
-    let deny_paths = paths
+/// Each path's walk holds the object it names, which the in-process check and
+/// the OS sandbox profiles each judge, expanded to the firmlink variants.
+/// A path [`host_absolute`] refuses fails the layer whole: a deny that named
+/// nothing would fail open.
+fn deny_layer(paths: &[PathBuf]) -> Result<GrantLayer, String> {
+    let deny_paths: Vec<_> = paths
         .iter()
         .map(|p| host_absolute(p))
         .collect::<Result<BTreeSet<_>, _>>()
         .map_err(|e| e.message)?
         .into_iter()
         .collect();
-    Ok(Capabilities {
-        fs: FsPolicy {
-            deny_paths,
-            ..FsPolicy::default()
-        }
-        .join_top(),
-        ..Capabilities::default()
-    })
+    let everywhere = || vec![FrozenPath::root()];
+    let fs = (!deny_paths.is_empty()).then(|| FsPolicy {
+        read_prefixes: everywhere(),
+        write_prefixes: everywhere(),
+        deny_paths,
+    });
+    GrantLayer::from_capabilities(
+        Capabilities {
+            fs,
+            ..Capabilities::default()
+        },
+        &EnvVars::new(),
+    )
+    .map_err(|e| e.message)
 }
 
 /// The layer that keeps the agent from starting exarch: an exec exclusion of
-/// the path exarch's own binary was pinned from at boot, which, like every
-/// exclusion, follows that name afresh at each judgment.  Exec only: an fs
-/// exclusion would refuse every bundled tool.  Unpinned, it names nothing
-/// rather than guess.
-fn self_layer() -> Result<Capabilities, String> {
+/// the path exarch's own binary was pinned from at boot, the object its walk
+/// held, under every program less it.  Exec only: an fs exclusion would
+/// refuse every bundled tool.  Unpinned, it names nothing rather than guess.
+fn self_layer() -> Result<GrantLayer, String> {
     let exe = ral_core::sandbox::pinned_arg0().ok_or(
         "exarch could not pin its own binary at startup (is it missing or unreadable?), \
          so cannot exclude it from exec",
     )?;
     let exarch = ExecKey::Path(FrozenPath::freeze(exe)?);
-    Ok(Capabilities {
-        exec: ExecGrant::from_iter([(exarch, Evidence::DENY)]).join_top(),
-        ..Capabilities::default()
-    })
+    GrantLayer::from_capabilities(
+        Capabilities {
+            exec: Some(ExecGrant::from_iter([(exarch, Evidence::DENY)]).with_every()),
+            ..Capabilities::default()
+        },
+        &EnvVars::new(),
+    )
+    .map_err(|e| e.message)
 }
 
 #[cfg(test)]
@@ -217,10 +227,13 @@ mod tests {
         let Invocation { stack, .. } =
             for_invocation(&cwd, "dangerous", None, std::slice::from_ref(&path)).unwrap();
 
-        let here = ral_core::test_helper::process_cwd();
-        let rp = ral_core::path::Resolver::at(&EnvVars::new(), &here).anchor(&path);
+        let runtime = ral_core::test_helper::core_runtime();
         assert!(
-            !stack.admits_fs(&ral_core::capability::FsOp::Write, &rp),
+            !stack.admits_fs(
+                runtime.floor(),
+                &ral_core::capability::FsOp::Write,
+                &ral_core::test_helper::trace(&path)
+            ),
             "restrict file path should be write-denied"
         );
 
@@ -245,7 +258,7 @@ mod tests {
         let cwd = std::env::temp_dir();
         let confined = base_layer("confined", &cwd).unwrap();
         assert_eq!(
-            confined.net,
+            confined.summary().and_then(|s| s.net),
             Some(Net::Offline),
             "confined layer has net off"
         );

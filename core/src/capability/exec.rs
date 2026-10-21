@@ -1,19 +1,25 @@
 //! Exec authority as a [`Table`] of evidence about programs, and the judgment
 //! that mints [`Admitted`].
 //!
-//! Decode leaves each layer an authored [`ExecGrant`];
-//! [`ExecRules::compile`] turns it into allowances over host files, bundled
-//! tools and directories and exclusions of files, directories and names, which
-//! judge a [`Program`] as any table judges a subject.  A stack's authority is the meet of its layers'
-//! tables, compiled afresh on every question.  [`GrantStack::admit`] is the
-//! one judgment; the guard words its refusals and the sandbox renders the
-//! table it judged with.
+//! A layer's exec is its [`ExecRules`], resolved where the layer is decoded:
+//! allowances over host files, bundled tools and directories, and exclusions
+//! of files, directories and names, which judge a [`Program`] as any table
+//! judges a subject.  A stack's authority is the meet of its layers' tables.
+//! [`GrantStack::admit`] is the one judgment; the guard words its refusals
+//! and the sandbox renders the table it judged with.
 
-use super::fs::FsDeny;
+use super::fs::{Floor, FsAllow, FsDeny};
+use super::lattice::{Extent, GrantPath};
 use super::table::{Allows, Denies, Table, Withheld};
-use super::{ExecGrant, ExecKey, GrantStack, Join, Meet};
-use crate::path::{Depth, MatchedBy, RealPath, command_name_key};
+use super::{ExecGrant, ExecKey, ExecSummary, GrantStack, Join, Meet};
+use crate::guard::freeze::PolicyError;
+use crate::path::{
+    self, Depth, Excluded, FrozenPath, LeafMode, LexicalPath, MatchedBy, RealPath, Trace, Walked,
+    command_name_key, walk_lenient,
+};
 use crate::syntax::quote::quote_word;
+use crate::types::EnvVars;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::LazyLock;
@@ -61,9 +67,13 @@ pub(crate) struct Refused {
 }
 
 /// ral's own binary, the file a bundled tool runs and so reads.
-pub(crate) fn ral_binary() -> Option<&'static RealPath> {
-    static OWN: LazyLock<Option<RealPath>> =
-        LazyLock::new(|| RealPath::of_path(&std::env::current_exe().ok()?).ok());
+pub(crate) fn ral_binary() -> Option<&'static Trace> {
+    static OWN: LazyLock<Option<Trace>> = LazyLock::new(|| {
+        let exe = LexicalPath::absolute(&std::env::current_exe().ok()?)?;
+        walk_lenient(&exe, LeafMode::Follow)
+            .ok()
+            .filter(|trace| trace.kind().is_some())
+    });
     OWN.as_ref()
 }
 
@@ -72,11 +82,12 @@ impl GrantStack {
     /// running it reads.
     pub(crate) fn admit(
         &self,
+        floor: &Floor,
         program: Program,
         args: Vec<String>,
     ) -> Result<Admitted, Box<Refused>> {
         let rules = rules(self);
-        match self.judge(rules.as_ref(), &program) {
+        match self.judge(floor, rules.as_ref(), &program) {
             None => Ok(Admitted {
                 program,
                 args,
@@ -87,26 +98,31 @@ impl GrantStack {
     }
 
     /// Head-only admission, before any argv is known.
-    pub(crate) fn admits(&self, program: &Program) -> bool {
-        self.refusal(program).is_none()
+    pub(crate) fn admits(&self, floor: &Floor, program: &Program) -> bool {
+        self.refusal(floor, program).is_none()
     }
 
     /// Why a head is refused, for a refusal raised before [`GrantStack::admit`].
-    pub(crate) fn refusal(&self, program: &Program) -> Option<ExecDenial> {
-        self.judge(rules(self).as_ref(), program)
+    pub(crate) fn refusal(&self, floor: &Floor, program: &Program) -> Option<ExecDenial> {
+        self.judge(floor, rules(self).as_ref(), program)
     }
 
     /// `↓run = ↓exec ∧ ↓read` (law 7): a supplied exec table must support the
     /// program, then what running it reads must be readable.  A bundled tool
     /// runs ral's image, which only an fs exclusion withholds.
-    fn judge(&self, rules: Option<&ExecRules>, program: &Program) -> Option<ExecDenial> {
+    fn judge(
+        &self,
+        floor: &Floor,
+        rules: Option<&ExecRules>,
+        program: &Program,
+    ) -> Option<ExecDenial> {
         if let Some(why) = rules.and_then(|r| r.withheld(program.subject())) {
             return Some(ExecDenial::Run(why));
         }
         let read = match program {
-            Program::File { real, .. } => self.read(real.as_path()),
+            Program::File { trace, .. } => self.read(floor, trace),
             Program::Tool(_) => {
-                ral_binary().map_or(Ok(()), |own| self.read_not_excluded(own.as_path()))
+                ral_binary().map_or(Ok(()), |own| self.read_not_excluded(floor, own))
             }
         };
         read.err().map(ExecDenial::Read)
@@ -118,18 +134,18 @@ impl GrantStack {
 pub(crate) enum Program {
     /// A bundled tool, run as ral itself.
     Tool(String),
-    /// A host file: `real` is `realpath(path)`, judged and run; `path` is the
-    /// spelling, which the program sees as `argv[0]`. A `#!` script sees
-    /// `real` as its script name: the kernel hands the interpreter the exec
-    /// path.
-    File { path: PathBuf, real: RealPath },
+    /// A host file: `trace` is the walk that found it, judged and run; `path`
+    /// is the spelling, which the program sees as `argv[0]`. A `#!` script
+    /// sees its real path as its script name: the kernel hands the
+    /// interpreter the exec path.
+    File { path: PathBuf, trace: Trace },
 }
 
 impl Program {
     pub(crate) fn subject(&self) -> Subject<'_> {
         match self {
             Self::Tool(name) => Subject::Tool(name),
-            Self::File { real, .. } => Subject::File(real),
+            Self::File { trace, .. } => Subject::Program(path::Subject::Access(trace)),
         }
     }
 }
@@ -139,88 +155,123 @@ impl std::fmt::Display for Program {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Tool(name) => write!(f, "bundled {name}"),
-            Self::File { real, .. } => real.fmt(f),
+            Self::File { trace, .. } => trace.real().fmt(f),
         }
     }
 }
 
-/// What a grant judges: a borrowed view of a [`Program`], or what a rule is
-/// itself judged at.
+/// What a grant judges: a program, by where it is; a directory, by where it
+/// is; a bundled tool, by name; or what holds every program.  Also what a
+/// rule is itself judged at.
 #[derive(Clone, Copy)]
 pub(crate) enum Subject<'a> {
-    Any,
+    Program(path::Subject<'a>),
+    Dir(path::Subject<'a>),
     Tool(&'a str),
-    File(&'a RealPath),
-    Under(&'a RealPath),
+    Any,
 }
 
 /// What an exec allowance admits.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum ExecAllow {
-    /// Every program: compiled from [`ExecGrant::every`].
+    /// Every program.
     Any,
-    Dir(RealPath),
-    /// `named` is the bare name the file was found under: provenance, never
-    /// consulted by judgement.  Entries differing only in `named` hold the
-    /// same subjects, each holding the other's `own()`, so the meet's nesting
-    /// obligation holds.
+    Dir(GrantPath<Extent>),
+    /// One file, at one position, never everywhere.  `found_as` is the bare
+    /// name it was found under: provenance, never consulted by judgement.
+    /// Entries differing only in `found_as` hold the same subjects, each
+    /// holding the other's `own()`, so the meet's nesting obligation holds.
     File {
-        path: RealPath,
-        named: Option<String>,
+        written: FrozenPath,
+        real: RealPath,
+        found_as: Option<String>,
     },
     Tool(String),
 }
 
 impl ExecAllow {
-    pub(crate) fn file(path: RealPath) -> Self {
-        Self::File { path, named: None }
+    /// A file a launch needs beyond the policy, which no author wrote.
+    pub(crate) fn support(real: &RealPath) -> Self {
+        Self::File {
+            written: FrozenPath::of_real(real),
+            real: real.clone(),
+            found_as: None,
+        }
+    }
+
+    /// The key as a grant spells it, `None` for what holds every program.
+    fn spelled(&self) -> Option<String> {
+        match self {
+            Self::Any => None,
+            Self::Dir(dir) => Some(dir_key(&dir.written)),
+            Self::File {
+                found_as: Some(name),
+                ..
+            }
+            | Self::Tool(name) => Some(name_key(name)),
+            Self::File { written, .. } => Some(file_key(written)),
+        }
     }
 }
 
 /// What an exec exclusion refuses.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+///
+/// `Name` comes first: the derived order is the order a refusal cites, and a
+/// denied bare name is cited as written before the file it was found as.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum ExecDeny {
-    Dir(RealPath),
-    /// `named` as for [`ExecAllow::File`], but cited in a refusal.
-    File {
-        path: RealPath,
-        named: Option<String>,
-    },
     /// The [`command_name_key`] of a bare exclusion: a veto on the name
     /// everywhere.
     Name(String),
+    Dir(GrantPath<Excluded>),
+    File(GrantPath<Excluded>),
 }
 
 impl ExecDeny {
-    pub(crate) fn file(path: RealPath) -> Self {
-        Self::File { path, named: None }
+    fn rehold(&mut self) {
+        match self {
+            Self::Dir(path) | Self::File(path) => path.real.rehold(),
+            Self::Name(_) => {}
+        }
     }
+}
+
+fn dir_key(written: &FrozenPath) -> String {
+    format!("`dir `absolute {}", quote_word(&written.shown()))
+}
+
+fn file_key(written: &FrozenPath) -> String {
+    format!("`absolute {}", quote_word(&written.shown()))
+}
+
+fn name_key(name: &str) -> String {
+    format!("`name {}", quote_word(name))
 }
 
 /// As a grant spells it: a directory under its `dir` constructor, a file as
 /// its `absolute` place, a name under `name`.
 impl std::fmt::Display for ExecDeny {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Dir(path) => write!(f, "`dir `absolute {}", quote_word(&path.to_string())),
-            Self::File { named: Some(n), .. } => write!(f, "`name {}", quote_word(n)),
-            Self::File { path, .. } => write!(f, "`absolute {}", quote_word(&path.to_string())),
-            Self::Name(name) => write!(f, "`name {}", quote_word(name)),
-        }
+        f.write_str(&match self {
+            Self::Dir(dir) => dir_key(&dir.written),
+            Self::File(file) => file_key(&file.written),
+            Self::Name(name) => name_key(name),
+        })
     }
 }
 
 impl Allows for ExecAllow {
     type Subject<'a> = Subject<'a>;
 
-    /// A tool has no place on disk, and only a dir speaks to `Under`.
+    /// A tool has no place on disk, and only a program or a directory
+    /// speaks to a directory allowance.
     fn contains(&self, subject: Subject<'_>) -> bool {
         match (self, subject) {
             (Self::Any, _) => true,
-            (Self::Dir(dir), Subject::File(path) | Subject::Under(path)) => dir.contains(path),
-            (Self::File { path: file, .. }, Subject::File(path)) => {
-                file.contains(path) && path.contains(file)
-            }
+            (Self::Dir(dir), Subject::Program(at) | Subject::Dir(at)) => dir.real.contains(at),
+            (Self::File { real, .. }, Subject::Program(at)) => at
+                .position()
+                .is_some_and(|at| real.contains(&at) && at.contains(real)),
             (Self::Tool(tool), Subject::Tool(name)) => tool == name,
             _ => false,
         }
@@ -229,29 +280,36 @@ impl Allows for ExecAllow {
     fn own(&self) -> Subject<'_> {
         match self {
             Self::Any => Subject::Any,
-            Self::Dir(dir) => Subject::Under(dir),
-            Self::File { path, .. } => Subject::File(path),
+            Self::Dir(GrantPath {
+                real: Extent::Under(position),
+                ..
+            }) => Subject::Dir(path::Subject::Position(position)),
+            Self::Dir(GrantPath {
+                real: Extent::Everywhere,
+                ..
+            }) => Subject::Dir(path::Subject::Everywhere),
+            Self::File { real, .. } => Subject::Program(path::Subject::Position(real)),
             Self::Tool(name) => Subject::Tool(name),
         }
     }
 }
 
 impl Denies<ExecAllow> for ExecDeny {
-    /// A tool has no place on disk, and only a dir speaks to `Under`.  A
-    /// name's key is folded already, so it holds every spelling as stored.
+    /// A tool has no place on disk, and only a directory exclusion speaks to
+    /// a directory.  A name's key is folded already, so it holds every
+    /// spelling as stored.
     fn matches(&self, subject: Subject<'_>) -> Option<MatchedBy> {
         let vetoes =
             |key: &str, name: &str| (key == command_name_key(name)).then_some(MatchedBy::Name);
         match (self, subject) {
-            (Self::Dir(dir), Subject::File(path) | Subject::Under(path)) => {
-                dir.matched_by(path.as_path(), Depth::Within)
+            (Self::Dir(dir), Subject::Program(at) | Subject::Dir(at)) => {
+                dir.real.matches(at, Depth::Within)
             }
-            (Self::File { path: file, .. }, Subject::File(path)) => {
-                file.matched_by(path.as_path(), Depth::Exact)
-            }
+            (Self::File(file), Subject::Program(at)) => file.real.matches(at, Depth::Exact),
             (Self::Name(key), Subject::Tool(name)) => vetoes(key, name),
-            (Self::Name(key), Subject::File(path)) => {
-                path.name().and_then(|name| vetoes(key, name))
+            (Self::Name(key), Subject::Program(at)) => {
+                let at = at.position()?;
+                vetoes(key, at.name()?)
             }
             _ => None,
         }
@@ -261,66 +319,122 @@ impl Denies<ExecAllow> for ExecDeny {
 /// Exec authority, as a function from programs to evidence.
 pub(crate) type ExecRules = Table<ExecAllow, ExecDeny>;
 
-impl ExecRules {
-    /// A bare key is the file the host `PATH` finds, resolved afresh as every
-    /// run resolves it (the process's own `PATH`, so a scoped one cannot
-    /// redirect it), and the bundled tool of that name, and for an exclusion
-    /// a veto on the name everywhere.  Every key carries its allowance to
-    /// every scope it compiles to, and its exclusion to the file and the veto.
-    /// A path or dir key splits its polarities: the allowance keeps the real
-    /// path frozen at decode, the exclusion is re-resolved from its surface
-    /// now.  `every` is [`ExecAllow::Any`].
-    pub(crate) fn compile(grant: &ExecGrant) -> Self {
-        let host_path = std::env::var("PATH").ok();
-        let mut allows: Vec<_> = grant
-            .every()
-            .then_some(ExecAllow::Any)
-            .into_iter()
-            .collect();
-        let mut denies = Vec::new();
-        for (key, evidence) in grant.iter() {
-            match key {
-                ExecKey::Name(name) => {
-                    let file = crate::path::locate(name, host_path.as_deref(), None)
-                        .and_then(|hit| RealPath::of_path(&hit).ok());
-                    let named = || Some(name.clone());
-                    if evidence.positive {
-                        allows.extend(
-                            crate::uutils::is_uutils_tool(name)
-                                .then(|| ExecAllow::Tool(name.clone())),
-                        );
-                        allows.extend(file.clone().map(|path| ExecAllow::File {
-                            path,
-                            named: named(),
-                        }));
-                    }
-                    if evidence.negative {
-                        denies.extend(file.map(|path| ExecDeny::File {
-                            path,
-                            named: named(),
-                        }));
-                        denies.push(ExecDeny::Name(command_name_key(name)));
-                    }
-                }
-                ExecKey::Path(path) => {
-                    allows.extend(
-                        evidence
-                            .positive
-                            .then(|| ExecAllow::file(path.real().clone())),
-                    );
-                    denies.extend(evidence.negative.then(|| ExecDeny::file(path.live_real())));
-                }
-                ExecKey::Dir(dir) => {
-                    allows.extend(
-                        evidence
-                            .positive
-                            .then(|| ExecAllow::Dir(dir.real().clone())),
-                    );
-                    denies.extend(evidence.negative.then(|| ExecDeny::Dir(dir.live_real())));
-                }
+/// A rule of either half.
+#[derive(Clone, Debug)]
+pub(crate) enum Rule {
+    Allow(ExecAllow),
+    Deny(ExecDeny),
+}
+
+impl FromIterator<Rule> for ExecRules {
+    fn from_iter<I: IntoIterator<Item = Rule>>(rules: I) -> Self {
+        let (mut allows, mut denies) = (Vec::new(), Vec::new());
+        for rule in rules {
+            match rule {
+                Rule::Allow(allow) => allows.push(allow),
+                Rule::Deny(deny) => denies.push(deny),
             }
         }
         Self::new(allows, denies)
+    }
+}
+
+/// How a walked key becomes a rule, by the polarity that walked it: an
+/// allowance keeps the position, an exclusion the holds.
+pub(crate) trait Keyed: Walked {
+    fn file(path: GrantPath<Self>) -> Rule;
+    fn dir(path: GrantPath<Self>) -> Rule;
+    /// A bare name: the tool bundled under it and the file found on the
+    /// `PATH`, and for an exclusion the veto on the name everywhere.
+    fn name(name: &str, bundled: bool, found: Option<GrantPath<Self>>) -> Vec<Rule>;
+}
+
+impl Keyed for Trace {
+    fn file(path: GrantPath<Self>) -> Rule {
+        Rule::Allow(ExecAllow::File {
+            real: path.real.real().clone(),
+            written: path.written,
+            found_as: None,
+        })
+    }
+
+    fn dir(path: GrantPath<Self>) -> Rule {
+        Rule::Allow(ExecAllow::Dir(path.extent()))
+    }
+
+    fn name(name: &str, bundled: bool, found: Option<GrantPath<Self>>) -> Vec<Rule> {
+        let tool = bundled.then(|| Rule::Allow(ExecAllow::Tool(name.into())));
+        let file = found.map(|path| {
+            Rule::Allow(ExecAllow::File {
+                real: path.real.real().clone(),
+                written: path.written,
+                found_as: Some(name.into()),
+            })
+        });
+        tool.into_iter().chain(file).collect()
+    }
+}
+
+impl Keyed for Excluded {
+    fn file(path: GrantPath<Self>) -> Rule {
+        Rule::Deny(ExecDeny::File(path))
+    }
+
+    fn dir(path: GrantPath<Self>) -> Rule {
+        Rule::Deny(ExecDeny::Dir(path))
+    }
+
+    fn name(name: &str, _: bool, found: Option<GrantPath<Self>>) -> Vec<Rule> {
+        let file = found.map(|path| Rule::Deny(ExecDeny::File(path)));
+        let veto = Rule::Deny(ExecDeny::Name(command_name_key(name)));
+        file.into_iter().chain([veto]).collect()
+    }
+}
+
+/// The rules a bare `name` makes on `path`: the bundled tool, where this
+/// platform bundles it (`unix_available` says whether it counts the Unix-only
+/// ones), and the file the `PATH` finds, walked as its polarity walks; a name
+/// found nowhere makes no allowance and keeps its veto.
+///
+/// # Errors
+/// A found file whose walk fails, named.
+pub(crate) fn name_rules<W: Keyed>(
+    name: &str,
+    path: Option<&str>,
+    unix_available: bool,
+) -> Result<Vec<Rule>, PolicyError> {
+    let found = path::locate(name, path, None)
+        .and_then(|hit| FrozenPath::freeze(&hit).ok())
+        .map(GrantPath::<W>::walk)
+        .transpose()?;
+    Ok(W::name(
+        name,
+        crate::uutils::bundled(name, unix_available),
+        found,
+    ))
+}
+
+impl ExecRules {
+    /// The rules of an authored grant: each key walked as its polarity walks,
+    /// a bare name on the `PATH` of `env`.  `every` is [`ExecAllow::Any`].
+    ///
+    /// # Errors
+    /// A spelling that cannot be resolved, named; a root exclusion.
+    pub(crate) fn of_grant(grant: &ExecGrant, env: &EnvVars) -> Result<Self, PolicyError> {
+        let path = env.get_or_host("PATH");
+        let mut rules = Vec::new();
+        if grant.every() {
+            rules.push(Rule::Allow(ExecAllow::Any));
+        }
+        for (key, evidence) in grant.iter() {
+            if evidence.positive {
+                rules.extend(key_rules::<Trace>(key, path.as_deref())?);
+            }
+            if evidence.negative {
+                rules.extend(key_rules::<Excluded>(key, path.as_deref())?);
+            }
+        }
+        Ok(rules.into_iter().collect())
     }
 
     /// What the kernel is handed: this table beside `support`, the files its
@@ -335,17 +449,25 @@ impl ExecRules {
                 .cloned(),
             self.denies().cloned(),
         );
-        rules.join(Self::new(
-            support.iter().map(|c| ExecAllow::file(c.clone())),
-            [],
-        ))
+        rules.join(Self::new(support.iter().map(ExecAllow::support), []))
     }
 
-    /// The run places: the real paths of the allowed
-    /// files and directories, which running reads.
-    pub(crate) fn places(&self) -> impl Iterator<Item = &RealPath> {
+    /// The fs allowances running makes: each allowed file and directory is a
+    /// place, and a directory that holds everywhere reads everywhere, as an
+    /// authored `dir /` does.
+    pub(crate) fn places(&self) -> impl Iterator<Item = FsAllow> + '_ {
         self.allows().filter_map(|scope| match scope {
-            ExecAllow::Dir(path) | ExecAllow::File { path, .. } => Some(path),
+            ExecAllow::Dir(
+                dir @ GrantPath {
+                    real: Extent::Everywhere,
+                    ..
+                },
+            ) => Some(FsAllow::Prefix(dir.clone())),
+            ExecAllow::Dir(GrantPath {
+                real: Extent::Under(place),
+                ..
+            })
+            | ExecAllow::File { real: place, .. } => Some(FsAllow::RunPlace(place.clone())),
             _ => None,
         })
     }
@@ -354,46 +476,65 @@ impl ExecRules {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn allowed_files(&self) -> impl Iterator<Item = &RealPath> {
         self.live().filter_map(|scope| match scope {
-            ExecAllow::File { path, .. } => Some(path),
+            ExecAllow::File { real, .. } => Some(real),
             _ => None,
         })
     }
 
     /// The directories a rule admits.
     #[cfg(target_os = "linux")]
-    pub(crate) fn allowed_dirs(&self) -> impl Iterator<Item = &RealPath> {
+    pub(crate) fn allowed_dirs(&self) -> impl Iterator<Item = RealPath> {
         self.live().filter_map(|scope| match scope {
-            ExecAllow::Dir(dir) => Some(dir),
+            ExecAllow::Dir(dir) => Some(dir.real.real()),
             _ => None,
         })
     }
-}
 
-/// A rule of either half, for tests that write a table as a list.
-#[cfg(test)]
-#[derive(Clone, Debug)]
-pub(crate) enum ExecRule {
-    Allow(ExecAllow),
-    Deny(ExecDeny),
-}
+    /// Take hold again of every exclusion's objects.
+    pub(super) fn rehold(&mut self) {
+        self.rehold_with(ExecDeny::rehold);
+    }
 
-#[cfg(test)]
-impl FromIterator<ExecRule> for ExecRules {
-    fn from_iter<I: IntoIterator<Item = ExecRule>>(rules: I) -> Self {
-        let (mut allows, mut denies) = (Vec::new(), Vec::new());
-        for rule in rules {
-            match rule {
-                ExecRule::Allow(allow) => allows.push(allow),
-                ExecRule::Deny(deny) => denies.push(deny),
-            }
+    /// What the table shows of itself: each key as a grant spells it.
+    pub(super) fn summary(&self) -> ExecSummary {
+        let sorted = |keys: BTreeSet<String>| keys.into_iter().collect();
+        ExecSummary {
+            every: self.allows().any(|a| matches!(a, ExecAllow::Any)),
+            allows: sorted(self.allows().filter_map(ExecAllow::spelled).collect()),
+            denies: sorted(self.denies().map(ToString::to_string).collect()),
         }
-        Self::new(allows, denies)
+    }
+}
+
+/// The rules of one authored key at polarity `W`.
+fn key_rules<W: Keyed>(key: &ExecKey, path: Option<&str>) -> Result<Vec<Rule>, PolicyError> {
+    Ok(match key {
+        ExecKey::Name(name) => name_rules::<W>(name, path, cfg!(unix))?,
+        ExecKey::Path(file) => vec![W::file(GrantPath::walk(file.clone())?)],
+        ExecKey::Dir(dir) if dir.is_root() && !W::EXCLUDES => {
+            let everywhere = GrantPath::allowing(dir.clone())?;
+            vec![Rule::Allow(ExecAllow::Dir(everywhere))]
+        }
+        ExecKey::Dir(dir) => vec![W::dir(GrantPath::walk(dir.clone())?)],
+    })
+}
+
+impl super::Axis for ExecRules {
+    /// A fragment that says anything, over the omitted `t`: every program,
+    /// less its exclusions.
+    fn join_top(self) -> Option<Self> {
+        (self.allows().next().is_some() || self.denies().next().is_some())
+            .then(|| self.join(Self::new([ExecAllow::Any], [])))
+    }
+
+    fn is_top(&self) -> bool {
+        self.allows().any(|a| matches!(a, ExecAllow::Any)) && self.denies().next().is_none()
     }
 }
 
 /// The stack's exec authority; `None` when no layer holds an exec opinion.
 pub(crate) fn rules(grants: &GrantStack) -> Option<ExecRules> {
-    grants.exec().map(ExecRules::compile).reduce(Meet::meet)
+    grants.exec().cloned().reduce(Meet::meet)
 }
 
 #[cfg(test)]
@@ -403,65 +544,92 @@ pub(crate) fn rules(grants: &GrantStack) -> Option<ExecRules> {
 )]
 pub(super) mod tests {
     use super::*;
-    #[cfg(unix)]
-    use crate::capability::Axis;
     use crate::capability::Evidence;
-    use crate::path::{FrozenPath, test_absolute};
-    #[cfg(unix)]
+    use crate::path::{shown, test_absolute, utf8};
+    use crate::test_helper::trace;
     use std::path::Path;
 
+    /// The access to `p`, a POSIX-style fixture path, walked as it is: an
+    /// absent path is its own lexical position.
+    fn access(p: &str) -> Trace {
+        trace(test_absolute(p))
+    }
+
     fn real(p: &str) -> RealPath {
-        RealPath::assumed(test_absolute(p))
+        access(p).real().clone()
+    }
+
+    fn written(p: &str) -> FrozenPath {
+        FrozenPath::from_surface(&test_absolute(p))
+    }
+
+    fn excluded(p: &str) -> GrantPath<Excluded> {
+        GrantPath::walk(written(p)).unwrap()
     }
 
     pub(crate) const ALLOW: Evidence = Evidence::ALLOW;
     pub(crate) const DENY: Evidence = Evidence::DENY;
     const BOTH: Evidence = Evidence::BOTH;
 
-    fn allow_file(p: &str) -> ExecRule {
-        ExecRule::Allow(ExecAllow::file(real(p)))
+    fn file_allowance(p: &str) -> ExecAllow {
+        ExecAllow::File {
+            written: written(p),
+            real: real(p),
+            found_as: None,
+        }
     }
 
-    fn deny_file(p: &str) -> ExecRule {
-        ExecRule::Deny(ExecDeny::file(real(p)))
+    fn dir_allowance(p: &str) -> ExecAllow {
+        ExecAllow::Dir(GrantPath::allowing(written(p)).unwrap())
     }
 
-    fn allow_dir(p: &str) -> ExecRule {
-        ExecRule::Allow(ExecAllow::Dir(real(p)))
+    fn allow_file(p: &str) -> Rule {
+        Rule::Allow(file_allowance(p))
     }
 
-    fn deny_dir(p: &str) -> ExecRule {
-        ExecRule::Deny(ExecDeny::Dir(real(p)))
+    fn deny_file(p: &str) -> Rule {
+        Rule::Deny(ExecDeny::File(excluded(p)))
     }
 
-    fn allow_tool(name: &str) -> ExecRule {
-        ExecRule::Allow(ExecAllow::Tool(name.into()))
+    fn allow_dir(p: &str) -> Rule {
+        Rule::Allow(dir_allowance(p))
     }
 
-    fn veto(name: &str) -> ExecRule {
-        ExecRule::Deny(ExecDeny::Name(command_name_key(name)))
+    fn deny_dir(p: &str) -> Rule {
+        Rule::Deny(ExecDeny::Dir(excluded(p)))
     }
 
-    fn any() -> ExecRule {
-        ExecRule::Allow(ExecAllow::Any)
+    fn allow_tool(name: &str) -> Rule {
+        Rule::Allow(ExecAllow::Tool(name.into()))
     }
 
-    /// The file rules `e` says: an allowance, an exclusion, or both.
-    fn file(p: &str, e: Evidence) -> impl Iterator<Item = ExecRule> {
-        (e.positive.then(|| allow_file(p)))
+    fn veto(name: &str) -> Rule {
+        Rule::Deny(ExecDeny::Name(command_name_key(name)))
+    }
+
+    fn any() -> Rule {
+        Rule::Allow(ExecAllow::Any)
+    }
+
+    /// `dir /`, which holds every program and no tool.
+    fn everywhere() -> Rule {
+        Rule::Allow(ExecAllow::Dir(GrantPath::everywhere()))
+    }
+
+    /// The rules `e` says of a place, whose allowance and exclusion are given:
+    /// an allowance, an exclusion, or both.
+    fn say(place: &(ExecAllow, ExecDeny), e: Evidence) -> impl Iterator<Item = Rule> {
+        (e.positive.then(|| Rule::Allow(place.0.clone())))
             .into_iter()
-            .chain(e.negative.then(|| deny_file(p)))
+            .chain(e.negative.then(|| Rule::Deny(place.1.clone())))
     }
 
-    /// The dir rules `e` says.
-    fn dir(p: &str, e: Evidence) -> impl Iterator<Item = ExecRule> {
-        (e.positive.then(|| allow_dir(p)))
-            .into_iter()
-            .chain(e.negative.then(|| deny_dir(p)))
+    fn program(at: &RealPath) -> Subject<'_> {
+        Subject::Program(path::Subject::Position(at))
     }
 
     fn of_file(rules: &ExecRules, p: &str) -> Evidence {
-        rules.evidence(Subject::File(&real(p)))
+        rules.evidence(program(&real(p)))
     }
 
     #[test]
@@ -499,7 +667,7 @@ pub(super) mod tests {
     fn a_tool_is_judged_by_tools_and_vetoes_only() {
         let allowed: ExecRules = std::iter::once(allow_tool("ls")).collect();
         assert!(allowed.evidence(Subject::Tool("ls")).permits());
-        let covered: ExecRules = [allow_dir("/"), allow_file("/bin/ls")]
+        let covered: ExecRules = [allow_dir("/"), allow_file("/x/bin/ls")]
             .into_iter()
             .collect();
         assert_eq!(covered.evidence(Subject::Tool("ls")), Evidence::NEITHER);
@@ -546,44 +714,82 @@ pub(super) mod tests {
         assert_eq!(of_file(&met, "/x/t"), Evidence::NEITHER);
     }
 
-    /// A directory exclusion keeps its `dir` marker in a refusal, distinct
-    /// from a file exclusion at the same place.
+    /// An exclusion is cited as its author wrote it, a directory under its
+    /// `dir` marker, apart from a file exclusion at the same place.
     #[test]
     fn a_directory_exclusion_reads_apart_from_a_file_exclusion() {
-        let at = |scope: fn(RealPath) -> ExecDeny| scope(RealPath::assumed("/tools")).to_string();
-        assert_eq!(at(ExecDeny::Dir), "`dir `absolute /tools");
-        assert_eq!(at(ExecDeny::file), "`absolute /tools");
+        let tools = shown(test_absolute("/tools"));
+        let tools = quote_word(&tools);
+        assert_eq!(
+            ExecDeny::Dir(excluded("/tools")).to_string(),
+            format!("`dir `absolute {tools}")
+        );
+        assert_eq!(
+            ExecDeny::File(excluded("/tools")).to_string(),
+            format!("`absolute {tools}")
+        );
         assert_eq!(ExecDeny::Name("bash".into()).to_string(), "`name bash");
     }
 
-    /// A file found under a bare name is cited as the author wrote it.
+    /// A file found under a bare name keeps the name it was found as, and the
+    /// denial of a bare name holds the file found beside the veto on the name.
     #[test]
-    fn a_file_found_by_name_is_cited_by_name() {
-        let path = RealPath::assumed("/usr/bin/dash");
-        let named = ExecDeny::File {
-            path: path.clone(),
-            named: Some("sh".into()),
+    fn a_file_found_by_name_is_cited_by_its_path_and_vetoed_by_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = RealPath::of_path(tmp.path()).unwrap().as_path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let file = bin.join(format!("zz-found{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&file, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let search = Some(utf8(&bin).unwrap());
+        let found = RealPath::of_path(&file).unwrap();
+
+        let allows: ExecRules = name_rules::<Trace>("zz-found", search, cfg!(unix))
+            .unwrap()
+            .into_iter()
+            .collect();
+        let [
+            ExecAllow::File {
+                written,
+                real,
+                found_as,
+            },
+        ] = allows.allows().collect::<Vec<_>>()[..]
+        else {
+            panic!("the name finds one file: {allows:?}");
         };
-        assert_eq!(named.to_string(), "`name sh");
-        assert_eq!(ExecDeny::file(path).to_string(), "`absolute /usr/bin/dash");
+        assert_eq!((real, found_as.as_deref()), (&found, Some("zz-found")));
+
+        let denies: ExecRules = name_rules::<Excluded>("zz-found", search, cfg!(unix))
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(
+            denies.denies().map(ToString::to_string).collect::<Vec<_>>(),
+            [
+                format!("`name {}", quote_word("zz-found")),
+                format!("`absolute {}", quote_word(&written.shown())),
+            ]
+        );
     }
 
     /// an exclusion holds every spelling of its name, an allow its own.
     #[test]
     fn an_exclusion_holds_every_spelling_and_an_allow_its_own() {
         let (nfc, nfd) = ("/x/caf\u{e9}", "/x/cafe\u{301}");
-        let deny = |scope: &ExecDeny, p: &str| scope.matches(Subject::File(&real(p)));
-        let allow = |scope: &ExecAllow, p: &str| scope.contains(Subject::File(&real(p)));
+        let deny = |scope: &ExecDeny, p: &str| scope.matches(program(&real(p)));
+        let allow = |scope: &ExecAllow, p: &str| scope.contains(program(&real(p)));
         let (evil, tool) = (
-            ExecDeny::Dir(real("/x/Evil")),
-            ExecDeny::file(real("/x/Tool")),
+            ExecDeny::Dir(excluded("/x/Evil")),
+            ExecDeny::File(excluded("/x/Tool")),
         );
-        let (cafe_dir, cafe) = (ExecDeny::Dir(real(nfc)), ExecDeny::file(real(nfc)));
-        let (evil_dir, tool_file) = (
-            ExecAllow::Dir(real("/x/Evil")),
-            ExecAllow::file(real("/x/Tool")),
-        );
-        let (cafe_allow_dir, cafe_allow) = (ExecAllow::Dir(real(nfc)), ExecAllow::file(real(nfc)));
+        let (cafe_dir, cafe) = (ExecDeny::Dir(excluded(nfc)), ExecDeny::File(excluded(nfc)));
+        let (evil_dir, tool_file) = (dir_allowance("/x/Evil"), file_allowance("/x/Tool"));
+        let (cafe_allow_dir, cafe_allow) = (dir_allowance(nfc), file_allowance(nfc));
         assert_eq!(deny(&evil, "/x/evil/t"), Some(MatchedBy::FoldedName));
         assert_eq!(deny(&evil, "/x/Evil/t"), Some(MatchedBy::Name));
         assert_eq!(deny(&evil, "/x/evilx/t"), None);
@@ -636,12 +842,12 @@ pub(super) mod tests {
     /// stored.
     #[test]
     fn a_folded_name_is_cited_only_when_no_exclusion_holds_the_stored_name() {
-        let program = real("/x/evil/t");
+        let program_at = real("/x/evil/t");
         let folded: ExecRules = [allow_dir("/"), deny_dir("/x/Evil")].into_iter().collect();
         assert_eq!(
-            folded.withheld(Subject::File(&program)),
+            folded.withheld(program(&program_at)),
             Some(Withheld::Excluded {
-                scope: ExecDeny::Dir(real("/x/Evil")),
+                scope: Box::new(ExecDeny::Dir(excluded("/x/Evil"))),
                 matched_by: MatchedBy::FoldedName
             })
         );
@@ -649,9 +855,9 @@ pub(super) mod tests {
             .into_iter()
             .collect();
         assert_eq!(
-            both.withheld(Subject::File(&program)),
+            both.withheld(program(&program_at)),
             Some(Withheld::Excluded {
-                scope: ExecDeny::Dir(real("/x")),
+                scope: Box::new(ExecDeny::Dir(excluded("/x"))),
                 matched_by: MatchedBy::Name
             })
         );
@@ -664,12 +870,11 @@ pub(super) mod tests {
         let rules: ExecRules = [deny_dir("/X"), deny_file("/x/TOOL"), deny_dir("/y")]
             .into_iter()
             .collect();
-        let Some(Withheld::Excluded { scope, .. }) =
-            rules.withheld(Subject::File(&real("/x/tool")))
+        let Some(Withheld::Excluded { scope, .. }) = rules.withheld(program(&real("/x/tool")))
         else {
             panic!("an exclusion holds /x/tool");
         };
-        assert!(scope.matches(Subject::File(&real("/x/tool"))).is_some());
+        assert!(scope.matches(program(&real("/x/tool"))).is_some());
     }
 
     /// a veto holds every spelling of the name.
@@ -722,27 +927,53 @@ pub(super) mod tests {
         [ALLOW, DENY, BOTH]
     }
 
-    /// Every path the universe names.
-    pub(crate) fn paths() -> Vec<RealPath> {
+    /// The access to every path the universe names.
+    pub(crate) fn paths() -> Vec<Trace> {
         (FILES.iter().chain(&DIRS).chain(&PROBES))
-            .map(|p| real(p))
+            .map(|p| access(p))
             .collect()
     }
 
-    /// Each path as a file and as a directory, each tool, and every program.
-    pub(crate) fn subjects(paths: &[RealPath]) -> impl Iterator<Item = Subject<'_>> {
+    /// Each path as a program, by its access and by its position, and as a
+    /// directory by its position; everywhere as a directory, each tool, and
+    /// every program.
+    pub(crate) fn subjects(paths: &[Trace]) -> impl Iterator<Item = Subject<'_>> {
         (paths.iter())
-            .flat_map(|p| [Subject::File(p), Subject::Under(p)])
+            .flat_map(|t| {
+                let at = path::Subject::Position(t.real());
+                [
+                    Subject::Program(path::Subject::Access(t)),
+                    Subject::Program(at),
+                    Subject::Dir(at),
+                ]
+            })
+            .chain([Subject::Dir(path::Subject::Everywhere)])
             .chain(TOOLS.map(Subject::Tool))
             .chain([Subject::Any])
     }
 
+    /// The universe's files and directories as the rules that name them,
+    /// walked once.
+    struct World {
+        files: Vec<(ExecAllow, ExecDeny)>,
+        dirs: Vec<(ExecAllow, ExecDeny)>,
+    }
+
+    static WORLD: LazyLock<World> = LazyLock::new(|| World {
+        files: (FILES.iter())
+            .map(|f| (file_allowance(f), ExecDeny::File(excluded(f))))
+            .collect(),
+        dirs: (DIRS.iter())
+            .map(|d| (dir_allowance(d), ExecDeny::Dir(excluded(d))))
+            .collect(),
+    });
+
     /// A table over the universe, each rule present one time in three.
     pub(crate) fn random(rng: &mut Rng) -> ExecRules {
         let mut rules = Vec::new();
-        for f in FILES {
+        for place in &WORLD.files {
             if rng.below(3) == 0 {
-                rules.extend(file(f, rng.pick(&evidences())));
+                rules.extend(say(place, rng.pick(&evidences())));
             }
         }
         for t in TOOLS {
@@ -750,9 +981,9 @@ pub(super) mod tests {
                 rules.push(allow_tool(t));
             }
         }
-        for d in DIRS {
+        for place in &WORLD.dirs {
             if rng.below(3) == 0 {
-                rules.extend(dir(d, rng.pick(&evidences())));
+                rules.extend(say(place, rng.pick(&evidences())));
             }
         }
         for n in NAMES {
@@ -762,6 +993,9 @@ pub(super) mod tests {
         }
         if rng.below(6) == 0 {
             rules.push(any());
+        }
+        if rng.below(6) == 0 {
+            rules.push(everywhere());
         }
         rules.into_iter().collect()
     }
@@ -776,20 +1010,25 @@ pub(super) mod tests {
             let rules = random(&mut rng);
             let support: BTreeSet<RealPath> = (paths.iter())
                 .filter(|_| rng.below(4) == 0)
-                .cloned()
+                .map(|t| t.real().clone())
                 .collect();
             let kernel = rules.for_kernel(&support);
             assert!(kernel.allows().all(|s| !matches!(s, ExecAllow::Tool(_))));
-            let with = rules.clone().join(ExecRules::new(
-                support.iter().map(|c| ExecAllow::file(c.clone())),
-                [],
-            ));
-            for p in &paths {
-                for s in [Subject::File(p), Subject::Under(p)] {
+            let with = rules
+                .clone()
+                .join(ExecRules::new(support.iter().map(ExecAllow::support), []));
+            for t in &paths {
+                let at = path::Subject::Position(t.real());
+                for s in [
+                    Subject::Program(path::Subject::Access(t)),
+                    Subject::Program(at),
+                    Subject::Dir(at),
+                ] {
                     assert_eq!(
                         kernel.evidence(s),
                         with.evidence(s),
-                        "{p}\nrules = {rules:?}\nsupport = {support:?}\nkernel = {kernel:?}"
+                        "{}\nrules = {rules:?}\nsupport = {support:?}\nkernel = {kernel:?}",
+                        t.real()
                     );
                 }
             }
@@ -811,7 +1050,8 @@ pub(super) mod tests {
         assert_eq!(rules.allowed_files().count(), 0);
     }
 
-    /// The run places are the positive files and directories.
+    /// The run places are the positive files and directories: a file and a
+    /// directory are places, and `dir /` is the prefix at everywhere.
     #[test]
     fn the_places_are_the_positive_files_and_dirs() {
         let rules: ExecRules = [
@@ -822,125 +1062,193 @@ pub(super) mod tests {
             allow_tool("ls"),
             any(),
             veto("sh"),
+            allow_dir("/"),
         ]
         .into_iter()
         .collect();
-        let places: Vec<_> = rules.places().collect();
-        assert_eq!(places, [&real("/a/b"), &real("/a/x")]);
+        let places: BTreeSet<_> = rules.places().collect();
+        assert_eq!(
+            places,
+            BTreeSet::from([
+                FsAllow::Prefix(GrantPath::everywhere()),
+                FsAllow::RunPlace(real("/a/b")),
+                FsAllow::RunPlace(real("/a/x")),
+            ])
+        );
     }
 
-    /// A key with both bits compiles to both entries, at paths that may differ;
+    /// The rules a grant makes: each key walked, a key with both bits both
+    /// kinds of rule, and `every` is `Any`.
+    fn granting(keys: impl IntoIterator<Item = (ExecKey, Evidence)>) -> ExecRules {
+        ExecRules::of_grant(&keys.into_iter().collect(), &EnvVars::new()).unwrap()
+    }
+
+    /// The directory `name` of `root`, made.
+    fn made(root: &Path, name: &str) -> PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A tempdir and the real path of its root.
+    fn tmp() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = RealPath::of_path(tmp.path())
+            .unwrap()
+            .as_path()
+            .to_path_buf();
+        (tmp, root)
+    }
+
+    fn spelled(path: &Path) -> FrozenPath {
+        FrozenPath::from_surface(utf8(path).unwrap())
+    }
+
+    fn at(path: &Path) -> RealPath {
+        RealPath::of_path(path).unwrap()
+    }
+
+    /// A key with both bits resolves to both entries, at paths that may differ;
     /// `every` is `Any`.
-    #[cfg(unix)]
     #[test]
-    fn compile_carries_evidence_to_every_scope_and_sets_any() {
-        let grant: ExecGrant =
-            std::iter::once((ExecKey::Dir(FrozenPath::for_test("/d", "/d")), BOTH)).collect();
-        let compiled = ExecRules::compile(&grant);
-        assert_eq!(compiled.evidence(Subject::Under(&real("/d"))), BOTH);
+    fn of_grant_carries_evidence_to_every_rule_and_sets_any() {
+        let rules = granting([(ExecKey::Dir(written("/d")), BOTH)]);
+        assert_eq!(
+            rules.evidence(Subject::Dir(path::Subject::Position(&real("/d")))),
+            BOTH
+        );
         let every = std::iter::once((ExecKey::Name("zzz-no-such".into()), ALLOW))
             .collect::<ExecGrant>()
-            .join_top()
-            .unwrap();
-        let compiled = ExecRules::compile(&every);
-        assert!(compiled.allows().any(|s| *s == ExecAllow::Any));
+            .with_every();
+        let rules = ExecRules::of_grant(&every, &EnvVars::new()).unwrap();
+        assert!(rules.allows().any(|s| *s == ExecAllow::Any));
     }
 
     /// One file, two path keys: an exclusion on the link `a` and an allowance on
-    /// its target `b` compile to one rule, and it holds both.
+    /// its target `b` are one allowance and one exclusion, and hold both.
     #[cfg(unix)]
     #[test]
     fn two_path_keys_naming_one_file_are_both() {
-        let tmp = tempfile::tempdir().unwrap();
-        let target = tmp.path().join("b");
+        let (_tmp, root) = tmp();
+        let (target, link) = (root.join("b"), root.join("a"));
         std::fs::write(&target, "").unwrap();
-        let link = tmp.path().join("a");
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        let grant: ExecGrant = [
-            (
-                ExecKey::Path(FrozenPath::from_surface(crate::path::utf8(&link).unwrap())),
-                DENY,
-            ),
-            (
-                ExecKey::Path(FrozenPath::from_surface(
-                    crate::path::utf8(&target).unwrap(),
-                )),
-                ALLOW,
-            ),
-        ]
-        .into_iter()
-        .collect();
-        let table = ExecRules::compile(&grant);
-        let at = RealPath::of_path(&target).unwrap();
-        assert_eq!(table.evidence(Subject::File(&at)), BOTH);
+        let table = granting([
+            (ExecKey::Path(spelled(&link)), DENY),
+            (ExecKey::Path(spelled(&target)), ALLOW),
+        ]);
+        assert_eq!(table.evidence(program(&at(&target))), BOTH);
         assert_eq!((table.allows().count(), table.denies().count()), (1, 1));
-    }
-
-    /// A table of one dir key `/l` frozen as resolving to `/x`.
-    fn linked_dir(e: Evidence) -> ExecRules {
-        let linked = FrozenPath::for_test(&test_absolute("/l"), &test_absolute("/x"));
-        ExecRules::compile(&std::iter::once((ExecKey::Dir(linked), e)).collect())
     }
 
     /// An allowed dir that is a symlink covers where it was frozen to.
     #[test]
     fn a_symlinked_allow_dir_covers_its_frozen_target() {
-        assert!(of_file(&linked_dir(ALLOW), "/x/tool").permits());
+        let (_tmp, root) = tmp();
+        let target = made(&root, "x");
+        std::fs::write(target.join("tool"), "").unwrap();
+        let link = root.join("l");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&target, &link).unwrap();
+        let rules = granting([(ExecKey::Dir(spelled(&link)), ALLOW)]);
+        assert!(rules.evidence(program(&at(&target.join("tool")))).permits());
     }
 
     /// A deeper allow inside a symlinked exclusion's target reopens nothing.
     #[cfg(unix)]
     #[test]
     fn a_symlinked_exclusion_covers_its_target_whatever_sits_beneath() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (target, link) = (tmp.path().join("x"), tmp.path().join("l"));
-        std::fs::create_dir_all(target.join("sub")).unwrap();
+        let (_tmp, root) = tmp();
+        let target = made(&root, "x");
+        made(&target, "sub");
+        let link = root.join("l");
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        let grant: ExecGrant = [
-            (
-                ExecKey::Dir(FrozenPath::from_surface(crate::path::utf8(&link).unwrap())),
-                DENY,
-            ),
-            (
-                ExecKey::Dir(FrozenPath::from_surface(
-                    crate::path::utf8(&target.join("sub")).unwrap(),
-                )),
-                ALLOW,
-            ),
-        ]
-        .into_iter()
-        .collect();
-        let rules = ExecRules::compile(&grant);
-        let at = |p: &Path| RealPath::of_path(p).unwrap();
-        assert!(
-            !rules
-                .evidence(Subject::File(&at(&target.join("sub"))))
-                .permits()
+        let rules = granting([
+            (ExecKey::Dir(spelled(&link)), DENY),
+            (ExecKey::Dir(spelled(&target.join("sub"))), ALLOW),
+        ]);
+        assert!(!rules.evidence(program(&at(&target.join("sub")))).permits());
+    }
+
+    /// An exclusion is frozen where its name was walked, and holds what it
+    /// held: a name that was a link holds the link's position and its target; a
+    /// name that was a plain directory keeps that position when it later
+    /// becomes a link, and the new target is judged on its own.  An allowance
+    /// keeps its position as it was walked.
+    #[cfg(unix)]
+    #[test]
+    fn an_exclusion_holds_what_it_was_walked_to_and_an_allowance_its_position() {
+        let (_tmp, root) = tmp();
+        let blocked = made(&root, "blocked");
+        let tools = made(&root, "tools");
+        std::fs::write(tools.join("prog"), "").unwrap();
+        let prog = at(&tools.join("prog"));
+        let key = |e| [(ExecKey::Dir(spelled(&blocked)), e)];
+
+        let (denied, granted) = (granting(key(DENY)), granting(key(ALLOW)));
+        std::fs::remove_dir(&blocked).unwrap();
+        std::os::unix::fs::symlink(&tools, &blocked).unwrap();
+        let name = LexicalPath::absolute(&blocked).unwrap();
+        let name = walk_lenient(&name, LeafMode::NoFollow).unwrap();
+        let name = Subject::Program(path::Subject::Access(&name));
+        assert!(denied.evidence(name).negative);
+        assert_eq!(denied.evidence(program(&prog)), Evidence::NEITHER);
+        assert_eq!(granted.evidence(program(&prog)), Evidence::NEITHER);
+
+        let (denied, granted) = (granting(key(DENY)), granting(key(ALLOW)));
+        let Some(ExecDeny::Dir(held)) = denied.denies().next() else {
+            panic!("a directory exclusion: {denied:?}");
+        };
+        assert_eq!(held.real.named().real().as_path(), blocked.as_path());
+        assert_eq!(
+            held.real.target().map(|t| t.real().as_path()),
+            Some(tools.as_path())
+        );
+        assert!(denied.evidence(program(&prog)).negative);
+        assert_eq!(granted.evidence(program(&prog)), ALLOW);
+    }
+
+    /// `live` reads positions: a directory allowance stays where its spelling
+    /// walked when the directory is renamed beneath a later exclusion, and the
+    /// object at its new place is the exclusion's to refuse.
+    #[test]
+    fn a_directory_allowance_stays_live_where_its_directory_was_renamed_under_a_deny() {
+        let (_tmp, root) = tmp();
+        let (dir, denied) = (made(&root, "dir"), made(&root, "denied"));
+        let allowed = granting([(ExecKey::Dir(spelled(&dir)), ALLOW)]);
+        let denying = granting([(ExecKey::Dir(spelled(&denied)), DENY)]);
+        std::fs::rename(&dir, denied.join("dir")).unwrap();
+        let table = allowed.join(denying);
+        assert_eq!(table.live().count(), 1, "{table:?}");
+        let moved = trace(denied.join("dir").join("t"));
+        assert_eq!(
+            table.evidence(program(moved.real())),
+            DENY,
+            "the old position allows nothing the object's new one does"
         );
     }
 
-    /// Rule 6: an exclusion of `/work/blocked` follows the name after it
-    /// becomes a link to an admitted directory, and an allowance does not.
-    #[cfg(unix)]
+    /// As above for a file allowance: it is the position, not the object that
+    /// moved, and the exclusion that holds the new place leaves it live.
     #[test]
-    fn an_exclusion_follows_its_name_and_an_allowance_keeps_its_real_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (blocked, tools) = (tmp.path().join("blocked"), tmp.path().join("tools"));
-        std::fs::create_dir_all(&blocked).unwrap();
-        std::fs::create_dir_all(&tools).unwrap();
-        std::fs::write(tools.join("prog"), "").unwrap();
-        let (excluded, allowed) = (
-            FrozenPath::from_surface(crate::path::utf8(&blocked).unwrap()),
-            FrozenPath::from_surface(crate::path::utf8(&blocked).unwrap()),
+    fn a_file_allowance_stays_live_where_its_object_moved_and_was_denied_elsewhere() {
+        let (_tmp, root) = tmp();
+        let (bin, denied) = (made(&root, "bin"), made(&root, "denied"));
+        std::fs::write(bin.join("tool"), "").unwrap();
+        let allowed = granting([(ExecKey::Path(spelled(&bin.join("tool"))), ALLOW)]);
+        std::fs::rename(bin.join("tool"), denied.join("tool")).unwrap();
+        let denying = granting([(ExecKey::Dir(spelled(&denied)), DENY)]);
+        let table = allowed.join(denying);
+        assert!(
+            table.live().any(
+                |a| matches!(a, ExecAllow::File { real, .. } if real.as_path() == bin.join("tool"))
+            ),
+            "{table:?}"
         );
-        std::fs::remove_dir(&blocked).unwrap();
-        std::os::unix::fs::symlink(&tools, &blocked).unwrap();
-        let prog = RealPath::of_path(&tools.join("prog")).unwrap();
-        let denied = ExecRules::compile(&std::iter::once((ExecKey::Dir(excluded), DENY)).collect());
-        assert!(denied.evidence(Subject::File(&prog)).negative);
-        let granted =
-            ExecRules::compile(&std::iter::once((ExecKey::Dir(allowed), ALLOW)).collect());
-        assert_eq!(granted.evidence(Subject::File(&prog)), Evidence::NEITHER);
+        let moved = trace(denied.join("tool"));
+        assert_eq!(table.evidence(program(moved.real())), DENY);
     }
 
     /// `/tmp/bin` and `/private/tmp/bin` are one directory to the guard but

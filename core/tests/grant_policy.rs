@@ -2,7 +2,7 @@
 
 //! Grant-policy admittance rules at the `Shell` boundary.
 //!
-//! Each test drives `Shell::with_capabilities` and `sandbox_projection` over
+//! Each test drives `Shell::with_layer` and `sandbox_projection` over
 //! the public API, and the in-process exec guard through `test_access`'s doors, which
 //! judge a file by the real path a test names.  The policies and their
 //! meet/extension semantics are the contract.
@@ -12,6 +12,7 @@ use ral_core::path::FrozenPath;
 use ral_core::test_access::check_file;
 #[cfg(unix)]
 use ral_core::test_access::{KernelExecRule, exec_projection_files, exec_projection_rules};
+use ral_core::test_helper::layer;
 #[cfg(unix)]
 use std::path::Path;
 
@@ -51,7 +52,7 @@ fn dirs(entries: &[(&str, bool)]) -> impl Iterator<Item = (ExecKey, Evidence)> {
 fn exec_only(exec: ExecGrant) -> Capabilities {
     Capabilities {
         exec: Some(exec),
-        ..Capabilities::root()
+        ..Capabilities::default()
     }
 }
 
@@ -62,9 +63,11 @@ fn an_excluded_dir_carves_a_hole_in_an_allowed_dir() {
     let mut shell = ral_core::test_helper::core_shell();
     let grant = exec_only(dirs(&[("/bin", true), ("/bin/sensitive", false)]).collect());
     shell
-        .with_capabilities(grant.clone(), |sh| check_file(sh, &host("/bin/ls"), &[]))
+        .with_layer(layer(grant.clone()), |sh| {
+            check_file(sh, &host("/bin/ls"), &[])
+        })
         .expect("ls under the allow dir should be admitted");
-    let result = shell.with_capabilities(grant, |sh| {
+    let result = shell.with_layer(layer(grant), |sh| {
         check_file(sh, &host("/bin/sensitive/payload"), &[])
     });
     assert!(result.is_err(), "the exclusion should beat the allowed dir");
@@ -76,7 +79,7 @@ fn an_excluded_dir_carves_a_hole_in_an_allowed_dir() {
 fn a_bare_allow_admits_no_other_file_of_its_name() {
     let mut shell = ral_core::test_helper::core_shell();
     let grant = exec_only(names(&[("git", Evidence::ALLOW)]).collect());
-    let result = shell.with_capabilities(grant, |shell| {
+    let result = shell.with_layer(layer(grant), |shell| {
         check_file(shell, &host("/fake-bin/git"), &["status".into()])
     });
     assert!(result.is_err());
@@ -87,7 +90,7 @@ fn a_path_key_admits_its_file() {
     let mut shell = ral_core::test_helper::core_shell();
     let grant = exec_only(paths(&[("/fake-bin/git", Evidence::ALLOW)]).collect());
     shell
-        .with_capabilities(grant, |shell| {
+        .with_layer(layer(grant), |shell| {
             check_file(shell, &host("/fake-bin/git"), &["status".into()])
         })
         .expect("a path key should admit the file it names");
@@ -102,7 +105,7 @@ fn sandbox_projection_intersects_path_components() {
             write_prefixes: Vec::new(),
             deny_paths: Vec::new(),
         }),
-        ..Capabilities::root()
+        ..Capabilities::default()
     };
     let inner = Capabilities {
         fs: Some(FsPolicy {
@@ -110,10 +113,10 @@ fn sandbox_projection_intersects_path_components() {
             write_prefixes: Vec::new(),
             deny_paths: Vec::new(),
         }),
-        ..Capabilities::root()
+        ..Capabilities::default()
     };
-    let projection = shell.with_capabilities(outer, |shell| {
-        shell.with_capabilities(inner, |shell| shell.sandbox_projection().unwrap())
+    let projection = shell.with_layer(layer(outer), |shell| {
+        shell.with_layer(layer(inner), |shell| shell.sandbox_projection().unwrap())
     });
     let read = ral_core::test_access::fs_read_paths(&projection.fs).expect("fs restricted");
     assert!(
@@ -141,7 +144,7 @@ fn sandbox_projection_does_not_leak_outer_raw_prefix() {
             write_prefixes: Vec::new(),
             deny_paths: Vec::new(),
         }),
-        ..Capabilities::root()
+        ..Capabilities::default()
     };
     let inner = Capabilities {
         fs: Some(FsPolicy {
@@ -149,11 +152,11 @@ fn sandbox_projection_does_not_leak_outer_raw_prefix() {
             write_prefixes: Vec::new(),
             deny_paths: Vec::new(),
         }),
-        ..Capabilities::root()
+        ..Capabilities::default()
     };
 
-    let projection = shell.with_capabilities(outer, |shell| {
-        shell.with_capabilities(inner, |shell| shell.sandbox_projection().unwrap())
+    let projection = shell.with_layer(layer(outer), |shell| {
+        shell.with_layer(layer(inner), |shell| shell.sandbox_projection().unwrap())
     });
     let read = ral_core::test_access::fs_read_paths(&projection.fs).expect("fs restricted");
     assert!(!read.contains(&link.to_string_lossy().into_owned()));
@@ -171,7 +174,7 @@ fn a_bare_deny_vetoes_its_name_under_an_allow_dir() {
             .chain(dirs(&[("/bin", true)]))
             .collect(),
     );
-    let result = shell.with_capabilities(grant, |sh| check_file(sh, &host("/bin/bash"), &[]));
+    let result = shell.with_layer(layer(grant), |sh| check_file(sh, &host("/bin/bash"), &[]));
     assert!(
         result.is_err(),
         "a bare bash: deny must veto a bash under an allow dir"
@@ -184,7 +187,7 @@ fn a_bare_deny_vetoes_its_name_under_an_allow_dir() {
 fn a_bare_allow_does_not_admit_a_planted_file_of_its_name() {
     let mut shell = ral_core::test_helper::core_shell();
     let grant = exec_only(names(&[("rg", Evidence::ALLOW)]).collect());
-    let result = shell.with_capabilities(grant, |sh| check_file(sh, &host("/evil/rg"), &[]));
+    let result = shell.with_layer(layer(grant), |sh| check_file(sh, &host("/evil/rg"), &[]));
     assert!(
         result.is_err(),
         "a bare rg: allow must not admit a planted evil/rg"
@@ -200,7 +203,7 @@ fn a_path_key_deny_beats_a_covering_allow_dir() {
             .chain(dirs(&[("/bin", true)]))
             .collect(),
     );
-    let result = shell.with_capabilities(grant, |sh| check_file(sh, &host("/bin/git"), &[]));
+    let result = shell.with_layer(layer(grant), |sh| check_file(sh, &host("/bin/git"), &[]));
     assert!(result.is_err(), "a path key's deny must veto its file");
 }
 
@@ -224,7 +227,7 @@ fn with_fs(exec: ExecGrant) -> Capabilities {
     Capabilities {
         exec: Some(exec),
         fs: Some(projection_fs()),
-        ..Capabilities::root()
+        ..Capabilities::default()
     }
 }
 
@@ -240,8 +243,8 @@ fn sandbox_projection_admits_a_path_key_covered_by_a_sibling_dir() {
     let git = host("/bin/git");
 
     let mut shell = ral_core::test_helper::core_shell();
-    let projection = shell.with_capabilities(outer.clone(), |sh| {
-        sh.with_capabilities(inner.clone(), |sh| sh.sandbox_projection().unwrap())
+    let projection = shell.with_layer(layer(outer.clone()), |sh| {
+        sh.with_layer(layer(inner.clone()), |sh| sh.sandbox_projection().unwrap())
     });
     let files = exec_projection_files(&projection);
     assert!(
@@ -251,8 +254,8 @@ fn sandbox_projection_admits_a_path_key_covered_by_a_sibling_dir() {
 
     let mut shell = ral_core::test_helper::core_shell();
     shell
-        .with_capabilities(outer, |sh| {
-            sh.with_capabilities(inner, |sh| check_file(sh, &git, &[]))
+        .with_layer(layer(outer), |sh| {
+            sh.with_layer(layer(inner), |sh| check_file(sh, &git, &[]))
         })
         .expect("the in-process guard must admit the file");
 }
@@ -332,16 +335,16 @@ fn exec_projection_never_out_permits_the_guard() {
         let outer = with_fs(outer_exec);
         let inner = with_fs(inner_exec);
         let mut shell = ral_core::test_helper::core_shell();
-        let projection = shell.with_capabilities(outer.clone(), |sh| {
-            sh.with_capabilities(inner.clone(), |sh| sh.sandbox_projection().unwrap())
+        let projection = shell.with_layer(layer(outer.clone()), |sh| {
+            sh.with_layer(layer(inner.clone()), |sh| sh.sandbox_projection().unwrap())
         });
         let kernel = exec_projection_rules(&projection);
         for probe in probes {
             let real = host(probe);
             let mut shell = ral_core::test_helper::core_shell();
             let guard_ok = shell
-                .with_capabilities(outer.clone(), |sh| {
-                    sh.with_capabilities(inner.clone(), |sh| check_file(sh, &real, &[]))
+                .with_layer(layer(outer.clone()), |sh| {
+                    sh.with_layer(layer(inner.clone()), |sh| check_file(sh, &real, &[]))
                 })
                 .is_ok();
             if kernel_admits(kernel.as_deref(), &real) {

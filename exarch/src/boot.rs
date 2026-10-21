@@ -6,8 +6,12 @@ use crate::app::{EXARCH, seed_var};
 use crate::shell_eval;
 use crate::shell_eval::builtins;
 use ral_core::boot::boot_runtime;
+use ral_core::capability::{Capabilities, GrantLayer};
+use ral_core::first_order::FOValue;
+use ral_core::first_order::datum::Datum as _;
 use ral_core::protocol::{EngineSpec, Root};
 use ral_core::terminal::TerminalState;
+use ral_core::types::EnvVars;
 use ral_core::{Runtime, Shell};
 
 /// The process-level signal ceremony, once at each entry point that hosts an
@@ -22,24 +26,30 @@ pub fn face_process_signals(terminal: &TerminalState) {
 /// Exarch's process half, under either carrier: the dressed surface and
 /// prelude, `detach` where the double fork exists, the agent library's docs.
 ///
-pub fn engine_runtime(spec: &EngineSpec) -> Runtime {
+/// # Errors
+/// A host whose read floor cannot be resolved, which can run nothing.
+pub fn engine_runtime(spec: &EngineSpec) -> Result<Runtime, String> {
     let mut runtime = boot_runtime(
         spec.terminal,
         &shell_eval::PRELUDE,
         &builtins::host_surface(),
-    );
+    )?;
     #[cfg(unix)]
     runtime.install_builtins(ral_core::builtins::DETACH_BUILTIN);
     runtime.install_library_docs(crate::library::agent_library_docs());
-    runtime
+    Ok(runtime)
 }
 
 /// Exarch's root-only recipe: the agent library, hints, the detach budget,
 /// and the root's env seeded as bindings before the ledgers arm. The
 /// scratch is the host's, named by the root.
 ///
+/// A root whose config is not unit carries the ceiling its host authored for
+/// this engine, resolved here, on the host it runs on, and pushed as a session
+/// layer: synod's guest names its places in the guest's namespace.
+///
 /// # Errors
-/// A root that names no scratch.
+/// A root that names no scratch, or whose ceiling does not decode or resolve.
 ///
 /// # Panics
 /// Panics if the embedded agent library fails to load.
@@ -49,6 +59,17 @@ pub fn engine_root(root: &Root, shell: &mut Shell) -> Result<(), String> {
         return Err(format!(
             "exarch engine: the root attach names no ${var}: the host owns the scratch and names it in every root attach"
         ));
+    }
+    if !matches!(root.config, FOValue::Unit) {
+        let ceiling = Capabilities::decode(&root.config)
+            .map_err(|e| format!("exarch engine: the root's ceiling does not decode: {e}"))?;
+        let layer = GrantLayer::from_capabilities(ceiling, &EnvVars::new()).map_err(|e| {
+            format!(
+                "exarch engine: the root's ceiling cannot be resolved: {}",
+                e.message
+            )
+        })?;
+        shell.push_session_capabilities(layer);
     }
     crate::library::install_agent_library(&ral_core::types::Mooring::adrift(), shell)
         .unwrap_or_else(|e| panic!("exarch: embedded agent library failed to load: {e:?}"));
@@ -90,7 +111,9 @@ pub(crate) fn test_attach() -> (EngineSpec, Root) {
 pub(crate) fn test_shell() -> Shell {
     let (spec, root) = test_attach();
     let mut shell = Shell::root(
-        engine_runtime(&spec).into(),
+        engine_runtime(&spec)
+            .expect("a test host resolves its floor")
+            .into(),
         ral_core::test_helper::process_cwd(),
     );
     ral_core::boot::seed_host_env(&mut shell);
@@ -147,7 +170,9 @@ mod tests {
             EnginePath::Host(temp.clone()),
         );
         let mut shell = Shell::root(
-            engine_runtime(&spec).into(),
+            engine_runtime(&spec)
+                .expect("a test host resolves its floor")
+                .into(),
             ral_core::test_helper::process_cwd(),
         );
         let Err(why) = engine_root(&Root::new(EnginePath::Host(temp)), &mut shell) else {

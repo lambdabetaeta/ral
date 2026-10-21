@@ -25,7 +25,7 @@ use super::warrant::Seatbelt;
 use super::warrant::{Handoff, Native, Slot, Warrant};
 use super::{Refusal, SandboxProjection};
 use crate::Role;
-use crate::capability::Admitted;
+use crate::capability::{Admitted, Floor};
 use std::ffi::OsString;
 use std::path::Path;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -56,7 +56,8 @@ pub(crate) enum Ownership {
 ///
 /// `cwd` is the logical cwd Linux folds in as `--chdir`, and `ownership`
 /// likewise reaches Linux alone, the one backend that builds an
-/// envelope process to tie to us.
+/// envelope process to tie to us; `floor`, which of the projection's read
+/// objects a host may keep from this user, is Linux's alone too.
 ///
 /// macOS and Linux both launch the `ral --warrant` trampoline — Linux's under
 /// bwrap — while Windows spawns the program itself, confined by the token the
@@ -65,11 +66,12 @@ pub(crate) enum Ownership {
     not(target_os = "linux"),
     allow(
         unused_variables,
-        reason = "cwd and ownership are consumed by the bwrap argv alone"
+        reason = "floor, cwd and ownership are consumed by the bwrap argv alone"
     )
 )]
 pub(crate) fn sandboxed_command(
     projection: &SandboxProjection,
+    floor: &Floor,
     admitted: &Admitted,
     ownership: Ownership,
     cwd: &Path,
@@ -82,7 +84,7 @@ pub(crate) fn sandboxed_command(
     let _ = cancel;
     #[cfg(target_os = "linux")]
     {
-        let (cmd, info_fd) = linux_sandboxed_command(projection, admitted, ownership, cwd)?;
+        let (cmd, info_fd) = linux_sandboxed_command(projection, floor, admitted, ownership, cwd)?;
         let mut launch = crate::process::Launch::from_command(cmd);
         // A host package rather than part of ral, so it may simply be absent.
         launch.envelope(crate::process::launch::Envelope {
@@ -119,11 +121,11 @@ fn windows_sandboxed_command(
     // mirroring the Linux backend binding the program path into the bwrap argv.
     let (mut launch, image): (crate::process::Launch, Option<crate::path::RealPath>) =
         match admitted.program() {
-            Program::File { path, real } => {
-                let mut launch = crate::process::Launch::new(real.as_path());
+            Program::File { path, trace } => {
+                let mut launch = crate::process::Launch::new(trace.real().as_path());
                 launch.arg0(path);
                 launch.args(args);
-                (launch, Some(real.clone()))
+                (launch, Some(trace.real().clone()))
             }
             Program::Tool(tool) => {
                 let mut launch = super::reexec::launch(Role::BundledTool).map_err(|e| {
@@ -162,6 +164,7 @@ fn issue(
 #[cfg(target_os = "linux")]
 fn linux_sandboxed_command(
     projection: &SandboxProjection,
+    floor: &Floor,
     admitted: &Admitted,
     ownership: Ownership,
     cwd: &Path,
@@ -170,7 +173,7 @@ fn linux_sandboxed_command(
     let own = super::reexec::own()?;
     let cwd = faithful(cwd, "the working directory")?;
     let env = Envelope::probe(bwrap, own);
-    enveloped(&env, projection, admitted, Some(cwd), ownership)
+    enveloped(&env, projection, floor, admitted, Some(cwd), ownership)
 }
 
 /// `path` as bwrap's argv can carry it: every other name there is a
@@ -196,12 +199,13 @@ fn faithful<'a>(path: &'a Path, what: &str) -> Result<&'a str, Refusal> {
 pub(super) fn enveloped(
     env: &Envelope<'_>,
     projection: &SandboxProjection,
+    floor: &Floor,
     admitted: &Admitted,
     chdir: Option<&str>,
     ownership: Ownership,
 ) -> Result<(Command, Option<super::linux::InfoFd>), Refusal> {
     let rendered = projection.rendered()?;
-    let shown = super::linux::Shown::of(&rendered)?;
+    let shown = super::linux::Shown::of(&rendered, floor)?;
     let (ruleset, confinement) = super::linux::landlock::build(
         &rendered.exec,
         &rendered.fs,
@@ -296,7 +300,7 @@ pub fn serve_warrant(_extra: &[OsString]) -> u8 {
 ))]
 pub(super) fn admitted(program: crate::capability::Program, args: &[String]) -> Admitted {
     crate::capability::GrantStack::root()
-        .admit(program, args.to_vec())
+        .admit(&Floor::default(), program, args.to_vec())
         .expect("an unrestricted stack admits everything")
 }
 
@@ -316,17 +320,19 @@ mod tests {
     // Needed only by the per-platform launch tests; elsewhere the two
     // refusals are the only tests, and they need no scaffolding.
     #[cfg(target_os = "macos")]
-    use crate::capability::{ExecAllow, ExecDeny, ExecRule};
+    use crate::capability::{ExecAllow, ExecDeny, Rule};
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     use crate::{
-        capability::Program,
+        capability::{Extent, FsAllow, GrantPath, Program},
         path::FrozenPath,
         sandbox::{ExecProjection, FsProjection, FsRules},
     };
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn prefix(path: &str) -> crate::capability::FsAllow {
-        crate::capability::FsAllow::Prefix(FrozenPath::from_surface(path))
+    fn prefix(path: &str) -> FsAllow {
+        FsAllow::Prefix(
+            GrantPath::<Extent>::allowing(FrozenPath::from_surface(path)).expect("a prefix walks"),
+        )
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -383,6 +389,12 @@ mod tests {
             net: true,
             exec: ExecProjection::default(),
         }
+    }
+
+    /// The host's floor, which a confined child needs to start at all.
+    #[cfg(target_os = "macos")]
+    fn host_floor() -> Floor {
+        crate::test_helper::core_runtime().floor().clone()
     }
 
     /// Created on the host, outside any sandbox, so a confined child can write
@@ -586,7 +598,7 @@ mod tests {
             fs: FsProjection::Restricted(FsRules {
                 read: scopes(read).into_iter().chain(floor()).collect(),
                 write: scopes(write),
-                deny: deny.iter().map(FrozenPath::from_surface).collect(),
+                deny: deny.iter().map(|d| FrozenPath::from_surface(d)).collect(),
                 pinned_dirs: Vec::new(),
             }),
             net: true,
@@ -597,7 +609,7 @@ mod tests {
     /// `every` program, and nothing else.
     #[cfg(target_os = "macos")]
     fn every() -> ExecProjection {
-        ExecProjection::Restricted(std::iter::once(ExecRule::Allow(ExecAllow::Any)).collect())
+        ExecProjection::Restricted(std::iter::once(Rule::Allow(ExecAllow::Any)).collect())
     }
 
     /// The exit code and stderr of `cmd` run confined, stdout silenced.
@@ -672,10 +684,10 @@ mod tests {
             .expect("chmod");
         let projection = if by_exec {
             let shell =
-                crate::path::RealPath::of_path(Path::new("/bin/sh")).expect("/bin/sh exists");
+                GrantPath::walk(FrozenPath::from_surface("/bin/sh")).expect("/bin/sh walks");
             let exec = [
-                ExecRule::Allow(ExecAllow::Any),
-                ExecRule::Deny(ExecDeny::file(shell)),
+                Rule::Allow(ExecAllow::Any),
+                Rule::Deny(ExecDeny::File(shell)),
             ];
             confined_to(
                 &[&work],
@@ -731,24 +743,26 @@ mod tests {
     /// beside `exec` as given: it starts, through the live support alone.
     #[cfg(target_os = "macos")]
     fn start_system_script(script: &Path, exec: Option<crate::capability::ExecGrant>) -> String {
-        use crate::capability::{Capabilities, FsPolicy, GrantStack};
+        use crate::capability::{Capabilities, FsPolicy};
+        use crate::test_helper::{layer, stack};
         let work = scratch("support");
-        let layer = Capabilities {
+        let caps = Capabilities {
             exec,
             fs: Some(FsPolicy {
-                read_prefixes: vec![FrozenPath::from_surface(&work)],
+                read_prefixes: vec![FrozenPath::from_surface(crate::path::utf8(&work).unwrap())],
                 write_prefixes: Vec::new(),
                 deny_paths: Vec::new(),
             }),
-            ..Capabilities::root()
+            ..Capabilities::default()
         };
-        let stack = GrantStack::of(layer);
+        let stack = stack([layer(caps)]);
+        let floor = host_floor();
         let program = Program::file(script.to_path_buf()).expect("a program");
         let admitted = stack
-            .admit(program, Vec::new())
+            .admit(&floor, program, Vec::new())
             .expect("the grant admits the script");
-        let projection =
-            SandboxProjection::of(&stack, Some(&admitted)).expect("a restricted fs sandboxes");
+        let projection = SandboxProjection::of(&stack, &floor, Some(&admitted))
+            .expect("a restricted fs sandboxes");
         let cmd = macos_sandboxed_command(&projection, &admitted).expect("build host command");
         let (_, stderr) = confined_stderr(cmd);
         let _ = std::fs::remove_dir_all(&work);
@@ -766,7 +780,9 @@ mod tests {
             eprintln!("skipping: no system script under /usr/bin");
             return;
         };
-        let dir = FrozenPath::from_surface(script.parent().expect("a directory"));
+        let dir = FrozenPath::from_surface(
+            crate::path::utf8(script.parent().expect("a directory")).expect("a Unicode path"),
+        );
         let supplied: ExecGrant = std::iter::once((ExecKey::Dir(dir), Evidence::ALLOW)).collect();
         for exec in [Some(supplied), None] {
             let stderr = start_system_script(&script, exec.clone());
@@ -782,7 +798,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn an_excluded_shim_candidate_the_stub_does_not_use_refuses_nothing() {
-        use crate::capability::{Capabilities, Evidence, ExecGrant, ExecKey, GrantStack};
+        use crate::capability::{Capabilities, Evidence, ExecGrant, ExecKey};
+        use crate::test_helper::{layer, stack};
         let stub = Path::new("/usr/bin/git");
         let used = Command::new("xcrun")
             .args(["--find", "git"])
@@ -806,19 +823,21 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let layer = Capabilities {
+        let caps = Capabilities {
             exec: Some(exec),
-            ..Capabilities::root()
+            ..Capabilities::default()
         };
-        let stack = GrantStack::of(layer);
+        let stack = stack([layer(caps)]);
+        let floor = host_floor();
         let admitted = stack
             .admit(
+                &floor,
                 Program::file(stub.into()).expect("git stub"),
                 vec!["--version".into()],
             )
             .expect("the grant admits the stub");
         let projection =
-            SandboxProjection::of(&stack, Some(&admitted)).expect("exec is restricted");
+            SandboxProjection::of(&stack, &floor, Some(&admitted)).expect("exec is restricted");
         let cmd = macos_sandboxed_command(&projection, &admitted).expect("build host command");
         let (code, stderr) = confined_stderr(cmd);
         assert_eq!(code, Some(0), "{stderr}");
@@ -826,16 +845,13 @@ mod tests {
 
     /// The floor, as read scopes.
     #[cfg(target_os = "macos")]
-    fn floor() -> impl Iterator<Item = crate::capability::FsAllow> {
-        crate::capability::floor()
-            .iter()
-            .cloned()
-            .map(crate::capability::FsAllow::Prefix)
+    fn floor() -> Vec<FsAllow> {
+        host_floor().allows().cloned().collect()
     }
 
     /// `cat file` confined to reading `read` and the floor, minus `deny`.
     #[cfg(target_os = "macos")]
-    fn reads(read: Vec<crate::capability::FsAllow>, deny: Vec<FrozenPath>, file: &Path) -> bool {
+    fn reads(read: Vec<FsAllow>, deny: Vec<FrozenPath>, file: &Path) -> bool {
         let projection = SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
                 read: read.into_iter().chain(floor()).collect(),
@@ -879,14 +895,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn an_allowance_through_a_respelled_link_reaches_nothing_beneath_the_new_name() {
-        use crate::capability::FsAllow::Prefix;
         let (root, [a, b], link) = linked_dirs("respell");
-        let frozen = || {
-            vec![Prefix(FrozenPath::for_test(
-                &link.to_string_lossy(),
-                &a.to_string_lossy(),
-            ))]
-        };
+        let held = prefix(&link.to_string_lossy());
+        let frozen = || vec![held.clone()];
         assert!(reads(frozen(), Vec::new(), &link.join("f")), "control");
 
         std::fs::remove_file(&link).expect("unlink");
@@ -915,17 +926,11 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn an_exclusion_follows_a_retargeted_spelling() {
-        use crate::capability::FsAllow::Prefix;
         let (root, [a, b], link) = linked_dirs("exclusion");
         std::fs::remove_file(&link).expect("unlink");
         std::os::unix::fs::symlink(&b, &link).expect("retarget");
-        let whole = || vec![Prefix(FrozenPath::from_surface(&root))];
-        let deny = || {
-            vec![FrozenPath::for_test(
-                &link.to_string_lossy(),
-                &b.to_string_lossy(),
-            )]
-        };
+        let whole = || vec![prefix(&root.to_string_lossy())];
+        let deny = || vec![FrozenPath::from_surface(&link.to_string_lossy())];
         assert!(reads(whole(), Vec::new(), &b.join("f")), "control");
         assert!(
             !reads(whole(), deny(), &b.join("f")),
@@ -954,6 +959,7 @@ mod tests {
         for program in [sh(), Program::Tool("ls".into())] {
             let (cmd, _info_fd) = linux_sandboxed_command(
                 &restrictive(),
+                &Floor::default(),
                 &admitted(program, &["-l".into()]),
                 Ownership::Kept,
                 Path::new("/"),

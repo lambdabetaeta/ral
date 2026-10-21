@@ -8,7 +8,7 @@ use super::hooks::HookTable;
 use super::modules::Modules;
 use super::workers::Roster;
 use super::{Context, DEFAULT_STACK_LIMIT, LocalState, SessionState, Shell};
-use crate::capability::GrantStack;
+use crate::capability::{Floor, GrantStack};
 use crate::guard::{GrantNarrower, SpawnGrant};
 use crate::io::{Io, Source};
 use crate::path::CwdPath;
@@ -36,18 +36,36 @@ pub struct Runtime {
     pub(crate) base: Vec<BuiltinEntry>,
     pub(crate) library_docs: HashMap<String, String>,
     pub(crate) terminal: TerminalState,
+    /// The read-only system paths this host lets every program start from,
+    /// resolved once here: host state, so no stack holds it.
+    floor: Floor,
 }
 
 impl Runtime {
-    /// No builtins, no prelude, no docs.
-    pub fn bare(terminal: TerminalState) -> Self {
+    /// No builtins, no prelude, no docs, over the floor of this host.
+    ///
+    /// # Errors
+    /// A floor path whose walk fails, named: a host that cannot resolve its
+    /// own floor cannot run anything.
+    pub fn bare(terminal: TerminalState) -> Result<Self, String> {
+        Ok(Self::bare_on(Floor::of_host()?, terminal))
+    }
+
+    /// [`bare`](Self::bare) over a floor already resolved.
+    pub(crate) fn bare_on(floor: Floor, terminal: TerminalState) -> Self {
         Self {
             sig: Arc::default(),
             builtins: BuiltinTable::default(),
             base: Vec::new(),
             library_docs: HashMap::new(),
             terminal,
+            floor,
         }
+    }
+
+    /// The floor every fs judgment under this runtime reads.
+    pub fn floor(&self) -> &Floor {
+        &self.floor
     }
 
     pub fn install_builtins(&mut self, entries: &'static [BuiltinEntry]) {
@@ -304,7 +322,10 @@ mod tests {
             ..TerminalState::default()
         };
         let shell = Shell::root(
-            HostSurface::default().runtime(terminal).into(),
+            HostSurface::default()
+                .runtime(terminal)
+                .expect("a test host resolves its floor")
+                .into(),
             crate::test_helper::process_cwd(),
         );
         assert!(shell.session.hooks.is_some());

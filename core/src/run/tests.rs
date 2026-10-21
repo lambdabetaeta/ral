@@ -709,6 +709,7 @@ fn panicking_shell() -> Shell {
         crate::terminal::TerminalState::default(),
         crate::test_helper::process_cwd(),
     )
+    .expect("a test host resolves its floor")
 }
 
 /// Rollback is to the run's entry, not to session birth: the panicking run's
@@ -852,10 +853,10 @@ fn narrowing_shell() -> Shell {
             crate::typecheck::builtins::scheme::pure_bool,
             "",
             BuiltinBody::Captured(Arc::new(|_, _, s: &mut Shell| {
-                s.push_session_capabilities(Capabilities {
+                s.push_session_capabilities(crate::test_helper::layer(Capabilities {
                     net: Some(crate::capability::Net::Offline),
-                    ..Capabilities::root()
-                });
+                    ..Capabilities::default()
+                }));
                 Ok(Value::Bool(true))
             })),
         ),
@@ -877,6 +878,7 @@ fn narrowing_shell() -> Shell {
         crate::terminal::TerminalState::default(),
         crate::test_helper::process_cwd(),
     )
+    .expect("a test host resolves its floor")
 }
 
 /// Run `narrow`, then assert its session ceiling alone outlived it and
@@ -911,10 +913,10 @@ fn assert_ceiling_survives(mut shell: Shell, narrow: Run) {
 #[test]
 fn a_session_ceiling_pushed_in_a_run_outlives_it() {
     let mut caps = GrantStack::root();
-    caps.push(crate::capability::Capabilities {
+    caps.push(crate::test_helper::layer(crate::capability::Capabilities {
         shell: Some([crate::capability::ShellVerb::Chdir].into()),
-        ..crate::capability::Capabilities::root()
-    });
+        ..crate::capability::Capabilities::default()
+    }));
     let mut narrow = Run::captured("_narrow", test_origin());
     narrow.caps = caps;
     assert_ceiling_survives(narrowing_shell(), narrow);

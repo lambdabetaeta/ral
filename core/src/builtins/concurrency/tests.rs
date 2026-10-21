@@ -1006,7 +1006,8 @@ fn detach_test_shell(budget: u64) -> Shell {
     .shell(
         crate::terminal::TerminalState::default(),
         crate::test_helper::process_cwd(),
-    );
+    )
+    .expect("a test host resolves its floor");
     shell.arm_detach(budget);
     shell
 }
@@ -2542,6 +2543,7 @@ fn first_of_takes_the_winner_and_drains_losers() {
             crate::boot::BakedPrelude::runtime(),
             &crate::HostSurface::default(),
         )
+        .expect("a test host resolves its floor")
         .into(),
         crate::test_helper::process_cwd(),
     );
@@ -3352,6 +3354,7 @@ fn par_surfaces_outside_claim_with_par_prefix() {
             crate::boot::BakedPrelude::runtime(),
             &crate::HostSurface::default(),
         )
+        .expect("a test host resolves its floor")
         .into(),
         crate::test_helper::process_cwd(),
     );

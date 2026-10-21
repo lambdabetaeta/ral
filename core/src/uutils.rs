@@ -27,8 +27,8 @@ macro_rules! declare_coreutils {
         ];
 
         /// The `unix:` names, listed on every platform — unlike their gated
-        /// [`COREUTILS_TOOLS`] entries — so exarch's `drop_dead_exec_grants`
-        /// can strip the grants Windows cannot honour while compiling here.
+        /// [`COREUTILS_TOOLS`] entries — so [`bundled`]
+        /// can leave out the tools Windows cannot honour while compiling here.
         pub const COREUTILS_UNIX_ONLY_TOOLS: &[&str] = &[
             $($( $uname, )+)?
         ];
@@ -77,6 +77,24 @@ pub(crate) fn is_uutils_tool(name: &str) -> bool {
     if RIPGREP_TOOLS.contains(&name) {
         return true;
     }
+    false
+}
+
+/// Whether this platform bundles `name`: [`is_uutils_tool`], less the
+/// Unix-only coreutils where Unix is not `unix_available`.  A parameter
+/// rather than a `cfg!(unix)` read here, so the other shape is testable from
+/// a Unix host.
+pub(crate) fn bundled(name: &str, unix_available: bool) -> bool {
+    is_uutils_tool(name) && (unix_available || !unix_only(name))
+}
+
+#[cfg(feature = "coreutils")]
+fn unix_only(name: &str) -> bool {
+    COREUTILS_UNIX_ONLY_TOOLS.contains(&name)
+}
+
+#[cfg(not(feature = "coreutils"))]
+fn unix_only(_: &str) -> bool {
     false
 }
 

@@ -41,7 +41,7 @@ fn run_shell_direct(
 ) -> ToolResult {
     run_shell_under(
         transport,
-        &ral_core::capability::GrantStack::of(caps.clone()),
+        &ral_core::test_helper::stack([ral_core::test_helper::layer(caps.clone())]),
         cmd,
         timeout_secs,
         recorder,
@@ -86,13 +86,13 @@ fn run_shell_under(
     }
 }
 
-/// One tool run under `Capabilities::root()` — exarch's least-restricted
+/// One tool run under `Capabilities::default()` — exarch's least-restricted
 /// default, so every source here runs without exercising the OS sandbox,
 /// which `core/tests/top_level_vs_block.rs` covers separately.
 fn run_once(engine: &IdentityTransport, cmd: &str) -> ToolResult {
     run_shell_direct(
         engine,
-        &Capabilities::root(),
+        &Capabilities::default(),
         cmd,
         30,
         &crate::record::Emitter::none(),
@@ -110,7 +110,36 @@ fn projecting_caps() -> Capabilities {
             write_prefixes: vec![ral_core::path::FrozenPath::root()],
             deny_paths: Vec::new(),
         }),
-        ..Capabilities::root()
+        ..Capabilities::default()
+    }
+}
+
+/// An in-process engine is local, and takes the ambient stack and a resolved
+/// one alike: only a guest is refused the latter.
+#[test]
+fn a_local_transport_takes_root_and_a_restrictive_stack() {
+    use ral_core::capability::{GrantStack, Net};
+    use ral_core::carrier::Transport as _;
+    let engine = fresh();
+    assert!(engine.is_local());
+    let offline = ral_core::test_helper::stack([ral_core::test_helper::layer(Capabilities {
+        net: Some(Net::Offline),
+        ..Capabilities::default()
+    })]);
+    for stack in [GrantStack::root(), offline] {
+        let r = run_shell_under(
+            &engine,
+            &stack,
+            "$[1 + 1]",
+            30,
+            &crate::record::Emitter::none(),
+        );
+        assert_eq!(
+            r.exit,
+            0,
+            "{stack:?}: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
     }
 }
 
@@ -766,7 +795,7 @@ fn timeout_kills_external_subprocess_tree() {
     let t0 = std::time::Instant::now();
     let r = run_shell_direct(
         &engine,
-        &Capabilities::root(),
+        &Capabilities::default(),
         cmd,
         2,
         &crate::record::Emitter::none(),
@@ -814,7 +843,7 @@ fn a_timed_out_cleanup_returns_within_wall_plus_grace() {
     let t0 = std::time::Instant::now();
     let r = run_shell_direct(
         &engine,
-        &Capabilities::root(),
+        &Capabilities::default(),
         "guard { /bin/sh -c 'sleep 30' } { /bin/sleep 30 }",
         1,
         &crate::record::Emitter::none(),
@@ -841,7 +870,7 @@ fn timeout_message_names_budget_and_knob() {
     let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
     let r = run_shell_direct(
         &engine,
-        &Capabilities::root(),
+        &Capabilities::default(),
         cmd,
         2,
         &crate::record::Emitter::none(),
@@ -870,7 +899,7 @@ fn command_exit_is_the_tool_exit() {
     let engine = fresh();
     let r = run_shell_direct(
         &engine,
-        &Capabilities::root(),
+        &Capabilities::default(),
         "/bin/sh -c 'exit 3'",
         10,
         &crate::record::Emitter::none(),
@@ -884,7 +913,7 @@ fn raised_error_status_is_the_tool_exit() {
     let engine = fresh();
     let r = run_shell_direct(
         &engine,
-        &Capabilities::root(),
+        &Capabilities::default(),
         "fail [status: 7, message: 'raised error']",
         10,
         &crate::record::Emitter::none(),
@@ -992,7 +1021,7 @@ fn root_cancel_unwinds_inflight_run_shell() {
         let worker = s.spawn(|| {
             run_shell_direct(
                 &engine,
-                &Capabilities::root(),
+                &Capabilities::default(),
                 cmd,
                 30,
                 &crate::record::Emitter::none(),
@@ -1467,7 +1496,7 @@ fn run_capturing(
         tx: tx.downgrade(),
         meter: crate::bus::UsageMeter::default(),
     }));
-    let result = run_shell_direct(engine, &Capabilities::root(), cmd, 30, &recorder);
+    let result = run_shell_direct(engine, &Capabilities::default(), cmd, 30, &recorder);
     (result, crate::bus::drain_records(&rx))
 }
 

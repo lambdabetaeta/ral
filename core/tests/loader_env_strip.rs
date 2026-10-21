@@ -28,11 +28,12 @@
 mod common;
 
 use ral_core::RunIo;
-use ral_core::capability::{Capabilities, EditorVerb, FsPolicy, GrantStack, ShellVerb};
+use ral_core::capability::{Capabilities, EditorVerb, FsPolicy, ShellVerb};
 use ral_core::path::FrozenPath;
 use ral_core::protocol::Run;
 use ral_core::run::RunReport;
 use ral_core::source::SourceOrigin;
+use ral_core::test_helper::{layer, stack};
 use ral_core::types::{Shell, Value};
 use std::collections::BTreeSet;
 use strum::VariantArray;
@@ -44,6 +45,7 @@ fn boot() -> Shell {
         &ral_core::boot::HostSurface::default(),
         ral_core::test_helper::process_cwd(),
     )
+    .expect("a test host resolves its floor")
 }
 
 /// A capability frame whose fs policy confines reads and writes to a scratch
@@ -58,7 +60,7 @@ fn restrict() -> Capabilities {
             write_prefixes: vec![FrozenPath::from_surface(&dir)],
             deny_paths: Vec::new(),
         }),
-        ..Capabilities::root()
+        ..Capabilities::default()
     }
 }
 
@@ -67,19 +69,19 @@ fn neutral_layers() -> [Capabilities; 4] {
     let editor: BTreeSet<_> = EditorVerb::VARIANTS.iter().copied().collect();
     let shell: BTreeSet<_> = ShellVerb::VARIANTS.iter().copied().collect();
     [
-        Capabilities::root(),
+        Capabilities::default(),
         Capabilities {
             editor: Some(editor.clone()),
-            ..Capabilities::root()
+            ..Capabilities::default()
         },
         Capabilities {
             shell: Some(shell.clone()),
-            ..Capabilities::root()
+            ..Capabilities::default()
         },
         Capabilities {
             editor: Some(editor),
             shell: Some(shell),
-            ..Capabilities::root()
+            ..Capabilities::default()
         },
     ]
 }
@@ -87,8 +89,7 @@ fn neutral_layers() -> [Capabilities; 4] {
 /// The environment a bundled child sees under `layers`, as `printenv` reports
 /// it, with `vars` set in a `within`.
 fn child_env(layers: impl IntoIterator<Item = Capabilities>, vars: &str) -> String {
-    let mut caps = GrantStack::root();
-    layers.into_iter().for_each(|layer| caps.push(layer));
+    let caps = stack(layers.into_iter().map(layer));
     let src = format!("within [env: [{vars}]] {{ printenv | from-string }}");
     let report = boot().run(Run {
         io: RunIo::Inherit,
@@ -134,11 +135,11 @@ fn dyld_overrides_never_reach_a_confined_child() {
 /// A withheld verb alone activates the strip.
 #[test]
 fn a_withheld_verb_strips_loader_overrides() {
-    let layer = Capabilities {
+    let withheld = Capabilities {
         shell: Some(BTreeSet::from([ShellVerb::Chdir])),
-        ..Capabilities::root()
+        ..Capabilities::default()
     };
-    assert_stripped(&child_env([layer], LOADER_VARS));
+    assert_stripped(&child_env([withheld], LOADER_VARS));
 }
 
 /// Neutral layers around a restriction cannot turn the strip off.

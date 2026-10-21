@@ -57,7 +57,7 @@ use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Bureau, Provider, ToolCall};
 use exarch::record::AgentId;
 use exarch::record::{Display, Record, Recorded, Settlement, Transient};
-use ral_core::capability::GrantStack;
+use ral_core::capability::{Capabilities, GrantStack};
 use std::path::PathBuf;
 use std::sync::Arc;
 use synod::session::{seat_machine, unseat_machine};
@@ -166,7 +166,7 @@ fn main() {
     // `_net` is held open only so its EOF ends the session; this example
     // wants no guest network of its own.
     let (factory, mut agent, _net) =
-        seat_machine(machine, config, provider).expect("start the trunk");
+        seat_machine(machine, config, Capabilities::default(), provider).expect("start the trunk");
 
     let mut sink = PrintSink;
     let exchange = converse_settled(

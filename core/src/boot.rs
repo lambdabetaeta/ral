@@ -10,6 +10,7 @@
 //! build script cannot depend on the crate it is building — so a test
 //! binary takes [`BakedPrelude::runtime`] instead.
 
+use crate::capability::Floor;
 use crate::evaluator::{Mode, run_phrases};
 use crate::ir::{CompKind, Phrase, Toplevel};
 use crate::path::CwdPath;
@@ -66,14 +67,18 @@ impl BakedPrelude {
     /// ([`crate::host::cwd`]), which a front end refuses to boot without
     /// before it seats a prelude.
     pub fn seat(&self, runtime: &mut Runtime) {
-        let map = self.map.get_or_init(|| self.evaluate());
+        let map = self.map.get_or_init(|| self.evaluate(runtime.floor()));
         Arc::make_mut(&mut runtime.sig).install_prelude(Arc::clone(map));
     }
 
-    fn evaluate(&self) -> Arc<PreludeMap> {
+    /// Run the prelude on a core-only shell over `floor`, the floor of the
+    /// runtime it is being seated in, which exists before the prelude runs.
+    fn evaluate(&self, floor: &Floor) -> Arc<PreludeMap> {
         let cwd =
             crate::host::cwd().expect("the prelude runs in a process with a working directory");
-        let mut shell = HostSurface::default().shell(TerminalState::default(), cwd);
+        let runtime = HostSurface::default()
+            .install(Runtime::bare_on(floor.clone(), TerminalState::default()));
+        let mut shell = Shell::root(runtime.into(), cwd);
         let ran = run_phrases(
             &self.comp().phrases,
             Env::new(),
@@ -240,10 +245,20 @@ impl HostSurface {
 
     /// Core plus this surface, no prelude: the process half of a session.
     ///
+    /// # Errors
+    /// [`Runtime::bare`]'s: the host's floor cannot be resolved.
+    ///
     /// # Panics
     /// Panics if a name here collides with a core builtin or repeats.
-    pub fn runtime(&self, terminal: TerminalState) -> Runtime {
-        let mut runtime = Runtime::bare(terminal);
+    pub fn runtime(&self, terminal: TerminalState) -> Result<Runtime, String> {
+        Runtime::bare(terminal).map(|bare| self.install(bare))
+    }
+
+    /// `runtime` with core and this surface installed in it.
+    ///
+    /// # Panics
+    /// Panics if a name here collides with a core builtin or repeats.
+    pub(crate) fn install(&self, mut runtime: Runtime) -> Runtime {
         for set in self.sets() {
             runtime.install_set(&set);
         }
@@ -255,10 +270,13 @@ impl HostSurface {
     /// Core plus this surface at `cwd`, no env, no prelude: a loader's
     /// scaffold.
     ///
+    /// # Errors
+    /// As [`runtime`](Self::runtime).
+    ///
     /// # Panics
     /// Panics if a name here collides with a core builtin or repeats.
-    pub fn shell(&self, terminal: TerminalState, cwd: CwdPath) -> Shell {
-        Shell::root(self.runtime(terminal).into(), cwd)
+    pub fn shell(&self, terminal: TerminalState, cwd: CwdPath) -> Result<Shell, String> {
+        Ok(Shell::root(self.runtime(terminal)?.into(), cwd))
     }
 }
 
@@ -268,6 +286,9 @@ impl HostSurface {
 /// `surface` lands before any rc file or user code is checked, so the
 /// typechecker and the runtime agree by construction.
 ///
+/// # Errors
+/// [`HostSurface::runtime`]'s.
+///
 /// # Panics
 /// Panics if a name in `surface` collides with a core builtin or repeats
 /// within the surface.
@@ -275,10 +296,10 @@ pub fn boot_runtime(
     terminal: TerminalState,
     prelude: &BakedPrelude,
     surface: &HostSurface,
-) -> Runtime {
-    let mut runtime = surface.runtime(terminal);
+) -> Result<Runtime, String> {
+    let mut runtime = surface.runtime(terminal)?;
     prelude.seat(&mut runtime);
-    runtime
+    Ok(runtime)
 }
 
 /// A shell as every front end boots one: [`boot_runtime`] over a root at
@@ -287,6 +308,9 @@ pub fn boot_runtime(
 /// Terminal handling, output capture, watchdogs, capability frames and rc
 /// files stay the host's, interposed around this call.
 ///
+/// # Errors
+/// As [`boot_runtime`].
+///
 /// # Panics
 /// As [`boot_runtime`].
 pub fn boot_shell(
@@ -294,10 +318,10 @@ pub fn boot_shell(
     prelude: &BakedPrelude,
     surface: &HostSurface,
     cwd: CwdPath,
-) -> Shell {
-    let mut shell = Shell::root(boot_runtime(terminal, prelude, surface).into(), cwd);
+) -> Result<Shell, String> {
+    let mut shell = Shell::root(boot_runtime(terminal, prelude, surface)?.into(), cwd);
     seed_host_env(&mut shell);
-    shell
+    Ok(shell)
 }
 
 /// Adopt the host process's env onto a fresh shell, defaulting anything
@@ -435,7 +459,7 @@ mod tests {
     #[test]
     fn two_bakes_seat_two_preludes() {
         let (first, second) = (baked("let only_first = 1"), baked("let only_second = 2"));
-        let bare = || Runtime::bare(TerminalState::default());
+        let bare = || Runtime::bare(TerminalState::default()).expect("a host floor");
         let (mut a, mut b) = (bare(), bare());
         first.seat(&mut a);
         second.seat(&mut b);
@@ -450,7 +474,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "the prelude failed to run: exit 3")]
     fn a_prelude_that_fails_to_run_panics() {
-        baked("exit 3").seat(&mut Runtime::bare(TerminalState::default()));
+        let mut bare = Runtime::bare(TerminalState::default()).expect("a host floor");
+        baked("exit 3").seat(&mut bare);
     }
 
     /// A prelude phrase whose RHS is computed at boot — an `if`, here — fails

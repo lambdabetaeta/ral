@@ -2,14 +2,14 @@
 //! loader dressed in exarch's error format, and the cwd-relative path helper
 //! `super::for_invocation` calls around it.
 
-use ral_core::capability::{Capabilities, Fragment};
+use ral_core::capability::{Fragment, GrantLayer};
 use ral_core::guard::freeze::FreezeCtx;
 use ral_core::types::{Break, Escape, Mooring, Shell};
 use std::path::{Path, PathBuf};
 
 use ral_core::path;
 
-/// Read a capabilities profile from `path` as a frozen [`Capabilities`].
+/// Read a capabilities profile from `path` as a resolved [`GrantLayer`].
 ///
 /// Sigils freeze against `ctx` here, so a bad `xdg:` fails at the profile that
 /// names it even where a later `meet` would have discarded the grant, and an
@@ -21,14 +21,14 @@ pub(super) fn load_capabilities_ral(
     path: &Path,
     flag: &str,
     ctx: &FreezeCtx,
-) -> Result<Capabilities, String> {
+) -> Result<GrantLayer, String> {
     load(path, flag, || {
         ral_core::load::profile::load_capabilities_from_path(mooring, shell, path, ctx)
     })
 }
 
 /// [`load_capabilities_ral`] for an extension file, which only
-/// [`Capabilities::extend`] may consume.
+/// [`GrantLayer::extend`] may consume.
 pub(super) fn load_fragment_ral(
     mooring: &Mooring,
     shell: &mut Shell,

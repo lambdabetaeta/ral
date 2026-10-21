@@ -157,6 +157,7 @@ mod tests {
             &ral_core::HostSurface::default(),
             ral_core::test_helper::process_cwd(),
         )
+        .expect("a test host resolves its floor")
     }
 
     fn profile(src: &str) -> Result<(), Stop> {

@@ -14,8 +14,7 @@
 
 use exarch::app::{EXARCH, SYNOD, Scratch};
 use exarch::policy::{Invocation, for_invocation};
-use ral_core::capability::FsOp;
-use ral_core::capability::GrantStack;
+use ral_core::capability::{FsOp, GrantLayer, GrantStack};
 use ral_core::path::XdgKind;
 use ral_core::path::{Resolver, locate};
 use ral_core::test_access::check_file;
@@ -78,9 +77,18 @@ fn refusal(r: Settled<()>) -> String {
 /// the meet, so a real session's whole composed authority is these layers
 /// folded at every check, never one flattened `Capabilities`.
 fn install(shell: &mut Shell, stack: &GrantStack) {
-    for layer in stack {
+    for layer in stack.layers() {
         shell.push_session_capabilities(layer.clone());
     }
+}
+
+/// The fs exclusions each layer of `stack` shows, as it spells them.
+fn denies(stack: &GrantStack) -> impl Iterator<Item = Vec<String>> {
+    stack
+        .layers()
+        .filter_map(GrantLayer::summary)
+        .filter_map(|s| s.fs)
+        .map(|fs| fs.deny)
 }
 
 /// The extension runs before the meet, so an extended grant the attenuation file
@@ -157,21 +165,19 @@ fn two_restricts_compose_to_the_same_grant_in_either_order() {
         );
         for name in ["a.ral", "b.ral"] {
             let path = dir.path().join(name);
-            let denied = stack
-                .fs()
-                .flat_map(|fs| fs.deny_paths.iter())
-                .filter(|p| ral_core::path::shown(p.as_str()) == ral_core::path::shown(&path))
+            let denied = denies(stack)
+                .flatten()
+                .filter(|p| *p == ral_core::path::shown(&path))
                 .count();
             assert_eq!(
                 denied, 1,
                 "{name} should be denied exactly once whichever order it was named"
             );
         }
-        for fs in stack.fs() {
+        for deny in denies(stack) {
             assert!(
-                fs.deny_paths.is_sorted(),
-                "each layer's own deny list is canonical, not argv-ordered: {:?}",
-                fs.deny_paths
+                deny.is_sorted(),
+                "each layer's own deny list is canonical, not argv-ordered: {deny:?}"
             );
         }
     }
@@ -241,17 +247,13 @@ fn no_attenuated_base_can_read_a_credential_file() {
 
     for base in BASES.into_iter().filter(|b| *b != "dangerous") {
         let Invocation { stack, .. } = for_invocation(cwd, base, None, &[]).expect("base composes");
-        assert!(
-            stack.fs().next().is_some(),
-            "{base} attenuates the filesystem"
-        );
+        assert!(!stack.fs_is_top(), "{base} attenuates the filesystem");
         let mut shell = ral_core::test_helper::core_shell();
         install(&mut shell, &stack);
         for secret in &secrets {
-            let denied_somewhere = stack
-                .fs()
-                .flat_map(|fs| fs.deny_paths.iter())
-                .any(|p| ral_core::path::shown(p.as_str()) == ral_core::path::shown(secret));
+            let denied_somewhere = denies(&stack)
+                .flatten()
+                .any(|p| p == ral_core::path::shown(secret));
             assert!(
                 denied_somewhere,
                 "{base} must veto {}, not merely leave it ungranted",
@@ -295,14 +297,10 @@ fn dangerous_stays_ambient_until_something_attenuates_it() {
     let Invocation { stack, .. } =
         for_invocation(cwd, "dangerous", None, std::slice::from_ref(&restrict))
             .expect("dangerous composes with a restrict file");
-    let denies: Vec<String> = stack
-        .fs()
-        .flat_map(|fs| fs.deny_paths.iter())
-        .map(|p| ral_core::path::shown(p.as_str()))
-        .collect();
+    let listed: Vec<String> = denies(&stack).flatten().collect();
     assert!(
-        denies.iter().any(|p| *p == ral_core::path::shown(&oauth)),
-        "an attenuated dangerous must still carve out the tokens: {denies:?}"
+        listed.iter().any(|p| *p == ral_core::path::shown(&oauth)),
+        "an attenuated dangerous must still carve out the tokens: {listed:?}"
     );
 }
 
@@ -353,7 +351,7 @@ fn dangerous_extended_is_unrestricted_less_the_extensions_exclusions() {
     let Invocation { stack, .. } =
         for_invocation(cwd, "dangerous", Some(&positive), &[]).expect("profiles compose");
     assert!(
-        stack.iter().nth(1).is_some_and(|c| !c.is_restrictive()),
+        stack.layers().nth(1).is_some_and(|c| !c.is_restrictive()),
         "an allowance beside `dangerous` leaves the ceiling unrestricted"
     );
     let mut shell = ral_core::test_helper::core_shell();
@@ -437,10 +435,9 @@ fn the_credential_layer_follows_an_fs_restriction() {
     let cwd = dir.path();
     let oauth = EXARCH.xdg_dir(XdgKind::State).join("oauth.json");
     let carved = |stack: &GrantStack| {
-        stack
-            .fs()
-            .flat_map(|fs| fs.deny_paths.iter())
-            .any(|p| ral_core::path::shown(p.as_str()) == ral_core::path::shown(&oauth))
+        denies(stack)
+            .flatten()
+            .any(|p| p == ral_core::path::shown(&oauth))
     };
     let excluding = profile(
         &dir,

@@ -596,7 +596,8 @@ mod tests {
             crate::boot::BakedPrelude::runtime(),
             &crate::boot::HostSurface::default(),
             crate::test_helper::process_cwd(),
-        );
+        )
+        .expect("a test host resolves its floor");
         shell.env.bind(
             "only_mine".into(),
             Binding {

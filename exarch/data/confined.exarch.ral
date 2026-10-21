@@ -60,8 +60,8 @@ return [
       # the fs guard does not already hold.
       #
       # The `unix:` half of the set (`id`, `kill`, `stat`, `tac`, `test`,
-      # `timeout`) cannot link on Windows; `policy::base::drop_dead_exec_grants`
-      # strips those there, so listing them here stays honest on every host.
+      # `timeout`) cannot link on Windows; decoding drops a name this platform
+      # bundles nowhere, so listing them here stays honest on every host.
       `name base64,
       `name basename,
       `name cat,

@@ -8,10 +8,10 @@
 //! lexical, with no filesystem to gate.
 
 use crate::capability::FsOp;
-use crate::path::LeafMode;
 use crate::path::shown;
 use crate::path::tree::glob::Glob;
 use crate::path::walk::{Entry, Kind, Stat};
+use crate::path::{LeafMode, LexicalPath};
 use crate::record;
 use crate::types::{Break, Settled, Shell, Value, sig};
 use std::ffi::OsStr;
@@ -112,7 +112,9 @@ pub(super) fn builtin_list_dir(args: &[Value], shell: &mut Shell) -> Settled<Val
         // `locate` admitted the directory; each entry is a distinct path
         // whose metadata this returns.  Drop a denied entry rather than
         // abort, as `grep-files` and `explore-dir` do.
-        if !shell.admits_fs_exact(&FsOp::Read, &dir.join(&entry.name)) {
+        let admitted = LexicalPath::absolute(&dir.join(&entry.name))
+            .is_some_and(|path| shell.admits_named(&FsOp::Read, &path));
+        if !admitted {
             continue;
         }
         entries.push(DirEntry::of(&entry));

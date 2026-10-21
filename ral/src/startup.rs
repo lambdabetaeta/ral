@@ -131,7 +131,7 @@ pub(crate) mod engine {
     }
 
     /// The REPL's process half.
-    fn repl_runtime(spec: &EngineSpec) -> Runtime {
+    fn repl_runtime(spec: &EngineSpec) -> Result<Runtime, String> {
         boot_runtime(spec.terminal, &crate::PRELUDE, &repl_surface())
     }
 
@@ -145,7 +145,7 @@ pub(crate) mod engine {
     }
 
     /// The batch session's process half.
-    fn batch_runtime(spec: &EngineSpec) -> Runtime {
+    fn batch_runtime(spec: &EngineSpec) -> Result<Runtime, String> {
         boot_runtime(spec.terminal, &crate::PRELUDE, &batch_surface())
     }
 
@@ -173,7 +173,7 @@ pub(crate) mod engine {
     fn no_seeded_children(
         _grant: &str,
         _cwd: &std::path::Path,
-    ) -> Result<ral_core::capability::Capabilities, String> {
+    ) -> Result<ral_core::capability::GrantLayer, String> {
         Err(
             "the ral shell's engine spawns no child engines, so it has no grant policy to hold \
              one to: was this meant to run under exarch?"

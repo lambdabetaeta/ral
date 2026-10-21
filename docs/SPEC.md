@@ -3298,7 +3298,7 @@ exec: [
 
 A target is one of:
 
-- `` `name N `` — the bare command `N`: the file the host `PATH` finds for it, and the bundled tool of that name. A scoped `PATH` cannot change what it names. `N` must be a bare command name; a path-shaped payload is refused with a hint to use a place. Path shape is judged under Windows rules on every host, so `a\b` and a drive-headed `C:x` are refused alike everywhere;
+- `` `name N `` — the bare command `N`: the file the `PATH` in force where the grant is decoded finds for it, and the bundled tool of that name; a `PATH` scoped inside the grant's body does not change what it names. `N` must be a bare command name; a path-shaped payload is refused with a hint to use a place. Path shape is judged under Windows rules on every host, so `a\b` and a drive-headed `C:x` are refused alike everywhere;
 - a place (§12.2) — the one executable at that path, frozen to its real path when the grant is decoded. A place that is a directory is refused, with a hint to use `dir`;
 - `` `dir D `` — every executable beneath each directory `D` names, recursively, frozen to its real path, where `D` is a place or a selector. Directory scope is spelled, never inferred from a stat: `` `cwd tools/build `` names one executable, `` `dir `cwd tools `` names everything beneath `tools`.
 

@@ -13,7 +13,7 @@ use icu_locale_core::LanguageIdentifier;
 use icu_normalizer::DecomposingNormalizerBorrowed;
 
 use super::lex::parse_bytes;
-use super::walk::{Listed, RealPath, Trace};
+use super::walk::{Excluded, Hold, Listed, RealPath, Trace};
 use super::{FrozenPath, PathRules};
 
 /// `p` plus any alternate spelling the host treats as the same file
@@ -75,12 +75,30 @@ pub enum MatchedBy {
 /// authority takes a `Located`, so a listing's record can reach `admits` and
 /// never `judge`.
 #[derive(Clone, Copy)]
-#[expect(dead_code, reason = "used from step 4")]
 pub(crate) enum Subject<'a> {
     Access(&'a Trace),
+    #[expect(dead_code, reason = "used from step 4")]
     Listed(&'a Listed<'a>),
     Position(&'a RealPath),
     Everywhere,
+}
+
+impl<'a> Subject<'a> {
+    /// The position the subject is at; `None` for everywhere, which is none.
+    pub(crate) fn position(self) -> Option<Cow<'a, RealPath>> {
+        match self {
+            Self::Access(trace) => Some(Cow::Borrowed(trace.real())),
+            Self::Listed(listed) => Some(Cow::Owned(listed.real())),
+            Self::Position(position) => Some(Cow::Borrowed(position)),
+            Self::Everywhere => None,
+        }
+    }
+
+    /// Whether the subject is at `position` or beneath it, names as stored:
+    /// the positive reading, never true of everywhere.
+    pub(crate) fn beneath(self, position: &RealPath) -> bool {
+        self.position().is_some_and(|at| position.contains(&at))
+    }
 }
 
 /// How far an exclusion reaches: the subject at or beneath it (fs, an exec
@@ -118,6 +136,26 @@ impl RealPath {
         } else {
             holds(Identity::Collision).then_some(MatchedBy::FoldedName)
         }
+    }
+}
+
+impl Hold {
+    /// How this hold covers `subject`, by position alone.
+    fn matches(&self, subject: Subject<'_>, depth: Depth) -> Option<MatchedBy> {
+        let position = subject.position()?;
+        self.trace().real().matched_by(position.as_path(), depth)
+    }
+}
+
+impl Excluded {
+    /// Whether this exclusion covers `subject`, by either of its holds: the
+    /// least [`MatchedBy`] of the two.  `Within`: the subject at or beneath
+    /// the rule; `Exact`: the rule's position itself.  A `Position` is read
+    /// positionally alone; `Everywhere` is excluded by nothing.
+    pub(crate) fn matches(&self, subject: Subject<'_>, depth: Depth) -> Option<MatchedBy> {
+        self.holds()
+            .filter_map(|hold| hold.matches(subject, depth))
+            .min()
     }
 }
 

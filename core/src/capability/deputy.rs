@@ -11,12 +11,14 @@
 //! overlay are each innocent alone, and only the stack's meet-fold of both
 //! dimensions is a deputy.
 
-use super::fs::{FsAllow, FsDeny, Region};
-use super::{ExecGrant, ExecKey, FsOp, GrantStack, Meet, region};
+use super::exec::{ExecAllow, ExecDeny, ExecRules};
+use super::fs::{FsAllow, FsDeny, FsRules};
+use super::lattice::GrantPath;
+use super::{Floor, FsOp, GrantStack, Meet, region};
 use crate::path::FrozenPath;
 
 /// The prefixes that are both exec-admitted and fs-writable under `stack`,
-/// the live part of the meet of the two regions, each folded as the guard
+/// the live part of the meet of the two tables, each folded as the guard
 /// folds it, so neither side's exclusions are lost.
 ///
 /// `None` from either side, no layer opining on fs writes or no exec that
@@ -24,55 +26,55 @@ use crate::path::FrozenPath;
 /// "everything runnable".  A directory wholly excluded on either side holds
 /// Both and is dropped; each writable island under a runnable directory is
 /// reported.
-pub fn deputy_prefixes(stack: &GrantStack) -> Vec<FrozenPath> {
+pub fn deputy_prefixes(stack: &GrantStack, floor: &Floor) -> Vec<FrozenPath> {
     if stack.exec_is_top() {
         return Vec::new();
     }
     let runs = stack.exec().map(runnable).reduce(Meet::meet);
-    let writes = region(stack, &FsOp::Write);
+    let writes = region(stack, &FsOp::Write, floor);
     let (Some(runs), Some(writes)) = (runs, writes) else {
         return Vec::new();
     };
     let both = runs.meet(writes);
     both.live()
         .filter_map(|scope| match scope {
-            FsAllow::Prefix(prefix) => Some(prefix.clone()),
+            FsAllow::Prefix(prefix) => Some(prefix.written.clone()),
             FsAllow::RunPlace(_) => None,
         })
         .collect()
 }
 
-/// One layer's runnable directories as a region; `every` is the root.  The
-/// positive half of an entry stays as frozen and the negative half is
-/// re-resolved, as `fs::region` treats its own.
-fn runnable(exec: &ExecGrant) -> Region {
-    let root = exec.every().then(|| FsAllow::Prefix(FrozenPath::root()));
-    let dirs = || {
-        exec.iter().filter_map(|(key, e)| match key {
-            ExecKey::Dir(dir) => Some((dir, e)),
-            _ => None,
-        })
-    };
-    let allows = (dirs().filter(|(_, e)| e.positive)).map(|(dir, _)| FsAllow::Prefix(dir.clone()));
-    let denies = (dirs().filter(|(_, e)| e.negative)).map(|(dir, _)| FsDeny(dir.live()));
-    Region::new(root.into_iter().chain(allows), denies)
+/// One layer's runnable directories as an fs table: `every` and a directory
+/// that holds everywhere are everywhere, a directory is its position, and
+/// an excluded directory carries its holds.
+fn runnable(exec: &ExecRules) -> FsRules {
+    let allows = exec.allows().filter_map(|allow| match allow {
+        ExecAllow::Any => Some(GrantPath::everywhere()),
+        ExecAllow::Dir(dir) => Some(dir.clone()),
+        ExecAllow::File { .. } | ExecAllow::Tool(_) => None,
+    });
+    let denies = exec.denies().filter_map(|deny| match deny {
+        ExecDeny::Dir(dir) => Some(FsDeny(dir.clone())),
+        ExecDeny::File(_) | ExecDeny::Name(_) => None,
+    });
+    FsRules::new(allows.map(FsAllow::Prefix), denies)
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[test] a tempdir tree with a real link; fixture paths already in normal form"
+)]
 mod tests {
     use super::deputy_prefixes;
     use crate::capability::{
-        Axis, Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy, GrantStack,
+        Capabilities, Evidence, ExecGrant, ExecKey, Floor, FsPolicy, GrantStack,
     };
-    use crate::path::{FrozenPath, shown, test_absolute};
-
-    /// A prefix spelled `surface` that froze as `real`, both on this host.
-    fn frozen(surface: &str, real: &str) -> FrozenPath {
-        FrozenPath::for_test(&test_absolute(surface), &test_absolute(real))
-    }
+    use crate::path::{FrozenPath, RealPath, shown, test_absolute, utf8};
+    use crate::test_helper::{layer, stack};
 
     fn lit(p: &str) -> FrozenPath {
-        frozen(p, p)
+        FrozenPath::from_surface(&test_absolute(p))
     }
 
     /// The surfaces a finding of `paths` reports, on this host, as shown.
@@ -86,15 +88,9 @@ mod tests {
             .collect()
     }
 
-    /// The grant of `dirs` with `every` set, as `join_top` makes it, its one
-    /// name entry only there to make it non-empty.
+    /// The grant of `dirs` with `every` set.
     fn every(dirs: &[(&str, Evidence)]) -> ExecGrant {
-        let bait = (ExecKey::Name("x".into()), Evidence::ALLOW);
-        std::iter::once(bait)
-            .chain(dirs.iter().map(|&(d, e)| (ExecKey::Dir(lit(d)), e)))
-            .collect::<ExecGrant>()
-            .join_top()
-            .expect("non-empty")
+        exec_dirs(dirs).with_every()
     }
 
     fn fs(write: &[&str], deny: &[&str]) -> FsPolicy {
@@ -106,17 +102,16 @@ mod tests {
     }
 
     fn found(exec: ExecGrant, fs: FsPolicy) -> Vec<String> {
-        let stack = GrantStack::of(Capabilities {
+        report(&stack([layer(Capabilities {
             exec: Some(exec),
             fs: Some(fs),
             ..Capabilities::default()
-        });
-        report(&stack)
+        })]))
     }
 
     /// The finding as the audit shows it.
     fn report(stack: &GrantStack) -> Vec<String> {
-        (deputy_prefixes(stack).iter())
+        (deputy_prefixes(stack, &Floor::default()).iter())
             .map(FrozenPath::shown)
             .collect()
     }
@@ -126,25 +121,35 @@ mod tests {
 
     #[test]
     fn symlinked_write_region_is_reported_via_resolved_form() {
-        // `/data` is a symlink: lexically disjoint from `/usr/bin`, resolved inside it.
-        let stack = GrantStack::of(Capabilities {
-            exec: Some(exec_dirs(&[("/usr/bin", ALLOW)])),
+        // `data` is a link: lexically disjoint from `bin`, resolved inside it.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = RealPath::of_path(tmp.path()).unwrap();
+        let root = root.as_path();
+        std::fs::create_dir_all(root.join("bin/sub")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("bin/sub"), root.join("data")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(root.join("bin/sub"), root.join("data")).unwrap();
+        let spelled = |name: &str| FrozenPath::from_surface(utf8(&root.join(name)).unwrap());
+        let data = spelled("data");
+        let stack = stack([layer(Capabilities {
+            exec: Some(std::iter::once((ExecKey::Dir(spelled("bin")), ALLOW)).collect()),
             fs: Some(FsPolicy {
-                write_prefixes: vec![frozen("/data", "/usr/bin/sub")],
+                write_prefixes: vec![data.clone()],
                 ..FsPolicy::default()
             }),
             ..Capabilities::default()
-        });
-        assert_eq!(report(&stack), named(&["/data"]));
+        })]);
+        assert_eq!(report(&stack), [data.shown()]);
     }
 
     #[test]
     fn fs_none_is_invisible_even_with_an_exec_dir() {
-        let stack = GrantStack::of(Capabilities {
-            exec: Some(exec_dirs(&[("/usr/bin", ALLOW)])),
+        let stack = stack([layer(Capabilities {
+            exec: Some(exec_dirs(&[("/x/bin", ALLOW)])),
             fs: None,
             ..Capabilities::default()
-        });
+        })]);
         assert!(
             report(&stack).is_empty(),
             "an unrestricted fs dimension must not be read as \"everything writable\""
@@ -153,22 +158,20 @@ mod tests {
 
     #[test]
     fn two_innocent_layers_fold_into_a_finding() {
-        let layer_a = Capabilities {
-            exec: Some(exec_dirs(&[("/usr/bin", ALLOW)])),
+        let layer_a = layer(Capabilities {
+            exec: Some(exec_dirs(&[("/x/bin", ALLOW)])),
             ..Capabilities::default()
-        };
-        let layer_b = Capabilities {
-            fs: Some(fs(&["/usr/bin"], &[])),
+        });
+        let layer_b = layer(Capabilities {
+            fs: Some(fs(&["/x/bin"], &[])),
             ..Capabilities::default()
-        };
+        });
         assert!(
-            report(&GrantStack::of(layer_a.clone())).is_empty()
-                && report(&GrantStack::of(layer_b.clone())).is_empty(),
+            report(&stack([layer_a.clone()])).is_empty()
+                && report(&stack([layer_b.clone()])).is_empty(),
             "neither layer alone names both dimensions"
         );
-        let mut stack = GrantStack::of(layer_a);
-        stack.push(layer_b);
-        assert_eq!(report(&stack), named(&["/usr/bin"]));
+        assert_eq!(report(&stack([layer_a, layer_b])), named(&["/x/bin"]));
     }
 
     #[test]
@@ -212,15 +215,17 @@ mod tests {
 
     #[test]
     fn an_every_layer_does_not_erase_the_findings_of_another() {
-        let mut stack = GrantStack::of(Capabilities {
-            exec: Some(every(&[])),
-            ..Capabilities::default()
-        });
-        stack.push(Capabilities {
-            exec: Some(exec_dirs(&[("/work", ALLOW)])),
-            fs: Some(fs(&["/work/a"], &[])),
-            ..Capabilities::default()
-        });
+        let stack = stack([
+            layer(Capabilities {
+                exec: Some(every(&[])),
+                ..Capabilities::default()
+            }),
+            layer(Capabilities {
+                exec: Some(exec_dirs(&[("/work", ALLOW)])),
+                fs: Some(fs(&["/work/a"], &[])),
+                ..Capabilities::default()
+            }),
+        ]);
         assert_eq!(report(&stack), named(&["/work/a"]));
     }
 

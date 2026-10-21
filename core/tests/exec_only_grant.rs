@@ -24,6 +24,7 @@ mod common;
 use ral_core::capability::{Capabilities, Evidence, ExecKey};
 use ral_core::path::FrozenPath;
 use ral_core::test_access::exec_projection_restricts;
+use ral_core::test_helper::layer;
 
 #[test]
 fn exec_only_grant_still_projects() {
@@ -36,9 +37,9 @@ fn exec_only_grant_still_projects() {
             ))
             .collect(),
         ),
-        ..Capabilities::root()
+        ..Capabilities::default()
     };
-    shell.with_capabilities(caps, |shell| {
+    shell.with_layer(layer(caps), |shell| {
         let projection = shell
             .sandbox_projection()
             .expect("an exec-only grant asks for kernel exec confinement");

@@ -1,25 +1,24 @@
 //! Decode a capability `Value` — the argument of `grant [...]`, or a
-//! `--capabilities` profile — into a frozen [`Capabilities`].
+//! `--capabilities` profile — into a resolved [`GrantLayer`].
 //!
 //! A dimension the record does not name stays `None` and inherits the
 //! surrounding frame, so an attenuation touches only what it lists.  The
 //! author is the live user, so every malformed shape is a strict error.
-//! The one exception is a path rooted under a foreign platform's
-//! convention: it can never match an access here, so it is dropped as a
-//! dead grant rather than failing the whole profile — the treatment
-//! `exarch::policy::base::drop_dead_exec_grants` gives a bundled tool
-//! Windows cannot back.
+//! Two things are dropped as dead rather than failing the whole profile: a
+//! path rooted under a foreign platform's convention, which can never match
+//! an access here, and a bare exec name that finds nothing here, neither a
+//! file on the `PATH` nor a tool this platform bundles.
 //!
 //! The runtime cannot tell a record from a map, so both are read, at every
 //! depth.  Every list denotes a set: a repeat adds nothing and is no error.
 
 use super::freeze::{Anchor, FreezeCtx, Place, PolicyError, Selector};
 use crate::capability::{
-    Capabilities, EditorVerb, Evidence, ExecGrant, ExecKey, FsPolicy, Net, ShellVerb,
+    EditorVerb, ExecRules, FsLayer, GrantLayer, GrantPath, Keyed, Net, Rule, ShellVerb, name_rules,
 };
 use crate::path::lex::has_drive;
 use crate::path::sigil::SigilHead;
-use crate::path::{PathRules, names_a_path_for};
+use crate::path::{Excluded, Kind, PathRules, Trace, Walked, names_a_path_for};
 use crate::syntax::quote::quote_word;
 use crate::text::{indefinite, near_names};
 use crate::typecheck::contract::{
@@ -169,14 +168,15 @@ fn decode_place(value: &Value) -> Result<Place, PolicyError> {
     place_of(&tag)?.ok_or_else(|| unknown_tag(&PLACE, tag.label))
 }
 
-fn freeze_places(
+/// The places of an fs list, each walked as polarity `W` walks.
+fn freeze_places<W: Walked>(
     list: &List,
     ctx: &FreezeCtx,
-) -> Result<BTreeSet<crate::path::FrozenPath>, PolicyError> {
+) -> Result<Vec<GrantPath<W>>, PolicyError> {
     list.iter()
         .filter_map(|item| {
             decode_place(&item)
-                .and_then(|place| ctx.place(&place))
+                .and_then(|place| ctx.walked::<W>(&place))
                 .transpose()
         })
         .collect()
@@ -186,23 +186,24 @@ fn freeze_places(
 
 /// `fs: [read: [...], write: [...], deny: [...]]`, lists of places, where
 /// `deny` carves holes inside the `read`/`write` prefix regions.
-fn decode_fs(value: &Value, err_prefix: &str, ctx: &FreezeCtx) -> Result<FsPolicy, PolicyError> {
+fn decode_fs(value: &Value, err_prefix: &str, ctx: &FreezeCtx) -> Result<FsLayer, PolicyError> {
     let at = within(err_prefix);
-    let mut fp = FsPolicy::default();
+    let (mut read, mut write, mut deny) = (Vec::new(), Vec::new(), Vec::new());
     for (sub, paths) in table_of(value, "fs: [read: []]").map_err(&at)? {
-        let slot = match sub {
-            "read" => &mut fp.read_prefixes,
-            "write" => &mut fp.write_prefixes,
-            "deny" => &mut fp.deny_paths,
-            _ => return Err(at(PolicyError::new(nested("fs").unknown_key(sub)))),
+        let list = |paths: &Value| list_of(paths, "places").map_err(&at);
+        let allowing = |list: &List| {
+            freeze_places::<Trace>(list, ctx)
+                .map(|paths| paths.into_iter().map(GrantPath::extent).collect::<Vec<_>>())
+                .map_err(&at)
         };
-        let list = list_of(&paths, "places").map_err(&at)?;
-        *slot = freeze_places(&list, ctx)
-            .map_err(&at)?
-            .into_iter()
-            .collect();
+        match sub {
+            "read" => read = allowing(&list(&paths)?)?,
+            "write" => write = allowing(&list(&paths)?)?,
+            "deny" => deny = freeze_places::<Excluded>(&list(&paths)?, ctx).map_err(&at)?,
+            _ => return Err(at(PolicyError::new(nested("fs").unknown_key(sub)))),
+        }
     }
-    Ok(fp)
+    Ok(FsLayer::new(read, write, deny))
 }
 
 /// `net` takes `offline`, the one restriction; omit it to inherit.
@@ -274,11 +275,11 @@ fn path_shaped(name: &str) -> bool {
 
 /// An unwrapped place names one executable; a directory there is a mistake
 /// the author can fix by wrapping it in `dir`.
-fn file_key(place: &Place, ctx: &FreezeCtx) -> Result<Vec<ExecKey>, PolicyError> {
-    let Some(frozen) = ctx.place(place)? else {
+fn file_rules<W: Keyed>(place: &Place, ctx: &FreezeCtx) -> Result<Vec<Rule>, PolicyError> {
+    let Some(walked) = ctx.walked::<W>(place)? else {
         return Ok(vec![]);
     };
-    if crate::path::is_dir(frozen.as_str()) {
+    if walked.real.followed().kind() == Some(Kind::Dir) {
         let spelled = format!("`{} {}", place.tag(), quote_word(place.payload()));
         return Err(PolicyError::new(format!(
             "{} is a directory, so as an exec target it names a binary that \
@@ -290,61 +291,69 @@ fn file_key(place: &Place, ctx: &FreezeCtx) -> Result<Vec<ExecKey>, PolicyError>
             code(&format!("`dir {spelled}"))
         )));
     }
-    Ok(vec![ExecKey::Path(frozen)])
+    Ok(vec![W::file(walked)])
 }
 
 /// `dir D`: every directory `D`, a place or a selector, resolves to.
-fn dir_keys(tag: &Tag, ctx: &FreezeCtx) -> Result<Vec<ExecKey>, PolicyError> {
+fn dir_rules<W: Keyed>(tag: &Tag, ctx: &FreezeCtx) -> Result<Vec<Rule>, PolicyError> {
     let payload = tag.payload.ok_or_else(|| {
         PolicyError::new(format!("{} needs a place or a selector", code("`dir")))
             .with_hint(DIR_TARGET.untagged)
     })?;
     let inner = Tag::of(payload).ok_or_else(|| untagged(&DIR_TARGET, payload))?;
     let dirs = if let Some(selector) = selector_of(&inner)? {
-        ctx.selector(selector)?
+        ctx.selector::<W>(selector)?
     } else if let Some(place) = place_of(&inner)? {
-        ctx.place(&place)?.into_iter().collect()
+        ctx.walked::<W>(&place)?.into_iter().collect()
     } else {
         return Err(unknown_tag(&DIR_TARGET, inner.label));
     };
-    Ok(dirs.into_iter().map(ExecKey::Dir).collect())
+    Ok(dirs.into_iter().map(W::dir).collect())
 }
 
-/// One entry of an `allow` or `deny` list.
-fn decode_target(value: &Value, ctx: &FreezeCtx) -> Result<Vec<ExecKey>, PolicyError> {
+/// One entry of an `allow` or `deny` list, as the rules polarity `W` makes
+/// of it.
+fn decode_target<W: Keyed>(value: &Value, ctx: &FreezeCtx) -> Result<Vec<Rule>, PolicyError> {
     let tag = Tag::of(value).ok_or_else(|| untagged(&EXEC_TARGET, value))?;
     match tag.label {
         "name" => {
             let name = tag.text(&EXEC_TARGET, "a command name")?;
             bare_name(name)?;
-            Ok(vec![ExecKey::Name(name.into())])
+            let path = ctx.env().get_or_host("PATH");
+            name_rules::<W>(name, path.as_deref(), cfg!(unix))
         }
-        "dir" => dir_keys(&tag, ctx),
+        "dir" => dir_rules::<W>(&tag, ctx),
         _ => match place_of(&tag)? {
-            Some(place) => file_key(&place, ctx),
+            Some(place) => file_rules::<W>(&place, ctx),
             None => Err(unknown_tag(&EXEC_TARGET, tag.label)),
         },
     }
 }
 
+/// An `allow` or `deny` list, the rules of each target at polarity `W`.
+fn decode_targets<W: Keyed>(list: &List, ctx: &FreezeCtx) -> Result<Vec<Rule>, PolicyError> {
+    let rules: Vec<_> = list
+        .iter()
+        .map(|item| decode_target::<W>(&item, ctx))
+        .collect::<Result<_, _>>()?;
+    Ok(rules.into_iter().flatten().collect())
+}
+
 /// `exec: [allow: [...], deny: [...]]`.  Argument restrictions are gone: a
 /// target is admitted or denied whatever its arguments.
-fn decode_exec(value: &Value, err_prefix: &str, ctx: &FreezeCtx) -> Result<ExecGrant, PolicyError> {
+fn decode_exec(value: &Value, err_prefix: &str, ctx: &FreezeCtx) -> Result<ExecRules, PolicyError> {
     let at = within(err_prefix);
-    let mut pairs = Vec::new();
+    let mut rules = Vec::new();
     for (key, targets) in table_of(value, "exec: [allow: []]").map_err(&at)? {
-        let evidence = match key {
-            "allow" => Evidence::ALLOW,
-            "deny" => Evidence::DENY,
+        let decode = match key {
+            "allow" => decode_targets::<Trace>,
+            "deny" => decode_targets::<Excluded>,
             other => return Err(at(unknown_exec_key(other, &targets))),
         };
         let list = list_of(&targets, "targets").map_err(&at)?;
-        for item in &list {
-            let keys = decode_target(&item, ctx).map_err(&at)?;
-            pairs.extend(keys.into_iter().map(|k| (k, evidence)));
-        }
+        rules.extend(decode(&list, ctx).map_err(&at)?);
     }
-    Ok(ExecGrant::from_iter(pairs))
+    Ok(rules.into_iter().collect())
 }
 
 /// Whether `value` has the shape of the old surface's per-command policy:
@@ -372,41 +381,41 @@ fn unknown_exec_key(key: &str, value: &Value) -> PolicyError {
 
 // ── Capability walker ─────────────────────────────────────────────────────
 
-/// Walk a capability record into a frozen [`Capabilities`], resolving every
+/// Walk a capability record into a resolved [`GrantLayer`], walking every
 /// place against `ctx`.
 ///
-/// The single `Value → Capabilities` constructor, shared by the
+/// The single `Value → GrantLayer` constructor for a record, shared by the
 /// `grant [...] { body }` builtin in `evaluator::scope`, the
 /// profile loader in `load::profile`, and [`crate::SpawnGrant`]'s
-/// resolver; every path is frozen against `ctx` right here, so "a
-/// `Capabilities` has every path already resolved" holds by construction
+/// resolver; every spelling is walked against `ctx` right here, so "a
+/// `GrantLayer` has every spelling already resolved" holds by construction
 /// whoever comes through.  Unknown keys error here and in each dimension's
 /// decoder rather than being silently dropped; the keyset is `grant`'s own
 /// declared table, so this door and the checker cannot drift apart.
 ///
 /// # Errors
 /// A [`PolicyError`] naming the key whose shape or value it will not read, or
-/// the place that would not resolve absolute.
+/// the place that would not resolve absolute or whose walk failed.
 pub fn decode_capability_map(
     value: &Value,
     err_prefix: &str,
     ctx: &FreezeCtx,
-) -> Result<Capabilities, PolicyError> {
+) -> Result<GrantLayer, PolicyError> {
     let entries = settings_map(value).ok_or_else(|| {
         PolicyError::new(format!(
             "{err_prefix} expects a record or `()`, got {}",
             value.type_name()
         ))
     })?;
-    let mut caps = Capabilities::default();
+    let (mut exec, mut fs, mut net, mut editor, mut shell) = (None, None, None, None, None);
     for (k, v) in &*entries {
         let at = format!("{err_prefix} {k}");
         match k {
-            "exec" => caps.exec = Some(decode_exec(&v, &at, ctx)?),
-            "fs" => caps.fs = Some(decode_fs(&v, &at, ctx)?),
-            "net" => caps.net = Some(decode_net(&v, &at)?),
-            "editor" => caps.editor = Some(decode_verbs::<EditorVerb>(&v, &EDITOR, &at)?),
-            "shell" => caps.shell = Some(decode_verbs::<ShellVerb>(&v, &SHELL, &at)?),
+            "exec" => exec = Some(decode_exec(&v, &at, ctx)?),
+            "fs" => fs = Some(decode_fs(&v, &at, ctx)?),
+            "net" => net = Some(decode_net(&v, &at)?),
+            "editor" => editor = Some(decode_verbs::<EditorVerb>(&v, &EDITOR, &at)?),
+            "shell" => shell = Some(decode_verbs::<ShellVerb>(&v, &SHELL, &at)?),
             other => {
                 let table = declared(ContractForm::Grant);
                 return Err(PolicyError::new(match table.holds(other) {
@@ -416,7 +425,7 @@ pub fn decode_capability_map(
             }
         }
     }
-    Ok(caps)
+    Ok(GrantLayer::new(fs, exec, net, editor, shell))
 }
 
 #[cfg(test)]
@@ -426,8 +435,15 @@ pub fn decode_capability_map(
 )]
 mod tests {
     use super::*;
+    use crate::capability::{ExecAllow, ExecDeny};
     #[cfg(unix)]
-    use crate::path::FrozenPath;
+    use crate::capability::{ExecDenial, Floor, Program, Withheld};
+    #[cfg(unix)]
+    use crate::capability::{FsAllow, FsOp};
+    use crate::path::command_name_key;
+    use crate::path::{RealPath, utf8};
+    #[cfg(unix)]
+    use crate::test_helper::{stack, trace};
 
     fn bare(label: &str) -> Value {
         Value::variant(label, None)
@@ -472,12 +488,59 @@ mod tests {
         )
     }
 
-    fn decode(value: &Value) -> Result<Capabilities, PolicyError> {
+    fn decode(value: &Value) -> Result<GrantLayer, PolicyError> {
         decode_capability_map(value, "test", &ctx())
     }
 
-    fn grant_of(exec_value: Value) -> Result<ExecGrant, PolicyError> {
-        decode(&rec(&[("exec", exec_value)])).map(|c| c.exec.unwrap())
+    fn rules_of(exec_value: Value) -> Result<ExecRules, PolicyError> {
+        decode(&rec(&[("exec", exec_value)])).map(|layer| layer.exec().cloned().unwrap())
+    }
+
+    /// The tool and found-file allowances, by the bare name they answer to.
+    fn allowed_names(rules: &ExecRules) -> BTreeSet<&str> {
+        rules
+            .allows()
+            .filter_map(|a| match a {
+                ExecAllow::Tool(name)
+                | ExecAllow::File {
+                    found_as: Some(name),
+                    ..
+                } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn vetoed(rules: &ExecRules, name: &str) -> bool {
+        rules.denies().any(|d| *d == ExecDeny::Name(name.into()))
+    }
+
+    /// The allowed files and directories as written, a directory under `dir`.
+    #[cfg(unix)]
+    fn written(rules: &ExecRules) -> Vec<String> {
+        rules
+            .allows()
+            .filter_map(|a| match a {
+                ExecAllow::Dir(dir) => Some(format!("dir {}", dir.written.as_str())),
+                ExecAllow::File { written, .. } => Some(written.as_str().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The read allowances of an fs layer as written.
+    #[cfg(unix)]
+    fn read_prefixes(layer: &GrantLayer) -> Vec<&str> {
+        layer
+            .fs()
+            .expect("an fs layer")
+            .table(&FsOp::Read)
+            .allows()
+            .map(|a| match a {
+                FsAllow::Prefix(prefix) => prefix.written.as_str(),
+                FsAllow::RunPlace(_) => panic!("a decoded fs list holds no run place"),
+            })
+            .collect()
     }
 
     fn refusal(value: &Value) -> PolicyError {
@@ -495,20 +558,141 @@ mod tests {
     // ── exec ──
 
     #[test]
-    fn exec_names_decode_to_name_keys_with_their_list_evidence() {
-        let g = grant_of(exec(
-            vec![tagged("name", "git")],
+    fn exec_names_decode_to_allowances_and_vetoes_by_their_list() {
+        let g = rules_of(exec(
+            vec![tagged("name", "ls")],
             vec![tagged("name", "bash")],
         ))
         .unwrap();
-        assert_eq!(g.get(&ExecKey::Name("git".into())), Some(&Evidence::ALLOW));
-        assert_eq!(g.get(&ExecKey::Name("bash".into())), Some(&Evidence::DENY));
+        assert_eq!(allowed_names(&g), BTreeSet::from(["ls"]));
+        assert!(vetoed(&g, "bash"), "{g:?}");
+        assert!(!vetoed(&g, "ls"), "{g:?}");
+    }
+
+    /// A name the platform does not bundle and the `PATH` does not find allows
+    /// nothing, and keeps its veto: off Unix a Unix-only tool is such a name.
+    #[cfg(feature = "coreutils")]
+    #[test]
+    fn a_dead_name_makes_no_allowance_and_keeps_its_veto() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = crate::path::utf8(tmp.path()).unwrap();
+        let dead = crate::uutils::COREUTILS_UNIX_ONLY_TOOLS
+            .iter()
+            .chain(&["zzz-no-such"]);
+        for name in dead {
+            let allow = name_rules::<Trace>(name, Some(path), false).unwrap();
+            assert!(allow.is_empty(), "{name}: {allow:?}");
+            let deny = name_rules::<Excluded>(name, Some(path), false).unwrap();
+            assert!(
+                matches!(&deny[..], [Rule::Deny(d)] if *d == ExecDeny::Name(command_name_key(name))),
+                "{name}: {deny:?}"
+            );
+        }
+        let kept = name_rules::<Trace>("ls", Some(path), false).unwrap();
+        assert!(
+            matches!(&kept[..], [Rule::Allow(ExecAllow::Tool(name))] if name == "ls"),
+            "a cross-platform bundled tool survives: {kept:?}"
+        );
+    }
+
+    /// A bare name decodes to the file the `PATH` finds, or to no allowance and
+    /// its veto, whatever `unix_available` says: the platform decides only
+    /// what it bundles, and no tool is bundled here.
+    #[test]
+    fn a_name_is_a_found_file_or_no_rule_with_unix_available_a_parameter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = RealPath::of_path(tmp.path()).unwrap().as_path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let file = bin.join(format!("zz-found{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&file, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = Some(utf8(&bin).unwrap());
+        for unix_available in [true, false] {
+            let found = name_rules::<Trace>("zz-found", path, unix_available).unwrap();
+            assert!(
+                matches!(&found[..], [Rule::Allow(ExecAllow::File { found_as: Some(n), .. })] if n == "zz-found"),
+                "{unix_available}: {found:?}"
+            );
+            let lost = name_rules::<Trace>("zz-lost", path, unix_available).unwrap();
+            assert!(lost.is_empty(), "{unix_available}: {lost:?}");
+            let veto = name_rules::<Excluded>("zz-lost", path, unix_available).unwrap();
+            assert!(
+                matches!(&veto[..], [Rule::Deny(d)] if *d == ExecDeny::Name(command_name_key("zz-lost"))),
+                "{unix_available}: {veto:?}"
+            );
+        }
+    }
+
+    /// A name is resolved where it is decoded, on the `PATH` of the decoding
+    /// env: no later `PATH` redirects it, and a name found nowhere keeps its
+    /// veto, which holds whatever file bears the name.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_found_at_decode_is_not_redirected_and_a_lost_name_keeps_its_veto() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = RealPath::of_path(tmp.path())
+            .unwrap()
+            .as_path()
+            .to_path_buf();
+        let (first, later) = (root.join("first"), root.join("later"));
+        for (bin, names) in [(&first, &["git"][..]), (&later, &["git", "zz-lost"][..])] {
+            std::fs::create_dir(bin).unwrap();
+            for name in names {
+                std::fs::write(bin.join(name), "").unwrap();
+                std::fs::set_permissions(bin.join(name), PermissionsExt::from_mode(0o755)).unwrap();
+            }
+        }
+        let on = |path: &std::path::Path| {
+            let env = [("HOME", "/h"), ("PATH", utf8(path).unwrap())];
+            let cwd = crate::path::CwdPath::new(root.clone()).unwrap();
+            FreezeCtx::at(env.into_iter().collect::<crate::types::EnvVars>(), cwd)
+        };
+        let layer = decode_capability_map(
+            &rec(&[(
+                "exec",
+                exec(vec![tagged("name", "git")], vec![tagged("name", "zz-lost")]),
+            )]),
+            "test",
+            &on(&first),
+        )
+        .unwrap();
+        let grants = stack([layer]);
+        let floor = Floor::default();
+        let refusal = |at: &std::path::Path| {
+            grants.refusal(
+                &floor,
+                &Program::File {
+                    trace: trace(at),
+                    path: at.to_path_buf(),
+                },
+            )
+        };
+        assert!(refusal(&first.join("git")).is_none());
+        assert!(
+            matches!(
+                refusal(&later.join("git")),
+                Some(ExecDenial::Run(Withheld::MissingAllowance))
+            ),
+            "a later `PATH` finds another git, which the grant never named"
+        );
+        assert!(
+            refusal(&later.join("zz-lost")).is_some_and(|denied| matches!(
+                denied,
+                ExecDenial::Run(Withheld::Excluded { scope, .. })
+                    if *scope == ExecDeny::Name(command_name_key("zz-lost"))
+            ))
+        );
     }
 
     #[cfg(unix)]
     #[test]
-    fn exec_places_decode_to_path_keys_and_dir_to_dir_keys() {
-        let g = grant_of(exec(
+    fn exec_places_decode_to_file_allowances_and_dir_to_dir_allowances() {
+        let g = rules_of(exec(
             vec![
                 tagged("absolute", "/bin/sh"),
                 tagged("cwd", "tools/build"),
@@ -517,58 +701,45 @@ mod tests {
             vec![],
         ))
         .unwrap();
-        let key = |k: fn(FrozenPath) -> ExecKey, p: &str| k(FrozenPath::from_surface(p));
         assert_eq!(
-            g.get(&key(ExecKey::Path, "/bin/sh")),
-            Some(&Evidence::ALLOW)
+            written(&g),
+            ["dir /opt/tools", "/bin/sh", "/work/tools/build"]
         );
-        assert_eq!(
-            g.get(&key(ExecKey::Path, "/work/tools/build")),
-            Some(&Evidence::ALLOW)
-        );
-        assert_eq!(
-            g.get(&key(ExecKey::Dir, "/opt/tools")),
-            Some(&Evidence::ALLOW)
-        );
+        assert_eq!(g.denies().count(), 0);
     }
 
     #[test]
     fn exec_dir_system_expands_to_the_tool_roots() {
-        let g = grant_of(exec(vec![dir(bare("system"))], vec![])).unwrap();
-        assert!(g.iter().count() >= 1);
-        assert!(
-            g.iter()
-                .all(|(k, v)| matches!(k, ExecKey::Dir(_)) && *v == Evidence::ALLOW)
-        );
+        let g = rules_of(exec(vec![dir(bare("system"))], vec![])).unwrap();
+        assert!(g.allows().count() >= 1);
+        assert!(g.allows().all(|a| matches!(a, ExecAllow::Dir(_))));
+        assert_eq!(g.denies().count(), 0);
     }
 
     /// A list is a set: a repeat adds nothing, and refuses nothing.
     #[test]
     fn exec_repeats_are_idempotent() {
-        let once = grant_of(exec(vec![tagged("name", "git")], vec![])).unwrap();
-        let twice = grant_of(exec(
-            vec![tagged("name", "git"), tagged("name", "git")],
+        let once = rules_of(exec(vec![tagged("name", "ls")], vec![])).unwrap();
+        let twice = rules_of(exec(
+            vec![tagged("name", "ls"), tagged("name", "ls")],
             vec![],
         ))
         .unwrap();
         assert_eq!(once, twice);
     }
 
-    /// A target in both lists is Both, which `↓` refuses.
+    /// A target in both lists is an allowance and a veto, which refuses.
     #[test]
     fn a_target_in_both_lists_is_both() {
-        let g = grant_of(exec(
-            vec![tagged("name", "git")],
-            vec![tagged("name", "git")],
-        ))
-        .unwrap();
-        assert_eq!(g.get(&ExecKey::Name("git".into())), Some(&Evidence::BOTH));
+        let g = rules_of(exec(vec![tagged("name", "ls")], vec![tagged("name", "ls")])).unwrap();
+        assert_eq!(allowed_names(&g), BTreeSet::from(["ls"]));
+        assert!(vetoed(&g, "ls"), "{g:?}");
     }
 
     #[test]
     fn an_empty_allow_list_admits_nothing() {
-        let g = grant_of(rec(&[("allow", list(vec![]))])).unwrap();
-        assert_eq!(g.iter().count(), 0);
+        let g = rules_of(rec(&[("allow", list(vec![]))])).unwrap();
+        assert_eq!((g.allows().count(), g.denies().count()), (0, 0));
     }
 
     #[test]
@@ -757,15 +928,8 @@ mod tests {
             tagged("cwd", "src"),
             tagged("home", ".cache"),
         ];
-        let caps = decode(&rec(&[("fs", rec(&[("read", list(places))]))])).unwrap();
-        let read: Vec<_> = caps
-            .fs
-            .unwrap()
-            .read_prefixes
-            .iter()
-            .map(|p| p.as_str().to_string())
-            .collect();
-        assert_eq!(read, ["/h/.cache", "/work/src"]);
+        let layer = decode(&rec(&[("fs", rec(&[("read", list(places))]))])).unwrap();
+        assert_eq!(read_prefixes(&layer), ["/h/.cache", "/work/src"]);
     }
 
     #[test]
@@ -801,27 +965,201 @@ mod tests {
 
     #[test]
     fn an_empty_fs_list_keeps_only_the_floor() {
-        let caps = decode(&rec(&[("fs", rec(&[("read", list(vec![]))]))])).unwrap();
-        assert_eq!(caps.fs, Some(FsPolicy::default()));
+        let layer = decode(&rec(&[("fs", rec(&[("read", list(vec![]))]))])).unwrap();
+        assert_eq!(layer.fs(), Some(&FsLayer::default()));
     }
 
     #[test]
     fn a_dead_place_is_dropped_not_refused() {
         let foreign = if cfg!(windows) { "/x" } else { r"C:\x" };
-        let caps = decode(&rec(&[(
+        let layer = decode(&rec(&[(
             "fs",
             rec(&[("read", list(vec![tagged("absolute", foreign)]))]),
         )]))
         .unwrap();
-        assert_eq!(caps.fs, Some(FsPolicy::default()));
+        assert_eq!(layer.fs(), Some(&FsLayer::default()));
+    }
+
+    /// `/tmp` is a Unix place: Windows has no such root, so it is dropped.
+    #[cfg(windows)]
+    #[test]
+    fn a_unix_tmp_is_dropped_on_windows() {
+        let layer = decode(&rec(&[(
+            "fs",
+            rec(&[("read", list(vec![tagged("absolute", "/tmp")]))]),
+        )]))
+        .unwrap();
+        assert_eq!(layer.fs(), Some(&FsLayer::default()));
+    }
+
+    /// A freeze anchor at the real `home` and `root`, binding `extra` too.
+    #[cfg(unix)]
+    fn anchored_at(
+        home: &std::path::Path,
+        root: &std::path::Path,
+        extra: &[(&str, &std::path::Path)],
+    ) -> FreezeCtx {
+        let env = std::iter::once(("HOME", home))
+            .chain(extra.iter().copied())
+            .map(|(k, v)| (k, utf8(v).unwrap()))
+            .collect::<crate::types::EnvVars>();
+        FreezeCtx::at(env, crate::path::CwdPath::new(root.to_path_buf()).unwrap())
+    }
+
+    /// A tempdir and the real path of its root.
+    #[cfg(unix)]
+    fn tree() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = RealPath::of_path(tmp.path())
+            .unwrap()
+            .as_path()
+            .to_path_buf();
+        (tmp, root)
+    }
+
+    /// A deny through a directory the user cannot enter is resolved at its
+    /// position, and holds what lies beneath it.
+    #[cfg(unix)]
+    #[test]
+    fn a_deny_through_an_unreadable_directory_resolves_positionally_and_holds_beneath() {
+        use std::os::unix::fs::PermissionsExt;
+        if rustix::process::geteuid().is_root() {
+            eprintln!("skip: root enters every directory");
+            return;
+        }
+        let (_tmp, root) = tree();
+        let (locked, open) = (root.join("locked"), root.join("open"));
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::create_dir(&open).unwrap();
+        let secret = locked.join("secret");
+        std::fs::set_permissions(&locked, PermissionsExt::from_mode(0o000)).unwrap();
+        let decoded = decode_capability_map(
+            &rec(&[(
+                "fs",
+                rec(&[
+                    ("read", list(vec![tagged("absolute", utf8(&root).unwrap())])),
+                    (
+                        "deny",
+                        list(vec![tagged("absolute", utf8(&secret).unwrap())]),
+                    ),
+                ]),
+            )]),
+            "test",
+            &anchored_at(&root, &root, &[]),
+        );
+        std::fs::set_permissions(&locked, PermissionsExt::from_mode(0o700)).unwrap();
+        let grants = stack([decoded.expect("an unenterable directory is no refusal")]);
+        let floor = Floor::default();
+        for held in [secret.clone(), secret.join("f")] {
+            assert!(
+                matches!(
+                    grants.read(&floor, &trace(&held)),
+                    Err(Withheld::Excluded { .. })
+                ),
+                "{held:?}"
+            );
+        }
+        assert!(grants.read(&floor, &trace(open.join("f"))).is_ok());
+    }
+
+    /// A spelling whose walk fails, neither absent nor unenterable, refuses
+    /// the layer and names the spelling, whichever axis wrote it.
+    #[cfg(unix)]
+    #[test]
+    fn a_spelling_whose_walk_fails_refuses_the_layer_naming_it() {
+        let (_tmp, root) = tree();
+        let (a, b) = (root.join("a"), root.join("b"));
+        std::os::unix::fs::symlink(&b, &a).unwrap();
+        std::os::unix::fs::symlink(&a, &b).unwrap();
+        let looped = a.join("x");
+        let place = tagged("absolute", utf8(&looped).unwrap());
+        for value in [
+            rec(&[("fs", rec(&[("read", list(vec![place.clone()]))]))]),
+            rec(&[("fs", rec(&[("deny", list(vec![place.clone()]))]))]),
+            rec(&[("exec", exec(vec![dir(place)], vec![]))]),
+        ] {
+            let why = decode_capability_map(&value, "test", &anchored_at(&root, &root, &[]))
+                .expect_err("a link cycle cannot be walked");
+            assert!(
+                why.message.contains(utf8(&looped).unwrap()),
+                "{}",
+                why.message
+            );
+        }
+    }
+
+    /// An exclusion of the root is refused where it is decoded, whichever axis
+    /// writes it.
+    #[test]
+    fn a_root_exclusion_is_refused_at_decode() {
+        let root = tagged("absolute", "/");
+        for value in [
+            rec(&[("fs", rec(&[("deny", list(vec![root.clone()]))]))]),
+            rec(&[("exec", exec(vec![], vec![dir(root)]))]),
+        ] {
+            let why = refusal(&value);
+            assert!(why.message.contains("filesystem root"), "{}", why.message);
+        }
+    }
+
+    /// So is a link that leads to it.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_the_root_is_refused_as_an_exclusion() {
+        let (_tmp, root) = tree();
+        std::os::unix::fs::symlink("/", root.join("alias")).unwrap();
+        let alias = tagged("absolute", utf8(&root.join("alias")).unwrap());
+        let why = decode_capability_map(
+            &rec(&[("fs", rec(&[("deny", list(vec![alias]))]))]),
+            "test",
+            &anchored_at(&root, &root, &[]),
+        )
+        .expect_err("a link to the root excludes every path");
+        assert!(why.message.contains("filesystem root"), "{}", why.message);
+    }
+
+    /// `xdg-*` judges its base by the walk the layer keeps: a base linked out
+    /// of the home is refused, one linked within it is held where it led, and
+    /// stays there when the link is retargeted after.
+    #[cfg(unix)]
+    #[test]
+    fn xdg_refuses_a_base_linked_out_of_home_as_it_was_at_decode() {
+        let (_tmp, root) = tree();
+        let (home, outside) = (root.join("home"), root.join("outside"));
+        let inside = home.join("inside");
+        for dir in [&inside, &outside] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let (leaves, stays) = (home.join("leaves"), home.join("stays"));
+        std::os::unix::fs::symlink(&outside, &leaves).unwrap();
+        std::os::unix::fs::symlink(&inside, &stays).unwrap();
+        let read = |base: &std::path::Path| {
+            decode_capability_map(
+                &rec(&[(
+                    "fs",
+                    rec(&[("read", list(vec![tagged("xdg-config", ".")]))]),
+                )]),
+                "test",
+                &anchored_at(&home, &root, &[("XDG_CONFIG_HOME", base)]),
+            )
+        };
+        let why = read(&leaves).expect_err("a base linked out of HOME");
+        assert!(why.message.contains("outside HOME"), "{}", why.message);
+
+        let grants = stack([read(&stays).expect("a base linked within HOME")]);
+        std::fs::remove_file(&stays).unwrap();
+        std::os::unix::fs::symlink(&outside, &stays).unwrap();
+        let floor = Floor::default();
+        assert!(grants.read(&floor, &trace(inside.join("f"))).is_ok());
+        assert!(grants.read(&floor, &trace(outside.join("f"))).is_err());
     }
 
     // ── net, editor, shell ──
 
     #[test]
     fn net_offline_decodes_and_nothing_else_does() {
-        let caps = decode(&rec(&[("net", bare("offline"))])).unwrap();
-        assert_eq!(caps.net, Some(Net::Offline));
+        let layer = decode(&rec(&[("net", bare("offline"))])).unwrap();
+        assert_eq!(layer.summary().unwrap().net, Some(Net::Offline));
         for value in [Value::Bool(true), Value::Bool(false)] {
             let e = refusal(&rec(&[("net", value)]));
             assert!(e.message.contains("expected a net mode"), "{}", e.message);
@@ -844,19 +1182,21 @@ mod tests {
 
     #[test]
     fn verb_lists_decode_as_sets() {
-        let caps = decode(&rec(&[
+        let summary = decode(&rec(&[
             (
                 "editor",
                 list(vec![bare("read"), bare("tui"), bare("read")]),
             ),
             ("shell", list(vec![])),
         ]))
+        .unwrap()
+        .summary()
         .unwrap();
         assert_eq!(
-            caps.editor,
+            summary.editor,
             Some([EditorVerb::Read, EditorVerb::Tui].into())
         );
-        assert_eq!(caps.shell, Some(BTreeSet::new()));
+        assert_eq!(summary.shell, Some(BTreeSet::new()));
     }
 
     #[test]

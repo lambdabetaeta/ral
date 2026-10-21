@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::capability::GrantStack;
+use crate::capability::{Capabilities, GrantStack, GrantSummary};
 use crate::first_order::datum::{Datum, tag, untag};
 use crate::first_order::{Bytes, FOValue, Finite};
 use crate::ty::{Ty, Typed, closed_record};
@@ -37,7 +37,8 @@ pub enum Probe {
     Bindings,
     /// The entries of a directory, resolved against the engine's cwd.
     PathEntries(PathBuf),
-    /// The session's own grant stack, without any run's ceiling.
+    /// The session's own grant stack as it is shown, without any run's
+    /// ceiling: spellings and axes, never a position or an identity.
     Grants,
     #[cfg(feature = "test-util")]
     WorkerCount,
@@ -179,6 +180,32 @@ impl Datum for GrantStack {
     }
 }
 
+/// Opaque to ral likewise: what `Probe::Grants` answers, in the codec the
+/// stack rides.
+impl Datum for GrantSummary {
+    fn encode(self) -> FOValue {
+        Bytes::from(serde_json::to_vec(&self).expect("a grant summary is plain data")).encode()
+    }
+
+    fn decode(v: &FOValue) -> Result<Self, String> {
+        serde_json::from_slice(&Bytes::decode(v)?)
+            .map_err(|e| format!("expected an encoded grant summary: {e}"))
+    }
+}
+
+/// Opaque to ral likewise: an authored ceiling crosses in the same codec, for
+/// an engine to resolve on the host it runs on (`Root.config`).
+impl Datum for Capabilities {
+    fn encode(self) -> FOValue {
+        Bytes::from(serde_json::to_vec(&self).expect("a ceiling is plain data")).encode()
+    }
+
+    fn decode(v: &FOValue) -> Result<Self, String> {
+        serde_json::from_slice(&Bytes::decode(v)?)
+            .map_err(|e| format!("expected an encoded ceiling: {e}"))
+    }
+}
+
 /// The names a completer offers beside the builtins, which have their own
 /// probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +234,10 @@ record!(PathEntry {
 });
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[test] a tempdir tree of real directories for the stacks"
+)]
 mod tests {
     use super::*;
 
@@ -238,20 +269,67 @@ mod tests {
         assert!(why.contains("`title"), "{why}");
     }
 
-    /// A grant stack crosses a probe layer for layer, exec keys and all.
+    /// A grant stack crosses a probe layer for layer, exec rules and all.
     #[test]
     fn a_grant_stack_round_trips() {
         use crate::capability::{Capabilities, Evidence, ExecGrant, ExecKey, Net};
+        use crate::path::{FrozenPath, test_absolute};
+        let dir = FrozenPath::from_surface(&test_absolute("/ral-probe/bin"));
         let mut stack = GrantStack::root();
-        stack.push(Capabilities {
+        stack.push(crate::test_helper::layer(Capabilities {
+            exec: Some(ExecGrant::from_iter([(ExecKey::Dir(dir), Evidence::ALLOW)])),
+            net: Some(Net::Offline),
+            ..Capabilities::default()
+        }));
+        assert_eq!(GrantStack::decode(&stack.clone().encode()), Ok(stack));
+    }
+
+    /// A stack of real directories, exclusions and all: restrictive on every
+    /// axis a summary shows.
+    fn stack_over(root: &std::path::Path) -> GrantStack {
+        use crate::capability::{Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy, Net};
+        use crate::path::FrozenPath;
+        let spell = |dir: &str| {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+            FrozenPath::from_surface(crate::path::utf8(&root.join(dir)).unwrap())
+        };
+        let mut stack = GrantStack::root();
+        stack.push(crate::test_helper::layer(Capabilities {
             exec: Some(ExecGrant::from_iter([(
-                ExecKey::Name("git".into()),
+                ExecKey::Dir(spell("bin")),
                 Evidence::ALLOW,
             )])),
+            fs: Some(FsPolicy {
+                read_prefixes: vec![spell("work")],
+                write_prefixes: vec![spell("scratch")],
+                deny_paths: vec![spell("work/secret")],
+            }),
             net: Some(Net::Offline),
-            ..Capabilities::root()
-        });
-        assert_eq!(GrantStack::decode(&stack.clone().encode()), Ok(stack));
+            ..Capabilities::default()
+        }));
+        stack
+    }
+
+    /// A codec is pure: a stack deserialises with no walk, and what the
+    /// receiver owes it is a call of its own.
+    #[test]
+    fn a_stack_decodes_without_walking() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stack = stack_over(tmp.path());
+        let encoded = stack.clone().encode();
+        let before = crate::path::walk::steps_taken();
+        let decoded = GrantStack::decode(&encoded);
+        assert_eq!(crate::path::walk::steps_taken(), before, "a walk was taken");
+        assert_eq!(decoded, Ok(stack));
+    }
+
+    /// What `Probe::Grants` answers crosses as spellings and axes alone.
+    #[test]
+    fn a_grant_summary_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let summary = stack_over(tmp.path()).summary();
+        assert_eq!(summary.layers().len(), 1, "the ambient root shows nothing");
+        assert_eq!(GrantSummary::decode(&summary.clone().encode()), Ok(summary));
     }
 
     /// Every row a new reading answers in survives its own round trip.

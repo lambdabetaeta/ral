@@ -182,6 +182,7 @@ pub fn restricted_envelope_launches() -> bool {
         launch::enveloped(
             &linux::Envelope::probe(bwrap, own),
             &projection,
+            &crate::capability::Floor::default(),
             &launch::admitted(program, &[]),
             None,
             // `Surrendered` carries no `--info-fd` to read and no parent-death tie:

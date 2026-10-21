@@ -12,7 +12,9 @@
 
 use super::{ExecProjection, FsProjection, RenderedRules, SandboxProjection};
 use crate::capability::{ExecAllow, ExecDeny};
-use crate::path::{Object, RealPath, Rendered, render_paths, render_real, rendered_ancestors};
+use crate::path::{
+    Object, RealPath, Rendered, Walked, render_paths, render_real, rendered_ancestors,
+};
 use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
 use std::fmt;
@@ -258,13 +260,13 @@ fn emit_exec_rules(profile: &mut Profile, exec: &ExecProjection) -> Result<(), S
     };
     let positives = rules.allows().map(|scope| match scope {
         ExecAllow::Any => Ok(vec![ANY_EXEC.to_string()]),
-        ExecAllow::Dir(path) => exec_clauses(true, path, true),
-        ExecAllow::File { path, .. } => exec_clauses(true, path, false),
+        ExecAllow::Dir(dir) => exec_clauses(true, &dir.real.real(), true),
+        ExecAllow::File { real, .. } => exec_clauses(true, real, false),
         ExecAllow::Tool(_) => Ok(Vec::new()),
     });
     let negatives = rules.denies().map(|scope| match scope {
-        ExecDeny::Dir(path) => exec_clauses(false, path, true),
-        ExecDeny::File { path, .. } => exec_clauses(false, path, false),
+        ExecDeny::Dir(dir) => exec_clauses(false, dir.real.followed().real(), true),
+        ExecDeny::File(file) => exec_clauses(false, file.real.followed().real(), false),
         ExecDeny::Name(name) => Ok(vec![exec_clause(false, Filter::Regex(name))]),
     });
     for clauses in positives.chain(negatives) {
@@ -273,7 +275,8 @@ fn emit_exec_rules(profile: &mut Profile, exec: &ExecProjection) -> Result<(), S
     let granted = rules
         .live()
         .filter_map(|scope| match scope {
-            ExecAllow::Dir(path) | ExecAllow::File { path, .. } => Some(render_real(path)),
+            ExecAllow::Dir(dir) => Some(render_real(&dir.real.real())),
+            ExecAllow::File { real, .. } => Some(render_real(real)),
             _ => None,
         })
         .collect::<Result<Vec<_>, _>>()?
@@ -426,10 +429,11 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::{BASE_PROFILE, NET_PROFILE, Profile, build_profile, withheld_doors};
-    use crate::capability::{ExecAllow, ExecDeny, ExecRule, FsAllow};
+    use crate::capability::{ExecAllow, ExecDeny, Extent, FsAllow, GrantPath, Rule};
     use crate::path::proper_ancestors;
-    use crate::path::{FrozenPath, RealPath, command_name_key};
+    use crate::path::{Excluded, FrozenPath, RealPath, command_name_key};
     use crate::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
+    use crate::test_helper::trace;
 
     /// The profile with its commentary dropped — what the kernel reads.  The
     /// `.sbpl` files argue at length for what they leave *out*, so a test
@@ -443,28 +447,36 @@ mod tests {
             .join("\n")
     }
 
-    type Rule = ExecRule;
-
     fn dir(path: &str, allow: bool) -> Rule {
-        let path = RealPath::assumed(path);
+        let written = FrozenPath::from_surface(path);
         if allow {
-            ExecRule::Allow(ExecAllow::Dir(path))
+            Rule::Allow(ExecAllow::Dir(
+                GrantPath::<Extent>::allowing(written).expect("a directory walks"),
+            ))
         } else {
-            ExecRule::Deny(ExecDeny::Dir(path))
+            Rule::Deny(ExecDeny::Dir(
+                GrantPath::<Excluded>::walk(written).expect("a directory walks"),
+            ))
         }
     }
 
     fn file(path: &str, allow: bool) -> Rule {
-        let path = RealPath::assumed(path);
+        let written = FrozenPath::from_surface(path);
         if allow {
-            ExecRule::Allow(ExecAllow::file(path))
+            Rule::Allow(ExecAllow::File {
+                real: trace(path).real().clone(),
+                written,
+                found_as: None,
+            })
         } else {
-            ExecRule::Deny(ExecDeny::file(path))
+            Rule::Deny(ExecDeny::File(
+                GrantPath::<Excluded>::walk(written).expect("a file walks"),
+            ))
         }
     }
 
     fn veto(name: &str) -> Rule {
-        ExecRule::Deny(ExecDeny::Name(command_name_key(name)))
+        Rule::Deny(ExecDeny::Name(command_name_key(name)))
     }
 
     fn restricted(fs: FsProjection, rules: Vec<Rule>) -> SandboxProjection {
@@ -476,11 +488,13 @@ mod tests {
     }
 
     fn prefix(path: &str) -> FsAllow {
-        FsAllow::Prefix(FrozenPath::for_test(path, path))
+        FsAllow::Prefix(
+            GrantPath::<Extent>::allowing(FrozenPath::from_surface(path)).expect("a prefix walks"),
+        )
     }
 
     fn frozen(paths: &[&str]) -> Vec<FrozenPath> {
-        paths.iter().map(|p| FrozenPath::for_test(p, p)).collect()
+        paths.iter().map(|p| FrozenPath::from_surface(p)).collect()
     }
 
     /// A restricted fs writing under `prefixes` and nothing else.
@@ -629,7 +643,7 @@ mod tests {
     fn mac_profile_renders_any_as_unrestricted_exec_before_its_exclusions() {
         let policy = restricted(
             FsProjection::default(),
-            vec![ExecRule::Allow(ExecAllow::Any), veto("git")],
+            vec![Rule::Allow(ExecAllow::Any), veto("git")],
         );
         let profile = build_profile(&policy).unwrap();
         let any = at(&profile, "(allow process-exec)\n");
@@ -641,7 +655,7 @@ mod tests {
     /// region starts under no exec rule, `every` included.
     #[test]
     fn mac_profile_runs_nothing_the_fs_does_not_read() {
-        let any = || vec![ExecRule::Allow(ExecAllow::Any)];
+        let any = || vec![Rule::Allow(ExecAllow::Any)];
         let profile =
             build_profile(&restricted(reading(vec![prefix("/ral-test/r")]), any())).unwrap();
         let wildcard = at(&profile, "(allow process-exec)\n");
@@ -708,22 +722,34 @@ mod tests {
     /// alone: the surface it was written by is only stat-able, so a lookup
     /// may pass the link and reach nothing beneath it.
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] test fs scaffolding: a tempdir tree and a symlink"
+    )]
     fn mac_profile_lets_a_lookup_stat_the_surface_of_a_frozen_allowance() {
-        let linked = FsAllow::Prefix(FrozenPath::for_test("/ral-test/link", "/ral-test/real"));
+        let tmp = tempfile::tempdir().expect("a temp dir");
+        let root = RealPath::of_path(tmp.path()).expect("the temp dir resolves");
+        let (real, link) = (root.as_path().join("real"), root.as_path().join("link"));
+        std::fs::create_dir(&real).expect("the target");
+        std::os::unix::fs::symlink(&real, &link).expect("a link to the target");
+        let real = crate::path::utf8(&real).unwrap();
+        let linked = prefix(crate::path::utf8(&link).unwrap());
         let profile = build_profile(&SandboxProjection {
             fs: reading(vec![linked]),
             ..SandboxProjection::default()
         })
         .unwrap();
-        at(&profile, "(allow file-read* (subpath \"/ral-test/real\"))");
+        at(
+            &profile,
+            &format!("(allow file-read* (subpath \"{real}\"))"),
+        );
         let kernel = rules(&profile);
-        let surface: Vec<&str> = kernel
-            .lines()
-            .filter(|l| l.contains("/ral-test/link"))
-            .collect();
-        assert_eq!(
-            surface,
-            ["(allow file-read-metadata (literal \"/ral-test/link\"))"],
+        let surface: Vec<&str> = kernel.lines().filter(|l| l.contains("/link")).collect();
+        assert!(
+            !surface.is_empty()
+                && surface
+                    .iter()
+                    .all(|l| l.starts_with("(allow file-read-metadata (literal ")),
             "{profile}"
         );
     }

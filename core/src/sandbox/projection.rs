@@ -4,7 +4,7 @@
 //! [`SandboxProjection::of`] folds a stack once, at spawn, because that is
 //! when the OS profile is written.  The in-process guard (`crate::guard`)
 //! folds the same per-dimension tables afresh on every check: the fs
-//! [`region`] per op, the read one carrying the [`floor`] and the run places,
+//! [`region`] per op, the read one carrying the [`Floor`] and the run places,
 //! and for exec the very table [`GrantStack::admit`] judged with.  So guard
 //! and profile cannot disagree about what the stack permits; all that
 //! separates them is when the fold runs.  `detach` gates a verb rather than an
@@ -17,8 +17,8 @@
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::capability::Subject;
 use crate::capability::{
-    Admitted, ExecRules, FsAllow, FsOp, GrantStack, Join, Net, Region, region, rules,
-    running_region,
+    Admitted, ExecRules, Floor, FsAllow, FsOp, FsRules as FsTable, GrantStack, Join, Net, region,
+    rules, running_region,
 };
 use crate::path::{FrozenPath, RealPath};
 #[cfg(unix)]
@@ -34,7 +34,7 @@ use std::collections::BTreeSet;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsRules<A = FsAllow, X = FrozenPath> {
     /// The live read region: authored reads and writes, the run places, the
-    /// live support and the [`floor`].
+    /// live support and the [`Floor`].
     pub(crate) read: Vec<A>,
     /// The live write prefixes.  Only prefixes: a place is never written.
     pub(crate) write: Vec<A>,
@@ -208,7 +208,11 @@ impl SandboxProjection {
     /// computed once for every launch with a restricted fs or exec, filtered to
     /// the live files no exec or fs exclusion covers, and joined into the read
     /// region as places and into the exec table as file allows.
-    pub(crate) fn of(grants: &GrantStack, admitted: Option<&Admitted>) -> Option<Self> {
+    pub(crate) fn of(
+        grants: &GrantStack,
+        floor: &Floor,
+        admitted: Option<&Admitted>,
+    ) -> Option<Self> {
         // Traced because this fold is not the pure reduction it reads as:
         // re-freezing exclusions canonicalises against the filesystem, and
         // compiling the exec table walks the host `PATH` for every bare key, so
@@ -218,8 +222,8 @@ impl SandboxProjection {
         let t_fold = std::time::Instant::now();
         // Zipped because the two regions are `Some` on the same condition,
         // some layer held an `fs` opinion, so there is no mixed case to weigh.
-        let regions = running_region(grants)
-            .zip(region(grants, &FsOp::Write))
+        let regions = running_region(grants, floor)
+            .zip(region(grants, &FsOp::Write, floor))
             .filter(|_| !grants.fs_is_top());
         let online = !grants.net().any(|n| n == Net::Offline);
 
@@ -249,7 +253,7 @@ impl SandboxProjection {
         });
         let fs = match regions {
             Some((read, write)) => {
-                let read = read.join(Region::new(
+                let read = read.join(FsTable::new(
                     live.iter().map(|s| FsAllow::RunPlace(s.clone())),
                     [],
                 ));
@@ -259,7 +263,7 @@ impl SandboxProjection {
                     // Both regions carry the same denies; a disk change between
                     // the two folds can only drop a write allow, which fails
                     // closed.
-                    deny: read.denies().map(|deny| deny.prefix().clone()).collect(),
+                    deny: read.denies().map(|deny| deny.written().clone()).collect(),
                     pinned_dirs: Vec::new(),
                 })
             }
@@ -279,7 +283,7 @@ impl SandboxProjection {
 #[cfg(unix)]
 fn objects(scopes: &[FsAllow]) -> Result<Vec<Object>, String> {
     let named = scopes.iter().map(|scope| match scope {
-        FsAllow::Prefix(prefix) => (prefix.real().clone(), Some(prefix)),
+        FsAllow::Prefix(prefix) => (prefix.real.real(), Some(&prefix.written)),
         FsAllow::RunPlace(place) => (place.clone(), None),
     });
     render_objects(named)
@@ -293,12 +297,12 @@ fn objects(scopes: &[FsAllow]) -> Result<Vec<Object>, String> {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn live_support(
     table: Option<&ExecRules>,
-    read: Option<&Region>,
+    read: Option<&FsTable>,
     admitted: Option<&Admitted>,
 ) -> BTreeSet<RealPath> {
     use crate::capability::Program;
     let launched = admitted.and_then(|a| match a.program() {
-        Program::File { real, .. } => Some(real),
+        Program::File { trace, .. } => Some(trace.real()),
         Program::Tool(_) => None,
     });
     let files = table.into_iter().flat_map(ExecRules::allowed_files);
@@ -307,8 +311,9 @@ fn live_support(
         support.extend(super::carriers::linkers());
     }
     support.retain(|s| {
-        !table.is_some_and(|t| t.excludes(Subject::File(s)))
-            && !read.is_some_and(|r| r.excludes(s.as_path()))
+        let at = crate::path::Subject::Position(s);
+        !table.is_some_and(|t| t.excludes(Subject::Program(at)))
+            && !read.is_some_and(|r| r.excludes(at))
     });
     support
 }
@@ -318,7 +323,7 @@ fn live_support(
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn live_support(
     _: Option<&ExecRules>,
-    _: Option<&Region>,
+    _: Option<&FsTable>,
     _: Option<&Admitted>,
 ) -> BTreeSet<RealPath> {
     BTreeSet::new()
@@ -327,9 +332,13 @@ fn live_support(
 #[cfg(all(test, unix))]
 mod rendered_tests {
     use super::*;
+    use crate::capability::{Extent, GrantPath};
+    use crate::path::utf8;
 
     fn prefix(path: &str) -> FsAllow {
-        FsAllow::Prefix(FrozenPath::for_test(path, path))
+        FsAllow::Prefix(
+            GrantPath::<Extent>::allowing(FrozenPath::from_surface(path)).expect("a prefix walks"),
+        )
     }
 
     fn projection(write: &[&str], deny: &[&str], pinned: &[&str]) -> SandboxProjection {
@@ -337,8 +346,8 @@ mod rendered_tests {
             fs: FsProjection::Restricted(FsRules {
                 read: Vec::new(),
                 write: write.iter().copied().map(prefix).collect(),
-                deny: deny.iter().map(|d| FrozenPath::for_test(d, d)).collect(),
-                pinned_dirs: pinned.iter().map(|d| FrozenPath::for_test(d, d)).collect(),
+                deny: deny.iter().map(|d| FrozenPath::from_surface(d)).collect(),
+                pinned_dirs: pinned.iter().map(|d| FrozenPath::from_surface(d)).collect(),
             }),
             net: true,
             exec: ExecProjection::default(),
@@ -400,7 +409,16 @@ mod rendered_tests {
     /// through a symlink never as the surface it was written by on macOS.
     #[test]
     fn an_allowance_renders_as_its_frozen_real_path() {
-        let linked = FsAllow::Prefix(FrozenPath::for_test("/ral-test/link", "/ral-test/real"));
+        let tmp = tempfile::tempdir().unwrap();
+        let root = RealPath::of_path(tmp.path()).unwrap();
+        let real = root.as_path().join("real");
+        let link = root.as_path().join("link");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let linked = FsAllow::Prefix(
+            GrantPath::<Extent>::allowing(FrozenPath::from_surface(utf8(&link).unwrap()))
+                .expect("a link walks"),
+        );
         let projection = SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
                 read: vec![linked],
@@ -412,7 +430,7 @@ mod rendered_tests {
         let out = projection.rendered().expect("ASCII paths render");
         let rules = out.fs.rules().expect("restricted");
         let object = &rules.read[0];
-        assert_eq!(object.real.as_str(), "/ral-test/real");
+        assert_eq!(object.real.as_str(), utf8(&real).unwrap());
         #[cfg(target_os = "macos")]
         assert!(object.names().all(|n| !n.as_str().contains("link")));
         #[cfg(target_os = "linux")]
@@ -423,11 +441,12 @@ mod rendered_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use super::ExecProjection;
-    use crate::capability::{Axis, Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy};
+    use crate::capability::{Capabilities, Evidence, ExecGrant, ExecKey, Floor, FsPolicy};
     use crate::path::{FrozenPath, RealPath};
     use crate::test_access::fs_read_paths;
+    use crate::test_helper::{layer, stack};
 
-    fn layer(read: Option<&str>, run: Option<&str>) -> Capabilities {
+    fn authored(read: Option<&str>, run: Option<&str>) -> Capabilities {
         let prefix = FrozenPath::from_surface;
         Capabilities {
             fs: read.map(|w| FsPolicy {
@@ -437,19 +456,20 @@ mod tests {
             }),
             exec: run
                 .map(|dir| std::iter::once((ExecKey::Dir(prefix(dir)), Evidence::ALLOW)).collect()),
-            ..Capabilities::root()
+            ..Capabilities::default()
         }
     }
 
     fn project(base: Capabilities) -> super::SandboxProjection {
-        crate::test_helper::core_shell()
-            .with_capabilities(base, |sh| sh.sandbox_projection().expect("restricted"))
+        crate::test_helper::core_shell().with_layer(layer(base), |sh| {
+            sh.sandbox_projection().expect("restricted")
+        })
     }
 
     /// The run place joins the read region, and nothing becomes writable.
     #[test]
     fn a_run_place_is_read_and_never_written() {
-        let projection = project(layer(Some("/ral-test/w"), Some("/ral-test/bin")));
+        let projection = project(authored(Some("/ral-test/w"), Some("/ral-test/bin")));
         let read = fs_read_paths(&projection.fs).expect("fs restricted");
         assert!(read.iter().any(|p| p == "/ral-test/bin"), "{read:?}");
         let rules = projection.fs.rules().expect("fs restricted");
@@ -465,11 +485,10 @@ mod tests {
             Evidence::ALLOW,
         ))
         .collect::<ExecGrant>()
-        .join_top()
-        .expect("every");
+        .with_every();
         let projection = project(Capabilities {
             exec: Some(every),
-            ..layer(Some("/ral-test/w"), None)
+            ..authored(Some("/ral-test/w"), None)
         });
         assert_eq!(projection.exec, ExecProjection::Unrestricted);
         let read = fs_read_paths(&projection.fs).expect("fs restricted");
@@ -490,14 +509,15 @@ mod tests {
             Evidence::ALLOW,
         )];
         for exec in [None, Some(only_script.into_iter().collect())] {
-            let stack = crate::capability::GrantStack::of(Capabilities {
+            let stack = stack([layer(Capabilities {
                 exec,
-                ..layer(Some("/ral-test/w"), None)
-            });
+                ..authored(Some("/ral-test/w"), None)
+            })]);
+            let floor = Floor::of_host().expect("the host floor resolves");
             let program =
                 crate::capability::Program::file(script.as_path().into()).expect("a script");
-            let admitted = stack.admit(program, Vec::new()).expect("admitted");
-            let rendered = super::SandboxProjection::of(&stack, Some(&admitted))
+            let admitted = stack.admit(&floor, program, Vec::new()).expect("admitted");
+            let rendered = super::SandboxProjection::of(&stack, &floor, Some(&admitted))
                 .expect("fs restricted")
                 .rendered()
                 .expect("system paths render");

@@ -21,7 +21,7 @@ use super::super::Refusal;
 use super::super::warrant::Slot;
 use super::{DenyMask, OpenError, open_real};
 use crate::capability::{ExecDeny, ExecRules, Subject};
-use crate::path::{Allow, Deny, Object, RealPath, Rendered};
+use crate::path::{Allow, Deny, Object, RealPath, Rendered, Trace};
 use crate::sandbox::{ExecProjection, RenderedFs};
 use libc::{c_int, c_uint};
 use rustix::fs::{FileType, Mode, OFlags};
@@ -422,8 +422,11 @@ fn lowered(table: &ExecRules, roots: &[RealPath]) -> BTreeSet<RealPath> {
     (table.allowed_dirs())
         .flat_map(|dir| {
             let at = roots.iter().any(|root| dir.within::<Allow>(root));
-            let inside = roots.iter().filter(|root| root.within::<Allow>(dir));
-            at.then(|| dir.clone()).into_iter().chain(inside.cloned())
+            let inside: Vec<_> = (roots.iter())
+                .filter(|root| root.within::<Allow>(&dir))
+                .cloned()
+                .collect();
+            at.then_some(dir).into_iter().chain(inside)
         })
         .collect()
 }
@@ -475,8 +478,11 @@ fn listed(table: &ExecRules, masks: &[Rendered], d: &RealPath, walks: bool) -> b
         .any(|m| d.contains_path::<Deny>(m.as_str().as_ref()) && !held(m, d));
     masked
         || table.denies().any(|scope| match scope {
-            ExecDeny::Dir(p) | ExecDeny::File { path: p, .. } => {
-                p.within::<Deny>(d) && !d.within::<Deny>(p)
+            ExecDeny::Dir(p) | ExecDeny::File(p) => {
+                let holds = std::iter::once(p.real.named()).chain(p.real.target());
+                holds
+                    .map(Trace::real)
+                    .any(|p| p.within::<Deny>(d) && !d.within::<Deny>(p))
             }
             ExecDeny::Name(_) => walks,
         })
@@ -556,9 +562,10 @@ impl Walk<'_> {
     /// directory the table permits, entered; a permitted file, admitted.
     fn object(&mut self, e: &RealPath, fd: BorrowedFd<'_>) -> Result<(), Error> {
         let kind = shape(fd).map_err(|errno| Error::admit(e, errno))?;
+        let at = crate::path::Subject::Position(e);
         let subject = match kind {
-            FileType::Directory => Subject::Under(e),
-            FileType::RegularFile => Subject::File(e),
+            FileType::Directory => Subject::Dir(at),
+            FileType::RegularFile => Subject::Program(at),
             _ => return Ok(()),
         };
         let masked = kind == FileType::Directory && self.masks.iter().any(|m| held(m, e));
@@ -645,12 +652,10 @@ impl From<Error> for String {
 #[allow(clippy::disallowed_methods, reason = "[test] test fs scaffolding")]
 mod tests {
     use super::*;
-    use crate::capability::{ExecAllow, ExecDeny, ExecRule};
-    use crate::path::{render_objects, render_paths};
+    use crate::capability::{ExecAllow, ExecDeny, Extent, GrantPath, Rule};
+    use crate::path::{Excluded, FrozenPath, render_objects, render_paths, utf8};
     use crate::sandbox::{FsProjection, FsRules};
     use std::path::{Path, PathBuf};
-
-    type Rule = ExecRule;
 
     /// The roots of an unrestricted fs.
     fn whole() -> Vec<RealPath> {
@@ -763,12 +768,20 @@ mod tests {
     }
 
     fn rule(path: &Path, dir: bool, allow: bool) -> Rule {
-        let path = RealPath::assumed(path);
+        let written = FrozenPath::from_surface(utf8(path).unwrap());
+        let real = RealPath::assumed(path);
         match (dir, allow) {
-            (true, true) => ExecRule::Allow(ExecAllow::Dir(path)),
-            (true, false) => ExecRule::Deny(ExecDeny::Dir(path)),
-            (false, true) => ExecRule::Allow(ExecAllow::file(path)),
-            (false, false) => ExecRule::Deny(ExecDeny::file(path)),
+            (true, true) => Rule::Allow(ExecAllow::Dir(GrantPath {
+                written,
+                real: Extent::Under(real),
+            })),
+            (true, false) => Rule::Deny(ExecDeny::Dir(
+                GrantPath::<Excluded>::walk(written).expect("a directory walks"),
+            )),
+            (false, true) => Rule::Allow(ExecAllow::support(&real)),
+            (false, false) => Rule::Deny(ExecDeny::File(
+                GrantPath::<Excluded>::walk(written).expect("a file walks"),
+            )),
         }
     }
 
@@ -781,11 +794,11 @@ mod tests {
     }
 
     fn veto(name: &str) -> Rule {
-        ExecRule::Deny(ExecDeny::Name(crate::path::command_name_key(name)))
+        Rule::Deny(ExecDeny::Name(crate::path::command_name_key(name)))
     }
 
     fn any() -> Rule {
-        ExecRule::Allow(ExecAllow::Any)
+        Rule::Allow(ExecAllow::Any)
     }
 
     /// An admit naming nothing, and a file admit since replaced by a
@@ -916,7 +929,9 @@ mod tests {
             .map(|f| d.join(f))
             .filter(|f| {
                 table
-                    .evidence(Subject::File(&real(&f.to_string_lossy())))
+                    .evidence(Subject::Program(crate::path::Subject::Position(&real(
+                        &f.to_string_lossy(),
+                    ))))
                     .permits()
             })
             .map(|f| (f, false))

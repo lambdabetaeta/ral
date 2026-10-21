@@ -74,6 +74,7 @@ pub(crate) fn prelude_runtime() -> ral_core::Runtime {
         &crate::PRELUDE,
         &ral_core::HostSurface::default(),
     )
+    .expect("a test host resolves its floor")
 }
 
 /// Boot an identity engine at `attach`, over a root on `runtime` that `dress`
@@ -94,10 +95,14 @@ pub(crate) fn engine_at(
         static RUNTIME: Cell<Option<ral_core::Runtime>> = const { Cell::new(None) };
         static DRESS: Cell<Option<Dress>> = const { Cell::new(None) };
     }
-    fn test_runtime(_: &ral_core::protocol::EngineSpec) -> ral_core::Runtime {
-        RUNTIME
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "must match EngineInstaller::runtime's signature, which can genuinely refuse"
+    )]
+    fn test_runtime(_: &ral_core::protocol::EngineSpec) -> Result<ral_core::Runtime, String> {
+        Ok(RUNTIME
             .take()
-            .expect("no runtime: was this test engine booted through `engine_at`?")
+            .expect("no runtime: was this test engine booted through `engine_at`?"))
     }
     #[allow(
         clippy::unnecessary_wraps,

@@ -10,6 +10,8 @@ use ral_core::source::SourceOrigin;
 use ral_core::terminal::TerminalState;
 use ral_core::types::{Break, Escape, Mooring, Settled, Shell};
 
+const HOST: &str = "a test host resolves its floor";
+
 /// Run one top-level run of `source` through the public `run` door
 /// and return the body's `Settled<Value>`.  Every test below picks source
 /// it expects to compile, so a static diagnostic is a test bug.
@@ -69,7 +71,8 @@ fn handler_self_mask_survives_panic_mid_body() {
             ..HostSurface::default()
         },
         ral_core::test_helper::process_cwd(),
-    );
+    )
+    .expect(HOST);
     let _ = top_level(&mut shell, "alias boom { |args| __test-panic }")
         .expect("installing the alias must succeed");
     assert!(
@@ -108,6 +111,7 @@ fn test_shell() -> Shell {
         &HostSurface::default(),
         ral_core::test_helper::process_cwd(),
     )
+    .expect(HOST)
 }
 
 /// A cleanup runs under an `exit`, and the `exit` follows it.

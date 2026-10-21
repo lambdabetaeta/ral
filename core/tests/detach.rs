@@ -61,7 +61,8 @@ fn armed() -> Shell {
             ..ral_core::boot::HostSurface::default()
         },
         ral_core::test_helper::process_cwd(),
-    );
+    )
+    .expect("a test host resolves its floor");
     shell.arm_detach(16);
     shell
 }

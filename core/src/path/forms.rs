@@ -149,6 +149,12 @@ impl LexicalPath {
         Self(path)
     }
 
+    /// `path` as a spelling, where it is absolute: what a held path is when
+    /// it must be walked again, such as a `PATH` entry or the running binary.
+    pub(crate) fn absolute(path: &Path) -> Option<Self> {
+        is_absolute(path).then(|| Self::from_lexed(path.to_path_buf()))
+    }
+
     /// The lexical fold, a fixed point of [`fold_dots`](super::lex::fold_dots):
     /// no `.` or `..` past the root, no trailing separator, and on Windows one
     /// separator throughout, `\`, but in a head whose kind or meaning turns on
@@ -367,6 +373,22 @@ impl FrozenPath {
         Path::new(&self.surface)
     }
 
+    /// This spelling as the walk takes one: absolute and folded already, as
+    /// every frozen spelling is.  Never the root, which no host walks as one
+    /// spelling (Windows has no `/`).
+    pub(crate) fn lexical(&self) -> LexicalPath {
+        LexicalPath::from_lexed(PathBuf::from(&self.surface))
+    }
+
+    /// A position held as a spelling, shown: what a launch's own support
+    /// files are, which no author wrote.
+    pub(crate) fn of_real(real: &RealPath) -> Self {
+        Self {
+            surface: shown(real.as_path()),
+            real: real.clone(),
+        }
+    }
+
     /// The surface form, for the OS sandbox renderer and overlap keys.
     pub fn as_str(&self) -> &str {
         &self.surface
@@ -384,24 +406,6 @@ impl FrozenPath {
         &self.real
     }
 
-    /// `self` unless it is the root, which is never re-resolved:
-    /// canonicalising anchors a driveless path to a cwd, which on Windows
-    /// would narrow the universal root to one drive.
-    fn off_root(&self) -> Option<&Self> {
-        (!self.is_root()).then_some(self)
-    }
-
-    /// This prefix with its real form re-resolved against the live disk, for
-    /// an exclusion, which names whatever its spelling reaches now.  The
-    /// surface is kept: it is absolute and folded, as the freeze guarantees.
-    pub(crate) fn live(&self) -> Self {
-        debug_assert!(self.is_root() || self.is_absolute(), "{:?}", self.surface);
-        Self {
-            surface: self.surface.clone(),
-            real: self.live_real(),
-        }
-    }
-
     /// Whether this is the universal prefix, [`root`](Self::root).
     pub fn is_root(&self) -> bool {
         super::lex::is_bare_root(&self.surface, PathRules::HOST)
@@ -411,14 +415,6 @@ impl FrozenPath {
     /// whose frozen real form is.
     pub fn is_universal(&self) -> bool {
         self.contains::<super::Allow>(Self::root().real.as_path())
-    }
-
-    /// The real form of this prefix's surface against the live disk.
-    pub(crate) fn live_real(&self) -> RealPath {
-        self.off_root().map_or_else(
-            || self.real.clone(),
-            |p| RealPath::lenient(p.surface_path()),
-        )
     }
 
     /// Consume into the owned surface `String`, for the wire and render
@@ -431,17 +427,6 @@ impl FrozenPath {
     /// frozen entry that is not.
     pub fn is_absolute(&self) -> bool {
         is_absolute(self.surface_path())
-    }
-
-    /// Mint a divergent `surface`/`real` pair — the shape a real
-    /// symlink freezes to, without a disk.  `#[cfg(test)]` so it can never
-    /// become a production door for fabricating a real form.
-    #[cfg(test)]
-    pub(crate) fn for_test(surface: &str, real: &str) -> Self {
-        Self {
-            surface: surface.to_string(),
-            real: RealPath::assumed(real),
-        }
     }
 }
 
@@ -473,10 +458,13 @@ impl PartialEq<String> for FrozenPath {
 mod tests {
     use super::{FrozenPath, GuestPath, RealPath};
     #[cfg(unix)]
-    use crate::path::utf8;
+    use crate::capability::GrantPath;
+    #[cfg(unix)]
+    use crate::path::{Depth, Excluded, Subject, Walked as _, utf8};
 
-    /// An exclusion's live real form keeps a name that is not Unicode
-    /// byte-exact, so it holds that name and not the U+FFFD sibling.
+    /// An exclusion's walk keeps a name that is not Unicode byte-exact, so it
+    /// holds that name and not the U+FFFD sibling, nor what the link reached
+    /// when it was walked before.
     #[cfg(unix)]
     #[test]
     #[allow(
@@ -491,17 +479,22 @@ mod tests {
         let link = dir.as_path().join("dlink");
         std::os::unix::fs::symlink(dir.as_path().join("tgt"), &link).unwrap();
         let prefix = FrozenPath::from_surface(utf8(&link).unwrap());
+        let before = GrantPath::<Excluded>::walk(prefix.clone()).unwrap();
 
         let target = dir.as_path().join(OsStr::from_bytes(b"tgt\xFF"));
         std::fs::remove_file(&link).unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        let live = prefix.live();
+        let walked = GrantPath::<Excluded>::walk(prefix).unwrap().real;
+        let holds = |excluded: &Excluded, path: &std::path::Path| {
+            let trace = crate::test_helper::trace(path);
+            excluded.matches(Subject::Access(&trace), Depth::Within)
+        };
 
-        assert_eq!(live.real().as_path(), target);
-        assert!(live.contains::<crate::path::Deny>(&target.join("child")));
+        assert_eq!(walked.followed().real().as_path(), target);
+        assert!(holds(&walked, &target.join("child")).is_some());
         let lossy = dir.as_path().join("tgt\u{FFFD}");
-        assert!(!live.contains::<crate::path::Deny>(&lossy.join("child")));
-        assert!(!prefix.contains::<crate::path::Deny>(&target.join("child")));
+        assert!(holds(&walked, &lossy.join("child")).is_none());
+        assert!(holds(&before.real, &target.join("child")).is_none());
     }
 
     /// The ceiling covers every path, on whatever drive.

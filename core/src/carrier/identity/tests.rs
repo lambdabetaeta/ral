@@ -336,9 +336,9 @@ mod durability_tests {
         "panicky",
         |_| {
             let mut runtime =
-                crate::HostSurface::default().runtime(crate::terminal::TerminalState::default());
+                crate::HostSurface::default().runtime(crate::terminal::TerminalState::default())?;
             runtime.install_builtins(&PANIC_BUILTINS_ARR);
-            runtime
+            Ok(runtime)
         },
         |_, _| Ok(()),
     )];
@@ -416,9 +416,53 @@ mod probe_tests {
         use crate::carrier::read;
         let transport = fresh();
         assert_eq!(read::<u64>(&transport, &Probe::WorkerCount), Ok(0));
+        assert_eq!(
+            transport.grants(),
+            Ok(crate::capability::GrantStack::root().summary()),
+            "a fresh shell shows the ambient root as nothing"
+        );
+    }
+
+    /// An engine seated under a layer that withholds the net and reads one
+    /// folder.
+    static GRANTED: [crate::engine::EngineInstaller; 1] = [crate::carrier::testkit::installer(
+        "granted",
+        |_| crate::HostSurface::default().runtime(crate::terminal::TerminalState::default()),
+        |_, shell| {
+            use crate::capability::{Capabilities, FsPolicy, Net};
+            use crate::path::{FrozenPath, test_absolute};
+            shell
+                .context
+                .grants
+                .push(crate::test_helper::layer(Capabilities {
+                    fs: Some(FsPolicy {
+                        read_prefixes: vec![FrozenPath::from_surface(&test_absolute(
+                            "/ral-probe/work",
+                        ))],
+                        ..FsPolicy::default()
+                    }),
+                    net: Some(Net::Offline),
+                    ..Capabilities::default()
+                }));
+            Ok(())
+        },
+    )];
+
+    /// `Probe::Grants` answers what the session's stack shows, not the stack.
+    #[test]
+    fn grants_answer_a_summary_of_the_sessions_stack() {
+        use crate::capability::Net;
+        let transport = boot(&GRANTED);
+        let shown = transport.grants().expect("the probe answers");
+        let [layer] = shown.layers() else {
+            panic!("the ambient root shows nothing, the one layer does: {shown:?}");
+        };
+        assert_eq!(layer.net, Some(Net::Offline));
+        let read = &layer.fs.as_ref().expect("fs is shown").read;
+        assert_eq!(read.len(), 1, "{read:?}");
         assert!(
-            transport.grants().is_ok_and(|stack| !stack.is_empty()),
-            "a fresh shell still carries the ambient root frame"
+            std::path::Path::new(&read[0]).ends_with("ral-probe/work"),
+            "{read:?}"
         );
     }
 

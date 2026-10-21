@@ -143,7 +143,8 @@ impl Launch {
         fuel: u32,
         name: &str,
     ) -> Result<String, Severed> {
-        let own = crate::prompt::with_grant(&self.system, &seat.read(|t| t.grants())?, caps);
+        let own =
+            crate::prompt::with_grant(&self.system, &seat.read(|t| t.grants())?, &caps.summary());
         Ok(if self.tools.is_empty() {
             own
         } else {

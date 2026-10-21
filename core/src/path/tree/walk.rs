@@ -184,7 +184,7 @@ impl<I: Iterator<Item = Settled<Sighting>>> Admitted<I> {
         for sighting in self.sightings.by_ref() {
             let Sighting { path, depth, kind } = sighting?;
             let anchored = shell.anchor(&path);
-            if !shell.admits_fs_exact(&FsOp::Read, &anchored.canonicalise_lenient()) {
+            if !shell.admits_named(&FsOp::Read, &anchored) {
                 continue;
             }
             let shown = match self

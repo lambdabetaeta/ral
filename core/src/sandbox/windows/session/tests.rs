@@ -2,6 +2,7 @@ use super::{
     FsAllow, FsRules, GrantKind, ProjectionKey, filter_out_granted, profile_name,
     refuse_deny_meeting_grant, refuse_universal_prefix,
 };
+use crate::capability::{Extent, GrantPath};
 use crate::path::{FrozenPath, RealPath};
 use crate::sandbox::Refusal;
 use std::collections::HashSet;
@@ -58,7 +59,11 @@ fn projection_key_identity_is_the_fs_triple() {
 fn prefixes(paths: &[&str]) -> Vec<FsAllow> {
     paths
         .iter()
-        .map(|p| FsAllow::Prefix(FrozenPath::from_surface(p)))
+        .map(|p| {
+            FsAllow::Prefix(
+                GrantPath::<Extent>::allowing(FrozenPath::from_surface(p)).expect("a prefix walks"),
+            )
+        })
         .collect()
 }
 
@@ -66,7 +71,7 @@ fn rules(read: &[&str], write: &[&str], deny: &[&str]) -> FsRules {
     FsRules {
         read: prefixes(read),
         write: prefixes(write),
-        deny: deny.iter().map(FrozenPath::from_surface).collect(),
+        deny: deny.iter().map(|d| FrozenPath::from_surface(d)).collect(),
         pinned_dirs: Vec::new(),
     }
 }

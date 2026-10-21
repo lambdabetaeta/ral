@@ -248,6 +248,10 @@ pub fn run() -> Result<(), String> {
         }
     }
     let config_dir = app::EXARCH.xdg_dir(ral_core::path::XdgKind::Config);
+    // The boot's own reads are judged under the floor of a runtime built here,
+    // before any is made; a host that cannot resolve its floor boots nothing.
+    let boot_floor =
+        ral_core::Runtime::bare(terminal).map_err(|e| format!("exarch cannot start: {e}"))?;
     // Chat registers no tools, so there is nothing for a system prompt to say.
     let system = if c.chat {
         prompt::CHAT_SYSTEM.to_string()
@@ -255,6 +259,7 @@ pub fn run() -> Result<(), String> {
         prompt::assemble(
             &c.system_files,
             &invocation,
+            boot_floor.floor(),
             app::EXARCH,
             &launch_cwd,
             &config_dir,

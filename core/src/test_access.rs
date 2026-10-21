@@ -22,7 +22,9 @@ use crate::capability::{ExecAllow, ExecDeny};
 use crate::carrier::{IdentityTransport, ProbeError, Transport};
 use crate::first_order::FOValue;
 use crate::ir::{CaseArm, Comp, CompKind, Exec, Val, ValListElem};
-use crate::path::RealPath;
+#[cfg(unix)]
+use crate::path::Walked;
+use crate::path::{LeafMode, LexicalPath, walk_lenient};
 use crate::protocol::Frame;
 use crate::protocol::channel::{WireChannel, WireStream};
 use crate::protocol::probe::Probe;
@@ -123,23 +125,23 @@ pub fn exec_projection_rules(projection: &SandboxProjection) -> Option<Vec<Kerne
     };
     let positives = rules.allows().filter_map(|scope| match scope {
         ExecAllow::Any => Some(KernelExecRule::Any { allow: true }),
-        ExecAllow::Dir(path) => Some(KernelExecRule::Dir {
-            path: path.to_string(),
+        ExecAllow::Dir(dir) => Some(KernelExecRule::Dir {
+            path: dir.real.real().to_string(),
             allow: true,
         }),
-        ExecAllow::File { path, .. } => Some(KernelExecRule::File {
-            path: path.to_string(),
+        ExecAllow::File { real, .. } => Some(KernelExecRule::File {
+            path: real.to_string(),
             allow: true,
         }),
         ExecAllow::Tool(_) => None,
     });
     let negatives = rules.denies().map(|scope| match scope {
-        ExecDeny::Dir(path) => KernelExecRule::Dir {
-            path: path.to_string(),
+        ExecDeny::Dir(dir) => KernelExecRule::Dir {
+            path: dir.real.followed().real().to_string(),
             allow: false,
         },
-        ExecDeny::File { path, .. } => KernelExecRule::File {
-            path: path.to_string(),
+        ExecDeny::File(file) => KernelExecRule::File {
+            path: file.real.followed().real().to_string(),
             allow: false,
         },
         ExecDeny::Name(name) => KernelExecRule::Name(name.clone()),
@@ -164,17 +166,20 @@ pub fn exec_projection_files(projection: &SandboxProjection) -> Vec<String> {
     }
 }
 
-/// A host file whose real path, and launch path, is `real`.
+/// A host file whose real path, and launch path, is `real`: walked leniently,
+/// so a path the test names need not exist.
 fn file(real: &str) -> Program {
+    let path = std::path::PathBuf::from(real);
+    let spelled = LexicalPath::absolute(&path).expect("a test names an absolute file");
     Program::File {
-        path: real.into(),
-        real: RealPath::assumed(real),
+        trace: walk_lenient(&spelled, LeafMode::Follow).expect("a test file walks"),
+        path,
     }
 }
 
 /// Whether the live stack admits running the file whose real path is `real`.
 pub fn admits_file(shell: &Shell, real: &str) -> bool {
-    shell.context.grants.admits(&file(real))
+    shell.context.grants.admits(shell.floor(), &file(real))
 }
 
 /// `Shell::check_exec` on the file whose real path is `real`, with `args`.
@@ -275,6 +280,12 @@ pub fn wire_read_frame(channel: &mut WireChannel) -> std::io::Result<Option<Fram
     channel.read_frame()
 }
 
+/// How many path components this thread's walks have opened so far: what a
+/// test reads to show that something walked nothing, or walked once.
+pub fn walk_steps() -> usize {
+    crate::path::walk::steps_taken()
+}
+
 /// The engine's answer to one probe, read straight off `shell`.
 pub fn answer_probe(shell: &Shell, probe: &Probe) -> FOValue {
     crate::engine::probe::answer(shell, probe)
@@ -288,12 +299,13 @@ pub fn worker_count(transport: &dyn Transport) -> Result<u64, ProbeError> {
     crate::carrier::read(transport, &Probe::WorkerCount)
 }
 
-/// How many capability frames the engine behind `transport` carries.
+/// How many capability layers the engine behind `transport` shows: those
+/// that restrict or run something.
 ///
 /// # Errors
 /// As [`Transport::cwd`].
 pub fn grant_depth(transport: &dyn Transport) -> Result<u64, ProbeError> {
-    transport.grants().map(|stack| stack.len() as u64)
+    transport.grants().map(|shown| shown.layers().len() as u64)
 }
 
 /// `Shell::workers` on the engine behind `transport`, each entry's handle

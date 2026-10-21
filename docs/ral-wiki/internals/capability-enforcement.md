@@ -65,24 +65,29 @@ and the layers beneath it, so pushing a layer appends a conjunct and changes
 none beneath it.
 
 There is no `Capabilities::meet`, because an authored `ExecGrant` is not closed
-under intersection: a bare key means whatever file the host `PATH` finds at
-run time ([[decisions/260906_object-not-name|object-not-name]]). So the fold
-compiles first, then meets:
+under intersection: a bare key means whatever file the decoding env's `PATH` finds
+([[decisions/260906_object-not-name|object-not-name]]). So a layer is resolved
+where it is decoded, and the fold meets what it holds. A `GrantLayer` keeps its
+rules and nothing beside them: every spelling was walked as the layer was made
+(`GrantLayer::from_capabilities`, or `decode_capability_map`), an allowance
+holding the position its walk reached (`Extent`: everywhere, or under a
+position), an exclusion the objects its walk held (`Excluded`: the name and,
+where it was a link, its target), a bare name the file the decoding env's `PATH`
+found and the tool this platform bundles. Nothing judges a spelling again:
 
-- `rules` compiles every layer into an `ExecRules` table for each question, and
-  meets the tables. `every` compiles to `ExecAllow::Any`.
-- `region` folds every layer's prefixes for one operation into a
-  `Table<FsAllow, FsDeny>` and meets those. Allowances stay as frozen at decode; only
-  deny paths are re-frozen. A read takes each layer's read and write prefixes
-  (writing reads) and, through `GrantStack::read`, its run places, then joins
-  `floor()`.
+- `rules` meets every layer's `ExecRules` table for each question. `every` is
+  `ExecAllow::Any`.
+- `region` folds every layer's tables for one operation into a
+  `Table<FsAllow, FsDeny>` and meets those. A read takes each layer's read and
+  write allowances (writing reads) and, through `GrantStack::read`, its run
+  places, then joins the `Floor`.
 
 Both are a `Table`, whose meet is the pointwise law `⟦a ∧ b⟧ = ⟦a⟧ ∧ ⟦b⟧`
 ([[design/authority-tables|authority-tables]]).
 [[related/access-control-algebra|access-control-algebra]] reads the design
 against Bruns and Huth's PBel.
 
-**Extension happens once, before the first push.** `Capabilities::extend` takes
+**Extension happens once, before the first push.** `GrantLayer::extend` takes
 a `Fragment`, the loader's result for exarch's `--extend` file, in which an
 omitted axis states nothing; in a policy an omitted axis is `t`. A `Fragment`
 can never be pushed, so extension cannot follow restriction.
@@ -125,9 +130,11 @@ process does on its own.**
 
 **For the filesystem, guard and sandbox cannot disagree, by construction.**
 Both read one fold (`capability/fs.rs`). `region` meets each layer's table
-for the operation: the allows meet and the `deny_paths` join. A read then joins
-`floor()`, the platform's system paths, after the meet, so no `read` narrows the
-floor and only a `deny` removes part of it. No backend carries a system set of
+for the operation: the allows meet and the exclusions join. A read then joins
+the `Floor`, the platform's system paths, after the meet, so no `read` narrows
+the floor and only a `deny` removes part of it. The floor is host state, resolved
+once where the `Runtime` is built (a host that cannot resolve it refuses to
+boot) and passed to every reader; no stack holds it and no wire carries it. No backend carries a system set of
 its own. So the conservatism invariant needs no differential test. The only
 difference is *when* the fold runs:
 

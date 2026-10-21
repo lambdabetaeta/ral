@@ -278,7 +278,8 @@ mod tests {
         .shell(
             crate::terminal::TerminalState::default(),
             crate::test_helper::process_cwd(),
-        );
+        )
+        .expect("a test host resolves its floor");
         match shell.run(Run::captured(
             "audit { core-panic-now }",
             SourceOrigin::named("<test>"),
@@ -309,7 +310,8 @@ mod tests {
         .shell(
             crate::terminal::TerminalState::default(),
             crate::test_helper::process_cwd(),
-        );
+        )
+        .expect("a test host resolves its floor");
         let before_cwd = shell.cwd();
         let tmp = shown(std::env::temp_dir());
 

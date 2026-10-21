@@ -51,7 +51,8 @@ pub fn discover_all(cwd: &Path, config_dir: &Path) -> Vec<(String, PathBuf)> {
 ///
 /// Runs once at boot, before a `Shell` exists, so it asks the fs guard's own
 /// verdict — [`GrantStack::admits_fs`](ral_core::capability::GrantStack::admits_fs)
-/// over the session's whole grant stack — about each `SKILL.md` it opens,
+/// over the session's whole grant stack, with the floor of the runtime the
+/// boot built — about each `SKILL.md` it opens,
 /// where `skill-list` and `skill` use `Shell::check_fs_read`.  At boot that
 /// stack is the one this agent will run under, so the two doors agree by
 /// construction.
@@ -63,6 +64,7 @@ pub fn discover_metadata(
     cwd: &ral_core::path::CwdPath,
     config_dir: &Path,
     grants: &ral_core::capability::GrantStack,
+    floor: &ral_core::capability::Floor,
 ) -> Vec<Skill> {
     // No shell: every candidate is `cwd`/`config_dir` joined, and so the
     // resolver's home is never consulted.
@@ -72,7 +74,10 @@ pub fn discover_metadata(
     for (name, dir) in discover_all(cwd.as_path(), config_dir) {
         let sk_md = dir.join("SKILL.md");
         let rp = resolver.anchor(&sk_md);
-        if !grants.admits_fs(&ral_core::capability::FsOp::Read, &rp) {
+        let Ok(trace) = ral_core::path::walk_lenient(&rp, ral_core::path::LeafMode::Follow) else {
+            continue;
+        };
+        if !grants.admits_fs(floor, &ral_core::capability::FsOp::Read, &trace) {
             continue;
         }
         let Ok(raw) = std::fs::read_to_string(rp.as_path()) else {

@@ -8,20 +8,19 @@
 )]
 
 use super::FsOp;
-use crate::capability::{Capabilities, FsPolicy, GrantStack};
-use crate::path::{FrozenPath, Resolver};
+use crate::capability::{Capabilities, Floor, FsPolicy, GrantStack};
+use crate::path::FrozenPath;
+use crate::test_helper::{layer, trace};
 
 fn stack(fs: FsPolicy) -> GrantStack {
-    GrantStack::of(Capabilities {
+    crate::test_helper::stack([layer(Capabilities {
         fs: Some(fs),
         ..Capabilities::default()
-    })
+    })])
 }
 
 fn admits_read(grants: &GrantStack, path: &std::path::Path) -> bool {
-    let cwd = crate::test_helper::process_cwd();
-    let rp = Resolver::at(&crate::types::EnvVars::new(), &cwd).anchor(path);
-    grants.admits_fs(&FsOp::Read, &rp)
+    grants.admits_fs(&Floor::default(), &FsOp::Read, &trace(path))
 }
 
 #[test]
@@ -55,9 +54,10 @@ fn a_symlink_spelled_read_prefix_admits_its_target() {
 fn a_write_onto_a_pinned_binary_is_guarded_before_any_grant_is_consulted() {
     use super::{FsRefusal, fs_judge};
     crate::sandbox::pin();
-    let open = GrantStack::of(Capabilities::default());
+    let open = crate::test_helper::stack([layer(Capabilities::default())]);
     let own = std::env::current_exe().expect("own path");
-    let verdict = |path: &std::path::Path, op: &FsOp| fs_judge(&open, path, op);
+    let verdict =
+        |path: &std::path::Path, op: &FsOp| fs_judge(&open, &Floor::default(), &trace(path), op);
 
     assert!(
         matches!(verdict(&own, &FsOp::Write), Err(FsRefusal::Guarded("ral"))),
@@ -128,7 +128,7 @@ fn a_deny_holding_the_stored_name_refuses_plainly() {
     };
     let matched_by = |grants: &GrantStack| {
         let access = root.join("d/secrets/f");
-        match fs_judge(grants, &access, &FsOp::Read) {
+        match fs_judge(grants, &Floor::default(), &trace(&access), &FsOp::Read) {
             Err(FsRefusal::Withheld(Withheld::Excluded { matched_by, .. })) => matched_by,
             _ => panic!("an exclusion holds the access"),
         }
@@ -141,12 +141,11 @@ mod words {
     use super::*;
     use crate::capability::{Evidence, ExecGrant, ExecKey, Program};
     use crate::guard::enforce::{check_exec, check_fs_exact};
-    use crate::path::RealPath;
     use crate::types::Context;
 
     fn ctx(layers: impl IntoIterator<Item = Capabilities>) -> Context {
         let mut ctx = Context::under_grants(GrantStack::root());
-        layers.into_iter().for_each(|l| ctx.grants.push(l));
+        layers.into_iter().for_each(|l| ctx.grants.push(layer(l)));
         ctx
     }
 
@@ -160,16 +159,16 @@ mod words {
     fn file(real: &str) -> Program {
         Program::File {
             path: real.into(),
-            real: RealPath::assumed(real),
+            trace: trace(real),
         }
     }
 
     fn dir(path: &str) -> ExecKey {
-        ExecKey::Dir(FrozenPath::for_test(path, path))
+        ExecKey::Dir(FrozenPath::from_surface(path))
     }
 
     fn refusal(ctx: &Context, real: &str) -> crate::types::Error {
-        match check_exec(ctx, "t", file(real), vec![]) {
+        match check_exec(ctx, &Floor::default(), "t", file(real), vec![]) {
             Ok(_) => panic!("{real} should be refused"),
             Err(denial) => denial.error,
         }
@@ -209,17 +208,20 @@ mod words {
         assert!(!e.hint.unwrap().contains("--extend"));
     }
 
-    /// A name deny is cited as the author wrote it, not as the file it found.
+    /// A name deny is cited as the author wrote it.  The program is a native
+    /// binary named `sh` that the file `sh` resolved to cannot reach, so only
+    /// the name veto fires.
+    #[cfg(unix)]
     #[test]
     fn a_name_deny_is_named_as_written() {
-        let path = crate::path::locate("sh", std::env::var("PATH").ok().as_deref(), None)
-            .expect("sh on PATH");
-        let real = RealPath::of_path(&path).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let sh = tmp.path().join("sh");
+        std::fs::copy("/bin/true", &sh).unwrap();
         let deny = exec(&[
             (ExecKey::Name("sh".into()), Evidence::ALLOW),
             (ExecKey::Name("sh".into()), Evidence::DENY),
         ]);
-        let e = refusal(&ctx([deny]), &real.to_string());
+        let e = refusal(&ctx([deny]), crate::path::utf8(&sh).unwrap());
         assert!(
             e.message.contains("excluded by `` `name sh ``"),
             "{}",
@@ -243,7 +245,7 @@ mod words {
             "{}",
             e.message
         );
-        let unrestricted = check_exec(&ctx([runs]), "t", file("/x/t"), vec![]);
+        let unrestricted = check_exec(&ctx([runs]), &Floor::default(), "t", file("/x/t"), vec![]);
         assert!(unrestricted.is_ok());
     }
 
@@ -263,7 +265,13 @@ mod words {
             ..Capabilities::default()
         };
         let ctx = ctx([excluding]);
-        let Err(denial) = check_exec(&ctx, "ls", Program::Tool("ls".into()), vec![]) else {
+        let Err(denial) = check_exec(
+            &ctx,
+            &Floor::default(),
+            "ls",
+            Program::Tool("ls".into()),
+            vec![],
+        ) else {
             panic!("an fs exclusion over ral's binary refuses a bundled tool");
         };
         assert!(
@@ -285,9 +293,10 @@ mod words {
             fs: Some(FsPolicy::default()),
             ..Capabilities::default()
         }]);
-        let read = check_fs_exact(&ctx, std::path::Path::new("/nowhere/x"), &FsOp::Read);
+        let (floor, nowhere) = (Floor::default(), trace("/nowhere/x"));
+        let read = check_fs_exact(&ctx, &floor, &nowhere, &FsOp::Read);
         assert!(read.err().unwrap().error.message.contains("reading"));
-        let write = check_fs_exact(&ctx, std::path::Path::new("/nowhere/x"), &FsOp::Write);
+        let write = check_fs_exact(&ctx, &floor, &nowhere, &FsOp::Write);
         assert!(write.err().unwrap().error.message.contains("writing"));
     }
 }
@@ -297,7 +306,6 @@ mod words {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_case_variant_spelling_meets_the_deny() {
-    use crate::path::{LeafMode, walk};
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let secret = root.join("secret");
@@ -307,13 +315,13 @@ fn a_case_variant_spelling_meets_the_deny() {
         return;
     }
     let grants = stack(FsPolicy {
-        read_prefixes: vec![FrozenPath::from_surface(&root)],
-        deny_paths: vec![FrozenPath::from_surface(&secret)],
+        read_prefixes: vec![FrozenPath::from_surface(crate::path::utf8(&root).unwrap())],
+        deny_paths: vec![FrozenPath::from_surface(
+            crate::path::utf8(&secret).unwrap(),
+        )],
         ..FsPolicy::default()
     });
-    let cwd = crate::test_helper::process_cwd();
-    let rp = Resolver::at(&crate::types::EnvVars::new(), &cwd).anchor(&root.join("SECRET/key"));
-    let located = walk(&rp, LeafMode::Follow).unwrap();
-    assert_eq!(located.real().as_path(), secret.join("key"));
-    assert!(!admits_read(&grants, located.real().as_path()));
+    let access = trace(root.join("SECRET/key"));
+    assert_eq!(access.real().as_path(), secret.join("key"));
+    assert!(!grants.admits_fs(&Floor::default(), &FsOp::Read, &access));
 }

@@ -5,8 +5,8 @@
 //! withholds.
 
 use super::enforce::{Denial, check_device_name, check_exec, check_flag, check_fs_exact};
-use crate::capability::{Admitted, Capabilities, Flag, FsOp, GrantStack, Program};
-use crate::path::{LeafMode, LexicalPath, Located};
+use crate::capability::{Admitted, Flag, Floor, FsOp, GrantLayer, GrantStack, Program};
+use crate::path::{LeafMode, LexicalPath, Located, Trace, walk_lenient};
 use crate::sandbox::SandboxProjection;
 use crate::types::{Break, Check, Resource, Settled, Shell};
 use std::collections::BTreeMap;
@@ -43,7 +43,7 @@ impl Shell {
         program: Program,
         args: Vec<String>,
     ) -> Settled<Admitted> {
-        let verdict = check_exec(&self.context, shown, program, args);
+        let verdict = check_exec(&self.context, self.floor(), shown, program, args);
         self.judged(verdict)
     }
 
@@ -59,17 +59,24 @@ impl Shell {
         self.check_named(path, &FsOp::Read)
     }
 
-    /// Judge `op` on `path` as a name, canonicalised leniently.  A
+    /// The floor every fs judgment of this shell reads: its runtime's.
+    pub fn floor(&self) -> &Floor {
+        self.session.runtime.floor()
+    }
+
+    /// Judge `op` on `path` as a name, walked leniently.  A
     /// [discard device](LexicalPath::is_discard) is exempt from both regions,
     /// and a [reserved device name](check_device_name) is refused before
-    /// either, asked before canonicalisation, since the question is about the
-    /// name and not about what is on the disk under it.
+    /// either, asked before the walk, since the question is about the name and
+    /// not about what is on the disk under it.
     fn check_named(&mut self, path: &LexicalPath, op: &FsOp) -> Settled<()> {
         if path.is_discard() {
             return Ok(());
         }
         check_device_name(path)?;
-        let verdict = check_fs_exact(&self.context, &path.canonicalise_lenient(), op);
+        let trace = walk_lenient(path, LeafMode::Follow)
+            .map_err(|e| crate::types::Error::io(path.shown(), &e))?;
+        let verdict = check_fs_exact(&self.context, self.floor(), &trace, op);
         self.judged(verdict)
     }
 
@@ -88,7 +95,7 @@ impl Shell {
         let located = crate::path::walk(path, LeafMode::Follow)
             .map_err(|e| crate::types::Error::io(path.shown(), &e))?;
         if !path.is_discard() {
-            let verdict = check_fs_exact(&self.context, located.real().as_path(), op);
+            let verdict = check_fs_exact(&self.context, self.floor(), located.trace(), op);
             self.judged(verdict)?;
         }
         Ok(located)
@@ -117,7 +124,7 @@ impl Shell {
             self.check_named(path, op)?;
             return Ok(None);
         };
-        let verdict = check_fs_exact(&self.context, located.real().as_path(), op);
+        let verdict = check_fs_exact(&self.context, self.floor(), located.trace(), op);
         self.judged(verdict)?;
         Ok(Some(located))
     }
@@ -127,46 +134,52 @@ impl Shell {
     /// aborting.  One off-limits entry must not blank a whole listing.
     pub fn locate_if_admitted(&mut self, path: &LexicalPath, op: &FsOp) -> Option<Located> {
         let located = crate::path::walk(path, LeafMode::Follow).ok()?;
-        self.admits_fs_exact(op, located.real().as_path())
-            .then_some(located)
+        self.admits_fs(op, located.trace()).then_some(located)
     }
 
-    /// Whether the live stack admits `op` on a path already located — no
+    /// Whether the live stack admits `op` on an access already walked — no
     /// audit, no refusal: the question a door asks about a *side* read it
     /// may simply forgo, such as a write's before-image.
-    pub fn admits_fs_exact(&self, op: &FsOp, real: &std::path::Path) -> bool {
-        self.context.grants.admits_fs_exact(op, real)
+    pub fn admits_fs(&self, op: &FsOp, trace: &Trace) -> bool {
+        self.context.grants.admits_fs(self.floor(), op, trace)
+    }
+
+    /// Whether the live stack admits `op` on `path` as a name, walked
+    /// leniently: what a listing asks of each entry it may show.  A name that
+    /// cannot be walked is not admitted.
+    pub fn admits_named(&self, op: &FsOp, path: &LexicalPath) -> bool {
+        walk_lenient(path, LeafMode::Follow).is_ok_and(|trace| self.admits_fs(op, &trace))
     }
 
     /// The OS-renderable projection of the live capability stack; `None` when
     /// no layer restricts enough to need an OS sandbox at all.
     pub fn sandbox_projection(&self) -> Option<SandboxProjection> {
-        SandboxProjection::of(&self.context.grants, None)
+        SandboxProjection::of(&self.context.grants, self.floor(), None)
     }
 
-    /// Run `f` with `capabilities` pushed for its dynamic extent.  The single
-    /// gate into capability-checked code — `grant { … }` blocks and plugin
-    /// hook / keybinding / alias dispatch all funnel through here.  The push
-    /// sits on top of the caller's stack, so effective authority is always
-    /// caller ∩ this layer.
-    pub fn with_capabilities<R>(
-        &mut self,
-        capabilities: Capabilities,
-        f: impl FnOnce(&mut Self) -> R,
-    ) -> R {
-        self.with_layers(GrantStack::of(capabilities), f)
+    /// Run `f` with `layer` pushed for its dynamic extent.  The single gate
+    /// into capability-checked code — `grant { … }` blocks and plugin hook /
+    /// keybinding / alias dispatch all funnel through here.  The push sits on
+    /// top of the caller's stack, so effective authority is always caller ∩
+    /// this layer.
+    pub fn with_layer<R>(&mut self, layer: GrantLayer, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.with_pushed(vec![layer], f)
     }
 
-    /// [`with_capabilities`](Self::with_capabilities) for a whole ceiling: every
-    /// layer of `stack` is pushed for `f`'s dynamic extent and popped after —
-    /// never folded into one frame, since the stack is the meet.
+    /// [`with_layer`](Self::with_layer) for a whole ceiling: every layer of
+    /// `stack` is pushed for `f`'s dynamic extent and popped after — never
+    /// folded into one layer, since the stack is the meet.
     pub(crate) fn with_layers<R>(
         &mut self,
         stack: GrantStack,
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
-        let (at, depth) = (self.context.grants.len(), stack.len());
-        for layer in stack {
+        self.with_pushed(stack.into_iter().collect(), f)
+    }
+
+    fn with_pushed<R>(&mut self, layers: Vec<GrantLayer>, f: impl FnOnce(&mut Self) -> R) -> R {
+        let (at, depth) = (self.context.grants.len(), layers.len());
+        for layer in layers {
             self.context.grants.push(layer);
         }
         self.audit_deputy_prefixes();
@@ -175,12 +188,12 @@ impl Shell {
         r
     }
 
-    /// Push a capability frame with no paired pop: it survives to process
-    /// exit.  Where `ral --capabilities <file.ral>`'s session-wide ceiling
-    /// lands, above the [`Capabilities::root`] frame [`Shell::root`] installs.
-    /// Lexical attenuation (`grant {}`) wants [`Self::with_capabilities`].
-    pub fn push_session_capabilities(&mut self, capabilities: Capabilities) {
-        self.context.grants.push(capabilities);
+    /// Push a layer with no paired pop: it survives to process exit.  Where
+    /// `ral --capabilities <file.ral>`'s session-wide ceiling lands, above the
+    /// [`GrantLayer::root`] layer [`Shell::root`] installs.  Lexical
+    /// attenuation (`grant {}`) wants [`Self::with_layer`].
+    pub fn push_session_capabilities(&mut self, layer: GrantLayer) {
+        self.context.grants.push(layer);
         self.audit_deputy_prefixes();
     }
 
@@ -193,7 +206,8 @@ impl Shell {
         if !self.local.audit.active() {
             return;
         }
-        for prefix in crate::capability::deputy_prefixes(&self.context.grants) {
+        let prefixes = crate::capability::deputy_prefixes(&self.context.grants, self.floor());
+        for prefix in prefixes {
             let fields = BTreeMap::from([("prefix".to_string(), prefix.shown())]);
             self.record_check(None, Check::new(Resource::Deputy, fields));
         }

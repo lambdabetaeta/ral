@@ -826,7 +826,7 @@ fn a_struck_frame_signals_an_enveloped_stage_member_once() {
 }
 
 #[test]
-fn grant_exec_bare_name_denied_when_scoped_path_rebinds_command() {
+fn grant_exec_bare_name_resolves_on_the_scoped_path_at_decode() {
     if !sandbox_functional() {
         return;
     }
@@ -837,15 +837,34 @@ fn grant_exec_bare_name_denied_when_scoped_path_rebinds_command() {
     perms.set_mode(0o755);
     std::fs::set_permissions(&fake_git, perms).unwrap();
 
-    // fs:read is needed so the bwrap sandbox binds the tempdir; without it
-    // PATH lookup inside the sandbox can't even see the spoofed git, and we
-    // get "command not found" instead of the expected denial.  /tmp is
-    // tmpfs'd by bwrap by default — only explicit binds make tempfile paths
-    // reachable inside the IPC subprocess.  The grant fs:read clause is
-    // semantically orthogonal to the exec/PATH-spoofing check this test
-    // exercises.
+    // fs:read is needed so the bwrap sandbox binds the tempdir (/tmp is
+    // tmpfs'd by default).  The fake git is a `#!/bin/sh` script, so its
+    // interpreter is admitted too.  The grant is decoded under the scoped
+    // PATH, so `name git` names the fake.
     let script = format!(
-        "within [env: [PATH: '{0}']] {{ grant [exec: [allow: [`name git]], fs: [read: [`absolute '{0}']]] {{ git }} }}",
+        "within [env: [PATH: '{0}']] {{ grant [exec: [allow: [`name git, `absolute /bin/sh]], fs: [read: [`absolute '{0}']]] {{ git }} }}",
+        dir.path().to_string_lossy()
+    );
+    let o = run(&script);
+    assert_eq!(o.status, 0, "stdout: {}\nstderr: {}", o.stdout, o.stderr);
+    assert_eq!(o.stdout.trim(), "spoofed");
+}
+
+#[test]
+fn grant_exec_bare_name_is_not_redirected_by_a_path_scoped_inside_the_body() {
+    if !sandbox_functional() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let fake_git = dir.path().join("git");
+    std::fs::write(&fake_git, "#!/bin/sh\necho spoofed\n").unwrap();
+    let mut perms = std::fs::metadata(&fake_git).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&fake_git, perms).unwrap();
+
+    // `name git` was resolved on the outer PATH, so the planted git is not it.
+    let script = format!(
+        "grant [exec: [allow: [`name git, `absolute /bin/sh]], fs: [read: [`absolute '{0}']]] {{ within [env: [PATH: '{0}']] {{ git }} }}",
         dir.path().to_string_lossy()
     );
     let o = run(&script);

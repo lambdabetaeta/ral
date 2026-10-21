@@ -17,6 +17,8 @@ use ral_core::types::Shell;
 use ral_core::{Scheme, ir::Comp};
 use std::sync::Arc;
 
+const HOST: &str = "a test host resolves its floor";
+
 #[ctor::ctor(unsafe)]
 #[allow(
     clippy::disallowed_methods,
@@ -37,7 +39,9 @@ pub fn prelude() -> &'static BakedPrelude {
 /// A root shell over core's surface and the prelude: no env vars.
 pub fn prelude_shell() -> Shell {
     Shell::root(
-        boot_runtime(TerminalState::default(), prelude(), &HostSurface::default()).into(),
+        boot_runtime(TerminalState::default(), prelude(), &HostSurface::default())
+            .expect(HOST)
+            .into(),
         ral_core::test_helper::process_cwd(),
     )
 }
@@ -51,6 +55,7 @@ pub fn fresh_shell() -> Shell {
         &HostSurface::default(),
         ral_core::test_helper::process_cwd(),
     )
+    .expect(HOST)
 }
 
 /// `surface`'s Σ, as the checker sees it.

@@ -10,11 +10,11 @@
 //! so the two cannot drift.
 
 use crate::capability::{
-    Admitted, ExecDenial, Flag, FsDeny, FsOp, GrantStack, Program, Refused, ShellVerb, Withheld,
-    ral_binary,
+    Admitted, ExecDenial, Flag, Floor, FsDeny, FsOp, GrantStack, Program, Refused, ShellVerb,
+    Withheld, ral_binary,
 };
 use crate::path::shown;
-use crate::path::{LexicalPath, MatchedBy};
+use crate::path::{LexicalPath, MatchedBy, Trace};
 use crate::text::code;
 use crate::types::{Check, Context, Error, Resource, Settled, sig};
 use std::fmt::Display;
@@ -69,11 +69,12 @@ const EXCLUSION_HINT: &str =
 /// Judge a program and its argv against the stack's exec rules.
 pub(crate) fn check_exec(
     ctx: &Context,
+    floor: &Floor,
     shown: &str,
     program: Program,
     args: Vec<String>,
 ) -> Result<Admitted, Box<Denial>> {
-    ctx.grants.admit(program, args).map_err(|refused| {
+    ctx.grants.admit(floor, program, args).map_err(|refused| {
         let Refused { program, args, why } = *refused;
         let error = exec_error(&ctx.grants, shown, &program, &why);
         Box::new(exec_denial(shown, &program, &why, Some(&args), error))
@@ -117,12 +118,12 @@ fn exec_error(grants: &GrantStack, shown: &str, program: &Program, why: &ExecDen
 /// bundled tool ral's binary, which it runs.
 fn read_cause(shown: &str, program: &Program, why: &Withheld<FsDeny>) -> String {
     let (lead, subject) = match program {
-        Program::File { real, .. } => (String::new(), format!("'{real}'")),
+        Program::File { trace, .. } => (String::new(), format!("'{}'", trace.real())),
         Program::Tool(_) => (
             format!("'{shown}' is built into ral, and "),
             ral_binary().map_or_else(
                 || "ral's binary".to_string(),
-                |own| format!("ral's binary '{own}'"),
+                |own| format!("ral's binary '{}'", own.real()),
             ),
         ),
     };
@@ -189,28 +190,28 @@ pub(super) enum FsRefusal {
     Withheld(Withheld<FsDeny>),
 }
 
-/// Judge the resolved path by `op`'s region: an exclusion beats every
+/// Judge the access `trace` by `op`'s table: an exclusion beats every
 /// allowance, and a path no allowance supports is withheld.  `Ok` exactly when
 /// no layer held an `fs` opinion or some allowance supports the path alone.
 ///
-/// The fold re-resolves exclusions against the live disk on every check, so the exclusions
-/// this decides against are the ones the disk describes now, where the
-/// sandbox's projection folds once, at spawn, because that is when the OS
-/// profile is written.
+/// The exclusions this decides against are the ones their walks held; the
+/// sandbox's projection folds the same tables once, at spawn, because that is
+/// when the OS profile is written.
 pub(super) fn fs_judge(
     grants: &GrantStack,
-    resolved: &std::path::Path,
+    floor: &Floor,
+    trace: &Trace,
     op: &FsOp,
 ) -> Result<(), FsRefusal> {
     // Before the stack: an empty stack is exactly the case it must catch.
     if matches!(op, FsOp::Write)
-        && let Some(pinned) = crate::sandbox::pinned_binary(resolved)
+        && let Some(pinned) = crate::sandbox::pinned_binary(trace.real().as_path())
     {
         return Err(FsRefusal::Guarded(pinned));
     }
     match op {
-        FsOp::Read => grants.read(resolved),
-        FsOp::Write => grants.write(resolved),
+        FsOp::Read => grants.read(floor, trace),
+        FsOp::Write => grants.write(floor, trace),
     }
     .map_err(FsRefusal::Withheld)
 }
@@ -218,23 +219,12 @@ pub(super) fn fs_judge(
 impl GrantStack {
     /// The fs guard's verdict as a plain bool, for callers with no [`Context`]
     /// to audit through: exarch's boot-time skill discovery asks it of a
-    /// one-frame [`GrantStack::of`].  The same [`fs_judge`] the guard runs,
-    /// canonicalising leniently inside as [`Shell::check_fs_read`] does, so
-    /// there is no surface-form spelling of the question.  The
-    /// [`LexicalPath::is_discard`] exemption is the Shell door's alone: it
-    /// excuses a discard device from an *access*, and this door decides
-    /// membership, not access.
-    ///
-    /// [`Shell::check_fs_read`]: crate::types::Shell::check_fs_read
-    pub fn admits_fs(&self, op: &FsOp, path: &LexicalPath) -> bool {
-        self.admits_fs_exact(op, &path.canonicalise_lenient())
-    }
-
-    /// [`admits_fs`](Self::admits_fs) for a path already symlink-free, what
-    /// [`crate::path::Located::real`] hands over, so no second walk gets to
-    /// disagree with the one that located the object.
-    pub fn admits_fs_exact(&self, op: &FsOp, real: &std::path::Path) -> bool {
-        fs_judge(self, real, op).is_ok()
+    /// stack.  The same [`fs_judge`] the guard runs, of the access a walk
+    /// found.  The [`LexicalPath::is_discard`] exemption is the Shell door's
+    /// alone: it excuses a discard device from an *access*, and this door
+    /// decides membership, not access.
+    pub fn admits_fs(&self, floor: &Floor, op: &FsOp, trace: &Trace) -> bool {
+        fs_judge(self, floor, trace, op).is_ok()
     }
 }
 
@@ -245,17 +235,18 @@ pub(crate) fn check_device_name(path: &LexicalPath) -> Settled<()> {
         .map_or(Ok(()), |m| Err(sig(m)))
 }
 
-/// Decide an `op` on a symlink-free path: [`fs_judge`] is the decision,
+/// Decide an `op` on the access a walk found: [`fs_judge`] is the decision,
 /// this the wording and the fact around it.
 pub(crate) fn check_fs_exact(
     ctx: &Context,
-    resolved: &std::path::Path,
+    floor: &Floor,
+    trace: &Trace,
     op: &FsOp,
 ) -> Result<(), Box<Denial>> {
     let name = <&str>::from(op);
-    let path = shown(resolved);
+    let path = shown(trace.real().as_path());
     let layers = ctx.grants.fs().count();
-    let refusal = match fs_judge(&ctx.grants, resolved, op) {
+    let refusal = match fs_judge(&ctx.grants, floor, trace, op) {
         Ok(()) => return Ok(()),
         Err(refusal) => refusal,
     };

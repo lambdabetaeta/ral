@@ -1,13 +1,18 @@
-//! The capability lattice: one frame of typed authority, and the folds over it.
+//! The capability lattice: one layer of typed authority, and the folds over it.
 //!
-//! A [`Capabilities`] frame bundles the per-effect policies.  Composition
-//! downward is the [`GrantStack`]: a `grant { ... }` or a loaded profile
-//! pushes one more layer, and every judgment folds the layers afresh,
-//! `exec::rules`, `fs::region`, [`GrantStack::permits`], rather than
-//! flattening them into one `Capabilities` first.
-//! [`Capabilities::extend`] is the one place a frame still composes eagerly:
-//! `--extend` joins a [`Fragment`] onto a base ceiling at load time, before
-//! any attenuation runs.
+//! A [`GrantLayer`] bundles the per-effect policies, each already resolved:
+//! its spellings were walked where it was decoded, so what it holds are
+//! positions and the objects its exclusions name, and nothing judges a
+//! spelling again.  Composition downward is the [`GrantStack`]: a `grant { ... }`
+//! or a loaded profile pushes one more layer, and every judgment folds the
+//! layers afresh, `exec::rules`, `fs::region`, [`GrantStack::permits`], rather
+//! than flattening them into one layer first.  [`GrantLayer::extend`] is the
+//! one place a layer still composes eagerly: `--extend` joins a [`Fragment`]
+//! onto a base ceiling at load time, before any attenuation runs.
+//!
+//! [`Capabilities`] is the authored value: what a grant file decodes to, and
+//! what [`GrantLayer::from_capabilities`] resolves for a layer written in code.
+//! Nothing judges it and no layer keeps it.
 //!
 //! Every policy denotes a function from requests to Belnap's four values,
 //! [`Evidence`].  Restriction is truth meet ([`Meet`]), extension information
@@ -19,8 +24,12 @@
 //! (`crate::guard`) and the OS sandbox (`crate::sandbox`) are its two
 //! consumers.
 
-use crate::path::FrozenPath;
+use super::exec::ExecRules;
+use super::fs::FsLayer;
+use crate::guard::freeze::PolicyError;
+use crate::path::{FrozenPath, RealPath, Subject, Trace, Walked};
 use crate::syntax::quote::quote_word;
+use crate::types::EnvVars;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use strum::{EnumString, IntoStaticStr, VariantArray};
@@ -92,8 +101,8 @@ impl Join for Evidence {
     }
 }
 
-/// An authored axis policy, as a fragment over the unrestricted policy.
-pub trait Axis: Join + Sized {
+/// A resolved axis policy, as a fragment over the unrestricted policy.
+pub(crate) trait Axis: Join + Sized {
     /// `t ⊕ self`; `None`, which is `t`, where omission loses nothing.
     fn join_top(self) -> Option<Self>;
     /// Denotes `t`: restricts nothing.
@@ -101,15 +110,15 @@ pub trait Axis: Join + Sized {
 }
 
 /// An extension fragment: an omitted axis states nothing (`⊥`), where an
-/// omitted axis of a [`Capabilities`] restricts nothing (`t`).  Only
-/// [`Capabilities::extend`] consumes one, and only the loader makes one.
+/// omitted axis of a [`GrantLayer`] restricts nothing (`t`).  Only
+/// [`GrantLayer::extend`] consumes one, and only the loader makes one.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Fragment(Capabilities);
+pub struct Fragment(GrantLayer);
 
 impl Fragment {
     /// Only `load::profile` calls this.
-    pub(crate) fn of(capabilities: Capabilities) -> Self {
-        Self(capabilities)
+    pub(crate) fn of(layer: GrantLayer) -> Self {
+        Self(layer)
     }
 }
 
@@ -133,7 +142,7 @@ pub(crate) fn join_insert<K: Ord>(map: &mut BTreeMap<K, Evidence>, key: K, evide
 }
 
 /// An exec key as the author wrote it: the written twin of
-/// `capability::exec::{ExecAllow, ExecDeny}`.
+/// `capability::exec::{ExecAllow, ExecDeny}`, which resolve it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ExecKey {
     /// A bare name: `git`.
@@ -156,17 +165,18 @@ impl std::fmt::Display for ExecKey {
     }
 }
 
-/// Exec authority as authored, per layer.
+/// Exec authority as authored.
 ///
-/// The author's spellings survive for display; `capability::exec` compiles
-/// the grant into rules over programs, and nothing matches it directly.  Both
-/// fields are private: entries come only through joining, so no grant holds
-/// Neither, and `every` only through [`Axis::join_top`], so "every program"
-/// has no negative form.
+/// The author's spellings, which [`GrantLayer::from_capabilities`] resolves
+/// into the rules of `capability::exec`; nothing judges a grant of this form.
+/// Entries come only through joining, so no grant holds Neither, and `every`
+/// only through [`with_every`](Self::with_every), so "every program" has no
+/// negative form: a layer written in code that excludes a program from all
+/// the rest says so with it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecGrant {
-    /// `join_top`'s universal support: every program, never authored.
+    /// Every program, less the exclusions among the entries.
     every: bool,
     #[serde(with = "pairs")]
     rules: BTreeMap<ExecKey, Evidence>,
@@ -177,26 +187,21 @@ impl ExecGrant {
         self.every
     }
 
+    /// This grant, admitting every program less its exclusions.
+    #[must_use]
+    pub fn with_every(self) -> Self {
+        Self {
+            every: true,
+            ..self
+        }
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&ExecKey, &Evidence)> {
         self.rules.iter()
     }
 
     pub fn get(&self, key: &ExecKey) -> Option<&Evidence> {
         self.rules.get(key)
-    }
-
-    /// Withdraws the allowances `drop` selects; an exclusion stays.
-    pub fn withdraw(&mut self, mut drop: impl FnMut(&ExecKey) -> bool) {
-        for (key, e) in &mut self.rules {
-            if drop(key) {
-                e.positive = false;
-            }
-        }
-        self.rules.retain(|_, e| *e != Evidence::NEITHER);
-    }
-
-    fn denies(&self) -> bool {
-        self.rules.values().any(|e| e.negative)
     }
 }
 
@@ -247,31 +252,6 @@ mod pairs {
             }
         }
         Ok(map)
-    }
-}
-
-impl Join for ExecGrant {
-    fn join(mut self, other: Self) -> Self {
-        self.every |= other.every;
-        for (key, e) in other.rules {
-            join_insert(&mut self.rules, key, e);
-        }
-        self
-    }
-}
-
-impl Axis for ExecGrant {
-    /// The entries stay beside `every`: they change nothing about running,
-    /// but the stack still reads what they name.
-    fn join_top(self) -> Option<Self> {
-        (self.every || !self.rules.is_empty()).then_some(Self {
-            every: true,
-            ..self
-        })
-    }
-
-    fn is_top(&self) -> bool {
-        self.every && !self.denies()
     }
 }
 
@@ -359,15 +339,14 @@ pub enum Net {
     Offline,
 }
 
-/// One layer of the dynamic grant stack — the per-effect policies, with every
-/// place already resolved to a concrete path.
+/// The per-effect policies as authored: every place a spelling, nothing yet
+/// resolved.
 ///
-/// Resolved *by construction*: the only non-trivial constructor is
-/// `guard::decode::decode_capability_map`, which resolves every place against
-/// a `FreezeCtx` before returning, and the remaining ways in ([`root`](Self::root), [`deny_all`](Self::deny_all),
-/// `default`) are path-free.  So the `Serialize` impls can back the seed's
-/// `Context` unguarded: a re-exec'd child inherits a stack whose paths
-/// the parent already pinned.
+/// What a grant file decodes to and what [`GrantLayer::from_capabilities`]
+/// resolves into a layer.  The one non-trivial way to make a [`GrantLayer`]
+/// from a *value* is that; the other is `guard::decode::decode_capability_map`,
+/// which walks each spelling of a record as it freezes it.  Either way the
+/// layer holds what the walks found, and this is no part of it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Capabilities {
@@ -384,6 +363,20 @@ pub struct Capabilities {
     pub shell: Option<BTreeSet<ShellVerb>>,
 }
 
+impl Capabilities {
+    /// Lattice bottom for positive authority: every effect pinned to its
+    /// most-restrictive value, so pushing it as a layer zeroes every axis.
+    pub fn deny_all() -> Self {
+        Self {
+            exec: Some(ExecGrant::default()),
+            fs: Some(FsPolicy::default()),
+            net: Some(Net::Offline),
+            editor: Some(BTreeSet::new()),
+            shell: Some(BTreeSet::new()),
+        }
+    }
+}
+
 /// A verb a layer may withhold, gating a builtin rather than an access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flag {
@@ -393,10 +386,10 @@ pub enum Flag {
 
 impl Flag {
     /// Whether a layer lists the verb; `None` abstains.
-    fn vote(self, caps: &Capabilities) -> Option<bool> {
+    fn vote(self, layer: &GrantLayer) -> Option<bool> {
         match self {
-            Self::Editor(v) => caps.editor.as_ref().map(|s| s.contains(&v)),
-            Self::Shell(v) => caps.shell.as_ref().map(|s| s.contains(&v)),
+            Self::Editor(v) => layer.editor.as_ref().map(|s| s.contains(&v)),
+            Self::Shell(v) => layer.shell.as_ref().map(|s| s.contains(&v)),
         }
     }
 
@@ -409,7 +402,288 @@ impl Flag {
     }
 }
 
-/// The dynamic stack of capability layers: ambient root at index 0, innermost
+/// Where an allowance holds: everywhere (the root spelling, or a spelling
+/// whose walk reached the root), or under a position.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Extent {
+    Everywhere,
+    Under(RealPath),
+}
+
+impl Extent {
+    /// Where the walk `trace` left a spelling: everywhere if it reached the
+    /// root, as the root spelling does, else the position it reached.
+    pub(crate) fn of(trace: &Trace) -> Self {
+        if trace.real().is_universal() {
+            Self::Everywhere
+        } else {
+            Self::Under(trace.real().clone())
+        }
+    }
+
+    /// Whether this extent contains `subject`: everywhere contains every
+    /// subject, a position what lies beneath it and never everywhere.
+    pub(crate) fn contains(&self, subject: Subject<'_>) -> bool {
+        match self {
+            Self::Everywhere => true,
+            Self::Under(position) => subject.beneath(position),
+        }
+    }
+
+    /// The position this extent holds from, `/` for everywhere.
+    pub(crate) fn real(&self) -> RealPath {
+        match self {
+            Self::Everywhere => RealPath::universal(),
+            Self::Under(position) => position.clone(),
+        }
+    }
+}
+
+/// A grant spelling in force: as written, and what the walk made of it.  `R`
+/// is [`Extent`] for an allowance and [`Excluded`] for an exclusion.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct GrantPath<R> {
+    pub written: FrozenPath,
+    pub real: R,
+}
+
+impl GrantPath<Extent> {
+    /// What holds everywhere, as the root spelling says it.
+    pub(crate) fn everywhere() -> Self {
+        Self {
+            written: FrozenPath::root(),
+            real: Extent::Everywhere,
+        }
+    }
+
+    /// `written`, which the walk `trace` left at its extent.
+    pub(crate) fn of(written: FrozenPath, trace: &Trace) -> Self {
+        Self {
+            real: Extent::of(trace),
+            written,
+        }
+    }
+
+    /// The allowance a spelling makes, the root spelling being everywhere
+    /// with no walk to make (Windows has no `/` to walk).
+    ///
+    /// # Errors
+    /// The walk's, naming the spelling.
+    pub(crate) fn allowing(written: FrozenPath) -> Result<Self, PolicyError> {
+        if written.is_root() {
+            return Ok(Self {
+                written,
+                real: Extent::Everywhere,
+            });
+        }
+        GrantPath::<Trace>::walk(written).map(GrantPath::extent)
+    }
+}
+
+impl GrantPath<Trace> {
+    /// This walk read as an allowance's extent.
+    pub(crate) fn extent(self) -> GrantPath<Extent> {
+        GrantPath {
+            real: Extent::of(&self.real),
+            written: self.written,
+        }
+    }
+}
+
+impl<W: Walked> GrantPath<W> {
+    /// `written` walked as its polarity walks: an allowance's transcript, an
+    /// exclusion's holds.
+    ///
+    /// # Errors
+    /// A spelling whose walk fails for any reason but an absent or
+    /// unenterable tail, named; an exclusion of the root, which holds no
+    /// object to name and means `deny_all`.
+    pub(crate) fn walk(written: FrozenPath) -> Result<Self, PolicyError> {
+        if W::EXCLUDES && written.is_root() {
+            return Err(PolicyError::root_exclusion(&written));
+        }
+        let real =
+            W::walk(&written.lexical()).map_err(|e| PolicyError::unwalkable(&written, &e))?;
+        if W::EXCLUDES && real.followed().real().is_universal() {
+            return Err(PolicyError::root_exclusion(&written));
+        }
+        Ok(Self { written, real })
+    }
+}
+
+/// A layer in force: its rules, resolved, and the axes that name no path.
+///
+/// One representation: there is no authored copy beside it, and whatever shows
+/// a layer (exarch's prompt, a refusal) reads `written` off its rules.  `None`
+/// on an axis is no opinion.  Serialises as its traces and deserialises as
+/// they were, for [`GrantLayer::rehold`] to take hold of again on the receiving
+/// host.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantLayer {
+    fs: Option<FsLayer>,
+    exec: Option<ExecRules>,
+    net: Option<Net>,
+    editor: Option<BTreeSet<EditorVerb>>,
+    shell: Option<BTreeSet<ShellVerb>>,
+}
+
+impl GrantLayer {
+    /// Resolve every spelling of `caps`; `env` for the `PATH` a `` `name ``
+    /// key is found on (every [`FrozenPath`] is already absolute).
+    ///
+    /// # Errors
+    /// A spelling that cannot be resolved, named; a root exclusion.
+    pub fn from_capabilities(caps: Capabilities, env: &EnvVars) -> Result<Self, PolicyError> {
+        let Capabilities {
+            exec,
+            fs,
+            net,
+            editor,
+            shell,
+        } = caps;
+        Ok(Self {
+            fs: fs.map(FsLayer::of_policy).transpose()?,
+            exec: exec
+                .map(|grant| ExecRules::of_grant(&grant, env))
+                .transpose()?,
+            net,
+            editor,
+            shell,
+        })
+    }
+
+    /// A layer of these axes, each already resolved: what the decoder makes
+    /// of a record.
+    pub(crate) fn new(
+        fs: Option<FsLayer>,
+        exec: Option<ExecRules>,
+        net: Option<Net>,
+        editor: Option<BTreeSet<EditorVerb>>,
+        shell: Option<BTreeSet<ShellVerb>>,
+    ) -> Self {
+        Self {
+            fs,
+            exec,
+            net,
+            editor,
+            shell,
+        }
+    }
+
+    /// Ambient authority, the lattice top: all axes `None`, no attenuation.
+    pub fn root() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn fs(&self) -> Option<&FsLayer> {
+        self.fs.as_ref()
+    }
+
+    pub(crate) fn exec(&self) -> Option<&ExecRules> {
+        self.exec.as_ref()
+    }
+
+    /// `self ◁ fragment`: the ceiling a base and an extension make, before any
+    /// restriction.  An exclusion of the fragment always wins; an allowance
+    /// never removes authority; an axis the base omits stays unrestricted,
+    /// less the fragment's exclusions.
+    #[must_use]
+    pub fn extend(self, fragment: Fragment) -> Self {
+        let Fragment(fragment) = fragment;
+        Self {
+            fs: extend(self.fs, fragment.fs),
+            exec: extend(self.exec, fragment.exec),
+            net: extend(self.net, fragment.net),
+            editor: extend(self.editor, fragment.editor),
+            shell: extend(self.shell, fragment.shell),
+        }
+    }
+
+    /// True iff some supplied axis does not denote `t`.
+    pub fn is_restrictive(&self) -> bool {
+        fn restricts<T: Axis>(axis: Option<&T>) -> bool {
+            axis.is_some_and(|a| !a.is_top())
+        }
+        restricts(self.fs.as_ref())
+            || restricts(self.exec.as_ref())
+            || restricts(self.net.as_ref())
+            || restricts(self.editor.as_ref())
+            || restricts(self.shell.as_ref())
+    }
+
+    /// Take hold again of every exclusion's objects on this host.
+    pub(crate) fn rehold(&mut self) {
+        if let Some(fs) = &mut self.fs {
+            fs.rehold();
+        }
+        if let Some(exec) = &mut self.exec {
+            exec.rehold();
+        }
+    }
+
+    /// What this layer shows of itself, `None` where it has nothing to say: it
+    /// restricts no axis and its exec runs nothing by name.  Under a nested fs
+    /// restriction a run place stays readable, which the reader needs to know
+    /// even of a layer that denotes `t`.
+    pub fn summary(&self) -> Option<LayerSummary> {
+        let exec = self.exec.as_ref().map(ExecRules::summary);
+        let runs = exec
+            .as_ref()
+            .is_some_and(|e| e.every || !e.allows.is_empty());
+        (self.is_restrictive() || runs).then(|| LayerSummary {
+            fs: self.fs.as_ref().map(FsLayer::summary),
+            exec,
+            net: self.net,
+            editor: self.editor.clone(),
+            shell: self.shell.clone(),
+        })
+    }
+}
+
+/// A stack as it is shown: each layer's spellings and axes, nothing a host
+/// could judge with.  What `Probe::Grants` answers and what a prompt reads,
+/// from a local engine and a remote one alike.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantSummary(Vec<LayerSummary>);
+
+impl GrantSummary {
+    pub fn layers(&self) -> &[LayerSummary] {
+        &self.0
+    }
+}
+
+/// A layer as it is shown: its spellings and axes, nothing a host could judge
+/// with.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LayerSummary {
+    /// `read`, `write`, `deny`: each rule's `written`, shown.
+    pub fs: Option<FsSummary>,
+    /// `every`, and `allows`/`denies` as the grant spells each key —
+    /// `` `name git ``, `` `absolute /usr/bin/git ``, `` `dir `absolute /opt ``.
+    pub exec: Option<ExecSummary>,
+    pub net: Option<Net>,
+    pub editor: Option<BTreeSet<EditorVerb>>,
+    pub shell: Option<BTreeSet<ShellVerb>>,
+}
+
+/// What a layer reads, writes and excludes, as written.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsSummary {
+    pub read: Vec<String>,
+    pub write: Vec<String>,
+    pub deny: Vec<String>,
+}
+
+/// What a layer runs and excludes, as written.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecSummary {
+    pub every: bool,
+    pub allows: Vec<String>,
+    pub denies: Vec<String>,
+}
+
+/// The dynamic stack of layers: ambient root at index 0, innermost
 /// `grant { ... }` on top.
 ///
 /// A newtype so the folds over it live together rather than being respelled
@@ -417,28 +691,19 @@ impl Flag {
 /// at every boundary.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct GrantStack(Vec<Capabilities>);
+pub struct GrantStack(Vec<GrantLayer>);
 
 impl GrantStack {
     /// Where every shell starts; `grant { ... }` blocks and the session-wide
     /// `--capabilities` ceiling push attenuating layers on top.
     pub fn root() -> Self {
-        Self(vec![Capabilities::root()])
-    }
-
-    /// A stack of exactly `frame`: a view for asking the in-process guard's question of one
-    /// frame — a boot-time `Capabilities` no shell holds yet — not a session
-    /// stack, which is always built by [`GrantStack::root`] plus `push`.
-    /// Decision-identical to `[root, frame]` because the ambient root holds no
-    /// opinion on any axis.
-    pub fn of(frame: Capabilities) -> Self {
-        Self(vec![frame])
+        Self(vec![GrantLayer::root()])
     }
 
     /// True iff some layer restricts (denotes other than `t`) — what
     /// `Shell::has_active_capabilities` reports.
     pub fn is_restrictive(&self) -> bool {
-        self.0.iter().any(Capabilities::is_restrictive)
+        self.0.iter().any(GrantLayer::is_restrictive)
     }
 
     /// Whether no layer restricts exec: the one question of exec denoting `t`.
@@ -451,11 +716,11 @@ impl GrantStack {
         self.fs().all(Axis::is_top)
     }
 
-    pub fn push(&mut self, layer: Capabilities) {
+    pub fn push(&mut self, layer: GrantLayer) {
         self.0.push(layer);
     }
 
-    /// Remove the `n` frames pushed at `at`, keeping any session frame pushed
+    /// Remove the `n` layers pushed at `at`, keeping any session layer pushed
     /// above them meanwhile.
     pub(crate) fn remove(&mut self, at: usize, n: usize) {
         self.0.drain(at..at + n);
@@ -469,91 +734,50 @@ impl GrantStack {
         self.0.is_empty()
     }
 
-    pub fn iter(&self) -> std::slice::Iter<'_, Capabilities> {
+    pub fn layers(&self) -> impl Iterator<Item = &GrantLayer> {
         self.0.iter()
+    }
+
+    /// What the stack shows of itself: the layers that have something to say.
+    pub fn summary(&self) -> GrantSummary {
+        GrantSummary(self.0.iter().filter_map(GrantLayer::summary).collect())
+    }
+
+    /// Take hold again of every exclusion's object on this host: the one walk
+    /// a received stack costs, and the only thing a receiver does to it.  The
+    /// seed's decode and `run_framed` call it.  Never fails: an object not
+    /// found at its position stays unheld.
+    pub fn rehold(&mut self) {
+        self.0.iter_mut().for_each(GrantLayer::rehold);
     }
 
     /// Layers with no opinion are skipped, here and in `fs` and `net` below:
     /// the folds intersect what remains, and an empty run means no attenuation.
-    pub fn exec(&self) -> impl Iterator<Item = &ExecGrant> {
-        self.0.iter().filter_map(|c| c.exec.as_ref())
+    pub(crate) fn exec(&self) -> impl Iterator<Item = &ExecRules> {
+        self.0.iter().filter_map(|l| l.exec.as_ref())
     }
 
-    pub fn fs(&self) -> impl Iterator<Item = &FsPolicy> {
-        self.0.iter().filter_map(|c| c.fs.as_ref())
+    pub(crate) fn fs(&self) -> impl Iterator<Item = &FsLayer> {
+        self.0.iter().filter_map(|l| l.fs.as_ref())
     }
 
     pub fn net(&self) -> impl Iterator<Item = Net> {
-        self.0.iter().filter_map(|c| c.net)
+        self.0.iter().filter_map(|l| l.net)
     }
 
     /// A meet over the layers: one `false` vote anywhere withholds `flag`
     /// whatever sits above it, and silence permits.  A verb's gate, not an OS
     /// rule, so it reaches no sandbox projection.
     pub fn permits(&self, flag: Flag) -> bool {
-        self.0.iter().all(|c| flag.vote(c) != Some(false))
-    }
-}
-
-impl<'a> IntoIterator for &'a GrantStack {
-    type Item = &'a Capabilities;
-    type IntoIter = std::slice::Iter<'a, Capabilities>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
+        self.0.iter().all(|l| flag.vote(l) != Some(false))
     }
 }
 
 impl IntoIterator for GrantStack {
-    type Item = Capabilities;
-    type IntoIter = std::vec::IntoIter<Capabilities>;
+    type Item = GrantLayer;
+    type IntoIter = std::vec::IntoIter<GrantLayer>;
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
-    }
-}
-
-impl Capabilities {
-    /// Lattice bottom for positive authority: every effect pinned to its
-    /// most-restrictive value, so pushing it as a layer zeroes every axis.
-    pub fn deny_all() -> Self {
-        Self {
-            exec: Some(ExecGrant::default()),
-            fs: Some(FsPolicy::default()),
-            net: Some(Net::Offline),
-            editor: Some(BTreeSet::new()),
-            shell: Some(BTreeSet::new()),
-        }
-    }
-
-    /// True iff some supplied axis does not denote `t`.
-    pub fn is_restrictive(&self) -> bool {
-        fn restricts<T: Axis>(axis: Option<&T>) -> bool {
-            axis.is_some_and(|a| !a.is_top())
-        }
-        restricts(self.exec.as_ref())
-            || restricts(self.fs.as_ref())
-            || restricts(self.net.as_ref())
-            || restricts(self.editor.as_ref())
-            || restricts(self.shell.as_ref())
-    }
-
-    /// Ambient authority, the lattice top: all fields `None`, no attenuation.
-    pub fn root() -> Self {
-        Self::default()
-    }
-
-    /// `self ◁ fragment`: the ceiling a base and an extension make, before any
-    /// restriction.  An exclusion of the fragment always wins; an allowance
-    /// never removes authority; an axis the base omits stays unrestricted,
-    /// less the fragment's exclusions.
-    pub fn extend(self, fragment: Fragment) -> Self {
-        let Fragment(fragment) = fragment;
-        Self {
-            exec: extend(self.exec, fragment.exec),
-            fs: extend(self.fs, fragment.fs),
-            net: extend(self.net, fragment.net),
-            editor: extend(self.editor, fragment.editor),
-            shell: extend(self.shell, fragment.shell),
-        }
     }
 }
 
@@ -575,32 +799,6 @@ impl Axis for Net {
     }
 }
 
-impl Join for FsPolicy {
-    fn join(self, other: Self) -> Self {
-        Self {
-            read_prefixes: union_prefixes(self.read_prefixes, other.read_prefixes),
-            write_prefixes: union_prefixes(self.write_prefixes, other.write_prefixes),
-            deny_paths: union_prefixes(self.deny_paths, other.deny_paths),
-        }
-    }
-}
-
-impl Axis for FsPolicy {
-    fn join_top(self) -> Option<Self> {
-        (!self.deny_paths.is_empty()).then(|| Self {
-            read_prefixes: vec![FrozenPath::root()],
-            write_prefixes: vec![FrozenPath::root()],
-            deny_paths: self.deny_paths,
-        })
-    }
-
-    /// Writing reads, so writing the root reads it too; the root as its frozen
-    /// identity holds it, so a symlink to `/` does.
-    fn is_top(&self) -> bool {
-        self.deny_paths.is_empty() && self.write_prefixes.iter().any(FrozenPath::is_universal)
-    }
-}
-
 impl<V: Ord + VariantArray> Join for BTreeSet<V> {
     fn join(mut self, other: Self) -> Self {
         self.extend(other);
@@ -616,12 +814,4 @@ impl<V: Ord + VariantArray> Axis for BTreeSet<V> {
     fn is_top(&self) -> bool {
         self.len() == V::VARIANTS.len()
     }
-}
-
-fn union_prefixes(a: Vec<FrozenPath>, b: Vec<FrozenPath>) -> Vec<FrozenPath> {
-    a.into_iter()
-        .chain(b)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
 }

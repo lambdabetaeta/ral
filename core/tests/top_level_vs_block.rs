@@ -16,12 +16,13 @@ mod common;
 
 use common::fresh_shell;
 
+use ral_core::capability::Capabilities;
 #[cfg(unix)]
 use ral_core::capability::FsPolicy;
-use ral_core::capability::{Capabilities, GrantStack};
 use ral_core::path::shown;
 use ral_core::protocol::Run;
 use ral_core::source::SourceOrigin;
+use ral_core::test_helper::{layer, stack};
 use ral_core::types::{Settled, Shell};
 use ral_core::{Break, Value};
 use std::path::{Path, PathBuf};
@@ -36,7 +37,7 @@ use std::path::{Path, PathBuf};
 fn top_level_under(shell: &mut Shell, caps: Capabilities, source: &str) -> Settled<Value> {
     shell
         .run(Run {
-            caps: GrantStack::of(caps),
+            caps: stack([layer(caps)]),
             ..Run::foreground(source, SourceOrigin::named("<test>"))
         })
         .expect_ran()
@@ -44,7 +45,7 @@ fn top_level_under(shell: &mut Shell, caps: Capabilities, source: &str) -> Settl
 }
 
 fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
-    top_level_under(shell, Capabilities::root(), source)
+    top_level_under(shell, Capabilities::default(), source)
 }
 
 /// Capability frame that actually triggers `sandbox_projection()` to
@@ -59,7 +60,7 @@ fn projecting_caps() -> Capabilities {
             write_prefixes: vec![ral_core::path::FrozenPath::root()],
             deny_paths: Vec::new(),
         }),
-        ..Capabilities::root()
+        ..Capabilities::default()
     }
 }
 
@@ -68,9 +69,9 @@ fn projecting_caps() -> Capabilities {
 /// the session.
 fn parity_caps() -> Vec<Capabilities> {
     #[cfg(unix)]
-    return vec![Capabilities::root(), projecting_caps()];
+    return vec![Capabilities::default(), projecting_caps()];
     #[cfg(not(unix))]
-    return vec![Capabilities::root()];
+    return vec![Capabilities::default()];
 }
 
 /// `path` as ral shows it (`/`-separated on every host, as `cwd` returns it),

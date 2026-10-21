@@ -33,7 +33,7 @@ use super::reexec::Pinned;
 use super::warrant::{Handoff, Slot, nul_terminated, parcel};
 use super::{FsProjection, RenderedProjection};
 use crate::Role;
-use crate::capability::floor;
+use crate::capability::Floor;
 use crate::path::{Object, PathShape, RealPath, Rendered, render_real};
 use rustix::fs::OFlags;
 use std::collections::{BTreeMap, BTreeSet};
@@ -481,7 +481,7 @@ impl Shown {
     /// another bind already shows; read-only before writable, each sorted by
     /// name, so a parent precedes its children and a writable prefix inside
     /// a read-only one wins.
-    pub(crate) fn of(policy: &RenderedProjection) -> Result<Self, String> {
+    pub(crate) fn of(policy: &RenderedProjection, floor: &Floor) -> Result<Self, String> {
         let FsProjection::Restricted(rules) = &policy.fs else {
             let root =
                 RealPath::of_path("/".as_ref()).map_err(|e| format!("sandbox: no root: {e}"))?;
@@ -491,12 +491,11 @@ impl Shown {
                 roots: vec![root],
             });
         };
-        let floor = floor();
         let tolerated = (rules.read.iter())
             .map(|object| &object.real)
             .filter(|real| {
                 floor
-                    .iter()
+                    .allows()
                     .any(|f| f.real().as_path().as_os_str() == std::ffi::OsStr::new(real.as_str()))
             })
             .cloned()
@@ -826,34 +825,44 @@ mod tests {
         bwrap_command, seccomp_programs,
     };
     use crate::Role;
-    use crate::capability::{Admitted, Capabilities, FsAllow, FsPolicy, GrantStack, Program};
-    use crate::capability::{Evidence, ExecAllow, ExecDeny, ExecRule, Join};
-    use crate::path::{FrozenPath, RealPath};
+    use crate::capability::{Admitted, Capabilities, Floor, FsAllow, FsPolicy, Program};
+    use crate::capability::{Evidence, ExecAllow, ExecDeny, Extent, GrantPath, Join, Rule};
+    use crate::path::{Excluded, FrozenPath, RealPath};
     use crate::sandbox::launch::{Ownership, admitted, enveloped};
     use crate::sandbox::warrant::{Handoff, Slot};
     use crate::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
     use std::process::Stdio;
 
-    type Rule = ExecRule;
+    /// The host's floor, which a restricted read region carries.
+    fn host_floor() -> Floor {
+        crate::test_helper::core_runtime().floor().clone()
+    }
 
-    fn dir_rule(path: RealPath, allow: bool) -> Rule {
+    fn dir_rule(path: &RealPath, allow: bool) -> Rule {
+        let written = FrozenPath::of_real(path);
         if allow {
-            ExecRule::Allow(ExecAllow::Dir(path))
+            Rule::Allow(ExecAllow::Dir(
+                GrantPath::<Extent>::allowing(written).expect("a directory walks"),
+            ))
         } else {
-            ExecRule::Deny(ExecDeny::Dir(path))
+            Rule::Deny(ExecDeny::Dir(
+                GrantPath::<Excluded>::walk(written).expect("a directory walks"),
+            ))
         }
     }
 
-    fn file_rule(path: RealPath, allow: bool) -> Rule {
+    fn file_rule(path: &RealPath, allow: bool) -> Rule {
         if allow {
-            ExecRule::Allow(ExecAllow::file(path))
+            Rule::Allow(ExecAllow::support(path))
         } else {
-            ExecRule::Deny(ExecDeny::file(path))
+            Rule::Deny(ExecDeny::File(
+                GrantPath::<Excluded>::walk(FrozenPath::of_real(path)).expect("a file walks"),
+            ))
         }
     }
 
     fn veto_rule(name: &str) -> Rule {
-        ExecRule::Deny(ExecDeny::Name(crate::path::command_name_key(name)))
+        Rule::Deny(ExecDeny::Name(crate::path::command_name_key(name)))
     }
 
     /// A bare Linux host.
@@ -908,13 +917,15 @@ mod tests {
     }
 
     fn prefix(path: &str) -> FsAllow {
-        FsAllow::Prefix(FrozenPath::from_surface(path))
+        FsAllow::Prefix(
+            GrantPath::<Extent>::allowing(FrozenPath::from_surface(path)).expect("a prefix walks"),
+        )
     }
 
     /// What the envelope would show of `policy`.
     fn plan(policy: &SandboxProjection) -> Shown {
         let rendered = policy.rendered().expect("ASCII paths render");
-        Shown::of(&rendered).expect("the plan builds")
+        Shown::of(&rendered, &host_floor()).expect("the plan builds")
     }
 
     /// `policy`'s binds, opened over this host's tree.
@@ -1157,9 +1168,10 @@ mod tests {
         };
         let caps = Capabilities {
             fs: Some(fs),
-            ..Capabilities::root()
+            ..Capabilities::default()
         };
-        SandboxProjection::of(&GrantStack::of(caps), None).expect("an fs grant projects")
+        let stack = crate::test_helper::stack([crate::test_helper::layer(caps)]);
+        SandboxProjection::of(&stack, &host_floor(), None).expect("an fs grant projects")
     }
 
     /// The `Shown` binds beneath `dir`, the floor left out.
@@ -1261,7 +1273,7 @@ mod tests {
                 .push(FsAllow::RunPlace(RealPath::of_path(&bin).expect("a place")));
         }
         policy.exec = ExecProjection::Restricted(
-            std::iter::once(dir_rule(RealPath::of_path(&bin).expect("an admit"), true)).collect(),
+            std::iter::once(dir_rule(&RealPath::of_path(&bin).expect("an admit"), true)).collect(),
         );
         let binds = binds(&policy, WHOLE);
         let name = |p: &std::path::Path| p.to_string_lossy().into_owned();
@@ -1350,7 +1362,7 @@ mod tests {
             .expect("ASCII paths render");
         std::fs::rename(&parent, dir.join("moved")).unwrap();
         std::os::unix::fs::symlink(&elsewhere, &parent).unwrap();
-        let shown = Shown::of(&rendered).expect("the plan builds");
+        let shown = Shown::of(&rendered, &host_floor()).expect("the plan builds");
         let Err(why) = Binds::open(&on(&stand_in(), WHOLE), shown) else {
             panic!("a symlinked component would show its target");
         };
@@ -1485,7 +1497,8 @@ mod tests {
         between: impl FnOnce(),
     ) -> Option<std::process::Output> {
         let (mut cmd, info_fd) =
-            enveloped(env, policy, admitted, None, Ownership::Kept).expect("the launch builds");
+            enveloped(env, policy, &host_floor(), admitted, None, Ownership::Kept)
+                .expect("the launch builds");
         between();
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         let out = cmd.output().ok();
@@ -2258,6 +2271,7 @@ mod tests {
         let sh = Program::file("/bin/sh".into()).expect("/bin/sh exists");
         let mut launch = crate::sandbox::sandboxed_command(
             &policy,
+            &Floor::default(),
             &admitted(sh, &["-c".to_string(), script]),
             Ownership::Kept,
             &shell.cwd(),
@@ -2468,11 +2482,11 @@ mod tests {
             .chain(dirs)
             .map(|d| real(d))
             .chain(coreutils)
-            .map(|d| dir_rule(d, true));
-        let files = paths.iter().map(|p| file_rule(real(p), true));
+            .map(|d| dir_rule(&d, true));
+        let files = paths.iter().map(|p| file_rule(&real(p), true));
         let linkers = crate::sandbox::carriers::linkers()
             .into_iter()
-            .map(|linker| file_rule(linker, true));
+            .map(|linker| file_rule(&linker, true));
         ExecProjection::Restricted(dirs.chain(files).chain(linkers).collect())
     }
 
@@ -2627,7 +2641,7 @@ mod tests {
                 &[],
                 [
                     file_rule(
-                        RealPath::of_path(&denied).expect("the command exists"),
+                        &RealPath::of_path(&denied).expect("the command exists"),
                         false,
                     ),
                     veto_rule(&name),
@@ -2694,7 +2708,7 @@ mod tests {
             exec: admitting_less(
                 &[&expanded.to_string_lossy(), &whole.to_string_lossy()],
                 [file_rule(
-                    RealPath::of_path(&blocked).expect("the block exists"),
+                    &RealPath::of_path(&blocked).expect("the block exists"),
                     false,
                 )],
             ),
@@ -2989,9 +3003,9 @@ mod tests {
         let policy = SandboxProjection {
             exec: ExecProjection::Restricted(
                 [
-                    ExecRule::Allow(ExecAllow::Any),
-                    file_rule(real(&excluded), false),
-                    file_rule(real(&unrelated), false),
+                    Rule::Allow(ExecAllow::Any),
+                    file_rule(&real(&excluded), false),
+                    file_rule(&real(&unrelated), false),
                 ]
                 .into_iter()
                 .collect(),
@@ -3197,7 +3211,7 @@ mod tests {
             pid = sleeper.id(),
         );
         let bare = ExecProjection::Restricted(
-            [ExecRule::Allow(ExecAllow::Any), veto_rule("rm")]
+            [Rule::Allow(ExecAllow::Any), veto_rule("rm")]
                 .into_iter()
                 .collect(),
         );
@@ -3320,18 +3334,19 @@ mod tests {
                 .chain(deny.iter().map(|p| (key(p), Evidence::DENY)))
                 .collect()
         });
-        let stack = GrantStack::of(Capabilities {
+        let stack = crate::test_helper::stack([crate::test_helper::layer(Capabilities {
             exec,
             fs,
-            ..Capabilities::root()
-        });
+            ..Capabilities::default()
+        })]);
+        let floor = host_floor();
         let program = Program::file(program.to_path_buf()).expect("the program exists");
         let args: Vec<String> = args.iter().map(|a| (*a).to_string()).collect();
         let admitted = stack
-            .admit(program, args)
+            .admit(&floor, program, args)
             .unwrap_or_else(|why| panic!("the stack refuses the program: {why:?}"));
-        let projection =
-            SandboxProjection::of(&stack, Some(&admitted)).expect("a restricted stack projects");
+        let projection = SandboxProjection::of(&stack, &floor, Some(&admitted))
+            .expect("a restricted stack projects");
         (projection, admitted)
     }
 
@@ -3618,8 +3633,8 @@ mod tests {
         let policy = exec_policy(admitting_less(
             &[],
             [
-                file_rule(RealPath::of_path(&admitted_file).expect("exists"), true),
-                file_rule(RealPath::of_path(&linked).expect("exists"), false),
+                file_rule(&RealPath::of_path(&admitted_file).expect("exists"), true),
+                file_rule(&RealPath::of_path(&linked).expect("exists"), false),
             ],
         ));
         let Some(env) = envelope_launches(&policy) else {
@@ -3658,6 +3673,7 @@ mod tests {
         let launch = enveloped(
             &on(&stand_in(), host),
             &exec_policy(admitting(&[], &[])),
+            &Floor::default(),
             &admitted(sh, &["-c".to_string(), "echo RAN".to_string()]),
             None,
             Ownership::Kept,

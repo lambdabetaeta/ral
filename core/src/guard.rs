@@ -2,8 +2,8 @@
 //! attempted, and the one place a grant is read into it.
 //!
 //! [`crate::capability`] is data; this is its reader above the `Shell`.
-//! [`freeze`] turns a grant's strings into frozen paths against one anchor,
-//! [`decode`] a capability map into a [`Capabilities`](crate::capability::Capabilities),
+//! [`freeze`] turns a grant's strings into walked spellings against one
+//! anchor, [`decode`] a capability map into a [`GrantLayer`](crate::capability::GrantLayer),
 //! [`grant`] a spawn's grant into the layer its child pushes.  [`enforce`]
 //! words the model's refusals, and `shell` hands them the live context and
 //! records a denial at one door, so the sandbox

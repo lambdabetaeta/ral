@@ -54,7 +54,7 @@ impl OpenedWrite {
 /// grant.
 fn snapshot(target: &Located, shell: &Shell) -> Option<Vec<u8>> {
     shell
-        .admits_fs_exact(&FsOp::Read, target.real().as_path())
+        .admits_fs(&FsOp::Read, target.trace())
         .then(|| target.preview())
         .flatten()
 }

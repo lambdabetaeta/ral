@@ -42,13 +42,15 @@
 //! given, `TMPDIR` being the launching user's to set.
 
 use super::toolchains::{self, Toolchain};
+use crate::capability::GrantPath;
 use crate::path::git::{BadPointer, Pointer, discover_git_dir};
 use crate::path::identity::windows_identity_components;
 use crate::path::lex::relative_suffix;
 use crate::path::sigil::SigilHead;
 use crate::path::{
-    Allow, CwdPath, FrozenPath, GrantRefusal, PathRules, SubpathRefusal, XdgKind, classify_subpath,
-    grant_eligibility, path_dirs_absolute, resolve_xdg_in, shown,
+    CwdPath, FrozenPath, GrantRefusal, LeafMode, PathRules, RealPath, SubpathRefusal, Trace,
+    Walked, XdgKind, classify_subpath, grant_eligibility, path_dirs_absolute, resolve_xdg_in,
+    shown, walk_lenient,
 };
 use crate::syntax::quote::quote_word;
 use crate::text::code;
@@ -211,6 +213,30 @@ impl PolicyError {
         self.hint = Some(hint.into());
         self
     }
+
+    /// A spelling whose walk failed for a reason that is no absent or
+    /// unenterable tail.
+    pub(crate) fn unwalkable(written: &FrozenPath, error: &std::io::Error) -> Self {
+        Self::new(format!(
+            "ral cannot resolve '{}', which the grant names: {error}",
+            written.shown()
+        ))
+        .with_hint(
+            "A grant is resolved when it loads, so every name it passes through must be \
+             one ral can follow: is a link in a loop, or a path component not a directory?",
+        )
+    }
+
+    /// An exclusion of the filesystem root, which holds no object to name.
+    pub(crate) fn root_exclusion(written: &FrozenPath) -> Self {
+        Self::new(format!(
+            "'{}' is the filesystem root, and excluding the root excludes every path",
+            written.shown()
+        ))
+        .with_hint(
+            "To withhold every path, grant none: leave the fs `read` and `write` lists empty.",
+        )
+    }
 }
 
 impl From<PolicyError> for Break {
@@ -327,29 +353,58 @@ impl FreezeCtx {
         &self.cwd
     }
 
+    /// The environment a freeze reads, for the `PATH` a bare name is found on.
+    pub(crate) fn env(&self) -> &EnvVars {
+        &self.env
+    }
+
     fn home(&self) -> Option<String> {
         self.env.home()
     }
 
-    /// Freeze one place: validate its payload, resolve its anchor, then fold
-    /// `.`/`..` and wrap, so every frozen place is in the normal form the
-    /// in-process guard matches against.  Resolving here at load rather than
-    /// per check is what makes a grant immune to later env and cwd changes.
+    /// The home, walked: where the escape guards ask what lies within it.
+    fn home_dir(&self) -> Result<Option<Home>, PolicyError> {
+        self.home().as_deref().map(Home::of).transpose()
+    }
+
+    /// Freeze one place as an allowance: validate its payload, resolve its
+    /// anchor, then fold `.`/`..` and wrap, so every frozen place is in the
+    /// normal form the in-process guard matches against.  Resolving here at
+    /// load rather than per check is what makes a grant immune to later env
+    /// and cwd changes.
     ///
     /// `Ok(None)` is the dead grant: an `absolute` path rooted under the other
     /// platform's rules, which can never match an access here.
     ///
     /// # Errors
+    /// As [`walked`](Self::walked).
+    pub fn place(&self, place: &Place) -> Result<Option<FrozenPath>, PolicyError> {
+        Ok(self.walked::<Trace>(place)?.map(|walked| walked.written))
+    }
+
+    /// Freeze one place and walk it as polarity `W` walks: an allowance's
+    /// transcript, an exclusion's holds.  The refusals that judge where a
+    /// place lands (`xdg-*` within `home`) judge the walk's own, so what was
+    /// judged is what is kept.
+    ///
+    /// # Errors
     /// A malformed payload, an `XDG_*_HOME` that escapes `HOME`, an unset
     /// `HOME` under a home-relative place, an anchored place that freezes
-    /// relative, or a `.git` pointer no git directory claims.
-    pub fn place(&self, place: &Place) -> Result<Option<FrozenPath>, PolicyError> {
+    /// relative, a `.git` pointer no git directory claims, a spelling whose
+    /// walk fails, or an exclusion of the root.
+    pub(crate) fn walked<W: Walked>(
+        &self,
+        place: &Place,
+    ) -> Result<Option<GrantPath<W>>, PolicyError> {
         let tag = place.tag();
         let sub = |s| subpath(&tag, s);
         let frozen = match place {
             Place::Absolute(raw) => {
+                if W::EXCLUDES && names_the_root(raw) {
+                    return Err(PolicyError::root_exclusion(&FrozenPath::root()));
+                }
                 return live_absolute(raw, PathRules::HOST)?
-                    .then(|| freeze(raw))
+                    .then(|| freeze(raw).and_then(GrantPath::<W>::walk))
                     .transpose();
             }
             Place::Cwd(s) => join_sub(self.cwd.as_path(), sub(s)?)?,
@@ -364,86 +419,123 @@ impl FreezeCtx {
                 let sub = sub(s)?;
                 join_sub(self.home().ok_or_else(home_unknown)?, sub)?
             }
-            Place::Xdg(kind, s) => self.xdg(*kind, sub(s)?)?,
+            Place::Xdg(kind, s) => return self.xdg::<W>(*kind, sub(s)?).map(Some),
         };
-        anchored(&tag, frozen).map(Some)
+        GrantPath::walk(anchored(&tag, frozen)?).map(Some)
     }
 
-    /// The directories a selector names.  Selectors read the host, not the
-    /// anchor, save for the home; they sit here so that one resolver freezes
-    /// every grant path.
+    /// The directories a selector names, each walked as polarity `W` walks.
+    /// Selectors read the host, not the anchor, save for the home; they sit
+    /// here so that one resolver freezes every grant path.
     ///
     /// # Errors
     /// `path` over a `$PATH` with no absolute entry, or a `$PATH` entry or
     /// toolchain override that names the filesystem root or the home.
-    pub fn selector(&self, selector: Selector) -> Result<Vec<FrozenPath>, PolicyError> {
+    pub(crate) fn selector<W: Walked>(
+        &self,
+        selector: Selector,
+    ) -> Result<Vec<GrantPath<W>>, PolicyError> {
+        let home = self.home_dir()?;
         match selector {
-            Selector::Path => path_dirs(self.home().as_deref()),
-            Selector::Toolchain(t) => toolchains::expand(t, self.home().as_deref())?
-                .iter()
-                .map(freeze)
-                .collect(),
+            Selector::Path => path_dirs(home.as_ref()),
+            Selector::Toolchain(t) => {
+                toolchains::expand_in(t, |k| std::env::var(k).ok(), home.as_ref())
+            }
         }
     }
 
     /// An XDG kind plus subpath, required to lie under `home`.
     ///
-    /// The question is asked exactly as the in-process fs guard asks it, by
-    /// containment of the symlink-followed forms, fs authority being over
-    /// objects, so the freeze guard and the fs guard cannot disagree.  Both
-    /// sides are folded and canonicalised: `xdg-config ../../etc` collapses to
-    /// `/etc` rather than stepping over the guard and collapsing at match
-    /// time, an `XDG_*_HOME` pointing *through* a symlink is judged where it
+    /// The question is asked of the walk, by containment of positions, fs
+    /// authority being over objects, so the freeze guard and the fs guard
+    /// cannot disagree: `xdg-config ../../etc` lands on `/etc` and not under
+    /// `home`, an `XDG_*_HOME` pointing *through* a symlink is judged where it
     /// lands, and a HOME that is itself a symlink (macOS `/home`) still
     /// contains its own subdirectories.
     ///
     /// That guard is stated in `home`'s terms, so an unknown home leaves an
     /// `xdg-*` grant unanswerable, an absolute `XDG_*_HOME` included, since
     /// there would then be nothing to contain it.
-    fn xdg(&self, kind: XdgKind, sub: &str) -> Result<FrozenPath, PolicyError> {
-        let home = self.home();
-        let (Some(home), Some(base)) = (
-            home.as_deref(),
-            resolve_xdg_in(|k| self.env.get_or_host(k), kind, home.as_deref()),
+    fn xdg<W: Walked>(&self, kind: XdgKind, sub: &str) -> Result<GrantPath<W>, PolicyError> {
+        let spelled = self.home();
+        let (Some(spelled), Some(base)) = (
+            spelled.as_deref(),
+            resolve_xdg_in(|k| self.env.get_or_host(k), kind, spelled.as_deref()),
         ) else {
             return Err(home_unknown());
         };
-        let resolved = join_sub(base, sub)?;
-        if FrozenPath::from_surface(home).contains::<Allow>(resolved.real().as_path()) {
+        let tag = format!("xdg-{}", <&str>::from(kind));
+        let resolved = GrantPath::<W>::walk(anchored(&tag, join_sub(base, sub)?)?)?;
+        let lands = resolved.real.followed().real();
+        let home = Home::of(spelled)?;
+        if home.real.as_ref().is_some_and(|home| home.contains(lands)) {
             return Ok(resolved);
         }
         let var = kind.env_var();
         let val = self.env.get_or_host(var).unwrap_or_default();
         let name = <&str>::from(kind);
+        let written = resolved.written.shown();
         let clause = if val.is_empty() {
             format!(
-                "{var} is unset, so the default ({}) was used. Is HOME ({}) set correctly?",
-                resolved.shown(),
-                shown(home),
+                "{var} is unset, so the default ({written}) was used. Is HOME ({}) set correctly?",
+                shown(spelled),
             )
         } else {
             format!(
                 "{var}={val}: set it to a subpath of HOME ({}), unset it to use the \
                  default, or replace {} in the policy with an {} path.",
-                shown(home),
+                shown(spelled),
                 code(&format!("`xdg-{name}")),
                 code("`absolute"),
             )
         };
-        let via = if resolved.real().as_path().as_os_str() == resolved.as_str() {
+        let via = if lands.as_path().as_os_str() == resolved.written.as_str() {
             String::new()
         } else {
-            format!(
-                " (written '{}', which is a symbolic link)",
-                resolved.shown()
-            )
+            format!(" (written '{written}', which is a symbolic link)")
         };
         Err(PolicyError::new(format!(
-            "{} resolves to '{}'{via}, outside HOME; refusing to widen the grant.  {clause}",
+            "{} resolves to '{lands}'{via}, outside HOME; refusing to widen the grant.  {clause}",
             code(&format!("`xdg-{name}")),
-            resolved.real(),
         )))
     }
+}
+
+/// The home directory: as spelled, and where its walk lies, `None` for one
+/// that is not absolute and so lies nowhere.
+#[derive(Debug, Clone)]
+pub(crate) struct Home {
+    pub(crate) spelled: String,
+    pub(crate) real: Option<RealPath>,
+}
+
+impl Home {
+    /// `spelled`, walked.
+    ///
+    /// # Errors
+    /// A home whose walk fails, named.
+    pub(crate) fn of(spelled: &str) -> Result<Self, PolicyError> {
+        let written = FrozenPath::from_surface(spelled);
+        let real = written
+            .is_absolute()
+            .then(|| walk_lenient(&written.lexical(), LeafMode::Follow))
+            .transpose()
+            .map_err(|e| PolicyError::unwalkable(&written, &e))?
+            .map(|trace| trace.real().clone());
+        Ok(Self {
+            spelled: spelled.into(),
+            real,
+        })
+    }
+}
+
+/// Whether the raw `absolute` payload folds to the filesystem root, which an
+/// exclusion refuses on every host, live or not.
+fn names_the_root(raw: &str) -> bool {
+    crate::path::lex::is_bare_root(
+        crate::path::lex::fold_dots_under(raw, PathRules::HOST),
+        PathRules::HOST,
+    )
 }
 
 /// An anchored place must freeze absolute: a relative `HOME` or `TMPDIR`
@@ -665,9 +757,9 @@ fn freeze(path: impl AsRef<Path>) -> Result<FrozenPath, PolicyError> {
 
 /// A directory chosen for `selector` that is the root, the home or an
 /// ancestor of it would make running reads a read of everything, `~/.ssh`
-/// included.  Judged on the directory, by containment of symlink-followed
-/// forms as [`FreezeCtx::xdg`] judges, so a home that is a symlink is still
-/// caught.  `subject` says what chose it; `var` is what to check.
+/// included.  Judged on where the directory's walk landed, by containment of
+/// positions as [`FreezeCtx::xdg`] judges, so a home that is a symlink is
+/// still caught.  `subject` says what chose it; `var` is what to check.
 ///
 /// # Errors
 /// `dir` is the filesystem root, the home or an ancestor of it.
@@ -675,21 +767,15 @@ pub(super) fn refuse_the_world(
     selector: Selector,
     subject: &str,
     var: &str,
-    dir: &Path,
-    home: Option<&str>,
+    dir: &Trace,
+    home: Option<&Home>,
 ) -> Result<(), PolicyError> {
-    // A name that is not Unicode cannot be frozen, and is refused there.
-    let Ok(dir) = crate::path::utf8(dir) else {
-        return Ok(());
-    };
-    let dir = FrozenPath::from_surface(dir);
-    let holds =
-        |outer: &FrozenPath, inner: &FrozenPath| outer.contains::<Allow>(inner.real().as_path());
-    let home = home.map(FrozenPath::from_surface);
-    let what = match &home {
+    let dir = dir.real();
+    let home = home.and_then(|h| h.real.as_ref());
+    let what = match home {
         _ if dir.is_universal() => "the filesystem root",
-        Some(home) if holds(&dir, home) && holds(home, &dir) => "the home directory itself",
-        Some(home) if holds(&dir, home) => "an ancestor of the home directory",
+        Some(home) if dir.contains(home) && home.contains(dir) => "the home directory itself",
+        Some(home) if dir.contains(home) => "an ancestor of the home directory",
         _ => return Ok(()),
     };
     let selector = code(&format!("`dir `{}", selector.name()));
@@ -699,32 +785,37 @@ pub(super) fn refuse_the_world(
 }
 
 /// [`path_dirs_in`] over the host's `$PATH`.
-fn path_dirs(home: Option<&str>) -> Result<Vec<FrozenPath>, PolicyError> {
+fn path_dirs<W: Walked>(home: Option<&Home>) -> Result<Vec<GrantPath<W>>, PolicyError> {
     #[allow(clippy::disallowed_methods, reason = "PATH, not an XDG basedir")]
     let path = std::env::var_os("PATH").unwrap_or_default();
     path_dirs_in(&path, home)
 }
 
 /// The absolute entries of `path` ([`path_dirs_absolute`]), each frozen as
-/// the host-held path it is ([`host_absolute`]).  A relative entry is the
-/// environment's business, not the grant author's, so unlike a relative
+/// the host-held path it is ([`host_absolute`]) and walked.  A relative entry
+/// is the environment's business, not the grant author's, so unlike a relative
 /// grant path it is dropped in silence; one naming the world is not
 /// ([`refuse_the_world`]), nor one [`host_absolute`] refuses, absolute to
 /// the kernel but under a malformed or mixed head, or not UTF-8: the
 /// selector fails whole rather than freeze a path it cannot read.
-fn path_dirs_in(path: &OsStr, home: Option<&str>) -> Result<Vec<FrozenPath>, PolicyError> {
+fn path_dirs_in<W: Walked>(
+    path: &OsStr,
+    home: Option<&Home>,
+) -> Result<Vec<GrantPath<W>>, PolicyError> {
     let dirs: Vec<_> = path_dirs_absolute(path)
         .into_iter()
         .map(|entry| {
             let subject = format!("PATH holds {}", shown(&entry));
-            let dir = host_absolute(&entry).map_err(|e| {
+            let held = host_absolute(&entry).map_err(|e| {
                 PolicyError::new(format!(
                     "{subject}, which {} cannot hold: {}",
                     code("`dir `path"),
                     e.message
                 ))
             })?;
-            refuse_the_world(Selector::Path, &subject, "PATH", &entry, home).map(|()| dir)
+            let dir = GrantPath::<W>::walk(held)?;
+            refuse_the_world(Selector::Path, &subject, "PATH", dir.real.followed(), home)
+                .map(|()| dir)
         })
         .collect::<Result<_, _>>()?;
     if dirs.is_empty() {
@@ -796,7 +887,8 @@ mod tests {
             ("/home/a", "/home", "an ancestor of the home directory"),
         ] {
             let path = format!("/usr/bin:{entry}");
-            let err = path_dirs_in(OsStr::new(&path), Some(home)).unwrap_err();
+            let home = Home::of(home).unwrap();
+            let err = path_dirs_in::<Trace>(OsStr::new(&path), Some(&home)).unwrap_err();
             assert_eq!(
                 err.message,
                 format!(
@@ -816,7 +908,7 @@ mod tests {
         } else {
             "/usr/bin:///x/bin"
         };
-        let err = path_dirs_in(OsStr::new(malformed), None).unwrap_err();
+        let err = path_dirs_in::<Trace>(OsStr::new(malformed), None).unwrap_err();
         assert!(
             err.message.contains("no well-formed UNC"),
             "{}",
@@ -825,7 +917,8 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStrExt;
-            let err = path_dirs_in(OsStr::from_bytes(b"/usr/bin:/\xff"), None).unwrap_err();
+            let err =
+                path_dirs_in::<Trace>(OsStr::from_bytes(b"/usr/bin:/\xff"), None).unwrap_err();
             assert!(err.message.contains("is not UTF-8"), "{}", err.message);
         }
     }
@@ -833,15 +926,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_homeless_path_is_refused_only_for_the_root() {
-        assert!(path_dirs_in(OsStr::new("/usr/bin:/h"), None).is_ok());
-        assert!(path_dirs_in(OsStr::new("/usr/bin:/"), None).is_err());
+        assert!(path_dirs_in::<Trace>(OsStr::new("/usr/bin:/h"), None).is_ok());
+        assert!(path_dirs_in::<Trace>(OsStr::new("/usr/bin:/"), None).is_err());
     }
 
     #[cfg(unix)]
     #[test]
     fn a_home_subdirectory_on_path_is_accepted() {
-        let dirs = path_dirs_in(OsStr::new("/usr/bin:/h/bin:relative"), Some("/h")).unwrap();
-        let dirs: Vec<_> = dirs.iter().map(FrozenPath::as_str).collect();
+        let home = Home::of("/h").unwrap();
+        let path = OsStr::new("/usr/bin:/h/bin:relative");
+        let dirs = path_dirs_in::<Trace>(path, Some(&home)).unwrap();
+        let dirs: Vec<_> = dirs.iter().map(|d| d.written.as_str()).collect();
         assert_eq!(dirs, ["/usr/bin", "/h/bin"]);
     }
 

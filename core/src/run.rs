@@ -590,7 +590,9 @@ pub(crate) fn run_framed(
         Program::Hook { .. } => false,
     };
 
-    let result = shell.with_layers(run.caps.clone(), |s| body(mooring, s));
+    let mut caps = run.caps.clone();
+    caps.rehold();
+    let result = shell.with_layers(caps, |s| body(mooring, s));
 
     // The run's last step boundary.  The wall is disarmed first; a firing
     // the daemon has already claimed is waited for (the node may already

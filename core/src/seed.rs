@@ -182,7 +182,7 @@ impl EngineSeed {
     pub(crate) fn decode(self, runtime: &Runtime) -> Result<Bequest, String> {
         let dec =
             WireDecoder::for_runtime(runtime, &self.scope_table).map_err(failed("scope table"))?;
-        let context = self
+        let mut context = self
             .context
             .try_map_handlers(|frames| {
                 frames
@@ -191,6 +191,7 @@ impl EngineSeed {
                     .collect::<Result<Vec<_>, _>>()
             })
             .map_err(failed("context"))?;
+        context.grants.rehold();
         let env = self
             .env
             .into_runtime(&dec)
@@ -212,7 +213,6 @@ impl EngineSeed {
 mod tests {
     use super::*;
     use crate::boot::BakedPrelude;
-    use crate::capability::Capabilities;
     use crate::sync::LockExt as _;
     use crate::types::{
         DefaultPolicy, Env, HookName, HookSig, Shell, Value, block_over, captured, idle_handle,
@@ -226,6 +226,7 @@ mod tests {
             BakedPrelude::runtime(),
             &crate::boot::HostSurface::default(),
         )
+        .expect("a test host resolves its floor")
     }
 
     /// The recipe a parent is built by: core's own surface, the prelude
@@ -236,7 +237,8 @@ mod tests {
             BakedPrelude::runtime(),
             &crate::boot::HostSurface::default(),
             crate::test_helper::process_cwd(),
-        );
+        )
+        .expect("a test host resolves its floor");
         shell.set_exit_hints(crate::types::ExitHints::from_text("false 1 hinted\n"));
         shell.arm_binding_lease(crate::types::BindingLease {
             idle_calls: 3,
@@ -248,7 +250,7 @@ mod tests {
     }
 
     /// A narrower no test here may reach: only a Base grant consults one.
-    fn no_base(_: &str, _: &std::path::Path) -> Result<Capabilities, String> {
+    fn no_base(_: &str, _: &std::path::Path) -> Result<crate::capability::GrantLayer, String> {
         panic!("only a Base grant consults the narrower")
     }
 

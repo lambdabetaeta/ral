@@ -33,27 +33,36 @@ pub(crate) fn build_launch(
     let jail = crate::process::jail::guest();
     let admitted = &plan.admitted;
     let mut cmd = if jail.is_none()
-        && let Some(projection) =
-            crate::sandbox::SandboxProjection::of(&shell.context.grants, Some(admitted))
-    {
+        && let Some(projection) = crate::sandbox::SandboxProjection::of(
+            &shell.context.grants,
+            shell.floor(),
+            Some(admitted),
+        ) {
         // A `grant` body evaluates in this process unconfined; spawned children
         // are the only thing an OS sandbox reaches, and this is where it does.
         crate::sandbox::projection_enforceable(&projection)?;
-        crate::sandbox::sandboxed_command(&projection, admitted, ownership, &shell.cwd(), cancel)
-            .map_err(|refusal| match refusal {
-                #[cfg(windows)]
-                Refusal::Cancelled(cause) => Break::of_child(
-                    &plan.shown,
-                    crate::process::ChildEnd::Cancelled(cause),
-                    cancel,
-                    shell,
-                ),
-                other => Break::from(other),
-            })?
+        crate::sandbox::sandboxed_command(
+            &projection,
+            shell.floor(),
+            admitted,
+            ownership,
+            &shell.cwd(),
+            cancel,
+        )
+        .map_err(|refusal| match refusal {
+            #[cfg(windows)]
+            Refusal::Cancelled(cause) => Break::of_child(
+                &plan.shown,
+                crate::process::ChildEnd::Cancelled(cause),
+                cancel,
+                shell,
+            ),
+            other => Break::from(other),
+        })?
     } else {
         match admitted.program() {
-            Program::File { path, real } => {
-                let mut cmd = crate::process::Launch::new(real.as_path());
+            Program::File { path, trace } => {
+                let mut cmd = crate::process::Launch::new(trace.real().as_path());
                 cmd.arg0(path);
                 cmd.args(admitted.args());
                 cmd

@@ -19,9 +19,9 @@
 use crate::provider::identity::{adapter_for_protocol, key_var, protocol_for_adapter, protocols};
 use crate::provider::{Auth, Service, ServiceName, built_in};
 use ral_core::Shell;
-use ral_core::capability::Capabilities;
+use ral_core::capability::{Capabilities, GrantLayer};
 use ral_core::source::{SourceFile, SourceOrigin};
-use ral_core::types::{Break, Escape, Mooring, Value};
+use ral_core::types::{Break, EnvVars, Escape, Mooring, Value};
 
 const CONFIG_FILE: &str = "config.ral";
 
@@ -71,8 +71,9 @@ pub fn load_declared(path: &std::path::Path, label: &str) -> Result<Vec<Service>
     let origin = SourceOrigin::File(SourceFile::new(path).map_err(|e| format!("{label} {e}"))?);
     let cwd = ral_core::host::cwd()
         .ok_or_else(|| format!("{label} cannot load: the working directory is unavailable"))?;
-    let mut shell =
-        ral_core::HostSurface::default().shell(ral_core::terminal::TerminalState::default(), cwd);
+    let mut shell = ral_core::HostSurface::default()
+        .shell(ral_core::terminal::TerminalState::default(), cwd)
+        .map_err(|e| format!("{label} cannot load: {e}"))?;
     decode(
         evaluate_no_authority(&mut shell, &source, &origin, label)?,
         &origin.to_string(),
@@ -184,7 +185,7 @@ pub(crate) fn read_optional_file(
     }
 }
 
-/// Evaluate `source` under a [`Capabilities::deny_all`] frame, so the config can
+/// Evaluate `source` under a [`Capabilities::deny_all`] layer, so the config can
 /// compute a value but reach no effect. Shared with [`crate::net_policy::load`].
 pub(crate) fn evaluate_no_authority(
     shell: &mut Shell,
@@ -195,8 +196,10 @@ pub(crate) fn evaluate_no_authority(
     // No run is in hand — a throwaway shell computing a value — so nothing is
     // installed: no surface, no desk, no nursery.
     let mooring = Mooring::adrift();
+    let deny_all = GrantLayer::from_capabilities(Capabilities::deny_all(), &EnvVars::new())
+        .map_err(|e| format!("{label} {origin}: {}", e.message))?;
     shell
-        .with_capabilities(Capabilities::deny_all(), |sh| {
+        .with_layer(deny_all, |sh| {
             ral_core::load::evaluate_source(&mooring, sh, source, origin, None)
         })
         .map_err(|e| match e {

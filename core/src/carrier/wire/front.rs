@@ -425,6 +425,12 @@ impl Transport for WireTransport {
         let _ = self.write(&Frame::Detach);
     }
 
+    /// A wire's far end is another machine as far as a resolution goes: it
+    /// holds its own filesystem, and no stream says otherwise.
+    fn is_local(&self) -> bool {
+        false
+    }
+
     /// An answer the fuse refuses is replaced by its refusal, so the parked
     /// engine is not left waiting.
     fn answer(&self, eid: EnquiryId, answer: Result<FOValue, EnquiryError>) {

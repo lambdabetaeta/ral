@@ -55,5 +55,11 @@ have not, by name:
   `a_walk_starts_only_from_a_parsed_root` and
   `a_file_reached_by_its_short_alias_locates_at_its_long_name`.
 
+Step 3 (the layer, part a) adds no host-assertion test of its own: its
+macOS and Windows changes — the Seatbelt and AppContainer renderers reading
+the resolved exec and fs rules, `FreezeCtx`'s home walk, the floor's walk of
+`SystemRoot` and `ProgramFiles` — were cross-compiled only, and the layer
+tests it ports run on those hosts under the same first green run.
+
 The first green macOS `ci.yml` and `windows.yml` run on the landing commit
 discharges them; it is recorded here when it comes.

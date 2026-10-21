@@ -45,8 +45,8 @@ pub use tilde::abbreviate_home;
 
 pub use forms::{CwdPath, FrozenPath, LexicalPath, NotACwd};
 pub use git::work_tree_chain;
-pub(crate) use identity::Depth;
 pub use identity::{Allow, Deny, MatchedBy, Polarity};
+pub(crate) use identity::{Depth, Subject};
 pub(crate) use lex::{
     GrantRefusal, SubpathRefusal, classify_subpath, grant_eligibility, proper_ancestors,
 };
@@ -64,8 +64,8 @@ pub(crate) use render::{Object, Rendered, render_objects, render_paths, rendered
 pub use resolver::Resolver;
 pub(crate) use walk::open_discard;
 pub use walk::{
-    Dir, DirEntry, EntryName, LeafMode, Located, NotAnEntryName, ObjectId, RealPath, RootName,
-    Step, Trace, walk, walk_dir, walk_lenient,
+    Dir, DirEntry, EntryName, Excluded, Hold, Kind, LeafMode, Located, NotAnEntryName, ObjectId,
+    RealPath, RootName, Step, Trace, Walked, walk, walk_dir, walk_lenient,
 };
 #[cfg(windows)]
 pub(crate) use which::is_batch_image;

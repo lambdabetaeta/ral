@@ -211,10 +211,10 @@ impl Run {
     fn of(admitted: &Admitted, projection: &SandboxProjection) -> Self {
         let args = admitted.args().iter().map(OsString::from).collect();
         match admitted.program() {
-            Program::File { path, real } => Self::File {
-                real: real.as_path().to_path_buf(),
+            Program::File { path, trace } => Self::File {
+                real: trace.real().as_path().to_path_buf(),
                 arg0: path.clone(),
-                excluded: interpreter_exclusion(real, projection),
+                excluded: interpreter_exclusion(trace.real(), projection),
                 args,
             },
             Program::Tool(tool) => Self::Tool(tool.clone(), args),
@@ -228,7 +228,9 @@ impl Run {
 fn interpreter_exclusion(real: &RealPath, projection: &SandboxProjection) -> Option<String> {
     let interpreter = RealPath::of_path(&super::carriers::shebang(real.as_path())?).ok()?;
     let exec = match &projection.exec {
-        ExecProjection::Restricted(rules) => rules.withheld(Subject::File(&interpreter)),
+        ExecProjection::Restricted(rules) => rules.withheld(Subject::Program(
+            crate::path::Subject::Position(&interpreter),
+        )),
         ExecProjection::Unrestricted => None,
     }
     .and_then(|w| match w {

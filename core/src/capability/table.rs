@@ -5,7 +5,7 @@
 //! allowance contains it as stored, and negative evidence where some exclusion
 //! matches it under any spelling of its name.  Nothing is ranked: an exclusion
 //! beats every allowance, and only [`Evidence::permits`] closes a gap.  The fs
-//! [`Region`](super::fs::Region) and the [`ExecRules`](super::exec::ExecRules)
+//! [`FsRules`](super::fs::FsRules) and the [`ExecRules`](super::exec::ExecRules)
 //! are its two instances.
 
 use super::{Evidence, Join, Meet};
@@ -47,8 +47,12 @@ pub(crate) trait Denies<A: Allows>: Ord + Clone + Debug {
 pub(crate) enum Withheld<D> {
     /// No allowance contains it.
     MissingAllowance,
-    /// An exclusion matches it, `matched_by` the least way any does.
-    Excluded { scope: D, matched_by: MatchedBy },
+    /// An exclusion matches it, `matched_by` the least way any does.  Boxed:
+    /// an exclusion holds its walks, which a refusal passes by value.
+    Excluded {
+        scope: Box<D>,
+        matched_by: MatchedBy,
+    },
 }
 
 /// Allowances and exclusions, each a set.  Bounds sit on the impls, not the
@@ -86,6 +90,17 @@ impl<A: Ord, D: Ord> Table<A, D> {
     pub(crate) fn denies(&self) -> impl Iterator<Item = &D> {
         self.denies.iter()
     }
+
+    /// Every exclusion taken hold of again by `rehold`.
+    pub(crate) fn rehold_with(&mut self, rehold: impl Fn(&mut D)) {
+        self.denies = std::mem::take(&mut self.denies)
+            .into_iter()
+            .map(|mut deny| {
+                rehold(&mut deny);
+                deny
+            })
+            .collect();
+    }
 }
 
 impl<A: Allows, D: Denies<A>> Table<A, D> {
@@ -120,7 +135,7 @@ impl<A: Allows, D: Denies<A>> Table<A, D> {
             .min_by_key(|&(matched_by, _)| matched_by);
         match witness {
             Some((matched_by, scope)) => Some(Withheld::Excluded {
-                scope: scope.clone(),
+                scope: Box::new(scope.clone()),
                 matched_by,
             }),
             None => (!self.supports(s)).then_some(Withheld::MissingAllowance),
@@ -158,9 +173,10 @@ impl<A: Allows, D: Denies<A>> Join for Table<A, D> {
 mod tests {
     use super::{Allows, Denies, Table};
     use crate::capability::exec::tests::{Rng, paths, random};
-    use crate::capability::fs::{FsAllow, FsDeny, Region};
-    use crate::capability::{Evidence, Join, Meet};
-    use crate::path::{FrozenPath, RealPath, test_absolute};
+    use crate::capability::fs::{FsAllow, FsDeny, FsRules};
+    use crate::capability::{Evidence, Extent, GrantPath, Join, Meet};
+    use crate::path::{Excluded, FrozenPath, RealPath, Subject, Trace, test_absolute};
+    use crate::test_helper::trace;
     use std::path::{Path, PathBuf};
 
     /// The three obligations of [`Allows`], at every subject given.
@@ -264,9 +280,10 @@ mod tests {
         (tmp, root)
     }
 
-    /// The tree's names as frozen prefixes: its root, a case pair of which one
-    /// is absent, the link, the hard link, the renamed directory.
-    fn prefixes(root: &Path) -> Vec<FrozenPath> {
+    /// The tree's names as the allowance and the exclusion each makes: its
+    /// root, a case pair of which one is absent, the link, the hard link, the
+    /// renamed directory.
+    fn prefixes(root: &Path) -> Vec<(GrantPath<Extent>, GrantPath<Excluded>)> {
         let names = [
             "d",
             "d/Secrets",
@@ -281,6 +298,12 @@ mod tests {
         std::iter::once(root.to_path_buf())
             .chain(names.map(|name| root.join(name)))
             .map(|path| FrozenPath::from_surface(crate::path::utf8(&path).unwrap()))
+            .map(|path| {
+                (
+                    GrantPath::allowing(path.clone()).unwrap(),
+                    GrantPath::walk(path).unwrap(),
+                )
+            })
             .collect()
     }
 
@@ -291,32 +314,41 @@ mod tests {
             .into()
     }
 
-    fn random_region(rng: &mut Rng, root: &Path) -> Region {
+    /// A table over the tree's names, each present one time in three: as an
+    /// allowance, an exclusion or both; the places; and everywhere.
+    fn random_region(
+        rng: &mut Rng,
+        prefixes: &[(GrantPath<Extent>, GrantPath<Excluded>)],
+        places: &[RealPath],
+    ) -> FsRules {
         let (mut allows, mut denies) = (Vec::new(), Vec::new());
-        for prefix in prefixes(root) {
+        for (allow, deny) in prefixes {
             if rng.below(3) == 0 {
                 match rng.below(3) {
-                    0 => allows.push(FsAllow::Prefix(prefix)),
-                    1 => denies.push(FsDeny(prefix)),
+                    0 => allows.push(FsAllow::Prefix(allow.clone())),
+                    1 => denies.push(FsDeny(deny.clone())),
                     _ => {
-                        allows.push(FsAllow::Prefix(prefix.clone()));
-                        denies.push(FsDeny(prefix));
+                        allows.push(FsAllow::Prefix(allow.clone()));
+                        denies.push(FsDeny(deny.clone()));
                     }
                 }
             }
         }
-        for place in places(root) {
+        for place in places {
             if rng.below(3) == 0 {
-                allows.push(FsAllow::RunPlace(place));
+                allows.push(FsAllow::RunPlace(place.clone()));
             }
         }
-        Region::new(allows, denies)
+        if rng.below(6) == 0 {
+            allows.push(FsAllow::Prefix(GrantPath::everywhere()));
+        }
+        FsRules::new(allows, denies)
     }
 
     #[test]
     fn the_fs_meet_and_join_are_pointwise_on_evidence() {
         let (_tmp, root) = tree();
-        let probes: Vec<PathBuf> = [
+        let accesses: Vec<Trace> = [
             "d/secrets/f/x",
             "d/Secrets/x",
             "d/SECRETS/y",
@@ -329,11 +361,15 @@ mod tests {
             "z",
             "z/y",
         ]
-        .map(|name| root.join(name))
+        .map(|name| trace(root.join(name)))
         .into();
-        let subjects: Vec<&Path> = probes.iter().map(PathBuf::as_path).collect();
-        let top = Table::new([FsAllow::Prefix(FrozenPath::root())], []);
-        let random = |rng: &mut Rng| random_region(rng, &root);
+        let subjects: Vec<Subject<'_>> = (accesses.iter())
+            .flat_map(|t| [Subject::Access(t), Subject::Position(t.real())])
+            .chain([Subject::Everywhere])
+            .collect();
+        let top = Table::new([FsAllow::Prefix(GrantPath::everywhere())], []);
+        let (prefixes, places) = (prefixes(&root), places(&root));
+        let random = |rng: &mut Rng| random_region(rng, &prefixes, &places);
         laws(Rng(0x5851_f42d_4c95_7f2d), &top, random, &subjects);
     }
 
@@ -342,20 +378,23 @@ mod tests {
     /// the other holds, and holds nothing against a table that holds nothing.
     #[test]
     fn the_universal_allowance_meets_as_any_other() {
-        let lit = |p: &str| {
-            let p = test_absolute(p);
-            FrozenPath::for_test(&p, &p)
-        };
-        let at = |p: &str| PathBuf::from(test_absolute(p));
-        let everywhere = || Region::new([FsAllow::Prefix(FrozenPath::root())], []);
-        let work = Region::new([FsAllow::Prefix(lit("/work"))], []);
+        let at = |p: &str| trace(test_absolute(p));
+        let everywhere = || FsRules::new([FsAllow::Prefix(GrantPath::everywhere())], []);
+        let prefix = GrantPath::allowing(FrozenPath::from_surface(&test_absolute("/work")));
+        let work = FsRules::new([FsAllow::Prefix(prefix.unwrap())], []);
         let met = everywhere().meet(work);
-        assert!(met.evidence(&at("/work")).permits());
-        assert!(met.evidence(&at("/work/f")).permits());
-        assert!(!met.evidence(&at("/secret")).permits());
-        let met = everywhere().meet(Region::default());
-        for path in ["/", "/work", "/secret"] {
-            assert_eq!(met.evidence(&at(path)), Evidence::NEITHER, "{path}");
+        assert!(met.evidence(Subject::Access(&at("/work"))).permits());
+        assert!(met.evidence(Subject::Access(&at("/work/f"))).permits());
+        assert!(!met.evidence(Subject::Access(&at("/secret"))).permits());
+        let met = everywhere().meet(FsRules::default());
+        let (work, secret, root) = (at("/work"), at("/secret"), RealPath::universal());
+        for subject in [
+            Subject::Access(&work),
+            Subject::Access(&secret),
+            Subject::Position(&root),
+            Subject::Everywhere,
+        ] {
+            assert_eq!(met.evidence(subject), Evidence::NEITHER);
         }
     }
 }

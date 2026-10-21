@@ -73,6 +73,26 @@ use windows as host;
 #[cfg(test)]
 mod tests;
 
+#[cfg(any(test, feature = "test-util"))]
+thread_local! {
+    /// How many components [`step_into`] has opened on this thread, which a
+    /// test reads to show what a walk cost.
+    static STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many components have been opened on this thread.
+#[cfg(any(test, feature = "test-util"))]
+pub(crate) fn steps_taken() -> usize {
+    STEPS.with(std::cell::Cell::get)
+}
+
+/// [`host::step`], counted under test.
+fn step_into(parent: &Held, name: &EntryName, sharing: Sharing) -> io::Result<Child> {
+    #[cfg(any(test, feature = "test-util"))]
+    STEPS.with(|taken| taken.set(taken.get() + 1));
+    host::step(parent, name, sharing)
+}
+
 /// `SYMLOOP_MAX`'s customary value: a name still splicing past this is a cycle.
 const MAX_HOPS: usize = 40;
 
@@ -508,6 +528,10 @@ impl RealPath {
 
     /// Whether `path` lies inside this one, as a rule of polarity `P` reads
     /// names; an fs access against a run place.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(dead_code, reason = "used from step 7")
+    )]
     pub(crate) fn contains_path<P: super::Polarity>(&self, path: &Path) -> bool {
         super::identity::within::<P>(path, &self.0)
     }
@@ -582,11 +606,22 @@ impl RealPath {
     }
 }
 
-#[expect(dead_code, reason = "used from step 8")]
 impl RealPath {
     /// Whether this position is the root of its filesystem: `/`, `C:\`.
     pub(crate) fn is_root(&self) -> bool {
         self.0.parent().is_none()
+    }
+
+    /// `/`, the position every path lies beneath.  No walk makes it on
+    /// Windows, where a root is one drive's.
+    pub(crate) fn universal() -> Self {
+        Self(PathBuf::from("/"))
+    }
+
+    /// Whether this position holds every path: `/`, where `/` is a root; a
+    /// drive root holds its own drive alone.
+    pub(crate) fn is_universal(&self) -> bool {
+        PathRules::HOST == PathRules::Posix && self.is_root()
     }
 }
 
@@ -748,6 +783,109 @@ impl<'de> Deserialize<'de> for Trace {
             )));
         }
         Ok(trace)
+    }
+}
+
+/// An exclusion's hold on the last object its walk opened.
+///
+/// For now its trace alone, which is what `Serialize` writes and
+/// `Deserialize` reads, and what `Eq` and `Ord` compare.  The handle that
+/// makes it a hold is step 10's.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Hold {
+    trace: Trace,
+}
+
+impl Hold {
+    pub(crate) fn trace(&self) -> &Trace {
+        &self.trace
+    }
+
+    /// Take hold of the object again on this host.  Nothing is held yet, so
+    /// there is nothing to take again.
+    #[allow(clippy::unused_self, reason = "nothing is held yet: step 10")]
+    pub(crate) fn rehold(&mut self) {}
+}
+
+impl Serialize for Hold {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.trace.serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for Hold {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Trace::deserialize(d).map(|trace| Self { trace })
+    }
+}
+
+/// What an exclusion holds: the object at the name as named and, where that
+/// was a link, what the link reached.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Excluded {
+    named: Hold,
+    target: Option<Hold>,
+}
+
+impl Excluded {
+    pub(crate) fn named(&self) -> &Trace {
+        self.named.trace()
+    }
+
+    pub(crate) fn target(&self) -> Option<&Trace> {
+        self.target.as_ref().map(Hold::trace)
+    }
+
+    pub(crate) fn rehold(&mut self) {
+        self.named.rehold();
+        self.target.iter_mut().for_each(Hold::rehold);
+    }
+
+    /// The holds, the name's first.
+    pub(super) fn holds(&self) -> impl Iterator<Item = &Hold> {
+        std::iter::once(&self.named).chain(&self.target)
+    }
+}
+
+/// What a grant spelling's walk makes, by the polarity of the rule that
+/// names it: the transcript an allowance reads, or the holds an exclusion
+/// keeps.
+pub trait Walked: Sized {
+    /// Whether this walk is an exclusion's, which names an object it holds.
+    const EXCLUDES: bool;
+
+    /// The spelling walked, as far as the disk goes.
+    ///
+    /// # Errors
+    /// [`walk_lenient`]'s, or [`walk_excluded`]'s.
+    fn walk(spelling: &LexicalPath) -> io::Result<Self>;
+
+    /// Where an access to the spelling lands, for the refusals that judge it.
+    fn followed(&self) -> &Trace;
+}
+
+impl Walked for Trace {
+    const EXCLUDES: bool = false;
+
+    fn walk(spelling: &LexicalPath) -> io::Result<Self> {
+        walk_lenient(spelling, LeafMode::Follow)
+    }
+
+    fn followed(&self) -> &Trace {
+        self
+    }
+}
+
+impl Walked for Excluded {
+    const EXCLUDES: bool = true;
+
+    fn walk(spelling: &LexicalPath) -> io::Result<Self> {
+        walk_excluded(spelling)
+    }
+
+    /// The link's target, else the object at the name.
+    fn followed(&self) -> &Trace {
+        self.target().unwrap_or_else(|| self.named())
     }
 }
 
@@ -950,7 +1088,7 @@ impl Dir {
     /// # Errors
     /// The open's; `NotADirectory` for a link or anything else but a directory.
     pub(crate) fn open_dir(&self, name: &EntryName) -> io::Result<Self> {
-        let child = host::step(&self.handle, name, Sharing::Directory)?;
+        let child = step_into(&self.handle, name, Sharing::Directory)?;
         match child.step.kind {
             Kind::Dir => {
                 let (handle, step, stat) = child.held()?;
@@ -1006,7 +1144,7 @@ impl Dir {
     /// # Errors
     /// The walk's; `InvalidInput` where `name` is not a link.
     pub(crate) fn open_dir_via_link(&self, name: &EntryName, chain: &[&Self]) -> io::Result<Self> {
-        let link = host::step(&self.handle, name, Sharing::Leaf)?;
+        let link = step_into(&self.handle, name, Sharing::Leaf)?;
         let (link, step, _) = link.held()?;
         if step.kind != Kind::Symlink {
             return Err(io::Error::new(
@@ -1091,13 +1229,11 @@ impl DirEntry<'_> {
 /// the listing's kind and identity.  Not a [`Trace`]: its step was stated by
 /// name after the listing, not opened, and the type says so, so no door that
 /// wants a walk's evidence can be handed a listing's.
-#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 4"))]
 pub(crate) struct Listed<'a> {
     parent: &'a Trace,
     step: Step,
 }
 
-#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 4"))]
 impl Listed<'_> {
     pub(crate) fn real(&self) -> RealPath {
         self.parent.real.child(&self.step.name)
@@ -1398,7 +1534,7 @@ impl Located {
             return Err(io::ErrorKind::AlreadyExists.into());
         };
         host::mkdir(&self.dir.file, name)?;
-        let (handle, step, stat) = host::step(&self.dir, name, Sharing::Directory)?.held()?;
+        let (handle, step, stat) = step_into(&self.dir, name, Sharing::Directory)?.held()?;
         if step.kind != Kind::Dir {
             return Err(io::ErrorKind::NotADirectory.into());
         }
@@ -1712,6 +1848,14 @@ impl Cursor {
 
 /// The walk's loop: a cursor, the names still to take, and how to treat the
 /// last one.
+/// Where a walk's names ran out: on a leaf, in the directory on top of the
+/// cursor, or at a name that could not be entered, and why.
+enum Ended {
+    Leaf(Child),
+    Entered,
+    Stopped(EntryName, io::Error),
+}
+
 struct Walker<V> {
     cursor: Cursor,
     names: VecDeque<Name>,
@@ -1821,6 +1965,12 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
     }
 
     fn run(mut self) -> io::Result<Located> {
+        let ended = self.advance()?;
+        self.conclude(ended)
+    }
+
+    /// Consume the names, to where the walk ends.
+    fn advance(&mut self) -> io::Result<Ended> {
         while let Some(name) = self.names.pop_front() {
             let Name::Entry(name) = name else {
                 self.cursor.up()?;
@@ -1833,33 +1983,46 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
             } else {
                 Sharing::Leaf
             };
-            let child = match host::step(self.cursor.top(), &name, sharing) {
+            let child = match step_into(self.cursor.top(), &name, sharing) {
                 Ok(child) => child,
-                Err(e) => return self.stopped(name, e),
+                Err(e) => return Ok(Ended::Stopped(name, e)),
             };
             self.check(&child, &name)?;
             match child.step.kind {
                 _ if child.step.kind == Kind::Symlink && self.links == Links::Refuse => {
                     return Err(loop_error());
                 }
-                Kind::Symlink if last && self.mode == Mode::NoFollow => return Ok(self.leaf(child)),
+                Kind::Symlink if last && self.mode == Mode::NoFollow => {
+                    return Ok(Ended::Leaf(child));
+                }
                 Kind::Symlink => {
                     let (link, ..) = child.held()?;
                     let spliced = host::read_link(&link.file).and_then(|t| self.splice(&t));
                     if let Err(e) = spliced {
-                        return self.stopped(name, e);
+                        return Ok(Ended::Stopped(name, e));
                     }
                 }
                 Kind::Dir if entering => {
                     let (handle, step, _) = child.held()?;
                     self.cursor.push(handle, step);
                 }
-                Kind::Dir => return Ok(self.leaf(child)),
-                _ if entering => return self.stopped(name, io::ErrorKind::NotADirectory.into()),
-                _ => return Ok(self.leaf(child)),
+                Kind::Dir => return Ok(Ended::Leaf(child)),
+                _ if entering => {
+                    return Ok(Ended::Stopped(name, io::ErrorKind::NotADirectory.into()));
+                }
+                _ => return Ok(Ended::Leaf(child)),
             }
         }
-        self.entered()
+        Ok(Ended::Entered)
+    }
+
+    /// The object the walk ended as, as a [`Located`].
+    fn conclude(self, ended: Ended) -> io::Result<Located> {
+        match ended {
+            Ended::Leaf(child) => Ok(self.leaf(child)),
+            Ended::Entered => self.entered(),
+            Ended::Stopped(name, error) => self.stopped(name, error),
+        }
     }
 
     /// The walk ended on `child`, the last name's object.
@@ -1941,13 +2104,24 @@ fn finish(
     links: Links,
     vet: impl FnMut(&Vetted<'_>) -> bool,
 ) -> io::Result<Located> {
+    start(rp, mode, missing, links, vet)?.run()
+}
+
+/// `rp` walked from its root, as [`finish`] does, before any name is taken.
+fn start<V: FnMut(&Vetted<'_>) -> bool>(
+    rp: &Path,
+    mode: Mode,
+    missing: OnMissing,
+    links: Links,
+    vet: V,
+) -> io::Result<Walker<V>> {
     rooted(rp)?;
     let Spelling { root, names } = split(rp)?;
     let root = root.ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
     let mode = if names_a_dir(rp) { Mode::Enter } else { mode };
     let mut walker = Walker::new(Cursor::root(root)?, names, mode, missing, links, vet);
     walker.vet_root()?;
-    walker.run()
+    Ok(walker)
 }
 
 /// An access to an object or a create target.
@@ -2002,6 +2176,49 @@ pub fn walk_lenient(rp: &LexicalPath, mode: LeafMode) -> io::Result<Trace> {
         |_| true,
     )
     .map(|located| located.trace)
+}
+
+/// A grant exclusion: the spelling walked leniently without following its
+/// last component, and where that is a link, the target read through the
+/// link's own handle and walked, following links, from the directory the
+/// walk left the cursor in; the spelling is never walked a second time.
+///
+/// # Errors
+/// What ends no steps, as [`walk_lenient`]'s.
+pub(crate) fn walk_excluded(rp: &LexicalPath) -> io::Result<Excluded> {
+    let mut walker = start(
+        rp.as_path(),
+        Mode::NoFollow,
+        OnMissing::Stop,
+        Links::Splice,
+        |_| true,
+    )?;
+    let hold = |located: Located| Hold {
+        trace: located.trace,
+    };
+    match walker.advance()? {
+        Ended::Leaf(child) if child.step.kind == Kind::Symlink => {
+            let (name, named) = (
+                child.step.name.clone(),
+                walker.cursor.trace(Some(child.step.clone()), Vec::new()),
+            );
+            let (link, ..) = child.held()?;
+            walker.mode = Mode::Follow;
+            let spliced = host::read_link(&link.file).and_then(|target| walker.splice(&target));
+            let target = match spliced {
+                Ok(()) => walker.run()?,
+                Err(e) => walker.stopped(name, e)?,
+            };
+            Ok(Excluded {
+                named: Hold { trace: named },
+                target: Some(hold(target)),
+            })
+        }
+        ended => Ok(Excluded {
+            named: hold(walker.conclude(ended)?),
+            target: None,
+        }),
+    }
 }
 
 /// The real path `path` names, or will name once its missing tail is

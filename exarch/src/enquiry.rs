@@ -1347,6 +1347,7 @@ mod tests {
                                 ral_core::terminal::TerminalState::default(),
                                 ral_core::test_helper::process_cwd(),
                             )
+                            .expect("a test host resolves its floor")
                             .bequeath(SpawnGrant::Inherit),
                     )
                     .expect("a bequest seals"),

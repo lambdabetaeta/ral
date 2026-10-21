@@ -5,7 +5,7 @@ pub mod host;
 
 use crate::policy::Invocation;
 use crate::skill;
-use ral_core::capability::{Capabilities, ExecKey, GrantStack};
+use ral_core::capability::{ExecSummary, GrantSummary, LayerSummary};
 use std::collections::BTreeSet;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -37,9 +37,14 @@ pub enum EditScheme {
 ///
 /// # Errors
 /// If reading a `--system` file or a discovered `AGENTS.md` fails.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the prompt's inputs are the launch's, each read once; the launch has no struct for them"
+)]
 pub fn assemble(
     files: &[PathBuf],
     invocation: &Invocation,
+    floor: &ral_core::capability::Floor,
     app: crate::app::App,
     cwd: &ral_core::path::CwdPath,
     config_dir: &Path,
@@ -75,7 +80,7 @@ pub fn assemble(
     if !agents.is_empty() {
         sections.push((Some("Workspace"), read_files(&agents)?));
     }
-    let skills = skill::discover_metadata(cwd, config_dir, &invocation.stack);
+    let skills = skill::discover_metadata(cwd, config_dir, &invocation.stack, floor);
     if !skills.is_empty() {
         sections.push((Some("Skills"), skills_section(&skills)));
     }
@@ -109,13 +114,11 @@ pub const SCRATCH_PLACEHOLDER: &str = "@@EXARCH_SCRATCH_PATH@@";
 /// the agent's own engine as the agent is constructed.
 pub const GRANT_PLACEHOLDER: &str = "@@EXARCH_GRANT@@";
 
-/// Fill [`GRANT_PLACEHOLDER`] with the stack an agent's every eval runs
+/// Fill [`GRANT_PLACEHOLDER`] with the grant an agent's every eval runs
 /// under: its engine session's layers, then the ceiling its host pushes.
-pub(crate) fn with_grant(template: &str, session: &GrantStack, ceiling: &GrantStack) -> String {
-    template.replace(
-        GRANT_PLACEHOLDER,
-        &grant_summary(session.iter().chain(ceiling)),
-    )
+pub(crate) fn with_grant(template: &str, session: &GrantSummary, ceiling: &GrantSummary) -> String {
+    let layers = session.layers().iter().chain(ceiling.layers());
+    template.replace(GRANT_PLACEHOLDER, &grant_summary(layers))
 }
 
 /// The `AGENTS.md` chain to inject, outermost first so the most specific
@@ -193,23 +196,10 @@ pub fn host_section(app: crate::app::App) -> String {
     )
 }
 
-/// Whether a layer is worth summarising: it restricts, or its exec names a run
-/// place.
-///
-/// Under a nested fs restriction such a place stays readable, which the reader
-/// needs to know even of a layer that denotes `t`.
-fn says_something(caps: &Capabilities) -> bool {
-    caps.is_restrictive()
-        || caps
-            .exec
-            .as_ref()
-            .is_some_and(|grant| grant.iter().any(|(_, e)| e.positive))
-}
-
 /// The grant a stack denotes, as the model reads it.
 ///
 /// A static legend teaching the notation and the runtime denial string, then
-/// each distinct layer that [`says_something`], oldest first, then the net
+/// each distinct layer a [`GrantSummary`] shows, oldest first, then the net
 /// line once.  The stack is the meet, so describing each layer describes the
 /// whole ceiling, and a repeat adds nothing.
 ///
@@ -217,11 +207,11 @@ fn says_something(caps: &Capabilities) -> bool {
 /// container "(none)".  The caller appends the `- scratch:` bullet, since
 /// exarch names a seeded env var and host path where synod names the guest's
 /// tmpfs.
-fn grant_summary<'a>(stack: impl IntoIterator<Item = &'a Capabilities>) -> String {
-    let mut layers: Vec<&Capabilities> = Vec::new();
-    for caps in stack {
-        if says_something(caps) && !layers.contains(&caps) {
-            layers.push(caps);
+fn grant_summary<'a>(shown: impl IntoIterator<Item = &'a LayerSummary>) -> String {
+    let mut layers: Vec<&LayerSummary> = Vec::new();
+    for summary in shown {
+        if !layers.contains(&summary) {
+            layers.push(summary);
         }
     }
     // The denial legend would describe a runtime event that cannot occur.
@@ -238,13 +228,13 @@ the sandbox is the trust boundary.\n\n"
             layers.len()
         );
     }
-    for (i, caps) in layers.iter().enumerate() {
+    for (i, layer) in layers.iter().enumerate() {
         if layers.len() > 1 {
             let _ = writeln!(s, "\nLayer {}:", i + 1);
         }
-        s.push_str(&layer_lines(caps));
+        s.push_str(&layer_lines(layer));
     }
-    let denied = layers.iter().any(|c| c.net.is_some());
+    let denied = layers.iter().any(|l| l.net.is_some());
     let _ = writeln!(s, "\n- net: {}", if denied { "deny" } else { "inherit" });
     s
 }
@@ -254,47 +244,59 @@ fn legend() -> String {
 }
 
 /// One layer's bullets bar net and scratch.
-fn layer_lines(caps: &Capabilities) -> String {
+fn layer_lines(layer: &LayerSummary) -> String {
     let mut s = String::new();
-    let _ = writeln!(s, "- exec: {}", exec_line(caps));
-    let dirs = exec_dirs_line(caps);
+    let _ = writeln!(s, "- exec: {}", exec_line(layer.exec.as_ref()));
+    let dirs = layer.exec.as_ref().map_or(vec![], allowed_dirs);
     if !dirs.is_empty() {
-        let _ = writeln!(s, "- exec dirs: {dirs}");
+        let _ = writeln!(s, "- exec dirs: {}", dirs.join(", "));
     }
-    let denies = exec_denies(caps);
+    let denies = layer.exec.as_ref().map_or(&[][..], |exec| &exec.denies);
     if !denies.is_empty() {
         let _ = writeln!(s, "- exec deny: {}", denies.join(", "));
     }
-    if let Some(fs) = &caps.fs {
-        let _ = writeln!(s, "- fs read: {}", or_none(&fs.read_prefixes));
-        let _ = writeln!(s, "- fs write: {}", or_none(&fs.write_prefixes));
-        if !fs.deny_paths.is_empty() {
-            let _ = writeln!(s, "- fs deny: {}", join_str(&fs.deny_paths));
+    if let Some(fs) = &layer.fs {
+        let _ = writeln!(s, "- fs read: {}", or_none(&fs.read));
+        let _ = writeln!(s, "- fs write: {}", or_none(&fs.write));
+        if !fs.deny.is_empty() {
+            let _ = writeln!(s, "- fs deny: {}", join_str(&fs.deny));
         }
     }
-    if let Some(verbs) = &caps.editor {
+    if let Some(verbs) = &layer.editor {
         let _ = writeln!(s, "- editor: {}", verbs_line(verbs));
     }
-    if let Some(verbs) = &caps.shell {
+    if let Some(verbs) = &layer.shell {
         let _ = writeln!(s, "- shell: {}", verbs_line(verbs));
     }
     s
 }
 
+/// A directory allowance as a grant spells it.
+const DIR_KEY: &str = "`dir ";
+
+/// Allowed directories, each rendered as its `dir` target.  Empty when
+/// nothing allows by directory.
+fn allowed_dirs(exec: &ExecSummary) -> Vec<&str> {
+    (exec.allows.iter())
+        .map(String::as_str)
+        .filter(|k| k.starts_with(DIR_KEY))
+        .collect()
+}
+
 /// Admitted commands, comma-joined: bare names, then path keys as their
 /// author spelled them.  Directory allowances are surfaced by
-/// [`exec_dirs_line`], exclusions by [`exec_denies`], so only the other
+/// [`allowed_dirs`], exclusions by the layer's `exec deny`, so only the other
 /// allowed keys land here.  Beside `every` they add no running, and are
 /// listed as authored.
-fn exec_line(caps: &Capabilities) -> String {
-    let Some(grant) = &caps.exec else {
+fn exec_line(exec: Option<&ExecSummary>) -> String {
+    let Some(exec) = exec else {
         return "unrestricted".into();
     };
-    let admitted: Vec<String> = (grant.iter())
-        .filter(|(key, e)| !matches!(key, ExecKey::Dir(_)) && e.positive)
-        .map(|(key, _)| key.to_string())
+    let admitted: Vec<&str> = (exec.allows.iter())
+        .map(String::as_str)
+        .filter(|k| !k.starts_with(DIR_KEY))
         .collect();
-    match (grant.every(), admitted.is_empty()) {
+    match (exec.every, admitted.is_empty()) {
         (true, true) => "every program, less the exclusions below".into(),
         (true, false) => format!(
             "every program, less the exclusions below; also named: {}",
@@ -303,30 +305,6 @@ fn exec_line(caps: &Capabilities) -> String {
         (false, true) => "(none)".into(),
         (false, false) => admitted.join(", "),
     }
-}
-
-/// Allowed directories, each rendered as its `dir` target.  Empty when
-/// nothing allows by directory.
-fn exec_dirs_line(caps: &Capabilities) -> String {
-    caps.exec.as_ref().map_or_else(String::new, |grant| {
-        (grant.iter())
-            .filter(|(key, e)| matches!(key, ExecKey::Dir(_)) && e.positive)
-            .map(|(key, _)| key.to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    })
-}
-
-/// Names, path keys and directory prefixes carrying an exclusion, which wins
-/// over every allowance, a covering directory's included.  A key allowed and
-/// excluded appears here and in the allowed lists.
-fn exec_denies(caps: &Capabilities) -> Vec<String> {
-    caps.exec.as_ref().map_or_else(Vec::new, |grant| {
-        (grant.iter())
-            .filter(|(_, e)| e.negative)
-            .map(|(key, _)| key.to_string())
-            .collect()
-    })
 }
 
 fn verbs_line<V: Copy>(verbs: &BTreeSet<V>) -> String
@@ -364,4 +342,50 @@ fn skills_section(skills: &[skill::Skill]) -> String {
         let _ = writeln!(body, "- {}: {}", s.name, s.description);
     }
     body
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ral_core::capability::{EditorVerb, FsSummary, Net};
+
+    /// A Linux guest's summary as a macOS or Windows host receives it: built
+    /// of spellings and axes, a newtype of its layers on the wire.
+    fn crossed() -> GrantSummary {
+        let layers = vec![LayerSummary {
+            fs: Some(FsSummary {
+                read: vec!["/work".into()],
+                write: vec!["/work".into()],
+                deny: vec!["/work/.env".into()],
+            }),
+            exec: Some(ExecSummary {
+                every: false,
+                allows: vec!["`name git".into(), "`dir `absolute /usr/bin".into()],
+                denies: vec!["`name bash".into()],
+            }),
+            net: Some(Net::Offline),
+            editor: Some(BTreeSet::from([EditorVerb::Read])),
+            shell: None,
+        }];
+        let wire = serde_json::to_string(&layers).expect("a summary is plain data");
+        serde_json::from_str(&wire).expect("a summary decodes where it crossed to")
+    }
+
+    /// The same lines on every host, whatever the host's own paths look like.
+    #[test]
+    fn a_crossed_summary_renders_the_same_lines_on_every_host() {
+        let shown = with_grant(GRANT_PLACEHOLDER, &crossed(), &GrantSummary::default());
+        let lines = "\
+- exec: `name git
+- exec dirs: `dir `absolute /usr/bin
+- exec deny: `name bash
+- fs read: /work
+- fs write: /work
+- fs deny: /work/.env
+- editor: read
+
+- net: deny
+";
+        assert!(shown.ends_with(lines), "{shown}");
+    }
 }

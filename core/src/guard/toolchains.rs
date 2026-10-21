@@ -8,13 +8,16 @@
 //! defaults.  The rules are stated once, in `docs/ral-wiki/design/grant.md`
 //! §Selectors; the table is the data.
 //!
-//! [`expand_in`] is pure over an injected environment, home and `exists`;
-//! [`expand`] is its live wrapper, which the freeze and the fs floor read.
+//! [`chosen`] is pure over an injected environment and home; [`expand_in`]
+//! walks what it chose, refusing an override that names the world and keeping
+//! a directory that is one, and [`expand`] is its live wrapper, which the
+//! freeze and the fs floor read.
 
-use super::freeze::{PolicyError, Selector, refuse_the_world};
-use crate::path::{Allow, FrozenPath, is_absolute, join_slash, path_entries, shown, utf8};
+use super::freeze::{Home, PolicyError, Selector, refuse_the_world};
+use crate::capability::GrantPath;
+use crate::path::{FrozenPath, Kind, Trace, Walked, is_absolute, join_slash, path_entries, shown};
 use crate::path::{XdgKind, resolve_xdg_in};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use strum::{EnumString, IntoStaticStr, VariantArray};
 
 /// A package manager, or `system`: the selector names `dir` takes.
@@ -369,130 +372,176 @@ impl Base {
     }
 }
 
+/// A directory a location chooses, before anything is walked: and, where the
+/// environment chose it, the variable that did and its value as given.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Chosen {
+    pub(super) dir: PathBuf,
+    via: Option<(&'static str, PathBuf)>,
+}
+
 impl Location {
-    /// The directories chosen, before any existence check.
-    fn chosen(
-        &self,
-        toolchain: Toolchain,
-        env: &impl Fn(&str) -> Option<String>,
-        home: Option<&str>,
-    ) -> Result<Vec<PathBuf>, PolicyError> {
+    /// The directories chosen: the first usable override alone, else every
+    /// default.
+    fn chosen(&self, env: &impl Fn(&str) -> Option<String>, home: Option<&str>) -> Vec<Chosen> {
         let Some((over, value)) = (self.overrides.iter()).find_map(|&o| Some((o, o.value(env)?)))
         else {
-            return Ok(self
-                .defaults
-                .iter()
+            return (self.defaults.iter())
                 .filter_map(|b| b.dir(env, home))
-                .collect());
+                .map(|dir| Chosen { dir, via: None })
+                .collect();
         };
         let dir = join_slash(&value, over.sub());
-        let subject = format!("{} is {}", over.var(), shown(&value));
-        refuse_the_world(
-            Selector::Toolchain(toolchain),
-            &subject,
-            over.var(),
-            &dir,
-            home,
-        )?;
-        Ok(vec![dir])
+        vec![Chosen {
+            dir,
+            via: Some((over.var(), value)),
+        }]
     }
 }
 
-/// The directories `toolchain` expands to over an injected environment, home
-/// and `exists`, native as the OS takes them.  A toolchain that is absent
-/// expands to nothing.
-///
-/// # Errors
-/// An override that names the filesystem root, the home or an ancestor of it.
-pub fn expand_in(
+/// The directories `toolchain` chooses over an injected environment and
+/// home, native as the OS takes them, before any is walked.
+pub(super) fn chosen(
     toolchain: Toolchain,
     env: impl Fn(&str) -> Option<String>,
     home: Option<&str>,
-    exists: impl Fn(&Path) -> bool,
-) -> Result<Vec<PathBuf>, PolicyError> {
-    let chosen = (toolchain.locations().iter())
-        .map(|l| l.chosen(toolchain, &env, home))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(chosen
-        .into_iter()
-        .flatten()
-        .filter(|dir| exists(dir))
+) -> Vec<Chosen> {
+    (toolchain.locations().iter())
+        .flat_map(|l| l.chosen(&env, home))
+        .collect()
+}
+
+/// The directories `toolchain` expands to over an injected environment and
+/// home, each walked as polarity `W` walks: an override that names the
+/// filesystem root, the home or an ancestor of it is refused, and a directory
+/// that is absent or no directory is dropped.  A toolchain that is absent
+/// expands to nothing.
+///
+/// # Errors
+/// An override that names the world; a directory whose walk fails, or that no
+/// grant can hold.
+pub(crate) fn expand_in<W: Walked>(
+    toolchain: Toolchain,
+    env: impl Fn(&str) -> Option<String>,
+    home: Option<&Home>,
+) -> Result<Vec<GrantPath<W>>, PolicyError> {
+    let mut kept = Vec::new();
+    for Chosen { dir, via } in chosen(toolchain, env, home.map(|h| h.spelled.as_str())) {
+        let written = FrozenPath::freeze(&dir).map_err(PolicyError::new)?;
+        let walked = GrantPath::<W>::walk(written)?;
+        if let Some((var, value)) = via {
+            let subject = format!("{var} is {}", shown(&value));
+            refuse_the_world(
+                Selector::Toolchain(toolchain),
+                &subject,
+                var,
+                walked.real.followed(),
+                home,
+            )?;
+        }
+        if walked.real.followed().kind() == Some(Kind::Dir) {
+            kept.push(walked);
+        }
+    }
+    Ok(kept)
+}
+
+/// [`expand_in`] over the host environment and filesystem, as the spellings
+/// that survive.
+///
+/// # Errors
+/// As [`expand_in`]; a home that cannot be walked.
+pub fn expand(toolchain: Toolchain, home: Option<&str>) -> Result<Vec<PathBuf>, PolicyError> {
+    let home = home.map(Home::of).transpose()?;
+    let kept = expand_in::<Trace>(toolchain, |k| std::env::var(k).ok(), home.as_ref())?;
+    Ok(kept
+        .iter()
+        .map(|dir| PathBuf::from(dir.written.as_str()))
         .collect())
 }
 
-/// [`expand_in`] over the host environment and filesystem.
-///
-/// # Errors
-/// As [`expand_in`].
-pub fn expand(toolchain: Toolchain, home: Option<&str>) -> Result<Vec<PathBuf>, PolicyError> {
-    expand_in(toolchain, |k| std::env::var(k).ok(), home, Path::exists)
-}
-
-/// The [`FLOOR`] rows' directories outside `home`: a prefix an override puts
-/// in the home is the user's, to be read only where granted.  A row that
-/// fails is dropped.
+/// The [`FLOOR`] rows' directories outside `home`, walked: a prefix an
+/// override puts in the home is the user's, to be read only where granted.  A
+/// row that fails is dropped.
 pub(crate) fn floor_in(
     env: impl Fn(&str) -> Option<String>,
-    home: Option<&str>,
-    exists: impl Fn(&Path) -> bool,
-) -> Vec<PathBuf> {
-    let held = home.map(FrozenPath::from_surface);
-    // A name that is not Unicode cannot be a grant, so it is no floor.
-    let outside = |dir: &PathBuf| {
-        utf8(dir).is_ok_and(|dir| {
-            held.as_ref().is_none_or(|h| {
-                !h.contains::<Allow>(FrozenPath::from_surface(dir).real().as_path())
-            })
-        })
-    };
+    home: Option<&Home>,
+) -> Vec<GrantPath<Trace>> {
+    let held = home.and_then(|h| h.real.as_ref());
     FLOOR
         .into_iter()
-        .filter_map(|t| expand_in(t, &env, home, &exists).ok())
+        .filter_map(|t| expand_in::<Trace>(t, &env, home).ok())
         .flatten()
-        .filter(outside)
+        .filter(|dir| held.is_none_or(|h| !h.contains(dir.real.real())))
         .collect()
 }
 
 /// [`floor_in`] over the host environment and filesystem.
-pub(crate) fn floor(home: Option<&str>) -> Vec<PathBuf> {
-    floor_in(|k| std::env::var(k).ok(), home, Path::exists)
+///
+/// # Errors
+/// A home that cannot be walked.
+pub(crate) fn floor(home: Option<&str>) -> Result<Vec<GrantPath<Trace>>, String> {
+    let home = home.map(Home::of).transpose().map_err(|e| e.message)?;
+    Ok(floor_in(|k| std::env::var(k).ok(), home.as_ref()))
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[test] fixtures build real directories and links, and probe them by name"
+)]
 mod tests {
     use super::*;
     use crate::guard::freeze::Anchor;
+    #[cfg(unix)]
+    use crate::path::Subject;
+    use std::path::Path;
 
-    /// A directory as the fixtures spell it: natively, as `exists` is asked
-    /// and the expansion answers.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] fixture directories are UTF-8 by construction"
-    )]
+    /// A directory as the fixtures spell it.
     fn spelled(dir: &Path) -> &str {
-        dir.to_str().expect("a UTF-8 fixture")
+        crate::path::utf8(dir).expect("a UTF-8 fixture")
     }
 
-    /// [`super::expand_in`] over string fixtures.
-    fn expand_in(
+    /// [`chosen`] as the strings the fixtures spell.
+    fn chosen_in(
         toolchain: Toolchain,
         env: impl Fn(&str) -> Option<String>,
         home: Option<&str>,
-        exists: impl Fn(&str) -> bool,
-    ) -> Result<Vec<String>, PolicyError> {
-        let dirs = super::expand_in(toolchain, env, home, |dir| exists(spelled(dir)))?;
-        Ok(dirs.iter().map(|dir| spelled(dir).to_owned()).collect())
+    ) -> Vec<String> {
+        (chosen(toolchain, env, home).iter())
+            .map(|c| spelled(&c.dir).to_owned())
+            .collect()
     }
 
-    /// [`super::floor_in`] over string fixtures.
-    #[cfg(unix)]
-    fn floor_in(
+    /// [`expand_in`] as the spellings it keeps, the home walked where it is
+    /// spelled.
+    fn expanded(
+        toolchain: Toolchain,
         env: impl Fn(&str) -> Option<String>,
         home: Option<&str>,
-        exists: impl Fn(&str) -> bool,
-    ) -> Vec<String> {
-        let dirs = super::floor_in(env, home, |dir| exists(spelled(dir)));
-        dirs.iter().map(|dir| spelled(dir).to_owned()).collect()
+    ) -> Result<Vec<String>, PolicyError> {
+        let home = home.map(Home::of).transpose()?;
+        let dirs = expand_in::<Trace>(toolchain, env, home.as_ref())?;
+        Ok(dirs.iter().map(|d| d.written.as_str().to_owned()).collect())
+    }
+
+    /// [`floor_in`] as the spellings it keeps.
+    #[cfg(unix)]
+    fn floor_of(env: impl Fn(&str) -> Option<String>, home: &str) -> Vec<String> {
+        let home = Home::of(home).unwrap();
+        let dirs = floor_in(env, Some(&home));
+        dirs.iter().map(|d| d.written.as_str().to_owned()).collect()
+    }
+
+    /// A tempdir with `dirs` made beneath it, and its root as the fixtures
+    /// spell it.
+    fn tree(dirs: &[&str]) -> (tempfile::TempDir, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        for dir in dirs {
+            std::fs::create_dir_all(tmp.path().join(dir)).unwrap();
+        }
+        let root = spelled(tmp.path()).to_owned();
+        (tmp, root)
     }
 
     fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
@@ -501,19 +550,6 @@ mod tests {
                 .iter()
                 .find_map(|&(var, v)| (var == k).then(|| v.to_owned()))
         }
-    }
-
-    fn all(_: &str) -> bool {
-        true
-    }
-
-    fn none(_: &str) -> bool {
-        false
-    }
-
-    #[cfg(unix)]
-    fn only<'a>(present: &'a [&'a str]) -> impl Fn(&str) -> bool + 'a {
-        move |p| present.contains(&p)
     }
 
     #[test]
@@ -526,8 +562,8 @@ mod tests {
         }
     }
 
-    /// Every row against an empty environment, `/h` and a full disk: the
-    /// defaults, by anchor.
+    /// Every row against an empty environment and `/h`: the defaults, by
+    /// anchor.
     #[cfg(unix)]
     #[test]
     fn defaults() {
@@ -629,45 +665,27 @@ mod tests {
             (Toolchain::Winget, &[]),
         ];
         for &(t, want) in cases {
-            assert_eq!(
-                expand_in(t, env(&[]), Some("/h"), all).unwrap(),
-                want,
-                "{t:?}"
-            );
+            assert_eq!(chosen_in(t, env(&[]), Some("/h")), want, "{t:?}");
         }
     }
 
     #[cfg(unix)]
     #[test]
     fn an_override_replaces_only_its_own_location() {
-        let got = expand_in(
-            Toolchain::Go,
-            env(&[("GOROOT", "/opt/go")]),
-            Some("/h"),
-            all,
-        );
-        assert_eq!(got.unwrap(), ["/opt/go", "/h/go/bin"]);
-        let got = expand_in(
-            Toolchain::Deno,
-            env(&[("DENO_INSTALL", "/d")]),
-            Some("/h"),
-            all,
-        );
-        assert_eq!(got.unwrap(), ["/d", "/h/.deno/bin"]);
+        let got = chosen_in(Toolchain::Go, env(&[("GOROOT", "/opt/go")]), Some("/h"));
+        assert_eq!(got, ["/opt/go", "/h/go/bin"]);
+        let got = chosen_in(Toolchain::Deno, env(&[("DENO_INSTALL", "/d")]), Some("/h"));
+        assert_eq!(got, ["/d", "/h/.deno/bin"]);
     }
 
     #[cfg(unix)]
     #[test]
     fn overrides_are_tried_in_order() {
-        let go = |pairs: &[(&str, &str)]| {
-            let got = expand_in(Toolchain::Go, env(pairs), Some("/h"), all).unwrap();
-            got[3..].to_vec()
-        };
+        let go =
+            |pairs: &[(&str, &str)]| chosen_in(Toolchain::Go, env(pairs), Some("/h"))[3..].to_vec();
         assert_eq!(go(&[("GOBIN", "/b"), ("GOPATH", "/p")]), ["/b"]);
         assert_eq!(go(&[("GOPATH", "/p")]), ["/p/bin"]);
-        let cargo = |pairs: &[(&str, &str)]| {
-            expand_in(Toolchain::Cargo, env(pairs), Some("/h"), all).unwrap()
-        };
+        let cargo = |pairs: &[(&str, &str)]| chosen_in(Toolchain::Cargo, env(pairs), Some("/h"));
         assert_eq!(
             cargo(&[("CARGO_INSTALL_ROOT", "/i"), ("CARGO_HOME", "/c")]),
             ["/i/bin"]
@@ -675,79 +693,74 @@ mod tests {
         assert_eq!(cargo(&[("CARGO_HOME", "/c")]), ["/c/bin"]);
     }
 
-    /// The environment said where the manager is: no fallback to defaults.
+    /// The environment said where the manager is: no fallback to defaults,
+    /// though the defaults are there.
     #[cfg(unix)]
     #[test]
     fn a_chosen_override_naming_a_missing_directory_yields_nothing() {
-        let got = expand_in(
-            Toolchain::Cargo,
-            env(&[("CARGO_HOME", "/c")]),
-            Some("/h"),
-            only(&["/h/.cargo/bin"]),
+        let (_tmp, root) = tree(&["h/.cargo/bin"]);
+        let home = format!("{root}/h");
+        let missing = format!("{root}/c");
+        let cargo = [("CARGO_HOME", missing.as_str())];
+        assert_eq!(
+            chosen_in(Toolchain::Cargo, env(&cargo), Some(&home)),
+            [format!("{missing}/bin")]
         );
+        let got = expanded(Toolchain::Cargo, env(&cargo), Some(&home));
         assert_eq!(got.unwrap(), Vec::<String>::new());
-        let got = expand_in(
-            Toolchain::Homebrew,
-            env(&[("HOMEBREW_PREFIX", "/usr/local")]),
-            Some("/h"),
-            |p| p != "/usr/local",
+        let prefix = format!("{root}/prefix");
+        let brew = [("HOMEBREW_PREFIX", prefix.as_str())];
+        assert_eq!(
+            chosen_in(Toolchain::Homebrew, env(&brew), Some(&home)),
+            std::slice::from_ref(&prefix)
         );
+        let got = expanded(Toolchain::Homebrew, env(&brew), Some(&home));
         assert_eq!(got.unwrap(), Vec::<String>::new());
     }
 
     #[cfg(unix)]
     #[test]
     fn only_the_first_gopath_entry_counts() {
-        let got = expand_in(
-            Toolchain::Go,
-            env(&[("GOPATH", "/p:/q")]),
-            Some("/h"),
-            only(&["/p/bin", "/q/bin", "/p:/q/bin"]),
-        );
-        assert_eq!(got.unwrap(), ["/p/bin"]);
+        let got = chosen_in(Toolchain::Go, env(&[("GOPATH", "/p:/q")]), Some("/h"));
+        assert_eq!(got[3..], ["/p/bin"]);
     }
 
     #[cfg(unix)]
     #[test]
     fn empty_and_relative_values_are_ignored() {
         for bad in ["", "rel/c", "./c"] {
-            let got = expand_in(
+            let got = chosen_in(
                 Toolchain::Cargo,
                 env(&[("CARGO_HOME", bad), ("CARGO_INSTALL_ROOT", bad)]),
                 Some("/h"),
-                all,
             );
-            assert_eq!(got.unwrap(), ["/h/.cargo/bin"], "{bad:?}");
+            assert_eq!(got, ["/h/.cargo/bin"], "{bad:?}");
         }
-        let got = expand_in(
+        let got = chosen_in(
             Toolchain::Homebrew,
             env(&[("HOMEBREW_PREFIX", "brew")]),
             None,
-            only(&["/opt/homebrew"]),
         );
-        assert_eq!(got.unwrap(), ["/opt/homebrew"]);
+        assert_eq!(got, ["/opt/homebrew", "/home/linuxbrew/.linuxbrew"]);
     }
 
     #[cfg(unix)]
     #[test]
     fn data_defaults_follow_xdg_data_home() {
-        let got = expand_in(
-            Toolchain::Fnm,
-            env(&[("XDG_DATA_HOME", "/x")]),
-            Some("/h"),
-            all,
-        );
+        let got = chosen_in(Toolchain::Fnm, env(&[("XDG_DATA_HOME", "/x")]), Some("/h"));
         assert_eq!(
-            got.unwrap(),
+            got,
             ["/x/fnm", "/h/.fnm", "/h/Library/Application Support/fnm"]
         );
-        let got = expand_in(
-            Toolchain::Fnm,
-            env(&[("XDG_DATA_HOME", "rel")]),
-            Some("/h"),
-            only(&["/h/.local/share/fnm"]),
+        let got = chosen_in(Toolchain::Fnm, env(&[("XDG_DATA_HOME", "rel")]), Some("/h"));
+        assert_eq!(
+            got,
+            [
+                "/h/.local/share/fnm",
+                "/h/.fnm",
+                "/h/Library/Application Support/fnm"
+            ]
         );
-        assert_eq!(got.unwrap(), ["/h/.local/share/fnm"]);
     }
 
     /// A selector reports what is installed: with no home, home defaults are
@@ -755,16 +768,16 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_unbound_home_leaves_home_defaults_absent() {
-        let expand = |t, pairs: &[(&str, &str)]| expand_in(t, env(pairs), None, all).unwrap();
-        assert_eq!(expand(Toolchain::Rustup, &[]), Vec::<String>::new());
-        assert_eq!(expand(Toolchain::Fnm, &[]), Vec::<String>::new());
+        let chosen = |t, pairs: &[(&str, &str)]| chosen_in(t, env(pairs), None);
+        assert_eq!(chosen(Toolchain::Rustup, &[]), Vec::<String>::new());
+        assert_eq!(chosen(Toolchain::Fnm, &[]), Vec::<String>::new());
         assert_eq!(
-            expand(Toolchain::Fnm, &[("XDG_DATA_HOME", "/x")]),
+            chosen(Toolchain::Fnm, &[("XDG_DATA_HOME", "/x")]),
             ["/x/fnm"]
         );
-        assert_eq!(expand(Toolchain::Nix, &[]), ["/nix/store"]);
-        let got = expand_in(Toolchain::Rustup, env(&[]), Some("rel"), all);
-        assert_eq!(got.unwrap(), Vec::<String>::new());
+        assert_eq!(chosen(Toolchain::Nix, &[]), ["/nix/store"]);
+        let got = chosen_in(Toolchain::Rustup, env(&[]), Some("rel"));
+        assert_eq!(got, Vec::<String>::new());
     }
 
     #[test]
@@ -778,34 +791,39 @@ mod tests {
             (&[Toolchain::Chocolatey], &[Toolchain::Macports])
         };
         for &t in foreign {
-            assert_eq!(
-                expand_in(t, env(&[]), None, all).unwrap(),
-                Vec::<String>::new(),
-                "{t:?}"
-            );
+            assert_eq!(chosen_in(t, env(&[]), None), Vec::<String>::new(), "{t:?}");
         }
         for &t in native {
-            assert!(
-                !expand_in(t, env(&[]), None, all).unwrap().is_empty(),
-                "{t:?}"
-            );
+            assert!(!chosen_in(t, env(&[]), None).is_empty(), "{t:?}");
         }
     }
 
     #[cfg(unix)]
     #[test]
     fn an_override_naming_the_world_is_refused() {
+        let (_tmp, root) = tree(&["h", "home/a"]);
         for (home, value, what) in [
-            ("/h", "/", "the filesystem root"),
-            ("/h", "/h", "the home directory itself"),
-            ("/h", "/h/../h", "the home directory itself"),
-            ("/home/a", "/home", "an ancestor of the home directory"),
+            (format!("{root}/h"), "/".to_owned(), "the filesystem root"),
+            (
+                format!("{root}/h"),
+                format!("{root}/h"),
+                "the home directory itself",
+            ),
+            (
+                format!("{root}/h"),
+                format!("{root}/h/../h"),
+                "the home directory itself",
+            ),
+            (
+                format!("{root}/home/a"),
+                format!("{root}/home"),
+                "an ancestor of the home directory",
+            ),
         ] {
-            let err = expand_in(
+            let err = expanded(
                 Toolchain::Rustup,
-                env(&[("RUSTUP_HOME", value)]),
-                Some(home),
-                all,
+                env(&[("RUSTUP_HOME", &value)]),
+                Some(&home),
             )
             .unwrap_err();
             assert_eq!(
@@ -822,20 +840,25 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_variable_naming_the_home_is_fine_where_its_subpath_goes_below() {
-        let expand = |t, var, v| expand_in(t, env(&[(var, v)]), Some("/h"), all).unwrap();
+        let (_tmp, root) = tree(&["h/.ghcup", "h/bin"]);
+        let home = format!("{root}/h");
+        let expand = |t, var, v: &str| expanded(t, env(&[(var, v)]), Some(&home)).unwrap();
         assert_eq!(
-            expand(Toolchain::Ghcup, "GHCUP_INSTALL_BASE_PREFIX", "/h"),
-            ["/h/.ghcup"]
+            expand(Toolchain::Ghcup, "GHCUP_INSTALL_BASE_PREFIX", &home),
+            [format!("{home}/.ghcup")]
         );
-        assert_eq!(expand(Toolchain::Go, "GOPATH", "/h")[3..], ["/h/bin"]);
+        assert_eq!(
+            expand(Toolchain::Go, "GOPATH", &home).last(),
+            Some(&format!("{home}/bin"))
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn the_floor_holds_the_system_prefixes_and_not_a_prefix_in_the_home() {
-        let floor = |pairs: &[(&str, &str)], present: &[&str]| {
-            floor_in(env(pairs), Some("/h"), only(present))
-        };
+        let (_tmp, root) = tree(&["h/linuxbrew", "elsewhere"]);
+        let home = format!("{root}/h");
+        let floor = |pairs: &[(&str, &str)]| floor_of(env(pairs), &home);
         let prefixes = [
             "/opt/homebrew",
             "/opt/local",
@@ -843,39 +866,49 @@ mod tests {
             "/usr/pkg",
             "/opt/pkg",
         ];
-        assert_eq!(floor(&[], &prefixes), prefixes);
-        assert_eq!(floor(&[], &[]), Vec::<String>::new());
-        let home_brew = [("HOMEBREW_PREFIX", "/h/linuxbrew")];
-        assert_eq!(
-            floor(&home_brew, &["/h/linuxbrew", "/opt/local"]),
-            ["/opt/local"]
+        let held = floor(&[]);
+        assert!(
+            held.iter().all(|p| prefixes.contains(&p.as_str())),
+            "{held:?}"
         );
-        let elsewhere = [("HOMEBREW_PREFIX", "/usr/local")];
-        assert_eq!(floor(&elsewhere, &["/usr/local"]), ["/usr/local"]);
+        // What the other rows hold on this host, the homebrew row disowned.
+        let gone = format!("{root}/gone");
+        let rest = floor(&[("HOMEBREW_PREFIX", &gone)]);
+        let elsewhere = format!("{root}/elsewhere");
+        assert_eq!(
+            floor(&[("HOMEBREW_PREFIX", &elsewhere)]),
+            [vec![elsewhere.clone()], rest.clone()].concat()
+        );
+        let in_home = format!("{home}/linuxbrew");
+        assert_eq!(floor(&[("HOMEBREW_PREFIX", &in_home)]), rest);
         // A row that fails is dropped, the others stay.
-        let world = [("HOMEBREW_PREFIX", "/")];
-        assert_eq!(floor(&world, &["/", "/opt/local"]), ["/opt/local"]);
+        assert_eq!(floor(&[("HOMEBREW_PREFIX", "/")]), rest);
     }
 
     #[cfg(unix)]
     #[test]
     fn system_is_kept_by_existence_and_carries_no_homebrew() {
-        let system = |exists: &dyn Fn(&str) -> bool| {
-            expand_in(Toolchain::System, env(&[]), None, exists).unwrap()
-        };
-        assert_eq!(system(&none), Vec::<String>::new());
-        assert_eq!(system(&|p| p.contains("brew")), Vec::<String>::new());
-        let tools = [
-            "/usr/libexec",
-            "/usr/lib/git-core",
-            "/usr/lib/gcc",
-            "/Library/Developer/CommandLineTools",
-            "/Applications/Xcode.app/Contents/Developer",
-        ];
-        assert_eq!(system(&|p| tools.contains(&p)), tools);
-        for present in tools.into_iter().chain(["/usr/bin", "/bin"]) {
-            assert_eq!(system(&|p| p == present), [present]);
-        }
+        let (_tmp, root) = tree(&["Git/usr", "real"]);
+        let git = format!("{root}/Git/usr/bin");
+        let pairs = [("ProgramFiles", root.as_str())];
+        let system = || expanded(Toolchain::System, env(&pairs), None).unwrap();
+        let table = chosen_in(Toolchain::System, env(&pairs), None);
+        assert!(table.contains(&git), "{table:?}");
+        assert!(table.iter().all(|d| !d.contains("brew")), "{table:?}");
+        assert!(!system().contains(&git), "an absent directory is dropped");
+        std::fs::write(&git, "x").unwrap();
+        assert!(!system().contains(&git), "a file is dropped");
+        std::fs::remove_file(&git).unwrap();
+        std::os::unix::fs::symlink(format!("{root}/real"), &git).unwrap();
+        assert!(system().contains(&git), "a link to a directory is kept");
+        std::fs::remove_file(&git).unwrap();
+        std::fs::create_dir(&git).unwrap();
+        assert!(system().contains(&git), "a directory is kept");
+        let present: Vec<_> = table
+            .into_iter()
+            .filter(|d| Path::new(d).is_dir())
+            .collect();
+        assert_eq!(system(), present);
     }
 
     /// Rustup resolves `cargo` under `~/.rustup/toolchains/`, a path shape
@@ -883,52 +916,49 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn rustup_covers_a_toolchain_cargo() {
-        let roots = expand_in(Toolchain::Rustup, env(&[]), Some("/h"), all).unwrap();
-        let cargo =
-            FrozenPath::from_surface("/h/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo");
+        let (_tmp, root) = tree(&["h/.rustup"]);
+        let home = Home::of(&format!("{root}/h")).unwrap();
+        let roots = expand_in::<Trace>(Toolchain::Rustup, env(&[]), Some(&home)).unwrap();
+        let cargo = crate::test_helper::trace(format!(
+            "{root}/h/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo"
+        ));
         assert!(
             roots
                 .iter()
-                .any(|r| FrozenPath::from_surface(r).contains::<Allow>(cargo.real().as_path())),
+                .any(|r| r.clone().extent().real.contains(Subject::Access(&cargo))),
             "{roots:?}"
         );
     }
 
+    /// With nothing of any manager in the home, what a toolchain keeps is
+    /// what the host has outside it.
     #[test]
     fn an_absent_manager_expands_to_nothing() {
+        let (tmp, _) = tree(&["h"]);
+        let home = spelled(&tmp.path().join("h")).to_owned();
         for &t in Toolchain::VARIANTS {
-            let got = expand_in(t, env(&[]), Some("/h"), none);
-            assert_eq!(got.unwrap(), Vec::<String>::new(), "{t:?}");
+            for dir in expanded(t, env(&[]), Some(&home)).unwrap() {
+                assert!(Path::new(&dir).is_dir(), "{t:?}: {dir}");
+                assert!(!dir.starts_with(&home), "{t:?}: {dir}");
+            }
         }
     }
 
     #[cfg(windows)]
     #[test]
     fn system_on_windows() {
-        let system = |pairs: &[(&str, &str)], exists: &dyn Fn(&str) -> bool| {
-            expand_in(Toolchain::System, env(pairs), None, exists).unwrap()
-        };
-        let root = [("SystemRoot", r"C:\Windows")];
-        assert_eq!(
-            system(&root, &|p| p.starts_with(r"C:\Windows")),
-            [
-                r"C:\Windows\System32",
-                r"C:\Windows\System32\WindowsPowerShell\v1.0"
-            ]
-        );
-        assert_eq!(
-            system(&[], &|p| p.starts_with(r"C:\Windows")),
-            [
-                r"C:\Windows\System32",
-                r"C:\Windows\System32\WindowsPowerShell\v1.0"
-            ]
-        );
+        let system = |pairs: &[(&str, &str)]| chosen_in(Toolchain::System, env(pairs), None);
+        let base = [
+            r"C:\Windows\System32",
+            r"C:\Windows\System32\WindowsPowerShell\v1.0",
+        ];
+        assert_eq!(system(&[("SystemRoot", r"C:\Windows")]), base);
+        assert_eq!(system(&[]), base);
         let git = r"C:\Program Files\Git\usr\bin";
         let pf = [("ProgramFiles", r"C:\Program Files")];
-        assert_eq!(system(&pf, &|p| p == git), [git]);
-        assert_eq!(system(&pf, &none), Vec::<String>::new());
+        assert_eq!(system(&pf), [base[0], base[1], git]);
         let x86 = [("ProgramFiles(x86)", r"C:\Program Files (x86)")];
         let git86 = r"C:\Program Files (x86)\Git\usr\bin";
-        assert_eq!(system(&x86, &|p| p == git86), [git86]);
+        assert_eq!(system(&x86), [base[0], base[1], git86]);
     }
 }

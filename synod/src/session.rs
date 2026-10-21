@@ -38,6 +38,7 @@ use exarch::provider::{
     models::resolve_account,
     pricing,
 };
+use ral_core::first_order::datum::Datum as _;
 use ral_core::path::{EnginePath, GuestPath, shown};
 use ral_core::sync::LockExt;
 use std::path::Path;
@@ -266,7 +267,7 @@ impl Conversation {
 
         let config = exarch::agent::RootConfig {
             system,
-            caps: ral_core::capability::GrantStack::of(caps),
+            caps: ral_core::capability::GrantStack::root(),
             run_dir,
             // Synod's agent may not schedule its own wakeups: a
             // conversing office assistant still runs on nothing but
@@ -295,7 +296,7 @@ impl Conversation {
             bureau,
             roles: exarch::provider::roles::Roles::default(),
         };
-        let (factory, agent, net_wire) = seat_machine(machine, config, provider)?;
+        let (factory, agent, net_wire) = seat_machine(machine, config, caps, provider)?;
         let net = net_seat(net_wire, egress)?;
 
         Ok((
@@ -478,6 +479,7 @@ impl Conversation {
 pub fn seat_machine(
     mut machine: Box<dyn vm_manager::Machine>,
     mut config: exarch::agent::RootConfig,
+    ceiling: ral_core::capability::Capabilities,
     provider: Arc<Provider>,
 ) -> Result<(Arc<crate::machine_factory::MachineFactory>, Avatar, NetWire), String> {
     // `vm_manager` reports the mount point as a `Path`; its text is the
@@ -486,7 +488,7 @@ pub fn seat_machine(
         .map(|path| GuestPath::new(path.to_owned()))
         .map_err(|e| format!("the machine's folder cannot be named inside it: {e}"))?;
     let wires = machine.take_wires();
-    let root_seat = control_seat(wires.control, workspace)?;
+    let root_seat = control_seat(wires.control, workspace, ceiling)?;
     let factory = Arc::new(crate::machine_factory::MachineFactory::new(machine));
     config.factory = Some(factory.clone());
     let agent = match Avatar::root(config, root_seat, provider) {
@@ -632,6 +634,7 @@ fn select_account(store: &Mutex<CredentialStore>, choice: Choice) -> Result<Sele
 fn control_seat(
     control: impl Into<ral_core::protocol::channel::WireStream>,
     cwd: GuestPath,
+    ceiling: ral_core::capability::Capabilities,
 ) -> Result<exarch::agent::RootSeat, String> {
     // Home is the guest scratch, not the workspace: `HOME` is where
     // XDG-defaulting tools drop caches and dotfiles, and pointed at
@@ -642,9 +645,12 @@ fn control_seat(
             exarch::shell_eval::builtins::INSTALLER_TAG,
             EnginePath::Guest(crate::grant::GUEST_SCRATCH),
         ),
-        ral_core::protocol::Root::new(EnginePath::Guest(cwd)).with_env(
-            exarch::app::guest_scratch_env(exarch::app::EXARCH, &crate::grant::GUEST_SCRATCH),
-        ),
+        ral_core::protocol::Root::new(EnginePath::Guest(cwd))
+            .with_env(exarch::app::guest_scratch_env(
+                exarch::app::EXARCH,
+                &crate::grant::GUEST_SCRATCH,
+            ))
+            .with_config(ceiling.encode()),
     );
     Ok(exarch::agent::RootSeat::Wire {
         transport: Box::new(

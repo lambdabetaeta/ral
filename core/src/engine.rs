@@ -29,10 +29,12 @@ pub(crate) mod probe;
 /// the function.
 pub struct EngineInstaller {
     pub tag: &'static str,
-    /// The process half: Σ, builtins, docs. Derived from the binary and the
-    /// spec's terminal, once per engine: a root and a child engine each derive
-    /// their own, an in-process child shares its parent's.
-    pub runtime: fn(&EngineSpec) -> Runtime,
+    /// The process half: Σ, builtins, docs, and the read floor this host
+    /// resolves. Derived from the binary and the spec's terminal, once per
+    /// engine: a root and a child engine each derive their own, an in-process
+    /// child shares its parent's. An `Err` refuses the attach, in the
+    /// recipe's own words.
+    pub runtime: fn(&EngineSpec) -> Result<Runtime, String>,
     /// The root-only recipe over a root session: libraries, hints, seeds,
     /// ledgers. An `Err` refuses the attach, in the recipe's own words.
     pub root: fn(&Root, &mut Shell) -> Result<(), String>,
@@ -111,7 +113,7 @@ impl Engine {
         let spec = &attach.engine;
         let installer = resolve_installer(installers, spec.proto_version, &spec.installer)?;
         crate::process::jail::install_guest();
-        let runtime = Arc::new((installer.runtime)(spec));
+        let runtime = Arc::new((installer.runtime)(spec)?);
         let shell = match &attach.origin {
             Origin::Root(root) => {
                 let cwd =

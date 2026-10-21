@@ -137,8 +137,9 @@ pub fn load() -> Result<NetPolicy, String> {
     let source = ral_core::source::normalize_source_text(source);
     let cwd = ral_core::host::cwd()
         .ok_or_else(|| format!("{LABEL} cannot load: the working directory is unavailable"))?;
-    let mut shell =
-        ral_core::HostSurface::default().shell(ral_core::terminal::TerminalState::default(), cwd);
+    let mut shell = ral_core::HostSurface::default()
+        .shell(ral_core::terminal::TerminalState::default(), cwd)
+        .map_err(|e| format!("{LABEL} cannot load: {e}"))?;
     decode(
         crate::config::evaluate_no_authority(&mut shell, &source, &origin, LABEL)?,
         &origin.to_string(),

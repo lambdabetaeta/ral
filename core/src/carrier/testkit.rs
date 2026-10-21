@@ -12,7 +12,7 @@ use crate::types::{Runtime, Shell};
 /// with no grant lexicon can: no seeded child.
 pub(crate) const fn installer(
     tag: &'static str,
-    runtime: fn(&EngineSpec) -> Runtime,
+    runtime: fn(&EngineSpec) -> Result<Runtime, String>,
     root: fn(&Root, &mut Shell) -> Result<(), String>,
 ) -> EngineInstaller {
     EngineInstaller {

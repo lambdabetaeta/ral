@@ -23,6 +23,37 @@ pub fn core_schemes() -> crate::typecheck::SessionSchemes {
     crate::typecheck::SessionSchemes::new(crate::HostSurface::default().manifest())
 }
 
+/// A layer resolved from `caps`, a bare name found on the host's `PATH`: the
+/// door a test authors a layer through.  A path the grant names need not
+/// exist, for the walk ends its steps where the disk does.
+///
+/// # Panics
+/// If a spelling cannot be resolved.
+pub fn layer(caps: crate::capability::Capabilities) -> crate::capability::GrantLayer {
+    crate::capability::GrantLayer::from_capabilities(caps, &crate::types::EnvVars::new())
+        .expect("a test grant resolves")
+}
+
+/// The stack of `layers` over the ambient root.
+pub fn stack(
+    layers: impl IntoIterator<Item = crate::capability::GrantLayer>,
+) -> crate::capability::GrantStack {
+    let mut stack = crate::capability::GrantStack::root();
+    layers.into_iter().for_each(|layer| stack.push(layer));
+    stack
+}
+
+/// The walk of the absolute `path`, leniently: the transcript an access to it
+/// would be judged by.
+///
+/// # Panics
+/// If `path` is not absolute or its walk fails.
+pub fn trace(path: impl AsRef<std::path::Path>) -> crate::path::Trace {
+    let spelled =
+        crate::path::LexicalPath::absolute(path.as_ref()).expect("a test names an absolute path");
+    crate::path::walk_lenient(&spelled, crate::path::LeafMode::Follow).expect("a test path walks")
+}
+
 /// The test process's working directory, which a test shell is rooted at.
 ///
 /// # Panics
@@ -38,6 +69,11 @@ pub fn core_shell() -> crate::Shell {
 }
 
 /// Core's own surface as a runtime: what [`core_shell`] is a root over.
+///
+/// # Panics
+/// If the host's floor does not resolve, which no test can run without.
 pub fn core_runtime() -> crate::Runtime {
-    crate::HostSurface::default().runtime(crate::terminal::TerminalState::default())
+    crate::HostSurface::default()
+        .runtime(crate::terminal::TerminalState::default())
+        .expect("a test host resolves its floor")
 }

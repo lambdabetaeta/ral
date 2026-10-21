@@ -55,10 +55,11 @@
 mod common;
 
 use ral_core::RunIo;
-use ral_core::capability::{Capabilities, FsPolicy, GrantStack};
+use ral_core::capability::{Capabilities, FsPolicy};
 use ral_core::path::FrozenPath;
 use ral_core::protocol::Run;
 use ral_core::source::SourceOrigin;
+use ral_core::test_helper::{layer, stack};
 use ral_core::types::{Break, Settled, Shell, Value};
 
 /// A `Shell` matching what every front end ends up with after bootstrap:
@@ -70,6 +71,7 @@ fn boot() -> Shell {
         &ral_core::boot::HostSurface::default(),
         ral_core::test_helper::process_cwd(),
     )
+    .expect("a test host resolves its floor")
 }
 
 /// A process-unique work directory under the system temp root, created on
@@ -104,7 +106,7 @@ fn restrict_to(dir: &str) -> Capabilities {
             write_prefixes: vec![FrozenPath::from_surface(dir)],
             deny_paths: Vec::new(),
         }),
-        ..Capabilities::root()
+        ..Capabilities::default()
     }
 }
 
@@ -115,7 +117,7 @@ fn top_level_under(shell: &mut Shell, caps: Capabilities, src: &str) -> Settled<
     shell
         .run(Run {
             io: RunIo::Inherit,
-            caps: GrantStack::of(caps),
+            caps: stack([layer(caps)]),
             ..Run::captured(src, SourceOrigin::named("<test>"))
         })
         .expect_ran()

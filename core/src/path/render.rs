@@ -300,18 +300,25 @@ mod tests {
     /// names, shown at the spelling it was granted by, however many grants
     /// name the object.
     #[cfg(target_os = "linux")]
+    #[allow(clippy::disallowed_methods, reason = "[test] fs scaffolding")]
     #[test]
     fn a_frozen_prefix_is_its_real_object_shown_at_its_surface() {
-        let link = super::super::FrozenPath::for_test("/bin", "/usr/bin");
-        let real = || super::super::RealPath::assumed("/usr/bin");
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = tmp.path().join("usr-bin");
+        std::fs::create_dir(&dir).expect("dir");
+        let link = tmp.path().join("bin");
+        std::os::unix::fs::symlink(&dir, &link).expect("symlink");
+        let link = super::super::FrozenPath::from_surface(link.to_str().expect("UTF-8"));
+        let real = || super::super::RealPath::of_path(&dir).expect("dir is real");
+        let shown = |name: &std::path::Path| Rendered(name.to_str().expect("UTF-8").to_owned());
         let objects =
             render_objects([(real(), Some(&link)), (real(), None), (real(), Some(&link))])
                 .expect("ASCII paths render");
         assert_eq!(
             objects,
             [Object {
-                real: Rendered("/usr/bin".to_string()),
-                spellings: vec![Rendered("/bin".to_string())],
+                real: shown(real().as_path()),
+                spellings: vec![Rendered(link.as_str().to_owned())],
                 walk: Vec::new(),
             }]
         );

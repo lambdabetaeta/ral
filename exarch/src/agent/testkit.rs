@@ -35,12 +35,12 @@ thread_local! {
     static RUNTIME_DRESS: std::cell::Cell<Option<RuntimeDress>> = const { std::cell::Cell::new(None) };
 }
 
-fn dressed_runtime(spec: &ral_core::protocol::EngineSpec) -> Runtime {
-    let mut runtime = crate::boot::engine_runtime(spec);
+fn dressed_runtime(spec: &ral_core::protocol::EngineSpec) -> Result<Runtime, String> {
+    let mut runtime = crate::boot::engine_runtime(spec)?;
     if let Some(dress) = RUNTIME_DRESS.take() {
         dress(&mut runtime);
     }
-    runtime
+    Ok(runtime)
 }
 
 #[allow(

@@ -92,10 +92,11 @@ fn the_root_is_a_directory() {
     assert!(run_in(&dir, "echo x > '/'").is_err());
 }
 
-/// A deny on `dlink`, retargeted inside the block by an external `ln` at the
-/// file `moved` (named by `printf`), refuses a write through `dlink`.
+/// A deny on `dlink` holds the link and the target it had; retargeted inside
+/// the block by an external `ln` at the file `moved` (named by `printf`), it
+/// holds `dlink` itself and the old target, and not `moved`.
 #[cfg(target_os = "linux")]
-fn deny_follows_a_retargeted_link(moved: &[u8], printf: &str) {
+fn deny_holds_what_it_held_when_its_link_is_retargeted(moved: &[u8], printf: &str) {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::PermissionsExt;
@@ -103,7 +104,6 @@ fn deny_follows_a_retargeted_link(moved: &[u8], printf: &str) {
     let moved = dir.join(OsStr::from_bytes(moved));
     std::fs::write(&moved, "original").unwrap();
     std::fs::write(dir.join("tgt"), "original").unwrap();
-    std::os::unix::fs::symlink("tgt", dir.join("dlink")).unwrap();
     let script = dir.join("retarget.sh");
     std::fs::write(
         &script,
@@ -111,28 +111,44 @@ fn deny_follows_a_retargeted_link(moved: &[u8], printf: &str) {
     )
     .unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let body = "grant [fs: [read: [`absolute /], write: [`cwd .], deny: [`cwd dlink]]] \
-                { ./retarget.sh; to-string overwritten > 'dlink' }";
-    assert!(run_in(&dir, body).is_err(), "> dlink must be refused");
-    assert_eq!(std::fs::read_to_string(&moved).unwrap(), "original");
+    let after_retarget = |op: &str| {
+        std::fs::remove_file(dir.join("dlink")).ok();
+        std::os::unix::fs::symlink("tgt", dir.join("dlink")).unwrap();
+        let body = format!(
+            "grant [fs: [read: [`absolute /], write: [`cwd .], deny: [`cwd dlink]]] \
+             {{ ./retarget.sh; {op} }}"
+        );
+        run_in(&dir, &body)
+    };
+    assert!(
+        after_retarget("exists dlink").is_err(),
+        "the link itself stays denied"
+    );
+    assert!(
+        after_retarget("to-string overwritten > 'tgt'").is_err(),
+        "the old target stays denied"
+    );
     assert_eq!(
         std::fs::read_to_string(dir.join("tgt")).unwrap(),
         "original"
     );
-}
-
-/// An exclusion holds the live target of its link, whether or not that name
-/// is Unicode.
-#[cfg(target_os = "linux")]
-#[test]
-fn a_deny_holds_a_link_retargeted_at_a_utf8_name() {
-    deny_follows_a_retargeted_link(b"tgt2", "tgt2");
+    assert!(
+        after_retarget("to-string overwritten > 'dlink'").is_ok(),
+        "what the link now reaches was never denied"
+    );
+    assert_eq!(std::fs::read_to_string(&moved).unwrap(), "overwritten");
 }
 
 #[cfg(target_os = "linux")]
 #[test]
-fn a_deny_holds_a_link_retargeted_at_a_name_that_is_not_unicode() {
-    deny_follows_a_retargeted_link(b"tgt\xFF", "tgt\\377");
+fn a_deny_holds_a_retargeted_link_and_its_old_target_not_the_new_one() {
+    deny_holds_what_it_held_when_its_link_is_retargeted(b"tgt2", "tgt2");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_deny_holds_a_link_retargeted_at_a_name_that_is_not_unicode_likewise() {
+    deny_holds_what_it_held_when_its_link_is_retargeted(b"tgt\xFF", "tgt\\377");
 }
 
 /// `xdg:` reads the `XDG_*_HOME` of the effective environment, an overlay

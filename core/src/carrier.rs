@@ -12,7 +12,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use crate::capability::GrantStack;
+use crate::capability::GrantSummary;
 use crate::engine::Scopes;
 use crate::first_order::FOValue;
 use crate::first_order::datum::Datum;
@@ -201,6 +201,10 @@ pub trait Transport: Send + Sync {
     /// restore terminal state.
     fn detach(&self);
 
+    /// Whether the engine runs on this host, where a resolved grant means what
+    /// it meant when it was resolved.
+    fn is_local(&self) -> bool;
+
     /// Answer one enquiry the engine raised on `Event::Enquiry`. A no-op under
     /// the identity transport, whose enquiry is a direct call through the
     /// installed `Desk` and never a frame.
@@ -261,13 +265,13 @@ pub trait Transport: Send + Sync {
         read(self, &Probe::EnvVar(name.to_string()))
     }
 
-    /// The engine session's grant stack: what every run's ceiling is pushed
-    /// onto, so a forked child's carries its parent's authority and its own
-    /// layer.
+    /// The engine session's grant stack as it is shown: what every run's
+    /// ceiling is pushed onto, so a forked child's carries its parent's
+    /// authority and its own layer.
     ///
     /// # Errors
     /// As [`Self::cwd`].
-    fn grants(&self) -> Result<GrantStack, ProbeError> {
+    fn grants(&self) -> Result<GrantSummary, ProbeError> {
         read(self, &Probe::Grants)
     }
 

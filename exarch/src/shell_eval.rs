@@ -149,6 +149,12 @@ pub(crate) fn run_shell(
     use ral_core::protocol::Run;
     use ral_core::source::SourceOrigin;
 
+    if !transport.is_local() && *caps != ral_core::capability::GrantStack::root() {
+        return Err(ral_core::carrier::Severed::Closed(
+            "a resolved grant cannot cross to another host".into(),
+        ));
+    }
+
     let run = Run {
         caps: caps.clone(),
         wall: Some(Duration::from_secs(timeout_secs)),

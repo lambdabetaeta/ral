@@ -516,6 +516,7 @@ fn settings_trees(
 mod tests {
     use super::*;
     use crate::test_fixture::workshop;
+    #[cfg(unix)]
     use ral_core::capability::FsOp;
 
     fn refusal(folder: &Path) -> String {
@@ -767,24 +768,27 @@ mod tests {
     /// The point of the whole file: the value admits the guest namespace —
     /// the mount point and the guest scratch — and denies the host one,
     /// the granted folder's own host path included.  Judged by ral's own
-    /// in-process guard rather than by reading the struct's fields.
+    /// in-process guard rather than by reading the struct's fields.  Unix
+    /// hosts only: the guest resolves its own ceiling, and a host walks the
+    /// guest's `/work` only where `/` is a root.
+    #[cfg(unix)]
     #[test]
     fn the_policy_admits_the_guest_namespace_and_denies_the_host_one() {
         let (_dir, grant) = granted("grant-fs");
-        let caps = grant.capabilities();
+        let layer = ral_core::test_helper::layer(grant.capabilities());
 
         let mut shell = ral_core::test_helper::core_shell();
         // Read asks the guard, write asks the stack directly: the write door
         // is `locate`, which walks the name first and would fail on these
         // paths for not existing, long before it reached the grant.
-        shell.with_capabilities(caps, |sh| {
+        shell.with_layer(layer, |sh| {
             for admitted in ["/work/letter.docx", "/tmp/draft.docx"] {
                 let path = sh.resolve(admitted);
                 sh.check_fs_read(&path)
                     .unwrap_or_else(|_| panic!("{admitted} must be readable"));
                 let path = sh.resolve(admitted);
                 assert!(
-                    sh.admits_fs_exact(&FsOp::Write, &path.canonicalise_lenient()),
+                    sh.admits_named(&FsOp::Write, &path),
                     "{admitted} must be writable"
                 );
             }
@@ -799,7 +803,7 @@ mod tests {
             );
             let path = sh.anchor(&host);
             assert!(
-                !sh.admits_fs_exact(&FsOp::Write, &path.canonicalise_lenient()),
+                !sh.admits_named(&FsOp::Write, &path),
                 "the granted folder's host path must not be writable"
             );
         });
@@ -835,7 +839,9 @@ mod tests {
     }
 
     /// The user's home is outside the grant even when the grant is a
-    /// folder inside it: unreachable by absence, not by a rule.
+    /// folder inside it: unreachable by absence, not by a rule.  Unix hosts
+    /// only, as the first of these.
+    #[cfg(unix)]
     #[test]
     fn the_home_folder_is_unreachable_from_inside_a_grant() {
         let (_dir, grant) = granted("grant-home-unreachable");
@@ -843,7 +849,7 @@ mod tests {
             return;
         };
         let mut shell = ral_core::test_helper::core_shell();
-        shell.with_capabilities(grant.capabilities(), |sh| {
+        shell.with_layer(ral_core::test_helper::layer(grant.capabilities()), |sh| {
             let path = sh.anchor(&PathBuf::from(&home).join(".ssh").join("id_ed25519"));
             assert!(
                 sh.check_fs_read(&path).is_err(),
@@ -854,7 +860,8 @@ mod tests {
 
     /// A bare name is the file the guest's `PATH` finds, so the toolbox is
     /// asserted as the names it lists; a developer tool is absent, and no
-    /// file of its name is admitted.
+    /// file of its name is admitted.  Unix hosts only, as the first of these.
+    #[cfg(unix)]
     #[test]
     fn the_office_toolbox_is_admitted_and_the_developer_one_is_not() {
         let (_dir, grant) = granted("grant-exec");
@@ -868,7 +875,7 @@ mod tests {
             );
         }
         let mut shell = ral_core::test_helper::core_shell();
-        shell.with_capabilities(caps, |sh| {
+        shell.with_layer(ral_core::test_helper::layer(caps), |sh| {
             // The image cuts these on purpose: what has to be built from
             // source on a machine that forgets it at reboot is a delay,
             // not a capability.

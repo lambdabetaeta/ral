@@ -9,7 +9,7 @@
 //! session start — so the per-invocation working directory is baked into the
 //! policy and exarch never injects it dynamically.
 
-use ral_core::capability::{Capabilities, ExecKey};
+use ral_core::capability::GrantLayer;
 use ral_core::guard::freeze::FreezeCtx;
 use ral_core::source::SourceOrigin;
 use ral_core::terminal::TerminalState;
@@ -24,9 +24,10 @@ const DANGEROUS_RAL: &str = include_str!("../../data/dangerous.exarch.ral");
 #[cfg(all(test, unix))]
 const GIT_EXTENSION_RAL: &str = include_str!("../../examples/git.exarch.ral");
 
-/// Resolve `name` to a frozen [`Capabilities`], every sigil resolved against
-/// `ctx`, so `super::for_invocation` composes on already-resolved bundles.
-pub(super) fn resolve_base(name: &str, ctx: &FreezeCtx) -> Result<Capabilities, String> {
+/// Resolve `name` to a [`GrantLayer`], every spelling walked against `ctx`, so
+/// `super::for_invocation` composes on already-resolved bundles.  A bare exec
+/// name this host finds nowhere, and bundles not at all, makes no allowance.
+pub(super) fn resolve_base(name: &str, ctx: &FreezeCtx) -> Result<GrantLayer, String> {
     let text = match name {
         "minimal" => MINIMAL_RAL,
         "reasonable" => REASONABLE_RAL,
@@ -41,10 +42,11 @@ pub(super) fn resolve_base(name: &str, ctx: &FreezeCtx) -> Result<Capabilities, 
             ));
         }
     };
-    let mut shell =
-        ral_core::HostSurface::default().shell(TerminalState::default(), ctx.cwd().clone());
+    let mut shell = ral_core::HostSurface::default()
+        .shell(TerminalState::default(), ctx.cwd().clone())
+        .map_err(|e| format!("built-in base '{name}' cannot load: {e}"))?;
     let origin = SourceOrigin::named(format!("<built-in:{name}>"));
-    let mut caps = ral_core::load::profile::load_capabilities_from_str(
+    ral_core::load::profile::load_capabilities_from_str(
         &ral_core::types::Mooring::adrift(),
         &mut shell,
         text,
@@ -58,59 +60,58 @@ pub(super) fn resolve_base(name: &str, ctx: &FreezeCtx) -> Result<Capabilities, 
         other @ ral_core::types::Break::Escape(_) => {
             format!("built-in base '{name}' failed: {other:?}")
         }
-    })?;
-    drop_dead_exec_grants(&mut caps, cfg!(unix));
-    Ok(caps)
-}
-
-/// Withdraw the allowances of bare exec keys naming a coreutil this platform
-/// cannot bundle (the `coreutils-unix-only` set, whose `uu_*` crates compile on
-/// Unix alone), so a rendered profile never advertises a grant it cannot
-/// honour.  Exclusions stay: a veto does not depend on the tool existing.
-///
-/// `unix_available` is a parameter rather than a `cfg!(unix)` read here so the
-/// non-Unix shape is testable from a Unix host.
-fn drop_dead_exec_grants(caps: &mut Capabilities, unix_available: bool) {
-    if unix_available {
-        return;
-    }
-    if let Some(exec) = caps.exec.as_mut() {
-        exec.withdraw(|key| {
-            matches!(key, ExecKey::Name(name)
-                if ral_core::uutils::COREUTILS_UNIX_ONLY_TOOLS.contains(&name.as_str()))
-        });
-    }
+    })
 }
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
-    use ral_core::capability::ExecGrant;
     #[cfg(unix)]
-    use ral_core::capability::{Evidence, Fragment};
+    use ral_core::capability::{Capabilities, Fragment, Net};
+    use ral_core::capability::{ExecSummary, FsSummary, GrantLayer};
     use ral_core::guard::freeze::FreezeCtx;
     #[cfg(unix)]
     use ral_core::guard::freeze::Place;
     #[cfg(unix)]
     use ral_core::path::XdgKind;
 
-    fn bare(s: &str) -> ExecKey {
-        ExecKey::Name(s.into())
-    }
-
-    /// Each dir key's surface, and whether it admits.
-    fn dirs(exec: &ExecGrant) -> impl Iterator<Item = (&str, bool)> {
-        exec.iter().filter_map(|(key, v)| match key {
-            ExecKey::Dir(dir) => Some((dir.as_str(), v.permits())),
-            _ => None,
-        })
-    }
-    use ral_core::capability::Capabilities;
-    #[cfg(unix)]
-    use ral_core::capability::Net;
     #[cfg(unix)]
     use std::path::Path;
+
+    /// The fs spelling a grant shows for the frozen `path`.
+    fn spelled(path: &str) -> String {
+        ral_core::path::shown(ral_core::path::FrozenPath::from_surface(path).as_str())
+    }
+
+    /// The exec key a grant writes for the directory `path`.
+    fn dir_key(path: &str) -> String {
+        format!(
+            "`dir `absolute {}",
+            ral_core::syntax::quote_word(&spelled(path))
+        )
+    }
+
+    /// The exec key a grant writes for the bare `name`.
+    fn name_key(name: &str) -> String {
+        format!("`name {}", ral_core::syntax::quote_word(name))
+    }
+
+    /// The fs rules `layer` shows.
+    fn fs_of(layer: &GrantLayer) -> FsSummary {
+        layer
+            .summary()
+            .and_then(|s| s.fs)
+            .expect("the layer declares fs")
+    }
+
+    /// The exec rules `layer` shows.
+    fn exec_of(layer: &GrantLayer) -> ExecSummary {
+        layer
+            .summary()
+            .and_then(|s| s.exec)
+            .expect("the layer declares exec")
+    }
 
     /// A freeze anchor whose overlay binds `HOME` alone, at `cwd`.
     fn ctx_at(home: &str, cwd: impl AsRef<std::path::Path>) -> FreezeCtx {
@@ -124,7 +125,7 @@ mod tests {
 
     /// Parse *and* freeze a bake-in: the loader resolves places, so a failure
     /// here is malformed source, a refused payload, or an xdg escape.
-    fn load(name: &str, text: &str, ctx: &FreezeCtx) -> Capabilities {
+    fn load(name: &str, text: &str, ctx: &FreezeCtx) -> GrantLayer {
         let mut shell = ral_core::test_helper::core_shell();
         ral_core::load::profile::load_capabilities_from_str(
             &ral_core::types::Mooring::adrift(),
@@ -171,11 +172,7 @@ mod tests {
     /// exec guard judges it.
     #[cfg(unix)]
     fn object(path: &Path) -> String {
-        let cwd = ral_core::test_helper::process_cwd();
-        let real = ral_core::path::Resolver::at(&ral_core::types::EnvVars::new(), &cwd)
-            .anchor(path)
-            .canonicalise_lenient();
-        ral_core::path::shown(real)
+        ral_core::test_helper::trace(path).real().to_string()
     }
 
     /// The real path of the `name` the host `PATH` finds, if any.
@@ -186,11 +183,11 @@ mod tests {
         Some(object(&hit))
     }
 
-    /// Whether `caps` admits running the file whose real path is `real`.
+    /// Whether `layer` admits running the file whose real path is `real`.
     #[cfg(unix)]
-    fn admits(caps: Capabilities, real: &str) -> bool {
+    fn admits(layer: GrantLayer, real: &str) -> bool {
         let mut shell = ral_core::test_helper::core_shell();
-        shell.with_capabilities(caps, |sh| ral_core::test_access::admits_file(sh, real))
+        shell.with_layer(layer, |sh| ral_core::test_access::admits_file(sh, real))
     }
 
     /// Every bake-in names `home`/`xdg-*` places, so a host with no `HOME` cannot
@@ -198,6 +195,25 @@ mod tests {
     fn host_home() -> String {
         ral_core::host::home()
             .expect("these profiles name `home`/`xdg-*` places, so the test host needs HOME")
+    }
+
+    /// A base profile is walked once, by the loader that makes its layer:
+    /// `resolve_base` takes no step the loader did not.
+    #[cfg(unix)]
+    #[test]
+    fn a_base_is_walked_once() {
+        let ctx = ctx_at(&host_home(), "/");
+        for (name, text) in [("reasonable", REASONABLE_RAL), ("confined", CONFINED_RAL)] {
+            let steps = ral_core::test_access::walk_steps;
+            let before = steps();
+            let loaded = load(name, text, &ctx);
+            let loader = steps() - before;
+            assert!(loader > 0, "{name}: the loader walks its places");
+            let before = steps();
+            let resolved = resolve_base(name, &ctx).expect("a bake-in resolves");
+            assert_eq!(steps() - before, loader, "{name}: walked again");
+            assert_eq!(resolved, loaded, "{name}");
+        }
     }
 
     /// Every bake-in must load against the real `HOME`, so a broken profile
@@ -248,15 +264,16 @@ mod tests {
     fn minimal_drops_foreign_rooted_grants_on_windows() {
         let home = host_home();
         let ctx = ctx_at(&home, r"C:\work");
-        let caps = load("minimal", MINIMAL_RAL, &ctx);
-        let fs = caps.fs.as_ref().expect("minimal declares fs");
+        let layer = load("minimal", MINIMAL_RAL, &ctx);
         assert!(
-            !fs.read_prefixes.iter().any(|p| p.as_str() == "/tmp"),
+            !fs_of(&layer).read.iter().any(|p| p == "/tmp"),
             "the Unix-only '/tmp' literal must not survive freeze on Windows"
         );
-        let exec = caps.exec.as_ref().expect("minimal declares exec");
         assert!(
-            !dirs(exec).any(|(p, _)| p == "/opt/homebrew"),
+            !exec_of(&layer)
+                .allows
+                .iter()
+                .any(|k| k == "`dir `absolute /opt/homebrew"),
             "the foreign-rooted '/opt/homebrew/' override must not survive freeze on Windows"
         );
     }
@@ -268,28 +285,32 @@ mod tests {
     #[test]
     fn confined_is_offline_subpath_only_no_home_reads() {
         let ctx = ctx_at("/h", "/work/proj");
-        let caps = load("confined", CONFINED_RAL, &ctx);
-        assert_eq!(caps.net, Some(Net::Offline), "confined must have net off");
-        let exec = caps.exec.as_ref().expect("confined declares exec");
-        let bundled = ral_core::uutils::bundled_tools();
-        let host_named: Vec<&str> = (exec.iter())
-            .filter_map(|(key, _)| match key {
-                ExecKey::Name(name) if !bundled.contains(&name.as_str()) => Some(name.as_str()),
-                ExecKey::Path(path) => Some(path.as_str()),
-                _ => None,
-            })
+        let layer = load("confined", CONFINED_RAL, &ctx);
+        assert_eq!(
+            layer.summary().and_then(|s| s.net),
+            Some(Net::Offline),
+            "confined must have net off"
+        );
+        let bundled: Vec<String> = ral_core::uutils::bundled_tools()
+            .into_iter()
+            .map(name_key)
+            .collect();
+        let allows = exec_of(&layer).allows;
+        let host_named: Vec<&str> = (allows.iter())
+            .filter(|key| key.starts_with("`absolute ") || key.starts_with("`name "))
+            .filter(|key| !bundled.contains(key))
+            .map(String::as_str)
             .collect();
         assert!(
             host_named.is_empty(),
             "confined names host binaries {host_named:?}; the build jail admits those by \
              directory prefix, and only the bundled tools (which have no path) are listed"
         );
-        let fs = caps.fs.as_ref().expect("confined declares fs");
-        for prefix in fs.read_prefixes.iter().chain(fs.write_prefixes.iter()) {
+        let fs = fs_of(&layer);
+        for prefix in fs.read.iter().chain(&fs.write) {
             assert!(
-                !prefix.as_str().starts_with("/h"),
-                "confined fs prefix '{}' reaches into home: build jail must not",
-                prefix.as_str()
+                !prefix.starts_with("/h"),
+                "confined fs prefix '{prefix}' reaches into home: build jail must not"
             );
         }
     }
@@ -301,14 +322,13 @@ mod tests {
     fn read_only_does_not_write_cwd() {
         let home = host_home();
         let ctx = ctx_at(&home, "/work/proj");
-        let caps = load("read-only", READ_ONLY_RAL, &ctx);
-        let fs = caps.fs.as_ref().expect("read-only declares fs");
+        let fs = fs_of(&load("read-only", READ_ONLY_RAL, &ctx));
         assert!(
-            !fs.write_prefixes.iter().any(|p| p == "/work/proj"),
+            !fs.write.contains(&spelled("/work/proj")),
             "read-only must not write the working tree"
         );
         assert!(
-            fs.read_prefixes.iter().any(|p| p == "/work/proj"),
+            fs.read.contains(&spelled("/work/proj")),
             "read-only must read the working tree"
         );
     }
@@ -316,10 +336,7 @@ mod tests {
     #[test]
     fn dangerous_is_root() {
         let ctx = ctx_at("/h", "/");
-        assert_eq!(
-            load("dangerous", DANGEROUS_RAL, &ctx),
-            Capabilities::default()
-        );
+        assert_eq!(load("dangerous", DANGEROUS_RAL, &ctx), GrantLayer::root());
     }
 
     /// `xdg-bin` freezes to `${XDG_BIN_HOME:-~/.local/bin}` and must land in
@@ -329,12 +346,10 @@ mod tests {
     fn reasonable_carries_xdg_bin_subpath_in_exec() {
         let home = host_home();
         let ctx = ctx_at(&home, "/");
-        let caps = load("reasonable", REASONABLE_RAL, &ctx);
-        let exec = caps.exec.as_ref().expect("reasonable should declare exec");
+        let exec = exec_of(&load("reasonable", REASONABLE_RAL, &ctx));
         let xdg_bin = frozen(&xdg(XdgKind::Bin, "."), &ctx);
-        assert_eq!(
-            exec.get(&ExecKey::Dir(xdg_bin.clone())),
-            Some(&Evidence::ALLOW),
+        assert!(
+            exec.allows.contains(&dir_key(xdg_bin.as_str())),
             "reasonable should list the resolved xdg-bin ({}) in exec dirs",
             xdg_bin.as_str()
         );
@@ -350,34 +365,21 @@ mod tests {
         let ctx = ctx_at(&home, cwd);
         // Freeze folds away the trailing separator macOS `$TMPDIR` carries, so
         // compare in the same normal form the frozen keys hold.
-        let normal = |p: &str| ral_core::path::FrozenPath::from_surface(p).into_string();
-        let cwd_resolved = normal(&cwd.to_string_lossy());
-        let tempdir_resolved = normal(&std::env::temp_dir().to_string_lossy());
+        let cwd_resolved = spelled(&cwd.to_string_lossy());
+        let tempdir_resolved = spelled(&std::env::temp_dir().to_string_lossy());
         for (name, text) in [("minimal", MINIMAL_RAL), ("reasonable", REASONABLE_RAL)] {
-            let caps = load(name, text, &ctx);
-            let exec = caps
-                .exec
-                .as_ref()
-                .unwrap_or_else(|| panic!("{name} should declare exec"));
-            let allows = |dir: &str| dirs(exec).any(|(p, v)| p == dir && v);
-            assert!(allows(&cwd_resolved), "{name} exec missing resolved cwd");
-            assert!(
-                allows(&tempdir_resolved),
-                "{name} exec missing resolved tempdir"
-            );
-            let fs = caps
-                .fs
-                .as_ref()
-                .unwrap_or_else(|| panic!("{name} should declare fs"));
+            let layer = load(name, text, &ctx);
+            let exec = exec_of(&layer);
             for token in [&cwd_resolved, &tempdir_resolved] {
                 assert!(
-                    fs.read_prefixes.iter().any(|p| p == token),
-                    "{name} fs.read_prefixes missing {token}"
+                    exec.allows.contains(&dir_key(token)),
+                    "{name} exec missing resolved {token}"
                 );
-                assert!(
-                    fs.write_prefixes.iter().any(|p| p == token),
-                    "{name} fs.write_prefixes missing {token}"
-                );
+            }
+            let fs = fs_of(&layer);
+            for token in [&cwd_resolved, &tempdir_resolved] {
+                assert!(fs.read.contains(token), "{name} fs.read missing {token}");
+                assert!(fs.write.contains(token), "{name} fs.write missing {token}");
             }
         }
     }
@@ -390,10 +392,10 @@ mod tests {
         let work = std::path::Path::new("/work/proj");
         let home = host_home();
         let ctx = ctx_at(&home, work);
-        let caps = load("minimal", MINIMAL_RAL, &ctx);
+        let layer = load("minimal", MINIMAL_RAL, &ctx);
 
         assert!(
-            admits(caps, "/work/proj/configure"),
+            admits(layer, "/work/proj/configure"),
             "./configure under `cwd` must be admitted"
         );
     }
@@ -410,15 +412,13 @@ mod tests {
         }
         let home = host_home();
         let ctx = ctx_at(&home, "/");
-        let caps = load("reasonable", REASONABLE_RAL, &ctx);
+        let layer = load("reasonable", REASONABLE_RAL, &ctx);
         assert!(
-            caps.exec
-                .as_ref()
-                .is_some_and(|m| dirs(m).any(|(p, v)| p == "/opt/homebrew" && v)),
+            exec_of(&layer).allows.contains(&dir_key("/opt/homebrew")),
             "reasonable should list /opt/homebrew in exec dirs when it exists on this host"
         );
         assert!(
-            admits(caps, "/opt/homebrew/bin/cmake"),
+            admits(layer, "/opt/homebrew/bin/cmake"),
             "cmake under /opt/homebrew/bin must be admitted"
         );
     }
@@ -481,9 +481,9 @@ mod tests {
         let ctx = ctx_at(&host_home(), "/");
         let cache = frozen(&xdg(XdgKind::Cache, "."), &ctx);
         for (name, text) in [("minimal", MINIMAL_RAL), ("reasonable", REASONABLE_RAL)] {
-            let fs = load(name, text, &ctx).fs.expect("declares fs");
+            let fs = fs_of(&load(name, text, &ctx));
             assert!(
-                !fs.write_prefixes.contains(&cache),
+                !fs.write.contains(&spelled(cache.as_str())),
                 "{name} must not write {}",
                 cache.as_str()
             );
@@ -501,16 +501,16 @@ mod tests {
         let ctx = ctx_at(&home, "/");
         let gitconfig = frozen(&Place::Home(".gitconfig".into()), &ctx);
         for (name, text) in [("reasonable", REASONABLE_RAL), ("read-only", READ_ONLY_RAL)] {
-            let caps = load(name, text, &ctx);
-            let exec = caps.exec.as_ref().expect("base declares exec");
-            assert_eq!(
-                exec.get(&bare("git")),
-                Some(&Evidence::ALLOW),
-                "{name} should admit git"
-            );
-            let fs = caps.fs.as_ref().expect("base declares fs");
+            let layer = load(name, text, &ctx);
+            if let Some(git) = host_real("git") {
+                assert!(
+                    exec_of(&layer).allows.contains(&name_key("git")),
+                    "{name} should name git"
+                );
+                assert!(admits(layer.clone(), &git), "{name} should admit git");
+            }
             assert!(
-                fs.read_prefixes.iter().any(|p| p == &gitconfig),
+                fs_of(&layer).read.contains(&spelled(gitconfig.as_str())),
                 "{name} should add resolved ~/.gitconfig ({}) to read prefixes",
                 gitconfig.as_str()
             );
@@ -536,14 +536,11 @@ mod tests {
         );
         let extended =
             load("minimal", MINIMAL_RAL, &ctx).extend(fragment("git-ext", GIT_EXTENSION_RAL, &ctx));
-        assert_eq!(
-            extended
-                .exec
-                .as_ref()
-                .and_then(|exec| exec.get(&bare("git"))),
-            Some(&Evidence::ALLOW)
-        );
         if let Some(git) = host_real("git") {
+            assert!(
+                exec_of(&extended).allows.contains(&name_key("git")),
+                "the git extension names git"
+            );
             assert!(
                 admits(extended, &git),
                 "the git extension's `name git` carries the host's git, wherever it lives"
@@ -552,7 +549,7 @@ mod tests {
     }
 
     /// The extension extends `minimal` — gitconfig readable, `git` admitted —
-    /// while `reasonable`'s credential denies survive: extending an `FsPolicy`
+    /// while `reasonable`'s credential denies survive: extending an fs layer
     /// unions deny sets, so a veto sticks without the overlay re-stating it, which is
     /// what lets an overlay stay purely additive.  Both sides freeze against
     /// the same home, so their `xdg-config` places coincide.
@@ -569,21 +566,16 @@ mod tests {
             GIT_EXTENSION_RAL,
             &ctx,
         ));
-        let exec = extended_minimal
-            .exec
-            .as_ref()
-            .expect("extension should keep exec map");
-        assert_eq!(exec.get(&bare("git")), Some(&Evidence::ALLOW));
-        let fs = extended_minimal
-            .fs
-            .as_ref()
-            .expect("extension should keep fs map");
+        if host_real("git").is_some() {
+            assert!(exec_of(&extended_minimal).allows.contains(&name_key("git")));
+        }
+        let fs = fs_of(&extended_minimal);
         assert!(
-            fs.read_prefixes.iter().any(|p| p == &gitconfig),
+            fs.read.contains(&spelled(gitconfig.as_str())),
             "extending minimal should add ~/.gitconfig"
         );
         assert!(
-            fs.read_prefixes.iter().any(|p| p == &xdg_config_git),
+            fs.read.contains(&spelled(xdg_config_git.as_str())),
             "extending minimal should add xdg-config git"
         );
 
@@ -592,14 +584,11 @@ mod tests {
             GIT_EXTENSION_RAL,
             &ctx,
         ));
-        let fs = extended_reasonable
-            .fs
-            .as_ref()
-            .expect("extension should keep fs map");
+        let fs = fs_of(&extended_reasonable);
         for denied in ["gh", "op", "gcloud"] {
             let resolved = frozen(&xdg(XdgKind::Config, denied), &ctx);
             assert!(
-                fs.deny_paths.iter().any(|p| p == &resolved),
+                fs.deny.contains(&spelled(resolved.as_str())),
                 "extending reasonable should preserve xdg-config {denied} deny ({})",
                 resolved.as_str()
             );
@@ -651,17 +640,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn verbs_join_by_union() {
-        use ral_core::capability::ShellVerb;
+        use ral_core::capability::{Flag, ShellVerb};
+        use ral_core::test_helper::{layer, stack};
         let ctx = ctx_at(&host_home(), "/work");
-        let base = Capabilities {
+        let base = layer(Capabilities {
             shell: Some([ShellVerb::Chdir].into()),
             ..Capabilities::default()
-        };
+        });
+        let detach = Flag::Shell(ShellVerb::Detach);
+        assert!(!stack([base.clone()]).permits(detach));
         let extended = base.extend(fragment("verbs", "return [shell: [`detach]]", &ctx));
-        assert_eq!(
-            extended.shell,
-            Some([ShellVerb::Chdir, ShellVerb::Detach].into())
-        );
+        assert!(stack([extended]).permits(detach));
     }
 
     /// A base that omits exec but restricts fs, extended with a run allowance
@@ -672,13 +661,13 @@ mod tests {
     #[allow(clippy::disallowed_methods, reason = "[test] scratch executable")]
     fn a_run_allowance_beside_every_is_readable_under_an_fs_only_base() {
         let ctx = ctx_at(&host_home(), "/work");
-        let base = Capabilities {
+        let base = ral_core::test_helper::layer(Capabilities {
             fs: Some(ral_core::capability::FsPolicy {
                 read_prefixes: vec![frozen(&Place::Absolute("/work".into()), &ctx)],
                 ..Default::default()
             }),
             ..Capabilities::default()
-        };
+        });
         let dir = tempfile::tempdir().expect("scratch dir");
         let tool = dir.path().join("tool");
         std::fs::write(&tool, "#!/bin/sh\n").expect("write the tool");
@@ -715,18 +704,12 @@ mod tests {
             ("minimal", MINIMAL_RAL),
             ("confined", CONFINED_RAL),
         ] {
-            let caps = load(name, text, &ctx);
-            let exec = caps
-                .exec
-                .as_ref()
-                .unwrap_or_else(|| panic!("{name} should declare exec"));
+            let exec = exec_of(&load(name, text, &ctx));
             for root in &roots {
-                let normalized =
-                    ral_core::path::FrozenPath::from_surface(ral_core::path::utf8(root).unwrap())
-                        .into_string();
+                let key = dir_key(ral_core::path::utf8(root).unwrap());
                 assert!(
-                    dirs(exec).any(|(p, v)| p == normalized && v),
-                    "{name} should allow the live system tool root {normalized}"
+                    exec.allows.contains(&key),
+                    "{name} should allow the live system tool root {key}"
                 );
             }
         }
@@ -751,14 +734,13 @@ mod tests {
             ("read-only", READ_ONLY_RAL),
             ("confined", CONFINED_RAL),
         ] {
-            let caps = load(name, text, &ctx);
-            let exec = caps
-                .exec
-                .as_ref()
-                .unwrap_or_else(|| panic!("{name} should declare exec"));
+            let exec = exec_of(&load(name, text, &ctx));
             let unsettled: Vec<&str> = ral_core::uutils::bundled_tools()
                 .into_iter()
-                .filter(|tool| exec.get(&bare(tool)).is_none())
+                .filter(|tool| {
+                    let key = name_key(tool);
+                    !exec.allows.contains(&key) && !exec.denies.contains(&key)
+                })
                 .collect();
             assert!(
                 unsettled.is_empty(),
@@ -766,72 +748,5 @@ mod tests {
                  so silence makes them unrunnable: {unsettled:?}"
             );
         }
-    }
-
-    /// Passing [`drop_dead_exec_grants`] `false` simulates a non-Unix host:
-    /// the `coreutils-unix-only` grants go, ordinary and cross-platform names
-    /// stay.  Unix-gated because it first checks the host really bundles them.
-    #[cfg(unix)]
-    #[test]
-    fn reasonable_drops_unix_only_bundled_tool_grants_off_unix() {
-        let home = host_home();
-        let ctx = ctx_at(&home, "/");
-        let mut caps = load("reasonable", REASONABLE_RAL, &ctx);
-        {
-            let exec = caps.exec.as_ref().expect("reasonable declares exec");
-            assert!(
-                exec.get(&bare("tac")).is_some(),
-                "host build should still bundle tac"
-            );
-            assert!(
-                exec.get(&bare("test")).is_some(),
-                "host build should still bundle test"
-            );
-        }
-
-        drop_dead_exec_grants(&mut caps, false);
-
-        let exec = caps.exec.as_ref().expect("reasonable declares exec");
-        for dead in ral_core::uutils::COREUTILS_UNIX_ONLY_TOOLS {
-            assert!(
-                exec.get(&bare(dead)).is_none(),
-                "'{dead}' should be dropped when the platform can't bundle it"
-            );
-        }
-        assert!(
-            exec.get(&bare("git")).is_some(),
-            "an ordinary named binary must survive the drop"
-        );
-        assert!(
-            exec.get(&bare("cat")).is_some(),
-            "a cross-platform bundled tool must survive the drop"
-        );
-    }
-
-    #[test]
-    fn dropping_dead_grants_keeps_exclusions() {
-        use ral_core::capability::Evidence;
-        let [allowed, denied, both, ..] = *ral_core::uutils::COREUTILS_UNIX_ONLY_TOOLS else {
-            unreachable!("at least three unix-only tools")
-        };
-        let mut caps = Capabilities::deny_all();
-        caps.exec = Some(
-            [
-                (bare(allowed), Evidence::ALLOW),
-                (bare(denied), Evidence::DENY),
-                (bare(both), Evidence::BOTH),
-                (bare("git"), Evidence::ALLOW),
-            ]
-            .into_iter()
-            .collect(),
-        );
-
-        drop_dead_exec_grants(&mut caps, false);
-
-        let exec = caps.exec.as_ref().unwrap();
-        assert_eq!(exec.get(&bare(allowed)), None);
-        assert_eq!(exec.get(&bare(denied)), Some(&Evidence::DENY));
-        assert_eq!(exec.get(&bare(both)), Some(&Evidence::DENY));
-        assert_eq!(exec.get(&bare("git")), Some(&Evidence::ALLOW));
     }
 }

@@ -10,7 +10,7 @@
 
 use crate::capability::Program;
 use crate::ir::CommandName;
-use crate::path::{PathSearch, RealPath, is_executable_file};
+use crate::path::{LeafMode, LexicalPath, PathSearch, is_executable_file, walk};
 use crate::process::{SpawnFailure, Unrunnable};
 use crate::types::{Context, Error};
 use std::io::ErrorKind;
@@ -86,14 +86,22 @@ impl Program {
     /// The file `path` names, which the launcher will run by its real path,
     /// seen as `path` by the program.
     pub(crate) fn file(path: PathBuf) -> Result<Self, Missing> {
-        let real = RealPath::of_path(&path).map_err(|e| match e.kind() {
-            ErrorKind::NotFound | ErrorKind::NotADirectory => Missing::NotFound(Some(path.clone())),
+        let missing = || Missing::NotFound(Some(path.clone()));
+        let spelled = LexicalPath::absolute(&path).ok_or_else(missing)?;
+        let located = walk(&spelled, LeafMode::Follow).map_err(|e| match e.kind() {
+            ErrorKind::NotFound | ErrorKind::NotADirectory => missing(),
             _ => Missing::NotExecutable(path.clone()),
         })?;
+        if located.stat().is_none() {
+            return Err(missing());
+        }
         if !is_executable_file(&path) {
             return Err(Missing::NotExecutable(path));
         }
-        Ok(Self::File { path, real })
+        Ok(Self::File {
+            trace: located.trace().clone(),
+            path,
+        })
     }
 }
 
@@ -167,13 +175,14 @@ fn launch_path(target: &Path, ctx: &Context) -> PathBuf {
 )]
 mod tests {
     use super::*;
-    use crate::capability::{Capabilities, Evidence, ExecGrant, ExecKey, GrantStack};
+    use crate::capability::{Capabilities, Evidence, ExecGrant, ExecKey, Floor, GrantStack};
     use crate::path::FrozenPath;
     use std::path::Path;
 
     /// Head admission as dispatch asks it: a head with no program passes.
     fn admits_head(ctx: &Context, head: &Head) -> bool {
-        (head.program.as_ref().ok()).is_none_or(|program| ctx.grants.admits(program))
+        (head.program.as_ref().ok())
+            .is_none_or(|program| ctx.grants.admits(&Floor::default(), program))
     }
 
     #[test]
@@ -192,10 +201,10 @@ mod tests {
     /// A context whose sole grant layer is `exec`.
     fn under(exec: ExecGrant) -> Context {
         let mut grants = GrantStack::root();
-        grants.push(Capabilities {
+        grants.push(crate::test_helper::layer(Capabilities {
             exec: Some(exec),
-            ..Capabilities::root()
-        });
+            ..Capabilities::default()
+        }));
         Context::under_grants(grants)
     }
 
@@ -203,15 +212,15 @@ mod tests {
         CommandName::Path(file.to_string_lossy().into_owned())
     }
 
-    fn file_of(head: &Head) -> (&Path, &RealPath) {
+    fn file_of(head: &Head) -> (&Path, &crate::path::RealPath) {
         match &head.program {
-            Ok(Program::File { path, real }) => (path, real),
+            Ok(Program::File { path, trace }) => (path, trace.real()),
             other => panic!("expected a host file, got {other:?}"),
         }
     }
 
-    fn canonical(path: &Path) -> RealPath {
-        RealPath::of_path(path).expect("the file exists")
+    fn canonical(path: &Path) -> crate::path::RealPath {
+        crate::test_helper::trace(path).real().clone()
     }
 
     /// A path head runs the file it names from the shell's cwd, and is
