@@ -13,7 +13,7 @@ use icu_locale_core::LanguageIdentifier;
 use icu_normalizer::DecomposingNormalizerBorrowed;
 
 use super::PathRules;
-use super::lex::{Heads, Namespace, namespace_head};
+use super::lex::parse_bytes;
 
 /// `p` plus any alternate spelling the host treats as the same file
 /// (`/tmp/foo` ↔ `/private/tmp/foo` on macOS; just `[p]` elsewhere).
@@ -263,12 +263,11 @@ pub(crate) fn windows_stored_components(p: &OsStr) -> Vec<Vec<u8>> {
 /// [`starts_with_collision`] share.
 ///
 /// Lossless on either encoding: a separator is ASCII, and an ASCII byte in
-/// either stands for that character alone; a head is ASCII, so it lies
-/// within the UTF-8 run the path opens with whenever it is there at all.
+/// either stands for that character alone; a head is ASCII, so slicing at its
+/// boundary preserves the encoding of the rest.
 fn windows_components(p: &[u8]) -> impl Iterator<Item = &[u8]> {
-    let text = p.utf8_chunks().next().map_or("", |chunk| chunk.valid());
-    let head = text.len() - windows_head(text).len();
-    p[head..]
+    parse_bytes(p, PathRules::Windows)
+        .without_verbatim_prefix()
         .split(|&b| PathRules::Windows.is_separator(char::from(b)))
         .filter(|c| !c.is_empty())
 }
@@ -280,10 +279,10 @@ fn windows_components(p: &[u8]) -> impl Iterator<Item = &[u8]> {
 /// the head fold without the case fold.  One copy, because a head the two
 /// folded differently would silently unfold a `~`.
 pub(crate) fn windows_head(p: &str) -> &str {
-    let Some((Namespace::Verbatim, tail)) = namespace_head(p, Heads::Written) else {
-        return p;
-    };
-    super::lex::verbatim_unc_tail(tail).unwrap_or(tail)
+    let rest = parse_bytes(p.as_bytes(), PathRules::Windows).without_verbatim_prefix();
+    // SAFETY: `without_verbatim_prefix` slices `p` at an ASCII prefix boundary,
+    // which cannot land inside a multi-byte UTF-8 sequence.
+    unsafe { std::str::from_utf8_unchecked(rest) }
 }
 
 #[cfg(test)]

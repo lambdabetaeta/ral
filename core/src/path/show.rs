@@ -1,7 +1,12 @@
 //! How ral shows a path: `/`-separated on every host.
+//!
+//! For diagnostics and display only, never identity or serialisation: lossy on
+//! non-Unicode names, not byte-injective (`\` and `/` both render as `/` on
+//! Windows), and host-dependent (`dunce` simplifies verbatim prefixes on
+//! Windows alone, and `\` is folded only under Windows rules).
 
 use super::PathRules;
-use super::lex::{Heads, namespace_head};
+use super::lex::parse_bytes;
 use std::borrow::Cow;
 use std::path::Path;
 
@@ -19,11 +24,13 @@ pub fn shown(p: impl AsRef<Path>) -> String {
 }
 
 /// The separator fold: a Windows path reads `/`-separated unless it opens
-/// with a [namespace head](super::lex::namespace_head) as the OS returns one,
-/// past which `/` is not a separator.
+/// with a [namespace head](super::lex::Parsed::has_os_namespace_head) as the OS
+/// returns one, past which `/` is not a separator.
 pub(crate) fn fold_for(s: &str, rules: PathRules) -> Cow<'_, str> {
     match rules {
-        PathRules::Windows if namespace_head(s, Heads::OsReturned).is_none() => {
+        PathRules::Windows
+            if !parse_bytes(s.as_bytes(), PathRules::Windows).has_os_namespace_head() =>
+        {
             Cow::Owned(s.replace('\\', "/"))
         }
         _ => Cow::Borrowed(s),

@@ -121,11 +121,10 @@ impl std::error::Error for NotACwd {}
 /// separator throughout, `\`, but in a head whose kind or meaning turns on
 /// its spelling (a verbatim `//?/` head, say), which is kept as written.  A
 /// malformed or mixed head
-/// ([`Root::Malformed`](super::lex::Root::Malformed),
-/// [`Root::MixedHead`](super::lex::Root::MixedHead)) is all head, so such a
-/// path is carried as written, `..` and all, for the kernel to read: a fold
-/// across it could assemble a share or a drive it never named, and the walk
-/// refuses what `std::path` cannot parse
+/// ([`HeadKind::Malformed`](super::lex::HeadKind::Malformed)) is all head, so
+/// such a path is carried as written, `..` and all, for the kernel to read: a
+/// fold across it could assemble a share or a drive it never named, and the
+/// walk refuses what `std::path` cannot parse
 /// ([`is_unparsed_head`](super::lex::is_unparsed_head)).
 ///
 /// Reified so that canonicalisation can only follow resolution — there is
@@ -305,9 +304,10 @@ impl FrozenPath {
         // ceiling frozen here covered one volume and denied every other, and
         // the universal prefix stopped being universal the moment a session
         // ran from a drive its data was not on.  Folded to zero components it
-        // matches everything, which is what naming the root in a grant has
-        // always meant.
-        if super::lex::is_bare_root(&folded.to_string_lossy(), PathRules::HOST) {
+        // matches everything, which is what the internal ceiling
+        // [`Self::root`] means (an authored `absolute /` is a POSIX grant and
+        // dead on Windows).
+        if super::lex::is_bare_root(&folded, PathRules::HOST) {
             return Ok(Self {
                 surface: "/".into(),
                 real: "/".into(),

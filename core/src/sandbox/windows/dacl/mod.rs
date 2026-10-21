@@ -68,7 +68,7 @@
 //! [`recover_orphaned_state`] sweeps a crashed session's ledger at the next
 //! boot, deleting its registered profiles.
 
-use crate::path::lex::{Root, is_network, is_volume_guid, root};
+use crate::path::lex::{is_network, is_verbatim_drive, is_volume_guid};
 use crate::path::shown;
 use crate::process::cancel::{CancelCause, Scope};
 use std::fmt::Write as _;
@@ -426,12 +426,7 @@ fn ensure_local_canonical_prefix(canonical: &Path) -> Result<(), DaclError> {
     if is_network(canonical) {
         return Err(DaclError::NetworkPathRejected(canonical.to_path_buf()));
     }
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "native: a path the OS spelled, classified by its head, which is ASCII and so survives a lossy decode"
-    )]
-    let verbatim_drive = root(&canonical.to_string_lossy()) == Root::VerbatimDrive;
-    if verbatim_drive || is_volume_guid(canonical) {
+    if is_verbatim_drive(canonical) || is_volume_guid(canonical) {
         return Ok(());
     }
     Err(DaclError::NotCanonicalLocal(canonical.to_path_buf()))

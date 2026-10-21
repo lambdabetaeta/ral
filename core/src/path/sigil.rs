@@ -88,9 +88,9 @@ pub(crate) fn literal_relative(name: &str) -> String {
 /// would re-root the join, leaves the whole path as written: under Windows,
 /// a drive component (`xdg:config/C:\x`) or a share or namespace head
 /// opening the sub-path (`xdg:config/\\?\UNC\srv\sh`, `xdg:config///x`).
-/// That fails closed, a prefix matching nothing beating a fabricated path
-/// that might.  A grant refuses the gap instead, in
-/// `guard::freeze::FreezeCtx::place`.
+/// The unexpanded literal is then anchored against `cwd` (`<cwd>/~/x`) rather
+/// than fabricating a root-anchored `/.gitconfig`.  A grant refuses the gap
+/// instead, in `guard::freeze::FreezeCtx::place`.
 pub fn expand_path_prefix(input: &str, home: Option<&str>) -> String {
     let expanded = match SigilHead::of(input) {
         Some(SigilHead::Xdg(kind, sub)) => resolve_xdg(kind, home)

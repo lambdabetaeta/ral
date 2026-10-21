@@ -26,10 +26,13 @@
 //! grant, and are refused under every tag.
 //!
 //! Two anchors read a source the session does not own, and each guards it in
-//! the terms of what would otherwise author the grant.  An `XDG_*_HOME` must
-//! land under `home`: a variable set to `/etc` would otherwise widen an
-//! `xdg-data` grant to it.  And a `.git` *file* names its git directory in the
-//! working tree's own words, so a `gitdir` that followed the pointer alone
+//! the terms of what would otherwise author the grant.  An `xdg-*` grant must
+//! land under `home`, not merely under its XDG base directory (`cwd`, `home`,
+//! `tempdir` and `gitdir` permit `..` to climb past their anchor, whereas
+//! `xdg-*` checks the resolved path against `home`): an `XDG_*_HOME` set to
+//! `/etc`, or a `..` subpath escaping `home`, would otherwise widen an
+//! `xdg-data` grant to `/etc`.  And a `.git` *file* names its git directory in
+//! the working tree's own words, so a `gitdir` that followed the pointer alone
 //! would be authored by whoever wrote the tree, and the place is granted for
 //! read *and* write.  Following it therefore asks the other direction too: the
 //! git directory must name this working tree back, as a linked worktree's
@@ -42,9 +45,7 @@ use super::toolchains::{self, Toolchain};
 use crate::host::resolve_xdg;
 use crate::path::git::{BadPointer, Pointer, discover_git_dir};
 use crate::path::identity::windows_identity_components;
-use crate::path::lex::{
-    Heads, Namespace, Root, absolute_under, namespace_head, relative_suffix, root,
-};
+use crate::path::lex::{HeadKind, parse_bytes, relative_suffix};
 use crate::path::sigil::SigilHead;
 use crate::path::{Allow, FrozenPath, PathRules, XdgKind, path_dirs_absolute, shown};
 use crate::syntax::quote::quote_word;
@@ -448,14 +449,66 @@ fn anchored(tag: &str, frozen: FrozenPath) -> Result<FrozenPath, PolicyError> {
     )))
 }
 
+/// Which platforms' rules admit a raw `absolute` payload as a live grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EligibleOn {
+    Posix,
+    Windows,
+    Both,
+}
+
+impl EligibleOn {
+    fn admits(self, rules: PathRules) -> bool {
+        match rules {
+            PathRules::Posix => matches!(self, Self::Posix | Self::Both),
+            PathRules::Windows => matches!(self, Self::Windows | Self::Both),
+        }
+    }
+}
+
+/// Why a raw `absolute` payload is refused on every platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GrantRefusal {
+    Malformed,
+    MixedHead,
+    NtObject,
+    Driveless,
+    DriveRelative,
+    /// Relative under both platforms' rules, or (in [`host_absolute`]) a held
+    /// path whose head is live only on the other platform.
+    ForeignOrRelative,
+}
+
+/// Classify a raw `absolute` payload from one [`parse_bytes`] call under
+/// Windows rules into the platforms it is live on or the refusal it raises.
+fn grant_eligibility(raw: &str) -> Result<EligibleOn, GrantRefusal> {
+    let parsed = parse_bytes(raw.as_bytes(), PathRules::Windows);
+    match parsed.kind {
+        HeadKind::Posix => Ok(EligibleOn::Posix),
+        HeadKind::Unc { .. }
+            if parsed.spelling.namespace.is_none() && parsed.spelling.opens_with_slash =>
+        {
+            Ok(EligibleOn::Both)
+        }
+        HeadKind::Drive { .. } | HeadKind::Unc { .. } => Ok(EligibleOn::Windows),
+        _ if parsed.is_mixed_head() => Err(GrantRefusal::MixedHead),
+        HeadKind::Device | HeadKind::Malformed => Err(GrantRefusal::Malformed),
+        _ if parsed.is_nt_object() => Err(GrantRefusal::NtObject),
+        HeadKind::Driveless => Err(GrantRefusal::Driveless),
+        HeadKind::DriveRelative { .. } => Err(GrantRefusal::DriveRelative),
+        HeadKind::Relative => Err(GrantRefusal::ForeignOrRelative),
+    }
+}
+
 /// Whether the raw `absolute` payload is a live path under `rules`, judged
 /// before any folding: host folding would read `C:/../x` on POSIX as the
 /// relative `x`.  A malformed root, or a head of two mixed separators
 /// (`/\x`, `\/x`), is refused first, though Windows would read either as
 /// absolute: the mixed head is one spelling POSIX and Windows read as
-/// different paths, and refusing it on every host keeps a profile portable.  Then host first: live when [live
-/// under](live_under) `rules`, `Ok(false)` (the dead grant) when only
-/// under the other platform's, refused when under neither.
+/// different paths, and refusing it on every host keeps a profile portable.
+/// Then host first: live when [`grant_eligibility`] admits `rules`,
+/// `Ok(false)` (the dead grant) when only the other platform's, refused when
+/// under neither.
 ///
 /// # Errors
 /// A run-time prefix, a root-relative `\x`, a malformed UNC, verbatim or
@@ -465,35 +518,16 @@ pub(crate) fn live_absolute(raw: &str, rules: PathRules) -> Result<bool, PolicyE
     if let Some(err) = runtime_prefix(raw) {
         return Err(err);
     }
-    let root = root(raw);
-    let other = match rules {
-        PathRules::Posix => PathRules::Windows,
-        PathRules::Windows => PathRules::Posix,
-    };
-    if matches!(root, Root::Malformed | Root::MixedHead) {
-        Err(not_absolute(raw, root))
-    } else if live_under(raw, root, rules) {
+    let live = grant_eligibility(raw)
+        .map_err(|why| not_absolute(raw, why))?
+        .admits(rules);
+    if live {
         debug_assert!(
             rules != PathRules::Windows || !windows_identity_components(raw).is_empty(),
             "a live Windows root must name a component, or it prefixes every path"
         );
-        Ok(true)
-    } else if live_under(raw, root, other) {
-        Ok(false)
-    } else {
-        Err(not_absolute(raw, root))
     }
-}
-
-/// Whether a well-formed payload, of root `root`, is a live grant under
-/// `rules`: it is absolute there, and is no verbatim root read under
-/// POSIX.  A verbatim root is a Windows grant, dead under POSIX rules
-/// whatever the kernel would make of the spelling: POSIX reads `//?/C:/x`
-/// as the rooted `/?/C:/x`, but its author named a Windows path, and a
-/// profile must not grant a different path on another host.
-fn live_under(raw: &str, root: Root, rules: PathRules) -> bool {
-    let windows_grant = matches!(root, Root::VerbatimDrive | Root::VerbatimUnc);
-    absolute_under(raw, rules) && !(windows_grant && rules == PathRules::Posix)
+    Ok(live)
 }
 
 /// A path the host holds, frozen as an `absolute` grant naming it would be.
@@ -514,18 +548,17 @@ pub fn host_absolute(path: &Path) -> Result<FrozenPath, PolicyError> {
     if live_absolute(text, PathRules::HOST)? {
         freeze(path)
     } else {
-        Err(not_absolute(text, root(text)))
+        Err(not_absolute(text, GrantRefusal::ForeignOrRelative))
     }
 }
 
-/// The refusal of `raw` by its `root`: a malformed or mixed head, or one
-/// absolute under neither platform's rules; every other root is absolute
-/// under one of them.
-fn not_absolute(raw: &str, root: Root) -> PolicyError {
+/// The refusal of `raw` by its [`GrantRefusal`]: a malformed or mixed head, or
+/// one absolute under neither platform's rules.
+fn not_absolute(raw: &str, why: GrantRefusal) -> PolicyError {
     let word = quote_word(raw);
     let abs = |rest: &str| code(&format!("`absolute {rest}"));
-    PolicyError::new(match root {
-        Root::Malformed => format!(
+    PolicyError::new(match why {
+        GrantRefusal::Malformed => format!(
             "{} is no well-formed UNC or verbatim path; a UNC path needs a \
              server and a share, as in {}; a verbatim path is \
              {} or {}.  A '?' is no server name, \
@@ -536,48 +569,31 @@ fn not_absolute(raw: &str, root: Root) -> PolicyError {
             abs("'\\\\?\\C:\\x'"),
             abs("'\\\\?\\UNC\\server\\share\\x'"),
         ),
-        Root::MixedHead => format!(
+        GrantRefusal::MixedHead => format!(
             "{} opens with two different separators, which Windows reads as a \
              UNC or device path and POSIX does not; write {} or {}",
             abs(&word),
             abs("'\\\\server\\share\\x'"),
             abs("/x"),
         ),
-        Root::Driveless if object_manager_path(raw) => format!(
+        GrantRefusal::NtObject => format!(
             "{} is an NT object-manager path, not a path a grant can name; write {}",
             abs(&word),
             abs("'C:\\x'")
         ),
-        Root::Driveless => {
+        GrantRefusal::Driveless => {
             format!("{} names no drive; write {}", abs(&word), abs("'C:\\x'"))
         }
-        Root::DriveRelative => {
+        GrantRefusal::DriveRelative => {
             format!("{} is drive-relative; write {}", abs(&word), abs("'C:\\…'"))
         }
-        Root::Relative
-        | Root::Posix
-        | Root::Unc
-        | Root::VerbatimDrive
-        | Root::VerbatimUnc
-        | Root::Drive => format!(
+        GrantRefusal::ForeignOrRelative => format!(
             "{} needs an absolute path; for a path under the working \
              directory write {}",
             code("`absolute"),
             code(&format!("`cwd {word}")),
         ),
     })
-}
-
-/// Whether `raw` opens with `\??\`, the NT object manager's DOS-device
-/// directory: Win32 hands such a path to the kernel unparsed, so it is no
-/// path a grant can name, under any tag.  Read as Win32 reads the head,
-/// backslashes only, which is the [`Heads::OsReturned`] reading; `/??/` is
-/// an ordinary POSIX path.
-fn object_manager_path(raw: &str) -> bool {
-    matches!(
-        namespace_head(raw, Heads::OsReturned),
-        Some((Namespace::Object, _))
-    )
 }
 
 /// A relative subpath, judged lexically so that a profile fails alike on
@@ -590,24 +606,25 @@ fn subpath<'a>(tag: &str, s: &'a str) -> Result<&'a str, PolicyError> {
     let word = quote_word(s);
     let this = code(&format!("`{tag}"));
     let drive = code("`absolute 'C:\\…'");
-    match root(s) {
-        Root::Relative if s.is_empty() => Err(PolicyError::new(format!(
+    let parsed = parse_bytes(s.as_bytes(), PathRules::Windows);
+    match parsed.kind {
+        HeadKind::Relative if s.is_empty() => Err(PolicyError::new(format!(
             "{this} needs a path; write {} for the anchor itself",
             code(&format!("`{tag} ."))
         ))),
-        Root::Relative => Ok(s),
-        Root::Drive | Root::DriveRelative => Err(PolicyError::new(format!(
+        HeadKind::Relative => Ok(s),
+        _ if parsed.has_drive() => Err(PolicyError::new(format!(
             "{this} takes a relative path, not {word}; a drive belongs in {drive}"
         ))),
-        Root::MixedHead => Err(PolicyError::new(format!(
+        _ if parsed.is_mixed_head() => Err(PolicyError::new(format!(
             "{this} takes a relative path, not {word}, which opens with two \
              different separators"
         ))),
-        _ if s.starts_with('/') => Err(PolicyError::new(format!(
+        _ if parsed.spelling.opens_with_slash => Err(PolicyError::new(format!(
             "{this} takes a relative path, not {word}; for {word} write {}",
             code(&format!("`absolute {word}"))
         ))),
-        _ if object_manager_path(s) => Err(PolicyError::new(format!(
+        _ if parsed.is_nt_object() => Err(PolicyError::new(format!(
             "{this} takes a relative path, not {word}, an NT object-manager path, \
              which no grant can name"
         ))),
@@ -1173,7 +1190,7 @@ mod tests {
                 if let Err(err) = got {
                     assert_eq!(
                         err.message,
-                        not_absolute(raw, root(raw)).message,
+                        not_absolute(raw, grant_eligibility(raw).unwrap_err()).message,
                         "{raw} {rules:?}"
                     );
                 }
@@ -1257,8 +1274,8 @@ mod tests {
 
     /// A home-relative place has no answer where nothing binds `HOME`.  The
     /// freeze refuses and says which env var is missing; the runtime twin
-    /// passes the entry through literally, a prefix matching nothing being the
-    /// fail-closed reading on that side.  Neither fabricates `/.gitconfig`.
+    /// passes the entry through literally (resolved against `cwd`), so neither
+    /// fabricates `/.gitconfig`.
     #[test]
     fn freeze_rejects_home_relative_places_without_home() {
         for place in [

@@ -48,7 +48,7 @@ impl GuestPath {
     /// and not the host's, under which, on Windows, `/work` is not.
     #[must_use]
     pub fn is_absolute(&self) -> bool {
-        absolute_under(&self.0, PathRules::Posix)
+        absolute_under(self.as_str(), PathRules::Posix)
     }
 
     /// [`join_slash`](super::lex::join_slash) in the guest's namespace: `sub`

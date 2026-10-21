@@ -9,220 +9,440 @@ use std::path::{Component, Path, PathBuf};
 
 use super::{CwdPath, PathRules};
 
-/// How a raw path string is rooted, judged on the string alone.  A UNC or
-/// verbatim-UNC root is recognised only with a server and a share both named,
-/// neither `.` nor `..`: bare, its component list folds empty, a prefix of
-/// every path, and a dot name is no name but a step the fold would take.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Root {
-    /// `/x`: rooted by one separator, no drive.
-    Posix,
-    /// `\\server\share` with either separator, both names non-empty and
-    /// neither `.` nor `..`.
-    Unc,
-    /// `\\?\C:\x`, with either separator.
-    VerbatimDrive,
-    /// `\\?\UNC\server\share`, with either separator, both names as for
-    /// [`Unc`](Self::Unc).
-    VerbatimUnc,
-    /// `C:\x` or `C:/x`.
-    Drive,
-    /// Opens with two separators but is no well-formed UNC or verbatim root:
-    /// a missing server or share, a `?` server, a `.` or `..` server or
-    /// share, a device path.
-    Malformed,
-    /// Opens with two separators of different spellings, `/\` or `\/`, and
-    /// no verbatim head.  Windows reads either as a separator, so to it this
-    /// is a UNC or device head like any doubled one; POSIX reads `/\x` as
-    /// rooted at `/` and `\/x` as relative.  One spelling, two paths: kept
-    /// apart from [`Unc`](Self::Unc) and [`Malformed`](Self::Malformed),
-    /// whose spellings each platform reads alike, so a grant can refuse it.
-    MixedHead,
-    /// `\x`: rooted by a backslash, but on no drive, so Windows anchors it
-    /// to the current one.
-    Driveless,
-    /// `C:x`: a drive but no root on it, so Windows anchors it to that
-    /// drive's current directory.
-    DriveRelative,
-    /// Neither root nor drive: `x`, `./x`, the empty string.
-    Relative,
-}
-
-/// The [`Root`] of `path`.  String logic rather than `std::path::Path`, whose
-/// absoluteness rule is fixed at compile time to the build target, so a grant
-/// can be classified from any host.
-pub(crate) fn root(path: &str) -> Root {
-    if let Some((Namespace::Verbatim, tail)) = namespace_head(path, Heads::Written) {
-        return verbatim_root(tail);
-    }
-    if let Some(rest) = path.strip_prefix(r"\\").or_else(|| path.strip_prefix("//")) {
-        return if server_share(rest.split(|c| PathRules::Windows.is_separator(c))) {
-            Root::Unc
-        } else {
-            Root::Malformed
-        };
-    }
-    match path.as_bytes() {
-        [b'/', b'\\', ..] | [b'\\', b'/', ..] => Root::MixedHead,
-        [b'/', ..] => Root::Posix,
-        [b'\\', ..] => Root::Driveless,
-        [d, b':', b'/' | b'\\', ..] if d.is_ascii_alphabetic() => Root::Drive,
-        [d, b':', ..] if d.is_ascii_alphabetic() => Root::DriveRelative,
-        _ => Root::Relative,
-    }
-}
-
-/// Whether `path` is absolute under `rules`: what that platform's kernel
-/// would answer, judged on the raw string as [`root`] is, so either
+/// Whether `path` is absolute under `rules`: answers both whether `path` is
+/// fully qualified under `rules` and whether [`anchor`] must not join `path`
+/// onto `cwd`, judged on the raw bytes via [`parse_bytes`] so either
 /// platform's answer can be read from any host.
 ///
 /// POSIX: whatever opens with `/`, `//`-headed spellings included, which
 /// the kernel anchors at the root like any other.  Windows: a drive root, a
-/// UNC share, or a namespace head, `\\?\` or `\\.\`; every path opening
-/// with two separators, of either spelling, is UNC or device to Windows, so
-/// a [`Root::Malformed`] or [`Root::MixedHead`] one is absolute there too.
-/// Whether such a root is *well formed*, and read alike on both platforms,
-/// is a separate question, those variants', which a grant asks first.
+/// UNC share, or a device or malformed head ([`HeadKind::Device`],
+/// [`HeadKind::Malformed`]); every path opening with two separators, of
+/// either spelling, is UNC or device to Windows, so device and malformed
+/// heads count as absolute there too.  Whether such a head is eligible as a
+/// grant is a separate question, which `guard::freeze` asks first.
 ///
 /// [`anchor`] and [`path_dirs_absolute`](super::which::path_dirs_absolute),
 /// through [`is_absolute`], and [`join_under`], rely on a
-/// [`Root::Malformed`] or [`Root::MixedHead`] path counting as absolute
+/// [`HeadKind::Device`] or [`HeadKind::Malformed`] path counting as absolute
 /// under Windows: the kernel never reads one against a cwd, so neither may
 /// they, joining it onto one or dropping it as relative.
-pub(crate) fn absolute_under(path: &str, rules: PathRules) -> bool {
-    match rules {
-        PathRules::Posix => path.starts_with('/'),
-        PathRules::Windows => matches!(
-            root(path),
-            Root::Unc
-                | Root::VerbatimDrive
-                | Root::VerbatimUnc
-                | Root::Drive
-                | Root::Malformed
-                | Root::MixedHead
-        ),
-    }
+pub(crate) fn absolute_under(path: impl AsRef<OsStr>, rules: PathRules) -> bool {
+    parse_bytes(path.as_ref().as_encoded_bytes(), rules).is_absolute()
 }
 
 /// Whether `path` opens with a drive, rooted on it or not: `C:\x`, `C:x`.
-pub(crate) fn has_drive(path: &str) -> bool {
-    matches!(root(path), Root::Drive | Root::DriveRelative)
+pub(crate) fn has_drive(path: impl AsRef<OsStr>) -> bool {
+    parse_bytes(path.as_ref().as_encoded_bytes(), PathRules::Windows).has_drive()
 }
 
 /// Whether `path` names a network share: `\\server\share`, or its verbatim
 /// spelling `\\?\UNC\server\share`.
 #[cfg(any(windows, test))]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "native: a path the OS spelled, classified by its head, which is ASCII and so survives a lossy decode"
-)]
-pub(crate) fn is_network(path: &Path) -> bool {
-    matches!(root(&path.to_string_lossy()), Root::Unc | Root::VerbatimUnc)
+pub(crate) fn is_network(path: impl AsRef<OsStr>) -> bool {
+    parse_bytes(path.as_ref().as_encoded_bytes(), PathRules::Windows).is_network()
 }
 
-/// The namespace a head opens: past one, Windows takes the rest of a path
-/// without its usual normalisation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Namespace {
-    /// `\\?\`: verbatim, the rest handed on uninterpreted.
-    Verbatim,
-    /// `\\.\`: the Win32 device namespace.
-    Device,
-    /// `\??\`: the NT object namespace's DOS-device directory.
-    Object,
-}
-
-/// Which spellings of a [namespace head](namespace_head) a reading accepts:
-/// the two readings Windows itself gives a head, by who spelled the path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Heads {
-    /// A path the OS handed back: backslashes only, and all three heads.
-    /// Windows normalises a `//?/` head's separators as it does any path's,
-    /// so no such spelling comes back, and `/` past a head is no separator.
-    OsReturned,
-    /// A path ral was given, a grant or an access: each separator of a head
-    /// read as Windows rules read one, `/` or `\`, so `//?/` and every mix
-    /// between open a verbatim path too; the Win32 heads `\\?\` and `\\.\`
-    /// alone.  The one reading [`root`], the identity fold and the discard
-    /// device share, so a grant and an access spelled with different
-    /// separators cannot part company over it.
-    Written,
-}
-
-/// The [`Namespace`] `path` opens with under `heads`, and what follows its
-/// head.
-pub(crate) fn namespace_head(path: &str, heads: Heads) -> Option<(Namespace, &str)> {
-    let sep = |b: &u8| match heads {
-        Heads::OsReturned => *b == b'\\',
-        Heads::Written => PathRules::Windows.is_separator(char::from(*b)),
-    };
-    let namespace = match path.as_bytes() {
-        [a, b, b'?', c, ..] if [a, b, c].into_iter().all(sep) => Namespace::Verbatim,
-        [a, b, b'.', c, ..] if [a, b, c].into_iter().all(sep) => Namespace::Device,
-        [b'\\', b'?', b'?', b'\\', ..] if heads == Heads::OsReturned => Namespace::Object,
-        _ => return None,
-    };
-    Some((namespace, &path[4..]))
+/// Whether `path` is a verbatim drive path (`\\?\C:\x`).
+#[cfg(any(windows, test))]
+pub(crate) fn is_verbatim_drive(path: impl AsRef<OsStr>) -> bool {
+    parse_bytes(path.as_ref().as_encoded_bytes(), PathRules::Windows).is_verbatim_drive()
 }
 
 /// Whether `path` is a volume GUID path, `\\?\Volume{…}\` under any
-/// [namespace head](namespace_head) the OS returns, as a volume mounted in a
-/// folder is the reparse target of that folder.
+/// exact backslash namespace head (`\\?\`, `\\.\`, `\??\`) the OS returns, as
+/// a volume mounted in a folder is the reparse target of that folder.
 #[cfg(any(windows, test))]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "native: a path the OS spelled, classified by its head, which is ASCII and so survives a lossy decode"
-)]
-pub(crate) fn is_volume_guid(path: &Path) -> bool {
-    namespace_head(&path.to_string_lossy(), Heads::OsReturned)
-        .and_then(|(_, rest)| rest.get(..7))
-        .is_some_and(|v| v.eq_ignore_ascii_case("Volume{"))
+pub(crate) fn is_volume_guid(path: impl AsRef<OsStr>) -> bool {
+    parse_bytes(path.as_ref().as_encoded_bytes(), PathRules::Windows).is_volume_guid()
 }
 
-/// What follows the `UNC` and separator opening a [`Heads::Written`]
-/// verbatim tail: the `server\share\…` of `\\?\UNC\server\share\…`, `UNC` in
-/// any case.
-pub(crate) fn verbatim_unc_tail(tail: &str) -> Option<&str> {
-    match tail.split_at_checked(4) {
-        Some((unc, rest))
-            if unc.as_bytes()[..3].eq_ignore_ascii_case(b"UNC")
-                && unc.ends_with(|c| PathRules::Windows.is_separator(c)) =>
-        {
-            Some(rest)
+/// The 4-byte Windows namespace prefix a path opens with.
+///
+/// Device (`\\.\`) and exact verbatim (`\\?\`) share no normalisation rule:
+/// Win32 normalises device paths and hands exact `\\?\` paths to the kernel
+/// uninterpreted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Namespace {
+    /// `\\?\` (any `/` or `\` separator spelling): verbatim prefix.
+    /// `exact` is true when all three separator bytes are `b'\\'`.
+    Verbatim { exact: bool },
+    /// `\\.\` (any `/` or `\` separator spelling): Win32 device namespace.
+    /// `exact` is true when all three separator bytes are `b'\\'`.
+    Device { exact: bool },
+    /// `\??\` (backslashes only): NT object manager DOS-device directory.
+    Object,
+}
+
+impl Namespace {
+    /// Whether all three separator bytes of the 4-byte namespace prefix are `b'\\'`.
+    pub(crate) const fn is_exact(self) -> bool {
+        match self {
+            Self::Verbatim { exact } | Self::Device { exact } => exact,
+            Self::Object => true,
         }
-        _ => None,
     }
 }
 
-/// [`root`] of a [`Heads::Written`] verbatim tail.
-fn verbatim_root(tail: &str) -> Root {
-    if let Some(rest) = verbatim_unc_tail(tail) {
-        return if server_share(rest.split(|c| PathRules::Windows.is_separator(c))) {
-            Root::VerbatimUnc
-        } else {
-            Root::Malformed
-        };
-    }
-    let mut parts = tail.split(|c| PathRules::Windows.is_separator(c));
-    match parts.next() {
-        Some(d) if is_drive(d) && parts.next().is_some() => Root::VerbatimDrive,
-        _ => Root::Malformed,
+/// Separator and namespace spelling of a parsed head, recorded once from the
+/// opening bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HeadSpelling {
+    /// Present when the path opens with a 4-byte namespace prefix (`\\?\`,
+    /// `\\.\`, `\??\`) under `PathRules::Windows`. Always `None` under
+    /// `PathRules::Posix`.
+    pub(crate) namespace: Option<Namespace>,
+    /// True when the first two bytes are different separators (`/\\` or `\\/`).
+    pub(crate) mixed_opening: bool,
+    /// True when the first byte is `b'/'`.
+    pub(crate) opens_with_slash: bool,
+}
+
+/// Structural head classification under a given [`PathRules`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeadKind<'a> {
+    /// `/x` or `/`: any path starting with `/` under `PathRules::Posix`, or a
+    /// single leading `/` under `PathRules::Windows`.
+    Posix,
+    /// `C:\x`, `c:/x`, or verbatim `\\?\C:\x`, `//?/C:/x`, `/\?\C:\x`.
+    /// `volume` is the slice through the drive colon (`C:` or `\\?\C:`).
+    Drive { letter: u8, volume: &'a [u8] },
+    /// `\\srv\sh`, `//srv/sh`, or verbatim `\\?\UNC\srv\sh`, `//?/UNC/srv/sh`.
+    /// Both `server` and `share` are non-empty, neither `.` nor `..`, and
+    /// `server != "?"`. `volume` is the slice through `share` (`\\srv\sh` or
+    /// `\\?\UNC\srv\sh`).
+    Unc { volume: &'a [u8] },
+    /// `\x` or `\`: single leading backslash under `PathRules::Windows`
+    /// (`\??\...` included, which carries `spelling.namespace == Some(Namespace::Object)`).
+    Driveless,
+    /// `C:x` or `C:`: ASCII drive letter and colon with no following separator
+    /// under `PathRules::Windows`.
+    DriveRelative { letter: u8 },
+    /// `x`, `./x`, `""`: neither root nor drive.
+    Relative,
+    /// `\\.\...` (with any `/` or `\` separators): Win32 device namespace.
+    Device,
+    /// Opens with two separators (or a `\\?\` prefix) that is no well-formed
+    /// `Drive`, `Unc`, or `Device`.
+    Malformed,
+}
+
+/// A path slice parsed once under `rules`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Parsed<'a> {
+    pub(crate) raw: &'a [u8],
+    pub(crate) rules: PathRules,
+    pub(crate) kind: HeadKind<'a>,
+    pub(crate) spelling: HeadSpelling,
+    /// Byte offset where the head ends and the foldable component tail begins.
+    /// Equal to `raw.len()` when the path is opaque to lexical folding.
+    pub(crate) head_len: usize,
+}
+
+/// Parse `raw`'s head and separator spelling once under `rules`.
+pub(crate) fn parse_bytes(raw: &[u8], rules: PathRules) -> Parsed<'_> {
+    let (kind, spelling) = match rules {
+        PathRules::Posix => parse_posix(raw),
+        PathRules::Windows => parse_windows(raw),
+    };
+    let head_len = match kind {
+        HeadKind::Posix | HeadKind::Driveless => 1,
+        HeadKind::DriveRelative { .. } => 2,
+        HeadKind::Relative => 0,
+        HeadKind::Device | HeadKind::Malformed => raw.len(),
+        HeadKind::Drive { .. } | HeadKind::Unc { .. }
+            if spelling.namespace.is_some_and(Namespace::is_exact) =>
+        {
+            raw.len()
+        }
+        HeadKind::Drive { volume, .. } | HeadKind::Unc { volume } => {
+            (volume.len() + 1).min(raw.len())
+        }
+    };
+    Parsed {
+        raw,
+        rules,
+        kind,
+        spelling,
+        head_len,
     }
 }
 
-fn is_drive(s: &str) -> bool {
-    matches!(s.as_bytes(), [d, b':'] if d.is_ascii_alphabetic())
+fn parse_posix(raw: &[u8]) -> (HeadKind<'_>, HeadSpelling) {
+    let opens_with_slash = raw.first() == Some(&b'/');
+    let kind = if opens_with_slash {
+        HeadKind::Posix
+    } else {
+        HeadKind::Relative
+    };
+    (
+        kind,
+        HeadSpelling {
+            namespace: None,
+            mixed_opening: false,
+            opens_with_slash,
+        },
+    )
 }
 
-/// A server, then a share: each non-empty and neither `.` nor `..`, which
-/// would read as a step of the fold rather than a name, and the server not
-/// `?`.
-fn server_share<'a>(mut parts: impl Iterator<Item = &'a str>) -> bool {
-    let named = |name: &str| !matches!(name, "" | "." | "..");
+fn parse_windows(raw: &[u8]) -> (HeadKind<'_>, HeadSpelling) {
+    let opens_with_slash = raw.first() == Some(&b'/');
+    let mixed_opening = matches!(raw, [b'/', b'\\', ..] | [b'\\', b'/', ..]);
+    match raw {
+        [b'\\', b'?', b'?', b'\\', ..] => (
+            HeadKind::Driveless,
+            HeadSpelling {
+                namespace: Some(Namespace::Object),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+        ),
+        [a, b, b'.', c, ..] if is_win_sep(*a) && is_win_sep(*b) && is_win_sep(*c) => (
+            HeadKind::Device,
+            HeadSpelling {
+                namespace: Some(Namespace::Device {
+                    exact: [*a, *b, *c] == [b'\\'; 3],
+                }),
+                mixed_opening,
+                opens_with_slash,
+            },
+        ),
+        [a, b, b'?', c, tail @ ..] if is_win_sep(*a) && is_win_sep(*b) && is_win_sep(*c) => {
+            let spelling = HeadSpelling {
+                namespace: Some(Namespace::Verbatim {
+                    exact: [*a, *b, *c] == [b'\\'; 3],
+                }),
+                mixed_opening,
+                opens_with_slash,
+            };
+            let kind = if let Some(unc_rest) = verbatim_unc_tail_bytes(tail)
+                && server_share_bytes(unc_rest.split(|&b| is_win_sep(b)))
+            {
+                HeadKind::Unc {
+                    volume: &raw[..share_end(raw, r"\\?\UNC\".len())],
+                }
+            } else if let [d, b':', sep, ..] = tail
+                && d.is_ascii_alphabetic()
+                && is_win_sep(*sep)
+            {
+                HeadKind::Drive {
+                    letter: *d,
+                    volume: &raw[..r"\\?\C:".len()],
+                }
+            } else {
+                HeadKind::Malformed
+            };
+            (kind, spelling)
+        }
+        [a, b, rest @ ..] if is_win_sep(*a) && is_win_sep(*b) => {
+            let spelling = HeadSpelling {
+                namespace: None,
+                mixed_opening,
+                opens_with_slash,
+            };
+            let kind = if !mixed_opening && server_share_bytes(rest.split(|&b| is_win_sep(b))) {
+                HeadKind::Unc {
+                    volume: &raw[..share_end(raw, r"\\".len())],
+                }
+            } else {
+                HeadKind::Malformed
+            };
+            (kind, spelling)
+        }
+        _ => {
+            let spelling = HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash,
+            };
+            let kind = match raw {
+                [b'/', ..] => HeadKind::Posix,
+                [b'\\', ..] => HeadKind::Driveless,
+                [d, b':', sep, ..] if d.is_ascii_alphabetic() && is_win_sep(*sep) => {
+                    HeadKind::Drive {
+                        letter: *d,
+                        volume: &raw[..2],
+                    }
+                }
+                [d, b':', ..] if d.is_ascii_alphabetic() => HeadKind::DriveRelative { letter: *d },
+                _ => HeadKind::Relative,
+            };
+            (kind, spelling)
+        }
+    }
+}
+
+fn is_sep_byte(rules: PathRules, b: u8) -> bool {
+    rules.is_separator(char::from(b))
+}
+
+fn is_win_sep(b: u8) -> bool {
+    is_sep_byte(PathRules::Windows, b)
+}
+
+fn verbatim_unc_tail_bytes(tail: &[u8]) -> Option<&[u8]> {
+    let [u, n, c, sep, rest @ ..] = tail else {
+        return None;
+    };
+    ([*u, *n, *c].eq_ignore_ascii_case(b"UNC") && is_win_sep(*sep)).then_some(rest)
+}
+
+fn server_share_bytes<'a>(mut parts: impl Iterator<Item = &'a [u8]>) -> bool {
+    let named = |name: &[u8]| !matches!(name, b"" | b"." | b"..");
     parts
         .next()
-        .is_some_and(|server| named(server) && server != "?")
+        .is_some_and(|server| named(server) && server != b"?")
         && parts.next().is_some_and(named)
+}
+
+impl<'a> Parsed<'a> {
+    /// What follows a 4-byte Windows namespace prefix (`\\?\`, `\\.\`, `\??\`),
+    /// when `self.spelling.namespace` is `Some`.
+    pub(crate) fn namespace_tail(&self) -> Option<&'a [u8]> {
+        self.spelling.namespace.map(|_| &self.raw[4..])
+    }
+
+    /// Answers two questions that agree for all current callers: whether `self`
+    /// is fully qualified under `self.rules`, and whether `anchor` must not
+    /// join `self` onto `cwd` (`Device` and `Malformed` count as absolute so
+    /// `anchor` never joins them onto `cwd`).
+    pub(crate) fn is_absolute(&self) -> bool {
+        match self.rules {
+            PathRules::Posix => matches!(self.kind, HeadKind::Posix),
+            PathRules::Windows => matches!(
+                self.kind,
+                HeadKind::Drive { .. }
+                    | HeadKind::Unc { .. }
+                    | HeadKind::Device
+                    | HeadKind::Malformed
+            ),
+        }
+    }
+
+    /// Whether `self` is a valid working directory (`CwdPath`) under `self.rules`.
+    pub(crate) fn is_working_directory(&self) -> bool {
+        match self.rules {
+            PathRules::Posix => matches!(self.kind, HeadKind::Posix),
+            PathRules::Windows => {
+                matches!(self.kind, HeadKind::Drive { .. } | HeadKind::Unc { .. })
+            }
+        }
+    }
+
+    /// Whether `self` is a single bare root separator (`/` under Posix;
+    /// `/` or `\` under Windows).
+    pub(crate) fn is_bare_root(&self) -> bool {
+        self.raw.len() == 1 && matches!(self.kind, HeadKind::Posix | HeadKind::Driveless)
+    }
+
+    /// Whether `self` opens with an ordinary (non-verbatim) drive (`C:\x` or `C:x`).
+    pub(crate) fn has_drive(&self) -> bool {
+        self.spelling.namespace.is_none()
+            && matches!(
+                self.kind,
+                HeadKind::Drive { .. } | HeadKind::DriveRelative { .. }
+            )
+    }
+
+    /// Whether `self` names a UNC share (`\\srv\sh` or `\\?\UNC\srv\sh`).
+    #[cfg(any(windows, test))]
+    pub(crate) fn is_network(&self) -> bool {
+        matches!(self.kind, HeadKind::Unc { .. })
+    }
+
+    /// Whether `self` is a verbatim drive path (`\\?\C:\x`).
+    #[cfg(any(windows, test))]
+    pub(crate) fn is_verbatim_drive(&self) -> bool {
+        matches!(self.spelling.namespace, Some(Namespace::Verbatim { .. }))
+            && matches!(self.kind, HeadKind::Drive { .. })
+    }
+
+    /// Whether `self` opens with an exact backslash namespace head
+    /// (`\\?\`, `\\.\`, `\??\`).
+    pub(crate) fn has_os_namespace_head(&self) -> bool {
+        self.spelling.namespace.is_some_and(Namespace::is_exact)
+    }
+
+    /// Whether `self` opens with two different separators (`/\\` or `\\/`)
+    /// outside the `\\?\` verbatim namespace: a head Windows reads as UNC or
+    /// device and POSIX reads as `/` followed by a `\` component or a
+    /// relative `\` name.
+    pub(crate) fn is_mixed_head(&self) -> bool {
+        matches!(self.kind, HeadKind::Device | HeadKind::Malformed)
+            && self.spelling.mixed_opening
+            && !matches!(self.spelling.namespace, Some(Namespace::Verbatim { .. }))
+    }
+
+    /// Whether `self` opens with `\??\`, the NT object manager's DOS-device
+    /// directory.
+    pub(crate) fn is_nt_object(&self) -> bool {
+        self.kind == HeadKind::Driveless && self.spelling.namespace == Some(Namespace::Object)
+    }
+
+    /// Whether `self` is a volume GUID path (`\\?\Volume{...}`,
+    /// `\\.\Volume{...}`, `\??\Volume{...}`).
+    #[cfg(any(windows, test))]
+    pub(crate) fn is_volume_guid(&self) -> bool {
+        self.has_os_namespace_head()
+            && self
+                .namespace_tail()
+                .and_then(|t| t.get(..b"Volume{".len()))
+                .is_some_and(|v| v.eq_ignore_ascii_case(b"Volume{"))
+    }
+
+    /// The drive letter of a `Drive` working directory.
+    pub(crate) fn drive_letter(&self) -> Option<u8> {
+        match self.kind {
+            HeadKind::Drive { letter, .. } => Some(letter),
+            _ => None,
+        }
+    }
+
+    /// The volume slice (`C:`, `\\?\C:`, `\\srv\sh`, `\\?\UNC\srv\sh`) of a
+    /// `Drive` or `Unc` head.
+    pub(crate) fn volume(&self) -> Option<&'a [u8]> {
+        match self.kind {
+            HeadKind::Drive { volume, .. } | HeadKind::Unc { volume } => Some(volume),
+            _ => None,
+        }
+    }
+
+    /// Whether `self`'s head is a root that absorbs leading `..` during folding.
+    pub(crate) fn is_rooted(&self) -> bool {
+        !matches!(
+            self.kind,
+            HeadKind::Relative | HeadKind::DriveRelative { .. }
+        )
+    }
+
+    /// Whether `fold_bytes` may respell separators inside `&self.raw[..self.head_len]`.
+    pub(crate) fn respell_head(&self) -> bool {
+        match self.rules {
+            PathRules::Posix => true,
+            PathRules::Windows => {
+                self.spelling.namespace.is_none()
+                    && matches!(
+                        self.kind,
+                        HeadKind::Drive { .. }
+                            | HeadKind::Unc { .. }
+                            | HeadKind::Driveless
+                            | HeadKind::DriveRelative { .. }
+                            | HeadKind::Relative
+                    )
+            }
+        }
+    }
+
+    /// `self.raw` past any Windows verbatim prefix (`\\?\` or `\\?\UNC\`), so
+    /// `\\?\C:\work` yields `C:\work` and `\\?\UNC\srv\sh\x` yields `srv\sh\x`.
+    pub(crate) fn without_verbatim_prefix(&self) -> &'a [u8] {
+        match self.namespace_tail() {
+            Some(tail) if matches!(self.spelling.namespace, Some(Namespace::Verbatim { .. })) => {
+                verbatim_unc_tail_bytes(tail).unwrap_or(tail)
+            }
+            _ => self.raw,
+        }
+    }
 }
 
 /// Resolve `path` against `cwd`, folding `.` and `..`: [`anchor`] on a
@@ -255,30 +475,30 @@ pub(crate) fn anchor(cwd: &CwdPath, input: &Path) -> PathBuf {
     let joined = if is_absolute(input) {
         input.to_path_buf()
     } else {
-        against(cwd.as_path(), input)
+        against(cwd, input)
     };
     fold_dots(&joined)
 }
 
 /// `input`, relative under the host's rules, read against `cwd` as
 /// [`anchor`] describes.
-fn against(cwd: &Path, input: &Path) -> PathBuf {
+fn against(cwd: &CwdPath, input: &Path) -> PathBuf {
     let bytes = input.as_os_str().as_encoded_bytes();
     if PathRules::HOST == PathRules::Windows {
-        match root(&String::from_utf8_lossy(bytes)) {
-            Root::Driveless | Root::Posix => return joined(volume(cwd), bytes),
-            Root::DriveRelative => return drive_relative(cwd, input),
+        match parse_bytes(bytes, PathRules::Windows).kind {
+            HeadKind::Driveless | HeadKind::Posix => return joined(volume(cwd), bytes),
+            HeadKind::DriveRelative { .. } => return drive_relative(cwd, input),
             _ => {}
         }
     }
-    joined(cwd.as_os_str().as_encoded_bytes(), bytes)
+    joined(cwd.as_path().as_os_str().as_encoded_bytes(), bytes)
 }
 
 /// `D:x` read as [`anchor`] describes, `cwd` a [`CwdPath`] under Windows
 /// rules.
-fn drive_relative(cwd: &Path, input: &Path) -> PathBuf {
+fn drive_relative(cwd: &CwdPath, input: &Path) -> PathBuf {
     let (drive, rest) = input.as_os_str().as_encoded_bytes().split_at(2);
-    let cwd = cwd.as_os_str().as_encoded_bytes();
+    let cwd = cwd.as_path().as_os_str().as_encoded_bytes();
     if drive_letter(cwd).is_some_and(|letter| letter.eq_ignore_ascii_case(&drive[0])) {
         return joined(cwd, rest);
     }
@@ -291,33 +511,25 @@ fn drive_relative(cwd: &Path, input: &Path) -> PathBuf {
 /// The drive a [`CwdPath`] under Windows rules is on, as its letter: that
 /// of `C:\x` or `\\?\C:\x`, none for a share.
 fn drive_letter(cwd: &[u8]) -> Option<u8> {
-    match root(&String::from_utf8_lossy(cwd)) {
-        Root::Drive => Some(cwd[0]),
-        Root::VerbatimDrive => Some(cwd[r"\\?\".len()]),
-        _ => None,
-    }
+    parse_bytes(cwd, PathRules::Windows).drive_letter()
 }
 
 /// The drive or share a [`CwdPath`] under Windows rules is on, as spelled
 /// and with no separator after it: `C:`, `\\srv\sh`, `\\?\C:`,
 /// `\\?\UNC\srv\sh`.
-fn volume(cwd: &Path) -> &[u8] {
-    let cwd = cwd.as_os_str().as_encoded_bytes();
-    let len = match root(&String::from_utf8_lossy(cwd)) {
-        Root::Drive => "C:".len(),
-        Root::VerbatimDrive => r"\\?\C:".len(),
-        Root::Unc => share_end(cwd, r"\\".len()),
-        Root::VerbatimUnc => share_end(cwd, r"\\?\UNC\".len()),
-        other => unreachable!("a working directory is on a drive or a share, not {other:?}"),
-    };
-    &cwd[..len]
+fn volume(cwd: &CwdPath) -> &[u8] {
+    parse_bytes(
+        cwd.as_path().as_os_str().as_encoded_bytes(),
+        PathRules::Windows,
+    )
+    .volume()
+    .expect("CwdPath is on a drive or a share under Windows rules")
 }
 
 /// `base`, then `rest`, a separator of the host's between them unless one
 /// already stands there or `rest` is empty.
 fn joined(base: &[u8], rest: &[u8]) -> PathBuf {
-    let is_separator =
-        |b: Option<&u8>| b.is_some_and(|&b| PathRules::HOST.is_separator(char::from(b)));
+    let is_separator = |b: Option<&u8>| b.is_some_and(|&b| is_sep_byte(PathRules::HOST, b));
     let mut out = base.to_vec();
     if !rest.is_empty() && !is_separator(base.last()) && !is_separator(rest.first()) {
         out.push(separator(PathRules::HOST));
@@ -337,19 +549,8 @@ fn joined(base: &[u8], rest: &[u8]) -> PathBuf {
 /// the verbatim spelling of either, the roots with an extent a name joins
 /// past without changing what the root names.  A malformed or mixed head has
 /// none: `\\srv` joined with `sh` would name the share `\\srv\sh`.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "native: classified by its head, which is ASCII and so survives a lossy decode"
-)]
-pub(crate) fn is_working_directory(path: &Path) -> bool {
-    let text = path.to_string_lossy();
-    match PathRules::HOST {
-        PathRules::Posix => text.starts_with('/'),
-        PathRules::Windows => matches!(
-            root(&text),
-            Root::Drive | Root::Unc | Root::VerbatimDrive | Root::VerbatimUnc
-        ),
-    }
+pub(crate) fn is_working_directory(path: impl AsRef<OsStr>) -> bool {
+    parse_bytes(path.as_ref().as_encoded_bytes(), PathRules::HOST).is_working_directory()
 }
 
 /// True iff `path` is the filesystem root and names no drive under `rules`:
@@ -365,14 +566,13 @@ pub(crate) fn is_working_directory(path: &Path) -> bool {
 /// on exactly this path and nowhere else, so the doors that must not anchor
 /// it ask here rather than matching a root apiece.
 ///
-/// String logic, as [`root`] is,
+/// Byte logic, as [`parse_bytes`] is,
 /// and exact rather than "all separators": `\\` opens a UNC name and `X:\`
 /// carries a prefix component, and neither is universal.  A drive root must
 /// keep anchoring as it always did, or a grant over one volume would widen
 /// to all of them.
-pub(crate) fn is_bare_root(path: &str, rules: PathRules) -> bool {
-    let mut chars = path.chars();
-    chars.next().is_some_and(|c| rules.is_separator(c)) && chars.next().is_none()
+pub(crate) fn is_bare_root(path: impl AsRef<OsStr>, rules: PathRules) -> bool {
+    parse_bytes(path.as_ref().as_encoded_bytes(), rules).is_bare_root()
 }
 
 /// Fold `.`/`..` lexically under the host's rules, touching neither
@@ -402,9 +602,9 @@ pub(crate) fn fold_dots(path: &Path) -> PathBuf {
 /// keeps a `.\` before it, so `a\..\C:\x` folds to `.\C:\x`, a name under
 /// the cwd as it was, not a drive.
 ///
-/// Under Windows rules the head is what [`root`] reads, so the fold keeps
-/// it: `\\srv\sh\..` stays on the share, and a [`Root::Malformed`] or
-/// [`Root::MixedHead`] path is head through to its end and comes back as
+/// Under Windows rules the head is what [`parse_bytes`] reads, so the fold keeps
+/// it: `\\srv\sh\..` stays on the share, and a [`HeadKind::Device`] or
+/// [`HeadKind::Malformed`] path is head through to its end and comes back as
 /// written.  Such a head has no extent ral could cut a tail from: past `\\`
 /// with no share, any fold may assemble a server and a share (`\\\srv\sh`
 /// would fold to `\\srv\sh`), or, past a verbatim head, a drive, so the
@@ -413,19 +613,21 @@ pub(crate) fn fold_dots(path: &Path) -> PathBuf {
 /// its end too: Win32 hands the rest to the kernel uninterpreted, `/` a byte
 /// of a name and `.` and `..` names, so the fold leaves it as written
 /// (`\\?\C:\a/b\..` stays so).  Spelled with a `/` anywhere in its head (`//?/C:/x`), it is a
-/// device path Win32 normalises as it does any other: its [`root`] is
-/// still verbatim, its head through the drive or share is kept as written,
-/// and the tail past it folds.  Under Posix rules the head is the one root,
-/// `/`, which a doubled `//` spells too.
+/// device path Win32 normalises as it does any other: its [`HeadKind`] is
+/// still [`Drive`](HeadKind::Drive) or [`Unc`](HeadKind::Unc) under
+/// [`Namespace::Verbatim`], its head through the drive or share is kept as
+/// written, and the tail past it folds.  Under Posix rules the head is the one
+/// root, `/`, which a doubled `//` spells too.
 ///
 /// A head is spelled with the separator of `rules`, as its names are,
-/// wherever that keeps both its [`root`] and what Windows reads it as: a
-/// [`Root::Drive`] (`C:/` folds to `C:\`), a [`Root::Unc`] (`//srv/sh` to
-/// `\\srv\sh`) and a [`Root::Driveless`] one, so such a path folds to one
+/// wherever that keeps both its [`HeadKind`] and what Windows reads it as: a
+/// non-verbatim [`HeadKind::Drive`] (`C:/` folds to `C:\`), a non-verbatim
+/// [`HeadKind::Unc`] (`//srv/sh` to `\\srv\sh`) and a non-namespace
+/// [`HeadKind::Driveless`] one, so such a path folds to one
 /// separator throughout.  Every other head is kept as written: `/` is a
-/// [`Root::Posix`] head, which `\` would make [`Root::Driveless`]; a
+/// [`HeadKind::Posix`] head, which `\` would make [`HeadKind::Driveless`]; a
 /// verbatim head is verbatim to Win32 only as `\\?\`, and `//?/` a device
-/// path it normalises; a malformed or mixed head means what its exact
+/// path it normalises; a device, malformed or mixed head means what its exact
 /// spelling does.
 ///
 /// A string, read under either rules from any host: the form a test proves
@@ -439,14 +641,11 @@ pub(crate) fn fold_dots_under(path: &str, rules: PathRules) -> String {
 
 /// [`fold_dots_under`] on a path's encoded bytes.
 fn fold_bytes(path: &[u8], rules: PathRules) -> Vec<u8> {
-    let Head {
-        len,
-        rooted,
-        respell,
-    } = head(path, rules);
-    let (head, tail) = path.split_at(len);
+    let parsed = parse_bytes(path, rules);
+    let rooted = parsed.is_rooted();
+    let (head, tail) = path.split_at(parsed.head_len);
     let mut names: Vec<&[u8]> = Vec::new();
-    for name in tail.split(|&b| rules.is_separator(char::from(b))) {
+    for name in tail.split(|&b| is_sep_byte(rules, b)) {
         match name {
             b"" | b"." => {}
             b".." if names.last().is_some_and(|last| *last != b"..") => {
@@ -456,10 +655,10 @@ fn fold_bytes(path: &[u8], rules: PathRules) -> Vec<u8> {
             _ => names.push(name),
         }
     }
-    let mut folded: Vec<u8> = if respell {
+    let mut folded: Vec<u8> = if parsed.respell_head() {
         head.iter()
             .map(|&b| {
-                if rules.is_separator(char::from(b)) {
+                if is_sep_byte(rules, b) {
                     separator(rules)
                 } else {
                     b
@@ -496,75 +695,12 @@ fn separator(rules: PathRules) -> u8 {
     }
 }
 
-/// Where a path's head ends, in bytes, whether it is a root, and whether its
-/// separators may be respelled: past a root a `..` with no name to take is
-/// dropped, past a drive or nothing kept.  A head that has a root separator
-/// ends with it, so a name follows it directly; a share with nothing after
-/// it ends at the share.
-struct Head {
-    len: usize,
-    rooted: bool,
-    /// Whether the head, spelled with the separator of its rules, keeps its
-    /// [`Root`] and its meaning (see [`fold_dots_under`]).
-    respell: bool,
-}
-
-/// The [`Head`] of `path` under `rules`.
-fn head(path: &[u8], rules: PathRules) -> Head {
-    let PathRules::Windows = rules else {
-        let rooted = path.first() == Some(&b'/');
-        return Head {
-            len: usize::from(rooted),
-            rooted,
-            respell: true,
-        };
-    };
-    // Classified on a lossy decode: every byte a kind turns on is ASCII, and
-    // a replacement character is neither a separator, `?`, `.`, nor a drive
-    // letter, nor empty, so the kind is the one the bytes have.  Extents are
-    // measured on the bytes themselves.
-    let text = String::from_utf8_lossy(path);
-    // `\\?\` exactly, the backslash-only reading: verbatim to Win32, read
-    // by the kernel as written.
-    if let Some((Namespace::Verbatim, _)) = namespace_head(&text, Heads::OsReturned) {
-        return Head {
-            len: path.len(),
-            rooted: true,
-            respell: false,
-        };
-    }
-    let kind = root(&text);
-    // Through the share, and the separator after it if one follows.
-    let through_share = |server: usize| (share_end(path, server) + 1).min(path.len());
-    let len = match kind {
-        Root::Relative => 0,
-        Root::Posix | Root::Driveless => 1,
-        Root::DriveRelative => 2,
-        Root::Drive => 3,
-        Root::VerbatimDrive => r"\\?\C:\".len(),
-        Root::Unc => through_share(r"\\".len()),
-        Root::VerbatimUnc => through_share(r"\\?\UNC\".len()),
-        Root::Malformed | Root::MixedHead => path.len(),
-    };
-    Head {
-        len,
-        rooted: !matches!(kind, Root::Relative | Root::DriveRelative),
-        respell: matches!(
-            kind,
-            Root::Drive | Root::Unc | Root::Driveless | Root::DriveRelative | Root::Relative
-        ),
-    }
-}
-
 /// Where the share of a UNC head under Windows rules ends, its server name
 /// starting at `server`: the end of the name after the server's.
 fn share_end(path: &[u8], server: usize) -> usize {
     let next_separator = |from: usize| {
         path.get(from..)
-            .and_then(|rest| {
-                rest.iter()
-                    .position(|&b| PathRules::Windows.is_separator(char::from(b)))
-            })
+            .and_then(|rest| rest.iter().position(|&b| is_win_sep(b)))
             .map_or(path.len(), |i| from + i)
     };
     next_separator(next_separator(server) + 1)
@@ -643,7 +779,7 @@ fn appended(base: &[u8], sub: &str, rules: PathRules) -> Result<String, Rerootin
     let mut open = match base {
         [] => true,
         [d, b':'] if rules == PathRules::Windows => d.is_ascii_alphabetic(),
-        [.., last] => rules.is_separator(char::from(*last)),
+        [.., last] => is_sep_byte(rules, *last),
     };
     let mut tail = String::new();
     for name in names() {
@@ -769,12 +905,8 @@ pub fn shape(path: &str) -> PathShape {
 /// Whether `path` is absolute on this host: [`absolute_under`] the host's
 /// rules, the one absoluteness the path module answers with, a path the
 /// host holds or a string alike.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "native: classified by its head, which is ASCII and so survives a lossy decode"
-)]
 pub fn is_absolute(path: impl AsRef<OsStr>) -> bool {
-    absolute_under(&path.as_ref().to_string_lossy(), PathRules::HOST)
+    parse_bytes(path.as_ref().as_encoded_bytes(), PathRules::HOST).is_absolute()
 }
 
 /// A path that is not UTF-8, refused where a path must travel as text: a
@@ -870,79 +1002,1066 @@ pub(crate) fn proper_ancestors<'a>(paths: impl IntoIterator<Item = &'a str>) -> 
 )]
 mod tests {
     use super::*;
-    use Root::*;
+    use HeadKind::*;
+    use Namespace::{Device as NsDevice, Object, Verbatim};
 
-    /// One spelling of every [`Root`], and of every way to miss one.
-    const ROOTS: &[(&str, Root)] = &[
-        ("/x", Posix),
-        ("/", Posix),
-        (r"\\srv\sh", Unc),
-        (r"\\srv\sh\x", Unc),
-        ("//srv/sh/x", Unc),
-        (r"\\?\C:\x", VerbatimDrive),
-        (r"\\?\C:\", VerbatimDrive),
-        ("//?/C:/x", VerbatimDrive),
-        (r"\\?\UNC\srv\sh", VerbatimUnc),
-        (r"\\?\UNC\srv\sh\x", VerbatimUnc),
-        (r"\\?\unc\srv\sh", VerbatimUnc),
-        ("//?/UNC/srv/sh", VerbatimUnc),
-        (r"\/?\C:\x", VerbatimDrive),
-        (r"/\?/unc\srv/sh", VerbatimUnc),
-        (r"C:\x", Drive),
-        ("c:/x", Drive),
-        (r"\\", Malformed),
-        ("//", Malformed),
-        ("///x", Malformed),
-        (r"\\srv", Malformed),
-        (r"\\srv\", Malformed),
-        ("//srv/", Malformed),
-        (r"\\\srv\sh", Malformed),
-        ("///srv/sh", Malformed),
-        (r"\\?\", Malformed),
-        (r"\\?", Malformed),
-        (r"\\?\UNC\", Malformed),
-        (r"\\?\UNC\srv", Malformed),
-        (r"\\?\UNC\srv\", Malformed),
-        (r"\\?\UNC\?\sh", Malformed),
-        (r"\\?\UNC\.\sh", Malformed),
-        ("//?/UNC/", Malformed),
-        ("//?/UNC/srv", Malformed),
-        (r"\\?\C:", Malformed),
-        (r"\\?\x", Malformed),
-        (r"\\.\C:\x", Malformed),
-        (r"\\.\pipe\x", Malformed),
-        (r"\\?\?\x", Malformed),
-        (r"\\..\sh", Malformed),
-        (r"\\srv\.", Malformed),
-        (r"\\srv\..\x", Malformed),
-        ("//x/../y", Malformed),
-        (r"\\?\UNC\..\sh", Malformed),
-        (r"\\?\UNC\srv\..", Malformed),
-        (r"/\x", MixedHead),
-        (r"/\srv\sh", MixedHead),
-        (r"\/srv/sh", MixedHead),
-        (r"/\.\pipe\x", MixedHead),
-        (r"\x", Driveless),
-        (r"\", Driveless),
-        ("C:x", DriveRelative),
-        ("C:", DriveRelative),
-        ("x", Relative),
-        ("./x", Relative),
-        ("", Relative),
+    /// One row per head form (`Relative`, `Driveless`, `DriveRelative`,
+    /// `Drive`, `Unc`, `Posix`, `Device`, `Malformed`) and separator spelling
+    /// (`\\`, `//`, `/\`, `\/`; for 4-byte namespace prefixes all eight
+    /// spellings of the three separator slots), plus every incomplete UNC and
+    /// verbatim form.  Expectations are literal, never computed from the
+    /// parser under test.
+    const PARSED_WINDOWS: &[(&str, HeadKind<'static>, HeadSpelling, usize)] = &[
+        // Posix
+        (
+            "/x",
+            Posix,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: true,
+            },
+            1,
+        ),
+        (
+            "/",
+            Posix,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: true,
+            },
+            1,
+        ),
+        (
+            "/??/C:/x",
+            Posix,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: true,
+            },
+            1,
+        ),
+        // Driveless (plain and NT object manager)
+        (
+            r"\x",
+            Driveless,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            1,
+        ),
+        (
+            r"\",
+            Driveless,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            1,
+        ),
+        (
+            r"\?\x",
+            Driveless,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            1,
+        ),
+        (
+            r"\?\UNC\srv",
+            Driveless,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            1,
+        ),
+        (
+            r"\??\C:\x",
+            Driveless,
+            HeadSpelling {
+                namespace: Some(Object),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            1,
+        ),
+        // DriveRelative
+        (
+            "C:x",
+            DriveRelative { letter: b'C' },
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            2,
+        ),
+        (
+            "C:",
+            DriveRelative { letter: b'C' },
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            2,
+        ),
+        // Drive (non-verbatim, both separator spellings)
+        (
+            r"C:\x",
+            Drive {
+                letter: b'C',
+                volume: b"C:",
+            },
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            3,
+        ),
+        (
+            r"C:\",
+            Drive {
+                letter: b'C',
+                volume: b"C:",
+            },
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            3,
+        ),
+        (
+            "c:/x",
+            Drive {
+                letter: b'c',
+                volume: b"c:",
+            },
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            3,
+        ),
+        (
+            "C:/?/x",
+            Drive {
+                letter: b'C',
+                volume: b"C:",
+            },
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            3,
+        ),
+        // Unc (non-verbatim, `\\` and `//` openings)
+        (
+            r"\\srv\sh",
+            Unc {
+                volume: br"\\srv\sh",
+            },
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            8,
+        ),
+        (
+            r"\\srv\sh\x",
+            Unc {
+                volume: br"\\srv\sh",
+            },
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            9,
+        ),
+        (
+            r"\\srv/sh",
+            Unc {
+                volume: br"\\srv/sh",
+            },
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            8,
+        ),
+        (
+            "//srv/sh",
+            Unc {
+                volume: b"//srv/sh",
+            },
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: true,
+            },
+            8,
+        ),
+        (
+            "//srv/sh/x",
+            Unc {
+                volume: b"//srv/sh",
+            },
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: true,
+            },
+            9,
+        ),
+        (
+            r"//srv\sh\x",
+            Unc {
+                volume: br"//srv\sh",
+            },
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: true,
+            },
+            9,
+        ),
+        // Verbatim Drive: all 8 spellings of the three separator slots
+        (
+            r"\\?\C:\x",
+            Drive {
+                letter: b'C',
+                volume: br"\\?\C:",
+            },
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: true }),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            8,
+        ),
+        (
+            r"\\?\C:\",
+            Drive {
+                letter: b'C',
+                volume: br"\\?\C:",
+            },
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: true }),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            7,
+        ),
+        (
+            r"\\?/C:\x",
+            Drive {
+                letter: b'C',
+                volume: br"\\?/C:",
+            },
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: false }),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            7,
+        ),
+        (
+            r"\/?\C:\x",
+            Drive {
+                letter: b'C',
+                volume: br"\/?\C:",
+            },
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: false }),
+                mixed_opening: true,
+                opens_with_slash: false,
+            },
+            7,
+        ),
+        (
+            r"\/?/C:\x",
+            Drive {
+                letter: b'C',
+                volume: br"\/?/C:",
+            },
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: false }),
+                mixed_opening: true,
+                opens_with_slash: false,
+            },
+            7,
+        ),
+        (
+            r"/\?\C:\x",
+            Drive {
+                letter: b'C',
+                volume: br"/\?\C:",
+            },
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: false }),
+                mixed_opening: true,
+                opens_with_slash: true,
+            },
+            7,
+        ),
+        (
+            r"/\?/C:\x",
+            Drive {
+                letter: b'C',
+                volume: br"/\?/C:",
+            },
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: false }),
+                mixed_opening: true,
+                opens_with_slash: true,
+            },
+            7,
+        ),
+        (
+            r"//?\C:\x",
+            Drive {
+                letter: b'C',
+                volume: br"//?\C:",
+            },
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: false }),
+                mixed_opening: false,
+                opens_with_slash: true,
+            },
+            7,
+        ),
+        (
+            "//?/C:/x",
+            Drive {
+                letter: b'C',
+                volume: b"//?/C:",
+            },
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: false }),
+                mixed_opening: false,
+                opens_with_slash: true,
+            },
+            7,
+        ),
+        // Verbatim Unc: all 8 spellings of the three separator slots
+        (
+            r"\\?\UNC\srv\sh",
+            Unc {
+                volume: br"\\?\UNC\srv\sh",
+            },
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: true }),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            14,
+        ),
+        (
+            r"\\?\UNC\srv\sh\x",
+            Unc {
+                volume: br"\\?\UNC\srv\sh",
+            },
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: true }),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            16,
+        ),
+        (
+            r"\\?\unc\srv\sh",
+            Unc {
+                volume: br"\\?\unc\srv\sh",
+            },
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: true }),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            14,
+        ),
+        (
+            r"\\?/UNC\srv\sh\x",
+            Unc {
+                volume: br"\\?/UNC\srv\sh",
+            },
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: false }),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            15,
+        ),
+        (
+            r"\/?\UNC\srv\sh\x",
+            Unc {
+                volume: br"\/?\UNC\srv\sh",
+            },
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: false }),
+                mixed_opening: true,
+                opens_with_slash: false,
+            },
+            15,
+        ),
+        (
+            r"\/?/UNC\srv\sh\x",
+            Unc {
+                volume: br"\/?/UNC\srv\sh",
+            },
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: false }),
+                mixed_opening: true,
+                opens_with_slash: false,
+            },
+            15,
+        ),
+        (
+            r"/\?\UNC\srv\sh\x",
+            Unc {
+                volume: br"/\?\UNC\srv\sh",
+            },
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: false }),
+                mixed_opening: true,
+                opens_with_slash: true,
+            },
+            15,
+        ),
+        (
+            r"/\?/unc\srv/sh",
+            Unc {
+                volume: br"/\?/unc\srv/sh",
+            },
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: false }),
+                mixed_opening: true,
+                opens_with_slash: true,
+            },
+            14,
+        ),
+        (
+            r"//?\UNC\srv\sh\x",
+            Unc {
+                volume: br"//?\UNC\srv\sh",
+            },
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: false }),
+                mixed_opening: false,
+                opens_with_slash: true,
+            },
+            15,
+        ),
+        (
+            "//?/UNC/srv/sh",
+            Unc {
+                volume: b"//?/UNC/srv/sh",
+            },
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: false }),
+                mixed_opening: false,
+                opens_with_slash: true,
+            },
+            14,
+        ),
+        // Device: all 8 spellings of the three separator slots
+        (
+            r"\\.\C:\x",
+            Device,
+            HeadSpelling {
+                namespace: Some(NsDevice { exact: true }),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            8,
+        ),
+        (
+            r"\\.\pipe\x",
+            Device,
+            HeadSpelling {
+                namespace: Some(NsDevice { exact: true }),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            10,
+        ),
+        (
+            r"\\.\nul",
+            Device,
+            HeadSpelling {
+                namespace: Some(NsDevice { exact: true }),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            7,
+        ),
+        (
+            r"\\./nul",
+            Device,
+            HeadSpelling {
+                namespace: Some(NsDevice { exact: false }),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            7,
+        ),
+        (
+            r"\/.\nul",
+            Device,
+            HeadSpelling {
+                namespace: Some(NsDevice { exact: false }),
+                mixed_opening: true,
+                opens_with_slash: false,
+            },
+            7,
+        ),
+        (
+            r"\/./nul",
+            Device,
+            HeadSpelling {
+                namespace: Some(NsDevice { exact: false }),
+                mixed_opening: true,
+                opens_with_slash: false,
+            },
+            7,
+        ),
+        (
+            r"/\.\pipe\x",
+            Device,
+            HeadSpelling {
+                namespace: Some(NsDevice { exact: false }),
+                mixed_opening: true,
+                opens_with_slash: true,
+            },
+            10,
+        ),
+        (
+            r"/\./nul",
+            Device,
+            HeadSpelling {
+                namespace: Some(NsDevice { exact: false }),
+                mixed_opening: true,
+                opens_with_slash: true,
+            },
+            7,
+        ),
+        (
+            r"//.\nul",
+            Device,
+            HeadSpelling {
+                namespace: Some(NsDevice { exact: false }),
+                mixed_opening: false,
+                opens_with_slash: true,
+            },
+            7,
+        ),
+        (
+            "//./pipe/x",
+            Device,
+            HeadSpelling {
+                namespace: Some(NsDevice { exact: false }),
+                mixed_opening: false,
+                opens_with_slash: true,
+            },
+            10,
+        ),
+        // Malformed: all 8 spellings of `\\?\x`
+        (
+            r"\\?\x",
+            Malformed,
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: true }),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            5,
+        ),
+        (
+            r"\\?/x",
+            Malformed,
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: false }),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            5,
+        ),
+        (
+            r"\/?\x",
+            Malformed,
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: false }),
+                mixed_opening: true,
+                opens_with_slash: false,
+            },
+            5,
+        ),
+        (
+            r"\/?/x",
+            Malformed,
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: false }),
+                mixed_opening: true,
+                opens_with_slash: false,
+            },
+            5,
+        ),
+        (
+            r"/\?\x",
+            Malformed,
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: false }),
+                mixed_opening: true,
+                opens_with_slash: true,
+            },
+            5,
+        ),
+        (
+            r"/\?/x",
+            Malformed,
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: false }),
+                mixed_opening: true,
+                opens_with_slash: true,
+            },
+            5,
+        ),
+        (
+            r"//?\x",
+            Malformed,
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: false }),
+                mixed_opening: false,
+                opens_with_slash: true,
+            },
+            5,
+        ),
+        (
+            "//?/x",
+            Malformed,
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: false }),
+                mixed_opening: false,
+                opens_with_slash: true,
+            },
+            5,
+        ),
+        // Malformed: incomplete UNC & verbatim forms and mixed 2-separator openings
+        (
+            r"\\",
+            Malformed,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            2,
+        ),
+        (
+            "//",
+            Malformed,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: true,
+            },
+            2,
+        ),
+        (
+            r"/\",
+            Malformed,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: true,
+                opens_with_slash: true,
+            },
+            2,
+        ),
+        (
+            r"\/",
+            Malformed,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: true,
+                opens_with_slash: false,
+            },
+            2,
+        ),
+        (
+            "///x",
+            Malformed,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: true,
+            },
+            4,
+        ),
+        (
+            r"\\srv",
+            Malformed,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            5,
+        ),
+        (
+            r"\\srv\",
+            Malformed,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            6,
+        ),
+        (
+            "//srv",
+            Malformed,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: true,
+            },
+            5,
+        ),
+        (
+            "//srv/",
+            Malformed,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: true,
+            },
+            6,
+        ),
+        (
+            r"\\\srv\sh",
+            Malformed,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            9,
+        ),
+        (
+            "///srv/sh",
+            Malformed,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: true,
+            },
+            9,
+        ),
+        (
+            r"\\?\",
+            Malformed,
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: true }),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            4,
+        ),
+        (
+            r"\\?",
+            Malformed,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            3,
+        ),
+        (
+            r"\\?\UNC\",
+            Malformed,
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: true }),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            8,
+        ),
+        (
+            r"\\?\UNC\srv",
+            Malformed,
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: true }),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            11,
+        ),
+        (
+            r"\\?\UNC\srv\",
+            Malformed,
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: true }),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            12,
+        ),
+        (
+            r"\\?\UNC\?\sh",
+            Malformed,
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: true }),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            12,
+        ),
+        (
+            r"\\?\UNC\.\sh",
+            Malformed,
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: true }),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            12,
+        ),
+        (
+            "//?/UNC/",
+            Malformed,
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: false }),
+                mixed_opening: false,
+                opens_with_slash: true,
+            },
+            8,
+        ),
+        (
+            "//?/UNC/srv",
+            Malformed,
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: false }),
+                mixed_opening: false,
+                opens_with_slash: true,
+            },
+            11,
+        ),
+        (
+            r"\\?\C:",
+            Malformed,
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: true }),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            6,
+        ),
+        (
+            r"\\?\?\x",
+            Malformed,
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: true }),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            7,
+        ),
+        (
+            r"\\..\sh",
+            Malformed,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            7,
+        ),
+        (
+            r"\\srv\.",
+            Malformed,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            7,
+        ),
+        (
+            r"\\srv\..\x",
+            Malformed,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            10,
+        ),
+        (
+            "//x/../y",
+            Malformed,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: true,
+            },
+            8,
+        ),
+        (
+            r"\\?\UNC\..\sh",
+            Malformed,
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: true }),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            13,
+        ),
+        (
+            r"\\?\UNC\srv\..",
+            Malformed,
+            HeadSpelling {
+                namespace: Some(Verbatim { exact: true }),
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            14,
+        ),
+        (
+            r"/\x",
+            Malformed,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: true,
+                opens_with_slash: true,
+            },
+            3,
+        ),
+        (
+            r"/\srv\sh",
+            Malformed,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: true,
+                opens_with_slash: true,
+            },
+            8,
+        ),
+        (
+            r"\/srv/sh",
+            Malformed,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: true,
+                opens_with_slash: false,
+            },
+            8,
+        ),
+        // Relative
+        (
+            "x",
+            Relative,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            0,
+        ),
+        (
+            "./x",
+            Relative,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            0,
+        ),
+        (
+            "",
+            Relative,
+            HeadSpelling {
+                namespace: None,
+                mixed_opening: false,
+                opens_with_slash: false,
+            },
+            0,
+        ),
     ];
 
-    /// Platform-independent: classification is on the raw string.
+    /// Platform-independent: `parse_bytes` classifies `kind`, `spelling`,
+    /// `head_len`, and `volume` on the raw byte slice under both `PathRules`.
     #[test]
-    fn roots_classify_on_the_raw_string() {
-        for &(raw, want) in ROOTS {
-            assert_eq!(root(raw), want, "{raw}");
+    fn parse_bytes_classifies_kind_and_spelling_under_both_rules() {
+        for &(raw, want_kind, want_spelling, want_head_len) in PARSED_WINDOWS {
+            let win = parse_bytes(raw.as_bytes(), PathRules::Windows);
+            assert_eq!(
+                win,
+                Parsed {
+                    raw: raw.as_bytes(),
+                    rules: PathRules::Windows,
+                    kind: want_kind,
+                    spelling: want_spelling,
+                    head_len: want_head_len,
+                },
+                "{raw:?} windows"
+            );
+            let want_vol = match want_kind {
+                Drive { volume, .. } | Unc { volume } => Some(volume),
+                _ => None,
+            };
+            assert_eq!(win.volume(), want_vol, "{raw:?} volume");
+
+            let posix = parse_bytes(raw.as_bytes(), PathRules::Posix);
+            let want_posix = if want_spelling.opens_with_slash {
+                Parsed {
+                    raw: raw.as_bytes(),
+                    rules: PathRules::Posix,
+                    kind: Posix,
+                    spelling: HeadSpelling {
+                        namespace: None,
+                        mixed_opening: false,
+                        opens_with_slash: true,
+                    },
+                    head_len: 1,
+                }
+            } else {
+                Parsed {
+                    raw: raw.as_bytes(),
+                    rules: PathRules::Posix,
+                    kind: Relative,
+                    spelling: HeadSpelling {
+                        namespace: None,
+                        mixed_opening: false,
+                        opens_with_slash: false,
+                    },
+                    head_len: 0,
+                }
+            };
+            assert_eq!(posix, want_posix, "{raw:?} posix");
         }
     }
 
-    /// Platform-independent, as [`roots_classify_on_the_raw_string`] is: the
-    /// kernel's answer under each rules set, root by root.  POSIX roots
-    /// whatever opens with `/`; Windows whatever opens with two separators,
-    /// well formed or not, and a drive root.
+    /// Platform-independent: the kernel's answer under each rules set, root by
+    /// root.  POSIX roots whatever opens with `/`; Windows whatever opens with
+    /// two separators, well formed or not, and a drive root.
     #[test]
     fn absoluteness_is_read_under_either_rules() {
         for (raw, posix, windows) in [
@@ -986,77 +2105,6 @@ mod tests {
         }
     }
 
-    /// The host's answer is [`absolute_under`] the host's rules, for a
-    /// string and a held path alike.
-    #[test]
-    fn is_absolute_is_the_hosts_rule() {
-        for raw in [
-            "/x",
-            "//?/C:/x",
-            r"\\srv\sh\x",
-            r"C:\x",
-            r"\\.\pipe\x",
-            r"\x",
-            "x",
-        ] {
-            let host = absolute_under(raw, PathRules::HOST);
-            assert_eq!(is_absolute(raw), host, "{raw}");
-            assert_eq!(is_absolute(PathBuf::from(raw)), host, "{raw}");
-        }
-    }
-
-    /// The written reading: two separators, the mark, a separator, each
-    /// separator either spelling; the Win32 heads alone.
-    #[test]
-    fn written_heads_take_either_separator() {
-        use Namespace::*;
-        for (raw, want) in [
-            (r"\\?\C:\x", Verbatim),
-            ("//?/C:/x", Verbatim),
-            (r"\/?/C:\x", Verbatim),
-            (r"\\.\nul", Device),
-            ("//./nul", Device),
-            (r"/\.\nul", Device),
-        ] {
-            assert_eq!(
-                namespace_head(raw, Heads::Written),
-                Some((want, &raw[4..])),
-                "{raw}"
-            );
-        }
-        for raw in [r"\\?", r"\?\x", r"\??\C:\x", "C:/?/x"] {
-            assert_eq!(namespace_head(raw, Heads::Written), None, "{raw}");
-        }
-    }
-
-    /// The OS-returned reading: backslashes only, the NT object head too.
-    #[test]
-    fn os_returned_heads_take_backslashes_only() {
-        use Namespace::*;
-        for (raw, want) in [
-            (r"\\?\C:\x", Verbatim),
-            (r"\\.\pipe\x", Device),
-            (r"\??\C:\x", Object),
-        ] {
-            assert_eq!(
-                namespace_head(raw, Heads::OsReturned),
-                Some((want, &raw[4..])),
-                "{raw}"
-            );
-        }
-        for raw in ["//?/C:/x", r"\/?/C:\x", "//./nul", "/??/C:/x", r"\\?"] {
-            assert_eq!(namespace_head(raw, Heads::OsReturned), None, "{raw}");
-        }
-    }
-
-    #[test]
-    fn a_verbatim_unc_tail_opens_with_unc() {
-        assert_eq!(verbatim_unc_tail(r"UNC\srv\sh"), Some(r"srv\sh"));
-        assert_eq!(verbatim_unc_tail("unc/srv"), Some("srv"));
-        assert_eq!(verbatim_unc_tail(r"UNCx\srv"), None);
-        assert_eq!(verbatim_unc_tail(r"C:\x"), None);
-    }
-
     #[test]
     fn network_paths_are_the_unc_roots() {
         for raw in [r"\\srv\sh\x", r"\\?\UNC\srv\sh\x", r"\\?\unc\srv\sh"] {
@@ -1065,6 +2113,9 @@ mod tests {
         for raw in [r"\\?\C:\x", r"\\.\Volume{1234}\x", r"\\.\C:\x", r"C:\x"] {
             assert!(!is_network(Path::new(raw)), "{raw}");
         }
+        assert!(is_verbatim_drive(Path::new(r"\\?\C:\x")));
+        assert!(!is_verbatim_drive(Path::new(r"C:\x")));
+        assert!(!is_verbatim_drive(Path::new(r"\\.\C:\x")));
     }
 
     #[test]
@@ -1374,37 +2425,83 @@ mod tests {
         }
     }
 
+    /// Compare `before` and `after` parsed heads after folding under `rules`:
+    /// `kind`, `volume` (with `/` respelled to `\` when `before.respell_head()`
+    /// under Windows rules), and `spelling.namespace` are preserved — save for
+    /// [`Namespace::Object`] (`\??\`), which Win32 reads as a [`Driveless`]
+    /// path (`head_len == 1`) whose first component is `??`, so `..` climbing
+    /// to `\??` or `\` keeps `Driveless` while dropping the 4-byte `\??\`
+    /// prefix (`namespace: None`).
+    fn assert_fold_preserves_head(before: Parsed<'_>, after: Parsed<'_>, ctx: &str) {
+        let want_ns = if before.spelling.namespace == Some(Namespace::Object) {
+            after
+                .raw
+                .starts_with(b"\\??\\")
+                .then_some(Namespace::Object)
+        } else {
+            before.spelling.namespace
+        };
+        assert_eq!(after.spelling.namespace, want_ns, "{ctx}: namespace");
+        let respell_vol = |vol: &[u8]| -> Vec<u8> {
+            if before.rules == PathRules::Windows && before.respell_head() {
+                vol.iter()
+                    .map(|&b| if b == b'/' { b'\\' } else { b })
+                    .collect()
+            } else {
+                vol.to_vec()
+            }
+        };
+        match (before.kind, after.kind) {
+            (
+                Drive {
+                    letter: l1,
+                    volume: v1,
+                },
+                Drive {
+                    letter: l2,
+                    volume: v2,
+                },
+            ) => {
+                assert_eq!(l2, l1, "{ctx}: drive letter");
+                assert_eq!(v2, respell_vol(v1).as_slice(), "{ctx}: drive volume");
+            }
+            (Unc { volume: v1 }, Unc { volume: v2 }) => {
+                assert_eq!(v2, respell_vol(v1).as_slice(), "{ctx}: unc volume");
+            }
+            (k1, k2) => assert_eq!(k2, k1, "{ctx}: kind"),
+        }
+    }
+
     /// The fold keeps the root its rules read, and is its own fixed point:
-    /// every root of [`ROOTS`], bare and under each tail, folds to a path of
-    /// that root, which folds to itself.  Under Windows rules the root is
-    /// [`root`]'s, and the fold spells it as [`fold_dots_under`] says, root
-    /// by root: with `\` alone, or with its head as written; under Posix
-    /// rules it is the one root or none, since POSIX reads `//x` as `/x`.  So
+    /// every head in [`PARSED_WINDOWS`], bare and under each tail, folds to a
+    /// path of that head, which folds to itself (for `\??\`, `Driveless` is
+    /// kept while `..` climbing to `\??` or `\` drops `Namespace::Object`).  So
     /// [`LexicalPath`](super::super::LexicalPath)'s invariant, a fixed point
     /// of [`fold_dots`], holds of whatever the resolver hands it.
     #[test]
     fn a_fold_keeps_the_root_under_either_rules() {
         let tails = ["", "/", "/x", r"\.\y\..", "/../..", r"\a\..\C:\z", "/./?/x"];
-        for &(raw, _) in ROOTS {
+        for &(raw, _, _, _) in PARSED_WINDOWS {
             for tail in tails {
                 let path = format!("{raw}{tail}");
                 for rules in [PathRules::Posix, PathRules::Windows] {
+                    let parsed = parse_bytes(path.as_bytes(), rules);
                     let folded = fold_dots_under(&path, rules);
-                    match rules {
-                        PathRules::Windows => {
-                            assert_eq!(root(&folded), root(&path), "{path:?} -> {folded:?}");
-                            let Head { len, respell, .. } = head(path.as_bytes(), rules);
-                            if respell {
-                                assert!(!folded.contains('/'), "{path:?} -> {folded:?}");
-                            } else {
-                                assert!(folded.starts_with(&path[..len]), "{path:?} -> {folded:?}");
-                            }
+                    let parsed_folded = parse_bytes(folded.as_bytes(), rules);
+                    assert_fold_preserves_head(
+                        parsed,
+                        parsed_folded,
+                        &format!("{path:?} -> {folded:?} ({rules:?})"),
+                    );
+                    if rules == PathRules::Windows {
+                        if parsed.respell_head() {
+                            assert!(!folded.contains('/'), "{path:?} -> {folded:?}");
+                        } else {
+                            assert!(
+                                folded.starts_with(&path[..parsed.head_len]),
+                                "{path:?} -> {folded:?}"
+                            );
                         }
-                        PathRules::Posix => assert_eq!(
-                            absolute_under(&folded, rules),
-                            absolute_under(&path, rules),
-                            "{path:?} -> {folded:?}"
-                        ),
                     }
                     assert_eq!(
                         fold_dots_under(&folded, rules),
@@ -1416,18 +2513,102 @@ mod tests {
         }
     }
 
-    /// The host's fold is the string kernel under the host's rules.
+    /// Laws 1–3 (§9): lossless parsing, host-independent explicit-rule parsing
+    /// and folding, and fold stability (`P_r(F_r(s))` preserves head — with
+    /// [`Namespace::Object`] `\??\` keeping `Driveless` and retaining
+    /// `Some(Namespace::Object)` iff the folded path still opens with `\??\` —
+    /// and `F_r(F_r(s)) == F_r(s)`, with `F_W(s) == s` on opaque heads),
+    /// checked by exhaustive enumeration over the token alphabet
+    /// `["a", ".", "..", ""]` to depth 4 across both separator spellings
+    /// (`"/"`, `r"\"`), plus non-UTF-8 byte slices on Unix and
+    /// unpaired-surrogate `OsString`s on Windows.
     #[test]
-    fn fold_dots_is_the_kernel_under_the_hosts_rules() {
-        for &(raw, _) in ROOTS {
-            for tail in ["", r"\a\..\b", "/./c/../.."] {
-                let path = format!("{raw}{tail}");
-                assert_eq!(
-                    fold_dots(Path::new(&path)),
-                    pb(&fold_dots_under(&path, PathRules::HOST)),
-                    "{path:?}"
-                );
+    fn laws_1_to_3_hold_across_token_alphabet_to_depth_4() {
+        let check_bytes = |s: &[u8], rules: PathRules| {
+            let p = parse_bytes(s, rules);
+            // Law 1: lossless parsing and head/tail partition.
+            assert_eq!(p.raw, s);
+            assert_eq!([&p.raw[..p.head_len], &p.raw[p.head_len..]].concat(), s);
+
+            // Law 3: fold stability and opaque preservation.
+            let f = fold_bytes(s, rules);
+            let ff = fold_bytes(&f, rules);
+            assert_eq!(ff, f, "idempotence failed on {s:?} under {rules:?}");
+            if rules == PathRules::Windows && p.head_len == s.len() && !p.respell_head() {
+                assert_eq!(f, s, "opaque head modified on {s:?}");
             }
+            let pf = parse_bytes(&f, rules);
+            assert_fold_preserves_head(p, pf, &format!("{s:?} ({rules:?})"));
+        };
+
+        let heads = [
+            "",
+            "/",
+            r"\",
+            "C:",
+            r"C:\",
+            "C:/",
+            r"\\srv\sh\",
+            "//srv/sh/",
+            r"\\?\C:\",
+            "//?/C:/",
+            r"\\.\pipe\",
+            r"\??\C:\",
+            r"\\srv\",
+            r"/\x\",
+        ];
+        let tokens = ["a", ".", "..", ""];
+        let seps = ["/", r"\"];
+        for head in heads {
+            for sep in seps {
+                for t0 in tokens {
+                    for t1 in tokens {
+                        for t2 in tokens {
+                            for t3 in tokens {
+                                let tail = [t0, t1, t2, t3].join(sep);
+                                let s = format!("{head}{tail}");
+                                for rules in [PathRules::Posix, PathRules::Windows] {
+                                    check_bytes(s.as_bytes(), rules);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            for raw in [
+                &b"/a/\xff/./b/../\xfe"[..],
+                &b"\\\xfe\\./..\\\xff"[..],
+                &b"C:\\\xff\\..\\a"[..],
+                &b"\\\\?\\C:\\\xff\\.."[..],
+            ] {
+                for rules in [PathRules::Posix, PathRules::Windows] {
+                    check_bytes(raw, rules);
+                }
+                let folded = fold_dots(Path::new(OsStr::from_bytes(raw)));
+                assert_eq!(fold_dots(&folded), folded);
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            let wide: Vec<u16> = r"C:\a\"
+                .encode_utf16()
+                .chain([0xD800])
+                .chain(r"\.\b\..\".encode_utf16())
+                .chain([0xD801])
+                .collect();
+            let os = std::ffi::OsString::from_wide(&wide);
+            for rules in [PathRules::Posix, PathRules::Windows] {
+                check_bytes(os.as_encoded_bytes(), rules);
+            }
+            let folded = fold_dots(Path::new(&os));
+            assert_eq!(fold_dots(&folded), folded);
         }
     }
 
@@ -1453,6 +2634,7 @@ mod tests {
             r"C:\x",
             r"\\srv\sh\x",
             r"\\?\C:\x",
+            "//?/C:/x",
             r"\\.\pipe\x",
             "/x",
             "x",

@@ -1,7 +1,7 @@
 //! Device names: the discard sink, and the DOS names no file may take.
 
 use super::PathRules;
-use super::lex::{Heads, Namespace, namespace_head};
+use super::lex::{HeadKind, parse_bytes};
 
 /// True iff `path` names the discard device: the sink that swallows every
 /// byte and keeps none.  `/dev/null` under POSIX rules; under Windows', the
@@ -15,8 +15,11 @@ pub(crate) fn is_discard_device(path: &str, rules: PathRules) -> bool {
     match rules {
         PathRules::Posix => path == "/dev/null",
         PathRules::Windows => {
-            matches!(namespace_head(path, Heads::Written),
-                Some((Namespace::Device, name)) if name.eq_ignore_ascii_case("nul"))
+            let parsed = parse_bytes(path.as_bytes(), PathRules::Windows);
+            parsed.kind == HeadKind::Device
+                && parsed
+                    .namespace_tail()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(b"nul"))
         }
     }
 }
