@@ -8,8 +8,9 @@
 //! program an `env` interpreter runs.  Kernel-only: the in-process guard
 //! never consults them.
 
-use crate::path::walk::{Kind, Leaf, walk_vetted};
-use crate::path::{RealPath, is_absolute};
+use crate::path::walk::{Kind, Vetted, walk_with};
+use crate::path::{CwdPath, LeafMode, LexicalPath, ObjectId, RealPath, Resolver, is_absolute};
+use crate::types::EnvVars;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs::File;
@@ -78,7 +79,7 @@ pub(crate) fn linkers() -> Vec<RealPath> {
                 .collect::<Vec<_>>()
         })
         // Merged-/usr makes /lib/x and /usr/lib/x one inode: one real path.
-        .filter_map(|p| RealPath::of(&p).ok())
+        .filter_map(|p| RealPath::of_path(&p).ok())
         .filter(|p| p.as_path().is_file())
         .collect();
     found.into_iter().collect()
@@ -102,21 +103,36 @@ fn hops(program: &RealPath) -> Vec<PathBuf> {
 /// tree.
 pub(crate) fn trusted_real(path: &Path) -> Option<RealPath> {
     let me = rustix::process::geteuid().as_raw();
-    let located = walk_vetted(path, Leaf::Resolve, |dir, name| system_only(dir, name, me)).ok()?;
-    (located.stat().ok()??.kind == Kind::File).then(|| RealPath::walked(&located))
+    let located = walk_with(&spelled(path)?, LeafMode::Follow, |v| system_only(v, me)).ok()?;
+    (located.kind() == Some(Kind::File)).then(|| located.real().clone())
 }
 
-/// Whether only the system can have made the entry `name` of `dir` what it
-/// is: not owned by `me`, and — unless a symlink, whose own mode the kernel
-/// ignores — not writable by it either.
-fn system_only(dir: &File, name: &OsStr, me: u32) -> bool {
-    use rustix::fs::{Access, AtFlags, FileType, accessat, statat};
-    let Ok(stat) = statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) else {
+/// `path`, which is absolute, as the spelling a walk takes: anchored on `/`,
+/// which an absolute path never reads.
+fn spelled(path: &Path) -> Option<LexicalPath> {
+    let root = CwdPath::new(PathBuf::from("/")).ok()?;
+    Some(Resolver::at(&EnvVars::new(), &root).anchor(path))
+}
+
+/// Whether only the system can have made the object `v` offers what it is:
+/// the entry is still the object the walk holds, which is not owned by `me`
+/// and — unless a symlink, whose own mode the kernel ignores — not writable
+/// by it either.  An object the walk could not hold is refused.
+fn system_only(v: &Vetted<'_>, me: u32) -> bool {
+    use rustix::fs::{Access, AtFlags, accessat, fstat, statat};
+    let Some(child) = v.child else {
         return false;
     };
-    stat.st_uid != me
-        && (FileType::from_raw_mode(stat.st_mode).is_symlink()
-            || accessat(dir, name, Access::WRITE_OK, AtFlags::EACCESS).is_err())
+    let (Ok(held), Ok(named)) = (
+        fstat(child),
+        statat(v.dir, v.name, AtFlags::SYMLINK_NOFOLLOW),
+    ) else {
+        return false;
+    };
+    let is_link = v.step.is_some_and(|step| step.kind() == Kind::Symlink);
+    ObjectId::of(child).is_ok_and(|id| id == ObjectId::from(&named))
+        && held.st_uid != me
+        && (is_link || accessat(v.dir, v.name, Access::WRITE_OK, AtFlags::EACCESS).is_err())
 }
 
 /// The interpreter on `path`'s `#!` line: the kernels' grammar narrowed to the
@@ -227,7 +243,7 @@ mod tests {
     }
 
     fn real(path: &Path) -> RealPath {
-        RealPath::of(path).expect("it exists")
+        RealPath::of_path(path).expect("it exists")
     }
 
     #[test]

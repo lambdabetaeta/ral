@@ -256,7 +256,7 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
     // leave the same empty directory, and only the exit status tells a
     // reader on another machine which of the two it is looking at.
     let cmd = Path::new(r"C:\Windows\System32\cmd.exe");
-    let image = RealPath::of(cmd).expect("cmd.exe has a real path");
+    let image = RealPath::of_path(cmd).expect("cmd.exe has a real path");
     let run_echo_to = |rel: &str| -> WaitOutcome {
         let mut launch = Launch::new(cmd);
         launch.args(["/d", "/s", "/c", &format!("echo ok>{rel}")]);
@@ -419,7 +419,7 @@ fn confined(
     launch.stdin(StdioSpec::null());
     launch.stdout(StdioSpec::Piped);
     launch.stderr(StdioSpec::Piped);
-    let image = RealPath::of(cmd()).expect("cmd.exe has a real path");
+    let image = RealPath::of_path(cmd()).expect("cmd.exe has a real path");
     super::confine(
         &mut launch,
         projection,

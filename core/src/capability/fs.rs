@@ -95,7 +95,7 @@ impl Scope for FsScope {
     }
 
     fn holds<P: Polarity>(&self, path: &Path) -> bool {
-        self.real().contains::<P>(path)
+        self.real().contains_path::<P>(path)
     }
 
     fn own(&self) -> &Path {

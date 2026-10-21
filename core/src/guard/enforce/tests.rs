@@ -213,7 +213,7 @@ mod words {
     fn a_name_deny_is_named_as_written() {
         let path = crate::path::locate("sh", std::env::var("PATH").ok().as_deref(), None)
             .expect("sh on PATH");
-        let real = RealPath::of(&path).unwrap();
+        let real = RealPath::of_path(&path).unwrap();
         let deny = exec(&[
             (ExecKey::Name("sh".into()), Evidence::ALLOW),
             (ExecKey::Name("sh".into()), Evidence::DENY),
@@ -296,7 +296,7 @@ mod words {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_case_variant_spelling_meets_the_deny() {
-    use crate::path::walk::{Leaf, walk};
+    use crate::path::{LeafMode, walk};
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let secret = root.join("secret");
@@ -312,7 +312,7 @@ fn a_case_variant_spelling_meets_the_deny() {
     });
     let cwd = crate::test_helper::process_cwd();
     let rp = Resolver::at(&crate::types::EnvVars::new(), &cwd).anchor(&root.join("SECRET/key"));
-    let located = walk(&rp, Leaf::Resolve).unwrap();
-    assert_eq!(located.real(), secret.join("key"));
-    assert!(!admits_read(&grants, located.real()));
+    let located = walk(&rp, LeafMode::Follow).unwrap();
+    assert_eq!(located.real().as_path(), secret.join("key"));
+    assert!(!admits_read(&grants, located.real().as_path()));
 }

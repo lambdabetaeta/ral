@@ -8,9 +8,10 @@
 //! lexical, with no filesystem to gate.
 
 use crate::capability::FsOp;
+use crate::path::LeafMode;
 use crate::path::shown;
 use crate::path::tree::glob::Glob;
-use crate::path::walk::{Entry, Kind, Leaf, Stat};
+use crate::path::walk::{Entry, Kind, Stat};
 use crate::record;
 use crate::types::{Break, Settled, Shell, Value, sig};
 use std::ffi::OsStr;
@@ -102,7 +103,7 @@ impl FileInfo {
 pub(super) fn builtin_list_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let rp = shell.resolve(args[0].as_str("list-dir")?);
     let located = shell.locate(&rp, &FsOp::Read)?;
-    let dir = located.real();
+    let dir = located.real().as_path();
     let mut entries: Vec<DirEntry> = Vec::new();
     for entry in located
         .read_dir()
@@ -131,7 +132,7 @@ pub(super) fn builtin_list_dir(args: &[Value], shell: &mut Shell) -> Settled<Val
 fn writable_temp_dir(ctx: &str, shell: &mut Shell) -> Settled<crate::path::Located> {
     let rp = shell.anchor(&std::env::temp_dir());
     let located = shell.locate(&rp, &crate::capability::FsOp::Write)?;
-    crate::path::utf8(located.real()).map_err(|e| {
+    crate::path::utf8(located.real().as_path()).map_err(|e| {
         sig(format!(
             "{ctx}: the temp directory {e}, so no path made in it can be returned as text; \
              point TMPDIR (TMP on Windows) at one that is"
@@ -144,7 +145,7 @@ pub(super) fn builtin_temp_dir(_args: &[Value], shell: &mut Shell) -> Settled<Va
     let parent = writable_temp_dir("temp-dir", shell)?;
     let path = tempfile::Builder::new()
         .prefix("ral-tmp-")
-        .tempdir_in(parent.real())
+        .tempdir_in(parent.real().as_path())
         .map_err(|e| sig(format!("temp-dir: {e}")))?
         .keep();
     Ok(Value::string(shown(&path)))
@@ -154,7 +155,7 @@ pub(super) fn builtin_temp_file(_args: &[Value], shell: &mut Shell) -> Settled<V
     let parent = writable_temp_dir("temp-file", shell)?;
     let named = tempfile::Builder::new()
         .prefix("ral-tmp-")
-        .tempfile_in(parent.real())
+        .tempfile_in(parent.real().as_path())
         .map_err(|e| sig(format!("temp-file: {e}")))?;
     let (_file, path) = named.keep().map_err(|e| sig(format!("temp-file: {e}")))?;
     Ok(Value::string(shown(&path)))
@@ -192,18 +193,15 @@ pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Va
     let path = rp.as_path().to_path_buf();
     let missing = || sig(format!("file-info: {raw}: no such file or directory"));
     let located = shell
-        .locate_existing(&rp, &FsOp::Read, Leaf::AsNamed)?
+        .locate_existing(&rp, &FsOp::Read, LeafMode::NoFollow)?
         .ok_or_else(missing)?;
-    let stat = located
-        .stat()
-        .map_err(|e| io_err("file-info", &path, &e))?
-        .ok_or_else(missing)?;
+    let stat = located.stat().ok_or_else(missing)?;
     let target = (stat.kind == Kind::Symlink)
         .then(|| located.read_link().ok())
         .flatten()
         .map(|p| shown(&p));
     let name = path.file_name().unwrap_or(path.as_os_str());
-    Ok(Value::from_datum(FileInfo::of(name, &stat, target)))
+    Ok(Value::from_datum(FileInfo::of(name, stat, target)))
 }
 
 pub(super) fn builtin_resolve_path(args: &[Value], shell: &mut Shell) -> Settled<Value> {
@@ -231,9 +229,9 @@ pub(super) fn builtin_abbreviate_home(args: &[Value], shell: &Shell) -> Settled<
 }
 
 /// Shared predicate body.  `leaf` is the whole difference between the two
-/// families: `Resolve` gives `test -f`/`test -d`/`test -r` semantics, where a
+/// families: `Follow` gives `test -f`/`test -d`/`test -r` semantics, where a
 /// link to a file is `is-file` and a dangling link fails every probe;
-/// `AsNamed` gives `exists`/`is-link`, where a dangling link still exists and
+/// `NoFollow` gives `exists`/`is-link`, where a dangling link still exists and
 /// a link is a link.  `probe` sees `None` when the path is missing or under a
 /// directory that does not exist, so every predicate answers `false` there
 /// rather than raising.
@@ -241,34 +239,34 @@ fn fs_probe(
     name: &str,
     args: &[Value],
     shell: &mut Shell,
-    leaf: Leaf,
+    leaf: LeafMode,
     probe: impl FnOnce(Option<Stat>) -> bool,
 ) -> Settled<Value> {
     let rp = shell.resolve(args[0].as_str(name)?);
     let stat = shell
         .locate_existing(&rp, &FsOp::Read, leaf)?
-        .and_then(|located| located.stat().ok().flatten());
+        .and_then(|located| located.stat().cloned());
     Ok(Value::Bool(probe(stat)))
 }
 
 pub(super) fn builtin_exists(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe("exists", args, shell, Leaf::AsNamed, |s| s.is_some())
+    fs_probe("exists", args, shell, LeafMode::NoFollow, |s| s.is_some())
 }
 
 pub(super) fn builtin_is_file(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe("is-file", args, shell, Leaf::Resolve, |s| {
+    fs_probe("is-file", args, shell, LeafMode::Follow, |s| {
         s.is_some_and(|s| s.kind == Kind::File)
     })
 }
 
 pub(super) fn builtin_is_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe("is-dir", args, shell, Leaf::Resolve, |s| {
+    fs_probe("is-dir", args, shell, LeafMode::Follow, |s| {
         s.is_some_and(|s| s.kind == Kind::Dir)
     })
 }
 
 pub(super) fn builtin_is_link(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe("is-link", args, shell, Leaf::AsNamed, |s| {
+    fs_probe("is-link", args, shell, LeafMode::NoFollow, |s| {
         s.is_some_and(|s| s.kind == Kind::Symlink)
     })
 }
@@ -276,13 +274,15 @@ pub(super) fn builtin_is_link(args: &[Value], shell: &mut Shell) -> Settled<Valu
 pub(super) fn builtin_is_readable(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     // Exact on Windows, where `readonly` governs writes alone; on Unix an
     // approximation of `test -r`, the truth needing uid/gid/acl logic.
-    fs_probe("is-readable", args, shell, Leaf::Resolve, |s| s.is_some())
+    fs_probe("is-readable", args, shell, LeafMode::Follow, |s| {
+        s.is_some()
+    })
 }
 
 pub(super) fn builtin_is_writable(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let rp = shell.resolve(args[0].as_str("is-writable")?);
     let writable = shell
-        .locate_existing(&rp, &FsOp::Read, Leaf::Resolve)?
+        .locate_existing(&rp, &FsOp::Read, LeafMode::Follow)?
         .is_some_and(|located| located.is_writable());
     Ok(Value::Bool(writable))
 }

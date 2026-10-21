@@ -360,8 +360,8 @@ mod judged_program {
         let plan = judge(&mut shell, &[]);
         point_build_at(tmp.path(), &b);
         assert_eq!(
-            RealPath::of(&link).unwrap(),
-            RealPath::of(&b).unwrap(),
+            RealPath::of_path(&link).unwrap(),
+            RealPath::of_path(&b).unwrap(),
             "the link moved"
         );
         assert_eq!(stdout_of(&plan, &shell), "a\n");

@@ -188,7 +188,7 @@ impl Grant {
     /// intention.  Every refusal says what to pick instead.
     pub fn open(folder: &Path) -> Result<Self, String> {
         let shown = shown(folder);
-        let root = RealPath::of(folder).map_err(|e| match e.kind() {
+        let root = RealPath::of_path(folder).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => format!(
                 "There is nothing at {shown}. Check the name, \
                  or choose the folder again from the picker."

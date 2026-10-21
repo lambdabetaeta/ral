@@ -11,7 +11,7 @@
 //! The grant types have private fields.  A prefix is a logical spelling, folded
 //! and then resolved; an access is resolved as the kernel resolves it,
 //! unfolded; the two meet on their real forms under
-//! [`path_within`](super::identity::path_within).  There is no `From<&str>`
+//! [`FrozenPath::contains`].  There is no `From<&str>`
 //! sugar: a `From` impl cannot consult the disk oracle `real` needs,
 //! so it would be a door for fabricating one.
 //!
@@ -22,12 +22,11 @@
 //! [`real`](FrozenPath::real), the one door from a prefix to its real form,
 //! and no other: `surface` leaves the type only as a `String`, for rendering.
 
-use super::identity::{Polarity, path_within};
 use super::lex::{is_absolute, is_working_directory, utf8};
+use super::walk::RealPath;
 use super::{GuestPath, PathRules};
 use crate::path::shown;
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
 /// A working directory as ral holds one: a path a relative one is read
@@ -277,7 +276,7 @@ impl FrozenPath {
         if super::lex::is_bare_root(&folded, PathRules::HOST) {
             return Self {
                 surface: "/".into(),
-                real: RealPath("/".into()),
+                real: RealPath::from_folded("/"),
             };
         }
         #[allow(
@@ -349,7 +348,7 @@ impl FrozenPath {
         let folded = super::lex::fold_dots_under(path.as_str(), PathRules::Posix);
         Self {
             surface: folded.clone(),
-            real: RealPath(folded.into()),
+            real: RealPath::from_folded(folded),
         }
     }
 
@@ -383,12 +382,6 @@ impl FrozenPath {
     /// been resolved.
     pub(crate) fn real(&self) -> &RealPath {
         &self.real
-    }
-
-    /// Whether `path` lies within this prefix as a rule of polarity `P`
-    /// reads names.
-    pub(crate) fn contains<P: Polarity>(&self, path: &Path) -> bool {
-        path_within(path, self.real.as_path(), P::IDENTITY)
     }
 
     /// `self` unless it is the root, which is never re-resolved:
@@ -476,117 +469,6 @@ impl PartialEq<String> for FrozenPath {
     }
 }
 
-/// A path with no symlink, `.` or `..`, as `realpath(3)` gives it.
-///
-/// Ordered as the host identifies files: by path components off Windows, by
-/// [`windows_stored_components`](super::identity::windows_stored_components)
-/// on it — so two keys naming one file are one key in a map.  Either way on
-/// the names as the host encodes them, never on their lossy decodings, so a
-/// name that is not Unicode is not the name holding U+FFFD it decodes to.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RealPath(PathBuf);
-
-impl RealPath {
-    /// `realpath(3)` of `path`, which must exist.
-    ///
-    /// # Errors
-    /// The `io::Error` of the failed resolution, e.g. `NotFound`.
-    pub fn of(path: &Path) -> std::io::Result<Self> {
-        super::canon::canonicalise_strict(path).map(Self)
-    }
-
-    /// The real path `path` has, or will have once its missing tail is created.
-    pub fn lenient(path: &Path) -> Self {
-        Self(super::canon::canonicalise_lenient(path))
-    }
-
-    /// Where a walk landed: real by construction, since the walk splices
-    /// every link itself and takes every `..` physically.
-    #[cfg(unix)]
-    pub(crate) fn walked(located: &super::Located) -> Self {
-        Self(located.real().to_path_buf())
-    }
-
-    /// A rendered object: already the frozen real path, so no lookup.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn rendered(object: &super::Rendered) -> Self {
-        Self(object.as_str().into())
-    }
-
-    #[cfg(any(test, feature = "test-util"))]
-    pub fn assumed(path: impl Into<PathBuf>) -> Self {
-        Self(path.into())
-    }
-
-    /// Whether this path lies inside `dir`, modulo firmlink aliases, as a
-    /// rule of polarity `P` reads names.
-    pub fn within<P: Polarity>(&self, dir: &Self) -> bool {
-        super::identity::path_within(&self.0, &dir.0, P::IDENTITY)
-    }
-
-    /// Whether `path` lies inside this one, as a rule of polarity `P` reads
-    /// names; an fs access against a run place.
-    pub(crate) fn contains<P: Polarity>(&self, path: &Path) -> bool {
-        super::identity::path_within(path, &self.0, P::IDENTITY)
-    }
-
-    /// The entry `name` of this directory: real by construction, since a
-    /// directory entry of a real directory opened without following is.
-    #[cfg(any(target_os = "linux", windows, test))]
-    pub(crate) fn entry(&self, name: &std::ffi::OsStr) -> Self {
-        Self(self.0.join(name))
-    }
-
-    pub fn as_path(&self) -> &Path {
-        &self.0
-    }
-
-    /// The final component, which a command name can speak of: `None` for a
-    /// root, and for a name that is not Unicode, which no command name is.
-    /// Never a lossy decoding, which would make such a file the one named
-    /// with U+FFFD in its place.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "native: a final component, refused where it is not UTF-8"
-    )]
-    pub(crate) fn name(&self) -> Option<&str> {
-        self.0.file_name()?.to_str()
-    }
-}
-
-impl Ord for RealPath {
-    fn cmp(&self, other: &Self) -> Ordering {
-        match PathRules::HOST {
-            PathRules::Windows => {
-                let identity =
-                    |p: &Self| super::identity::windows_stored_components(p.0.as_os_str());
-                identity(self).cmp(&identity(other))
-            }
-            PathRules::Posix => self.0.cmp(&other.0),
-        }
-    }
-}
-
-impl PartialOrd for RealPath {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl PartialEq for RealPath {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
-    }
-}
-
-impl Eq for RealPath {}
-
-impl std::fmt::Display for RealPath {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        shown(&self.0).fmt(f)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{FrozenPath, GuestPath, RealPath};
@@ -605,7 +487,7 @@ mod tests {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
         let tmp = tempfile::tempdir().unwrap();
-        let dir = RealPath::of(tmp.path()).unwrap();
+        let dir = RealPath::of_path(tmp.path()).unwrap();
         let link = dir.as_path().join("dlink");
         std::os::unix::fs::symlink(dir.as_path().join("tgt"), &link).unwrap();
         let prefix = FrozenPath::from_surface(utf8(&link).unwrap());

@@ -9,52 +9,121 @@
 //! never letting the kernel follow a symlink, splicing each link it meets
 //! into the remaining name itself.  Where it lands is [`Located::real`],
 //! canonical by construction, and every operation a [`Located`] offers is
-//! relative to the handle of its directory with `FollowSymlinks::No`.
+//! relative to the handle of its directory.
 //!
 //! This is the one file that opens a model-named object, so the reviewed
-//! syscall sites (`core/tests/syscall_sites.rs`) can be read off it: [`open_discard`] is
-//! the sole exception, a device with no object to locate.
+//! syscall sites (`core/tests/syscall_sites.rs`) can be read off it and its
+//! host modules: [`open_discard`] is the sole exception, a device with no
+//! object to locate.
+//!
+//! # The host seam
+//!
+//! The engine never asks the OS directly: it asks `host`, the module of this
+//! host's `cfg` (`linux.rs`, `macos.rs`, `windows.rs`).  Shared by the Unix
+//! hosts, `unix.rs` holds what reads alike on each, which a Unix host
+//! re-exports.  A host module provides, as `pub(super)` items:
+//!
+//! - `step`, the one primitive that opens a child of a held directory, with
+//!   `Child`; `DirInfo`, what the host records of a directory as it opens it
+//!   (Windows: its normalized path and volume, which `step` checks the child
+//!   against; Unix: nothing), kept beside the handle in a `Held`;
+//! - `open_root`, `seen`, `seen_at`, `read_link`, `derive`, `list` and its
+//!   `Lister`, which name the identity, kind and stat of an object, a link's
+//!   target through its handle, a data handle derived from a held leaf, and a
+//!   listing;
+//! - `create`, `create_sibling`, `open_named`, `mkdir`, `rename_over`,
+//!   `unlink`, `sync_dir`, `copy_mode`, `is_writable` and `open_discard`,
+//!   which write;
+//! - on Unix, `impl From<&rustix::fs::Stat> for ObjectId`, the identity a
+//!   by-name `stat` reports, which `carriers` compares with [`ObjectId::of`].
 
-use cap_fs_ext::OpenOptionsFollowExt;
-use cap_primitives::ambient_authority;
-use cap_primitives::fs::{
-    AccessModes, AccessType, FollowSymlinks, Metadata, OpenOptions, access, open, open_ambient_dir,
-    open_dir_nofollow, read_base_dir, read_link_contents, remove_file, rename, stat,
-};
-use cap_primitives::time::SystemTime as CapTime;
-use std::borrow::Cow;
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
+use std::fmt;
 use std::fs::File;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
-
-use super::LexicalPath;
-use super::lex::{fold_dots, is_absolute, is_unparsed_head, names_a_dir};
-use crate::label;
 use strum::{IntoStaticStr, VariantArray};
+
+use super::lex::{fold_dots, is_absolute, is_unparsed_head, names_a_dir};
+use super::{LexicalPath, PathRules, shown};
+use crate::label;
+
+#[cfg(unix)]
+mod unix;
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux as host;
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use macos as host;
+
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+use windows as host;
+
+#[cfg(test)]
+mod tests;
 
 /// `SYMLOOP_MAX`'s customary value: a name still splicing past this is a cycle.
 const MAX_HOPS: usize = 40;
 
-/// An object named exactly: the handle of its directory, its name there, and
-/// the symlink-free path the walk assembled.
-///
-/// The object need not exist — a name whose leaf is absent locates the place
-/// a create will put it.
-pub struct Located {
-    dir: File,
-    leaf: OsString,
-    real: PathBuf,
+/// `ELOOP`'s wording; `io::ErrorKind::FilesystemLoop` is not yet stable.
+const LOOP_MESSAGE: &str = "too many levels of symbolic links";
+
+fn loop_error() -> io::Error {
+    io::Error::other(LOOP_MESSAGE)
+}
+
+/// What every name of an object shares and no other object has while the
+/// object exists.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+pub struct ObjectId {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(windows)]
+    volume: u64,
+    #[cfg(windows)]
+    id: u128,
+}
+
+impl ObjectId {
+    /// The identity of the object `f` holds, read from the handle.
+    pub(crate) fn of(f: &File) -> io::Result<Self> {
+        host::seen(f).map(|seen| seen.id)
+    }
 }
 
 /// What the object is.  One of these and no other, so an enum rather than a
 /// row of bools that can contradict one another.
 ///
 /// Its tag is the `type` ral's `list-dir` and `file-info` give it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, IntoStaticStr, VariantArray)]
+#[derive(
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Debug,
+    IntoStaticStr,
+    VariantArray,
+    Serialize,
+    Deserialize,
+)]
 #[strum(serialize_all = "kebab-case")]
-pub(crate) enum Kind {
+pub enum Kind {
     File,
     Dir,
     Symlink,
@@ -65,46 +134,32 @@ label!(typed Kind);
 
 /// What a `stat` of the object found, when it exists.
 ///
-/// `kind` is `Symlink` only for a [`Leaf::AsNamed`] locate; a resolving walk
-/// has already followed the link, so what it stats is the target.  A
+/// `kind` is `Symlink` only for a [`LeafMode::NoFollow`] walk; a following
+/// walk has already spliced the link, so what it stats is the target.  A
 /// timestamp the filesystem does not record is `None`, not an epoch: the two
 /// are different answers, and only the caller knows how to say so.
-pub(crate) struct Stat {
+#[derive(Clone, Debug)]
+pub struct Stat {
     pub kind: Kind,
-    pub(crate) len: u64,
-    pub(crate) readonly: bool,
-    pub(crate) mtime: Option<SystemTime>,
-    pub(crate) atime: Option<SystemTime>,
-    pub(crate) btime: Option<SystemTime>,
+    pub len: u64,
+    pub readonly: bool,
+    pub mtime: Option<SystemTime>,
+    pub atime: Option<SystemTime>,
+    pub btime: Option<SystemTime>,
     #[cfg(unix)]
-    pub(crate) mode: u32,
+    pub mode: u32,
+    /// The reparse tag, where the object is a reparse point.
+    #[cfg(windows)]
+    pub reparse_tag: Option<u32>,
+    #[cfg(windows)]
+    pub hidden: bool,
 }
 
-impl From<&Metadata> for Stat {
-    fn from(m: &Metadata) -> Self {
-        Self {
-            // Symlink first: a nofollow stat of a link reports the link.
-            kind: if m.file_type().is_symlink() {
-                Kind::Symlink
-            } else if m.is_dir() {
-                Kind::Dir
-            } else if m.is_file() {
-                Kind::File
-            } else {
-                Kind::Other
-            },
-            len: m.len(),
-            readonly: m.permissions().readonly(),
-            mtime: m.modified().ok().map(CapTime::into_std),
-            atime: m.accessed().ok().map(CapTime::into_std),
-            btime: m.created().ok().map(CapTime::into_std),
-            #[cfg(unix)]
-            mode: {
-                use cap_primitives::fs::PermissionsExt;
-                m.permissions().mode() & 0o7777
-            },
-        }
-    }
+/// What a host reads of an object from a handle on it, or from its name in a
+/// directory: the stat and the identity, one lookup.
+pub(crate) struct Seen {
+    pub stat: Stat,
+    pub id: ObjectId,
 }
 
 /// One entry of [`Located::read_dir`]: its name in the directory, and what
@@ -114,127 +169,188 @@ pub(crate) struct Entry {
     pub(crate) stat: Stat,
 }
 
-enum Settled {
-    Object(Located),
-    Missing(PathBuf),
+/// Why a name is not an entry name.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Rule {
+    Empty,
+    Dots,
+    Separator,
+    Stream,
 }
 
-enum Step {
-    Settled(Settled),
-    Link(PathBuf),
+/// A name refused as an entry name by [`EntryName::parse`].  Shows as the
+/// sentence naming the rule.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct NotAnEntryName {
+    name: OsString,
+    rule: Rule,
 }
 
-/// What the walk does at a directory component it cannot enter.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Missing {
-    /// Fail with the open's error: an open names an object that is there.
-    Refuse,
-    /// Stop, and append the names left lexically: where a create would land.
-    Tolerate,
-}
-
-impl Missing {
-    /// `Link` to `spliced`; a failure, the open's or the splice's, settles at
-    /// `missing()` under `Tolerate`.
-    fn absorb(
-        self,
-        spliced: io::Result<PathBuf>,
-        missing: impl FnOnce() -> PathBuf,
-    ) -> io::Result<Step> {
-        match spliced {
-            Ok(spliced) => Ok(Step::Link(spliced)),
-            Err(_) if self == Self::Tolerate => Ok(Step::Settled(Settled::Missing(missing()))),
-            Err(e) => Err(e),
+impl fmt::Display for NotAnEntryName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = shown(&self.name);
+        match self.rule {
+            Rule::Empty => f.write_str("an entry name cannot be empty"),
+            Rule::Dots => write!(
+                f,
+                "{name} is not an entry name: it is a directory's own or its parent's"
+            ),
+            Rule::Separator => write!(
+                f,
+                "{name} is not an entry name: it holds a path separator, so it names a path"
+            ),
+            Rule::Stream => write!(
+                f,
+                "{name} is not an entry name: it holds `:`, which names a stream of a file, not an entry"
+            ),
         }
     }
 }
 
-/// What the walk does with a symlink at the *final* component.  Directory
-/// components are always resolved; only the leaf is in question.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Leaf {
-    /// Follow it to what it points at.  What an open wants: `> link` writes
-    /// through to the target, and the grant judges the target, so a link is
-    /// never a way to smuggle a write past a deny.
-    Resolve,
-    /// Stop at the link itself.  What `exists`, `is-link` and `file-info`
-    /// want: a dangling link exists, and a link is a link.
-    AsNamed,
-    /// The name is a directory, entered: a trailing separator or `..` names the
-    /// directory itself, and a link there is followed to it.
-    Entered,
-}
+impl std::error::Error for NotAnEntryName {}
 
-/// Locate `rp`, following symlinks by splicing rather than by the kernel.
-///
-/// # Errors
-/// A missing or untraversable intermediate directory, a name ending in a
-/// separator that is no directory, or a link cycle past [`MAX_HOPS`].
-pub(crate) fn walk(rp: &LexicalPath, leaf: Leaf) -> io::Result<Located> {
-    walk_vetted(rp.as_path(), leaf, |_, _| true)
-}
-
-/// [`walk`], with every object it passes put to `vet` before the walk relies
-/// on it: the root, each directory as it is entered (through its own handle),
-/// each symlink before it is spliced, and the leaf where it lands.  A splice
-/// restarts from the root, so `vet` sees a prefix again each time.
-///
-/// `vet(dir, name)` names the object relative to a handle the walk holds: the
-/// entry `name` of `dir`, or `dir` itself when `name` is `.`.
-///
-/// `path` must be absolute, and is taken as the kernel takes a name it
-/// resolves itself: its `..` physically, after the links before it.
-///
-/// # Errors
-/// [`walk`]'s; `InvalidInput` for a name with no root to walk it from
-/// ([`rooted`]), whether `path` itself or a symlink's target spliced into
-/// it; `PermissionDenied` when `vet` refuses an object.
-pub(crate) fn walk_vetted(
-    path: &Path,
-    leaf: Leaf,
-    mut vet: impl FnMut(&File, &OsStr) -> bool,
-) -> io::Result<Located> {
-    match settle(path, leaf, Missing::Refuse, &mut vet)? {
-        Settled::Object(located) => Ok(located),
-        Settled::Missing(_) => unreachable!(
-            "under Missing::Refuse a component that cannot be entered is an error, never a Missing"
-        ),
+impl From<NotAnEntryName> for io::Error {
+    fn from(refused: NotAnEntryName) -> Self {
+        Self::new(io::ErrorKind::InvalidInput, refused)
     }
 }
 
-/// The real path `path` names, or will name once its missing tail is
-/// created: [`walk`] under [`Missing::Tolerate`].  A policy match has no error
-/// channel, so a path the walk still fails on ([`rooted`], an unopenable root,
-/// a link cycle) is its own lexical fold.
-pub(crate) fn resolve_lenient(path: &Path) -> PathBuf {
-    match settle(path, Leaf::Resolve, Missing::Tolerate, &mut |_, _| true) {
-        Ok(Settled::Object(located)) => located.real,
-        Ok(Settled::Missing(real)) => real,
-        Err(_) => fold_dots(path),
+/// One name of a directory entry.
+///
+/// A single normal component: non-empty, not `.` or `..`, holding no
+/// separator, and on Windows no `:` (a stream is reached through its file; no
+/// listing shows one and ral has no door for one).  [`parse`](Self::parse) is
+/// the one constructor and checks that; the walk's parse of a spelling, a
+/// listing, [`fresh`](Self::fresh) and `Deserialize` all go through it, so
+/// [`Dir::open_dir`] cannot be handed `../x` or `a/b`.  Crosses the wire as
+/// serde's lossless `OsString` form, never through `Path`'s UTF-8-only one.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize)]
+pub struct EntryName(OsString);
+
+impl EntryName {
+    /// `name` as an entry name.
+    ///
+    /// # Errors
+    /// [`NotAnEntryName`] saying which rule `name` breaks.
+    pub fn parse(name: &OsStr) -> Result<Self, NotAnEntryName> {
+        let bytes = name.as_encoded_bytes();
+        let rule = if bytes.is_empty() {
+            Some(Rule::Empty)
+        } else if bytes == b"." || bytes == b".." {
+            Some(Rule::Dots)
+        } else if bytes
+            .iter()
+            .any(|&b| PathRules::HOST.is_separator(char::from(b)))
+        {
+            Some(Rule::Separator)
+        } else {
+            (cfg!(windows) && bytes.contains(&b':')).then_some(Rule::Stream)
+        };
+        rule.map_or_else(
+            || Ok(Self(name.to_owned())),
+            |rule| {
+                Err(NotAnEntryName {
+                    name: name.to_owned(),
+                    rule,
+                })
+            },
+        )
+    }
+
+    pub fn as_os_str(&self) -> &OsStr {
+        &self.0
+    }
+
+    /// `prefix` plus sixteen random alphanumerics: a name ral invents.
+    /// `prefix` is parsed, so a caller cannot smuggle a separator in it.
+    ///
+    /// # Errors
+    /// [`NotAnEntryName`] where the name made is not one.
+    pub(crate) fn fresh(prefix: &str) -> Result<Self, NotAnEntryName> {
+        let mut name = String::from(prefix);
+        name.extend((0..16).map(|_| fastrand::alphanumeric()));
+        Self::parse(OsStr::new(&name))
     }
 }
 
-/// The restart loop: descend, and on a splice start again from the root.
-/// Settles on an object, or under [`Missing::Tolerate`] on a missing one.
-fn settle(
-    path: &Path,
-    leaf: Leaf,
-    missing: Missing,
-    vet: &mut impl FnMut(&File, &OsStr) -> bool,
-) -> io::Result<Settled> {
-    let mut path = path.to_path_buf();
-    let mut leaf = leaf;
-    for _ in 0..=MAX_HOPS {
-        rooted(&path)?;
-        if names_a_dir(&path) {
-            leaf = Leaf::Entered;
+impl<'de> Deserialize<'de> for EntryName {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Self::parse(&OsString::deserialize(d)?).map_err(D::Error::custom)
+    }
+}
+
+/// A parsed root spelling, what [`rooted`] accepts: `/`; `C:\`,
+/// `\\server\share\` and their verbatim forms.  Crosses the wire as an
+/// `OsString`, checked on the way in.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct RootName(PathBuf);
+
+impl RootName {
+    fn parse(raw: &OsStr) -> io::Result<Self> {
+        let path = lexical(raw);
+        rooted(path)?;
+        match split(path)? {
+            Spelling {
+                root: Some(root),
+                names,
+            } if names.is_empty() => Ok(root),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is more than a root", shown(path)),
+            )),
         }
-        match descend(&path, leaf, missing, vet)? {
-            Step::Link(spliced) => path = spliced,
-            Step::Settled(settled) => return Ok(settled),
+    }
+}
+
+impl Serialize for RootName {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.0.as_os_str().serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for RootName {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Self::parse(&OsString::deserialize(d)?).map_err(D::Error::custom)
+    }
+}
+
+/// `raw` as a path, read lexically: no disk, no fold.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "path-form: lifts a name the wire or the walk holds for a lexical split; nothing is resolved"
+)]
+fn lexical(raw: &OsStr) -> &Path {
+    Path::new(raw)
+}
+
+/// One component of a spelling past its root.
+enum Name {
+    Entry(EntryName),
+    Parent,
+}
+
+/// A spelling split into its root, where it has one, and its names.
+struct Spelling {
+    root: Option<RootName>,
+    names: VecDeque<Name>,
+}
+
+/// `path` as its root and the names past it, `.` dropped.
+fn split(path: &Path) -> io::Result<Spelling> {
+    let mut root = PathBuf::new();
+    let mut names = VecDeque::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => root.push(component),
+            Component::CurDir => {}
+            Component::ParentDir => names.push_back(Name::Parent),
+            Component::Normal(name) => names.push_back(Name::Entry(EntryName::parse(name)?)),
         }
     }
-    Err(io::Error::other(LOOP_MESSAGE))
+    Ok(Spelling {
+        root: (!root.as_os_str().is_empty()).then_some(RootName(root)),
+        names,
+    })
 }
 
 /// Whether a walk can start `path` from a root: every name it descends, the
@@ -262,361 +378,1120 @@ fn rooted(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Put `name` in `dir` to `vet`, refusing the walk where it says no.
-fn pass(vet: &mut impl FnMut(&File, &OsStr) -> bool, dir: &File, name: &OsStr) -> io::Result<()> {
-    if vet(dir, name) {
-        Ok(())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "the walk passed an object its vetting refused",
-        ))
+/// One component the walk opened: its name as the filesystem stores it, its
+/// identity and its kind, all read from the handle the walk opened on it.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+pub struct Step {
+    name: EntryName,
+    id: ObjectId,
+    kind: Kind,
+}
+
+impl Step {
+    pub(super) fn name(&self) -> &EntryName {
+        &self.name
+    }
+
+    pub(super) fn id(&self) -> ObjectId {
+        self.id
+    }
+
+    pub(crate) fn kind(&self) -> Kind {
+        self.kind
     }
 }
 
-/// `name` for a directory judged through its own handle.
-fn itself() -> &'static OsStr {
-    OsStr::new(".")
-}
-
-/// `ELOOP`'s wording; `io::ErrorKind::FilesystemLoop` is not yet stable.
-const LOOP_MESSAGE: &str = "too many levels of symbolic links";
-
-/// One pass from the root.  `Link` carries the whole name with the first
-/// symlink met spliced in; the caller restarts from the root, so a target
-/// that itself crosses links is handled by the same rule.
+/// A position: an absolute path with no link, `.` or `..` in it.
 ///
-/// A path naming a directory itself (no names past the root, a trailing `..`,
-/// [`Leaf::Entered`]) locates it through its own handle.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-descend] Opens the root and then each directory component as a search handle with FollowSymlinks::No, to reach the object a grant will judge. Path resolution, not the model's data I/O: the card belongs to the site that then opens the leaf."
-)]
-fn descend(
-    path: &Path,
-    leaf_mode: Leaf,
-    missing: Missing,
-    vet: &mut impl FnMut(&File, &OsStr) -> bool,
-) -> io::Result<Step> {
-    let mut comps = path.components().peekable();
-    let mut real = PathBuf::new();
-    while let Some(c @ (Component::Prefix(_) | Component::RootDir)) = comps.peek() {
-        real.push(c.as_os_str());
-        comps.next();
+/// Each name is spelled as the filesystem stores it.  Made by the walk
+/// ([`Trace::real`]),
+/// and read off the wire by a hand-written `Deserialize` that applies the
+/// lexical check (absolute, parsed root, no `.` or `..`) through a private
+/// constructor.  No `TryFrom` and no `From`: nothing mints a position from a
+/// string.  On the wire it is its `OsString`, serde's lossless form, so a
+/// position that is not Unicode crosses whole.  `Eq` and `Ord` compare
+/// stored components on Windows and components elsewhere.
+#[derive(Clone, Debug)]
+pub struct RealPath(PathBuf);
+
+impl RealPath {
+    /// `root` and `names`, joined.
+    fn assemble<'a>(root: &RootName, names: impl IntoIterator<Item = &'a EntryName>) -> Self {
+        let mut path = root.0.clone();
+        path.extend(names.into_iter().map(EntryName::as_os_str));
+        Self(path)
     }
-    let names: Vec<&OsStr> = comps.map(Component::as_os_str).collect();
-    let (dirs, leaf) = match names.split_last() {
-        Some((last, dirs)) if leaf_mode != Leaf::Entered && *last != ".." => (dirs, Some(*last)),
-        _ => (&names[..], None),
-    };
-    let mut at = Cursor {
-        dir: open_ambient_dir(&real, ambient_authority())?,
-        parents: Vec::new(),
-        real,
-    };
-    pass(vet, &at.dir, itself())?;
-    for (i, name) in dirs.iter().enumerate() {
-        if *name == ".." {
-            at.up();
-            continue;
+
+    /// `raw` as a position, lexically checked: absolute, a parsed root, no
+    /// `.` or `..`, and spelled as the walk spells one.
+    fn parse(raw: &OsStr) -> io::Result<Self> {
+        let path = lexical(raw);
+        rooted(path)?;
+        let Spelling { root, names } = split(path)?;
+        let root = root.ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        let names = names
+            .into_iter()
+            .map(|name| match name {
+                Name::Entry(name) => Ok(name),
+                Name::Parent => Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{} holds `..`, which no position does", shown(path)),
+                )),
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let real = Self::assemble(&root, &names);
+        if real.0.as_os_str() != raw {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{} is not spelled as the walk spells a position: no `.`, no doubled or trailing separator",
+                    shown(path)
+                ),
+            ));
         }
-        let spliced = match open_search_dir(&at.dir, name) {
-            Ok(next) => {
-                pass(vet, &next, itself())?;
-                at.enter(name, next);
-                continue;
-            }
-            Err(_) if is_symlink(&at.dir, name) => {
-                pass(vet, &at.dir, name)?;
-                splice(&at.dir, &at.real, name, &names[i + 1..])
-            }
-            Err(e) => Err(e),
+        Ok(real)
+    }
+
+    /// A fold's result, a position whose spelling already says so: what
+    /// `FrozenPath` keeps of a surface it folded and of a guest's.
+    pub(super) fn from_folded(path: impl Into<PathBuf>) -> Self {
+        Self(path.into())
+    }
+
+    /// This position's entry `name`.
+    fn child(&self, name: &EntryName) -> Self {
+        Self(self.0.join(name.as_os_str()))
+    }
+
+    /// Where `spelling` leads, which must exist: [`walk`] with
+    /// [`LeafMode::Follow`].
+    ///
+    /// # Errors
+    /// `NotFound` for an absent leaf; otherwise the walk's error.
+    pub fn of(spelling: &LexicalPath) -> io::Result<Self> {
+        let located = walk(spelling, LeafMode::Follow)?;
+        if located.stat().is_none() {
+            return Err(io::ErrorKind::NotFound.into());
+        }
+        Ok(located.trace.real)
+    }
+
+    /// `realpath(3)` of `path`, which must exist.
+    ///
+    /// # Errors
+    /// The `io::Error` of the failed resolution, e.g. `NotFound`.
+    pub fn of_path(path: &Path) -> io::Result<Self> {
+        super::canon::canonicalise_strict(path).map(Self)
+    }
+
+    /// The real path `path` has, or will have once its missing tail is created.
+    pub fn lenient(path: &Path) -> Self {
+        Self(super::canon::canonicalise_lenient(path))
+    }
+
+    /// A rendered object: already the frozen real path, so no lookup.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn rendered(object: &super::Rendered) -> Self {
+        Self(object.as_str().into())
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn assumed(path: impl Into<PathBuf>) -> Self {
+        Self(path.into())
+    }
+
+    /// Whether this path lies inside `dir`, modulo firmlink aliases, as a
+    /// rule of polarity `P` reads names.
+    pub fn within<P: super::Polarity>(&self, dir: &Self) -> bool {
+        super::identity::within::<P>(&self.0, &dir.0)
+    }
+
+    /// Whether `path` lies inside this one, as a rule of polarity `P` reads
+    /// names; an fs access against a run place.
+    pub(crate) fn contains_path<P: super::Polarity>(&self, path: &Path) -> bool {
+        super::identity::within::<P>(path, &self.0)
+    }
+
+    /// The entry `name` of this directory: real by construction, since a
+    /// directory entry of a real directory opened without following is.
+    #[cfg(any(target_os = "linux", windows, test))]
+    pub(crate) fn entry(&self, name: &OsStr) -> Self {
+        Self(self.0.join(name))
+    }
+
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+
+    /// The final component, which a command name can speak of: `None` for a
+    /// root, and for a name that is not Unicode, which no command name is.
+    /// Never a lossy decoding, which would make such a file the one named
+    /// with U+FFFD in its place.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "native: a final component, refused where it is not UTF-8"
+    )]
+    pub(crate) fn name(&self) -> Option<&str> {
+        self.0.file_name()?.to_str()
+    }
+
+    /// The names of this position past `root`, for a key or a shown name;
+    /// `None` where `root` does not contain it.
+    pub fn relative_to(&self, root: &Self) -> Option<Vec<EntryName>> {
+        let spellings = |p: &Self| {
+            std::iter::once(p.0.clone())
+                .chain(super::canon::firmlink_toggle(&p.0))
+                .collect::<Vec<_>>()
         };
-        return missing.absorb(spliced, || appended(at.real, &names[i..]));
+        root.contains(self).then_some(())?;
+        let (own, base) = (spellings(self), spellings(root));
+        let rest = own
+            .iter()
+            .find_map(|p| base.iter().find_map(|q| p.strip_prefix(q).ok()))?;
+        rest.components()
+            .map(|c| EntryName::parse(c.as_os_str()).ok())
+            .collect()
     }
-    let Cursor { dir, mut real, .. } = at;
-    let leaf = match leaf {
-        None => itself().to_os_string(),
-        Some(leaf) => {
-            pass(vet, &dir, leaf)?;
-            if leaf_mode == Leaf::Resolve && is_symlink(&dir, leaf) {
-                let spliced = splice(&dir, &real, leaf, &[]);
-                return missing.absorb(spliced, || appended(real, &[leaf]));
+}
+
+#[expect(dead_code, reason = "used from step 7")]
+impl RealPath {
+    /// The position above this one, `None` at a root.
+    pub(crate) fn parent(&self) -> Option<Self> {
+        self.0.parent().map(|p| Self(p.to_path_buf()))
+    }
+
+    /// This position's proper ancestors at or beneath `prefix`, nearest
+    /// first: what the Seatbelt profile pins.
+    pub(crate) fn ancestors_within<'a>(
+        &'a self,
+        prefix: &'a Self,
+    ) -> impl Iterator<Item = Self> + 'a {
+        self.0
+            .ancestors()
+            .skip(1)
+            .map(|a| Self(a.to_path_buf()))
+            .take_while(|a| prefix.contains(a))
+    }
+
+    /// This position with its prefix `from` replaced by `to`; `None` where
+    /// `from` does not contain it.  Where a bind shows a deny (`linux.rs`).
+    pub(crate) fn rebased(&self, from: &Self, to: &Self) -> Option<Self> {
+        let rest = self.relative_to(from)?;
+        Some(rest.iter().fold(to.clone(), |at, name| at.child(name)))
+    }
+}
+
+#[expect(dead_code, reason = "used from step 8")]
+impl RealPath {
+    /// Whether this position is the root of its filesystem: `/`, `C:\`.
+    pub(crate) fn is_root(&self) -> bool {
+        self.0.parent().is_none()
+    }
+}
+
+impl Ord for RealPath {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match PathRules::HOST {
+            PathRules::Windows => {
+                let identity =
+                    |p: &Self| super::identity::windows_stored_components(p.0.as_os_str());
+                identity(self).cmp(&identity(other))
             }
-            real.push(spelled(&dir, leaf));
-            leaf.to_os_string()
-        }
-    };
-    #[cfg(windows)]
-    let real = dealias(&dir, &leaf, &real)?;
-    Ok(Step::Settled(Settled::Object(Located { dir, leaf, real })))
-}
-
-/// `real` with `rest` appended, folded lexically: a `..` takes the name
-/// before it in `rest`, never one of `real`, which is already walked.
-fn appended(mut real: PathBuf, rest: &[&OsStr]) -> PathBuf {
-    let mut tail: Vec<&OsStr> = Vec::new();
-    for name in rest {
-        if *name == ".." {
-            tail.pop();
-        } else {
-            tail.push(name);
-        }
-    }
-    real.extend(tail);
-    real
-}
-
-/// Where the walk stands: a directory handle, the handles of its ancestors in
-/// the walked (link-free) prefix, and that prefix.  Keeping the ancestors makes
-/// `..` physical without a path-based reopen.
-struct Cursor {
-    dir: File,
-    parents: Vec<File>,
-    real: PathBuf,
-}
-
-impl Cursor {
-    fn enter(&mut self, name: &OsStr, next: File) {
-        self.real.push(spelled(&self.dir, name));
-        self.parents.push(std::mem::replace(&mut self.dir, next));
-    }
-
-    /// `..`, as the kernel takes it; the root is its own parent.
-    fn up(&mut self) {
-        if let Some(parent) = self.parents.pop() {
-            self.dir = parent;
-            self.real.pop();
+            PathRules::Posix => self.0.cmp(&other.0),
         }
     }
 }
 
-/// The name as the directory stores it.  Everywhere but macOS a name has one
-/// spelling, and the walk's own is it.
-#[cfg(not(target_os = "macos"))]
-fn spelled<'a>(_dir: &File, name: &'a OsStr) -> Cow<'a, OsStr> {
-    Cow::Borrowed(name)
-}
-
-/// Default APFS ignores case and Unicode normalisation, so `SECRET` and
-/// `secret` are one entry and a grant frozen through `realpath` — which
-/// answers in stored spellings — would never match an access in another.
-/// The stored name is asked of the directory handle the walk holds, without
-/// following: `F_GETPATH` may answer with the spelling the lookup used.  An
-/// absent name, a create target, keeps the caller's.
-#[cfg(target_os = "macos")]
-fn spelled<'a>(dir: &File, name: &'a OsStr) -> Cow<'a, OsStr> {
-    stored_name(dir, name).map_or(Cow::Borrowed(name), Cow::Owned)
-}
-
-#[cfg(target_os = "macos")]
-fn stored_name(dir: &File, name: &OsStr) -> Option<OsString> {
-    use std::ffi::CString;
-    use std::os::fd::AsRawFd;
-    use std::os::unix::ffi::{OsStrExt, OsStringExt};
-
-    // A length word, an attrreference, then the NUL-terminated name.
-    const HEAD: usize = 4 + std::mem::size_of::<libc::attrreference_t>();
-    let c_name = CString::new(name.as_bytes()).ok()?;
-    let mut list = libc::attrlist {
-        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
-        reserved: 0,
-        commonattr: libc::ATTR_CMN_NAME,
-        volattr: 0,
-        dirattr: 0,
-        fileattr: 0,
-        forkattr: 0,
-    };
-    let mut buf = [0u32; 128];
-    // SAFETY: `dir` is a live descriptor, `c_name` a NUL-terminated string,
-    // and `list` and `buf` outlive the call, which writes at most the
-    // `size_of_val(&buf)` bytes it is told of.
-    let rc = unsafe {
-        libc::getattrlistat(
-            dir.as_raw_fd(),
-            c_name.as_ptr(),
-            (&raw mut list).cast(),
-            buf.as_mut_ptr().cast(),
-            std::mem::size_of_val(&buf),
-            libc::c_ulong::from(libc::FSOPT_NOFOLLOW),
-        )
-    };
-    if rc != 0 {
-        return None;
+impl PartialOrd for RealPath {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
-    let bytes: Vec<u8> = buf.iter().flat_map(|w| w.to_ne_bytes()).collect();
-    let offset = i32::from_ne_bytes(bytes[4..8].try_into().ok()?);
-    let len = u32::from_ne_bytes(bytes[8..HEAD].try_into().ok()?) as usize;
-    // The offset is relative to the attrreference, which starts at byte 4.
-    let start = usize::try_from(i64::from(offset) + 4).ok()?;
-    let stored = bytes.get(start..start + len.checked_sub(1)?)?;
-    Some(OsString::from_vec(stored.to_vec()))
 }
 
-/// Ask the handle for stored case and long names, as grant freezing does.
-/// An absent leaf keeps its spelling under its parent's stored name.
-#[cfg(windows)]
-fn dealias(dir: &File, leaf: &OsStr, real: &Path) -> io::Result<PathBuf> {
-    let named = if leaf == itself() {
-        final_path(dir)
-    } else {
-        match open_attributes(dir, leaf) {
-            Ok(object) => final_path(&object),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                final_path(dir).map(|base| base.join(leaf))
+impl PartialEq for RealPath {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+
+impl Eq for RealPath {}
+
+impl fmt::Display for RealPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        shown(&self.0).fmt(f)
+    }
+}
+
+impl Serialize for RealPath {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.0.as_os_str().serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for RealPath {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Self::parse(&OsString::deserialize(d)?).map_err(D::Error::custom)
+    }
+}
+
+/// The transcript of a walk.
+///
+/// `root` is the parsed root spelling; `root_id`
+/// the root's identity; `steps` one per component opened, in order; `tail`
+/// the components past the last step, lexically folded (a `..` in the tail
+/// takes the name before it in the tail, never a step).  `real` is `root`
+/// plus the steps' names plus `tail`, computed by the one constructor: a memo
+/// of the steps, never a separate observation.  `Deserialize` by hand: each
+/// field checks itself, the shape is checked — every step but the last has
+/// kind `Dir`, and a non-empty tail follows a `Dir` step or the root — and
+/// `real` is recomputed, so a trace read off the wire is one the walk could
+/// have made.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize)]
+pub struct Trace {
+    root: RootName,
+    root_id: ObjectId,
+    steps: Vec<Step>,
+    tail: Vec<EntryName>,
+    real: RealPath,
+}
+
+impl Trace {
+    fn new(root: RootName, root_id: ObjectId, steps: Vec<Step>, tail: Vec<EntryName>) -> Self {
+        let real = RealPath::assemble(&root, steps.iter().map(Step::name).chain(&tail));
+        Self {
+            root,
+            root_id,
+            steps,
+            tail,
+            real,
+        }
+    }
+
+    /// This trace, a directory's, with `more` steps below it and `tail` past.
+    fn extended(&self, more: impl IntoIterator<Item = Step>, tail: Vec<EntryName>) -> Self {
+        let steps = self.steps.iter().cloned().chain(more).collect();
+        Self::new(self.root.clone(), self.root_id, steps, tail)
+    }
+
+    pub fn real(&self) -> &RealPath {
+        &self.real
+    }
+}
+
+#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 10"))]
+impl Trace {
+    /// What `identity.rs` reads, nothing outside `path/`.
+    pub(super) fn steps(&self) -> &[Step] {
+        &self.steps
+    }
+
+    pub(super) fn tail(&self) -> &[EntryName] {
+        &self.tail
+    }
+}
+
+#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 7"))]
+impl Trace {
+    /// The kind of the object at this position: the last step's where the
+    /// tail is empty; `Dir` for the root; `None` for a missing tail.
+    pub(crate) fn kind(&self) -> Option<Kind> {
+        if !self.tail.is_empty() {
+            return None;
+        }
+        Some(self.steps.last().map_or(Kind::Dir, Step::kind))
+    }
+
+    /// The identity of the object at this position, where the tail is empty.
+    /// A present root has one: `C:\` and `D:\` are two objects.
+    pub(crate) fn leaf_id(&self) -> Option<ObjectId> {
+        self.tail.is_empty().then(|| self.last_id())
+    }
+}
+
+#[cfg_attr(not(test), expect(dead_code, reason = "used from step 10"))]
+impl Trace {
+    /// The identity of the last object the walk opened: the last step's,
+    /// else the root's.
+    pub(crate) fn last_id(&self) -> ObjectId {
+        self.steps.last().map_or(self.root_id, Step::id)
+    }
+}
+
+/// A trace as it crosses the wire, before its shape is checked.
+#[derive(Deserialize)]
+struct WireTrace {
+    root: RootName,
+    root_id: ObjectId,
+    steps: Vec<Step>,
+    tail: Vec<EntryName>,
+    real: RealPath,
+}
+
+impl<'de> Deserialize<'de> for Trace {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let wire = WireTrace::deserialize(d)?;
+        let walkable = wire.steps.split_last().is_none_or(|(last, above)| {
+            above.iter().all(|s| s.kind == Kind::Dir)
+                && (wire.tail.is_empty() || last.kind == Kind::Dir)
+        });
+        if !walkable {
+            return Err(D::Error::custom(
+                "a trace descends through directories alone: a file or a link has nothing beneath it",
+            ));
+        }
+        let trace = Self::new(wire.root, wire.root_id, wire.steps, wire.tail);
+        if trace.real != wire.real {
+            return Err(D::Error::custom(format!(
+                "a trace of {} claims to be of {}",
+                trace.real, wire.real
+            )));
+        }
+        Ok(trace)
+    }
+}
+
+/// How the walk treats a link at the last component.  A spelling that names a
+/// directory (`d/`, `d/..`, a link target `f/`) and [`walk_dir`] have no
+/// mode: the directory is entered and a link there followed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LeafMode {
+    /// Splice it and go on: what an open wants.
+    Follow,
+    /// Stop at the link: what `exists`, `is-link`, `file-info` want.
+    NoFollow,
+}
+
+/// How the walk treats a link anywhere: splice it (every door but two), or
+/// refuse the walk (the position is already real, and a link met now is a
+/// redirection).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Links {
+    Splice,
+    Refuse,
+}
+
+/// What the walk does at the last name: [`LeafMode`]'s two, and `Enter`,
+/// where the spelling names a directory and the directory entered is the
+/// object.  Never a caller's choice.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Follow,
+    NoFollow,
+    Enter,
+}
+
+impl From<LeafMode> for Mode {
+    fn from(mode: LeafMode) -> Self {
+        match mode {
+            LeafMode::Follow => Self::Follow,
+            LeafMode::NoFollow => Self::NoFollow,
+        }
+    }
+}
+
+/// What the walk does at a name it cannot enter: refuse (an open names an
+/// object that is there; a last name that is absent is a create target), or
+/// stop and keep the names left lexically.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OnMissing {
+    Fail,
+    Stop,
+}
+
+/// How a child is opened where a host shares by handle: a directory step
+/// holds the directory itself in place, a leaf step blocks no one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sharing {
+    Directory,
+    Leaf,
+}
+
+/// What a data open is for.  Private: the public methods are its values.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Access {
+    Read,
+    Append,
+    Write,
+}
+
+/// A directory the walk holds: its handle, and what the host recorded of it
+/// as it opened it (`host::DirInfo`: Windows keeps the normalized path and
+/// volume the next step checks its child against, Unix nothing).
+struct Held {
+    file: File,
+    info: host::DirInfo,
+}
+
+impl Held {
+    fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self {
+            file: self.file.try_clone()?,
+            info: self.info.clone(),
+        })
+    }
+}
+
+/// What [`host::step`] returns: the handle opened, what it is, and the
+/// host's record of it, which it keeps if it is a directory.  `handle` is
+/// `None` only where the host refused the hold for permission (macOS, a leaf
+/// the user cannot open), which is then [`Leaf::Stated`]: a link or a
+/// directory is always held.
+struct Child {
+    handle: Option<File>,
+    step: Step,
+    stat: Stat,
+    info: host::DirInfo,
+}
+
+impl Child {
+    /// The child as a held directory, with its step and stat; an error for
+    /// one that could not be held.
+    fn held(self) -> io::Result<(Held, Step, Stat)> {
+        let file = self.handle.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the object could not be held, so it is not entered",
+            )
+        })?;
+        let held = Held {
+            file,
+            info: self.info,
+        };
+        Ok((held, self.step, self.stat))
+    }
+}
+
+/// One object the walk opened, offered to a vet before the walk relies on it:
+/// its step, the handle just opened, and the directory handle and name it was
+/// opened under (`name` is `.` and `dir` the object itself for the root,
+/// whose `step` is `None` since it is no entry).  `child` is `None` for a
+/// leaf the host refused to hold, which a vet that needs the object refuses.
+/// Every object: the root, each directory on entry, each link before it is
+/// spliced, the leaf.
+#[cfg_attr(
+    windows,
+    expect(dead_code, reason = "read by `carriers`, which is Unix-only")
+)]
+pub(crate) struct Vetted<'a> {
+    pub step: Option<&'a Step>,
+    pub child: Option<&'a File>,
+    pub dir: &'a File,
+    pub name: &'a OsStr,
+}
+
+/// An open directory: its handle, its trace, and its stat taken once at the
+/// open.
+#[must_use]
+pub struct Dir {
+    handle: Held,
+    trace: Trace,
+    stat: Stat,
+}
+
+impl Dir {
+    pub fn trace(&self) -> &Trace {
+        &self.trace
+    }
+
+    pub fn real(&self) -> &RealPath {
+        self.trace.real()
+    }
+}
+
+#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 4"))]
+impl Dir {
+    pub(crate) fn stat(&self) -> &Stat {
+        &self.stat
+    }
+
+    /// The entries of this directory from the held handle, in name order,
+    /// each stated as it is yielded, nothing followed: the names are read
+    /// first, from a handle reopened for listing, then each is stated as the
+    /// iterator reaches it, so a caller polls its cancel scope between
+    /// entries.  An entry whose stat fails is yielded with that error, since
+    /// "listed, then unstatable" is a state a manifest keeps apart from
+    /// absence, never dropped.
+    ///
+    /// # Errors
+    /// The reopen's: a directory that cannot be listed refuses here, not at
+    /// the walk.
+    pub(crate) fn read_dir(&self) -> io::Result<Listing<'_>> {
+        Ok(Listing {
+            parent: &self.trace,
+            lister: host::list(&self.handle.file)?,
+        })
+    }
+
+    /// The absent entry `name` of this directory, as a create target: a
+    /// [`Located`] whose leaf is absent, whose trace is this directory's plus
+    /// a one-name tail, and whose `dir` is a dup of the held handle.  It is
+    /// not judged: a name under a write-judged directory is still a distinct
+    /// position, and an exclusion can name an absent one, so the caller
+    /// judges it before anything makes it.
+    ///
+    /// # Errors
+    /// The dup's.
+    pub(crate) fn absent(&self, name: EntryName) -> io::Result<Located> {
+        Ok(Located {
+            dir: self.handle.try_clone()?,
+            trace: self.trace.extended([], vec![name]),
+            leaf: Leaf::Absent,
+        })
+    }
+}
+
+#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 7"))]
+impl Dir {
+    /// Open the entry `name` as a directory: one step with directory
+    /// sharing.  A link or a non-directory at `name` is an error.  The one
+    /// child-descent primitive.
+    ///
+    /// # Errors
+    /// The open's; `NotADirectory` for a link or anything else but a directory.
+    pub(crate) fn open_dir(&self, name: &EntryName) -> io::Result<Self> {
+        let child = host::step(&self.handle, name, Sharing::Directory)?;
+        match child.step.kind {
+            Kind::Dir => {
+                let (handle, step, stat) = child.held()?;
+                Ok(Self {
+                    handle,
+                    trace: self.trace.extended([step], Vec::new()),
+                    stat,
+                })
             }
-            Err(e) => return Err(e),
+            Kind::Symlink => Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                format!("{} is a link, not a directory", shown(name.as_os_str())),
+            )),
+            _ => Err(io::ErrorKind::NotADirectory.into()),
         }
-    };
-    named.ok_or_else(|| {
-        io::Error::other(format!(
-            "cannot learn the stored name of {}; \
-             ral refuses a name it cannot judge under every spelling",
-            crate::path::shown(real)
-        ))
-    })
-}
-
-/// A handle on `name` in `dir` with attribute access alone, a directory as
-/// readily as a file, never following a final link.
-#[cfg(windows)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-dealias] Opens the leaf with FILE_READ_ATTRIBUTES alone to ask the kernel its long name. Path resolution, not the model's data I/O."
-)]
-fn open_attributes(dir: &File, name: &OsStr) -> io::Result<File> {
-    use cap_primitives::fs::OpenOptionsExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES,
-    };
-    let mut opts = OpenOptions::new();
-    opts.access_mode(FILE_READ_ATTRIBUTES)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .follow(FollowSymlinks::No);
-    open(dir, name.as_ref(), &opts)
-}
-
-/// The canonical path of the object behind `f`, its verbatim head dropped
-/// where the path means the same without it.
-#[cfg(windows)]
-fn final_path(f: &File) -> Option<PathBuf> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_NAME_NORMALIZED, GetFinalPathNameByHandleW,
-    };
-
-    let handle = f.as_raw_handle();
-    // Called for a length, then for the name: the first call returns the
-    // count *without* the terminator, the second the count written, so a
-    // second answer that did not shrink means the name changed underneath.
-    let needed =
-        unsafe { GetFinalPathNameByHandleW(handle, std::ptr::null_mut(), 0, FILE_NAME_NORMALIZED) };
-    if needed == 0 {
-        return None;
     }
-    let mut buf = vec![0u16; needed as usize];
-    let written = unsafe {
-        GetFinalPathNameByHandleW(handle, buf.as_mut_ptr(), needed, FILE_NAME_NORMALIZED)
-    };
-    if written == 0 || written >= needed {
-        return None;
+
+    /// The entry `name` as an object: one leaf step under the held handle,
+    /// `mode` deciding a link.
+    ///
+    /// # Errors
+    /// The walk's; `NotFound` where there is no entry `name`.
+    pub(crate) fn locate(&self, name: &EntryName, mode: LeafMode) -> io::Result<Located> {
+        let names = VecDeque::from([Name::Entry(name.clone())]);
+        let walker = Walker::new(
+            Cursor::beneath(self, &[])?,
+            names,
+            mode.into(),
+            OnMissing::Fail,
+            Links::Splice,
+            |_| true,
+        );
+        let located = walker.run()?;
+        match located.leaf {
+            Leaf::Absent => Err(io::ErrorKind::NotFound.into()),
+            _ => Ok(located),
+        }
     }
-    buf.truncate(written as usize);
-    let name = String::from_utf16(&buf).ok()?;
-    Some(dunce::simplified(&PathBuf::from(name)).to_path_buf())
 }
 
-/// A search handle on `name` in `dir`: the right to resolve names through
-/// it, not to read it — what the kernel's own resolver holds on an ancestor,
-/// and so all a sandbox need grant one.  cap-primitives opens it `O_PATH`
-/// where the platform has that; Apple's spelling is `O_SEARCH`, which it does
-/// not know, so there it would fall back to a read handle.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-search] Opens one directory component of the walk as a search handle with FollowSymlinks::No. Path resolution, not the model's data I/O: the card belongs to the site that then opens the leaf."
-)]
-fn open_search_dir(dir: &File, name: &OsStr) -> io::Result<File> {
-    #[cfg(target_os = "macos")]
-    {
-        use cap_primitives::fs::OpenOptionsExt;
-        let mut opts = OpenOptions::new();
-        opts.read(true)
-            .custom_flags(libc::O_SEARCH)
-            .follow(FollowSymlinks::No);
-        open(dir, name.as_ref(), &opts)
+#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 9"))]
+impl Dir {
+    /// Follow the link entry `name` to the directory it names: the link is
+    /// opened as a step, its target read through that handle, and the walk
+    /// continued as a spliced link is — a relative target from this
+    /// directory's own handle, an absolute one from the root; never from
+    /// [`real`](Self::real) by name.  `chain` is the directories above this
+    /// one that the caller entered, nearest last, which a tree walk keeps for
+    /// its cycle check; a `..` pops it, and one that climbs past its first
+    /// entry is `NotFound`, since nothing above was walked.  The caller
+    /// judges the result as a fresh walk.
+    ///
+    /// # Errors
+    /// The walk's; `InvalidInput` where `name` is not a link.
+    pub(crate) fn open_dir_via_link(&self, name: &EntryName, chain: &[&Self]) -> io::Result<Self> {
+        let link = host::step(&self.handle, name, Sharing::Leaf)?;
+        let (link, step, _) = link.held()?;
+        if step.kind != Kind::Symlink {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is not a link", shown(name.as_os_str())),
+            ));
+        }
+        let target = host::read_link(&link.file)?;
+        let mut walker = Walker::new(
+            Cursor::beneath(self, chain)?,
+            VecDeque::new(),
+            Mode::Enter,
+            OnMissing::Fail,
+            Links::Splice,
+            |_| true,
+        );
+        walker.splice(&target)?;
+        walker.run()?.into_dir()
     }
-    #[cfg(not(target_os = "macos"))]
-    open_dir_nofollow(dir, name.as_ref())
 }
 
-/// Absent counts as not a link: a missing leaf is a legitimate create target,
-/// and a missing directory is reported by the open that just failed on it.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-link-probe] Stats one component to tell a symlink from an object, so the walk splices the link itself rather than letting the kernel follow it. A shape predicate, not turn-time model data I/O."
-)]
-fn is_symlink(dir: &File, name: &OsStr) -> bool {
-    stat(dir, name.as_ref(), FollowSymlinks::No).is_ok_and(|m| m.is_symlink())
+/// A listing in progress: the sorted names, stated as they are yielded.
+#[cfg_attr(not(test), expect(dead_code, reason = "used from step 4"))]
+pub(crate) struct Listing<'a> {
+    parent: &'a Trace,
+    lister: host::Lister<'a>,
 }
 
-/// The name with `link` replaced by its target — anchored at the link's own
-/// directory when relative — and `rest` re-appended.  Left unfolded: a `..`
-/// from the target is the kernel's, physical, and [`descend`] takes it so.
-/// An empty target names nothing, as the kernel's `ENOENT` says.  A target
-/// the join cannot anchor, one relative to a drive's current directory
-/// (`C:x`), which `Path::join` lets replace the name, or one whose head
-/// `std::path` cannot parse, is refused by [`rooted`] as the walk restarts.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-link-read] Reads a symlink's target to splice into the remaining name. Path resolution, not the model's data I/O."
-)]
-fn splice(dir: &File, real: &Path, link: &OsStr, rest: &[&OsStr]) -> io::Result<PathBuf> {
-    let target = read_link_contents(dir, link.as_ref())?;
-    if target.as_os_str().is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "a symlink with an empty target names nothing",
-        ));
+impl<'a> Iterator for Listing<'a> {
+    type Item = DirEntry<'a>;
+
+    fn next(&mut self) -> Option<DirEntry<'a>> {
+        let (name, seen) = self.lister.next()?;
+        Some(DirEntry {
+            parent: self.parent,
+            name,
+            seen,
+        })
     }
-    let mut spliced = if is_absolute(&target) {
-        target
-    } else {
-        real.join(target)
-    };
-    spliced.extend(rest);
-    Ok(spliced)
 }
 
-fn nofollow(opts: &mut OpenOptions) -> &mut OpenOptions {
-    opts.follow(FollowSymlinks::No)
+/// One listing entry, borrowing the trace of the directory it was listed from.
+///
+/// It is judged only as that directory's entry: its name and, where
+/// the stat after the listing succeeded, what it found; else why it did not
+/// (`NotFound` for an entry gone meanwhile), so a lister tells "unstatable"
+/// from "absent".
+#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 4"))]
+pub struct DirEntry<'a> {
+    parent: &'a Trace,
+    name: EntryName,
+    seen: io::Result<Seen>,
+}
+
+#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 4"))]
+impl DirEntry<'_> {
+    pub fn name(&self) -> &EntryName {
+        &self.name
+    }
+
+    pub(crate) fn seen(&self) -> Result<&Seen, &io::Error> {
+        self.seen.as_ref()
+    }
+
+    /// What the listing saw of this entry, for judging the name shown, never
+    /// an object used; an object used is walked.  `None` where the entry was
+    /// not seen, since it has no identity to record.
+    pub(crate) fn listed(&self) -> Option<Listed<'_>> {
+        let seen = self.seen.as_ref().ok()?;
+        Some(Listed {
+            parent: self.parent,
+            step: Step {
+                name: self.name.clone(),
+                id: seen.id,
+                kind: seen.stat.kind,
+            },
+        })
+    }
+}
+
+/// A listing's record of one entry: the parent's trace and one step made from
+/// the listing's kind and identity.  Not a [`Trace`]: its step was stated by
+/// name after the listing, not opened, and the type says so, so no door that
+/// wants a walk's evidence can be handed a listing's.
+#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 4"))]
+pub(crate) struct Listed<'a> {
+    parent: &'a Trace,
+    step: Step,
+}
+
+#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 4"))]
+impl Listed<'_> {
+    pub(crate) fn real(&self) -> RealPath {
+        self.parent.real.child(&self.step.name)
+    }
+}
+
+/// An object named exactly: the handle of its directory, its trace, its leaf.
+///
+/// The leaf is absent exactly when `trace.tail()` is non-empty (only the walk
+/// and [`Dir::absent`] make one), and `trace` is the only copy of the leaf's
+/// name.  A directory reached as one (`Mode::Enter`)
+/// is the leaf too, held as entered; for the root, `dir` is the root itself —
+/// its own container, as `/..` says — and every door that would use `dir`
+/// refuses a directory leaf first.
+#[must_use]
+pub struct Located {
+    dir: Held,
+    trace: Trace,
+    leaf: Leaf,
+}
+
+/// What the walk has of the leaf: nothing (a create target); the handle, held
+/// as the host holds it, and the stat taken through it; or — on macOS alone,
+/// where the hold was refused for permission — the identity, kind and stat
+/// one lookup by name gave, and no handle.  Host-neutral in the type; only the
+/// macOS host makes `Stated`, and nothing opens a `Stated` leaf afterwards.
+enum Leaf {
+    Absent,
+    Held {
+        file: File,
+        stat: Stat,
+        info: host::DirInfo,
+    },
+    Stated {
+        #[expect(dead_code, reason = "used from step 10")]
+        id: ObjectId,
+        stat: Stat,
+    },
 }
 
 impl Located {
-    /// The symlink-free path of the object: what a guard judges and a card names.
-    pub(crate) fn real(&self) -> &Path {
-        &self.real
+    pub fn trace(&self) -> &Trace {
+        &self.trace
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[surface:locate-open] The one open of a located object. Every caller surfaces it, each in its own way: a redirect's card is fused on by the frame that wrapped the locate (read recorded eagerly by install_stdin_redirect so it precedes what it feeds, write fired when the frame settles), while exarch's readers speak their own card and its editors emit a write event over a silent read. A write's before- and after-images and grep's per-file read ride the card of the operation that asked for them."
-    )]
-    fn open_leaf(&self, opts: &mut OpenOptions) -> io::Result<File> {
-        open(&self.dir, self.leaf.as_ref(), nofollow(opts))
+    pub fn real(&self) -> &RealPath {
+        self.trace.real()
+    }
+
+    /// `None` when the leaf is absent.  No syscall: taken at the walk.
+    pub fn stat(&self) -> Option<&Stat> {
+        match &self.leaf {
+            Leaf::Absent => None,
+            Leaf::Held { stat, .. } | Leaf::Stated { stat, .. } => Some(stat),
+        }
+    }
+
+    pub(crate) fn kind(&self) -> Option<Kind> {
+        self.stat().map(|stat| stat.kind)
+    }
+
+    /// The leaf's name: the last step's, or the one name of a create target.
+    /// `None` for the root.
+    fn leaf_name(&self) -> Option<&EntryName> {
+        self.trace
+            .tail
+            .first()
+            .or_else(|| self.trace.steps.last().map(Step::name))
+    }
+
+    /// The leaf's name as an entry of `dir`, `.` for the root.
+    fn entry(&self) -> &OsStr {
+        self.leaf_name()
+            .map_or_else(|| OsStr::new("."), EntryName::as_os_str)
+    }
+
+    /// The link's target, read through the held leaf handle.
+    ///
+    /// # Errors
+    /// `InvalidInput` where the leaf is not a link: a `Stated` leaf is never
+    /// one, since a link is always held.  `NotFound` for an absent leaf.
+    pub fn read_link(&self) -> io::Result<PathBuf> {
+        match &self.leaf {
+            Leaf::Held { file, stat, .. } if stat.kind == Kind::Symlink => host::read_link(file),
+            Leaf::Absent => Err(io::ErrorKind::NotFound.into()),
+            _ => Err(io::ErrorKind::InvalidInput.into()),
+        }
+    }
+
+    /// A data handle on the leaf.  Held: derived from the held handle where
+    /// the host can, else opened by name under `dir` and verified.  Stated:
+    /// `PermissionDenied`, the walk's; nothing is opened.  Absent: created
+    /// exclusively for `Append` and `Write`, `NotFound` for `Read`.
+    ///
+    /// # Errors
+    /// The open's; `IsADirectory` for a directory leaf, `InvalidInput` for a
+    /// link, which has no data.
+    fn open(&self, access: Access) -> io::Result<File> {
+        let name = self.leaf_name();
+        match &self.leaf {
+            Leaf::Held { stat, .. } if stat.kind == Kind::Dir => {
+                Err(io::ErrorKind::IsADirectory.into())
+            }
+            Leaf::Held { stat, .. } if stat.kind == Kind::Symlink => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a link has no data",
+            )),
+            Leaf::Held { file, stat, .. } => {
+                let name = name.expect("a leaf that is not a directory has a name");
+                host::derive(file, &self.dir.file, name, stat, access)
+            }
+            Leaf::Stated { .. } => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the object could not be held, so nothing is opened through it",
+            )),
+            Leaf::Absent => match (access, name) {
+                (Access::Read, _) | (_, None) => Err(io::ErrorKind::NotFound.into()),
+                (_, Some(name)) => host::create(&self.dir.file, name, access),
+            },
+        }
     }
 
     /// # Errors
     /// The open's, including `NotFound`.
     pub fn read(&self) -> io::Result<File> {
-        self.open_leaf(OpenOptions::new().read(true))
+        self.open(Access::Read)
     }
 
+    fn into_dir(self) -> io::Result<Dir> {
+        match self.leaf {
+            Leaf::Held { file, stat, info } if stat.kind == Kind::Dir => Ok(Dir {
+                handle: Held { file, info },
+                trace: self.trace,
+                stat,
+            }),
+            _ => Err(io::ErrorKind::NotADirectory.into()),
+        }
+    }
+}
+
+#[expect(dead_code, reason = "used from step 5")]
+impl Located {
+    /// Kind `File` and, on Unix, `mode & 0o111`; on Windows what
+    /// `is_executable_file` decides today.  Asked of an admitted program,
+    /// never before the judgment.
+    pub(crate) fn is_executable(&self) -> bool {
+        #[cfg(unix)]
+        let executable = self.stat().is_some_and(|s| s.mode & 0o111 != 0);
+        #[cfg(not(unix))]
+        let executable = super::is_executable_file(self.real().as_path());
+        self.kind() == Some(Kind::File) && executable
+    }
+}
+
+/// How a streaming write opens its target.
+#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 6"))]
+#[derive(Clone, Copy)]
+pub(crate) enum Streaming {
+    Append,
+    Truncate,
+}
+
+/// A streaming write, opened through the held leaf: the write handle, a read
+/// handle on the same object for the before- and after-images where the leaf
+/// is a regular file the caller may read, the stat of the handle opened, and
+/// whether the leaf was created.
+#[must_use]
+#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 6"))]
+pub(crate) struct Streamed {
+    file: File,
+    reader: Option<File>,
+    trace: Trace,
+    stat: Stat,
+    created: bool,
+}
+
+#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 6"))]
+impl Streamed {
+    pub(crate) fn file(&mut self) -> &mut File {
+        &mut self.file
+    }
+
+    /// Seek to 0 before each image.
+    pub(crate) fn reader(&mut self) -> Option<&mut File> {
+        self.reader.as_mut()
+    }
+
+    pub(crate) fn trace(&self) -> &Trace {
+        &self.trace
+    }
+
+    pub(crate) fn stat(&self) -> &Stat {
+        &self.stat
+    }
+
+    pub(crate) fn created(&self) -> bool {
+        self.created
+    }
+
+    /// `set_len(0)` where `stat` is a regular file; a no-op otherwise, so a
+    /// FIFO or a device streams.
+    ///
+    /// # Errors
+    /// The truncate's.
+    pub(crate) fn truncate(&self) -> io::Result<()> {
+        if self.stat.kind == Kind::File {
+            self.file.set_len(0)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 6"))]
+impl Located {
+    /// A streaming write — `>>`, or a `>` that cannot stage — opened through
+    /// the held leaf and consumed.  `Truncate` does not truncate:
+    /// [`Streamed::truncate`] does, after the caller has read its
+    /// before-image.  The read handle is `None` for a FIFO, a device, or a
+    /// file the caller may not read.  Takes `self`: after this the object is
+    /// the handles.
+    ///
+    /// # Errors
+    /// The open's: `AlreadyExists` where the leaf was absent at the walk and
+    /// has appeared since.
+    pub(crate) fn open_streaming(self, access: Streaming) -> io::Result<Streamed> {
+        let access = match access {
+            Streaming::Append => Access::Append,
+            Streaming::Truncate => Access::Write,
+        };
+        let created = matches!(self.leaf, Leaf::Absent);
+        let file = self.open(access)?;
+        let stat = host::seen(&file)?.stat;
+        let reader = self
+            .leaf_name()
+            .filter(|_| stat.kind == Kind::File)
+            .and_then(|name| host::derive(&file, &self.dir.file, name, &stat, Access::Read).ok());
+        Ok(Streamed {
+            file,
+            reader,
+            trace: self.trace,
+            stat,
+            created,
+        })
+    }
+
+    /// Stage an atomic write beside the leaf: a fresh exclusive sibling in
+    /// `dir`, read and write, with the leaf's mode copied from its stat
+    /// taken at the walk.  Takes `self`: the staged write owns its target
+    /// from here, so a sibling can land only over the leaf it was staged
+    /// beside.
+    ///
+    /// # Errors
+    /// `IsADirectory` where the leaf is a directory; the create's, other than
+    /// `AlreadyExists`, which is retried under another name; the mode's.
+    pub(crate) fn stage(self) -> io::Result<StagedWrite> {
+        match self.kind() {
+            Some(Kind::Dir) => return Err(io::ErrorKind::IsADirectory.into()),
+            Some(Kind::Symlink) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "a link has no data",
+                ));
+            }
+            _ => {}
+        }
+        let (file, name) = loop {
+            let name = EntryName::fresh(".ral-write-")?;
+            match host::create_sibling(&self.dir.file, &name) {
+                Ok(file) => break (file, name),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+        };
+        // Latched before the first fallible step, so an early `?` unlinks it.
+        let staged = StagedWrite {
+            target: self,
+            file,
+            name,
+            settled: false,
+        };
+        if let Some(stat) = staged.target.stat() {
+            host::copy_mode(&staged.file, stat)?;
+        }
+        Ok(staged)
+    }
+}
+
+#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 4"))]
+impl Located {
+    /// `mkdir` on an absent leaf, then one step onto the name made: the
+    /// directory found there, as entered.  Unjudged: the caller judges it as
+    /// it would any directory (not provably fresh).
+    ///
+    /// # Errors
+    /// `AlreadyExists` where the leaf is present; the make's or the step's.
+    pub(crate) fn create_dir(self) -> io::Result<Dir> {
+        let (Leaf::Absent, Some(name)) = (&self.leaf, self.leaf_name()) else {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        };
+        host::mkdir(&self.dir.file, name)?;
+        let (handle, step, stat) = host::step(&self.dir, name, Sharing::Directory)?.held()?;
+        if step.kind != Kind::Dir {
+            return Err(io::ErrorKind::NotADirectory.into());
+        }
+        Ok(Dir {
+            handle,
+            trace: self.trace.extended([step], Vec::new()),
+            stat,
+        })
+    }
+}
+
+/// A staged atomic write: the target, the exclusive sibling and its name,
+/// owned together until [`publish`](Self::publish) or
+/// [`discard`](Self::discard) consumes them, so the two never part and the
+/// sibling lands only over the leaf it was staged beside.  `Drop` discards: a
+/// staged sibling never outlives the frame that staged it, whatever the
+/// frame does.
+#[must_use]
+#[cfg_attr(not(test), expect(dead_code, reason = "used from step 6"))]
+pub(crate) struct StagedWrite {
+    target: Located,
+    file: File,
+    name: EntryName,
+    settled: bool,
+}
+
+#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 6"))]
+impl StagedWrite {
+    /// Written through and synced before [`publish`](Self::publish).
+    pub(crate) fn file(&mut self) -> &mut File {
+        &mut self.file
+    }
+
+    pub(crate) fn target(&self) -> &Located {
+        &self.target
+    }
+
+    /// Rename the sibling over the leaf's name.  The target's leaf handle is
+    /// dropped first.  Where the host renames by name, as Unix does, the
+    /// source is `name` under `dir`: POSIX has no publish-by-handle, so a
+    /// process with write permission on the directory can put a substitute at
+    /// the sibling's name between the sync and the rename.  On failure the
+    /// sibling is unlinked before the error returns, so a failed publish
+    /// leaves the target as it was and nothing beside it.  Then the directory
+    /// is synced, best effort.  No check follows: what the name holds later
+    /// is not this write's to assert.
+    ///
+    /// # Errors
+    /// The rename's.
+    pub(crate) fn publish(mut self) -> io::Result<()> {
+        self.settled = true;
+        self.target.leaf = Leaf::Absent;
+        let to = self
+            .target
+            .leaf_name()
+            .expect("a staged write targets a leaf with a name");
+        let landed = host::rename_over(&self.target.dir.file, &self.file, &self.name, to);
+        if landed.is_err() {
+            let _ = host::unlink(&self.target.dir.file, &self.name);
+        } else {
+            let _ = host::sync_dir(&self.target.dir.file);
+        }
+        landed
+    }
+
+    /// Unlink the sibling by its name under `dir`: the write is abandoned.
+    ///
+    /// # Errors
+    /// The unlink's.
+    pub(crate) fn discard(mut self) -> io::Result<()> {
+        self.settled = true;
+        host::unlink(&self.target.dir.file, &self.name)
+    }
+}
+
+impl Drop for StagedWrite {
+    fn drop(&mut self) {
+        if !self.settled {
+            let _ = host::unlink(&self.target.dir.file, &self.name);
+        }
+    }
+}
+
+/// Today's `Located` methods whose callers outside this file have not moved:
+/// reimplemented over the held handles, deleted with their callers (the
+/// redirects, step 6; `list-dir`, step 4).
+impl Located {
     /// Open for appending, creating an empty file if absent.
     ///
     /// # Errors
     /// The open's.
     pub(crate) fn append(&self) -> io::Result<File> {
-        self.open_leaf(OpenOptions::new().create(true).append(true))
+        self.open(Access::Append)
     }
 
     /// Open for writing from the start, creating or truncating.
@@ -624,112 +1499,75 @@ impl Located {
     /// # Errors
     /// The open's.
     pub(crate) fn truncate(&self) -> io::Result<File> {
-        self.open_leaf(OpenOptions::new().create(true).write(true).truncate(true))
+        let file = self.open(Access::Write)?;
+        if self.kind() == Some(Kind::File) {
+            file.set_len(0)?;
+        }
+        Ok(file)
     }
 
-    /// `None` when the object does not exist.
-    ///
-    /// Never follows: the walk already settled that question, so a
-    /// [`Leaf::Resolve`] locate stats what the link pointed at, and a
-    /// [`Leaf::AsNamed`] one stats the link. `Kind::Symlink` is therefore
-    /// reachable only through the latter.
+    /// What is at the leaf's name now, as today's `stat` answered: `None`
+    /// where nothing is.
     ///
     /// # Errors
     /// Any `stat` failure other than absence.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:locate-stat] Stats the located object: for the write site, to choose atomic against streaming semantics, to carry the mode onto the staged file and to size a write's snapshots; for `exists`/`is-file`/`file-info`, as the predicate they are. A metadata read, never the model's turn-time data I/O; the write site's own card is its surface, and a predicate raises none."
-    )]
-    pub(crate) fn stat(&self) -> io::Result<Option<Stat>> {
-        match stat(&self.dir, self.leaf.as_ref(), FollowSymlinks::No) {
-            Ok(m) => Ok(Some(Stat::from(&m))),
+    pub(crate) fn restat(&self) -> io::Result<Option<Stat>> {
+        match host::seen_at(&self.dir.file, self.entry()) {
+            Ok(seen) => Ok(Some(seen.stat)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
     }
 
-    /// The object's entries, each stated without following, sorted by name so
-    /// a listing does not depend on the order the kernel happens to hand back.
-    ///
-    /// An entry whose own stat fails is dropped: a listing reports what it
-    /// could see, rather than failing whole because one entry vanished mid-walk.
+    /// The leaf opened for reading by its name under `dir`, as today's `read`
+    /// did: a leaf made since the walk is found.
     ///
     /// # Errors
-    /// The directory open's, including `NotADirectory`.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:locate-read-dir] `list-dir`'s enumeration of the located directory, relative to its own handle. A listing predicate, not turn-time model data I/O: the caller still judges each entry against the live grant, and raises no card."
-    )]
-    pub(crate) fn read_dir(&self) -> io::Result<Vec<Entry>> {
-        let dir = open_dir_nofollow(&self.dir, self.leaf.as_ref())?;
-        let mut entries: Vec<Entry> = read_base_dir(&dir)?
-            .filter_map(|e| {
-                let e = e.ok()?;
-                Some(Entry {
-                    name: e.file_name(),
-                    stat: Stat::from(&e.metadata().ok()?),
-                })
-            })
-            .collect();
-        entries.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(entries)
+    /// The open's.
+    pub(crate) fn read_named(&self) -> io::Result<File> {
+        let name = self.leaf_name().ok_or(io::ErrorKind::IsADirectory)?;
+        host::open_named(&self.dir.file, name, Access::Read)
     }
 
-    /// The target of the object as written in the link, not resolved.
+    /// The directory's entries, each stated without following, sorted by name.
+    /// An entry whose own stat fails is dropped: a listing reports what it
+    /// could see, rather than failing whole because one entry vanished.
     ///
     /// # Errors
-    /// The readlink's, including `InvalidInput` when it is not a link.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:locate-read-link] `file-info`'s symlink target: reads the link's own contents as a metadata predicate. Not turn-time model data I/O, raises no surface card."
-    )]
-    pub(crate) fn read_link(&self) -> io::Result<PathBuf> {
-        read_link_contents(&self.dir, self.leaf.as_ref())
+    /// `NotADirectory` for any other leaf; the reopen's.
+    pub(crate) fn read_dir(&self) -> io::Result<Vec<Entry>> {
+        let Leaf::Held { file, stat, .. } = &self.leaf else {
+            return Err(io::ErrorKind::NotADirectory.into());
+        };
+        if stat.kind != Kind::Dir {
+            return Err(io::ErrorKind::NotADirectory.into());
+        }
+        Ok(host::list(file)?
+            .filter_map(|(name, seen)| {
+                Some(Entry {
+                    name: name.as_os_str().to_owned(),
+                    stat: seen.ok()?.stat,
+                })
+            })
+            .collect())
     }
 
     /// `access(2)` against the real uid/gid — not `permissions().readonly()`,
     /// which ignores ownership, so another user's 0644 file would read as
     /// writable.  Follows, as `test -w` does.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:locate-access] The `is-writable` predicate's access(2) against the real uid/gid. A permission predicate, not turn-time model data I/O, raises no surface card."
-    )]
     pub(crate) fn is_writable(&self) -> bool {
-        access(
-            &self.dir,
-            self.leaf.as_ref(),
-            AccessType::Access(AccessModes {
-                readable: false,
-                writable: true,
-                executable: false,
-            }),
-            FollowSymlinks::Yes,
-        )
-        .is_ok()
+        host::is_writable(&self.dir.file, self.entry())
     }
 
-    /// A fresh, exclusively created, dot-hidden sibling for staging a write,
-    /// and its name.  Random so concurrent writers in one directory never
-    /// collide; a collision retries.
+    /// A fresh, exclusively created sibling for staging a write, and its name.
     ///
     /// # Errors
     /// The create's, other than `AlreadyExists`.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[surface:locate-stage] The atomic `>` staging create: a fresh exclusive sibling in the target's own directory, holding the write until the rename commits it. A sub-step of the write site; the reported write is the operation's surface."
-    )]
     pub(crate) fn create_sibling_tmp(&self) -> io::Result<(File, OsString)> {
         loop {
-            let mut name = String::from(".");
-            name.extend((0..16).map(|_| fastrand::alphanumeric()));
-            name.push_str(".ral-write.tmp");
-            let name = OsString::from(name);
-            match open(
-                &self.dir,
-                name.as_ref(),
-                nofollow(OpenOptions::new().create_new(true).write(true)),
-            ) {
-                Ok(file) => return Ok((file, name)),
+            let name = EntryName::fresh(".ral-write-")?;
+            match host::create_sibling(&self.dir.file, &name) {
+                Ok(file) => return Ok((file, name.as_os_str().to_owned())),
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(e),
             }
@@ -738,30 +1576,14 @@ impl Located {
 
     /// # Errors
     /// The open's.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[surface:locate-staged-read] Reads the staged temp back as the write's after-image, before the rename commits it. A sub-step of the write site, not a separate model read."
-    )]
     pub(crate) fn sibling_read(&self, name: &OsStr) -> io::Result<File> {
-        open(
-            &self.dir,
-            name.as_ref(),
-            nofollow(OpenOptions::new().read(true)),
-        )
+        host::open_named(&self.dir.file, &EntryName::parse(name)?, Access::Read)
     }
 
     /// # Errors
     /// The open's.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[surface:locate-staged-write] Re-opens the staged temp for writing so its bytes can be flushed durable before the rename. A sub-step of the write site's commit; these opens carry written bytes to disk, they are not separate model reads."
-    )]
     pub(crate) fn sibling_write(&self, name: &OsStr) -> io::Result<File> {
-        open(
-            &self.dir,
-            name.as_ref(),
-            nofollow(OpenOptions::new().write(true)),
-        )
+        host::open_named(&self.dir.file, &EntryName::parse(name)?, Access::Write)
     }
 
     /// Rename the sibling `name` onto this object, atomically within the
@@ -769,352 +1591,464 @@ impl Located {
     ///
     /// # Errors
     /// The rename's.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[surface:locate-commit] The atomic `>` commit step: rename the staged sibling onto the target within the one directory handle. The write surface fires when the write settles, committed once this returns Ok."
-    )]
     pub(crate) fn rename_sibling_over(&self, name: &OsStr) -> io::Result<()> {
-        rename(&self.dir, name.as_ref(), &self.dir, self.leaf.as_ref())
+        let to = self.leaf_name().ok_or(io::ErrorKind::IsADirectory)?;
+        let sibling = self.sibling_write(name)?;
+        host::rename_over(&self.dir.file, &sibling, &EntryName::parse(name)?, to)
     }
 
     /// # Errors
     /// The unlink's.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:locate-abandon] Reasoned-silent rollback of the atomic `>`: unlink the staged temp for a write that will not land. The aborted write is the surface; this removal raises none of its own."
-    )]
     pub(crate) fn remove_sibling(&self, name: &OsStr) -> io::Result<()> {
-        remove_file(&self.dir, name.as_ref())
+        host::unlink(&self.dir.file, &EntryName::parse(name)?)
     }
 
     /// Flush the directory entries to disk, so a rename just made survives a
     /// crash.
     ///
     /// # Errors
-    /// The fsync's; Windows has no directory flush and errors here.
+    /// The fsync's.
     pub(crate) fn sync_dir(&self) -> io::Result<()> {
-        self.dir.sync_all()
+        host::sync_dir(&self.dir.file)
     }
 }
 
-/// The discard device, opened by name.
+/// A frame of the cursor: a directory handle and the trace to it.
+struct Frame {
+    handle: Held,
+    trace: Trace,
+}
+
+/// Where the walk stands: the root, or the directory a walk began beneath
+/// (`base`), and a stack of `(handle, step)` for every directory entered
+/// since.  The cursor's handles are what every open is relative to, and its
+/// steps are the trace as it grows.  A `..` pops the stack — the walk returns
+/// to the directory it already holds, never to the kernel's current parent —
+/// and at the root stays.  Where the walk began beneath a directory (`chain`
+/// is `Some`), a `..` past the stack pops the chain of directories the caller
+/// entered, and past that it is `NotFound`, since nothing above was walked.
+struct Cursor {
+    base: Frame,
+    chain: Option<Vec<Frame>>,
+    stack: Vec<(Held, Step)>,
+}
+
+impl Cursor {
+    fn root(root: RootName) -> io::Result<Self> {
+        let handle = host::open_root(&root)?;
+        let id = ObjectId::of(&handle.file)?;
+        Ok(Self {
+            base: Frame {
+                handle,
+                trace: Trace::new(root, id, Vec::new(), Vec::new()),
+            },
+            chain: None,
+            stack: Vec::new(),
+        })
+    }
+
+    /// A cursor standing in `dir`, with `chain` above it.
+    fn beneath(dir: &Dir, chain: &[&Dir]) -> io::Result<Self> {
+        let frame = |d: &Dir| -> io::Result<Frame> {
+            Ok(Frame {
+                handle: d.handle.try_clone()?,
+                trace: d.trace.clone(),
+            })
+        };
+        Ok(Self {
+            base: frame(dir)?,
+            chain: Some(chain.iter().map(|d| frame(d)).collect::<io::Result<_>>()?),
+            stack: Vec::new(),
+        })
+    }
+
+    fn top(&self) -> &Held {
+        self.stack.last().map_or(&self.base.handle, |(h, _)| h)
+    }
+
+    fn push(&mut self, handle: Held, step: Step) {
+        self.stack.push((handle, step));
+    }
+
+    fn up(&mut self) -> io::Result<()> {
+        if self.stack.pop().is_none()
+            && let Some(chain) = &mut self.chain
+        {
+            self.base = chain.pop().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "no directory above this one was walked",
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    /// The trace of where the cursor stands, plus a step opened below it and
+    /// the names past.
+    fn trace(&self, step: Option<Step>, tail: Vec<EntryName>) -> Trace {
+        let steps = self.stack.iter().map(|(_, step)| step.clone());
+        self.base.trace.extended(steps.chain(step), tail)
+    }
+
+    fn into_top(self) -> Held {
+        self.stack
+            .into_iter()
+            .next_back()
+            .map_or(self.base.handle, |(h, _)| h)
+    }
+
+    /// The directory on top and the one beneath it; the root is its own.
+    fn into_pair(self) -> io::Result<(Held, Held)> {
+        let Self {
+            base, mut stack, ..
+        } = self;
+        match stack.pop() {
+            None => Ok((base.handle.try_clone()?, base.handle)),
+            Some((top, _)) => Ok((stack.pop().map_or(base.handle, |(h, _)| h), top)),
+        }
+    }
+}
+
+/// The walk's loop: a cursor, the names still to take, and how to treat the
+/// last one.
+struct Walker<V> {
+    cursor: Cursor,
+    names: VecDeque<Name>,
+    mode: Mode,
+    missing: OnMissing,
+    links: Links,
+    vet: V,
+    splices: usize,
+}
+
+impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
+    fn new(
+        cursor: Cursor,
+        names: VecDeque<Name>,
+        mode: Mode,
+        missing: OnMissing,
+        links: Links,
+        vet: V,
+    ) -> Self {
+        let mut walker = Self {
+            cursor,
+            names,
+            mode,
+            missing,
+            links,
+            vet,
+            splices: 0,
+        };
+        walker.settle_mode();
+        walker
+    }
+
+    /// A walk that ends on a `..`, or on no name at all, names a directory.
+    fn settle_mode(&mut self) {
+        if self
+            .names
+            .back()
+            .is_none_or(|name| matches!(name, Name::Parent))
+        {
+            self.mode = Mode::Enter;
+        }
+    }
+
+    fn refused() -> io::Error {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the walk passed an object its vetting refused",
+        )
+    }
+
+    /// Put the root the cursor stands at to the vet.
+    fn vet_root(&mut self) -> io::Result<()> {
+        let root = &self.cursor.top().file;
+        let vetted = Vetted {
+            step: None,
+            child: Some(root),
+            dir: root,
+            name: OsStr::new("."),
+        };
+        (self.vet)(&vetted).then_some(()).ok_or_else(Self::refused)
+    }
+
+    /// Put `child`, opened as the entry `name` of the cursor's directory, to
+    /// the vet.
+    fn check(&mut self, child: &Child, name: &EntryName) -> io::Result<()> {
+        let vetted = Vetted {
+            step: Some(&child.step),
+            child: child.handle.as_ref(),
+            dir: &self.cursor.top().file,
+            name: name.as_os_str(),
+        };
+        (self.vet)(&vetted).then_some(()).ok_or_else(Self::refused)
+    }
+
+    /// Replace the link just met with its `target`: the names of a relative
+    /// one continue from the cursor, those of an absolute one from its root.
+    /// Whether the walk must end in a directory is re-asked of the whole
+    /// spliced spelling, as the target's trailing separator and what is still
+    /// to come say.
+    fn splice(&mut self, target: &Path) -> io::Result<()> {
+        self.splices += 1;
+        if self.splices > MAX_HOPS {
+            return Err(loop_error());
+        }
+        if target.as_os_str().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "a symlink with an empty target names nothing",
+            ));
+        }
+        let Spelling { root, names } = split(target)?;
+        if let Some(root) = root {
+            rooted(target)?;
+            self.cursor = Cursor::root(root)?;
+            self.vet_root()?;
+        } else if is_absolute(target) {
+            rooted(target)?;
+        }
+        if self.names.is_empty() && names_a_dir(target) {
+            self.mode = Mode::Enter;
+        }
+        for name in names.into_iter().rev() {
+            self.names.push_front(name);
+        }
+        self.settle_mode();
+        Ok(())
+    }
+
+    fn run(mut self) -> io::Result<Located> {
+        while let Some(name) = self.names.pop_front() {
+            let Name::Entry(name) = name else {
+                self.cursor.up()?;
+                continue;
+            };
+            let last = self.names.is_empty();
+            let entering = !last || self.mode == Mode::Enter;
+            let sharing = if entering {
+                Sharing::Directory
+            } else {
+                Sharing::Leaf
+            };
+            let child = match host::step(self.cursor.top(), &name, sharing) {
+                Ok(child) => child,
+                Err(e) => return self.stopped(name, e),
+            };
+            self.check(&child, &name)?;
+            match child.step.kind {
+                _ if child.step.kind == Kind::Symlink && self.links == Links::Refuse => {
+                    return Err(loop_error());
+                }
+                Kind::Symlink if last && self.mode == Mode::NoFollow => return Ok(self.leaf(child)),
+                Kind::Symlink => {
+                    let (link, ..) = child.held()?;
+                    let spliced = host::read_link(&link.file).and_then(|t| self.splice(&t));
+                    if let Err(e) = spliced {
+                        return self.stopped(name, e);
+                    }
+                }
+                Kind::Dir if entering => {
+                    let (handle, step, _) = child.held()?;
+                    self.cursor.push(handle, step);
+                }
+                Kind::Dir => return Ok(self.leaf(child)),
+                _ if entering => return self.stopped(name, io::ErrorKind::NotADirectory.into()),
+                _ => return Ok(self.leaf(child)),
+            }
+        }
+        self.entered()
+    }
+
+    /// The walk ended on `child`, the last name's object.
+    fn leaf(self, child: Child) -> Located {
+        let trace = self.cursor.trace(Some(child.step.clone()), Vec::new());
+        let leaf = match child.handle {
+            Some(file) => Leaf::Held {
+                file,
+                stat: child.stat,
+                info: child.info,
+            },
+            None => Leaf::Stated {
+                id: child.step.id,
+                stat: child.stat,
+            },
+        };
+        Located {
+            dir: self.cursor.into_top(),
+            trace,
+            leaf,
+        }
+    }
+
+    /// The names are spent: the directory on top of the cursor is the object,
+    /// held as entered, with the one beneath it as `dir`.
+    fn entered(self) -> io::Result<Located> {
+        let stat = host::seen(&self.cursor.top().file)?.stat;
+        let trace = self.cursor.trace(None, Vec::new());
+        let (dir, top) = self.cursor.into_pair()?;
+        let Held { file, info } = top;
+        Ok(Located {
+            dir,
+            trace,
+            leaf: Leaf::Held { file, stat, info },
+        })
+    }
+
+    /// `name` could not be entered, for `error`.  The lenient walks end their
+    /// steps at `NotFound`, `NotADirectory` and `PermissionDenied` and keep
+    /// the names left as the tail, folded; the strict ones fail, but for an
+    /// absent last name, which is a create target.  Nothing else differs
+    /// between the two.
+    fn stopped(self, name: EntryName, error: io::Error) -> io::Result<Located> {
+        use io::ErrorKind::{NotADirectory, NotFound, PermissionDenied};
+        let last = self.names.is_empty();
+        let tail = match (self.missing, error.kind()) {
+            (OnMissing::Stop, NotFound | NotADirectory | PermissionDenied) => {
+                let mut tail = vec![name];
+                for name in self.names {
+                    match name {
+                        Name::Entry(name) => tail.push(name),
+                        Name::Parent => {
+                            tail.pop();
+                        }
+                    }
+                }
+                tail
+            }
+            (OnMissing::Fail, NotFound) if last && self.mode != Mode::Enter => vec![name],
+            _ => return Err(error),
+        };
+        let trace = self.cursor.trace(None, tail);
+        Ok(Located {
+            dir: self.cursor.into_top(),
+            trace,
+            leaf: Leaf::Absent,
+        })
+    }
+}
+
+/// The engine behind every door: `rp` walked from its root, `mode` deciding
+/// the last name, `missing` whether a name that cannot be entered fails or
+/// ends the steps, `links` whether a link is spliced or refused, and every
+/// object put to `vet`.  A directory spelling raises `mode` to `Enter`.
+fn finish(
+    rp: &Path,
+    mode: Mode,
+    missing: OnMissing,
+    links: Links,
+    vet: impl FnMut(&Vetted<'_>) -> bool,
+) -> io::Result<Located> {
+    rooted(rp)?;
+    let Spelling { root, names } = split(rp)?;
+    let root = root.ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let mode = if names_a_dir(rp) { Mode::Enter } else { mode };
+    let mut walker = Walker::new(Cursor::root(root)?, names, mode, missing, links, vet);
+    walker.vet_root()?;
+    walker.run()
+}
+
+/// An access to an object or a create target.
+///
+/// An absent intermediate directory is an error.  A spelling that names a directory (`d/`, `d/..`,
+/// `/`, or a link target so spelled) yields the directory itself as the leaf,
+/// entered; there is no spelling `walk` refuses for its shape.
+///
+/// # Errors
+/// A missing or untraversable intermediate directory, a name ending in a
+/// separator that is no directory, a link cycle past the splice budget, or
+/// `InvalidInput` for a name with no root to walk it from, whether `rp`
+/// itself or a link's target spliced into it.
+pub fn walk(rp: &LexicalPath, mode: LeafMode) -> io::Result<Located> {
+    finish(
+        rp.as_path(),
+        mode.into(),
+        OnMissing::Fail,
+        Links::Splice,
+        |_| true,
+    )
+}
+
+/// A directory entered — `cd`, a listing root, `within [dir:]` — whatever the
+/// spelling's shape: [`walk`] under `Enter`, viewed as a [`Dir`].  A link at
+/// the end is followed.
+///
+/// # Errors
+/// [`walk`]'s; `NotADirectory` for anything but a directory.
+pub fn walk_dir(rp: &LexicalPath) -> io::Result<Dir> {
+    finish(
+        rp.as_path(),
+        Mode::Enter,
+        OnMissing::Fail,
+        Links::Splice,
+        |_| true,
+    )?
+    .into_dir()
+}
+
+/// A grant spelling's transcript: as far as the disk goes, the rest lexical.
+///
+/// # Errors
+/// What ends no steps: a splice budget exhausted, `InvalidInput` for a name
+/// or a target with no root, any other I/O failure.
+pub fn walk_lenient(rp: &LexicalPath, mode: LeafMode) -> io::Result<Trace> {
+    finish(
+        rp.as_path(),
+        mode.into(),
+        OnMissing::Stop,
+        Links::Splice,
+        |_| true,
+    )
+    .map(|located| located.trace)
+}
+
+/// The real path `path` names, or will name once its missing tail is
+/// created: [`walk_lenient`] on a name that is not yet a [`LexicalPath`].  A
+/// policy match has no error channel, so a path the walk still fails on (a
+/// name with no root, an unopenable root, a link cycle) is its own lexical
+/// fold.
+pub(super) fn resolve_lenient(path: &Path) -> PathBuf {
+    finish(path, Mode::Follow, OnMissing::Stop, Links::Splice, |_| true)
+        .map_or_else(|_| fold_dots(path), |located| located.trace.real.0)
+}
+
+/// [`walk`], with every object it passes put to `vet` before the walk relies
+/// on it: the root, each directory as it is entered, each link before it is
+/// spliced, and the leaf where it lands.  An absolute splice restarts from the
+/// root, so `vet` sees the root again.
+///
+/// # Errors
+/// [`walk`]'s; `PermissionDenied` when `vet` refuses an object.
+#[cfg_attr(
+    windows,
+    expect(dead_code, reason = "called by `carriers`, which is Unix-only")
+)]
+pub(crate) fn walk_with(
+    rp: &LexicalPath,
+    mode: LeafMode,
+    vet: impl FnMut(&Vetted<'_>) -> bool,
+) -> io::Result<Located> {
+    finish(
+        rp.as_path(),
+        mode.into(),
+        OnMissing::Fail,
+        Links::Splice,
+        vet,
+    )
+}
+
+/// The discard device, opened by its fixed name — `/dev/null`, `\\.\NUL` —
+/// and never by a spelling: a spelling that folds to the device might open
+/// whatever a link on the way leads to.  No argument, so there is nothing to
+/// open but the device.
 ///
 /// The one object this module opens without walking to it: exempt from the
-/// walk and from the grant alike, since there is nothing to locate — on
-/// Windows it is the device-namespace name `\\.\NUL`, no entry in any
-/// directory.
+/// walk and from the grant alike, since there is nothing to locate.
 ///
 /// # Errors
 /// The open's.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:discard-device] `/dev/null` / `NUL` opened by name: no bytes reach or leave the model, and no grant region can contain a device that is not a file."
-)]
-pub(crate) fn open_discard(rp: &LexicalPath) -> io::Result<File> {
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(rp.as_path())
-}
-
-#[cfg(all(test, unix))]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] fixtures build the tree the walk is asked about"
-)]
-mod tests {
-    use super::*;
-    use crate::path::{CwdPath, Resolver};
-    use crate::types::EnvVars;
-
-    fn located(dir: &Path, rel: &str) -> io::Result<Located> {
-        located_with(dir, rel, Leaf::Resolve)
-    }
-
-    fn located_with(dir: &Path, rel: &str, leaf: Leaf) -> io::Result<Located> {
-        let dir = CwdPath::new(dir.to_path_buf()).expect("a tempdir is a working directory");
-        walk(&Resolver::at(&EnvVars::new(), &dir).resolve(rel), leaf)
-    }
-
-    /// The two leaf modes are the whole difference: `Resolve` walks through a
-    /// terminal link to its target, `AsNamed` stops at the link itself, which
-    /// is the only way `exists` can say a dangling link is there and `is-link`
-    /// can say it is a link.
-    #[test]
-    fn as_named_stops_at_the_link_that_resolve_walks_through() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = root(&tmp);
-        std::fs::write(dir.join("target"), b"body").unwrap();
-        std::os::unix::fs::symlink("target", dir.join("link")).unwrap();
-
-        let resolved = located(&dir, "link").unwrap();
-        assert_eq!(resolved.real(), dir.join("target"));
-        assert_eq!(resolved.stat().unwrap().unwrap().kind, Kind::File);
-
-        let as_named = located_with(&dir, "link", Leaf::AsNamed).unwrap();
-        assert_eq!(as_named.real(), dir.join("link"));
-        assert_eq!(as_named.stat().unwrap().unwrap().kind, Kind::Symlink);
-        assert_eq!(as_named.read_link().unwrap(), Path::new("target"));
-    }
-
-    /// A dangling link is absent to `Resolve` and present to `AsNamed` —
-    /// `exists` answers the second question, not the first.
-    #[test]
-    fn a_dangling_link_is_absent_resolved_and_present_as_named() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = root(&tmp);
-        std::os::unix::fs::symlink("gone", dir.join("dangling")).unwrap();
-
-        assert!(located(&dir, "dangling").unwrap().stat().unwrap().is_none());
-        let as_named = located_with(&dir, "dangling", Leaf::AsNamed).unwrap();
-        assert_eq!(as_named.stat().unwrap().unwrap().kind, Kind::Symlink);
-    }
-
-    /// The temp root as the walk resolves it: macOS hands out `/var/folders/…`,
-    /// a link to `/private/var/folders/…`, and following one is the point.
-    fn root(tmp: &tempfile::TempDir) -> std::path::PathBuf {
-        std::fs::canonicalize(tmp.path()).expect("the temp root canonicalises")
-    }
-
-    #[test]
-    fn a_plain_new_file_locates_where_its_name_says() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = root(&tmp);
-        let loc = located(&dir, "fresh").unwrap();
-        assert_eq!(loc.real(), dir.join("fresh"));
-        assert!(loc.stat().unwrap().is_none());
-    }
-
-    /// The finding that motivated the walk: a link whose target does not
-    /// exist must locate the *target*, so a guard judges where the bytes go.
-    #[test]
-    fn a_dangling_link_locates_its_target() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = root(&tmp);
-        std::fs::create_dir_all(dir.join("work")).unwrap();
-        std::fs::create_dir_all(dir.join("outside")).unwrap();
-        std::os::unix::fs::symlink("../outside/marker", dir.join("work/dangling")).unwrap();
-        let loc = located(&dir, "work/dangling").unwrap();
-        assert_eq!(loc.real(), dir.join("outside/marker"));
-    }
-
-    #[test]
-    fn a_link_in_the_directory_chain_is_spliced() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = root(&tmp);
-        std::fs::create_dir_all(dir.join("top/deep")).unwrap();
-        std::os::unix::fs::symlink("top/deep", dir.join("alias")).unwrap();
-        let loc = located(&dir, "alias/secret").unwrap();
-        assert_eq!(loc.real(), dir.join("top/deep/secret"));
-    }
-
-    /// The walk asks of an ancestor what the kernel's resolver asks — search,
-    /// not read — so a `--x` directory, and a sandbox that admits ancestors as
-    /// metadata only, let it through.
-    #[test]
-    fn a_search_only_ancestor_is_walked() {
-        use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = root(&tmp);
-        std::fs::create_dir_all(dir.join("gate/inner")).unwrap();
-        std::fs::write(dir.join("gate/inner/f"), b"body").unwrap();
-        std::fs::set_permissions(dir.join("gate"), PermissionsExt::from_mode(0o111)).unwrap();
-        let loc = located(&dir, "gate/inner/f");
-        std::fs::set_permissions(dir.join("gate"), PermissionsExt::from_mode(0o755)).unwrap();
-        assert_eq!(loc.unwrap().stat().unwrap().unwrap().kind, Kind::File);
-    }
-
-    #[test]
-    fn a_link_cycle_is_refused() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink("b", tmp.path().join("a")).unwrap();
-        std::os::unix::fs::symlink("a", tmp.path().join("b")).unwrap();
-        let Err(err) = located(tmp.path(), "a") else {
-            panic!("a cycle must not locate");
-        };
-        assert_eq!(err.to_string(), LOOP_MESSAGE);
-    }
-
-    #[test]
-    fn the_leaf_open_never_follows_a_link_that_appeared_later() {
-        let tmp = tempfile::tempdir().unwrap();
-        let loc = located(tmp.path(), "victim").unwrap();
-        std::os::unix::fs::symlink("elsewhere", tmp.path().join("victim")).unwrap();
-        assert!(
-            loc.append().is_err(),
-            "a swapped-in leaf link must not be followed"
-        );
-        assert!(!tmp.path().join("elsewhere").exists());
-    }
-
-    /// A `..` from a link target is the kernel's: physical, so it climbs out
-    /// of the link's target, not out of the link's place.
-    #[test]
-    fn a_dotdot_from_a_link_target_is_physical() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = root(&tmp);
-        std::fs::create_dir_all(dir.join("x/y")).unwrap();
-        std::fs::create_dir(dir.join("sub")).unwrap();
-        std::os::unix::fs::symlink(dir.join("x/y"), dir.join("sub/lnk")).unwrap();
-        std::os::unix::fs::symlink("sub/lnk/../f", dir.join("L")).unwrap();
-        assert_eq!(located(&dir, "L").unwrap().real(), dir.join("x/f"));
-    }
-
-    /// Every restart is put to [`rooted`], the given name's and each
-    /// spliced one's alike: a name with no root is refused.
-    #[test]
-    fn a_walk_starts_only_from_a_root() {
-        assert_eq!(
-            rooted(Path::new("x")).unwrap_err().kind(),
-            io::ErrorKind::InvalidInput
-        );
-        assert!(rooted(Path::new("/x")).is_ok());
-    }
-
-    #[test]
-    fn the_root_locates_as_itself() {
-        let loc = located(Path::new("/"), "/").unwrap();
-        assert_eq!(loc.real(), Path::new("/"));
-        assert_eq!(loc.stat().unwrap().unwrap().kind, Kind::Dir);
-    }
-
-    /// Physically: through a link, `..` climbs out of its target.
-    #[test]
-    fn a_trailing_dotdot_locates_the_directory_reached() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = root(&tmp);
-        std::fs::create_dir_all(dir.join("top/deep")).unwrap();
-        std::os::unix::fs::symlink("top/deep", dir.join("alias")).unwrap();
-        for rel in ["top/deep/..", "alias/.."] {
-            let loc = located(&dir, rel).unwrap();
-            assert_eq!(loc.real(), dir.join("top"), "{rel}");
-            assert_eq!(loc.stat().unwrap().unwrap().kind, Kind::Dir, "{rel}");
-        }
-    }
-
-    #[test]
-    fn a_trailing_separator_on_a_file_is_not_a_directory() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = root(&tmp);
-        std::fs::write(dir.join("f"), b"body").unwrap();
-        for rel in ["f/", "f/."] {
-            let Err(err) = located_with(&dir, rel, Leaf::AsNamed) else {
-                panic!("{rel} names a directory");
-            };
-            assert_eq!(err.kind(), io::ErrorKind::NotADirectory, "{rel}");
-        }
-        std::fs::create_dir(dir.join("d")).unwrap();
-        assert_eq!(located(&dir, "d/").unwrap().real(), dir.join("d"));
-    }
-
-    #[test]
-    fn a_link_target_ending_in_a_separator_carries_the_requirement() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = root(&tmp);
-        std::fs::write(dir.join("f"), b"body").unwrap();
-        std::fs::create_dir(dir.join("d")).unwrap();
-        std::os::unix::fs::symlink("f/", dir.join("to_file")).unwrap();
-        std::os::unix::fs::symlink("d/", dir.join("to_dir")).unwrap();
-        let Err(err) = located(&dir, "to_file") else {
-            panic!("a link to `f/` names a directory");
-        };
-        assert_eq!(err.kind(), io::ErrorKind::NotADirectory);
-        let loc = located(&dir, "to_dir").unwrap();
-        assert_eq!(loc.real(), dir.join("d"));
-        assert_eq!(loc.stat().unwrap().unwrap().kind, Kind::Dir);
-    }
-
-    #[test]
-    fn a_dotdot_through_a_missing_directory_is_not_found() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = root(&tmp);
-        std::os::unix::fs::symlink("missing/../f", dir.join("L")).unwrap();
-        let Err(err) = located(&dir, "L") else {
-            panic!("the kernel gives ENOENT");
-        };
-        assert_eq!(err.kind(), io::ErrorKind::NotFound);
-    }
-}
-
-#[cfg(all(test, windows))]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] fixtures build the file whose short alias the walk is asked about"
-)]
-mod windows_tests {
-    use super::*;
-    use crate::path::Resolver;
-
-    fn walked(path: &Path) -> Located {
-        let cwd = crate::test_helper::process_cwd();
-        let rp = Resolver::at(&crate::types::EnvVars::new(), &cwd).anchor(path);
-        walk(&rp, Leaf::Resolve).unwrap()
-    }
-
-    #[test]
-    fn existing_and_absent_leaves_use_the_parents_stored_case() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("StoredCase");
-        std::fs::create_dir(&dir).unwrap();
-        std::fs::write(dir.join("File"), "x").unwrap();
-        for (spelled, stored) in [("file", "File"), ("new", "new")] {
-            let located = walked(&tmp.path().join("storedcase").join(spelled));
-            assert!(
-                located
-                    .real()
-                    .ends_with(Path::new("StoredCase").join(stored)),
-                "{}",
-                located.real().display()
-            );
-        }
-    }
-
-    /// What a link target may splice in, and the walk refuses on restart:
-    /// a drive-relative name, which `Path::join` lets replace the walked
-    /// prefix, and a head `std::path` reads on the current drive.
-    #[test]
-    fn a_walk_starts_only_from_a_parsed_root() {
-        for raw in ["x", "C:x", r"\x", r"\\x", r"/\x", r"\\\srv\sh"] {
-            assert_eq!(
-                rooted(Path::new(raw)).unwrap_err().kind(),
-                io::ErrorKind::InvalidInput,
-                "{raw}"
-            );
-        }
-        for raw in [r"C:\x", r"\\srv\sh\x", r"\\?\C:\x"] {
-            assert!(rooted(Path::new(raw)).is_ok(), "{raw}");
-        }
-    }
-
-    /// The 8.3 alias Windows keeps for `path`, if this volume keeps one.
-    fn short_name(path: &Path) -> Option<PathBuf> {
-        use std::os::windows::ffi::{OsStrExt, OsStringExt};
-        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
-        let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
-        let mut buf = vec![0u16; 1024];
-        // SAFETY: `wide` is NUL-terminated and `buf` holds the 1024 units
-        // the call is told of.
-        let len = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), 1024) };
-        buf.truncate(usize::try_from(len).ok().filter(|&n| n > 0 && n < 1024)?);
-        Some(PathBuf::from(std::ffi::OsString::from_wide(&buf)))
-    }
-
-    /// M4b: a *file* reached by its short alias locates at its long name, so
-    /// a deny frozen on the long name meets it.
-    #[test]
-    fn a_file_reached_by_its_short_alias_locates_at_its_long_name() {
-        let tmp = tempfile::tempdir().unwrap();
-        let long = tmp.path().join("secretfile-with-a-long-name.txt");
-        std::fs::write(&long, "x").unwrap();
-        let Some(short) = short_name(&long).filter(|s| s.file_name() != long.file_name()) else {
-            eprintln!("skip: this volume keeps no 8.3 names, so there is no alias to walk");
-            return;
-        };
-        let located = walked(&short);
-        assert_eq!(
-            located.real().file_name(),
-            long.file_name(),
-            "the walk kept the short alias {short:?}"
-        );
-    }
+pub(crate) fn open_discard() -> io::Result<File> {
+    host::open_discard()
 }

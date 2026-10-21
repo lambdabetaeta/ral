@@ -43,9 +43,9 @@ pub use show::shown;
 pub use slug::project_slug;
 pub use tilde::abbreviate_home;
 
-pub use forms::{CwdPath, FrozenPath, LexicalPath, NotACwd, RealPath};
+pub use forms::{CwdPath, FrozenPath, LexicalPath, NotACwd};
 pub use git::work_tree_chain;
-pub use identity::{Allow, Deny, Polarity};
+pub use identity::{Allow, Deny, MatchedBy, Polarity};
 pub(crate) use lex::{
     GrantRefusal, SubpathRefusal, classify_subpath, grant_eligibility, proper_ancestors,
 };
@@ -61,7 +61,11 @@ pub(crate) use render::rendered_ancestors;
 #[cfg(unix)]
 pub(crate) use render::{Object, Rendered, render_objects, render_paths, rendered_pins};
 pub use resolver::Resolver;
-pub use walk::Located;
+pub(crate) use walk::open_discard;
+pub use walk::{
+    Dir, DirEntry, EntryName, LeafMode, Located, NotAnEntryName, ObjectId, RealPath, RootName,
+    Step, Trace, walk, walk_dir, walk_lenient,
+};
 #[cfg(windows)]
 pub(crate) use which::is_batch_image;
 pub(crate) use which::is_executable_file;

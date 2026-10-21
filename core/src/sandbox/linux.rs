@@ -483,7 +483,8 @@ impl Shown {
     /// a read-only one wins.
     pub(crate) fn of(policy: &RenderedProjection) -> Result<Self, String> {
         let FsProjection::Restricted(rules) = &policy.fs else {
-            let root = RealPath::of("/".as_ref()).map_err(|e| format!("sandbox: no root: {e}"))?;
+            let root =
+                RealPath::of_path("/".as_ref()).map_err(|e| format!("sandbox: no root: {e}"))?;
             return Ok(Self {
                 binds: Vec::new(),
                 tolerated: BTreeSet::new(),
@@ -536,7 +537,7 @@ fn binds(objects: &[Object], access: Access) -> impl Iterator<Item = Bind> {
 
 /// `name` as the one object it reaches; `None` where it names nothing.
 fn object(name: &str) -> Result<Option<Rendered>, String> {
-    match RealPath::of(name.as_ref()) {
+    match RealPath::of_path(name.as_ref()) {
         Ok(real) => Ok(render_real(&real)?.into_iter().next()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("sandbox: cannot resolve {name}: {e}")),
@@ -1198,7 +1199,7 @@ mod tests {
         if let FsProjection::Restricted(rules) = &mut policy.fs {
             rules.read.extend(
                 [&tools, &w.join("bin")]
-                    .map(|d| FsScope::Place(RealPath::of(d).expect("a run place exists"))),
+                    .map(|d| FsScope::Place(RealPath::of_path(d).expect("a run place exists"))),
             );
         }
         let binds = binds(&policy, WHOLE);
@@ -1260,10 +1261,10 @@ mod tests {
         if let FsProjection::Restricted(rules) = &mut policy.fs {
             rules
                 .read
-                .push(FsScope::Place(RealPath::of(&bin).expect("a place")));
+                .push(FsScope::Place(RealPath::of_path(&bin).expect("a place")));
         }
         policy.exec = ExecProjection::Restricted(
-            std::iter::once(dir_rule(RealPath::of(&bin).expect("an admit"), true)).collect(),
+            std::iter::once(dir_rule(RealPath::of_path(&bin).expect("an admit"), true)).collect(),
         );
         let binds = binds(&policy, WHOLE);
         let name = |p: &std::path::Path| p.to_string_lossy().into_owned();
@@ -2461,8 +2462,8 @@ mod tests {
     /// multi-call image elsewhere, and the linkers a launch's support
     /// supplies: nothing else is admitted, ral's own binary included.
     fn admitting(dirs: &[&str], paths: &[&str]) -> ExecProjection {
-        let real = |p: &str| RealPath::of(std::path::Path::new(p)).expect("an admit exists");
-        let coreutils = RealPath::of(std::path::Path::new("/usr/bin/cat"))
+        let real = |p: &str| RealPath::of_path(std::path::Path::new(p)).expect("an admit exists");
+        let coreutils = RealPath::of_path(std::path::Path::new("/usr/bin/cat"))
             .ok()
             .and_then(|cat| cat.as_path().parent().map(RealPath::assumed));
         let dirs = ["/bin", "/usr/bin"]
@@ -2629,7 +2630,10 @@ mod tests {
             exec: admitting_less(
                 &[],
                 [
-                    file_rule(RealPath::of(&denied).expect("the command exists"), false),
+                    file_rule(
+                        RealPath::of_path(&denied).expect("the command exists"),
+                        false,
+                    ),
                     veto_rule(&name),
                 ],
             ),
@@ -2694,7 +2698,7 @@ mod tests {
             exec: admitting_less(
                 &[&expanded.to_string_lossy(), &whole.to_string_lossy()],
                 [file_rule(
-                    RealPath::of(&blocked).expect("the block exists"),
+                    RealPath::of_path(&blocked).expect("the block exists"),
                     false,
                 )],
             ),
@@ -2763,9 +2767,9 @@ mod tests {
                 ..deny_within(&elsewhere, &[])
             };
             if let FsProjection::Restricted(rules) = &mut policy.fs {
-                rules
-                    .read
-                    .extend(placed.then(|| FsScope::Place(RealPath::of(&tools).expect("a place"))));
+                rules.read.extend(
+                    placed.then(|| FsScope::Place(RealPath::of_path(&tools).expect("a place"))),
+                );
             }
             let Some(env) = envelope_launches(&policy) else {
                 return;
@@ -2985,7 +2989,7 @@ mod tests {
         let bind = dir.join("w/deep/bind");
         let (prog, excluded) = (copy_true(&bind, "prog"), copy_true(&bind, "excluded"));
         let unrelated = copy_true(&dir.join("elsewhere"), "unrelated");
-        let real = |p: &std::path::Path| RealPath::of(p).expect("the file exists");
+        let real = |p: &std::path::Path| RealPath::of_path(p).expect("the file exists");
         let policy = SandboxProjection {
             exec: ExecProjection::Restricted(
                 [
@@ -3618,8 +3622,8 @@ mod tests {
         let policy = exec_policy(admitting_less(
             &[],
             [
-                file_rule(RealPath::of(&admitted_file).expect("exists"), true),
-                file_rule(RealPath::of(&linked).expect("exists"), false),
+                file_rule(RealPath::of_path(&admitted_file).expect("exists"), true),
+                file_rule(RealPath::of_path(&linked).expect("exists"), false),
             ],
         ));
         let Some(env) = envelope_launches(&policy) else {

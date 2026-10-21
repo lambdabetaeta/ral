@@ -212,9 +212,11 @@ fn a_restrict_file_is_refused_by_the_fs_guard_under_either_spelling() {
         );
     }
     let path = shell.anchor(&sibling);
-    shell
-        .locate(&path, &FsOp::Write)
-        .expect("the deny is targeted: a sibling file stays writable");
+    drop(
+        shell
+            .locate(&path, &FsOp::Write)
+            .expect("the deny is targeted: a sibling file stays writable"),
+    );
 }
 
 /// The key that pays for the turn is not a thing the turn may read back.

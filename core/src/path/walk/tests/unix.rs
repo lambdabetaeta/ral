@@ -1,0 +1,1339 @@
+//! The walk on a real filesystem with real links.
+
+#![allow(
+    clippy::disallowed_methods,
+    reason = "[test] fixtures build the tree the walk is asked about"
+)]
+
+use super::super::*;
+use crate::path::{CwdPath, Resolver};
+use crate::types::EnvVars;
+use serde::de::DeserializeOwned;
+use std::io::{Read, Write};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink};
+
+pub(super) fn spelled(path: &Path) -> LexicalPath {
+    let cwd = CwdPath::new(PathBuf::from("/")).expect("/ is a working directory");
+    Resolver::at(&EnvVars::new(), &cwd).anchor(path)
+}
+
+fn located(path: &Path) -> io::Result<Located> {
+    located_with(path, LeafMode::Follow)
+}
+
+pub(super) fn located_with(path: &Path, mode: LeafMode) -> io::Result<Located> {
+    walk(&spelled(path), mode)
+}
+
+/// The temp root as the walk resolves it: macOS hands out `/var/folders/…`,
+/// a link to `/private/var/folders/…`, and following one is the point.
+pub(super) fn root(tmp: &tempfile::TempDir) -> PathBuf {
+    std::fs::canonicalize(tmp.path()).expect("the temp root canonicalises")
+}
+
+/// The identity of the object at `path`, which is a directory or a file.
+pub(super) fn id(path: &Path) -> ObjectId {
+    ObjectId::of(&File::open(path).expect("the object is there")).expect("it has an identity")
+}
+
+pub(super) fn root_user() -> bool {
+    rustix::process::geteuid().is_root()
+}
+
+fn json<T: Serialize>(value: &T) -> serde_json::Value {
+    serde_json::to_value(value).expect("it serialises")
+}
+
+fn decodes<T: DeserializeOwned>(value: serde_json::Value) -> bool {
+    serde_json::from_value::<T>(value).is_ok()
+}
+
+pub(super) fn name(raw: &str) -> EntryName {
+    EntryName::parse(OsStr::new(raw)).expect("a name")
+}
+
+/// The two leaf modes are the whole difference: `Follow` walks through a
+/// terminal link to its target, `NoFollow` stops at the link itself, which is
+/// the only way `exists` can say a dangling link is there and `is-link` can
+/// say it is a link.
+#[test]
+fn no_follow_stops_at_the_link_that_follow_walks_through() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("target"), b"body").unwrap();
+    symlink("target", dir.join("link")).unwrap();
+
+    let followed = located(&dir.join("link")).unwrap();
+    assert_eq!(followed.real().as_path(), dir.join("target"));
+    assert_eq!(followed.stat().unwrap().kind, Kind::File);
+
+    let named = located_with(&dir.join("link"), LeafMode::NoFollow).unwrap();
+    assert_eq!(named.real().as_path(), dir.join("link"));
+    assert_eq!(named.stat().unwrap().kind, Kind::Symlink);
+    assert_eq!(named.read_link().unwrap(), Path::new("target"));
+}
+
+/// A dangling link is absent to `Follow` and present to `NoFollow`.
+#[test]
+fn a_dangling_link_is_absent_followed_and_present_unfollowed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    symlink("gone", dir.join("dangling")).unwrap();
+
+    assert!(located(&dir.join("dangling")).unwrap().stat().is_none());
+    let named = located_with(&dir.join("dangling"), LeafMode::NoFollow).unwrap();
+    assert_eq!(named.stat().unwrap().kind, Kind::Symlink);
+}
+
+#[test]
+fn a_plain_new_file_locates_where_its_name_says() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    let loc = located(&dir.join("fresh")).unwrap();
+    assert_eq!(loc.real().as_path(), dir.join("fresh"));
+    assert!(loc.stat().is_none());
+}
+
+/// A link whose target does not exist must locate the *target*, so a guard
+/// judges where the bytes go.
+#[test]
+fn a_dangling_link_locates_its_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir_all(dir.join("work")).unwrap();
+    std::fs::create_dir_all(dir.join("outside")).unwrap();
+    symlink("../outside/marker", dir.join("work/dangling")).unwrap();
+    let loc = located(&dir.join("work/dangling")).unwrap();
+    assert_eq!(loc.real().as_path(), dir.join("outside/marker"));
+}
+
+#[test]
+fn a_link_in_the_directory_chain_is_spliced() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir_all(dir.join("top/deep")).unwrap();
+    symlink("top/deep", dir.join("alias")).unwrap();
+    let loc = located(&dir.join("alias/secret")).unwrap();
+    assert_eq!(loc.real().as_path(), dir.join("top/deep/secret"));
+}
+
+/// The walk asks of an ancestor what the kernel's resolver asks — search, not
+/// read — so a `--x` directory, and a sandbox that admits ancestors as
+/// metadata only, let it through.
+#[test]
+fn a_search_only_ancestor_is_walked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir_all(dir.join("gate/inner")).unwrap();
+    std::fs::write(dir.join("gate/inner/f"), b"body").unwrap();
+    std::fs::set_permissions(dir.join("gate"), PermissionsExt::from_mode(0o111)).unwrap();
+    let loc = located(&dir.join("gate/inner/f"));
+    std::fs::set_permissions(dir.join("gate"), PermissionsExt::from_mode(0o755)).unwrap();
+    assert_eq!(loc.unwrap().stat().unwrap().kind, Kind::File);
+}
+
+#[test]
+fn a_link_cycle_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    symlink("b", tmp.path().join("a")).unwrap();
+    symlink("a", tmp.path().join("b")).unwrap();
+    let Err(err) = located(&tmp.path().join("a")) else {
+        panic!("a cycle must not locate");
+    };
+    assert_eq!(err.to_string(), LOOP_MESSAGE);
+    assert!(walk_lenient(&spelled(&tmp.path().join("a")), LeafMode::Follow).is_err());
+}
+
+/// Forty splices are the budget: a chain of forty links walks, one of
+/// forty-one is a loop.
+#[test]
+fn the_splice_budget_is_forty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("end"), b"").unwrap();
+    symlink("end", dir.join("l0")).unwrap();
+    for i in 1..=MAX_HOPS {
+        symlink(format!("l{}", i - 1), dir.join(format!("l{i}"))).unwrap();
+    }
+    assert_eq!(
+        located(&dir.join(format!("l{}", MAX_HOPS - 1)))
+            .unwrap()
+            .real()
+            .as_path(),
+        dir.join("end")
+    );
+    let Err(err) = located(&dir.join(format!("l{MAX_HOPS}"))) else {
+        panic!("forty-one splices are a loop");
+    };
+    assert_eq!(err.to_string(), LOOP_MESSAGE);
+}
+
+/// Where a link is a redirection, the walk refuses it rather than splicing.
+#[test]
+fn a_walk_that_refuses_links_refuses_the_first_it_meets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("real")).unwrap();
+    symlink("real", dir.join("link")).unwrap();
+    let refusing = |rel: &str| {
+        finish(
+            &dir.join(rel),
+            Mode::Follow,
+            OnMissing::Fail,
+            Links::Refuse,
+            |_: &Vetted<'_>| true,
+        )
+    };
+    assert!(refusing("real").is_ok());
+    for rel in ["link", "link/x"] {
+        let Err(err) = refusing(rel) else {
+            panic!("{rel} is a link");
+        };
+        assert_eq!(err.to_string(), LOOP_MESSAGE, "{rel}");
+    }
+}
+
+#[test]
+fn the_leaf_open_never_follows_a_link_that_appeared_later() {
+    let tmp = tempfile::tempdir().unwrap();
+    let loc = located(&tmp.path().join("victim")).unwrap();
+    symlink("elsewhere", tmp.path().join("victim")).unwrap();
+    assert!(
+        loc.append().is_err(),
+        "a swapped-in leaf link must not be followed"
+    );
+    assert!(!tmp.path().join("elsewhere").exists());
+}
+
+/// A `..` from a link target is the kernel's: physical, so it climbs out of
+/// the link's target, not out of the link's place.
+#[test]
+fn a_dotdot_from_a_link_target_is_physical() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir_all(dir.join("x/y")).unwrap();
+    std::fs::create_dir(dir.join("sub")).unwrap();
+    symlink(dir.join("x/y"), dir.join("sub/lnk")).unwrap();
+    symlink("sub/lnk/../f", dir.join("L")).unwrap();
+    assert_eq!(
+        located(&dir.join("L")).unwrap().real().as_path(),
+        dir.join("x/f")
+    );
+}
+
+/// Every restart is put to [`rooted`], the given name's and each spliced
+/// one's alike: a name with no root is refused.
+#[test]
+fn a_walk_starts_only_from_a_root() {
+    assert_eq!(
+        rooted(Path::new("x")).unwrap_err().kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert!(rooted(Path::new("/x")).is_ok());
+}
+
+#[test]
+fn the_root_locates_as_itself() {
+    let loc = located(Path::new("/")).unwrap();
+    assert_eq!(loc.real().as_path(), Path::new("/"));
+    assert_eq!(loc.stat().unwrap().kind, Kind::Dir);
+}
+
+/// Physically: through a link, `..` climbs out of its target.
+#[test]
+fn a_trailing_dotdot_locates_the_directory_reached() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir_all(dir.join("top/deep")).unwrap();
+    symlink("top/deep", dir.join("alias")).unwrap();
+    for rel in ["top/deep/..", "alias/.."] {
+        let loc = located(&dir.join(rel)).unwrap();
+        assert_eq!(loc.real().as_path(), dir.join("top"), "{rel}");
+        assert_eq!(loc.stat().unwrap().kind, Kind::Dir, "{rel}");
+    }
+}
+
+#[test]
+fn a_trailing_separator_on_a_file_is_not_a_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("f"), b"body").unwrap();
+    for rel in ["f/", "f/."] {
+        let Err(err) = located_with(&dir.join(rel), LeafMode::NoFollow) else {
+            panic!("{rel} names a directory");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::NotADirectory, "{rel}");
+    }
+    std::fs::create_dir(dir.join("d")).unwrap();
+    assert_eq!(
+        located(&dir.join("d/")).unwrap().real().as_path(),
+        dir.join("d")
+    );
+}
+
+#[test]
+fn a_link_target_ending_in_a_separator_carries_the_requirement() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("f"), b"body").unwrap();
+    std::fs::create_dir(dir.join("d")).unwrap();
+    symlink("f/", dir.join("to_file")).unwrap();
+    symlink("d/", dir.join("to_dir")).unwrap();
+    let Err(err) = located(&dir.join("to_file")) else {
+        panic!("a link to `f/` names a directory");
+    };
+    assert_eq!(err.kind(), io::ErrorKind::NotADirectory);
+    let loc = located(&dir.join("to_dir")).unwrap();
+    assert_eq!(loc.real().as_path(), dir.join("d"));
+    assert_eq!(loc.stat().unwrap().kind, Kind::Dir);
+}
+
+/// `alias -> d/` with a name still to come is `d` then the name, not a
+/// requirement on the whole.
+#[test]
+fn a_link_to_a_directory_spelling_opens_the_file_beneath_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("d")).unwrap();
+    std::fs::write(dir.join("d/file"), b"body").unwrap();
+    symlink("d/", dir.join("alias")).unwrap();
+    let loc = located(&dir.join("alias/file")).unwrap();
+    assert_eq!(loc.real().as_path(), dir.join("d/file"));
+    let mut body = String::new();
+    loc.read().unwrap().read_to_string(&mut body).unwrap();
+    assert_eq!(body, "body");
+}
+
+#[test]
+fn a_dotdot_through_a_missing_directory_is_not_found() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    symlink("missing/../f", dir.join("L")).unwrap();
+    let Err(err) = located(&dir.join("L")) else {
+        panic!("the kernel gives ENOENT");
+    };
+    assert_eq!(err.kind(), io::ErrorKind::NotFound);
+}
+
+/// A directory spelling is the directory itself, held as entered, with the
+/// one beneath it as `dir`: the root is its own container.  `walk_dir` of
+/// each is the same directory.
+#[test]
+fn a_directory_spelling_is_the_directory_entered() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    let parent = dir.parent().unwrap().to_path_buf();
+    std::fs::create_dir(dir.join("d")).unwrap();
+    symlink("d/", dir.join("alias")).unwrap();
+    let cases = [
+        ("/".into(), "/".into(), "/".into()),
+        (dir.join("d/"), dir.join("d"), dir.clone()),
+        (dir.join("d/.."), dir.clone(), parent),
+        (dir.join("alias"), dir.join("d"), dir.clone()),
+    ];
+    for (spelling, leaf, beneath) in cases {
+        let loc = located(&spelling).unwrap();
+        assert_eq!(loc.real().as_path(), leaf, "{spelling:?}");
+        let Leaf::Held { file, stat, .. } = &loc.leaf else {
+            panic!("{spelling:?} holds its directory");
+        };
+        assert_eq!(stat.kind, Kind::Dir);
+        assert_eq!(ObjectId::of(file).unwrap(), id(&leaf), "{spelling:?}");
+        assert_eq!(
+            ObjectId::of(&loc.dir.file).unwrap(),
+            id(&beneath),
+            "{spelling:?}"
+        );
+
+        let entered = walk_dir(&spelled(&spelling)).unwrap();
+        assert_eq!(entered.trace(), loc.trace(), "{spelling:?}");
+        assert_eq!(ObjectId::of(&entered.handle.file).unwrap(), id(&leaf));
+        assert_eq!(entered.stat().kind, Kind::Dir);
+    }
+    assert_eq!(
+        walk_dir(&spelled(&dir.join("missing/")))
+            .err()
+            .unwrap()
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+}
+
+#[test]
+fn a_directory_spelling_of_a_file_or_a_missing_name_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("f"), b"").unwrap();
+    symlink("f", dir.join("to_f")).unwrap();
+    for rel in ["f/", "to_f/", "to_f/."] {
+        let Err(err) = located(&dir.join(rel)) else {
+            panic!("{rel} is no directory");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::NotADirectory, "{rel}");
+    }
+    let Err(err) = located(&dir.join("missing/")) else {
+        panic!("missing/ is nothing");
+    };
+    assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    let Err(err) = walk_dir(&spelled(&dir.join("f"))) else {
+        panic!("a file is not entered");
+    };
+    assert_eq!(err.kind(), io::ErrorKind::NotADirectory);
+}
+
+/// The transcript has the root's identity and one step per component.
+#[test]
+fn a_trace_has_the_roots_identity_and_one_step_per_component() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir_all(dir.join("a/b")).unwrap();
+    std::fs::write(dir.join("a/b/f"), b"").unwrap();
+    let located = located(&dir.join("a/b/f")).unwrap();
+    let trace = located.trace();
+    assert_eq!(trace.root_id, id(Path::new("/")));
+    let depth = dir.components().count() - 1;
+    let steps = trace.steps();
+    assert_eq!(steps.len(), depth + 3);
+    assert_eq!(trace.tail(), []);
+    let mut at = PathBuf::from("/");
+    for step in steps {
+        at.push(step.name().as_os_str());
+        assert_eq!(step.id(), id(&at), "{at:?}");
+    }
+    let kinds: Vec<Kind> = steps.iter().map(Step::kind).collect();
+    assert!(kinds[..kinds.len() - 1].iter().all(|k| *k == Kind::Dir));
+    assert_eq!(kinds.last(), Some(&Kind::File));
+    assert_eq!(trace.kind(), Some(Kind::File));
+    assert_eq!(trace.leaf_id(), Some(id(&dir.join("a/b/f"))));
+}
+
+/// A `..` in a link target pops one step: the transcript has no `..`.
+#[test]
+fn a_dotdot_in_a_link_target_pops_one_step() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir_all(dir.join("a/b")).unwrap();
+    std::fs::write(dir.join("a/f"), b"").unwrap();
+    symlink("../f", dir.join("a/b/l")).unwrap();
+    let located = located(&dir.join("a/b/l")).unwrap();
+    let plain = super::super::walk(&spelled(&dir.join("a/f")), LeafMode::Follow).unwrap();
+    assert_eq!(located.trace(), plain.trace());
+    assert_eq!(located.real().as_path(), dir.join("a/f"));
+}
+
+/// A missing leaf has a one-name tail and a trace without a kind.
+#[test]
+fn a_missing_leaf_has_a_one_name_tail() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    let located = located(&dir.join("fresh")).unwrap();
+    assert_eq!(located.trace().tail(), [name("fresh")]);
+    assert_eq!(located.trace().kind(), None);
+    assert_eq!(located.trace().leaf_id(), None);
+    assert!(located.stat().is_none());
+}
+
+/// A lenient walk of a spelling whose last two names are missing has a
+/// two-name tail and two fewer steps than components.
+#[test]
+fn a_lenient_walk_keeps_the_missing_names_as_a_tail() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    let strict = located(&dir).unwrap();
+    let trace = walk_lenient(&spelled(&dir.join("one/two")), LeafMode::Follow).unwrap();
+    assert_eq!(trace.tail(), [name("one"), name("two")]);
+    assert_eq!(trace.steps().len(), strict.trace().steps().len());
+    assert_eq!(trace.real().as_path(), dir.join("one/two"));
+    assert_eq!(trace.kind(), None);
+    let folded = walk_lenient(&spelled(&dir.join("one/../two")), LeafMode::Follow).unwrap();
+    assert_eq!(folded.tail(), [name("two")]);
+}
+
+/// A lenient walk ends its steps at a name it cannot enter and keeps the
+/// rest as the tail: a directory that may be walked to and not searched.
+#[test]
+fn a_lenient_walk_through_an_unreadable_directory_ends_its_steps_there() {
+    if root_user() {
+        eprintln!("skip: root searches every directory, so none is unreadable");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir_all(dir.join("closed/inner")).unwrap();
+    std::fs::set_permissions(dir.join("closed"), PermissionsExt::from_mode(0o000)).unwrap();
+    let trace = walk_lenient(&spelled(&dir.join("closed/inner/f")), LeafMode::Follow);
+    std::fs::set_permissions(dir.join("closed"), PermissionsExt::from_mode(0o755)).unwrap();
+    let trace = trace.unwrap();
+    assert_eq!(trace.tail(), [name("inner"), name("f")]);
+    assert_eq!(trace.steps().last().unwrap().name(), &name("closed"));
+    assert_eq!(trace.real().as_path(), dir.join("closed/inner/f"));
+}
+
+/// A directory has a kind, and so has a link to one under `Follow`; a missing
+/// tail has none; a present root has its own identity.
+#[test]
+fn a_lenient_trace_knows_its_kind_and_a_root_its_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("d")).unwrap();
+    symlink("d", dir.join("to_d")).unwrap();
+    let kind = |rel: &str, mode| walk_lenient(&spelled(&dir.join(rel)), mode).unwrap().kind();
+    assert_eq!(kind("d", LeafMode::Follow), Some(Kind::Dir));
+    assert_eq!(kind("to_d", LeafMode::Follow), Some(Kind::Dir));
+    assert_eq!(kind("to_d", LeafMode::NoFollow), Some(Kind::Symlink));
+    assert_eq!(kind("missing", LeafMode::Follow), None);
+    let root_trace = walk_lenient(&spelled(Path::new("/")), LeafMode::Follow).unwrap();
+    assert_eq!(root_trace.leaf_id(), Some(id(Path::new("/"))));
+    assert_eq!(root_trace.kind(), Some(Kind::Dir));
+}
+
+/// `real` is the join of the root, the steps' names and the tail.
+#[test]
+fn a_traces_real_is_the_join_of_its_parts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("d")).unwrap();
+    let trace = walk_lenient(&spelled(&dir.join("d/gone/f")), LeafMode::Follow).unwrap();
+    let mut joined = trace.root.0.clone();
+    joined.extend(trace.steps().iter().map(|s| s.name().as_os_str()));
+    joined.extend(trace.tail().iter().map(EntryName::as_os_str));
+    assert_eq!(trace.real().as_path(), joined);
+    assert_eq!(joined, dir.join("d/gone/f"));
+}
+
+/// A trace read off the wire is one the walk could have made: `real` is
+/// recomputed, a step past a file is refused, and so is a tail past one.
+#[test]
+fn a_trace_decodes_checked_and_recomputed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("d")).unwrap();
+    std::fs::write(dir.join("d/f"), b"").unwrap();
+    let walked = located(&dir.join("d/f")).unwrap();
+    let trace = walked.trace();
+    let wire = json(trace);
+    assert_eq!(
+        serde_json::from_value::<Trace>(wire.clone()).unwrap(),
+        *trace
+    );
+
+    let mut lying = wire.clone();
+    lying["real"] = json(located(&dir.join("d")).unwrap().real());
+    assert!(!decodes::<Trace>(lying), "a `real` the steps do not make");
+
+    let [.., dstep, fstep] = trace.steps() else {
+        panic!("a walk of d/f has steps");
+    };
+    let root_id = trace.root_id;
+    let made = |steps: &[Step], tail: &[EntryName]| {
+        json(&Trace::new(
+            trace.root.clone(),
+            root_id,
+            trace.steps()[..trace.steps().len() - 2]
+                .iter()
+                .chain(steps)
+                .cloned()
+                .collect(),
+            tail.to_vec(),
+        ))
+    };
+    assert!(decodes::<Trace>(made(&[dstep.clone(), fstep.clone()], &[])));
+    assert!(
+        !decodes::<Trace>(made(&[fstep.clone(), dstep.clone()], &[])),
+        "a step beneath a file"
+    );
+    assert!(
+        !decodes::<Trace>(made(&[dstep.clone(), fstep.clone()], &[name("more")])),
+        "a tail beneath a file"
+    );
+    assert!(decodes::<Trace>(made(
+        std::slice::from_ref(dstep),
+        &[name("more")]
+    )));
+
+    let mut unnamed = wire;
+    unnamed["steps"][0]["name"] = json(&OsString::from("a/b"));
+    assert!(!decodes::<Trace>(unnamed), "a step named by a path");
+}
+
+#[test]
+fn an_entry_name_is_one_normal_component() {
+    for refused in ["", ".", "..", "a/b", "/a", "a/", "/"] {
+        assert!(
+            EntryName::parse(OsStr::new(refused)).is_err(),
+            "{refused:?} is no entry name"
+        );
+        assert!(!decodes::<EntryName>(json(&OsString::from(refused))));
+    }
+    for named in ["a", ".hidden", "..a", "a b", "a\\b", "a:b"] {
+        let parsed = EntryName::parse(OsStr::new(named)).unwrap();
+        assert_eq!(parsed.as_os_str(), named);
+        assert_eq!(
+            serde_json::from_value::<EntryName>(json(&parsed)).unwrap(),
+            parsed
+        );
+    }
+    let refusal = EntryName::parse(OsStr::new("a/b")).unwrap_err().to_string();
+    assert!(refusal.contains("separator"), "{refusal}");
+}
+
+#[test]
+fn a_fresh_name_is_a_prefix_and_sixteen_alphanumerics() {
+    let fresh = EntryName::fresh(".ral-write-").unwrap();
+    let rest = fresh
+        .as_os_str()
+        .to_str()
+        .unwrap()
+        .strip_prefix(".ral-write-")
+        .unwrap()
+        .to_owned();
+    assert_eq!(rest.len(), 16);
+    assert!(rest.chars().all(|c| c.is_ascii_alphanumeric()));
+    assert_ne!(fresh, EntryName::fresh(".ral-write-").unwrap());
+    assert!(EntryName::fresh("a/b").is_err());
+    assert!(EntryName::fresh("../").is_err());
+}
+
+#[test]
+fn a_root_name_is_a_root_and_nothing_more() {
+    let root_of = |raw: &str| serde_json::from_value::<RootName>(json(&OsString::from(raw)));
+    assert!(root_of("/").is_ok());
+    for refused in ["", "x", "/a", "a/b", "."] {
+        assert!(root_of(refused).is_err(), "{refused:?} is no root");
+    }
+    assert_eq!(json(&root_of("/").unwrap()), json(&OsString::from("/")));
+}
+
+/// A position is absolute, spelled as the walk spells one, and without `.`
+/// or `..`; a non-Unicode one crosses the wire whole.
+#[test]
+fn a_real_path_decodes_checked_and_whole() {
+    let position = |raw: &str| serde_json::from_value::<RealPath>(json(&OsString::from(raw)));
+    assert!(position("/").is_ok());
+    assert!(position("/a/b").is_ok());
+    for refused in ["", "a", "a/b", "/a/../b", "/a/./b", "//a", "/a/", "/.."] {
+        assert!(position(refused).is_err(), "{refused:?} is no position");
+    }
+    let raw = RealPath::assumed(OsStr::from_bytes(b"/opt/\xFFtool"));
+    let back = serde_json::from_value::<RealPath>(json(&raw)).unwrap();
+    assert_eq!(back, raw);
+    assert_eq!(back.as_path().as_os_str().as_bytes(), b"/opt/\xFFtool");
+    assert_ne!(back, RealPath::assumed("/opt/\u{FFFD}tool"));
+}
+
+/// The Linux step asks for a directory first, so a file, a link and a
+/// directory are classified alike, each by `fstat` of what was opened, under
+/// the name asked.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_linux_step_classifies_a_file_a_link_and_a_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("f"), b"body").unwrap();
+    std::fs::create_dir(dir.join("d")).unwrap();
+    symlink("f", dir.join("l")).unwrap();
+    let held = Held {
+        file: File::open(&dir).unwrap(),
+        info: host::DirInfo,
+    };
+    for (entry, kind) in [("f", Kind::File), ("d", Kind::Dir), ("l", Kind::Symlink)] {
+        let child = host::step(&held, &name(entry), Sharing::Leaf).unwrap();
+        assert_eq!(child.step.kind, kind, "{entry}");
+        assert_eq!(child.stat.kind, kind, "{entry}");
+        assert_eq!(child.step.name.as_os_str(), entry);
+        let handle = child.handle.unwrap();
+        assert_eq!(child.step.id, ObjectId::of(&handle).unwrap(), "{entry}");
+        if kind != Kind::Symlink {
+            assert_eq!(child.step.id, id(&dir.join(entry)), "{entry}");
+        }
+    }
+    let Err(err) = host::step(&held, &name("missing"), Sharing::Leaf) else {
+        panic!("nothing is there");
+    };
+    assert_eq!(err.kind(), io::ErrorKind::NotFound);
+}
+
+/// An identity read from a handle is the one a by-name `stat` reads.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_identity_agrees_across_handle_and_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("f"), b"").unwrap();
+    let file = File::open(dir.join("f")).unwrap();
+    let held = File::open(&dir).unwrap();
+    let named = rustix::fs::statat(&held, "f", rustix::fs::AtFlags::SYMLINK_NOFOLLOW).unwrap();
+    assert_eq!(ObjectId::of(&file).unwrap(), ObjectId::from(&named));
+    assert_eq!(
+        ObjectId::of(&file).unwrap(),
+        host::seen_at(&held, OsStr::new("f")).unwrap().id
+    );
+    let meta = file.metadata().unwrap();
+    assert_eq!(host::seen(&file).unwrap().stat.len, meta.len());
+    assert_eq!(host::seen(&file).unwrap().stat.mode, meta.mode() & 0o7777);
+}
+
+/// A walk through an untriggered autofs mount point enters it: the step asks
+/// for a directory first, which triggers the automount, where a plain `O_PATH`
+/// open would answer the empty directory the mount lies over.  Run in a mount
+/// namespace of its own where `automount` is on `PATH` and the user may make
+/// one; the namespace re-runs this test with `RAL_TEST_AUTOFS` set.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_linux_walk_enters_an_untriggered_autofs_mount_point() {
+    use std::process::Command;
+    const ME: &str = "the_linux_walk_enters_an_untriggered_autofs_mount_point";
+    if let Some(mounts) = std::env::var_os("RAL_TEST_AUTOFS") {
+        let walked = located(&Path::new(&mounts).join("k")).unwrap();
+        assert_eq!(walked.stat().unwrap().kind, Kind::Dir);
+        return;
+    }
+    let on_path = |tool: &str| {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join(tool))
+            .find(|candidate| candidate.is_file())
+    };
+    let (Some(automount), Some(_)) = (on_path("automount"), on_path("unshare")) else {
+        eprintln!(
+            "skip: `automount` and `unshare` are not both on PATH, and an untriggered autofs mount point needs the daemon"
+        );
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    let mounts = dir.join("mnt");
+    std::fs::create_dir(&mounts).unwrap();
+    std::fs::write(
+        dir.join("auto.master"),
+        format!("{} {}\n", mounts.display(), dir.join("auto.map").display()),
+    )
+    .unwrap();
+    std::fs::write(dir.join("auto.map"), "k -fstype=tmpfs :tmpfs\n").unwrap();
+    let script = "\"$AUTOMOUNT\" -f -p \"$DIR/pid\" \"$DIR/auto.master\" & daemon=$!; \
+                  trap 'kill $daemon' EXIT; \
+                  for _ in 1 2 3 4 5 6 7 8 9 10; do mountpoint -q \"$DIR/mnt\" && break; sleep 0.2; done; \
+                  \"$TEST\" --exact \"$NAME\" --nocapture";
+    let module = module_path!().split_once("::").map_or("", |(_, rest)| rest);
+    let status = Command::new("unshare")
+        .args(["--mount", "--propagation", "private", "sh", "-c", script])
+        .env("RAL_TEST_AUTOFS", &mounts)
+        .env("AUTOMOUNT", automount)
+        .env("DIR", &dir)
+        .env("TEST", std::env::current_exe().unwrap())
+        .env("NAME", format!("{module}::{ME}"))
+        .status();
+    match status.map(|s| s.code()) {
+        Ok(Some(0)) => {}
+        Ok(Some(101)) => panic!("the walk did not enter the autofs mount point"),
+        _ => eprintln!("skip: no mount namespace in which `automount` can run is available here"),
+    }
+}
+
+/// A link is read through the handle the walk opened on it: replaced at its
+/// name afterwards, it still answers what it said when opened.
+#[test]
+fn a_links_target_is_read_through_the_handle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    symlink("first", dir.join("l")).unwrap();
+    let opened = located_with(&dir.join("l"), LeafMode::NoFollow).unwrap();
+    std::fs::remove_file(dir.join("l")).unwrap();
+    symlink("second", dir.join("l")).unwrap();
+    assert_eq!(opened.read_link().unwrap(), Path::new("first"));
+    let fresh = located_with(&dir.join("l"), LeafMode::NoFollow).unwrap();
+    assert_eq!(fresh.read_link().unwrap(), Path::new("second"));
+}
+
+#[test]
+fn only_a_link_has_a_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("f"), b"").unwrap();
+    let file = located(&dir.join("f")).unwrap();
+    assert_eq!(
+        file.read_link().unwrap_err().kind(),
+        io::ErrorKind::InvalidInput
+    );
+    let missing = located(&dir.join("gone")).unwrap();
+    assert_eq!(
+        missing.read_link().unwrap_err().kind(),
+        io::ErrorKind::NotFound
+    );
+}
+
+/// A relative target continues from the directory the walk holds, not from
+/// where that directory's name leads now.
+#[test]
+fn a_relative_target_continues_from_the_held_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir_all(dir.join("d/original")).unwrap();
+    symlink("original", dir.join("d/l")).unwrap();
+    let held = walk_dir(&spelled(&dir.join("d"))).unwrap();
+    let wanted = id(&dir.join("d/original"));
+
+    std::fs::rename(dir.join("d"), dir.join("moved")).unwrap();
+    std::fs::create_dir_all(dir.join("d/other")).unwrap();
+    symlink("other", dir.join("d/l")).unwrap();
+
+    let entered = held.open_dir_via_link(&name("l"), &[]).unwrap();
+    assert_eq!(ObjectId::of(&entered.handle.file).unwrap(), wanted);
+    assert_eq!(entered.trace().real().as_path(), dir.join("d/original"));
+    assert_eq!(entered.stat().kind, Kind::Dir);
+}
+
+/// A `..` in the target pops the chain of directories the caller entered, and
+/// one past its first entry is `NotFound`: nothing above was walked.
+#[test]
+fn a_dotdot_in_a_target_pops_the_chain_and_stops_at_its_end() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir_all(dir.join("a/b")).unwrap();
+    std::fs::create_dir(dir.join("a/c")).unwrap();
+    symlink("../c", dir.join("a/b/up")).unwrap();
+    symlink("../../a/c", dir.join("a/b/far")).unwrap();
+    let above = walk_dir(&spelled(&dir.join("a"))).unwrap();
+    let below = above.open_dir(&name("b")).unwrap();
+
+    let entered = below.open_dir_via_link(&name("up"), &[&above]).unwrap();
+    assert_eq!(entered.real().as_path(), dir.join("a/c"));
+    assert_eq!(
+        ObjectId::of(&entered.handle.file).unwrap(),
+        id(&dir.join("a/c"))
+    );
+
+    let Err(err) = below.open_dir_via_link(&name("far"), &[&above]) else {
+        panic!("nothing above `a` was walked");
+    };
+    assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    let Err(err) = below.open_dir_via_link(&name("up"), &[]) else {
+        panic!("an empty chain has nothing to pop");
+    };
+    assert_eq!(err.kind(), io::ErrorKind::NotFound);
+}
+
+#[test]
+fn open_dir_enters_a_directory_and_nothing_else() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("d")).unwrap();
+    std::fs::write(dir.join("f"), b"").unwrap();
+    symlink("d", dir.join("l")).unwrap();
+    let held = walk_dir(&spelled(&dir)).unwrap();
+    let entered = held.open_dir(&name("d")).unwrap();
+    assert_eq!(entered.real().as_path(), dir.join("d"));
+    assert_eq!(
+        ObjectId::of(&entered.handle.file).unwrap(),
+        id(&dir.join("d"))
+    );
+    for refused in ["f", "l"] {
+        let Err(err) = held.open_dir(&name(refused)) else {
+            panic!("{refused} is no directory entry");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::NotADirectory, "{refused}");
+    }
+    let Err(err) = held.open_dir(&name("missing")) else {
+        panic!("nothing is there");
+    };
+    assert_eq!(err.kind(), io::ErrorKind::NotFound);
+}
+
+#[test]
+fn locate_holds_an_entry_by_its_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("f"), b"body").unwrap();
+    symlink("f", dir.join("l")).unwrap();
+    let held = walk_dir(&spelled(&dir)).unwrap();
+    let file = held.locate(&name("f"), LeafMode::Follow).unwrap();
+    assert_eq!(file.real().as_path(), dir.join("f"));
+    let followed = held.locate(&name("l"), LeafMode::Follow).unwrap();
+    assert_eq!(followed.real().as_path(), dir.join("f"));
+    let link = held.locate(&name("l"), LeafMode::NoFollow).unwrap();
+    assert_eq!(link.read_link().unwrap(), Path::new("f"));
+    let Err(err) = held.locate(&name("missing"), LeafMode::Follow) else {
+        panic!("nothing is there");
+    };
+    assert_eq!(err.kind(), io::ErrorKind::NotFound);
+}
+
+/// The listing names the entries in order, and stats each as it is reached:
+/// one removed after the first is yielded is seen to be gone.
+#[test]
+fn a_listing_is_sorted_and_stated_as_it_is_yielded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    for entry in ["c", "a", "b"] {
+        std::fs::write(dir.join(entry), entry).unwrap();
+    }
+    std::fs::create_dir(dir.join("d")).unwrap();
+    symlink("a", dir.join("l")).unwrap();
+    let held = walk_dir(&spelled(&dir)).unwrap();
+
+    let listed: Vec<(String, Kind)> = held
+        .read_dir()
+        .unwrap()
+        .map(|e| {
+            (
+                e.name().as_os_str().to_str().unwrap().to_owned(),
+                e.seen().unwrap().stat.kind,
+            )
+        })
+        .collect();
+    let want = [
+        ("a", Kind::File),
+        ("b", Kind::File),
+        ("c", Kind::File),
+        ("d", Kind::Dir),
+        ("l", Kind::Symlink),
+    ];
+    assert_eq!(
+        listed,
+        want.map(|(n, k)| (n.to_owned(), k)).to_vec(),
+        "a link is stated, not followed"
+    );
+
+    let mut entries = held.read_dir().unwrap();
+    let first = entries.next().unwrap();
+    assert_eq!(first.name().as_os_str(), "a");
+    std::fs::remove_file(dir.join("b")).unwrap();
+    let second = entries.next().unwrap();
+    assert_eq!(second.name().as_os_str(), "b");
+    assert_eq!(second.seen().err().unwrap().kind(), io::ErrorKind::NotFound);
+    assert!(second.listed().is_none(), "an unseen entry has no identity");
+    assert_eq!(entries.next().unwrap().name().as_os_str(), "c");
+}
+
+/// What the listing saw of an entry is its identity and kind, judged as the
+/// name shown under the directory it was listed from.
+#[test]
+fn a_listed_entry_records_its_identity_beneath_its_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("f"), b"").unwrap();
+    let held = walk_dir(&spelled(&dir)).unwrap();
+    let entries: Vec<_> = held.read_dir().unwrap().collect();
+    let [entry] = entries.as_slice() else {
+        panic!("one entry");
+    };
+    let listed = entry.listed().unwrap();
+    assert_eq!(listed.real().as_path(), dir.join("f"));
+    assert_eq!(listed.step.id(), id(&dir.join("f")));
+    assert_eq!(listed.step.kind(), Kind::File);
+}
+
+/// A directory the user may search and not list is walked, and refuses where
+/// it is listed: at the reopen.
+#[test]
+fn listing_a_search_only_directory_fails_at_the_reopen_not_at_the_walk() {
+    if root_user() {
+        eprintln!("skip: root lists every directory");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("gate")).unwrap();
+    std::fs::set_permissions(dir.join("gate"), PermissionsExt::from_mode(0o111)).unwrap();
+    let held = walk_dir(&spelled(&dir.join("gate")));
+    let listed = held.as_ref().map(|d| d.read_dir().err().map(|e| e.kind()));
+    std::fs::set_permissions(dir.join("gate"), PermissionsExt::from_mode(0o755)).unwrap();
+    assert_eq!(
+        listed.unwrap(),
+        Some(io::ErrorKind::PermissionDenied),
+        "the walk entered it, the listing refused"
+    );
+}
+
+/// The bridge listing is the same one: sorted, stated without following.
+#[test]
+fn a_located_directory_lists_as_a_directory_does() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("b"), b"").unwrap();
+    std::fs::write(dir.join("a"), b"").unwrap();
+    symlink("a", dir.join("l")).unwrap();
+    let names: Vec<_> = located(&dir)
+        .unwrap()
+        .read_dir()
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.name, e.stat.kind))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("a".into(), Kind::File),
+            ("b".into(), Kind::File),
+            ("l".into(), Kind::Symlink)
+        ]
+    );
+    let file = located(&dir.join("a")).unwrap();
+    assert_eq!(
+        file.read_dir().err().unwrap().kind(),
+        io::ErrorKind::NotADirectory
+    );
+}
+
+/// A write staged beside a leaf lands in the directory the walk held, whatever
+/// that directory is called by the time it is published; what is read back is
+/// the installed object, not the staging handle.
+#[test]
+fn a_staged_write_publishes_under_the_held_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("d")).unwrap();
+    std::fs::write(dir.join("d/f"), b"old").unwrap();
+    let mut staged = located(&dir.join("d/f")).unwrap().stage().unwrap();
+    assert_eq!(staged.target().real().as_path(), dir.join("d/f"));
+    staged.file().write_all(b"new").unwrap();
+    staged.file().sync_all().unwrap();
+
+    std::fs::rename(dir.join("d"), dir.join("moved")).unwrap();
+    staged.publish().unwrap();
+
+    assert_eq!(std::fs::read(dir.join("moved/f")).unwrap(), b"new");
+    assert!(!dir.join("d").exists(), "the old name was not recreated");
+    let beside: Vec<_> = std::fs::read_dir(dir.join("moved")).unwrap().collect();
+    assert_eq!(beside.len(), 1, "no sibling is left beside the leaf");
+}
+
+#[test]
+fn a_staged_write_over_an_absent_leaf_creates_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    let mut staged = located(&dir.join("fresh")).unwrap().stage().unwrap();
+    staged.file().write_all(b"made").unwrap();
+    assert!(!dir.join("fresh").exists());
+    staged.publish().unwrap();
+    assert_eq!(std::fs::read(dir.join("fresh")).unwrap(), b"made");
+}
+
+/// The staged file carries the leaf's mode, as the leaf had it at the walk.
+#[test]
+fn a_staged_write_carries_the_leafs_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("f"), b"").unwrap();
+    std::fs::set_permissions(dir.join("f"), PermissionsExt::from_mode(0o640)).unwrap();
+    let mut staged = located(&dir.join("f")).unwrap().stage().unwrap();
+    let mode = |file: &File| file.metadata().unwrap().mode() & 0o7777;
+    assert_eq!(mode(staged.file()), 0o640);
+    staged.publish().unwrap();
+    assert_eq!(
+        std::fs::metadata(dir.join("f")).unwrap().mode() & 0o7777,
+        0o640
+    );
+}
+
+/// The residual, stated as such: a rename selects its source by name, so a
+/// sibling swapped at its name between the sync and the rename is what lands.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_sibling_swapped_at_its_name_before_the_rename_is_what_lands() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("f"), b"old").unwrap();
+    let mut staged = located(&dir.join("f")).unwrap().stage().unwrap();
+    staged.file().write_all(b"staged").unwrap();
+    staged.file().sync_all().unwrap();
+
+    let sibling = dir.join(staged.name.as_os_str());
+    std::fs::remove_file(&sibling).unwrap();
+    std::fs::write(&sibling, b"substitute").unwrap();
+    staged.publish().unwrap();
+    assert_eq!(std::fs::read(dir.join("f")).unwrap(), b"substitute");
+}
+
+#[test]
+fn a_dropped_staged_write_leaves_no_sibling() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("f"), b"old").unwrap();
+    let staged = located(&dir.join("f")).unwrap().stage().unwrap();
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count(),
+        2,
+        "staging makes one"
+    );
+    drop(staged);
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    assert_eq!(std::fs::read(dir.join("f")).unwrap(), b"old");
+
+    let staged = located(&dir.join("f")).unwrap().stage().unwrap();
+    staged.discard().unwrap();
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+}
+
+#[test]
+fn a_failed_publish_leaves_the_target_and_no_sibling() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("f"), b"old").unwrap();
+    let staged = located(&dir.join("f")).unwrap().stage().unwrap();
+    std::fs::remove_file(dir.join("f")).unwrap();
+    std::fs::create_dir_all(dir.join("f/inside")).unwrap();
+    assert!(
+        staged.publish().is_err(),
+        "a file cannot replace a directory"
+    );
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    assert!(dir.join("f/inside").is_dir());
+}
+
+#[test]
+fn a_directory_leaf_is_not_staged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("d")).unwrap();
+    let err = located(&dir.join("d")).unwrap().stage().err().unwrap();
+    assert_eq!(err.kind(), io::ErrorKind::IsADirectory);
+}
+
+/// A leaf replaced by rename between the walk and the open is read through
+/// the handle the walk held, not through the name it had.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_leaf_replaced_after_the_walk_is_read_through_the_held_handle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("f"), b"walked").unwrap();
+    let held = located(&dir.join("f")).unwrap();
+    std::fs::rename(dir.join("f"), dir.join("elsewhere")).unwrap();
+    std::fs::write(dir.join("f"), b"replacement").unwrap();
+    let mut body = String::new();
+    held.read().unwrap().read_to_string(&mut body).unwrap();
+    assert_eq!(body, "walked");
+}
+
+/// The directory entry is flushed through a read handle on the held
+/// directory: an `O_PATH` descriptor cannot be synced, and Linux succeeds.
+#[cfg(target_os = "linux")]
+#[test]
+fn sync_dir_succeeds_on_linux() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("f"), b"").unwrap();
+    located(&dir.join("f")).unwrap().sync_dir().unwrap();
+    host::sync_dir(&walk_dir(&spelled(&dir)).unwrap().handle.file).unwrap();
+}
+
+/// Reads and writes go through the leaf the walk held, and a leaf absent at
+/// the walk is created exclusively.
+#[test]
+fn a_leaf_absent_at_the_walk_is_created_exclusively() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    let target = located(&dir.join("fresh")).unwrap();
+    std::fs::write(dir.join("fresh"), b"raced").unwrap();
+    let err = target.open_streaming(Streaming::Append).err().unwrap();
+    assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read(dir.join("fresh")).unwrap(), b"raced");
+
+    let target = located(&dir.join("made")).unwrap();
+    let mut streamed = target.open_streaming(Streaming::Truncate).unwrap();
+    assert!(streamed.created());
+    streamed.file().write_all(b"body").unwrap();
+    let reader = streamed.reader().unwrap();
+    let mut body = String::new();
+    reader.read_to_string(&mut body).unwrap();
+    assert_eq!(body, "body");
+    assert_eq!(streamed.stat().kind, Kind::File);
+    assert_eq!(streamed.trace().real().as_path(), dir.join("made"));
+}
+
+#[test]
+fn a_streamed_truncate_runs_after_the_before_image_was_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("f"), b"before").unwrap();
+    let mut streamed = located(&dir.join("f"))
+        .unwrap()
+        .open_streaming(Streaming::Truncate)
+        .unwrap();
+    assert!(!streamed.created());
+    let mut before = String::new();
+    streamed
+        .reader()
+        .unwrap()
+        .read_to_string(&mut before)
+        .unwrap();
+    assert_eq!(before, "before");
+    assert_eq!(std::fs::read(dir.join("f")).unwrap(), b"before");
+    streamed.truncate().unwrap();
+    assert_eq!(std::fs::read(dir.join("f")).unwrap(), b"");
+}
+
+#[test]
+fn a_directory_leaf_is_not_read_or_written() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("d")).unwrap();
+    symlink("d", dir.join("l")).unwrap();
+    let held = located(&dir.join("d")).unwrap();
+    assert_eq!(held.read().unwrap_err().kind(), io::ErrorKind::IsADirectory);
+    assert_eq!(
+        held.append().unwrap_err().kind(),
+        io::ErrorKind::IsADirectory
+    );
+    let link = located_with(&dir.join("l"), LeafMode::NoFollow).unwrap();
+    assert_eq!(link.read().unwrap_err().kind(), io::ErrorKind::InvalidInput);
+}
+
+/// The directory a walk holds is the one `absent` and `create_dir` act in,
+/// whatever it is called by then.
+#[test]
+fn an_absent_entry_is_made_in_the_directory_held() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("d")).unwrap();
+    let held = walk_dir(&spelled(&dir.join("d"))).unwrap();
+    std::fs::rename(dir.join("d"), dir.join("moved")).unwrap();
+
+    let target = held.absent(name("sub")).unwrap();
+    assert_eq!(target.trace().tail(), [name("sub")]);
+    assert!(target.stat().is_none());
+    let made = target.create_dir().unwrap();
+    assert!(dir.join("moved/sub").is_dir());
+    assert!(!dir.join("d").exists());
+    assert_eq!(made.real().as_path(), dir.join("d/sub"));
+    assert_eq!(made.trace().tail(), []);
+
+    let file = held.absent(name("f")).unwrap();
+    file.open_streaming(Streaming::Append)
+        .unwrap()
+        .file()
+        .write_all(b"x")
+        .unwrap();
+    assert_eq!(std::fs::read(dir.join("moved/f")).unwrap(), b"x");
+
+    let Err(err) = located(&dir.join("moved/sub")).unwrap().create_dir() else {
+        panic!("a present leaf is not made");
+    };
+    assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+}
+
+/// What a vet is offered: the root, each directory on entry, each link before
+/// it is spliced, and the leaf.
+#[test]
+fn a_vet_is_offered_every_object_the_walk_relies_on() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("d")).unwrap();
+    std::fs::write(dir.join("d/f"), b"").unwrap();
+    symlink("d", dir.join("l")).unwrap();
+    let mut seen: Vec<(String, Option<Kind>)> = Vec::new();
+    let located = walk_with(&spelled(&dir.join("l/f")), LeafMode::Follow, |v| {
+        seen.push((v.name.to_str().unwrap().to_owned(), v.step.map(Step::kind)));
+        assert_eq!(
+            ObjectId::of(v.child.unwrap()).unwrap(),
+            host::seen_at(v.dir, v.name).unwrap().id
+        );
+        true
+    })
+    .unwrap();
+    assert_eq!(located.real().as_path(), dir.join("d/f"));
+    let tail: Vec<_> = seen.iter().rev().take(3).rev().cloned().collect();
+    assert_eq!(
+        tail,
+        [
+            ("l".to_owned(), Some(Kind::Symlink)),
+            ("d".to_owned(), Some(Kind::Dir)),
+            ("f".to_owned(), Some(Kind::File)),
+        ]
+    );
+    assert_eq!(seen[0], (".".to_owned(), None), "the root is offered first");
+}
+
+#[test]
+fn a_vet_refusal_refuses_the_walk() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("f"), b"").unwrap();
+    let refused = |name: &'static str| {
+        walk_with(&spelled(&dir.join("f")), LeafMode::Follow, move |v| {
+            v.name != name
+        })
+    };
+    assert!(refused("elsewhere").is_ok());
+    for name in [".", "f"] {
+        let Err(err) = refused(name) else {
+            panic!("the vet refused {name}");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{name}");
+    }
+}
+
+/// The discard device is opened by its fixed name, never by a spelling: one
+/// that folds to the device and leads, through a link, to a regular file opens
+/// the device all the same.
+#[test]
+fn open_discard_opens_the_device_where_a_spelling_names_a_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    // `link`, then enough `..` to fold away `link` and every name of `dir`,
+    // and — since the link leads that many levels below `p` — to climb back
+    // to `p` through it.
+    let ups = dir.components().count();
+    let mut deep = dir.join("p");
+    for level in 0..ups {
+        deep.push(format!("c{level}"));
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::create_dir_all(dir.join("p/dev")).unwrap();
+    std::fs::write(dir.join("p/dev/null"), b"").unwrap();
+    symlink(&deep, dir.join("link")).unwrap();
+    let mut spelling = dir.join("link");
+    spelling.extend(std::iter::repeat_n("..", ups));
+    spelling.push("dev/null");
+
+    let spelling = spelled(&spelling);
+    assert!(spelling.is_discard(), "folded, it is the device");
+    let walked = walk(&spelling, LeafMode::Follow).unwrap();
+    assert_eq!(walked.real().as_path(), dir.join("p/dev/null"));
+
+    let mut device = open_discard().unwrap();
+    assert!(device.metadata().unwrap().file_type().is_char_device());
+    device.write_all(b"swallowed").unwrap();
+    assert_eq!(std::fs::read(dir.join("p/dev/null")).unwrap(), b"");
+}
+
+/// What `exists`, `is-dir` and `shape` ask of the walk: a final link is seen
+/// through by `Follow` and not by `NoFollow`; a dangling link does not exist
+/// and is a link; the root answers like any spelling.
+#[test]
+fn the_probes_see_through_a_final_link_only_when_they_follow() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("d")).unwrap();
+    std::fs::write(dir.join("f"), b"").unwrap();
+    symlink("d", dir.join("to_d")).unwrap();
+    symlink("f", dir.join("to_f")).unwrap();
+    symlink("gone", dir.join("dangling")).unwrap();
+    let kind = |rel: &str, mode| {
+        located_with(&dir.join(rel), mode)
+            .unwrap()
+            .stat()
+            .map(|s| s.kind)
+    };
+    let follow = |rel: &str| kind(rel, LeafMode::Follow);
+    let named = |rel: &str| kind(rel, LeafMode::NoFollow);
+    assert_eq!(follow("to_d"), Some(Kind::Dir));
+    assert_eq!(follow("to_f"), Some(Kind::File));
+    assert_eq!(follow("dangling"), None);
+    assert_eq!(named("to_d"), Some(Kind::Symlink));
+    assert_eq!(named("dangling"), Some(Kind::Symlink));
+    assert_eq!(named("d"), Some(Kind::Dir));
+    assert_eq!(named("f"), Some(Kind::File));
+    assert_eq!(named("missing"), None);
+    for mode in [LeafMode::Follow, LeafMode::NoFollow] {
+        assert_eq!(
+            located_with(Path::new("/"), mode)
+                .unwrap()
+                .stat()
+                .unwrap()
+                .kind,
+            Kind::Dir
+        );
+    }
+}

@@ -63,7 +63,7 @@ pub(crate) struct Refused {
 /// ral's own binary, the file a bundled tool runs and so reads.
 pub(crate) fn ral_binary() -> Option<&'static RealPath> {
     static OWN: LazyLock<Option<RealPath>> =
-        LazyLock::new(|| RealPath::of(&std::env::current_exe().ok()?).ok());
+        LazyLock::new(|| RealPath::of_path(&std::env::current_exe().ok()?).ok());
     OWN.as_ref()
 }
 
@@ -254,7 +254,7 @@ impl ExecRules {
                 let tool =
                     crate::uutils::is_uutils_tool(name).then(|| ExecScope::Tool(name.clone()));
                 let file = crate::path::locate(name, host_path.as_deref(), None)
-                    .and_then(|hit| RealPath::of(&hit).ok())
+                    .and_then(|hit| RealPath::of_path(&hit).ok())
                     .map(|path| ExecScope::File {
                         path,
                         named: Some(name.clone()),
@@ -830,7 +830,7 @@ pub(super) mod tests {
         .into_iter()
         .collect();
         let rules = ExecRules::compile(&grant);
-        let at = |p: &Path| RealPath::of(p).unwrap();
+        let at = |p: &Path| RealPath::of_path(p).unwrap();
         assert!(
             !rules
                 .evidence(Subject::File(&at(&target.join("sub"))))
@@ -854,7 +854,7 @@ pub(super) mod tests {
         );
         std::fs::remove_dir(&blocked).unwrap();
         std::os::unix::fs::symlink(&tools, &blocked).unwrap();
-        let prog = RealPath::of(&tools.join("prog")).unwrap();
+        let prog = RealPath::of_path(&tools.join("prog")).unwrap();
         let denied = ExecRules::compile(&std::iter::once((ExecKey::Dir(excluded), DENY)).collect());
         assert!(denied.evidence(Subject::File(&prog)).negative);
         let granted =

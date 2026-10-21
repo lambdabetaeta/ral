@@ -8,8 +8,7 @@
 //! is a [`BadPointer`]; why that is a refusal and not a wider grant, and how it
 //! is worded, is the freeze's.
 
-use crate::path::canon::canonicalise_lenient;
-use crate::path::identity::{Identity, path_within};
+use crate::path::RealPath;
 use crate::path::lex::{fold_dots, parent_or_cwd};
 use std::path::{Path, PathBuf};
 
@@ -133,11 +132,11 @@ fn against(base: &Path, path: &str) -> PathBuf {
 }
 
 /// Two spellings of one path, under the identity the grant matcher uses:
-/// `realpath(3)` on both sides, then the alias-aware containment of
-/// [`path_within`] in both directions.
+/// the walk's real path on both sides, then the alias-aware containment of
+/// [`RealPath::contains`] in both directions.
 fn same_path(a: &Path, b: &Path) -> bool {
-    let (a, b) = (canonicalise_lenient(a), canonicalise_lenient(b));
-    path_within(&a, &b, Identity::Stored) && path_within(&b, &a, Identity::Stored)
+    let (a, b) = (RealPath::lenient(a), RealPath::lenient(b));
+    a.contains(&b) && b.contains(&a)
 }
 
 #[allow(

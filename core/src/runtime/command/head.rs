@@ -86,7 +86,7 @@ impl Program {
     /// The file `path` names, which the launcher will run by its real path,
     /// seen as `path` by the program.
     pub(crate) fn file(path: PathBuf) -> Result<Self, Missing> {
-        let real = RealPath::of(&path).map_err(|e| match e.kind() {
+        let real = RealPath::of_path(&path).map_err(|e| match e.kind() {
             ErrorKind::NotFound | ErrorKind::NotADirectory => Missing::NotFound(Some(path.clone())),
             _ => Missing::NotExecutable(path.clone()),
         })?;
@@ -211,7 +211,7 @@ mod tests {
     }
 
     fn canonical(path: &Path) -> RealPath {
-        RealPath::of(path).expect("the file exists")
+        RealPath::of_path(path).expect("the file exists")
     }
 
     /// A path head runs the file it names from the shell's cwd, and is

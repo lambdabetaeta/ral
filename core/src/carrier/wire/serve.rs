@@ -109,7 +109,7 @@ impl Default for Patience {
 /// Bounds the settle against a run that ignores cancellation, so a dead peer
 /// can never wedge the exit. The bound is paid for in cleanup: the exit runs no
 /// destructor on the worker's thread, so an atomic write still in flight at the
-/// bound leaves its staged `.ral-write.tmp` sibling behind.
+/// bound leaves its staged `.ral-write-` sibling behind.
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 const SETTLE_POLL: Duration = Duration::from_millis(50);

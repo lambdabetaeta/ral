@@ -116,7 +116,7 @@ impl Located {
     ///
     /// # Errors
     /// The staging create's, or the mode's.
-    pub(crate) fn stage(self, existing: Option<&Stat>) -> io::Result<(File, PendingWrite)> {
+    pub(crate) fn stage_beside(self, existing: Option<&Stat>) -> io::Result<(File, PendingWrite)> {
         let (file, tmp) = self.create_sibling_tmp()?;
         // Latched before the first fallible step, so an early `?` unlinks it.
         let pending = PendingWrite(Some(Staged { target: self, tmp }));
@@ -138,10 +138,10 @@ impl Located {
     /// regular file.  Never a prefix: a card reads a write as the change it
     /// made, and half a side is not a change.
     pub(crate) fn preview(&self) -> Option<Vec<u8>> {
-        match self.stat().ok()? {
+        match self.restat().ok()? {
             None => Some(Vec::new()),
             Some(s) if s.kind == Kind::File && s.len <= PREVIEW_CAP => {
-                read_capped(self.read().ok()?)
+                read_capped(self.read_named().ok()?)
             }
             Some(_) => None,
         }

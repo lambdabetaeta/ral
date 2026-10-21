@@ -6,8 +6,7 @@
 
 use super::enforce::{Denial, check_device_name, check_exec, check_flag, check_fs_exact};
 use crate::capability::{Admitted, Capabilities, Flag, FsOp, GrantStack, Program};
-use crate::path::walk::Leaf;
-use crate::path::{LexicalPath, Located};
+use crate::path::{LeafMode, LexicalPath, Located};
 use crate::sandbox::SandboxProjection;
 use crate::types::{Break, Check, Resource, Settled, Shell};
 use std::collections::BTreeMap;
@@ -86,10 +85,10 @@ impl Shell {
     /// refusal; or the refusal of a reserved device name.
     pub fn locate(&mut self, path: &LexicalPath, op: &FsOp) -> Settled<Located> {
         check_device_name(path)?;
-        let located = crate::path::walk::walk(path, Leaf::Resolve)
+        let located = crate::path::walk(path, LeafMode::Follow)
             .map_err(|e| crate::types::Error::io(path.shown(), &e))?;
         if !path.is_discard() {
-            let verdict = check_fs_exact(&self.context, located.real(), op);
+            let verdict = check_fs_exact(&self.context, located.real().as_path(), op);
             self.judged(verdict)?;
         }
         Ok(located)
@@ -111,14 +110,14 @@ impl Shell {
         &mut self,
         path: &LexicalPath,
         op: &FsOp,
-        leaf: Leaf,
+        leaf: LeafMode,
     ) -> Settled<Option<Located>> {
         check_device_name(path)?;
-        let Ok(located) = crate::path::walk::walk(path, leaf) else {
+        let Ok(located) = crate::path::walk(path, leaf) else {
             self.check_named(path, op)?;
             return Ok(None);
         };
-        let verdict = check_fs_exact(&self.context, located.real(), op);
+        let verdict = check_fs_exact(&self.context, located.real().as_path(), op);
         self.judged(verdict)?;
         Ok(Some(located))
     }
@@ -127,8 +126,9 @@ impl Shell {
     /// or the grant refuses, so a scan skips what it may not read instead of
     /// aborting.  One off-limits entry must not blank a whole listing.
     pub fn locate_if_admitted(&mut self, path: &LexicalPath, op: &FsOp) -> Option<Located> {
-        let located = crate::path::walk::walk(path, Leaf::Resolve).ok()?;
-        self.admits_fs_exact(op, located.real()).then_some(located)
+        let located = crate::path::walk(path, LeafMode::Follow).ok()?;
+        self.admits_fs_exact(op, located.real().as_path())
+            .then_some(located)
     }
 
     /// Whether the live stack admits `op` on a path already located — no

@@ -283,7 +283,7 @@ mod tests {
         let outside = tmp.path().join("outside");
         std::fs::create_dir(&allowed).expect("allowed");
         std::fs::create_dir(&outside).expect("outside");
-        let real = super::super::RealPath::of(&allowed).expect("allowed is real");
+        let real = super::super::RealPath::of_path(&allowed).expect("allowed is real");
         std::fs::remove_dir(&allowed).expect("remove");
         std::os::unix::fs::symlink(&outside, &allowed).expect("symlink");
 

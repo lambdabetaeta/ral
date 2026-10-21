@@ -1,9 +1,9 @@
 //! Stage 3 of path resolution: `realpath(3)`, in two flavours named by what
 //! they do when the path does not exist.
 //!
-//! [`canonicalise_strict`] errors, [`canonicalise_lenient`] is the walk under
-//! [`Missing::Tolerate`](super::walk::Missing): it resolves what exists and
-//! appends the missing tail lexically.  Every module needing
+//! [`canonicalise_strict`] errors, [`canonicalise_lenient`] is the walk that
+//! stops at the first name it cannot enter ([`walk_lenient`](super::walk_lenient)):
+//! it resolves what exists and appends the missing tail lexically.  Every module needing
 //! canonicalisation comes through one of them, so the choice is visible at
 //! the call site.  [`match_variants`] is the sandbox-side companion: the
 //! several names one VFS object answers to.
@@ -269,7 +269,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn lenient_agrees_with_the_walk() {
-        use crate::path::walk::{Leaf, walk};
+        use crate::path::walk::{LeafMode, walk};
         let (_tmp, dir) = fixture();
         let cwd = crate::path::CwdPath::new(dir.clone()).unwrap();
         let env = crate::types::EnvVars::new();
@@ -283,8 +283,8 @@ mod tests {
             "deep/dir/..",
         ] {
             let p = dir.join(rel);
-            let walked = walk(&resolver.anchor(&p), Leaf::Resolve).unwrap();
-            assert_eq!(canonicalise_lenient(&p), walked.real(), "{rel}");
+            let walked = walk(&resolver.anchor(&p), LeafMode::Follow).unwrap();
+            assert_eq!(canonicalise_lenient(&p), walked.real().as_path(), "{rel}");
         }
     }
 

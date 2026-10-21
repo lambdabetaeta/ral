@@ -244,7 +244,7 @@ pub(crate) fn file_to_open(review: &Review, index: usize, shown: &str) -> Result
         return Err(format!("{rel} is not a file, so there is nothing to open."));
     }
 
-    let (root, real) = (RealPath::of(&folder), RealPath::of(&path));
+    let (root, real) = (RealPath::of_path(&folder), RealPath::of_path(&path));
     match (root, real) {
         (Ok(root), Ok(real)) if real.within::<Allow>(&root) => Ok(Target { path, how }),
         (Ok(_), Ok(_)) => Err(format!(

@@ -138,7 +138,7 @@ fn windows_sandboxed_command(
                 let image = (super::reexec::OWN.get())
                     .map(|own| own.exec_path().to_path_buf())
                     .or_else(|| std::env::current_exe().ok())
-                    .and_then(|exe| crate::path::RealPath::of(&exe).ok());
+                    .and_then(|exe| crate::path::RealPath::of_path(&exe).ok());
                 (launch, image)
             }
         };
@@ -675,7 +675,8 @@ mod tests {
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .expect("chmod");
         let projection = if by_exec {
-            let shell = crate::path::RealPath::of(Path::new("/bin/sh")).expect("/bin/sh exists");
+            let shell =
+                crate::path::RealPath::of_path(Path::new("/bin/sh")).expect("/bin/sh exists");
             let exec = [
                 (
                     crate::capability::ExecScope::Any,

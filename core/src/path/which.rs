@@ -377,15 +377,8 @@ pub(crate) fn is_batch_image(program: &OsStr) -> bool {
 
 /// A command name as a deny holds it: the host's name for it, under every
 /// spelling some filesystem takes for that.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "native: an identity key is a string, and a key folded from one is UTF-8"
-)]
 pub(crate) fn command_name_key(name: &str) -> String {
-    let name = name_key_on(name, PathRules::HOST);
-    super::identity::collision_key(OsStr::new(name.as_ref()))
-        .to_string_lossy()
-        .into_owned()
+    super::identity::collision_fold(&name_key_on(name, PathRules::HOST))
 }
 
 /// Off Windows the name itself; on Windows ASCII lower-case, a trailing

@@ -12,8 +12,9 @@ use icu_casemap::CaseMapper;
 use icu_locale_core::LanguageIdentifier;
 use icu_normalizer::DecomposingNormalizerBorrowed;
 
-use super::PathRules;
 use super::lex::parse_bytes;
+use super::walk::{Listed, RealPath, Trace};
+use super::{FrozenPath, PathRules};
 
 /// `p` plus any alternate spelling the host treats as the same file
 /// (`/tmp/foo` ↔ `/private/tmp/foo` on macOS; just `[p]` elsewhere).
@@ -34,7 +35,7 @@ fn path_aliases(p: &Path) -> Vec<PathBuf> {
 pub enum Identity {
     /// The name as stored, with Windows heads and separators normalised.
     Stored,
-    /// Every name some filesystem takes for the same: [`collision_key`] per
+    /// Every name some filesystem takes for the same: `collision_key` per
     /// component.
     Collision,
 }
@@ -59,6 +60,66 @@ impl Polarity for Deny {
     const IDENTITY: Identity = Identity::Collision;
 }
 
+/// How an exclusion matched, in citation order: the least is cited.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum MatchedBy {
+    Name,
+    FoldedName,
+    Identity,
+}
+
+/// What a rule is asked about: an access, by its transcript; a listing's
+/// record of an entry, for a name shown; a position, for a scope's own
+/// subject and a listing entry never seen; everywhere, the universal
+/// allowance's own subject.  `Listed` is not `Access`: a door that mints
+/// authority takes a `Located`, so a listing's record can reach `admits` and
+/// never `judge`.
+#[derive(Clone, Copy)]
+#[expect(dead_code, reason = "used from step 2")]
+pub(crate) enum Subject<'a> {
+    Access(&'a Trace),
+    Listed(&'a Listed<'a>),
+    Position(&'a RealPath),
+    Everywhere,
+}
+
+/// How far an exclusion reaches: the subject at or beneath it (fs, an exec
+/// directory), or exactly it (an exec file).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[expect(dead_code, reason = "used from step 2")]
+pub(crate) enum Depth {
+    Within,
+    Exact,
+}
+
+impl RealPath {
+    /// Whether `other` is this position or lies beneath it, component by
+    /// component, names as stored: the positive reading.
+    pub fn contains(&self, other: &Self) -> bool {
+        path_within(other.as_path(), self.as_path(), Identity::Stored)
+    }
+
+    /// The same under `collision_key`, every spelling some filesystem takes
+    /// for one name: the negative reading by position alone, for a refusal
+    /// that must catch every spelling of a protected place and holds nothing.
+    pub fn contains_folded(&self, other: &Self) -> bool {
+        path_within(other.as_path(), self.as_path(), Identity::Collision)
+    }
+}
+
+impl FrozenPath {
+    /// Whether `path` lies within this prefix as a rule of polarity `P`
+    /// reads names.
+    pub(crate) fn contains<P: Polarity>(&self, path: &Path) -> bool {
+        within::<P>(path, self.real().as_path())
+    }
+}
+
+/// [`path_within`] under the identity a rule of polarity `P` reads names by.
+pub(super) fn within<P: Polarity>(path: &Path, prefix: &Path) -> bool {
+    path_within(path, prefix, P::IDENTITY)
+}
+
 /// The name a filesystem may take `name` for: compatibility caseless
 /// matching (Unicode D147) of the uppercase image of its compatibility
 /// decomposition.  A name that is not UTF-8 is its own key; no filesystem
@@ -69,6 +130,10 @@ impl Polarity for Deny {
 /// `casesensitivity` and `normalization`) and so fail-closed where a volume
 /// is finer.  NFKD comes first: `𝚤` decomposes to ı, which ZFS upcases to I,
 /// yet has no uppercase of its own.
+///
+/// Seen by the macOS host's stored-name rule alone, which asks whether the
+/// name a directory answers is a spelling of the name asked.
+#[cfg(any(target_os = "macos", test))]
 pub(super) fn collision_key(name: &OsStr) -> Cow<'_, OsStr> {
     #[allow(
         clippy::disallowed_methods,
@@ -80,7 +145,7 @@ pub(super) fn collision_key(name: &OsStr) -> Cow<'_, OsStr> {
     Cow::Owned(collision_fold(s).into())
 }
 
-/// [`collision_key`] of a name as its host encodes it
+/// `collision_key` of a name as its host encodes it
 /// ([`OsStr::as_encoded_bytes`]): a name that is not UTF-8 is its own key
 /// here too, byte for byte, so no two such names merge as their
 /// replacement-character decodings would.
@@ -90,8 +155,8 @@ fn encoded_collision_key(name: &[u8]) -> Cow<'_, [u8]> {
     })
 }
 
-/// [`collision_key`] of a name that is UTF-8.
-fn collision_fold(s: &str) -> String {
+/// `collision_key` of a name that is UTF-8.
+pub(super) fn collision_fold(s: &str) -> String {
     if s.is_ascii() {
         return s.to_ascii_lowercase();
     }
@@ -113,13 +178,13 @@ fn collision_fold(s: &str) -> String {
 ///
 /// Every authority judgment, fs and exec, decides containment through it.
 ///
-/// `pub(super)`: the kernel is form-blind, and *which* of a prefix's two
-/// forms a containment question is asked of, under which identity, is
-/// settled inside `path` — by a [`Polarity`] through
-/// [`FrozenPath::contains`](super::FrozenPath::contains) for fs and
-/// [`RealPath::within`](super::RealPath::within) for exec — and never by a
-/// caller holding two bare paths.
-pub(super) fn path_within(path: &Path, prefix: &Path, identity: Identity) -> bool {
+/// Private: the kernel is form-blind, and *which* of a prefix's two forms a
+/// containment question is asked of, under which identity, is settled by the
+/// methods beside it — [`RealPath::contains`] and
+/// [`contains_folded`](RealPath::contains_folded) for positions, a
+/// [`Polarity`] through [`within`] for the bridges that remain — and never by
+/// a caller holding two bare paths.
+fn path_within(path: &Path, prefix: &Path, identity: Identity) -> bool {
     let rules = PathRules::HOST;
     let ps = path_aliases(path);
     let qs = path_aliases(prefix);
@@ -139,7 +204,7 @@ pub(super) fn path_within(path: &Path, prefix: &Path, identity: Identity) -> boo
     })
 }
 
-/// [`path_within`] on strings, and `pub(super)` for the same reason.
+/// [`path_within`] on strings, for the renderers that hold the kernel's names.
 #[allow(
     clippy::disallowed_methods,
     reason = "path-form: lifts both strings for `path_within`; nothing is resolved"
@@ -148,7 +213,7 @@ pub(super) fn path_within_str(path: &str, prefix: &str, identity: Identity) -> b
     path_within(Path::new(path), Path::new(prefix), identity)
 }
 
-/// Component-wise prefix test under [`collision_key`]: split as
+/// Component-wise prefix test under `collision_key`: split as
 /// [`starts_with_identity`] splits under Windows rules, by
 /// [`Path::components`] otherwise, then compared key by key, so no fold
 /// crosses a component boundary (`/w/secretsx` is not within `/w/Secrets`).
@@ -176,7 +241,7 @@ fn starts_with_collision(path: &Path, prefix: &Path, rules: PathRules) -> bool {
 /// A display identity, not an authority one: the prompt's home-strip asks
 /// it whether to fold a path to `~`.  Grant containment, [`path_within`],
 /// never asks it: an allow there keeps case ([`Identity::Stored`]) and a
-/// deny folds by [`collision_key`], each per its [`Polarity`].
+/// deny folds by `collision_key`, each per its [`Polarity`].
 ///
 /// String logic rather than `std::path::Path`, whose separator and prefix
 /// parsing are fixed at compile time to the build target.
@@ -214,7 +279,7 @@ pub(crate) fn windows_identity_components(p: &str) -> Vec<Vec<u8>> {
 /// A native path as one key under which every spelling some filesystem may
 /// take for the same object collides: split as
 /// [`windows_identity_components`] splits, each component through
-/// [`collision_key`].  For a caller that must name a kernel object by a path
+/// `collision_key`.  For a caller that must name a kernel object by a path
 /// and errs safe by merging, never by splitting: a lock.
 ///
 /// Coarser than NTFS, which upcases each UTF-16 unit by its volume's

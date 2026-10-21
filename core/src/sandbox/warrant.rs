@@ -226,7 +226,7 @@ impl Run {
 /// script at `real`.  For the hint alone: support is the projection's, and
 /// nothing here is evidence.
 fn interpreter_exclusion(real: &RealPath, projection: &SandboxProjection) -> Option<String> {
-    let interpreter = RealPath::of(&super::carriers::shebang(real.as_path())?).ok()?;
+    let interpreter = RealPath::of_path(&super::carriers::shebang(real.as_path())?).ok()?;
     let exec = match &projection.exec {
         ExecProjection::Restricted(rules) => rules.withheld(Subject::File(&interpreter)),
         ExecProjection::Unrestricted => None,

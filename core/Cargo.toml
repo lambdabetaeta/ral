@@ -168,6 +168,10 @@ windows-sys  = { workspace = true, features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_IO",
+    # FSCTL_GET_REPARSE_POINT, for a link's target; FILE_RENAME_FLAG_*, for the
+    # atomic rename by handle.
+    "Win32_System_Ioctl",
+    "Win32_System_WindowsProgramming",
     "Win32_System_JobObjects",
     "Win32_System_Memory",
     "Win32_System_Pipes",

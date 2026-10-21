@@ -406,7 +406,7 @@ fn written(fs: &RenderedFs, dir: &RealPath) -> bool {
         return false;
     };
     (rules.write.iter().flat_map(Object::names))
-        .any(|w| w.holds(name) || dir.contains::<Allow>(w.as_str().as_ref()))
+        .any(|w| w.holds(name) || dir.contains_path::<Allow>(w.as_str().as_ref()))
 }
 
 /// The objects a live directory admission puts a rule on.  A rule on `dir`
@@ -472,7 +472,7 @@ fn expand(
 fn listed(table: &ExecRules, masks: &[Rendered], d: &RealPath, walks: bool) -> bool {
     let masked = masks
         .iter()
-        .any(|m| d.contains::<Deny>(m.as_str().as_ref()) && !held(m, d));
+        .any(|m| d.contains_path::<Deny>(m.as_str().as_ref()) && !held(m, d));
     masked
         || table.denies().any(|scope| match scope {
             ExecScope::Dir(p) | ExecScope::File { path: p, .. } => {
@@ -852,7 +852,10 @@ mod tests {
     /// [`FILES`] under a real `d`.
     fn tree() -> (tempfile::TempDir, PathBuf) {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let d = RealPath::of(tmp.path()).expect("real").as_path().join("d");
+        let d = RealPath::of_path(tmp.path())
+            .expect("real")
+            .as_path()
+            .join("d");
         for file in FILES {
             let path = d.join(file);
             std::fs::create_dir_all(path.parent().expect("a parent")).expect("dirs");

@@ -54,7 +54,7 @@ impl OpenedWrite {
 /// grant.
 fn snapshot(target: &Located, shell: &Shell) -> Option<Vec<u8>> {
     shell
-        .admits_fs_exact(&FsOp::Read, target.real())
+        .admits_fs_exact(&FsOp::Read, target.real().as_path())
         .then(|| target.preview())
         .flatten()
 }
@@ -72,19 +72,19 @@ pub(crate) fn open_write(
     let opened = |file: std::io::Result<File>| file.map_err(|e| Break::from(Error::io(path, &e)));
     let rp = shell.resolve(path);
     if rp.is_discard() {
-        return opened(crate::path::walk::open_discard(&rp)).map(|f| (f, None));
+        return opened(crate::path::open_discard()).map(|f| (f, None));
     }
     let target = shell.locate(&rp, &FsOp::Write)?;
     let stream = |file, target| opened(file).map(|f| (f, Some(OpenedWrite::Stream(target))));
     match mode {
         WriteMode::Append => stream(target.append(), target),
         WriteMode::Stream => stream(target.truncate(), target),
-        WriteMode::Write => match target.stat().map_err(|e| Error::io(path, &e))? {
+        WriteMode::Write => match target.stat().cloned() {
             // TTYs and named pipes stream: there is no inode to rename.
             Some(s) if s.kind != Kind::File => stream(target.truncate(), target),
             existing => {
                 let (file, pending) = target
-                    .stage(existing.as_ref())
+                    .stage_beside(existing.as_ref())
                     .map_err(|e| Error::io(path, &e))?;
                 Ok((file, Some(OpenedWrite::Atomic(pending))))
             }
@@ -96,7 +96,7 @@ pub(crate) fn open_write(
 fn open_read(path: &str, shell: &mut Shell) -> Settled<File> {
     let rp = shell.resolve(path);
     let opened = if rp.is_discard() {
-        crate::path::walk::open_discard(&rp)
+        crate::path::open_discard()
     } else {
         shell.locate(&rp, &FsOp::Read)?.read()
     };
