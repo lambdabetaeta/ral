@@ -826,37 +826,34 @@ mod tests {
         bwrap_command, seccomp_programs,
     };
     use crate::Role;
-    use crate::capability::{Admitted, Capabilities, FsPolicy, FsScope, GrantStack, Program};
-    use crate::capability::{Evidence, ExecScope};
+    use crate::capability::{Admitted, Capabilities, FsAllow, FsPolicy, GrantStack, Program};
+    use crate::capability::{Evidence, ExecAllow, ExecDeny, ExecRule, Join};
     use crate::path::{FrozenPath, RealPath};
     use crate::sandbox::launch::{Ownership, admitted, enveloped};
     use crate::sandbox::warrant::{Handoff, Slot};
     use crate::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
     use std::process::Stdio;
 
-    type Rule = (ExecScope, Evidence);
+    type Rule = ExecRule;
 
-    fn evidence(allow: bool) -> Evidence {
+    fn dir_rule(path: RealPath, allow: bool) -> Rule {
         if allow {
-            Evidence::ALLOW
+            ExecRule::Allow(ExecAllow::Dir(path))
         } else {
-            Evidence::DENY
+            ExecRule::Deny(ExecDeny::Dir(path))
         }
     }
 
-    fn dir_rule(path: RealPath, allow: bool) -> Rule {
-        (ExecScope::Dir(path), evidence(allow))
-    }
-
     fn file_rule(path: RealPath, allow: bool) -> Rule {
-        (ExecScope::file(path), evidence(allow))
+        if allow {
+            ExecRule::Allow(ExecAllow::file(path))
+        } else {
+            ExecRule::Deny(ExecDeny::file(path))
+        }
     }
 
     fn veto_rule(name: &str) -> Rule {
-        (
-            ExecScope::Name(crate::path::command_name_key(name)),
-            Evidence::DENY,
-        )
+        ExecRule::Deny(ExecDeny::Name(crate::path::command_name_key(name)))
     }
 
     /// A bare Linux host.
@@ -910,8 +907,8 @@ mod tests {
         }
     }
 
-    fn prefix(path: &str) -> FsScope {
-        FsScope::Prefix(FrozenPath::from_surface(path))
+    fn prefix(path: &str) -> FsAllow {
+        FsAllow::Prefix(FrozenPath::from_surface(path))
     }
 
     /// What the envelope would show of `policy`.
@@ -1199,7 +1196,7 @@ mod tests {
         if let FsProjection::Restricted(rules) = &mut policy.fs {
             rules.read.extend(
                 [&tools, &w.join("bin")]
-                    .map(|d| FsScope::Place(RealPath::of_path(d).expect("a run place exists"))),
+                    .map(|d| FsAllow::RunPlace(RealPath::of_path(d).expect("a run place exists"))),
             );
         }
         let binds = binds(&policy, WHOLE);
@@ -1261,7 +1258,7 @@ mod tests {
         if let FsProjection::Restricted(rules) = &mut policy.fs {
             rules
                 .read
-                .push(FsScope::Place(RealPath::of_path(&bin).expect("a place")));
+                .push(FsAllow::RunPlace(RealPath::of_path(&bin).expect("a place")));
         }
         policy.exec = ExecProjection::Restricted(
             std::iter::once(dir_rule(RealPath::of_path(&bin).expect("an admit"), true)).collect(),
@@ -2589,11 +2586,10 @@ mod tests {
     /// [`admitting`] less `blocks`, which Landlock renders by subtracting
     /// them from the allowed directories that hold them.
     fn admitting_less(dirs: &[&str], blocks: impl IntoIterator<Item = Rule>) -> ExecProjection {
-        let ExecProjection::Restricted(mut rules) = admitting(dirs, &[]) else {
+        let ExecProjection::Restricted(rules) = admitting(dirs, &[]) else {
             unreachable!("admitting restricts");
         };
-        rules.extend(blocks);
-        ExecProjection::Restricted(rules)
+        ExecProjection::Restricted(rules.join(blocks.into_iter().collect()))
     }
 
     /// A command of `/usr/bin` with an inode of its own: a hard link or a
@@ -2768,7 +2764,7 @@ mod tests {
             };
             if let FsProjection::Restricted(rules) = &mut policy.fs {
                 rules.read.extend(
-                    placed.then(|| FsScope::Place(RealPath::of_path(&tools).expect("a place"))),
+                    placed.then(|| FsAllow::RunPlace(RealPath::of_path(&tools).expect("a place"))),
                 );
             }
             let Some(env) = envelope_launches(&policy) else {
@@ -2993,7 +2989,7 @@ mod tests {
         let policy = SandboxProjection {
             exec: ExecProjection::Restricted(
                 [
-                    (ExecScope::Any, Evidence::ALLOW),
+                    ExecRule::Allow(ExecAllow::Any),
                     file_rule(real(&excluded), false),
                     file_rule(real(&unrelated), false),
                 ]
@@ -3201,7 +3197,7 @@ mod tests {
             pid = sleeper.id(),
         );
         let bare = ExecProjection::Restricted(
-            [(ExecScope::Any, Evidence::ALLOW), veto_rule("rm")]
+            [ExecRule::Allow(ExecAllow::Any), veto_rule("rm")]
                 .into_iter()
                 .collect(),
         );
@@ -3416,7 +3412,7 @@ mod tests {
         let carried = |deny: &[&std::path::Path]| {
             let (policy, _) = folded(Some((&[], deny)), Some(reads()), script.as_path(), &[]);
             let rules = policy.fs.rules().expect("a restricted fs").read.clone();
-            rules.contains(&FsScope::Place(carrier.clone()))
+            rules.contains(&FsAllow::RunPlace(carrier.clone()))
         };
         assert!(carried(&[]), "support carries the interpreter: {carrier}");
         assert!(

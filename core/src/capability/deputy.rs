@@ -11,8 +11,8 @@
 //! overlay are each innocent alone, and only the stack's meet-fold of both
 //! dimensions is a deputy.
 
-use super::fs::{FsScope, Region};
-use super::{Evidence, ExecGrant, ExecKey, FsOp, GrantStack, Meet, region};
+use super::fs::{FsAllow, FsDeny, Region};
+use super::{ExecGrant, ExecKey, FsOp, GrantStack, Meet, region};
 use crate::path::FrozenPath;
 
 /// The prefixes that are both exec-admitted and fs-writable under `stack`,
@@ -36,8 +36,8 @@ pub fn deputy_prefixes(stack: &GrantStack) -> Vec<FrozenPath> {
     let both = runs.meet(writes);
     both.live()
         .filter_map(|scope| match scope {
-            FsScope::Prefix(prefix) => Some(prefix.clone()),
-            FsScope::Place(_) => None,
+            FsAllow::Prefix(prefix) => Some(prefix.clone()),
+            FsAllow::RunPlace(_) => None,
         })
         .collect()
 }
@@ -46,20 +46,16 @@ pub fn deputy_prefixes(stack: &GrantStack) -> Vec<FrozenPath> {
 /// positive half of an entry stays as frozen and the negative half is
 /// re-resolved, as `fs::region` treats its own.
 fn runnable(exec: &ExecGrant) -> Region {
-    let root = exec
-        .every()
-        .then(|| (FsScope::Prefix(FrozenPath::root()), Evidence::ALLOW));
-    let dirs = exec.iter().filter_map(|(key, e)| match key {
-        ExecKey::Dir(dir) => Some((dir, e)),
-        _ => None,
-    });
-    let halves = dirs.flat_map(|(dir, e)| {
-        [
-            (e.positive).then(|| (FsScope::Prefix(dir.clone()), Evidence::ALLOW)),
-            (e.negative).then(|| (FsScope::Prefix(dir.live()), Evidence::DENY)),
-        ]
-    });
-    root.into_iter().chain(halves.flatten()).collect()
+    let root = exec.every().then(|| FsAllow::Prefix(FrozenPath::root()));
+    let dirs = || {
+        exec.iter().filter_map(|(key, e)| match key {
+            ExecKey::Dir(dir) => Some((dir, e)),
+            _ => None,
+        })
+    };
+    let allows = (dirs().filter(|(_, e)| e.positive)).map(|(dir, _)| FsAllow::Prefix(dir.clone()));
+    let denies = (dirs().filter(|(_, e)| e.negative)).map(|(dir, _)| FsDeny(dir.live()));
+    Region::new(root.into_iter().chain(allows), denies)
 }
 
 #[cfg(test)]

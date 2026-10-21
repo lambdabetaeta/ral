@@ -133,7 +133,7 @@ pub(crate) fn join_insert<K: Ord>(map: &mut BTreeMap<K, Evidence>, key: K, evide
 }
 
 /// An exec key as the author wrote it: the written twin of
-/// `capability::exec::ExecScope`.
+/// `capability::exec::{ExecAllow, ExecDeny}`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ExecKey {
     /// A bare name: `git`.

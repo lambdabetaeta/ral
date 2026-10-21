@@ -20,7 +20,7 @@
 use super::super::Refusal;
 use super::super::warrant::Slot;
 use super::{DenyMask, OpenError, open_real};
-use crate::capability::{ExecRules, ExecScope, Subject};
+use crate::capability::{ExecDeny, ExecRules, Subject};
 use crate::path::{Allow, Deny, Object, RealPath, Rendered};
 use crate::sandbox::{ExecProjection, RenderedFs};
 use libc::{c_int, c_uint};
@@ -280,7 +280,7 @@ fn kernel_table(exec: &ExecProjection) -> Option<&ExecRules> {
     let bare = table.supports(Subject::Any)
         && table
             .denies()
-            .all(|scope| matches!(scope, ExecScope::Name(_)));
+            .all(|scope| matches!(scope, ExecDeny::Name(_)));
     (!bare).then_some(table)
 }
 
@@ -475,11 +475,10 @@ fn listed(table: &ExecRules, masks: &[Rendered], d: &RealPath, walks: bool) -> b
         .any(|m| d.contains_path::<Deny>(m.as_str().as_ref()) && !held(m, d));
     masked
         || table.denies().any(|scope| match scope {
-            ExecScope::Dir(p) | ExecScope::File { path: p, .. } => {
+            ExecDeny::Dir(p) | ExecDeny::File { path: p, .. } => {
                 p.within::<Deny>(d) && !d.within::<Deny>(p)
             }
-            ExecScope::Name(_) => walks,
-            ExecScope::Any | ExecScope::Tool(_) => false,
+            ExecDeny::Name(_) => walks,
         })
 }
 
@@ -646,12 +645,12 @@ impl From<Error> for String {
 #[allow(clippy::disallowed_methods, reason = "[test] test fs scaffolding")]
 mod tests {
     use super::*;
-    use crate::capability::Evidence;
+    use crate::capability::{ExecAllow, ExecDeny, ExecRule};
     use crate::path::{render_objects, render_paths};
     use crate::sandbox::{FsProjection, FsRules};
     use std::path::{Path, PathBuf};
 
-    type Rule = (ExecScope, Evidence);
+    type Rule = ExecRule;
 
     /// The roots of an unrestricted fs.
     fn whole() -> Vec<RealPath> {
@@ -765,19 +764,12 @@ mod tests {
 
     fn rule(path: &Path, dir: bool, allow: bool) -> Rule {
         let path = RealPath::assumed(path);
-        let scope = if dir {
-            ExecScope::Dir(path)
-        } else {
-            ExecScope::file(path)
-        };
-        (
-            scope,
-            if allow {
-                Evidence::ALLOW
-            } else {
-                Evidence::DENY
-            },
-        )
+        match (dir, allow) {
+            (true, true) => ExecRule::Allow(ExecAllow::Dir(path)),
+            (true, false) => ExecRule::Deny(ExecDeny::Dir(path)),
+            (false, true) => ExecRule::Allow(ExecAllow::file(path)),
+            (false, false) => ExecRule::Deny(ExecDeny::file(path)),
+        }
     }
 
     fn allow(path: &Path, dir: bool) -> Rule {
@@ -789,14 +781,11 @@ mod tests {
     }
 
     fn veto(name: &str) -> Rule {
-        (
-            ExecScope::Name(crate::path::command_name_key(name)),
-            Evidence::DENY,
-        )
+        ExecRule::Deny(ExecDeny::Name(crate::path::command_name_key(name)))
     }
 
     fn any() -> Rule {
-        (ExecScope::Any, Evidence::ALLOW)
+        ExecRule::Allow(ExecAllow::Any)
     }
 
     /// An admit naming nothing, and a file admit since replaced by a

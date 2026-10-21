@@ -70,9 +70,9 @@ run time ([[decisions/260906_object-not-name|object-not-name]]). So the fold
 compiles first, then meets:
 
 - `rules` compiles every layer into an `ExecRules` table for each question, and
-  meets the tables. `every` compiles to `ExecScope::Any`.
+  meets the tables. `every` compiles to `ExecAllow::Any`.
 - `region` folds every layer's prefixes for one operation into a
-  `Table<FsScope>` and meets those. Allowances stay as frozen at decode; only
+  `Table<FsAllow, FsDeny>` and meets those. Allowances stay as frozen at decode; only
   deny paths are re-frozen. A read takes each layer's read and write prefixes
   (writing reads) and, through `GrantStack::read`, its run places, then joins
   `floor()`.
@@ -134,7 +134,7 @@ difference is *when* the fold runs:
 - the guard folds afresh on every check, and asks `withheld`, which cites an
   exclusion that applies or a missing allowance;
 - the sandbox folds once at spawn, when it writes the profile, and renders
-  the read region (`read: Vec<FsScope>`, run places and live support among
+  the read region (`read: Vec<FsAllow>`, run places and live support among
   them), the write prefixes and the exclusions. Every allowance renders as its
   frozen real path and as nothing else; only exclusions are rendered from their
   re-resolved names. A backend refuses a launch whose frozen allowance has

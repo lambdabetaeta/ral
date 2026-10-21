@@ -22,10 +22,10 @@
 //! when the OS profile is written.
 
 use super::exec::ExecRules;
-use super::table::{Scope, Table, Withheld};
-use super::{Evidence, FsPolicy, GrantStack, Join, Meet};
+use super::table::{Allows, Denies, Table, Withheld};
+use super::{FsPolicy, GrantStack, Join, Meet};
 use crate::guard::toolchains;
-use crate::path::{FrozenPath, Polarity, RealPath};
+use crate::path::{Allow, Depth, FrozenPath, MatchedBy, RealPath};
 use std::path::Path;
 use std::sync::LazyLock;
 use strum::IntoStaticStr;
@@ -50,21 +50,24 @@ impl FsOp {
     }
 }
 
-/// A key of an fs region: an authored prefix, or a place exec runs.  Both are
-/// prefixes of a real path, so a place reads as a prefix whether exec runs it
-/// as a file or a directory, and containment is transitive across every pair.
+/// An allowance of an fs region: an authored prefix, or a place exec runs.
+/// Both are prefixes of a real path, so a place reads as a prefix whether exec
+/// runs it as a file or a directory, and containment is transitive across
+/// every pair.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum FsScope {
+pub enum FsAllow {
     Prefix(FrozenPath),
-    Place(RealPath),
+    RunPlace(RealPath),
 }
 
-impl std::fmt::Display for FsScope {
+/// An exclusion of an fs region: an authored prefix, which a fold re-resolves
+/// against the live disk.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FsDeny(pub(super) FrozenPath);
+
+impl std::fmt::Display for FsDeny {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Prefix(prefix) => f.write_str(&prefix.shown()),
-            Self::Place(place) => place.fmt(f),
-        }
+        f.write_str(&self.0.shown())
     }
 }
 
@@ -73,33 +76,42 @@ impl std::fmt::Display for FsScope {
 const ROSETTA: &str = "/Library/Apple/usr";
 
 /// Fs evidence over one op: prefixes judged by their resolved form, an
-/// exclusion beating every allowance.  Only the read region holds a place, and
-/// no place is negative.
-pub(crate) type Region = Table<FsScope>;
+/// exclusion beating every allowance.  Only the read region holds a place.
+pub(crate) type Region = Table<FsAllow, FsDeny>;
 
-impl FsScope {
+impl FsAllow {
     /// The real form this scope judges.
     pub(crate) fn real(&self) -> &RealPath {
         match self {
             Self::Prefix(prefix) => prefix.real(),
-            Self::Place(place) => place,
+            Self::RunPlace(place) => place,
         }
     }
 }
 
-impl Scope for FsScope {
+impl FsDeny {
+    pub(crate) fn prefix(&self) -> &FrozenPath {
+        &self.0
+    }
+}
+
+/// The root prefix is judged at `/`, which only a prefix that holds everywhere
+/// contains.
+impl Allows for FsAllow {
     type Subject<'a> = &'a Path;
 
-    fn stores(&self, evidence: Evidence) -> bool {
-        matches!(self, Self::Prefix(_)) || !evidence.negative
-    }
-
-    fn holds<P: Polarity>(&self, path: &Path) -> bool {
-        self.real().contains_path::<P>(path)
+    fn contains(&self, path: &Path) -> bool {
+        self.real().contains_path::<Allow>(path)
     }
 
     fn own(&self) -> &Path {
         self.real().as_path()
+    }
+}
+
+impl Denies<FsAllow> for FsDeny {
+    fn matches(&self, path: &Path) -> Option<MatchedBy> {
+        self.0.real().matched_by(path, Depth::Within)
     }
 }
 
@@ -218,22 +230,17 @@ fn fold(grants: &GrantStack, op: &FsOp, places: bool) -> Option<Region> {
             meet_onto(&mut run, ExecRules::compile(exec));
         }
         let Some(fs) = &layer.fs else { continue };
-        let allows = op
-            .prefixes(fs)
-            .map(|p| (FsScope::Prefix(p.clone()), Evidence::ALLOW));
-        let denies = (fs.deny_paths.iter()).map(|p| (FsScope::Prefix(p.live()), Evidence::DENY));
-        let placed = (run.iter().flat_map(ExecRules::places))
-            .map(|p| (FsScope::Place(p.clone()), Evidence::ALLOW));
-        meet_onto(&mut met, allows.chain(denies).chain(placed).collect());
+        let allows = op.prefixes(fs).map(|p| FsAllow::Prefix(p.clone()));
+        let denies = (fs.deny_paths.iter()).map(|p| FsDeny(p.live()));
+        let placed = (run.iter().flat_map(ExecRules::places)).map(|p| FsAllow::RunPlace(p.clone()));
+        meet_onto(&mut met, Table::new(allows.chain(placed), denies));
     }
     let met = met?;
     Some(match op {
-        FsOp::Read => met.join(
-            floor()
-                .iter()
-                .map(|p| (FsScope::Prefix(p.clone()), Evidence::ALLOW))
-                .collect(),
-        ),
+        FsOp::Read => met.join(Table::new(
+            floor().iter().map(|p| FsAllow::Prefix(p.clone())),
+            [],
+        )),
         FsOp::Write => met,
     })
 }
@@ -243,7 +250,7 @@ impl GrantStack {
     /// permit or an exclusion of the first, which compiles no exec table, is
     /// final with the same witness; only a missing allowance asks again with
     /// the run places, which add positive evidence alone.
-    pub(crate) fn read(&self, path: &Path) -> Result<(), Withheld<FsScope>> {
+    pub(crate) fn read(&self, path: &Path) -> Result<(), Withheld<FsDeny>> {
         let Some(region) = region(self, &FsOp::Read) else {
             return Ok(());
         };
@@ -258,14 +265,14 @@ impl GrantStack {
     }
 
     /// The write judgment: may `path` be written?
-    pub(crate) fn write(&self, path: &Path) -> Result<(), Withheld<FsScope>> {
+    pub(crate) fn write(&self, path: &Path) -> Result<(), Withheld<FsDeny>> {
         let region = region(self, &FsOp::Write);
         region.and_then(|r| r.withheld(path)).map_or(Ok(()), Err)
     }
 
     /// Whether only an exclusion withholds the read of `path`, which is all a
     /// bundled tool needs of ral's binary.
-    pub(crate) fn read_not_excluded(&self, path: &Path) -> Result<(), Withheld<FsScope>> {
+    pub(crate) fn read_not_excluded(&self, path: &Path) -> Result<(), Withheld<FsDeny>> {
         let withheld = region(self, &FsOp::Read).and_then(|r| r.withheld(path));
         match withheld {
             Some(excluded @ Withheld::Excluded { .. }) => Err(excluded),
@@ -281,8 +288,9 @@ impl GrantStack {
 )]
 mod tests {
     use super::*;
+    use crate::capability::Evidence;
     use crate::capability::{Capabilities, ExecGrant, ExecKey};
-    use crate::path::{Allow, Deny, test_absolute};
+    use crate::path::test_absolute;
     use std::path::PathBuf;
 
     /// A divergent `surface`/`resolved` pair — what a symlink freezes to,
@@ -310,24 +318,18 @@ mod tests {
     }
 
     fn table(allows: &[FrozenPath], denies: &[FrozenPath]) -> Region {
-        let allows = allows
-            .iter()
-            .map(|p| (FsScope::Prefix(p.clone()), Evidence::ALLOW));
-        allows
-            .chain(
-                denies
-                    .iter()
-                    .map(|p| (FsScope::Prefix(p.clone()), Evidence::DENY)),
-            )
-            .collect()
+        Region::new(
+            allows.iter().cloned().map(FsAllow::Prefix),
+            denies.iter().cloned().map(FsDeny),
+        )
     }
 
-    fn live(region: &Region) -> Vec<FsScope> {
+    fn live(region: &Region) -> Vec<FsAllow> {
         region.live().cloned().collect()
     }
 
-    fn prefixes(paths: &[&str]) -> Vec<FsScope> {
-        paths.iter().map(|p| FsScope::Prefix(lit(p))).collect()
+    fn prefixes(paths: &[&str]) -> Vec<FsAllow> {
+        paths.iter().map(|p| FsAllow::Prefix(lit(p))).collect()
     }
 
     fn permits(region: &Region, path: &str) -> bool {
@@ -369,8 +371,8 @@ mod tests {
         assert_eq!(
             region.withheld(&access),
             Some(Withheld::Excluded {
-                scope: FsScope::Prefix(lit("/d/Secrets")),
-                respelled: true
+                scope: FsDeny(lit("/d/Secrets")),
+                matched_by: MatchedBy::FoldedName
             })
         );
         assert!(!permits(&table(&[lit("/d/Secrets")], &[]), "/d/secrets/f"));
@@ -403,7 +405,7 @@ mod tests {
         let Some(Withheld::Excluded { scope, .. }) = region.withheld(&path) else {
             panic!("an exclusion holds the path");
         };
-        assert!(scope.holds::<Deny>(&path) && !scope.holds::<Allow>(&path));
+        assert_eq!(scope.matches(&path), Some(MatchedBy::FoldedName));
         assert_eq!(region.withheld(&path), region.withheld(&path));
     }
 
@@ -624,7 +626,7 @@ mod tests {
     fn the_meet_admits_a_windows_verbatim_prefix_variant() {
         let sub = native(r"\\?\C:\work\sub");
         let met = table(&[native(r"C:\work")], &[]).meet(table(std::slice::from_ref(&sub), &[]));
-        assert_eq!(live(&met), [FsScope::Prefix(sub)]);
+        assert_eq!(live(&met), [FsAllow::Prefix(sub)]);
     }
 
     /// An allow holds a name as stored: the meet folds the separator and the
@@ -638,9 +640,9 @@ mod tests {
 
         let sub = native("c:/work/sub");
         let met = outer().meet(table(std::slice::from_ref(&sub), &[]));
-        assert_eq!(live(&met), [FsScope::Prefix(sub)]);
+        assert_eq!(live(&met), [FsAllow::Prefix(sub)]);
 
         let met = outer().meet(table(&[native(r"C:\WORK\sub")], &[]));
-        assert_eq!(live(&met), Vec::<FsScope>::new());
+        assert_eq!(live(&met), Vec::<FsAllow>::new());
     }
 }

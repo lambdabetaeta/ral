@@ -10,11 +10,11 @@
 //! so the two cannot drift.
 
 use crate::capability::{
-    Admitted, ExecDenial, Flag, FsOp, FsScope, GrantStack, Program, Refused, ShellVerb, Withheld,
+    Admitted, ExecDenial, Flag, FsDeny, FsOp, GrantStack, Program, Refused, ShellVerb, Withheld,
     ral_binary,
 };
-use crate::path::LexicalPath;
 use crate::path::shown;
+use crate::path::{LexicalPath, MatchedBy};
 use crate::text::code;
 use crate::types::{Check, Context, Error, Resource, Settled, sig};
 use std::fmt::Display;
@@ -50,14 +50,16 @@ const NESTED: &str = "an enclosing grant may be the one that withholds it, and a
                       cannot add authority its caller withholds";
 
 /// The exclusion half of a refusal, which no allowance overrides.
-fn excluded(subject: impl Display, scope: impl Display, respelled: bool) -> String {
-    if respelled {
-        format!(
+fn excluded(subject: impl Display, scope: impl Display, matched_by: MatchedBy) -> String {
+    match matched_by {
+        MatchedBy::Name => {
+            format!("{subject} is excluded by {scope}; an allowance cannot override an exclusion")
+        }
+        MatchedBy::FoldedName => format!(
             "{subject} is the denied {scope} under another spelling \
              (case or Unicode form); a deny holds under every spelling"
-        )
-    } else {
-        format!("{subject} is excluded by {scope}; an allowance cannot override an exclusion")
+        ),
+        MatchedBy::Identity => format!("{subject} is the denied object {scope} under another name"),
     }
 }
 
@@ -97,12 +99,12 @@ fn exec_error(grants: &GrantStack, shown: &str, program: &Program, why: &ExecDen
             code("`absolute /path/to/it"),
             code("`dir `absolute /path"),
         )),
-        ExecDenial::Run(Withheld::Excluded { scope, respelled }) => Error::new(format!(
+        ExecDenial::Run(Withheld::Excluded { scope, matched_by }) => Error::new(format!(
             "{head}: {}",
             excluded(
                 format_args!("'{program}'"),
                 code(&scope.to_string()),
-                *respelled
+                *matched_by
             )
         ))
         .with_hint(EXCLUSION_HINT),
@@ -113,7 +115,7 @@ fn exec_error(grants: &GrantStack, shown: &str, program: &Program, why: &ExecDen
 
 /// Why running `program` is refused for what it reads: a host file, or for a
 /// bundled tool ral's binary, which it runs.
-fn read_cause(shown: &str, program: &Program, why: &Withheld<FsScope>) -> String {
+fn read_cause(shown: &str, program: &Program, why: &Withheld<FsDeny>) -> String {
     let (lead, subject) = match program {
         Program::File { real, .. } => (String::new(), format!("'{real}'")),
         Program::Tool(_) => (
@@ -128,14 +130,14 @@ fn read_cause(shown: &str, program: &Program, why: &Withheld<FsScope>) -> String
         (Withheld::MissingAllowance, _) => {
             format!("{lead}{subject} may run, but it is not readable under the active grant")
         }
-        (Withheld::Excluded { scope, respelled }, _) => format!(
+        (Withheld::Excluded { scope, matched_by }, _) => format!(
             "{lead}{}",
-            excluded(subject, format_args!("the fs deny '{scope}'"), *respelled)
+            excluded(subject, format_args!("the fs deny '{scope}'"), *matched_by)
         ),
     }
 }
 
-fn read_hint(why: &Withheld<FsScope>, layers: usize) -> String {
+fn read_hint(why: &Withheld<FsDeny>, layers: usize) -> String {
     match why {
         Withheld::MissingAllowance if layers > 1 => NESTED.to_string(),
         Withheld::MissingAllowance => {
@@ -184,7 +186,7 @@ pub(crate) fn deny_head(
 /// consulted, the twin of the discard device, which is admitted before it is.
 pub(super) enum FsRefusal {
     Guarded(&'static str),
-    Withheld(Withheld<FsScope>),
+    Withheld(Withheld<FsDeny>),
 }
 
 /// Judge the resolved path by `op`'s region: an exclusion beats every
@@ -279,11 +281,11 @@ pub(crate) fn check_fs_exact(
             };
             (None, error.with_hint(hint))
         }
-        FsRefusal::Withheld(Withheld::Excluded { scope, respelled }) => (
+        FsRefusal::Withheld(Withheld::Excluded { scope, matched_by }) => (
             Some(("deny", scope.to_string())),
             Error::new(format!(
                 "fs {name} denied by grant: {}",
-                excluded(&path, &scope, respelled)
+                excluded(&path, &scope, matched_by)
             ))
             .with_hint(EXCLUSION_HINT),
         ),

@@ -45,6 +45,7 @@ pub use tilde::abbreviate_home;
 
 pub use forms::{CwdPath, FrozenPath, LexicalPath, NotACwd};
 pub use git::work_tree_chain;
+pub(crate) use identity::Depth;
 pub use identity::{Allow, Deny, MatchedBy, Polarity};
 pub(crate) use lex::{
     GrantRefusal, SubpathRefusal, classify_subpath, grant_eligibility, proper_ancestors,

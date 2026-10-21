@@ -17,7 +17,7 @@
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::capability::Subject;
 use crate::capability::{
-    Admitted, Evidence, ExecRules, FsOp, FsScope, GrantStack, Join, Net, Region, region, rules,
+    Admitted, ExecRules, FsAllow, FsOp, GrantStack, Join, Net, Region, region, rules,
     running_region,
 };
 use crate::path::{FrozenPath, RealPath};
@@ -29,10 +29,10 @@ use std::collections::BTreeSet;
 ///
 /// Allowances stay frozen, as the guard judges them, up to rendering;
 /// exclusions are the surface names re-resolved at the fold.  `A` names an
-/// allowance and `X` an exclusion: [`FsScope`] and [`FrozenPath`] as folded,
+/// allowance and `X` an exclusion: [`FsAllow`] and [`FrozenPath`] as folded,
 /// [`Object`] and [`Rendered`] as rendered.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FsRules<A = FsScope, X = FrozenPath> {
+pub struct FsRules<A = FsAllow, X = FrozenPath> {
     /// The live read region: authored reads and writes, the run places, the
     /// live support and the [`floor`].
     pub(crate) read: Vec<A>,
@@ -70,7 +70,7 @@ impl<A, X> Default for FsRules<A, X> {
 /// `file-write*` on macOS, `--dev-bind / /` on Linux. An empty `Restricted` is
 /// the other extreme: fs was attenuated to nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum FsProjection<A = FsScope, X = FrozenPath> {
+pub enum FsProjection<A = FsAllow, X = FrozenPath> {
     #[default]
     Unrestricted,
     Restricted(FsRules<A, X>),
@@ -111,7 +111,7 @@ pub(crate) enum ExecProjection {
 /// the launching process. Unlike a [`Capabilities`](crate::capability::Capabilities)
 /// frame, no further composition can widen it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SandboxProjection<A = FsScope, X = FrozenPath> {
+pub struct SandboxProjection<A = FsAllow, X = FrozenPath> {
     pub fs: FsProjection<A, X>,
     pub net: bool,
     pub(crate) exec: ExecProjection,
@@ -249,24 +249,17 @@ impl SandboxProjection {
         });
         let fs = match regions {
             Some((read, write)) => {
-                let read = read.join(
-                    live.iter()
-                        .map(|s| (FsScope::Place(s.clone()), Evidence::ALLOW))
-                        .collect(),
-                );
+                let read = read.join(Region::new(
+                    live.iter().map(|s| FsAllow::RunPlace(s.clone())),
+                    [],
+                ));
                 FsProjection::Restricted(FsRules {
                     read: read.live().cloned().collect(),
                     write: write.live().cloned().collect(),
                     // Both regions carry the same denies; a disk change between
                     // the two folds can only drop a write allow, which fails
                     // closed.
-                    deny: read
-                        .denies()
-                        .filter_map(|scope| match scope {
-                            FsScope::Prefix(prefix) => Some(prefix.clone()),
-                            FsScope::Place(_) => None,
-                        })
-                        .collect(),
+                    deny: read.denies().map(|deny| deny.prefix().clone()).collect(),
                     pinned_dirs: Vec::new(),
                 })
             }
@@ -284,10 +277,10 @@ impl SandboxProjection {
 
 /// `scopes` as their objects, each frozen allowance by its real path.
 #[cfg(unix)]
-fn objects(scopes: &[FsScope]) -> Result<Vec<Object>, String> {
+fn objects(scopes: &[FsAllow]) -> Result<Vec<Object>, String> {
     let named = scopes.iter().map(|scope| match scope {
-        FsScope::Prefix(prefix) => (prefix.real().clone(), Some(prefix)),
-        FsScope::Place(place) => (place.clone(), None),
+        FsAllow::Prefix(prefix) => (prefix.real().clone(), Some(prefix)),
+        FsAllow::RunPlace(place) => (place.clone(), None),
     });
     render_objects(named)
 }
@@ -335,8 +328,8 @@ fn live_support(
 mod rendered_tests {
     use super::*;
 
-    fn prefix(path: &str) -> FsScope {
-        FsScope::Prefix(FrozenPath::for_test(path, path))
+    fn prefix(path: &str) -> FsAllow {
+        FsAllow::Prefix(FrozenPath::for_test(path, path))
     }
 
     fn projection(write: &[&str], deny: &[&str], pinned: &[&str]) -> SandboxProjection {
@@ -407,7 +400,7 @@ mod rendered_tests {
     /// through a symlink never as the surface it was written by on macOS.
     #[test]
     fn an_allowance_renders_as_its_frozen_real_path() {
-        let linked = FsScope::Prefix(FrozenPath::for_test("/ral-test/link", "/ral-test/real"));
+        let linked = FsAllow::Prefix(FrozenPath::for_test("/ral-test/link", "/ral-test/real"));
         let projection = SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
                 read: vec![linked],

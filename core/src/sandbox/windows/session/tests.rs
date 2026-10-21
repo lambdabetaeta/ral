@@ -1,5 +1,5 @@
 use super::{
-    FsRules, FsScope, GrantKind, ProjectionKey, filter_out_granted, profile_name,
+    FsAllow, FsRules, GrantKind, ProjectionKey, filter_out_granted, profile_name,
     refuse_deny_meeting_grant, refuse_universal_prefix,
 };
 use crate::path::{FrozenPath, RealPath};
@@ -55,10 +55,10 @@ fn projection_key_identity_is_the_fs_triple() {
     assert_ne!(a, denied);
 }
 
-fn prefixes(paths: &[&str]) -> Vec<FsScope> {
+fn prefixes(paths: &[&str]) -> Vec<FsAllow> {
     paths
         .iter()
-        .map(|p| FsScope::Prefix(FrozenPath::from_surface(p)))
+        .map(|p| FsAllow::Prefix(FrozenPath::from_surface(p)))
         .collect()
 }
 
@@ -101,7 +101,7 @@ fn the_universal_prefix_is_refused_in_either_region() {
 #[test]
 fn the_root_is_refused_as_a_place_and_as_an_exclusion() {
     let place = FsRules {
-        read: vec![FsScope::Place(RealPath::assumed("/"))],
+        read: vec![FsAllow::RunPlace(RealPath::assumed("/"))],
         ..rules(&[], &[], &[])
     };
     for rules in [place, rules(&[r"C:\work"], &[], &["/"])] {

@@ -75,7 +75,7 @@ pub enum MatchedBy {
 /// authority takes a `Located`, so a listing's record can reach `admits` and
 /// never `judge`.
 #[derive(Clone, Copy)]
-#[expect(dead_code, reason = "used from step 2")]
+#[expect(dead_code, reason = "used from step 4")]
 pub(crate) enum Subject<'a> {
     Access(&'a Trace),
     Listed(&'a Listed<'a>),
@@ -86,7 +86,6 @@ pub(crate) enum Subject<'a> {
 /// How far an exclusion reaches: the subject at or beneath it (fs, an exec
 /// directory), or exactly it (an exec file).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[expect(dead_code, reason = "used from step 2")]
 pub(crate) enum Depth {
     Within,
     Exact,
@@ -104,6 +103,21 @@ impl RealPath {
     /// that must catch every spelling of a protected place and holds nothing.
     pub fn contains_folded(&self, other: &Self) -> bool {
         path_within(other.as_path(), self.as_path(), Identity::Collision)
+    }
+
+    /// How this exclusion holds `path`, if it does: `Name` as stored,
+    /// `FoldedName` only under another spelling of a name.  `Within` holds
+    /// this position and everything beneath it, `Exact` this position alone.
+    pub(crate) fn matched_by(&self, path: &Path, depth: Depth) -> Option<MatchedBy> {
+        let holds = |identity| {
+            path_within(path, self.as_path(), identity)
+                && (depth == Depth::Within || path_within(self.as_path(), path, identity))
+        };
+        if holds(Identity::Stored) {
+            Some(MatchedBy::Name)
+        } else {
+            holds(Identity::Collision).then_some(MatchedBy::FoldedName)
+        }
     }
 }
 

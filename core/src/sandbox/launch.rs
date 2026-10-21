@@ -315,6 +315,8 @@ mod tests {
 
     // Needed only by the per-platform launch tests; elsewhere the two
     // refusals are the only tests, and they need no scaffolding.
+    #[cfg(target_os = "macos")]
+    use crate::capability::{ExecAllow, ExecDeny, ExecRule};
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     use crate::{
         capability::Program,
@@ -323,8 +325,8 @@ mod tests {
     };
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn prefix(path: &str) -> crate::capability::FsScope {
-        crate::capability::FsScope::Prefix(FrozenPath::from_surface(path))
+    fn prefix(path: &str) -> crate::capability::FsAllow {
+        crate::capability::FsAllow::Prefix(FrozenPath::from_surface(path))
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -595,13 +597,7 @@ mod tests {
     /// `every` program, and nothing else.
     #[cfg(target_os = "macos")]
     fn every() -> ExecProjection {
-        ExecProjection::Restricted(
-            std::iter::once((
-                crate::capability::ExecScope::Any,
-                crate::capability::Evidence::ALLOW,
-            ))
-            .collect(),
-        )
+        ExecProjection::Restricted(std::iter::once(ExecRule::Allow(ExecAllow::Any)).collect())
     }
 
     /// The exit code and stderr of `cmd` run confined, stdout silenced.
@@ -678,14 +674,8 @@ mod tests {
             let shell =
                 crate::path::RealPath::of_path(Path::new("/bin/sh")).expect("/bin/sh exists");
             let exec = [
-                (
-                    crate::capability::ExecScope::Any,
-                    crate::capability::Evidence::ALLOW,
-                ),
-                (
-                    crate::capability::ExecScope::file(shell),
-                    crate::capability::Evidence::DENY,
-                ),
+                ExecRule::Allow(ExecAllow::Any),
+                ExecRule::Deny(ExecDeny::file(shell)),
             ];
             confined_to(
                 &[&work],
@@ -836,16 +826,16 @@ mod tests {
 
     /// The floor, as read scopes.
     #[cfg(target_os = "macos")]
-    fn floor() -> impl Iterator<Item = crate::capability::FsScope> {
+    fn floor() -> impl Iterator<Item = crate::capability::FsAllow> {
         crate::capability::floor()
             .iter()
             .cloned()
-            .map(crate::capability::FsScope::Prefix)
+            .map(crate::capability::FsAllow::Prefix)
     }
 
     /// `cat file` confined to reading `read` and the floor, minus `deny`.
     #[cfg(target_os = "macos")]
-    fn reads(read: Vec<crate::capability::FsScope>, deny: Vec<FrozenPath>, file: &Path) -> bool {
+    fn reads(read: Vec<crate::capability::FsAllow>, deny: Vec<FrozenPath>, file: &Path) -> bool {
         let projection = SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
                 read: read.into_iter().chain(floor()).collect(),
@@ -889,7 +879,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn an_allowance_through_a_respelled_link_reaches_nothing_beneath_the_new_name() {
-        use crate::capability::FsScope::Prefix;
+        use crate::capability::FsAllow::Prefix;
         let (root, [a, b], link) = linked_dirs("respell");
         let frozen = || {
             vec![Prefix(FrozenPath::for_test(
@@ -925,7 +915,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn an_exclusion_follows_a_retargeted_spelling() {
-        use crate::capability::FsScope::Prefix;
+        use crate::capability::FsAllow::Prefix;
         let (root, [a, b], link) = linked_dirs("exclusion");
         std::fs::remove_file(&link).expect("unlink");
         std::os::unix::fs::symlink(&b, &link).expect("retarget");

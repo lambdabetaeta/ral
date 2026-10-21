@@ -1,129 +1,127 @@
 //! Authority as a table of scoped evidence.
 //!
-//! A [`Table`] maps scopes to [`Evidence`] and denotes a function from
-//! subjects to it: a subject has positive evidence where some positive scope
-//! holds it as stored, and negative evidence where some negative scope holds
-//! it under any spelling of its name.  Nothing is ranked: an exclusion beats
-//! every allowance, and only [`Evidence::permits`] closes a gap.  The fs
+//! A [`Table`] is two sets, one polarity each, and denotes a function from
+//! subjects to [`Evidence`]: a subject has positive evidence where some
+//! allowance contains it as stored, and negative evidence where some exclusion
+//! matches it under any spelling of its name.  Nothing is ranked: an exclusion
+//! beats every allowance, and only [`Evidence::permits`] closes a gap.  The fs
 //! [`Region`](super::fs::Region) and the [`ExecRules`](super::exec::ExecRules)
 //! are its two instances.
 
-use super::lattice::join_insert;
 use super::{Evidence, Join, Meet};
-use crate::path::{Allow, Deny, Polarity};
-use std::collections::BTreeMap;
+use crate::path::MatchedBy;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+use std::fmt::Debug;
 
-/// Where a rule applies.
+/// A positive scope: positional, names as stored.
 ///
 /// The meet is exact under three obligations:
 ///
-/// - every positive scope holds its own subject;
-/// - two positive scopes with a common subject are nested;
-/// - `own()` detects containment: if `a` holds `own(k)` and `k` holds `s`,
-///   then `a` holds `s`.
+/// - every allowance contains its own subject;
+/// - two allowances with a common subject are nested;
+/// - `own()` detects containment: if `a` contains `k.own()` and `k` contains
+///   `s`, then `a` contains `s`.
 ///
-/// A future positive scope that does not nest needs an explicit intersection
-/// before it is added.
-pub(crate) trait Scope: Ord + Clone + std::fmt::Debug {
+/// A future allowance that does not nest needs an explicit intersection before
+/// it is added.
+pub(crate) trait Allows: Ord + Clone + Debug {
     type Subject<'a>: Copy
     where
         Self: 'a;
-    /// Whether `subject` falls in this scope, names read as `P` reads them.
-    fn holds<P: Polarity>(&self, subject: Self::Subject<'_>) -> bool;
-    /// The subject a rule at this scope is itself judged at.
+    fn contains(&self, s: Self::Subject<'_>) -> bool;
+    /// The subject this scope is itself judged at.  A scope that holds
+    /// everywhere is judged at the universal subject, which only a scope that
+    /// holds everywhere contains: so it survives a meet only with a table that
+    /// also holds everywhere, as the root prefix does.
     fn own(&self) -> Self::Subject<'_>;
-    /// Whether `evidence` may be stored here: a scope has one polarity by
-    /// construction where its subjects are not nested.
-    fn stores(&self, _evidence: Evidence) -> bool {
-        true
-    }
+}
+
+/// A negative scope: any spelling of a name.
+pub(crate) trait Denies<A: Allows>: Ord + Clone + Debug {
+    fn matches(&self, s: A::Subject<'_>) -> Option<MatchedBy>;
 }
 
 /// Why a supplied table refuses a subject.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Withheld<K> {
-    /// No scope supports it.
+pub(crate) enum Withheld<D> {
+    /// No allowance contains it.
     MissingAllowance,
-    /// An exclusion applies; `respelled` when it holds the subject only under
-    /// another spelling of its name.
-    Excluded { scope: K, respelled: bool },
+    /// An exclusion matches it, `matched_by` the least way any does.
+    Excluded { scope: D, matched_by: MatchedBy },
 }
 
-/// Evidence by scope; a scope written twice joins.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Table<K: Scope>(BTreeMap<K, Evidence>);
+/// Allowances and exclusions, each a set.  Bounds sit on the impls, not the
+/// struct, so the derives bound nothing but the keys.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Table<A: Ord, D: Ord> {
+    allows: BTreeSet<A>,
+    denies: BTreeSet<D>,
+}
 
-impl<K: Scope> Default for Table<K> {
+impl<A: Ord, D: Ord> Default for Table<A, D> {
     fn default() -> Self {
-        Self(BTreeMap::new())
-    }
-}
-
-impl<K: Scope> Extend<(K, Evidence)> for Table<K> {
-    fn extend<I: IntoIterator<Item = (K, Evidence)>>(&mut self, rules: I) {
-        for (scope, evidence) in rules {
-            debug_assert!(scope.stores(evidence), "{scope:?}");
-            join_insert(&mut self.0, scope, evidence);
+        Self {
+            allows: BTreeSet::new(),
+            denies: BTreeSet::new(),
         }
     }
 }
 
-impl<K: Scope> FromIterator<(K, Evidence)> for Table<K> {
-    fn from_iter<I: IntoIterator<Item = (K, Evidence)>>(rules: I) -> Self {
-        let mut table = Self::default();
-        table.extend(rules);
-        table
+impl<A: Ord, D: Ord> Table<A, D> {
+    pub(crate) fn new(
+        allows: impl IntoIterator<Item = A>,
+        denies: impl IntoIterator<Item = D>,
+    ) -> Self {
+        Self {
+            allows: allows.into_iter().collect(),
+            denies: denies.into_iter().collect(),
+        }
+    }
+
+    pub(crate) fn allows(&self) -> impl Iterator<Item = &A> {
+        self.allows.iter()
+    }
+
+    pub(crate) fn denies(&self) -> impl Iterator<Item = &D> {
+        self.denies.iter()
     }
 }
 
-impl<K: Scope> Table<K> {
-    pub(crate) fn rules(&self) -> impl Iterator<Item = (&K, &Evidence)> {
-        self.0.iter()
+impl<A: Allows, D: Denies<A>> Table<A, D> {
+    pub(crate) fn supports(&self, s: A::Subject<'_>) -> bool {
+        self.allows.iter().any(|a| a.contains(s))
     }
 
-    pub(crate) fn supports(&self, s: K::Subject<'_>) -> bool {
-        self.0
-            .iter()
-            .any(|(k, e)| e.positive && k.holds::<Allow>(s))
+    pub(crate) fn excludes(&self, s: A::Subject<'_>) -> bool {
+        self.denies.iter().any(|d| d.matches(s).is_some())
     }
 
-    pub(crate) fn excludes(&self, s: K::Subject<'_>) -> bool {
-        self.0.iter().any(|(k, e)| e.negative && k.holds::<Deny>(s))
-    }
-
-    pub(crate) fn evidence(&self, s: K::Subject<'_>) -> Evidence {
+    /// Computed, never stored: a table cannot hold a subject's evidence apart
+    /// from its keys.
+    pub(crate) fn evidence(&self, s: A::Subject<'_>) -> Evidence {
         Evidence {
             positive: self.supports(s),
             negative: self.excludes(s),
         }
     }
 
-    pub(crate) fn positives(&self) -> impl Iterator<Item = &K> {
-        (self.0.iter()).filter(|(_, e)| e.positive).map(|(k, _)| k)
-    }
-
-    pub(crate) fn denies(&self) -> impl Iterator<Item = &K> {
-        (self.0.iter()).filter(|(_, e)| e.negative).map(|(k, _)| k)
-    }
-
     /// Permitted at its own subject; descendants may still be excluded.
-    pub(crate) fn live(&self) -> impl Iterator<Item = &K> {
-        self.positives()
-            .filter(move |k| self.evidence(k.own()).permits())
+    pub(crate) fn live(&self) -> impl Iterator<Item = &A> {
+        (self.allows.iter()).filter(move |a| self.evidence(a.own()).permits())
     }
 
-    /// `None` exactly when `s` has positive evidence alone.  An exclusion
-    /// that holds `s` as stored is cited before one that holds it only by a
-    /// fold, in stable key order: deterministic, never by depth.
-    pub(crate) fn withheld(&self, s: K::Subject<'_>) -> Option<Withheld<K>> {
-        let witness = self
-            .denies()
-            .filter(|k| k.holds::<Deny>(s))
-            .min_by_key(|k| !k.holds::<Allow>(s));
+    /// `None` exactly when `s` has positive evidence alone.  The exclusion
+    /// cited is the one matching `s` the least way, in stable key order:
+    /// deterministic, never by depth.
+    pub(crate) fn withheld(&self, s: A::Subject<'_>) -> Option<Withheld<D>> {
+        let witness = (self.denies.iter())
+            .filter_map(|d| Some((d.matches(s)?, d)))
+            .min_by_key(|&(matched_by, _)| matched_by);
         match witness {
-            Some(k) => Some(Withheld::Excluded {
-                scope: k.clone(),
-                respelled: !k.holds::<Allow>(s),
+            Some((matched_by, scope)) => Some(Withheld::Excluded {
+                scope: scope.clone(),
+                matched_by,
             }),
             None => (!self.supports(s)).then_some(Withheld::MissingAllowance),
         }
@@ -132,20 +130,22 @@ impl<K: Scope> Table<K> {
 
 /// `∧`, pointwise on evidence: denies join; an allow survives where both
 /// tables support its own subject.
-impl<K: Scope> Meet for Table<K> {
+impl<A: Allows, D: Denies<A>> Meet for Table<A, D> {
     fn meet(self, other: Self) -> Self {
-        let denies = (self.denies().chain(other.denies())).map(|k| (k.clone(), Evidence::DENY));
-        let allows = (self.positives().chain(other.positives()))
-            .filter(|k| self.supports(k.own()) && other.supports(k.own()))
-            .map(|k| (k.clone(), Evidence::ALLOW));
-        denies.chain(allows).collect()
+        let allows = (self.allows.iter().chain(&other.allows))
+            .filter(|a| self.supports(a.own()) && other.supports(a.own()))
+            .cloned()
+            .collect();
+        let denies = self.denies.into_iter().chain(other.denies).collect();
+        Self { allows, denies }
     }
 }
 
 /// `⊕`, pointwise on evidence: the floor and support join through it.
-impl<K: Scope> Join for Table<K> {
+impl<A: Allows, D: Denies<A>> Join for Table<A, D> {
     fn join(mut self, other: Self) -> Self {
-        self.extend(other.0);
+        self.allows.extend(other.allows);
+        self.denies.extend(other.denies);
         self
     }
 }
@@ -153,29 +153,53 @@ impl<K: Scope> Join for Table<K> {
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "test probes are lexical paths already in normal form"
+    reason = "[test] a tempdir tree of real links; probes are lexical paths already in normal form"
 )]
 mod tests {
-    use super::{Scope, Table};
-    use crate::capability::exec::ExecScope;
+    use super::{Allows, Denies, Table};
     use crate::capability::exec::tests::{Rng, paths, random};
-    use crate::capability::fs::{FsScope, Region};
+    use crate::capability::fs::{FsAllow, FsDeny, Region};
     use crate::capability::{Evidence, Join, Meet};
-    use crate::path::{FrozenPath, RealPath};
-    use std::path::Path;
+    use crate::path::{FrozenPath, RealPath, test_absolute};
+    use std::path::{Path, PathBuf};
+
+    /// The three obligations of [`Allows`], at every subject given.
+    fn obligations<'s, A: Allows + 's>(allows: &[A], subjects: &[A::Subject<'s>]) {
+        for a in allows {
+            assert!(a.contains(a.own()), "{a:?} does not hold its own subject");
+            for k in allows {
+                let shared = subjects.iter().any(|&s| a.contains(s) && k.contains(s));
+                assert!(
+                    !shared || a.contains(k.own()) || k.contains(a.own()),
+                    "{a:?} and {k:?} share a subject and do not nest"
+                );
+                if a.contains(k.own()) {
+                    for &s in subjects {
+                        assert!(
+                            !k.contains(s) || a.contains(s),
+                            "{a:?} holds {k:?}'s own subject, and {k:?} a subject {a:?} does not"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     /// `ev(a ∧ b, s) = ev(a, s) ∧ ev(b, s)` and likewise for `⊕`, Both and
     /// Neither included, at every subject; and on what the meet makes, a
     /// semilattice, structurally: `a ∧ a = a`, commutative, associative; and
     /// likewise `⊕`, with `top` the meet's unit and the empty table the join's.
-    fn laws<'s, K: Scope + 's>(
+    /// The tables' allowances meet the three obligations that make the first
+    /// exact.
+    fn laws<'s, A: Allows + 's, D: Denies<A>>(
         mut rng: Rng,
-        top: &Table<K>,
-        random: impl Fn(&mut Rng) -> Table<K>,
-        subjects: &[K::Subject<'s>],
+        top: &Table<A, D>,
+        random: impl Fn(&mut Rng) -> Table<A, D>,
+        subjects: &[A::Subject<'s>],
     ) {
         for _ in 0..1000 {
             let (a, b, c) = (random(&mut rng), random(&mut rng), random(&mut rng));
+            obligations(&a.allows().cloned().collect::<Vec<_>>(), subjects);
             let met = a.clone().meet(b.clone());
             let joined = a.clone().join(b.clone());
             for &s in subjects {
@@ -215,61 +239,123 @@ mod tests {
     fn the_exec_meet_and_join_are_pointwise_on_evidence() {
         let paths = paths();
         let subjects: Vec<_> = crate::capability::exec::tests::subjects(&paths).collect();
-        let top = std::iter::once((ExecScope::Any, Evidence::ALLOW)).collect();
+        let top = Table::new([crate::capability::exec::ExecAllow::Any], []);
         laws(Rng(0x9e37_79b9_7f4a_7c15), &top, random, &subjects);
     }
 
-    /// A case pair, a symlink-divergent pair, the root and nested dirs.
-    fn prefixes() -> [FrozenPath; 8] {
-        let lit = |s: &str| FrozenPath::for_test(s, s);
-        [
-            lit("/"),
-            lit("/d"),
-            lit("/d/Secrets"),
-            lit("/d/secrets"),
-            lit("/d/secrets/f"),
-            FrozenPath::for_test("/d/link", "/e"),
-            lit("/e"),
-            lit("/e/sub"),
-        ]
+    /// A tempdir tree with a symlink to a directory, a hard link and a renamed
+    /// directory, and the real path of its root.
+    fn tree() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = RealPath::of_path(tmp.path())
+            .unwrap()
+            .as_path()
+            .to_path_buf();
+        for dir in ["d/secrets", "e/sub", "old/inner"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(root.join("d/secrets/f"), "").unwrap();
+        std::fs::hard_link(root.join("d/secrets/f"), root.join("d/hard")).unwrap();
+        std::fs::rename(root.join("old"), root.join("moved")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("e"), root.join("link")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(root.join("e"), root.join("link")).unwrap();
+        (tmp, root)
     }
 
-    /// Places at a prefix's path and at its descendants.
-    fn places() -> [RealPath; 4] {
-        ["/d", "/d/secrets/f", "/e/sub", "/z"].map(RealPath::assumed)
+    /// The tree's names as frozen prefixes: its root, a case pair of which one
+    /// is absent, the link, the hard link, the renamed directory.
+    fn prefixes(root: &Path) -> Vec<FrozenPath> {
+        let names = [
+            "d",
+            "d/Secrets",
+            "d/secrets",
+            "d/secrets/f",
+            "d/hard",
+            "link",
+            "e",
+            "e/sub",
+            "moved",
+        ];
+        std::iter::once(root.to_path_buf())
+            .chain(names.map(|name| root.join(name)))
+            .map(|path| FrozenPath::from_surface(crate::path::utf8(&path).unwrap()))
+            .collect()
     }
 
-    fn random_region(rng: &mut Rng) -> Region {
-        let mut region = Region::default();
-        for prefix in prefixes() {
+    /// Places beneath the tree's names, and one beside it.
+    fn places(root: &Path) -> Vec<RealPath> {
+        ["d", "d/secrets/f", "e/sub", "moved/inner", "z"]
+            .map(|name| RealPath::lenient(&root.join(name)))
+            .into()
+    }
+
+    fn random_region(rng: &mut Rng, root: &Path) -> Region {
+        let (mut allows, mut denies) = (Vec::new(), Vec::new());
+        for prefix in prefixes(root) {
             if rng.below(3) == 0 {
-                let evidence = rng.pick(&[Evidence::ALLOW, Evidence::DENY, Evidence::BOTH]);
-                region.extend([(FsScope::Prefix(prefix), evidence)]);
+                match rng.below(3) {
+                    0 => allows.push(FsAllow::Prefix(prefix)),
+                    1 => denies.push(FsDeny(prefix)),
+                    _ => {
+                        allows.push(FsAllow::Prefix(prefix.clone()));
+                        denies.push(FsDeny(prefix));
+                    }
+                }
             }
         }
-        for place in places() {
+        for place in places(root) {
             if rng.below(3) == 0 {
-                region.extend([(FsScope::Place(place), Evidence::ALLOW)]);
+                allows.push(FsAllow::RunPlace(place));
             }
         }
-        region
+        Region::new(allows, denies)
     }
 
     #[test]
     fn the_fs_meet_and_join_are_pointwise_on_evidence() {
-        let probes = [
-            "/d/secrets/f/x",
-            "/d/Secrets/x",
-            "/d/SECRETS/y",
-            "/d/x",
-            "/d/link/x",
-            "/e/x",
-            "/e/sub/x",
-            "/z",
-            "/z/y",
+        let (_tmp, root) = tree();
+        let probes: Vec<PathBuf> = [
+            "d/secrets/f/x",
+            "d/Secrets/x",
+            "d/SECRETS/y",
+            "d/hard",
+            "d/x",
+            "link/x",
+            "e/x",
+            "e/sub/x",
+            "moved/inner",
+            "z",
+            "z/y",
         ]
-        .map(Path::new);
-        let top = std::iter::once((FsScope::Prefix(FrozenPath::root()), Evidence::ALLOW)).collect();
-        laws(Rng(0x5851_f42d_4c95_7f2d), &top, random_region, &probes);
+        .map(|name| root.join(name))
+        .into();
+        let subjects: Vec<&Path> = probes.iter().map(PathBuf::as_path).collect();
+        let top = Table::new([FsAllow::Prefix(FrozenPath::root())], []);
+        let random = |rng: &mut Rng| random_region(rng, &root);
+        laws(Rng(0x5851_f42d_4c95_7f2d), &top, random, &subjects);
+    }
+
+    /// The universal allowance is not privileged: it survives a meet only
+    /// where the other table supports its own subject, so it narrows to what
+    /// the other holds, and holds nothing against a table that holds nothing.
+    #[test]
+    fn the_universal_allowance_meets_as_any_other() {
+        let lit = |p: &str| {
+            let p = test_absolute(p);
+            FrozenPath::for_test(&p, &p)
+        };
+        let at = |p: &str| PathBuf::from(test_absolute(p));
+        let everywhere = || Region::new([FsAllow::Prefix(FrozenPath::root())], []);
+        let work = Region::new([FsAllow::Prefix(lit("/work"))], []);
+        let met = everywhere().meet(work);
+        assert!(met.evidence(&at("/work")).permits());
+        assert!(met.evidence(&at("/work/f")).permits());
+        assert!(!met.evidence(&at("/secret")).permits());
+        let met = everywhere().meet(Region::default());
+        for path in ["/", "/work", "/secret"] {
+            assert_eq!(met.evidence(&at(path)), Evidence::NEITHER, "{path}");
+        }
     }
 }

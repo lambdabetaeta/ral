@@ -15,10 +15,10 @@
 //! `pub(crate)` and `dead_code` still names one whose last in-crate caller
 //! went away.
 
-#[cfg(unix)]
-use crate::capability::ExecScope;
-use crate::capability::FsScope;
+use crate::capability::FsAllow;
 use crate::capability::Program;
+#[cfg(unix)]
+use crate::capability::{ExecAllow, ExecDeny};
 use crate::carrier::{IdentityTransport, ProbeError, Transport};
 use crate::first_order::FOValue;
 use crate::ir::{CaseArm, Comp, CompKind, Exec, Val, ValListElem};
@@ -87,7 +87,7 @@ pub trait ReadName {
     fn real_name(&self) -> String;
 }
 
-impl ReadName for FsScope {
+impl ReadName for FsAllow {
     fn real_name(&self) -> String {
         self.real().to_string()
     }
@@ -121,25 +121,29 @@ pub fn exec_projection_rules(projection: &SandboxProjection) -> Option<Vec<Kerne
     let ExecProjection::Restricted(rules) = &projection.exec else {
         return None;
     };
-    let clause = |scope: &ExecScope, allow: bool| match scope {
-        ExecScope::Any => Some(KernelExecRule::Any { allow }),
-        ExecScope::Dir(path) => Some(KernelExecRule::Dir {
+    let positives = rules.allows().filter_map(|scope| match scope {
+        ExecAllow::Any => Some(KernelExecRule::Any { allow: true }),
+        ExecAllow::Dir(path) => Some(KernelExecRule::Dir {
             path: path.to_string(),
-            allow,
+            allow: true,
         }),
-        ExecScope::File { path, .. } => Some(KernelExecRule::File {
+        ExecAllow::File { path, .. } => Some(KernelExecRule::File {
             path: path.to_string(),
-            allow,
+            allow: true,
         }),
-        ExecScope::Name(name) => Some(KernelExecRule::Name(name.clone())),
-        ExecScope::Tool(_) => None,
-    };
-    let positives = (rules.rules())
-        .filter(|(_, e)| e.positive)
-        .filter_map(|(scope, _)| clause(scope, true));
-    let negatives = (rules.rules())
-        .filter(|(_, e)| e.negative)
-        .filter_map(|(scope, _)| clause(scope, false));
+        ExecAllow::Tool(_) => None,
+    });
+    let negatives = rules.denies().map(|scope| match scope {
+        ExecDeny::Dir(path) => KernelExecRule::Dir {
+            path: path.to_string(),
+            allow: false,
+        },
+        ExecDeny::File { path, .. } => KernelExecRule::File {
+            path: path.to_string(),
+            allow: false,
+        },
+        ExecDeny::Name(name) => KernelExecRule::Name(name.clone()),
+    });
     Some(positives.chain(negatives).collect())
 }
 

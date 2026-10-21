@@ -108,12 +108,13 @@ fn a_symlink_spelled_deny_covers_its_target() {
     );
 }
 
-/// The refusal cites a respelling only when no deny holds the access as
+/// The refusal cites a folded name only when no deny holds the access as
 /// stored, though the deepest deny holds it only by a fold.
 #[test]
 fn a_deny_holding_the_stored_name_refuses_plainly() {
     use super::{FsRefusal, fs_judge};
     use crate::capability::Withheld;
+    use crate::path::MatchedBy;
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let under = |denies: &[&str]| {
@@ -125,15 +126,15 @@ fn a_deny_holding_the_stored_name_refuses_plainly() {
             ..FsPolicy::default()
         })
     };
-    let respelled = |grants: &GrantStack| {
+    let matched_by = |grants: &GrantStack| {
         let access = root.join("d/secrets/f");
         match fs_judge(grants, &access, &FsOp::Read) {
-            Err(FsRefusal::Withheld(Withheld::Excluded { respelled, .. })) => respelled,
+            Err(FsRefusal::Withheld(Withheld::Excluded { matched_by, .. })) => matched_by,
             _ => panic!("an exclusion holds the access"),
         }
     };
-    assert!(respelled(&under(&["d/Secrets"])));
-    assert!(!respelled(&under(&["d", "d/Secrets"])));
+    assert_eq!(matched_by(&under(&["d/Secrets"])), MatchedBy::FoldedName);
+    assert_eq!(matched_by(&under(&["d", "d/Secrets"])), MatchedBy::Name);
 }
 
 mod words {

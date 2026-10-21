@@ -39,7 +39,7 @@ use std::sync::{LazyLock, Mutex};
 use windows_sys::Win32::Security::{PSID, SID_AND_ATTRIBUTES};
 use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
 
-use crate::capability::FsScope;
+use crate::capability::FsAllow;
 use crate::path::{Deny, FrozenPath, RealPath, shown};
 use crate::process::Launch;
 use crate::process::cancel::Scope;
@@ -440,9 +440,9 @@ fn ensure_allows(
 /// alone judges.
 fn refuse_universal_prefix(rules: &FsRules) -> Result<(), Refusal> {
     let bare = |p: &Path| crate::path::lex::is_bare_root(p, crate::path::PathRules::HOST);
-    let universal = |s: &FsScope| match s {
-        FsScope::Prefix(p) => p.is_root() || bare(p.real().as_path()),
-        FsScope::Place(r) => bare(r.as_path()),
+    let universal = |s: &FsAllow| match s {
+        FsAllow::Prefix(p) => p.is_root() || bare(p.real().as_path()),
+        FsAllow::RunPlace(r) => bare(r.as_path()),
     };
     let excluded = |p: &FrozenPath| p.is_root() || bare(p.real().as_path());
     if !rules.read.iter().chain(&rules.write).any(universal) && !rules.deny.iter().any(excluded) {
@@ -531,12 +531,12 @@ fn listing(dir: &RealPath) -> Result<Listing, Refusal> {
 
 /// A scope's frozen real path, which the stamps and capability names key on,
 /// never re-resolved.
-fn real_path(scope: &FsScope) -> RealPath {
+fn real_path(scope: &FsAllow) -> RealPath {
     scope.real().clone()
 }
 
 /// A region's frozen real paths.
-fn real_paths(region: &[FsScope]) -> Vec<PathBuf> {
+fn real_paths(region: &[FsAllow]) -> Vec<PathBuf> {
     region
         .iter()
         .map(|scope| real_path(scope).as_path().to_path_buf())

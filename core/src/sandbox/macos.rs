@@ -11,8 +11,8 @@
 //! one allow/deny bit rather than an endpoint list.
 
 use super::{ExecProjection, FsProjection, RenderedRules, SandboxProjection};
-use crate::capability::ExecScope;
-use crate::path::{Object, Rendered, render_paths, render_real, rendered_ancestors};
+use crate::capability::{ExecAllow, ExecDeny};
+use crate::path::{Object, RealPath, Rendered, render_paths, render_real, rendered_ancestors};
 use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
 use std::fmt;
@@ -215,12 +215,36 @@ fn emit_fs_restricted(profile: &mut Profile, rules: &RenderedRules) {
 /// `process-exec` clauses [`emit_exec_rules`] renders below.
 pub(crate) const RENDERS_EXEC: bool = true;
 
+/// A `process-exec` clause.
+fn exec_clause(allow: bool, filter: Filter) -> String {
+    Clause {
+        allow,
+        ops: "process-exec",
+        filter,
+    }
+    .to_string()
+}
+
+/// A clause for each name the kernel may present `path` by: the subtree of a
+/// `dir`, a file's literal.
+fn exec_clauses(allow: bool, path: &RealPath, dir: bool) -> Result<Vec<String>, String> {
+    let clause = |name| {
+        let filter = if dir {
+            Filter::Subpath(name)
+        } else {
+            Filter::Literal(name)
+        };
+        exec_clause(allow, filter)
+    };
+    Ok(render_real(path)?.iter().map(clause).collect())
+}
+
 /// Render the `process-exec` rules.  `Unrestricted` is a wildcard.
 /// `Restricted` admits every positive scope (`Any` as the wildcard), then
 /// every negative one, so that an exclusion reaches everything above it:
 /// Seatbelt is last-match-wins.
 /// Order within a group is for stable output; depth grants no exception.  A
-/// scope holding both polarities emits both.  Support arrives among the
+/// place both allowed and excluded emits both.  Support arrives among the
 /// positives as file allows.  Exec clauses are `process-exec` alone: reads are
 /// the fs section's.  Rule by rule:
 /// `docs/ral-wiki/internals/seatbelt-profile.md`.
@@ -232,47 +256,24 @@ fn emit_exec_rules(profile: &mut Profile, exec: &ExecProjection) -> Result<(), S
         profile.exec_rules.push(ANY_EXEC.to_string());
         return Ok(());
     };
-    let spell = |scope: &ExecScope, allow: bool| -> Result<Vec<String>, String> {
-        let clause = |filter| {
-            Clause {
-                allow,
-                ops: "process-exec",
-                filter,
-            }
-            .to_string()
-        };
-        Ok(match (scope, allow) {
-            (ExecScope::Any, true) => vec![ANY_EXEC.to_string()],
-            (ExecScope::Dir(path), _) => render_real(path)?
-                .iter()
-                .map(|name| clause(Filter::Subpath(name)))
-                .collect(),
-            (ExecScope::File { path, .. }, _) => render_real(path)?
-                .iter()
-                .map(|name| clause(Filter::Literal(name)))
-                .collect(),
-            (ExecScope::Name(name), false) => vec![clause(Filter::Regex(name))],
-            (ExecScope::Tool(_), _) => Vec::new(),
-            (ExecScope::Any, false) | (ExecScope::Name(_), true) => {
-                unreachable!("Table::extend's `stores`: Any is only positive, Name only negative")
-            }
-        })
-    };
-    let positives = rules
-        .rules()
-        .filter(|(_, e)| e.positive)
-        .map(|(s, _)| (s, true));
-    let negatives = rules
-        .rules()
-        .filter(|(_, e)| e.negative)
-        .map(|(s, _)| (s, false));
-    for (scope, allow) in positives.chain(negatives) {
-        profile.exec_rules.extend(spell(scope, allow)?);
+    let positives = rules.allows().map(|scope| match scope {
+        ExecAllow::Any => Ok(vec![ANY_EXEC.to_string()]),
+        ExecAllow::Dir(path) => exec_clauses(true, path, true),
+        ExecAllow::File { path, .. } => exec_clauses(true, path, false),
+        ExecAllow::Tool(_) => Ok(Vec::new()),
+    });
+    let negatives = rules.denies().map(|scope| match scope {
+        ExecDeny::Dir(path) => exec_clauses(false, path, true),
+        ExecDeny::File { path, .. } => exec_clauses(false, path, false),
+        ExecDeny::Name(name) => Ok(vec![exec_clause(false, Filter::Regex(name))]),
+    });
+    for clauses in positives.chain(negatives) {
+        profile.exec_rules.extend(clauses?);
     }
     let granted = rules
         .live()
         .filter_map(|scope| match scope {
-            ExecScope::Dir(path) | ExecScope::File { path, .. } => Some(render_real(path)),
+            ExecAllow::Dir(path) | ExecAllow::File { path, .. } => Some(render_real(path)),
             _ => None,
         })
         .collect::<Result<Vec<_>, _>>()?
@@ -425,7 +426,7 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::{BASE_PROFILE, NET_PROFILE, Profile, build_profile, withheld_doors};
-    use crate::capability::{Evidence, ExecScope, FsScope};
+    use crate::capability::{ExecAllow, ExecDeny, ExecRule, FsAllow};
     use crate::path::proper_ancestors;
     use crate::path::{FrozenPath, RealPath, command_name_key};
     use crate::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
@@ -442,26 +443,28 @@ mod tests {
             .join("\n")
     }
 
-    type Rule = (ExecScope, Evidence);
+    type Rule = ExecRule;
 
-    fn evidence(allow: bool) -> Evidence {
+    fn dir(path: &str, allow: bool) -> Rule {
+        let path = RealPath::assumed(path);
         if allow {
-            Evidence::ALLOW
+            ExecRule::Allow(ExecAllow::Dir(path))
         } else {
-            Evidence::DENY
+            ExecRule::Deny(ExecDeny::Dir(path))
         }
     }
 
-    fn dir(path: &str, allow: bool) -> Rule {
-        (ExecScope::Dir(RealPath::assumed(path)), evidence(allow))
-    }
-
     fn file(path: &str, allow: bool) -> Rule {
-        (ExecScope::file(RealPath::assumed(path)), evidence(allow))
+        let path = RealPath::assumed(path);
+        if allow {
+            ExecRule::Allow(ExecAllow::file(path))
+        } else {
+            ExecRule::Deny(ExecDeny::file(path))
+        }
     }
 
     fn veto(name: &str) -> Rule {
-        (ExecScope::Name(command_name_key(name)), Evidence::DENY)
+        ExecRule::Deny(ExecDeny::Name(command_name_key(name)))
     }
 
     fn restricted(fs: FsProjection, rules: Vec<Rule>) -> SandboxProjection {
@@ -472,8 +475,8 @@ mod tests {
         }
     }
 
-    fn prefix(path: &str) -> FsScope {
-        FsScope::Prefix(FrozenPath::for_test(path, path))
+    fn prefix(path: &str) -> FsAllow {
+        FsAllow::Prefix(FrozenPath::for_test(path, path))
     }
 
     fn frozen(paths: &[&str]) -> Vec<FrozenPath> {
@@ -489,7 +492,7 @@ mod tests {
     }
 
     /// A restricted fs reading `reads` and nothing else.
-    fn reading(reads: Vec<FsScope>) -> FsProjection {
+    fn reading(reads: Vec<FsAllow>) -> FsProjection {
         FsProjection::Restricted(FsRules {
             read: reads,
             ..FsRules::default()
@@ -610,14 +613,11 @@ mod tests {
         assert!(last_positive < first_negative, "out of order:\n{profile}");
     }
 
-    /// A scope holding both polarities emits both clauses.
+    /// A place both allowed and excluded emits both clauses.
     #[test]
-    fn mac_profile_emits_both_clauses_for_a_both_scope() {
-        let both = (
-            ExecScope::file(RealPath::assumed("/x/tool")),
-            Evidence::BOTH,
-        );
-        let profile = build_profile(&restricted(FsProjection::default(), vec![both])).unwrap();
+    fn mac_profile_emits_both_clauses_for_a_place_allowed_and_excluded() {
+        let both = vec![file("/x/tool", true), file("/x/tool", false)];
+        let profile = build_profile(&restricted(FsProjection::default(), both)).unwrap();
         let allow = at(&profile, "(allow process-exec (literal \"/x/tool\"))");
         let deny = at(&profile, "(deny process-exec (literal \"/x/tool\"))");
         assert!(allow < deny);
@@ -629,7 +629,7 @@ mod tests {
     fn mac_profile_renders_any_as_unrestricted_exec_before_its_exclusions() {
         let policy = restricted(
             FsProjection::default(),
-            vec![(ExecScope::Any, Evidence::ALLOW), veto("git")],
+            vec![ExecRule::Allow(ExecAllow::Any), veto("git")],
         );
         let profile = build_profile(&policy).unwrap();
         let any = at(&profile, "(allow process-exec)\n");
@@ -641,7 +641,7 @@ mod tests {
     /// region starts under no exec rule, `every` included.
     #[test]
     fn mac_profile_runs_nothing_the_fs_does_not_read() {
-        let any = || vec![(ExecScope::Any, Evidence::ALLOW)];
+        let any = || vec![ExecRule::Allow(ExecAllow::Any)];
         let profile =
             build_profile(&restricted(reading(vec![prefix("/ral-test/r")]), any())).unwrap();
         let wildcard = at(&profile, "(allow process-exec)\n");
@@ -690,7 +690,7 @@ mod tests {
     /// whether or not exec is restricted.
     #[test]
     fn mac_profile_reads_a_place_as_its_frozen_real_path_and_twin() {
-        let place = FsScope::Place(RealPath::assumed("/tmp/ral-test/tool"));
+        let place = FsAllow::RunPlace(RealPath::assumed("/tmp/ral-test/tool"));
         let profile = build_profile(&SandboxProjection {
             fs: reading(vec![place]),
             ..SandboxProjection::default()
@@ -709,7 +709,7 @@ mod tests {
     /// may pass the link and reach nothing beneath it.
     #[test]
     fn mac_profile_lets_a_lookup_stat_the_surface_of_a_frozen_allowance() {
-        let linked = FsScope::Prefix(FrozenPath::for_test("/ral-test/link", "/ral-test/real"));
+        let linked = FsAllow::Prefix(FrozenPath::for_test("/ral-test/link", "/ral-test/real"));
         let profile = build_profile(&SandboxProjection {
             fs: reading(vec![linked]),
             ..SandboxProjection::default()

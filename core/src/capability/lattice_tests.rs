@@ -1211,10 +1211,13 @@ fn the_read_and_run_judgments_agree_with_their_regions() {
             let read = stack.read(path);
             let want = full.as_ref().is_none_or(|r| r.evidence(path).permits());
             assert_eq!(read.is_ok(), want, "{f}\nstack = {stack:?}");
-            if let Err(Withheld::Excluded { scope, .. }) = &read {
-                use super::table::Scope;
-                use crate::path::Deny;
-                assert!(scope.holds::<Deny>(path), "{scope:?} does not hold {f}");
+            if let Err(Withheld::Excluded { scope, matched_by }) = &read {
+                use super::table::Denies;
+                assert_eq!(
+                    scope.matches(path),
+                    Some(*matched_by),
+                    "{scope:?} does not hold {f} as cited"
+                );
             }
             let runs = stack.admit(file(f), vec![]).is_ok();
             assert_eq!(
