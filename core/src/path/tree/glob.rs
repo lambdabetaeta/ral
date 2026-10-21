@@ -5,6 +5,7 @@
 //! component names a dotfile.
 
 use super::walk::Walk;
+use crate::path::shown;
 use globset::{GlobBuilder, GlobMatcher};
 use std::ffi::{OsStr, OsString};
 use std::iter::successors;
@@ -26,13 +27,20 @@ pub(crate) struct Glob {
 
 impl Glob {
     /// # Errors
-    /// A wildcard component beginning with `.`, or one `globset` rejects.
+    /// A wildcard component beginning with `.`, one `globset` rejects, or
+    /// a `..` after a wildcard, which no walked entry carries.
     pub(crate) fn parse(pattern: &Path) -> Result<Self, String> {
         let mut glob = Self {
             root: PathBuf::new(),
             steps: Vec::new(),
         };
         for c in pattern.components() {
+            if c == Component::ParentDir && !glob.steps.is_empty() {
+                return Err(format!(
+                    "'{}': a walk never climbs '..' after a wildcard; glob from the directory it climbs to, as in `glob '../x'`?",
+                    shown(pattern)
+                ));
+            }
             match step(c)? {
                 Step::Name(name) if glob.steps.is_empty() => glob.root.push(name),
                 s => glob.steps.push(s),
@@ -120,4 +128,18 @@ fn step(c: Component<'_>) -> Result<Step, String> {
         .build()
         .map(|g| Step::Wild(g.compile_matcher()))
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "[test] fixed patterns")]
+mod tests {
+    use super::Glob;
+    use std::path::Path;
+
+    #[test]
+    fn a_parent_after_a_wildcard_is_refused() {
+        assert!(Glob::parse(Path::new("*/../x")).is_err());
+        assert!(Glob::parse(Path::new("../x")).is_ok());
+        assert!(Glob::parse(Path::new("a/../*")).is_ok());
+    }
 }

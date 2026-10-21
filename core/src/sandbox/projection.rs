@@ -431,7 +431,7 @@ mod rendered_tests {
 mod tests {
     use super::ExecProjection;
     use crate::capability::{Axis, Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy};
-    use crate::path::FrozenPath;
+    use crate::path::{FrozenPath, RealPath};
     use crate::test_access::fs_read_paths;
 
     fn layer(read: Option<&str>, run: Option<&str>) -> Capabilities {
@@ -481,5 +481,38 @@ mod tests {
         assert_eq!(projection.exec, ExecProjection::Unrestricted);
         let read = fs_read_paths(&projection.fs).expect("fs restricted");
         assert!(read.iter().any(|p| p == "/ral-test/bin"), "{read:?}");
+    }
+
+    /// Support reads a system script's interpreter where the fs grant names
+    /// neither, with exec omitted or restricted to the script.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn live_support_reads_a_system_scripts_interpreter() {
+        let Some((script, interp)) = crate::sandbox::carriers::system_script() else {
+            eprintln!("skipping: this host has no system script");
+            return;
+        };
+        let only_script = [(
+            ExecKey::Path(FrozenPath::freeze(script.as_path()).expect("a Unicode path")),
+            Evidence::ALLOW,
+        )];
+        for exec in [None, Some(only_script.into_iter().collect())] {
+            let stack = crate::capability::GrantStack::of(Capabilities {
+                exec,
+                ..layer(Some("/ral-test/w"), None)
+            });
+            let program =
+                crate::capability::Program::file(script.as_path().into()).expect("a script");
+            let admitted = stack.admit(program, Vec::new()).expect("admitted");
+            let rendered = super::SandboxProjection::of(&stack, Some(&admitted))
+                .expect("fs restricted")
+                .rendered()
+                .expect("system paths render");
+            let read = &rendered.fs.rules().expect("fs restricted").read;
+            let carried = read
+                .iter()
+                .any(|o| RealPath::assumed(o.real.as_str()) == interp);
+            assert!(carried, "{interp} is not read: {read:?}");
+        }
     }
 }

@@ -825,9 +825,7 @@ mod tests {
         bwrap_command, seccomp_programs,
     };
     use crate::Role;
-    use crate::capability::{
-        Admitted, Capabilities, FsPolicy, FsScope, GrantStack, Program, floor,
-    };
+    use crate::capability::{Admitted, Capabilities, FsPolicy, FsScope, GrantStack, Program};
     use crate::capability::{Evidence, ExecScope};
     use crate::path::{FrozenPath, RealPath};
     use crate::sandbox::launch::{Ownership, admitted, enveloped};
@@ -3400,14 +3398,10 @@ mod tests {
     /// region's places, where support would otherwise carry it.
     #[test]
     fn an_exec_excluded_carrier_is_not_read() {
-        let Some(script) = trusted_script() else {
-            eprintln!("skipping: this host has no trusted script");
+        let Some((script, carrier)) = crate::sandbox::carriers::system_script() else {
+            eprintln!("skipping: this host has no system script");
             return;
         };
-        let carrier = crate::sandbox::carriers::trusted_real(&script)
-            .and_then(|real| crate::sandbox::carriers::shebang(real.as_path()))
-            .and_then(|interp| crate::sandbox::carriers::trusted_real(&interp))
-            .expect("a trusted script has a trusted interpreter");
         let reads = || FsPolicy {
             read_prefixes: vec![FrozenPath::from_surface(
                 crate::path::utf8(&std::env::temp_dir()).unwrap(),
@@ -3416,7 +3410,7 @@ mod tests {
             deny_paths: Vec::new(),
         };
         let carried = |deny: &[&std::path::Path]| {
-            let (policy, _) = folded(Some((&[], deny)), Some(reads()), &script, &[]);
+            let (policy, _) = folded(Some((&[], deny)), Some(reads()), script.as_path(), &[]);
             let rules = policy.fs.rules().expect("a restricted fs").read.clone();
             rules.contains(&FsScope::Place(carrier.clone()))
         };
@@ -3490,42 +3484,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A system-written script whose interpreter is system-written too,
-    /// preferring one whose interpreter lies beyond the floor.
-    fn trusted_script() -> Option<std::path::PathBuf> {
-        let beyond_floor = |interp: &std::path::Path| {
-            !floor()
-                .iter()
-                .any(|f| interp.starts_with(f.real().as_path()))
-        };
-        let scripts: Vec<_> = std::fs::read_dir("/usr/bin")
-            .ok()?
-            .flatten()
-            .filter_map(|e| {
-                let real = crate::sandbox::carriers::trusted_real(&e.path())?;
-                let interp = crate::sandbox::carriers::shebang(real.as_path())?;
-                crate::sandbox::carriers::trusted_real(&interp)?;
-                Some((real.as_path().to_path_buf(), interp))
-            })
-            .collect();
-        scripts
-            .iter()
-            .find(|(_, interp)| beyond_floor(interp))
-            .or_else(|| scripts.first())
-            .map(|(script, _)| script.clone())
-    }
-
     /// A trusted script starts under a restricted fs whose reads name neither
-    /// it nor its interpreter, with exec supplied and omitted: support's
-    /// reads carry it.  (On most hosts no system interpreter lies beyond the
-    /// floor, which then covers the one found.)
+    /// it nor its interpreter, with exec supplied and omitted.
     #[test]
     fn a_trusted_script_starts_through_live_supports_reads() {
         if !landlock_at_least(super::landlock::Abi::EXEC) {
             return;
         }
-        let Some(script) = trusted_script() else {
-            eprintln!("skipping: this host has no trusted script");
+        let Some((script, _)) = crate::sandbox::carriers::system_script() else {
+            eprintln!("skipping: this host has no system script");
             return;
         };
         let dir = workdir("trusted-script");
@@ -3534,21 +3501,20 @@ mod tests {
             write_prefixes: Vec::new(),
             deny_paths: Vec::new(),
         };
+        // The trampoline's refusal of the launch, the script's or its
+        // interpreter's, unread or unadmitted; the script's children are its own.
+        let refused = format!("ral: {script}:");
         for (label, exec) in [
             ("exec supplied", Some((&[script.as_path()][..], &[][..]))),
             ("exec omitted", None),
         ] {
-            let (policy, admitted) = folded(exec, Some(reads()), &script, &["--help"]);
+            let (policy, admitted) = folded(exec, Some(reads()), script.as_path(), &["--help"]);
             let Some(env) = envelope_launches(&policy) else {
                 return;
             };
             let out = run_admitted(&env, &policy, &admitted).expect("spawn");
             let stderr = String::from_utf8_lossy(&out.stderr);
-            assert!(
-                !stderr.contains("Permission denied") && !stderr.contains("hint:"),
-                "{label}: the kernel refused {}: {stderr}",
-                script.display()
-            );
+            assert!(!stderr.contains(&refused), "{label}: {stderr}");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

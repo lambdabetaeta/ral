@@ -42,18 +42,12 @@ pub(crate) fn canonicalise_strict(p: &Path) -> std::io::Result<PathBuf> {
     Ok(real)
 }
 
-/// The real path of `p`, or the one it will have once its missing tail is
-/// created: the walk under [`Missing::Tolerate`](super::walk::Missing), so a
-/// policy names objects by the code that locates them.  Grant prefixes need
-/// this: a `fs.write` grant may name a build output that does not exist yet,
-/// and a grant authored `/tmp/foo` must still match an access that resolves
-/// through the symlink to `/private/tmp/foo`.
-///
-/// `p` is read as the kernel reads it: each `..` physically, after the
-/// links before it, a dangling link at its target.  A name no walk can start
-/// (relative, or with a head `std::path` cannot parse,
-/// [`is_unparsed_head`](super::lex::is_unparsed_head)) is its own lexical
-/// fold.
+/// The walk's [`resolve_lenient`](super::walk::resolve_lenient): a policy
+/// names objects by the code that locates them, so a grant authored `/tmp/foo`
+/// matches an access through the link at `/private/tmp/foo`, and one on a
+/// build output not yet made names where it will land.  `p` is read as the
+/// kernel reads it: each `..` after the links before it, a dangling link at
+/// its target.
 pub(crate) fn canonicalise_lenient(p: &Path) -> PathBuf {
     super::walk::resolve_lenient(p)
 }

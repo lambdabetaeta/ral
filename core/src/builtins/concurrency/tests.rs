@@ -1420,17 +1420,15 @@ fn race_removes_winner_and_cancelled_losers() {
     let _ = l2_tx.send(());
 }
 
-/// The flow rule: the registry `Arc` flows into a worker's own shell, so a
-/// `spawn` nested in a worker's body registers into the *same* registry the
-/// owning shell reads.  The `go_rx` gate buys determinism only — a thread
-/// starts before its outer entry is filed, so an ungated body could sample
-/// ahead of it; production order is deliberately unordered.
+/// The flow rule: a `spawn` nested in a worker's body registers into the
+/// *same* registry the owning shell reads, not a copy.
 #[test]
 fn nested_spawn_registers_into_the_owning_shells_registry() {
     let mut shell = crate::test_helper::core_shell();
     let m = Mooring::adrift();
     let (go_tx, go_rx) = mpsc::channel::<()>();
     let (ready_tx, ready_rx) = mpsc::channel::<usize>();
+    let (done_tx, done_rx) = mpsc::channel::<()>();
     let _outer = spawn_child(
         &m,
         &mut shell,
@@ -1441,26 +1439,23 @@ fn nested_spawn_registers_into_the_owning_shells_registry() {
                 Ok(Value::Unit)
             })
             .unwrap();
-            // The outer entry is filed (the gate above), so this count is
-            // exact.
             ready_tx.send(child_shell.local.workers.count()).unwrap();
+            // The body's exit joins `<inner>`, claiming it out of the registry.
+            let _ = done_rx.recv();
             Ok(Value::Unit)
         },
     )
     .unwrap();
-    // The outer entry is filed; release the worker to spawn and sample.
+    // A worker's thread starts before its entry is filed.
     go_tx.send(()).unwrap();
 
-    let observed_from_worker = ready_rx.recv().unwrap();
-    assert_eq!(
-        observed_from_worker, 2,
-        "the nested spawn's own shell sees both entries in the one shared registry"
-    );
+    assert_eq!(ready_rx.recv().unwrap(), 2, "the worker's shell sees both");
     assert_eq!(
         shell.local.workers.count(),
         2,
-        "the parent's registry observes the nested spawn's entry too: same registry, not a copy"
+        "the parent's shell sees both"
     );
+    done_tx.send(()).unwrap();
 }
 
 // ── settled retention (the epoch sweep) ──────────────────────────────

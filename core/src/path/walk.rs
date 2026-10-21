@@ -133,6 +133,22 @@ pub(crate) enum Missing {
     Tolerate,
 }
 
+impl Missing {
+    /// `Link` to `spliced`; a failure, the open's or the splice's, settles at
+    /// `missing()` under `Tolerate`.
+    fn absorb(
+        self,
+        spliced: io::Result<PathBuf>,
+        missing: impl FnOnce() -> PathBuf,
+    ) -> io::Result<Step> {
+        match spliced {
+            Ok(spliced) => Ok(Step::Link(spliced)),
+            Err(_) if self == Self::Tolerate => Ok(Step::Settled(Settled::Missing(missing()))),
+            Err(e) => Err(e),
+        }
+    }
+}
+
 /// What the walk does with a symlink at the *final* component.  Directory
 /// components are always resolved; only the leaf is in question.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -187,11 +203,9 @@ pub(crate) fn walk_vetted(
 }
 
 /// The real path `path` names, or will name once its missing tail is
-/// created: [`walk`] under [`Missing::Tolerate`], so a policy judges a name
-/// where an open of it would land.  Never fails, since a policy match has no
-/// error channel: what `settle` can still fail on (a name no walk can start
-/// ([`rooted`]), a root that will not open, a link cycle) is its own lexical
-/// fold.
+/// created: [`walk`] under [`Missing::Tolerate`].  A policy match has no error
+/// channel, so a path the walk still fails on ([`rooted`], an unopenable root,
+/// a link cycle) is its own lexical fold.
 pub(crate) fn resolve_lenient(path: &Path) -> PathBuf {
     match settle(path, Leaf::Resolve, Missing::Tolerate, &mut |_, _| true) {
         Ok(Settled::Object(located)) => located.real,
@@ -272,9 +286,8 @@ const LOOP_MESSAGE: &str = "too many levels of symbolic links";
 /// symlink met spliced in; the caller restarts from the root, so a target
 /// that itself crosses links is handled by the same rule.
 ///
-/// Every name is entered as a directory where the path names one itself:
-/// with no names past the root, a trailing `..`, or [`Leaf::Entered`].  The object
-/// is then that directory, through its own handle.
+/// A path naming a directory itself (no names past the root, a trailing `..`,
+/// [`Leaf::Entered`]) locates it through its own handle.
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:walk-descend] Opens the root and then each directory component as a search handle with FollowSymlinks::No, to reach the object a grant will judge. Path resolution, not the model's data I/O: the card belongs to the site that then opens the leaf."
@@ -307,31 +320,19 @@ fn descend(
             at.up();
             continue;
         }
-        match open_search_dir(&at.dir, name) {
+        let spliced = match open_search_dir(&at.dir, name) {
             Ok(next) => {
                 pass(vet, &next, itself())?;
                 at.enter(name, next);
+                continue;
             }
-            Err(e) => {
-                if is_symlink(&at.dir, name) {
-                    pass(vet, &at.dir, name)?;
-                    return match splice(&at.dir, &at.real, name, &names[i + 1..]) {
-                        Ok(spliced) => Ok(Step::Link(spliced)),
-                        Err(_) if missing == Missing::Tolerate => Ok(Step::Settled(
-                            Settled::Missing(appended(at.real, &names[i..])),
-                        )),
-                        Err(e) => Err(e),
-                    };
-                }
-                return match missing {
-                    Missing::Refuse => Err(e),
-                    Missing::Tolerate => Ok(Step::Settled(Settled::Missing(appended(
-                        at.real,
-                        &names[i..],
-                    )))),
-                };
+            Err(_) if is_symlink(&at.dir, name) => {
+                pass(vet, &at.dir, name)?;
+                splice(&at.dir, &at.real, name, &names[i + 1..])
             }
-        }
+            Err(e) => Err(e),
+        };
+        return missing.absorb(spliced, || appended(at.real, &names[i..]));
     }
     let Cursor { dir, mut real, .. } = at;
     let leaf = match leaf {
@@ -339,13 +340,8 @@ fn descend(
         Some(leaf) => {
             pass(vet, &dir, leaf)?;
             if leaf_mode == Leaf::Resolve && is_symlink(&dir, leaf) {
-                return match splice(&dir, &real, leaf, &[]) {
-                    Ok(spliced) => Ok(Step::Link(spliced)),
-                    Err(_) if missing == Missing::Tolerate => {
-                        Ok(Step::Settled(Settled::Missing(appended(real, &[leaf]))))
-                    }
-                    Err(e) => Err(e),
-                };
+                let spliced = splice(&dir, &real, leaf, &[]);
+                return missing.absorb(spliced, || appended(real, &[leaf]));
             }
             real.push(spelled(&dir, leaf));
             leaf.to_os_string()
@@ -828,19 +824,16 @@ pub(crate) fn open_discard(rp: &LexicalPath) -> io::Result<File> {
 )]
 mod tests {
     use super::*;
-    use crate::path::Resolver;
+    use crate::path::{CwdPath, Resolver};
+    use crate::types::EnvVars;
 
     fn located(dir: &Path, rel: &str) -> io::Result<Located> {
         located_with(dir, rel, Leaf::Resolve)
     }
 
     fn located_with(dir: &Path, rel: &str, leaf: Leaf) -> io::Result<Located> {
-        let dir =
-            crate::path::CwdPath::new(dir.to_path_buf()).expect("a tempdir is a working directory");
-        walk(
-            &Resolver::at(&crate::types::EnvVars::new(), &dir).resolve(rel),
-            leaf,
-        )
+        let dir = CwdPath::new(dir.to_path_buf()).expect("a tempdir is a working directory");
+        walk(&Resolver::at(&EnvVars::new(), &dir).resolve(rel), leaf)
     }
 
     /// The two leaf modes are the whole difference: `Resolve` walks through a
@@ -980,15 +973,7 @@ mod tests {
 
     #[test]
     fn the_root_locates_as_itself() {
-        let loc = walk(
-            &Resolver::at(
-                &crate::types::EnvVars::new(),
-                &crate::path::CwdPath::new("/".into()).unwrap(),
-            )
-            .resolve("/"),
-            Leaf::Resolve,
-        )
-        .unwrap();
+        let loc = located(Path::new("/"), "/").unwrap();
         assert_eq!(loc.real(), Path::new("/"));
         assert_eq!(loc.stat().unwrap().unwrap().kind, Kind::Dir);
     }
@@ -1060,18 +1045,20 @@ mod windows_tests {
     use super::*;
     use crate::path::Resolver;
 
+    fn walked(path: &Path) -> Located {
+        let cwd = crate::test_helper::process_cwd();
+        let rp = Resolver::at(&crate::types::EnvVars::new(), &cwd).anchor(path);
+        walk(&rp, Leaf::Resolve).unwrap()
+    }
+
     #[test]
     fn existing_and_absent_leaves_use_the_parents_stored_case() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("StoredCase");
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(dir.join("File"), "x").unwrap();
-        let cwd = crate::test_helper::process_cwd();
-        let env = crate::types::EnvVars::new();
-        let resolver = Resolver::at(&env, &cwd);
         for (spelled, stored) in [("file", "File"), ("new", "new")] {
-            let path = tmp.path().join("storedcase").join(spelled);
-            let located = walk(&resolver.anchor(&path), Leaf::Resolve).unwrap();
+            let located = walked(&tmp.path().join("storedcase").join(spelled));
             assert!(
                 located
                     .real()
@@ -1123,12 +1110,7 @@ mod windows_tests {
             eprintln!("skip: this volume keeps no 8.3 names, so there is no alias to walk");
             return;
         };
-        let cwd = crate::test_helper::process_cwd();
-        let located = walk(
-            &Resolver::at(&crate::types::EnvVars::new(), &cwd).anchor(&short),
-            Leaf::Resolve,
-        )
-        .unwrap();
+        let located = walked(&short);
         assert_eq!(
             located.real().file_name(),
             long.file_name(),

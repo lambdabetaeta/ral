@@ -119,9 +119,8 @@ impl std::error::Error for NotACwd {}
 ///
 /// What reaches the disk takes it unfolded, for the physical resolvers to
 /// read as the kernel does; a logical consumer (`cd`, `absolute-path`, a
-/// display base) asks for [`folded`](Self::folded).  The walk refuses what
-/// `std::path` cannot parse
-/// ([`is_unparsed_head`](super::lex::is_unparsed_head)).
+/// display base) asks for [`folded`](Self::folded).  The walk refuses a head
+/// `std::path` cannot parse ([`is_unparsed_head`](super::lex::is_unparsed_head)).
 ///
 /// Reified so that canonicalisation can only follow resolution — there is
 /// no way to `realpath` a path that has not first been anchored.
@@ -160,8 +159,7 @@ impl LexicalPath {
     /// a drive it never named.
     #[must_use]
     pub fn folded(self) -> Self {
-        let folded = super::lex::fold_dots(&self.0);
-        Self::from_lexed(folded)
+        Self::from_lexed(super::lex::fold_dots(&self.0))
     }
 
     /// A borrow, for the disk operation the check authorised.
@@ -245,9 +243,8 @@ impl LexicalPath {
 /// That form is absolute, `.`/`..`-collapsed, and on Windows spelled with
 /// `\` wherever its head allows (`C:/a/b` is frozen as `C:\a\b`).
 ///
-/// `real` is that same path with symlinks followed, as native as the host
-/// names it: nothing here decodes it to a `String`.  A surface is UTF-8 by
-/// type, being authored text that is rendered into OS rules.
+/// `real` is that path with symlinks followed, kept native, never decoded to
+/// a `String`; `surface` is UTF-8, being authored text.
 ///
 /// Field order is load-bearing: the derived `Ord` sorts by `surface`
 /// first, so a `BTreeSet` dedups two spellings of one directory by the
@@ -261,14 +258,11 @@ pub struct FrozenPath {
 }
 
 impl FrozenPath {
-    /// Mint a prefix from a surface form: fold it, follow its symlinks, and
-    /// hold both forms.  A prefix is a logical spelling, folded and then
-    /// resolved, so `cwd link/../x` names `<cwd>/x`; an access is resolved
-    /// physically, and the two meet on their real forms.
+    /// Mint a prefix from a surface form: fold it, then follow its symlinks,
+    /// so `cwd link/../x` names `<cwd>/x`, a prefix being a logical spelling.
     ///
-    /// The one disk consultation this type ever makes, done here at the door,
-    /// and the one minting door, whose grant-side caller is the freeze pass in
-    /// `guard::freeze`.  Idempotent on a form already normal, such as the
+    /// The type's one disk consultation and its one minting door, the freeze
+    /// pass's in `guard::freeze`.  Idempotent on a normal form, such as the
     /// OS-sandbox renderer emits.
     pub fn from_surface(surface: &str) -> Self {
         let folded = super::lex::fold_dots_under(surface, PathRules::HOST);
@@ -304,24 +298,17 @@ impl FrozenPath {
     /// # Errors
     /// The refusal to hold `path` as a grant, saying why.
     pub fn freeze(path: &Path) -> Result<Self, String> {
-        let refusal = |real: &dyn std::fmt::Display| {
+        let refusal = |real: &Path| {
             format!(
-                "ral cannot hold '{}' as a grant: it resolves to '{real}', which is not valid \
+                "ral cannot hold '{}' as a grant: it resolves to '{}', which is not valid \
                  Unicode; grant a path that is, or one that does not pass through it",
                 shown(path),
+                shown(real),
             )
         };
-        let frozen = Self::from_surface(utf8(path).map_err(|_| refusal(&shown(path)))?);
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "native: a real form that is not UTF-8 is refused as a grant"
-        )]
-        let unicode = frozen.real.as_path().to_str().is_some();
-        if unicode {
-            Ok(frozen)
-        } else {
-            Err(refusal(&frozen.real))
-        }
+        let frozen = Self::from_surface(utf8(path).map_err(|_| refusal(path))?);
+        utf8(frozen.real.as_path()).map_err(|_| refusal(frozen.real.as_path()))?;
+        Ok(frozen)
     }
 
     /// The filesystem root, as the prefix that covers every path: the

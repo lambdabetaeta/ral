@@ -47,8 +47,8 @@ use crate::path::identity::windows_identity_components;
 use crate::path::lex::relative_suffix;
 use crate::path::sigil::SigilHead;
 use crate::path::{
-    Allow, CwdPath, FrozenPath, GrantRefusal, PathRules, Resolver, SubpathRefusal, XdgKind,
-    classify_subpath, grant_eligibility, path_dirs_absolute, resolve_xdg_in, shown,
+    Allow, CwdPath, FrozenPath, GrantRefusal, PathRules, SubpathRefusal, XdgKind, classify_subpath,
+    grant_eligibility, path_dirs_absolute, resolve_xdg_in, shown,
 };
 use crate::syntax::quote::quote_word;
 use crate::text::code;
@@ -295,14 +295,12 @@ fn unreadable_message(dot_git: &Path, error: &std::io::Error) -> PolicyError {
     )
 }
 
-/// The anchor a grant is frozen against: the [`Resolver`] pair.
+/// The anchor a grant is frozen against, once rather than per access: the
+/// [`Resolver`](crate::path::Resolver) pair.
 ///
 /// `home` and `xdg-*` read the environment (overlay, then host), `tempdir`
-/// the host's, and `gitdir` walks the filesystem from `cwd`.
-///
-/// No `HOME` in the environment means a policy naming a home-relative place
-/// is refused rather than resolved against a stand-in.  A grant is frozen
-/// once, so "here" is settled now rather than re-asked per access.
+/// the host's, `gitdir` the disk from `cwd`; no `HOME` refuses a home-relative
+/// place rather than resolve it against a stand-in.
 #[derive(Debug, Clone)]
 pub struct FreezeCtx {
     env: EnvVars,
@@ -329,12 +327,8 @@ impl FreezeCtx {
         &self.cwd
     }
 
-    fn resolver(&self) -> Resolver<'_> {
-        Resolver::at(&self.env, &self.cwd)
-    }
-
     fn home(&self) -> Option<String> {
-        self.resolver().home()
+        self.env.home()
     }
 
     /// Freeze one place: validate its payload, resolve its anchor, then fold
@@ -436,15 +430,14 @@ impl FreezeCtx {
                 code("`absolute"),
             )
         };
-        let via =
-            if resolved.real().as_path().as_os_str() == std::ffi::OsStr::new(resolved.as_str()) {
-                String::new()
-            } else {
-                format!(
-                    " (written '{}', which is a symbolic link)",
-                    resolved.shown()
-                )
-            };
+        let via = if resolved.real().as_path().as_os_str() == resolved.as_str() {
+            String::new()
+        } else {
+            format!(
+                " (written '{}', which is a symbolic link)",
+                resolved.shown()
+            )
+        };
         Err(PolicyError::new(format!(
             "{} resolves to '{}'{via}, outside HOME; refusing to widen the grant.  {clause}",
             code(&format!("`xdg-{name}")),
@@ -759,10 +752,7 @@ mod tests {
     }
 
     fn ctx(home: &str, cwd: &str) -> FreezeCtx {
-        FreezeCtx::at(
-            std::iter::once(("HOME", home)).collect::<EnvVars>(),
-            cwd_at(cwd),
-        )
+        FreezeCtx::at(std::iter::once(("HOME", home)).collect(), cwd_at(cwd))
     }
 
     /// A context whose overlay binds no `HOME`: the shape every home-relative
@@ -976,13 +966,11 @@ mod tests {
     #[test]
     fn xdg_subpath_cannot_discard_its_base() {
         crate::test_env::with_var("XDG_CONFIG_HOME", None, || {
-            let err = refusal(&xdg(XdgKind::Config, "/etc"), &ctx("/h", "/cwd"));
+            let ctx = ctx("/h", "/cwd");
+            let err = refusal(&xdg(XdgKind::Config, "/etc"), &ctx);
             assert!(err.contains("absolute"), "{err}");
             assert_eq!(
-                expand_path_prefix(
-                    "xdg:config//etc",
-                    &std::iter::once(("HOME", "/h")).collect::<EnvVars>()
-                ),
+                expand_path_prefix("xdg:config//etc", &ctx.env),
                 "/h/.config/etc"
             );
         });

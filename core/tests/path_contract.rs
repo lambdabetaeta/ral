@@ -147,3 +147,16 @@ fn xdg_reads_the_overlay_environment() {
     );
     assert_eq!(shown(&dir, &body), format!("{}/probe", dir.display()));
 }
+
+/// `..` climbs before the first wildcard, as written, and is refused after it.
+#[cfg(unix)]
+#[test]
+fn glob_climbs_only_before_a_wildcard() {
+    let (_tmp, dir) = fixture();
+    std::fs::write(dir.join("deep/b.rs"), "").unwrap();
+    let Err(e) = run_in(&dir, "glob '*/../*.rs'") else {
+        panic!("glob '*/../*.rs' must be refused");
+    };
+    assert!(e.to_string().contains("'..'"), "{e}");
+    assert_eq!(shown(&dir.join("deep/dir"), "glob '../*.rs'"), "[../b.rs]");
+}
