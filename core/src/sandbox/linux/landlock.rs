@@ -21,16 +21,15 @@ use super::super::Refusal;
 use super::super::warrant::Slot;
 use super::{DenyMask, OpenError, leaf_fd, open_dir_nofollow, open_nofollow};
 use crate::capability::{ExecDeny, ExecRules, Subject};
-use crate::path::{Allow, Deny, Kind, Object, RealPath, Rendered, Trace};
+use crate::path::{
+    Dir, Installing, Kind, LeafMode, Located, Object, ObjectId, RealPath, Rendered, Trace,
+};
 use crate::sandbox::{ExecProjection, RenderedFs};
 use libc::{c_int, c_uint};
-use rustix::fs::{FileType, Mode, OFlags};
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
 use std::fmt;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
-use std::os::unix::ffi::OsStrExt;
 use std::sync::LazyLock;
 
 /// `LANDLOCK_CREATE_RULESET_VERSION` in the UAPI; not exported by `libc`.
@@ -357,8 +356,23 @@ fn admit_exec(
     fs: &RenderedFs,
     roots: &[RealPath],
 ) -> Result<(), String> {
+    let sink = &mut |admit: Admit<'_>| ruleset.admit(admit.fd, Access::EXECUTE);
+    admit_files(table, sink)?;
+    let walks = vetoes_walk(table, fs);
+    let masks: Vec<_> = (fs.rules().into_iter().flat_map(|rules| &rules.deny))
+        .filter(|path| matches!(DenyMask::over(path), DenyMask::EmptyDir))
+        .cloned()
+        .collect();
+    expand(table, roots, &walks, &masks, sink)?;
+    Ok(())
+}
+
+/// Each file `table` allows, as itself, into `sink`.
+fn admit_files(
+    table: &ExecRules,
+    sink: &mut dyn FnMut(Admit<'_>) -> io::Result<()>,
+) -> Result<(), Error> {
     for file in table.allowed_files() {
-        let name = file.as_path();
         let Some(held) = open_nofollow(file)? else {
             continue;
         };
@@ -367,18 +381,9 @@ fn admit_exec(
         if held.kind() == Some(Kind::Dir) {
             continue;
         }
-        let fd = leaf_fd(&held).map_err(|e| Error::admit(crate::path::shown(name), e))?;
-        (ruleset.admit(fd, Access::EXECUTE))
-            .map_err(|source| Error::admit(crate::path::shown(name), source))?;
+        let fd = leaf_fd(&held).map_err(|e| Error::admit(file, e))?;
+        sink(Admit { path: file, fd }).map_err(|source| Error::admit(file, source))?;
     }
-    let walks = vetoes_walk(table, fs);
-    let masks: Vec<_> = (fs.rules().into_iter().flat_map(|rules| &rules.deny))
-        .filter(|path| matches!(DenyMask::over(path), DenyMask::EmptyDir))
-        .cloned()
-        .collect();
-    expand(table, roots, &walks, &masks, &mut |admit| {
-        ruleset.admit(admit.fd, Access::EXECUTE)
-    })?;
     Ok(())
 }
 
@@ -406,7 +411,7 @@ fn written(fs: &RenderedFs, dir: &RealPath) -> bool {
         return false;
     };
     (rules.write.iter().flat_map(Object::names))
-        .any(|w| w.holds(name) || dir.contains_path::<Allow>(w.as_str().as_ref()))
+        .any(|w| w.holds(name) || dir.contains(&RealPath::rendered(w)))
 }
 
 /// The objects a live directory admission puts a rule on.  A rule on `dir`
@@ -421,9 +426,9 @@ fn lowered(table: &ExecRules, roots: &[RealPath]) -> BTreeSet<RealPath> {
     }
     (table.allowed_dirs())
         .flat_map(|dir| {
-            let at = roots.iter().any(|root| dir.within::<Allow>(root));
+            let at = roots.iter().any(|root| root.contains(&dir));
             let inside: Vec<_> = (roots.iter())
-                .filter(|root| root.within::<Allow>(&dir))
+                .filter(|root| dir.contains(root))
                 .cloned()
                 .collect();
             at.then_some(dir).into_iter().chain(inside)
@@ -461,9 +466,10 @@ fn expand(
         spine: Vec::new(),
     };
     for root in lowered(table, roots) {
-        if let Some(held) = open_nofollow(&root)? {
-            let fd = leaf_fd(&held).map_err(|e| Error::admit(&root, e))?;
-            walk.object(&root, fd)?;
+        if let Some(dir) = open_dir_nofollow(&root)? {
+            walk.dir(&dir)?;
+        } else if let Some(file) = open_nofollow(&root)? {
+            walk.file(&file)?;
         }
     }
     Ok(())
@@ -476,14 +482,14 @@ fn expand(
 fn listed(table: &ExecRules, masks: &[Rendered], d: &RealPath, walks: bool) -> bool {
     let masked = masks
         .iter()
-        .any(|m| d.contains_path::<Deny>(m.as_str().as_ref()) && !held(m, d));
+        .any(|m| d.contains_folded(&RealPath::rendered(m)) && !held(m, d));
     masked
         || table.denies().any(|scope| match scope {
             ExecDeny::Dir(p) | ExecDeny::File(p) => {
                 let holds = std::iter::once(p.real.named()).chain(p.real.target());
                 holds
                     .map(Trace::real)
-                    .any(|p| p.within::<Deny>(d) && !d.within::<Deny>(p))
+                    .any(|p| d.contains_folded(p) && !p.contains_folded(d))
             }
             ExecDeny::Name(_) => walks,
         })
@@ -506,77 +512,72 @@ struct Walk<'w> {
     walks: &'w dyn Fn(&RealPath) -> bool,
     masks: &'w [Rendered],
     sink: &'w mut dyn FnMut(Admit<'_>) -> io::Result<()>,
-    /// The `(dev, ino)` of each directory being listed, so a bind mount
-    /// looping back onto one ends the descent there.
-    spine: Vec<(u64, u64)>,
+    /// The identity of each directory being listed, so a bind mount looping
+    /// back onto one ends the descent there.
+    spine: Vec<ObjectId>,
 }
 
 impl Walk<'_> {
-    fn dir(&mut self, d: &RealPath, fd: BorrowedFd<'_>) -> Result<(), Error> {
-        if !listed(self.table, self.masks, d, (self.walks)(d)) {
-            return self.admit(Admit { path: d, fd });
-        }
-        let stat = rustix::fs::fstat(fd).map_err(|errno| Error::admit(d, errno))?;
-        let at = (stat.st_dev, stat.st_ino);
-        if self.spine.contains(&at) {
+    /// `d` as its position decides: entered where the table permits it, and
+    /// listed only where a rule could speak beneath it.
+    fn dir(&mut self, d: &Dir<Installing>) -> Result<(), Error> {
+        let at = crate::path::Subject::Position(d.real());
+        let masked = self.masks.iter().any(|m| held(m, d.real()));
+        if masked || !self.table.evidence(Subject::Dir(at)).permits() {
             return Ok(());
         }
-        self.spine.push(at);
-        self.list(d, fd)?;
+        if !listed(self.table, self.masks, d.real(), (self.walks)(d.real())) {
+            return self.admit(Admit {
+                path: d.real(),
+                fd: d.as_fd(),
+            });
+        }
+        let id = d.trace().last_id();
+        if self.spine.contains(&id) {
+            return Ok(());
+        }
+        self.spine.push(id);
+        self.list(d)?;
         self.spine.pop();
         Ok(())
     }
 
-    /// `d`'s entries, each judged by the table.
-    fn list(&mut self, d: &RealPath, fd: BorrowedFd<'_>) -> Result<(), Error> {
-        use rustix::fs::{RawDir, openat};
-        let read = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
-        let Some(listing) = reached(openat(fd, c".", read, Mode::empty()), d)? else {
+    /// `f` as its position decides: a regular file the table permits,
+    /// admitted.
+    fn file(&mut self, f: &Located<Installing>) -> Result<(), Error> {
+        let at = crate::path::Subject::Position(f.real());
+        if f.kind() != Some(Kind::File) || !self.table.evidence(Subject::Program(at)).permits() {
             return Ok(());
-        };
-        let mut buf = Vec::with_capacity(8192);
-        let mut entries = RawDir::new(listing, buf.spare_capacity_mut());
-        while let Some(entry) = entries.next() {
-            let entry = entry.map_err(|errno| Error::admit(d, errno))?;
-            let name = OsStr::from_bytes(entry.file_name().to_bytes());
-            // Symlinks are nothing: a rule attaches to the inode one
-            // reaches, and the guard judges the real path.
-            let shaped = matches!(
-                entry.file_type(),
-                FileType::Directory | FileType::RegularFile | FileType::Unknown
-            );
-            if !shaped || name == "." || name == ".." {
-                continue;
-            }
-            let e = d.entry(name);
-            let flags = OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-            let Some(object) = reached(openat(fd, entry.file_name(), flags, Mode::empty()), &e)?
-            else {
-                continue;
-            };
-            self.object(&e, object.as_fd())?;
         }
-        Ok(())
+        let fd = leaf_fd(f).map_err(|e| Error::admit(f.real(), e))?;
+        self.admit(Admit { path: f.real(), fd })
     }
 
-    /// `e` as the inode opened decides, not the type listed before it: a
-    /// directory the table permits, entered; a permitted file, admitted.
-    fn object(&mut self, e: &RealPath, fd: BorrowedFd<'_>) -> Result<(), Error> {
-        let kind = shape(fd).map_err(|errno| Error::admit(e, errno))?;
-        let at = crate::path::Subject::Position(e);
-        let subject = match kind {
-            FileType::Directory => Subject::Dir(at),
-            FileType::RegularFile => Subject::Program(at),
-            _ => return Ok(()),
-        };
-        let masked = kind == FileType::Directory && self.masks.iter().any(|m| held(m, e));
-        if masked || !self.table.evidence(subject).permits() {
+    /// `d`'s entries, each judged by the table.  Symlinks are nothing: a rule
+    /// attaches to the inode one reaches, and the guard judges the real path.
+    fn list(&mut self, d: &Dir<Installing>) -> Result<(), Error> {
+        let Some(entries) = reached(d.read_dir(), d.real())? else {
             return Ok(());
+        };
+        for entry in entries {
+            let Ok(seen) = entry.seen() else { continue };
+            match seen.stat.kind {
+                Kind::Dir => {
+                    let child = d.open_dir(entry.name());
+                    if let Some(child) = reached(child, &entry.real())? {
+                        self.dir(&child)?;
+                    }
+                }
+                Kind::File => {
+                    let child = d.locate(entry.name(), LeafMode::NoFollow);
+                    if let Some(child) = reached(child, &entry.real())? {
+                        self.file(&child)?;
+                    }
+                }
+                Kind::Symlink | Kind::Other => {}
+            }
         }
-        match kind {
-            FileType::Directory => self.dir(e, fd),
-            _ => self.admit(Admit { path: e, fd }),
-        }
+        Ok(())
     }
 
     fn admit(&mut self, admit: Admit<'_>) -> Result<(), Error> {
@@ -584,19 +585,16 @@ impl Walk<'_> {
     }
 }
 
-/// `None` where the walk cannot reach an entry: gone since it was listed, a
-/// symlink now, or unreadable, which admits it nowhere and fails closed.
-fn reached<T>(opened: rustix::io::Result<T>, at: &RealPath) -> Result<Option<T>, Error> {
-    use rustix::io::Errno;
+/// `None` where the walk cannot reach an entry: gone since it was listed,
+/// not what it was listed as, or unreadable, which admits it nowhere and
+/// fails closed.
+fn reached<T>(opened: io::Result<T>, at: &RealPath) -> Result<Option<T>, Error> {
+    use io::ErrorKind::{NotADirectory, NotFound, PermissionDenied};
     match opened {
         Ok(object) => Ok(Some(object)),
-        Err(Errno::NOENT | Errno::NOTDIR | Errno::LOOP | Errno::ACCESS) => Ok(None),
-        Err(errno) => Err(Error::admit(at, errno)),
+        Err(e) if matches!(e.kind(), NotFound | NotADirectory | PermissionDenied) => Ok(None),
+        Err(e) => Err(Error::admit(at, e)),
     }
-}
-
-fn shape(fd: impl AsFd) -> rustix::io::Result<FileType> {
-    Ok(FileType::from_raw_mode(rustix::fs::fstat(fd)?.st_mode))
 }
 
 /// Which stage refused, and what the user can do about it.
@@ -656,6 +654,7 @@ mod tests {
     use crate::capability::{ExecAllow, ExecDeny, Extent, GrantPath, Rule};
     use crate::path::{Excluded, FrozenPath, render_objects, render_paths, utf8};
     use crate::sandbox::{FsProjection, FsRules};
+    use rustix::fs::FileType;
     use std::path::{Path, PathBuf};
 
     /// The roots of an unrestricted fs.
@@ -994,13 +993,26 @@ mod tests {
         assert!(seen.contains(&(d.join("sub/h"), false)), "{seen:?}");
     }
 
-    /// A file admit names a file; a directory since put at its name is no
-    /// root, so nothing beneath it is admitted.
+    /// The files `admit_files` admits for `rules`.
+    fn admitted_files(rules: &[Rule]) -> Result<BTreeSet<PathBuf>, Error> {
+        let mut seen = BTreeSet::new();
+        admit_files(&table_of(rules), &mut |admit| {
+            seen.insert(admit.path.as_path().to_path_buf());
+            Ok(())
+        })?;
+        Ok(seen)
+    }
+
+    /// An allowed executable replaced by a directory holding another
+    /// executable admits nothing beneath it: a directory rule would admit
+    /// its descendants, and a file admit names that file alone.
     #[test]
-    fn a_file_admit_now_a_directory_admits_nothing_beneath() {
+    fn an_allowed_executable_now_a_directory_admits_nothing_beneath() {
         let (_tmp, d) = tree();
-        let seen = expanded(&[allow(&d.join("sub"), false)], true).expect("expands");
+        let seen = admitted_files(&[allow(&d.join("sub"), false)]).expect("admits");
         assert!(seen.is_empty(), "{seen:?}");
+        let seen = admitted_files(&[allow(&d.join("a"), false)]).expect("admits");
+        assert_eq!(seen, BTreeSet::from([d.join("a")]), "a file is admitted");
     }
 
     #[test]
@@ -1026,7 +1038,8 @@ mod tests {
 
     /// The write prefixes of an fs projection, each a rendered object.
     fn writing(prefixes: &[&str]) -> RenderedFs {
-        let write = render_objects(prefixes.iter().map(|p| (real(p), None))).expect("renders");
+        let prefixes: Vec<_> = prefixes.iter().map(|p| real(p)).collect();
+        let write = render_objects(prefixes.iter().map(|p| (p, None))).expect("renders");
         FsProjection::Restricted(FsRules {
             write,
             ..FsRules::default()

@@ -1387,6 +1387,7 @@ fn a_nested_run_allowance_cannot_make_what_the_ceiling_withholds_readable() {
 /// ral's binary; an exec exclusion of ral leaves it alone.
 #[test]
 fn a_bundled_tool_reads_ral_s_binary() {
+    crate::sandbox::pin();
     let Some(own) = ral_binary() else { return };
     let floor = Floor::default();
     let stack = |fs: FsPolicy| test_helper::stack([with_fs(fs)]);

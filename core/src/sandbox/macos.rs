@@ -493,8 +493,10 @@ mod tests {
         )
     }
 
-    fn frozen(paths: &[&str]) -> Vec<FrozenPath> {
-        paths.iter().map(|p| FrozenPath::from_surface(p)).collect()
+    fn frozen(paths: &[&str]) -> Vec<GrantPath<Excluded>> {
+        (paths.iter())
+            .map(|p| GrantPath::walk(FrozenPath::from_surface(p)).expect("an exclusion walks"))
+            .collect()
     }
 
     /// A restricted fs writing under `prefixes` and nothing else.
@@ -1192,7 +1194,7 @@ mod tests {
         let policy = SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
                 write: vec![prefix(&write)],
-                deny: vec![FrozenPath::from_surface(&deny)],
+                deny: frozen(&[&deny]),
                 ..FsRules::default()
             }),
             net: true,

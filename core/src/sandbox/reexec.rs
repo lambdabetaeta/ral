@@ -8,15 +8,17 @@
 //! confined trampoline included: bwrap is lent ral's pin and execs it by its
 //! slot, its fresh `/proc` resolving that as any other.  macOS cannot —
 //! `execve` is refused on a devfs entry, which carries no X bit — so it execs
-//! the trampoline by name and re-stats `(dev, ino)` before each such spawn,
-//! catching the inode flip an atomic-rename swap leaves behind; Windows,
-//! confining at the parent's spawn, has no self re-exec to guard.
+//! the trampoline by name and walks that name again for its identity before
+//! each such spawn, catching the inode flip an atomic-rename swap leaves
+//! behind; Windows, confining at the parent's spawn, has no self re-exec to
+//! guard.
 //!
 //! [`Pinned::command`] hands every exec it builds the on-disk path as
 //! `argv[0]`; bwrap execs the trampoline as `/proc/self/fd/<slot>`.
 
 use crate::Role;
-use crate::path::ObjectId;
+use crate::path::{LeafMode, LexicalPath, Located, ObjectId, Trace, walk};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -29,20 +31,30 @@ pub(super) struct Pinned {
     #[cfg_attr(windows, allow(dead_code))]
     pin: Pin,
     /// `/proc/self/fd/<N>` on Linux, the on-disk path everywhere else.
+    #[cfg_attr(windows, allow(dead_code))]
     exec_path: PathBuf,
     arg0: PathBuf,
+    /// What `arg0` reached when it was pinned: the one hold on the binary.
+    trace: Trace,
 }
 
 impl Pinned {
     /// Pin the executable at `arg0` for the rest of the process's life;
     /// `None` on any failure, which every caller reads as "unpinned".
     pub(super) fn open(arg0: PathBuf) -> Option<Self> {
-        let (pin, exec_path) = build_pin(&arg0)?;
+        let trace = reach(&arg0).ok()?.trace().clone();
+        let (pin, exec_path) = build_pin(&arg0, &trace)?;
         Some(Self {
             pin,
             exec_path,
             arg0,
+            trace,
         })
+    }
+
+    /// What the pinned name reached when it was pinned.
+    pub(crate) fn trace(&self) -> &Trace {
+        &self.trace
     }
 
     /// The on-disk path the pin was taken from: `argv[0]` of every exec
@@ -52,6 +64,7 @@ impl Pinned {
     }
 
     /// What `execve` is handed to run the pinned file.
+    #[cfg(unix)]
     pub(super) fn exec_path(&self) -> &Path {
         &self.exec_path
     }
@@ -105,6 +118,7 @@ impl Pinned {
             exec_path: crate::path::proc_fd_path(fd.as_raw_fd()),
             pin: Pin::Fd { fd, id },
             arg0: self.arg0.clone(),
+            trace: self.trace.clone(),
         }
     }
 
@@ -134,17 +148,13 @@ impl Pinned {
     #[cfg(target_os = "macos")]
     pub(super) fn verify(&self) -> Result<(), String> {
         let arg0 = self.arg0();
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "[silent:verify-stat] sandbox respawn guard: re-stats the pinned executable and compares (dev, ino) to catch a mid-session binary swap before re-exec; a self-path stat at respawn setup, not turn-time model data I/O, raises no surface card."
-        )]
-        let meta = std::fs::metadata(arg0).map_err(|e| {
+        let reached = reach(arg0).map_err(|e| {
             format!(
-                "sandbox eval: verify self: cannot stat {}: {e}",
+                "sandbox eval: verify self: cannot reach {}: {e}",
                 crate::path::shown(arg0)
             )
         })?;
-        if self.is_object_id(ObjectId::from(&meta)) {
+        if (reached.trace().leaf_id()).is_some_and(|id| self.is_object_id(id)) {
             Ok(())
         } else {
             Err(format!(
@@ -154,6 +164,13 @@ impl Pinned {
             ))
         }
     }
+}
+
+/// Where the absolute name `arg0` leads now.
+fn reach(arg0: &Path) -> io::Result<Located> {
+    let at = LexicalPath::absolute(arg0)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "a pinned name is absolute"))?;
+    walk(&at, LeafMode::Follow)
 }
 
 /// How `exec_path` stays bound to the binary we pinned.
@@ -177,6 +194,12 @@ enum Pin {
 }
 
 pub(super) static OWN: OnceLock<Pinned> = OnceLock::new();
+
+/// What ral's own binary reached when it was pinned at boot, the one hold on
+/// it; `None` while unpinned.
+pub(crate) fn own_binary() -> Option<&'static Trace> {
+    OWN.get().map(Pinned::trace)
+}
 
 /// The path ral's own binary was pinned from at boot, for a guard that names
 /// it; `None` while unpinned.
@@ -244,32 +267,31 @@ pub(super) fn pin_self() {
 }
 
 /// Open `arg0` and produce the `(pin, exec_path)` pair; `None` on any
-/// failure, which the caller reads as "leave this binary unpinned".
+/// failure, which the caller reads as "leave this binary unpinned".  The
+/// file opened must be the object `trace` holds.
 #[cfg(target_os = "linux")]
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:pin-open] Opens a boot-time sandbox binary (ral itself, the bwrap envelope) to pin it by fd, immune to on-disk swaps. Sandbox exe-pinning infrastructure, not the model's data I/O: raises no card."
 )]
-fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
+fn build_pin(arg0: &Path, trace: &Trace) -> Option<(Pin, PathBuf)> {
     use std::os::fd::{AsRawFd, OwnedFd};
 
     let file = std::fs::File::open(arg0).ok()?;
     let id = ObjectId::of(&file).ok()?;
+    if trace.leaf_id() != Some(id) {
+        return None;
+    }
     let fd: OwnedFd = file.into();
     let exec_path = crate::path::proc_fd_path(fd.as_raw_fd());
     Some((Pin::Fd { fd, id }, exec_path))
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:pin-stat] sandbox respawn exe-pinning: stats the running executable to capture (dev, ino) so a mid-session binary swap is detectable; a self-path stat at respawn setup, not turn-time model data I/O, raises no surface card."
-)]
-fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
-    let meta = std::fs::metadata(arg0).ok()?;
+fn build_pin(arg0: &Path, trace: &Trace) -> Option<(Pin, PathBuf)> {
     Some((
         Pin::Stat {
-            id: ObjectId::from(&meta),
+            id: trace.leaf_id()?,
         },
         arg0.to_path_buf(),
     ))
@@ -283,6 +305,6 @@ fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
     clippy::unnecessary_wraps,
     reason = "the Option is the cross-platform contract of build_pin, not a claim that this arm can fail: see the doc above"
 )]
-fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
+fn build_pin(arg0: &Path, _: &Trace) -> Option<(Pin, PathBuf)> {
     Some((Pin::Unguarded, arg0.to_path_buf()))
 }

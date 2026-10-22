@@ -35,7 +35,8 @@ use super::{FsProjection, RenderedProjection};
 use crate::Role;
 use crate::capability::Floor;
 use crate::path::{
-    Dir, Installing, Located, Object, PathShape, RealPath, Rendered, is_loop, render_real,
+    Dir, Installing, Kind, LeafMode, LexicalPath, Located, Object, RealPath, Rendered, is_loop,
+    render_real, walk_lenient,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -44,6 +45,7 @@ use std::io;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -289,7 +291,7 @@ pub(crate) fn bwrap_argv(
         denied.sort();
         for path in denied {
             let mask = DenyMask::over(path);
-            for name in binds.names(path) {
+            for name in binds.names(path)? {
                 if name.holds("/proc") {
                     return Err(format!(
                         "sandbox: the grant denies {}, which hides /proc, and the envelope \
@@ -362,8 +364,11 @@ impl Bind {
     }
 
     /// Where this bind shows `name`, if its object holds it.
-    fn shows(&self, name: &Rendered) -> Option<Rendered> {
-        name.rebased(&self.object, &self.dest)
+    fn shows(&self, name: &RealPath) -> Option<RealPath> {
+        name.rebased(
+            &RealPath::rendered(&self.object),
+            &RealPath::rendered(&self.dest),
+        )
     }
 }
 
@@ -444,14 +449,17 @@ impl Binds {
     /// Every name the envelope shows `name` at: itself, and wherever a
     /// `Shown` bind of an object holding it puts it.  A mount laid at one
     /// does not show at another.
-    fn names(&self, name: &Rendered) -> Vec<Rendered> {
-        let mut names: Vec<_> = (self.layer(Layer::Shown))
-            .filter_map(|(_, bind)| bind.shows(name))
-            .chain([name.clone()])
+    fn names(&self, name: &Rendered) -> Result<Vec<Rendered>, String> {
+        let at = RealPath::rendered(name);
+        let mut shown: Vec<_> = (self.layer(Layer::Shown))
+            .filter_map(|(_, bind)| bind.shows(&at))
             .collect();
-        names.sort();
-        names.dedup();
-        names
+        shown.push(at);
+        let mut names = BTreeSet::new();
+        for real in &shown {
+            names.extend(render_real(real)?);
+        }
+        Ok(names.into_iter().collect())
     }
 
     fn render(&self, c: &mut Options, layer: Layer) {
@@ -485,12 +493,11 @@ impl Shown {
     /// a read-only one wins.
     pub(crate) fn of(policy: &RenderedProjection, floor: &Floor) -> Result<Self, String> {
         let FsProjection::Restricted(rules) = &policy.fs else {
-            let root =
-                RealPath::of_path("/".as_ref()).map_err(|e| format!("sandbox: no root: {e}"))?;
+            let root = open_dir_nofollow(&RealPath::universal())?.ok_or("sandbox: no root")?;
             return Ok(Self {
                 binds: Vec::new(),
                 tolerated: BTreeSet::new(),
-                roots: vec![root],
+                roots: vec![root.real().clone()],
             });
         };
         let tolerated = (rules.read.iter())
@@ -538,7 +545,10 @@ fn binds(objects: &[Object], access: Access) -> impl Iterator<Item = Bind> {
 
 /// `name` as the one object it reaches; `None` where it names nothing.
 fn object(name: &str) -> Result<Option<Rendered>, String> {
-    match RealPath::of_path(name.as_ref()) {
+    let Some(spelling) = LexicalPath::absolute(&PathBuf::from(name)) else {
+        return Ok(None);
+    };
+    match RealPath::of(&spelling) {
         Ok(real) => Ok(render_real(&real)?.into_iter().next()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("sandbox: cannot resolve {name}: {e}")),
@@ -807,12 +817,18 @@ enum DenyMask {
 }
 
 impl DenyMask {
+    /// The mask `path` needs, from what stands there, never followed; a name
+    /// that cannot be walked stands nothing.
     fn over(path: &Rendered) -> Self {
-        match crate::path::shape(path.as_str()) {
-            PathShape::Symlink => Self::OnItsTarget,
-            PathShape::NonDir => Self::UnopenableNode,
-            PathShape::Dir => Self::EmptyDir,
-            PathShape::Absent => Self::LeftAbsent,
+        let name = LexicalPath::absolute(RealPath::rendered(path).as_path());
+        let kind = name
+            .and_then(|name| walk_lenient(&name, LeafMode::NoFollow).ok())
+            .and_then(|trace| trace.kind());
+        match kind {
+            Some(Kind::Symlink) => Self::OnItsTarget,
+            Some(Kind::File | Kind::Other) => Self::UnopenableNode,
+            Some(Kind::Dir) => Self::EmptyDir,
+            None => Self::LeftAbsent,
         }
     }
 
@@ -936,6 +952,10 @@ mod tests {
         FsAllow::Prefix(
             GrantPath::<Extent>::allowing(FrozenPath::from_surface(path)).expect("a prefix walks"),
         )
+    }
+
+    fn excluding(path: &str) -> GrantPath<Excluded> {
+        GrantPath::walk(FrozenPath::from_surface(path)).expect("an exclusion walks")
     }
 
     /// What the envelope would show of `policy`.
@@ -1327,10 +1347,10 @@ mod tests {
     /// a mask like any other.
     #[test]
     fn a_deny_that_hides_proc_is_refused() {
-        for (denied, refused) in [("/proc", true), ("/", true), ("/proc/sys", false)] {
+        for (denied, refused) in [("/proc", true), ("/proc/sys", false)] {
             let policy = SandboxProjection {
                 fs: FsProjection::Restricted(FsRules {
-                    deny: vec![FrozenPath::from_surface(denied)],
+                    deny: vec![excluding(denied)],
                     ..FsRules::default()
                 }),
                 ..unrestricted()
@@ -1383,6 +1403,89 @@ mod tests {
             panic!("a symlinked component would show its target");
         };
         assert!(why.contains("symbolic link"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The bind at `dest` and what its handle holds, as `Binds::open` made them.
+    fn handle_at<'a>(binds: &'a Binds, dest: &std::path::Path) -> &'a std::os::fd::OwnedFd {
+        let dest = dest.to_string_lossy();
+        let found =
+            (binds.slots().zip(&binds.handles)).find(|((_, bind), _)| bind.dest.as_str() == dest);
+        found.map(|(_, handle)| handle).expect("a bind there")
+    }
+
+    /// A directory removed and made again after the grant rendered it is what
+    /// the launch mounts: the object at the position, not the one it named.
+    #[test]
+    fn a_directory_recreated_after_the_render_is_what_the_bind_holds() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = workdir("binds-recreated");
+        let dir = std::fs::canonicalize(&dir).expect("the work dir is real");
+        let data = dir.join("data");
+        std::fs::create_dir(&data).unwrap();
+        let policy = restricted(&[&data], &[], &[]);
+        let rendered = policy.rendered().expect("ASCII paths render");
+        let before = std::fs::metadata(&data).unwrap().ino();
+        std::fs::rename(&data, dir.join("old")).unwrap();
+        std::fs::create_dir(&data).unwrap();
+        std::fs::write(data.join("fresh"), "x").unwrap();
+        let shown = Shown::of(&rendered, &host_floor()).expect("the plan builds");
+        let binds = Binds::open(&on(&stand_in(), WHOLE), shown).expect("the binds open");
+        let held = rustix::fs::fstat(handle_at(&binds, &data)).expect("fstat the handle");
+        assert_ne!(held.st_ino, before, "the directory the grant named is gone");
+        assert_eq!(held.st_ino, std::fs::metadata(&data).unwrap().ino());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A position that names a link when the launch opens it refuses the
+    /// launch, in the sentence it always did.
+    #[test]
+    fn a_position_turned_link_refuses_the_launch_in_todays_sentence() {
+        let dir = workdir("binds-turned-link");
+        let dir = std::fs::canonicalize(&dir).expect("the work dir is real");
+        let (data, elsewhere) = (dir.join("data"), dir.join("elsewhere"));
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let policy = restricted(&[&data], &[], &[]);
+        let rendered = policy.rendered().expect("ASCII paths render");
+        std::fs::rename(&data, dir.join("old")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &data).unwrap();
+        let shown = Shown::of(&rendered, &host_floor()).expect("the plan builds");
+        let Err(why) = Binds::open(&on(&stand_in(), WHOLE), shown) else {
+            panic!("a link at the position would show its target");
+        };
+        assert_eq!(
+            why,
+            format!(
+                "sandbox: {} now goes through a symbolic link that ral will not follow; \
+                 reload the grant or restart ral if you made that change",
+                data.display()
+            )
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file allowance and a run place that is a file are bound as files.
+    #[test]
+    fn a_file_allowance_and_a_run_place_are_bound_as_files() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = workdir("binds-files");
+        let dir = std::fs::canonicalize(&dir).expect("the work dir is real");
+        let (allowed, tool) = (dir.join("allowed"), dir.join("tool"));
+        for file in [&allowed, &tool] {
+            std::fs::write(file, "x").unwrap();
+        }
+        let mut policy = restricted(&[&allowed], &[], &[]);
+        if let FsProjection::Restricted(rules) = &mut policy.fs {
+            let place = RealPath::of_path(&tool).expect("a run place exists");
+            rules.read.push(FsAllow::RunPlace(place));
+        }
+        let binds = binds(&policy, WHOLE);
+        for file in [&allowed, &tool] {
+            let held = rustix::fs::fstat(handle_at(&binds, file)).expect("fstat the handle");
+            assert!(rustix::fs::FileType::from_raw_mode(held.st_mode).is_file());
+            assert_eq!(held.st_ino, std::fs::metadata(file).unwrap().ino());
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

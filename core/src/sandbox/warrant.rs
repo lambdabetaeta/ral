@@ -23,7 +23,7 @@ use super::linux::landlock::Landlocked;
 use super::{ExecProjection, SandboxProjection};
 use crate::Role;
 use crate::capability::{Admitted, Program, Subject, Withheld};
-use crate::path::{Deny, Judged, Located, Reading, RealPath, shown};
+use crate::path::{Depth, Judged, LeafMode, LexicalPath, Located, Reading, shown, walk};
 use crate::process::SpawnFailure;
 use crate::syntax::quote::quote_word;
 use libc::c_int;
@@ -229,11 +229,13 @@ fn interpreter_exclusion(
     program: &Located<Judged<Reading>>,
     projection: &SandboxProjection,
 ) -> Option<String> {
-    let interpreter = RealPath::of_path(&super::carriers::launched_shebang(program)?).ok()?;
+    let spelled = LexicalPath::absolute(&super::carriers::launched_shebang(program)?)?;
+    let walked = walk(&spelled, LeafMode::Follow).ok()?;
+    let trace = walked.trace();
+    trace.kind()?;
+    let at = crate::path::Subject::Access(trace);
     let exec = match &projection.exec {
-        ExecProjection::Restricted(rules) => rules.withheld(Subject::Program(
-            crate::path::Subject::Position(&interpreter),
-        )),
+        ExecProjection::Restricted(rules) => rules.withheld(Subject::Program(at)),
         ExecProjection::Unrestricted => None,
     }
     .and_then(|w| match w {
@@ -245,8 +247,8 @@ fn interpreter_exclusion(
         let denied = fs
             .deny
             .iter()
-            .find(|p| p.contains::<Deny>(interpreter.as_path()));
-        denied.map(|p| format!("`absolute {}", quote_word(p.as_str())))
+            .find(|p| p.real.matches(at, Depth::Within).is_some());
+        denied.map(|p| format!("`absolute {}", quote_word(p.written.as_str())))
     })
 }
 

@@ -39,12 +39,12 @@ use std::sync::{LazyLock, Mutex};
 use windows_sys::Win32::Security::{PSID, SID_AND_ATTRIBUTES};
 use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
 
-use crate::capability::{Extent, FsAllow};
-use crate::path::{Deny, FrozenPath, Kind, RealPath, shown};
+use crate::capability::{Extent, FsAllow, GrantPath};
+use crate::path::{Dir, Excluded, Installing, Kind, RealPath, shown};
 use crate::process::Launch;
 use crate::process::cancel::Scope;
 use crate::sandbox::Refusal;
-use crate::sandbox::carve::{self, EntryKind, Listing};
+use crate::sandbox::carve;
 use crate::sandbox::{FsRules, SandboxProjection};
 use crate::sync::LockExt as _;
 
@@ -246,7 +246,7 @@ pub(crate) fn confine(
     // ALL APPLICATION PACKAGES grants.
     let rules = projection.fs.rules().cloned().unwrap_or_default();
     refuse_universal_prefix(&rules)?;
-    let denied: Vec<RealPath> = rules.deny.iter().map(|p| p.real().clone()).collect();
+    let denied: Vec<RealPath> = rules.deny.iter().map(excluded_real).collect();
     let readwrite: Vec<RealPath> = rules.write.iter().map(real_path).collect();
     let readonly: Vec<RealPath> = rules
         .read
@@ -254,8 +254,8 @@ pub(crate) fn confine(
         .map(real_path)
         .filter(|p| !readwrite.contains(p))
         .collect();
-    let readwrite = carve::carve(&readwrite, &denied, &mut listing)?;
-    let mut readonly = carve::carve(&readonly, &denied, &mut listing)?;
+    let readwrite = carve::carve(&readwrite, &denied, &mut open, &mut listing)?;
+    let mut readonly = carve::carve(&readonly, &denied, &mut open, &mut listing)?;
     readonly.whole.retain(|p| !readwrite.whole.contains(p));
     if let Some(image) = program_image
         && !readwrite.whole.contains(image)
@@ -286,15 +286,11 @@ pub(crate) fn confine(
         ..
     } = sandbox;
     let proj = projections.get_mut(&key).expect("projection ensured above");
-    let paths = |region: Vec<RealPath>| -> Vec<PathBuf> {
-        region.iter().map(|p| p.as_path().to_path_buf()).collect()
-    };
     let mut carved = readwrite.entries;
     carved.extend(readonly.entries);
     carved.sort();
     carved.dedup();
-    let (readwrite, readonly, carved) =
-        (paths(readwrite.whole), paths(readonly.whole), paths(carved));
+    let (readwrite, readonly) = (readwrite.whole, readonly.whole);
 
     // The redirect check comes first, before every filter and whatever the
     // memo remembers: a path granted at an earlier launch and since replaced
@@ -368,8 +364,8 @@ pub(crate) fn confine(
     let t_deny = std::time::Instant::now();
     if !rules.deny.is_empty() {
         let access = dacl::ContainerAccess::of(profile_sid, &capabilities)?;
-        for denied in &rules.deny {
-            dacl::ensure_unreachable(denied.real().as_path(), &access, cancel)?;
+        for denied in &denied {
+            dacl::ensure_unreachable(denied, &access, cancel)?;
         }
     }
     crate::dbg_trace!(
@@ -435,17 +431,17 @@ fn ensure_allows(
 /// Refuse "every path, less exclusions". The universal prefix means every
 /// path on every volume, and an `AppContainer` reaches only what is stamped for
 /// it; stamped as a path it would narrow to one drive and stamp that whole.
-/// The root is refused however it arrives (a prefix, a run place, an
-/// exclusion), since the drive it opens is stamped, or walked, whole. Run before anything is stamped, so the guard
-/// alone judges.
+/// The root is refused however it arrives (a prefix, a run place), since the
+/// drive it opens is stamped, or walked, whole; an exclusion of it is already
+/// no exclusion (`deny_all`), and never reaches here. Run before anything is
+/// stamped, so the guard alone judges.
 fn refuse_universal_prefix(rules: &FsRules) -> Result<(), Refusal> {
     let bare = |p: &Path| crate::path::lex::is_bare_root(p, crate::path::PathRules::HOST);
     let universal = |s: &FsAllow| match s {
         FsAllow::Prefix(p) => p.real == Extent::Everywhere,
         FsAllow::RunPlace(r) => bare(r.as_path()),
     };
-    let excluded = |p: &FrozenPath| p.is_root() || bare(p.real().as_path());
-    if !rules.read.iter().chain(&rules.write).any(universal) && !rules.deny.iter().any(excluded) {
+    if !rules.read.iter().chain(&rules.write).any(universal) {
         return Ok(());
     }
     let allows = if rules.deny.is_empty() {
@@ -473,7 +469,7 @@ fn refuse_universal_prefix(rules: &FsRules) -> Result<(), Refusal> {
 fn refuse_deny_meeting_grant(granted: &[&RealPath], denied: &[RealPath]) -> Result<(), Refusal> {
     for d in denied {
         for g in granted {
-            if g.within::<Deny>(d) || d.within::<Deny>(g) {
+            if d.contains_folded(g) || g.contains_folded(d) {
                 let (d, g) = (shown(d.as_path()), shown(g.as_path()));
                 return Err(Refusal::Unavailable(format!(
                     "this command is allowed '{g}' and '{d}' is excluded, which Windows \
@@ -488,43 +484,48 @@ fn refuse_deny_meeting_grant(granted: &[&RealPath], denied: &[RealPath]) -> Resu
     Ok(())
 }
 
-/// The listing [`carve::carve`] asks for, held through the sandbox side's own
-/// doors and read without following links: a name surrogate (a symlink, a
-/// junction) is a link, any other reparse point (a cloud placeholder) the
-/// object it is.
-fn listing(dir: &RealPath) -> Result<Listing, Refusal> {
-    let unlisted = |e: &std::io::Error| {
-        Refusal::Launch(format!(
-            "sandbox: cannot list '{}' to grant around an exclusion in it: {e}",
-            shown(dir.as_path())
-        ))
-    };
-    let held = match dir.open_dir_nofollow(&crate::sandbox::TOKEN) {
-        Ok(Some(held)) => held,
-        Ok(None) => {
-            return match dir.open_nofollow(&crate::sandbox::TOKEN) {
-                Ok(None) => Ok(Listing::Missing),
-                Ok(Some(_)) => Ok(Listing::NotDirectory),
-                Err(e) => Err(unlisted(&e)),
-            };
-        }
-        Err(e) => return Err(unlisted(&e)),
-    };
-    held.read_dir()
-        .map_err(|e| unlisted(&e))?
+/// Why carving could not list `at`, as a refusal.
+fn unlisted(at: &RealPath, e: &std::io::Error) -> Refusal {
+    Refusal::Launch(format!(
+        "sandbox: cannot list '{}' to grant around an exclusion in it: {e}",
+        shown(at.as_path())
+    ))
+}
+
+/// The allowance at `at`, held through the sandbox side's own door: the walk
+/// with every link refused.
+fn open(at: &RealPath) -> Result<Option<Dir<Installing>>, Refusal> {
+    at.open_dir_nofollow(&crate::sandbox::TOKEN)
+        .map_err(|e| unlisted(at, &e))
+}
+
+/// The listing [`carve::carve`] asks for, read from the held directory
+/// without following links, and each subdirectory opened from it: a name
+/// surrogate (a symlink, a junction) is a link, any other reparse point (a
+/// cloud placeholder) the object it is.
+fn listing(dir: &Dir<Installing>) -> Result<Vec<carve::Entry>, Refusal> {
+    let here = |e: &std::io::Error| unlisted(dir.real(), e);
+    dir.read_dir()
+        .map_err(|e| here(&e))?
         .map(|entry| {
-            let seen = entry.seen().map_err(unlisted)?;
-            Ok(carve::Entry {
-                name: entry.name().as_os_str().to_owned(),
-                kind: match seen.stat.kind {
-                    Kind::Symlink => EntryKind::Link,
-                    Kind::Dir => EntryKind::Directory,
-                    _ => EntryKind::Other,
-                },
+            let kind = entry.seen().map_err(here)?.stat.kind;
+            Ok::<_, Refusal>(match kind {
+                Kind::Symlink => carve::Entry::Link(entry.real()),
+                Kind::Dir => carve::Entry::Directory(
+                    dir.open_dir(entry.name())
+                        .map_err(|e| unlisted(&entry.real(), &e))?,
+                ),
+                _ => carve::Entry::Other(entry.real()),
             })
         })
-        .collect::<Result<_, _>>()
-        .map(Listing::Directory)
+        .collect()
+}
+
+/// Where an exclusion lies: the object its name reaches, which a link there
+/// leads to, as the stamps and carving read it.
+fn excluded_real(deny: &GrantPath<Excluded>) -> RealPath {
+    let held = deny.real.target().unwrap_or_else(|| deny.real.named());
+    held.real().clone()
 }
 
 /// A scope's frozen real path, which the stamps and capability names key on,

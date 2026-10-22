@@ -14,8 +14,7 @@
 //! ([`fs_capability_name`]); [`ensure_frozen_grant`] stamps that SID's ACE onto
 //! the prefix, and a child reaches the path only if `session` put the
 //! capability in its `LowBox` token. The stamp is the expensive part — one
-//! security write (`SetNamedSecurityInfoW`, or `SetSecurityInfo` through a
-//! held handle), whose inheritable ACE Windows propagates into every existing
+//! security write (`SetSecurityInfo` through a held handle), whose inheritable ACE Windows propagates into every existing
 //! descendant before returning, seconds on a build tree — so it is paid once
 //! per `(path, kind)` *ever*, across sessions and projections, and never
 //! reverted. Leaving it is safe: a capability SID is
@@ -68,7 +67,7 @@
 //! [`recover_orphaned_state`] sweeps a crashed session's ledger at the next
 //! boot, deleting its registered profiles.
 
-use crate::path::lex::{is_network, is_verbatim_drive, is_volume_guid};
+use crate::path::lex::is_volume_guid;
 use crate::path::shown;
 use crate::process::cancel::{CancelCause, Scope};
 use std::fmt::Write as _;
@@ -165,10 +164,9 @@ const _: () = {
 /// Errors returned by [`DaclManager`] and [`recover_orphaned_state`].
 #[derive(Debug)]
 pub(crate) enum DaclError {
-    NetworkPathRejected(PathBuf),
-    /// Neither a verbatim drive path nor a volume GUID path: no canonical
-    /// local spelling.
-    NotCanonicalLocal(PathBuf),
+    /// A frozen allowance on a share, a removable drive or a volume that has
+    /// no GUID path: no DACL a stamp may key.
+    NotLocal(PathBuf),
     /// A frozen allowance whose path now meets a reparse point at `at`,
     /// which is `granted` itself or an ancestor of it.
     Redirected {
@@ -211,15 +209,10 @@ pub(crate) enum DaclError {
 impl std::fmt::Display for DaclError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NetworkPathRejected(p) => write!(
+            Self::NotLocal(p) => write!(
                 f,
-                "path is not local (network/UNC paths not supported): {}",
-                shown(p)
-            ),
-            Self::NotCanonicalLocal(p) => write!(
-                f,
-                "path is not a canonical local path (a verbatim drive path or a \
-                 volume GUID path): {}",
+                "'{}' is not on a local fixed volume (a network share, a removable \
+                 drive and an unnamed volume cannot be granted); grant a folder on a local disk",
                 shown(p)
             ),
             Self::Redirected {
@@ -353,7 +346,7 @@ pub(crate) fn ensure_frozen_grant(
 ) -> Result<(), DaclError> {
     cancelled(cancel)?;
     let target = pin.target();
-    let canonical = target.path();
+    let canonical = target.path;
     let inheritable = kind.inherits()
         && target.is_dir().map_err(|e| DaclError::Win32 {
             path: canonical.to_path_buf(),
@@ -386,7 +379,7 @@ pub(crate) fn ensure_frozen_grant(
 /// namespace, so the two mutations' idempotency never entangles, and its own
 /// probe, so a label removed or never stamped is seen whatever the DACL says.
 fn ensure_low_integrity_label(target: Target<'_>) -> Result<(), DaclError> {
-    let key = label_stamp_key(target.path());
+    let key = label_stamp_key(target.path);
     if stamp_recorded(&key) && low_integrity_label_present(target) {
         return Ok(());
     }
@@ -399,13 +392,13 @@ fn ensure_low_integrity_label(target: Target<'_>) -> Result<(), DaclError> {
 /// `inheritable`. An unreadable DACL answers `false` —
 /// attempt the real grant and let it fail loudly, the same posture as
 /// [`appcontainer_already_grants`].
-fn capability_ace_present<'a>(
-    target: impl Into<Target<'a>>,
+fn capability_ace_present(
+    target: Target<'_>,
     sid_str: &str,
     kind: GrantKind,
     inheritable: bool,
 ) -> bool {
-    match scan_explicit_aces_for_sid(target.into(), sid_str) {
+    match scan_explicit_aces_for_sid(target, sid_str) {
         Ok(aces) => aces.iter().any(|a| {
             a.ace_type == AceType::Allow
                 && (a.access_mask & kind.mask()) == kind.mask()
@@ -414,20 +407,4 @@ fn capability_ace_present<'a>(
         }),
         Err(_) => false,
     }
-}
-
-/// An allow-list of the local canonical forms: `canonicalise_strict` emits
-/// `\\?\X:\...` for a local drive, and a caller may also hand us a volume
-/// GUID path, `\\?\Volume{GUID}\...` or its `\\.\` spelling, local too
-/// though canonicalisation never produces it.  Everything else is refused: a
-/// share, `\\?\UNC\server\share\...`, has no DACL we may write, and any
-/// other spelling is no canonical path a stamp could key.
-fn ensure_local_canonical_prefix(canonical: &Path) -> Result<(), DaclError> {
-    if is_network(canonical) {
-        return Err(DaclError::NetworkPathRejected(canonical.to_path_buf()));
-    }
-    if is_verbatim_drive(canonical) || is_volume_guid(canonical) {
-        return Ok(());
-    }
-    Err(DaclError::NotCanonicalLocal(canonical.to_path_buf()))
 }

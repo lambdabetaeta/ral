@@ -156,7 +156,10 @@ pub(crate) fn pinned_binary(id: ObjectId) -> Option<&'static str> {
 /// renderer lends it, and nothing outside `sandbox` can name it.
 pub(crate) struct InstallToken(());
 
-#[cfg_attr(target_os = "macos", expect(dead_code, reason = "used from step 7"))]
+#[cfg_attr(
+    all(target_os = "macos", not(test)),
+    expect(dead_code, reason = "no macOS renderer holds a position")
+)]
 static TOKEN: InstallToken = InstallToken(());
 
 /// Whether this host builds a `Restricted` envelope at all.
@@ -289,7 +292,6 @@ mod tests {
     mod nofollow {
         use crate::path::{Dir, Installing, Kind, Located, ObjectId, RealPath};
         use crate::sandbox::TOKEN;
-        use std::ffi::OsStr;
         use std::fs::File;
         use std::io;
 
@@ -301,7 +303,7 @@ mod tests {
         }
 
         fn at(parent: &RealPath, name: &str) -> RealPath {
-            parent.entry(OsStr::new(name))
+            RealPath::assumed(parent.as_path().join(name))
         }
 
         fn hold(position: &RealPath) -> io::Result<Option<Located<Installing>>> {

@@ -1,10 +1,11 @@
 use super::{
-    FsAllow, FsRules, GrantKind, ProjectionKey, filter_out_granted, profile_name,
+    FsAllow, FsRules, GrantKind, ProjectionKey, filter_out_granted, listing, open, profile_name,
     refuse_deny_meeting_grant, refuse_universal_prefix,
 };
 use crate::capability::{Extent, GrantPath};
 use crate::path::{FrozenPath, RealPath};
 use crate::sandbox::Refusal;
+use crate::sandbox::carve::{Carving, carve};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -71,7 +72,10 @@ fn rules(read: &[&str], write: &[&str], deny: &[&str]) -> FsRules {
     FsRules {
         read: prefixes(read),
         write: prefixes(write),
-        deny: deny.iter().map(|d| FrozenPath::from_surface(d)).collect(),
+        deny: deny
+            .iter()
+            .map(|d| GrantPath::walk(FrozenPath::from_surface(d)).expect("an exclusion walks"))
+            .collect(),
         pinned_dirs: Vec::new(),
     }
 }
@@ -104,15 +108,13 @@ fn the_universal_prefix_is_refused_in_either_region() {
 }
 
 #[test]
-fn the_root_is_refused_as_a_place_and_as_an_exclusion() {
+fn the_root_is_refused_as_a_place() {
     let place = FsRules {
         read: vec![FsAllow::RunPlace(RealPath::assumed("/"))],
         ..rules(&[], &[], &[])
     };
-    for rules in [place, rules(&[r"C:\work"], &[], &["/"])] {
-        let why = refuse_universal_prefix(&rules).unwrap_err().to_string();
-        assert!(why.contains("ral will not stamp every drive"), "{why}");
-    }
+    let why = refuse_universal_prefix(&place).unwrap_err().to_string();
+    assert!(why.contains("ral will not stamp every drive"), "{why}");
 }
 
 #[test]
@@ -197,6 +199,49 @@ fn a_redirected_allowance_refuses_the_launch_before_the_memo_is_consulted() {
     assert!(
         why.contains("an allowance names what it named when granted"),
         "{why}"
+    );
+}
+
+/// A tree holding a junction and a symlink is carved by listing it without
+/// following either: each is a link, never granted, and what they lead to is
+/// neither listed nor granted through them.
+#[test]
+#[allow(clippy::disallowed_methods, reason = "[test] link fixtures")]
+fn carving_meets_a_junction_and_a_symlink_as_links() {
+    let td = tempfile::tempdir().unwrap();
+    let root = RealPath::of_path(td.path()).unwrap();
+    let (cfg, outside) = (root.as_path().join("cfg"), root.as_path().join("outside"));
+    for dir in [cfg.join("gh"), cfg.join("keep"), outside.join("inner")] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(cfg.join("other.txt"), b"x").unwrap();
+    let junction = std::process::Command::new("cmd")
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(cfg.join("junction"))
+        .arg(&outside)
+        .output()
+        .unwrap();
+    assert!(junction.status.success(), "{junction:?}");
+    std::os::windows::fs::symlink_dir(&outside, cfg.join("symlink")).unwrap();
+
+    let real = |at: PathBuf| RealPath::of_path(&at).unwrap();
+    let allowance = real(cfg.clone());
+    let mut carved = carve(
+        &[allowance.clone()],
+        &[real(cfg.join("gh"))],
+        &mut open,
+        &mut listing,
+    )
+    .unwrap();
+    carved.whole.sort();
+    let mut whole = vec![real(cfg.join("keep")), real(cfg.join("other.txt"))];
+    whole.sort();
+    assert_eq!(
+        carved,
+        Carving {
+            whole,
+            entries: vec![allowance]
+        }
     );
 }
 

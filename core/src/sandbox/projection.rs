@@ -14,25 +14,28 @@
 //! (carriers, the Linux linker), is joined into both tables here, as allows
 //! that yield to every exclusion, so that no backend knows support as such.
 
+#[cfg(unix)]
+use crate::capability::Extent;
+use crate::capability::GrantPath;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::capability::Subject;
 use crate::capability::{
     Admitted, ExecRules, Floor, FsAllow, FsOp, FsRules as FsTable, GrantStack, Join, Net, region,
     rules, running_region,
 };
-use crate::path::{FrozenPath, RealPath};
+use crate::path::{Excluded, RealPath};
 #[cfg(unix)]
-use crate::path::{Object, Rendered, render_objects, render_paths, rendered_pins};
+use crate::path::{Object, Rendered, pinned_dirs, render_excluded, render_objects};
 use std::collections::BTreeSet;
 
 /// The fs half of a projection.
 ///
-/// Allowances stay frozen, as the guard judges them, up to rendering;
-/// exclusions are the surface names re-resolved at the fold.  `A` names an
-/// allowance and `X` an exclusion: [`FsAllow`] and [`FrozenPath`] as folded,
+/// Allowances and exclusions stay as the guard judges them, up to rendering:
+/// an exclusion with the objects its walk held.  `A` names an allowance and
+/// `X` an exclusion: [`FsAllow`] and [`GrantPath<Excluded>`] as folded,
 /// [`Object`] and [`Rendered`] as rendered.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FsRules<A = FsAllow, X = FrozenPath> {
+pub struct FsRules<A = FsAllow, X = GrantPath<Excluded>> {
     /// The live read region: authored reads and writes, the run places, the
     /// live support and the [`Floor`].
     pub(crate) read: Vec<A>,
@@ -70,7 +73,7 @@ impl<A, X> Default for FsRules<A, X> {
 /// `file-write*` on macOS, `--dev-bind / /` on Linux. An empty `Restricted` is
 /// the other extreme: fs was attenuated to nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum FsProjection<A = FsAllow, X = FrozenPath> {
+pub enum FsProjection<A = FsAllow, X = GrantPath<Excluded>> {
     #[default]
     Unrestricted,
     Restricted(FsRules<A, X>),
@@ -111,7 +114,7 @@ pub(crate) enum ExecProjection {
 /// the launching process. Unlike a [`Capabilities`](crate::capability::Capabilities)
 /// frame, no further composition can widen it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SandboxProjection<A = FsAllow, X = FrozenPath> {
+pub struct SandboxProjection<A = FsAllow, X = GrantPath<Excluded>> {
     pub fs: FsProjection<A, X>,
     pub net: bool,
     pub(crate) exec: ExecProjection,
@@ -145,19 +148,19 @@ impl SandboxProjection {
     /// exhaustively, the output constructed exhaustively, and the only way to
     /// obtain a [`Rendered`] is to render.  An allowance renders as its frozen
     /// real path, never re-resolved ([`render_objects`]); an exclusion
-    /// renders as every name its surface reaches now ([`render_paths`]).
-    /// Exec rules pass through as real paths, for their backend to render with
+    /// renders as the real paths its walk held, its name's and its link's
+    /// target's ([`render_excluded`]).  Exec rules pass through as real
+    /// paths, for their backend to render with
     /// [`render_real`](crate::path::render_real).
     ///
     /// Pins are derived here rather than carried because they are a function
-    /// of the deny and write names, once both are rendered: containment before
-    /// expansion and after do not commute, since a name reached only through a
-    /// symlinked chain has ancestors the surface spelling never mentions.
+    /// of the deny and write positions: the ancestors of what a deny holds,
+    /// within a write prefix ([`pinned_dirs`]).
     ///
     /// # Errors
     ///
     /// A name whose expansion cannot be spelled faithfully, as
-    /// [`render_paths`] refuses it.
+    /// [`render_excluded`] refuses it.
     #[cfg(unix)]
     pub(crate) fn rendered(&self) -> Result<SandboxProjection<Object, Rendered>, String> {
         let Self { fs, net, exec } = self;
@@ -170,21 +173,13 @@ impl SandboxProjection {
                 // Derived below, so nothing a caller supplied is authority.
                 pinned_dirs: _,
             }) => {
-                let write = objects(write)?;
-                let deny = render_paths(
-                    &deny
-                        .iter()
-                        .map(FrozenPath::as_str)
-                        .collect::<BTreeSet<_>>()
-                        .into_iter()
-                        .collect::<Vec<_>>(),
-                )?;
-                let names: Vec<Rendered> = write.iter().flat_map(Object::names).cloned().collect();
+                let holds = || deny.iter().map(|deny| &deny.real);
+                let prefixes: Vec<_> = write.iter().map(FsAllow::real).collect();
                 FsProjection::Restricted(FsRules {
                     read: objects(read)?,
-                    pinned_dirs: rendered_pins(&deny, &names),
-                    write,
-                    deny,
+                    pinned_dirs: pinned_dirs(holds(), &prefixes)?,
+                    write: objects(write)?,
+                    deny: render_excluded(holds())?,
                 })
             }
         };
@@ -263,7 +258,7 @@ impl SandboxProjection {
                     // Both regions carry the same denies; a disk change between
                     // the two folds can only drop a write allow, which fails
                     // closed.
-                    deny: read.denies().map(|deny| deny.written().clone()).collect(),
+                    deny: read.denies().map(|deny| deny.grant().clone()).collect(),
                     pinned_dirs: Vec::new(),
                 })
             }
@@ -282,9 +277,14 @@ impl SandboxProjection {
 /// `scopes` as their objects, each frozen allowance by its real path.
 #[cfg(unix)]
 fn objects(scopes: &[FsAllow]) -> Result<Vec<Object>, String> {
+    let universal = RealPath::universal();
     let named = scopes.iter().map(|scope| match scope {
-        FsAllow::Prefix(prefix) => (prefix.real.real(), Some(&prefix.written)),
-        FsAllow::RunPlace(place) => (place.clone(), None),
+        FsAllow::Prefix(GrantPath {
+            written,
+            real: Extent::Under(real),
+        }) => (real, Some(written)),
+        FsAllow::Prefix(GrantPath { written, .. }) => (&universal, Some(written)),
+        FsAllow::RunPlace(place) => (place, None),
     });
     render_objects(named)
 }
@@ -332,8 +332,8 @@ fn live_support(
 #[cfg(all(test, unix))]
 mod rendered_tests {
     use super::*;
-    use crate::capability::{Extent, GrantPath};
-    use crate::path::utf8;
+    use crate::capability::Extent;
+    use crate::path::{FrozenPath, utf8};
 
     fn prefix(path: &str) -> FsAllow {
         FsAllow::Prefix(
@@ -341,13 +341,17 @@ mod rendered_tests {
         )
     }
 
+    fn excluding(path: &str) -> GrantPath<Excluded> {
+        GrantPath::walk(FrozenPath::from_surface(path)).expect("an exclusion walks")
+    }
+
     fn projection(write: &[&str], deny: &[&str], pinned: &[&str]) -> SandboxProjection {
         SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
                 read: Vec::new(),
                 write: write.iter().copied().map(prefix).collect(),
-                deny: deny.iter().map(|d| FrozenPath::from_surface(d)).collect(),
-                pinned_dirs: pinned.iter().map(|d| FrozenPath::from_surface(d)).collect(),
+                deny: deny.iter().copied().map(excluding).collect(),
+                pinned_dirs: pinned.iter().copied().map(excluding).collect(),
             }),
             net: true,
             exec: ExecProjection::default(),

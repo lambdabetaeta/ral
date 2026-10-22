@@ -4,27 +4,13 @@
 )]
 
 use super::super::ensure_frozen_grant;
-use super::super::tests::{real, with_scoped_state_dir};
+use super::super::tests::{junction, labelled, mklink, pin, real, with_scoped_state_dir};
 use super::*;
+use crate::path::RealPath;
 use crate::process::cancel::DurableRoot;
-use std::process::Command;
+use std::path::PathBuf;
 
 const CAP_SID: &str = "S-1-15-3-1024-1-2-3-4-5-6-7-8";
-
-/// `mklink /J link target`, as `cmd` reports it.
-fn mklink(link: &Path, target: &Path) -> std::process::Output {
-    Command::new("cmd")
-        .args(["/d", "/c", "mklink", "/J"])
-        .arg(link)
-        .arg(target)
-        .output()
-        .unwrap()
-}
-
-fn junction(link: &Path, target: &Path) {
-    let output = mklink(link, target);
-    assert!(output.status.success(), "create junction: {output:?}");
-}
 
 fn is_redirected(r: &Result<Option<FrozenPin>, DaclError>) -> bool {
     matches!(r, Err(DaclError::Redirected { .. }))
@@ -33,31 +19,38 @@ fn is_redirected(r: &Result<Option<FrozenPin>, DaclError>) -> bool {
 #[test]
 fn a_real_directory_is_held() {
     let td = tempfile::tempdir().unwrap();
-    let pin = FrozenPin::open(&real(td.path()), GrantKind::ReadOnly).unwrap();
+    let pin = pin(&real(td.path()), GrantKind::ReadOnly).unwrap();
     assert!(pin.is_some());
+}
+
+/// `path`, a verbatim drive path, as its drive's administrative share names
+/// it: `\\localhost\C$\…`.
+fn through_share(path: &Path) -> PathBuf {
+    let text = path.to_str().unwrap();
+    let (drive, rest) = text
+        .strip_prefix(r"\\?\")
+        .and_then(|local| local.split_once(':'))
+        .expect("a verbatim drive path");
+    PathBuf::from(format!(r"\\localhost\{drive}${rest}"))
+}
+
+#[test]
+fn a_share_is_refused() {
+    let td = tempfile::tempdir().unwrap();
+    let shared = through_share(&real(td.path()));
+    let refused = pin(&shared, GrantKind::ReadOnly);
+    assert!(
+        matches!(refused, Err(DaclError::NotLocal(_))),
+        "{:?}",
+        refused.err()
+    );
 }
 
 #[test]
 fn an_absent_path_is_not_an_error() {
     let td = tempfile::tempdir().unwrap();
     let absent = real(td.path()).join("absent").join("deeper");
-    assert!(
-        FrozenPin::open(&absent, GrantKind::ReadOnly)
-            .unwrap()
-            .is_none()
-    );
-}
-
-#[test]
-fn a_reparse_tag_is_redirecting_exactly_when_it_is_a_name_surrogate() {
-    // Symlink and mount point carry the bit; a cloud-files tag does not.
-    for (tag, redirects) in [
-        (0xA000_000C_u32, true),
-        (0xA000_0003, true),
-        (0x9000_001A, false),
-    ] {
-        assert_eq!(tag & REPARSE_TAG_NAME_SURROGATE != 0, redirects, "{tag:#x}");
-    }
+    assert!(pin(&absent, GrantKind::ReadOnly).unwrap().is_none());
 }
 
 #[test]
@@ -67,7 +60,7 @@ fn a_junction_on_the_leaf_is_refused() {
     let (outside, link) = (root.join("outside"), root.join("link"));
     fs::create_dir(&outside).unwrap();
     junction(&link, &outside);
-    assert!(is_redirected(&FrozenPin::open(&link, GrantKind::ReadOnly)));
+    assert!(is_redirected(&pin(&link, GrantKind::ReadOnly)));
 }
 
 #[test]
@@ -77,7 +70,7 @@ fn a_junction_on_an_ancestor_is_refused() {
     let (outside, link) = (root.join("outside"), root.join("link"));
     fs::create_dir_all(outside.join("inner")).unwrap();
     junction(&link, &outside);
-    assert!(is_redirected(&FrozenPin::open(
+    assert!(is_redirected(&pin(
         &link.join("inner"),
         GrantKind::ReadWrite
     )));
@@ -119,7 +112,7 @@ fn a_directory_converted_to_a_junction_while_its_path_is_opened_is_never_descend
         // Walk first, test after: a flipper that finishes before this thread
         // is scheduled still meets one walk, so the test is never vacuous.
         loop {
-            let pinned = FrozenPin::open(&a.join("b"), GrantKind::ReadOnly);
+            let pinned = pin(&a.join("b"), GrantKind::ReadOnly);
             assert!(
                 !matches!(pinned, Ok(Some(_))),
                 "descended through a converted component"
@@ -140,9 +133,7 @@ fn a_grant_since_replaced_by_a_junction_is_refused_on_the_next_launch() {
         fs::create_dir_all(&granted).unwrap();
         fs::create_dir(&outside).unwrap();
         {
-            let pin = FrozenPin::open(&granted, GrantKind::ReadOnly)
-                .unwrap()
-                .unwrap();
+            let pin = pin(&granted, GrantKind::ReadOnly).unwrap().unwrap();
             ensure_frozen_grant(
                 &pin,
                 CAP_SID,
@@ -153,7 +144,7 @@ fn a_grant_since_replaced_by_a_junction_is_refused_on_the_next_launch() {
         }
         fs::remove_dir(&granted).unwrap();
         junction(&granted, &outside);
-        let err = pin_all(&[granted], GrantKind::ReadOnly).err();
+        let err = pin_all(&[RealPath::assumed(&granted)], GrantKind::ReadOnly).err();
         assert!(matches!(err, Some(DaclError::Redirected { .. })), "{err:?}");
     });
 }
@@ -165,9 +156,7 @@ fn a_read_write_grant_stamps_dacl_and_label_through_the_held_handle() {
         let root = real(td.path());
         let sub = root.join("sub");
         fs::create_dir(&sub).unwrap();
-        let pin = FrozenPin::open(&root, GrantKind::ReadWrite)
-            .unwrap()
-            .unwrap();
+        let pin = pin(&root, GrantKind::ReadWrite).unwrap().unwrap();
         ensure_frozen_grant(
             &pin,
             CAP_SID,
@@ -175,9 +164,9 @@ fn a_read_write_grant_stamps_dacl_and_label_through_the_held_handle() {
             &DurableRoot::default().worker(),
         )
         .unwrap();
-        assert!(super::super::low_integrity_label_present(&sub));
+        assert!(labelled(&sub));
         assert!(
-            super::super::scan_explicit_aces_for_sid(&root, CAP_SID)
+            super::super::scan_explicit_aces_for_sid(pin.target(), CAP_SID)
                 .unwrap()
                 .iter()
                 .any(|a| a.access_mask & super::super::RW_MASK == super::super::RW_MASK)

@@ -11,9 +11,10 @@
     clippy::disallowed_methods,
     reason = "[test] test fs/process scaffolding"
 )]
-use super::super::tests::{grant, real, with_scoped_state_dir};
+use super::super::tests::{grant, pin, real, with_scoped_state_dir};
 use super::super::{GrantKind, RW_MASK, needing_grant, pin_all};
 use super::*;
+use crate::path::RealPath;
 #[test]
 fn sid_parse_valid_and_invalid() {
     let ok = OwnedSid::parse("S-1-1-0");
@@ -36,8 +37,11 @@ fn sid_parse_rejects_empty_and_oversized() {
 fn effective_access_is_zero_on_fresh_dir() {
     with_scoped_state_dir(|| {
         let td = tempfile::tempdir().unwrap();
-        let access = compute_appcontainer_effective_access(Target::Named(td.path())).unwrap();
-        assert_eq!(access, 0);
+        let pin = pin(&real(td.path()), GrantKind::ReadOnly).unwrap().unwrap();
+        assert_eq!(
+            compute_appcontainer_effective_access(pin.target()).unwrap(),
+            0
+        );
     });
 }
 
@@ -60,7 +64,7 @@ fn needing_grant_drops_well_known_grant() {
 
         let not_granted = real(td_no_grant.path());
         let pins = pin_all(
-            &[granted.clone(), not_granted.clone()],
+            &[RealPath::assumed(&granted), RealPath::assumed(&not_granted)],
             GrantKind::ReadWrite,
         )
         .unwrap();

@@ -1,64 +1,92 @@
-use super::{Carving, Entry, EntryKind, Listing, carve};
-use crate::path::{RealPath, shown};
-use std::collections::{BTreeMap, BTreeSet};
+#![allow(
+    clippy::disallowed_methods,
+    reason = "[test] a real tree with real links is the fixture"
+)]
 
-/// A tree spelled one path per line: a trailing `/` is a directory, a
-/// trailing `@` a link, anything else a file. Every parent is a directory.
+use super::{Carving, Entry, carve};
+use crate::path::{Dir, Installing, Kind, RealPath, shown};
+use crate::sandbox::TOKEN;
+use std::io;
+use std::path::Path;
+
+/// A tree spelled one path per line, under a fresh real root that `/` stands
+/// for: a trailing `/` is a directory, a trailing `@` a link, anything else a
+/// file. Every parent is a directory.
 struct Tree {
-    dirs: BTreeMap<String, Vec<Entry>>,
-    others: BTreeSet<String>,
+    _dir: tempfile::TempDir,
+    root: RealPath,
 }
 
 impl Tree {
     fn new(paths: &[&str]) -> Self {
-        let mut tree = Self {
-            dirs: BTreeMap::new(),
-            others: BTreeSet::new(),
+        let dir = tempfile::tempdir().unwrap();
+        let tree = Self {
+            root: RealPath::of_path(dir.path()).unwrap(),
+            _dir: dir,
         };
         for spelled in paths {
-            let (path, kind) = if let Some(dir) = spelled.strip_suffix('/') {
-                tree.dirs.entry(dir.to_owned()).or_default();
-                (dir, EntryKind::Directory)
-            } else if let Some(link) = spelled.strip_suffix('@') {
-                tree.others.insert(link.to_owned());
-                (link, EntryKind::Link)
-            } else {
-                tree.others.insert((*spelled).to_owned());
-                (*spelled, EntryKind::Other)
-            };
-            let (parent, name) = path.rsplit_once('/').unwrap();
-            tree.dirs.entry(parent.to_owned()).or_default().push(Entry {
-                name: name.into(),
-                kind,
-            });
+            let at = tree.at(spelled.trim_end_matches(['/', '@']));
+            std::fs::create_dir_all(at.as_path().parent().unwrap()).unwrap();
+            match spelled.chars().last() {
+                Some('/') => std::fs::create_dir_all(at.as_path()).unwrap(),
+                Some('@') => link(at.as_path()),
+                _ => std::fs::write(at.as_path(), b"").unwrap(),
+            }
         }
         tree
     }
 
-    fn list(&self, dir: &RealPath) -> Listing {
-        let key = shown(dir.as_path());
-        match self.dirs.get(&key) {
-            Some(entries) => Listing::Directory(entries.clone()),
-            None if self.others.contains(&key) => Listing::NotDirectory,
-            None => Listing::Missing,
-        }
+    /// The position `spelled` names under the root.
+    fn at(&self, spelled: &str) -> RealPath {
+        let names = spelled.split('/').filter(|name| !name.is_empty());
+        RealPath::assumed(names.fold(self.root.as_path().to_path_buf(), |at, name| at.join(name)))
+    }
+
+    /// `real` as `at` spells it.
+    fn spelled(&self, real: &RealPath) -> String {
+        let names = real.relative_to(&self.root).expect("beneath the root");
+        names.iter().fold(String::new(), |out, name| {
+            format!("{out}/{}", shown(name.as_os_str()))
+        })
     }
 }
 
-fn real(paths: &[&str]) -> Vec<RealPath> {
-    paths.iter().map(|p| RealPath::assumed(*p)).collect()
+/// A link that leads nowhere in particular.
+fn link(at: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("elsewhere", at).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file("elsewhere", at).unwrap();
+}
+
+/// The lister `session` is over the same doors, with the error left as it is.
+fn open(at: &RealPath) -> io::Result<Option<Dir<Installing>>> {
+    at.open_dir_nofollow(&TOKEN)
+}
+
+fn list(dir: &Dir<Installing>) -> io::Result<Vec<Entry>> {
+    dir.read_dir()?
+        .map(|entry| {
+            Ok(match entry.seen().unwrap().stat.kind {
+                Kind::Symlink => Entry::Link(entry.real()),
+                Kind::Dir => Entry::Directory(dir.open_dir(entry.name())?),
+                _ => Entry::Other(entry.real()),
+            })
+        })
+        .collect()
 }
 
 /// The carving's two sets, spelled and sorted, and the directories listed.
 fn plan(tree: &Tree, allow: &[&str], deny: &[&str]) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let reals = |spelled: &[&str]| spelled.iter().map(|p| tree.at(p)).collect::<Vec<_>>();
     let mut listed = Vec::new();
-    let Carving { whole, entries } = carve(&real(allow), &real(deny), &mut |dir| {
-        listed.push(shown(dir.as_path()));
-        Ok::<_, ()>(tree.list(dir))
+    let Carving { whole, entries } = carve(&reals(allow), &reals(deny), &mut open, &mut |dir| {
+        listed.push(tree.spelled(dir.real()));
+        list(dir)
     })
     .unwrap();
     let spelled = |paths: Vec<RealPath>| {
-        let mut out: Vec<String> = paths.iter().map(|p| shown(p.as_path())).collect();
+        let mut out: Vec<String> = paths.iter().map(|p| tree.spelled(p)).collect();
         out.sort();
         out
     };
@@ -180,8 +208,7 @@ fn a_non_directory_with_an_exclusion_beneath_is_withheld() {
 #[test]
 fn an_absent_allowance_grants_nothing() {
     let (whole, entries, listed) = plan(&cfg(), &["/r/gone"], &["/r/gone/x"]);
-    assert!(whole.is_empty() && entries.is_empty());
-    assert_eq!(listed, strings(&["/r/gone"]));
+    assert!(whole.is_empty() && entries.is_empty() && listed.is_empty());
 }
 
 /// An exclusion on an allowance or around it is no carving's to answer: the
@@ -218,12 +245,17 @@ fn each_allowance_is_carved_on_its_own() {
 #[test]
 fn a_lister_error_ends_the_plan() {
     let tree = Tree::new(&["/a/", "/a/b/", "/a/b/c", "/a/d"]);
-    let refused = carve(&real(&["/a"]), &real(&["/a/b/c"]), &mut |dir| {
-        if shown(dir.as_path()) == "/a/b" {
-            Err("unlistable")
-        } else {
-            Ok(tree.list(dir))
-        }
-    });
-    assert_eq!(refused, Err("unlistable"));
+    let refused = carve(
+        &[tree.at("/a")],
+        &[tree.at("/a/b/c")],
+        &mut |at| open(at).map_err(|_| "unopenable"),
+        &mut |dir| {
+            if tree.spelled(dir.real()) == "/a/b" {
+                Err("unlistable")
+            } else {
+                list(dir).map_err(|_| "unlistable")
+            }
+        },
+    );
+    assert_eq!(refused.err(), Some("unlistable"));
 }

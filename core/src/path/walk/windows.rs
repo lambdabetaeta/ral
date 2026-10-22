@@ -158,7 +158,6 @@ fn reopen(f: &File, rights: u32, share: u32, flags: u32) -> io::Result<File> {
 /// and delete: what a DACL stamp needs beyond the attributes a held handle
 /// asks.  Derived from the held handle, so no name is resolved again, and a
 /// reparse point is the object it is, never followed.
-#[expect(dead_code, reason = "used from step 7")]
 pub(super) fn reopen_shared(f: &File, access: u32) -> io::Result<File> {
     reopen(
         f,
@@ -171,7 +170,6 @@ pub(super) fn reopen_shared(f: &File, access: u32) -> io::Result<File> {
 /// Whether the object `f` holds is on a local fixed volume: the volume's GUID
 /// path asked of the handle, then that volume's drive type.  A share has no
 /// GUID path, so it is not local, nor is a volume that cannot be named.
-#[expect(dead_code, reason = "used from step 7")]
 pub(super) fn is_local(f: &File) -> io::Result<bool> {
     let mut path = vec![0u16; 512];
     let len = loop {

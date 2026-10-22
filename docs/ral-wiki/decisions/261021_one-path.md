@@ -72,5 +72,37 @@ sandbox's step; on macOS, the pin of ral's own binary (`reexec.rs`) is by
 `verify` compares.  `dacl/frozen.rs` and `dacl/deny.rs` open by name as
 before.  Their tests run on those hosts under the same first green run.
 
+Step 7 (the sandbox, mechanically), on Windows, is cross-compiled only.
+`carve` runs over a lister that opens each directory it lists as
+`Dir<Installing>` (`windows/session.rs::listing`); `FrozenPin::open` holds its
+position by `open_nofollow`, refuses a share by `Located::is_local` and
+derives its stamping handle by `reopen`; `ensure_unreachable` holds each
+exclusion, a file or a directory, and reads every descriptor through
+`reopen(READ_CONTROL)`; the by-name opens, `ensure_local_canonical_prefix` and
+`dacl/acl.rs`'s named route are gone.  The `FileRenameInfoEx` premise with a
+non-null `RootDirectory` (plan §9 item 3) is pinned by
+`publish_through_file_rename_info_ex_lands_the_file` (step 1) and is not
+confirmed: the redirect commit's Windows publish rests on it until that test
+has run on a host.  The step-7 host assertions that have not run:
+`an_exact_file_exclusion_is_verified_and_reported` and
+`a_junction_and_a_symlink_beneath_an_exclusion_are_not_followed`
+(`dacl/tests.rs`), `a_share_is_refused` and the junction cases
+(`dacl/frozen/tests.rs`), and `carving_meets_a_junction_and_a_symlink_as_links`
+(`windows/session/tests.rs`).
+
+Step 7 (the sandbox, mechanically), on macOS, is cross-compiled only.
+The pin of ral's own binary keeps the `Trace` of the walk that found it
+(`Pinned::open`), and `reexec::OWN` is the one hold on it: `ral_binary()`, the
+launch's Windows image and `verify` read it, and `verify` walks the pinned
+name again and compares the leaf's `ObjectId` with the pin's, where it
+re-`stat`ted by name before.  The Seatbelt profile's pins are
+`RealPath::ancestors_within` of the positions each exclusion holds, rendered
+with their firmlink twins, and an exclusion renders from those positions, its
+name's and its link's target's, never from the text as written; `shims`
+compares `program.parent()` by `RealPath::parent`.  No macOS host assertion
+is new: `mac_profile_lets_a_lookup_stat_the_surface_of_a_frozen_allowance`
+and the profile tests that build exclusions (now `GrantPath<Excluded>`, so
+walked) are the existing ones, unrun on a Mac.
+
 The first green macOS `ci.yml` and `windows.yml` run on the landing commit
 discharges them; it is recorded here when it comes.

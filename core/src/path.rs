@@ -51,22 +51,24 @@ pub use forms::{CwdPath, FrozenPath, LexicalPath, NotACwd};
 pub use git::work_tree_chain;
 pub use identity::{Allow, Deny, MatchedBy, Polarity};
 pub(crate) use identity::{Depth, Subject};
-pub(crate) use lex::{
-    GrantRefusal, SubpathRefusal, classify_subpath, grant_eligibility, proper_ancestors,
-};
+#[cfg(target_os = "macos")]
+pub(crate) use lex::proper_ancestors;
+pub(crate) use lex::{GrantRefusal, SubpathRefusal, classify_subpath, grant_eligibility};
 pub use lex::{
-    NotUtf8, PathShape, basename, exists, extension, is_absolute, is_dir, is_stream_or_drive,
-    join_slash, shape, strip_appended_suffix, utf8, with_appended_suffix,
+    NotUtf8, basename, exists, extension, is_absolute, is_dir, is_stream_or_drive, join_slash,
+    strip_appended_suffix, utf8, with_appended_suffix,
 };
 pub use namespace::{EnginePath, GuestPath};
+#[cfg(any(target_os = "macos", all(test, unix)))]
+pub(crate) use render::render_paths;
 #[cfg(unix)]
 pub(crate) use render::render_real;
 #[cfg(target_os = "macos")]
 pub(crate) use render::rendered_ancestors;
 #[cfg(unix)]
-pub(crate) use render::{Object, Rendered, render_objects, render_paths, rendered_pins};
+pub(crate) use render::{Object, Rendered, pinned_dirs, render_excluded, render_objects};
 pub use resolver::Resolver;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub(crate) use walk::is_loop;
 pub use walk::{
     Authority, Dir, DirEntry, EntryName, Excluded, Hold, Installing, Judged, Kind, LeafMode,

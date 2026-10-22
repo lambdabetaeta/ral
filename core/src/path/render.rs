@@ -33,31 +33,6 @@ impl Rendered {
     pub(crate) fn holds(&self, spelled: &str) -> bool {
         super::identity::path_within_str(spelled, &self.0, super::identity::Identity::Stored)
     }
-
-    /// This name as a mount of `from` shows it at `onto`; `None` where `from`
-    /// does not hold it.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn rebased(&self, from: &Self, onto: &Self) -> Option<Self> {
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "lexical: rebases one rendered name onto another"
-        )]
-        let beneath = std::path::Path::new(&self.0).strip_prefix(&from.0).ok()?;
-        if beneath.as_os_str().is_empty() {
-            return Some(onto.clone());
-        }
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "lexical: rebases one rendered name onto another"
-        )]
-        let name = std::path::Path::new(&onto.0).join(beneath);
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "native: a name that is not Unicode is no rendered one"
-        )]
-        let name = name.to_str();
-        name.map(|name| Self(name.to_owned()))
-    }
 }
 
 impl AsRef<str> for Rendered {
@@ -79,7 +54,7 @@ impl AsRef<str> for Rendered {
     clippy::disallowed_methods,
     reason = "path-form: lifts grant strings for `match_variants_paths` to canonicalise"
 )]
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn render_paths<S: AsRef<str>>(paths: &[S]) -> Result<Vec<Rendered>, String> {
     Ok(
         super::canon::match_variants_paths(paths.iter().map(|p| std::path::Path::new(p.as_ref())))?
@@ -121,12 +96,12 @@ impl Object {
 /// As [`render_paths`].
 #[cfg(unix)]
 pub(crate) fn render_objects<'a>(
-    grants: impl IntoIterator<Item = (super::RealPath, Option<&'a super::FrozenPath>)>,
+    grants: impl IntoIterator<Item = (&'a super::RealPath, Option<&'a super::FrozenPath>)>,
 ) -> Result<Vec<Object>, String> {
     use std::collections::{BTreeMap, BTreeSet};
     let mut objects = BTreeMap::<Rendered, [BTreeSet<Rendered>; 2]>::new();
     for (real, surface) in grants {
-        let mut names = render_real(&real)?.into_iter();
+        let mut names = render_real(real)?.into_iter();
         let Some(real) = names.next() else { continue };
         let shown = surface
             .filter(|_| cfg!(target_os = "linux"))
@@ -202,23 +177,60 @@ pub(crate) fn rendered_ancestors<'a>(
         .collect()
 }
 
+/// The positions an exclusion holds: its name's and, where that is a link,
+/// the link's target's.
+#[cfg(unix)]
+fn held(excluded: &super::Excluded) -> impl Iterator<Item = &super::RealPath> {
+    std::iter::once(excluded.named().real()).chain(excluded.target().map(super::Trace::real))
+}
+
+/// Every name by which a kernel sandbox hook might present what `denies`
+/// exclude: each held position and its firmlink twin, deduped, never
+/// re-resolved.
+///
+/// # Errors
+///
+/// As [`render_real`].
+#[cfg(unix)]
+pub(crate) fn render_excluded<'a>(
+    denies: impl IntoIterator<Item = &'a super::Excluded>,
+) -> Result<Vec<Rendered>, String> {
+    let mut names = std::collections::BTreeSet::new();
+    for real in denies.into_iter().flat_map(held) {
+        names.extend(render_real(real)?);
+    }
+    Ok(names.into_iter().collect())
+}
+
 /// The directories a deny needs kept traversable to be reachable at all:
-/// every proper ancestor of a rendered deny name that lies within some
-/// rendered write name — taken *after* expansion, so a deny reached only
-/// through a symlinked chain (`W/alias/secret` where `W/alias → W/top/deep`)
-/// pins every ancestor of both the surface and the resolved spelling, not
-/// just the ones the pre-expansion string happened to share with `write`.
-#[cfg_attr(not(unix), allow(dead_code))]
-pub(crate) fn rendered_pins(deny: &[Rendered], write: &[Rendered]) -> Vec<Rendered> {
-    super::proper_ancestors(deny.iter().map(Rendered::as_str))
+/// every proper ancestor, root excepted, of a position `denies` hold that
+/// lies within some `writes` prefix, rendered with its firmlink twin.  A deny
+/// reached through a symlinked chain pins the chain it resolves to, the one
+/// the kernel walks.
+///
+/// # Errors
+///
+/// As [`render_real`].
+#[cfg(unix)]
+pub(crate) fn pinned_dirs<'a>(
+    denies: impl IntoIterator<Item = &'a super::Excluded>,
+    writes: &[super::RealPath],
+) -> Result<Vec<Rendered>, String> {
+    let pins: std::collections::BTreeSet<_> = denies
         .into_iter()
-        .filter(|dir| {
-            write.iter().any(|w| {
-                super::identity::path_within_str(dir, w.as_str(), super::identity::Identity::Stored)
-            })
+        .flat_map(held)
+        .flat_map(|real| {
+            writes
+                .iter()
+                .flat_map(move |write| real.ancestors_within(write))
         })
-        .map(Rendered)
-        .collect()
+        .filter(|dir| !dir.is_root())
+        .collect();
+    let mut names = std::collections::BTreeSet::new();
+    for dir in &pins {
+        names.extend(render_real(dir)?);
+    }
+    Ok(names.into_iter().collect())
 }
 
 #[cfg(test)]
@@ -309,15 +321,14 @@ mod tests {
         let link = tmp.path().join("bin");
         std::os::unix::fs::symlink(&dir, &link).expect("symlink");
         let link = super::super::FrozenPath::from_surface(link.to_str().expect("UTF-8"));
-        let real = || super::super::RealPath::of_path(&dir).expect("dir is real");
+        let real = super::super::RealPath::of_path(&dir).expect("dir is real");
         let shown = |name: &std::path::Path| Rendered(name.to_str().expect("UTF-8").to_owned());
-        let objects =
-            render_objects([(real(), Some(&link)), (real(), None), (real(), Some(&link))])
-                .expect("ASCII paths render");
+        let objects = render_objects([(&real, Some(&link)), (&real, None), (&real, Some(&link))])
+            .expect("ASCII paths render");
         assert_eq!(
             objects,
             [Object {
-                real: shown(real().as_path()),
+                real: shown(real.as_path()),
                 spellings: vec![Rendered(link.as_str().to_owned())],
                 walk: Vec::new(),
             }]

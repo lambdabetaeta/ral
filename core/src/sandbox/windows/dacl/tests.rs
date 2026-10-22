@@ -12,8 +12,12 @@
     reason = "[test] test fs/process scaffolding"
 )]
 use super::*;
+use crate::path::RealPath;
 use crate::process::cancel::DurableRoot;
 use std::fs;
+use std::process::Command;
+use windows_sys::Win32::Security::SID_AND_ATTRIBUTES;
+use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
 
 /// An uncancelled scope: every test here exercises the stamp itself, while
 /// the cancel path has its own test below.
@@ -28,56 +32,6 @@ const CAP_SID: &str = "S-1-15-3-1024-1-2-3-4-5-6-7-8";
 // The mask-shape invariants are `const _` asserts at the declarations
 // above, not tests here, so drift fails the build rather than depending
 // on someone running an unfiltered suite.
-
-#[test]
-fn ensure_local_canonical_prefix_accepts_local() {
-    for local in [
-        r"\\?\C:\tmp\foo",
-        r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\foo",
-        r"\\.\Volume{12345678-1234-1234-1234-123456789abc}\foo",
-    ] {
-        assert!(
-            ensure_local_canonical_prefix(Path::new(local)).is_ok(),
-            "{local}"
-        );
-    }
-}
-
-/// An allow-list: whatever is neither a verbatim drive path nor a volume
-/// GUID path is refused, not let through for being no share.
-#[test]
-fn ensure_local_canonical_prefix_rejects_every_other_form() {
-    for other in [
-        r"C:\tmp\foo",
-        r"\\.\C:\tmp\foo",
-        r"\\.\pipe\x",
-        r"\??\C:\tmp\foo",
-        r"\\?\C:",
-        r"\tmp\foo",
-        r"tmp\foo",
-        "",
-    ] {
-        let err = ensure_local_canonical_prefix(Path::new(other));
-        assert!(
-            matches!(err, Err(DaclError::NotCanonicalLocal(_))),
-            "{other}: {err:?}"
-        );
-    }
-}
-
-#[test]
-fn ensure_local_canonical_prefix_rejects_unc_namespace() {
-    let err = ensure_local_canonical_prefix(Path::new(r"\\?\UNC\server\share\foo"));
-    assert!(matches!(err, Err(DaclError::NetworkPathRejected(_))));
-    let err = ensure_local_canonical_prefix(Path::new(r"\\?\unc\server\share\foo"));
-    assert!(matches!(err, Err(DaclError::NetworkPathRejected(_))));
-}
-
-#[test]
-fn ensure_local_canonical_prefix_rejects_raw_unc() {
-    let err = ensure_local_canonical_prefix(Path::new(r"\\server\share\foo"));
-    assert!(matches!(err, Err(DaclError::NetworkPathRejected(_))));
-}
 
 // ---------------- integration tests -----------------
 //
@@ -96,6 +50,27 @@ pub(super) fn real(path: &Path) -> PathBuf {
     crate::path::canon::canonicalise_strict(path).unwrap()
 }
 
+/// `mklink /J link target`, as `cmd` reports it.
+pub(super) fn mklink(link: &Path, target: &Path) -> std::process::Output {
+    Command::new("cmd")
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .output()
+        .unwrap()
+}
+
+pub(super) fn junction(link: &Path, target: &Path) {
+    let output = mklink(link, target);
+    assert!(output.status.success(), "create junction: {output:?}");
+}
+
+/// The frozen allowance at `path`, as `pin_all` opens one: held by the walk
+/// with every link refused, `None` where nothing is there.
+pub(super) fn pin(path: &Path, kind: GrantKind) -> Result<Option<FrozenPin>, DaclError> {
+    FrozenPin::open(&RealPath::assumed(path), kind)
+}
+
 /// Stamp `kind` for `sid` on `canonical` through its pin, as `confine` does.
 pub(super) fn grant(
     canonical: &Path,
@@ -103,8 +78,20 @@ pub(super) fn grant(
     kind: GrantKind,
     cancel: &Scope,
 ) -> Result<(), DaclError> {
-    let pin = FrozenPin::open(canonical, kind)?.expect("the grant target is on disk");
+    let pin = pin(canonical, kind)?.expect("the grant target is on disk");
     ensure_frozen_grant(&pin, sid, kind, cancel)
+}
+
+/// Whether `path` carries the `Low` label, read through its pin.
+pub(super) fn labelled(path: &Path) -> bool {
+    let pin = pin(path, GrantKind::ReadOnly).unwrap().unwrap();
+    low_integrity_label_present(pin.target())
+}
+
+/// [`capability_ace_present`] on `path`, read through its pin.
+fn ace_present(path: &Path, sid: &str, kind: GrantKind, inheritable: bool) -> bool {
+    let pin = pin(path, kind).unwrap().unwrap();
+    capability_ace_present(pin.target(), sid, kind, inheritable)
 }
 
 #[test]
@@ -112,19 +99,14 @@ fn ensure_grant_stamps_the_ace_and_records_the_witness() {
     with_scoped_state_dir(|| {
         let td = tempfile::tempdir().unwrap();
         let canonical = real(td.path());
-        assert!(!capability_ace_present(
+        assert!(!ace_present(
             &canonical,
             CAP_SID,
             GrantKind::ReadWrite,
             true
         ));
         grant(&canonical, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
-        assert!(capability_ace_present(
-            &canonical,
-            CAP_SID,
-            GrantKind::ReadWrite,
-            true
-        ));
+        assert!(ace_present(&canonical, CAP_SID, GrantKind::ReadWrite, true));
         assert!(stamp_recorded(&stamp_key(&canonical, GrantKind::ReadWrite)));
     });
 }
@@ -145,10 +127,10 @@ fn a_read_write_label_reaches_directories_and_never_files() {
         let after = td.path().join("after.exe");
         fs::write(&after, b"").unwrap();
 
-        assert!(low_integrity_label_present(&canonical));
-        assert!(low_integrity_label_present(&sub));
-        assert!(!low_integrity_label_present(&before));
-        assert!(!low_integrity_label_present(&after));
+        assert!(labelled(&canonical));
+        assert!(labelled(&sub));
+        assert!(!labelled(&before));
+        assert!(!labelled(&after));
     });
 }
 
@@ -158,13 +140,13 @@ fn only_a_read_write_directory_grant_takes_the_label() {
         let td = tempfile::tempdir().unwrap();
         let canonical = real(td.path());
         grant(&canonical, CAP_SID, GrantKind::ReadOnly, &live()).unwrap();
-        assert!(!low_integrity_label_present(&canonical));
+        assert!(!labelled(&canonical));
 
         let file = td.path().join("f.txt");
         fs::write(&file, b"").unwrap();
         let file = real(&file);
         grant(&file, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
-        assert!(!low_integrity_label_present(&file));
+        assert!(!labelled(&file));
     });
 }
 
@@ -196,14 +178,9 @@ fn a_read_only_stamp_does_not_satisfy_a_read_write_probe() {
         let td = tempfile::tempdir().unwrap();
         let canonical = real(td.path());
         grant(&canonical, CAP_SID, GrantKind::ReadOnly, &live()).unwrap();
-        assert!(capability_ace_present(
-            &canonical,
-            CAP_SID,
-            GrantKind::ReadOnly,
-            true
-        ));
+        assert!(ace_present(&canonical, CAP_SID, GrantKind::ReadOnly, true));
         assert!(
-            !capability_ace_present(&canonical, CAP_SID, GrantKind::ReadWrite, true),
+            !ace_present(&canonical, CAP_SID, GrantKind::ReadWrite, true),
             "RO_MASK must not cover a read-write probe"
         );
         assert!(!stamp_recorded(&stamp_key(
@@ -229,7 +206,7 @@ fn a_recreated_root_fails_the_probe_and_is_restamped() {
         std::fs::create_dir(&root).unwrap();
         let canonical = real(&root);
         assert!(stamp_recorded(&stamp_key(&canonical, GrantKind::ReadWrite)));
-        assert!(!capability_ace_present(
+        assert!(!ace_present(
             &canonical,
             CAP_SID,
             GrantKind::ReadWrite,
@@ -237,12 +214,7 @@ fn a_recreated_root_fails_the_probe_and_is_restamped() {
         ));
 
         grant(&canonical, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
-        assert!(capability_ace_present(
-            &canonical,
-            CAP_SID,
-            GrantKind::ReadWrite,
-            true
-        ));
+        assert!(ace_present(&canonical, CAP_SID, GrantKind::ReadWrite, true));
     });
 }
 
@@ -291,4 +263,69 @@ fn capability_name_is_deterministic_kind_and_path_keyed() {
             "stay inside the most conservative name cap: {name}"
         );
     }
+}
+
+/// Run `check` against the access of a token that carries `CAP_SID` as its
+/// one capability, in a package nothing is stamped for.
+fn with_token_access<R>(check: impl FnOnce(&ContainerAccess) -> R) -> R {
+    let package = acl::OwnedSid::parse("S-1-15-2-1-2-3-4-5-6-7").unwrap();
+    let capability = acl::OwnedSid::parse(CAP_SID).unwrap();
+    let capabilities = [SID_AND_ATTRIBUTES {
+        Sid: capability.as_psid(),
+        Attributes: SE_GROUP_ENABLED as u32,
+    }];
+    check(&ContainerAccess::of(package.as_psid(), &capabilities).unwrap())
+}
+
+/// The position `ensure_unreachable` reports as reachable, if it does.
+fn reachable(excluded: &Path, access: &ContainerAccess) -> Option<PathBuf> {
+    match ensure_unreachable(&RealPath::assumed(excluded), access, &live()) {
+        Err(DaclError::Reachable { at, .. }) => Some(at),
+        other => {
+            other.unwrap();
+            None
+        }
+    }
+}
+
+/// A file excluded by its exact name is held and read like a directory is: a
+/// descriptor that already admits the token is reported, not skipped.
+#[test]
+fn an_exact_file_exclusion_is_verified_and_reported() {
+    with_scoped_state_dir(|| {
+        let td = tempfile::tempdir().unwrap();
+        let file = real(td.path()).join("secret.env");
+        fs::write(&file, b"x").unwrap();
+        grant(&file, CAP_SID, GrantKind::ReadOnly, &live()).unwrap();
+        with_token_access(|access| {
+            let at = reachable(&file, access).expect("the file admits the token");
+            assert!(at.ends_with("secret.env"), "{at:?}");
+        });
+    });
+}
+
+/// A link beneath an exclusion is checked as itself and never followed: what
+/// it leads to is reachable by the token and is not what was excluded, while
+/// a real directory beneath it is descended into.
+#[test]
+fn a_junction_and_a_symlink_beneath_an_exclusion_are_not_followed() {
+    with_scoped_state_dir(|| {
+        let td = tempfile::tempdir().unwrap();
+        let root = real(td.path());
+        let (excluded, outside) = (root.join("excluded"), root.join("outside"));
+        let deep = excluded.join("sub").join("deep.txt");
+        fs::create_dir_all(deep.parent().unwrap()).unwrap();
+        fs::write(&deep, b"x").unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("open.txt"), b"x").unwrap();
+        grant(&outside, CAP_SID, GrantKind::ReadOnly, &live()).unwrap();
+        junction(&excluded.join("junction"), &outside);
+        std::os::windows::fs::symlink_dir(&outside, excluded.join("symlink")).unwrap();
+        with_token_access(|access| {
+            assert_eq!(reachable(&excluded, access), None);
+            grant(&deep, CAP_SID, GrantKind::ReadOnly, &live()).unwrap();
+            let at = reachable(&excluded, access).expect("the real directory is descended into");
+            assert!(at.ends_with("deep.txt"), "{at:?}");
+        });
+    });
 }

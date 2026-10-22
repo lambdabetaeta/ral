@@ -14,15 +14,14 @@ use super::table::{Allows, Denies, Table, Withheld};
 use super::{ExecGrant, ExecKey, ExecSummary, GrantStack, Join, Meet};
 use crate::guard::freeze::PolicyError;
 use crate::path::{
-    self, Authority, Depth, Excluded, FrozenPath, Judged, LeafMode, LexicalPath, Located,
-    MatchedBy, Reading, RealPath, Trace, Unjudged, Walked, command_name_key, walk_lenient,
+    self, Authority, Depth, Excluded, FrozenPath, Judged, Located, MatchedBy, Reading, RealPath,
+    Trace, Unjudged, Walked, command_name_key,
 };
 use crate::syntax::quote::quote_word;
 use crate::types::EnvVars;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::LazyLock;
 
 /// A program the stack admitted with these arguments, and the table that
 /// admitted it.  Only [`GrantStack::admit`] makes one, so nothing launches
@@ -66,15 +65,10 @@ pub(crate) struct Refused {
     pub why: ExecDenial,
 }
 
-/// ral's own binary, the file a bundled tool runs and so reads.
+/// ral's own binary, the file a bundled tool runs and so reads: what the boot
+/// pin reached, `None` while ral is unpinned.
 pub(crate) fn ral_binary() -> Option<&'static Trace> {
-    static OWN: LazyLock<Option<Trace>> = LazyLock::new(|| {
-        let exe = LexicalPath::absolute(&std::env::current_exe().ok()?)?;
-        walk_lenient(&exe, LeafMode::Follow)
-            .ok()
-            .filter(|trace| trace.kind().is_some())
-    });
-    OWN.as_ref()
+    crate::sandbox::reexec::own_binary()
 }
 
 impl GrantStack {
@@ -591,6 +585,7 @@ pub(super) mod tests {
     use crate::path::{shown, test_absolute, utf8};
     use crate::test_helper::trace;
     use std::path::Path;
+    use std::sync::LazyLock;
 
     /// The access to `p`, a POSIX-style fixture path, walked as it is: an
     /// absent path is its own lexical position.
@@ -1223,6 +1218,7 @@ pub(super) mod tests {
     #[cfg(unix)]
     #[test]
     fn an_exclusion_holds_what_it_was_walked_to_and_an_allowance_its_position() {
+        use crate::path::{LeafMode, LexicalPath, walk_lenient};
         let (_tmp, root) = tmp();
         let blocked = made(&root, "blocked");
         let tools = made(&root, "tools");

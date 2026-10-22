@@ -137,10 +137,7 @@ fn windows_sandboxed_command(
                 launch.args(args);
                 // The confined child is ral.exe itself; the token must load
                 // it, at its real path, since a link on the path refuses.
-                let image = (super::reexec::OWN.get())
-                    .map(|own| own.exec_path().to_path_buf())
-                    .or_else(|| std::env::current_exe().ok())
-                    .and_then(|exe| crate::path::RealPath::of_path(&exe).ok());
+                let image = super::reexec::own_binary().map(|own| own.real().clone());
                 (launch, image)
             }
         };
@@ -324,7 +321,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     use crate::{
         capability::{Extent, FsAllow, GrantPath, Program},
-        path::FrozenPath,
+        path::{Excluded, FrozenPath},
         sandbox::{ExecProjection, FsProjection, FsRules},
     };
 
@@ -336,12 +333,17 @@ mod tests {
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn excluding(path: &str) -> GrantPath<Excluded> {
+        GrantPath::walk(FrozenPath::from_surface(path)).expect("an exclusion walks")
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn restrictive() -> SandboxProjection {
         SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
                 read: vec![prefix("/tmp")],
                 write: vec![prefix("/tmp")],
-                deny: vec![FrozenPath::from_surface("/etc")],
+                deny: vec![excluding("/etc")],
                 pinned_dirs: Vec::new(),
             }),
             net: true,
@@ -598,7 +600,7 @@ mod tests {
             fs: FsProjection::Restricted(FsRules {
                 read: scopes(read).into_iter().chain(floor()).collect(),
                 write: scopes(write),
-                deny: deny.iter().map(|d| FrozenPath::from_surface(d)).collect(),
+                deny: deny.iter().copied().map(excluding).collect(),
                 pinned_dirs: Vec::new(),
             }),
             net: true,
@@ -807,7 +809,7 @@ mod tests {
             .ok()
             .and_then(|o| std::fs::canonicalize(String::from_utf8(o.stdout).ok()?.trim()).ok());
         let unused = used.and_then(|used| {
-            super::super::carriers::shims(stub)
+            super::super::carriers::shims(crate::test_helper::trace(stub).real())
                 .into_iter()
                 .filter_map(|c| std::fs::canonicalize(c).ok())
                 .find(|c| *c != used)
@@ -851,7 +853,7 @@ mod tests {
 
     /// `cat file` confined to reading `read` and the floor, minus `deny`.
     #[cfg(target_os = "macos")]
-    fn reads(read: Vec<FsAllow>, deny: Vec<FrozenPath>, file: &Path) -> bool {
+    fn reads(read: Vec<FsAllow>, deny: Vec<GrantPath<Excluded>>, file: &Path) -> bool {
         let projection = SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
                 read: read.into_iter().chain(floor()).collect(),
@@ -921,8 +923,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// An exclusion is re-resolved at launch, so it follows its name to
-    /// wherever the name leads now.
+    /// An exclusion follows its name to wherever the name leads when the
+    /// grant is made.
     #[cfg(target_os = "macos")]
     #[test]
     fn an_exclusion_follows_a_retargeted_spelling() {
@@ -930,7 +932,7 @@ mod tests {
         std::fs::remove_file(&link).expect("unlink");
         std::os::unix::fs::symlink(&b, &link).expect("retarget");
         let whole = || vec![prefix(&root.to_string_lossy())];
-        let deny = || vec![FrozenPath::from_surface(&link.to_string_lossy())];
+        let deny = || vec![excluding(&link.to_string_lossy())];
         assert!(reads(whole(), Vec::new(), &b.join("f")), "control");
         assert!(
             !reads(whole(), deny(), &b.join("f")),

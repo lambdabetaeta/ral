@@ -186,7 +186,6 @@ impl super::Axis for FsLayer {
 
 impl FsAllow {
     /// The position this allowance holds from, `/` for everywhere.
-    #[cfg(any(target_os = "linux", windows, test, feature = "test-util"))]
     pub(crate) fn real(&self) -> RealPath {
         match self {
             Self::Prefix(prefix) => prefix.real.real(),
@@ -196,9 +195,9 @@ impl FsAllow {
 }
 
 impl FsDeny {
-    /// The spelling this exclusion was written as.
-    pub(crate) fn written(&self) -> &FrozenPath {
-        &self.0.written
+    /// The exclusion as the walk made it: its spelling and the objects it held.
+    pub(crate) fn grant(&self) -> &GrantPath<Excluded> {
+        &self.0
     }
 
     fn rehold(&mut self) {
@@ -260,6 +259,19 @@ impl Floor {
     /// A floor spelling whose walk fails, named: a host that cannot resolve
     /// its own floor cannot run anything.
     pub(crate) fn of_host() -> Result<Self, String> {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "the floor has no FreezeCtx: its home is the process's, as `home` places default to"
+        )]
+        let home = crate::host::home();
+        Self::of_home(home.as_deref())
+    }
+
+    /// [`of_host`](Self::of_host) with the process's home given.
+    ///
+    /// # Errors
+    /// As [`of_host`](Self::of_host); a `home` that cannot be walked, named.
+    pub(crate) fn of_home(home: Option<&str>) -> Result<Self, String> {
         #[cfg(windows)]
         let listed = ["SystemRoot", "ProgramFiles", "ProgramFiles(x86)"]
             .map(|k| std::env::var(k).unwrap_or_default());
@@ -316,13 +328,8 @@ impl Floor {
         ];
         #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         let listed: [&str; 0] = [];
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "the floor has no FreezeCtx: its home is the process's, as `home` places default to"
-        )]
-        let home = crate::host::home();
         let mut floor = Self::resolve(listed.map(std::path::PathBuf::from))?;
-        let prefixes = toolchains::floor(home.as_deref())?;
+        let prefixes = toolchains::floor(home)?;
         floor.0.extend(
             prefixes
                 .into_iter()
@@ -983,16 +990,13 @@ mod tests {
     /// which spelling: here the home, which the toolchain rows are judged by.
     #[cfg(unix)]
     #[test]
-    fn a_runtime_whose_floor_cannot_be_walked_refuses_construction_naming_it() {
+    fn a_floor_that_cannot_be_walked_refuses_construction_naming_it() {
         let (_tmp, root) = tmp();
         let (a, b) = (root.join("a"), root.join("b"));
         std::os::unix::fs::symlink(&b, &a).unwrap();
         std::os::unix::fs::symlink(&a, &b).unwrap();
         let home = a.join("home");
-        let built = crate::test_env::with_var("HOME", utf8(&home).ok(), || {
-            crate::HostSurface::default().runtime(crate::terminal::TerminalState::default())
-        });
-        let Err(why) = built else {
+        let Err(why) = Floor::of_home(utf8(&home).ok()) else {
             panic!("a floor through a link cycle cannot be walked");
         };
         assert!(why.contains(utf8(&home).unwrap()), "{why}");

@@ -43,8 +43,7 @@
 //!   From<&rustix::fs::Stat> for ObjectId`, the identity a by-name `stat`
 //!   reports, which `carriers` compares with [`ObjectId::of`];
 //! - on Windows, `reopen_shared` and `is_local`, which the `Installing` doors
-//!   `reopen` and `is_local` ask, and on macOS `impl From<&Metadata> for
-//!   ObjectId`, which the pin of ral's own binary compares.
+//!   `reopen` and `is_local` ask.
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -134,8 +133,8 @@ fn loop_error() -> io::Error {
 /// Whether `e` is the walk's `ELOOP`: a link met where none is allowed, or a
 /// splice budget spent.
 #[cfg_attr(
-    not(target_os = "linux"),
-    expect(dead_code, reason = "used from step 7")
+    not(any(target_os = "linux", windows)),
+    expect(dead_code, reason = "no macOS renderer holds a position")
 )]
 pub(crate) fn is_loop(e: &io::Error) -> bool {
     e.get_ref()
@@ -537,8 +536,8 @@ impl RealPath {
     /// # Errors
     /// The walk's.
     #[cfg_attr(
-        not(any(target_os = "linux", windows)),
-        expect(dead_code, reason = "used from step 7")
+        not(any(target_os = "linux", windows, test)),
+        expect(dead_code, reason = "no macOS renderer holds a position")
     )]
     pub(crate) fn open_nofollow(
         &self,
@@ -565,8 +564,8 @@ impl RealPath {
     /// # Errors
     /// The walk's.
     #[cfg_attr(
-        not(any(target_os = "linux", windows)),
-        expect(dead_code, reason = "used from step 7")
+        not(any(target_os = "linux", windows, test)),
+        expect(dead_code, reason = "no macOS renderer holds a position")
     )]
     pub(crate) fn open_dir_nofollow(
         &self,
@@ -599,29 +598,6 @@ impl RealPath {
     #[cfg(any(test, feature = "test-util"))]
     pub fn assumed(path: impl Into<PathBuf>) -> Self {
         Self(path.into())
-    }
-
-    /// Whether this path lies inside `dir`, modulo firmlink aliases, as a
-    /// rule of polarity `P` reads names.
-    pub fn within<P: super::Polarity>(&self, dir: &Self) -> bool {
-        super::identity::within::<P>(&self.0, &dir.0)
-    }
-
-    /// Whether `path` lies inside this one, as a rule of polarity `P` reads
-    /// names; an fs access against a run place.
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(dead_code, reason = "used from step 7")
-    )]
-    pub(crate) fn contains_path<P: super::Polarity>(&self, path: &Path) -> bool {
-        super::identity::within::<P>(path, &self.0)
-    }
-
-    /// The entry `name` of this directory: real by construction, since a
-    /// directory entry of a real directory opened without following is.
-    #[cfg(any(target_os = "linux", windows, test))]
-    pub(crate) fn entry(&self, name: &OsStr) -> Self {
-        Self(self.0.join(name))
     }
 
     pub fn as_path(&self) -> &Path {
@@ -659,9 +635,9 @@ impl RealPath {
     }
 }
 
-#[expect(dead_code, reason = "used from step 7")]
 impl RealPath {
     /// The position above this one, `None` at a root.
+    #[cfg(any(target_os = "macos", windows))]
     pub(crate) fn parent(&self) -> Option<Self> {
         self.0.parent().map(|p| Self(p.to_path_buf()))
     }
@@ -681,6 +657,7 @@ impl RealPath {
 
     /// This position with its prefix `from` replaced by `to`; `None` where
     /// `from` does not contain it.  Where a bind shows a deny (`linux.rs`).
+    #[cfg(target_os = "linux")]
     pub(crate) fn rebased(&self, from: &Self, to: &Self) -> Option<Self> {
         let rest = self.relative_to(from)?;
         Some(rest.iter().fold(to.clone(), |at, name| at.child(name)))
@@ -1211,7 +1188,10 @@ impl<A: Authority> Dir<A> {
     }
 }
 
-#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 9"))]
+#[cfg_attr(
+    not(any(windows, all(test, unix))),
+    expect(dead_code, reason = "used from step 9")
+)]
 impl<A: Peeks> Dir<A> {
     pub(crate) fn stat(&self) -> &Stat {
         &self.stat
@@ -1236,7 +1216,6 @@ impl Dir<Installing> {
     ///
     /// # Errors
     /// The reopen's.
-    #[expect(dead_code, reason = "used from step 7")]
     pub(crate) fn reopen(&self, access: u32) -> io::Result<File> {
         host::reopen_shared(&self.handle.file, access)
     }
@@ -1611,7 +1590,6 @@ impl Located<Installing> {
     /// # Errors
     /// The reopen's; `NotFound` for a leaf that is not held.
     #[cfg(windows)]
-    #[expect(dead_code, reason = "used from step 7")]
     pub(crate) fn reopen(&self, access: u32) -> io::Result<File> {
         match &self.leaf {
             Leaf::Held { file, .. } => host::reopen_shared(file, access),
@@ -1624,7 +1602,6 @@ impl Located<Installing> {
     /// # Errors
     /// The volume query's; `NotFound` for a leaf that is not held.
     #[cfg(windows)]
-    #[expect(dead_code, reason = "used from step 7")]
     pub(crate) fn is_local(&self) -> io::Result<bool> {
         match &self.leaf {
             Leaf::Held { file, .. } => host::is_local(file),

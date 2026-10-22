@@ -105,23 +105,24 @@ the session's `SessionSandbox`.
   reach past its owning user's. So a worker keeps the authority it was
   born with, by construction.
 - **A frozen allowance is stamped through a held handle, never by name.** Its
-  real path was frozen at decode, and `canonicalise` then `SetNamedSecurityInfoW`
-  would follow a junction planted on the path or on any ancestor and leave a
-  window between check and stamp. So the invariant is: resolution meets no
-  redirecting reparse point anywhere on the path, and the grant lands on the very
-  object checked. Components are held root first, each opened relative to its
-  parent's handle with `FILE_OPEN_REPARSE_POINT`, without delete sharing; the tag of a reparse point is read on the
-  held handle, and only a name surrogate (symlink, junction, mount point) refuses
-  the launch, naming both; a cloud-files placeholder passes, which
-  `OBJ_DONT_REPARSE` would have refused
+  real path was frozen at decode, and a stamp by name would follow a junction
+  planted on the path or on any ancestor and leave a window between check and
+  stamp. So the invariant is: resolution meets no redirecting reparse point
+  anywhere on the path, and the grant lands on the very object checked. The
+  walk holds the position root first, each component opened relative to its
+  parent's handle without following, without delete sharing; only a name
+  surrogate (symlink, junction, mount point) refuses the launch, naming both,
+  and a cloud-files placeholder passes, which `OBJ_DONT_REPARSE` would have
+  refused. The leaf's stamping handle is derived from the walk's by
+  `ReOpenFile`, and a share is refused by asking that handle for its volume
   (`dacl/frozen.rs`).
 - **The check comes before every filter, on every launch.** Three filters drop
   paths before anything is stamped: the projection's memo of what it granted,
   existence, and the ambient-access probe. A path granted at an earlier launch and
   since replaced by a junction would pass all three and skip a check placed in
   the stamp alone, so every frozen allowance is checked first, warm cache or not.
-  A read-write grant also sets a mandatory integrity label by name; it goes
-  through the held handle too, so both operations reach the object checked.
+  A read-write grant also sets a mandatory integrity label; it goes through the
+  held handle too, so both operations reach the object checked.
 - **The projection key covers the whole `read` list**, run places and live
   support included, not only its prefixes: capabilities accumulate per key and
   reach every later token minted under it, so two launches with the same
@@ -135,7 +136,8 @@ the session's `SessionSandbox`.
   the way only its own listing by an ACE nothing inherits (`sandbox::carve`),
   and refuses one on or around an allowance, the program image among them,
   before anything is stamped; for every exclusion it then asks `AuthzAccessCheck`, with the child's own package and capability SIDs,
-  whether the token could open anything beneath it, and refuses the launch,
+  whether the token could open anything beneath it, a file or a directory held
+  by the walk and read through handles derived from it, and refuses the launch,
   naming the object, if so (`dacl::ensure_unreachable`;
   [[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]],
   amendment of 2026-10-20).

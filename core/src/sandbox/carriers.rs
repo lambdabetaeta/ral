@@ -10,7 +10,7 @@
 
 use crate::path::walk::{Kind, Vetted, walk_with};
 use crate::path::{
-    CwdPath, Judged, LeafMode, LexicalPath, Located, ObjectId, Reading, RealPath, Resolver,
+    CwdPath, Judged, LeafMode, LexicalPath, Located, ObjectId, Reading, RealPath, Resolver, Trace,
     is_absolute,
 };
 use crate::types::EnvVars;
@@ -29,16 +29,16 @@ const DEPTH: usize = 4;
 /// written.
 pub(crate) fn carriers<'a>(programs: impl IntoIterator<Item = &'a RealPath>) -> BTreeSet<RealPath> {
     let mut found = BTreeSet::new();
-    let mut frontier: Vec<RealPath> = programs
+    let mut frontier: Vec<Trace> = programs
         .into_iter()
         .filter_map(|program| trusted_real(program.as_path()))
         .collect();
     for _ in 0..DEPTH {
         frontier = frontier
             .iter()
-            .flat_map(hops)
+            .flat_map(|carrier| hops(carrier.real()))
             .filter_map(|hop| trusted_real(&hop))
-            .filter(|hop| found.insert(hop.clone()))
+            .filter(|hop| found.insert(hop.real().clone()))
             .collect();
     }
     found
@@ -82,8 +82,7 @@ pub(crate) fn linkers() -> Vec<RealPath> {
                 .collect::<Vec<_>>()
         })
         // Merged-/usr makes /lib/x and /usr/lib/x one inode: one real path.
-        .filter_map(|p| RealPath::of_path(&p).ok())
-        .filter(|p| p.as_path().is_file())
+        .filter_map(|p| file(&p))
         .collect();
     found.into_iter().collect()
 }
@@ -93,20 +92,28 @@ pub(crate) fn linkers() -> Vec<RealPath> {
 fn hops(program: &RealPath) -> Vec<PathBuf> {
     let mut hops = Vec::new();
     #[cfg(target_os = "macos")]
-    hops.extend(shims(program.as_path()));
+    hops.extend(shims(program));
     hops.extend(shebang(program.as_path()));
     hops
 }
 
-/// The real path of `path` if only the system can have written it: walked
-/// from `/`, every directory and the file itself neither owned nor writable
-/// by this euid, and every symlink not owned by it.  Root owns everything, so
-/// it trusts nothing: that fails closed.  The final object must be a regular
+/// What `path` reaches if only the system can have written it: walked from
+/// `/`, every directory and the file itself neither owned nor writable by
+/// this euid, and every symlink not owned by it.  Root owns everything, so it
+/// trusts nothing: that fails closed.  The final object must be a regular
 /// file: a carrier is bound read-only whole, so a directory would expose its
 /// tree.
-pub(crate) fn trusted_real(path: &Path) -> Option<RealPath> {
+pub(crate) fn trusted_real(path: &Path) -> Option<Trace> {
     let me = rustix::process::geteuid().as_raw();
     let located = walk_with(&spelled(path)?, LeafMode::Follow, |v| system_only(v, me)).ok()?;
+    (located.trace().kind() == Some(Kind::File)).then(|| located.trace().clone())
+}
+
+/// The real path of `path` where it reaches a regular file.
+#[cfg(target_os = "linux")]
+fn file(path: &Path) -> Option<RealPath> {
+    use crate::path::walk;
+    let located = walk(&spelled(path)?, LeafMode::Follow).ok()?;
     (located.trace().kind() == Some(Kind::File)).then(|| located.real().clone())
 }
 
@@ -189,20 +196,21 @@ fn head_shebang(file: File) -> Option<PathBuf> {
 /// tool in the developer directory.  Never `DEVELOPER_DIR`: the confined code
 /// controls its environment.
 #[cfg(target_os = "macos")]
-pub(super) fn shims(program: &Path) -> Vec<PathBuf> {
-    if program.as_os_str() == "/bin/sh" {
+pub(super) fn shims(program: &RealPath) -> Vec<PathBuf> {
+    if program.as_path().as_os_str() == "/bin/sh" {
         return vec![PathBuf::from("/private/var/select/sh")];
     }
-    let (Some(dir), Some(name)) = (program.parent(), program.file_name()) else {
+    let real = |name: &str| spelled(&PathBuf::from(name)).and_then(|at| RealPath::of(&at).ok());
+    let (Some(usr_bin), Some(name)) = (real("/usr/bin"), program.as_path().file_name()) else {
         return Vec::new();
     };
-    if dir.as_os_str() != "/usr/bin" {
+    if program.parent().as_ref() != Some(&usr_bin) {
         return Vec::new();
     }
-    let dev = crate::path::canon::canonicalise_strict(&PathBuf::from(
-        "/private/var/db/xcode_select_link",
-    ))
-    .unwrap_or_else(|_| PathBuf::from("/Library/Developer/CommandLineTools"));
+    let dev = real("/private/var/db/xcode_select_link").map_or_else(
+        || PathBuf::from("/Library/Developer/CommandLineTools"),
+        |link| link.as_path().to_path_buf(),
+    );
     vec![
         crate::path::join_slash(&dev, "usr/bin").join(name),
         crate::path::join_slash(&dev, "Toolchains/XcodeDefault.xctoolchain/usr/bin").join(name),
@@ -223,8 +231,8 @@ pub(super) fn system_script() -> Option<(RealPath, RealPath)> {
     .into_iter()
     .find_map(|script| {
         let script = trusted_real(&PathBuf::from(script))?;
-        let interp = trusted_real(&shebang(script.as_path())?)?;
-        Some((script, interp))
+        let interp = trusted_real(&shebang(script.real().as_path())?)?;
+        Some((script.real().clone(), interp.real().clone()))
     })
 }
 
@@ -395,16 +403,16 @@ mod tests {
             trusted_real(Path::new("/bin/sh")),
             trusted_real(Path::new("/private/var/select/sh")),
         ) {
-            let got = carriers([&sh]);
-            assert!(got.contains(&select), "{got:?}");
+            let got = carriers([sh.real()]);
+            assert!(got.contains(select.real()), "{got:?}");
         }
         if let (Some(git), Some(real), false) = (
             trusted_real(Path::new("/usr/bin/git")),
             trusted_real(Path::new("/Library/Developer/CommandLineTools/usr/bin/git")),
             crate::path::exists("/private/var/db/xcode_select_link"),
         ) {
-            let got = carriers([&git]);
-            assert!(got.contains(&real), "{got:?}");
+            let got = carriers([git.real()]);
+            assert!(got.contains(real.real()), "{got:?}");
         }
     }
 }

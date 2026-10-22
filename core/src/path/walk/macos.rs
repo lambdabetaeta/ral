@@ -33,19 +33,6 @@ impl From<&rustix::fs::Stat> for ObjectId {
     }
 }
 
-/// The identity a by-name `metadata` reports, which the pin of ral's own binary
-/// compares with [`ObjectId::of`] of a handle.  `st_dev` is a signed 32 bits,
-/// which std widens with its sign.
-impl From<&std::fs::Metadata> for ObjectId {
-    fn from(meta: &std::fs::Metadata) -> Self {
-        use std::os::unix::fs::MetadataExt;
-        Self {
-            dev: meta.dev() & u64::from(u32::MAX),
-            ino: meta.ino(),
-        }
-    }
-}
-
 /// Search authority on a directory, as the kernel's own resolver asks it.
 const O_SEARCH: OFlags = OFlags::from_bits_retain(libc::O_SEARCH.cast_unsigned());
 

@@ -62,7 +62,7 @@ pub(crate) fn canonicalise_lenient(p: &Path) -> PathBuf {
 /// version, but `(subpath "/var/select")` does; other syscalls behave the
 /// inverse way.  Granting both removes the guess without enlarging the trust
 /// surface — the two names already reach the same inode.
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn match_variants(p: &Path) -> Vec<PathBuf> {
     with_firmlink_twins(vec![p.to_path_buf(), canonicalise_lenient(p)])
 }
@@ -90,7 +90,7 @@ pub(crate) fn lookup_walk(p: &Path) -> Vec<PathBuf> {
 /// path's grant to the other.  Separate from `render_paths` because that
 /// function's `S: AsRef<str>` bound means a test can never hand it a
 /// non-UTF-8 [`Path`].
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn match_variants_paths<'a>(
     paths: impl Iterator<Item = &'a Path>,
 ) -> Result<Vec<String>, String> {

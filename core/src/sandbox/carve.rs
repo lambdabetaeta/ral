@@ -27,38 +27,30 @@
 //! An exclusion equal to an allowance, or around one, is not carving's to
 //! answer: that allowance is passed on whole, for the backend to refuse.
 //!
-//! Pure over an injected lister, so the plan is judged on every host; the
-//! paths are the frozen real paths the backend stamps.
+//! Pure over an injected lister, so the plan is judged on one set of rules;
+//! the paths are the frozen real paths the backend stamps. The lister opens
+//! each directory it lists, and each entry is judged by its position.
 
-use crate::path::{Deny, RealPath};
-use std::ffi::OsString;
+use crate::path::{Dir, Installing, RealPath};
 
-/// What the lister found at a path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Listing {
-    /// Nothing is there.
-    Missing,
-    /// Something that is not a directory.
-    NotDirectory,
-    /// A directory, with its entries.
-    Directory(Vec<Entry>),
-}
-
-/// One directory entry, as the lister reads it without following it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Entry {
-    pub(crate) name: OsString,
-    pub(crate) kind: EntryKind,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EntryKind {
-    Directory,
+/// One directory entry, as the lister reads it without following it: a
+/// directory comes with the handle the lister opened on it.
+pub(crate) enum Entry {
+    Directory(Dir<Installing>),
     /// Anything else that is itself an object to grant: a file, or a
     /// reparse point that redirects nowhere (a cloud placeholder).
-    Other,
+    Other(RealPath),
     /// A link: a reparse point that names another object.
-    Link,
+    Link(RealPath),
+}
+
+impl Entry {
+    fn real(&self) -> &RealPath {
+        match self {
+            Self::Directory(dir) => dir.real(),
+            Self::Other(real) | Self::Link(real) => real,
+        }
+    }
 }
 
 /// The allowances as granted, once carved.
@@ -72,41 +64,42 @@ pub(crate) struct Carving {
 }
 
 /// Carve every exclusion out of `allowances`, listing a directory only where
-/// an exclusion lies strictly beneath it. A lister's error ends the plan: what
-/// cannot be listed cannot be carved, and is not granted whole instead.
+/// an exclusion lies strictly beneath it. `open` holds an allowance's
+/// position, `None` where it is absent or no directory; `list` reads one
+/// directory's entries. Either's error ends the plan: what cannot be listed
+/// cannot be carved, and is not granted whole instead.
 pub(crate) fn carve<E>(
     allowances: &[RealPath],
     exclusions: &[RealPath],
-    list: &mut impl FnMut(&RealPath) -> Result<Listing, E>,
+    open: &mut impl FnMut(&RealPath) -> Result<Option<Dir<Installing>>, E>,
+    list: &mut impl FnMut(&Dir<Installing>) -> Result<Vec<Entry>, E>,
 ) -> Result<Carving, E> {
     let mut carving = Carving::default();
     for allowance in allowances {
-        if exclusions.iter().any(|e| allowance.within::<Deny>(e)) {
+        if exclusions.iter().any(|e| e.contains_folded(allowance)) {
             // Equal to an exclusion, or inside one: the backend's refusal.
             carving.whole.push(allowance.clone());
             continue;
         }
-        let beneath = |dir: &RealPath| exclusions.iter().any(|e| e.within::<Deny>(dir));
+        let beneath = |dir: &RealPath| exclusions.iter().any(|e| dir.contains_folded(e));
         if !beneath(allowance) {
             carving.whole.push(allowance.clone());
             continue;
         }
-        let mut pending = vec![allowance.clone()];
+        // Absent: nothing to grant. Not a directory: nothing to carve.
+        let mut pending: Vec<_> = open(allowance)?.into_iter().collect();
         while let Some(dir) = pending.pop() {
-            let Listing::Directory(entries) = list(&dir)? else {
-                // Missing: nothing to grant. Not a directory: nothing to carve.
-                continue;
-            };
-            carving.entries.push(dir.clone());
-            for entry in entries {
-                let path = dir.entry(&entry.name);
-                if exclusions.iter().any(|e| path.within::<Deny>(e)) {
+            carving.entries.push(dir.real().clone());
+            for entry in list(&dir)? {
+                if exclusions.iter().any(|e| e.contains_folded(entry.real())) {
                     continue;
                 }
-                match (entry.kind, beneath(&path)) {
-                    (EntryKind::Link, _) | (EntryKind::Other, true) => {}
-                    (EntryKind::Directory, true) => pending.push(path),
-                    (EntryKind::Directory | EntryKind::Other, false) => carving.whole.push(path),
+                let beneath = beneath(entry.real());
+                match (entry, beneath) {
+                    (Entry::Link(_), _) | (Entry::Other(_), true) => {}
+                    (Entry::Directory(child), true) => pending.push(child),
+                    (Entry::Directory(child), false) => carving.whole.push(child.real().clone()),
+                    (Entry::Other(real), false) => carving.whole.push(real),
                 }
             }
         }

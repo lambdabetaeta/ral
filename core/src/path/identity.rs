@@ -256,6 +256,7 @@ fn path_within(path: &Path, prefix: &Path, identity: Identity) -> bool {
 }
 
 /// [`path_within`] on strings, for the renderers that hold the kernel's names.
+#[cfg(target_os = "linux")]
 #[allow(
     clippy::disallowed_methods,
     reason = "path-form: lifts both strings for `path_within`; nothing is resolved"

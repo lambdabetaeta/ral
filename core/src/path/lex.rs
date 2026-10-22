@@ -39,13 +39,13 @@ pub(crate) fn has_drive(path: impl AsRef<OsStr>) -> bool {
 
 /// Whether `path` names a network share: `\\server\share`, or its verbatim
 /// spelling `\\?\UNC\server\share`.
-#[cfg(any(windows, test))]
+#[cfg(test)]
 pub(crate) fn is_network(path: impl AsRef<OsStr>) -> bool {
     parse_bytes(path.as_ref().as_encoded_bytes(), PathRules::Windows).is_network()
 }
 
 /// Whether `path` is a verbatim drive path (`\\?\C:\x`).
-#[cfg(any(windows, test))]
+#[cfg(test)]
 pub(crate) fn is_verbatim_drive(path: impl AsRef<OsStr>) -> bool {
     parse_bytes(path.as_ref().as_encoded_bytes(), PathRules::Windows).is_verbatim_drive()
 }
@@ -346,13 +346,13 @@ impl<'a> Parsed<'a> {
     }
 
     /// Whether `self` names a UNC share (`\\srv\sh` or `\\?\UNC\srv\sh`).
-    #[cfg(any(windows, test))]
+    #[cfg(test)]
     pub(crate) fn is_network(&self) -> bool {
         matches!(self.kind, HeadKind::Unc { .. })
     }
 
     /// Whether `self` is a verbatim drive path (`\\?\C:\x`).
-    #[cfg(any(windows, test))]
+    #[cfg(test)]
     pub(crate) fn is_verbatim_drive(&self) -> bool {
         matches!(self.spelling.namespace, Some(Namespace::Verbatim { .. }))
             && matches!(self.kind, HeadKind::Drive { .. })
@@ -960,35 +960,6 @@ pub fn is_dir(path: &str) -> bool {
     Path::new(path).is_dir()
 }
 
-/// What stands at a path, as the shapes a mount can be laid over.  A final
-/// symlink is its own shape rather than followed: the kernel refuses to mount
-/// over one at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PathShape {
-    Dir,
-    /// A regular file, or any other non-directory inode — fifo, socket,
-    /// device — since they share the mount rule.
-    NonDir,
-    Symlink,
-    Absent,
-}
-
-/// The [`PathShape`] of `path`, from one `lstat`, so a caller choosing
-/// between mount kinds cannot race itself between two predicates.  An
-/// unstatable path reports [`PathShape::Absent`].
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:mount-shape] sandbox mount probe: one `lstat` picking a mount kind for a denied path; a shape predicate, not model data I/O, raises no surface card."
-)]
-pub fn shape(path: &str) -> PathShape {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => PathShape::Symlink,
-        Ok(meta) if meta.is_dir() => PathShape::Dir,
-        Ok(_) => PathShape::NonDir,
-        Err(_) => PathShape::Absent,
-    }
-}
-
 /// Whether `path` is absolute on this host: [`absolute_under`] the host's
 /// rules, the one absoluteness the path module answers with, a path the
 /// host holds or a string alike.
@@ -1065,6 +1036,7 @@ pub fn is_stream_or_drive(name: &OsStr) -> bool {
 }
 
 /// Proper ancestors of `paths`, sorted, dedup'd across inputs, root excluded.
+#[cfg(target_os = "macos")]
 pub(crate) fn proper_ancestors<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     let mut out = std::collections::BTreeSet::new();
     for path in paths {

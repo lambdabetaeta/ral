@@ -18,9 +18,8 @@
 //! each object beneath the deny.
 
 use std::ffi::c_void;
-use std::fs;
+use std::fs::File;
 use std::io;
-use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::ptr::{null, null_mut};
@@ -36,18 +35,16 @@ use windows_sys::Win32::Security::{
     DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PSID, SID_AND_ATTRIBUTES, TOKEN_QUERY,
 };
-use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, READ_CONTROL,
-};
+use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
 use windows_sys::Win32::System::SystemServices::MAXIMUM_ALLOWED;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use super::super::local::Local;
-use super::acl::{attribute_tag, win32_err, win32_err_str};
+use super::acl::{win32_err, win32_err_str};
 use super::{DaclError, cancelled};
+use crate::path::{Kind, LeafMode, RealPath};
 use crate::process::cancel::Scope;
+use crate::sandbox::TOKEN;
 
 /// The access check a launch's token would meet, run in-process: an `AuthZ`
 /// client context built from this process's token — the one `CreateProcessW`
@@ -133,7 +130,7 @@ impl ContainerAccess {
 
     /// Every right the token would be granted on the object `held`: owner,
     /// group, DACL and mandatory label, checked as the kernel checks them.
-    fn granted(&self, held: &OwnedHandle, path: &Path) -> Result<u32, DaclError> {
+    fn granted(&self, held: &File, path: &Path) -> Result<u32, DaclError> {
         let mut sd = null_mut();
         // SAFETY: `held` is live with READ_CONTROL; the descriptor is ours on success.
         let rc = unsafe {
@@ -214,59 +211,72 @@ impl Drop for ContainerAccess {
 /// and not followed: what it leads to is another object, reached under its own
 /// name and judged there.
 ///
-/// Every object is read through a handle of its own, so ral must be able to
-/// open each one for `READ_CONTROL` and list each directory; where it cannot,
-/// nothing is proven and the launch is refused.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:dacl-deny-walk] Lists each directory beneath an exclusion to prove the sandbox token reaches none of it. Sandbox setup, not model data I/O."
-)]
+/// The exclusion is held, a file or a directory, and every object beneath it
+/// is held in its parent, each read for its descriptor through a handle of its
+/// own, derived from the held one: ral must be able to reopen each for
+/// `READ_CONTROL` and list each directory; where it cannot, nothing is proven
+/// and the launch is refused.
 pub(crate) fn ensure_unreachable(
-    denied: &Path,
+    denied: &RealPath,
     access: &ContainerAccess,
     cancel: &Scope,
 ) -> Result<(), DaclError> {
-    let mut pending = vec![denied.to_path_buf()];
-    while let Some(path) = pending.pop() {
-        cancelled(cancel)?;
-        let held = match pin(&path) {
-            // Gone since it was listed, or never there: nothing to reach.
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            held => held.map_err(|e| walk_error(&path, &e))?,
-        };
-        if access.granted(&held, &path)? != 0 {
-            return Err(DaclError::Reachable {
-                denied: denied.to_path_buf(),
-                at: path,
-            });
+    // Gone since it was listed: nothing to reach.
+    let check = |held: io::Result<File>, at: &RealPath| match held {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        held => {
+            let held = held.map_err(|e| walk_error(at.as_path(), &e))?;
+            match access.granted(&held, at.as_path())? {
+                0 => Ok(()),
+                _ => Err(DaclError::Reachable {
+                    denied: denied.as_path().to_path_buf(),
+                    at: at.as_path().to_path_buf(),
+                }),
+            }
         }
-        let attributes = attribute_tag(&held)
-            .map_err(|e| walk_error(&path, &e))?
-            .FileAttributes;
-        if attributes & FILE_ATTRIBUTE_DIRECTORY != 0
-            && attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
-        {
-            for entry in fs::read_dir(&path).map_err(|e| walk_error(&path, &e))? {
-                pending.push(entry.map_err(|e| walk_error(&path, &e))?.path());
+    };
+    let mut pending = Vec::new();
+    match denied.open_dir_nofollow(&TOKEN) {
+        Ok(Some(dir)) => pending.push(dir),
+        Ok(None) => match denied.open_nofollow(&TOKEN) {
+            Ok(Some(file)) => check(file.reopen(READ_CONTROL), file.real())?,
+            Ok(None) => {}
+            Err(e) => return Err(walk_error(denied.as_path(), &e)),
+        },
+        Err(e) => return Err(walk_error(denied.as_path(), &e)),
+    }
+    while let Some(dir) = pending.pop() {
+        cancelled(cancel)?;
+        check(dir.reopen(READ_CONTROL), dir.real())?;
+        if dir.stat().reparse_tag.is_some() {
+            continue;
+        }
+        let listing = dir
+            .read_dir()
+            .map_err(|e| walk_error(dir.real().as_path(), &e))?;
+        for entry in listing {
+            let at = entry.real();
+            let kind = match entry.seen() {
+                Ok(seen) => seen.stat.kind,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(walk_error(at.as_path(), e)),
+            };
+            if kind == Kind::Dir {
+                match dir.open_dir(entry.name()) {
+                    Ok(child) => pending.push(child),
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(walk_error(at.as_path(), &e)),
+                }
+            } else {
+                match dir.locate(entry.name(), LeafMode::NoFollow) {
+                    Ok(held) => check(held.reopen(READ_CONTROL), &at)?,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(walk_error(at.as_path(), &e)),
+                }
             }
         }
     }
     Ok(())
-}
-
-/// The object at `path`, opened as itself for its descriptor and attributes
-/// alone, sharing everything: the check must not disturb whoever has it open.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:dacl-deny-pin] Opens each object beneath an exclusion as itself, for its security descriptor alone. Sandbox setup, not model data I/O."
-)]
-fn pin(path: &Path) -> io::Result<OwnedHandle> {
-    fs::OpenOptions::new()
-        .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-        .map(OwnedHandle::from)
 }
 
 fn walk_error(path: &Path, error: &io::Error) -> DaclError {
