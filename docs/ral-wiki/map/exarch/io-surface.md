@@ -92,9 +92,10 @@ application, which is no door at all.
 
   Mode is `write` / `append` / `stream`. No byte count — path, mode, outcome,
   plus the content snapshots, each whole or `` `none `` and never a prefix:
-  `old-bytes` taken at the open, `new-bytes` at settle (the staged file for an
-  atomic `>`, the target for a stream), read only within 64 KiB
-  (`PREVIEW_CAP`), of a regular file, under a grant that admits the read. A
+  `old-bytes` taken at the open, `new-bytes` at settle (what ral wrote, read
+  through the staging handle for an atomic `>` and the derived reader for a
+  stream, never by name), read only within 64 KiB (`PREVIEW_CAP`), of a
+  regular file, under a grant that admits the read. A
   write that did not land carries neither. Exarch diffs the two into the
   write's `Change`; the [[design/audit|audit trail]] keeps them whole.
 - **Commands** are hooked *after* resolution, at the completion sites, never

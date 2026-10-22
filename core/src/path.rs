@@ -66,8 +66,6 @@ pub(crate) use render::rendered_ancestors;
 #[cfg(unix)]
 pub(crate) use render::{Object, Rendered, render_objects, render_paths, rendered_pins};
 pub use resolver::Resolver;
-#[expect(unused_imports, reason = "used from step 6")]
-pub(crate) use walk::Streaming;
 #[cfg(target_os = "linux")]
 pub(crate) use walk::is_loop;
 pub use walk::{
@@ -75,7 +73,7 @@ pub use walk::{
     Listing, Lists, Located, NotAnEntryName, ObjectId, Op, Peeks, Reading, Reads, RealPath,
     RootName, Stat, Step, Trace, Unjudged, Walked, Writing, walk, walk_dir, walk_lenient,
 };
-pub(crate) use walk::{Listed, Visibility, open_discard};
+pub(crate) use walk::{Listed, StagedWrite, Streamed, Streaming, Visibility, open_discard};
 #[cfg(windows)]
 pub(crate) use which::is_batch_image;
 pub(crate) use which::is_executable_file;

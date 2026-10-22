@@ -80,21 +80,6 @@ pub(super) fn create_sibling(dir: &File, name: &EntryName) -> io::Result<File> {
     ))
 }
 
-/// The existing entry `name`, opened by that name and never followed.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[surface:walk-named-open] Opens an existing entry of a held directory by its name, never followed: the staged sibling read back as the write's after-image, or opened to be flushed before the rename.  A sub-step of the write site, not a separate model read."
-)]
-pub(super) fn open_named(dir: &File, name: &EntryName, access: Access) -> io::Result<File> {
-    let flags = oflags(access) | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    opened(rustix::fs::openat(
-        dir,
-        name.as_os_str(),
-        flags,
-        Mode::empty(),
-    ))
-}
-
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:walk-mkdir] Makes an absent entry of a held directory, which the caller judged as the absent leaf it is; the directory is then stepped onto."

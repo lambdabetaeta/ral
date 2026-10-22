@@ -26,7 +26,7 @@ struct WriteIntent {
     path: String,
     mode: WriteMode,
     opened: OpenedWrite,
-    /// Taken at the open, before any byte lands, and only for an ear to hear it.
+    /// Read at the open, before any byte lands, and only for an ear to hear it.
     before: Option<Vec<u8>>,
 }
 
@@ -59,7 +59,8 @@ fn open_redirect_sink(
     shell: &mut Shell,
     intents: &mut Vec<WriteIntent>,
 ) -> Settled<Sink> {
-    let (file, opened) = open_write(path, mode, shell).inspect_err(|_| {
+    let heard = shell.listening(mooring);
+    let (file, opened, before) = open_write(path, mode, heard, shell).inspect_err(|_| {
         let what = Observed::Write(Write {
             path: path.to_string(),
             mode,
@@ -70,10 +71,6 @@ fn open_redirect_sink(
         shell.observe(mooring, what);
     })?;
     if let Some(opened) = opened {
-        let before = shell
-            .listening(mooring)
-            .then(|| opened.before(shell))
-            .flatten();
         intents.push(WriteIntent {
             path: path.to_string(),
             mode,
@@ -98,14 +95,17 @@ fn settle(
     for WriteIntent {
         path,
         mode,
-        opened,
+        mut opened,
         before,
     } in intents
     {
-        // Read before a commit renames the staged file away.
+        // Read before the commit consumes the staged write.
         let after = heard.then(|| opened.after(shell)).flatten();
         let (outcome, landed) = match (opened, fate) {
-            (OpenedWrite::Atomic(_), WriteFate::Abort) => (WriteOutcome::Aborted, false),
+            (OpenedWrite::Atomic(pending), WriteFate::Abort) => {
+                pending.discard();
+                (WriteOutcome::Aborted, false)
+            }
             (OpenedWrite::Atomic(commit), WriteFate::Commit) => match commit.commit() {
                 Ok(()) => (WriteOutcome::Committed, true),
                 Err(e) => {

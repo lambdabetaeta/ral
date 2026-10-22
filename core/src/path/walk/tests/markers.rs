@@ -23,9 +23,6 @@ trait Fallback {
     fn read(&self) -> Absent {
         Absent
     }
-    fn read_named(&self) -> Absent {
-        Absent
-    }
     fn stat(&self) -> Absent {
         Absent
     }
@@ -51,12 +48,6 @@ trait Fallback {
         Absent
     }
     fn create_dir<T>(&self, _: T) -> Absent {
-        Absent
-    }
-    fn append(&self) -> Absent {
-        Absent
-    }
-    fn truncate(&self) -> Absent {
         Absent
     }
     fn leaf_fd(&self) -> Absent {
@@ -95,15 +86,12 @@ fn an_unjudged_object_offers_its_trace_and_nothing_more() {
     let _: &Trace = located.trace();
     let _: &RealPath = located.real();
     let _: Absent = located.read();
-    let _: Absent = located.read_named();
     let _: Absent = located.stat();
     let _: Absent = located.read_link();
     let _: Absent = located.open_streaming(());
     let _: Absent = located.stage();
     let _: Absent = located.create_file(());
     let _: Absent = located.create_dir(());
-    let _: Absent = located.append();
-    let _: Absent = located.truncate();
     let _: Absent = located.leaf_fd();
     let _: Absent = located.reopen(());
     let _: Absent = located.is_local();
@@ -134,8 +122,6 @@ fn a_read_judged_object_reads_and_states_and_has_no_write_door() {
     let _: Absent = located.stage();
     let _: Absent = located.create_file(());
     let _: Absent = located.create_dir(());
-    let _: Absent = located.append();
-    let _: Absent = located.truncate();
     let _: Absent = located.leaf_fd();
     let _: Absent = located.reopen(());
     let _: Absent = located.is_local();
@@ -170,7 +156,6 @@ fn an_installing_object_states_and_reads_nothing() {
     let located: Located<Installing> = located.marked();
     let _: Option<&Stat> = located.stat();
     let _: Absent = located.read();
-    let _: Absent = located.read_named();
     let _: Absent = located.open_streaming(());
     let _: Absent = located.stage();
 }

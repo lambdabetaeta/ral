@@ -433,20 +433,6 @@ pub(super) fn seen(f: &File) -> io::Result<Seen> {
     })
 }
 
-/// What the entry `name` of `dir` is, not followed.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-stat] Opens one entry of a held directory for attribute access without following it: a metadata read, never turn-time data I/O."
-)]
-pub(super) fn seen_at(dir: &File, name: &OsStr) -> io::Result<Seen> {
-    let mut options = OpenOptions::new();
-    options
-        .access_mode(FILE_READ_ATTRIBUTES)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .follow(FollowSymlinks::No);
-    seen(&cap_primitives::fs::open(dir, name.as_ref(), &options)?)
-}
-
 /// A link's target, read from the reparse buffer of the handle that opened
 /// it.
 #[allow(
@@ -609,26 +595,6 @@ pub(super) fn create_sibling(dir: &File, name: &EntryName) -> io::Result<File> {
         .write(true)
         .create_new(true)
         .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE)
-        .follow(FollowSymlinks::No);
-    cap_primitives::fs::open(dir, name.as_os_str().as_ref(), &options)
-}
-
-/// The existing entry `name`, opened by that name and never followed.  A
-/// `Write` handle carries `DELETE` too: it is the staged sibling's, which a
-/// rename by handle asks it of.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[surface:walk-named-open] Opens an existing entry of a held directory by its name, never followed: the staged sibling read back as the write's after-image, or opened to be flushed before the rename.  A sub-step of the write site, not a separate model read."
-)]
-pub(super) fn open_named(dir: &File, name: &EntryName, access: Access) -> io::Result<File> {
-    let delete = if matches!(access, Access::Write) {
-        DELETE
-    } else {
-        0
-    };
-    let mut options = OpenOptions::new();
-    options
-        .access_mode(rights(access) | delete)
         .follow(FollowSymlinks::No);
     cap_primitives::fs::open(dir, name.as_os_str().as_ref(), &options)
 }

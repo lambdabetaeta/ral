@@ -14,83 +14,100 @@ use crate::capability::FsOp;
 use crate::fact::Read;
 use crate::ir::{StdinSource, WriteMode};
 use crate::path::walk::Kind;
-use crate::path::{Judged, Located, Reading, Writing};
+use crate::path::{Reading, Streamed, Streaming, Trace, Writing};
 use crate::types::{Break, Error, Mooring, Observed, Settled, Shell};
-use stage::PendingWrite;
+use stage::{PendingWrite, read_capped};
 use std::fs::File;
+use std::io;
 
 /// A write redirect's target as opened, held until its frame settles so the
-/// frame can report what the write did to it.
+/// frame can report what the write did to it.  No `Located` remains: the
+/// object is the handles.
 pub(crate) enum OpenedWrite {
     /// `>` onto a regular file, staged beside it until commit.
     Atomic(PendingWrite),
     /// Every other shape: bytes land as they are written.
-    Stream(Located<Judged<Writing>>),
+    Stream(Streamed),
 }
 
 impl OpenedWrite {
-    fn target(&self) -> Option<&Located<Judged<Writing>>> {
+    /// What stands at the target before the write, where it is ours to read
+    /// under the live grant: empty for a leaf the write created, `None` for
+    /// an object with no reader.
+    pub(crate) fn before(&mut self, shell: &Shell) -> Option<Vec<u8>> {
         match self {
-            Self::Atomic(pending) => pending.target(),
-            Self::Stream(target) => Some(target),
+            Self::Atomic(pending) => {
+                admitted(shell, pending.target().trace()).then(|| pending.before())?
+            }
+            Self::Stream(streamed) => admitted(shell, streamed.trace()).then(|| {
+                if streamed.created() {
+                    Some(Vec::new())
+                } else {
+                    read_capped(streamed.reader()?)
+                }
+            })?,
         }
     }
 
-    /// What stands at the target now: [`snapshot`] of it.
-    pub(crate) fn before(&self, shell: &Shell) -> Option<Vec<u8>> {
-        snapshot(self.target()?, shell)
-    }
-
-    /// What the write leaves standing: the staged file for an atomic `>`,
-    /// read before its rename takes it away, the target itself for a stream.
-    pub(crate) fn after(&self, shell: &Shell) -> Option<Vec<u8>> {
+    /// What the write leaves standing: what ral wrote, read through the
+    /// staging handle or the stream's own reader.  Never a read of the name,
+    /// which may hold another object by now.
+    pub(crate) fn after(&mut self, shell: &Shell) -> Option<Vec<u8>> {
         match self {
             Self::Atomic(pending) => pending.staged(),
-            Self::Stream(target) => snapshot(target, shell),
+            Self::Stream(streamed) => {
+                admitted(shell, streamed.trace()).then(|| read_capped(streamed.reader()?))?
+            }
         }
     }
 }
 
-/// A target's [`Located::preview`], where it is ours to read under the live
-/// grant.
-fn snapshot(target: &Located<Judged<Writing>>, shell: &Shell) -> Option<Vec<u8>> {
-    shell
-        .admits_fs(&FsOp::Read, target.trace())
-        .then(|| target.preview())
-        .flatten()
+/// Whether the live grant lets ral read what `trace` names.
+fn admitted(shell: &Shell, trace: &Trace) -> bool {
+    shell.admits_fs(&FsOp::Read, trace)
 }
 
-/// Open a write redirect's target.  `>` to a regular file is staged, to be
-/// committed or dropped once the writer finishes; every other shape streams.
-/// `None` is the discard device, which no write changes.
-/// Paths resolve against the shell's scoped cwd, so a `within [dir: …]`
-/// redirect lands right even from a native, where the host cwd never moves.
+/// Open a write redirect's target, and the before-image of it where `heard`
+/// asks.  `>` to a regular file is staged, to be committed or dropped once
+/// the writer finishes; every other shape streams, a truncating one only
+/// after its before-image was read.  `None` is the discard device, which no
+/// write changes.  Paths resolve against the shell's scoped cwd, so a
+/// `within [dir: …]` redirect lands right even from a native, where the host
+/// cwd never moves.
 pub(crate) fn open_write(
     path: &str,
     mode: WriteMode,
+    heard: bool,
     shell: &mut Shell,
-) -> Settled<(File, Option<OpenedWrite>)> {
-    let opened = |file: std::io::Result<File>| file.map_err(|e| Break::from(Error::io(path, &e)));
+) -> Settled<(File, Option<OpenedWrite>, Option<Vec<u8>>)> {
+    let io = |e: io::Error| Break::from(Error::io(path, &e));
     let rp = shell.resolve(path);
     if rp.is_discard() {
-        return opened(crate::path::open_discard()).map(|f| (f, None));
+        return Ok((crate::path::open_discard().map_err(io)?, None, None));
     }
     let target = shell.locate::<Writing>(&rp)?;
-    let stream = |file, target| opened(file).map(|f| (f, Some(OpenedWrite::Stream(target))));
-    match mode {
-        WriteMode::Append => stream(target.append(), target),
-        WriteMode::Stream => stream(target.truncate(), target),
-        WriteMode::Write => match target.stat().cloned() {
-            // TTYs and named pipes stream: there is no inode to rename.
-            Some(s) if s.kind != Kind::File => stream(target.truncate(), target),
-            existing => {
-                let (file, pending) = target
-                    .stage_beside(existing.as_ref())
-                    .map_err(|e| Error::io(path, &e))?;
-                Ok((file, Some(OpenedWrite::Atomic(pending))))
-            }
-        },
+    let streaming = match mode {
+        WriteMode::Append => Some(Streaming::Append),
+        WriteMode::Stream => Some(Streaming::Truncate),
+        // TTYs and named pipes stream: there is no inode to rename.
+        WriteMode::Write => target
+            .stat()
+            .is_some_and(|s| s.kind != Kind::File)
+            .then_some(Streaming::Truncate),
+    };
+    let (file, mut opened) = if let Some(access) = streaming {
+        let mut streamed = target.open_streaming(access).map_err(io)?;
+        let file = streamed.file().try_clone().map_err(io)?;
+        (file, OpenedWrite::Stream(streamed))
+    } else {
+        let (file, pending) = PendingWrite::stage(target).map_err(io)?;
+        (file, OpenedWrite::Atomic(pending))
+    };
+    let before = heard.then(|| opened.before(shell)).flatten();
+    if let (OpenedWrite::Stream(streamed), Some(Streaming::Truncate)) = (&opened, streaming) {
+        streamed.truncate().map_err(io)?;
     }
+    Ok((file, Some(opened), before))
 }
 
 /// Open a `< path` target, against the scoped cwd as [`open_write`] does.
@@ -117,8 +134,9 @@ impl Shell {
     /// atomic commit (rename and fsync) fails.
     pub fn atomic_write(&mut self, path: &str, bytes: &[u8]) -> Settled<()> {
         use std::io::Write as _;
-        let (mut file, opened) = open_write(path, WriteMode::Write, self)?;
+        let (mut file, opened, _) = open_write(path, WriteMode::Write, false, self)?;
         file.write_all(bytes).map_err(|e| Error::io(path, &e))?;
+        drop(file);
         if let Some(OpenedWrite::Atomic(pending)) = opened {
             pending
                 .commit()

@@ -32,15 +32,16 @@
 //!   `Child`; `DirInfo`, what the host records of a directory as it opens it
 //!   (Windows: its normalized path and volume, which `step` checks the child
 //!   against; Unix: nothing), kept beside the handle in a `Held`;
-//! - `open_root`, `seen`, `seen_at`, `read_link`, `derive`, `list` and its
+//! - `open_root`, `seen`, `read_link`, `derive`, `list` and its
 //!   `Lister`, which name the identity, kind and stat of an object, a link's
 //!   target through its handle, a data handle derived from a held leaf, and a
 //!   listing;
-//! - `create`, `create_sibling`, `open_named`, `mkdir`, `rename_over`,
+//! - `create`, `create_sibling`, `mkdir`, `rename_over`,
 //!   `unlink`, `sync_dir`, `copy_mode`, `is_writable` and `open_discard`,
 //!   which write;
-//! - on Unix, `impl From<&rustix::fs::Stat> for ObjectId`, the identity a
-//!   by-name `stat` reports, which `carriers` compares with [`ObjectId::of`];
+//! - on Unix, `seen_at`, which stats a listed entry by name, and `impl
+//!   From<&rustix::fs::Stat> for ObjectId`, the identity a by-name `stat`
+//!   reports, which `carriers` compares with [`ObjectId::of`];
 //! - on Windows, `reopen_shared` and `is_local`, which the `Installing` doors
 //!   `reopen` and `is_local` ask, and on macOS `impl From<&Metadata> for
 //!   ObjectId`, which the pin of ral's own binary compares.
@@ -1684,7 +1685,6 @@ pub(crate) enum Visibility {
 }
 
 /// How a streaming write opens its target.
-#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 6"))]
 #[derive(Clone, Copy)]
 pub(crate) enum Streaming {
     Append,
@@ -1696,7 +1696,6 @@ pub(crate) enum Streaming {
 /// is a regular file the caller may read, the stat of the handle opened, and
 /// whether the leaf was created.
 #[must_use]
-#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 6"))]
 pub(crate) struct Streamed {
     file: File,
     reader: Option<File>,
@@ -1705,7 +1704,6 @@ pub(crate) struct Streamed {
     created: bool,
 }
 
-#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 6"))]
 impl Streamed {
     pub(crate) fn file(&mut self) -> &mut File {
         &mut self.file
@@ -1718,10 +1716,6 @@ impl Streamed {
 
     pub(crate) fn trace(&self) -> &Trace {
         &self.trace
-    }
-
-    pub(crate) fn stat(&self) -> &Stat {
-        &self.stat
     }
 
     pub(crate) fn created(&self) -> bool {
@@ -1752,7 +1746,6 @@ impl Located<Judged<Writing>> {
     /// # Errors
     /// The open's: `AlreadyExists` where the leaf was absent at the walk and
     /// has appeared since.
-    #[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 6"))]
     pub(crate) fn open_streaming(self, access: Streaming) -> io::Result<Streamed> {
         let access = match access {
             Streaming::Append => Access::Append,
@@ -1783,7 +1776,6 @@ impl Located<Judged<Writing>> {
     /// # Errors
     /// `IsADirectory` where the leaf is a directory; the create's, other than
     /// `AlreadyExists`, which is retried under another name; the mode's.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used from step 6"))]
     pub(crate) fn stage(self) -> io::Result<StagedWrite> {
         match self.kind() {
             Some(Kind::Dir) => return Err(io::ErrorKind::IsADirectory.into()),
@@ -1863,7 +1855,6 @@ impl Located<Judged<Writing>> {
 /// staged sibling never outlives the frame that staged it, whatever the
 /// frame does.
 #[must_use]
-#[cfg_attr(not(test), expect(dead_code, reason = "used from step 6"))]
 pub(crate) struct StagedWrite {
     target: Located<Judged<Writing>>,
     file: File,
@@ -1871,7 +1862,6 @@ pub(crate) struct StagedWrite {
     settled: bool,
 }
 
-#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 6"))]
 impl StagedWrite {
     /// Written through and synced before [`publish`](Self::publish).
     pub(crate) fn file(&mut self) -> &mut File {
@@ -1925,108 +1915,6 @@ impl Drop for StagedWrite {
         if !self.settled {
             let _ = host::unlink(&self.target.dir.file, &self.name);
         }
-    }
-}
-
-/// Today's `Located` write methods whose callers outside this file have not
-/// moved: reimplemented over the held handles, deleted with their callers
-/// (the redirects, step 6).
-impl Located<Judged<Writing>> {
-    /// Open for appending, creating an empty file if absent.
-    ///
-    /// # Errors
-    /// The open's.
-    pub(crate) fn append(&self) -> io::Result<File> {
-        self.open(Access::Append)
-    }
-
-    /// Open for writing from the start, creating or truncating.
-    ///
-    /// # Errors
-    /// The open's.
-    pub(crate) fn truncate(&self) -> io::Result<File> {
-        let file = self.open(Access::Write)?;
-        if self.kind() == Some(Kind::File) {
-            file.set_len(0)?;
-        }
-        Ok(file)
-    }
-
-    /// What is at the leaf's name now, as today's `stat` answered: `None`
-    /// where nothing is.
-    ///
-    /// # Errors
-    /// Any `stat` failure other than absence.
-    pub(crate) fn restat(&self) -> io::Result<Option<Stat>> {
-        match host::seen_at(&self.dir.file, self.entry()) {
-            Ok(seen) => Ok(Some(seen.stat)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// A fresh, exclusively created sibling for staging a write, and its name.
-    ///
-    /// # Errors
-    /// The create's, other than `AlreadyExists`.
-    pub(crate) fn create_sibling_tmp(&self) -> io::Result<(File, OsString)> {
-        loop {
-            let name = EntryName::fresh(".ral-write-")?;
-            match host::create_sibling(&self.dir.file, &name) {
-                Ok(file) => return Ok((file, name.as_os_str().to_owned())),
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(e),
-            }
-        }
-    }
-
-    /// # Errors
-    /// The open's.
-    pub(crate) fn sibling_read(&self, name: &OsStr) -> io::Result<File> {
-        host::open_named(&self.dir.file, &EntryName::parse(name)?, Access::Read)
-    }
-
-    /// # Errors
-    /// The open's.
-    pub(crate) fn sibling_write(&self, name: &OsStr) -> io::Result<File> {
-        host::open_named(&self.dir.file, &EntryName::parse(name)?, Access::Write)
-    }
-
-    /// Rename the sibling `name` onto this object, atomically within the
-    /// directory.
-    ///
-    /// # Errors
-    /// The rename's.
-    pub(crate) fn rename_sibling_over(&self, name: &OsStr) -> io::Result<()> {
-        let to = self.leaf_name().ok_or(io::ErrorKind::IsADirectory)?;
-        let sibling = self.sibling_write(name)?;
-        host::rename_over(&self.dir.file, &sibling, &EntryName::parse(name)?, to)
-    }
-
-    /// # Errors
-    /// The unlink's.
-    pub(crate) fn remove_sibling(&self, name: &OsStr) -> io::Result<()> {
-        host::unlink(&self.dir.file, &EntryName::parse(name)?)
-    }
-
-    /// Flush the directory entries to disk, so a rename just made survives a
-    /// crash.
-    ///
-    /// # Errors
-    /// The fsync's.
-    pub(crate) fn sync_dir(&self) -> io::Result<()> {
-        host::sync_dir(&self.dir.file)
-    }
-}
-
-/// Today's by-name read, for the redirects (step 6): the leaf opened by its
-/// name under `dir`, so a leaf made since the walk is found.
-impl<A: Reads> Located<A> {
-    /// # Errors
-    /// The open's.
-    pub(crate) fn read_named(&self) -> io::Result<File> {
-        let name = self.leaf_name().ok_or(io::ErrorKind::IsADirectory)?;
-        host::open_named(&self.dir.file, name, Access::Read)
     }
 }
 

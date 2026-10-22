@@ -211,7 +211,7 @@ fn the_leaf_open_never_follows_a_link_that_appeared_later() {
     let loc = located(&tmp.path().join("victim")).unwrap();
     symlink("elsewhere", tmp.path().join("victim")).unwrap();
     assert!(
-        loc.append().is_err(),
+        loc.open_streaming(Streaming::Append).is_err(),
         "a swapped-in leaf link must not be followed"
     );
     assert!(!tmp.path().join("elsewhere").exists());
@@ -1095,7 +1095,6 @@ fn sync_dir_succeeds_on_linux() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = root(&tmp);
     std::fs::write(dir.join("f"), b"").unwrap();
-    located(&dir.join("f")).unwrap().sync_dir().unwrap();
     host::sync_dir(&walk_dir(&spelled(&dir)).unwrap().handle.file).unwrap();
 }
 
@@ -1119,7 +1118,6 @@ fn a_leaf_absent_at_the_walk_is_created_exclusively() {
     let mut body = String::new();
     reader.read_to_string(&mut body).unwrap();
     assert_eq!(body, "body");
-    assert_eq!(streamed.stat().kind, Kind::File);
     assert_eq!(streamed.trace().real().as_path(), dir.join("made"));
 }
 
@@ -1145,6 +1143,36 @@ fn a_streamed_truncate_runs_after_the_before_image_was_read() {
     assert_eq!(std::fs::read(dir.join("f")).unwrap(), b"");
 }
 
+/// A FIFO has no inode to truncate and no image to read: it streams.
+#[test]
+fn a_streamed_truncate_on_a_fifo_is_a_no_op_that_streams() {
+    use rustix::fs::OFlags;
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    let made = std::process::Command::new("mkfifo")
+        .arg(dir.join("pipe"))
+        .status()
+        .unwrap();
+    assert!(made.success());
+    // A reader first: a write open on a FIFO with nobody to meet is refused.
+    let mut sink = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(OFlags::NONBLOCK.bits().cast_signed())
+        .open(dir.join("pipe"))
+        .unwrap();
+    let mut streamed = located(&dir.join("pipe"))
+        .unwrap()
+        .open_streaming(Streaming::Truncate)
+        .unwrap();
+    assert!(streamed.reader().is_none());
+    streamed.truncate().unwrap();
+    streamed.file().write_all(b"through").unwrap();
+    let mut body = [0; 7];
+    sink.read_exact(&mut body).unwrap();
+    assert_eq!(&body, b"through");
+}
+
 #[test]
 fn a_directory_leaf_is_not_read_or_written() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1154,7 +1182,7 @@ fn a_directory_leaf_is_not_read_or_written() {
     let held = located(&dir.join("d")).unwrap();
     assert_eq!(held.read().unwrap_err().kind(), io::ErrorKind::IsADirectory);
     assert_eq!(
-        held.append().unwrap_err().kind(),
+        held.open_streaming(Streaming::Append).err().unwrap().kind(),
         io::ErrorKind::IsADirectory
     );
     let link = located_with(&dir.join("l"), LeafMode::NoFollow).unwrap();

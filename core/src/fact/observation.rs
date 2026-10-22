@@ -127,9 +127,10 @@ pub struct Write {
     pub path: String,
     pub mode: WriteMode,
     pub outcome: WriteOutcome,
-    /// The target's whole content once the write landed.  Never a prefix:
-    /// a card reads a write as the change it made, and half a side is not
-    /// a change.
+    /// What ral wrote: the target's whole content as the write left it, read
+    /// through the handle it wrote to, never from the name, which a commit
+    /// cannot assert on Unix.  Never a prefix: a card reads a write as the
+    /// change it made, and half a side is not a change.
     pub new_bytes: Option<Bytes>,
     /// The target's whole content before the write, empty for a file that
     /// did not yet exist.  `None` means the before-image is *unknown* (a

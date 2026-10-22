@@ -2,148 +2,88 @@
 //! file beside the target, renamed over it on commit.  Pure of the shell:
 //! judging the write and reporting it belong to `runtime::redirect`.
 //!
-//! Staging, commit and rollback all act relative to the directory handle the
-//! door located, so nothing between the judgment and the rename can rename
-//! the directory out from under the write.  The rename mints a fresh inode:
-//! hardlinks to the old one keep the old contents, and owner, xattrs and ACLs
-//! fall to kernel inheritance.  Concurrent writers race as usual: this buys
-//! crash safety, not exclusion.
+//! The staged write holds its target and its sibling together, so nothing
+//! between the judgment and the rename can rename the directory out from
+//! under it.  The rename mints a fresh inode: hardlinks to the old one keep
+//! the old contents, and owner, xattrs and ACLs fall to kernel inheritance.
+//! Concurrent writers race as usual: this buys crash safety, not exclusion.
 
-use crate::path::walk::{Kind, Stat};
-use crate::path::{Judged, Located, Writing};
-use std::ffi::OsString;
+use crate::path::walk::Kind;
+use crate::path::{Judged, Located, StagedWrite, Writing};
 use std::fs::File;
-use std::io::{self, Read as _};
+use std::io::{self, Read as _, Seek as _};
 
 /// Cap on the bytes a preview reads, so a large file is never pulled into
 /// memory whole to show a change.
 const PREVIEW_CAP: u64 = 64 * 1024;
 
-/// An atomic `>` staged in a temp file beside its target, until
-/// [`commit`](Self::commit) renames it, and `Drop` unlinks it
-/// if nobody committed: a staged temp never outlives the frame that staged it.
-///
-/// The `Option` is the commit-by-value latch: `commit` takes `self` and
-/// empties it first, so the `Drop` that follows sees `None` and does
-/// nothing on the path that already decided.
-pub(crate) struct PendingWrite(Option<Staged>);
-
-struct Staged {
-    target: Located<Judged<Writing>>,
-    tmp: OsString,
-}
+/// An atomic `>` staged beside its target until [`commit`](Self::commit)
+/// renames it; dropped, the [`StagedWrite`] unlinks the sibling, so a staged
+/// temp never outlives the frame that staged it.
+pub(crate) struct PendingWrite(StagedWrite);
 
 impl PendingWrite {
-    /// Finish the write: flush the staged bytes, rename onto the target, then
-    /// fsync the directory entry.  Any failure unlinks the temp, so the target
-    /// is either replaced whole or left exactly as it was.
+    /// Stage a write beside `target`: the pending write, and a handle for the
+    /// writer, which shares the staging handle's offset.
+    ///
+    /// # Errors
+    /// The staging create's, or the mode's.
+    pub(crate) fn stage(target: Located<Judged<Writing>>) -> io::Result<(File, Self)> {
+        let mut staged = target.stage()?;
+        let writer = staged.file().try_clone()?;
+        Ok((writer, Self(staged)))
+    }
+
+    /// Finish the write: flush the staged bytes, then rename onto the target.
+    /// A failure leaves no sibling, so the target is either replaced whole or
+    /// left exactly as it was.
     ///
     /// # Errors
     /// Returns the first I/O error of the flush or the rename.
     pub(crate) fn commit(mut self) -> io::Result<()> {
-        let staged = self
-            .0
-            .take()
-            .expect("commit consumes a freshly staged write");
-        let landed = staged.rename_durable();
-        if landed.is_err() {
-            staged.unlink();
-        }
-        landed
+        // Data blocks before any directory entry, or a crash can commit the
+        // entry with the blocks still unwritten: a renamed zero-length file.
+        self.0.file().sync_all()?;
+        self.0.publish()
+    }
+
+    /// Abandon the write, leaving the target as it was.
+    pub(crate) fn discard(self) {
+        let _ = self.0.discard();
     }
 
     /// The target the write is staged beside.
-    pub(crate) fn target(&self) -> Option<&Located<Judged<Writing>>> {
-        self.0.as_ref().map(|staged| &staged.target)
+    pub(crate) fn target(&self) -> &Located<Judged<Writing>> {
+        self.0.target()
     }
 
-    /// The staged file whole: what lands at the target if `commit` succeeds.
-    pub(crate) fn staged(&self) -> Option<Vec<u8>> {
-        let staged = self.0.as_ref()?;
-        read_capped(staged.target.sibling_read(&staged.tmp).ok()?)
-    }
-}
-
-impl Drop for PendingWrite {
-    fn drop(&mut self) {
-        if let Some(staged) = self.0.take() {
-            staged.unlink();
-        }
-    }
-}
-
-impl Staged {
-    /// Drop the staged bytes, leaving the target as it was.
-    fn unlink(&self) {
-        let _ = self.target.remove_sibling(&self.tmp);
-    }
-
-    fn rename_durable(&self) -> io::Result<()> {
-        // Data blocks before any directory entry, or a crash can commit the
-        // entry with the blocks still unwritten: a renamed zero-length file.
-        // Opened for writing, not reading: Windows' `FlushFileBuffers` refuses
-        // a read-only handle.
-        self.target.sibling_write(&self.tmp)?.sync_all()?;
-        // On Windows this is `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`, which
-        // *fails* rather than swapping when another process holds the target
-        // open without delete sharing, so a live reader turns a silent success
-        // into a hard error.
-        self.target.rename_sibling_over(&self.tmp)?;
-        // Without the parent fsync a panic can roll the directory entry back.
-        // Errors don't unwind the rename, and Windows has no directory flush,
-        // so both just fall through.
-        let _ = self.target.sync_dir();
-        Ok(())
-    }
-}
-
-/// `None` past [`PREVIEW_CAP`], judged on the open handle so the size read
-/// is the size of the bytes read.
-fn read_capped(mut file: File) -> Option<Vec<u8>> {
-    if file.metadata().ok()?.len() > PREVIEW_CAP {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
-    Some(bytes)
-}
-
-impl Located<Judged<Writing>> {
-    /// Stage an atomic `>` beside this target.  `existing` is its stat when it
-    /// exists: its mode is carried onto the staged file, since a redirect must
-    /// not silently narrow a 0644 file; a new file keeps what its create gave
-    /// it, 0o666 under the umask.
-    ///
-    /// # Errors
-    /// The staging create's, or the mode's.
-    pub(crate) fn stage_beside(self, existing: Option<&Stat>) -> io::Result<(File, PendingWrite)> {
-        let (file, tmp) = self.create_sibling_tmp()?;
-        // Latched before the first fallible step, so an early `?` unlinks it.
-        let pending = PendingWrite(Some(Staged { target: self, tmp }));
-        // The umask is never read: reading it means setting it, which races
-        // other threads' creates.
-        #[cfg(unix)]
-        if let Some(existing) = existing {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(std::fs::Permissions::from_mode(existing.mode))?;
-        }
-        #[cfg(not(unix))]
-        let _ = existing;
-        Ok((file, pending))
-    }
-
-    /// The object's whole content, empty when it does not exist.
-    ///
-    /// `None` where it cannot be read whole: past [`PREVIEW_CAP`] or not a
-    /// regular file.  Never a prefix: a card reads a write as the change it
-    /// made, and half a side is not a change.
-    pub(crate) fn preview(&self) -> Option<Vec<u8>> {
-        match self.restat().ok()? {
+    /// The target as it stands: empty where it does not exist, `None` where
+    /// it cannot be read whole.
+    pub(crate) fn before(&self) -> Option<Vec<u8>> {
+        let target = self.target();
+        match target.stat() {
             None => Some(Vec::new()),
-            Some(s) if s.kind == Kind::File && s.len <= PREVIEW_CAP => {
-                read_capped(self.read_named().ok()?)
-            }
+            Some(s) if s.kind == Kind::File => read_capped(&mut target.read().ok()?),
             Some(_) => None,
         }
     }
+
+    /// The staged file whole: what ral wrote, read through the staging
+    /// handle.  On Unix the rename takes the sibling's *name*, so what lands
+    /// at the target is not this write's to assert.
+    pub(crate) fn staged(&mut self) -> Option<Vec<u8>> {
+        read_capped(self.0.file())
+    }
+}
+
+/// `file` whole, from its start.  `None` past [`PREVIEW_CAP`], judged on the
+/// open handle so the size read is the size of the bytes read.
+pub(super) fn read_capped(file: &mut File) -> Option<Vec<u8>> {
+    if file.metadata().ok()?.len() > PREVIEW_CAP {
+        return None;
+    }
+    file.rewind().ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    Some(bytes)
 }
