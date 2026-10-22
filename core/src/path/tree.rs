@@ -1,34 +1,35 @@
 //! Directory trees: the one walk over them, glob patterns enumerated by it, and their size.
 
+use crate::capability::{Floor, GrantStack};
+use crate::path::LexicalPath;
+use crate::process::{DurableRoot, Scope};
 use std::path::Path;
+use walk::{Found, Walk};
 
 pub(crate) mod glob;
+mod ignore;
 pub mod walk;
 
 /// Total bytes of every regular file under `root`, recursively.
 ///
 /// Symlinks are not followed (their target may leave the tree) and an
-/// unreadable entry counts zero rather than failing the fold. Sizes come per
-/// path from `symlink_metadata`: on Windows a directory entry's own figure is
-/// a cached size a still-open file has not updated.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:tree-bytes] a read-only metadata walk sizing a host's own scratch and log directories, for the `path-bytes` probe and exarch `/resources`; operator diagnostics, not model I/O"
-)]
+/// unreadable entry counts zero rather than failing the fold.  A host-side
+/// sizing of its own scratch and log directories, judged by no grant, for the
+/// `path-bytes` probe and exarch `/resources`.
 #[must_use]
 pub fn bytes(root: &Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(root) else {
+    let Some(root) = LexicalPath::absolute(root) else {
         return 0;
     };
-    entries
-        .flatten()
-        .map(|entry| {
-            let path = entry.path();
-            match std::fs::symlink_metadata(&path) {
-                Ok(meta) if meta.is_dir() => bytes(&path),
-                Ok(meta) if meta.is_file() => meta.len(),
-                _ => 0,
-            }
+    let region = GrantStack::root().read_region(&Floor::default());
+    Walk::all(&root)
+        .readable_by(region)
+        .entries(Scope::clone(&DurableRoot::default()))
+        .filter_map(Result::ok)
+        .filter(|entry| entry.depth > 0)
+        .map(|entry| match entry.found {
+            Found::Seen(stat) if stat.kind == crate::path::Kind::File => stat.len,
+            _ => 0,
         })
         .sum()
 }

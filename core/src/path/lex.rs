@@ -8,7 +8,7 @@
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
-use super::{CwdPath, PathRules};
+use super::{CwdPath, Kind, LeafMode, LexicalPath, PathRules, walk};
 
 /// Whether `path` is absolute under `rules`: answers both whether `path` is
 /// fully qualified under `rules` and whether [`anchor`] must not join `path`
@@ -936,28 +936,43 @@ pub(crate) fn parent_or_cwd(path: &Path) -> &Path {
         .unwrap_or_else(|| Path::new("."))
 }
 
-/// `Path::new(path).exists()` for call sites already holding a string.
-/// Follows symlinks, canonicalises nothing.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "path-form: this is the `exists` helper the ban names"
-)]
+/// Whether the absolute spelling `path` reaches an object, a final link
+/// followed: its walk.  A relative one reaches nothing: no cwd is asked.
 pub fn exists(path: &str) -> bool {
-    Path::new(path).exists()
+    reaches(path).is_some()
 }
 
-/// `Path::new(path).is_dir()`, the companion of [`exists`] for callers that
-/// must tell a directory from a file.
+/// Whether the absolute spelling `path` reaches a directory, a link to one
+/// seen through.
 ///
-/// Exec grants spell their two kinds of path key apart by trailing slash,
-/// and `guard::decode` checks that spelling against disk.  Follows
-/// symlinks; `false` for a missing path.
+/// Exec grants spell their two kinds of path key apart by
+/// trailing slash, and `guard::decode` checks that spelling against disk.
+pub fn is_dir(path: &str) -> bool {
+    reaches(path) == Some(Kind::Dir)
+}
+
 #[allow(
     clippy::disallowed_methods,
-    reason = "path-form: this is `is_dir`, the companion of the `exists` helper the ban names"
+    reason = "path-form: the string a caller holds, taken as a spelling"
 )]
-pub fn is_dir(path: &str) -> bool {
-    Path::new(path).is_dir()
+fn reaches(path: &str) -> Option<Kind> {
+    let spelled = LexicalPath::absolute(Path::new(path))?;
+    walk(&spelled, LeafMode::Follow).ok()?.trace().kind()
+}
+
+/// `shown` relative to `root`, its names slash-joined: a manifest's key,
+/// lexical history that needs no live root to be compared.  `None` where
+/// `shown` is not beneath `root` or a name is not UTF-8.
+pub fn relative_key(shown: &LexicalPath, root: &LexicalPath) -> Option<String> {
+    let rest = shown.as_path().strip_prefix(root.as_path()).ok()?;
+    let names: Option<Vec<&str>> = rest
+        .components()
+        .map(|c| match c {
+            Component::Normal(name) => utf8(name.as_ref()).ok(),
+            _ => None,
+        })
+        .collect();
+    Some(names?.join("/"))
 }
 
 /// Whether `path` is absolute on this host: [`absolute_under`] the host's

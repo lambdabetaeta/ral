@@ -12,7 +12,7 @@ use super::exec::{ExecRules, Subject};
 use super::*;
 use crate::guard::decode_capability_map;
 use crate::guard::freeze::{FreezeCtx, PolicyError};
-use crate::path::{self, Excluded, FrozenPath, RealPath, Trace};
+use crate::path::{self, Excluded, FrozenPath, Trace};
 use crate::test_helper::{self, Tree, layer, trace};
 use crate::types::Value;
 use std::collections::BTreeSet;
@@ -51,9 +51,9 @@ fn places(entries: &[(&str, Value)]) -> Value {
     )
 }
 
-/// `p` as an absolute path on this host.
+/// `p`, `/`-rooted, as an absolute path on this host that nothing occupies.
 fn at(p: &str) -> PathBuf {
-    crate::path::test_absolute(p).into()
+    Tree::nowhere().path(p)
 }
 
 /// `p` as a grant writes it.
@@ -262,10 +262,7 @@ fn link(target: &Path, to: &Path) {
 /// A tempdir and the real path of its root.
 fn scratch() -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
-    let root = RealPath::of_path(tmp.path())
-        .unwrap()
-        .as_path()
-        .to_path_buf();
+    let root = test_helper::real(tmp.path()).as_path().to_path_buf();
     (tmp, root)
 }
 
@@ -409,7 +406,7 @@ fn exec_keys_follow_the_frozen_surface() {
     };
     let (rel, abs) = (
         tagged("cwd", "ral-lattice/tools/x"),
-        tagged("absolute", "/ral-lattice/tools/x"),
+        tagged("absolute", &Tree::nowhere().at("/ral-lattice/tools/x")),
     );
     let forward = decode(vec![rel.clone(), abs.clone()]);
     assert_eq!(forward.allows().count(), 1);
@@ -434,8 +431,12 @@ fn exec_keys_follow_the_frozen_surface() {
 #[test]
 fn exec_keys_display_as_their_targets() {
     assert_eq!(name("git").to_string(), "`name git");
-    assert_eq!(path_key("/tools").to_string(), "`absolute /tools");
-    assert_eq!(dir_key("/tools").to_string(), "`dir `absolute /tools");
+    let tools = Tree::nowhere().at("/tools");
+    assert_eq!(path_key("/tools").to_string(), format!("`absolute {tools}"));
+    assert_eq!(
+        dir_key("/tools").to_string(),
+        format!("`dir `absolute {tools}")
+    );
 }
 
 /// An unfrozen field is refused: a peer's stale `detach` must not vanish into
@@ -740,8 +741,10 @@ fn no_home_ctx() -> FreezeCtx {
     FreezeCtx::at(crate::types::EnvVars::new(), test_cwd_path())
 }
 
+/// The root of the tree [`at`] names places in.
 fn test_cwd_path() -> crate::path::CwdPath {
-    crate::path::CwdPath::new(crate::path::test_cwd().into()).expect("a fixture cwd is absolute")
+    crate::path::CwdPath::new(Tree::nowhere().root().to_path_buf())
+        .expect("a fixture cwd is absolute")
 }
 
 // ── Evidence ──────────────────────────────────────────────────────────────

@@ -12,9 +12,7 @@
 
 use super::{ExecProjection, FsProjection, RenderedRules, SandboxProjection};
 use crate::capability::{ExecAllow, ExecDeny};
-use crate::path::{
-    Object, RealPath, Rendered, Walked, render_paths, render_real, rendered_ancestors,
-};
+use crate::path::{Object, RealPath, Rendered, Walked, render_real, rendered_ancestors};
 use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
 use std::fmt;
@@ -138,11 +136,7 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
 
     // Ral's own file, rendered like the rest: execve presents `/tmp/x` as
     // `/private/tmp/x`.  Protected whatever the grant, never admitted by it.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "native: ral's own path, handed to Seatbelt as the profile names it"
-    )]
-    let own = render_paths(&[super::reexec::own()?.exec_path().to_string_lossy()])?;
+    let own = render_real(super::reexec::own()?.trace().real())?;
     let pinned = rendered
         .fs
         .rules()
@@ -251,7 +245,7 @@ fn exec_clauses(allow: bool, path: &RealPath, dir: bool) -> Result<Vec<String>, 
 /// the fs section's.  Rule by rule:
 /// `docs/ral-wiki/internals/seatbelt-profile.md`.
 ///
-/// `Err` when a name's expansion is not valid UTF-8, which [`render_paths`]
+/// `Err` when a name's expansion is not valid UTF-8, which [`render_real`]
 /// refuses.
 fn emit_exec_rules(profile: &mut Profile, exec: &ExecProjection) -> Result<(), String> {
     let ExecProjection::Restricted(rules) = exec else {
@@ -397,7 +391,7 @@ fn emit_ancestor_metadata<'a>(
 
 /// Quote a rendered name for an SBPL string literal.  Taking [`Rendered`] and
 /// not `&str` is what makes it impossible to splice a path into a rule without
-/// first passing it through [`render_paths`]: every emitter in this file
+/// first passing it through [`render_real`]: every emitter in this file
 /// funnels here, so the only `&str` items left are the denied basenames, which
 /// are final components rather than paths and go to [`escape_regex`].
 fn escape_path(path: &Rendered) -> String {
@@ -431,7 +425,7 @@ mod tests {
     use super::{BASE_PROFILE, NET_PROFILE, Profile, build_profile, withheld_doors};
     use crate::capability::{ExecAllow, ExecDeny, Extent, FsAllow, GrantPath, Rule};
     use crate::path::proper_ancestors;
-    use crate::path::{Excluded, FrozenPath, RealPath, command_name_key};
+    use crate::path::{Excluded, FrozenPath, command_name_key};
     use crate::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
     use crate::test_helper::trace;
 
@@ -706,13 +700,16 @@ mod tests {
     /// whether or not exec is restricted.
     #[test]
     fn mac_profile_reads_a_place_as_its_frozen_real_path_and_twin() {
-        let place = FsAllow::RunPlace(RealPath::assumed("/tmp/ral-test/tool"));
+        let tmp = tempfile::tempdir().expect("a temp dir");
+        let place = crate::test_helper::real(tmp.path());
+        let forms = crate::path::canon::with_firmlink_twins(vec![place.as_path().to_path_buf()]);
         let profile = build_profile(&SandboxProjection {
-            fs: reading(vec![place]),
+            fs: reading(vec![FsAllow::RunPlace(place)]),
             ..SandboxProjection::default()
         })
         .unwrap();
-        for form in ["/tmp/ral-test/tool", "/private/tmp/ral-test/tool"] {
+        for form in forms {
+            let form = crate::path::utf8(&form).unwrap();
             at(
                 &profile,
                 &format!("(allow file-read* (subpath \"{form}\"))"),
@@ -730,12 +727,15 @@ mod tests {
     )]
     fn mac_profile_lets_a_lookup_stat_the_surface_of_a_frozen_allowance() {
         let tmp = tempfile::tempdir().expect("a temp dir");
-        let root = RealPath::of_path(tmp.path()).expect("the temp dir resolves");
+        let root = crate::test_helper::real(tmp.path());
         let (real, link) = (root.as_path().join("real"), root.as_path().join("link"));
         std::fs::create_dir(&real).expect("the target");
         std::os::unix::fs::symlink(&real, &link).expect("a link to the target");
-        let real = crate::path::utf8(&real).unwrap();
-        let linked = prefix(crate::path::utf8(&link).unwrap());
+        let (real, link) = (
+            crate::path::utf8(&real).unwrap(),
+            crate::path::utf8(&link).unwrap(),
+        );
+        let linked = prefix(link);
         let profile = build_profile(&SandboxProjection {
             fs: reading(vec![linked]),
             ..SandboxProjection::default()
@@ -746,12 +746,10 @@ mod tests {
             &format!("(allow file-read* (subpath \"{real}\"))"),
         );
         let kernel = rules(&profile);
-        let surface: Vec<&str> = kernel.lines().filter(|l| l.contains("/link")).collect();
-        assert!(
-            !surface.is_empty()
-                && surface
-                    .iter()
-                    .all(|l| l.starts_with("(allow file-read-metadata (literal ")),
+        let surface: Vec<&str> = kernel.lines().filter(|l| l.contains(link)).collect();
+        assert_eq!(
+            surface,
+            [format!("(allow file-read-metadata (literal \"{link}\"))")],
             "{profile}"
         );
     }
@@ -896,14 +894,10 @@ mod tests {
     }
 
     /// Ral's own spellings, as the profile will name them.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] ral's own path, rendered as the profile renders it"
-    )]
     fn own_names() -> Vec<crate::path::Rendered> {
         super::super::reexec::pin_self();
         let own = super::super::reexec::own().expect("pin_self pins this test binary");
-        crate::path::render_paths(&[own.exec_path().to_string_lossy()]).unwrap()
+        crate::path::render_real(own.trace().real()).unwrap()
     }
 
     /// A swap of ral's binary between the parent's check and the re-exec

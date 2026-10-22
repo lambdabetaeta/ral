@@ -749,8 +749,8 @@ fn join_sub(base: impl AsRef<Path>, sub: &str) -> Result<FrozenPath, PolicyError
     freeze(base.as_ref().join(sub))
 }
 
-/// The grant door of [`FrozenPath`]: an allowance keeps the real path it is
-/// frozen to for good, so one that is not Unicode is refused here.
+/// The grant door of [`FrozenPath`]: a grant is serialized as text, so a
+/// spelling that is not Unicode is refused here.
 fn freeze(path: impl AsRef<Path>) -> Result<FrozenPath, PolicyError> {
     FrozenPath::freeze(path.as_ref()).map_err(PolicyError::new)
 }

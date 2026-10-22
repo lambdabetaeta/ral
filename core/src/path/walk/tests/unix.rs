@@ -620,17 +620,23 @@ fn a_root_name_is_a_root_and_nothing_more() {
 /// or `..`; a non-Unicode one crosses the wire whole.
 #[test]
 fn a_real_path_decodes_checked_and_whole() {
-    let position = |raw: &str| serde_json::from_value::<RealPath>(json(&OsString::from(raw)));
-    assert!(position("/").is_ok());
-    assert!(position("/a/b").is_ok());
+    let position = |raw: &[u8]| {
+        let raw = OsStr::from_bytes(raw).to_owned();
+        serde_json::from_value::<RealPath>(json(&raw))
+    };
+    assert!(position(b"/").is_ok());
+    assert!(position(b"/a/b").is_ok());
     for refused in ["", "a", "a/b", "/a/../b", "/a/./b", "//a", "/a/", "/.."] {
-        assert!(position(refused).is_err(), "{refused:?} is no position");
+        assert!(
+            position(refused.as_bytes()).is_err(),
+            "{refused:?} is no position"
+        );
     }
-    let raw = RealPath::assumed(OsStr::from_bytes(b"/opt/\xFFtool"));
+    let raw = position(b"/opt/\xFFtool").unwrap();
     let back = serde_json::from_value::<RealPath>(json(&raw)).unwrap();
     assert_eq!(back, raw);
     assert_eq!(back.as_path().as_os_str().as_bytes(), b"/opt/\xFFtool");
-    assert_ne!(back, RealPath::assumed("/opt/\u{FFFD}tool"));
+    assert_ne!(back, position("/opt/\u{FFFD}tool".as_bytes()).unwrap());
 }
 
 /// The Linux step asks for a directory first, so a file, a link and a

@@ -196,12 +196,12 @@ fn temp_file_in(shell: &mut Shell, parent: &Dir<Judged<Writing>>) -> Settled<Val
 pub(super) fn builtin_glob(args: &[Value], shell: &Shell) -> Settled<Value> {
     let raw = args[0].as_str("glob")?;
     let pattern = shell.resolve(raw);
-    let glob = Arc::new(Glob::parse(pattern.as_path()).map_err(|e| sig(format!("glob: {e}")))?);
+    let glob = Arc::new(Glob::parse(&pattern).map_err(|e| sig(format!("glob: {e}")))?);
     let mut walk = glob.walk().admitted(shell, "glob", raw);
     let mut hits = Vec::new();
-    while let Some(entry) = walk.next(shell)? {
-        if glob.matches(entry.path.as_path()) {
-            hits.push(entry.name()?);
+    while let Some(entry) = walk.next()? {
+        if glob.matches(&entry.shown) {
+            hits.push(walk.name(&entry)?);
         }
     }
     hits.sort();
@@ -358,6 +358,36 @@ mod tests {
         assert_eq!(moved.len(), 2, "{moved:?}");
         assert!(moved.iter().all(|name| name.starts_with("ral-tmp-")));
         assert_eq!(names("elsewhere"), Vec::<String>::new());
+    }
+
+    /// A pattern is matched by the names the walk reached entries by, so a
+    /// link in the root leads elsewhere and the matches are still named
+    /// through it; a directory link beneath a wildcard is matched by its name.
+    #[test]
+    fn a_glob_matches_by_traversal_name_through_links() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir_all(root.join("elsewhere")).unwrap();
+        std::fs::create_dir_all(root.join("repo")).unwrap();
+        std::fs::write(root.join("elsewhere/a.txt"), "").unwrap();
+        symlink(root.join("elsewhere"), root.join("repo/link")).unwrap();
+        let shell = crate::test_helper::core_shell();
+        let glob = |pattern: String| -> Vec<String> {
+            let found = builtin_glob(&[Value::string(pattern)], &shell).unwrap();
+            let Value::List(items) = found else {
+                panic!("a glob is a list");
+            };
+            items
+                .iter()
+                .map(|v| v.as_str("test").unwrap().to_string())
+                .collect()
+        };
+        let repo = shown(root.join("repo"));
+        assert_eq!(
+            glob(format!("{repo}/link/*.txt")),
+            [format!("{repo}/link/a.txt")]
+        );
+        assert_eq!(glob(format!("{repo}/*")), [format!("{repo}/link")]);
     }
 
     /// A name ral invents is made private, whatever the umask: as `mktemp(1)`

@@ -12,9 +12,9 @@ use icu_casemap::CaseMapper;
 use icu_locale_core::LanguageIdentifier;
 use icu_normalizer::DecomposingNormalizerBorrowed;
 
+use super::PathRules;
 use super::lex::parse_bytes;
 use super::walk::{Excluded, Hold, Listed, RealPath, Trace};
-use super::{FrozenPath, PathRules};
 
 /// `p` plus any alternate spelling the host treats as the same file
 /// (`/tmp/foo` ↔ `/private/tmp/foo` on macOS; just `[p]` elsewhere).
@@ -28,36 +28,15 @@ fn path_aliases(p: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Which spellings of a name count as one name.  An allow is judged under
-/// [`Stored`](Self::Stored), a deny under [`Collision`](Self::Collision): a
-/// rule's [`Polarity`] picks, never a caller.
+/// Which spellings of a name count as one name.  A positive reading is under
+/// [`Stored`](Self::Stored), a negative one under [`Collision`](Self::Collision).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Identity {
+enum Identity {
     /// The name as stored, with Windows heads and separators normalised.
     Stored,
     /// Every name some filesystem takes for the same: `collision_key` per
     /// component.
     Collision,
-}
-
-/// Which way a rule speaks, and so which [`Identity`] it reads names under.
-/// Sealed: `Identity` cannot be named outside the crate.
-pub trait Polarity {
-    const IDENTITY: Identity;
-}
-
-/// An allow holds a name as stored.
-pub enum Allow {}
-
-/// A deny holds every spelling of a name.
-pub enum Deny {}
-
-impl Polarity for Allow {
-    const IDENTITY: Identity = Identity::Stored;
-}
-
-impl Polarity for Deny {
-    const IDENTITY: Identity = Identity::Collision;
 }
 
 /// How an exclusion matched, in citation order: the least is cited.
@@ -158,19 +137,6 @@ impl Excluded {
     }
 }
 
-impl FrozenPath {
-    /// Whether `path` lies within this prefix as a rule of polarity `P`
-    /// reads names.
-    pub(crate) fn contains<P: Polarity>(&self, path: &Path) -> bool {
-        within::<P>(path, self.real().as_path())
-    }
-}
-
-/// [`path_within`] under the identity a rule of polarity `P` reads names by.
-pub(super) fn within<P: Polarity>(path: &Path, prefix: &Path) -> bool {
-    path_within(path, prefix, P::IDENTITY)
-}
-
 /// The name a filesystem may take `name` for: compatibility caseless
 /// matching (Unicode D147) of the uppercase image of its compatibility
 /// decomposition.  A name that is not UTF-8 is its own key; no filesystem
@@ -232,9 +198,9 @@ pub(super) fn collision_fold(s: &str) -> String {
 /// Private: the kernel is form-blind, and *which* of a prefix's two forms a
 /// containment question is asked of, under which identity, is settled by the
 /// methods beside it — [`RealPath::contains`] and
-/// [`contains_folded`](RealPath::contains_folded) for positions, a
-/// [`Polarity`] through [`within`] for the bridges that remain — and never by
-/// a caller holding two bare paths.
+/// [`contains_folded`](RealPath::contains_folded) for positions,
+/// [`Excluded::matches`] for exclusions — and never by a caller holding two
+/// bare paths.
 fn path_within(path: &Path, prefix: &Path, identity: Identity) -> bool {
     let rules = PathRules::HOST;
     let ps = path_aliases(path);
@@ -255,14 +221,15 @@ fn path_within(path: &Path, prefix: &Path, identity: Identity) -> bool {
     })
 }
 
-/// [`path_within`] on strings, for the renderers that hold the kernel's names.
+/// [`path_within`] on strings, names as stored, for the renderers that hold the
+/// kernel's names.
 #[cfg(target_os = "linux")]
 #[allow(
     clippy::disallowed_methods,
     reason = "path-form: lifts both strings for `path_within`; nothing is resolved"
 )]
-pub(super) fn path_within_str(path: &str, prefix: &str, identity: Identity) -> bool {
-    path_within(Path::new(path), Path::new(prefix), identity)
+pub(super) fn path_within_str(path: &str, prefix: &str) -> bool {
+    path_within(Path::new(path), Path::new(prefix), Identity::Stored)
 }
 
 /// Component-wise prefix test under `collision_key`: split as
@@ -293,7 +260,7 @@ fn starts_with_collision(path: &Path, prefix: &Path, rules: PathRules) -> bool {
 /// A display identity, not an authority one: the prompt's home-strip asks
 /// it whether to fold a path to `~`.  Grant containment, [`path_within`],
 /// never asks it: an allow there keeps case ([`Identity::Stored`]) and a
-/// deny folds by `collision_key`, each per its [`Polarity`].
+/// deny folds by `collision_key`.
 ///
 /// String logic rather than `std::path::Path`, whose separator and prefix
 /// parsing are fixed at compile time to the build target.

@@ -414,7 +414,7 @@ mod rendered_tests {
     #[test]
     fn an_allowance_renders_as_its_frozen_real_path() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = RealPath::of_path(tmp.path()).unwrap();
+        let root = crate::test_helper::real(tmp.path());
         let real = root.as_path().join("real");
         let link = root.as_path().join("link");
         std::fs::create_dir(&real).unwrap();
@@ -446,7 +446,7 @@ mod rendered_tests {
 mod tests {
     use super::ExecProjection;
     use crate::capability::{Capabilities, Evidence, ExecGrant, ExecKey, Floor, FsPolicy};
-    use crate::path::{FrozenPath, RealPath};
+    use crate::path::{FrozenPath, utf8};
     use crate::test_access::fs_read_paths;
     use crate::test_helper::{layer, stack};
 
@@ -528,7 +528,7 @@ mod tests {
             let read = &rendered.fs.rules().expect("fs restricted").read;
             let carried = read
                 .iter()
-                .any(|o| RealPath::assumed(o.real.as_str()) == interp);
+                .any(|o| o.real.as_str() == utf8(interp.as_path()).unwrap());
             assert!(carried, "{interp} is not read: {read:?}");
         }
     }

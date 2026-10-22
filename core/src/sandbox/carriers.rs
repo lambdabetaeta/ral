@@ -57,6 +57,7 @@ pub(crate) fn linkers() -> Vec<RealPath> {
 /// admit a command directory.
 #[cfg(target_os = "linux")]
 pub(crate) fn linkers() -> Vec<RealPath> {
+    use crate::capability::{Floor, GrantStack};
     const PATTERNS: &[&str] = &[
         "/lib/ld*.so*",
         "/lib64/ld*.so*",
@@ -69,20 +70,22 @@ pub(crate) fn linkers() -> Vec<RealPath> {
         "/usr/lib/*/ld*.so*",
     ];
     let scope = crate::process::Scope::clone(&crate::process::DurableRoot::default());
+    let region = || GrantStack::root().read_region(&Floor::default());
     let found: BTreeSet<RealPath> = PATTERNS
         .iter()
-        .filter_map(|p| crate::path::tree::glob::Glob::parse(&PathBuf::from(*p)).ok())
+        .filter_map(|p| crate::path::tree::glob::Glob::parse(&spelled(&PathBuf::from(*p))?).ok())
         .map(std::sync::Arc::new)
         .flat_map(|g| {
             g.walk()
-                .sightings(scope.clone())
+                .readable_by(region())
+                .entries(scope.clone())
                 .filter_map(Result::ok)
-                .map(|s| s.path)
-                .filter(|p| g.matches(p))
+                .map(|entry| entry.shown)
+                .filter(|shown| g.matches(shown))
                 .collect::<Vec<_>>()
         })
         // Merged-/usr makes /lib/x and /usr/lib/x one inode: one real path.
-        .filter_map(|p| file(&p))
+        .filter_map(|shown| file(shown.as_path()))
         .collect();
     found.into_iter().collect()
 }
@@ -243,6 +246,7 @@ pub(super) fn system_script() -> Option<(RealPath, RealPath)> {
 )]
 mod tests {
     use super::*;
+    use crate::test_helper::real;
     use std::os::unix::fs::PermissionsExt;
 
     /// An executable `name` under `dir` holding `body`.
@@ -256,12 +260,8 @@ mod tests {
 
     fn temp_root() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("temp dir");
-        let root = crate::path::canon::canonicalise_strict(dir.path()).expect("temp dir resolves");
+        let root = crate::test_helper::real(dir.path()).as_path().to_path_buf();
         (dir, root)
-    }
-
-    fn real(path: &Path) -> RealPath {
-        RealPath::of_path(path).expect("it exists")
     }
 
     #[test]
@@ -275,7 +275,7 @@ mod tests {
         );
         assert_eq!(hops(&real(&script)), [interp]);
         assert_eq!(
-            hops(&real(&file(&root, "plain", "no shebang\n"))),
+            hops(&real(file(&root, "plain", "no shebang\n"))),
             Vec::<PathBuf>::new()
         );
     }

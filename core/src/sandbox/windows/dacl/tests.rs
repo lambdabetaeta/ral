@@ -12,7 +12,6 @@
     reason = "[test] test fs/process scaffolding"
 )]
 use super::*;
-use crate::path::RealPath;
 use crate::process::cancel::DurableRoot;
 use std::fs;
 use std::process::Command;
@@ -47,7 +46,7 @@ pub(super) fn with_scoped_state_dir<R>(f: impl FnOnce() -> R) -> R {
 
 /// `path`'s real path: the spelling a frozen allowance holds.
 pub(super) fn real(path: &Path) -> PathBuf {
-    crate::path::canon::canonicalise_strict(path).unwrap()
+    crate::test_helper::real(path).as_path().to_path_buf()
 }
 
 /// `mklink /J link target`, as `cmd` reports it.
@@ -65,10 +64,10 @@ pub(super) fn junction(link: &Path, target: &Path) {
     assert!(output.status.success(), "create junction: {output:?}");
 }
 
-/// The frozen allowance at `path`, as `pin_all` opens one: held by the walk
-/// with every link refused, `None` where nothing is there.
+/// The frozen allowance at `path`'s position now, as `pin_all` opens one:
+/// held by the walk with every link refused, `None` where nothing is there.
 pub(super) fn pin(path: &Path, kind: GrantKind) -> Result<Option<FrozenPin>, DaclError> {
-    FrozenPin::open(&RealPath::assumed(path), kind)
+    FrozenPin::open(&crate::test_helper::place(path), kind)
 }
 
 /// Stamp `kind` for `sid` on `canonical` through its pin, as `confine` does.
@@ -279,7 +278,7 @@ fn with_token_access<R>(check: impl FnOnce(&ContainerAccess) -> R) -> R {
 
 /// The position `ensure_unreachable` reports as reachable, if it does.
 fn reachable(excluded: &Path, access: &ContainerAccess) -> Option<PathBuf> {
-    match ensure_unreachable(&RealPath::assumed(excluded), access, &live()) {
+    match ensure_unreachable(&crate::test_helper::place(excluded), access, &live()) {
         Err(DaclError::Reachable { at, .. }) => Some(at),
         other => {
             other.unwrap();

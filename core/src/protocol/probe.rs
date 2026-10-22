@@ -273,8 +273,9 @@ mod tests {
     #[test]
     fn a_grant_stack_round_trips() {
         use crate::capability::{Capabilities, Evidence, ExecGrant, ExecKey, Net};
-        use crate::path::{FrozenPath, test_absolute};
-        let dir = FrozenPath::from_surface(&test_absolute("/ral-probe/bin"));
+        use crate::path::FrozenPath;
+        let dir =
+            FrozenPath::from_surface(&crate::test_helper::Tree::nowhere().at("/ral-probe/bin"));
         let mut stack = GrantStack::root();
         stack.push(crate::test_helper::layer(Capabilities {
             exec: Some(ExecGrant::from_iter([(ExecKey::Dir(dir), Evidence::ALLOW)])),

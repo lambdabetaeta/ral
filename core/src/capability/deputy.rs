@@ -70,34 +70,54 @@ mod tests {
     use crate::capability::{
         Capabilities, Evidence, ExecGrant, ExecKey, Floor, FsPolicy, GrantStack,
     };
-    use crate::path::{FrozenPath, RealPath, shown, test_absolute, utf8};
-    use crate::test_helper::{layer, stack};
+    use crate::path::{FrozenPath, shown, utf8};
+    use crate::test_helper::{Tree, layer, stack};
 
-    fn lit(p: &str) -> FrozenPath {
-        FrozenPath::from_surface(&test_absolute(p))
+    /// A tempdir, whose real path the `/`-rooted names of a test lie under:
+    /// what a grant names need not exist, the walk ends where the disk does.
+    struct Disk {
+        _dir: tempfile::TempDir,
+        tree: Tree,
     }
 
-    /// The surfaces a finding of `paths` reports, on this host, as shown.
-    fn named(paths: &[&str]) -> Vec<String> {
-        paths.iter().map(|p| shown(test_absolute(p))).collect()
-    }
+    impl Disk {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let tree = Tree::lay(dir.path(), std::iter::empty::<&str>());
+            Self { _dir: dir, tree }
+        }
 
-    fn exec_dirs(dirs: &[(&str, Evidence)]) -> ExecGrant {
-        (dirs.iter())
-            .map(|&(d, e)| (ExecKey::Dir(lit(d)), e))
-            .collect()
-    }
+        /// The spelling of `/`-rooted `p`; `/` itself is the universal prefix.
+        fn lit(&self, p: &str) -> FrozenPath {
+            if p == "/" {
+                FrozenPath::root()
+            } else {
+                FrozenPath::from_surface(&self.tree.at(p))
+            }
+        }
 
-    /// The grant of `dirs` with `every` set.
-    fn every(dirs: &[(&str, Evidence)]) -> ExecGrant {
-        exec_dirs(dirs).with_every()
-    }
+        /// The surfaces a finding of `paths` reports, as shown.
+        fn named(&self, paths: &[&str]) -> Vec<String> {
+            paths.iter().map(|p| shown(self.tree.at(p))).collect()
+        }
 
-    fn fs(write: &[&str], deny: &[&str]) -> FsPolicy {
-        FsPolicy {
-            write_prefixes: write.iter().map(|p| lit(p)).collect(),
-            deny_paths: deny.iter().map(|p| lit(p)).collect(),
-            ..FsPolicy::default()
+        fn exec_dirs(&self, dirs: &[(&str, Evidence)]) -> ExecGrant {
+            (dirs.iter())
+                .map(|&(d, e)| (ExecKey::Dir(self.lit(d)), e))
+                .collect()
+        }
+
+        /// The grant of `dirs` with `every` set.
+        fn every(&self, dirs: &[(&str, Evidence)]) -> ExecGrant {
+            self.exec_dirs(dirs).with_every()
+        }
+
+        fn fs(&self, write: &[&str], deny: &[&str]) -> FsPolicy {
+            FsPolicy {
+                write_prefixes: write.iter().map(|p| self.lit(p)).collect(),
+                deny_paths: deny.iter().map(|p| self.lit(p)).collect(),
+                ..FsPolicy::default()
+            }
         }
     }
 
@@ -122,9 +142,8 @@ mod tests {
     #[test]
     fn symlinked_write_region_is_reported_via_resolved_form() {
         // `data` is a link: lexically disjoint from `bin`, resolved inside it.
-        let tmp = tempfile::tempdir().unwrap();
-        let root = RealPath::of_path(tmp.path()).unwrap();
-        let root = root.as_path();
+        let disk = Disk::new();
+        let root = disk.tree.root();
         std::fs::create_dir_all(root.join("bin/sub")).unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(root.join("bin/sub"), root.join("data")).unwrap();
@@ -145,8 +164,9 @@ mod tests {
 
     #[test]
     fn fs_none_is_invisible_even_with_an_exec_dir() {
+        let disk = Disk::new();
         let stack = stack([layer(Capabilities {
-            exec: Some(exec_dirs(&[("/x/bin", ALLOW)])),
+            exec: Some(disk.exec_dirs(&[("/x/bin", ALLOW)])),
             fs: None,
             ..Capabilities::default()
         })]);
@@ -158,12 +178,13 @@ mod tests {
 
     #[test]
     fn two_innocent_layers_fold_into_a_finding() {
+        let disk = Disk::new();
         let layer_a = layer(Capabilities {
-            exec: Some(exec_dirs(&[("/x/bin", ALLOW)])),
+            exec: Some(disk.exec_dirs(&[("/x/bin", ALLOW)])),
             ..Capabilities::default()
         });
         let layer_b = layer(Capabilities {
-            fs: Some(fs(&["/x/bin"], &[])),
+            fs: Some(disk.fs(&["/x/bin"], &[])),
             ..Capabilities::default()
         });
         assert!(
@@ -171,78 +192,96 @@ mod tests {
                 && report(&stack([layer_b.clone()])).is_empty(),
             "neither layer alone names both dimensions"
         );
-        assert_eq!(report(&stack([layer_a, layer_b])), named(&["/x/bin"]));
+        assert_eq!(report(&stack([layer_a, layer_b])), disk.named(&["/x/bin"]));
     }
 
     #[test]
     fn compile_and_run_shape_fires_benignly() {
+        let disk = Disk::new();
         let found = found(
-            exec_dirs(&[("/work/target/debug", ALLOW)]),
-            fs(&["/work"], &[]),
+            disk.exec_dirs(&[("/work/target/debug", ALLOW)]),
+            disk.fs(&["/work"], &[]),
         );
-        assert_eq!(found, named(&["/work/target/debug"]));
+        assert_eq!(found, disk.named(&["/work/target/debug"]));
     }
 
     #[test]
     fn a_wholly_exec_excluded_directory_is_not_found() {
-        let exec = exec_dirs(&[("/work", ALLOW), ("/work", DENY)]);
-        assert_eq!(found(exec, fs(&["/work"], &[])), Vec::<String>::new());
+        let disk = Disk::new();
+        let exec = disk.exec_dirs(&[("/work", ALLOW), ("/work", DENY)]);
+        assert_eq!(found(exec, disk.fs(&["/work"], &[])), Vec::<String>::new());
     }
 
     #[test]
     fn a_wholly_fs_excluded_directory_is_not_found() {
-        let exec = exec_dirs(&[("/work", ALLOW)]);
+        let disk = Disk::new();
+        let exec = disk.exec_dirs(&[("/work", ALLOW)]);
         assert_eq!(
-            found(exec, fs(&["/work"], &["/work"])),
+            found(exec, disk.fs(&["/work"], &["/work"])),
             Vec::<String>::new()
         );
     }
 
     #[test]
     fn a_write_region_wholly_inside_an_exec_exclusion_is_not_found() {
-        let exec = exec_dirs(&[("/", ALLOW), ("/work", DENY)]);
-        assert_eq!(found(exec, fs(&["/work/a"], &[])), Vec::<String>::new());
+        let disk = Disk::new();
+        let exec = disk.exec_dirs(&[("/", ALLOW), ("/work", DENY)]);
+        assert_eq!(
+            found(exec, disk.fs(&["/work/a"], &[])),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
     fn two_writable_islands_under_one_runnable_directory_are_both_found() {
+        let disk = Disk::new();
         let found = found(
-            exec_dirs(&[("/work", ALLOW)]),
-            fs(&["/work/a", "/work/b"], &[]),
+            disk.exec_dirs(&[("/work", ALLOW)]),
+            disk.fs(&["/work/a", "/work/b"], &[]),
         );
-        assert_eq!(found, named(&["/work/a", "/work/b"]));
+        assert_eq!(found, disk.named(&["/work/a", "/work/b"]));
     }
 
     #[test]
     fn an_every_layer_does_not_erase_the_findings_of_another() {
+        let disk = Disk::new();
         let stack = stack([
             layer(Capabilities {
-                exec: Some(every(&[])),
+                exec: Some(disk.every(&[])),
                 ..Capabilities::default()
             }),
             layer(Capabilities {
-                exec: Some(exec_dirs(&[("/work", ALLOW)])),
-                fs: Some(fs(&["/work/a"], &[])),
+                exec: Some(disk.exec_dirs(&[("/work", ALLOW)])),
+                fs: Some(disk.fs(&["/work/a"], &[])),
                 ..Capabilities::default()
             }),
         ]);
-        assert_eq!(report(&stack), named(&["/work/a"]));
+        assert_eq!(report(&stack), disk.named(&["/work/a"]));
     }
 
     #[test]
     fn an_every_layer_excluding_a_subdirectory_still_finds_the_write_region() {
-        let found = found(every(&[("/work/private", DENY)]), fs(&["/work"], &[]));
-        assert_eq!(found, named(&["/work"]));
+        let disk = Disk::new();
+        let found = found(
+            disk.every(&[("/work/private", DENY)]),
+            disk.fs(&["/work"], &[]),
+        );
+        assert_eq!(found, disk.named(&["/work"]));
     }
 
     #[test]
     fn an_authored_root_directory_finds_every_writable_prefix() {
-        let found = found(exec_dirs(&[("/", ALLOW)]), fs(&["/a", "/b"], &[]));
-        assert_eq!(found, named(&["/a", "/b"]));
+        let disk = Disk::new();
+        let found = found(disk.exec_dirs(&[("/", ALLOW)]), disk.fs(&["/a", "/b"], &[]));
+        assert_eq!(found, disk.named(&["/a", "/b"]));
     }
 
     #[test]
     fn an_exec_that_denotes_top_has_no_finding() {
-        assert_eq!(found(every(&[]), fs(&["/work"], &[])), Vec::<String>::new());
+        let disk = Disk::new();
+        assert_eq!(
+            found(disk.every(&[]), disk.fs(&["/work"], &[])),
+            Vec::<String>::new()
+        );
     }
 }

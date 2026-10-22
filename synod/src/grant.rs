@@ -619,33 +619,37 @@ mod tests {
         }
     }
 
-    /// A made-up home, spelled the way this platform spells an absolute
-    /// path, so the territory tests judge no real machine.
-    fn fake_home() -> PathBuf {
-        if cfg!(windows) {
-            PathBuf::from(r"C:\Users\ada")
-        } else {
-            PathBuf::from("/home/ada")
-        }
+    /// A made-up home, in a workshop of its own, so the territory tests judge
+    /// no real machine.  Nothing is made under it: a lenient walk ends where
+    /// the disk does.
+    struct Fake {
+        _dir: tempfile::TempDir,
+        home: PathBuf,
     }
 
-    /// A territory over [`fake_home`] whose one settings tree is the
-    /// roaming `AppData`, and whose temp folder lies under the local one.
-    fn fake_territory() -> Territory {
-        let home = fake_home();
-        let app_data = home.join("AppData");
-        Territory {
-            settings: vec![
-                RealPath::assumed(app_data.join("Roaming")),
-                RealPath::assumed(app_data.join("Local")),
-            ],
-            scratch: Some(RealPath::assumed(app_data.join("Local").join("Temp"))),
-            home: Some(RealPath::assumed(home)),
+    impl Fake {
+        fn new() -> Self {
+            let dir = workshop("grant-territory");
+            let home = dir.path().join("ada");
+            Self { _dir: dir, home }
         }
-    }
 
-    fn judged(root: &Path) -> Result<(), String> {
-        Grant::refuse_too_much(&RealPath::assumed(root), &fake_territory())
+        /// A territory over the home whose one settings tree is the roaming
+        /// `AppData`, and whose temp folder lies under the local one.
+        fn territory(&self) -> Territory {
+            let app_data = self.home.join("AppData");
+            let at = |path: PathBuf| position(&path).expect("a fixture resolves");
+            Territory {
+                settings: vec![at(app_data.join("Roaming")), at(app_data.join("Local"))],
+                scratch: Some(at(app_data.join("Local").join("Temp"))),
+                home: Some(at(self.home.clone())),
+            }
+        }
+
+        fn judged(&self, root: &Path) -> Result<(), String> {
+            let root = position(root).expect("a fixture resolves");
+            Grant::refuse_too_much(&root, &self.territory())
+        }
     }
 
     /// A settings tree not created yet is still refused: the territory is
@@ -674,7 +678,8 @@ mod tests {
     /// tree whole, is refused and says why.
     #[test]
     fn a_folder_inside_the_settings_trees_is_refused() {
-        let roaming = fake_home().join("AppData").join("Roaming");
+        let fake = Fake::new();
+        let roaming = fake.home.join("AppData").join("Roaming");
         let startup = roaming
             .join("Microsoft")
             .join("Windows")
@@ -682,7 +687,9 @@ mod tests {
             .join("Programs")
             .join("Startup");
         for root in [&startup, &roaming] {
-            let message = judged(root).expect_err("a settings folder must be refused");
+            let message = fake
+                .judged(root)
+                .expect_err("a settings folder must be refused");
             assert!(
                 message.contains("keep their own settings")
                     && message.contains("runs by itself the next time you sign in")
@@ -694,7 +701,9 @@ mod tests {
 
     #[test]
     fn a_folder_holding_a_settings_tree_is_refused() {
-        let message = judged(&fake_home().join("AppData"))
+        let fake = Fake::new();
+        let message = fake
+            .judged(&fake.home.join("AppData"))
             .expect_err("a folder over AppData must be refused");
         assert!(
             message.contains("holds") && message.contains("Roaming"),
@@ -708,22 +717,25 @@ mod tests {
     /// folder.
     #[test]
     fn a_hidden_folder_under_home_is_refused() {
-        let home = fake_home();
+        let fake = Fake::new();
+        let home = fake.home.clone();
         for root in [
             home.join(".config").join("autostart"),
             home.join(".ssh"),
             home.join(".local").join("share"),
         ] {
-            let message = judged(&root).expect_err("a hidden home folder must be refused");
+            let message = fake
+                .judged(&root)
+                .expect_err("a hidden home folder must be refused");
             assert!(
                 message.contains("keep their own settings"),
                 "{} should be refused as settings: {message}",
                 ral_core::path::shown(&root)
             );
         }
-        judged(&home.join("Documents").join(".drafts"))
+        fake.judged(&home.join("Documents").join(".drafts"))
             .expect("a hidden folder inside an ordinary one is an ordinary grant");
-        judged(&home.join("Documents").join("Admissions"))
+        fake.judged(&home.join("Documents").join("Admissions"))
             .expect("an ordinary folder inside home is an ordinary grant");
     }
 
@@ -732,15 +744,19 @@ mod tests {
     /// not.
     #[test]
     fn a_folder_inside_the_temp_folder_is_allowed() {
-        let temp = fake_home().join("AppData").join("Local").join("Temp");
-        judged(&temp.join("Admissions")).expect("a folder inside temp must open");
-        judged(&temp).expect_err("the whole temp folder is still a settings tree's");
+        let fake = Fake::new();
+        let temp = fake.home.join("AppData").join("Local").join("Temp");
+        fake.judged(&temp.join("Admissions"))
+            .expect("a folder inside temp must open");
+        fake.judged(&temp)
+            .expect_err("the whole temp folder is still a settings tree's");
     }
 
     #[cfg(windows)]
     #[test]
     fn the_settings_trees_on_windows_follow_the_environment() {
-        let home = fake_home();
+        let fake = Fake::new();
+        let home = fake.home.clone();
         let env = |name: &str| match name {
             "APPDATA" => Some(r"\\profiles\ada\Roaming".into()),
             "LOCALAPPDATA" => Some(r"Local".into()), // relative: names nothing
@@ -763,7 +779,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn the_settings_tree_on_macos_is_the_library() {
-        let home = fake_home();
+        let fake = Fake::new();
+        let home = fake.home.clone();
         assert_eq!(
             settings_trees(Some(&home), |_| None),
             [home.join("Library")]
@@ -773,7 +790,8 @@ mod tests {
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn the_settings_trees_on_linux_are_config_and_local() {
-        let home = fake_home();
+        let fake = Fake::new();
+        let home = fake.home.clone();
         assert_eq!(
             settings_trees(Some(&home), |_| None),
             [home.join(".config"), home.join(".local")]

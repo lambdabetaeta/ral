@@ -1,26 +1,15 @@
 //! The normal-form path types the grant pipeline trusts: [`LexicalPath`] on
 //! the access side, [`FrozenPath`] on the grant side, and [`RealPath`], the
-//! symlink-followed form a prefix carries and exec authority judges.
+//! position a walk ends at and exec authority judges.
 //!
-//! A prefix carries its symlink-followed `real` form on the value, so
-//! the meet of two policies is a total pure function of them: the disk is
-//! consulted once, at freeze.  Enforcement still re-resolves
-//! against the live filesystem — the algebra speaks about the policy,
-//! enforcement about the world.
+//! A [`FrozenPath`] is a spelling and nothing else: folded, shown, ordered.
+//! What it names is the walk's to say, once, when the grant is made
+//! (`GrantPath { written, real }`); no containment or resolution is asked of
+//! the spelling.  There is no `From<&str>` sugar: the doors, [`from_surface`]
+//! and [`freeze`], keep the fold in one place.
 //!
-//! The grant types have private fields.  A prefix is a logical spelling, folded
-//! and then resolved; an access is resolved as the kernel resolves it,
-//! unfolded; the two meet on their real forms under
-//! [`FrozenPath::contains`].  There is no `From<&str>`
-//! sugar: a `From` impl cannot consult the disk oracle `real` needs,
-//! so it would be a door for fabricating one.
-//!
-//! A prefix's two forms are not a normal form and a spelling of it: fs and
-//! exec alike are judged over *objects*, on `real`; `surface` is the
-//! author's spelling, kept for display and for the order of a set.  Hence
-//! the containment door, [`contains`](FrozenPath::contains), and
-//! [`real`](FrozenPath::real), the one door from a prefix to its real form,
-//! and no other: `surface` leaves the type only as a `String`, for rendering.
+//! [`from_surface`]: FrozenPath::from_surface
+//! [`freeze`]: FrozenPath::freeze
 
 use super::lex::{is_absolute, is_working_directory, utf8};
 use super::walk::RealPath;
@@ -121,8 +110,8 @@ impl std::error::Error for NotACwd {}
 /// display base) asks for [`folded`](Self::folded).  The walk refuses a head
 /// `std::path` cannot parse ([`is_unparsed_head`](super::lex::is_unparsed_head)).
 ///
-/// Reified so that canonicalisation can only follow resolution — there is
-/// no way to `realpath` a path that has not first been anchored.
+/// Reified so that a walk can only follow resolution — there is no way to
+/// walk a path that has not first been anchored.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LexicalPath(PathBuf);
 
@@ -223,112 +212,54 @@ impl LexicalPath {
             .to_string_lossy()
             .into_owned()
     }
-
-    /// Strict `realpath(3)`.  The input is already absolute, so nothing here
-    /// can anchor against the *process* cwd.
-    ///
-    /// # Errors
-    /// Returns `Err` if the path or any intermediate component does not
-    /// exist, or on any other `realpath(3)` failure (a non-directory in the
-    /// prefix, a permission or symlink-loop error).
-    pub fn canonicalise_strict(&self) -> std::io::Result<PathBuf> {
-        super::canon::canonicalise_strict(&self.0)
-    }
-
-    /// Lenient canonicalisation: the physical walk, its missing tail
-    /// appended lexically.  Infallible.
-    pub fn canonicalise_lenient(&self) -> PathBuf {
-        super::canon::canonicalise_lenient(&self.0)
-    }
 }
 
-/// A frozen grant prefix: `surface` as the author wrote it, in the normal
-/// form [`LexicalPath::folded`] gives.
+/// A frozen grant prefix: the author's spelling, in the normal form
+/// [`LexicalPath::folded`] gives.
 ///
 /// That form is absolute, `.`/`..`-collapsed, and on Windows spelled with
-/// `\` wherever its head allows (`C:/a/b` is frozen as `C:\a\b`).
-///
-/// `real` is that path with symlinks followed, kept native, never decoded to
-/// a `String`; `surface` is UTF-8, being authored text.
-///
-/// Field order is load-bearing: the derived `Ord` sorts by `surface`
-/// first, so a `BTreeSet` dedups two spellings of one directory by the
-/// string the author wrote.  Deduping on `real` instead would fold
-/// two distinct-looking grants into one and change the rendered OS rule
-/// list.
+/// `\` wherever its head allows (`C:/a/b` is frozen as `C:\a\b`).  The
+/// derived `Ord` is by spelling, so a `BTreeSet` dedups by the string the
+/// author wrote, and the wire form is that string.
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct FrozenPath {
     surface: String,
-    real: RealPath,
 }
 
 impl FrozenPath {
-    /// Mint a prefix from a surface form: fold it, then follow its symlinks,
-    /// so `cwd link/../x` names `<cwd>/x`, a prefix being a logical spelling.
+    /// Mint a prefix from a surface form: fold it.  Idempotent on a normal
+    /// form, such as the OS-sandbox renderer emits.
     ///
-    /// The type's one disk consultation and its one minting door, the freeze
-    /// pass's in `guard::freeze`.  Idempotent on a normal form, such as the
-    /// OS-sandbox renderer emits.
+    /// The root is one spelling, `/`, on every host: it is the universal
+    /// prefix, and Windows has no `/` to walk (a drive's root is one drive's).
     pub fn from_surface(surface: &str) -> Self {
         let folded = super::lex::fold_dots_under(surface, PathRules::HOST);
-        // The root is the one path `realpath` must not be asked about.  It
-        // answers with a *drive* on Windows — the process's own — so a
-        // ceiling frozen here covered one volume and denied every other, and
-        // the universal prefix stopped being universal the moment a session
-        // ran from a drive its data was not on.  Folded to zero components it
-        // matches everything, which is what the internal ceiling
-        // [`Self::root`] means (an authored `absolute /` is a POSIX grant and
-        // dead on Windows).
-        if super::lex::is_bare_root(&folded, PathRules::HOST) {
-            return Self {
-                surface: "/".into(),
-                real: RealPath::from_folded("/"),
-            };
-        }
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "lexical Path::new over a folded surface: no I/O behind it"
-        )]
-        let real = RealPath::lenient(Path::new(&folded));
-        Self {
-            surface: folded,
-            real,
-        }
+        let surface = if super::lex::is_bare_root(&folded, PathRules::HOST) {
+            "/".into()
+        } else {
+            folded
+        };
+        Self { surface }
     }
 
-    /// [`from_surface`](Self::from_surface) for a grant, an identity that is
-    /// kept for good: `Err` when the surface or the real path it follows is not
-    /// valid Unicode, since a grant is serialized as text.
+    /// [`from_surface`](Self::from_surface) for a path held natively, as a
+    /// grant is serialized as text.
     ///
     /// # Errors
-    /// The refusal to hold `path` as a grant, saying why.
+    /// The refusal to hold `path` as a grant, saying why: it is not valid
+    /// Unicode.
     pub fn freeze(path: &Path) -> Result<Self, String> {
-        let refusal = |real: &Path| {
+        utf8(path).map(Self::from_surface).map_err(|_| {
             format!(
-                "ral cannot hold '{}' as a grant: it resolves to '{}', which is not valid \
-                 Unicode; grant a path that is, or one that does not pass through it",
+                "ral cannot hold '{}' as a grant: it is not valid Unicode; grant a path that is",
                 shown(path),
-                shown(real),
             )
-        };
-        let frozen = Self::from_surface(utf8(path).map_err(|_| refusal(path))?);
-        utf8(frozen.real.as_path()).map_err(|_| refusal(frozen.real.as_path()))?;
-        Ok(frozen)
+        })
     }
 
     /// The filesystem root, as the prefix that covers every path: the
     /// implicit ceiling a policy attenuates down from.
-    ///
-    /// Minted rather than frozen, because freezing would *narrow* it.
-    /// `realpath("/")` is drive-relative on Windows: it answers `D:\` when
-    /// the process cwd sits on `D:` — so a ceiling built through
-    /// [`from_surface`](Self::from_surface) covers one drive and silently
-    /// denies every other, and a session whose checkout and whose `%TEMP%`
-    /// are on different drives (GitHub's Windows runners are exactly that)
-    /// loses the whole of the second.  Left unfrozen, `/` folds to zero
-    /// components under
-    /// [`starts_with_identity`](super::identity::starts_with_identity) and is the
-    /// universal prefix on either platform, which is what a ceiling means.
     #[must_use]
     pub fn root() -> Self {
         Self::from_surface("/")
@@ -342,29 +273,19 @@ impl FrozenPath {
     /// rules ([`fold_dots_under`](super::lex::fold_dots_under)), not this
     /// process's — hence a [`GuestPath`] here where
     /// [`from_surface`](Self::from_surface), for prefixes matched on
-    /// *this* computer, takes an `AsRef<Path>`.  There is no `realpath(3)`
-    /// on this host for another machine's path, so `real` is `surface`
-    /// again.
+    /// *this* computer, takes an `AsRef<Path>`.
     #[must_use]
     pub fn from_guest(path: &GuestPath) -> Self {
         debug_assert!(
             path.is_absolute(),
             "a guest prefix must be absolute in the guest's namespace, got {path}"
         );
-        let folded = super::lex::fold_dots_under(path.as_str(), PathRules::Posix);
         Self {
-            surface: folded.clone(),
-            real: RealPath::from_folded(folded),
+            surface: super::lex::fold_dots_under(path.as_str(), PathRules::Posix),
         }
     }
 
-    /// The surface form as a `Path` — the author's spelling.
-    ///
-    /// Private, and staying so: authority is judged on the real form
-    /// ([`real`](Self::real)), so the choice of form is
-    /// made here — never by a caller holding a `&Path`.  The `xdg:` freeze
-    /// guard made that choice for itself once, and read a symlink out of
-    /// `HOME` as contained.
+    /// The surface form as a `Path`, for [`lexical`](Self::lexical).
     #[allow(
         clippy::disallowed_methods,
         reason = "lexical Path::new over a surface already in normal form: no I/O behind it"
@@ -385,7 +306,6 @@ impl FrozenPath {
     pub(crate) fn of_real(real: &RealPath) -> Self {
         Self {
             surface: shown(real.as_path()),
-            real: real.clone(),
         }
     }
 
@@ -399,22 +319,9 @@ impl FrozenPath {
         shown(&self.surface)
     }
 
-    /// The symlink-followed form: the one door from a prefix to its real
-    /// form, for containment matching against an access path that has itself
-    /// been resolved.
-    pub(crate) fn real(&self) -> &RealPath {
-        &self.real
-    }
-
     /// Whether this is the universal prefix, [`root`](Self::root).
     pub fn is_root(&self) -> bool {
         super::lex::is_bare_root(&self.surface, PathRules::HOST)
-    }
-
-    /// Whether this prefix holds every path: it is the root, or a spelling
-    /// whose frozen real form is.
-    pub fn is_universal(&self) -> bool {
-        self.contains::<super::Allow>(Self::root().real.as_path())
     }
 
     /// Consume into the owned surface `String`, for the wire and render
@@ -456,7 +363,7 @@ impl PartialEq<String> for FrozenPath {
 
 #[cfg(test)]
 mod tests {
-    use super::{FrozenPath, GuestPath, RealPath};
+    use super::{FrozenPath, GuestPath};
     #[cfg(unix)]
     use crate::capability::GrantPath;
     #[cfg(unix)]
@@ -475,7 +382,7 @@ mod tests {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
         let tmp = tempfile::tempdir().unwrap();
-        let dir = RealPath::of_path(tmp.path()).unwrap();
+        let dir = crate::test_helper::real(tmp.path());
         let link = dir.as_path().join("dlink");
         std::os::unix::fs::symlink(dir.as_path().join("tgt"), &link).unwrap();
         let prefix = FrozenPath::from_surface(utf8(&link).unwrap());
@@ -495,31 +402,6 @@ mod tests {
         let lossy = dir.as_path().join("tgt\u{FFFD}");
         assert!(holds(&walked, &lossy.join("child")).is_none());
         assert!(holds(&before.real, &target.join("child")).is_none());
-    }
-
-    /// The ceiling covers every path, on whatever drive.
-    ///
-    /// Windows-only because it is the only host where "the root" is not one
-    /// place: `realpath("/")` answers the *current* drive there, so a ceiling
-    /// frozen through `from_surface` covered `D:\` alone whenever the process
-    /// ran from `D:`, and denied a `%TEMP%` on `C:` — the shape GitHub's
-    /// Windows runners have.  Spelled with drives rather than with the live
-    /// root, so it pins the claim on a host that has only one.
-    #[cfg(windows)]
-    #[test]
-    fn the_root_ceiling_covers_paths_on_every_drive() {
-        let root = FrozenPath::root();
-        for path in [
-            r"C:\Users\someone\AppData\Local\Temp\x",
-            r"D:\a\repo\y",
-            r"Z:\z",
-        ] {
-            let p = FrozenPath::from_surface(path);
-            assert!(
-                root.contains::<crate::path::Allow>(p.real().as_path()),
-                "the ceiling must cover {path}"
-            );
-        }
     }
 
     /// The universal prefix is one separator alone, read by the rules: `\`
@@ -553,7 +435,6 @@ mod tests {
     fn a_backslash_mints_no_universal_authority_under_posix_rules() {
         let prefix = FrozenPath::from_surface("\\/.");
         assert!(!prefix.is_root(), "{prefix:?}");
-        assert!(!prefix.is_universal(), "{prefix:?}");
         assert_eq!(prefix.as_str(), "\\");
     }
 
@@ -575,13 +456,30 @@ mod tests {
 
     /// A name that is not Unicode orders apart from the U+FFFD spelling it
     /// decodes to, and is no command name.
-    #[cfg(unix)]
+    ///
+    /// Linux alone can lay one: APFS refuses a name that is not UTF-8.
+    #[cfg(target_os = "linux")]
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] a file whose name is not UTF-8"
+    )]
     fn a_non_utf8_byte_is_not_its_replacement_character() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
-        let raw = RealPath::assumed(OsStr::from_bytes(b"/opt/\xFFtool"));
-        assert_ne!(raw, RealPath::assumed("/opt/\u{FFFD}tool"));
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = crate::test_helper::real(tmp.path());
+        let (raw, lossy) = (
+            dir.as_path().join(OsStr::from_bytes(b"\xFFtool")),
+            "\u{FFFD}tool",
+        );
+        std::fs::write(&raw, "").unwrap();
+        std::fs::write(dir.as_path().join(lossy), "").unwrap();
+        let (raw, lossy) = (
+            crate::test_helper::real(raw),
+            crate::test_helper::real(dir.as_path().join(lossy)),
+        );
+        assert_ne!(raw, lossy);
         assert_eq!(raw.name(), None);
     }
 
@@ -589,16 +487,26 @@ mod tests {
     /// decodes to, and is no command name.
     #[cfg(windows)]
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] a file whose name holds an unpaired surrogate"
+    )]
     fn an_unpaired_surrogate_is_not_its_replacement_character() {
         use std::os::windows::ffi::OsStringExt;
-        let wide: Vec<u16> = r"C:\opt\"
-            .encode_utf16()
-            .chain([0xD800])
-            .chain("tool".encode_utf16())
-            .collect();
-        let raw = RealPath::assumed(std::ffi::OsString::from_wide(&wide));
-        assert_ne!(raw, RealPath::assumed("C:\\opt\\\u{FFFD}tool"));
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = crate::test_helper::real(tmp.path());
+        let wide: Vec<u16> = [0xD800].into_iter().chain("tool".encode_utf16()).collect();
+        let (raw, lossy) = (
+            dir.as_path().join(std::ffi::OsString::from_wide(&wide)),
+            dir.as_path().join("\u{FFFD}tool"),
+        );
+        std::fs::write(&raw, "").unwrap();
+        std::fs::write(&lossy, "").unwrap();
+        let (raw, lossy) = (
+            crate::test_helper::real(raw),
+            crate::test_helper::real(lossy),
+        );
+        assert_ne!(raw, lossy);
         assert_eq!(raw.name(), None);
-        assert_eq!(RealPath::assumed(r"C:\opt\tool").name(), Some("tool"));
     }
 }

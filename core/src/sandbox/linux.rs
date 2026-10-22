@@ -820,7 +820,7 @@ impl DenyMask {
     /// The mask `path` needs, from what stands there, never followed; a name
     /// that cannot be walked stands nothing.
     fn over(path: &Rendered) -> Self {
-        let name = LexicalPath::absolute(RealPath::rendered(path).as_path());
+        let name = LexicalPath::absolute(&PathBuf::from(path.as_str()));
         let kind = name
             .and_then(|name| walk_lenient(&name, LeafMode::NoFollow).ok())
             .and_then(|trace| trace.kind());
@@ -1243,8 +1243,7 @@ mod tests {
         let mut policy = restricted(&[&ro, &inner, &file, &absent], &[&w], &[]);
         if let FsProjection::Restricted(rules) = &mut policy.fs {
             rules.read.extend(
-                [&tools, &w.join("bin")]
-                    .map(|d| FsAllow::RunPlace(RealPath::of_path(d).expect("a run place exists"))),
+                [&tools, &w.join("bin")].map(|d| FsAllow::RunPlace(crate::test_helper::real(d))),
             );
         }
         let binds = binds(&policy, WHOLE);
@@ -1306,10 +1305,10 @@ mod tests {
         if let FsProjection::Restricted(rules) = &mut policy.fs {
             rules
                 .read
-                .push(FsAllow::RunPlace(RealPath::of_path(&bin).expect("a place")));
+                .push(FsAllow::RunPlace(crate::test_helper::real(&bin)));
         }
         policy.exec = ExecProjection::Restricted(
-            std::iter::once(dir_rule(&RealPath::of_path(&bin).expect("an admit"), true)).collect(),
+            std::iter::once(dir_rule(&crate::test_helper::real(&bin), true)).collect(),
         );
         let binds = binds(&policy, WHOLE);
         let name = |p: &std::path::Path| p.to_string_lossy().into_owned();
@@ -1477,7 +1476,7 @@ mod tests {
         }
         let mut policy = restricted(&[&allowed], &[], &[]);
         if let FsProjection::Restricted(rules) = &mut policy.fs {
-            let place = RealPath::of_path(&tool).expect("a run place exists");
+            let place = crate::test_helper::real(&tool);
             rules.read.push(FsAllow::RunPlace(place));
         }
         let binds = binds(&policy, WHOLE);
@@ -2592,14 +2591,12 @@ mod tests {
     /// multi-call image elsewhere, and the linkers a launch's support
     /// supplies: nothing else is admitted, ral's own binary included.
     fn admitting(dirs: &[&str], paths: &[&str]) -> ExecProjection {
-        let real = |p: &str| RealPath::of_path(std::path::Path::new(p)).expect("an admit exists");
-        let coreutils = RealPath::of_path(std::path::Path::new("/usr/bin/cat"))
-            .ok()
-            .and_then(|cat| cat.as_path().parent().map(RealPath::assumed));
+        use crate::test_helper::real;
+        let coreutils = real("/usr/bin/cat").as_path().parent().map(real);
         let dirs = ["/bin", "/usr/bin"]
             .iter()
             .chain(dirs)
-            .map(|d| real(d))
+            .map(real)
             .chain(coreutils)
             .map(|d| dir_rule(&d, true));
         let files = paths.iter().map(|p| file_rule(&real(p), true));
@@ -2759,10 +2756,7 @@ mod tests {
             exec: admitting_less(
                 &[],
                 [
-                    file_rule(
-                        &RealPath::of_path(&denied).expect("the command exists"),
-                        false,
-                    ),
+                    file_rule(&crate::test_helper::real(&denied), false),
                     veto_rule(&name),
                 ],
             ),
@@ -2826,10 +2820,7 @@ mod tests {
         let policy = SandboxProjection {
             exec: admitting_less(
                 &[&expanded.to_string_lossy(), &whole.to_string_lossy()],
-                [file_rule(
-                    &RealPath::of_path(&blocked).expect("the block exists"),
-                    false,
-                )],
+                [file_rule(&crate::test_helper::real(&blocked), false)],
             ),
             ..restricted(&[], &[&expanded, &whole], &[])
         };
@@ -2896,9 +2887,9 @@ mod tests {
                 ..deny_within(&elsewhere, &[])
             };
             if let FsProjection::Restricted(rules) = &mut policy.fs {
-                rules.read.extend(
-                    placed.then(|| FsAllow::RunPlace(RealPath::of_path(&tools).expect("a place"))),
-                );
+                rules
+                    .read
+                    .extend(placed.then(|| FsAllow::RunPlace(crate::test_helper::real(&tools))));
             }
             let Some(env) = envelope_launches(&policy) else {
                 return;
@@ -3118,7 +3109,7 @@ mod tests {
         let bind = dir.join("w/deep/bind");
         let (prog, excluded) = (copy_true(&bind, "prog"), copy_true(&bind, "excluded"));
         let unrelated = copy_true(&dir.join("elsewhere"), "unrelated");
-        let real = |p: &std::path::Path| RealPath::of_path(p).expect("the file exists");
+        let real = |p: &std::path::Path| crate::test_helper::real(p);
         let policy = SandboxProjection {
             exec: ExecProjection::Restricted(
                 [
@@ -3752,8 +3743,8 @@ mod tests {
         let policy = exec_policy(admitting_less(
             &[],
             [
-                file_rule(&RealPath::of_path(&admitted_file).expect("exists"), true),
-                file_rule(&RealPath::of_path(&linked).expect("exists"), false),
+                file_rule(&crate::test_helper::real(&admitted_file), true),
+                file_rule(&crate::test_helper::real(&linked), false),
             ],
         ));
         let Some(env) = envelope_launches(&policy) else {

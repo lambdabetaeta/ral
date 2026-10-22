@@ -5,11 +5,11 @@
 //! component names a dotfile.
 
 use super::walk::Walk;
-use crate::path::shown;
+use crate::path::{LexicalPath, shown};
 use globset::{GlobBuilder, GlobMatcher};
 use std::ffi::{OsStr, OsString};
 use std::iter::successors;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, PathBuf};
 use std::sync::Arc;
 
 enum Step {
@@ -21,7 +21,7 @@ enum Step {
 
 pub(crate) struct Glob {
     /// The leading literal components, where the walk starts.
-    root: PathBuf,
+    root: LexicalPath,
     steps: Vec<Step>,
 }
 
@@ -29,24 +29,27 @@ impl Glob {
     /// # Errors
     /// A wildcard component beginning with `.`, one `globset` rejects, or
     /// a `..` after a wildcard, which no walked entry carries.
-    pub(crate) fn parse(pattern: &Path) -> Result<Self, String> {
-        let mut glob = Self {
-            root: PathBuf::new(),
-            steps: Vec::new(),
-        };
-        for c in pattern.components() {
-            if c == Component::ParentDir && !glob.steps.is_empty() {
+    pub(crate) fn parse(pattern: &LexicalPath) -> Result<Self, String> {
+        let (mut root, mut steps) = (PathBuf::new(), Vec::new());
+        for c in pattern.as_path().components() {
+            if c == Component::ParentDir && !steps.is_empty() {
                 return Err(format!(
                     "'{}': a walk never climbs '..' after a wildcard; glob from the directory it climbs to, as in `glob '../x'`?",
-                    shown(pattern)
+                    pattern.shown()
                 ));
             }
             match step(c)? {
-                Step::Name(name) if glob.steps.is_empty() => glob.root.push(name),
-                s => glob.steps.push(s),
+                Step::Name(name) if steps.is_empty() => root.push(name),
+                s => steps.push(s),
             }
         }
-        Ok(glob)
+        let root = LexicalPath::absolute(&root).ok_or_else(|| {
+            format!(
+                "'{}': a glob walks from an absolute directory",
+                shown(&root)
+            )
+        })?;
+        Ok(Self { root, steps })
     }
 
     /// The walk over the pattern's candidates, entering only directories
@@ -54,31 +57,35 @@ impl Glob {
     pub(crate) fn walk(self: &Arc<Self>) -> Walk {
         let bounded = !self.steps.iter().any(|s| matches!(s, Step::Any));
         let alive = Arc::clone(self);
-        Walk::everything(&self.root)
-            .following_links()
-            .depth(bounded.then_some(self.steps.len()))
-            .keeping(move |p| !alive.reach(p).is_empty())
+        Walk::all(&self.root)
+            .follow_links()
+            .max_depth(bounded.then_some(self.steps.len()))
+            .filter_entry(move |shown| !alive.reach(shown).is_empty())
     }
 
-    pub(crate) fn matches(&self, path: &Path) -> bool {
-        self.reach(path).contains(&self.steps.len())
+    pub(crate) fn matches(&self, shown: &LexicalPath) -> bool {
+        self.reach(shown).contains(&self.steps.len())
     }
 
-    /// The steps `path` can have reached, closed under `**` matching nothing.
-    /// A path outside the root reaches none.
-    fn reach(&self, path: &Path) -> Vec<usize> {
-        path.strip_prefix(&self.root).map_or_else(
-            |_| Vec::new(),
-            |rel| {
-                rel.components().fold(self.close([0]), |states, c| {
-                    self.close(
-                        states
-                            .into_iter()
-                            .filter_map(|i| self.advance(i, c.as_os_str())),
-                    )
-                })
-            },
-        )
+    /// The steps the entry `shown` can have reached, closed under `**`
+    /// matching nothing: it is named as the walk reached it, through any link.
+    /// A name outside the root reaches none.
+    fn reach(&self, shown: &LexicalPath) -> Vec<usize> {
+        shown
+            .as_path()
+            .strip_prefix(self.root.as_path())
+            .map_or_else(
+                |_| Vec::new(),
+                |rel| {
+                    rel.components().fold(self.close([0]), |states, c| {
+                        self.close(
+                            states
+                                .into_iter()
+                                .filter_map(|i| self.advance(i, c.as_os_str())),
+                        )
+                    })
+                },
+            )
     }
 
     fn advance(&self, i: usize, name: &OsStr) -> Option<usize> {
@@ -131,15 +138,18 @@ fn step(c: Component<'_>) -> Result<Step, String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "[test] fixed patterns")]
 mod tests {
     use super::Glob;
-    use std::path::Path;
+    use crate::path::LexicalPath;
+
+    fn parse(pattern: &str) -> Result<Glob, String> {
+        Glob::parse(&LexicalPath::absolute(pattern.as_ref()).expect("an absolute pattern"))
+    }
 
     #[test]
     fn a_parent_after_a_wildcard_is_refused() {
-        assert!(Glob::parse(Path::new("*/../x")).is_err());
-        assert!(Glob::parse(Path::new("../x")).is_ok());
-        assert!(Glob::parse(Path::new("a/../*")).is_ok());
+        assert!(parse("/*/../x").is_err());
+        assert!(parse("/../x").is_ok());
+        assert!(parse("/a/../*").is_ok());
     }
 }

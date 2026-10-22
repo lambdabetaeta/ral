@@ -73,8 +73,7 @@ impl Tree {
         reason = "[test] a fixture tree on disk, laid by name"
     )]
     pub fn lay(dir: &std::path::Path, names: impl IntoIterator<Item: AsRef<str>>) -> Self {
-        let root = crate::path::RealPath::of_path(dir).expect("a test tree's root exists");
-        let tree = Self(root.as_path().to_path_buf());
+        let tree = Self(real(dir).as_path().to_path_buf());
         for name in names {
             let name = name.as_ref();
             let at = tree.path(name);
@@ -89,6 +88,16 @@ impl Tree {
             }
         }
         tree
+    }
+
+    /// A tree nobody laid: its root is a name under the temp dir that nothing
+    /// occupies, so a walk of a name below it goes as far as the temp dir and
+    /// is lexical beyond.  For tests that judge names no disk need hold.
+    ///
+    /// # Panics
+    /// If the temp dir is not an existing, absolute path.
+    pub fn nowhere() -> Self {
+        Self(real(std::env::temp_dir()).as_path().join("ral-nowhere"))
     }
 
     /// The real path of the tree's root.
@@ -111,6 +120,25 @@ impl Tree {
             .expect("a test tree is UTF-8")
             .to_owned()
     }
+}
+
+/// The position of the existing, absolute `path`: where its walk ends.
+///
+/// # Panics
+/// If `path` is not absolute or names nothing the walk reaches.
+pub fn real(path: impl AsRef<std::path::Path>) -> crate::path::RealPath {
+    let spelled =
+        crate::path::LexicalPath::absolute(path.as_ref()).expect("a test names an absolute path");
+    crate::path::RealPath::of(&spelled).expect("a test names what exists")
+}
+
+/// The position where the walk of the absolute `path` ends, as far as the
+/// disk goes and the rest lexical: a place that need not exist.
+///
+/// # Panics
+/// If `path` is not absolute or its walk fails.
+pub fn place(path: impl AsRef<std::path::Path>) -> crate::path::RealPath {
+    trace(path).real().clone()
 }
 
 /// The walk of the absolute `path`, leniently: the transcript an access to it

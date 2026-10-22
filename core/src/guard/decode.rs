@@ -441,7 +441,7 @@ mod tests {
     #[cfg(unix)]
     use crate::capability::{FsAllow, FsOp};
     use crate::path::command_name_key;
-    use crate::path::{RealPath, utf8};
+    use crate::path::utf8;
     #[cfg(unix)]
     use crate::test_helper::{located, stack, trace};
 
@@ -601,7 +601,7 @@ mod tests {
     #[test]
     fn a_name_is_a_found_file_or_no_rule_with_unix_available_a_parameter() {
         let tmp = tempfile::tempdir().unwrap();
-        let bin = RealPath::of_path(tmp.path()).unwrap().as_path().join("bin");
+        let bin = crate::test_helper::real(tmp.path()).as_path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         let file = bin.join(format!("zz-found{}", std::env::consts::EXE_SUFFIX));
         std::fs::write(&file, "").unwrap();
@@ -635,10 +635,7 @@ mod tests {
     fn a_name_found_at_decode_is_not_redirected_and_a_lost_name_keeps_its_veto() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
-        let root = RealPath::of_path(tmp.path())
-            .unwrap()
-            .as_path()
-            .to_path_buf();
+        let root = crate::test_helper::real(tmp.path()).as_path().to_path_buf();
         let (first, later) = (root.join("first"), root.join("later"));
         for (bin, names) in [(&first, &["git"][..]), (&later, &["git", "zz-lost"][..])] {
             std::fs::create_dir(bin).unwrap();
@@ -1010,10 +1007,7 @@ mod tests {
     #[cfg(unix)]
     fn tree() -> (tempfile::TempDir, std::path::PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
-        let root = RealPath::of_path(tmp.path())
-            .unwrap()
-            .as_path()
-            .to_path_buf();
+        let root = crate::test_helper::real(tmp.path()).as_path().to_path_buf();
         (tmp, root)
     }
 

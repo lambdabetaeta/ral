@@ -14,7 +14,7 @@
 use super::super::tests::{grant, pin, real, with_scoped_state_dir};
 use super::super::{GrantKind, RW_MASK, needing_grant, pin_all};
 use super::*;
-use crate::path::RealPath;
+use crate::test_helper::place;
 #[test]
 fn sid_parse_valid_and_invalid() {
     let ok = OwnedSid::parse("S-1-1-0");
@@ -64,7 +64,7 @@ fn needing_grant_drops_well_known_grant() {
 
         let not_granted = real(td_no_grant.path());
         let pins = pin_all(
-            &[RealPath::assumed(&granted), RealPath::assumed(&not_granted)],
+            &[place(&granted), place(&not_granted)],
             GrantKind::ReadWrite,
         )
         .unwrap();

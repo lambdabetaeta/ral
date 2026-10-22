@@ -290,7 +290,6 @@ mod judged_program {
     };
     use super::build_launch;
     use crate::ir::CommandName;
-    use crate::path::RealPath;
     use crate::process::{DurableRoot, PgidPolicy, StdioSpec};
     use crate::types::{Shell, Value};
     use std::io::Read;
@@ -377,8 +376,8 @@ mod judged_program {
         let plan = judge(&mut shell, &[]);
         point_build_at(tmp.path(), &b);
         assert_eq!(
-            RealPath::of_path(&link).unwrap(),
-            RealPath::of_path(&b).unwrap(),
+            crate::test_helper::real(&link),
+            crate::test_helper::real(&b),
             "the link moved"
         );
         assert_eq!(stdout_of(plan, &shell), "a\n");

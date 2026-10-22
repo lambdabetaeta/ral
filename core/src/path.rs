@@ -49,17 +49,17 @@ pub use tilde::abbreviate_home;
 
 pub use forms::{CwdPath, FrozenPath, LexicalPath, NotACwd};
 pub use git::work_tree_chain;
-pub use identity::{Allow, Deny, MatchedBy, Polarity};
+pub use identity::MatchedBy;
 pub(crate) use identity::{Depth, Subject};
 #[cfg(target_os = "macos")]
 pub(crate) use lex::proper_ancestors;
 pub(crate) use lex::{GrantRefusal, SubpathRefusal, classify_subpath, grant_eligibility};
 pub use lex::{
     NotUtf8, basename, exists, extension, is_absolute, is_dir, is_stream_or_drive, join_slash,
-    strip_appended_suffix, utf8, with_appended_suffix,
+    relative_key, strip_appended_suffix, utf8, with_appended_suffix,
 };
 pub use namespace::{EnginePath, GuestPath};
-#[cfg(any(target_os = "macos", all(test, unix)))]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) use render::render_paths;
 #[cfg(unix)]
 pub(crate) use render::render_real;
@@ -115,29 +115,4 @@ impl PathRules {
 #[cfg(target_os = "linux")]
 pub(crate) fn proc_fd_path(raw: std::os::fd::RawFd) -> std::path::PathBuf {
     std::path::PathBuf::from(format!("/proc/self/fd/{raw}"))
-}
-
-/// Placeholder absolute path for fixtures that need a `cwd: &Path`
-/// (`guard::freeze::FreezeCtx`) but no particular directory.
-#[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "lexical Path::new for a test placeholder: no I/O behind it; the lint here guards path-construction discipline, and this shared fixture is its one sanctioned test door"
-)]
-pub(crate) fn test_cwd() -> &'static std::path::Path {
-    std::path::Path::new("/")
-}
-
-/// A fixture path written POSIX-style, `/a/b`, as an absolute path on this
-/// host: on Windows a driveless `/a/b` is not absolute, and a resolver anchors
-/// it to the cwd's drive, so it gains a drive and the host's separator.  The
-/// root `/` is the universal prefix on every host, as
-/// [`FrozenPath::root`] is, and stays as written.
-#[cfg(test)]
-pub(crate) fn test_absolute(posix: &str) -> String {
-    debug_assert!(posix.starts_with('/'), "{posix:?} is not POSIX-absolute");
-    match PathRules::HOST {
-        PathRules::Windows if posix != "/" => format!("C:{}", posix.replace('/', r"\")),
-        _ => posix.to_string(),
-    }
 }

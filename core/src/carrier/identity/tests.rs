@@ -430,15 +430,16 @@ mod probe_tests {
         |_| crate::HostSurface::default().runtime(crate::terminal::TerminalState::default()),
         |_, shell| {
             use crate::capability::{Capabilities, FsPolicy, Net};
-            use crate::path::{FrozenPath, test_absolute};
+            use crate::path::FrozenPath;
+            use crate::test_helper::Tree;
             shell
                 .context
                 .grants
                 .push(crate::test_helper::layer(Capabilities {
                     fs: Some(FsPolicy {
-                        read_prefixes: vec![FrozenPath::from_surface(&test_absolute(
-                            "/ral-probe/work",
-                        ))],
+                        read_prefixes: vec![FrozenPath::from_surface(
+                            &Tree::nowhere().at("/ral-probe/work"),
+                        )],
                         ..FsPolicy::default()
                     }),
                     net: Some(Net::Offline),

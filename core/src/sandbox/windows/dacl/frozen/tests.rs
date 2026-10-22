@@ -6,8 +6,8 @@
 use super::super::ensure_frozen_grant;
 use super::super::tests::{junction, labelled, mklink, pin, real, with_scoped_state_dir};
 use super::*;
-use crate::path::RealPath;
 use crate::process::cancel::DurableRoot;
+use crate::test_helper::place;
 use std::path::PathBuf;
 
 const CAP_SID: &str = "S-1-15-3-1024-1-2-3-4-5-6-7-8";
@@ -59,8 +59,12 @@ fn a_junction_on_the_leaf_is_refused() {
     let root = real(td.path());
     let (outside, link) = (root.join("outside"), root.join("link"));
     fs::create_dir(&outside).unwrap();
+    let position = place(&link);
     junction(&link, &outside);
-    assert!(is_redirected(&pin(&link, GrantKind::ReadOnly)));
+    assert!(is_redirected(&FrozenPin::open(
+        &position,
+        GrantKind::ReadOnly
+    )));
 }
 
 #[test]
@@ -69,9 +73,10 @@ fn a_junction_on_an_ancestor_is_refused() {
     let root = real(td.path());
     let (outside, link) = (root.join("outside"), root.join("link"));
     fs::create_dir_all(outside.join("inner")).unwrap();
+    let position = place(link.join("inner"));
     junction(&link, &outside);
-    assert!(is_redirected(&pin(
-        &link.join("inner"),
+    assert!(is_redirected(&FrozenPin::open(
+        &position,
         GrantKind::ReadWrite
     )));
 }
@@ -101,6 +106,7 @@ fn a_directory_converted_to_a_junction_while_its_path_is_opened_is_never_descend
     let (a, outside) = (root.join("a"), root.join("outside"));
     fs::create_dir_all(outside.join("b")).unwrap();
     fs::create_dir(&a).unwrap();
+    let below = place(a.join("b"));
     std::thread::scope(|s| {
         // Bounded on its own, and the walks end when it does: a panic on
         // either side leaves nothing for the scope to wait on forever.
@@ -112,7 +118,7 @@ fn a_directory_converted_to_a_junction_while_its_path_is_opened_is_never_descend
         // Walk first, test after: a flipper that finishes before this thread
         // is scheduled still meets one walk, so the test is never vacuous.
         loop {
-            let pinned = pin(&a.join("b"), GrantKind::ReadOnly);
+            let pinned = FrozenPin::open(&below, GrantKind::ReadOnly);
             assert!(
                 !matches!(pinned, Ok(Some(_))),
                 "descended through a converted component"
@@ -132,6 +138,7 @@ fn a_grant_since_replaced_by_a_junction_is_refused_on_the_next_launch() {
         let (granted, outside) = (root.join("granted"), root.join("outside"));
         fs::create_dir_all(&granted).unwrap();
         fs::create_dir(&outside).unwrap();
+        let position = place(&granted);
         {
             let pin = pin(&granted, GrantKind::ReadOnly).unwrap().unwrap();
             ensure_frozen_grant(
@@ -144,7 +151,7 @@ fn a_grant_since_replaced_by_a_junction_is_refused_on_the_next_launch() {
         }
         fs::remove_dir(&granted).unwrap();
         junction(&granted, &outside);
-        let err = pin_all(&[RealPath::assumed(&granted)], GrantKind::ReadOnly).err();
+        let err = pin_all(&[position], GrantKind::ReadOnly).err();
         assert!(matches!(err, Some(DaclError::Redirected { .. })), "{err:?}");
     });
 }

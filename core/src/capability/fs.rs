@@ -416,10 +416,12 @@ fn fold(grants: &GrantStack, op: &FsOp, places: bool, floor: &Floor) -> Option<F
 pub(crate) type Returned = Box<(Located, Withheld<FsDeny>)>;
 
 /// The read and running regions folded once, for a walk that judges many
-/// objects.  A permit or an exclusion of the first, which holds no run
-/// places, is final with the same witness; only a missing allowance asks the
-/// second, whose run places add positive evidence alone.
-pub(crate) struct ReadRegion {
+/// objects.
+///
+/// A permit or an exclusion of the first, which holds no run places, is final
+/// with the same witness; only a missing allowance asks the second, whose run
+/// places add positive evidence alone.
+pub struct ReadRegion {
     plain: Option<FsRules>,
     placed: Option<FsRules>,
 }
@@ -496,7 +498,7 @@ impl GrantStack {
     }
 
     /// The read and running regions, folded now.
-    pub(crate) fn read_region(&self, floor: &Floor) -> ReadRegion {
+    pub fn read_region(&self, floor: &Floor) -> ReadRegion {
         ReadRegion {
             plain: region(self, &FsOp::Read, floor),
             placed: running_region(self, floor),
@@ -584,27 +586,31 @@ mod tests {
     use super::*;
     use crate::capability::Evidence;
     use crate::capability::{Capabilities, ExecDenial, ExecGrant, ExecKey, Program};
-    use crate::path::{test_absolute, utf8};
-    use crate::test_helper::{core_runtime, layer, located, stack, trace};
+    use crate::path::utf8;
+    use crate::test_helper::{Tree, core_runtime, layer, located, real, stack, trace};
     use std::path::{Path, PathBuf};
 
-    /// A spelling taken as written, on this host.
+    /// A `/`-rooted fixture name as a spelling on this host: a name below a
+    /// place nothing occupies, `/` itself the universal prefix.
     fn lit(s: &str) -> FrozenPath {
-        FrozenPath::from_surface(&test_absolute(s))
+        match s {
+            "/" => FrozenPath::root(),
+            _ => FrozenPath::from_surface(&Tree::nowhere().at(s)),
+        }
     }
 
     /// A Windows spelling taken exactly as written: the `cfg(windows)` tests
-    /// below judge the host's own spellings, which no [`test_absolute`]
-    /// mapping may rewrite.
+    /// below judge the host's own spellings, which no [`lit`] mapping may
+    /// rewrite.
     #[cfg(windows)]
     fn native(s: &str) -> FrozenPath {
         FrozenPath::from_surface(s)
     }
 
-    /// The access to `path`, a POSIX-style fixture path, walked as it is: an
+    /// The access to `path`, a `/`-rooted fixture name, walked as it is: an
     /// absent path is its own lexical position.
     fn at(path: &str) -> Trace {
-        trace(test_absolute(path))
+        trace(Tree::nowhere().path(path))
     }
 
     fn table(allows: &[FrozenPath], denies: &[FrozenPath]) -> FsRules {
@@ -631,10 +637,7 @@ mod tests {
     /// A tempdir and the real path of its root.
     fn tmp() -> (tempfile::TempDir, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
-        let root = RealPath::of_path(tmp.path())
-            .unwrap()
-            .as_path()
-            .to_path_buf();
+        let root = real(tmp.path()).as_path().to_path_buf();
         (tmp, root)
     }
 
@@ -771,16 +774,17 @@ mod tests {
         let root = GrantPath::<Extent>::allowing(FrozenPath::root()).unwrap();
         assert_eq!(root.real, Extent::Everywhere);
         let region = table(&[FrozenPath::root()], &[]);
-        // A drive spelling is a path only on Windows.
-        let mut paths = vec!["/etc/hosts"];
+        // A drive spelling is a path only on Windows, and `D:` may not exist.
+        let mut positions = vec![at("/etc/hosts").real().clone()];
         if cfg!(windows) {
-            paths.extend([r"C:\Users\someone\Temp\x", r"D:\a\repo\y"]);
+            positions.extend(
+                [r"C:\Users\someone\Temp\x", r"D:\a\repo\y"].map(RealPath::unwalked_for_test),
+            );
         }
-        for path in paths {
-            let position = RealPath::lenient(Path::new(path));
+        for position in positions {
             assert!(
                 region.evidence(Subject::Position(&position)).permits(),
-                "{path}"
+                "{position}"
             );
         }
     }

@@ -77,7 +77,6 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("core/src/builtins/modules.rs", "silent:module-load"),
     ("core/build.rs", "silent:prelude-bake-build"),
     ("core/src/invocation.rs", "silent:argv-before-main"),
-    ("core/src/path/tree/walk.rs", "silent:tree-walk"),
     ("core/src/boot.rs", "silent:prelude-bake"),
     // The fs sites: `path/walk/` is the one place that opens a model-named
     // object — the engine in `walk.rs` asks a host module and holds none
@@ -115,6 +114,8 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("core/src/path/walk/windows.rs", "surface:walk-publish"),
     ("core/src/path/walk/windows.rs", "surface:walk-reopen"),
     ("core/src/path/walk/windows.rs", "surface:walk-stage"),
+    ("core/src/runtime/command/head.rs", "silent:head-refusal"),
+    ("core/src/runtime/command/head.rs", "silent:head-suffixed"),
     ("core/src/path/which.rs", "silent:which-stat"),
     ("core/src/path/which.rs", "silent:which-stat-absent"),
     ("core/src/process/jail/linux.rs", "silent:jail-cgroup-procs"),
@@ -127,7 +128,6 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
         "silent:cloexec-socketpair",
     ),
     ("core/src/process/spawn_lock.rs", "silent:spawn-door"),
-    ("core/src/path/tree.rs", "silent:tree-bytes"),
     ("core/src/sandbox/reexec.rs", "silent:self-reexec-windows"),
     ("core/src/sandbox.rs", "silent:restricted-envelope-probe"),
     ("core/src/sandbox/reexec.rs", "silent:self-reexec"),
@@ -248,10 +248,7 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     // Provider declarations written back to the app's own config directory by
     // synod's accounts screen; addresses and protocols, never keys.
     ("exarch/src/config.rs", "silent:config-write"),
-    ("core/src/path/git.rs", "silent:git-dir-backpointer"),
-    ("core/src/path/git.rs", "silent:git-dir-config-worktree"),
-    ("core/src/path/git.rs", "silent:git-dir-discovery"),
-    ("core/src/path/git.rs", "silent:git-dir-pointer"),
+    ("core/src/path/git.rs", "silent:git-read"),
     ("exarch/src/provider/state.rs", "silent:state-read"),
     ("exarch/src/provider/state.rs", "silent:state-write"),
     ("exarch/src/tui/terminal.rs", "silent:editor-compose"),

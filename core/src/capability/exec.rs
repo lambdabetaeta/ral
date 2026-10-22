@@ -582,15 +582,15 @@ pub(crate) fn rules(grants: &GrantStack) -> Option<ExecRules> {
 pub(super) mod tests {
     use super::*;
     use crate::capability::Evidence;
-    use crate::path::{shown, test_absolute, utf8};
-    use crate::test_helper::trace;
+    use crate::path::utf8;
+    use crate::test_helper::{Tree, real as walked, trace};
     use std::path::Path;
     use std::sync::LazyLock;
 
-    /// The access to `p`, a POSIX-style fixture path, walked as it is: an
+    /// The access to `p`, a `/`-rooted fixture name, walked as it is: an
     /// absent path is its own lexical position.
     fn access(p: &str) -> Trace {
-        trace(test_absolute(p))
+        trace(Tree::nowhere().path(p))
     }
 
     fn real(p: &str) -> RealPath {
@@ -598,7 +598,10 @@ pub(super) mod tests {
     }
 
     fn written(p: &str) -> FrozenPath {
-        FrozenPath::from_surface(&test_absolute(p))
+        match p {
+            "/" => FrozenPath::root(),
+            _ => FrozenPath::from_surface(&Tree::nowhere().at(p)),
+        }
     }
 
     fn excluded(p: &str) -> GrantPath<Excluded> {
@@ -756,7 +759,7 @@ pub(super) mod tests {
     /// `dir` marker, apart from a file exclusion at the same place.
     #[test]
     fn a_directory_exclusion_reads_apart_from_a_file_exclusion() {
-        let tools = shown(test_absolute("/tools"));
+        let tools = Tree::nowhere().at("/tools");
         let tools = quote_word(&tools);
         assert_eq!(
             ExecDeny::Dir(excluded("/tools")).to_string(),
@@ -774,7 +777,7 @@ pub(super) mod tests {
     #[test]
     fn a_file_found_by_name_is_cited_by_its_path_and_vetoed_by_name() {
         let tmp = tempfile::tempdir().unwrap();
-        let bin = RealPath::of_path(tmp.path()).unwrap().as_path().join("bin");
+        let bin = walked(tmp.path()).as_path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         let file = bin.join(format!("zz-found{}", std::env::consts::EXE_SUFFIX));
         std::fs::write(&file, "").unwrap();
@@ -784,7 +787,7 @@ pub(super) mod tests {
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let search = Some(utf8(&bin).unwrap());
-        let found = RealPath::of_path(&file).unwrap();
+        let found = walked(&file);
 
         let allows: ExecRules = name_rules::<Trace>("zz-found", search, cfg!(unix))
             .unwrap()
@@ -1131,10 +1134,7 @@ pub(super) mod tests {
     /// A tempdir and the real path of its root.
     fn tmp() -> (tempfile::TempDir, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
-        let root = RealPath::of_path(tmp.path())
-            .unwrap()
-            .as_path()
-            .to_path_buf();
+        let root = walked(tmp.path()).as_path().to_path_buf();
         (tmp, root)
     }
 
@@ -1143,7 +1143,7 @@ pub(super) mod tests {
     }
 
     fn at(path: &Path) -> RealPath {
-        RealPath::of_path(path).unwrap()
+        walked(path)
     }
 
     /// A key with both bits resolves to both entries, at paths that may differ;

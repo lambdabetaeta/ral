@@ -654,16 +654,19 @@ mod tests {
     use crate::capability::{ExecAllow, ExecDeny, Extent, GrantPath, Rule};
     use crate::path::{Excluded, FrozenPath, render_objects, render_paths, utf8};
     use crate::sandbox::{FsProjection, FsRules};
+    use crate::test_helper::{Tree, place, real};
     use rustix::fs::FileType;
     use std::path::{Path, PathBuf};
 
     /// The roots of an unrestricted fs.
     fn whole() -> Vec<RealPath> {
-        vec![RealPath::assumed("/")]
+        vec![real("/")]
     }
 
-    fn real(path: &str) -> RealPath {
-        RealPath::assumed(path)
+    /// The position of the `/`-rooted fixture name `spelled`, under a place
+    /// nothing occupies.
+    fn nowhere(spelled: &str) -> RealPath {
+        place(Tree::nowhere().path(spelled))
     }
 
     fn restricted() -> ExecProjection {
@@ -767,9 +770,8 @@ mod tests {
             })
     }
 
-    fn rule(path: &Path, dir: bool, allow: bool) -> Rule {
-        let written = FrozenPath::from_surface(utf8(path).unwrap());
-        let real = RealPath::assumed(path);
+    fn rule(real: RealPath, dir: bool, allow: bool) -> Rule {
+        let written = FrozenPath::from_surface(utf8(real.as_path()).unwrap());
         match (dir, allow) {
             (true, true) => Rule::Allow(ExecAllow::Dir(GrantPath {
                 written,
@@ -786,11 +788,11 @@ mod tests {
     }
 
     fn allow(path: &Path, dir: bool) -> Rule {
-        rule(path, dir, true)
+        rule(place(path), dir, true)
     }
 
     fn deny(path: &Path, dir: bool) -> Rule {
-        rule(path, dir, false)
+        rule(place(path), dir, false)
     }
 
     fn veto(name: &str) -> Rule {
@@ -834,9 +836,10 @@ mod tests {
         let outside = tmp.path().join("outside");
         std::fs::create_dir(&outside).expect("outside");
         let allowed = tmp.path().join("allowed");
+        let position = place(&allowed);
         std::os::unix::fs::symlink(&outside, &allowed).expect("symlink");
         let Err(why) = build(
-            &ExecProjection::Restricted(table_of(&[allow(&allowed, true)])),
+            &ExecProjection::Restricted(table_of(&[rule(position, true, true)])),
             &FsProjection::Unrestricted,
             &whole(),
             landlock,
@@ -854,10 +857,7 @@ mod tests {
     /// [`FILES`] under a real `d`.
     fn tree() -> (tempfile::TempDir, PathBuf) {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let d = RealPath::of_path(tmp.path())
-            .expect("real")
-            .as_path()
-            .join("d");
+        let d = real(tmp.path()).as_path().join("d");
         for file in FILES {
             let path = d.join(file);
             std::fs::create_dir_all(path.parent().expect("a parent")).expect("dirs");
@@ -929,9 +929,7 @@ mod tests {
             .map(|f| d.join(f))
             .filter(|f| {
                 table
-                    .evidence(Subject::Program(crate::path::Subject::Position(&real(
-                        &f.to_string_lossy(),
-                    ))))
+                    .evidence(Subject::Program(crate::path::Subject::Position(&real(f))))
                     .permits()
             })
             .map(|f| (f, false))
@@ -1028,8 +1026,9 @@ mod tests {
     fn a_root_now_a_symlink_refuses_the_expansion() {
         let (_tmp, d) = tree();
         let link = d.join("link");
+        let position = place(&link);
         std::os::unix::fs::symlink(d.join("sub"), &link).expect("symlink");
-        let refused = expanded(&[allow(&link, true)], true);
+        let refused = expanded(&[rule(position, true, true)], true);
         assert!(
             matches!(refused, Err(Error::Open(OpenError::Linked(_)))),
             "{refused:?}"
@@ -1038,7 +1037,7 @@ mod tests {
 
     /// The write prefixes of an fs projection, each a rendered object.
     fn writing(prefixes: &[&str]) -> RenderedFs {
-        let prefixes: Vec<_> = prefixes.iter().map(|p| real(p)).collect();
+        let prefixes: Vec<_> = prefixes.iter().map(|p| nowhere(p)).collect();
         let write = render_objects(prefixes.iter().map(|p| (p, None))).expect("renders");
         FsProjection::Restricted(FsRules {
             write,
@@ -1051,7 +1050,7 @@ mod tests {
     /// `Any` or under an unrestricted fs, where every write does.
     #[test]
     fn a_name_veto_walks_only_where_no_write_reaches() {
-        let bin = real("/ral-test/w/bin");
+        let bin = nowhere("/ral-test/w/bin");
         let table = table_of(&[allow(bin.as_path(), true), veto("n")]);
         let walks = |fs: &RenderedFs| vetoes_walk(&table, fs)(&bin);
         assert!(walks(&writing(&[])), "apart");
@@ -1072,33 +1071,39 @@ mod tests {
     /// inside it, `Any` being every root.
     #[test]
     fn a_directory_admission_is_lowered_onto_the_bind_roots() {
+        let nowhere = Tree::nowhere();
         let lowered = |rules: &[Rule], roots: &[&str]| {
-            let roots: Vec<_> = roots.iter().map(|r| real(r)).collect();
+            let roots: Vec<_> = roots.iter().map(|r| place(nowhere.path(r))).collect();
             lowered(&table_of(rules), &roots)
                 .iter()
                 .map(|r| r.as_path().to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
         };
-        let tools = [allow(Path::new("/tools"), true)];
-        assert_eq!(lowered(&tools, &["/"]), ["/tools"], "a root above");
-        assert_eq!(lowered(&tools, &["/tools"]), ["/tools"], "a root at it");
+        let at = |names: &[&str]| names.iter().map(|n| nowhere.at(n)).collect::<Vec<_>>();
+        let tools = [allow(&nowhere.path("/tools"), true)];
+        assert_eq!(lowered(&tools, &["/"]), at(&["/tools"]), "a root above");
+        assert_eq!(
+            lowered(&tools, &["/tools"]),
+            at(&["/tools"]),
+            "a root at it"
+        );
         assert_eq!(
             lowered(&tools, &["/tools/sub"]),
-            ["/tools/sub"],
+            at(&["/tools/sub"]),
             "a sub-bind"
         );
         assert_eq!(
             lowered(&tools, &["/", "/tools/sub", "/other"]),
-            ["/tools", "/tools/sub"],
+            at(&["/tools", "/tools/sub"]),
             "above and inside, never beside"
         );
         assert!(lowered(&tools, &["/other"]).is_empty(), "not shown at all");
         assert_eq!(
             lowered(&[any()], &["/usr", "/work"]),
-            ["/usr", "/work"],
+            at(&["/usr", "/work"]),
             "Any is every root"
         );
-        assert_eq!(lowered(&[any()], &["/"]), ["/"], "or `/` itself");
+        assert_eq!(lowered(&[any()], &["/"]), at(&["/"]), "or `/` itself");
     }
 
     /// An `every` table whose exclusions are all name vetoes subtracts
@@ -1121,9 +1126,10 @@ mod tests {
             plan(&bare, Landlock::Absent).expect("nothing to enforce"),
             None
         );
-        let cut = of(&[any(), deny(Path::new("/x"), false)]);
+        let x = Tree::nowhere().path("/x");
+        let cut = of(&[any(), deny(&x, false)]);
         assert!(kernel_table(&cut).is_some());
-        assert!(kernel_table(&of(&[allow(Path::new("/x"), true)])).is_some());
+        assert!(kernel_table(&of(&[allow(&x, true)])).is_some());
     }
 
     /// A bind root inside an admitted directory is a root of its own, and the
@@ -1132,7 +1138,7 @@ mod tests {
     #[test]
     fn a_sub_bind_is_expanded_from_its_own_root() {
         let (_tmp, d) = tree();
-        let sub = RealPath::assumed(d.join("s"));
+        let sub = real(d.join("s"));
         let rules = [allow(&d, true), deny(&d.join("s/f"), false)];
         let seen = expanded_on(&rules, std::slice::from_ref(&sub), true).expect("expands");
         assert_eq!(
@@ -1164,8 +1170,8 @@ mod tests {
             ),
             "everything but `s`, which the walk never enters"
         );
-        let seen = expanded_masking(&rules, &[RealPath::assumed(d.join("s"))], false, &mask("s"))
-            .expect("expands");
+        let seen =
+            expanded_masking(&rules, &[real(d.join("s"))], false, &mask("s")).expect("expands");
         assert!(seen.is_empty(), "a masked root admits nothing: {seen:?}");
     }
 }

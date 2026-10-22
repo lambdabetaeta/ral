@@ -59,7 +59,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 use strum::{IntoStaticStr, VariantArray};
 
-use super::lex::{fold_dots, is_absolute, is_unparsed_head, names_a_dir};
+use super::lex::{is_absolute, is_unparsed_head, names_a_dir};
 use super::{LexicalPath, PathRules, shown};
 use crate::label;
 // Inverted edge, deliberate: `Verdict`'s field is private to its module, which `pub(in ..)` cannot name from a sibling.
@@ -156,6 +156,14 @@ pub struct ObjectId {
 }
 
 impl ObjectId {
+    /// Whether both objects are on one device or volume.
+    pub(crate) fn same_volume(self, other: Self) -> bool {
+        #[cfg(unix)]
+        return self.dev == other.dev;
+        #[cfg(windows)]
+        return self.volume == other.volume;
+    }
+
     /// The identity of the object `f` holds, read from the handle.
     pub(crate) fn of(f: &File) -> io::Result<Self> {
         host::seen(f).map(|seen| seen.id)
@@ -503,12 +511,6 @@ impl RealPath {
         Ok(real)
     }
 
-    /// A fold's result, a position whose spelling already says so: what
-    /// `FrozenPath` keeps of a surface it folded and of a guest's.
-    pub(super) fn from_folded(path: impl Into<PathBuf>) -> Self {
-        Self(path.into())
-    }
-
     /// This position's entry `name`.
     fn child(&self, name: &EntryName) -> Self {
         Self(self.0.join(name.as_os_str()))
@@ -576,28 +578,21 @@ impl RealPath {
             .and_then(|located| located.into_dir().ok()))
     }
 
-    /// `realpath(3)` of `path`, which must exist.
-    ///
-    /// # Errors
-    /// The `io::Error` of the failed resolution, e.g. `NotFound`.
-    pub fn of_path(path: &Path) -> io::Result<Self> {
-        super::canon::canonicalise_strict(path).map(Self)
-    }
-
-    /// The real path `path` has, or will have once its missing tail is created.
-    pub fn lenient(path: &Path) -> Self {
-        Self(super::canon::canonicalise_lenient(path))
-    }
-
     /// A rendered object: already the frozen real path, so no lookup.
     #[cfg(target_os = "linux")]
     pub(crate) fn rendered(object: &super::Rendered) -> Self {
         Self(object.as_str().into())
     }
 
-    #[cfg(any(test, feature = "test-util"))]
-    pub fn assumed(path: impl Into<PathBuf>) -> Self {
-        Self(path.into())
+    /// The position `path` spells, which no walk made: for the tests that need
+    /// one on a drive the host does not have (the Windows ceiling tests with
+    /// a `D:\` position), where no walk can reach one.
+    ///
+    /// # Panics
+    /// If `path` is not a position's spelling.
+    #[cfg(test)]
+    pub(crate) fn unwalked_for_test(path: &str) -> Self {
+        Self::parse(path.as_ref()).expect("a test spells a position")
     }
 
     pub fn as_path(&self) -> &Path {
@@ -1188,10 +1183,6 @@ impl<A: Authority> Dir<A> {
     }
 }
 
-#[cfg_attr(
-    not(any(windows, all(test, unix))),
-    expect(dead_code, reason = "used from step 9")
-)]
 impl<A: Peeks> Dir<A> {
     pub(crate) fn stat(&self) -> &Stat {
         &self.stat
@@ -1310,7 +1301,6 @@ impl<A: Lists> Dir<A> {
     ///
     /// # Errors
     /// The walk's; `InvalidInput` where `name` is not a link.
-    #[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 9"))]
     pub(crate) fn open_dir_via_link(
         &self,
         name: &EntryName,
@@ -2368,16 +2358,6 @@ pub(crate) fn walk_excluded(rp: &LexicalPath) -> io::Result<Excluded> {
             target: None,
         }),
     }
-}
-
-/// The real path `path` names, or will name once its missing tail is
-/// created: [`walk_lenient`] on a name that is not yet a [`LexicalPath`].  A
-/// policy match has no error channel, so a path the walk still fails on (a
-/// name with no root, an unopenable root, a link cycle) is its own lexical
-/// fold.
-pub(super) fn resolve_lenient(path: &Path) -> PathBuf {
-    finish(path, Mode::Follow, OnMissing::Stop, Links::Splice, |_| true)
-        .map_or_else(|_| fold_dots(path), |located| located.trace.real.0)
 }
 
 /// [`walk`], with every object it passes put to `vet` before the walk relies

@@ -1,12 +1,7 @@
-//! Stage 3 of path resolution: `realpath(3)`, in two flavours named by what
-//! they do when the path does not exist.
-//!
-//! [`canonicalise_strict`] errors, [`canonicalise_lenient`] is the walk that
-//! stops at the first name it cannot enter ([`walk_lenient`](super::walk_lenient)):
-//! it resolves what exists and appends the missing tail lexically.  Every module needing
-//! canonicalisation comes through one of them, so the choice is visible at
-//! the call site.  [`match_variants`] is the sandbox-side companion: the
-//! several names one VFS object answers to.
+//! The names one object answers to, for the kernel sandboxes: its firmlink
+//! twins ([`match_variants`]) and the names a lookup of it stats on the way
+//! ([`lookup_walk`]).  All lexical: what the object is, and where a surface
+//! reaches it, is the walk's to say.
 
 use std::path::{Path, PathBuf};
 
@@ -23,38 +18,9 @@ pub(crate) const FIRMLINKS: &[(&str, &str)] = &[
 #[cfg(not(target_os = "macos"))]
 pub(crate) const FIRMLINKS: &[(&str, &str)] = &[];
 
-/// `realpath(3)`: errors when the file or an intermediate directory is
-/// missing.  Wraps `fs::canonicalize` so the workspace `disallowed_methods`
-/// lint can cage that call inside this file; the door outside `path` is
-/// [`LexicalPath::canonicalise_strict`](super::LexicalPath::canonicalise_strict),
-/// so nothing can `realpath` a path that was not first resolved through
-/// [`Resolver::resolve`](super::Resolver::resolve).
-#[allow(
-    clippy::disallowed_methods,
-    reason = "canon: the one strict `realpath(3)`, caged here behind `LexicalPath::canonicalise_strict`"
-)]
-pub(crate) fn canonicalise_strict(p: &Path) -> std::io::Result<PathBuf> {
-    let real = std::fs::canonicalize(p)?;
-    // Darwin's realpath(3) drops a trailing slash every lookup reads as "a directory".
-    if p.as_os_str().as_encoded_bytes().ends_with(b"/") && !real.is_dir() {
-        return Err(std::io::ErrorKind::NotADirectory.into());
-    }
-    Ok(real)
-}
-
-/// The walk's [`resolve_lenient`](super::walk::resolve_lenient): a policy
-/// names objects by the code that locates them, so a grant authored `/tmp/foo`
-/// matches an access through the link at `/private/tmp/foo`, and one on a
-/// build output not yet made names where it will land.  `p` is read as the
-/// kernel reads it: each `..` after the links before it, a dangling link at
-/// its target.
-pub(crate) fn canonicalise_lenient(p: &Path) -> PathBuf {
-    super::walk::resolve_lenient(p)
-}
-
-/// Every path string by which a kernel sandbox MAC hook might present the same
-/// VFS object as `p`: `p` itself, its lenient canonical form, and on macOS the
-/// firmlink toggle of each.  Unsorted and possibly repeating — the sole caller,
+/// Every path string by which a kernel sandbox MAC hook might present the VFS
+/// object at `real`, a resolved path: `real` itself and, on macOS, its
+/// firmlink toggle.  Unsorted and possibly repeating — the sole caller,
 /// [`match_variants_paths`], owns order and uniqueness.
 ///
 /// The motivation is empirical.  A Seatbelt rule `(subpath "/private/var/select")`
@@ -62,9 +28,9 @@ pub(crate) fn canonicalise_lenient(p: &Path) -> PathBuf {
 /// version, but `(subpath "/var/select")` does; other syscalls behave the
 /// inverse way.  Granting both removes the guess without enlarging the trust
 /// surface — the two names already reach the same inode.
-#[cfg(any(target_os = "macos", test))]
-pub(crate) fn match_variants(p: &Path) -> Vec<PathBuf> {
-    with_firmlink_twins(vec![p.to_path_buf(), canonicalise_lenient(p)])
+#[cfg(test)]
+pub(crate) fn match_variants(real: &Path) -> Vec<PathBuf> {
+    with_firmlink_twins(vec![real.to_path_buf()])
 }
 
 /// `names` and the firmlink toggle of each.
@@ -75,22 +41,28 @@ pub(crate) fn with_firmlink_twins(mut names: Vec<PathBuf>) -> Vec<PathBuf> {
     names
 }
 
-/// Each name a lookup of `p` stats on its way, the leaf included: every
-/// component under its parent's real path, never itself followed.
+/// Each name a lookup of the object at `real`, granted by `surface`, stats on
+/// its way, the root apart: the ancestors of `surface`, itself included where it
+/// differs from `real` (an authored link is passed, never followed), and the
+/// proper ancestors of `real`.
 #[cfg(unix)]
-pub(crate) fn lookup_walk(p: &Path) -> Vec<PathBuf> {
-    p.ancestors()
-        .filter_map(|a| Some(canonicalise_lenient(a.parent()?).join(a.file_name()?)))
+pub(crate) fn lookup_walk(surface: &Path, real: &Path) -> Vec<PathBuf> {
+    surface
+        .ancestors()
+        .filter(|a| *a != real)
+        .chain(real.ancestors().skip(1))
+        .filter(|a| a.file_name().is_some())
+        .map(Path::to_path_buf)
         .collect()
 }
 
-/// Engine behind [`render_paths`](super::render_paths).  Dedup keys on the
-/// exact path bytes, never a lossy rendering: two distinct non-UTF-8 paths
-/// decode to the same U+FFFD string, and collapsing them would attribute one
-/// path's grant to the other.  Separate from `render_paths` because that
-/// function's `S: AsRef<str>` bound means a test can never hand it a
-/// non-UTF-8 [`Path`].
-#[cfg(any(target_os = "macos", test))]
+/// Engine behind [`render_paths`](super::render_paths), whose paths are
+/// resolved ones.  Dedup keys on the exact path bytes, never a lossy
+/// rendering: two distinct non-UTF-8 paths decode to the same U+FFFD string,
+/// and collapsing them would attribute one path's grant to the other.
+/// Separate from `render_paths` because that function's `S: AsRef<str>` bound
+/// means a test can never hand it a non-UTF-8 [`Path`].
+#[cfg(test)]
 pub(crate) fn match_variants_paths<'a>(
     paths: impl Iterator<Item = &'a Path>,
 ) -> Result<Vec<String>, String> {
@@ -161,132 +133,11 @@ pub(crate) fn firmlink_toggle(p: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[test] fixtures write and canonicalise real files"
+    reason = "[test] fixtures build literal and non-UTF-8 paths"
 )]
 mod tests {
     use super::*;
     use std::path::Path;
-
-    #[test]
-    fn strict_errors_on_missing_path() {
-        let r = canonicalise_strict(Path::new("/this/should/not/exist/anywhere"));
-        assert!(r.is_err());
-    }
-
-    #[cfg(unix)]
-    #[allow(clippy::disallowed_methods, reason = "[test] fs scaffolding")]
-    #[test]
-    fn strict_refuses_a_trailing_slash_on_a_file_only() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("f");
-        std::fs::write(&file, "").unwrap();
-        let slashed = |p: &Path| PathBuf::from(format!("{}/", p.display()));
-        assert_eq!(
-            canonicalise_strict(&slashed(&file)).unwrap_err().kind(),
-            std::io::ErrorKind::NotADirectory
-        );
-        assert!(canonicalise_strict(&slashed(dir.path())).is_ok());
-    }
-
-    #[test]
-    fn lenient_falls_back_to_input_for_missing_path() {
-        let p = Path::new("/this/should/not/exist/anywhere/either");
-        let out = canonicalise_lenient(p);
-        // Only the suffix is asserted: where `/` canonicalises non-trivially
-        // the tail is re-appended to a different head.
-        assert!(out.ends_with("either"), "got {out:?}");
-    }
-
-    #[test]
-    fn lenient_resolves_existing_ancestor_and_reattaches_tail() {
-        // `/tmp` exists and the tail does not, so the head may come back as
-        // `/private/tmp` on macOS.
-        let suffix = "ral-canon-lenient-probe/foo";
-        let probe = Path::new("/tmp").join(suffix);
-        let out = canonicalise_lenient(&probe);
-        assert!(out.ends_with(suffix), "got {out:?}");
-    }
-
-    /// A tempdir fixture as the walk resolves it, and a name under it.
-    #[cfg(unix)]
-    fn fixture() -> (tempfile::TempDir, PathBuf) {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = std::fs::canonicalize(tmp.path()).unwrap();
-        std::fs::create_dir_all(dir.join("deep/dir")).unwrap();
-        std::fs::write(dir.join("file"), "").unwrap();
-        std::os::unix::fs::symlink("file", dir.join("to_file")).unwrap();
-        std::os::unix::fs::symlink("deep/dir", dir.join("link")).unwrap();
-        std::os::unix::fs::symlink("absent", dir.join("dangling")).unwrap();
-        (tmp, dir)
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn lenient_resolves_a_dangling_leaf_link_to_its_target() {
-        let (_tmp, dir) = fixture();
-        assert_eq!(
-            canonicalise_lenient(&dir.join("dangling")),
-            dir.join("absent")
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn lenient_takes_dotdot_physically_and_folds_a_missing_tail() {
-        let (_tmp, dir) = fixture();
-        assert_eq!(
-            canonicalise_lenient(&dir.join("link/../x")),
-            dir.join("deep/x")
-        );
-        assert_eq!(
-            canonicalise_lenient(&dir.join("missing/../x")),
-            dir.join("x")
-        );
-    }
-
-    /// A link cycle is its own fold.
-    #[cfg(unix)]
-    #[test]
-    fn lenient_folds_a_link_cycle() {
-        let (_tmp, dir) = fixture();
-        std::os::unix::fs::symlink("b", dir.join("a")).unwrap();
-        std::os::unix::fs::symlink("a", dir.join("b")).unwrap();
-        assert_eq!(canonicalise_lenient(&dir.join("a")), dir.join("a"));
-    }
-
-    /// A `..` in a missing tail never pops the walked prefix.
-    #[cfg(unix)]
-    #[test]
-    fn lenient_dotdot_in_a_missing_tail_keeps_the_walked_prefix() {
-        let (_tmp, dir) = fixture();
-        assert_eq!(
-            canonicalise_lenient(&dir.join("missing/../../x")),
-            dir.join("x")
-        );
-    }
-
-    /// Policy matching and access resolve a name by the same code.
-    #[cfg(unix)]
-    #[test]
-    fn lenient_agrees_with_the_walk() {
-        use crate::path::walk::{LeafMode, walk};
-        let (_tmp, dir) = fixture();
-        let cwd = crate::path::CwdPath::new(dir.clone()).unwrap();
-        let env = crate::types::EnvVars::new();
-        let resolver = crate::path::Resolver::at(&env, &cwd);
-        for rel in [
-            "file",
-            "to_file",
-            "link/x",
-            "dangling",
-            "link/../file",
-            "deep/dir/..",
-        ] {
-            let p = dir.join(rel);
-            let walked = walk(&resolver.anchor(&p), LeafMode::Follow).unwrap();
-            assert_eq!(canonicalise_lenient(&p), walked.real().as_path(), "{rel}");
-        }
-    }
 
     #[test]
     fn match_variants_always_includes_input() {
@@ -309,10 +160,6 @@ mod tests {
         assert!(v.iter().any(|p| p == Path::new("/var/folders/X/T")));
     }
 
-    // Unix-only because Windows reads `/Users/...` as relative to the current
-    // drive, where `C:\Users` exists, so the ancestor walk resolves a head and
-    // the path no longer passes through untouched.
-    #[cfg(unix)]
     #[test]
     fn match_variants_passes_unrelated_paths_through() {
         let v = match_variants(Path::new("/Users/nobody/projects/foo"));

@@ -6,6 +6,7 @@ use crate::capability::{Extent, GrantPath};
 use crate::path::{FrozenPath, RealPath};
 use crate::sandbox::Refusal;
 use crate::sandbox::carve::{Carving, carve};
+use crate::test_helper::{place, real as walked};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -110,7 +111,7 @@ fn the_universal_prefix_is_refused_in_either_region() {
 #[test]
 fn the_root_is_refused_as_a_place() {
     let place = FsRules {
-        read: vec![FsAllow::RunPlace(RealPath::assumed("/"))],
+        read: vec![FsAllow::RunPlace(RealPath::universal())],
         ..rules(&[], &[], &[])
     };
     let why = refuse_universal_prefix(&place).unwrap_err().to_string();
@@ -122,8 +123,11 @@ fn a_drive_root_is_not_the_universal_prefix() {
     assert!(refuse_universal_prefix(&rules(&[r"C:"], &[r"C:\work"], &[])).is_ok());
 }
 
-fn assumed(paths: &[&str]) -> Vec<RealPath> {
-    paths.iter().map(|p| RealPath::assumed(*p)).collect()
+/// The positions of the `/`-rooted fixture names, spelled as given: places
+/// nothing occupies, so a name keeps its case.
+fn positions(paths: &[&str]) -> Vec<RealPath> {
+    let nowhere = crate::test_helper::Tree::nowhere();
+    paths.iter().map(|p| place(nowhere.path(p))).collect()
 }
 
 /// What carving leaves — an allowance on or inside an exclusion, the program
@@ -132,14 +136,14 @@ fn assumed(paths: &[&str]) -> Vec<RealPath> {
 #[test]
 fn an_exclusion_meeting_a_whole_grant_is_refused() {
     for (granted, denied) in [
-        (r"C:\work", r"C:\work"),
-        (r"C:\secret\run", r"C:\secret"),
-        (r"C:\secret\tool.exe", r"C:\Secret"),
-        (r"C:\work", r"c:\WORK\secret"),
+        ("/work", "/work"),
+        ("/secret/run", "/secret"),
+        ("/secret/tool.exe", "/Secret"),
+        ("/work", "/WORK/secret"),
     ] {
-        let granted = assumed(&[granted]);
+        let granted = positions(&[granted]);
         let refused =
-            refuse_deny_meeting_grant(&granted.iter().collect::<Vec<_>>(), &assumed(&[denied]));
+            refuse_deny_meeting_grant(&granted.iter().collect::<Vec<_>>(), &positions(&[denied]));
         match refused {
             Err(Refusal::Unavailable(why)) => {
                 assert!(why.contains("cannot enforce together"), "{why}");
@@ -153,10 +157,10 @@ fn an_exclusion_meeting_a_whole_grant_is_refused() {
 /// sibling sharing a name prefix is apart.
 #[test]
 fn an_exclusion_apart_from_every_whole_grant_is_kept() {
-    let granted = assumed(&[r"C:\work", r"C:\out", r"C:\tools\tool.exe"]);
+    let granted = positions(&["/work", "/out", "/tools/tool.exe"]);
     let granted: Vec<&RealPath> = granted.iter().collect();
-    for denied in [r"C:\secret", r"C:\work-secret"] {
-        assert!(refuse_deny_meeting_grant(&granted, &assumed(&[denied])).is_ok());
+    for denied in ["/secret", "/work-secret"] {
+        assert!(refuse_deny_meeting_grant(&granted, &positions(&[denied])).is_ok());
     }
 }
 
@@ -209,7 +213,7 @@ fn a_redirected_allowance_refuses_the_launch_before_the_memo_is_consulted() {
 #[allow(clippy::disallowed_methods, reason = "[test] link fixtures")]
 fn carving_meets_a_junction_and_a_symlink_as_links() {
     let td = tempfile::tempdir().unwrap();
-    let root = RealPath::of_path(td.path()).unwrap();
+    let root = walked(td.path());
     let (cfg, outside) = (root.as_path().join("cfg"), root.as_path().join("outside"));
     for dir in [cfg.join("gh"), cfg.join("keep"), outside.join("inner")] {
         std::fs::create_dir_all(dir).unwrap();
@@ -224,7 +228,7 @@ fn carving_meets_a_junction_and_a_symlink_as_links() {
     assert!(junction.status.success(), "{junction:?}");
     std::os::windows::fs::symlink_dir(&outside, cfg.join("symlink")).unwrap();
 
-    let real = |at: PathBuf| RealPath::of_path(&at).unwrap();
+    let real = |at: PathBuf| walked(&at);
     let allowance = real(cfg.clone());
     let mut carved = carve(
         &[allowance.clone()],
@@ -306,7 +310,7 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
     // leave the same empty directory, and only the exit status tells a
     // reader on another machine which of the two it is looking at.
     let cmd = Path::new(r"C:\Windows\System32\cmd.exe");
-    let image = RealPath::of_path(cmd).expect("cmd.exe has a real path");
+    let image = walked(cmd);
     let run_echo_to = |rel: &str| -> WaitOutcome {
         let mut launch = Launch::new(cmd);
         launch.args(["/d", "/s", "/c", &format!("echo ok>{rel}")]);
@@ -419,7 +423,7 @@ impl Tree {
 
     /// The real path the grants key on.
     fn real(&self, relative: &str) -> String {
-        crate::path::shown(crate::path::canon::canonicalise_strict(&self.at(relative)).unwrap())
+        crate::path::shown(crate::test_helper::real(self.at(relative)).as_path())
     }
 
     /// Cut `D`'s descendants off from inheritance in each way a DACL can.
@@ -469,7 +473,7 @@ fn confined(
     launch.stdin(StdioSpec::null());
     launch.stdout(StdioSpec::Piped);
     launch.stderr(StdioSpec::Piped);
-    let image = RealPath::of_path(cmd()).expect("cmd.exe has a real path");
+    let image = walked(cmd());
     super::confine(
         &mut launch,
         projection,

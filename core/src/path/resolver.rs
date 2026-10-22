@@ -1,11 +1,10 @@
-//! Stages 1–3 of `crate::path` composed against one `HOME`/cwd pair.
+//! Stages 1 and 2 of `crate::path` composed against one `HOME`/cwd pair.
 //!
 //! [`Resolver::resolve`] and [`Resolver::anchor`] are the sole constructors
-//! of a [`LexicalPath`], and
-//! outside `crate::path` the canonicalisers are reachable only through one —
-//! so the stage order is enforced by the types, not by convention.
+//! of a [`LexicalPath`], which is what a walk takes — so the stage order is
+//! enforced by the types, not by convention.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::{CwdPath, LexicalPath, NotACwd, lex, sigil};
 use crate::types::EnvVars;
@@ -73,13 +72,6 @@ impl<'a> Resolver<'a> {
         let dir = self.anchor(dir).into_cwd()?;
         Ok(Resolver::at(self.env, &dir).resolve(raw))
     }
-
-    /// The whole pipeline: [`Self::resolve`], then canonicalise leniently —
-    /// symlinks followed across the existing prefix, unresolved tail
-    /// re-appended.
-    pub fn check(&self, raw: &str) -> PathBuf {
-        self.resolve(raw).canonicalise_lenient()
-    }
 }
 
 #[cfg(test)]
@@ -89,6 +81,7 @@ impl<'a> Resolver<'a> {
 )]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn cwd(path: &str) -> CwdPath {
         CwdPath::new(PathBuf::from(path)).expect("a fixture cwd is absolute")
@@ -257,26 +250,10 @@ mod tests {
         }
     }
 
-    /// A child of `/tmp` gives the ancestor walk something that always
-    /// exists, so the assertion is about the tail being re-appended.
-    #[test]
-    fn check_resolves_partial_paths_against_existing_ancestor() {
-        let here = crate::host::cwd().expect("the test process has a cwd");
-        let env = std::iter::once(("HOME", "/h")).collect::<EnvVars>();
-        let r = Resolver::at(&env, &here);
-        let suffix = format!("ral-resolver-probe-{}/leaf", std::process::id());
-        let probe = format!("/tmp/{suffix}");
-        let out = r.check(&probe);
-        assert!(
-            out.ends_with(&suffix),
-            "expected suffix {suffix:?} in {out:?}"
-        );
-    }
-
     // Unix-only: Linux XDG defaults, and `/h` is not Windows-absolute.
     #[cfg(unix)]
     #[test]
-    fn check_pipeline_handles_xdg_with_unset_env() {
+    fn resolve_reads_xdg_with_unset_env() {
         // Held for the whole scope: the suite mutates process env in
         // parallel, and this test's answer depends on XDG_DATA_HOME.
         let _guard = crate::test_env::env_guard();
@@ -285,14 +262,12 @@ mod tests {
         let elsewhere = elsewhere();
         let env = std::iter::once(("HOME", "/h")).collect::<EnvVars>();
         let r = Resolver::at(&env, &elsewhere);
-        let out = r.check("xdg:data/agda");
+        let out = r.resolve("xdg:data/agda");
         match prev {
             Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
             None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
         }
-        // `/h` does not exist, so the lenient canonicaliser finds no ancestor
-        // to resolve and hands back the lexical form untouched.
-        assert_eq!(out, Path::new("/h/.local/share/agda"));
+        assert_eq!(out.as_path(), Path::new("/h/.local/share/agda"));
     }
 
     // Unix-only: Windows reads `/etc/hostname` relative to the cwd's drive.

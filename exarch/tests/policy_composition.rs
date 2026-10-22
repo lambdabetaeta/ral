@@ -58,10 +58,10 @@ fn on_path(name: &str) -> String {
         panic!("no executable '{name}' on this host's PATH, so the fixture has no real path for it:\n{path}")
     });
     let cwd = ral_core::test_helper::process_cwd();
-    let object = Resolver::at(&ral_core::types::EnvVars::new(), &cwd)
-        .anchor(&hit)
-        .canonicalise_strict();
-    ral_core::path::shown(object.expect("a PATH hit exists"))
+    let object = ral_core::path::RealPath::of(
+        &Resolver::at(&ral_core::types::EnvVars::new(), &cwd).anchor(&hit),
+    );
+    ral_core::path::shown(object.expect("a PATH hit exists").as_path())
 }
 
 /// The guard's refusal message, or a panic naming what arrived instead.

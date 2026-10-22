@@ -31,7 +31,7 @@ impl Rendered {
     /// Whether `spelled`, taken as written, is this name or lies under it.
     #[cfg(target_os = "linux")]
     pub(crate) fn holds(&self, spelled: &str) -> bool {
-        super::identity::path_within_str(spelled, &self.0, super::identity::Identity::Stored)
+        super::identity::path_within_str(spelled, &self.0)
     }
 }
 
@@ -41,20 +41,19 @@ impl AsRef<str> for Rendered {
     }
 }
 
-/// Every name by which a kernel sandbox hook might present the objects that
-/// `paths` name, deduped, each blessed as [`Rendered`].
+/// Every name by which a kernel sandbox hook might present the objects at
+/// `paths`, resolved ones, deduped, each blessed as [`Rendered`].
 ///
 /// # Errors
 ///
-/// `realpath(3)` can surface a symlink target or mount whose name is not
-/// valid Unicode.  An OS rule is a string literal, so a lossy rendering
-/// would name a different inode; a grant that cannot be expressed
-/// faithfully is refused, not approximated.
+/// An OS rule is a string literal, so a path that is not valid Unicode
+/// would be rendered lossily as a different inode; a grant that cannot be
+/// expressed faithfully is refused, not approximated.
 #[allow(
     clippy::disallowed_methods,
-    reason = "path-form: lifts grant strings for `match_variants_paths` to canonicalise"
+    reason = "path-form: lifts resolved strings for `match_variants_paths` to name"
 )]
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 pub(crate) fn render_paths<S: AsRef<str>>(paths: &[S]) -> Result<Vec<Rendered>, String> {
     Ok(
         super::canon::match_variants_paths(paths.iter().map(|p| std::path::Path::new(p.as_ref())))?
@@ -100,8 +99,8 @@ pub(crate) fn render_objects<'a>(
 ) -> Result<Vec<Object>, String> {
     use std::collections::{BTreeMap, BTreeSet};
     let mut objects = BTreeMap::<Rendered, [BTreeSet<Rendered>; 2]>::new();
-    for (real, surface) in grants {
-        let mut names = render_real(real)?.into_iter();
+    for (position, surface) in grants {
+        let mut names = render_real(position)?.into_iter();
         let Some(real) = names.next() else { continue };
         let shown = surface
             .filter(|_| cfg!(target_os = "linux"))
@@ -109,7 +108,7 @@ pub(crate) fn render_objects<'a>(
             .filter(|surface| *surface != real);
         let walk = surface
             .filter(|_| cfg!(target_os = "macos"))
-            .map(render_walk);
+            .map(|surface| render_walk(surface, position));
         let [spellings, walked] = objects.entry(real).or_default();
         spellings.extend(names.chain(shown));
         walked.extend(walk.transpose()?.into_iter().flatten());
@@ -124,17 +123,21 @@ pub(crate) fn render_objects<'a>(
         .collect())
 }
 
-/// Every name a lookup of `surface` stats, with firmlink twins, the leaf
-/// never followed.
+/// Every name a lookup of `real`, granted by `surface`, stats
+/// ([`lookup_walk`](super::canon::lookup_walk)), with firmlink twins.
 #[cfg(unix)]
-fn render_walk(surface: &super::FrozenPath) -> Result<Vec<Rendered>, String> {
-    let walk =
-        |p: &std::path::Path| super::canon::with_firmlink_twins(super::canon::lookup_walk(p));
+fn render_walk(
+    surface: &super::FrozenPath,
+    real: &super::RealPath,
+) -> Result<Vec<Rendered>, String> {
+    let names = super::canon::lookup_walk(surface.surface_path(), real.as_path());
     Ok(
-        super::canon::spelled(std::iter::once(surface.surface_path()), walk)?
-            .into_iter()
-            .map(Rendered)
-            .collect(),
+        super::canon::spelled(names.iter().map(std::path::PathBuf::as_path), |p| {
+            super::canon::with_firmlink_twins(vec![p.to_path_buf()])
+        })?
+        .into_iter()
+        .map(Rendered)
+        .collect(),
     )
 }
 
@@ -255,10 +258,7 @@ mod tests {
     }
 
     /// A name the renderer cannot express faithfully must be refused, never
-    /// lossily rendered into a rule naming the wrong inode.  Reaching the
-    /// non-UTF-8 expansion needs a non-UTF-8 *input*, which `S: AsRef<str>`
-    /// forbids, so the door is exercised through a real symlink whose target
-    /// carries the invalid bytes.
+    /// lossily rendered into a rule naming the wrong inode.
     ///
     /// Linux-only because APFS validates filenames as UTF-8 and returns
     /// `EILSEQ`, so the situation cannot be staged on macOS; there the
@@ -269,18 +269,16 @@ mod tests {
         clippy::disallowed_methods,
         reason = "[test] a non-UTF-8 fixture path handed to the renderer"
     )]
-    fn rendering_refuses_a_path_whose_expansion_is_not_utf8() {
+    fn rendering_refuses_a_position_that_is_not_utf8() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
 
         let dir = tempfile::tempdir().expect("temp dir");
         let target = dir.path().join(OsStr::from_bytes(b"\xFFghost"));
         std::fs::create_dir(&target).expect("non-UTF-8 target dir");
-        let link = dir.path().join("link");
-        std::os::unix::fs::symlink(&target, &link).expect("symlink");
 
-        let err = render_paths(&[link.to_str().expect("temp path is UTF-8")])
-            .expect_err("a non-UTF-8 expansion must fail closed");
+        let err = render_real(&crate::test_helper::real(&target))
+            .expect_err("a non-UTF-8 position must fail closed");
         assert!(err.contains("not valid UTF-8"), "got {err:?}");
     }
 
@@ -295,7 +293,7 @@ mod tests {
         let outside = tmp.path().join("outside");
         std::fs::create_dir(&allowed).expect("allowed");
         std::fs::create_dir(&outside).expect("outside");
-        let real = super::super::RealPath::of_path(&allowed).expect("allowed is real");
+        let real = crate::test_helper::real(&allowed);
         std::fs::remove_dir(&allowed).expect("remove");
         std::os::unix::fs::symlink(&outside, &allowed).expect("symlink");
 
@@ -321,7 +319,7 @@ mod tests {
         let link = tmp.path().join("bin");
         std::os::unix::fs::symlink(&dir, &link).expect("symlink");
         let link = super::super::FrozenPath::from_surface(link.to_str().expect("UTF-8"));
-        let real = super::super::RealPath::of_path(&dir).expect("dir is real");
+        let real = crate::test_helper::real(&dir);
         let shown = |name: &std::path::Path| Rendered(name.to_str().expect("UTF-8").to_owned());
         let objects = render_objects([(&real, Some(&link)), (&real, None), (&real, Some(&link))])
             .expect("ASCII paths render");

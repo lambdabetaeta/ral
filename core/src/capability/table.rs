@@ -175,8 +175,8 @@ mod tests {
     use crate::capability::exec::tests::{Rng, paths, random};
     use crate::capability::fs::{FsAllow, FsDeny, FsRules};
     use crate::capability::{Evidence, Extent, GrantPath, Join, Meet};
-    use crate::path::{Excluded, FrozenPath, RealPath, Subject, Trace, test_absolute};
-    use crate::test_helper::trace;
+    use crate::path::{Excluded, FrozenPath, RealPath, Subject, Trace};
+    use crate::test_helper::{Tree, real, trace};
     use std::path::{Path, PathBuf};
 
     /// The three obligations of [`Allows`], at every subject given.
@@ -263,10 +263,7 @@ mod tests {
     /// directory, and the real path of its root.
     fn tree() -> (tempfile::TempDir, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
-        let root = RealPath::of_path(tmp.path())
-            .unwrap()
-            .as_path()
-            .to_path_buf();
+        let root = real(tmp.path()).as_path().to_path_buf();
         for dir in ["d/secrets", "e/sub", "old/inner"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
         }
@@ -310,7 +307,7 @@ mod tests {
     /// Places beneath the tree's names, and one beside it.
     fn places(root: &Path) -> Vec<RealPath> {
         ["d", "d/secrets/f", "e/sub", "moved/inner", "z"]
-            .map(|name| RealPath::lenient(&root.join(name)))
+            .map(|name| crate::test_helper::trace(root.join(name)).real().clone())
             .into()
     }
 
@@ -378,9 +375,10 @@ mod tests {
     /// the other holds, and holds nothing against a table that holds nothing.
     #[test]
     fn the_universal_allowance_meets_as_any_other() {
-        let at = |p: &str| trace(test_absolute(p));
+        let nowhere = Tree::nowhere();
+        let at = |p: &str| trace(nowhere.path(p));
         let everywhere = || FsRules::new([FsAllow::Prefix(GrantPath::everywhere())], []);
-        let prefix = GrantPath::allowing(FrozenPath::from_surface(&test_absolute("/work")));
+        let prefix = GrantPath::allowing(FrozenPath::from_surface(&nowhere.at("/work")));
         let work = FsRules::new([FsAllow::Prefix(prefix.unwrap())], []);
         let met = everywhere().meet(work);
         assert!(met.evidence(Subject::Access(&at("/work"))).permits());

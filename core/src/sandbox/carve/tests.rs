@@ -7,7 +7,7 @@ use super::{Carving, Entry, carve};
 use crate::path::{Dir, Installing, Kind, RealPath, shown};
 use crate::sandbox::TOKEN;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A tree spelled one path per line, under a fresh real root that `/` stands
 /// for: a trailing `/` is a directory, a trailing `@` a link, anything else a
@@ -21,25 +21,30 @@ impl Tree {
     fn new(paths: &[&str]) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let tree = Self {
-            root: RealPath::of_path(dir.path()).unwrap(),
+            root: crate::test_helper::real(dir.path()),
             _dir: dir,
         };
         for spelled in paths {
-            let at = tree.at(spelled.trim_end_matches(['/', '@']));
-            std::fs::create_dir_all(at.as_path().parent().unwrap()).unwrap();
+            let at = tree.path(spelled.trim_end_matches(['/', '@']));
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
             match spelled.chars().last() {
-                Some('/') => std::fs::create_dir_all(at.as_path()).unwrap(),
-                Some('@') => link(at.as_path()),
-                _ => std::fs::write(at.as_path(), b"").unwrap(),
+                Some('/') => std::fs::create_dir_all(&at).unwrap(),
+                Some('@') => link(&at),
+                _ => std::fs::write(&at, b"").unwrap(),
             }
         }
         tree
     }
 
-    /// The position `spelled` names under the root.
-    fn at(&self, spelled: &str) -> RealPath {
+    /// Where `spelled` lies on disk under the root.
+    fn path(&self, spelled: &str) -> PathBuf {
         let names = spelled.split('/').filter(|name| !name.is_empty());
-        RealPath::assumed(names.fold(self.root.as_path().to_path_buf(), |at, name| at.join(name)))
+        names.fold(self.root.as_path().to_path_buf(), |at, name| at.join(name))
+    }
+
+    /// The position `spelled` names under the root, present or not.
+    fn at(&self, spelled: &str) -> RealPath {
+        crate::test_helper::place(self.path(spelled))
     }
 
     /// `real` as `at` spells it.

@@ -124,6 +124,10 @@ impl Missing {
 
 /// What stands at `found`, which the walk would not spawn.  A file the stat
 /// cannot reach, or one carrying `+x`, is refused by the OS: permission.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:head-refusal] metadata questions of an admitted program's real path, by name, after its exec failed: is it a directory, does it exist, is it executable; they grant nothing"
+)]
 fn refusal(shown: &str, found: &Path) -> SpawnFailure {
     let not_a_program = |kind| SpawnFailure::NotAProgram {
         found: (!crate::path::names_a_path(shown)).then(|| found.into()),
@@ -143,6 +147,10 @@ fn refusal(shown: &str, found: &Path) -> SpawnFailure {
 /// On Windows, a path head written without its extension: `shown` with the
 /// first executable extension that names a file beside `file`, the one it
 /// looked for.  A bare name has already tried them all on `PATH`.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:head-suffixed] which extension names a sibling of an admitted program's real path, by name, after its exec failed; it grants nothing"
+)]
 fn suffixed(shown: &str, file: &Path) -> Option<String> {
     if !cfg!(windows) || !crate::path::names_a_path(shown) {
         return None;

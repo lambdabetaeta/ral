@@ -292,18 +292,16 @@ mod tests {
     mod nofollow {
         use crate::path::{Dir, Installing, Kind, Located, ObjectId, RealPath};
         use crate::sandbox::TOKEN;
+        use crate::test_helper::{place, real};
         use std::fs::File;
         use std::io;
 
         #[cfg(target_os = "linux")]
         const ELOOP: &str = "too many levels of symbolic links";
 
-        fn real(path: &std::path::Path) -> RealPath {
-            RealPath::of_path(path).expect("a fixture exists")
-        }
-
+        /// `name` in `parent`, present or not.
         fn at(parent: &RealPath, name: &str) -> RealPath {
-            RealPath::assumed(parent.as_path().join(name))
+            place(parent.as_path().join(name))
         }
 
         fn hold(position: &RealPath) -> io::Result<Option<Located<Installing>>> {
@@ -384,14 +382,15 @@ mod tests {
         #[test]
         fn a_link_in_a_position_refuses_with_eloops_wording() {
             let (tmp, root) = fixture();
-            std::os::unix::fs::symlink(tmp.path().join("f"), tmp.path().join("link")).unwrap();
-            std::os::unix::fs::symlink(tmp.path().join("d"), tmp.path().join("via")).unwrap();
-            std::fs::write(tmp.path().join("d").join("g"), b"x").unwrap();
-            for position in [
+            let positions = [
                 at(&root, "link"),
                 at(&at(&root, "via"), "g"),
                 at(&root, "via"),
-            ] {
+            ];
+            std::os::unix::fs::symlink(tmp.path().join("f"), tmp.path().join("link")).unwrap();
+            std::os::unix::fs::symlink(tmp.path().join("d"), tmp.path().join("via")).unwrap();
+            std::fs::write(tmp.path().join("d").join("g"), b"x").unwrap();
+            for position in positions {
                 let held = hold(&position).err().expect("a link refuses");
                 assert_eq!(held.to_string(), ELOOP);
                 let held = hold_dir(&position).err().expect("a link refuses");

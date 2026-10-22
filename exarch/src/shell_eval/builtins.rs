@@ -10,7 +10,7 @@ use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
 use ral_core::builtins::util::regex_err;
 use ral_core::fact::{Grep, Read};
 use ral_core::path::tree::walk::Walk;
-use ral_core::path::{LeafMode, Reading};
+use ral_core::path::{LeafMode, LexicalPath, Reading};
 use ral_core::text::rank;
 use ral_core::ty::{Scheme, Ty, closed_record};
 use ral_core::typecheck::Unifier;
@@ -20,7 +20,6 @@ use ral_core::{HostSurface, Shell, Value};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Read as _;
-use std::path::PathBuf;
 
 pub(crate) mod harness;
 
@@ -432,9 +431,9 @@ fn search_tree(
         .map_err(|e| sig(regex_err(name, pattern, &e.to_string())))?;
     let root = walk_root(shell, name, path)?;
     let tree = if hidden {
-        Walk::everything(&root).keeping(|p| p.file_name() != Some(".git".as_ref()))
+        Walk::all(&root).filter_entry(|p| p.as_path().file_name() != Some(".git".as_ref()))
     } else {
-        Walk::tracked(&root)
+        Walk::respecting_ignores(&root)
     };
     let mut searcher = SearcherBuilder::new()
         .line_terminator(LineTerminator::crlf())
@@ -443,13 +442,13 @@ fn search_tree(
         .build();
 
     let mut results = Vec::new();
-    let mut walk = tree.one_file_system().admitted(shell, name, path);
-    while let Some(entry) = walk.next(shell)? {
+    let mut walk = tree.same_file_system().admitted(shell, name, path);
+    while let Some(entry) = walk.next()? {
         if !entry.is_file() {
             continue;
         }
         let Some(file) = shell
-            .locate_if_admitted::<Reading>(&entry.path)
+            .locate_if_admitted::<Reading>(&entry.shown)
             .and_then(|located| located.read().ok())
         else {
             continue;
@@ -467,14 +466,14 @@ fn search_tree(
         let eol = scanned.eol.eol();
         shell.poll()?;
         if let Err(e) = searched {
-            let shown = ral_core::path::shown(entry.path.as_path());
+            let shown = ral_core::path::shown(entry.shown.as_path());
             let _ = shell.write_stderr(format!("{name}: {shown}: skipped: {e}\n").as_bytes());
             continue;
         }
         if !lines.is_empty() {
             // Cut by the file's own ending, so a hit is the row `view-text` shows.
             let term = eol.terminator();
-            let file = entry.name()?;
+            let file = walk.name(&entry)?;
             results.extend(lines.into_iter().map(|(line, mut text)| {
                 if text.ends_with(term) {
                     text.truncate(text.len() - term.len());
@@ -832,13 +831,13 @@ fn builtin_explore_dir(args: &[Value], _mooring: &Mooring, shell: &mut Shell) ->
     };
     let path = args[1].as_str("explore-dir")?;
     let root = walk_root(shell, "explore-dir", path)?;
-    let mut walk = Walk::tracked(&root)
-        .depth(Some(depth))
+    let mut walk = Walk::respecting_ignores(&root)
+        .max_depth(Some(depth))
         .admitted(shell, "explore-dir", path);
     let mut entries = Vec::new();
-    while let Some(entry) = walk.next(shell)? {
+    while let Some(entry) = walk.next()? {
         if entry.depth > 0 {
-            entries.push(Value::string(entry.name()?));
+            entries.push(Value::string(walk.name(&entry)?));
         }
     }
     Ok(Value::list(entries))
@@ -859,11 +858,11 @@ fn builtin_find_files(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> 
     let query = args[0].as_str("find-files")?;
     let path = args[1].as_str("find-files")?;
     let root = walk_root(shell, "find-files", path)?;
-    let mut walk = Walk::tracked(&root).admitted(shell, "find-files", path);
+    let mut walk = Walk::respecting_ignores(&root).admitted(shell, "find-files", path);
     let mut files = Vec::new();
-    while let Some(entry) = walk.next(shell)? {
+    while let Some(entry) = walk.next()? {
         if entry.is_file() {
-            files.push(entry.name()?);
+            files.push(walk.name(&entry)?);
         }
     }
     let best = rank(query, files).into_iter().take(FIND_LIMIT);
@@ -871,7 +870,7 @@ fn builtin_find_files(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> 
 }
 
 /// The grant-checked root of a walk; a missing one is an error, not an empty walk.
-fn walk_root(shell: &mut Shell, who: &str, path: &str) -> Settled<PathBuf> {
+fn walk_root(shell: &mut Shell, who: &str, path: &str) -> Settled<LexicalPath> {
     let root = shell.resolve(path);
     let found = shell
         .locate_existing::<Reading>(&root, LeafMode::Follow)?
@@ -881,7 +880,7 @@ fn walk_root(shell: &mut Shell, who: &str, path: &str) -> Settled<PathBuf> {
             "{who}: {path} does not exist; the path is a file or directory, relative to the cwd or absolute."
         )));
     }
-    Ok(root.into_inner())
+    Ok(root)
 }
 
 fn scheme_grep_files(_u: &mut Unifier) -> Scheme {

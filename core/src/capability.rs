@@ -28,8 +28,8 @@ pub(crate) use exec::{
     Admitted, ExecDenial, ExecRules, Keyed, Program, Refused as ExecRefused, Rule, name_rules,
     ral_binary, rules,
 };
-pub use fs::{Floor, FsDeny, FsOp, LocateError, Refused};
-pub(crate) use fs::{FsAllow, FsLayer, FsRules, ReadRegion, Verdict, region, running_region};
+pub use fs::{Floor, FsDeny, FsOp, LocateError, ReadRegion, Refused};
+pub(crate) use fs::{FsAllow, FsLayer, FsRules, Verdict, region, running_region};
 pub(crate) use lattice::Axis;
 pub use lattice::{
     Capabilities, EditorVerb, Evidence, ExecGrant, ExecKey, ExecSummary, Extent, Flag, Fragment,
