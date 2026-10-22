@@ -45,6 +45,10 @@ pub(crate) fn with_firmlink_twins(mut names: Vec<PathBuf>) -> Vec<PathBuf> {
 /// its way, the root apart: the ancestors of `surface`, itself included where it
 /// differs from `real` (an authored link is passed, never followed), and the
 /// proper ancestors of `real`.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "path-form: the names a lookup stats, rendered for a kernel sandbox"
+)]
 #[cfg(unix)]
 pub(crate) fn lookup_walk(surface: &Path, real: &Path) -> Vec<PathBuf> {
     surface

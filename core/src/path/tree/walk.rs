@@ -185,6 +185,10 @@ impl WalkEntry {
         self.named(base).map_err(sig)
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "path-form: a walked name taken relative to the cwd the caller named"
+    )]
     fn named(&self, base: Option<&CwdPath>) -> Result<String, String> {
         let path = self.shown.as_path();
         let rel = base
@@ -200,6 +204,10 @@ impl WalkEntry {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "path-form: the longest UTF-8 spelling above a name no ral string can hold, to say where it stops"
+)]
 #[allow(
     clippy::unnecessary_debug_formatting,
     reason = "Debug escapes the invalid bytes; Display would mangle them"
@@ -607,6 +615,10 @@ impl Entries {
     /// The rules of every directory above the root, and the names that lead
     /// to it: `.ignore` of each up to the filesystem root, and `.gitignore`
     /// of those within the nearest repository.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "path-form: the spellings above a root already walked, whose ignore files discovery reads"
+    )]
     fn ancestry(&self, root: &Dir<Judged<Reading>>) -> Rules {
         let real = root.real();
         let mut rules = Rules::new(normals(real.as_path()));
@@ -657,6 +669,10 @@ fn slurp(file: &Located<Judged<Reading>>) -> io::Result<Vec<u8>> {
 }
 
 /// The names of `path` beneath its root.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "path-form: the names of a root already walked, for ignore discovery"
+)]
 fn normals(path: &Path) -> Vec<OsString> {
     path.components()
         .filter_map(|c| match c {

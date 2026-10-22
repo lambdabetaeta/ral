@@ -777,13 +777,13 @@ mod tests {
                 written,
                 real: Extent::Under(real),
             })),
-            (true, false) => Rule::Deny(ExecDeny::Dir(
+            (true, false) => Rule::Deny(Box::new(ExecDeny::Dir(
                 GrantPath::<Excluded>::walk(written).expect("a directory walks"),
-            )),
+            ))),
             (false, true) => Rule::Allow(ExecAllow::support(&real)),
-            (false, false) => Rule::Deny(ExecDeny::File(
+            (false, false) => Rule::Deny(Box::new(ExecDeny::File(
                 GrantPath::<Excluded>::walk(written).expect("a file walks"),
-            )),
+            ))),
         }
     }
 
@@ -796,7 +796,9 @@ mod tests {
     }
 
     fn veto(name: &str) -> Rule {
-        Rule::Deny(ExecDeny::Name(crate::path::command_name_key(name)))
+        Rule::Deny(Box::new(ExecDeny::Name(crate::path::command_name_key(
+            name,
+        ))))
     }
 
     fn any() -> Rule {

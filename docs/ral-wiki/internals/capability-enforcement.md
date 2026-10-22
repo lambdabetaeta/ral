@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 002c654a
 verified_at_date: 2026-10-13
-anchors: [check_exec, Admitted, admit, Flag, ExecDenial, FsRefusal, Withheld, refused, region, Table, Evidence, GrantStack, SandboxProjection, Fragment, sandboxed_command, build_launch, projection_enforceable]
+anchors: [check_exec, Admitted, admit, Flag, ExecDenial, Refused, Withheld, refused, region, Table, Evidence, GrantStack, SandboxProjection, Fragment, sandboxed_command, build_launch, projection_enforceable]
 ---
 
 # Capability enforcement: one model, two enforcers
@@ -39,15 +39,17 @@ not a typestate ([[decisions/260605_witness-collapse|witness-collapse]]).
 in `guard/enforce.rs` is a free function over a borrowed `Context`. It folds
 the whole dynamic `GrantStack` (`ctx.grants`) before it answers, so an answer
 reflects every frame on the stack, not just the top one. The exec and fs checks
-return a typed refusal (`ExecDenial`, `FsRefusal`), and `Shell::refused` (`guard/shell.rs`) records it on
+return a typed refusal (`ExecDenial`, `Refused`), and `Shell::refused` (`guard/shell.rs`) records it on
 the trail. The doors are:
 
 - `check_exec`, which returns the `Admitted` token every launch needs. Only
   `GrantStack::admit` mints one.
-- `Shell::check_fs_read`, a read *by name*: a predicate, a listing, a module
-  load.
-- `Shell::locate`, the door every open goes through. It judges the object it
-  lands on with `check_fs_exact`.
+- `Shell::locate` and its siblings (`locate_dir`, `locate_existing`,
+  `locate_if_admitted`), the doors every read and open goes through. Each walks
+  the name, then `GrantStack::judge` takes the transcript and returns the handle
+  vouched for the operation; a probe of a name the walk found nothing at is
+  judged on the name, so a denied absent name reads as denied
+  ([[internals/path-judgment|path-judgment]]).
 - the verbs of `editor` and `shell`: one `Flag`, checked by one `Shell::check(Flag, who)`.
 - on the sandbox's side, `SandboxProjection::of`, the part of the policy the OS
   can render, folded from the same tables.
@@ -55,7 +57,7 @@ the trail. The doors are:
 ## The fold keeps the layers apart
 
 **A judgment combines what each layer says about *this* access. It never
-flattens the layers into one frame.** A `Capabilities` is a layer, and the
+flattens the layers into one frame.** A `GrantLayer` is a layer, and the
 `GrantStack` is their meet. Every judgment is evidence, a pair of Booleans
 (positive, negative), and `↓` closes it to permit or refuse once, at the
 boundary that enforces ([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]).
@@ -128,23 +130,25 @@ process does on its own.**
   itself. The OS sandbox is the only enforcer. On Windows it is the withheld
   network capability SIDs: a LowBox token without them cannot open a socket.
 
-**For the filesystem, guard and sandbox cannot disagree, by construction.**
-Both read one fold (`capability/fs.rs`). `region` meets each layer's table
+**For the filesystem, guard and sandbox read one fold and judge it on different
+evidence.** Both read one fold (`capability/fs.rs`). `region` meets each layer's table
 for the operation: the allows meet and the exclusions join. A read then joins
 the `Floor`, the platform's system paths, after the meet, so no `read` narrows
 the floor and only a `deny` removes part of it. The floor is host state, resolved
 once where the `Runtime` is built (a host that cannot resolve it refuses to
 boot) and passed to every reader; no stack holds it and no wire carries it. No backend carries a system set of
-its own. So the conservatism invariant needs no differential test. The only
-difference is *when* the fold runs:
+its own. They differ in *when* the fold runs, and in what an exclusion is
+matched against: ral's own readers match it by position or by the object it was
+fixed to; the kernel renderers by position alone
+([[design/two-enforcers|two-enforcers]]).
 
-- the guard folds afresh on every check, and asks `withheld`, which cites an
-  exclusion that applies or a missing allowance;
+- the guard folds the stack's resolved layers on every check, and asks
+  `withheld`, which cites an exclusion that applies or a missing allowance;
 - the sandbox folds once at spawn, when it writes the profile, and renders
   the read region (`read: Vec<FsAllow>`, run places and live support among
   them), the write prefixes and the exclusions. Every allowance renders as its
-  frozen real path and as nothing else; only exclusions are rendered from their
-  re-resolved names. A backend refuses a launch whose frozen allowance has
+  resolved real position and as nothing else; an exclusion renders from the
+  resolved real paths its walk held, never from the text as written. A backend refuses a launch whose frozen allowance has
   been redirected rather than follow it.
 
 **The projection never carries an allow beneath an exclusion (`live()`).** Such

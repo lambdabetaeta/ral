@@ -42,7 +42,7 @@ use ral_core::terminal::TerminalState;
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -113,6 +113,15 @@ impl Genesis {
 }
 
 impl Launch {
+    /// The run's directory, which `sessions_root` hangs in: exarch's own.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "path-form: exarch's own run directory above its own sessions directory, not a name any grant judges"
+    )]
+    pub(crate) fn run_dir(&self) -> Option<&Path> {
+        self.sessions_root.parent()
+    }
+
     /// A fresh root's seat.
     ///
     /// # Errors
@@ -123,9 +132,9 @@ impl Launch {
                 "this host boots no further engines, so it cannot open another session",
             )
         })?;
-        genesis.seat().map_err(|lost| {
-            io::Error::other(EngineLost::starting(&lost, self.sessions_root.parent()))
-        })
+        genesis
+            .seat()
+            .map_err(|lost| io::Error::other(EngineLost::starting(&lost, self.run_dir())))
     }
 
     /// The system prompt a node on `seat` reads, resolved against its own

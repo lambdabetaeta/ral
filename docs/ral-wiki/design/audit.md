@@ -131,7 +131,7 @@ Each observation is self-describing about who and how it happened:
   key: "there was no before-image" is a fact the trail states, not one a reader
   infers from silence. A before-image is a *read*: under a grant that admits
   no read of the target, the write still lands and `old-bytes` is `` `none `` —
-  decided at the door (`Shell::admits_fs_exact`), before the bytes could enter
+  decided at the door (`Shell::admits_fs`), before the bytes could enter
   any observation, never hidden afterwards by a renderer;
 - tail-recursive iteration adds no wrapper: a loop contributes one flat run of
   observations, not a chain as deep as the iteration count, matching how

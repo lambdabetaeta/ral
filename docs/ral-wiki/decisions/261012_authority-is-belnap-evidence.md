@@ -2,7 +2,7 @@
 status: active
 generated_at_commit: 002c654a
 verified_at_commit: 002c654a
-anchors: [Evidence, Meet, Join, Axis, Fragment, ExecGrant, Table, Withheld, ExecScope, FsScope, ExecDenial, FsRefusal, join_top, extend, places, GrantStack]
+anchors: [Evidence, Meet, Join, Axis, Fragment, ExecGrant, Table, Withheld, ExecDenial, Refused, join_top, extend, places, GrantStack]
 ---
 
 # Authority is Belnap evidence
@@ -524,3 +524,15 @@ not cover Homebrew is corrected; profile comments that sent readers to
 `core/src/guard/{enforce,freeze,decode}.rs`, `core/src/sandbox/projection.rs`
 and the three backends, `core/src/load/profile.rs` (`Fragment`),
 `exarch/src/policy.rs` (`for_invocation`, the self layer).
+
+**Amended 2026-10-22 by [[decisions/261021_one-path|one-path]].** The denotation
+above is unchanged; its representation is. A `Table` is two sets, one polarity
+each (allowances and exclusions); a key cannot hold `Both`, because evidence is
+computed at the access and never stored. The scopes are resolved where a layer
+is decoded: an allowance holds a position (`Extent`), an exclusion the objects
+its walk held (`Excluded`), and nothing is re-frozen at a check. "An exclusion
+re-resolves" therefore reads: an exclusion names the object its spelling reached
+at decode, and also holds its position, so a new name for that object and
+whatever is put at its old name are both caught. `FsRefusal` is `Refused`
+(`Guarded`, `Withheld`); `ExecScope` and `FsScope` are the two `Table`
+instances' key types, `ExecAllow`/`ExecDeny` and `FsAllow`/`FsDeny`.

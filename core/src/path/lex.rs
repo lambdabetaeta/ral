@@ -800,6 +800,10 @@ pub(crate) fn names_a_dir(path: &Path) -> bool {
 /// that descends or climbs it by its components would move it there, onto
 /// a path the kernel never reads it as; such steps refuse it.  Never true
 /// off Windows, where every absolute path opens with the one root.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "path-form: the one reading of a head std finds no prefix in"
+)]
 pub(crate) fn is_unparsed_head(path: &Path) -> bool {
     PathRules::HOST == PathRules::Windows
         && is_absolute(path)
@@ -963,6 +967,10 @@ fn reaches(path: &str) -> Option<Kind> {
 /// `shown` relative to `root`, its names slash-joined: a manifest's key,
 /// lexical history that needs no live root to be compared.  `None` where
 /// `shown` is not beneath `root` or a name is not UTF-8.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "path-form: a spelling's names, the one slash-joined key over traversal names"
+)]
 pub fn relative_key(shown: &LexicalPath, root: &LexicalPath) -> Option<String> {
     let rest = shown.as_path().strip_prefix(root.as_path()).ok()?;
     let names: Option<Vec<&str>> = rest

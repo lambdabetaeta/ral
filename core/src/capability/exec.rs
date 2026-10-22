@@ -360,7 +360,7 @@ pub(crate) type ExecRules = Table<ExecAllow, ExecDeny>;
 #[derive(Clone, Debug)]
 pub(crate) enum Rule {
     Allow(ExecAllow),
-    Deny(ExecDeny),
+    Deny(Box<ExecDeny>),
 }
 
 impl FromIterator<Rule> for ExecRules {
@@ -369,7 +369,7 @@ impl FromIterator<Rule> for ExecRules {
         for rule in rules {
             match rule {
                 Rule::Allow(allow) => allows.push(allow),
-                Rule::Deny(deny) => denies.push(deny),
+                Rule::Deny(deny) => denies.push(*deny),
             }
         }
         Self::new(allows, denies)
@@ -414,16 +414,16 @@ impl Keyed for Trace {
 
 impl Keyed for Excluded {
     fn file(path: GrantPath<Self>) -> Rule {
-        Rule::Deny(ExecDeny::File(path))
+        Rule::Deny(Box::new(ExecDeny::File(path)))
     }
 
     fn dir(path: GrantPath<Self>) -> Rule {
-        Rule::Deny(ExecDeny::Dir(path))
+        Rule::Deny(Box::new(ExecDeny::Dir(path)))
     }
 
     fn name(name: &str, _: bool, found: Option<GrantPath<Self>>) -> Vec<Rule> {
-        let file = found.map(|path| Rule::Deny(ExecDeny::File(path)));
-        let veto = Rule::Deny(ExecDeny::Name(command_name_key(name)));
+        let file = found.map(|path| Rule::Deny(Box::new(ExecDeny::File(path))));
+        let veto = Rule::Deny(Box::new(ExecDeny::Name(command_name_key(name))));
         file.into_iter().chain([veto]).collect()
     }
 }
@@ -629,7 +629,7 @@ pub(super) mod tests {
     }
 
     fn deny_file(p: &str) -> Rule {
-        Rule::Deny(ExecDeny::File(excluded(p)))
+        Rule::Deny(Box::new(ExecDeny::File(excluded(p))))
     }
 
     fn allow_dir(p: &str) -> Rule {
@@ -637,7 +637,7 @@ pub(super) mod tests {
     }
 
     fn deny_dir(p: &str) -> Rule {
-        Rule::Deny(ExecDeny::Dir(excluded(p)))
+        Rule::Deny(Box::new(ExecDeny::Dir(excluded(p))))
     }
 
     fn allow_tool(name: &str) -> Rule {
@@ -645,7 +645,7 @@ pub(super) mod tests {
     }
 
     fn veto(name: &str) -> Rule {
-        Rule::Deny(ExecDeny::Name(command_name_key(name)))
+        Rule::Deny(Box::new(ExecDeny::Name(command_name_key(name))))
     }
 
     fn any() -> Rule {
@@ -662,7 +662,7 @@ pub(super) mod tests {
     fn say(place: &(ExecAllow, ExecDeny), e: Evidence) -> impl Iterator<Item = Rule> {
         (e.positive.then(|| Rule::Allow(place.0.clone())))
             .into_iter()
-            .chain(e.negative.then(|| Rule::Deny(place.1.clone())))
+            .chain(e.negative.then(|| Rule::Deny(Box::new(place.1.clone()))))
     }
 
     fn program(at: &RealPath) -> Subject<'_> {

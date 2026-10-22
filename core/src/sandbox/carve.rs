@@ -36,7 +36,7 @@ use crate::path::{Dir, Installing, RealPath};
 /// One directory entry, as the lister reads it without following it: a
 /// directory comes with the handle the lister opened on it.
 pub(crate) enum Entry {
-    Directory(Dir<Installing>),
+    Directory(Box<Dir<Installing>>),
     /// Anything else that is itself an object to grant: a file, or a
     /// reparse point that redirects nowhere (a cloud placeholder).
     Other(RealPath),
@@ -97,7 +97,7 @@ pub(crate) fn carve<E>(
                 let beneath = beneath(entry.real());
                 match (entry, beneath) {
                     (Entry::Link(_), _) | (Entry::Other(_), true) => {}
-                    (Entry::Directory(child), true) => pending.push(child),
+                    (Entry::Directory(child), true) => pending.push(*child),
                     (Entry::Directory(child), false) => carving.whole.push(child.real().clone()),
                     (Entry::Other(real), false) => carving.whole.push(real),
                 }

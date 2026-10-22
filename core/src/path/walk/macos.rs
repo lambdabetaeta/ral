@@ -128,17 +128,14 @@ fn open_entry(dir: &File, name: &EntryName, sharing: Sharing) -> io::Result<Opti
 pub(super) fn step(parent: &Held, name: &EntryName, sharing: Sharing) -> io::Result<Child> {
     let dir = &parent.file;
     let handle = open_entry(dir, name, sharing)?;
-    let (seen, stored) = match &handle {
-        Some(file) => {
-            let seen = seen(file)?;
-            let stored = stored_name(dir, name, seen.id)?;
-            (seen, stored)
-        }
-        None => {
-            let looked = lookup(dir, name.as_os_str()).map_err(|e| gone(name, e))?;
-            let stored = settle(dir, name, looked.seen.id, &looked.name)?;
-            (looked.seen, stored)
-        }
+    let (seen, stored) = if let Some(file) = &handle {
+        let seen = seen(file)?;
+        let stored = stored_name(dir, name, seen.id)?;
+        (seen, stored)
+    } else {
+        let looked = lookup(dir, name.as_os_str()).map_err(|e| gone(name, e))?;
+        let stored = settle(dir, name, looked.seen.id, &looked.name)?;
+        (looked.seen, stored)
     };
     let step = Step {
         name: stored,

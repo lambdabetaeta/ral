@@ -231,7 +231,7 @@ fn carving_meets_a_junction_and_a_symlink_as_links() {
     let real = |at: PathBuf| walked(&at);
     let allowance = real(cfg.clone());
     let mut carved = carve(
-        &[allowance.clone()],
+        std::slice::from_ref(&allowance),
         &[real(cfg.join("gh"))],
         &mut open,
         &mut listing,

@@ -234,12 +234,14 @@ on Windows, against another install, against a copy in a folder both writable an
 runnable (`--ral-bundled-tool mv` runs there without any stack), the dynamic
 linker run on one, or, on Linux, a hard link to it at an admitted path.
 
-**Allowances name what they named; exclusions follow their names.** An allowance
-keeps the real path it was frozen to and is never re-resolved, so a symlink put
-in its place later redirects nothing and both enforcers refuse a launch whose
-frozen allowance now meets a link. An exclusion re-resolves on every question,
-so it catches whatever its name reaches now. A bare program name is the one live
-allowance: it names whatever the host `PATH` finds at each run.
+**Allowances name what they named; exclusions follow their object.** An allowance
+keeps the position it was resolved to and is never resolved again, so a symlink
+put in its place later redirects nothing and both enforcers refuse a launch whose
+allowance now meets a link. An exclusion names the object its spelling reached
+when the grant was decoded, the link and its target where it was a link, under
+every name it has or gets and at the position it named, whatever is put there;
+it follows the object, not what is moved out of it. A bare program name is
+resolved where the grant is decoded.
 
 **Exclusions are guardrails, not walls, where writing meets running.** An
 exclusion names programs by path and name. A copy, a newly written program or a

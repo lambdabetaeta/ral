@@ -95,17 +95,17 @@ everything `crate::types::*`.
 `capability.rs` holds the capability *types* the [[map/core/capabilities|grant]]
 decision layer interprets: `Capabilities` (one layer), `ExecGrant` over
 `Evidence`, `FsPolicy`,
-`EditorPolicy`, `ShellPolicy`, `GrantStack` (`Vec<Capabilities>`, a *stack* of
+`EditorPolicy`, `ShellPolicy`, `GrantStack` (`Vec<GrantLayer>`, a *stack* of
 layers rather than a folded aggregate — attenuation is the fold over the
 stack's verdicts, not a `Capabilities::meet`
 ([[decisions/260906_object-not-name|object-not-name]]); a scoped push —
-`with_capabilities`, `with_layers`, `Frame::Grant` — removes its own frames by
+`with_layer`, `with_layers`, `Frame::Grant` — removes its own frames by
 position (`GrantStack::remove`) rather than popping the top, so a session
 frame `push_session_capabilities` lays inside it, as the boot door's
 `--capabilities` does inside its run, survives it), `SandboxProjection`,
-and `Capabilities::extend`, which adds an `--extend` `Fragment` to a base once (tested in
+and `GrantLayer::extend`, which adds an `--extend` `Fragment` to a base once (tested in
 `capability/lattice_tests.rs`). `Meet` survives only where evidence genuinely narrows by
-intersection, not as a whole-`Capabilities` operation.
+intersection, not as a whole-layer operation.
 
 ## Shell
 

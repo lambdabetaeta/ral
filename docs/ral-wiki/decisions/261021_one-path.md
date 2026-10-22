@@ -1,17 +1,107 @@
 ---
-status: proposed
-generated_at_commit: 6f703454
+status: active
+generated_at_commit: ed814376
 ---
 
 # One path
 
 **Every path ral judges is the path of an object its own walk opened, and
-every operation on it is relative to the handle that walk holds.** The
-principle is stated in §1–2 of `dev/docs/plans/261021_one-path.md`: a name is
-resolved once, by `path/walk.rs`, through directory handles and never by the
-kernel's following; what the grant judges is the transcript of that walk, and
-what is then read or written is the object it acquired. The decision body is
-written when the plan lands, in its last step.
+every operation on it is relative to the handle that walk holds.** A name is
+never authority: it is a way to find an object, resolved once, by
+`path/walk.rs`, through directory handles and never by the kernel's following.
+What the grant judges is the transcript of that walk; what is then read or
+written is the object it acquired. How a judgment runs is
+[[internals/path-judgment|path-judgment]]; the plan is
+`dev/docs/plans/261021_one-path.md`. Amends
+[[decisions/261021_access-is-physical|access-is-physical]] (the walk is now the
+only resolver, and policy is resolved by it) and
+[[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]
+(a table is two sets; evidence is computed).
+
+## Context
+
+Several resolvers looked a name up at several moments, and every gap between
+two lookups let the name change meaning: a lenient canonicaliser and a walk, a
+judgment of a string and an open of the original, an enumeration by `ignore`
+that listed, statted and followed by name. The grant's own exclusions were
+re-resolved at every check, so the same trick worked on the rules. Policy held
+its authored form beside its resolution, and the two could disagree.
+
+## Decision
+
+- **The walk is the one resolver, and the step is its unit.** One primitive per
+  host opens a child of a held handle and reports that child's stored name and
+  identity, both read through the handle just opened. A `Trace` (the root's
+  identity, the steps, the missing tail) is the evidence; its `RealPath`, its
+  identities and its leaf are projections of the steps, so the three hosts share
+  one construction.
+- **Four roles, four types.** A `Trace` is evidence; a `Hold` is an anchor (a
+  trace plus a handle, on the wire the trace alone, re-held on arrival); `Dir`
+  and `Located` are possession; a `Listed` is what a listing saw. The handle's
+  type says who vouched (`Unjudged`, `Judged<Reading>`, `Judged<Writing>`,
+  `Installing`), each minted at one door, so `walk(p)?.read()` does not compile.
+- **Two readings, one per polarity.** An allowance holds by position
+  (`RealPath::contains`), which is transitive and survives a directory removed
+  and recreated. An exclusion holds by position under `collision_key` *or* by
+  identity (`Excluded::matches`): the object, wherever it is reached and
+  whatever it is called, and its name under a renamed ancestor. Identity's only
+  effect is negative, so a reused id over-denies and never admits.
+- **An exclusion reaches the object it was fixed to, not what is moved out of
+  it.** A file renamed or hard-linked out of a denied folder by a process that
+  may write that folder is a new name, judged on its own. A planted link is not
+  the denied object, and what it reaches is judged on its own.
+- **A layer is resolved where it is decoded and is its rules and nothing
+  beside them.** Each spelling is walked once; an exclusion holds the object and,
+  where it was a link, its target, both through the handles of that walk; a bare
+  exec name is resolved on the decoding `PATH`. Nothing is resolved again. A
+  stack crosses a process boundary as traces and the receiver re-holds by
+  walking; a received stack is never refused.
+- **Use goes through the handle.** A `Located` opens, stats, stages and
+  publishes relative to its directory handle; a leaf absent at the walk is
+  created exclusively; ral enumerates trees itself. A program is judged as a
+  `Located` and started by its real name.
+- **The OS sandbox side consumes `RealPath` and `Hold` and still judges by
+  position.** The identity reading is ral's own readers'; a denied object moved
+  under an allowed directory is visible to a program ral runs. Narrowing that
+  is the sequel plan, `261021_enforcers-agree`.
+
+## Rejected
+
+- *Identity on both polarities (the meet).* The `Table` meet needs positive
+  containment to be transitive, and "same object or same name" is not; a
+  directory recreated under a grant would stop working, as the kernel enforcer
+  also sees it.
+- *Live exclusions.* Re-resolving at every check is two instants and a race
+  between them.
+- *Resolution-time handles for allowances.* They are positional, and the kernel
+  sees the recreated directory.
+- *Ancestor protection in the guard.* It is the kernel's, through `pinned_dirs`.
+- *Exec through a descriptor.* An interpreter needs a name for `$0`, and Landlock
+  rules only allow and cannot require the judged object.
+- *Windows handles on exclusions.* They lock the tree.
+- *Refusing a received stack.* Every atomic save of a denied file would refuse
+  the next spawn.
+- *A summary record instead of a transcript.* A path string and an aligned
+  vector of identities are two observations stitched together, and the stitching
+  comes apart under a move.
+- *One type for evidence and anchor.* A judgment would accept an address where it
+  needs evidence, and a consumer wanting evidence would keep possession for a
+  pipeline.
+- *A wire hierarchy beside the runtime types.* The unheld state is sound, so a
+  type parameter proving a stack was re-held guards no safety property; a `Hold`
+  serialises as its trace and `GrantStack::rehold` at the two receive sites is
+  the protocol.
+- *Refusing exclusions on volumes that reuse ids.* It bricks a default profile
+  on a host with a redirected home; over-denying is the cost, as for FUSE and NFS.
+
+## Where
+
+- **`core/src/path/walk.rs`** and its host modules: `Trace`, `RealPath`, `Hold`,
+  `Excluded`, `Dir`, `Located`, `walk`, `walk_excluded`.
+- **`core/src/path/identity.rs`** — the two readings.
+- **`core/src/capability/{lattice,fs,exec}.rs`** — `GrantLayer`, `GrantPath`,
+  `Extent`, `GrantStack::{judge, rehold}`.
+- **`core/src/path/tree/walk.rs`** — ral's own enumeration.
 
 ## Verification
 
@@ -103,6 +193,13 @@ compares `program.parent()` by `RealPath::parent`.  No macOS host assertion
 is new: `mac_profile_lets_a_lookup_stat_the_surface_of_a_frozen_allowance`
 and the profile tests that build exclusions (now `GrantPath<Excluded>`, so
 walked) are the existing ones, unrun on a Mac.
+
+Step 10 (macOS): `an_exclusion_holds_its_leaf_by_the_walks_own_o_evtonly_descriptor` and `an_unmounted_volume_leaves_an_exclusion_unheld_by_position` (`path/walk/tests/macos.rs`, the latter attaching and force-detaching an APFS image with `hdiutil`) were cross-compiled only; neither has run on a Mac.
+
+Two names of the deleted list survive, each deferred to the sequel plan:
+
+- `RealPath::rendered` (Linux only): the bwrap renderer's `Rendered` strings still become positions through it, until that renderer holds positions itself.
+- `FrozenPath::{lexical, of_real}`: the walk's lexical door from a grant's written spelling, and a launch's own support files shown as one, until the sequel plan's grant spelling is walked at freeze.
 
 The first green macOS `ci.yml` and `windows.yml` run on the landing commit
 discharges them; it is recorded here when it comes.

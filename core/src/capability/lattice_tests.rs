@@ -248,7 +248,7 @@ fn exec_of(p: &FrozenPath) -> ExecRules {
 }
 
 fn exec_deny_of(p: &FrozenPath) -> ExecRules {
-    std::iter::once(Rule::Deny(ExecDeny::Dir(excluding(p)))).collect()
+    std::iter::once(Rule::Deny(Box::new(ExecDeny::Dir(excluding(p))))).collect()
 }
 
 /// A link to `target` at `to`.

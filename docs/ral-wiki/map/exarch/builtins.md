@@ -110,7 +110,7 @@ judging the object it opens.
   its count covers only valid skills. `skill` reports a read or frontmatter
   failure with the skill's name and path.
 
-Reads resolve through `checked_read_path` / `check_fs_read`; the edit writes go
+Reads resolve through `Shell::locate::<Reading>`; the edit writes go
 through core's atomic write site under the run's pushed [[design/grant|grant]]
 frame ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]).
 

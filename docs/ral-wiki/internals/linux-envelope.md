@@ -52,9 +52,9 @@ included), the pins of bwrap and the trampoline, bound read-only at their own
 names before the masks, and, over everything, the cgroup tree. The launched
 image is not a bind of its own: the running-reads law puts it in the read
 region, and the table admits it as it admits any file.
-Every allowance is bound as the frozen real path the guard judged, never
-re-resolved; the surface spelling is only the destination at which the frozen
-object is bound.
+Every allowance is bound as the resolved position the guard judged, opened
+without following a link (`open_nofollow`) and never resolved again; the
+spelling is only the destination at which the opened object is bound.
 
 - **A path is its canonical object plus the spellings that reach it**
   (`render_objects`). `/bin` shows `/usr/bin`'s handle, except inside another

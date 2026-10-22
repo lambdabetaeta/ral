@@ -1,7 +1,7 @@
 ---
 verified_at_commit: f0b81686
 verified_at_date: 2026-10-17
-anchors: [Head, ExecRules, ExecScope, Withheld, ExecDenial, Evidence, GrantStack, admit, check_exec, Admitted, for_kernel, places, deputy_prefixes]
+anchors: [Head, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, check_exec, Admitted, for_kernel, places, deputy_prefixes]
 ---
 
 # Exec judgment: which program may run
@@ -25,7 +25,7 @@ table, then what running reads (below).
   containment. Specificity decides nothing: **an exclusion beats every
   allowance**, so an exact file or a deeper directory never reopens an excluded
   directory ([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]).
-- **`every` is a flag, not a key.** It compiles to `ExecScope::Any`, positive
+- **`every` is a flag, not a key.** It resolves to `ExecAllow::Any`, positive
   for every program, bundled tools included, and has no negative form.
 - **A bare key** means the file the decoding env's `PATH` finds. So a planted
   `/tmp/evil/rg` does not inherit ``allow: [`name rg]``.

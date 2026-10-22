@@ -689,7 +689,7 @@ mod tests {
                 GrantPath::walk(FrozenPath::from_surface("/bin/sh")).expect("/bin/sh walks");
             let exec = [
                 Rule::Allow(ExecAllow::Any),
-                Rule::Deny(ExecDeny::File(shell)),
+                Rule::Deny(Box::new(ExecDeny::File(shell))),
             ];
             confined_to(
                 &[&work],

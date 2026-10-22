@@ -2,7 +2,7 @@
 status: active
 generated_at_commit: 90479dea
 verified_at_commit: 446e3123
-anchors: [Table, Scope, ExecScope, Subject, Region, ExecKey, ExecRules, live, for_kernel, region, rules, refreeze, contains, own]
+anchors: [Table, Scope, Subject, Region, ExecKey, ExecRules, ExecAllow, ExecDeny, live, for_kernel, region, rules, contains, own]
 ---
 
 # One table, two instances
@@ -144,3 +144,11 @@ synod's base to nothing. The fix that had mattered was the fold:
 (`deputy_prefixes`), `core/src/path/forms.rs` (`contains`, `refreeze`,
 `from_guest`), `core/src/path/lex.rs` (`Polarity`, `Allow`, `Deny`),
 `core/src/capability/lattice.rs` (`ExecKey`, `ExecGrant`, `meet_insert`).
+
+**Amended 2026-10-22 by [[decisions/261021_one-path|one-path]] and
+[[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]].**
+A `Table<A, D>` is two sets, allowances (`Allows`: `contains`, `own`) and
+exclusions (`Denies`: `matches`), where `Table<K: Scope>` was one map of
+scopes to evidence; `Scope`, `ExecScope` and `FsScope` are `ExecAllow`/`ExecDeny`
+and `FsAllow`/`FsDeny`, and evidence is computed. Exclusions are no longer
+re-frozen (`refreeze` is gone): a layer is resolved where it is decoded.

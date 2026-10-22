@@ -470,3 +470,8 @@ Drafted against 0c52a8f4; revised at 6bfbb097 after three review rounds
 `typecheck::contract` (`Holds`, `drain_nested`). See [[design/grant|grant]],
 [[design/capability-freeze|capability-freeze]],
 [[design/two-enforcers|two-enforcers]] and `docs/SPEC.md` §12.
+
+**Amended 2026-10-22 by [[decisions/261021_one-path|one-path]].** `drop_dead_exec_grants` is the decoder's own
+predicate: a bare exec name that finds neither a file on the decoding `PATH` nor
+a tool this platform bundles makes no allowance and keeps its veto. The
+decoder returns a resolved `GrantLayer`, not a `Capabilities`.

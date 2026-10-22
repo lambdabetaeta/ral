@@ -102,3 +102,9 @@ check on the child's own SIDs; see the 2026-10-20 amendment
 of [[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]].
 The second invariant above still holds on every backend, though on Windows the
 order of ACEs it speaks of no longer arises.
+
+**Amended 2026-10-22 by [[decisions/261021_one-path|one-path]].** `check_fs_write` and `admits_fs_exact` are
+`GrantStack::judge` (and `admits_fs`): every fs door walks, then judges the
+transcript, then uses the handle the walk holds. The lenient canonicaliser and
+`walk_vetted` are gone; there is one resolver, and policy is resolved by it where
+a layer is decoded.

@@ -32,7 +32,7 @@ struct StampStore {
 /// other way.
 #[allow(
     clippy::disallowed_methods,
-    reason = "native: the canonical spelling the OS returned, kept as-is as a key"
+    reason = "native: the canonical spelling the OS returned, kept as-is as a key; keyed by name until the sequel plan narrows what the sandbox side does by name"
 )]
 pub(super) fn stamp_key(canonical: &Path, kind: GrantKind) -> String {
     format!("{}|{}", kind.tag(), canonical.to_string_lossy())
@@ -43,7 +43,7 @@ pub(super) fn stamp_key(canonical: &Path, kind: GrantKind) -> String {
 /// both key off the same canonical path.
 #[allow(
     clippy::disallowed_methods,
-    reason = "native: the canonical spelling the OS returned, kept as-is as a key"
+    reason = "native: the canonical spelling the OS returned, kept as-is as a key; keyed by name until the sequel plan narrows what the sandbox side does by name"
 )]
 pub(super) fn label_stamp_key(canonical: &Path) -> String {
     format!("label|{}", canonical.to_string_lossy())

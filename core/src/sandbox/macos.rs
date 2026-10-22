@@ -448,9 +448,9 @@ mod tests {
                 GrantPath::<Extent>::allowing(written).expect("a directory walks"),
             ))
         } else {
-            Rule::Deny(ExecDeny::Dir(
+            Rule::Deny(Box::new(ExecDeny::Dir(
                 GrantPath::<Excluded>::walk(written).expect("a directory walks"),
-            ))
+            )))
         }
     }
 
@@ -463,14 +463,14 @@ mod tests {
                 found_as: None,
             })
         } else {
-            Rule::Deny(ExecDeny::File(
+            Rule::Deny(Box::new(ExecDeny::File(
                 GrantPath::<Excluded>::walk(written).expect("a file walks"),
-            ))
+            )))
         }
     }
 
     fn veto(name: &str) -> Rule {
-        Rule::Deny(ExecDeny::Name(command_name_key(name)))
+        Rule::Deny(Box::new(ExecDeny::Name(command_name_key(name))))
     }
 
     fn restricted(fs: FsProjection, rules: Vec<Rule>) -> SandboxProjection {

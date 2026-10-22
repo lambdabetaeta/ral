@@ -131,6 +131,10 @@ fn spelled(path: &Path) -> Option<LexicalPath> {
 /// the entry is still the object the walk holds, which is not owned by `me`
 /// and — unless a symlink, whose own mode the kernel ignores — not writable
 /// by it either.  An object the walk could not hold is refused.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:carrier-system-only] asks, by name under the directory handle the walk holds, whether the entry is still the walked object and beyond the user's write; sandbox rendering over the walk's own names, not a model's data I/O"
+)]
 fn system_only(v: &Vetted<'_>, me: u32) -> bool {
     use rustix::fs::{Access, AtFlags, accessat, fstat, statat};
     let Some(child) = v.child else {

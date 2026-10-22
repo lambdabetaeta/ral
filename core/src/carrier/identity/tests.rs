@@ -94,6 +94,7 @@ mod identity_cancel_tests {
             std::thread::spawn(move || crate::carrier::testkit::eval(&transport, &src))
         };
         let deadline = Instant::now() + Duration::from_secs(5);
+        #[allow(clippy::disallowed_methods, reason = "[test] a marker file's stat")]
         while !marker.exists() {
             assert!(
                 Instant::now() < deadline,

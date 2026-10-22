@@ -1,7 +1,7 @@
 //! Test fixtures shared across the crate: a private temp directory per test.
 #![allow(
     clippy::disallowed_methods,
-    reason = "REASONED-SILENT: test-fixture scratch directories, made and read only by \
+    reason = "[test] test-fixture scratch directories, made and read only by \
               the tests themselves."
 )]
 

@@ -51,6 +51,18 @@ judged by its real path through the one exec judgment (`GrantStack::admit`), and
 the launcher runs that real path, under the user's spelling as `argv[0]`
 ([[decisions/261004_exec-rules|exec-rules]]).
 
+**The two enforcers agree on names and differ on identity, and the difference is
+ral's.** An exclusion is fixed, when the grant is decoded, to the object its
+spelling reached; ral's own readers (`cat`, `grep`, the editor, the tree walk,
+a redirect) match it by position *or* by that object, so a denied file
+renamed or hard-linked under an allowed directory is still refused to them.
+The kernel renderers consume the same `RealPath` and `Hold` and still judge by
+position: a bwrap mask, a Seatbelt rule or a DACL carve names the place, so
+that file is visible to a program ral runs. The sequel plan,
+`261021_enforcers-agree`, is where the renderers come to agree with ral's own
+readers ([[decisions/261021_one-path|one-path]],
+[[internals/path-judgment|path-judgment]]).
+
 **Why the guard cannot be the only enforcer.**
 
 - *It is blind to what a child does on its own.* Once ral spawns `sh`, the guard's

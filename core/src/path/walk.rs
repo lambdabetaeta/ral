@@ -37,8 +37,8 @@
 //!   target through its handle, a data handle derived from a held leaf, and a
 //!   listing;
 //! - `create`, `create_sibling`, `mkdir`, `rename_over`,
-//!   `unlink`, `sync_dir`, `copy_mode`, `is_writable` and `open_discard`,
-//!   which write;
+//!   `unlink`, `is_writable` and `open_discard`, which write, and on Unix
+//!   `sync_dir` and `copy_mode`, which Windows has no use for;
 //! - on Unix, `seen_at`, which stats a listed entry by name, and `impl
 //!   From<&rustix::fs::Stat> for ObjectId`, the identity a by-name `stat`
 //!   reports, which `carriers` compares with [`ObjectId::of`];
@@ -397,6 +397,10 @@ struct Spelling {
 }
 
 /// `path` as its root and the names past it, `.` dropped.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "path-form: the one split of a spelling into its root and names"
+)]
 fn split(path: &Path) -> io::Result<Spelling> {
     let mut root = PathBuf::new();
     let mut names = VecDeque::new();
@@ -615,6 +619,10 @@ impl RealPath {
 
     /// The names of this position past `root`, for a key or a shown name;
     /// `None` where `root` does not contain it.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "path-form: a position past a root, the one place two paths' prefixes are stripped"
+    )]
     pub fn relative_to(&self, root: &Self) -> Option<Vec<EntryName>> {
         let spellings = |p: &Self| {
             std::iter::once(p.0.clone())
@@ -634,6 +642,10 @@ impl RealPath {
 
 impl RealPath {
     /// The position above this one, `None` at a root.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "path-form: the position above a position, the one place a path's parent is taken"
+    )]
     #[cfg(any(target_os = "macos", windows))]
     pub(crate) fn parent(&self) -> Option<Self> {
         self.0.parent().map(|p| Self(p.to_path_buf()))
@@ -641,6 +653,10 @@ impl RealPath {
 
     /// This position's proper ancestors at or beneath `prefix`, nearest
     /// first: what the Seatbelt profile pins.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "path-form: the ancestors of a position, the one place a path's ancestors are walked"
+    )]
     pub(crate) fn ancestors_within<'a>(
         &'a self,
         prefix: &'a Self,
@@ -663,6 +679,10 @@ impl RealPath {
 
 impl RealPath {
     /// Whether this position is the root of its filesystem: `/`, `C:\`.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "path-form: whether a position has a parent is whether it is a root"
+    )]
     pub fn is_root(&self) -> bool {
         self.0.parent().is_none()
     }
@@ -1286,11 +1306,8 @@ impl Dir<Installing> {
     }
 
     /// Whether the directory is on a local fixed volume.
-    ///
-    /// # Errors
-    /// The volume query's.
     #[expect(dead_code, reason = "used from step 7")]
-    pub(crate) fn is_local(&self) -> io::Result<bool> {
+    pub(crate) fn is_local(&self) -> bool {
         host::is_local(&self.handle.file)
     }
 }
@@ -1686,11 +1703,11 @@ impl Located<Installing> {
     /// Whether the leaf is on a local fixed volume.
     ///
     /// # Errors
-    /// The volume query's; `NotFound` for a leaf that is not held.
+    /// `NotFound` for a leaf that is not held.
     #[cfg(windows)]
     pub(crate) fn is_local(&self) -> io::Result<bool> {
         match &self.leaf {
-            Leaf::Held { file, .. } => host::is_local(file),
+            Leaf::Held { file, .. } => Ok(host::is_local(file)),
             _ => Err(io::ErrorKind::NotFound.into()),
         }
     }
@@ -1865,6 +1882,8 @@ impl Located<Judged<Writing>> {
             name,
             settled: false,
         };
+        // A Windows file carries no mode beyond its create's attributes.
+        #[cfg(unix)]
         if let Some(stat) = staged.target.stat() {
             host::copy_mode(&staged.file, stat)?;
         }
@@ -1958,6 +1977,8 @@ impl StagedWrite {
         if landed.is_err() {
             let _ = host::unlink(&self.target.dir.file, &self.name);
         } else {
+            // Windows has no directory flush.
+            #[cfg(unix)]
             let _ = host::sync_dir(&self.target.dir.file);
         }
         landed

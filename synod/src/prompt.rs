@@ -97,7 +97,7 @@ pub fn assemble(workspace: &Path, folder_name: &str, config_dir: &Path) -> Resul
     let rules = config_dir.join(HOUSE_RULES);
     #[allow(
         clippy::disallowed_methods,
-        reason = "REASONED-SILENT: loading synod's own optional house-rules config file \
+        reason = "[silent:house-rules] loading synod's own optional house-rules config file \
                   while building the prompt; not the model's turn-time I/O"
     )]
     match std::fs::read_to_string(&rules) {

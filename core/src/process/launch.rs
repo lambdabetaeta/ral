@@ -914,6 +914,10 @@ mod windows {
         }
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[silent:nul-device] opens the NUL device as a child's stand-in stdio; the name is the OS's own constant, not a model's"
+    )]
     fn open_nul(access: u32) -> io::Result<OwnedHandle> {
         let name = wide_null(OsStr::new("NUL"))?;
         let handle = unsafe {

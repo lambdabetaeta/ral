@@ -62,7 +62,7 @@ pub(super) fn capture(
     let path = run_dir.join(FILE);
     #[allow(
         clippy::disallowed_methods,
-        reason = "REASONED-SILENT: writes the run directory's engine.log while a conversation is \
+        reason = "[silent:engine-log] writes the run directory's engine.log while a conversation is \
                   failing to start — host-side diagnostic plumbing beside a session that has no \
                   shell to route through and no run to raise a card in. See the module docs."
     )]

@@ -534,6 +534,10 @@ pub(crate) fn now_unix_ms() -> u64 {
 ///
 /// # Errors
 /// Returns a sentence when the target names a malformed session directory.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "path-form: exarch's own session and run directories read from a resume target, not a name any grant judges"
+)]
 pub fn normalize_resume_target(target: &Path) -> Result<PathBuf, String> {
     let Some(session) = target
         .file_name()
@@ -671,6 +675,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
     fn dropping_a_session_scratch_removes_its_directory_and_its_lock() {
         let scratch = Scratch::new(EXARCH).expect("session scratch");
         let dir = scratch.path().to_path_buf();

@@ -118,8 +118,10 @@ fn i64_at(bytes: &[u8], offset: usize) -> io::Result<i64> {
 fn wide_at(bytes: &[u8], offset: usize, len: usize) -> io::Result<Vec<u16>> {
     let raw = bytes.get(offset..offset + len).ok_or_else(short)?;
     Ok(raw
-        .chunks_exact(2)
-        .map(|unit| u16::from_le_bytes([unit[0], unit[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&unit| u16::from_le_bytes(unit))
         .collect())
 }
 
@@ -170,7 +172,11 @@ pub(super) fn reopen_shared(f: &File, access: u32) -> io::Result<File> {
 /// Whether the object `f` holds is on a local fixed volume: the volume's GUID
 /// path asked of the handle, then that volume's drive type.  A share has no
 /// GUID path, so it is not local, nor is a volume that cannot be named.
-pub(super) fn is_local(f: &File) -> io::Result<bool> {
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:walk-volume] asks a held handle for the GUID path of its volume, to say whether the volume is local; the handle's own answer, no name is resolved"
+)]
+pub(super) fn is_local(f: &File) -> bool {
     let mut path = vec![0u16; 512];
     let len = loop {
         let capacity = u32::try_from(path.len()).expect("a path buffer is under four gibibytes");
@@ -184,7 +190,7 @@ pub(super) fn is_local(f: &File) -> io::Result<bool> {
             )
         } as usize;
         match len {
-            0 => return Ok(false),
+            0 => return false,
             n if n >= path.len() => path.resize(n + 1, 0),
             n => break n,
         }
@@ -197,12 +203,12 @@ pub(super) fn is_local(f: &File) -> io::Result<bool> {
         .nth(3)
         .map(|(at, _)| at + 1);
     let Some(root_len) = root_len else {
-        return Ok(false);
+        return false;
     };
     let mut root = path[..root_len].to_vec();
     root.push(0);
     // SAFETY: `root` is a NUL-terminated wide string that outlives the call.
-    Ok(unsafe { GetDriveTypeW(root.as_ptr()) } == DRIVE_FIXED)
+    unsafe { GetDriveTypeW(root.as_ptr()) == DRIVE_FIXED }
 }
 
 /// The root a walk descends from, held without delete sharing, with its own
@@ -672,16 +678,6 @@ pub(super) fn rename_over(
 )]
 pub(super) fn unlink(dir: &File, name: &EntryName) -> io::Result<()> {
     cap_primitives::fs::remove_file(dir, name.as_os_str().as_ref())
-}
-
-/// Windows has no directory flush.
-pub(super) fn sync_dir(_dir: &File) -> io::Result<()> {
-    Ok(())
-}
-
-/// A Windows file carries no mode beyond the attributes its create gave it.
-pub(super) fn copy_mode(_file: &File, _stat: &Stat) -> io::Result<()> {
-    Ok(())
 }
 
 /// Whether the entry `name` of `dir` may be opened for writing, following a

@@ -74,7 +74,7 @@ fn list(dir: &Dir<Installing>) -> io::Result<Vec<Entry>> {
         .map(|entry| {
             Ok(match entry.seen().unwrap().stat.kind {
                 Kind::Symlink => Entry::Link(entry.real()),
-                Kind::Dir => Entry::Directory(dir.open_dir(entry.name())?),
+                Kind::Dir => Entry::Directory(Box::new(dir.open_dir(entry.name())?)),
                 _ => Entry::Other(entry.real()),
             })
         })

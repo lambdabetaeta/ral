@@ -511,10 +511,10 @@ fn listing(dir: &Dir<Installing>) -> Result<Vec<carve::Entry>, Refusal> {
             let kind = entry.seen().map_err(here)?.stat.kind;
             Ok::<_, Refusal>(match kind {
                 Kind::Symlink => carve::Entry::Link(entry.real()),
-                Kind::Dir => carve::Entry::Directory(
+                Kind::Dir => carve::Entry::Directory(Box::new(
                     dir.open_dir(entry.name())
                         .map_err(|e| unlisted(&entry.real(), &e))?,
-                ),
+                )),
                 _ => carve::Entry::Other(entry.real()),
             })
         })

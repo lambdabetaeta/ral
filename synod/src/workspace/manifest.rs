@@ -120,6 +120,10 @@ impl Manifest {
     /// and every file in the other manifest would answer to that as a
     /// deletion.  Only the root can raise `Vanished` this far: a subfolder
     /// that goes is recorded as unread and walked past.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "path-form: the folder a message names for an entry whose name this computer cannot read"
+    )]
     pub fn of_folder_via(root: &Path, stop: &Stop, progress: Progress<'_>) -> Result<Self, String> {
         let named = spelled(root)?;
         let region = GrantStack::root().read_region(&Floor::default());

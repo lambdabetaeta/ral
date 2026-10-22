@@ -2,7 +2,7 @@
 status: active
 generated_at_commit: 2afefdf4
 verified_at_commit: 646bff0a
-anchors: [Binds, Bind, render_objects, bwrap_argv, bwrap_command, HostEnvelope, Slot, open_real, Pinned]
+anchors: [Binds, Bind, render_objects, bwrap_argv, bwrap_command, HostEnvelope, Slot, open_nofollow, Pinned]
 ---
 
 # The envelope mounts by handle
@@ -156,3 +156,8 @@ by descriptor all the same.
 - A host whose locked `/etc/hosts` refuses a read-only rebind (a rootless
   container) refuses it by descriptor too: no `Restricted` envelope launches
   there, as before.
+
+**Amended 2026-10-22 by [[decisions/261021_one-path|one-path]].** `open_real` is `RealPath::open_nofollow` (and
+`open_dir_nofollow`): the one walk with every link refused, since the position is
+already real and a link met now is a redirection. The handle it returns is
+`Installing`, which lists, descends and lends its descriptor and reads nothing.

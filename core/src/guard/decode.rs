@@ -584,7 +584,7 @@ mod tests {
             assert!(allow.is_empty(), "{name}: {allow:?}");
             let deny = name_rules::<Excluded>(name, Some(path), false).unwrap();
             assert!(
-                matches!(&deny[..], [Rule::Deny(d)] if *d == ExecDeny::Name(command_name_key(name))),
+                matches!(&deny[..], [Rule::Deny(d)] if **d == ExecDeny::Name(command_name_key(name))),
                 "{name}: {deny:?}"
             );
         }
@@ -621,7 +621,7 @@ mod tests {
             assert!(lost.is_empty(), "{unix_available}: {lost:?}");
             let veto = name_rules::<Excluded>("zz-lost", path, unix_available).unwrap();
             assert!(
-                matches!(&veto[..], [Rule::Deny(d)] if *d == ExecDeny::Name(command_name_key("zz-lost"))),
+                matches!(&veto[..], [Rule::Deny(d)] if **d == ExecDeny::Name(command_name_key("zz-lost"))),
                 "{unix_available}: {veto:?}"
             );
         }

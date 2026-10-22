@@ -177,8 +177,8 @@ same layer elaborates differently above and beneath another
 Not in the fragment: priority, negation, provenance of evidence, argument
 policies, any public policy-expression language. Ours, not the reference's: the
 request domains (running as reading, looking down the stack), polarity-dependent
-path identity, omission indexed by role, frozen allowances with re-resolved
-exclusions, support, denotational activation, and the absence of specificity.
+path identity, omission indexed by role, allowances by position with exclusions that
+hold their objects, support, denotational activation, and the absence of specificity.
 
 ## What the reference gives, and what is ours
 
@@ -199,7 +199,7 @@ Ours, and our obligations rather than the reference's:
 - the request domains: running as reading at the stack, ral's binary as an
   ordinary file, a bundled tool's read of it, writing as reading;
 - polarity-dependent identity (allowances as stored, exclusions under every
-  spelling) and, on top of it, frozen allowances with re-resolved exclusions;
+  spelling) and, on top of it, allowances by position and exclusions that hold the object their walk reached;
 - omission indexed by role, the two role types and `◁`;
 - verbs as sets of positive evidence, and net as a decision;
 - the floor, carriers and linker as `⊕` support, and the guard/kernel contract

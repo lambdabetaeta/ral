@@ -264,6 +264,10 @@ mod tests {
         assert_ne!(b.uid, 0);
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] the plan roots its cgroup where the jail says"
+    )]
     #[test]
     fn plan_roots_the_cgroup_and_carries_the_jails_limits() {
         let Some(plan) = unwrap_or_skip(jail().plan(Ownership::Kept)) else {
@@ -273,6 +277,10 @@ mod tests {
         assert_eq!(plan.limits, JailLimits::default());
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] the engine's cgroup lies where the plan puts it"
+    )]
     #[cfg(unix)]
     #[test]
     fn plan_puts_a_survivor_beyond_every_engines_tree() {

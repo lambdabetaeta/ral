@@ -51,11 +51,11 @@ where it is asked for rather than announced: `ral`'s audit trail records
 one `deputy` check per flagged prefix when a grant frame is entered
 ([[map/core/capabilities|capabilities]]).
 
-Every profile is *frozen* as it loads — resolving each place (`` `home ``, `` `xdg-* ``, `` `cwd ``,
+Every profile is *resolved* as it loads — resolving each place (`` `home ``, `` `xdg-* ``, `` `cwd ``,
 `` `tempdir ``, `` `gitdir ``) and the `dir` selectors against the session's home, working
 directory, and the host's live tool roots inside
 `ral_core::guard`'s decode pass (`guard/decode.rs`, `guard/freeze.rs`) — so composition runs entirely on
-already-resolved `Capabilities` ([[design/capability-freeze|freeze boundary]]).
+resolved `GrantLayer`s ([[design/capability-freeze|freeze boundary]]).
 An `` `xdg-* `` place escaping `HOME` is rejected at the profile that names it, before
 composition could discard it. Loading reuses
 `ral_core::load::profile::load_capabilities_from_*` — the same surface as ral's
@@ -95,7 +95,7 @@ self-denial layer either — it is a value computed in the parent's shell, with
 no file on disk for the child to rewrite.
 
 `deny_layer(paths, ctx)` is a pure constructor, not a mutator: it returns a
-fresh `Capabilities` layer holding only those paths as `fs.deny_paths`, for the
+fresh `GrantLayer` holding only those paths as its fs exclusions, for the
 caller to push, rather than folding them into whatever layer already carries
 an `fs` opinion. Each path is frozen by `freeze::host_absolute`, and one it
 refuses — not UTF-8, or not absolute under this host's rules — fails the
@@ -122,7 +122,7 @@ that can read the same bytes a hundred other ways.
 `policy/base.rs` embeds the six bake-in profiles from `exarch/data/*.exarch.ral`
 via `include_str!`, ordered from most to least authority:
 
-- `dangerous` — `Capabilities::root`, lattice top, no attenuation;
+- `dangerous` — the lattice top, no attenuation;
 - `reasonable` — default; everyday tooling + standard binary dirs;
 - `edit-only` — reasonable's reads, writes to the working tree and scratch,
   network on; for patch/refactor jobs that never run a build;
@@ -179,16 +179,17 @@ runs. Two consequences ride the selectors:
   `--extend`; `reasonable`, `confined`, `edit-only` and `read-only` add
   `` `dir `homebrew ``.
 
-`resolve_base` also drops *dead grants* as a profile loads: exec literals
-naming the Unix-only bundled coreutils (`drop_dead_exec_grants`) are removed
-off Unix, and the freeze pass discards foreign-rooted Unix literals on
-Windows — a rendered profile never advertises authority the platform cannot
-back.
+The decoder drops *dead grants* as a profile loads: a bare exec name that finds
+neither a file on the decoding `PATH` nor a tool this platform bundles (the
+Unix-only coreutils off Unix) makes no allowance and keeps its veto
+(`name_rules`), and a path rooted under a foreign platform's convention, a Unix
+literal on Windows, is discarded — a rendered profile never advertises authority
+the platform cannot back.
 
 The in-module tests pin the load-bearing per-profile properties so a future edit
 can't silently widen a jail:
 
-- `dangerous` is `Capabilities::default` (lattice top);
+- `dangerous` is the lattice top;
 - `git` admitted in `reasonable`/`read-only` (commit flows work without
   `--extend`); `minimal` admits only the *system* git under `/usr/bin/`
   (a brew git is opt-in via the git extension);

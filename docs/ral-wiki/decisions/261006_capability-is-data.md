@@ -102,3 +102,6 @@ that took a `Context`.
 (`check_exec`, `check_flag`, `Denial`, `Shell::refused`, `FreezeCtx`,
 `PolicyError`, `decode_capability_map`, `SpawnGrant`), and
 `core/src/types/audit/door.rs` (`Shell::record_check`).
+
+**Amended 2026-10-22 by [[decisions/261021_one-path|one-path]].** `respelled` is `MatchedBy` on
+`Withheld::Excluded`: `Name`, `FoldedName` or `Identity`.

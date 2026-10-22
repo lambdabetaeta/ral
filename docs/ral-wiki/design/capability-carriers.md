@@ -60,7 +60,7 @@ understand different languages ([[design/two-enforcers|two-enforcers]]):
 `SandboxProjection` is the permission boiled down into that flat list — the
 subtle parts (a bare-name veto, a bundled tool's name) flattened away because the
 sentry could never act on them. It carries the same evidence table the guard
-judges by, with every allowance as its frozen real path, plus *support*.
+judges by, with every allowance as its resolved real position, plus *support*.
 
 **Support is what a launch needs beyond the policy, and it yields to every
 exclusion.** Carriers (a trusted script's interpreter) and the dynamic linker

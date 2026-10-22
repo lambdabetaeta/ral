@@ -154,7 +154,13 @@ impl MachineSpec {
                 cause: cause.to_string(),
             },
         })?;
-        if root.is_dir() {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "REASONED-SILENT: the same host-side resolution, one stat further: the \
+                      folder just resolved must be a directory."
+        )]
+        let is_folder = root.is_dir();
+        if is_folder {
             Ok(root)
         } else {
             Err(Error::NotAFolder(root))
@@ -544,6 +550,7 @@ mod tests {
     /// begin until this passes, so the failure looked like a hypervisor problem
     /// rather than an arithmetic one.
     #[test]
+    #[allow(clippy::disallowed_methods, reason = "[test] a fixture folder's stat")]
     fn a_conventional_spec_resolves_on_this_platform() {
         let dir = tempfile::tempdir().unwrap();
         let spec = MachineSpec::for_folder(dir.path());

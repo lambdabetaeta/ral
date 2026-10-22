@@ -1,7 +1,7 @@
 ---
 verified_at_commit: f0b81686
 verified_at_date: 2026-10-17
-anchors: [apply_profile, build_profile, Profile, emit_fs_restricted, emit_exec_rules, Clause, Filter, emit_ancestor_metadata, withheld_doors, rendered_ancestors, pinned_dirs, open_search_dir]
+anchors: [apply_profile, build_profile, Profile, emit_fs_restricted, emit_exec_rules, Clause, Filter, emit_ancestor_metadata, withheld_doors, rendered_ancestors, pinned_dirs, step]
 ---
 
 # The Seatbelt profile: an object policy in a name language
@@ -30,7 +30,7 @@ cost of saying the second in the first:
   (`emit_ancestor_metadata`, over `rendered_ancestors`). Metadata suffices
   because *search* is all a resolver holds on an ancestor — the kernel's,
   `posix_spawn`'s, and ral's own walk, which opens its intermediates `O_SEARCH`
-  for exactly this reason (`path/walk.rs::open_search_dir`). A read handle
+  for exactly this reason (the directory step of `path/walk/macos.rs`). A read handle
   there would need `file-read-data`, and a readable ancestor is a listable
   one: `/Users`, a home directory's dotfile names.
 - **Pins.** A deny names a path, so renaming its parent would carry the bytes
@@ -106,15 +106,15 @@ cannot see argv; its job is the interpreter-bypass class the guard never sees
 bound above. The confined child applies its profile after it has started, so its own
 image is already mapped when the profile takes force.
 
-**Allowances render frozen.** Every read, write and run allowance is rendered as
-its frozen real path, with its firmlink twins, and as nothing else: a surface
+**Allowances render resolved.** Every read, write and run allowance is rendered as
+its resolved real position, with its firmlink twins, and as nothing else: a surface
 spelling is never a predicate of its own. Seatbelt checks the resolved path of
 each access against it, so a symlink put in an allowance's place reaches
 nothing. It does gate the `lstat` of each link a lookup passes, so the surface
 an allowance was granted by is stat-able and no more: `Object::walk` names each
 component of its lookup under its parent's real path, admitted as
 `file-read-metadata` literals. The spelling reaches the object while it leads
-there, and nothing beneath it once retargeted. Exclusions are rendered from their re-resolved names.
+there, and nothing beneath it once retargeted. Exclusions are rendered from the resolved real paths their walks held, never from the text as written; Seatbelt judges names, so the identity reading is ral's own readers'.
 
 **There is no write freeze.** An admitted directory a broad write covers stays
 writable, with or without a veto, under any fs; a name veto there is advisory to

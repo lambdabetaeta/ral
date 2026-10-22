@@ -142,6 +142,10 @@ fn find_on_ral_path(name: &str, shell: &mut Shell) -> Settled<Option<Located<Jud
 /// # Errors
 /// When the source's directory is no working directory, against which no
 /// path can be read.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "path-form: the directory a script sits in, where a relative `use` name is anchored before the walk judges it"
+)]
 fn resolve_in_current_script(path: &str, shell: &Shell) -> Settled<crate::path::LexicalPath> {
     let origin = shell.context.modules.stack.last().or_else(|| {
         shell

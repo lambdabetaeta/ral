@@ -2,7 +2,7 @@
 status: active
 generated_at_commit: b49b3823
 verified_at_commit: 90479dea
-anchors: [collision_key, Identity, Polarity, Allow, Deny, Region, live, Respelled, dealias, open_attributes, holds, command_name_key, respelled, evicts]
+anchors: [collision_key, Identity, MatchedBy, Allow, Deny, Region, live, holds, command_name_key, evicts]
 ---
 
 > **Mechanics superseded 2026-10-06** by
@@ -241,3 +241,14 @@ is a refusal.**
 See [[invariants/grants-judge-objects|grants-judge-objects]],
 [[design/two-enforcers|two-enforcers]],
 [[internals/seatbelt-profile|seatbelt-profile]].
+
+**Amended 2026-10-22 by [[decisions/261021_one-path|one-path]].** The decision stands: an exclusion speaks under
+`collision_key`, an allowance as stored. The mechanism changed twice more: the
+reading is chosen by the type, `RealPath::contains` for an allowance and
+`Excluded::matches` for an exclusion, with `Polarity`, `Allow` and `Deny`
+gone and `Identity` private to `path/identity.rs`; and the witness a refusal
+cites is the exclusion with the least `MatchedBy` (`Name`, `FoldedName`,
+`Identity`), where `respelled` was a Boolean. On Windows the stored name is read
+from the handle just opened (the normalized name), not asked afterwards by
+`dealias`. An exclusion also matches by the object its walk held, under any
+name.

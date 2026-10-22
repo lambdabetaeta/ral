@@ -277,6 +277,10 @@ impl Agent {
 
     /// The run's directory, `<run>/sessions/<id>` read backwards: where the
     /// engine's captured output and the lock live.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "path-form: exarch's own run directory above its own session directory, not a name any grant judges"
+    )]
     pub(crate) fn run_dir(&self) -> Option<&Path> {
         self.log_dir.parent()?.parent()
     }

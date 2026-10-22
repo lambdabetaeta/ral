@@ -22,12 +22,20 @@ fn find_git_entry(cwd: &Path) -> Option<PathBuf> {
 
 /// The first ancestor of `cwd`, itself included, holding a `.git` entry —
 /// file or directory, so a worktree or submodule is a root of its own.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:git-root] probes each ancestor of the cwd for a .git entry at session start, before any grant governs; ral's own repository discovery, not a name the model gave"
+)]
 fn work_tree_root(cwd: &Path) -> Option<&Path> {
     cwd.ancestors().find(|dir| dir.join(".git").exists())
 }
 
 /// The directories from the working tree's root down to `cwd`, root first.
 /// Outside a working tree, `cwd` alone.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "path-form: the spellings from a root already found down to the cwd"
+)]
 pub fn work_tree_chain(cwd: &Path) -> Vec<&Path> {
     let mut chain: Vec<&Path> = match work_tree_root(cwd) {
         Some(root) => cwd
@@ -75,6 +83,10 @@ pub(crate) fn discover_git_dir(cwd: &Path) -> Result<Option<PathBuf>, BadPointer
 ///
 /// # Errors
 /// As [`discover_git_dir`].
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:git-dot-git] asks whether the .git entry session-start discovery found is a directory or a pointer file; ral's own repository discovery, not a name the model gave"
+)]
 pub(crate) fn discover_git_dir_with(
     cwd: &Path,
     mut read: impl FnMut(&LexicalPath) -> io::Result<String>,

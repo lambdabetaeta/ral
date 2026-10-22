@@ -176,6 +176,10 @@ mod windows_dacl {
     /// DACL and `SE_DACL_PROTECTED` already in force. Returns the open file
     /// for the caller to write through: there is no separate stamping step,
     /// hence no window in which the file carries an inherited ACL.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[silent:secret-create-windows] creates the owner-only secret file under its protected DACL, in the app's own config directory; credential store infra, not a model's name"
+    )]
     pub(super) fn create_owner_only(path: &Path) -> std::io::Result<std::fs::File> {
         let acl = owner_only_acl()?;
 

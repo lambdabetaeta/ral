@@ -29,6 +29,10 @@ impl Glob {
     /// # Errors
     /// A wildcard component beginning with `.`, one `globset` rejects, or
     /// a `..` after a wildcard, which no walked entry carries.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "path-form: the glob's literal components, where the walk starts"
+    )]
     pub(crate) fn parse(pattern: &LexicalPath) -> Result<Self, String> {
         let (mut root, mut steps) = (PathBuf::new(), Vec::new());
         for c in pattern.as_path().components() {
@@ -70,6 +74,10 @@ impl Glob {
     /// The steps the entry `shown` can have reached, closed under `**`
     /// matching nothing: it is named as the walk reached it, through any link.
     /// A name outside the root reaches none.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "path-form: the steps a walked name reached, counted from the glob's literal root"
+    )]
     fn reach(&self, shown: &LexicalPath) -> Vec<usize> {
         shown
             .as_path()

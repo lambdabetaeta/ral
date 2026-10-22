@@ -345,6 +345,10 @@ pub(super) fn cmd_copy(app: &mut App) {
 
 /// Render the focused tab's `record.jsonl` to `arg`, never over an existing
 /// file.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:export-overwrite] refuses to overwrite the file the user named to `/export`; the user's own command, not a model's name"
+)]
 pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
     let id = app.tabs.focused();
     let dest = match ral_core::path::CwdPath::new(info.cwd.to_path_buf()) {

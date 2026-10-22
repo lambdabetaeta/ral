@@ -328,6 +328,10 @@ impl RcPlan {
 // ── Config file locations ────────────────────────────────────────────────
 
 /// Search for an existing RC file in the standard locations.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:rc-candidate] picks the first of ral's own rc file locations that exists; ral's config, not a model's name"
+)]
 pub(super) fn find_ralrc() -> Option<PathBuf> {
     let candidates = [
         ral_core::path::app_dir(ral_core::path::XdgKind::Config, "ral").map(|d| d.join("rc")),

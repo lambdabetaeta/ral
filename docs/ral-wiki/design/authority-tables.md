@@ -33,42 +33,46 @@ evidence, and what it cost, is
   ral's binary. A bare name is resolved before its meaning meets another layer's
   directories. Belnap changes how evidence combines, not what a name denotes: no
   case folding, canonicalisation or containment code lives outside `path/`.
-- **Subjects** `s ∈ S`: what a table judges. A path for fs; for exec a
-  `Subject`: `Any`, a bundled tool by name, a file by its real path, or
-  `Under(d)`, the inside of a directory.
-- **Scopes** `k ∈ K`: where a rule applies. A table `T` is a finite map
-  `K → Evidence`, private, filled only by joining (`join_insert`): a scope
-  written twice joins, so a scope holding both an allowance and an exclusion is
-  Both, and no table holds Neither.
-- **Polarity picks identity.** A rule *speaks* to `s` when its scope holds `s`
-  as the rule's polarity reads names: positive evidence under `⊑S`, the name as
-  stored; negative evidence under `⊑C`, every spelling some filesystem takes for
-  it (`collision_key` per component). `⊑S ⊆ ⊑C`, both transitive, both
-  firmlink-aware. The table names `Allow` or `Deny`, never an `Identity`;
-  `core/src/path/` alone maps one to the other
-  ([[invariants/grants-judge-objects|grants-judge-objects]]).
-- **Own subject.** `k̂ = k.own()` is the subject a rule at `k` is itself judged
-  at: a prefix's real path, a directory's inside, a file itself, a tool's name.
+- **Subjects** `s ∈ S`: what a table judges. For fs, a `path::Subject`: an
+  access by its transcript (`Trace`), a position, or everywhere; for exec a
+  `Subject`: `Any`, a bundled tool by name, a program by where it is, or a
+  directory's inside.
+- **Scopes.** A table is two sets, `allows` of positive scopes and `denies` of
+  negative ones (`Table<A, D>`), each `Ord`, each of one polarity by its type.
+  Evidence is computed from the sets, never stored: a key cannot hold Both,
+  though a subject can, and no table holds Neither.
+- **Polarity picks the reading.** An allowance (`Allows::contains`) holds `s` by
+  position, names as stored (`⊑S`). An exclusion (`Denies::matches`) holds it by
+  position under every spelling some filesystem takes for the name (`⊑C`,
+  `collision_key` per component), *or by the object its walk held*, wherever
+  `s` reaches it from (`MatchedBy::Identity`). `⊑S ⊆ ⊑C`, both transitive and
+  firmlink-aware; identity is not transitive, and positive containment must be,
+  so an allowance cannot hold by identity: the two readings are two traits on
+  two types ([[invariants/grants-judge-objects|grants-judge-objects]],
+  [[internals/path-judgment|path-judgment]]).
+- **Own subject.** `k̂ = k.own()` is the subject an allowance is itself judged
+  at: a prefix's position, a directory's inside, a file itself, a tool's name.
 
 **Denotation.**
 
 ```
-supports(s)  = ∃ (k, e) ∈ T. e.positive ∧ k holds⟨Allow⟩ s
-excludes(s)  = ∃ (k, e) ∈ T. e.negative ∧ k holds⟨Deny⟩ s
+supports(s)  = ∃ k ∈ allows(T). k contains s
+excludes(s)  = ∃ k ∈ denies(T).  k matches s
 ev(T, s)     = (supports(s), excludes(s))
 ```
 
 There is no specificity: a rule's depth, kind and spelling decide nothing, only
 whether it speaks. One method answers a refusal, `Table::withheld`, which
 returns `None` exactly when `s` has positive evidence alone, otherwise
-`Withheld::Excluded { scope, respelled }` or `Withheld::MissingAllowance`. The
+`Withheld::Excluded { scope, matched_by }` or `Withheld::MissingAllowance`. The
 guard asks it, the projection renders what it admits, and no other code makes a
 decision.
 
-**The witness.** `withheld` looks only at exclusions that hold the subject, so
-it never cites one that does not exclude; among them it prefers one that holds
-the subject as stored, in stable key order. The choice is deterministic, not by
-depth. Its one guarantee is that the cited exclusion applies.
+**The witness.** `withheld` looks only at exclusions that match the subject, so
+it never cites one that does not exclude; among them it cites the one that
+matches the least way (`MatchedBy`: `Name`, then `FoldedName`, then `Identity`),
+in stable key order. The choice is deterministic, not by depth. Its one
+guarantee is that the cited exclusion applies.
 
 **A missing allowance is never an exclusion.** An absent positive candidate
 leaves Neither, which refuses under `↓` but is not stored as negative evidence;
@@ -100,8 +104,7 @@ Both layers allow `/a/B/x`. The pointwise table holds `/a/B ↦ Allow` and
 becomes Both. The kernel would render the same key, and Seatbelt, matching
 caselessly, would refuse a child what the guard admits. The meet is where the
 default is manufactured, so the meet is where it is stopped
-(`the_meet_writes_no_default_as_a_deny`;
-`ral/tests/capabilities.rs::a_stacked_one_sided_allow_denies_no_other_spelling`).
+(`ral/tests/capabilities.rs::a_stacked_one_sided_allow_denies_no_other_spelling`).
 
 **The law.** For every subject `s`, `ev(a ∧ b, s) = ev(a, s) ∧ ev(b, s)`,
 Neither and Both included. Agreement only after `↓` is too weak. It holds of
@@ -114,10 +117,8 @@ and both instances meet:
   `s`.
 
 Prefixes, run places, tools and `Any` satisfy them; `Name` is negative only.
-Two scopes have one polarity by construction, not by masking: compilation
-builds a `Name` veto only from negative evidence and `Any` only from the
-`every` flag, which has no negative form; the meet re-inserts each from
-`denies()` or `positives()` alone, and `Extend` debug-asserts it. A future
+Each scope has one polarity by its type, not by masking: a `Name` veto is an
+`ExecDeny` and `Any` an `ExecAllow`, and `every` has no negative form. A future
 positive scope that does not nest needs an explicit intersection first.
 
 *Proof sketch.* Fix `s`.
@@ -145,11 +146,12 @@ map normalisation and the machine's grant semantics remains to be proved.
 The working record is `dev/docs/agda-progress.md`.
 
 The pointwise law gives commutativity, associativity and idempotence of
-denotations. Rust's normalised map representation also satisfies these laws
-*structurally*, including `a ∧ a = a`; this stronger claim is checked by
+denotations. A table's representation, two ordered sets, also satisfies these
+laws *structurally*, including `a ∧ a = a`; this stronger claim is checked by
 property tests over a universe of directories, files,
-tools, vetoes and `Any` holding case pairs and an NFC/NFD pair, so a name one
-filesystem keeps apart and another merges (`laws` in `capability/table.rs`).
+tools, vetoes and `Any`, built over a tempdir tree of real links and renames and
+holding case pairs and an NFC/NFD pair, so a name one filesystem keeps apart and
+another merges (`laws` in `capability/table.rs`).
 
 ## Laws
 
@@ -228,9 +230,9 @@ law 4
 
 An omitted axis denotes the identity of the role it plays: in a *policy* (a
 base, a restriction layer, the ceiling, the stack) it is `t`; in an *extension
-fragment* it is `⊥`. The two roles are two types: `Capabilities` is a policy,
+fragment* it is `⊥`. The two roles are two types: `GrantLayer` is a policy,
 the loader returns a `Fragment`, and a `Fragment` is consumed only by
-`Capabilities::extend`. Reading an omission in the wrong role is a type error.
+`GrantLayer::extend`. Reading an omission in the wrong role is a type error.
 
 `B ◁ F`, per axis: any `B` with omitted `F` is `B`; omitted `B` with supplied
 `Q` is `t ⊕ Q`, every request less `Q`'s exclusions (`Axis::join_top`); supplied
@@ -254,26 +256,26 @@ appends a conjunct and elaborates none beneath it anew.
 layer is immutable, while `◁` takes a `Fragment`, which only the loader
 constructs, and runs once, in exarch's `for_invocation`, before the first push.
 One extension file is an interface choice; several would fold by `⊕` before
-extending the base. `◁` itself resolves no name: the ceiling keeps the
-fragment's names as names, and every judgment resolves them afresh. Its
-equations are relative to the host state at which the fragment's paths were
-frozen, as every layer's are.
+extending the base. `◁` itself resolves no name: a fragment is a layer, resolved
+where it was decoded, and the ceiling holds its rules. Its equations are
+relative to the host state at which the fragment's paths were walked, as every
+layer's are.
 
 **Representation per axis.** `Axis: Join` has `join_top` (`t ⊕ self`, `None`
 where omission loses nothing) and `is_top` (denotes `t`):
 
 | Axis | `join` | `join_top` | `is_top` |
 |---|---|---|---|
-| `ExecGrant` | `every` by `∨`, `join_insert` each entry | `None` for an empty grant; otherwise the same entries with `every` set, whose allowances still name run places | `every` and no negative entry |
-| `FsPolicy` | union each list | `None` without denies; otherwise read and write `[root]`, the same denies | writes the root, no denies |
+| `ExecRules` | union of the tables | `None` for an empty table; otherwise the same rules with `Any` among the allows, whose other allowances still name run places | `Any` and no exclusion |
+| `FsLayer` | union each table | `None` without exclusions; otherwise `Everywhere` among the read and write allows, the same exclusions | `Everywhere` among the write allows, no exclusions |
 | `Net` | `Offline` | `Some(Offline)` | never |
 | verb sets | union | `None` | every verb listed |
 
 `join_top` on exec keeps its result even where it denotes `t`, because its
 allowances still name run places; elsewhere a result that denotes `t` is `None`.
-`Capabilities::is_restrictive` is "some supplied axis is not `is_top`". `Meet`
+`GrantLayer::is_restrictive` is "some supplied axis is not `is_top`". `Meet`
 and `Join` are the two bare operations, implemented in one shape by `Evidence`
-and `Table` (both) and by the axis policies (`Join`); `Widen` is deleted and the
+and `Table` (both) and by the axes (`Join`); `Widen` is deleted and the
 symmetric `Option<T>` lift with it. `Evidence`'s `Default` is Neither, the
 identity for collecting evidence; restriction starts from `t` explicitly, never
 from `Default`; it derives no `Ord`, neither order being total. A written empty
@@ -285,8 +287,8 @@ which on fs leaves the floor alone; being empty never makes a table omitted.
 - **Writing reads.** A layer's read evidence is its read prefixes joined with
   its write prefixes.
 - **Running reads, looking down the stack.** The run places of an exec table are
-  its positive `File` and `Dir` scopes, as frozen real paths read as prefixes
-  (`FsScope::Place`; `ExecRules::places`); `every` and bundled tools have none.
+  its `File` and `Dir` allowances, as resolved positions read as prefixes
+  (`FsAllow::RunPlace`; `ExecRules::places`); `every` and bundled tools have none.
   For a layer `L` that supplies fs, `P≤L` is the set of run places of the exec
   meet over `L` and every layer beneath it. So a grant reads what it, and the
   grants enclosing it, let run by path, directory or name, and a nested grant
@@ -303,8 +305,8 @@ which on fs leaves the floor alone; being empty never makes a table omitted.
   `L`. Joining the floor into each layer before the meet equals joining it once
   after; an exclusion of a floor path or a place still refuses it; with no
   supplied fs there is no floor-only restriction. Universal positive support on
-  fs is the root prefix `FrozenPath::root`, so `t ⊕ Q` is read `[root]`, write
-  `[root]`, deny `Q`'s denies. Discard devices and the pinned-binary write guard
+  fs is `Extent::Everywhere`, so `t ⊕ Q` is read `Everywhere`, write
+  `Everywhere`, deny `Q`'s denies. Discard devices and the pinned-binary write guard
   keep their own rules.
 - **Why two calls, and what they are exact for.** `fs::region` runs on every fs
   check and `reasonable` has about a hundred names, so permitted reads compile
@@ -324,7 +326,7 @@ which on fs leaves the floor alone; being empty never makes a table omitted.
   already grants, or the host.
 - **A fragment pairs nothing on its own.** `join_top` keeps a fragment's exec
   allowances beside `every`, so the ceiling's table holds them, and a name in an
-  extension is resolved afresh at every run like every other name.
+  extension is resolved where the fragment is decoded like every other name.
 - **A toolchain is written once, in exec.** `reasonable` lists a `dir` selector
   per toolchain and no read entry for what a selector runs, running reads
   covering it ([[design/grant|grant]] §Selectors); it keeps `fs` entries only
@@ -339,7 +341,7 @@ which on fs leaves the floor alone; being empty never makes a table omitted.
   every platform, and an exec exclusion leaves them alone. Nothing admits ral
   beyond the policy and nothing excludes it beyond the policy.
 - **Refusals** are `ExecDenial::{Run, Read}` and
-  `FsRefusal::{Guarded, Withheld}`, each carrying a `Withheld` reason.
+  `Refused::{Guarded, Withheld}`, each carrying a `Withheld` reason.
 
 ## Activation is denotational
 
@@ -356,24 +358,26 @@ summaries. An `every` table with exclusions activates.
   which descendants may still be excluded. For fs, the lists a backend renders;
   for exec, the files and directories the kernel admits.
 - **`denies()`**: the scopes written as exclusions.
-- **`respelled`** on `Withheld::Excluded`: the exclusion holds `s` only by a
-  fold. A refusal says so, so the author learns the deny holds through case or
-  Unicode form:
-  `fs write denied by grant: /w/.ENV is the denied /w/.env under another spelling (case or Unicode form); a deny holds under every spelling`.
-  A veto's key is folded already and holds identically under both polarities,
-  so a vetoed name is refused plainly.
+- **`matched_by`** on `Withheld::Excluded`: the least way the exclusion holds
+  `s`. `FoldedName` says it holds only by a fold, so the author learns the deny
+  holds through case or Unicode form:
+  `fs write denied by grant: /w/.ENV is the denied /w/.env under another spelling (case or Unicode form); a deny holds under every spelling`;
+  `Identity` says it holds the object under another name. A veto's key is folded
+  already, so a vetoed name is refused plainly.
 
 ## Two instances
 
-| | fs: `Table<FsScope>` | exec: `ExecRules = Table<ExecScope>` |
+| | fs: `FsRules = Table<FsAllow, FsDeny>` | exec: `ExecRules = Table<ExecAllow, ExecDeny>` |
 |---|---|---|
-| scope `K` | `FsScope { Prefix(FrozenPath), Place(RealPath) }` | `ExecScope { Any, Dir, File, Tool, Name }` |
-| subject | a plain `&Path`, the access canonicalised or walked | `Subject { Any, Tool, File, Under }`, from a `Program` |
-| `k̂` | the real path | `Any`, `Under(d)`, `File(f)`, `Tool(t)` |
-| holds | `path_within(path, real, P::IDENTITY)`; a place reads as a prefix whether exec runs it as file or directory | `RealPath::within::<P>`; a file by mutual containment; a tool by name; a name by `command_name_key`; `Any` holds everything |
-| where the exclusions live | each layer's `deny_paths`, in both the read and the write region | in the table, beside the allowances |
+| allowance `A` | `FsAllow { Prefix(GrantPath<Extent>), RunPlace(RealPath) }` | `ExecAllow { Any, Dir, File, Tool }` |
+| exclusion `D` | `FsDeny(GrantPath<Excluded>)` | `ExecDeny { Name, Dir, File }` |
+| subject | `path::Subject`: an access by its `Trace`, a position, or everywhere | `Subject { Program, Dir, Tool, Any }`, from a `Program` |
+| `k̂` | the position; everywhere for `Everywhere` | `Any`, the directory's inside, the file itself, the tool's name |
+| an allowance holds | by position, `RealPath::contains`; a place reads as a prefix whether exec runs it as file or directory | by position; a file by mutual containment; a tool by name; `Any` holds everything |
+| an exclusion matches | `Excluded::matches` within: position under `collision_key`, or the object | the same, within for a directory and exactly for a file; a name by `command_name_key` |
+| where the exclusions live | each layer's read and write tables both hold every exclusion | in the table, beside the allowances |
 | tables per stack | two, one per `FsOp`, `None` when no layer holds an fs opinion | one, `None` when no layer holds an exec opinion |
-| when frozen | allowances frozen at decode, never re-frozen; exclusions re-frozen against the live `Resolver` on every check | allowance paths frozen at decode; exclusions re-resolved at every compile; names resolved afresh per run |
+| resolved | where the layer is decoded: allowances to a position, exclusions to the objects held; never again | the same; a bare name on the decoding environment's `PATH` |
 | extra scopes | places of exec's run allowances; the platform floor and live support, joined as positives | support files, joined by `for_kernel` |
 
 **An exclusion beats every allowance, in both.** An fs exclusion is a carve-out
@@ -393,23 +397,25 @@ clauses after the positive ones.
   wire, and exarch's prompt prints it through `Display`, a dir as `` `dir ``.
   `every` is not a key: only `join_top` sets it, so no surface spelling widens,
   and a flag has no negative form, so "every program" can never be excluded.
-- `ExecScope`: the grant *compiled against this host* (`ExecRules::compile`): a
-  bare name becomes the bundled tool of that name, the host file `PATH` finds,
-  and, for negative evidence alone, a `Name` veto; a path key a `File`, a dir key
-  a `Dir`; `every` the scope `Any`. A path key splits its polarities: the
-  positive bit at the real path frozen at decode, the negative at the one its
-  surface reaches now (`FrozenPath::live_real`); a key with Both yields both entries,
-possibly at different paths. The veto carries only the negative bit, since a
+- `ExecAllow` and `ExecDeny`: the grant *resolved where it is decoded*
+  (`ExecRules::of_grant`): a bare name becomes the bundled tool of that name,
+  the file the decoding environment's `PATH` finds and, for negative evidence
+  alone, a `Name` veto; a path key a `File`, a dir key a `Dir`; `every` the
+  allowance `Any`. A key walks as its polarity walks: the positive bit to the
+  position it reached, the negative to the objects it held; a key with Both
+  yields both entries. A name found nowhere makes no allowance and keeps its
+  veto. The veto carries only the negative bit, since a
 positive one would assert support for every executable sharing the basename: an
 allowance by name leaves no veto entry at all, and Both leaves exactly Deny, the
 positive half living on in the tool and file entries. One executable reached by
-several spellings accumulates evidence. A bare name resolves through the host
-`PATH` and the bundled-tool registry; a scoped `PATH` cannot redirect an
+several spellings accumulates evidence. A bare name resolves through the
+decoding `PATH` and the bundled-tool registry; a scoped `PATH` cannot redirect an
 allowance.
 
-A bare key is no scope until the host `PATH` is consulted, so an authored grant
-is not closed under meet and must be compiled per question
-([[decisions/260906_object-not-name|object-not-name]], fault B). The model sits
+A bare key is no scope until a `PATH` is consulted, so an authored grant is not
+closed under meet; the layer is resolved where it is decoded and the meet runs
+over what it holds ([[decisions/260906_object-not-name|object-not-name]],
+fault B). The model sits
 below the sandbox ([[decisions/261006_capability-is-data|capability-is-data]]),
 so `ExecProjection::Restricted` carries the `ExecRules` itself.
 
@@ -449,17 +455,18 @@ kernel's evidence at `s` is `(policy.positive(s) ∨ s ∈ S′, policy.negative
 On a case-sensitive volume, where `Tools` and `tools` are distinct
 directories. On a case-insensitive one each pair is one object with one
 stored spelling, `realpath` returns it, and the answers are those of the
-stored side. *Respelled* marks a refusal that names the excluded spelling.
+stored side. *Folded* marks a refusal cited `MatchedBy::FoldedName`, naming the excluded
+spelling.
 
 | Grant | Subject | Decision | Why |
 |---|---|---|---|
-| allow dir `/x/Tools`, exclude dir `/x/tools/evil` | `/x/Tools/evil/t` | refused, respelled | the exclusion holds `/x/Tools/evil` by `⊑C`; `/x/Tools/good/t` is allowed |
-| allow dir `/x/b`, exclude dir `/x/B` | `/x/b/t` | refused, respelled | Both; fs's `live()` drops the allowance likewise |
-| exclude dir `/x/B`, allow file `/x/b/tool` | `/x/b/tool` | refused, respelled | an exact file does not reopen an exclusion |
-| allow file `/x/tool`, exclude file `/x/Tool` | `/x/tool` | refused, respelled | Both |
+| allow dir `/x/Tools`, exclude dir `/x/tools/evil` | `/x/Tools/evil/t` | refused, folded | the exclusion holds `/x/Tools/evil` by `⊑C`; `/x/Tools/good/t` is allowed |
+| allow dir `/x/b`, exclude dir `/x/B` | `/x/b/t` | refused, folded | Both; fs's `live()` drops the allowance likewise |
+| exclude dir `/x/B`, allow file `/x/b/tool` | `/x/b/tool` | refused, folded | an exact file does not reopen an exclusion |
+| allow file `/x/tool`, exclude file `/x/Tool` | `/x/tool` | refused, folded | Both |
 | allow dir `/w`, exclude dir `/w/private` | `/w/private/k` | refused | Both inside the subtree; `/w/other` is allowed |
 | stack `a = {allow /a/B}`, `b = {allow /a/B, allow /a/b}` | `/a/B/x` | allowed | the counterexample: `/a/b` is not written as an exclusion |
-| stack `a = {allow /a, exclude /a/B}`, `b = {allow /a/b, allow /a/c}` | `/a/b/x` | refused, respelled | `/a/B` joins the met exclusions; `/a/b` and `/a` are dropped, each unsupported by the other side; `/a/c/x` is allowed |
+| stack `a = {allow /a, exclude /a/B}`, `b = {allow /a/b, allow /a/c}` | `/a/b/x` | refused, folded | `/a/B` joins the met exclusions; `/a/b` and `/a` are dropped, each unsupported by the other side; `/a/c/x` is allowed |
 | two layers, one allowing `/a/B`, the other `/a/b` | `/a/B/x` | refused | each allows only its spelling and the meet keeps neither |
 | stack `a = {allow /a, exclude /a/b}`, `b = {allow /a/b/c}` | `/a/b/c/x` | refused | a deeper allowance in one layer cannot lift an exclusion another places above it |
 | allow dir `/x`, veto `sh` | `/x/SH`, `/x/ſh` | refused | a veto's key folds; `/x/shx` is allowed |
@@ -536,8 +543,8 @@ stored side. *Respelled* marks a refusal that names the excluded spelling.
 - **A folded match is as good as a stored one.** `holds` decides whether a rule
   speaks; it decides nothing else. An exclusion met by fold is negative evidence
   like any other. The
-  witness a refusal cites is any exclusion that applies, so a respelled one is
-  named only when none holds the subject as stored.
+  witness a refusal cites is any exclusion that applies, so a folded one is
+  named only when none holds the subject by name.
 - **The over-deny is accepted and said.** On a case-sensitive volume — Linux,
   case-sensitive APFS, a case-sensitive NTFS folder — a distinct `secrets`
   beside a denied `Secrets` is refused in process and not by the Linux or
@@ -558,10 +565,9 @@ stored side. *Respelled* marks a refusal that names the excluded spelling.
   works on those encoded units too: separators and heads are ASCII, so they
   are found losslessly, and a component that is not UTF-8 keys as itself. A
   file name that is not Unicode is no command name: `RealPath::name` gives
-  none, so a `name` scope never matches it. An *allowance* is the other way
-  round: its real form is its identity, so
-  freezing a grant whose real path is not Unicode is refused, lest a sibling
-  whose name holds U+FFFD be granted in its place.
+  none, so a `name` scope never matches it. A grant spelling whose
+  real path is not Unicode is refused when it is frozen, lest a sibling whose
+  name holds U+FFFD be granted in its place.
 
 ### Windows path identity
 
@@ -580,14 +586,15 @@ stored side. *Respelled* marks a refusal that names the excluded spelling.
   neither is dark on the other.
 - **8.3 short names are an alias, not a fold**, so no key closes them. With a
   deny on `C:\w\secretfile.txt`, a leaf left spelled `SECRET~1.TXT` misses the
-  long name and admits the read. The walk instead opens every leaf,
-  file or directory, with attribute access alone and asks the kernel its long
-  name (`walk::dealias`); a name it cannot learn refuses the access. A short
+  long name and admits the read. The walk instead reads each step's stored name from the handle it just opened,
+  the normalized long name, and checks it against the parent's own path; a name
+  it cannot check refuses the access. A short
   spelling makes an allow miss, a refusal, but a deny miss, an admission; the
   kernel's ACE, being on the object, holds for a child regardless.
-- **The Windows allow side keeps stored case.** `GetFinalPathNameByHandleW`
-  supplies the existing object's name, or the parent's name for an absent
-  leaf. Both allow containment and `RealPath` ordering preserve that case,
+- **The Windows allow side keeps stored case.** The step's stored name
+  (`FileNormalizedNameInfo`) supplies the existing object's name, and the
+  parent's for an absent leaf. Both allow containment and `RealPath` ordering
+  preserve that case,
   so an allow on `Work` cannot reach a distinct `work`. Denies retain the
   collision fold. Display abbreviation still folds ASCII case.
 
@@ -599,14 +606,12 @@ stored side. *Respelled* marks a refusal that names the excluded spelling.
   `/tmp` itself and a grant authored in one spelling must cover an access in
   the other.
 - **Two spellings of one directory are one object**, an allowance and an
-  exclusion over them meet as Both, and the exclusion wins
-  (`a_firmlink_alias_does_not_outrank_a_deny`, kept as an alias-exclusion test).
-- **The root `/` is minted, never frozen.** `realpath("/")` answers the
+  exclusion over them meet as Both, and the exclusion wins.
+- **The root `/` is minted, never walked.** `realpath("/")` answers the
   *current drive* on Windows, so a frozen ceiling covered one volume, and a
   session launched from `D:` lost a `%TEMP%` on `C:` — the shape GitHub's
-  Windows runners have. Folded to zero components it is the universal prefix;
-  `FrozenPath::root` and `refreeze` both special-case the bare root
-  (`the_root_survives_a_re_freeze_as_the_universal_prefix`). The bare root is
+  Windows runners have. Folded to zero components it is the universal prefix, `Extent::Everywhere`;
+  a spelling that walks to the root is `Everywhere` too. The bare root is
   one separator alone under the host's rules (`lex::is_bare_root`): `/`, and
   under Windows rules `\` too, the same driveless root. Under POSIX rules `\`
   is a relative file name, and minting it as the root would widen a relative
@@ -615,7 +620,7 @@ stored side. *Respelled* marks a refusal that names the excluded spelling.
 
 ### Symlinks
 
-- **A prefix carries `surface` and `real`, and containment is on
+- **A grant path carries `written` and `real`, and containment is on
   `real` on both sides.** A grant that lexically nests under a shallower
   ceiling but resolves outside it collapses to the empty meet: `{allow /a}`
   met with `{allow /a/link}`, `link → /x`, keeps nothing. A survivor would
@@ -624,11 +629,12 @@ stored side. *Respelled* marks a refusal that names the excluded spelling.
   (`a_symlinked_grant_cannot_escape_a_shallower_ceiling`, with its positive
   control).
 - **A symlinked exec dir covers where it points**, allowance or exclusion
-  alike. An allowance keeps the target it was frozen to: a symlink put in its
+  alike. An allowance keeps the target it was resolved to: a symlink put in its
   place later redirects nothing and the allowance grants nothing there. An
-  exclusion follows its name, so after `/work/blocked` becomes a symlink to an
-  admitted `/tools`, excluding `Dir(/work/blocked)` excludes `/tools/prog`,
-  directly and through the link.
+  exclusion holds the objects its walk held, the link and its target, and the
+  position its spelling named; a symlink put at an excluded directory's place
+  later is not the denied object, and what it reaches, such as an admitted
+  `/tools`, is judged on its own.
 - **A symlink to an admitted file is admitted**, since it runs that file; a
   symlink under an admitted directory to a file outside it is not. The
   launcher runs the real path it judged, the user's spelling as `argv[0]`.
@@ -640,26 +646,25 @@ stored side. *Respelled* marks a refusal that names the excluded spelling.
   because the guard that matches them runs inside the machine, and on a
   Windows host the host fold once rebuilt `/work` as `\work`, a relative path
   in the namespace it claimed to name ([[decisions/260726_guest-namespace-prefixes|guest-namespace-prefixes]]).
-- **A prefix carries no namespace.** Whose machine a path names is settled by
-  the door that mints it; the meet compares real forms and nothing else,
-  and a guest prefix is re-frozen only by the guard that matches it, inside the
+- **A spelling carries no namespace.** Whose machine a path names is settled by
+  the door that mints it; the meet compares resolved positions and nothing else,
+  and a guest spelling is resolved only by the guard that matches it, inside the
   machine ([[decisions/261006_one-table-two-instances|one-table-two-instances]]).
 
 ### Exec identities
 
-- **A bare key is the file the *host* `PATH` finds plus the bundled tool of
-  that name**, walked with no cwd (`None`) on the process's own `PATH`,
-  never a scoped override: a planted `/tmp/evil/rg` inherits nothing from
+- **A bare key is the file the `PATH` of the decoding environment finds plus the
+  bundled tool of that name**, walked with no cwd (`None`), never a scoped
+  override: a planted `/tmp/evil/rg` inherits nothing from
   `rg: allow`, and `git: allow` admits `/usr/bin/git` typed as a path.
 - **A bare exclusion is also a veto on its `command_name_key`**, so it stops an absolute `/bin/bash` and a link to it alike.
-- **A path or dir key splits its polarities.** The allowance is the frozen real
-  form, never re-read; the exclusion is re-resolved from its surface at every
-  compile. A bare name is the one live allowance, resolved afresh at each run
+- **A path or dir key splits its polarities.** The allowance is the position its
+  walk reached, never re-read; the exclusion is the objects it held. A bare key
+  is resolved where the grant is decoded; a *head* is resolved afresh at each run
   (`which::locate` keeps an answer for the rest of one top-level run, shared by
   command resolution, so the program launched is the program judged). Two keys
   naming one file join to Both: `RealPath`'s `Ord` is the host's file identity, by
-  components off Windows and by Windows identity components on it
-  (`two_path_keys_naming_one_file_meet`).
+  components off Windows and by Windows identity components on it.
 - **A veto's key folds.** `` deny: [`name bash] `` compiles to a folding exact deny and a
   veto, and Seatbelt's veto regex folds, so a stored key would admit in the
   guard a macOS child's `/x/BASH` that the kernel refuses
@@ -684,7 +689,7 @@ stored side. *Respelled* marks a refusal that names the excluded spelling.
   shims. Both kernels check a script's interpreter (measured), so without
   carriers an admitted script would die in the kernel.
 - **Admitted only on bytes the uid cannot author** (`trusted_real`, a
-  link-following walk from `/`); `env` is not followed, since following it
+  link-following walk from `/` whose every object is vetted); `env` is not followed, since following it
   reads a `PATH` the confined code controls. System-only is not the floor: a
   root-owned interpreter under `/opt` is a carrier.
 - **The guard never consults them; the kernel needs them.** Carriers and the
@@ -732,18 +737,19 @@ argues from.
 
 ### The projection
 
-- **An allowance renders as its frozen real path, and as nothing else.** The
+- **An allowance renders as its resolved position, and as nothing else.** The
   projection (`SandboxProjection::of`) carries the read region as one list of
   live positives, run places and live support among them, beside the write
   prefixes, the floor and the exclusions; a surface spelling is never a
-  predicate of its own (macOS lets a lookup stat it, no more), since a name that was a symlink at freezing can later
-  hold a real directory the grant never named. Exclusions are re-resolved at
-  render time. Each backend refuses a redirected allowance rather than following
-  it: Linux's `openat2(RESOLVE_NO_SYMLINKS)` refuses the launch, Seatbelt matches
-  the resolved path against the frozen one, and Windows stamps the checked object
+  predicate of its own (macOS lets a lookup stat it, no more), since a name that was a symlink at decode can later
+  hold a real directory the grant never named. Exclusions render from the
+  resolved real paths their walks held, by position (the identity reading is
+  ral's own readers'). Each backend refuses a redirected allowance rather than
+  following it: Linux's `open_nofollow` refuses the launch, Seatbelt matches the
+  resolved path against the recorded one, and Windows stamps the checked object
   through a held handle, with no redirecting reparse point on its path (a symlink,
   junction or other name surrogate is refused; a cloud-files placeholder is not).
-- **The floor is an allowance like any other.** It is frozen once per process, on
+- **The floor is an allowance like any other.** It is resolved once per process, on
   the premise that its roots are the system's: its package-prefix entries are the
   rows `homebrew`, `macports`, `nix` and `pkgsrc` outside the process's home
   ([[design/grant|grant]] §Selectors). An override such as `HOMEBREW_PREFIX` can
@@ -754,22 +760,21 @@ argues from.
   (`freeze_floor`); a place that `PATH` resolved to and that is not Unicode
   cannot be frozen as an allowance in the first place.
 - **Windows refuses the universal prefix.** A launch whose fs projection holds
-  `FrozenPath::root` in either region is refused before anything is stamped: an
+  `Everywhere` in either region is refused before anything is stamped: an
   AppContainer reaches only what is stamped for it, and the root would narrow to
   one drive. The guard still judges.
 - **`live()` is why no allow beneath a deny ever reaches a backend.** Such an
   allowance is Both, dead, and a Windows ACL orders explicit allows
-  before inherited denies, so handing one over would invert the rule
-  (`the_live_allows_are_those_no_deny_holds`).
+  before inherited denies, so handing one over would invert the rule.
 - **Existing Windows ACLs are another source of explicit allows.** A directory
   deny walks its descendants, reasserting an explicit deny at protected DACLs
   and explicit ACL boundaries. The walk skips reparse points and refuses a
   descendant it cannot inspect or stamp. Its persistent completion witness
   describes the tree at that walk, not later ACL edits or replacements
   ([[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]]).
-- **`pinned_dirs` derive from *rendered* names**: the ancestor closure of each
-  rendered deny within a rendered write name, so an alias's chain is pinned
-  beside its target's ([[internals/seatbelt-profile|seatbelt-profile]]).
+- **`pinned_dirs` derive from *rendered* positions**: `RealPath::ancestors_within`
+  of each exclusion's positions within each write position, the name's and the
+  link's target's, so an alias's chain is pinned beside its target's ([[internals/seatbelt-profile|seatbelt-profile]]).
 - **The discard device is excused before either region** — `/dev/null`, or on
   Windows exactly `\\.\NUL` in either slash spelling and any case — since
   nothing reaches the disk through it. **DOS reserved device names are refused
@@ -778,33 +783,31 @@ argues from.
   digit, any case, any extension, trailing dots and blanks trimmed, so `COM1.log` and
   `nul .txt` too — since they name no object to judge. For `NUL` the refusal
   asks `Did you mean \\.\NUL?`.
-- **`Guarded`** answers a write onto the boot-pinned enforcer binary, judged by
+- **`Refused::Guarded`** answers a write onto the boot-pinned enforcer binary, judged by
   inode so a hard link names it too, *before* the stack is folded: a stack with
   no fs opinion is `Unrestricted` and exactly the case to catch.
 
 ### Freshness
 
-- **Allowances are frozen; exclusions re-resolve.** An allowance keeps the real
-  path it was frozen to at decode and is never re-frozen, in the guard or any
-  backend. Re-freezing it would let a child that can write the folder holding
-  an allowed folder replace it with a symlink and point it anywhere the user can
-  reach, and both enforcers would follow. An exclusion re-freezes against the live
-  disk on every check (`fs::region` re-freezes only `deny_paths`), so it holds its
-  object the moment it exists, under any spelling. Creating a granted directory
-  after the grant, or `rm -rf dir && mkdir dir`, keeps working: these are path
-  grants, not inode pins.
-- **A guest allowance is not yet frozen inside the machine.** synod mints it
-  with `FrozenPath::from_guest`, whose real form copies its surface, and sends it
-  with every run. Freezing it once per session, inside the guest, is deferred
-  (`dev/docs/plans/261013_authority-types.md`); until then a redirect made in one
-  guest run can take effect in the next.
+- **Allowances are positions; exclusions are objects.** An allowance keeps the
+  position its walk reached at decode and is never walked again, in the guard or
+  any backend. Walking it again would let a child that can write the folder
+  holding an allowed folder replace it with a symlink and point it anywhere the
+  user can reach, and both enforcers would follow. An exclusion keeps the
+  objects its walk held and matches by position or by object, so it holds its
+  object the moment it has another name. Creating a granted directory after the
+  grant, or `rm -rf dir && mkdir dir`, keeps working: these are path grants, not
+  inode pins.
+- **A guest's grant is resolved inside the machine.** synod spells it with
+  `FrozenPath::from_guest` and sends the authored `Capabilities`; the guest engine
+  resolves it on its own filesystem, so a redirect made in one guest run cannot
+  take effect in the next.
 - **The projection renders what the guard judged**, once at spawn, because that
   is when the profile is written.
-- **Exec tables are compiled afresh on every question**, because a bare name
-  follows the host `PATH`, live per run; the projection carries the very table in
-  the `Admitted` that judged the launch
-  (`ExecProjection::Restricted(ExecRules)`, by `ExecRules::for_kernel`), so the
-  kernel list is no third language.
+- **The exec table is a function of the layers**, resolved where each was
+  decoded; the projection carries the very table in the `Admitted` that judged
+  the launch (`ExecProjection::Restricted(ExecRules)`, by `ExecRules::for_kernel`),
+  so the kernel list is no third language.
 
 ### Absent denies
 

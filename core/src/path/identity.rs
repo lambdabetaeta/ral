@@ -261,6 +261,10 @@ pub(super) fn collision_fold(s: &str) -> String {
 /// [`contains_folded`](RealPath::contains_folded) for positions,
 /// [`Excluded::matches`] for exclusions — and never by a caller holding two
 /// bare paths.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "path-form: the containment kernel's byte-wise prefix test"
+)]
 fn path_within(path: &Path, prefix: &Path, identity: Identity) -> bool {
     let rules = PathRules::HOST;
     let ps = path_aliases(path);
@@ -296,6 +300,10 @@ pub(super) fn path_within_str(path: &str, prefix: &str) -> bool {
 /// [`starts_with_identity`] splits under Windows rules, by
 /// [`Path::components`] otherwise, then compared key by key, so no fold
 /// crosses a component boundary (`/w/secretsx` is not within `/w/Secrets`).
+#[allow(
+    clippy::disallowed_methods,
+    reason = "path-form: the containment kernel's component-wise key"
+)]
 fn starts_with_collision(path: &Path, prefix: &Path, rules: PathRules) -> bool {
     let keys = |p: &Path| -> Vec<Vec<u8>> {
         match rules {

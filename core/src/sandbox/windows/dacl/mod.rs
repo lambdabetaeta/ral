@@ -310,7 +310,7 @@ fn cancelled(cancel: &Scope) -> Result<(), DaclError> {
 pub(crate) fn fs_capability_name(canonical: &Path, kind: GrantKind) -> String {
     #[allow(
         clippy::disallowed_methods,
-        reason = "native: the canonical spelling the OS returned, hashed as-is into a capability name"
+        reason = "native: the canonical spelling the OS returned, hashed as-is into a capability name; hashed by name until the sequel plan narrows what the sandbox side does by name"
     )]
     let key = canonical.to_string_lossy();
     let digest = <sha2::Sha256 as sha2::Digest>::digest(key.as_bytes());

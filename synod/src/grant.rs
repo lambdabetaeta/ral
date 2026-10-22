@@ -189,6 +189,9 @@ impl Grant {
     /// read, or is so large a choice (`/`, the home folder, anything
     /// containing it) that it is far likelier to be a slip than an
     /// intention.  Every refusal says what to pick instead.
+    ///
+    /// # Panics
+    /// If the root stack withholds anything, which it never does.
     pub fn open(folder: &Path) -> Result<Self, String> {
         let shown = shown(folder);
         let dir = walk_dir(&spelled(folder)?).map_err(|e| match e.kind() {
@@ -546,7 +549,7 @@ fn settings_trees(
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "REASONED-SILENT: test fixtures write and read scratch files; no model in \
+    reason = "[test] test fixtures write and read scratch files; no model in \
               the loop"
 )]
 mod tests {
@@ -756,7 +759,7 @@ mod tests {
     #[test]
     fn the_settings_trees_on_windows_follow_the_environment() {
         let fake = Fake::new();
-        let home = fake.home.clone();
+        let home = fake.home;
         let env = |name: &str| match name {
             "APPDATA" => Some(r"\\profiles\ada\Roaming".into()),
             "LOCALAPPDATA" => Some(r"Local".into()), // relative: names nothing

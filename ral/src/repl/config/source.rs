@@ -42,6 +42,10 @@ fn tolerate<T>(outcome: Result<T, Stop>, fallback: T) -> Settled<T> {
 /// `~/.ral_profile`, and then the rc — `$XDG_CONFIG_HOME/ral/rc` or
 /// `~/.ralrc`, created from the default skeleton when neither exists.
 /// What the rc settled; the defaults when it settled nothing.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:rc-exists] asks whether ral's own rc file is there before sourcing it; ral's config, not a model's name"
+)]
 pub(crate) fn source_startup_files(
     login: bool,
     mooring: &Mooring,

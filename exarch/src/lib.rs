@@ -125,6 +125,31 @@ pub struct SessionInfo<'a> {
     pub cwd: &'a std::path::Path,
 }
 
+/// The `record.jsonl` that `exarch export` is asked for: `session` itself, or
+/// the one inside it where it is a session directory.
+///
+/// # Errors
+/// Where no such record is there.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:export-target] the session directory or record file the user names to `exarch export` on the command line; no shell, no grant, not a model's name"
+)]
+fn export_record(session: std::path::PathBuf) -> Result<std::path::PathBuf, String> {
+    let record = if session.is_dir() {
+        session.join("record.jsonl")
+    } else {
+        session
+    };
+    if record.is_file() {
+        Ok(record)
+    } else {
+        Err(format!(
+            "no record.jsonl at {}; is this a session directory under $XDG_STATE_HOME/exarch?",
+            ral_core::path::shown(&record)
+        ))
+    }
+}
+
 /// The binary's entry point, lifted into the library so integration tests can
 /// link the whole crate.
 ///
@@ -159,17 +184,7 @@ pub fn run() -> Result<(), String> {
                 Ok(())
             }
             cli::Command::Export { session, out } => {
-                let record = if session.is_dir() {
-                    session.join("record.jsonl")
-                } else {
-                    session
-                };
-                if !record.is_file() {
-                    return Err(format!(
-                        "no record.jsonl at {}; is this a session directory under $XDG_STATE_HOME/exarch?",
-                        ral_core::path::shown(&record)
-                    ));
-                }
+                let record = export_record(session)?;
                 match &out {
                     Some(dest) => tui::export_to(&record, dest, tui::Format::Plain),
                     None => tui::export(&record, &mut std::io::stdout().lock(), tui::Format::Plain),

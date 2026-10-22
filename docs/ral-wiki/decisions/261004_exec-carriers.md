@@ -2,7 +2,7 @@
 status: active
 generated_at_commit: 7f61632a
 verified_at_commit: 7f4d7d11
-anchors: [carriers, trusted_real, shebang, kernel, Rank, ExecScope, ExecRule, allowed_files, emit_exec_rules, Sbpl]
+anchors: [carriers, trusted_real, shebang, kernel, Rank, ExecAllow, ExecRule, allowed_files, emit_exec_rules]
 ---
 
 > **Amended 2026-10-06**
@@ -95,3 +95,7 @@ the ruleset itself; the payload only enters it.
   ([[decisions/260906_landlock-exec-layer|landlock-exec-layer]]).
 - **The kernel cannot see argv**, so `Only` renders as an allow.
 - **Windows has no kernel exec layer.**
+
+**Amended 2026-10-22 by [[decisions/261021_one-path|one-path]].** `trusted_real` walks from `/` through the one
+walk with a per-object check (`walk_with`, the check given each `Vetted` step),
+and returns a `Trace`; `walk_vetted` is gone. `ExecScope` is `ExecAllow`.

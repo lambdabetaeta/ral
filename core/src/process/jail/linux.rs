@@ -82,6 +82,10 @@ const CONTROLLERS: &str = "+memory +pids +cpu";
 /// Returns the kernel's error for any mkdir, and refuses outright when a parent
 /// will not delegate: a jail that cannot be given its limits must not run the
 /// command uncapped instead.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:jail-cgroup-probe] asks whether ral's own cgroup directory exists, and walks up its chain to delegate controllers; the jail, not a name any grant judges"
+)]
 fn make_delegated(cgroup: &Path) -> io::Result<()> {
     if cgroup.exists() {
         return Ok(());

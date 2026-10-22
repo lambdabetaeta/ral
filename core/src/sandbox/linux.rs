@@ -877,9 +877,9 @@ mod tests {
                 GrantPath::<Extent>::allowing(written).expect("a directory walks"),
             ))
         } else {
-            Rule::Deny(ExecDeny::Dir(
+            Rule::Deny(Box::new(ExecDeny::Dir(
                 GrantPath::<Excluded>::walk(written).expect("a directory walks"),
-            ))
+            )))
         }
     }
 
@@ -887,14 +887,16 @@ mod tests {
         if allow {
             Rule::Allow(ExecAllow::support(path))
         } else {
-            Rule::Deny(ExecDeny::File(
+            Rule::Deny(Box::new(ExecDeny::File(
                 GrantPath::<Excluded>::walk(FrozenPath::of_real(path)).expect("a file walks"),
-            ))
+            )))
         }
     }
 
     fn veto_rule(name: &str) -> Rule {
-        Rule::Deny(ExecDeny::Name(crate::path::command_name_key(name)))
+        Rule::Deny(Box::new(ExecDeny::Name(crate::path::command_name_key(
+            name,
+        ))))
     }
 
     /// A bare Linux host.

@@ -2,7 +2,7 @@
 status: active
 generated_at_commit: 7f61632a
 verified_at_commit: 446e3123
-anchors: [ExecGrant, ExecKey, ExecRules, ExecScope, Table, Verdict, Rank, Program, Subject, Head, Missing, Admitted, admit, admits, check_exec, RealPath, meet_insert, holds, command_name_key, evicts]
+anchors: [ExecGrant, ExecKey, ExecRules, ExecAllow, ExecDeny, Table, Verdict, Rank, Program, Subject, Head, Missing, Admitted, admit, admits, check_exec, RealPath, holds, command_name_key, evicts]
 ---
 
 > **Mechanics superseded 2026-10-06** by
@@ -267,3 +267,11 @@ program as stored.
 `core/src/runtime/command/head.rs` (`Head`, `Missing`),
 `core/src/path/forms.rs` (`RealPath`, `within::<P>`, `evicts`),
 `core/src/path/which.rs` (`command_name_key`).
+
+**Amended 2026-10-22 by [[decisions/261021_one-path|one-path]].** `ExecScope` is `ExecAllow` and `ExecDeny`
+(`Table<ExecAllow, ExecDeny>`); the "respelled" marks above are
+`MatchedBy::FoldedName`; and `ExecRules::compile` is `ExecRules::of_grant`,
+which resolves a layer where it is decoded: a bare name on the decoding
+environment's `PATH`, a path key's exclusion to the objects it held. A `Program`
+is one owned `Located`, judged to run and then to read, and started by its real
+name.

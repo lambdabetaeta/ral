@@ -227,6 +227,10 @@ impl AgentLog {
     /// # Errors
     /// Returns an error when the log is missing, malformed, foreign, or
     /// cannot be reopened after validation.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[silent:resume-record] asks whether the session directory exarch itself recorded holds its record, before resuming it; exarch's own directory, not a model's name"
+    )]
     pub fn resume(sessions_root: &Path, session_id: AgentId) -> io::Result<Self> {
         let dir = Self::dir_of(sessions_root, session_id);
         let record_path = dir.join("record.jsonl");

@@ -448,9 +448,7 @@ impl Avatar {
         let role = launch.trunk.role();
         let system_prompt = launch
             .prompt_for(&seat, &launch.caps, &role, launch.fuel, claim.name())
-            .map_err(|lost| {
-                io::Error::other(EngineLost::starting(&lost, launch.sessions_root.parent()))
-            })?;
+            .map_err(|lost| io::Error::other(EngineLost::starting(&lost, launch.run_dir())))?;
         let account = RecordedAccount::of(provider.account(), &launch.bureau.available());
         let (log, opened) = open(
             &launch.sessions_root,

@@ -495,7 +495,9 @@ mod tests {
         use std::os::windows::ffi::OsStringExt;
         let tmp = tempfile::tempdir().unwrap();
         let dir = crate::test_helper::real(tmp.path());
-        let wide: Vec<u16> = [0xD800].into_iter().chain("tool".encode_utf16()).collect();
+        let wide: Vec<u16> = std::iter::once(0xD800)
+            .chain("tool".encode_utf16())
+            .collect();
         let (raw, lossy) = (
             dir.as_path().join(std::ffi::OsString::from_wide(&wide)),
             dir.as_path().join("\u{FFFD}tool"),

@@ -61,6 +61,10 @@ enum Rootfs {
 /// this computer answers the question by not being there.  `None` — no media
 /// anywhere — is not an error this function raises: [`vm_manager::detect`]
 /// turns it into the refusal a synod with nothing to boot must give.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:boot-media] looks beside synod's own executable, in its bundle or the checkout it was built in, for the boot media that are files; synod's own files, not names any grant judges"
+)]
 pub(crate) fn boot_media() -> Option<BootPlan> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
@@ -176,13 +180,17 @@ fn cache_boot_dir() -> PathBuf {
 /// inflate itself always verifies, and writes to a temporary file renamed
 /// into place only on success, so an interrupted launch never leaves a
 /// half-written image that a later one would trust.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "path-form: the boot directory above synod's own rootfs cache file, not a name any grant judges"
+)]
 fn ensure_inflated(archive: &Path, checksum: &Path, target: &Path) -> Result<PathBuf, Error> {
     let expected = read_checksum(checksum)?;
     let marker = ral_core::path::with_appended_suffix(target, "verified");
 
     #[allow(
         clippy::disallowed_methods,
-        reason = "REASONED-SILENT: reads a prior inflate's marker — host-side rootfs-cache plumbing before any guest \
+        reason = "[silent:rootfs-marker-read]: reads a prior inflate's marker — host-side rootfs-cache plumbing before any guest \
                   exists; no shell, no run, no card. See the module docs."
     )]
     let verified = target.is_file()
@@ -196,7 +204,7 @@ fn ensure_inflated(archive: &Path, checksum: &Path, target: &Path) -> Result<Pat
         .expect("the rootfs cache path always has a boot-directory parent");
     #[allow(
         clippy::disallowed_methods,
-        reason = "REASONED-SILENT: makes the cache directory — host-side rootfs-cache plumbing before any guest \
+        reason = "[silent:rootfs-cache-dir]: makes the cache directory — host-side rootfs-cache plumbing before any guest \
                   exists; no shell, no run, no card. See the module docs."
     )]
     std::fs::create_dir_all(boot).map_err(Error::host_file(
@@ -209,7 +217,7 @@ fn ensure_inflated(archive: &Path, checksum: &Path, target: &Path) -> Result<Pat
 
     #[allow(
         clippy::disallowed_methods,
-        reason = "REASONED-SILENT: writes the marker back once the checksum verifies — host-side rootfs-cache plumbing before any guest \
+        reason = "[silent:rootfs-marker-write]: writes the marker back once the checksum verifies — host-side rootfs-cache plumbing before any guest \
                   exists; no shell, no run, no card. See the module docs."
     )]
     std::fs::write(&marker, &expected).map_err(Error::host_file(
@@ -225,7 +233,7 @@ fn ensure_inflated(archive: &Path, checksum: &Path, target: &Path) -> Result<Pat
 fn read_checksum(path: &Path) -> Result<String, Error> {
     #[allow(
         clippy::disallowed_methods,
-        reason = "REASONED-SILENT: reads the shipped checksum sidecar — host-side rootfs-cache plumbing before any guest \
+        reason = "[silent:rootfs-checksum-read]: reads the shipped checksum sidecar — host-side rootfs-cache plumbing before any guest \
                   exists; no shell, no run, no card. See the module docs."
     )]
     let line = std::fs::read_to_string(path).map_err(Error::host_file(

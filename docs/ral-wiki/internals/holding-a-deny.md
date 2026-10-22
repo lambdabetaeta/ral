@@ -146,9 +146,8 @@ launch, even for two commands in the same grant body.
   at the name and masks it as usual: a file under `/dev/null`, a directory
   under the empty tmpfs. Files created inside a planted directory are hidden
   with it.
-- **A planted symlink only widens the deny.** Every later launch, and the
-  guard, refuse the link's target as well. A planted link can make the grant
-  deny more than it says, never less.
+- **A planted link is not the denied object.** What it reaches is judged on its
+  own, by the guard and by every later launch, as SPEC §12.4 says.
 
 ### What is at stake
 
@@ -200,3 +199,11 @@ spawns the envelope for real:**
 
 **No Linux test pins the absent-name gap itself.** `tests/unix/grant-fs-deny.ral`
 denies only names that already exist.
+
+**Amended 2026-10-22 by [[decisions/261021_one-path|one-path]].** A denied object
+renamed or hard-linked under an allowed directory is hidden from ral's own
+readers by identity and visible to a program ral runs, since the bwrap mask,
+the Seatbelt rule and the DACL carve are placed at the resolved real paths
+and judge names ([[design/two-enforcers|two-enforcers]]). Seatbelt's pinned
+ancestors are `RealPath::ancestors_within` of the positions each exclusion
+holds.

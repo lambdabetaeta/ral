@@ -121,6 +121,10 @@ pub fn cache() -> PathBuf {
 /// # Errors
 /// Returns [`Error::ServiceUnlocated`] if this executable's own location cannot
 /// be read, and [`Error::NoGuestImage`] if no image is found where it should be.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "path-form: the ancestors of this service's own executable, to find the checkout it was built in; a host tool whose names no grant judges"
+)]
 pub fn media() -> Result<BootArtifact, Error> {
     let exe = std::env::current_exe().map_err(|cause| Error::ServiceUnlocated {
         cause: cause.to_string(),
@@ -178,6 +182,10 @@ fn artifact(boot: &Path) -> BootArtifact {
 /// `rootfs.img.zst`, while a checkout that has built the image holds *both*, and
 /// preferring the archive would make it inflate two and a half gigabytes it
 /// already has lying there uncompressed.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "REASONED-SILENT: the broker's own install directory, a name no grant judges; vm-manager deliberately does not depend on ral-core."
+)]
 fn rootfs_in(dir: &Path) -> PathBuf {
     let plain = dir.join("rootfs.img");
     if plain.is_file() {
