@@ -90,21 +90,27 @@ mod tests;
 
 #[cfg(any(test, feature = "test-util"))]
 thread_local! {
-    /// How many components [`step_into`] has opened on this thread, which a
-    /// test reads to show what a walk cost.
+    /// How many opens the walks on this thread have made — the root each
+    /// starts from and every component [`step_into`] takes — which a test
+    /// reads to show what a walk cost.
     static STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// How many components have been opened on this thread.
+/// How many roots and components the walks on this thread have opened.
 #[cfg(any(test, feature = "test-util"))]
 pub(crate) fn steps_taken() -> usize {
     STEPS.with(std::cell::Cell::get)
 }
 
-/// [`host::step`], counted under test.
-fn step_into(parent: &Held, name: &EntryName, sharing: Sharing) -> io::Result<Child> {
+/// One open a walk makes, counted under test.
+fn counted() {
     #[cfg(any(test, feature = "test-util"))]
     STEPS.with(|taken| taken.set(taken.get() + 1));
+}
+
+/// [`host::step`], counted under test.
+fn step_into(parent: &Held, name: &EntryName, sharing: Sharing) -> io::Result<Child> {
+    counted();
     host::step(parent, name, sharing)
 }
 
@@ -132,7 +138,6 @@ fn loop_error() -> io::Error {
 
 /// Whether `e` is the walk's `ELOOP`: a link met where none is allowed, or a
 /// splice budget spent.
-#[cfg(any(target_os = "linux", windows))]
 pub(crate) fn is_loop(e: &io::Error) -> bool {
     e.get_ref()
         .is_some_and(<dyn std::error::Error + Send + Sync>::is::<Looped>)
@@ -1579,19 +1584,13 @@ impl<A: Authority> Located<A> {
     }
 
     /// The leaf's own handle, where the walk holds one.
+    #[cfg(any(target_os = "linux", windows))]
     fn handle(&self) -> Option<&File> {
         match &self.leaf {
             Leaf::Held { file, .. } => Some(file),
             Leaf::Dir { node, .. } => Some(&node.held.file),
             Leaf::Absent { .. } | Leaf::Stated { .. } => None,
         }
-    }
-
-    /// The identity of the object the walk holds a handle on, pinned while
-    /// this `Located` lives: `None` for an absent leaf and for a stated one,
-    /// whose identity nothing pins.
-    pub(crate) fn held_id(&self) -> Option<ObjectId> {
-        self.handle().map(|_| self.trace.last_id())
     }
 
     /// The object the walk ended on, as an exclusion holds it: its trace and,
@@ -2050,6 +2049,7 @@ struct Cursor {
 
 impl Cursor {
     fn root(root: RootName) -> io::Result<Self> {
+        counted();
         let held = host::open_root(&root)?;
         let id = ObjectId::of(&held.file)?;
         Ok(Self {

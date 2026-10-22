@@ -82,7 +82,8 @@ does), tilde-expanded first when it needs quoting. It then gathers
 candidates from a `Sources` view the engine's readings answer — the cheap
 half (`completion-names`, `builtin-names`) once per prompt, the `PATH`
 enumeration lazily (only when a command name is wanted, never for `$var` or
-paths) through `path-entries` in the engine's own filesystem,
+paths) through `path-entries` in the engine's own filesystem, over the
+directories `locate` searches (`..` folded, relatives anchored at the cwd),
 keyed by the `env-var PATH` and `cwd` readings and aged by `SCAN_TTL`;
 cwd-anchored path entries likewise — and matches them.
 `completion::complete(line, pos, &Sources) -> (replace_from, Vec<Candidate>)`

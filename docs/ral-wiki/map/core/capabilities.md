@@ -191,7 +191,7 @@ Path resolution is `core/src/path/`: lexical stages, then one walk, plus
   never in a grant; the places `cwd`, `tempdir`, `gitdir` are policy-only,
   expanded at freeze by `guard::freeze`; `git.rs` backs `gitdir` discovery, following a `.git` pointer file only to a
   git directory whose `gitdir` back-pointer or `core.worktree` names the working
-  tree back; a bad pointer is a path-level `BadPointer`, phrased as a grant error by the caller), `tilde.rs` (`~` and `~/sub` only; an unset `HOME` is `None`,
+  tree back, judged by the positions the two walks reach, never by identity; a bad pointer is a path-level `BadPointer`, phrased as a grant error by the caller), `tilde.rs` (`~` and `~/sub` only; an unset `HOME` is `None`,
   and each caller picks its own honest answer; `TildePath::shown` is the one
   spelling `~`, `home` and a `~/…` command head share, and `TildePath::expand`
   the path such a head runs). The expansion `expand_path_prefix` answers is
@@ -286,8 +286,8 @@ and its paths resolve against the cwd.
 
 (`which::ral_path_entries` lists `RAL_PATH`; `use` searches it through the
 shell's resolver, and the plugin loader folds it into its own candidates.  The
-name beside the script is `use`'s first candidate; a candidate is chosen by kind
-and judged, a denied one passed over.)
+name beside the script is `use`'s first candidate; each candidate is judged
+before its kind is asked, a denied one passed over.)
 
 `tree/walk.rs` is the one directory-tree walk, `Walk`: ral enumerates, with
 `Dir::read_dir` and `Dir::open_dir`, depth first in name order, and `ignore` only

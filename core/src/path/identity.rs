@@ -795,17 +795,17 @@ mod tests {
         assert_eq!(relative(r"C:\x", r"C:\x"), Some(vec![]));
     }
 
-    /// A position under a firmlink's data spelling reads past the root's
-    /// other spelling, by the names it was given.
+    /// A position under one spelling of a `canon::FIRMLINKS` pair reads past
+    /// the root's other spelling, by the names it was given.
     #[cfg(target_os = "macos")]
     #[test]
     fn relative_to_reads_a_firmlink_twin() {
         assert_eq!(
-            relative("/System/Volumes/Data/Users/x/y", "/Users/x"),
+            relative("/private/tmp/x/y", "/tmp/x"),
             Some(vec!["y".into()])
         );
         assert_eq!(
-            relative("/Users/x/y", "/System/Volumes/Data/Users/x"),
+            relative("/tmp/x/y", "/private/tmp/x"),
             Some(vec!["y".into()])
         );
     }

@@ -45,10 +45,13 @@ its authored form beside its resolution, and the two could disagree.
   and recreated. An exclusion holds by position under `collision_key` *or* by
   identity (`Excluded::matches`): the object, wherever it is reached and
   whatever it is called, and its name under a renamed ancestor. Identity's only
-  effect is negative, so a reused id over-denies and never admits. Two
-  identities read from two handles both held at the comparison are one object —
-  the premise an exclusion's hold rests on — which is how git discovery checks
-  a back-pointer; an identity nothing holds proves nothing.
+  effect is negative, so a reused id over-denies and never admits. A
+  transcript's identity is read once, and holding the handle does not keep it
+  the object's alone: macOS revokes an event-only descriptor at an unmount,
+  after which a remount may reuse the id, and a FAT id is a directory slot that
+  a rename vacates for the next file. So no admission rests on two transcripts'
+  identities being equal: git discovery checks a back-pointer by the positions
+  two walks reached.
 - **An exclusion reaches the object it was fixed to, not what is moved out of
   it.** A file renamed or hard-linked out of a denied folder by a process that
   may write that folder is a new name, judged on its own. A planted link is not
@@ -122,8 +125,7 @@ have not, by name:
   `the_stored_name_rule_takes_a_spelling_and_lists_for_another_links_name`,
   `a_hard_link_is_recorded_under_the_name_it_was_opened_by` (the APFS
   hard-link experiment the plan's §9 item 39 assigns to this step, and the
-  one that asserts the packing of `getattrlistat` and `getattrlistbulk`
-  answers),
+  one that asserts the packing of `getattrlistat` answers),
   `a_link_is_read_through_its_o_symlink_descriptor`,
   `a_file_the_user_cannot_read_is_stated_and_never_opened`,
   `a_walk_through_a_firmlink_records_the_identity_openat_reached`,
@@ -135,11 +137,10 @@ have not, by name:
   `a_stream_to_a_fifo_is_opened_by_name_and_must_find_a_fifo`,
   `an_object_replaced_between_lookup_and_open_is_refused`,
   `pick_takes_the_byte_equal_name_then_the_unique_fold`,
-  `parse_lookup_reads_by_the_returned_set`,
-  `parse_bulk_skips_a_record_without_identity`; in `identity.rs`,
+  `parse_lookup_reads_by_the_returned_set`; in `identity.rs`,
   `relative_to_reads_a_firmlink_twin`; in `path/tree/walk/tests.rs`,
   `a_root_the_walk_cannot_enter_is_unentered_with_the_walks_error`; in
-  `core/tests/gitdir_sigil.rs`, `gitdir_refuses_a_claim_the_walk_cannot_hold`;
+  `core/tests/gitdir_sigil.rs`, `gitdir_takes_a_claim_whose_tree_the_walk_only_states`;
   in `sandbox/carriers.rs`,
   `a_launched_programs_interpreter_is_read_through_the_judged_handle` (the
   `None` arm); in `core/tests/surface_io_effect.rs`,

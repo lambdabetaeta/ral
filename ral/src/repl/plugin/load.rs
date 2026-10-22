@@ -269,7 +269,7 @@ fn check_is_manifest(val: &Value) -> Result<(), Error> {
 /// 3. The literal path, then `<name>.ral`
 ///
 /// # Errors
-/// The first candidate's refusal, where none was admitted; else `not found`.
+/// The first refused candidate, where none was admitted; else `not found`.
 fn resolve_plugin_path(name_or_path: &str, shell: &mut Shell) -> Settled<Located<Judged<Reading>>> {
     let plugin_file = format!("{name_or_path}.ral");
     let config_candidate = ral_core::path::app_dir(ral_core::path::XdgKind::Config, "ral")

@@ -389,11 +389,15 @@ fn a_dropped_or_failed_staged_write_leaves_no_sibling() {
     drop(walked(&f).stage().unwrap());
     assert_eq!(names_in(tmp.path()), ["f"]);
 
+    // The staged write holds `f`, so its name is moved aside rather than
+    // deleted, which would stay pending until that handle closes.
     let mut staged = walked(&f).stage().unwrap();
     staged.file().write_all(b"new").unwrap();
-    std::fs::remove_file(&f).unwrap();
+    let old = tmp.path().join("old");
+    std::fs::rename(&f, &old).unwrap();
     std::fs::create_dir(&f).unwrap();
     assert!(staged.publish().is_err());
+    std::fs::remove_file(&old).unwrap();
     assert_eq!(names_in(tmp.path()), ["f"]);
     assert!(f.is_dir());
 }

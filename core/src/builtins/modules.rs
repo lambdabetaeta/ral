@@ -62,8 +62,8 @@ pub(crate) fn builtin_use(
     let path = args[0].as_str("use")?.to_owned();
     let target = resolve_in_current_script(&path, shell)?;
     // The name beside the script is the first candidate; the `RAL_PATH` ones
-    // follow, each chosen by kind and judged, a denied one passed over as
-    // `execvp` does.  Failing every candidate, the target itself says why.
+    // follow, each judged before its kind is asked, a denied one passed over
+    // as `execvp` does.  Failing every candidate, the target itself says why.
     let candidates = std::iter::once(target.clone()).chain(ral_path_candidates(&path, shell));
     let located = match shell.locate_first::<Reading>(candidates)? {
         Some(found) => found,

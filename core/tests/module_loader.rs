@@ -226,3 +226,38 @@ fn a_denied_local_name_is_the_error_where_ral_path_has_nothing() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// A denied library module and a denied local name: the error is the local
+/// name's, whether or not it exists.
+#[test]
+fn a_denied_search_says_the_same_whether_or_not_the_local_name_exists() {
+    let root = scratch("denied-both");
+    let (here, lib) = (root.join("here"), root.join("lib"));
+    for dir in [&here, &lib] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(lib.join("m.ral"), "let answer = 1\n").unwrap();
+    let local = here.join("m.ral");
+    let source = format!(
+        "grant [fs: [read: [`absolute '{}'], deny: [`absolute '{}', `absolute '{}']]] \
+         {{ within [dir: '{}', env: [RAL_PATH: '{}']] {{ use 'm.ral' }} }}",
+        root.display(),
+        local.display(),
+        lib.join("m.ral").display(),
+        here.display(),
+        lib.display()
+    );
+    let mut shell = fresh_shell();
+
+    std::fs::write(&local, "let answer = 9\n").unwrap();
+    let present = top_level(&mut shell, &source).expect_err("both candidates are denied");
+    std::fs::remove_file(&local).unwrap();
+    let absent = top_level(&mut shell, &source).expect_err("both candidates are denied");
+    assert_eq!(present.to_string(), absent.to_string());
+    assert!(
+        absent.to_string().contains(&local.display().to_string()),
+        "{absent}"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}

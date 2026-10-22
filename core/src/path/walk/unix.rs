@@ -189,14 +189,22 @@ pub(super) struct Lister<'a> {
     names: IntoIter<EntryName>,
 }
 
-/// List `dir`: its names are read through a reopened handle, since the held
-/// one cannot enumerate, and sorted so a listing does not depend on the
-/// order the kernel hands them back.
+/// List `dir`, each name stated as it is yielded ([`names`]).
+pub(super) fn list(dir: &File) -> io::Result<Lister<'_>> {
+    Ok(Lister {
+        dir,
+        names: names(dir)?.into_iter(),
+    })
+}
+
+/// The names of `dir`, read through a reopened handle, since the held one
+/// cannot enumerate, and sorted so a listing does not depend on the order the
+/// kernel hands them back.
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:walk-list] `list-dir`'s enumeration of a held directory, relative to its own handle.  A listing predicate, not turn-time model data I/O: the caller still judges each entry and raises no card."
 )]
-pub(super) fn list(dir: &File) -> io::Result<Lister<'_>> {
+pub(super) fn names(dir: &File) -> io::Result<Vec<EntryName>> {
     let mut names = Vec::new();
     for entry in rustix::fs::Dir::new(reopen(dir)?)? {
         let entry = entry?;
@@ -206,10 +214,7 @@ pub(super) fn list(dir: &File) -> io::Result<Lister<'_>> {
         }
     }
     names.sort();
-    Ok(Lister {
-        dir,
-        names: names.into_iter(),
-    })
+    Ok(names)
 }
 
 impl Iterator for Lister<'_> {

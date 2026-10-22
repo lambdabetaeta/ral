@@ -939,40 +939,6 @@ fn a_dotdot_past_the_root_stays() {
     );
 }
 
-/// The walk holds a handle on a file, a directory (as a leaf or entered) and
-/// the root, and none on an absent name; a stated leaf, which macOS makes of a
-/// file it may not open and of a special file, has no identity that anything
-/// pins.
-#[test]
-fn held_id_is_the_identity_of_what_the_walk_holds() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = root(&tmp);
-    std::fs::write(dir.join("f"), b"").unwrap();
-    std::fs::create_dir(dir.join("d")).unwrap();
-    let held = |path: &Path| located(path).unwrap().held_id();
-    assert_eq!(held(&dir.join("f")), Some(id(&dir.join("f"))));
-    assert_eq!(held(&dir.join("d")), Some(id(&dir.join("d"))));
-    assert_eq!(held(&dir.join("d/")), Some(id(&dir.join("d"))));
-    assert_eq!(held(Path::new("/")), Some(id(Path::new("/"))));
-    assert_eq!(held(&dir.join("absent")), None);
-
-    #[cfg(target_os = "macos")]
-    {
-        if root_user() {
-            return;
-        }
-        std::fs::write(dir.join("closed"), b"").unwrap();
-        std::fs::set_permissions(dir.join("closed"), PermissionsExt::from_mode(0o000)).unwrap();
-        assert_eq!(held(&dir.join("closed")), None);
-        let made = std::process::Command::new("mkfifo")
-            .arg(dir.join("pipe"))
-            .status()
-            .unwrap();
-        assert!(made.success());
-        assert_eq!(held(&dir.join("pipe")), None);
-    }
-}
-
 #[test]
 fn open_dir_enters_a_directory_and_nothing_else() {
     let tmp = tempfile::tempdir().unwrap();

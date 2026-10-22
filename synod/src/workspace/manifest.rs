@@ -441,10 +441,13 @@ mod tests {
             std::fs::create_dir(&locked).expect("fixture");
             std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
                 .expect("fixture");
+            // Root lists a `0000` directory; the case binds only where the
+            // permission does.
+            let refused = std::fs::read_dir(&locked).is_err();
             let result = Manifest::of_folder(&locked);
             std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
                 .expect("fixture");
-            assert!(result.is_err());
+            assert!(!refused || result.is_err());
         }
     }
 
@@ -475,9 +478,12 @@ mod tests {
         let locked = dir.path().join("locked");
         std::fs::create_dir(&locked).expect("fixture");
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("fixture");
+        // Root lists a `0000` directory; the case binds only where the
+        // permission does.
+        let refused = std::fs::read_dir(&locked).is_err();
         let result = Manifest::of_folder(dir.path());
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("fixture");
-        assert!(result.is_err());
+        assert!(!refused || result.is_err());
     }
 
     #[test]

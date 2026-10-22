@@ -148,12 +148,14 @@ impl Shell {
     }
 
     /// The first of `candidates` that is a regular file the live stack admits
-    /// for `O`, held.  A denied candidate is passed over, as `execvp` does,
-    /// and the first denial is the error where none is admitted; `Ok(None)`
-    /// where no candidate is a file.
+    /// for `O`, held.  Each walked candidate is judged before its kind is
+    /// asked, present or absent, so which one is refused never says which
+    /// exists; a denied candidate is passed over, as `execvp` does, and the
+    /// first denial is the error where none is admitted; `Ok(None)` where none
+    /// is refused and none is an admitted file.
     ///
     /// # Errors
-    /// The first candidate's refusal, where none was admitted; or the refusal
+    /// The first refused candidate, where none was admitted; or the refusal
     /// of a reserved device name.
     pub fn locate_first<O: Op>(
         &mut self,
@@ -165,12 +167,10 @@ impl Shell {
             let Ok(located) = walk(&cand, LeafMode::Follow) else {
                 continue;
             };
-            if located.trace().kind() != Some(Kind::File) {
-                continue;
-            }
             let real = located.real().clone();
             match (self.context.grants).judge::<O>(self.floor(), located) {
-                Ok(found) => return Ok(Some(found)),
+                Ok(found) if found.trace().kind() == Some(Kind::File) => return Ok(Some(found)),
+                Ok(_) => {}
                 Err(refused) => {
                     first.get_or_insert_with(|| fs_denial(&self.context, refused, &O::FS, &real));
                 }

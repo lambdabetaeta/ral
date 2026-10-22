@@ -701,3 +701,18 @@ fn an_admitted_walk_that_is_cancelled_aborts() {
     let stop = walk.next().expect_err("a cancelled scope aborts the walk");
     assert_eq!(stop.code(), 130);
 }
+
+/// A link the walk fails to follow for a reason other than what it leads to
+/// — here a target name longer than any directory holds — is reported as not
+/// entered, never taken for a link to a file and its subtree dropped.
+#[cfg(unix)]
+#[test]
+fn a_link_the_walk_could_not_follow_is_reported() {
+    let (_tmp, root) = tmp();
+    link(Path::new(&"n".repeat(300)), &root.join("long"));
+    let entries = run(Walk::all(&lexical(&root)).follow_links(), open());
+    assert!(matches!(
+        found(&entries, &root, "long"),
+        Found::Unentered { stat, why: Unentered::Refused(_) } if stat.kind == Kind::Symlink
+    ));
+}

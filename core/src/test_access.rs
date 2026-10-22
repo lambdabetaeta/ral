@@ -278,8 +278,9 @@ pub fn wire_read_frame(channel: &mut WireChannel) -> std::io::Result<Option<Fram
     channel.read_frame()
 }
 
-/// How many path components this thread's walks have opened so far: what a
-/// test reads to show that something walked nothing, or walked once.
+/// How many roots and path components this thread's walks have opened so
+/// far: what a test reads to show that something walked nothing, or walked
+/// once.
 pub fn walk_steps() -> usize {
     crate::path::walk::steps_taken()
 }

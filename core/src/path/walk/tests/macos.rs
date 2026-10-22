@@ -9,7 +9,6 @@
 use super::super::*;
 use super::LOOKED;
 use super::unix::{id, located_with, name, root, root_user, spelled};
-use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
 use std::process::Command;
@@ -98,9 +97,9 @@ fn a_case_variant_is_recorded_at_the_spelling_the_directory_stores() {
 
 /// The rule over what a lookup answered, with two hard links `a` and `b` in
 /// one directory: an answer spelled as the name asked is taken without a
-/// listing; any other is decided by the listing's entries of the object held,
-/// the byte-equal name first; none, or a directory that will not list,
-/// refuses.
+/// listing; any other is decided by the entries whose lookup reaches the
+/// object held, the byte-equal name first; none, a directory that will not
+/// list, or an object only stated refuses.
 #[test]
 fn the_stored_name_rule_takes_a_spelling_and_lists_for_another_links_name() {
     let tmp = tempfile::tempdir().unwrap();
@@ -110,23 +109,30 @@ fn the_stored_name_rule_takes_a_spelling_and_lists_for_another_links_name() {
     let held = held(&dir);
     let wanted = id(&dir.join("a"));
 
-    let byte_present = host::settle(&held.file, &name("a"), wanted, OsStr::new("A")).unwrap();
+    let byte_present = host::settle(&held.file, &name("a"), Some(wanted), OsStr::new("A")).unwrap();
     assert_eq!(byte_present.as_os_str(), "a", "the name asked is listed");
-    let listed = host::settle(&held.file, &name("a"), wanted, OsStr::new("b")).unwrap();
+    let listed = host::settle(&held.file, &name("a"), Some(wanted), OsStr::new("b")).unwrap();
     assert_eq!(
         listed.as_os_str(),
         "a",
         "the other link's name is not adopted"
     );
-    let err = host::settle(&held.file, &name("c"), wanted, OsStr::new("b")).unwrap_err();
+    let err = host::settle(&held.file, &name("c"), Some(wanted), OsStr::new("b")).unwrap_err();
     assert!(err.to_string().contains("moved during the walk"), "{err}");
+    let stated = host::settle(&held.file, &name("a"), None, OsStr::new("a")).unwrap();
+    assert_eq!(stated.as_os_str(), "a", "a stated answer spelled as asked");
+    let err = host::settle(&held.file, &name("a"), None, OsStr::new("b")).unwrap_err();
+    assert!(
+        err.to_string().contains("states but does not hold"),
+        "{err}"
+    );
 
     if root_user() {
         return;
     }
     std::fs::set_permissions(&dir, PermissionsExt::from_mode(0o311)).unwrap();
-    let asked = host::settle(&held.file, &name("a"), wanted, OsStr::new("a"));
-    let blind = host::settle(&held.file, &name("a"), wanted, OsStr::new("b"));
+    let asked = host::settle(&held.file, &name("a"), Some(wanted), OsStr::new("a"));
+    let blind = host::settle(&held.file, &name("a"), Some(wanted), OsStr::new("b"));
     std::fs::set_permissions(&dir, PermissionsExt::from_mode(0o755)).unwrap();
     assert_eq!(
         asked.unwrap().as_os_str(),
@@ -198,7 +204,7 @@ fn an_ambiguous_fold_refuses() {
     let err = host::settle(
         &held(mount).file,
         &name("a\u{301}"),
-        id(&mount.join("\u{e1}")),
+        Some(id(&mount.join("\u{e1}"))),
         OsStr::new("\u{e1}"),
     )
     .unwrap_err();
@@ -207,7 +213,7 @@ fn an_ambiguous_fold_refuses() {
 
 #[test]
 fn pick_takes_the_byte_equal_name_then_the_unique_fold() {
-    let entries = |names: &[&str]| names.iter().map(OsString::from).collect::<Vec<_>>();
+    let entries = |names: &[&str]| names.iter().map(|n| name(n)).collect::<Vec<_>>();
     let picked = |names: &[&str], asked: &str| host::pick(&entries(names), &name(asked));
     assert_eq!(picked(&["a", "A"], "A").unwrap(), name("A"));
     assert_eq!(picked(&["Desktop"], "desktop").unwrap(), name("Desktop"));
@@ -287,23 +293,6 @@ fn parse_lookup_reads_by_the_returned_set() {
     assert_eq!(err.kind(), io::ErrorKind::Unsupported);
 }
 
-/// A record of an entry the kernel could not stat carries its name alone: it
-/// is skipped, the record after it is read.
-#[test]
-fn parse_bulk_skips_a_record_without_identity() {
-    let nameless = libc::ATTR_CMN_RETURNED_ATTRS | libc::ATTR_CMN_NAME;
-    let identified = nameless | libc::ATTR_CMN_DEVID | libc::ATTR_CMN_FILEID;
-    let mut rest = Vec::new();
-    rest.extend(7u32.to_ne_bytes());
-    rest.extend(42u64.to_ne_bytes());
-    let mut buf = packed(nameless, "broken", &[]);
-    buf.extend(packed(identified, "whole", &rest));
-    let found = host::parse_bulk(&buf, 2).unwrap();
-    assert_eq!(found.len(), 1);
-    assert_eq!(found[0].0, "whole");
-    assert_eq!((found[0].1.dev, found[0].1.ino), (7, 42));
-}
-
 /// An entry that moved between the lookup and the open is refused, never
 /// adopted: replaced, the open finds another object; renamed within its
 /// directory or moved to another, it finds none.
@@ -349,6 +338,17 @@ fn an_object_replaced_between_lookup_and_open_is_refused() {
         move || std::fs::rename(&x, &moved).unwrap()
     }));
     assert_eq!(elsewhere.kind(), io::ErrorKind::NotFound);
+
+    // The open cannot refuse a special file by kind: the substitute FIFO is
+    // opened, without blocking, and refused by identity — the residual.
+    let fifo = stepped(Box::new({
+        let x = at("a/x");
+        move || {
+            std::fs::remove_file(&x).unwrap();
+            mkfifo(&x);
+        }
+    }));
+    assert!(fifo.to_string().contains("moved during the walk"), "{fifo}");
 }
 
 /// `freadlink` reads a link's target through the `O_SYMLINK` descriptor that
@@ -415,6 +415,59 @@ fn a_walk_through_a_firmlink_records_the_identity_openat_reached() {
     let slash = held(Path::new("/"));
     let named = host::seen_at(&slash.file, OsStr::new("Users")).unwrap();
     assert_eq!(named.id, loc.trace().last_id());
+}
+
+/// A firmlink spelled in another case is recorded at the name the root
+/// stores: the listing's own entry for it carries the firmlink's identity, a
+/// lookup of it the identity the step reached.
+#[test]
+fn a_firmlink_in_another_case_is_recorded_at_its_stored_name() {
+    if !Path::new("/USERS").exists() {
+        eprintln!("skip: the boot volume is case-sensitive");
+        return;
+    }
+    let loc = located_with(Path::new("/users"), LeafMode::Follow).unwrap();
+    assert_eq!(loc.real().as_path(), Path::new("/Users"));
+    assert_eq!(loc.trace().last_id(), id(Path::new("/Users")));
+}
+
+/// A mount point spelled in another case is recorded at the name its parent
+/// stores, though the listing reports the covered directory's identity and
+/// the step the mounted root's.
+#[test]
+fn a_mount_point_in_another_case_is_recorded_at_its_stored_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    let volume = Volume::attach(&dir, "APFS");
+    std::fs::write(volume.path().join("f"), b"x").unwrap();
+    if !dir.join("MOUNT").exists() {
+        eprintln!("skip: this volume is case-sensitive, so no other spelling is an entry");
+        return;
+    }
+    let loc = located_with(&dir.join("MOUNT").join("f"), LeafMode::Follow).unwrap();
+    assert_eq!(loc.real().as_path(), dir.join("mount").join("f"));
+}
+
+/// A stated object reached by another spelling than the lookup answered is
+/// not named by an identity nothing holds: the walk refuses.
+#[test]
+fn a_stated_object_in_another_spelling_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    mkfifo(&dir.join("Pipe"));
+    if !dir.join("PIPE").exists() {
+        eprintln!("skip: this volume is case-sensitive, so no other spelling is an entry");
+        return;
+    }
+    let Err(err) = located_with(&dir.join("PIPE"), LeafMode::Follow) else {
+        panic!("a stated FIFO was named by an identity nothing holds");
+    };
+    assert!(
+        err.to_string().contains("states but does not hold"),
+        "{err}"
+    );
+    let loc = located_with(&dir.join("Pipe"), LeafMode::Follow).unwrap();
+    assert_eq!(loc.real().as_path(), dir.join("Pipe"));
 }
 
 /// A link is held whatever the mode: `Follow` reaches its target, `NoFollow`

@@ -39,12 +39,15 @@ between steps changes which child is obtained and the transcript says which.
   above that directory, never the names a caller descended by, and at the root
   stays.
 - **The stored name is the one the host can prove.** Linux: the name `openat`
-  resolved. macOS: the name asked where the lookup answers that spelling, else
-  the one entry of that identity the parent's listing shows under the name's
-  fold. Windows: the normalized name of the handle, checked against the
-  parent's own path. On Windows the walked prefix cannot be renamed while held,
-  because directories are opened with the traverse right and without
-  `FILE_SHARE_DELETE`; every create is relative to the held handle.
+  resolved. macOS: the name asked where the lookup answers that spelling;
+  else, for an object the walk holds, the one entry of the parent, among those
+  that fold as the name does, whose lookup reaches the held identity (a lookup,
+  not the listing, crosses a mount point or a firmlink as the step did); an
+  object the walk only states, under another spelling, is refused. Windows:
+  the normalized name of the handle, checked against the parent's own path. On
+  Windows the walked prefix cannot be renamed while held, because directories
+  are opened with the traverse right and without `FILE_SHARE_DELETE`; every
+  create is relative to the held handle.
 - **Anchoring is not folding.** A logical consumer (`cd`, `within [dir: …]`,
   `absolute-path`, a display base) folds `.` and `..` explicitly
   (`LexicalPath::folded`); what reaches the disk is handed unfolded
@@ -221,7 +224,12 @@ position; the kernel judges current ancestry. The residuals:
   `O_NONBLOCK`. A leaf its permissions refused, and a special file (FIFO,
   socket, device), is *stated* (one `getattrlistat`) and never held; a refused
   file is never opened, a special file is opened by name under the held
-  directory for a stream, which must find a special file there.
+  directory for a stream, which must find a special file there. The step looks
+  an entry up before it opens it, and no open refuses a special file by kind:
+  a process that may rename in the directory can put a FIFO or a device at the
+  name in between, and the event-only open is then that FIFO's reader, or runs
+  that device's open routine, for the instant before the identity check
+  refuses it — during the walk, before any judgment.
 - **A file moved or hard-linked out of a denied directory** by a process that may
   write it is a new name, judged on its own. A secret that must follow its
   moves is denied by its own name.
@@ -233,6 +241,13 @@ position; the kernel judges current ancestry. The residuals:
   exclusion there can over-deny and position still holds. No volume refuses an
   exclusion. FAT answers neither `FileIdInfo` nor a reparse tag; the 64-bit
   index and a tag of zero stand in.
+- **A held directory keeps its ancestry open.** A tree walk holds one handle
+  per directory above where it stands; a followed absolute link opens its
+  target's ancestry afresh, so nested absolute links multiply the handles held,
+  and a walk can run out of descriptors. A link the walk could not follow for
+  any reason but that it leads nowhere, to a non-directory or round a loop is
+  reported as not entered, never shown as a plain link with its subtree
+  dropped.
 - **Probes by name**: `is_writable`, the `+x` test of a `PATH` candidate, the
   diagnostic probes after a failed exec, and git's session-start reading of
   `.git` answer by name and grant nothing. A casefolded Linux directory stores

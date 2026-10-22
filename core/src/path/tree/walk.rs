@@ -414,9 +414,7 @@ impl Entries {
             return Ok(None);
         }
         let found = match (is_dir, linked) {
-            (false, Some(Err(e))) if e.kind() == io::ErrorKind::PermissionDenied => {
-                refused(stat, e)
-            }
+            (false, Some(Err(e))) if !names_no_directory(&e) => refused(stat, e),
             (false, _) => Found::Seen(stat),
             (true, _) if !enterable => pruned(stat),
             (true, linked) => self.descend(&name, stat, id, linked, &shown, depth)?,
@@ -704,6 +702,16 @@ fn hidden(name: &EntryName, stat: Option<&Stat>) -> bool {
     #[cfg(not(windows))]
     let _ = stat;
     name.as_os_str().as_encoded_bytes().starts_with(b".")
+}
+
+/// Whether a link's failure to lead to a directory says what it leads to:
+/// nothing, a non-directory, or a loop.  It is then a link and nothing more;
+/// any other failure is the walk's and is reported.
+fn names_no_directory(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    ) || crate::path::is_loop(e)
 }
 
 fn denied() -> io::Error {

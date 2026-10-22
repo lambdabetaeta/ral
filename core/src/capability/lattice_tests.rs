@@ -1507,3 +1507,14 @@ fn the_root_key_resolves_with_no_walk() {
     assert_eq!(crate::test_access::walk_steps(), before);
     assert!(GrantPath::<Excluded>::walk(FrozenPath::root()).is_err());
 }
+
+/// The counter the test above reads sees a walk of the root, which opens the
+/// root and takes no component step.
+#[cfg(unix)]
+#[test]
+fn a_walk_of_the_root_is_counted() {
+    let root = crate::path::LexicalPath::absolute(std::path::Path::new("/")).unwrap();
+    let before = crate::test_access::walk_steps();
+    drop(crate::path::walk(&root, crate::path::LeafMode::Follow).unwrap());
+    assert!(crate::test_access::walk_steps() > before);
+}

@@ -4,8 +4,8 @@
 //!
 //! A `.git` *file* names its git directory in the working tree's own words, so
 //! following it asks the other direction too: the git directory must name this
-//! working tree back ([`claims`]), which is settled by holding both names and
-//! comparing the identities held, never one the walk could not hold.  A
+//! working tree back ([`claims`]), which is settled by walking both names and
+//! comparing the positions the walks reached, never their identities.  A
 //! pointer that does not, or cannot be read, is a [`BadPointer`]; why that is a
 //! refusal and not a wider grant, and how it is worded, is the freeze's.  Every
 //! file is read through the caller's `read`, which judges it: the freeze's
@@ -193,17 +193,21 @@ fn against(base: &Path, path: &str) -> PathBuf {
     base.join(path)
 }
 
-/// Two spellings of one object: both walked and both held while they are
-/// compared, so the identities cannot have been recycled under the
-/// comparison — identity, not spelling, so a firmlink pair is one file.
-/// An operand the walk could not hold is no claim; two absent names are
-/// not the same file.
+/// Two spellings of one place: both walked, and the positions their
+/// transcripts reached compared, firmlink twins as one.  Not their
+/// identities: a transcript's is read once, and a held handle does not keep
+/// it the object's alone (an unmount revokes a macOS event-only descriptor
+/// and a remount may reuse the id; a FAT id is a directory slot).  Two absent
+/// names are not the same file.
 fn same_path(a: &Path, b: &Path) -> bool {
-    let hold = |p: &Path| walk(&LexicalPath::absolute(p)?, LeafMode::Follow).ok();
-    let (Some(a), Some(b)) = (hold(a), hold(b)) else {
+    let reached = |p: &Path| {
+        let located = walk(&LexicalPath::absolute(p)?, LeafMode::Follow).ok()?;
+        located.trace().kind().map(|_| located.real().clone())
+    };
+    let (Some(a), Some(b)) = (reached(a), reached(b)) else {
         return false;
     };
-    matches!((a.held_id(), b.held_id()), (Some(x), Some(y)) if x == y)
+    a.contains(&b) && b.contains(&a)
 }
 
 fn core_worktree(

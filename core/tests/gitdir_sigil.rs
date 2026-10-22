@@ -149,11 +149,11 @@ fn gitdir_refuses_a_pointer_whose_target_claims_another_tree() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// A claim whose tree the walk cannot hold is no claim: a held identity is the
-/// only proof.
+/// A tree the walk states and cannot hold still has a position, and the
+/// claim is by position: it stands.
 #[cfg(target_os = "macos")]
 #[test]
-fn gitdir_refuses_a_claim_the_walk_cannot_hold() {
+fn gitdir_takes_a_claim_whose_tree_the_walk_only_states() {
     use std::os::unix::fs::PermissionsExt;
     if rustix::process::geteuid().is_root() {
         return;
@@ -174,8 +174,58 @@ fn gitdir_refuses_a_claim_the_walk_cannot_hold() {
     let wt = root.join("wt");
     std::fs::set_permissions(&wt, PermissionsExt::from_mode(0o300)).unwrap();
 
-    let err = refused(&wt);
+    let found = freeze(&wt);
     std::fs::set_permissions(&wt, PermissionsExt::from_mode(0o700)).unwrap();
+    assert_eq!(found.unwrap(), root.join("gd").display().to_string());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A back-pointer reached through a link names the place the link resolves
+/// to: the walks' positions agree.
+#[test]
+fn gitdir_takes_a_back_pointer_spelled_through_a_link() {
+    let root = root("aliased");
+    let main = root.join("main/.git/worktrees/w");
+    std::fs::create_dir_all(&main).unwrap();
+    std::fs::create_dir_all(root.join("wt")).unwrap();
+    std::os::unix::fs::symlink(root.join("wt"), root.join("alias")).unwrap();
+    std::fs::write(
+        main.join("gitdir"),
+        format!("{}/alias/.git\n", root.display()),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("wt/.git"),
+        format!("gitdir: {}\n", main.display()),
+    )
+    .unwrap();
+
+    assert_eq!(frozen(&root.join("wt")), main.display().to_string());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A back-pointer naming a hard link of this tree's `.git` file names another
+/// place: the claim is by position, never by the object's identity.
+#[test]
+fn gitdir_refuses_a_back_pointer_to_a_hard_link_of_the_pointer() {
+    let root = root("hardlinked");
+    let main = root.join("main/.git/worktrees/w");
+    std::fs::create_dir_all(&main).unwrap();
+    std::fs::create_dir_all(root.join("wt")).unwrap();
+    std::fs::create_dir_all(root.join("other")).unwrap();
+    std::fs::write(
+        root.join("wt/.git"),
+        format!("gitdir: {}\n", main.display()),
+    )
+    .unwrap();
+    std::fs::hard_link(root.join("wt/.git"), root.join("other/.git")).unwrap();
+    std::fs::write(
+        main.join("gitdir"),
+        format!("{}/other/.git\n", root.display()),
+    )
+    .unwrap();
+
+    let err = refused(&root.join("wt"));
     assert!(
         err.message.contains("does not name this working tree back"),
         "{err:?}"

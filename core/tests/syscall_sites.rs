@@ -120,7 +120,6 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("core/src/path/walk/macos.rs", "silent:walk-root"),
     ("core/src/path/walk/macos.rs", "silent:walk-stat"),
     ("core/src/path/walk/macos.rs", "silent:walk-step"),
-    ("core/src/path/walk/macos.rs", "silent:walk-stored-name"),
     ("core/src/path/walk/macos.rs", "surface:walk-reopen"),
     ("core/src/path/walk/macos.rs", "surface:walk-reopen-special"),
     ("core/src/path/walk/unix.rs", "silent:discard-device"),

@@ -23,6 +23,7 @@
 use ral_core::carrier::Transport;
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::{Datum, exact_keys, field};
+use ral_core::path::CwdPath;
 use ral_core::path::complete::{PartialPath, Tilde, spell_entry};
 use ral_core::protocol::probe::PathEntry;
 use ral_core::record;
@@ -92,10 +93,10 @@ impl Sources<'_> {
     /// [`matching`] re-sorts.
     ///
     /// The one place `PATH` is enumerated, if this is the first request since
-    /// the scan was dropped.  It walks `PATH`'s entries as written, each
-    /// anchored by the engine, and requires the executable bit.  Dispatch still goes through the fresh
-    /// `locate`, so a scan gone stale can only misinform a menu, never
-    /// misdirect a spawn.
+    /// the scan was dropped.  It walks `locate`'s own directory list, read
+    /// against the engine's cwd, and requires the executable bit.  Dispatch
+    /// still goes through the fresh `locate`, so a scan gone stale can only
+    /// misinform a menu, never misdirect a spawn.
     fn command_names(&self) -> Vec<&String> {
         let scan = self.cache.scan.get_or_init(|| PathScan {
             names: self
@@ -104,7 +105,9 @@ impl Sources<'_> {
                 .path
                 .as_deref()
                 .map(|path| {
-                    ral_core::path::path_entries(std::ffi::OsStr::new(path))
+                    let cwd = CwdPath::new(self.cache.key.cwd.clone()).ok();
+                    ral_core::path::path_dirs(path, cwd.as_ref())
+                        .into_iter()
                         .flat_map(|dir| entries(self.engine, &dir))
                         .filter_map(|e| e.exec.then_some(e.name))
                         .collect()
@@ -691,6 +694,36 @@ mod tests {
         let offered = command_completions(&cache.sources(&second), "planted");
         assert!(offered.contains(&"plantedtwo".into()), "got {offered:?}");
         assert!(!offered.contains(&"plantedone".into()), "got {offered:?}");
+    }
+
+    /// A `..` in a `PATH` entry is read as the launch reads it, lexically,
+    /// so the menu offers what `locate` runs and not what lies past a link.
+    #[cfg(unix)]
+    #[test]
+    fn a_dotdot_entry_is_folded_as_the_launch_folds_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (r, other) = (tmp.path().join("r"), tmp.path().join("other"));
+        for dir in [r.join("bin"), other.join("deep"), other.join("bin")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        make_executable(&r.join("bin").join("plantedlexical"));
+        make_executable(&other.join("bin").join("plantedphysical"));
+        std::os::unix::fs::symlink(other.join("deep"), r.join("link")).unwrap();
+        let path = format!("{}/link/../bin", r.display());
+
+        let mut cache = SourceCache::new();
+        let engine = engine_at(&path, tmp.path());
+        cache.refresh(&engine);
+        let offered = command_completions(&cache.sources(&engine), "planted");
+        assert!(
+            offered.contains(&"plantedlexical".into()),
+            "got {offered:?}"
+        );
+        assert!(
+            !offered.contains(&"plantedphysical".into()),
+            "got {offered:?}"
+        );
+        assert!(ral_core::path::locate("plantedlexical", Some(&path), None).is_some());
     }
 
     /// The split, in one assertion: a binding defined on the previous line

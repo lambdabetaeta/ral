@@ -127,7 +127,7 @@ pub(super) fn step(parent: &Held, name: &EntryName, sharing: Sharing) -> io::Res
         }
         None => looked.seen,
     };
-    let stored = settle(dir, name, seen.id, &looked.name)?;
+    let stored = settle(dir, name, handle.as_ref().map(|_| seen.id), &looked.name)?;
     let step = Step {
         name: stored,
         id: seen.id,
@@ -142,121 +142,78 @@ pub(super) fn step(parent: &Held, name: &EntryName, sharing: Sharing) -> io::Res
 }
 
 /// What the lookup of `name` answered, `answered`, as the name of the entry
-/// of `dir` whose identity is `id`.  An answer spelled as the name asked is
-/// the entry's own: a volume that folds cannot hold two entries in one fold
-/// class, and one that does not resolved exactly that spelling.  Otherwise
-/// the directory is listed for the entries of `id` ([`stored_entry`]).
+/// of `dir` the walk reached, whose identity is `held` where the walk holds
+/// it.  An answer spelled as the name asked is the entry's own: a volume that
+/// folds cannot hold two entries in one fold class, and one that does not
+/// resolved exactly that spelling.  Any other answer is settled by the held
+/// identity ([`stored_entry`]); an object the walk only states has none that
+/// anything pins, so its name is not chosen by it.
 pub(super) fn settle(
     dir: &File,
     name: &EntryName,
-    id: ObjectId,
+    held: Option<ObjectId>,
     answered: &OsStr,
 ) -> io::Result<EntryName> {
     if answered == name.as_os_str() {
         return Ok(name.clone());
     }
+    let Some(id) = held else {
+        return Err(io::Error::other(format!(
+            "cannot learn the stored name of {}, which the walk states but does not hold: the lookup answered {}, and only a held object's identity can tell which entry is its own",
+            shown(name.as_os_str()),
+            shown(answered)
+        )));
+    };
     stored_entry(dir, id, name)
 }
 
-/// The name `dir` stores for the entry `name` of identity `id`: the entries of
-/// that identity in the directory's listing, decided by [`pick`].  A directory
-/// that cannot be read for the listing refuses: the name is not guessed.
+/// The name `dir` stores for the entry `name` reached, of identity `id`: the
+/// entries whose name folds as `name` does, each looked up as the step looked
+/// `name` up — across a mount point or a firmlink, as the step crossed it —
+/// and kept where the lookup reaches `id`, then decided by [`pick`].  A
+/// directory that cannot be listed refuses: the name is not guessed.
 fn stored_entry(dir: &File, id: ObjectId, name: &EntryName) -> io::Result<EntryName> {
-    let entries = of_identity(dir, id).map_err(|e| {
+    let cannot = |e: io::Error| {
         io::Error::new(
             e.kind(),
             format!(
-                "cannot learn the stored name of {}, a hard link whose directory will not list: {e}",
+                "cannot learn the stored name of {}: {e}",
                 shown(name.as_os_str())
             ),
         )
-    })?;
-    pick(&entries, name)
-}
-
-/// The names of every entry of `dir` whose identity is `id`, found by listing
-/// it to the end through a read handle reopened from it.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-stored-name] Lists a held directory for the entries whose identity the walk holds, to learn the name the directory stores for it: path resolution, not turn-time model data I/O."
-)]
-fn of_identity(dir: &File, id: ObjectId) -> io::Result<Vec<OsString>> {
-    let reader = unix::reopen(dir)?;
-    let mut list = wanted(
-        libc::ATTR_CMN_RETURNED_ATTRS
-            | libc::ATTR_CMN_NAME
-            | libc::ATTR_CMN_DEVID
-            | libc::ATTR_CMN_FILEID,
-        0,
-    );
-    let mut buf = vec![0u8; 1 << 16];
-    let mut names = Vec::new();
-    loop {
-        // SAFETY: `reader` is a live descriptor, and `list` and `buf` outlive
-        // the call, which writes at most the `buf.len()` bytes it is told of.
-        let count = unsafe {
-            libc::getattrlistbulk(
-                reader.as_raw_fd(),
-                (&raw mut list).cast(),
-                buf.as_mut_ptr().cast(),
-                buf.len(),
-                0,
-            )
-        };
-        match usize::try_from(count) {
-            Err(_) => return Err(io::Error::last_os_error()),
-            Ok(0) => return Ok(names),
-            Ok(count) => names.extend(
-                parse_bulk(&buf, count)?
-                    .into_iter()
-                    .filter_map(|(name, found)| (found == id).then_some(name)),
-            ),
-        }
-    }
-}
-
-/// The `count` records of a `getattrlistbulk` answer that identify their
-/// entry.  A record of an entry the kernel could not stat carries its name
-/// alone, and is not the one sought, whatever its reason.
-pub(super) fn parse_bulk(buf: &[u8], count: usize) -> io::Result<Vec<(OsString, ObjectId)>> {
-    const IDENTIFIED: u32 = libc::ATTR_CMN_NAME | libc::ATTR_CMN_DEVID | libc::ATTR_CMN_FILEID;
-    let mut rest = buf;
-    let mut found = Vec::new();
-    for _ in 0..count {
-        let mut reply = Reply::new(rest)?;
-        rest = &rest[reply.buf.len()..];
-        if reply.common & IDENTIFIED != IDENTIFIED {
+    };
+    let key = collision_key(name.as_os_str());
+    let mut reaching = Vec::new();
+    for entry in unix::names(dir).map_err(cannot)? {
+        if *collision_key(entry.as_os_str()) != *key {
             continue;
         }
-        let name = reply.name()?;
-        let dev = reply.u32()?;
-        let ino = reply.u64()?;
-        found.push((
-            name,
-            ObjectId {
-                dev: u64::from(dev),
-                ino,
-            },
-        ));
+        match lookup(dir, entry.as_os_str()) {
+            Ok(looked) if looked.seen.id == id => reaching.push(entry),
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(cannot(e)),
+        }
     }
-    Ok(found)
+    pick(&reaching, name)
 }
 
-/// The entry of `entries`, those of one object, that `name` asked for: `name`
-/// itself where one is spelled so; else the unique one under `name`'s fold,
-/// which is coarser than every volume's, so equality under it proves nothing
-/// of which entry a name resolved to.  None is a move; several refuse.
-pub(super) fn pick(entries: &[OsString], name: &EntryName) -> io::Result<EntryName> {
-    if entries.iter().any(|entry| entry == name.as_os_str()) {
+/// The entry of `entries`, those that reach one object, that `name` asked
+/// for: `name` itself where one is spelled so; else the unique one under
+/// `name`'s fold, which is coarser than every volume's, so equality under it
+/// proves nothing of which entry a name resolved to.  None is a move; several
+/// refuse.
+pub(super) fn pick(entries: &[EntryName], name: &EntryName) -> io::Result<EntryName> {
+    if entries.contains(name) {
         return Ok(name.clone());
     }
     let key = collision_key(name.as_os_str());
     let folded: Vec<_> = entries
         .iter()
-        .filter(|entry| *collision_key(entry) == *key)
+        .filter(|entry| *collision_key(entry.as_os_str()) == *key)
         .collect();
     match folded.as_slice() {
-        [only] => Ok(EntryName::parse(only)?),
+        [only] => Ok((*only).clone()),
         [] => Err(moved(name)),
         several => Err(io::Error::other(format!(
             "{} is one of {} spellings of one object in this directory, and the walk cannot tell which the directory stores",

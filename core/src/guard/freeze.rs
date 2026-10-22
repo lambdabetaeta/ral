@@ -886,12 +886,25 @@ mod tests {
     use crate::path::lex::fold_dots;
     use crate::path::sigil::expand_path_prefix;
 
+    /// A fixture anchor written `/a/b`, as this host spells an absolute path:
+    /// itself on Unix, `C:\a\b` on Windows.  Any other spelling is kept.
+    fn native(anchor: &str) -> String {
+        if cfg!(windows) && anchor.starts_with('/') {
+            format!("C:{}", anchor.replace('/', "\\"))
+        } else {
+            anchor.to_owned()
+        }
+    }
+
     fn cwd_at(cwd: &str) -> CwdPath {
-        CwdPath::new(cwd.into()).expect("a fixture cwd is absolute")
+        CwdPath::new(native(cwd).into()).expect("a fixture cwd is absolute")
     }
 
     fn ctx(home: &str, cwd: &str) -> FreezeCtx {
-        FreezeCtx::at(std::iter::once(("HOME", home)).collect(), cwd_at(cwd))
+        FreezeCtx::at(
+            std::iter::once(("HOME", native(home).as_str())).collect(),
+            cwd_at(cwd),
+        )
     }
 
     /// A context whose overlay binds no `HOME`: the shape every home-relative
