@@ -127,7 +127,10 @@ function of its layers.**
   environment** and kept the same way; a name not found keeps its veto.
 - **Resolving can fail**: a walk that fails for any reason other than an absent
   or unenterable tail refuses the layer, naming the spelling. A directory the
-  walk cannot enter ends the spelling's identities there; the rest is position.
+  walk cannot enter ends the spelling's identities there; the rest is position,
+  folded lexically. Where a `..` folds that name away, the walk resumes from
+  the directory it holds, so `missing/../x` is walked to `x`, its link
+  followed by the walk's mode, as though `missing` had never been spelled.
 - **Across a process boundary** a stack travels as its traces and the receiver
   calls `GrantStack::rehold` (the seed's decode, `run_framed`): each exclusion is
   walked again at its position and held where the object there is the one
@@ -224,9 +227,13 @@ position; the kernel judges current ancestry. The residuals:
   `O_NONBLOCK`. A leaf its permissions refused, and a special file (FIFO,
   socket, device), is *stated* (one `getattrlistat`) and never held; a refused
   file is never opened, a special file is opened by name under the held
-  directory for a stream, which must find a special file there. The step looks
-  an entry up before it opens it, and no open refuses a special file by kind:
-  a process that may rename in the directory can put a FIFO or a device at the
+  directory for a stream, which must find the object the walk stated there, by
+  identity, and still a special file, before a byte moves (unheld, its
+  identity can be reused, and the kind refuses a regular file that came to
+  bear it); a substitute is opened first, as at a held leaf, and a
+  substituted FIFO with no peer blocks that open. The step looks an
+  entry up before it opens it, and no open refuses a special file by kind: a
+  process that may rename in the directory can put a FIFO or a device at the
   name in between, and the event-only open is then that FIFO's reader, or runs
   that device's open routine, for the instant before the identity check
   refuses it — during the walk, before any judgment.

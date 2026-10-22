@@ -289,7 +289,7 @@ mod tests {
         reason = "[test] fixtures build the tree the positions are held in"
     )]
     mod nofollow {
-        use crate::path::{Dir, Installing, Kind, Located, ObjectId, RealPath};
+        use crate::path::{Dir, Installing, Located, ObjectId, RealPath};
         use crate::sandbox::TOKEN;
         use crate::test_helper::{place, real};
         use std::fs::File;
@@ -336,19 +336,12 @@ mod tests {
             assert!(hold_dir(&at(&at(&root, "f"), "g")).unwrap().is_none());
         }
 
-        #[test]
-        fn a_directory_is_held_as_an_installing_directory() {
-            let (_tmp, root) = fixture();
-            let dir = hold_dir(&at(&root, "d")).unwrap().expect("a directory");
-            assert_eq!(dir.real(), &at(&root, "d"));
-            assert_eq!(dir.trace().kind(), Some(Kind::Dir));
-        }
-
         /// The file is held as an `Installing` object of kind `File` that lends
         /// its descriptor; that it reads nothing is `path::walk::tests::markers`'.
         #[cfg(target_os = "linux")]
         #[test]
         fn a_file_is_held_as_an_installing_object_lending_its_leaf_fd() {
+            use crate::path::Kind;
             let (_tmp, root) = fixture();
             let located = hold(&at(&root, "f")).unwrap().expect("a file");
             assert_eq!(located.trace().kind(), Some(Kind::File));

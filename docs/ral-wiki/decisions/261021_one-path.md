@@ -135,6 +135,7 @@ have not, by name:
   `an_ambiguous_fold_refuses`,
   `a_special_file_is_stated_and_never_held`,
   `a_stream_to_a_fifo_is_opened_by_name_and_must_find_a_fifo`,
+  `a_stream_to_a_fifo_swapped_for_another_is_refused`,
   `an_object_replaced_between_lookup_and_open_is_refused`,
   `pick_takes_the_byte_equal_name_then_the_unique_fold`,
   `parse_lookup_reads_by_the_returned_set`; in `identity.rs`,

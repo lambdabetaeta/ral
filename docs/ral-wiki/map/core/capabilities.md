@@ -705,5 +705,7 @@ pinned binaries' exec (`Pinned::command`), the `ps` denial sampler, the
 boot-time binary pin, the stamp-store and profile-ledger lifecycle), or
 test scaffolding. The site
 shapes and their rail rendering live in [[map/exarch/io-surface|io-surface]]; here
-the sites are only declared and accounted, with `core/tests/syscall_sites.rs`
-failing CI on any unaccounted constructor.
+the sites are only declared and accounted, with clippy failing CI on a
+constructor under no allow, and `core/tests/syscall_sites.rs` on a tagged site
+missing from its manifest; that a constructor's allow is tagged at all is left
+to review.

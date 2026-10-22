@@ -4,34 +4,39 @@
 //! Enforcement §2; ADR `261021_one-path`).
 //!
 //! The clippy `disallowed-methods` denylist (see `clippy.toml`) bans every
-//! filesystem and process *constructor* outside a handful of reviewed syscall
-//! sites, so the only way to read, write, spawn, or exec is at a site that
-//! either *surfaces* the operation as a card or is a *reasoned-silent* one.
-//! Each site carries an `#[allow(clippy::disallowed_methods, reason = "[…] …")]`
-//! whose tag records which kind it is.  Clippy guarantees there is no I/O
-//! *outside* a site; this meta-test guarantees the set of sites is *closed*:
-//! no new, unaccounted site can slip in unreviewed.
+//! filesystem, process and network *constructor*, and the raw wrappers the
+//! walk is made of, so the only way to read, write, spawn, dial or exec is
+//! under an `#[allow(clippy::disallowed_methods, reason = "…")]`.  Clippy
+//! resolves the names, aliases and imports included, and CI runs it on Linux,
+//! macOS and Windows, so no call escapes it on any platform's `cfg`.  A
+//! syscall site's allow opens its reason with a tag — `[surface:<slug>]` (it
+//! raises a card), `[silent:<slug>]` (it raises none, and says why) or
+//! `[test]` — and this meta-test guarantees the set of tagged sites is
+//! *closed*: no new site lands without a reviewed manifest diff.
 //!
-//! It walks the production `src/` of every workspace crate that judges or
-//! hands out names (plus the `build.rs` files) — never the `tests/` trees,
+//! What neither gate checks is that the allow over a syscall is a *tagged*
+//! one.  `disallowed_methods` is one lint for every discipline in
+//! `clippy.toml`, and clippy cannot read a reason, so a `path-form:` or
+//! `native:` allow over an `fs::read` passes both.  That is left to review,
+//! as `clippy.toml` says beside the other disciplines it cannot enforce.
+//!
+//! The test reads the production `src/` of every workspace crate that judges
+//! or hands out names (plus the `build.rs` files) — never the `tests/` trees,
 //! which carry blanket `#![allow(clippy::disallowed_methods)]` for test
-//! scaffolding, a separate category that is not a syscall site — and enforces
-//! five facts.  Outside `core/src/path/`, nothing resolves a name a grant
-//! judges; what is left is a row here, each saying why its name is not a
-//! grant's to judge: ral's own binary, cgroup and jail, diagnostics, boot and
-//! config files; exarch's and synod's own directories and prompt files;
-//! terminal and device plumbing; the guest's bootstrap.  `vm-manager`, a host
-//! tool whose names no grant judges, is not walked; its one path ban is a
-//! reasoned allow.
+//! scaffolding — with its line comments dropped, and enforces four facts.
+//! Outside `core/src/path/`, nothing resolves a name a grant judges; what is
+//! left is a row here, each saying why its name is not a grant's to judge:
+//! ral's own binary, cgroup and jail, diagnostics, boot and config files;
+//! exarch's and synod's own directories and prompt files; terminal and device
+//! plumbing; the guest's bootstrap.  `vm-manager`, a host tool whose names no
+//! grant judges, is not walked; its one path ban is a reasoned allow.
 //!
 //!   1. **Every tagged allow is well-formed.**  An allow whose `reason` begins
 //!      with a `[…]` tag must name a known `<kind>` (`surface`, `silent`, or
 //!      `test`) and carry a non-empty explanation after the tag — so a site is
-//!      always a written decision, never an empty marker.  (Pre-existing bare
-//!      `#[allow(clippy::disallowed_methods)]` for the *other* disciplines —
-//!      path-construction, cwd, child-wait, env, `path-form:` lexical work on a
-//!      spelling — are governed by their own denylist entries and are out of
-//!      scope here; this test concerns the fs/process syscall sites.)
+//!      always a written decision, never an empty marker.  An untagged allow
+//!      belongs to another discipline (`path-form:`, `native:`, env, locks,
+//!      exit) and is not this test's concern.
 //!   2. **The site set equals the reviewed manifest.**  The set of
 //!      `(crate-relative file, tag)` pairs for `surface`/`silent` sites must
 //!      equal [`SYSCALL_SITES`], and each pair must occur *exactly once*.  A
@@ -39,33 +44,15 @@
 //!      manifest — the review gate.  Uniqueness is what keeps that gate shut:
 //!      the manifest is keyed by pair, so a site reusing a slug its file
 //!      already carries would land with no manifest diff at all.
-//!   3. **Every call lies in a tagged site.**  A *call* is an occurrence of a
-//!      banned token in code: not in a comment, a string or a character
-//!      literal, and not under `#[cfg(test)]`, which is scaffolding as an
-//!      out-of-line `tests.rs` is.  A tagged allow covers its *item*: from the
-//!      attribute to the item's closing brace (a statement, to its `;`).  A
-//!      call that no tagged item contains fails, so a file with one tagged
-//!      allow cannot hide a second constructor.  It also catches
-//!      platform-`cfg`-gated sites a single-target clippy run on one OS would
-//!      miss.  A `Path` syscall method (`exists`, `metadata`, `read_dir`, …;
-//!      the inherent methods `clippy.toml` bans) counts as a call where an
-//!      *untagged* allow covers it: outside an allow clippy proves the
-//!      receiver is not a `Path`, inside a tagged one the site is reviewed,
-//!      inside an untagged one it is hidden from both gates.  An import of
-//!      `libc::{open, openat}`, a `rustix::fs` wrapper, a cap-primitives
-//!      function, `std::process::Command` or a Win32 constructor binds a
-//!      name, aliased or not, and each bare use of that name is a call.
-//!   4. **A single-door token appears only at its door.**  Fact (3) is met by
-//!      any tagged allow, so for a token with exactly one legitimate caller,
-//!      [`SINGLE_DOORS`] names that file and no other production file may
-//!      contain the token at all.
-//!   5. **The string containment helpers gain no caller.**
+//!   3. **The string containment helpers gain no caller.**
 //!      [`STRING_CONTAINMENT_CALLERS`] pins, outside `path/`, each file that
 //!      calls `starts_with_identity`, `path_within_str`, `proper_ancestors` or
 //!      `Rendered::{holds, under, rebased}`, and how often.  They stay for
 //!      the sandbox renderers that call them today; the plan that moves those
 //!      renderers onto `RealPath` deletes the helpers, and finds no new caller.
-//!   6. **The ungoverned door gains no caller.**  [`UNGOVERNED_CALLERS`] pins
+//!      A ban could not say this: clippy scopes a ban to no module, and counts
+//!      nothing.
+//!   4. **The ungoverned door gains no caller.**  [`UNGOVERNED_CALLERS`] pins
 //!      each production file that reads through `capability::Ungoverned`, the
 //!      user's own authority with no grant over it, and how often: a read
 //!      ral makes for itself (its own tree, a manifest, a review), never one
@@ -121,7 +108,6 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("core/src/path/walk/macos.rs", "silent:walk-stat"),
     ("core/src/path/walk/macos.rs", "silent:walk-step"),
     ("core/src/path/walk/macos.rs", "surface:walk-reopen"),
-    ("core/src/path/walk/macos.rs", "surface:walk-reopen-special"),
     ("core/src/path/walk/unix.rs", "silent:discard-device"),
     ("core/src/path/walk/unix.rs", "silent:walk-abandon"),
     ("core/src/path/walk/unix.rs", "silent:walk-access"),
@@ -338,252 +324,6 @@ const SRC_ROOTS: &[&str] = &[
 /// Build scripts are production code too, and `ral/build.rs` spawns `git`.
 const BUILD_SCRIPTS: &[&str] = &["core/build.rs", "ral/build.rs", "exarch/build.rs"];
 
-/// Banned fs/process/network constructor tokens (substring match).  Coarse on
-/// purpose: fact (3) only needs "this code makes such a call", not clippy's
-/// resolution.
-const BANNED_TOKENS: &[&str] = &[
-    "fs::File::open",
-    "fs::File::create",
-    "fs::OpenOptions::",
-    "fs::read(",
-    "fs::read_to_string",
-    "fs::write(",
-    "fs::read_dir",
-    "fs::metadata",
-    "fs::symlink_metadata",
-    "fs::read_link",
-    "fs::remove_file",
-    "fs::remove_dir_all",
-    "fs::create_dir_all",
-    "fs::rename(",
-    "fs::copy(",
-    "fs::set_permissions",
-    // The raw wrappers the walk is made of.  A walk imports `openat2` and then
-    // calls it bare, so `bare_calls` finds those too.
-    "fs::open(",
-    "fs::openat(",
-    "fs::openat2(",
-    "fs::statat(",
-    "fs::accessat(",
-    "fs::readlinkat(",
-    "fs::renameat(",
-    "fs::unlinkat(",
-    "fs::mkdirat(",
-    "libc::open(",
-    "libc::openat(",
-    "CreateFileW",
-    "NtCreateFile",
-    "GetFinalPathNameByHandleW",
-    "GetNamedSecurityInfoW",
-    "SetNamedSecurityInfoW",
-    // The process type is named by its path or import, not bare `Command::new`,
-    // which also spells the audit fact `fact::Command`; an import is caught by
-    // `imports_banned`, and its bare calls by `bare_calls`.
-    "process::Command::new",
-    "CommandExt::exec",
-    // The pipe door: `cloexec_pipe` closes a CLOEXEC window Apple leaves open
-    // between `pipe()` and the flag, so a raw `os_pipe::pipe()` is a site too.
-    // Listed here rather than left to clippy because the one that got through
-    // was `cfg(windows)`, which a Unix clippy run never compiles.
-    "os_pipe::pipe(",
-    // The cap-std twins are imported by name and then called bare, so the
-    // import betrays them (`imports_banned`).
-    "cap_primitives::fs::",
-    "cap_fs_ext::",
-    // The network family: a host:port is an outside name and the socket it
-    // returns is the capability, the same shape as an open.  `reqwest` is
-    // spelled in full because `Client::builder` bare is genai's client, which
-    // threads this crate's own preconfigured reqwest client rather than
-    // acquiring anything.
-    "TcpStream::connect",
-    "TcpListener::bind",
-    "UdpSocket::bind",
-    "to_socket_addrs",
-    "reqwest::Client::builder",
-    "reqwest::Client::new",
-];
-
-/// The raw `rustix::fs` wrappers, the names a walk imports and then calls bare.
-const RAW_WRAPPERS: &[&str] = &[
-    "open",
-    "openat",
-    "openat2",
-    "statat",
-    "accessat",
-    "readlinkat",
-    "renameat",
-    "unlinkat",
-    "mkdirat",
-];
-
-/// The inherent `Path` methods `clippy.toml` bans, each a syscall by name.
-/// Outside an allow clippy proves such a call is not `Path`'s; under a
-/// tagged allow it is a reviewed site; under an *untagged* allow it is the
-/// one shape both gates would miss, so there it counts as a call.
-const PATH_SYSCALLS: &[&str] = &[
-    ".exists(",
-    ".try_exists(",
-    ".is_file(",
-    ".is_dir(",
-    ".is_symlink(",
-    ".metadata(",
-    ".symlink_metadata(",
-    ".read_dir(",
-    ".read_link(",
-    ".canonicalize(",
-];
-
-/// The `libc` constructors the walk could be built from, imported by name.
-const LIBC_OPENERS: &[&str] = &["open", "openat"];
-
-/// The Win32/NT constructors, for an aliased import.
-const WIN32_OPENERS: &[&str] = &[
-    "CreateFileW",
-    "NtCreateFile",
-    "GetFinalPathNameByHandleW",
-    "GetNamedSecurityInfoW",
-    "SetNamedSecurityInfoW",
-];
-
-/// The identifier words of `text`: what is left of a `use` item once its
-/// braces, commas and `::` are taken away.
-fn words(text: &str) -> impl Iterator<Item = &str> {
-    text.split(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .filter(|w| !w.is_empty())
-}
-
-/// The names a `use` item binds, as `(original, bound)`: `w as a` binds `a`
-/// to `w`, any other identifier word binds itself.  The keywords and the
-/// module-path words every import carries are no names.
-fn bound_names(import: &str) -> Vec<(&str, &str)> {
-    const NOT_NAMES: &[&str] = &[
-        "use",
-        "pub",
-        "crate",
-        "self",
-        "super",
-        "std",
-        "rustix",
-        "fs",
-        "cap_primitives",
-        "cap_fs_ext",
-        "as",
-    ];
-    let mut words = words(import).peekable();
-    let mut names = Vec::new();
-    while let Some(word) = words.next() {
-        if NOT_NAMES.contains(&word) {
-            continue;
-        }
-        let bound = if words.next_if_eq(&"as").is_some() {
-            words.next().unwrap_or(word)
-        } else {
-            word
-        };
-        names.push((word, bound));
-    }
-    names
-}
-
-/// The names `use` items import from a module that makes calls by name: the
-/// wrappers of `rustix::fs`, the openers of `libc` and `windows_sys`,
-/// `Command` of `std::process`, the functions of `cap_primitives::fs`.  Each
-/// is a call wherever the file then uses the name it bound, an alias
-/// included, bare.
-fn bare_calls(code: &str) -> Vec<(usize, String)> {
-    let mut found = Vec::new();
-    for (_, import) in use_items(code) {
-        let imports = |word: &str| words(import).any(|w| w == word);
-        let makes_calls = |original: &str| {
-            if import.contains("rustix::fs") {
-                RAW_WRAPPERS.contains(&original)
-            } else if imports("libc") {
-                LIBC_OPENERS.contains(&original)
-            } else if import.contains("cap_primitives::fs") || import.contains("cap_fs_ext") {
-                original.starts_with(char::is_lowercase)
-            } else if imports("windows_sys") {
-                WIN32_OPENERS.contains(&original)
-            } else {
-                false
-            }
-        };
-        for (original, bound) in bound_names(import) {
-            let named = if original == bound {
-                original.to_string()
-            } else {
-                format!("{original} as {bound}")
-            };
-            if makes_calls(original) {
-                found.extend(
-                    bare_uses(code, &format!("{bound}(")).map(|at| (at, format!("{named}(…)"))),
-                );
-            }
-            if import.contains("process") && original == "Command" {
-                found.extend(
-                    bare_uses(code, &format!("{bound}::new("))
-                        .map(|at| (at, format!("{named}::new"))),
-                );
-            }
-        }
-    }
-    found
-}
-
-/// Where `token` occurs in `code` beginning a name: after neither an
-/// identifier character, a `.` nor a `:`.
-fn bare_uses<'a>(code: &'a str, token: &'a str) -> impl Iterator<Item = usize> + 'a {
-    code.match_indices(token)
-        .map(|(at, _)| at)
-        .filter(move |&at| {
-            at == 0
-                || !(code.as_bytes()[at - 1].is_ascii_alphanumeric()
-                    || b"_.:".contains(&code.as_bytes()[at - 1]))
-        })
-}
-
-/// Every `use` item of `code`, as its offset and text.
-fn use_items(code: &str) -> Vec<(usize, &str)> {
-    code.match_indices("use ")
-        .filter(|&(at, _)| {
-            let before = code[..at].trim_end();
-            before.is_empty()
-                || before.ends_with([';', '{', '}', ']'])
-                || before.ends_with("pub")
-                || before.ends_with(')')
-        })
-        .filter_map(|(at, _)| code[at..].find(';').map(|n| (at, &code[at..at + n])))
-        .collect()
-}
-
-/// Whether some `use` item of `code` names a banned token: an import is not a
-/// call, but a file that imports one makes calls by name.
-fn imports_banned(code: &str) -> Option<&'static str> {
-    use_items(code).into_iter().find_map(|(_, import)| {
-        let tok = BANNED_TOKENS.iter().find(|t| import.contains(**t)).copied();
-        tok.or_else(|| {
-            (import.contains("process") && words(import).any(|w| w == "Command"))
-                .then_some("process::Command")
-        })
-        .or_else(|| {
-            (import.contains("rustix::fs") && words(import).any(|w| RAW_WRAPPERS.contains(&w)))
-                .then_some("rustix::fs::{…}")
-        })
-        .or_else(|| {
-            (words(import).any(|w| w == "libc") && words(import).any(|w| LIBC_OPENERS.contains(&w)))
-                .then_some("libc::{…}")
-        })
-        .or_else(|| {
-            (words(import).any(|w| w == "windows_sys")
-                && words(import).any(|w| WIN32_OPENERS.contains(&w)))
-            .then_some("windows_sys::{…}")
-        })
-    })
-}
-
-/// A banned token restricted to exactly one production file: the token may
-/// appear in no production file but its door, tagged allow or not.
-const SINGLE_DOORS: &[(&str, &str)] = &[("os_pipe::pipe(", "core/src/process/spawn_lock.rs")];
-
 /// The string containment helpers, which `path/` exports for the sandbox
 /// renderers that still hold names as strings: each file outside `path/` that
 /// calls one, with the helper and how many times.  `Rendered::{holds, under,
@@ -646,26 +386,58 @@ fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Every production `.rs` file (src roots + build scripts), crate-relative.
-fn production_files(root: &Path) -> Vec<PathBuf> {
+/// Every production source file (src roots + build scripts), as its
+/// crate-relative path and its code: the text with its line comments, doc
+/// comments among them, dropped, so a name a comment mentions is neither a
+/// site nor a caller.
+fn production_sources() -> Vec<(String, String)> {
+    let root = workspace_root();
     let mut abs = Vec::new();
     for src in SRC_ROOTS {
         rs_files(&root.join(src), &mut abs);
     }
-    for bs in BUILD_SCRIPTS {
-        let p = root.join(bs);
-        if p.exists() {
-            abs.push(p);
-        }
-    }
+    abs.extend(
+        BUILD_SCRIPTS
+            .iter()
+            .map(|bs| root.join(bs))
+            .filter(|p| p.exists()),
+    );
     abs.into_iter()
-        .map(|p| {
-            p.strip_prefix(root)
+        .map(|path| {
+            let rel = path
+                .strip_prefix(&root)
                 .expect("file is under the workspace root")
                 .to_string_lossy()
-                .replace('\\', "/")
+                .replace('\\', "/");
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+            let code = text
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (rel, code)
         })
-        .map(PathBuf::from)
+        .collect()
+}
+
+/// The `reason` of every `clippy::disallowed_methods` allow in `code`, `None`
+/// for an allow that gives none.  What follows the lint's name runs to the
+/// attribute's `)` unless a `reason = "…"` comes first.
+fn allow_reasons(code: &str) -> Vec<Option<String>> {
+    code.split("clippy::disallowed_methods")
+        .skip(1)
+        .map(|rest| {
+            let end = rest.find(')').unwrap_or(rest.len());
+            let rest = &rest[rest[..end].find("reason")?..];
+            let open = rest.find('"')? + 1;
+            let mut close = open;
+            while let Some(&c) = rest.as_bytes().get(close)
+                && c != b'"'
+            {
+                close += if c == b'\\' { 2 } else { 1 };
+            }
+            Some(rest[open..close.min(rest.len())].to_string())
+        })
         .collect()
 }
 
@@ -692,365 +464,36 @@ fn parse_tag(reason: &str) -> Option<Tag> {
     })
 }
 
-/// `text` with every comment, string and character literal blanked to spaces
-/// (newlines kept), so offsets still match `text` and a token inside one is no
-/// call.  The quotes stay, so an attribute's `reason = ""` still reads as one.
-fn blanked(text: &str) -> String {
-    let b = text.as_bytes();
-    let mut out = b.to_vec();
-    let wipe = |out: &mut [u8], from: usize, to: usize| {
-        out[from..to]
-            .iter_mut()
-            .filter(|c| **c != b'\n')
-            .for_each(|c| *c = b' ');
-    };
-    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-    let mut i = 0;
-    while i < b.len() {
-        match b[i] {
-            b'/' if b.get(i + 1) == Some(&b'/') => {
-                let end = text[i..].find('\n').map_or(b.len(), |n| i + n);
-                wipe(&mut out, i, end);
-                i = end;
-            }
-            b'/' if b.get(i + 1) == Some(&b'*') => {
-                let (mut depth, mut j) = (1, i + 2);
-                while j < b.len() && depth > 0 {
-                    match (b[j], b.get(j + 1)) {
-                        (b'/', Some(b'*')) => (depth, j) = (depth + 1, j + 2),
-                        (b'*', Some(b'/')) => (depth, j) = (depth - 1, j + 2),
-                        _ => j += 1,
-                    }
-                }
-                wipe(&mut out, i, j);
-                i = j;
-            }
-            b'r' if (i == 0
-                || !ident(b[i - 1])
-                || (b[i - 1] == b'b' && (i < 2 || !ident(b[i - 2]))))
-                && b[i + 1..].iter().find(|c| **c != b'#') == Some(&b'"') =>
-            {
-                let hashes = b[i + 1..].iter().take_while(|c| **c == b'#').count();
-                let open = i + 1 + hashes;
-                let close = format!("\"{}", "#".repeat(hashes));
-                let end = text[open + 1..]
-                    .find(&close)
-                    .map_or(b.len(), |n| open + 1 + n);
-                wipe(&mut out, open + 1, end);
-                i = (end + close.len()).min(b.len());
-            }
-            b'"' => {
-                let mut j = i + 1;
-                while j < b.len() && b[j] != b'"' {
-                    j += if b[j] == b'\\' { 2 } else { 1 };
-                }
-                let j = j.min(b.len());
-                wipe(&mut out, i + 1, j);
-                i = j + 1;
-            }
-            b'\'' => {
-                let close = if b.get(i + 1) == Some(&b'\\') {
-                    text[i + 3..].find('\'').map(|n| i + 3 + n)
-                } else {
-                    text[i + 1..]
-                        .char_indices()
-                        .nth(1)
-                        .filter(|&(n, c)| c == '\'' && n > 0)
-                        .map(|(n, _)| i + 1 + n)
-                };
-                match close {
-                    Some(end) => {
-                        wipe(&mut out, i + 1, end);
-                        i = end + 1;
-                    }
-                    None => i += 1,
-                }
-            }
-            _ => i += 1,
-        }
-    }
-    String::from_utf8(out).expect("only ASCII delimiters bound what is blanked")
-}
-
-/// The index of the bracket closing the one at `open`, or the end of `code`.
-fn closing(code: &[u8], open: usize) -> usize {
-    let mut depth = 0usize;
-    for (j, c) in code.iter().enumerate().skip(open) {
-        match c {
-            b'(' | b'[' | b'{' => depth += 1,
-            b')' | b']' | b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return j;
-                }
-            }
-            _ => {}
-        }
-    }
-    code.len()
-}
-
-/// Where the attributes beginning at or after `from` end.
-fn past_attributes(code: &[u8], mut from: usize) -> usize {
-    loop {
-        while code.get(from).is_some_and(u8::is_ascii_whitespace) {
-            from += 1;
-        }
-        let bang = usize::from(code.get(from + 1) == Some(&b'!'));
-        if code[from..].starts_with(b"#") && code.get(from + 1 + bang) == Some(&b'[') {
-            from = closing(code, from + 1 + bang) + 1;
-        } else {
-            return from;
-        }
-    }
-}
-
-/// The end of the item that begins at `from` (past its attributes): its
-/// closing brace, or its `;`.  A statement (`let …`, an expression) ends at
-/// its `;`, or where the block around it closes.
-fn item_end(code: &[u8], from: usize) -> usize {
-    const ITEMS: &[&str] = &[
-        "pub",
-        "fn",
-        "impl",
-        "mod",
-        "trait",
-        "struct",
-        "enum",
-        "union",
-        "static",
-        "const",
-        "use",
-        "type",
-        "unsafe",
-        "extern",
-        "async",
-        "macro_rules",
-    ];
-    let start = past_attributes(code, from).min(code.len());
-    let word: String = code[start..]
-        .iter()
-        .take_while(|c| c.is_ascii_alphanumeric() || **c == b'_')
-        .map(|c| *c as char)
-        .collect();
-    let item = ITEMS.contains(&word.as_str());
-    let mut depth = 0usize;
-    for (j, c) in code.iter().enumerate().skip(start) {
-        match c {
-            b'{' if item && depth == 0 => return closing(code, j) + 1,
-            b'(' | b'[' | b'{' => depth += 1,
-            b')' | b']' | b'}' if depth == 0 => return j,
-            b')' | b']' | b'}' => depth -= 1,
-            b';' if depth == 0 => return j + 1,
-            _ => {}
-        }
-    }
-    code.len()
-}
-
-/// A `clippy::disallowed_methods` allow: the span of the item it covers, and
-/// its `reason`.
-struct Allow {
-    covers: std::ops::Range<usize>,
-    reason: Option<String>,
-}
-
-/// The `reason = "…"` payload of an attribute's text, if present.
-fn reason_of(attr: &str) -> Option<String> {
-    let after = attr.find("reason")?;
-    let eq = attr[after..].find('=')? + after;
-    let q1 = attr[eq..].find('"')? + eq + 1;
-    let mut q2 = q1;
-    while attr.as_bytes().get(q2).is_some_and(|c| *c != b'"') {
-        q2 += if attr.as_bytes()[q2] == b'\\' { 2 } else { 1 };
-    }
-    Some(attr[q1..q2.min(attr.len())].to_string())
-}
-
-/// Every attribute naming `clippy::disallowed_methods` in `text`, with the
-/// item each covers.  An inner attribute covers the block around it.
-fn allows(text: &str, code: &str) -> Vec<Allow> {
-    let needle = "clippy::disallowed_methods";
-    let c = code.as_bytes();
-    code.match_indices(needle)
-        .map(|(at, _)| {
-            let start = code[..at]
-                .rfind("#[")
-                .max(code[..at].rfind("#!["))
-                .expect("an attribute");
-            let bracket = start + code[start..].find('[').expect("`[`");
-            let end = closing(c, bracket) + 1;
-            let covers = if c[start + 1] == b'!' {
-                start..item_end(c, end).max(enclosing_end(c, end))
-            } else {
-                start..item_end(c, end)
-            };
-            Allow {
-                covers,
-                reason: reason_of(&text[start..end.min(text.len())]),
-            }
-        })
-        .collect()
-}
-
-/// The end of the block around `from`: its closing brace, or the end of `code`.
-fn enclosing_end(code: &[u8], from: usize) -> usize {
-    let mut depth = 0usize;
-    for (j, c) in code.iter().enumerate().skip(from) {
-        match c {
-            b'{' => depth += 1,
-            b'}' if depth == 0 => return j,
-            b'}' => depth -= 1,
-            _ => {}
-        }
-    }
-    code.len()
-}
-
-/// `code` with each item gated on `#[cfg(test)]` blanked: scaffolding, which a
-/// call is not counted in.
-fn without_test_items(code: &str) -> String {
-    let mut out = code.as_bytes().to_vec();
-    for gate in ["#[cfg(test)]", "#[cfg(all(test"] {
-        for (at, _) in code.match_indices(gate) {
-            let end = item_end(code.as_bytes(), closing(code.as_bytes(), at + 1) + 1);
-            out[at..end]
-                .iter_mut()
-                .filter(|c| **c != b'\n')
-                .for_each(|c| *c = b' ');
-        }
-    }
-    String::from_utf8(out).expect("blanking ASCII spans keeps UTF-8")
-}
-
-/// The 1-based line of byte offset `at` in `text`.
-fn line_of(text: &str, at: usize) -> usize {
-    text[..at].matches('\n').count() + 1
-}
-
-/// `code` with its `use` items blanked: an import is not a call.
-fn without_uses(code: &str) -> String {
-    let mut out = code.as_bytes().to_vec();
-    for (at, import) in use_items(code) {
-        out[at..at + import.len()]
-            .iter_mut()
-            .filter(|c| **c != b'\n')
-            .for_each(|c| *c = b' ');
-    }
-    String::from_utf8(out).expect("blanking ASCII spans keeps UTF-8")
-}
-
-/// Every call in `code`, as `(offset, token)`: a banned token anywhere but in
-/// a `use` item, and each name a `use` item imports from a module that makes
-/// calls by name, where the file then uses it bare.
-fn calls(code: &str) -> Vec<(usize, String)> {
-    let bare = without_uses(code);
-    let mut found: Vec<_> = BANNED_TOKENS
-        .iter()
-        .flat_map(|tok| {
-            bare.match_indices(tok)
-                .map(move |(at, _)| (at, (*tok).to_string()))
-        })
-        .collect();
-    found.extend(
-        bare_calls(code)
-            .into_iter()
-            .filter(|(at, _)| bare.is_char_boundary(*at)),
-    );
-    found.sort_unstable();
-    found.dedup();
-    found
-}
-
-/// Every `Path` syscall method token of `code`, as `(offset, token)`, in
-/// order.
-fn path_syscalls(code: &str) -> Vec<(usize, &'static str)> {
-    let mut found: Vec<_> = PATH_SYSCALLS
-        .iter()
-        .flat_map(|tok| code.match_indices(tok).map(move |(at, _)| (at, *tok)))
-        .collect();
-    found.sort_unstable();
-    found
-}
-
 #[test]
-fn every_production_disallowed_allow_is_a_tagged_site() {
-    let root = workspace_root();
+fn the_tagged_sites_are_the_reviewed_manifest() {
     let mut failures = Vec::new();
     // Counted, not just collected: a set would swallow a slug reused inside one
     // file, and that reuse is exactly the way a new site lands with no manifest
     // diff to review.
     let mut found: BTreeMap<(String, String), usize> = BTreeMap::new();
 
-    for rel in production_files(&root) {
-        let rel_str = rel.to_string_lossy().to_string();
-        let text = std::fs::read_to_string(root.join(&rel))
-            .unwrap_or_else(|e| panic!("read {rel_str}: {e}"));
-        let code = blanked(&text);
-        let allows = allows(&text, &code);
-
+    for (rel, code) in production_sources() {
         // Fact (1): every tagged allow is well-formed (known kind, non-empty
-        // explanation).  Untagged allows belong to the other
-        // disallowed-methods disciplines and are not this test's concern;
-        // fact (3) below is what stops an fs/process site hiding behind one.
-        let (mut tagged, mut untagged) = (Vec::new(), Vec::new());
-        for allow in &allows {
-            let Some(tag) = allow.reason.as_deref().and_then(parse_tag) else {
-                untagged.push(allow);
-                continue;
-            };
+        // explanation).
+        for tag in allow_reasons(&code)
+            .iter()
+            .flatten()
+            .filter_map(|r| parse_tag(r))
+        {
             if !matches!(tag.kind.as_str(), "surface" | "silent" | "test") {
                 failures.push(format!(
-                    "{rel_str}: unknown kind `{}` (expected surface|silent|test) in `[{}]`.",
+                    "{rel}: unknown kind `{}` (expected surface|silent|test) in `[{}]`.",
                     tag.kind, tag.full
                 ));
             }
             if tag.explanation.is_empty() {
                 failures.push(format!(
-                    "{rel_str}: tag `[{}]` has an empty explanation after it.",
+                    "{rel}: tag `[{}]` has an empty explanation after it.",
                     tag.full
                 ));
             }
             if tag.kind == "surface" || tag.kind == "silent" {
-                *found.entry((rel_str.clone(), tag.full)).or_default() += 1;
-            }
-            tagged.push(allow);
-        }
-
-        // Fact (3): every call lies inside a tagged allow's item; an import
-        // of a banned name, which is no call, needs any tagged allow at all.
-        let scan = without_test_items(&code);
-        if tagged.is_empty()
-            && let Some(tok) = imports_banned(&scan)
-        {
-            failures.push(format!(
-                "{rel_str}: imports a banned fs/process name (`{tok}`) but declares no tagged \
-                 allow.\n    → route it through a reviewed syscall site or add a tagged allow."
-            ));
-        }
-        for (at, tok) in calls(&scan) {
-            if !tagged.iter().any(|a| a.covers.contains(&at)) {
-                failures.push(format!(
-                    "{rel_str}:{}: calls a banned fs/process constructor (`{tok}`) outside any \
-                     tagged allow.\n    → route it through a reviewed syscall site, or give the \
-                     item an `#[allow(clippy::disallowed_methods, reason = \"[silent:<slug>] …\")]` \
-                     and a row in SYSCALL_SITES.",
-                    line_of(&text, at)
-                ));
-            }
-        }
-        for (at, tok) in path_syscalls(&scan) {
-            if tagged.iter().any(|a| a.covers.contains(&at)) {
-                continue;
-            }
-            if untagged.iter().any(|a| a.covers.contains(&at)) {
-                failures.push(format!(
-                    "{rel_str}:{}: calls a `Path` syscall method (`{tok}`) under an untagged \
-                     `disallowed_methods` allow, where clippy cannot see it.\n    → a stat by \
-                     name is a `[silent:<slug>]` site: tag the item and add its row, or split \
-                     the item so the untagged allow covers the lexical work alone.",
-                    line_of(&text, at)
-                ));
+                *found.entry((rel.clone(), tag.full)).or_default() += 1;
             }
         }
     }
@@ -1072,15 +515,12 @@ fn every_production_disallowed_allow_is_a_tagged_site() {
         .map(|(f, t)| (f.to_string(), t.to_string()))
         .collect();
 
-    let unaccounted: Vec<_> = found.difference(&manifest).collect();
-    let stale: Vec<_> = manifest.difference(&found).collect();
-
-    for (f, t) in unaccounted {
+    for (f, t) in found.difference(&manifest) {
         failures.push(format!(
             "NEW unaccounted syscall site {f}  [{t}]\n    → review it, then add the pair to SYSCALL_SITES in this file."
         ));
     }
-    for (f, t) in stale {
+    for (f, t) in manifest.difference(&found) {
         failures.push(format!(
             "STALE manifest entry {f}  [{t}] no longer exists in source\n    → remove it from SYSCALL_SITES."
         ));
@@ -1095,62 +535,16 @@ fn every_production_disallowed_allow_is_a_tagged_site() {
 }
 
 #[test]
-fn single_door_tokens_appear_only_at_their_door() {
-    let root = workspace_root();
-    let mut failures = Vec::new();
-    let mut doors_seen = BTreeSet::new();
-
-    for rel in production_files(&root) {
-        let rel_str = rel.to_string_lossy().to_string();
-        let text = std::fs::read_to_string(root.join(&rel))
-            .unwrap_or_else(|e| panic!("read {rel_str}: {e}"));
-        let code = blanked(&text);
-
-        for (token, door) in SINGLE_DOORS {
-            if code.contains(token) {
-                if rel_str == *door {
-                    doors_seen.insert(token);
-                } else {
-                    failures.push(format!(
-                        "{rel_str}: calls `{token}`, whose one door is {door}\n    → route it through the door."
-                    ));
-                }
-            }
-        }
-    }
-
-    for (token, door) in SINGLE_DOORS {
-        if !doors_seen.contains(token) {
-            failures.push(format!(
-                "{door}: no longer contains `{token}` — update SINGLE_DOORS."
-            ));
-        }
-    }
-
-    assert!(
-        failures.is_empty(),
-        "single-door invariant violated ({} issue(s)):\n{}",
-        failures.len(),
-        failures.join("\n")
-    );
-}
-
-#[test]
 fn the_ungoverned_door_gains_no_caller() {
-    let root = workspace_root();
-    let mut counted: BTreeMap<String, usize> = BTreeMap::new();
-    for rel in production_files(&root) {
-        let rel_str = rel.to_string_lossy().replace('\\', "/");
-        if rel_str == "core/src/capability/fs.rs" {
-            continue;
-        }
-        let text = std::fs::read_to_string(root.join(&rel))
-            .unwrap_or_else(|e| panic!("read {rel_str}: {e}"));
-        let n = blanked(&text).matches("Ungoverned::").count();
-        if n > 0 {
-            counted.insert(rel_str, n);
-        }
-    }
+    let counted: BTreeMap<String, usize> = production_sources()
+        .into_iter()
+        .filter(|(rel, _)| rel != "core/src/capability/fs.rs")
+        .map(|(rel, code)| {
+            let n = code.matches("Ungoverned::").count();
+            (rel, n)
+        })
+        .filter(|(_, n)| *n > 0)
+        .collect();
     let pinned: BTreeMap<String, usize> = UNGOVERNED_CALLERS
         .iter()
         .map(|(f, n)| (f.to_string(), *n))
@@ -1164,17 +558,12 @@ fn the_ungoverned_door_gains_no_caller() {
 
 #[test]
 fn the_string_containment_helpers_gain_no_caller() {
-    let root = workspace_root();
     let mut counted: BTreeMap<(String, &str), usize> = BTreeMap::new();
 
-    for rel in production_files(&root) {
-        let rel_str = rel.to_string_lossy().replace('\\', "/");
-        if rel_str.starts_with("core/src/path/") || rel_str == "core/src/path.rs" {
+    for (rel, code) in production_sources() {
+        if rel.starts_with("core/src/path/") || rel == "core/src/path.rs" {
             continue;
         }
-        let text = std::fs::read_to_string(root.join(&rel))
-            .unwrap_or_else(|e| panic!("read {rel_str}: {e}"));
-        let code = blanked(&text);
         let rendered = code.contains("Rendered");
         for name in STRING_CONTAINMENT_HELPERS
             .iter()
@@ -1182,7 +571,7 @@ fn the_string_containment_helpers_gain_no_caller() {
         {
             let n = code.matches(name).count();
             if n > 0 {
-                counted.insert((rel_str.clone(), name), n);
+                counted.insert((rel.clone(), name), n);
             }
         }
     }
@@ -1197,70 +586,4 @@ fn the_string_containment_helpers_gain_no_caller() {
          RealPath::{{contains, rebased, ancestors_within}} instead, and the sequel plan deletes the \
          helpers — update STRING_CONTAINMENT_CALLERS only when a caller goes."
     );
-}
-
-#[test]
-fn the_scanner_sees_an_imported_libc_opener() {
-    let code = "use libc::openat;\nfn f() { let _ = openat(1, 2, 3); }";
-    assert!(
-        calls(code).iter().any(|(_, tok)| tok == "openat(…)"),
-        "{:?}",
-        calls(code)
-    );
-    assert_eq!(imports_banned(code), Some("libc::{…}"));
-}
-
-#[test]
-fn the_scanner_sees_an_aliased_wrapper() {
-    let named = |code: &str, name: &str| {
-        calls(code)
-            .iter()
-            .any(|(_, tok)| tok.starts_with(name) && tok.contains(" as "))
-    };
-    assert!(named(
-        "use rustix::fs::openat as o;\nfn f() { o(1); }",
-        "openat"
-    ));
-    assert!(named(
-        "use std::process::Command as C;\nfn f() { C::new(\"x\"); }",
-        "Command"
-    ));
-    assert!(named(
-        "use windows_sys::Win32::Storage::FileSystem::CreateFileW as cf;\nfn f() { cf(); }",
-        "CreateFileW"
-    ));
-}
-
-/// The allows of `text`, and the offsets of its `.exists(` and `.read_dir(`.
-fn path_syscall_fixture(reason: &str) -> (Vec<Allow>, usize, usize) {
-    let text = format!(
-        "#[allow(clippy::disallowed_methods, reason = \"{reason}\")]\n\
-         fn f(p: &std::path::Path) -> bool {{ p.exists() }}\n\
-         fn g(d: &Dir) {{ d.read_dir(); }}"
-    );
-    let code = blanked(&text);
-    let offsets = path_syscalls(&code);
-    let at = |token: &str| offsets.iter().find(|(_, t)| *t == token).unwrap().0;
-    (allows(&text, &code), at(".exists("), at(".read_dir("))
-}
-
-#[test]
-fn a_path_syscall_under_an_untagged_allow_is_a_call() {
-    let (allows, exists, read_dir) = path_syscall_fixture("path-form: x");
-    let [allow] = &allows[..] else {
-        panic!("one allow")
-    };
-    assert!(allow.reason.as_deref().and_then(parse_tag).is_none());
-    assert!(allow.covers.contains(&exists));
-    assert!(!allow.covers.contains(&read_dir));
-}
-
-#[test]
-fn a_path_syscall_under_a_tagged_allow_is_a_site() {
-    let (allows, exists, _) = path_syscall_fixture("[silent:x] a reviewed stat");
-    let [allow] = &allows[..] else {
-        panic!("one allow")
-    };
-    assert!(allow.reason.as_deref().and_then(parse_tag).is_some());
-    assert!(allow.covers.contains(&exists));
 }

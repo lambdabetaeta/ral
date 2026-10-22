@@ -51,6 +51,7 @@ use std::fmt;
 use std::fs::File;
 use std::io;
 use std::marker::PhantomData;
+use std::ops::ControlFlow;
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsFd, BorrowedFd};
 use std::path::{Component, Path, PathBuf};
@@ -710,8 +711,11 @@ impl<'de> Deserialize<'de> for RealPath {
 ///
 /// `root` is the parsed root spelling; `root_id`
 /// the root's identity; `steps` one per component opened, in order; `tail`
-/// the components past the last step, lexically folded (a `..` in the tail
-/// takes the name before it in the tail, never a step).  `real` is `root`
+/// the names past the last step, from the first the walk could not enter,
+/// lexically folded: a `..` in it takes the name before it, and one that
+/// takes the first resumes the walk from the last step with the names after
+/// it, as though the names folded away had never been spelled; so the tail
+/// is empty exactly where the walk reached an object.  `real` is `root`
 /// plus the steps' names plus `tail`, computed by the one constructor: a memo
 /// of the steps, never a separate observation.  `Deserialize` by hand: each
 /// field checks itself, the shape is checked — every step but the last has
@@ -1105,7 +1109,8 @@ impl From<LeafMode> for Mode {
 
 /// What the walk does at a name it cannot enter: refuse (an open names an
 /// object that is there; a last name that is absent is a create target), or
-/// stop and keep the names left lexically.
+/// stop and fold the names left onto it lexically, resuming the walk where
+/// they fold it away ([`Walker::stopped`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OnMissing {
     Fail,
@@ -1761,7 +1766,8 @@ impl Located<Installing> {
 impl<A: Reads> Located<A> {
     /// A data handle on the leaf.  Held: derived from the held handle where
     /// the host can, else opened by name under `dir` and verified.  A special
-    /// file (macOS): opened by name under `dir` and verified to be one.  Any
+    /// file (macOS): opened by name under `dir` and verified against the
+    /// identity its step recorded, and to be a special file still.  Any
     /// other stated leaf: `PermissionDenied`, the walk's; nothing is opened.
     /// Absent: created exclusively for `Append` and `Write`, `NotFound` for
     /// `Read`.
@@ -1777,7 +1783,9 @@ impl<A: Reads> Located<A> {
         match (self.data()?, access) {
             (Data::Held(file, stat), _) => host::derive(file, self.dir(), named(), stat, access),
             #[cfg(target_os = "macos")]
-            (Data::Special, _) => host::open_special(self.dir(), named(), access),
+            (Data::Special, _) => {
+                host::open_special(self.dir(), named(), self.trace.last_id(), access)
+            }
             #[cfg(not(target_os = "macos"))]
             (Data::Special, _) => Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -2105,11 +2113,11 @@ impl Cursor {
 }
 
 /// Where a walk's names ran out: on a leaf, in the directory on top of the
-/// cursor, or at a name that could not be entered, and why.
+/// cursor, or past it at names that are not there, the tail.
 enum Ended {
     Leaf(Child),
     Entered,
-    Stopped(EntryName, io::Error),
+    Absent(Vec<EntryName>),
 }
 
 /// The walk's loop: a cursor, the names still to take, and how to treat the
@@ -2230,46 +2238,53 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
     /// Consume the names, to where the walk ends.
     fn advance(&mut self) -> io::Result<Ended> {
         while let Some(name) = self.names.pop_front() {
-            let Name::Entry(name) = name else {
-                self.cursor.up();
-                continue;
-            };
-            let last = self.names.is_empty();
-            let entering = !last || self.mode == Mode::Enter;
-            let sharing = if entering {
-                Sharing::Directory
-            } else {
-                Sharing::Leaf
-            };
-            let child = match step_into(self.cursor.top(), &name, sharing) {
-                Ok(child) => child,
-                Err(e) => return Ok(Ended::Stopped(name, e)),
-            };
-            self.check(&child, &name)?;
-            match child.step.kind {
-                Kind::Symlink if self.links == Links::Refuse => return Err(loop_error()),
-                Kind::Symlink if last && self.mode == Mode::NoFollow => {
-                    return Ok(Ended::Leaf(child));
-                }
-                Kind::Symlink => {
-                    let (link, ..) = child.held()?;
-                    let spliced = host::read_link(&link.file).and_then(|t| self.splice(&t));
-                    if let Err(e) = spliced {
-                        return Ok(Ended::Stopped(name, e));
-                    }
-                }
-                Kind::Dir if entering => {
-                    let (handle, step, _) = child.held()?;
-                    self.cursor.push(handle, step);
-                }
-                Kind::Dir => return Ok(Ended::Leaf(child)),
-                _ if entering => {
-                    return Ok(Ended::Stopped(name, io::ErrorKind::NotADirectory.into()));
-                }
-                _ => return Ok(Ended::Leaf(child)),
+            if let ControlFlow::Break(ended) = self.take(name)? {
+                return Ok(ended);
             }
         }
         Ok(Ended::Entered)
+    }
+
+    /// Take `name`: a `..` climbs the cursor, an entry is opened beneath it.
+    /// `Break` where the walk ends there.
+    fn take(&mut self, name: Name) -> io::Result<ControlFlow<Ended>> {
+        let Name::Entry(name) = name else {
+            self.cursor.up();
+            return Ok(ControlFlow::Continue(()));
+        };
+        let last = self.names.is_empty();
+        let entering = !last || self.mode == Mode::Enter;
+        let sharing = if entering {
+            Sharing::Directory
+        } else {
+            Sharing::Leaf
+        };
+        let child = match step_into(self.cursor.top(), &name, sharing) {
+            Ok(child) => child,
+            Err(e) => return self.stopped(name, e),
+        };
+        self.check(&child, &name)?;
+        match child.step.kind {
+            Kind::Symlink if self.links == Links::Refuse => return Err(loop_error()),
+            Kind::Symlink if last && self.mode == Mode::NoFollow => {
+                return Ok(ControlFlow::Break(Ended::Leaf(child)));
+            }
+            Kind::Symlink => {
+                let (link, ..) = child.held()?;
+                let spliced = host::read_link(&link.file).and_then(|t| self.splice(&t));
+                if let Err(e) = spliced {
+                    return self.stopped(name, e);
+                }
+            }
+            Kind::Dir if entering => {
+                let (handle, step, _) = child.held()?;
+                self.cursor.push(handle, step);
+            }
+            Kind::Dir => return Ok(ControlFlow::Break(Ended::Leaf(child))),
+            _ if entering => return self.stopped(name, io::ErrorKind::NotADirectory.into()),
+            _ => return Ok(ControlFlow::Break(Ended::Leaf(child))),
+        }
+        Ok(ControlFlow::Continue(()))
     }
 
     /// The object the walk ended as, as a [`Located`].
@@ -2277,7 +2292,7 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
         match ended {
             Ended::Leaf(child) => Ok(self.leaf(child)),
             Ended::Entered => self.entered(),
-            Ended::Stopped(name, error) => self.stopped(name, error),
+            Ended::Absent(tail) => Ok(self.absent(tail)),
         }
     }
 
@@ -2329,21 +2344,27 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
     }
 
     /// `name` could not be entered, for `error`.  The lenient walks end their
-    /// steps at `NotFound`, `NotADirectory` and `PermissionDenied` and keep
-    /// the names left as the tail, folded; the strict ones fail, but for an
-    /// absent last name, which is a create target.  Nothing else differs
-    /// between the two.
-    fn stopped(self, name: EntryName, error: io::Error) -> io::Result<Located> {
+    /// steps at `NotFound`, `NotADirectory` and `PermissionDenied` and fold
+    /// the names left onto it, lexically, as the tail: a `..` takes the name
+    /// before it.  One that takes `name` itself has folded the stop away, and
+    /// the walk resumes from the cursor with the names after it, as though
+    /// those folded had never been spelled: `Continue`.  The strict ones fail,
+    /// but for an absent last name, which is a create target.  Nothing else
+    /// differs between the two.
+    fn stopped(&mut self, name: EntryName, error: io::Error) -> io::Result<ControlFlow<Ended>> {
         use io::ErrorKind::{NotADirectory, NotFound, PermissionDenied};
         let last = self.names.is_empty();
         let tail = match (self.missing, error.kind()) {
             (OnMissing::Stop, NotFound | NotADirectory | PermissionDenied) => {
                 let mut tail = vec![name];
-                for name in self.names {
+                while let Some(name) = self.names.pop_front() {
                     match name {
                         Name::Entry(name) => tail.push(name),
                         Name::Parent => {
                             tail.pop();
+                            if tail.is_empty() {
+                                return Ok(ControlFlow::Continue(()));
+                            }
                         }
                     }
                 }
@@ -2352,14 +2373,21 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
             (OnMissing::Fail, NotFound) if last && self.mode != Mode::Enter => vec![name],
             _ => return Err(error),
         };
+        Ok(ControlFlow::Break(Ended::Absent(tail)))
+    }
+
+    /// The walk ended at `tail`, names past the directory on top of the
+    /// cursor that are not there: a create target in it, or the names a
+    /// lenient walk could not enter.
+    fn absent(self, tail: Vec<EntryName>) -> Located {
         let trace = self.cursor.trace(None, tail);
-        Ok(Located {
+        Located {
             trace,
             leaf: Leaf::Absent {
                 dir: self.cursor.into_top(),
             },
             _a: PhantomData,
-        })
+        }
     }
 }
 
@@ -2457,7 +2485,8 @@ fn reaches(path: &str) -> Option<Kind> {
     walk(&spelled, LeafMode::Follow).ok()?.trace().kind()
 }
 
-/// A grant spelling's transcript: as far as the disk goes, the rest lexical.
+/// A grant spelling's transcript: as far as the disk goes, the rest lexical,
+/// and where the rest folds away the name the disk refused, the disk again.
 ///
 /// # Errors
 /// What ends no steps: a splice budget exhausted, `InvalidInput` for a name
@@ -2505,7 +2534,10 @@ pub(crate) fn walk_excluded(rp: &LexicalPath) -> io::Result<Excluded> {
             tests::around_link_read(tests::Around::After);
             let target = match read.and_then(|target| walker.splice(&target)) {
                 Ok(()) => walker.run()?,
-                Err(e) => walker.stopped(name, e)?,
+                Err(e) => match walker.stopped(name, e)? {
+                    ControlFlow::Continue(()) => walker.run()?,
+                    ControlFlow::Break(ended) => walker.conclude(ended)?,
+                },
             };
             Ok(Excluded {
                 named: Hold {

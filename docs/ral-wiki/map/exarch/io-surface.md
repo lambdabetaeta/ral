@@ -378,8 +378,9 @@ child-wait.
 A meta-test pins it: `core/tests/syscall_sites.rs` walks the production `src/`,
 checks every tagged allow is well-formed, and asserts the surface/silent site set
 equals a checked-in manifest keyed by `(file, tag)` — stable across line shifts,
-so only adding or removing a site perturbs it, and a new constructor call added
-with a bare or missing allow fails CI
+so only adding or removing a site perturbs it. A constructor call under no
+allow fails clippy; one under an untagged allow written for another discipline
+passes both, and is review's to catch
 ([[decisions/260614_structural-bug-prevention|structural bug prevention]]). What
 the lint cannot reach — the syscalls inside `ignore`/`tempfile`/bundled `uutils`,
 and what *spawned children* do — is confined by the OS sandbox

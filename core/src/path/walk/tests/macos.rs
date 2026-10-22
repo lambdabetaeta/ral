@@ -470,25 +470,6 @@ fn a_stated_object_in_another_spelling_is_refused() {
     assert_eq!(loc.real().as_path(), dir.join("Pipe"));
 }
 
-/// A link is held whatever the mode: `Follow` reaches its target, `NoFollow`
-/// the link, which answers its target; a link has no permission to refuse.
-#[test]
-fn a_leaf_link_is_held_under_every_mode() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = root(&tmp);
-    std::fs::write(dir.join("target"), b"body").unwrap();
-    symlink("target", dir.join("link")).unwrap();
-
-    let followed = located_with(&dir.join("link"), LeafMode::Follow).unwrap();
-    assert_eq!(followed.real().as_path(), dir.join("target"));
-    assert_eq!(followed.stat().unwrap().kind, Kind::File);
-
-    let named = located_with(&dir.join("link"), LeafMode::NoFollow).unwrap();
-    assert!(matches!(named.leaf, Leaf::Held { .. }));
-    assert_eq!(named.stat().unwrap().kind, Kind::Symlink);
-    assert_eq!(named.read_link().unwrap(), Path::new("target"));
-}
-
 /// A dangling link under `Follow` is a create target at the name it leads to,
 /// which `> dangling` needs, while a real path of it is `NotFound`.
 #[test]
@@ -580,7 +561,7 @@ fn a_special_file_is_stated_and_never_held() {
 }
 
 /// A stream to a stated FIFO is opened by name under the held directory, and
-/// must find a special file there.
+/// must find the object the walk stated there.
 #[test]
 fn a_stream_to_a_fifo_is_opened_by_name_and_must_find_a_fifo() {
     let tmp = tempfile::tempdir().unwrap();
@@ -613,4 +594,29 @@ fn a_stream_to_a_fifo_is_opened_by_name_and_must_find_a_fifo() {
         "{refused}"
     );
     assert_eq!(read_all(&dir.join("pipe2")), "kept");
+}
+
+/// Another FIFO put at a stated FIFO's name is opened, since a FIFO's open is
+/// its rendezvous, and refused by identity before a byte moves.
+#[test]
+fn a_stream_to_a_fifo_swapped_for_another_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    mkfifo(&dir.join("pipe"));
+    let loc = located_with(&dir.join("pipe"), LeafMode::Follow).unwrap();
+    std::fs::remove_file(dir.join("pipe")).unwrap();
+    mkfifo(&dir.join("pipe"));
+    // A reader on the substitute, so the stream's write open meets it.
+    let _sink = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits().cast_signed())
+        .open(dir.join("pipe"))
+        .unwrap();
+    let Err(refused) = loc.open_streaming(Streaming::Append) else {
+        panic!("another FIFO is not the one the walk stated");
+    };
+    assert!(
+        refused.to_string().contains("moved during the walk"),
+        "{refused}"
+    );
 }

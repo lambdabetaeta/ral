@@ -64,15 +64,13 @@ choice. Nothing outside `core/src/path/` is:
   banned outside `path/`** (`clippy.toml`), so the renderers and synod take
   `RealPath`'s operations; so are the inherent `Path` methods that forward to a
   syscall (`exists`, `is_file`, `metadata`, `read_dir`, `canonicalize`, …).
-  `core/tests/syscall_sites.rs` pins the raw `rustix`/`libc`/Win32 wrappers the
-  walk is made of by token scan and the manifest: every call lies in a tagged
-  site with a reason, in `synod` as in the rest, and the callers of the string
-  containment helpers outside `path/` are pinned at today's set. A `Path`
-  syscall method counts as a call where an *untagged* allow covers it (outside
-  an allow clippy proves the receiver is not a `Path`, inside a tagged one the
-  site is reviewed, inside an untagged one it is hidden from both gates); an
-  imported or aliased opener (`libc`, `rustix::fs`, cap-primitives, `Command`,
-  Win32) binds a name, and each bare use of it is a call.
+  `clippy.toml` bans the raw `rustix`/`libc`/Win32 wrappers the walk is made
+  of too, resolving aliases and imports, in `synod` as in the rest;
+  `core/tests/syscall_sites.rs` holds each tagged site to its manifest row and
+  pins the callers of the string containment helpers outside `path/` at
+  today's set. That the allow over a syscall is a tagged one is review's: one
+  lint serves every ban, so an untagged allow silences a syscall as readily as
+  the spelling work it was written for.
 
 A guard must ask on the form its check matches. The one time it did not, the
 `xdg-*` freeze guard asked containment of the surface while the check it guarded

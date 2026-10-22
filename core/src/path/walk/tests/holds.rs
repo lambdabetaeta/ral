@@ -66,16 +66,6 @@ fn a_deny_holds_its_file_moved_out_of_its_directory() {
     );
 }
 
-#[test]
-fn a_deny_holds_a_hard_link_to_its_file() {
-    let (_tmp, dir, excluded) = secret();
-    std::fs::hard_link(dir.join("d/secret"), dir.join("elsewhere/h")).unwrap();
-    assert_eq!(
-        by(&excluded, &dir.join("elsewhere/h")),
-        Some(MatchedBy::Identity)
-    );
-}
-
 /// A deny on a directory holds what the directory holds and nothing that
 /// left it, or was linked from it by a process that could write it.
 #[test]
@@ -130,6 +120,34 @@ fn a_moved_absent_name_is_held_under_every_spelling_of_its_tail() {
         by(&excluded, &dir.join("d2/.ENV")),
         Some(MatchedBy::Identity)
     );
+}
+
+/// A deny spelled through a name that is not there, folded away, is fixed to
+/// the object the spelling reaches, and holds it under another name.
+#[test]
+fn a_deny_through_a_name_folded_away_holds_its_object_by_identity() {
+    let (_tmp, dir, _) = secret();
+    let excluded = deny(&dir.join("d/missing/../secret"));
+    std::fs::hard_link(dir.join("d/secret"), dir.join("elsewhere/h")).unwrap();
+    assert_eq!(
+        by(&excluded, &dir.join("elsewhere/h")),
+        Some(MatchedBy::Identity)
+    );
+}
+
+/// A deny spelled through a name folded away to a link holds the link and
+/// what it reached, as a deny on the link's own name does.
+#[test]
+fn a_deny_through_a_name_folded_away_to_a_link_holds_its_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("tgt"), "t").unwrap();
+    symlink("tgt", dir.join("dlink")).unwrap();
+    let excluded = deny(&dir.join("missing/../dlink"));
+    assert_eq!(excluded, deny(&dir.join("dlink")));
+    assert_eq!(excluded.target().unwrap().real().as_path(), dir.join("tgt"));
+    std::fs::rename(dir.join("tgt"), dir.join("moved")).unwrap();
+    assert_eq!(by(&excluded, &dir.join("moved")), Some(MatchedBy::Identity));
 }
 
 /// A listing's record of an entry is the parent's trace plus its one step.

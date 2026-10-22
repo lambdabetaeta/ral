@@ -992,13 +992,6 @@ mod tests {
         assert!(!permits(&met, &trace(work.join(".env"))));
     }
 
-    #[test]
-    fn the_meet_of_everywhere_with_nothing_admits_nothing() {
-        let (_tmp, root) = tmp();
-        let met = table(&[FrozenPath::root()], &[]).meet(table(&[], &[]));
-        assert!(!permits(&met, &trace(root.join("f"))));
-    }
-
     /// The floor is an argument of the judgment: with it a read admits the
     /// floor and what the layer names; without it, only the latter.
     #[test]

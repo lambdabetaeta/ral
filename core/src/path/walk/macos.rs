@@ -458,15 +458,32 @@ pub(super) fn read_link(link: &File) -> io::Result<PathBuf> {
     Ok(PathBuf::from(OsString::from_vec(buf)))
 }
 
-/// A data handle on the object `leaf` holds, opened by `name` under `dir`
-/// and verified against the held handle's identity: macOS cannot derive one
-/// from a descriptor.  A regular file is opened `O_NONBLOCK`, so a swap for a
-/// FIFO cannot block the open before it is checked, and the flag is cleared
-/// once it has been.
+/// The entry `name` of `dir`, opened by name with `flags` and never
+/// followed, and refused unless its identity is `id`, the identity the walk
+/// recorded of the object at the name: macOS cannot derive a data handle from
+/// a descriptor, and the check runs before any byte moves through the one it
+/// opens.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[surface:walk-reopen] The one open of a held leaf, verified against its handle so a name that now leads elsewhere is refused.  Every caller surfaces it, each in its own way: a redirect's card is fused on by the frame that wrapped the locate, exarch's readers speak their own card, and a write's before- and after-images ride the card of the operation that asked for them."
+    reason = "[surface:walk-reopen] The one open of a leaf the walk reached, by name under its held directory and verified against the identity the walk recorded, so a name that now leads elsewhere is refused.  Every caller surfaces it, each in its own way: a redirect's card is fused on by the frame that wrapped the locate, exarch's readers speak their own card, and a write's before- and after-images ride the card of the operation that asked for them."
 )]
+fn reopen(dir: &File, name: &EntryName, id: ObjectId, flags: OFlags) -> io::Result<File> {
+    let file = File::from(rustix::fs::openat(
+        dir,
+        name.as_os_str(),
+        flags | OFlags::NOFOLLOW | OFlags::NOCTTY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?);
+    if ObjectId::of(&file)? != id {
+        return Err(moved(name));
+    }
+    Ok(file)
+}
+
+/// A data handle on the object `leaf` holds, opened by `name` under `dir`
+/// and verified against the held handle's identity ([`reopen`]).  A regular
+/// file is opened `O_NONBLOCK`, so a swap for a FIFO cannot block the open
+/// before it is checked, and the flag is cleared once it has been.
 pub(super) fn derive(
     leaf: &File,
     dir: &File,
@@ -477,40 +494,31 @@ pub(super) fn derive(
     #[cfg(test)]
     DERIVED.with(|opened| opened.set(opened.get() + 1));
     let regular = stat.kind == Kind::File;
-    let mut flags = oflags(access) | OFlags::NOFOLLOW | OFlags::NOCTTY | OFlags::CLOEXEC;
+    let mut flags = oflags(access);
     if regular {
         flags |= OFlags::NONBLOCK;
     }
-    let file = File::from(rustix::fs::openat(
-        dir,
-        name.as_os_str(),
-        flags,
-        Mode::empty(),
-    )?);
-    if ObjectId::of(&file)? != ObjectId::of(leaf)? {
-        return Err(moved(name));
-    }
+    let file = reopen(dir, name, ObjectId::of(leaf)?, flags)?;
     if regular {
         rustix::fs::fcntl_setfl(&file, rustix::fs::fcntl_getfl(&file)? - OFlags::NONBLOCK)?;
     }
     Ok(file)
 }
 
-/// A data handle on the special file `name` of `dir`, opened by name and
-/// verified to be one: macOS cannot hold a FIFO, a socket or a device without
-/// opening it, so the walk states it and a stream is opened here.  Not
+/// A data handle on the special file `name` of `dir`, which the walk stated
+/// as `id`, opened by name and verified to be that object ([`reopen`]) and
+/// still a special file: macOS cannot hold a FIFO, a socket or a device
+/// without opening it, so the walk states it and a stream is opened here.
+/// Unheld, its identity can be reused, and on a volume that reuses one a
+/// regular file could come to bear it; the kind refuses that file.  Not
 /// `O_NONBLOCK`: a FIFO's open is its rendezvous, blocking as a shell's does.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[surface:walk-reopen-special] The one open of a stated special file, by name under its held directory and verified to be a special file, since macOS has no hold that does not open it.  Every caller surfaces it as `walk-reopen`'s do: a write's before- and after-images ride the card of the operation that asked for them."
-)]
-pub(super) fn open_special(dir: &File, name: &EntryName, access: Access) -> io::Result<File> {
-    let file = File::from(rustix::fs::openat(
-        dir,
-        name.as_os_str(),
-        oflags(access) | OFlags::NOFOLLOW | OFlags::NOCTTY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )?);
+pub(super) fn open_special(
+    dir: &File,
+    name: &EntryName,
+    id: ObjectId,
+    access: Access,
+) -> io::Result<File> {
+    let file = reopen(dir, name, id, oflags(access))?;
     if seen(&file)?.stat.kind != Kind::Other {
         return Err(moved(name));
     }

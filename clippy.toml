@@ -17,6 +17,12 @@
 # ban: each resolves through a trait impl clippy cannot scope to a single
 # reachable function, so an entry would never fire.  Enforced by review.
 #
+# So is the rule that a syscall's allow carries a tag.  `disallowed_methods` is
+# one lint for every ban in this file, and an allow names the lint, not the
+# ban, so a `path-form:` or `native:` allow over an `fs::read` silences it too,
+# and no tag reaches the manifest.  A reviewer reading a new untagged allow
+# checks that it covers no syscall.
+#
 # `libc::_exit` is unbanned on purpose, despite `exit` and `abort` below: it is
 # mandatory in a signal handler and in a post-`fork` child, where `exit` would
 # run atexit hooks under a handler or destructors over the parent's state.
@@ -113,6 +119,41 @@ disallowed-methods = [
     { path = "cap_primitives::fs::symlink_contents", allow-invalid = true, reason = "Route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
     { path = "cap_primitives::fs::symlink_dir", allow-invalid = true, reason = "Route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
     { path = "cap_primitives::fs::symlink_file", allow-invalid = true, reason = "Route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    # `cap_fs_ext` acts through extension traits: `Reopen` on a held file, and
+    # `DirExt`, which has no impl until cap-std's `std` feature is on.  Banned
+    # entire, on the same ground as `cap_primitives`.
+    { path = "cap_fs_ext::Reopen::reopen", reason = "Route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "cap_fs_ext::DirExt::access", reason = "Route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "cap_fs_ext::DirExt::access_symlink", reason = "Route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "cap_fs_ext::DirExt::open_dir_nofollow", reason = "Route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "cap_fs_ext::DirExt::remove_file_or_symlink", reason = "Route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "cap_fs_ext::DirExt::set_atime", reason = "Route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "cap_fs_ext::DirExt::set_mtime", reason = "Route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "cap_fs_ext::DirExt::set_symlink_permissions", reason = "Route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "cap_fs_ext::DirExt::set_symlink_times", reason = "Route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "cap_fs_ext::DirExt::set_times", reason = "Route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "cap_fs_ext::DirExt::symlink", reason = "Route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "cap_fs_ext::DirExt::symlink_dir", reason = "Route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "cap_fs_ext::DirExt::symlink_file", reason = "Route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    # The raw wrappers the walk is made of: each takes a name, relative to a
+    # directory handle or to the process, and returns what it reached.
+    { path = "rustix::fs::open", reason = "A raw wrapper the walk is made of: route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "rustix::fs::openat", reason = "A raw wrapper the walk is made of: route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "rustix::fs::openat2", allow-invalid = true, reason = "A raw wrapper the walk is made of: route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "rustix::fs::statat", reason = "A raw wrapper the walk is made of: route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "rustix::fs::statx", allow-invalid = true, reason = "A raw wrapper the walk is made of: route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "rustix::fs::accessat", reason = "A raw wrapper the walk is made of: route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "rustix::fs::readlinkat", reason = "A raw wrapper the walk is made of: route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "rustix::fs::renameat", reason = "A raw wrapper the walk is made of: route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "rustix::fs::unlinkat", reason = "A raw wrapper the walk is made of: route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "rustix::fs::mkdirat", reason = "A raw wrapper the walk is made of: route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "libc::open", reason = "A raw wrapper the walk is made of: route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "libc::openat", allow-invalid = true, reason = "A raw wrapper the walk is made of: route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "windows_sys::Win32::Storage::FileSystem::CreateFileW", reason = "A raw wrapper the walk is made of: route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "windows_sys::Wdk::Storage::FileSystem::NtCreateFile", reason = "A raw wrapper the walk is made of: route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW", reason = "A name the kernel reads back off a handle: no path is derived from a handle outside crate::path::walk, which asks it only of its volume." },
+    { path = "windows_sys::Win32::Security::Authorization::GetNamedSecurityInfoW", reason = "A raw wrapper that resolves a name: act on a handle the walk holds (crate::path::walk) instead." },
+    { path = "windows_sys::Win32::Security::Authorization::SetNamedSecurityInfoW", reason = "A raw wrapper that resolves a name: act on a handle the walk holds (crate::path::walk) instead." },
     { path = "std::process::Command::new", reason = "The model's external exec is the site at crate::process::Launch::new that surfaces an exec card; sandbox respawn, which probes and infra subprocesses are reasoned-silent." },
     { path = "os_pipe::pipe", reason = "Use crate::process::cloexec_pipe — Apple sets CLOEXEC after pipe(), and a concurrent fork on another thread inherits the window." },
     { path = "std::os::unix::net::UnixStream::pair", allow-invalid = true, reason = "Use crate::process::cloexec_socketpair — same window." },
