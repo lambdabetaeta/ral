@@ -297,13 +297,13 @@ pub fn worker_count(transport: &dyn Transport) -> Result<u64, ProbeError> {
     crate::carrier::read(transport, &Probe::WorkerCount)
 }
 
-/// How many capability layers the engine behind `transport` shows: those
-/// that restrict or run something.
+/// How many capability layers the engine behind `transport` carries, root
+/// layers included.
 ///
 /// # Errors
 /// As [`Transport::cwd`].
 pub fn grant_depth(transport: &dyn Transport) -> Result<u64, ProbeError> {
-    transport.grants().map(|shown| shown.layers().len() as u64)
+    crate::carrier::read(transport, &Probe::GrantDepth)
 }
 
 /// `Shell::workers` on the engine behind `transport`, each entry's handle

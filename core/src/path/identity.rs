@@ -8,7 +8,7 @@
 
 use std::borrow::Cow;
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use icu_casemap::CaseMapper;
 use icu_locale_core::LanguageIdentifier;
@@ -98,6 +98,24 @@ impl RealPath {
     /// that must catch every spelling of a protected place and holds nothing.
     pub fn contains_folded(&self, other: &Self) -> bool {
         path_within(other.as_path(), self.as_path(), Identity::Collision)
+    }
+
+    /// The names of this position past `root`, for a key or a shown name;
+    /// `None` where `root` does not contain it.
+    ///
+    /// Read off the first spelling pair that `contains` accepts, so a
+    /// firmlink twin's names are as spelled.
+    pub fn relative_to(&self, root: &Self) -> Option<Vec<EntryName>> {
+        let qs = path_aliases(root.as_path());
+        let (p, q) = path_aliases(self.as_path()).into_iter().find_map(|p| {
+            let q = qs.iter().find(|q| within_one(&p, q, Identity::Stored))?;
+            Some((p, q))
+        })?;
+        let (own, base) = (normal_names(&p), normal_names(q));
+        own.get(base.len()..)?
+            .iter()
+            .map(|n| EntryName::parse(n).ok())
+            .collect()
     }
 
     /// How this exclusion holds `path`, if it does: `Name` as stored,
@@ -248,6 +266,21 @@ pub(super) fn collision_fold(s: &str) -> String {
     nfkd.normalize(&case.fold_string(&once)).into_owned()
 }
 
+/// The names of `p`, without a head or a root: a verbatim UNC head carries a
+/// root that a plain one lacks.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "path-form: a path's names, the one place a component scan is made"
+)]
+fn normal_names(p: &Path) -> Vec<&OsStr> {
+    p.components()
+        .filter_map(|c| match c {
+            Component::Normal(n) => Some(n),
+            _ => None,
+        })
+        .collect()
+}
+
 /// True iff some alias of `path` starts with some alias of `prefix`: `path`
 /// lies inside `prefix` modulo firmlinks and `identity`, on Windows with
 /// heads and separators normalised under either.
@@ -259,28 +292,32 @@ pub(super) fn collision_fold(s: &str) -> String {
 /// [`RealPath::contains`] and [`contains_folded`](RealPath::contains_folded)
 /// for positions, [`Excluded::matches`] for exclusions — and never by a
 /// caller holding two bare paths.
+fn path_within(path: &Path, prefix: &Path, identity: Identity) -> bool {
+    let qs = path_aliases(prefix);
+    path_aliases(path)
+        .iter()
+        .any(|p| qs.iter().any(|q| within_one(p, q, identity)))
+}
+
+/// `p` starts with `q` under `identity`, spellings taken as given: no alias
+/// of either is tried.
+///
+/// Every arm compares names as the host encodes them, never their
+/// `to_string_lossy` forms: two distinct names that are not Unicode (bytes
+/// off Windows, an unpaired surrogate on it) can decode to one
+/// replacement-character string, and the matcher would call them one.
 #[allow(
     clippy::disallowed_methods,
     reason = "path-form: the containment kernel's byte-wise prefix test"
 )]
-fn path_within(path: &Path, prefix: &Path, identity: Identity) -> bool {
+fn within_one(p: &Path, q: &Path, identity: Identity) -> bool {
     let rules = PathRules::HOST;
-    let ps = path_aliases(path);
-    let qs = path_aliases(prefix);
-    // Every arm compares names as the host encodes them, never their
-    // `to_string_lossy` forms: two distinct names that are not Unicode (bytes
-    // off Windows, an unpaired surrogate on it) can decode to one
-    // replacement-character string, and the matcher would call them one.
-    ps.iter().any(|p| {
-        qs.iter().any(|q| match identity {
-            Identity::Stored if rules == PathRules::Windows => {
-                windows_stored_components(p.as_os_str())
-                    .starts_with(&windows_stored_components(q.as_os_str()))
-            }
-            Identity::Stored => p.starts_with(q),
-            Identity::Collision => starts_with_collision(p, q, rules),
-        })
-    })
+    match identity {
+        Identity::Stored if rules == PathRules::Windows => windows_stored_components(p.as_os_str())
+            .starts_with(&windows_stored_components(q.as_os_str())),
+        Identity::Stored => p.starts_with(q),
+        Identity::Collision => starts_with_collision(p, q, rules),
+    }
 }
 
 /// [`path_within`] on strings, names as stored, for the renderers that hold the
@@ -726,5 +763,50 @@ mod tests {
                 "{path} under {prefix} ({rules:?})"
             );
         }
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    fn relative(position: &str, root: &str) -> Option<Vec<String>> {
+        let names = RealPath::unwalked_for_test(position)
+            .relative_to(&RealPath::unwalked_for_test(root))?;
+        Some(
+            names
+                .iter()
+                .map(|n| n.as_os_str().to_string_lossy().into_owned())
+                .collect(),
+        )
+    }
+
+    /// Roots compare under the stored identity, not as raw paths: a verbatim
+    /// head, a drive's case and a UNC head's spelling are one root.
+    #[cfg(windows)]
+    #[test]
+    fn relative_to_compares_roots_under_the_stored_identity() {
+        assert_eq!(
+            relative(r"\\?\C:\Users\Alice\.ssh", r"C:\Users\Alice"),
+            Some(vec![".ssh".into()])
+        );
+        assert_eq!(relative(r"c:\x\y", r"C:\x"), Some(vec!["y".into()]));
+        assert_eq!(
+            relative(r"\\?\UNC\srv\sh\x", r"\\srv\sh"),
+            Some(vec!["x".into()])
+        );
+        assert_eq!(relative(r"C:\x", r"D:\"), None);
+        assert_eq!(relative(r"C:\x", r"C:\x"), Some(vec![]));
+    }
+
+    /// A position under a firmlink's data spelling reads past the root's
+    /// other spelling, by the names it was given.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn relative_to_reads_a_firmlink_twin() {
+        assert_eq!(
+            relative("/System/Volumes/Data/Users/x/y", "/Users/x"),
+            Some(vec!["y".into()])
+        );
+        assert_eq!(
+            relative("/Users/x/y", "/System/Volumes/Data/Users/x"),
+            Some(vec!["y".into()])
+        );
     }
 }

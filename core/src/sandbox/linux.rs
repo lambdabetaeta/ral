@@ -66,7 +66,7 @@ pub(super) fn pin_envelope() {
     }
     #[allow(clippy::disallowed_methods, reason = "PATH, not an XDG basedir")]
     let host_path = std::env::var_os("PATH").unwrap_or_default();
-    let located = crate::path::locate_in(BWRAP, crate::path::path_dirs_absolute(&host_path));
+    let located = crate::path::locate_in(BWRAP, crate::path::path_dirs(&host_path, None));
     if let Some(pinned) = located.and_then(Pinned::open) {
         let _ = ENVELOPE.set(pinned);
     }
@@ -868,8 +868,8 @@ mod tests {
     };
     use crate::Role;
     use crate::capability::{Admitted, Capabilities, Floor, FsAllow, FsPolicy, Program};
-    use crate::capability::{Evidence, ExecAllow, ExecDeny, Extent, GrantPath, Join, Rule};
-    use crate::path::{Excluded, FrozenPath, RealPath};
+    use crate::capability::{Evidence, ExecAllow, ExecDeny, GrantPath, Join, Rule};
+    use crate::path::{Excluded, FrozenPath, RealPath, Trace};
     use crate::sandbox::launch::{Ownership, admitted, enveloped};
     use crate::sandbox::warrant::{Handoff, Slot};
     use crate::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
@@ -884,7 +884,7 @@ mod tests {
         let written = FrozenPath::of_real(path);
         if allow {
             Rule::Allow(ExecAllow::Dir(
-                GrantPath::<Extent>::allowing(written).expect("a directory walks"),
+                GrantPath::<Trace>::walk(written).expect("a directory walks"),
             ))
         } else {
             Rule::Deny(Box::new(ExecDeny::Dir(
@@ -962,12 +962,12 @@ mod tests {
 
     fn prefix(path: &str) -> FsAllow {
         FsAllow::Prefix(
-            GrantPath::<Extent>::allowing(FrozenPath::from_surface(path)).expect("a prefix walks"),
+            GrantPath::<Trace>::walk(FrozenPath::from_surface(path)).expect("a prefix walks"),
         )
     }
 
     fn excluding(path: &str) -> GrantPath<Excluded> {
-        GrantPath::walk(FrozenPath::from_surface(path)).expect("an exclusion walks")
+        GrantPath::<Excluded>::walk(FrozenPath::from_surface(path)).expect("an exclusion walks")
     }
 
     /// What the envelope would show of `policy`.

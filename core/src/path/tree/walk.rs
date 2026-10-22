@@ -335,7 +335,7 @@ impl Entries {
         let root = self.walk.root.clone();
         let found = match walk_dir(&root) {
             Ok(dir) => self.enter_root(dir)?,
-            Err(_) => self.shallow_root(&root),
+            Err(why) => self.shallow_root(&root, why),
         };
         Ok(WalkEntry {
             shown: root,
@@ -363,21 +363,29 @@ impl Entries {
         })
     }
 
-    /// A root that is no directory: a file, or a link to nothing.
-    fn shallow_root(&self, root: &LexicalPath) -> Found {
-        let located = match walk(root, LeafMode::Follow) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                walk(root, LeafMode::NoFollow).map_err(|_| e)
-            }
-            other => other,
+    /// A root that could not be entered: a file, a link to nothing, or a
+    /// directory the walk could not enter, with `why`.
+    fn shallow_root(&self, root: &LexicalPath, why: io::Error) -> Found {
+        let followed = walk(root, LeafMode::Follow);
+        // A followed walk that reaches nothing — an absent leaf, or `NotFound`
+        // on the way — is retried without following: a link to nothing is the entry.
+        let reached = match &followed {
+            Ok(located) => located.trace().kind().is_some(),
+            Err(e) => e.kind() != io::ErrorKind::NotFound,
+        };
+        let located = if reached {
+            followed
+        } else {
+            walk(root, LeafMode::NoFollow).or(followed)
         };
         let judged =
             located.and_then(|located| self.region.judge_file(located).map_err(|_| denied()));
         match judged {
-            Ok(located) => located.stat().cloned().map_or_else(
-                || Found::Unseen(io::ErrorKind::NotFound.into()),
-                Found::Seen,
-            ),
+            Ok(located) => match located.stat().cloned() {
+                None => Found::Unseen(io::ErrorKind::NotFound.into()),
+                Some(stat) if stat.kind == Kind::Dir => refused(stat, why),
+                Some(stat) => Found::Seen(stat),
+            },
             Err(e) => Found::Unseen(e),
         }
     }
@@ -420,15 +428,15 @@ impl Entries {
         }))
     }
 
-    /// The directory the link `name` of the one on top names, opened through
-    /// the directories entered above it.
+    /// The directory the link `name` of the one on top names, its target
+    /// walked from that directory and through the directories the walk opened
+    /// above it.
     fn follow(&self, name: &EntryName) -> io::Result<Dir> {
-        let (top, above) = self
-            .stack
-            .split_last()
-            .expect("a link belongs to a directory");
-        let chain: Vec<_> = above.iter().map(|frame| &frame.dir).collect();
-        top.dir.open_dir_via_link(name, &chain)
+        self.stack
+            .last()
+            .expect("a link belongs to a directory")
+            .dir
+            .open_dir_via_link(name)
     }
 
     /// A directory not pruned by depth: entered, or why not.
@@ -597,7 +605,7 @@ impl Entries {
             .flatten();
         let exclude = dot_git.and_then(|(at, is_dir)| {
             let file = git::info_exclude(at.as_path(), *is_dir, |p| self.read_text(p))?;
-            self.read_text(&file).ok()
+            self.read_named(&file).ok().map(ignore::text)
         });
         let files = Files {
             ignore: ignore.as_deref(),

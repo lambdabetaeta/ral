@@ -62,6 +62,17 @@ static DOORS_ARR: [BuiltinEntry; 2] = [
 ];
 pub(crate) static DOORS: &[BuiltinEntry] = &DOORS_ARR;
 
+/// The plugin's source, read through the judged handle, which ends here:
+/// nothing of the load after the read holds the file or its directory.
+fn read_source(located: Located<Judged<Reading>>) -> Settled<(SourceFile, String)> {
+    let file = SourceFile::new(located.real().as_path().to_path_buf()).map_err(load_err)?;
+    let read = located.read().and_then(std::io::read_to_string);
+    drop(located);
+    let source =
+        read.map_err(|e| load_err(format!("{}: {e}", ral_core::path::shown(file.path()))))?;
+    Ok((file, ral_core::source::normalize_source_text(source)))
+}
+
 /// Load a plugin by name (or path) with its options map — empty for a
 /// plugin configured by nothing but its own defaults.
 pub(crate) fn load_plugin(
@@ -70,14 +81,7 @@ pub(crate) fn load_plugin(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<()> {
-    let located = resolve_plugin_path(name_or_path, shell)?;
-    let file = SourceFile::new(located.real().as_path().to_path_buf()).map_err(load_err)?;
-    let name = ral_core::path::shown(file.path());
-    let source = located
-        .read()
-        .and_then(std::io::read_to_string)
-        .map_err(|e| load_err(format!("{name}: {e}")))?;
-    let source = ral_core::source::normalize_source_text(source);
+    let (file, source) = read_source(resolve_plugin_path(name_or_path, shell)?)?;
     // Core's module loader owns cycle detection, the recursion guard, and the
     // source registration; the plugin policy adds only the fresh frame —
     // top-level helper bindings are discarded, since the manifest is the

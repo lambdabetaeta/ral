@@ -137,7 +137,8 @@ the session's `SessionSandbox`.
   and refuses one on or around an allowance, the program image among them,
   before anything is stamped; for every exclusion it then asks `AuthzAccessCheck`, with the child's own package and capability SIDs,
   whether the token could open anything beneath it, a file or a directory held
-  by the walk and read through handles derived from it, and refuses the launch,
+  by the walk, each classified by what the hold acquired rather than by its
+  listing, and read through handles derived from it, and refuses the launch,
   naming the object, if so (`dacl::ensure_unreachable`;
   [[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]],
   amendment of 2026-10-20).

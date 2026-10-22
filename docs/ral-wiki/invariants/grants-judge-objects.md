@@ -67,7 +67,12 @@ choice. Nothing outside `core/src/path/` is:
   `core/tests/syscall_sites.rs` pins the raw `rustix`/`libc`/Win32 wrappers the
   walk is made of by token scan and the manifest: every call lies in a tagged
   site with a reason, in `synod` as in the rest, and the callers of the string
-  containment helpers outside `path/` are pinned at today's set.
+  containment helpers outside `path/` are pinned at today's set. A `Path`
+  syscall method counts as a call where an *untagged* allow covers it (outside
+  an allow clippy proves the receiver is not a `Path`, inside a tagged one the
+  site is reviewed, inside an untagged one it is hidden from both gates); an
+  imported or aliased opener (`libc`, `rustix::fs`, cap-primitives, `Command`,
+  Win32) binds a name, and each bare use of it is a call.
 
 A guard must ask on the form its check matches. The one time it did not, the
 `xdg-*` freeze guard asked containment of the surface while the check it guarded

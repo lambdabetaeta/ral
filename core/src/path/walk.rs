@@ -35,7 +35,7 @@
 //!   target through its handle, a data handle derived from a held leaf, and a
 //!   listing;
 //! - `create`, `create_sibling`, `mkdir`, `rename_over`,
-//!   `unlink`, `is_writable` and `open_discard`, which write, and on Unix
+//!   `discard`, `is_writable` and `open_discard`, which write, and on Unix
 //!   `sync_dir` and `copy_mode`, which Windows has no use for;
 //! - on Unix, `seen_at`, which stats a listed entry by name, and `impl
 //!   From<&rustix::fs::Stat> for ObjectId`, the identity a by-name `stat`
@@ -54,7 +54,6 @@ use std::marker::PhantomData;
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsFd, BorrowedFd};
 use std::path::{Component, Path, PathBuf};
-#[cfg(unix)]
 use std::sync::Arc;
 use std::time::SystemTime;
 use strum::{IntoStaticStr, VariantArray};
@@ -560,18 +559,24 @@ impl RealPath {
     }
 
     /// [`open_nofollow`](Self::open_nofollow) where the position must be a
-    /// directory to descend from: `None` also where it is not one.
+    /// directory to descend from: `None` also where it is not one.  Entered
+    /// as a directory, so held with directory sharing.
     ///
     /// # Errors
     /// The walk's.
     #[cfg(any(target_os = "linux", windows))]
     pub(crate) fn open_dir_nofollow(
         &self,
-        token: &InstallToken,
+        _: &InstallToken,
     ) -> io::Result<Option<Dir<Installing>>> {
-        Ok(self
-            .open_nofollow(token)?
-            .and_then(|located| located.into_dir().ok()))
+        use io::ErrorKind::{NotADirectory, NotFound};
+        match finish(&self.0, Mode::Enter, OnMissing::Fail, Links::Refuse, |_| {
+            true
+        }) {
+            Ok(located) => Ok(located.into_dir().ok().map(Dir::marked)),
+            Err(e) if matches!(e.kind(), NotFound | NotADirectory) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// The position `path` spells, which no walk made: for the tests that need
@@ -599,28 +604,6 @@ impl RealPath {
     )]
     pub(crate) fn name(&self) -> Option<&str> {
         self.0.file_name()?.to_str()
-    }
-
-    /// The names of this position past `root`, for a key or a shown name;
-    /// `None` where `root` does not contain it.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "path-form: a position past a root, the one place two paths' prefixes are stripped"
-    )]
-    pub fn relative_to(&self, root: &Self) -> Option<Vec<EntryName>> {
-        let spellings = |p: &Self| {
-            std::iter::once(p.0.clone())
-                .chain(super::canon::firmlink_toggle(&p.0))
-                .collect::<Vec<_>>()
-        };
-        root.contains(self).then_some(())?;
-        let (own, base) = (spellings(self), spellings(root));
-        let rest = own
-            .iter()
-            .find_map(|p| base.iter().find_map(|q| p.strip_prefix(q).ok()))?;
-        rest.components()
-            .map(|c| EntryName::parse(c.as_os_str()).ok())
-            .collect()
     }
 
     /// The position above this one, `None` at a root.
@@ -749,6 +732,19 @@ impl Trace {
             tail,
             real,
         }
+    }
+
+    /// This trace, a directory's, without its last step: the trace of the
+    /// directory above it; a root's is itself.
+    fn above(&self) -> Self {
+        Self::new(
+            self.root.clone(),
+            self.root_id,
+            self.steps
+                .split_last()
+                .map_or_else(Vec::new, |(_, above)| above.to_vec()),
+            Vec::new(),
+        )
     }
 
     /// This trace, a directory's, with `more` steps below it and `tail` past.
@@ -1112,7 +1108,8 @@ enum OnMissing {
 }
 
 /// How a child is opened where a host shares by handle: a directory step
-/// holds the directory itself in place, a leaf step blocks no one.
+/// holds the directory itself in place (Windows: `FILE_TRAVERSE` without
+/// delete sharing), a leaf step blocks no one.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Sharing {
     Directory,
@@ -1127,27 +1124,44 @@ enum Access {
     Write,
 }
 
-/// A directory the walk holds: its handle, and what the host recorded of it
-/// as it opened it (`host::DirInfo`: Windows keeps the normalized path and
-/// volume the next step checks its child against, Unix nothing).
+/// A directory the walk holds: its handle, shared by the node and by the
+/// leaves found in it, and what the host recorded of it as it opened it
+/// (`host::DirInfo`: Windows keeps the normalized path and volume the next
+/// step checks its child against, Unix nothing).
 struct Held {
-    file: File,
+    file: Arc<File>,
+    #[cfg_attr(
+        unix,
+        expect(
+            dead_code,
+            reason = "read by Windows' step, which checks a child against its directory"
+        )
+    )]
     info: host::DirInfo,
 }
 
-impl Held {
-    fn try_clone(&self) -> io::Result<Self> {
-        Ok(Self {
-            file: self.file.try_clone()?,
-            info: self.info.clone(),
-        })
+/// A directory the walk holds and the one it was opened from.
+///
+/// `above` is `None` exactly at a root.  Shared: every directory opened
+/// beneath holds this one by reference, so a walk of depth d holds d handles
+/// whatever it hands out.
+struct Node {
+    held: Held,
+    above: Option<Arc<Self>>,
+}
+
+impl Node {
+    /// The directory this one is in; a root is its own, as `/..` says.
+    fn container(self: &Arc<Self>) -> &Arc<Self> {
+        self.above.as_ref().unwrap_or(self)
     }
 }
 
 /// What [`host::step`] returns: the handle opened, what it is, and the
 /// host's record of it, which it keeps if it is a directory.  `handle` is
-/// `None` only where the host refused the hold for permission (macOS, a leaf
-/// the user cannot open), which is then [`Leaf::Stated`]: a link or a
+/// `None` only where the host will not hold the leaf: macOS, for a leaf the
+/// user cannot open or a special file — a FIFO, a socket, a device — since
+/// holding one is opening it.  It is then [`Leaf::Stated`]: a link or a
 /// directory is always held.
 struct Child {
     handle: Option<File>,
@@ -1167,7 +1181,7 @@ impl Child {
             )
         })?;
         let held = Held {
-            file,
+            file: Arc::new(file),
             info: self.info,
         };
         Ok((held, self.step, self.stat))
@@ -1178,7 +1192,9 @@ impl Child {
 /// its step, the handle just opened, and the directory handle and name it was
 /// opened under (`name` is `.` and `dir` the object itself for the root,
 /// whose `step` is `None` since it is no entry).  `child` is `None` for a
-/// leaf the host refused to hold, which a vet that needs the object refuses.
+/// leaf the host refused to hold, or (macOS) a special file — a FIFO, a
+/// socket, a device — which the host will not hold, since holding one is
+/// opening it; a vet that needs the object refuses either.
 /// Every object: the root, each directory on entry, each link before it is
 /// spliced, the leaf.
 #[cfg_attr(
@@ -1192,11 +1208,14 @@ pub(crate) struct Vetted<'a> {
     pub name: &'a OsStr,
 }
 
-/// An open directory: its handle, its trace, and its stat taken once at the
-/// open.  `A` says who vouched for it.
+/// An open directory: the node the walk holds it by, its trace, and its stat
+/// taken once at the open.
+///
+/// The node is its handle and, shared, those of the directories the walk
+/// opened above it, one per step of its trace.  `A` says who vouched for it.
 #[must_use]
 pub struct Dir<A: Authority = Unjudged> {
-    handle: Held,
+    node: Arc<Node>,
     trace: Trace,
     stat: Stat,
     _a: PhantomData<A>,
@@ -1220,7 +1239,7 @@ impl<A: Authority> Dir<A> {
     /// The same directory under another marker: a door of this file's.
     fn marked<B: Authority>(self) -> Dir<B> {
         Dir {
-            handle: self.handle,
+            node: self.node,
             trace: self.trace,
             stat: self.stat,
             _a: PhantomData,
@@ -1240,7 +1259,7 @@ impl<A: Peeks> Dir<A> {
 #[cfg(target_os = "linux")]
 impl AsFd for Dir<Installing> {
     fn as_fd(&self) -> BorrowedFd<'_> {
-        self.handle.file.as_fd()
+        self.node.held.file.as_fd()
     }
 }
 
@@ -1253,7 +1272,7 @@ impl Dir<Installing> {
     /// # Errors
     /// The reopen's.
     pub(crate) fn reopen(&self, access: u32) -> io::Result<File> {
-        host::reopen_shared(&self.handle.file, access)
+        host::reopen_shared(&self.node.held.file, access)
     }
 }
 
@@ -1272,7 +1291,7 @@ impl<A: Lists> Dir<A> {
     pub fn read_dir(&self) -> io::Result<Listing<'_>> {
         Ok(Listing {
             parent: &self.trace,
-            lister: host::list(&self.handle.file)?,
+            lister: host::list(&self.node.held.file)?,
         })
     }
 
@@ -1284,12 +1303,15 @@ impl<A: Lists> Dir<A> {
     /// # Errors
     /// The open's; `NotADirectory` for a link or anything else but a directory.
     pub fn open_dir(&self, name: &EntryName) -> io::Result<Dir<A::Child>> {
-        let child = step_into(&self.handle, name, Sharing::Directory)?;
+        let child = step_into(&self.node.held, name, Sharing::Directory)?;
         match child.step.kind {
             Kind::Dir => {
-                let (handle, step, stat) = child.held()?;
+                let (held, step, stat) = child.held()?;
                 Ok(Dir {
-                    handle,
+                    node: Arc::new(Node {
+                        held,
+                        above: Some(Arc::clone(&self.node)),
+                    }),
                     trace: self.trace.extended([step], Vec::new()),
                     stat,
                     _a: PhantomData,
@@ -1304,14 +1326,16 @@ impl<A: Lists> Dir<A> {
     }
 
     /// The entry `name` as an object: one leaf step under the held handle,
-    /// `mode` deciding a link.
+    /// `mode` deciding a link.  A link at `name` is followed as any walk
+    /// follows one: a `..` in its target climbs the directories this one was
+    /// opened from, and at a root stays.
     ///
     /// # Errors
     /// The walk's; `NotFound` where there is no entry `name`.
     pub fn locate(&self, name: &EntryName, mode: LeafMode) -> io::Result<Located<A::Child>> {
         let names = VecDeque::from([Name::Entry(name.clone())]);
         let walker = Walker::new(
-            Cursor::beneath(self, &[])?,
+            Cursor::beneath(self),
             names,
             mode.into(),
             OnMissing::Fail,
@@ -1320,7 +1344,7 @@ impl<A: Lists> Dir<A> {
         );
         let located = walker.run()?;
         match located.leaf {
-            Leaf::Absent => Err(io::ErrorKind::NotFound.into()),
+            Leaf::Absent { .. } => Err(io::ErrorKind::NotFound.into()),
             _ => Ok(located.marked()),
         }
     }
@@ -1328,21 +1352,15 @@ impl<A: Lists> Dir<A> {
     /// Follow the link entry `name` to the directory it names: the link is
     /// opened as a step, its target read through that handle, and the walk
     /// continued as a spliced link is — a relative target from this
-    /// directory's own handle, an absolute one from the root; never from
-    /// [`real`](Self::real) by name.  `chain` is the directories above this
-    /// one that the caller entered, nearest last, which a tree walk keeps for
-    /// its cycle check; a `..` pops it, and one that climbs past its first
-    /// entry is `NotFound`, since nothing above was walked.  The caller
-    /// judges the result as a fresh walk.
+    /// directory's own handle, a `..` in it climbing the directories this one
+    /// was opened from and at a root staying; an absolute one from the root;
+    /// never from [`real`](Self::real) by name.  The caller judges the result
+    /// as a fresh walk.
     ///
     /// # Errors
     /// The walk's; `InvalidInput` where `name` is not a link.
-    pub(crate) fn open_dir_via_link(
-        &self,
-        name: &EntryName,
-        chain: &[&Self],
-    ) -> io::Result<Dir<A::Child>> {
-        let link = step_into(&self.handle, name, Sharing::Leaf)?;
+    pub(crate) fn open_dir_via_link(&self, name: &EntryName) -> io::Result<Dir<A::Child>> {
+        let link = step_into(&self.node.held, name, Sharing::Leaf)?;
         let (link, step, _) = link.held()?;
         if step.kind != Kind::Symlink {
             return Err(io::Error::new(
@@ -1352,7 +1370,7 @@ impl<A: Lists> Dir<A> {
         }
         let target = host::read_link(&link.file)?;
         let mut walker = Walker::new(
-            Cursor::beneath(self, chain)?,
+            Cursor::beneath(self),
             VecDeque::new(),
             Mode::Enter,
             OnMissing::Fail,
@@ -1371,20 +1389,18 @@ impl<A: Lists> Dir<A> {
 impl Dir<Judged<Writing>> {
     /// The absent entry `name` of this directory, as a create target: a
     /// [`Located`] whose leaf is absent, whose trace is this directory's plus
-    /// a one-name tail, and whose `dir` is a dup of the held handle.  It is
-    /// unjudged: a name under a write-judged directory is still a distinct
-    /// position, and an exclusion can name an absent one, so the caller
-    /// judges it before anything makes it.
-    ///
-    /// # Errors
-    /// The dup's.
-    pub(crate) fn absent(&self, name: EntryName) -> io::Result<Located> {
-        Ok(Located {
-            dir: self.handle.try_clone()?,
+    /// a one-name tail, and whose directory is this one, by the walk's own
+    /// node: no syscall.  It is unjudged: a name under a write-judged
+    /// directory is still a distinct position, and an exclusion can name an
+    /// absent one, so the caller judges it before anything makes it.
+    pub(crate) fn absent(&self, name: EntryName) -> Located {
+        Located {
             trace: self.trace.extended([], vec![name]),
-            leaf: Leaf::Absent,
+            leaf: Leaf::Absent {
+                dir: Arc::clone(&self.node),
+            },
             _a: PhantomData,
-        })
+        }
     }
 }
 
@@ -1473,37 +1489,48 @@ impl Listed<'_> {
     }
 }
 
-/// An object named exactly: the handle of its directory, its trace, its leaf.
+/// An object named exactly: its trace and its leaf, which carries what the
+/// doors on it need.
 ///
-/// The leaf is absent exactly when `trace.tail()` is non-empty (only the walk
-/// and [`Dir::absent`] make one), and `trace` is the only copy of the leaf's
-/// name.  A directory reached as one (`Mode::Enter`)
-/// is the leaf too, held as entered; for the root, `dir` is the root itself —
-/// its own container, as `/..` says — and every door that would use `dir`
-/// refuses a directory leaf first.  `A` says who vouched for it.
+/// The leaf is absent exactly when `trace.tail()` is non-empty, and `trace` is
+/// the only copy of the leaf's name.  `A` says who vouched for it.
 #[must_use]
 pub struct Located<A: Authority = Unjudged> {
-    dir: Held,
     trace: Trace,
     leaf: Leaf,
     _a: PhantomData<A>,
 }
 
-/// What the walk has of the leaf: nothing (a create target); the handle, held
-/// as the host holds it, and the stat taken through it; or — on macOS alone,
-/// where the hold was refused for permission — the identity, kind and stat
-/// one lookup by name gave, and no handle.  Host-neutral in the type; only the
-/// macOS host makes `Stated`, and nothing opens a `Stated` leaf afterwards.
+/// What the walk has of the leaf.  Host-neutral in the type; only the macOS
+/// host makes `Stated`, and nothing opens a `Stated` leaf afterwards.
 enum Leaf {
-    Absent,
+    /// Nothing at the name: a create target in `dir`, which keeps the
+    /// directories above it, since what `create_dir` makes there is entered.
+    Absent { dir: Arc<Node> },
+    /// A directory, held as a node — entered (directory sharing) or reached
+    /// as the last name (leaf sharing); `node.above` is the directory it is
+    /// in, and the root is its own.
+    Dir { node: Arc<Node>, stat: Stat },
+    /// Anything else, held: its handle and stat, beside the handle of the
+    /// directory it is in — that handle alone, never the ones above.
     Held {
+        dir: Arc<File>,
         file: File,
         stat: Stat,
-        info: host::DirInfo,
     },
-    Stated {
-        stat: Stat,
-    },
+    /// macOS alone: a leaf the host will not hold — its permissions refuse
+    /// it, or it is a special file (a FIFO, a socket, a device), which macOS
+    /// cannot hold without opening — its stat, and its directory's handle.
+    Stated { dir: Arc<File>, stat: Stat },
+}
+
+/// What a leaf offers a data door: nothing yet (a create target), the handle
+/// held and its stat, or a special file — a FIFO, a socket, a device — which
+/// only macOS states without holding.
+enum Data<'a> {
+    Absent,
+    Held(&'a File, &'a Stat),
+    Special,
 }
 
 impl<A: Authority> Located<A> {
@@ -1524,7 +1551,6 @@ impl<A: Authority> Located<A> {
     /// The same object under another marker: a door of this file's.
     fn marked<B: Authority>(self) -> Located<B> {
         Located {
-            dir: self.dir,
             trace: self.trace,
             leaf: self.leaf,
             _a: PhantomData,
@@ -1535,23 +1561,53 @@ impl<A: Authority> Located<A> {
     /// it is absent.
     fn observed(&self) -> Option<&Stat> {
         match &self.leaf {
-            Leaf::Absent => None,
-            Leaf::Held { stat, .. } | Leaf::Stated { stat, .. } => Some(stat),
+            Leaf::Absent { .. } => None,
+            Leaf::Dir { stat, .. } | Leaf::Held { stat, .. } | Leaf::Stated { stat, .. } => {
+                Some(stat)
+            }
         }
     }
 
+    /// The handle of the directory the leaf is in: the root's own for the
+    /// root.
+    fn dir(&self) -> &File {
+        match &self.leaf {
+            Leaf::Absent { dir } => &dir.held.file,
+            Leaf::Dir { node, .. } => &node.container().held.file,
+            Leaf::Held { dir, .. } | Leaf::Stated { dir, .. } => dir,
+        }
+    }
+
+    /// The leaf's own handle, where the walk holds one.
+    fn handle(&self) -> Option<&File> {
+        match &self.leaf {
+            Leaf::Held { file, .. } => Some(file),
+            Leaf::Dir { node, .. } => Some(&node.held.file),
+            Leaf::Absent { .. } | Leaf::Stated { .. } => None,
+        }
+    }
+
+    /// The identity of the object the walk holds a handle on, pinned while
+    /// this `Located` lives: `None` for an absent leaf and for a stated one,
+    /// whose identity nothing pins.
+    pub(crate) fn held_id(&self) -> Option<ObjectId> {
+        self.handle().map(|_| self.trace.last_id())
+    }
+
     /// The object the walk ended on, as an exclusion holds it: its trace and,
-    /// on Unix, the handle the walk opened on the deepest object it reached,
-    /// which an absent leaf's is its directory.  A `Stated` leaf has none.
+    /// on Unix, the one handle the walk opened on the deepest object it
+    /// reached, which an absent leaf's is its directory; a hold keeps nothing
+    /// above it.  A `Stated` leaf has none.
     fn into_hold(self) -> Hold {
         Hold {
             #[cfg(unix)]
             handle: match self.leaf {
-                Leaf::Held { file, .. } => Some(file),
-                Leaf::Absent => Some(self.dir.file),
+                Leaf::Held { file, .. } => Some(Arc::new(file)),
+                Leaf::Dir { node, .. } | Leaf::Absent { dir: node } => {
+                    Some(Arc::clone(&node.held.file))
+                }
                 Leaf::Stated { .. } => None,
-            }
-            .map(Arc::new),
+            },
             trace: self.trace,
         }
     }
@@ -1572,27 +1628,28 @@ impl<A: Authority> Located<A> {
     }
 
     /// The leaf as one whose data may be opened or replaced: held, with its
-    /// handle and stat, or `None` for a create target.
+    /// handle and stat; a special file, which macOS states and never holds;
+    /// or a create target.
     ///
     /// # Errors
     /// `IsADirectory` for a directory; `InvalidInput` for a link, which has
-    /// no data; `PermissionDenied` for a stated leaf, the walk's refusal to
-    /// hold it, after which nothing is opened or replaced through its name.
-    fn data_leaf(&self) -> io::Result<Option<(&File, &Stat)>> {
+    /// no data; `PermissionDenied` for any other stated leaf, the walk's
+    /// refusal to hold it, after which nothing is opened or replaced through
+    /// its name.
+    fn data(&self) -> io::Result<Data<'_>> {
         match &self.leaf {
-            Leaf::Held { stat, .. } if stat.kind == Kind::Dir => {
-                Err(io::ErrorKind::IsADirectory.into())
-            }
+            Leaf::Dir { .. } => Err(io::ErrorKind::IsADirectory.into()),
             Leaf::Held { stat, .. } if stat.kind == Kind::Symlink => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "a link has no data",
             )),
+            Leaf::Held { file, stat, .. } => Ok(Data::Held(file, stat)),
+            Leaf::Stated { stat, .. } if stat.kind == Kind::Other => Ok(Data::Special),
             Leaf::Stated { .. } => Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "the object could not be held, so nothing is opened through it",
             )),
-            Leaf::Held { file, stat, .. } => Ok(Some((file, stat))),
-            Leaf::Absent => Ok(None),
+            Leaf::Absent { .. } => Ok(Data::Absent),
         }
     }
 
@@ -1602,13 +1659,13 @@ impl<A: Authority> Located<A> {
     /// `AlreadyExists` where the leaf is present.
     fn absent_name(&self) -> io::Result<&EntryName> {
         match (&self.leaf, self.leaf_name()) {
-            (Leaf::Absent, Some(name)) => Ok(name),
+            (Leaf::Absent { .. }, Some(name)) => Ok(name),
             _ => Err(io::ErrorKind::AlreadyExists.into()),
         }
     }
 
-    /// This object as a directory, under the same authority; handed back
-    /// where it is not one held.
+    /// This object as a directory, under the same authority, where the walk
+    /// holds it as one, entered or reached as a leaf; handed back otherwise.
     ///
     /// # Errors
     /// `self`, where the leaf is not a held directory.
@@ -1618,8 +1675,8 @@ impl<A: Authority> Located<A> {
     )]
     pub(crate) fn into_dir(self) -> Result<Dir<A>, Self> {
         match self.leaf {
-            Leaf::Held { file, stat, info } if stat.kind == Kind::Dir => Ok(Dir {
-                handle: Held { file, info },
+            Leaf::Dir { node, stat } => Ok(Dir {
+                node,
                 trace: self.trace,
                 stat,
                 _a: PhantomData,
@@ -1658,7 +1715,7 @@ impl<A: Peeks> Located<A> {
     pub fn read_link(&self) -> io::Result<PathBuf> {
         match &self.leaf {
             Leaf::Held { file, stat, .. } if stat.kind == Kind::Symlink => host::read_link(file),
-            Leaf::Absent => Err(io::ErrorKind::NotFound.into()),
+            Leaf::Absent { .. } => Err(io::ErrorKind::NotFound.into()),
             _ => Err(io::ErrorKind::InvalidInput.into()),
         }
     }
@@ -1667,7 +1724,7 @@ impl<A: Peeks> Located<A> {
     /// which ignores ownership, so another user's 0644 file would read as
     /// writable.  Follows, as `test -w` does.
     pub(crate) fn is_writable(&self) -> bool {
-        host::is_writable(&self.dir.file, self.entry())
+        host::is_writable(self.dir(), self.entry())
     }
 }
 
@@ -1675,10 +1732,7 @@ impl Located<Installing> {
     /// The held leaf, for a bind source; `None` for an absent or stated leaf.
     #[cfg(target_os = "linux")]
     pub(crate) fn leaf_fd(&self) -> Option<BorrowedFd<'_>> {
-        match &self.leaf {
-            Leaf::Held { file, .. } => Some(file.as_fd()),
-            _ => None,
-        }
+        self.handle().map(AsFd::as_fd)
     }
 
     /// A handle on the leaf with `access`, sharing read, write and delete,
@@ -1688,10 +1742,9 @@ impl Located<Installing> {
     /// The reopen's; `NotFound` for a leaf that is not held.
     #[cfg(windows)]
     pub(crate) fn reopen(&self, access: u32) -> io::Result<File> {
-        match &self.leaf {
-            Leaf::Held { file, .. } => host::reopen_shared(file, access),
-            _ => Err(io::ErrorKind::NotFound.into()),
-        }
+        self.handle()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
+            .and_then(|file| host::reopen_shared(file, access))
     }
 
     /// Whether the leaf is on a local fixed volume.
@@ -1700,37 +1753,41 @@ impl Located<Installing> {
     /// `NotFound` for a leaf that is not held.
     #[cfg(windows)]
     pub(crate) fn is_local(&self) -> io::Result<bool> {
-        match &self.leaf {
-            Leaf::Held { file, .. } => Ok(host::is_local(file)),
-            _ => Err(io::ErrorKind::NotFound.into()),
-        }
+        self.handle()
+            .map(host::is_local)
+            .ok_or_else(|| io::ErrorKind::NotFound.into())
     }
 }
 
 impl<A: Reads> Located<A> {
     /// A data handle on the leaf.  Held: derived from the held handle where
-    /// the host can, else opened by name under `dir` and verified.  Stated:
-    /// `PermissionDenied`, the walk's; nothing is opened.  Absent: created
-    /// exclusively for `Append` and `Write`, `NotFound` for `Read`.
+    /// the host can, else opened by name under `dir` and verified.  A special
+    /// file (macOS): opened by name under `dir` and verified to be one.  Any
+    /// other stated leaf: `PermissionDenied`, the walk's; nothing is opened.
+    /// Absent: created exclusively for `Append` and `Write`, `NotFound` for
+    /// `Read`.
     ///
     /// # Errors
     /// The open's; `IsADirectory` for a directory leaf, `InvalidInput` for a
     /// link, which has no data.
     fn open(&self, access: Access) -> io::Result<File> {
-        match (self.data_leaf()?, access) {
-            (Some((file, stat)), _) => {
-                let name = self
-                    .leaf_name()
-                    .expect("a leaf that is not a directory has a name");
-                host::derive(file, &self.dir.file, name, stat, access)
+        let named = || {
+            self.leaf_name()
+                .expect("a leaf that is not a directory has a name")
+        };
+        match (self.data()?, access) {
+            (Data::Held(file, stat), _) => host::derive(file, self.dir(), named(), stat, access),
+            #[cfg(target_os = "macos")]
+            (Data::Special, _) => host::open_special(self.dir(), named(), access),
+            #[cfg(not(target_os = "macos"))]
+            (Data::Special, _) => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the object could not be held, so nothing is opened through it",
+            )),
+            (Data::Absent, Access::Read) => Err(io::ErrorKind::NotFound.into()),
+            (Data::Absent, _) => {
+                host::create(self.dir(), self.absent_name()?, access, Visibility::Public)
             }
-            (None, Access::Read) => Err(io::ErrorKind::NotFound.into()),
-            (None, _) => host::create(
-                &self.dir.file,
-                self.absent_name()?,
-                access,
-                Visibility::Public,
-            ),
         }
     }
 
@@ -1818,13 +1875,13 @@ impl Located<Judged<Writing>> {
             Streaming::Append => Access::Append,
             Streaming::Truncate => Access::Write,
         };
-        let created = matches!(self.leaf, Leaf::Absent);
+        let created = matches!(self.leaf, Leaf::Absent { .. });
         let file = self.open(access)?;
         let stat = host::seen(&file)?.stat;
         let reader = self
             .leaf_name()
             .filter(|_| stat.kind == Kind::File)
-            .and_then(|name| host::derive(&file, &self.dir.file, name, &stat, Access::Read).ok());
+            .and_then(|name| host::derive(&file, self.dir(), name, &stat, Access::Read).ok());
         Ok(Streamed {
             file,
             reader,
@@ -1841,13 +1898,19 @@ impl Located<Judged<Writing>> {
     /// beside.
     ///
     /// # Errors
-    /// [`data_leaf`](Self::data_leaf)'s; the create's, other than
-    /// `AlreadyExists`, which is retried under another name; the mode's.
+    /// [`data`](Self::data)'s; `InvalidInput` for a special file, which is
+    /// streamed, not replaced; the create's, other than `AlreadyExists`,
+    /// which is retried under another name; the mode's.
     pub(crate) fn stage(self) -> io::Result<StagedWrite> {
-        self.data_leaf()?;
+        if matches!(self.data()?, Data::Special) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a special file is streamed, not replaced",
+            ));
+        }
         let (file, name) = loop {
             let name = EntryName::fresh(".ral-write-")?;
-            match host::create_sibling(&self.dir.file, &name) {
+            match host::create_sibling(self.dir(), &name) {
                 Ok(file) => break (file, name),
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(e),
@@ -1875,12 +1938,7 @@ impl Located<Judged<Writing>> {
     /// # Errors
     /// `AlreadyExists` where the leaf is present; the create's.
     pub(crate) fn create_file(self, visibility: Visibility) -> io::Result<Trace> {
-        host::create(
-            &self.dir.file,
-            self.absent_name()?,
-            Access::Write,
-            visibility,
-        )?;
+        host::create(self.dir(), self.absent_name()?, Access::Write, visibility)?;
         Ok(self.trace)
     }
 
@@ -1891,14 +1949,19 @@ impl Located<Judged<Writing>> {
     /// # Errors
     /// `AlreadyExists` where the leaf is present; the make's or the step's.
     pub(crate) fn create_dir(self, visibility: Visibility) -> io::Result<Dir> {
-        let name = self.absent_name()?;
-        host::mkdir(&self.dir.file, name, visibility)?;
-        let (handle, step, stat) = step_into(&self.dir, name, Sharing::Directory)?.held()?;
+        let (Leaf::Absent { dir }, Some(name)) = (&self.leaf, self.leaf_name()) else {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        };
+        host::mkdir(&dir.held.file, name, visibility)?;
+        let (held, step, stat) = step_into(&dir.held, name, Sharing::Directory)?.held()?;
         if step.kind != Kind::Dir {
             return Err(io::ErrorKind::NotADirectory.into());
         }
         Ok(Dir {
-            handle,
+            node: Arc::new(Node {
+                held,
+                above: Some(Arc::clone(dir)),
+            }),
             trace: self.trace.extended([step], Vec::new()),
             stat,
             _a: PhantomData,
@@ -1931,15 +1994,15 @@ impl StagedWrite {
         &self.target
     }
 
-    /// Commit: sync the sibling, then rename it over the leaf's name.  The
-    /// target's leaf handle is released first.  Where the host renames by
-    /// name, as Unix does, the source is `name` under `dir`: POSIX has no
-    /// publish-by-handle, so a process with write permission on the
-    /// directory can put a substitute at the sibling's name between the sync
-    /// and the rename.  On failure the sibling is unlinked before the error
-    /// returns, so a failed publish leaves the target as it was and nothing
-    /// beside it.  Then the directory is synced, best effort.  No check
-    /// follows: what the name holds later is not this write's to assert.
+    /// Commit: sync the sibling, then rename it over the leaf's name.  Where
+    /// the host renames by name, as Unix does, the source is `name` under
+    /// `dir`: POSIX has no publish-by-handle, so a process with write
+    /// permission on the directory can put a substitute at the sibling's name
+    /// between the sync and the rename.  On failure the sibling is unlinked
+    /// before the error returns, so a failed publish leaves the target as it
+    /// was and nothing beside it.  Then the directory is synced, best effort.
+    /// No check follows: what the name holds later is not this write's to
+    /// assert.
     ///
     /// # Errors
     /// The sync's, or the rename's.
@@ -1948,19 +2011,17 @@ impl StagedWrite {
         // entry with the blocks still unwritten: a renamed zero-length file.
         self.file.sync_all()?;
         self.settled = true;
-        // Only the handle goes: the leaf's name is the trace's.
-        drop(std::mem::replace(&mut self.target.leaf, Leaf::Absent));
         let to = self
             .target
             .leaf_name()
             .expect("a staged write targets a leaf with a name");
-        let landed = host::rename_over(&self.target.dir.file, &self.file, &self.name, to);
+        let landed = host::rename_over(self.target.dir(), &self.file, &self.name, to);
         if landed.is_err() {
-            let _ = host::unlink(&self.target.dir.file, &self.name);
+            let _ = host::discard(self.target.dir(), &self.file, &self.name);
         } else {
             // Windows has no directory flush.
             #[cfg(unix)]
-            let _ = host::sync_dir(&self.target.dir.file);
+            let _ = host::sync_dir(self.target.dir());
         }
         landed
     }
@@ -1969,105 +2030,77 @@ impl StagedWrite {
 impl Drop for StagedWrite {
     fn drop(&mut self) {
         if !self.settled {
-            let _ = host::unlink(&self.target.dir.file, &self.name);
+            let _ = host::discard(self.target.dir(), &self.file, &self.name);
         }
     }
 }
 
-/// A frame of the cursor: a directory handle and the trace to it.
-struct Frame {
-    handle: Held,
-    trace: Trace,
-}
-
-/// Where the walk stands: the root, or the directory a walk began beneath
-/// (`base`), and a stack of `(handle, step)` for every directory entered
-/// since.  The cursor's handles are what every open is relative to, and its
-/// steps are the trace as it grows.  A `..` pops the stack — the walk returns
-/// to the directory it already holds, never to the kernel's current parent —
-/// and at the root stays.  Where the walk began beneath a directory (`chain`
-/// is `Some`), a `..` past the stack pops the chain of directories the caller
-/// entered, and past that it is `NotFound`, since nothing above was walked.
+/// Where the walk stands: a base node — a root, or the directory a walk began
+/// beneath, with the directories the walk opened above it — its trace, and a
+/// stack of `(handle, step)` for every directory entered since.  The cursor's
+/// handles are what every open is relative to, and its steps are the trace as
+/// it grows.  A `..` pops the stack, so the walk returns to the directory it
+/// already holds, never to the kernel's current parent.  Past the stack it
+/// climbs the base's own ancestry, and at a root it stays.
 struct Cursor {
-    base: Frame,
-    chain: Option<Vec<Frame>>,
+    base: Arc<Node>,
+    trace: Trace,
     stack: Vec<(Held, Step)>,
 }
 
 impl Cursor {
     fn root(root: RootName) -> io::Result<Self> {
-        let handle = host::open_root(&root)?;
-        let id = ObjectId::of(&handle.file)?;
+        let held = host::open_root(&root)?;
+        let id = ObjectId::of(&held.file)?;
         Ok(Self {
-            base: Frame {
-                handle,
-                trace: Trace::new(root, id, Vec::new(), Vec::new()),
-            },
-            chain: None,
+            base: Arc::new(Node { held, above: None }),
+            trace: Trace::new(root, id, Vec::new(), Vec::new()),
             stack: Vec::new(),
         })
     }
 
-    /// A cursor standing in `dir`, with `chain` above it.
-    fn beneath<A: Authority>(dir: &Dir<A>, chain: &[&Dir<A>]) -> io::Result<Self> {
-        let frame = |d: &Dir<A>| -> io::Result<Frame> {
-            Ok(Frame {
-                handle: d.handle.try_clone()?,
-                trace: d.trace.clone(),
-            })
-        };
-        Ok(Self {
-            base: frame(dir)?,
-            chain: Some(chain.iter().map(|d| frame(d)).collect::<io::Result<_>>()?),
+    /// A cursor standing in `dir`.
+    fn beneath<A: Authority>(dir: &Dir<A>) -> Self {
+        Self {
+            base: Arc::clone(&dir.node),
+            trace: dir.trace.clone(),
             stack: Vec::new(),
-        })
+        }
     }
 
     fn top(&self) -> &Held {
-        self.stack.last().map_or(&self.base.handle, |(h, _)| h)
+        self.stack.last().map_or(&self.base.held, |(h, _)| h)
     }
 
     fn push(&mut self, handle: Held, step: Step) {
         self.stack.push((handle, step));
     }
 
-    fn up(&mut self) -> io::Result<()> {
+    fn up(&mut self) {
+        // At a root there is nothing above: the walk stays.
         if self.stack.pop().is_none()
-            && let Some(chain) = &mut self.chain
+            && let Some(above) = self.base.above.clone()
         {
-            self.base = chain.pop().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "no directory above this one was walked",
-                )
-            })?;
+            self.base = above;
+            self.trace = self.trace.above();
         }
-        Ok(())
     }
 
     /// The trace of where the cursor stands, plus a step opened below it and
     /// the names past.
     fn trace(&self, step: Option<Step>, tail: Vec<EntryName>) -> Trace {
         let steps = self.stack.iter().map(|(_, step)| step.clone());
-        self.base.trace.extended(steps.chain(step), tail)
+        self.trace.extended(steps.chain(step), tail)
     }
 
-    fn into_top(self) -> Held {
-        self.stack
-            .into_iter()
-            .next_back()
-            .map_or(self.base.handle, |(h, _)| h)
-    }
-
-    /// The directory on top and the one beneath it; the root is its own.
-    fn into_pair(self) -> io::Result<(Held, Held)> {
-        let Self {
-            base, mut stack, ..
-        } = self;
-        match stack.pop() {
-            None => Ok((base.handle.try_clone()?, base.handle)),
-            Some((top, _)) => Ok((stack.pop().map_or(base.handle, |(h, _)| h), top)),
-        }
+    /// The directory on top, as the node it is.
+    fn into_top(self) -> Arc<Node> {
+        self.stack.into_iter().fold(self.base, |above, (held, _)| {
+            Arc::new(Node {
+                held,
+                above: Some(above),
+            })
+        })
     }
 }
 
@@ -2198,7 +2231,7 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
     fn advance(&mut self) -> io::Result<Ended> {
         while let Some(name) = self.names.pop_front() {
             let Name::Entry(name) = name else {
-                self.cursor.up()?;
+                self.cursor.up();
                 continue;
             };
             let last = self.names.is_empty();
@@ -2251,16 +2284,29 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
     /// The walk ended on `child`, the last name's object.
     fn leaf(self, child: Child) -> Located {
         let trace = self.cursor.trace(Some(child.step.clone()), Vec::new());
+        let dir = self.cursor.into_top();
         let leaf = match child.handle {
+            Some(file) if child.stat.kind == Kind::Dir => Leaf::Dir {
+                node: Arc::new(Node {
+                    held: Held {
+                        file: Arc::new(file),
+                        info: child.info,
+                    },
+                    above: Some(dir),
+                }),
+                stat: child.stat,
+            },
             Some(file) => Leaf::Held {
+                dir: Arc::clone(&dir.held.file),
                 file,
                 stat: child.stat,
-                info: child.info,
             },
-            None => Leaf::Stated { stat: child.stat },
+            None => Leaf::Stated {
+                dir: Arc::clone(&dir.held.file),
+                stat: child.stat,
+            },
         };
         Located {
-            dir: self.cursor.into_top(),
             trace,
             leaf,
             _a: PhantomData,
@@ -2268,16 +2314,16 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
     }
 
     /// The names are spent: the directory on top of the cursor is the object,
-    /// held as entered, with the one beneath it as `dir`.
+    /// held as entered, as the node it is.
     fn entered(self) -> io::Result<Located> {
         let stat = host::seen(&self.cursor.top().file)?.stat;
         let trace = self.cursor.trace(None, Vec::new());
-        let (dir, top) = self.cursor.into_pair()?;
-        let Held { file, info } = top;
         Ok(Located {
-            dir,
             trace,
-            leaf: Leaf::Held { file, stat, info },
+            leaf: Leaf::Dir {
+                node: self.cursor.into_top(),
+                stat,
+            },
             _a: PhantomData,
         })
     }
@@ -2308,9 +2354,10 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
         };
         let trace = self.cursor.trace(None, tail);
         Ok(Located {
-            dir: self.cursor.into_top(),
             trace,
-            leaf: Leaf::Absent,
+            leaf: Leaf::Absent {
+                dir: self.cursor.into_top(),
+            },
             _a: PhantomData,
         })
     }
@@ -2464,7 +2511,7 @@ pub(crate) fn walk_excluded(rp: &LexicalPath) -> io::Result<Excluded> {
                 named: Hold {
                     trace: named,
                     #[cfg(unix)]
-                    handle: Some(Arc::new(link.file)),
+                    handle: Some(link.file),
                 },
                 target: Some(target.into_hold()),
             })

@@ -74,9 +74,9 @@ pub(crate) use which::is_batch_image;
 pub(crate) use which::is_executable_file;
 #[cfg(target_os = "linux")]
 pub(crate) use which::locate_in;
-pub(crate) use which::{PathSearch, path_dirs_absolute, path_entries, search};
+pub(crate) use which::{PathSearch, search};
 pub(crate) use which::{WINDOWS_EXEC_EXTENSIONS, command_name_key, names_a_path, names_a_path_for};
-pub use which::{forget_located_commands, locate, path_dirs, ral_path_entries};
+pub use which::{forget_located_commands, locate, path_dirs, path_entries, ral_path_entries};
 
 /// Which platform's path rules a question is asked under.
 ///

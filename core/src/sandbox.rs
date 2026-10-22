@@ -367,12 +367,26 @@ mod tests {
             let (tmp, root) = fixture();
             let position = at(&root, "d");
             let first = hold_dir(&position).unwrap().expect("a directory");
+            let first_id = first.trace().last_id();
+            drop(first);
             std::fs::rename(tmp.path().join("d"), tmp.path().join("old")).unwrap();
             std::fs::create_dir(tmp.path().join("d")).unwrap();
             let second = hold_dir(&position).unwrap().expect("the new directory");
-            assert_ne!(first.trace().last_id(), second.trace().last_id());
+            assert_ne!(first_id, second.trace().last_id());
             let made = File::open(tmp.path().join("d")).unwrap();
             assert_eq!(second.trace().last_id(), ObjectId::of(&made).unwrap());
+        }
+
+        /// A directory held for installing is held without delete sharing: it
+        /// cannot be renamed while the hold lives.
+        #[cfg(windows)]
+        #[test]
+        fn an_installing_directory_is_held_without_delete_sharing() {
+            let (tmp, root) = fixture();
+            let held = hold_dir(&at(&root, "d")).unwrap().expect("a directory");
+            assert!(std::fs::rename(tmp.path().join("d"), tmp.path().join("e")).is_err());
+            drop(held);
+            std::fs::rename(tmp.path().join("d"), tmp.path().join("e")).unwrap();
         }
 
         /// A position whose last component became a link, or with a link on

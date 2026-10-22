@@ -789,7 +789,7 @@ mod tests {
     #[test]
     fn the_settings_trees_on_linux_are_config_and_local() {
         let fake = Fake::new();
-        let home = fake.home.clone();
+        let home = fake.home;
         assert_eq!(
             settings_trees(Some(&home), |_| None),
             [home.join(".config"), home.join(".local")]

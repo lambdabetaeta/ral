@@ -4,11 +4,12 @@
 //!
 //! A `.git` *file* names its git directory in the working tree's own words, so
 //! following it asks the other direction too: the git directory must name this
-//! working tree back ([`claims`]).  A pointer that does not, or cannot be read,
-//! is a [`BadPointer`]; why that is a refusal and not a wider grant, and how it
-//! is worded, is the freeze's.  Every file is read through the caller's
-//! `read`, which judges it: the freeze's reads nothing governs, the tree
-//! walk's refuses what its region refuses.
+//! working tree back ([`claims`]), which is settled by holding both names and
+//! comparing the identities held, never one the walk could not hold.  A
+//! pointer that does not, or cannot be read, is a [`BadPointer`]; why that is a
+//! refusal and not a wider grant, and how it is worded, is the freeze's.  Every
+//! file is read through the caller's `read`, which judges it: the freeze's
+//! reads nothing governs, the tree walk's refuses what its region refuses.
 
 use crate::path::lex::{fold_dots, parent_or_cwd};
 use crate::path::{LeafMode, LexicalPath, shown, walk};
@@ -192,14 +193,17 @@ fn against(base: &Path, path: &str) -> PathBuf {
     base.join(path)
 }
 
-/// Two spellings of one file: both walked, both present, one object — identity,
-/// not spelling, so a firmlink pair is one file and two absent names are not.
+/// Two spellings of one object: both walked and both held while they are
+/// compared, so the identities cannot have been recycled under the
+/// comparison — identity, not spelling, so a firmlink pair is one file.
+/// An operand the walk could not hold is no claim; two absent names are
+/// not the same file.
 fn same_path(a: &Path, b: &Path) -> bool {
-    let identity = |p: &Path| {
-        let located = walk(&LexicalPath::absolute(p)?, LeafMode::Follow).ok()?;
-        located.trace().leaf_id()
+    let hold = |p: &Path| walk(&LexicalPath::absolute(p)?, LeafMode::Follow).ok();
+    let (Some(a), Some(b)) = (hold(a), hold(b)) else {
+        return false;
     };
-    matches!((identity(a), identity(b)), (Some(x), Some(y)) if x == y)
+    matches!((a.held_id(), b.held_id()), (Some(x), Some(y)) if x == y)
 }
 
 fn core_worktree(

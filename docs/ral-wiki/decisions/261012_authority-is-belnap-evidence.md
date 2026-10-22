@@ -380,9 +380,9 @@ stand:
   descends (Alex's decision; `sandbox/windows/dacl/frozen.rs`).
 - **The audit route is `ral --audit --capabilities <profile> -c true`**, not
   `audit { grant … }`.
-- **Non-Unicode floor entries are dropped.** The platform floor is not authored,
-  so an entry that resolves through a non-Unicode name is dropped rather than
-  refused (`freeze_floor`).
+- **A floor entry that cannot be walked refuses the floor.** The platform floor
+  is not authored, yet a host that cannot resolve it, a non-Unicode name
+  included, cannot run anything: boot fails, naming it (`floor_in`).
 - **`PROTOCOL_VERSION` is 17**, and the warrant's magic is `ral-warrant/2`.
 
 Freezing synod's guest grant once per session is deferred. synod sends its grant

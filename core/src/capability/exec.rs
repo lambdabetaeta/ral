@@ -386,27 +386,44 @@ impl FromIterator<Rule> for ExecRules {
 /// How a walked key becomes a rule, by the polarity that walked it: an
 /// allowance keeps the position, an exclusion the holds.
 pub(crate) trait Keyed: Polar {
-    fn file(path: GrantPath<Self>) -> Rule;
-    fn dir(path: GrantPath<Self>) -> Rule;
-    /// A bare name: the tool bundled under it and the file found on the
-    /// `PATH`, and for an exclusion the veto on the name everywhere.
-    fn name(name: &str, bundled: bool, found: Option<GrantPath<Self>>) -> Vec<Rule>;
+    /// # Errors
+    /// A file key naming the root (the root is a directory, not a program),
+    /// or what the polarity refuses of the root.
+    fn file(path: GrantPath<Self::Grant>) -> Result<Rule, PolicyError>;
+    fn dir(path: GrantPath<Self::Grant>) -> Rule;
+    /// A bare name: the tool bundled under it and the file the `PATH` found,
+    /// never the root; for an exclusion the veto on the name everywhere.
+    ///
+    /// # Errors
+    /// What the polarity refuses of the found file.
+    fn name(
+        name: &str,
+        bundled: bool,
+        found: Option<GrantPath<Self>>,
+    ) -> Result<Vec<Rule>, PolicyError>;
 }
 
 impl Keyed for Trace {
-    fn file(path: GrantPath<Self>) -> Rule {
-        Rule::Allow(ExecAllow::File {
-            real: path.real.real().clone(),
-            written: path.written,
-            found_as: None,
-        })
+    fn file(path: GrantPath<Extent>) -> Result<Rule, PolicyError> {
+        match path.real {
+            Extent::Under(real) => Ok(Rule::Allow(ExecAllow::File {
+                real,
+                written: path.written,
+                found_as: None,
+            })),
+            Extent::Everywhere => Err(PolicyError::root_program(&path.written)),
+        }
     }
 
-    fn dir(path: GrantPath<Self>) -> Rule {
-        Rule::Allow(ExecAllow::Dir(path.extent()))
+    fn dir(path: GrantPath<Extent>) -> Rule {
+        Rule::Allow(ExecAllow::Dir(path))
     }
 
-    fn name(name: &str, bundled: bool, found: Option<GrantPath<Self>>) -> Vec<Rule> {
+    fn name(
+        name: &str,
+        bundled: bool,
+        found: Option<GrantPath<Self>>,
+    ) -> Result<Vec<Rule>, PolicyError> {
         let tool = bundled.then(|| Rule::Allow(ExecAllow::Tool(name.into())));
         let file = found.map(|path| {
             Rule::Allow(ExecAllow::File {
@@ -415,30 +432,35 @@ impl Keyed for Trace {
                 found_as: Some(name.into()),
             })
         });
-        tool.into_iter().chain(file).collect()
+        Ok(tool.into_iter().chain(file).collect())
     }
 }
 
 impl Keyed for Excluded {
-    fn file(path: GrantPath<Self>) -> Rule {
-        Rule::Deny(Box::new(ExecDeny::File(path)))
+    fn file(path: GrantPath<Self>) -> Result<Rule, PolicyError> {
+        Ok(Rule::Deny(Box::new(ExecDeny::File(path))))
     }
 
     fn dir(path: GrantPath<Self>) -> Rule {
         Rule::Deny(Box::new(ExecDeny::Dir(path)))
     }
 
-    fn name(name: &str, _: bool, found: Option<GrantPath<Self>>) -> Vec<Rule> {
-        let file = found.map(|path| Rule::Deny(Box::new(ExecDeny::File(path))));
+    fn name(name: &str, _: bool, found: Option<GrantPath<Self>>) -> Result<Vec<Rule>, PolicyError> {
+        let file = found
+            .map(Self::grant)
+            .transpose()?
+            .map(|path| Rule::Deny(Box::new(ExecDeny::File(path))));
         let veto = Rule::Deny(Box::new(ExecDeny::Name(command_name_key(name))));
-        file.into_iter().chain([veto]).collect()
+        Ok(file.into_iter().chain([veto]).collect())
     }
 }
 
 /// The rules a bare `name` makes on `path`: the bundled tool, where this
 /// platform bundles it (`unix_available` says whether it counts the Unix-only
 /// ones), and the file the `PATH` finds, walked as its polarity walks; a name
-/// found nowhere makes no allowance and keeps its veto.
+/// found nowhere makes no allowance and keeps its veto.  The `PATH` is read
+/// on its absolute entries: a relative entry is the environment's, not a
+/// grant's.
 ///
 /// # Errors
 /// A found file whose walk fails, named.
@@ -449,13 +471,9 @@ pub(crate) fn name_rules<W: Keyed>(
 ) -> Result<Vec<Rule>, PolicyError> {
     let found = path::locate(name, path, None)
         .and_then(|hit| FrozenPath::freeze(&hit).ok())
-        .map(GrantPath::<W>::walk)
+        .map(GrantPath::<W>::walked)
         .transpose()?;
-    Ok(W::name(
-        name,
-        crate::uutils::bundled(name, unix_available),
-        found,
-    ))
+    W::name(name, crate::uutils::bundled(name, unix_available), found)
 }
 
 impl ExecRules {
@@ -554,8 +572,8 @@ impl ExecRules {
 fn key_rules<W: Keyed>(key: &ExecKey, path: Option<&str>) -> Result<Vec<Rule>, PolicyError> {
     Ok(match key {
         ExecKey::Name(name) => name_rules::<W>(name, path, cfg!(unix))?,
-        ExecKey::Path(file) => vec![W::file(GrantPath::walk(file.clone())?)],
-        ExecKey::Dir(dir) => vec![W::dir(GrantPath::walk(dir.clone())?)],
+        ExecKey::Path(file) => vec![W::file(GrantPath::<W>::walk(file.clone())?)?],
+        ExecKey::Dir(dir) => vec![W::dir(GrantPath::<W>::walk(dir.clone())?)],
     })
 }
 
@@ -608,7 +626,7 @@ pub(super) mod tests {
     }
 
     fn excluded(p: &str) -> GrantPath<Excluded> {
-        GrantPath::walk(written(p)).unwrap()
+        GrantPath::<Excluded>::walk(written(p)).unwrap()
     }
 
     pub(crate) const ALLOW: Evidence = Evidence::ALLOW;
@@ -624,7 +642,7 @@ pub(super) mod tests {
     }
 
     fn dir_allowance(p: &str) -> ExecAllow {
-        ExecAllow::Dir(GrantPath::allowing(written(p)).unwrap())
+        ExecAllow::Dir(GrantPath::<Trace>::walk(written(p)).unwrap())
     }
 
     fn allow_file(p: &str) -> Rule {
@@ -1311,5 +1329,35 @@ pub(super) mod tests {
             .into_iter()
             .collect();
         assert!(!of_file(&rules, "/tmp/a/b/x").permits());
+    }
+
+    /// The root is a directory: as a file key it names no program, and an
+    /// exclusion of it excludes every path.
+    #[test]
+    fn a_root_file_key_is_refused() {
+        for (evidence, wording) in [(ALLOW, "filesystem root"), (DENY, "excluding the root")] {
+            let grant = [(ExecKey::Path(FrozenPath::root()), evidence)];
+            let why =
+                ExecRules::of_grant(&grant.into_iter().collect(), &EnvVars::new()).unwrap_err();
+            assert!(why.message.contains(wording), "{}", why.message);
+        }
+    }
+
+    /// A grant has no "here": a relative `PATH` entry is the environment's, so
+    /// a name found only there makes no file rule and keeps its veto.
+    #[test]
+    fn a_name_on_a_relative_path_entry_makes_no_file_rule() {
+        let allow = name_rules::<Trace>("tool", Some("bin"), cfg!(unix)).unwrap();
+        assert!(
+            !allow
+                .iter()
+                .any(|r| matches!(r, Rule::Allow(ExecAllow::File { .. }))),
+            "{allow:?}"
+        );
+        let deny = name_rules::<Excluded>("tool", Some("bin"), cfg!(unix)).unwrap();
+        assert!(
+            matches!(&deny[..], [Rule::Deny(d)] if **d == ExecDeny::Name(command_name_key("tool"))),
+            "{deny:?}"
+        );
     }
 }

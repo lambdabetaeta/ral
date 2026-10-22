@@ -424,6 +424,24 @@ mod probe_tests {
         );
     }
 
+    /// The depth probe counts every layer, the ambient root's included, so a
+    /// frame left behind shows even where it restricts nothing.
+    #[cfg(feature = "test-util")]
+    #[test]
+    fn the_grant_depth_probe_counts_the_root_layer_and_every_frame() {
+        use crate::capability::GrantLayer;
+        use crate::carrier::read;
+        use crate::first_order::datum::Datum;
+        use crate::test_access::answer_probe;
+        assert_eq!(read::<u64>(&fresh(), &Probe::GrantDepth), Ok(1));
+        let mut shell = crate::test_helper::core_shell();
+        shell.with_layer(GrantLayer::root(), |sh| {
+            assert_eq!(sh.context.grants.len(), 2);
+            assert_eq!(answer_probe(sh, &Probe::GrantDepth), 2u64.encode());
+        });
+        assert_eq!(answer_probe(&shell, &Probe::GrantDepth), 1u64.encode());
+    }
+
     /// An engine seated under a layer that withholds the net and reads one
     /// folder.
     static GRANTED: [crate::engine::EngineInstaller; 1] = [crate::carrier::testkit::installer(

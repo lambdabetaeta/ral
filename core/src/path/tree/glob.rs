@@ -150,14 +150,24 @@ mod tests {
     use super::Glob;
     use crate::path::LexicalPath;
 
-    fn parse(pattern: &str) -> Result<Glob, String> {
+    /// `rest` beneath the host's root: `/rest` or `C:\rest`.
+    fn rooted(rest: &str) -> String {
+        if cfg!(windows) {
+            format!(r"C:\{}", rest.replace('/', r"\"))
+        } else {
+            format!("/{rest}")
+        }
+    }
+
+    fn parse(rest: &str) -> Result<Glob, String> {
+        let pattern = rooted(rest);
         Glob::parse(&LexicalPath::absolute(pattern.as_ref()).expect("an absolute pattern"))
     }
 
     #[test]
     fn a_parent_after_a_wildcard_is_refused() {
-        assert!(parse("/*/../x").is_err());
-        assert!(parse("/../x").is_ok());
-        assert!(parse("/a/../*").is_ok());
+        assert!(parse("*/../x").is_err());
+        assert!(parse("../x").is_ok());
+        assert!(parse("a/../*").is_ok());
     }
 }

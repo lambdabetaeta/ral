@@ -7,7 +7,9 @@
 //! with the compiler's complaint beside it; `pass/` holds what must keep
 //! compiling.  These are the `pub` surface.  What needs a `pub(crate)` door
 //! is pinned from inside the crate, by `path::walk::tests::markers`, and the
-//! two tokens' construction sites by its source scan.
+//! two tokens' construction sites by its source scan.  `installing/` holds the
+//! doors of the OS sandbox side, which exist where a renderer holds a
+//! position: not on macOS.
 //!
 //! After a deliberate change to a diagnostic, regenerate the `.stderr` files
 //! with `TRYBUILD=overwrite cargo test -p ral-core --test markers` and read
@@ -17,5 +19,8 @@
 fn the_markers_refuse_what_they_have_not_vouched_for() {
     let cases = trybuild::TestCases::new();
     cases.compile_fail("tests/markers/*.rs");
+    // The installing doors exist where a renderer holds a position; macOS's holds none.
+    #[cfg(any(target_os = "linux", windows))]
+    cases.compile_fail("tests/markers/installing/*.rs");
     cases.pass("tests/markers/pass/*.rs");
 }

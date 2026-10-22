@@ -116,11 +116,13 @@ pub(super) fn rename_over(
     )?)
 }
 
+/// `unlinkat` under `dir`: POSIX discards by name, so `sibling`, the object, is
+/// not asked.
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:walk-abandon] Reasoned-silent rollback of the atomic `>`: unlink the staged sibling for a write that will not land.  The aborted write is the surface; this removal raises none of its own."
 )]
-pub(super) fn unlink(dir: &File, name: &EntryName) -> io::Result<()> {
+pub(super) fn discard(dir: &File, _sibling: &File, name: &EntryName) -> io::Result<()> {
     Ok(rustix::fs::unlinkat(
         dir,
         name.as_os_str(),

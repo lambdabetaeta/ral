@@ -324,17 +324,16 @@ fn live_support(
 #[cfg(all(test, unix))]
 mod rendered_tests {
     use super::*;
-    use crate::capability::Extent;
-    use crate::path::{FrozenPath, utf8};
+    use crate::path::{FrozenPath, Trace, utf8};
 
     fn prefix(path: &str) -> FsAllow {
         FsAllow::Prefix(
-            GrantPath::<Extent>::allowing(FrozenPath::from_surface(path)).expect("a prefix walks"),
+            GrantPath::<Trace>::walk(FrozenPath::from_surface(path)).expect("a prefix walks"),
         )
     }
 
     fn excluding(path: &str) -> GrantPath<Excluded> {
-        GrantPath::walk(FrozenPath::from_surface(path)).expect("an exclusion walks")
+        GrantPath::<Excluded>::walk(FrozenPath::from_surface(path)).expect("an exclusion walks")
     }
 
     fn projection(write: &[&str], deny: &[&str], pinned: &[&str]) -> SandboxProjection {
@@ -412,7 +411,7 @@ mod rendered_tests {
         std::fs::create_dir(&real).unwrap();
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let linked = FsAllow::Prefix(
-            GrantPath::<Extent>::allowing(FrozenPath::from_surface(utf8(&link).unwrap()))
+            GrantPath::<Trace>::walk(FrozenPath::from_surface(utf8(&link).unwrap()))
                 .expect("a link walks"),
         );
         let projection = SandboxProjection {

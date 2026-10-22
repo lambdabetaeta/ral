@@ -9,9 +9,16 @@ use super::super::*;
 use super::{writable, writing};
 use crate::path::Resolver;
 use std::io::{Read, Write};
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::fs::OpenOptionsExt;
 use windows_sys::Wdk::Storage::FileSystem::SYMLINK_FLAG_RELATIVE;
+use windows_sys::Win32::Foundation::{
+    ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, ERROR_SHARING_VIOLATION,
+};
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+    DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    GetVolumeNameForVolumeMountPointW,
 };
 use windows_sys::Win32::System::SystemServices::{
     IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK,
@@ -43,6 +50,85 @@ fn read_all(path: &Path) -> String {
         .read_to_string(&mut text)
         .unwrap();
     text
+}
+
+/// A handle on `path` that asks attributes alone, which Windows grants for a
+/// directory too, given backup semantics.
+fn attributes_of(path: &Path) -> File {
+    std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .unwrap()
+}
+
+/// The names in `dir`, sorted.
+fn names_in(dir: &Path) -> Vec<std::ffi::OsString> {
+    let mut names: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    names.sort();
+    names
+}
+
+fn icacls(path: &Path, args: &[&str]) {
+    let output = std::process::Command::new(r"C:\Windows\System32\icacls.exe")
+        .arg(path)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "icacls {path:?} {args:?}: {output:?}"
+    );
+}
+
+/// A deny of `rights` to the current user on `path`, lifted when dropped.
+struct Denied<'a> {
+    path: &'a Path,
+    user: String,
+}
+
+impl<'a> Denied<'a> {
+    fn new(path: &'a Path, rights: &str) -> Self {
+        let whoami = std::process::Command::new(r"C:\Windows\System32\whoami.exe")
+            .output()
+            .unwrap();
+        let user = String::from_utf8(whoami.stdout).unwrap().trim().to_owned();
+        icacls(path, &["/deny", &format!("{user}:({rights})")]);
+        Self { path, user }
+    }
+}
+
+impl Drop for Denied<'_> {
+    fn drop(&mut self) {
+        icacls(self.path, &["/remove:d", &self.user]);
+    }
+}
+
+/// `path` spelled through the GUID of its volume, `\\?\Volume{…}\…`, which
+/// has no drive letter.
+fn volume_spelling(path: &Path) -> PathBuf {
+    use std::path::{Component, Prefix};
+    let Some(Component::Prefix(prefix)) = path.components().next() else {
+        panic!("{path:?} has no drive");
+    };
+    let (Prefix::Disk(drive) | Prefix::VerbatimDisk(drive)) = prefix.kind() else {
+        panic!("{path:?} is not on a drive");
+    };
+    let root: Vec<u16> = format!(r"{}:\", char::from(drive))
+        .encode_utf16()
+        .chain([0])
+        .collect();
+    let mut volume = [0u16; 64];
+    // SAFETY: `root` is NUL-terminated and `volume` holds the 64 units the
+    // call is told of.
+    let ok = unsafe { GetVolumeNameForVolumeMountPointW(root.as_ptr(), volume.as_mut_ptr(), 64) };
+    assert_ne!(ok, 0, "{path:?} is on a volume with no GUID path");
+    let len = volume.iter().position(|&unit| unit == 0).unwrap();
+    PathBuf::from(std::ffi::OsString::from_wide(&volume[..len]))
+        .join(path.components().skip(2).collect::<PathBuf>())
 }
 
 #[test]
@@ -83,7 +169,6 @@ fn a_walk_starts_only_from_a_parsed_root() {
 
 /// The 8.3 alias Windows keeps for `path`, if this volume keeps one.
 fn short_name(path: &Path) -> Option<PathBuf> {
-    use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
     let mut buf = vec![0u16; 1024];
@@ -138,18 +223,9 @@ fn an_identity_is_the_file_id_of_the_handle() {
 /// the volume stores, which is what the step records.
 #[test]
 fn file_normalized_name_info_answers_the_stored_case() {
-    use std::os::windows::fs::OpenOptionsExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES,
-    };
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join("Parent/Child")).unwrap();
-    let lower = tmp.path().join("parent").join("child");
-    let handle = std::fs::OpenOptions::new()
-        .access_mode(FILE_READ_ATTRIBUTES)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(&lower)
-        .unwrap();
+    let handle = attributes_of(&tmp.path().join("parent").join("child"));
     let wide = host::normalized(&handle).unwrap();
     let stored = String::from_utf16(&wide).unwrap();
     assert!(stored.ends_with(r"\Parent\Child"), "{stored}");
@@ -177,9 +253,13 @@ fn a_held_prefix_refuses_a_rename_while_it_lives() {
     std::fs::rename(tmp.path().join("z"), tmp.path().join("y")).unwrap();
 }
 
-/// A volume whose 128-bit ids are zero lists with the 64-bit id, and agrees
-/// with [`ObjectId::of`].  `RAL_TEST_FAT_VOLUME` names a directory on such a
-/// volume, a FAT VHD.
+/// A volume whose 128-bit ids are zero, or which refuses `FileIdInfo` and the
+/// reparse-tag class, walks and lists with the 64-bit id and a zero tag, and
+/// agrees with [`ObjectId::of`]; it creates a directory under the held one,
+/// and its atomic write fails, for want of `FileRenameInfoEx`, leaving no
+/// sibling.  `RAL_TEST_FAT_VOLUME` names a directory on such a volume, a FAT
+/// VHD, which may be mounted with no drive letter (a `\\?\Volume{GUID}\`
+/// spelling).
 #[test]
 fn a_listing_without_128_bit_ids_falls_back_to_the_64_bit_id() {
     let Some(volume) = std::env::var_os("RAL_TEST_FAT_VOLUME") else {
@@ -187,16 +267,146 @@ fn a_listing_without_128_bit_ids_falls_back_to_the_64_bit_id() {
         return;
     };
     let tmp = tempfile::tempdir_in(volume).unwrap();
-    std::fs::write(tmp.path().join("f"), b"body").unwrap();
-    std::fs::create_dir(tmp.path().join("d")).unwrap();
+    let at = |entry: &str| tmp.path().join(entry);
+    std::fs::write(at("f"), b"body").unwrap();
+    std::fs::create_dir(at("d")).unwrap();
     let dir = entered(tmp.path());
     let mut listed = 0;
     for entry in dir.read_dir().unwrap() {
-        let file = File::open(tmp.path().join(entry.name().as_os_str())).unwrap();
+        let file = attributes_of(&at(&entry.name().as_os_str().to_string_lossy()));
         assert_eq!(entry.seen().unwrap().id, ObjectId::of(&file).unwrap());
         listed += 1;
     }
     assert_eq!(listed, 2);
+    assert_eq!(
+        walked(&at("f")).trace().last_id(),
+        ObjectId::of(&attributes_of(&at("f"))).unwrap()
+    );
+    assert!(walked(&at("d")).stat().unwrap().reparse_tag.is_none());
+
+    drop(
+        writing(dir.absent(name("made")))
+            .create_dir(Visibility::Public)
+            .unwrap(),
+    );
+    assert!(at("made").is_dir());
+    let mut staged = walked(&at("f")).stage().unwrap();
+    staged.file().write_all(b"new").unwrap();
+    assert!(staged.publish().is_err());
+    assert_eq!(names_in(tmp.path()), ["d", "f", "made"]);
+}
+
+/// A directory step holds the directory in place by asking the traverse right
+/// and sharing no delete, so a handle with `DELETE` access refuses it; a leaf
+/// step asks attributes alone, which takes no part in the sharing check, and
+/// is let by.
+#[test]
+fn a_directory_step_holds_by_traverse_and_a_leaf_step_by_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(tmp.path().join("d")).unwrap();
+    let parent = entered(tmp.path());
+    let step = |sharing| host::step(&parent.node.held, &name("d"), sharing).map(|_| ());
+
+    let deleter = std::fs::OpenOptions::new()
+        .access_mode(DELETE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(tmp.path().join("d"))
+        .unwrap();
+    let err = step(Sharing::Directory).unwrap_err();
+    assert_eq!(
+        err.raw_os_error(),
+        i32::try_from(ERROR_SHARING_VIOLATION).ok(),
+        "{err}"
+    );
+    step(Sharing::Leaf).unwrap();
+    drop(deleter);
+    step(Sharing::Directory).unwrap();
+}
+
+/// An ancestor the user may pass through and not list is walked: the step
+/// asks the traverse right, not the right to list, and only the listing,
+/// which reopens the handle, refuses.
+#[test]
+fn an_ancestor_the_user_may_traverse_but_not_list_is_walked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a");
+    std::fs::create_dir_all(a.join("b")).unwrap();
+    std::fs::write(a.join("b/f"), b"x").unwrap();
+    let _denied = Denied::new(&a, "RD");
+
+    assert!(walked(&a.join("b/f")).stat().is_some());
+    let err = entered(&a).read_dir().map(|_| ()).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
+}
+
+/// A file whose traverse right is denied is a file where a directory was
+/// expected, not a directory the user may not enter.
+#[test]
+fn a_file_in_a_directorys_place_is_not_a_directory_whatever_its_rights() {
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("f");
+    std::fs::write(&f, b"x").unwrap();
+    let _denied = Denied::new(&f, "X");
+
+    let err = walk(&spelled(&f.join("g")), LeafMode::Follow)
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::NotADirectory, "{err}");
+}
+
+/// A directory is made under the held handle, whatever its path, and a taken
+/// name is `AlreadyExists`; a spelling through the volume's GUID, which has no
+/// drive letter, lands in the same place.
+#[test]
+fn create_dir_makes_the_entry_under_the_held_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let create = |at: &Path, made: &str| {
+        writing(entered(at).absent(name(made))).create_dir(Visibility::Public)
+    };
+
+    let made = create(tmp.path(), "made").unwrap();
+    assert!(made.real().as_path().ends_with("made"), "{}", made.real());
+    assert!(tmp.path().join("made").is_dir());
+    let again = create(tmp.path(), "made").map(|_| ()).unwrap_err();
+    assert_eq!(again.kind(), io::ErrorKind::AlreadyExists, "{again}");
+
+    let guid = volume_spelling(tmp.path());
+    drop(create(&guid, "by_guid").unwrap());
+    assert!(tmp.path().join("by_guid").is_dir());
+    let again = create(&guid, "by_guid").map(|_| ()).unwrap_err();
+    assert_eq!(again.kind(), io::ErrorKind::AlreadyExists, "{again}");
+}
+
+/// A staged write that is dropped, and one whose commit fails, discard the
+/// sibling by its own handle: the directory shows the target alone.
+#[test]
+fn a_dropped_or_failed_staged_write_leaves_no_sibling() {
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("f");
+    std::fs::write(&f, b"old").unwrap();
+
+    drop(walked(&f).stage().unwrap());
+    assert_eq!(names_in(tmp.path()), ["f"]);
+
+    let mut staged = walked(&f).stage().unwrap();
+    staged.file().write_all(b"new").unwrap();
+    std::fs::remove_file(&f).unwrap();
+    std::fs::create_dir(&f).unwrap();
+    assert!(staged.publish().is_err());
+    assert_eq!(names_in(tmp.path()), ["f"]);
+    assert!(f.is_dir());
+}
+
+/// A volume's refusal of an information class is the two codes FAT answers
+/// and no other: a denial is not one.
+#[test]
+fn an_unsupported_class_is_the_two_codes_and_no_other() {
+    let refused =
+        |code: u32| host::unsupported_class(&io::Error::from_raw_os_error(code.cast_signed()));
+    assert!(refused(ERROR_INVALID_PARAMETER));
+    assert!(refused(ERROR_NOT_SUPPORTED));
+    assert!(!refused(ERROR_ACCESS_DENIED));
 }
 
 /// `FileStandardInfo` carries the length, which a step and a listing answer.
@@ -299,16 +509,17 @@ fn a_component_renamed_is_adopted_and_one_moved_is_refused() {
     std::fs::create_dir(tmp.path().join("e")).unwrap();
     std::fs::write(tmp.path().join("d/old"), b"x").unwrap();
     let parent = entered(&tmp.path().join("d"));
-    let child = host::step(&parent.handle, &name("old"), Sharing::Leaf).unwrap();
+    let child = host::step(&parent.node.held, &name("old"), Sharing::Leaf).unwrap();
     let file = child.handle.as_ref().unwrap();
     let volume = child.step.id.volume;
 
     std::fs::rename(tmp.path().join("d/old"), tmp.path().join("d/new")).unwrap();
-    let (stored, _) = host::stored_name(&parent.handle.info, &name("old"), file, volume).unwrap();
+    let (stored, _) =
+        host::stored_name(&parent.node.held.info, &name("old"), file, volume).unwrap();
     assert_eq!(stored, name("new"));
 
     std::fs::rename(tmp.path().join("d/new"), tmp.path().join("e/new")).unwrap();
-    let err = host::stored_name(&parent.handle.info, &name("new"), file, volume)
+    let err = host::stored_name(&parent.node.held.info, &name("new"), file, volume)
         .map(|_| ())
         .unwrap_err();
     assert!(err.to_string().contains("moved during the walk"), "{err}");

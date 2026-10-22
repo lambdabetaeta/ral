@@ -42,6 +42,10 @@ pub enum Probe {
     Grants,
     #[cfg(feature = "test-util")]
     WorkerCount,
+    /// How many layers the shell's stack holds, the ambient root included:
+    /// what a test reads to see a frame leak.
+    #[cfg(feature = "test-util")]
+    GrantDepth,
 }
 
 /// Where a listed worker is in its lifecycle: a consumed worker has left the

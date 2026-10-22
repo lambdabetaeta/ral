@@ -2,8 +2,8 @@ use super::{
     FsAllow, FsRules, GrantKind, ProjectionKey, filter_out_granted, profile_name,
     refuse_deny_meeting_grant,
 };
-use crate::capability::{Extent, GrantPath};
-use crate::path::{FrozenPath, RealPath};
+use crate::capability::GrantPath;
+use crate::path::{Excluded, FrozenPath, RealPath, Trace};
 use crate::sandbox::Refusal;
 use crate::sandbox::carve::{Carving, carve};
 use crate::test_helper::{place, real as walked};
@@ -63,7 +63,7 @@ fn prefixes(paths: &[&str]) -> Vec<FsAllow> {
         .iter()
         .map(|p| {
             FsAllow::Prefix(
-                GrantPath::<Extent>::allowing(FrozenPath::from_surface(p)).expect("a prefix walks"),
+                GrantPath::<Trace>::walk(FrozenPath::from_surface(p)).expect("a prefix walks"),
             )
         })
         .collect()
@@ -75,7 +75,10 @@ fn rules(read: &[&str], write: &[&str], deny: &[&str]) -> FsRules {
         write: prefixes(write),
         deny: deny
             .iter()
-            .map(|d| GrantPath::walk(FrozenPath::from_surface(d)).expect("an exclusion walks"))
+            .map(|d| {
+                GrantPath::<Excluded>::walk(FrozenPath::from_surface(d))
+                    .expect("an exclusion walks")
+            })
             .collect(),
         pinned_dirs: Vec::new(),
     }

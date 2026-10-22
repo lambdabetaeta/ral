@@ -252,8 +252,9 @@ taken:
   worse bug: a subtree missing from a baseline for an ordinary reason (a
   share blipping, a cloud placeholder unhydrated) came back as *created by
   the assistant*. A `root` that is gone is an error, not an empty manifest,
-  for the same reason at the limit. Empty folders and symlink targets
-  recorded, links never followed. A `Stop` the walk reads once per entry
+  and so is a root the walk could not enter: the walk reports a directory it
+  did not enter as `Unentered`, never as seen; for the same reason at the
+  limit. Empty folders and symlink targets recorded, links never followed. A `Stop` the walk reads once per entry
   ends a walk nobody is waiting for any more; a stopped walk raises
   `WalkError::Stopped` and answers an error, never a short manifest, since a
   truncated record reads as one where everything unread had been deleted.

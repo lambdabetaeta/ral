@@ -171,6 +171,7 @@ fn a_streaming_appends_images_are_read_from_the_derived_reader() {
 
 /// A file the user may not read has no before-image, and is written all the
 /// same.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_write_to_an_unreadable_file_lands_with_no_before_image() {
     use std::os::unix::fs::PermissionsExt;
@@ -195,4 +196,33 @@ fn a_write_to_an_unreadable_file_lands_with_no_before_image() {
     );
     std::fs::set_permissions(&target, PermissionsExt::from_mode(0o600)).unwrap();
     assert_eq!(std::fs::read(&target).unwrap(), b"new\n");
+}
+
+/// A file the walk cannot hold is stated, and a stated leaf is not staged
+/// over: the write is refused and the file is left as it was.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_write_to_a_file_the_walk_cannot_hold_is_refused_and_leaves_it() {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::geteuid().is_root() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let target = dir.join("f");
+    std::fs::write(&target, b"old\n").unwrap();
+    std::fs::set_permissions(&target, PermissionsExt::from_mode(0o200)).unwrap();
+    let mut shell = fresh_shell();
+    let (result, _events) = run(
+        &mut shell,
+        &format!("/bin/echo new > '{}'", target.display()),
+    );
+    assert!(result.is_err(), "a stated leaf is not staged over");
+    std::fs::set_permissions(&target, PermissionsExt::from_mode(0o600)).unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), b"old\n");
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count(),
+        1,
+        "nothing staged"
+    );
 }

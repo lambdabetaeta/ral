@@ -82,13 +82,15 @@ the walk's to say, once. That makes the algebra a pure function of the layers.
 
 - **An allowance is a position and is never resolved again.** An fs prefix or
   an exec `Path`/`Dir` key keeps the `RealPath` its walk reached, so a symlink
-  put in its place later redirects nothing. A spelling that walks to the root is
-  `Extent::Everywhere`.
+  put in its place later redirects nothing. The root spelling `/` is
+  `Extent::Everywhere` on every host, resolved by polarity with no walk (Windows
+  has no `/` to walk); a spelling that walks to the root on Unix is the same.
 - **An exclusion is the object its spelling reached.** `walk_excluded` holds the
   object and, where it was a link, its target; the exclusion matches by position
   or by that object, so it holds under any new name the object gets, and a link
   retargeted later is still the denied link. A bare program name is resolved
-  where the grant is decoded, on the decoding environment's `PATH`.
+  where the grant is decoded, on the decoding environment's `PATH`, absolute
+  entries alone.
 - **Resolving refuses a path that is not Unicode** where it is a spelling
   (`FrozenPath::freeze`); a position is kept native and byte-exact.
 - **A guest's grant is resolved on the guest's own filesystem, not the host's.**

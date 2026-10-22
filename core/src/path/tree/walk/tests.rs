@@ -139,6 +139,31 @@ fn a_dangling_link_is_an_entry_of_kind_symlink() {
 }
 
 #[test]
+fn a_dangling_root_link_is_the_only_entry_and_a_link() {
+    let (_tmp, root) = tmp();
+    let at = root.join("dangling");
+    for target in [root.join("nowhere"), root.join("gone").join("x")] {
+        link(&target, &at);
+        for walk in [
+            Walk::all(&lexical(&at)),
+            Walk::all(&lexical(&at)).follow_links(),
+        ] {
+            let entries = run(walk, open());
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].shown, lexical(&at));
+            assert!(matches!(
+                &entries[0].found,
+                Found::Seen(stat) if stat.kind == Kind::Symlink
+            ));
+        }
+        #[cfg(unix)]
+        std::fs::remove_file(&at).unwrap();
+        #[cfg(windows)]
+        std::fs::remove_dir(&at).unwrap();
+    }
+}
+
+#[test]
 fn a_directory_the_region_refuses_is_not_entered() {
     let (_tmp, root) = tmp();
     lay(&root, &[("open/a", ""), ("secret/b", "")]);
@@ -226,6 +251,39 @@ fn the_filter_and_the_region_compose() {
     let mut names = named(&run(walk, reading(&root, &[&root.join("a/y")])), &root);
     names.sort();
     assert_eq!(names, ["a", "a/x"]);
+}
+
+#[test]
+fn a_link_followed_elsewhere_splices_dotdot_from_where_it_landed() {
+    let (_tmp, root) = tmp();
+    lay(
+        &root,
+        &[("a/b/", ""), ("a/c/t.txt", ""), ("c/wrong.txt", "")],
+    );
+    link(&root.join("a/b"), &root.join("link"));
+    link(Path::new("../c"), &root.join("a/b/next"));
+    let names = seen(&root, Walk::all(&lexical(&root)).follow_links());
+    assert!(names.contains(&"link/next/t.txt".to_string()), "{names:?}");
+    assert!(names.contains(&"a/b/next/t.txt".to_string()), "{names:?}");
+    assert!(
+        !names.iter().any(|name| name.starts_with("link/next/wrong")),
+        "{names:?}"
+    );
+}
+
+#[test]
+fn an_ignore_file_that_links_above_its_directory_applies() {
+    let (_tmp, root) = tmp();
+    lay(
+        &root,
+        &[
+            ("rules", "skip.txt\n"),
+            ("sub/skip.txt", ""),
+            ("sub/keep.txt", ""),
+        ],
+    );
+    link(Path::new("../rules"), &root.join("sub/.ignore"));
+    assert_eq!(kept(&root.join("sub")), ["keep.txt"]);
 }
 
 #[test]
@@ -377,6 +435,26 @@ fn info_exclude_applies_through_a_dot_git_pointer_file() {
 }
 
 #[test]
+fn an_info_exclude_keeps_the_lines_before_one_that_is_not_utf8() {
+    let (_tmp, root) = tmp();
+    lay(
+        &root,
+        &[
+            ("repo/.git/", ""),
+            ("repo/skip.txt", ""),
+            ("repo/keep.txt", ""),
+        ],
+    );
+    std::fs::create_dir_all(root.join("repo/.git/info")).unwrap();
+    std::fs::write(
+        root.join("repo/.git/info/exclude"),
+        b"skip.txt\n\xff\xfekeep.txt\n",
+    )
+    .unwrap();
+    assert_eq!(kept(&root.join("repo")), ["keep.txt"]);
+}
+
+#[test]
 fn a_linked_worktree_reads_info_exclude_through_its_commondir() {
     let (_tmp, root) = tmp();
     let linked = root.join("main/.git/worktrees/w");
@@ -523,6 +601,52 @@ fn a_directory_the_open_refuses_is_unentered_with_its_error() {
             if e.kind() == io::ErrorKind::PermissionDenied
     ));
     assert_eq!(named(&entries, &root), ["closed", "open"]);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_root_the_walk_cannot_enter_is_unentered_with_the_walks_error() {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skip: root enters every directory");
+        return;
+    }
+    let (_tmp, root) = tmp();
+    lay(&root, &[("closed/inside", "")]);
+    let closed = root.join("closed");
+    for mode in [0o000, 0o400] {
+        std::fs::set_permissions(&closed, PermissionsExt::from_mode(mode)).unwrap();
+        let entries = run(Walk::all(&lexical(&closed)), open());
+        std::fs::set_permissions(&closed, PermissionsExt::from_mode(0o700)).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].depth, 0);
+        assert!(matches!(
+            &entries[0].found,
+            Found::Unentered { stat: Stat { kind: Kind::Dir, .. }, why: Unentered::Refused(e) }
+                if e.kind() == io::ErrorKind::PermissionDenied
+        ));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_root_beneath_an_unenterable_directory_is_unseen() {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skip: root enters every directory");
+        return;
+    }
+    let (_tmp, root) = tmp();
+    lay(&root, &[("closed/inner/f", "")]);
+    let closed = root.join("closed");
+    std::fs::set_permissions(&closed, PermissionsExt::from_mode(0o000)).unwrap();
+    let entries = run(Walk::all(&lexical(&closed.join("inner"))), open());
+    std::fs::set_permissions(&closed, PermissionsExt::from_mode(0o700)).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(matches!(
+        &entries[0].found,
+        Found::Unseen(e) if e.kind() == io::ErrorKind::PermissionDenied
+    ));
 }
 
 #[test]

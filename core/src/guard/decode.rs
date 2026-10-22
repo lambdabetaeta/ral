@@ -12,7 +12,7 @@
 //! The runtime cannot tell a record from a map, so both are read, at every
 //! depth.  Every list denotes a set: a repeat adds nothing and is no error.
 
-use super::freeze::{Anchor, FreezeCtx, Place, PolicyError, Selector};
+use super::freeze::{Anchor, FreezeCtx, Place, Placed, PolicyError, Selector};
 use crate::capability::Polar;
 use crate::capability::{
     EditorVerb, ExecRules, FsLayer, GrantLayer, GrantPath, Keyed, Net, Rule, ShellVerb, name_rules,
@@ -170,11 +170,15 @@ fn decode_place(value: &Value) -> Result<Place, PolicyError> {
 }
 
 /// The places of an fs list, each walked as polarity `W` walks.
-fn freeze_places<W: Polar>(list: &List, ctx: &FreezeCtx) -> Result<Vec<GrantPath<W>>, PolicyError> {
+fn freeze_places<W: Polar>(
+    list: &List,
+    ctx: &FreezeCtx,
+) -> Result<Vec<GrantPath<W::Grant>>, PolicyError> {
     list.iter()
         .filter_map(|item| {
             decode_place(&item)
                 .and_then(|place| ctx.walked::<W>(&place))
+                .and_then(|placed| placed.map(Placed::grant).transpose())
                 .transpose()
         })
         .collect()
@@ -189,14 +193,9 @@ fn decode_fs(value: &Value, err_prefix: &str, ctx: &FreezeCtx) -> Result<FsLayer
     let (mut read, mut write, mut deny) = (Vec::new(), Vec::new(), Vec::new());
     for (sub, paths) in table_of(value, "fs: [read: []]").map_err(&at)? {
         let list = |paths: &Value| list_of(paths, "places").map_err(&at);
-        let allowing = |list: &List| {
-            freeze_places::<Trace>(list, ctx)
-                .map(|paths| paths.into_iter().map(GrantPath::extent).collect::<Vec<_>>())
-                .map_err(&at)
-        };
         match sub {
-            "read" => read = allowing(&list(&paths)?)?,
-            "write" => write = allowing(&list(&paths)?)?,
+            "read" => read = freeze_places::<Trace>(&list(&paths)?, ctx).map_err(&at)?,
+            "write" => write = freeze_places::<Trace>(&list(&paths)?, ctx).map_err(&at)?,
             "deny" => deny = freeze_places::<Excluded>(&list(&paths)?, ctx).map_err(&at)?,
             _ => return Err(at(PolicyError::new(nested("fs").unknown_key(sub)))),
         }
@@ -274,10 +273,12 @@ fn path_shaped(name: &str) -> bool {
 /// An unwrapped place names one executable; a directory there is a mistake
 /// the author can fix by wrapping it in `dir`.
 fn file_rules<W: Keyed>(place: &Place, ctx: &FreezeCtx) -> Result<Vec<Rule>, PolicyError> {
-    let Some(walked) = ctx.walked::<W>(place)? else {
+    let Some(placed) = ctx.walked::<W>(place)? else {
         return Ok(vec![]);
     };
-    if walked.real.followed().kind() == Some(Kind::Dir) {
+    if let Placed::Walked(walked) = &placed
+        && walked.real.followed().kind() == Some(Kind::Dir)
+    {
         let spelled = format!("`{} {}", place.tag(), quote_word(place.payload()));
         return Err(PolicyError::new(format!(
             "{} is a directory, so as an exec target it names a binary that \
@@ -289,7 +290,7 @@ fn file_rules<W: Keyed>(place: &Place, ctx: &FreezeCtx) -> Result<Vec<Rule>, Pol
             code(&format!("`dir {spelled}"))
         )));
     }
-    Ok(vec![W::file(walked)])
+    Ok(vec![W::file(placed.grant()?)?])
 }
 
 /// `dir D`: every directory `D`, a place or a selector, resolves to.
@@ -302,7 +303,11 @@ fn dir_rules<W: Keyed>(tag: &Tag, ctx: &FreezeCtx) -> Result<Vec<Rule>, PolicyEr
     let dirs = if let Some(selector) = selector_of(&inner)? {
         ctx.selector::<W>(selector)?
     } else if let Some(place) = place_of(&inner)? {
-        ctx.walked::<W>(&place)?.into_iter().collect()
+        ctx.walked::<W>(&place)?
+            .map(Placed::grant)
+            .transpose()?
+            .into_iter()
+            .collect()
     } else {
         return Err(unknown_tag(&DIR_TARGET, inner.label));
     };
@@ -433,11 +438,9 @@ pub fn decode_capability_map(
 )]
 mod tests {
     use super::*;
-    use crate::capability::{ExecAllow, ExecDeny};
+    use crate::capability::{ExecAllow, ExecDeny, FsAllow, FsOp};
     #[cfg(unix)]
     use crate::capability::{ExecDenial, Floor, Program, Withheld};
-    #[cfg(unix)]
-    use crate::capability::{FsAllow, FsOp};
     use crate::path::command_name_key;
     use crate::path::utf8;
     #[cfg(unix)]
@@ -1092,6 +1095,22 @@ mod tests {
             let why = refusal(&value);
             assert!(why.message.contains("filesystem root"), "{}", why.message);
         }
+    }
+
+    /// The root as an allowance is everywhere, on every host: an fs prefix,
+    /// an exec `dir`; as an exec file it is a directory, not a program.
+    #[test]
+    fn an_authored_root_allowance_is_everywhere() {
+        let root = tagged("absolute", "/");
+        let layer = decode(&rec(&[("fs", rec(&[("read", list(vec![root.clone()]))]))])).unwrap();
+        let everywhere = FsAllow::Prefix(GrantPath::everywhere());
+        let fs = layer.fs().expect("an fs layer").table(&FsOp::Read);
+        assert!(fs.allows().any(|a| *a == everywhere), "{fs:?}");
+        let rules = rules_of(exec(vec![dir(root.clone())], vec![])).unwrap();
+        let everywhere = ExecAllow::Dir(GrantPath::everywhere());
+        assert!(rules.allows().any(|a| *a == everywhere), "{rules:?}");
+        let why = exec_refusal(exec(vec![root], vec![]));
+        assert!(why.message.contains("a directory"), "{}", why.message);
     }
 
     /// So is a link that leads to it.

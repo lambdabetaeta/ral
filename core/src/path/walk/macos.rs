@@ -1,7 +1,8 @@
 //! The macOS host: a directory is entered by search authority alone, a leaf
 //! is held by an event-only descriptor that names it without a read
-//! permission, and the name a step records is the one its directory stores,
-//! which XNU's by-name lookup does not by itself prove.
+//! permission, a special file is stated and never held, and the name a step
+//! records is the one its directory stores, which XNU's by-name lookup does
+//! not by itself prove.
 
 use super::unix::{self, oflags};
 use super::{Access, Child, EntryName, Held, Kind, ObjectId, RootName, Seen, Sharing, Stat, Step};
@@ -15,11 +16,12 @@ use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 pub(super) use super::unix::{
-    DirInfo, Lister, copy_mode, create, create_sibling, is_writable, list, mkdir, open_discard,
-    rename_over, sync_dir, unlink,
+    DirInfo, Lister, copy_mode, create, create_sibling, discard, is_writable, list, mkdir,
+    open_discard, rename_over, sync_dir,
 };
 
 /// The identity a by-name `stat` reports, for a caller comparing it with
@@ -60,16 +62,6 @@ fn moved(name: &EntryName) -> io::Error {
     ))
 }
 
-/// `error` of a lookup of an entry the walk just found: absence now is a move,
-/// never a create target.
-fn gone(name: &EntryName, error: io::Error) -> io::Error {
-    if error.kind() == io::ErrorKind::NotFound {
-        moved(name)
-    } else {
-        error
-    }
-}
-
 /// `/`, held as a search handle.
 #[allow(
     clippy::disallowed_methods,
@@ -82,26 +74,29 @@ pub(super) fn open_root(_root: &RootName) -> io::Result<Held> {
         Mode::empty(),
     )?);
     Ok(Held {
-        file,
+        file: Arc::new(file),
         info: DirInfo,
     })
 }
 
-/// The entry `name` of `dir` as a step holds it: `None` where the OS refused
-/// the hold for permission, so the object is stated and never held.
-///
-/// A directory step asks search authority alone, so a `--x` ancestor is
-/// walked; `EACCES` is an unenterable directory and `ENOENT` an absent one.
-/// Any other failure — XNU answers `O_DIRECTORY` on a link `ENOTDIR` before
-/// it would say `ELOOP` — is not a classification, so the entry is opened as
-/// a leaf and told by its own `fstat`.  `O_SYMLINK` opens a link itself, and
-/// is not combined with `O_NOFOLLOW`, which XNU refuses on a link whatever
-/// else is set.
+/// The entry `name` of `parent`, looked up first so a special file is known
+/// before anything opens it, then opened where it can be held without
+/// touching it — a directory by search authority, a file or a link by an
+/// event-only descriptor — and stated otherwise: a special file, or a leaf
+/// the OS refused the hold for permission.  A directory step asks search
+/// authority alone, so a `--x` ancestor is walked; `EACCES` is an unenterable
+/// directory.  `O_SYMLINK` opens a link itself, and is not combined with
+/// `O_NOFOLLOW`, which XNU refuses on a link whatever else is set.  The
+/// handle's identity must be the lookup's, else the entry moved.
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:walk-step] Opens one component relative to a held directory and never follows it, to reach the object a grant will judge: path resolution, not the model's data I/O; the card belongs to the site that then opens the leaf."
 )]
-fn open_entry(dir: &File, name: &EntryName, sharing: Sharing) -> io::Result<Option<File>> {
+pub(super) fn step(parent: &Held, name: &EntryName, sharing: Sharing) -> io::Result<Child> {
+    let dir = &*parent.file;
+    let looked = lookup(dir, name.as_os_str())?;
+    #[cfg(test)]
+    super::tests::after_lookup();
     let open = |flags: OFlags| {
         rustix::fs::openat(
             dir,
@@ -109,34 +104,30 @@ fn open_entry(dir: &File, name: &EntryName, sharing: Sharing) -> io::Result<Opti
             flags | OFlags::CLOEXEC,
             Mode::empty(),
         )
+        .map(File::from)
     };
-    if sharing == Sharing::Directory {
-        match open(O_SEARCH | OFlags::NOFOLLOW) {
-            Ok(fd) => return Ok(Some(File::from(fd))),
-            Err(e @ (Errno::ACCESS | Errno::NOENT)) => return Err(e.into()),
-            Err(_) => {}
+    let handle = match looked.seen.stat.kind {
+        Kind::Other => None,
+        Kind::Dir if sharing == Sharing::Directory => {
+            Some(open(O_SEARCH | OFlags::DIRECTORY | OFlags::NOFOLLOW)?)
         }
-    }
-    match open(O_EVTONLY | OFlags::SYMLINK | OFlags::NOCTTY | OFlags::NONBLOCK) {
-        Ok(fd) => Ok(Some(File::from(fd))),
-        Err(Errno::ACCESS | Errno::PERM) => Ok(None),
-        Err(e) => Err(e.into()),
-    }
-}
-
-/// The entry `name` of `parent`, opened and then named as `parent` stores it.
-pub(super) fn step(parent: &Held, name: &EntryName, sharing: Sharing) -> io::Result<Child> {
-    let dir = &parent.file;
-    let handle = open_entry(dir, name, sharing)?;
-    let (seen, stored) = if let Some(file) = &handle {
-        let seen = seen(file)?;
-        let stored = stored_name(dir, name, seen.id)?;
-        (seen, stored)
-    } else {
-        let looked = lookup(dir, name.as_os_str()).map_err(|e| gone(name, e))?;
-        let stored = settle(dir, name, looked.seen.id, &looked.name)?;
-        (looked.seen, stored)
+        _ => match open(O_EVTONLY | OFlags::SYMLINK | OFlags::NOCTTY | OFlags::NONBLOCK) {
+            Ok(file) => Some(file),
+            Err(Errno::ACCESS | Errno::PERM) => None,
+            Err(e) => return Err(e.into()),
+        },
     };
+    let seen = match &handle {
+        Some(file) => {
+            let seen = seen(file)?;
+            if seen.id != looked.seen.id {
+                return Err(moved(name));
+            }
+            seen
+        }
+        None => looked.seen,
+    };
+    let stored = settle(dir, name, seen.id, &looked.name)?;
     let step = Step {
         name: stored,
         id: seen.id,
@@ -150,47 +141,129 @@ pub(super) fn step(parent: &Held, name: &EntryName, sharing: Sharing) -> io::Res
     })
 }
 
-/// The name `dir` stores for the entry `name` whose object, held by the walk,
-/// has identity `id`.  A query by name is not a proof: XNU fills the name
-/// from the vnode, so of two hard links `a` and `b` in one directory a query
-/// for `a` can answer `b`.  The query's identity must be the handle's, else
-/// the entry moved; its answer is then judged by [`settle`].
-pub(super) fn stored_name(dir: &File, name: &EntryName, id: ObjectId) -> io::Result<EntryName> {
-    let looked = lookup(dir, name.as_os_str()).map_err(|e| gone(name, e))?;
-    if looked.seen.id != id {
-        return Err(moved(name));
-    }
-    settle(dir, name, id, &looked.name)
-}
-
 /// What the lookup of `name` answered, `answered`, as the name of the entry
-/// of `dir` whose identity is `id`.  A spelling of `name` under every fold a
-/// filesystem applies is the entry's own, since a directory holds no two
-/// entries with one key.  Otherwise it is another hard link's name, and the
-/// directory is listed for the entry with `id` and `name`'s key, which is by
-/// construction an entry of `dir`; none refuses.  A directory that cannot be
-/// read for the listing refuses too: the name is not guessed.
+/// of `dir` whose identity is `id`.  An answer spelled as the name asked is
+/// the entry's own: a volume that folds cannot hold two entries in one fold
+/// class, and one that does not resolved exactly that spelling.  Otherwise
+/// the directory is listed for the entries of `id` ([`stored_entry`]).
 pub(super) fn settle(
     dir: &File,
     name: &EntryName,
     id: ObjectId,
     answered: &OsStr,
 ) -> io::Result<EntryName> {
-    let key = collision_key(name.as_os_str());
-    if *collision_key(answered) == *key {
-        return Ok(EntryName::parse(answered)?);
+    if answered == name.as_os_str() {
+        return Ok(name.clone());
     }
-    stored_entry(dir, id, &key)
-        .map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!(
-                    "cannot learn the stored name of {}, a hard link whose directory will not list: {e}",
-                    shown(name.as_os_str())
-                ),
+    stored_entry(dir, id, name)
+}
+
+/// The name `dir` stores for the entry `name` of identity `id`: the entries of
+/// that identity in the directory's listing, decided by [`pick`].  A directory
+/// that cannot be read for the listing refuses: the name is not guessed.
+fn stored_entry(dir: &File, id: ObjectId, name: &EntryName) -> io::Result<EntryName> {
+    let entries = of_identity(dir, id).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "cannot learn the stored name of {}, a hard link whose directory will not list: {e}",
+                shown(name.as_os_str())
+            ),
+        )
+    })?;
+    pick(&entries, name)
+}
+
+/// The names of every entry of `dir` whose identity is `id`, found by listing
+/// it to the end through a read handle reopened from it.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:walk-stored-name] Lists a held directory for the entries whose identity the walk holds, to learn the name the directory stores for it: path resolution, not turn-time model data I/O."
+)]
+fn of_identity(dir: &File, id: ObjectId) -> io::Result<Vec<OsString>> {
+    let reader = unix::reopen(dir)?;
+    let mut list = wanted(
+        libc::ATTR_CMN_RETURNED_ATTRS
+            | libc::ATTR_CMN_NAME
+            | libc::ATTR_CMN_DEVID
+            | libc::ATTR_CMN_FILEID,
+        0,
+    );
+    let mut buf = vec![0u8; 1 << 16];
+    let mut names = Vec::new();
+    loop {
+        // SAFETY: `reader` is a live descriptor, and `list` and `buf` outlive
+        // the call, which writes at most the `buf.len()` bytes it is told of.
+        let count = unsafe {
+            libc::getattrlistbulk(
+                reader.as_raw_fd(),
+                (&raw mut list).cast(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                0,
             )
-        })?
-        .ok_or_else(|| moved(name))
+        };
+        match usize::try_from(count) {
+            Err(_) => return Err(io::Error::last_os_error()),
+            Ok(0) => return Ok(names),
+            Ok(count) => names.extend(
+                parse_bulk(&buf, count)?
+                    .into_iter()
+                    .filter_map(|(name, found)| (found == id).then_some(name)),
+            ),
+        }
+    }
+}
+
+/// The `count` records of a `getattrlistbulk` answer that identify their
+/// entry.  A record of an entry the kernel could not stat carries its name
+/// alone, and is not the one sought, whatever its reason.
+pub(super) fn parse_bulk(buf: &[u8], count: usize) -> io::Result<Vec<(OsString, ObjectId)>> {
+    const IDENTIFIED: u32 = libc::ATTR_CMN_NAME | libc::ATTR_CMN_DEVID | libc::ATTR_CMN_FILEID;
+    let mut rest = buf;
+    let mut found = Vec::new();
+    for _ in 0..count {
+        let mut reply = Reply::new(rest)?;
+        rest = &rest[reply.buf.len()..];
+        if reply.common & IDENTIFIED != IDENTIFIED {
+            continue;
+        }
+        let name = reply.name()?;
+        let dev = reply.u32()?;
+        let ino = reply.u64()?;
+        found.push((
+            name,
+            ObjectId {
+                dev: u64::from(dev),
+                ino,
+            },
+        ));
+    }
+    Ok(found)
+}
+
+/// The entry of `entries`, those of one object, that `name` asked for: `name`
+/// itself where one is spelled so; else the unique one under `name`'s fold,
+/// which is coarser than every volume's, so equality under it proves nothing
+/// of which entry a name resolved to.  None is a move; several refuse.
+pub(super) fn pick(entries: &[OsString], name: &EntryName) -> io::Result<EntryName> {
+    if entries.iter().any(|entry| entry == name.as_os_str()) {
+        return Ok(name.clone());
+    }
+    let key = collision_key(name.as_os_str());
+    let folded: Vec<_> = entries
+        .iter()
+        .filter(|entry| *collision_key(entry) == *key)
+        .collect();
+    match folded.as_slice() {
+        [only] => Ok(EntryName::parse(only)?),
+        [] => Err(moved(name)),
+        several => Err(io::Error::other(format!(
+            "{} is one of {} spellings of one object in this directory, and the walk cannot tell which the directory stores",
+            shown(name.as_os_str()),
+            several.len()
+        ))),
+    }
 }
 
 /// A `getattrlist` answer, read in the order the kernel packs it: its length,
@@ -266,9 +339,9 @@ fn stamp(sec: i64, nsec: i64) -> Option<SystemTime> {
 
 /// What one lookup of an entry by name answered: what it is, and the name the
 /// vnode gave.
-struct Looked {
-    seen: Seen,
-    name: OsString,
+pub(super) struct Looked {
+    pub(super) seen: Seen,
+    pub(super) name: OsString,
 }
 
 const fn wanted(common: u32, file: u32) -> libc::attrlist {
@@ -289,16 +362,16 @@ const fn wanted(common: u32, file: u32) -> libc::attrlist {
     reason = "[silent:walk-stat] Looks up one entry of a held directory by name without following it: a metadata read, never turn-time data I/O.  It needs no permission on the object, which is how an object that cannot be held is still stated."
 )]
 fn lookup(dir: &File, name: &OsStr) -> io::Result<Looked> {
-    const COMMON: u32 = libc::ATTR_CMN_NAME
-        | libc::ATTR_CMN_DEVID
-        | libc::ATTR_CMN_OBJTYPE
-        | libc::ATTR_CMN_CRTIME
-        | libc::ATTR_CMN_MODTIME
-        | libc::ATTR_CMN_ACCTIME
-        | libc::ATTR_CMN_ACCESSMASK
-        | libc::ATTR_CMN_FILEID;
     let mut list = wanted(
-        libc::ATTR_CMN_RETURNED_ATTRS | COMMON,
+        libc::ATTR_CMN_RETURNED_ATTRS
+            | libc::ATTR_CMN_NAME
+            | libc::ATTR_CMN_DEVID
+            | libc::ATTR_CMN_OBJTYPE
+            | libc::ATTR_CMN_CRTIME
+            | libc::ATTR_CMN_MODTIME
+            | libc::ATTR_CMN_ACCTIME
+            | libc::ATTR_CMN_ACCESSMASK
+            | libc::ATTR_CMN_FILEID,
         libc::ATTR_FILE_DATALENGTH,
     );
     let c_name =
@@ -320,11 +393,24 @@ fn lookup(dir: &File, name: &OsStr) -> io::Result<Looked> {
     if rc != 0 {
         return Err(io::Error::last_os_error());
     }
-    let mut reply = Reply::new(&buf)?;
-    if reply.common & COMMON != COMMON {
+    parse_lookup(&buf)
+}
+
+/// A lookup's answer, read by the set of attributes it returned: an attribute
+/// a volume lacks is absent from the set and the buffer.  The name, identity,
+/// kind and mode are required, the timestamps are not.
+pub(super) fn parse_lookup(buf: &[u8]) -> io::Result<Looked> {
+    const REQUIRED: u32 = libc::ATTR_CMN_NAME
+        | libc::ATTR_CMN_DEVID
+        | libc::ATTR_CMN_OBJTYPE
+        | libc::ATTR_CMN_ACCESSMASK
+        | libc::ATTR_CMN_FILEID;
+    let mut reply = Reply::new(buf)?;
+    let common = reply.common;
+    if common & REQUIRED != REQUIRED {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "this volume does not answer what a lookup by name asks",
+            "this volume does not answer the name, identity, kind and mode of an entry, which a walk needs",
         ));
     }
     let name = reply.name()?;
@@ -335,9 +421,16 @@ fn lookup(dir: &File, name: &OsStr) -> io::Result<Looked> {
         VLNK => Kind::Symlink,
         _ => Kind::Other,
     };
-    let btime = reply.time()?;
-    let mtime = reply.time()?;
-    let atime = reply.time()?;
+    let mut time = |bit| {
+        if common & bit != 0 {
+            reply.time()
+        } else {
+            Ok(None)
+        }
+    };
+    let btime = time(libc::ATTR_CMN_CRTIME)?;
+    let mtime = time(libc::ATTR_CMN_MODTIME)?;
+    let atime = time(libc::ATTR_CMN_ACCTIME)?;
     let mode = reply.u32()? & 0o7777;
     let ino = reply.u64()?;
     let len = if reply.file & libc::ATTR_FILE_DATALENGTH != 0 {
@@ -363,57 +456,6 @@ fn lookup(dir: &File, name: &OsStr) -> io::Result<Looked> {
         },
         name,
     })
-}
-
-/// The entry of `dir` whose identity is `id` and whose name has collision key
-/// `key`, found by listing `dir` through a read handle reopened from it.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-stored-name] Lists a held directory for the one entry whose identity the walk holds, to learn the name the directory stores for it: path resolution, not turn-time model data I/O."
-)]
-fn stored_entry(dir: &File, id: ObjectId, key: &OsStr) -> io::Result<Option<EntryName>> {
-    let reader = unix::reopen(dir)?;
-    let mut list = wanted(
-        libc::ATTR_CMN_RETURNED_ATTRS
-            | libc::ATTR_CMN_NAME
-            | libc::ATTR_CMN_DEVID
-            | libc::ATTR_CMN_FILEID,
-        0,
-    );
-    let mut buf = vec![0u8; 1 << 16];
-    loop {
-        // SAFETY: `reader` is a live descriptor, and `list` and `buf` outlive
-        // the call, which writes at most the `buf.len()` bytes it is told of.
-        let count = unsafe {
-            libc::getattrlistbulk(
-                reader.as_raw_fd(),
-                (&raw mut list).cast(),
-                buf.as_mut_ptr().cast(),
-                buf.len(),
-                0,
-            )
-        };
-        match count {
-            ..0 => return Err(io::Error::last_os_error()),
-            0 => return Ok(None),
-            _ => {}
-        }
-        let mut rest = &buf[..];
-        for _ in 0..count {
-            let mut reply = Reply::new(rest)?;
-            rest = &rest[reply.buf.len()..];
-            let name = reply.name()?;
-            let dev = reply.u32()?;
-            let ino = reply.u64()?;
-            let entry = ObjectId {
-                dev: u64::from(dev),
-                ino,
-            };
-            if entry == id && *collision_key(&name) == *key {
-                return Ok(Some(EntryName::parse(&name)?));
-            }
-        }
-    }
 }
 
 /// What `f` is, by `fstat` of the descriptor itself.
@@ -493,6 +535,27 @@ pub(super) fn derive(
     }
     if regular {
         rustix::fs::fcntl_setfl(&file, rustix::fs::fcntl_getfl(&file)? - OFlags::NONBLOCK)?;
+    }
+    Ok(file)
+}
+
+/// A data handle on the special file `name` of `dir`, opened by name and
+/// verified to be one: macOS cannot hold a FIFO, a socket or a device without
+/// opening it, so the walk states it and a stream is opened here.  Not
+/// `O_NONBLOCK`: a FIFO's open is its rendezvous, blocking as a shell's does.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[surface:walk-reopen-special] The one open of a stated special file, by name under its held directory and verified to be a special file, since macOS has no hold that does not open it.  Every caller surfaces it as `walk-reopen`'s do: a write's before- and after-images ride the card of the operation that asked for them."
+)]
+pub(super) fn open_special(dir: &File, name: &EntryName, access: Access) -> io::Result<File> {
+    let file = File::from(rustix::fs::openat(
+        dir,
+        name.as_os_str(),
+        oflags(access) | OFlags::NOFOLLOW | OFlags::NOCTTY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?);
+    if seen(&file)?.stat.kind != Kind::Other {
+        return Err(moved(name));
     }
     Ok(file)
 }

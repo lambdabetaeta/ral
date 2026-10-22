@@ -77,3 +77,108 @@ fn gitdir_outside_a_repository_falls_back_to_the_cwd() {
     // a cwd with no `.git` anywhere above it — `/` is the one such directory.
     assert_eq!(frozen(Path::new("/")), "/");
 }
+
+/// A linked worktree's git directory names the working tree's `.git` file back
+/// in its `gitdir` file.
+#[test]
+fn gitdir_takes_a_linked_worktrees_git_directory_that_claims_it_back() {
+    let root = root("linked");
+    let main = root.join("main/.git/worktrees/w");
+    std::fs::create_dir_all(&main).unwrap();
+    std::fs::create_dir_all(root.join("wt")).unwrap();
+    std::fs::write(main.join("gitdir"), format!("{}/wt/.git\n", root.display())).unwrap();
+    std::fs::write(
+        root.join("wt/.git"),
+        format!("gitdir: {}\n", main.display()),
+    )
+    .unwrap();
+
+    assert_eq!(frozen(&root.join("wt")), main.display().to_string());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A split repository names its tree in `core.worktree`.
+#[test]
+fn gitdir_takes_a_split_repository_whose_config_claims_the_tree() {
+    let root = root("split");
+    std::fs::create_dir_all(root.join("gd")).unwrap();
+    std::fs::create_dir_all(root.join("wt")).unwrap();
+    std::fs::write(
+        root.join("gd/config"),
+        format!("[core]\n\tworktree = {}/wt\n", root.display()),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("wt/.git"),
+        format!("gitdir: {}/gd\n", root.display()),
+    )
+    .unwrap();
+
+    assert_eq!(
+        frozen(&root.join("wt")),
+        root.join("gd").display().to_string()
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A back-pointer that exists and names another tree claims nothing here.
+#[test]
+fn gitdir_refuses_a_pointer_whose_target_claims_another_tree() {
+    let root = root("other");
+    let main = root.join("main/.git/worktrees/w");
+    std::fs::create_dir_all(&main).unwrap();
+    std::fs::create_dir_all(root.join("wt")).unwrap();
+    std::fs::create_dir_all(root.join("other")).unwrap();
+    std::fs::write(root.join("other/.git"), "").unwrap();
+    std::fs::write(
+        main.join("gitdir"),
+        format!("{}/other/.git\n", root.display()),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("wt/.git"),
+        format!("gitdir: {}\n", main.display()),
+    )
+    .unwrap();
+
+    let err = refused(&root.join("wt"));
+    assert!(
+        err.message.contains("does not name this working tree back"),
+        "{err:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A claim whose tree the walk cannot hold is no claim: a held identity is the
+/// only proof.
+#[cfg(target_os = "macos")]
+#[test]
+fn gitdir_refuses_a_claim_the_walk_cannot_hold() {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::geteuid().is_root() {
+        return;
+    }
+    let root = root("unheld");
+    std::fs::create_dir_all(root.join("gd")).unwrap();
+    std::fs::create_dir_all(root.join("wt")).unwrap();
+    std::fs::write(
+        root.join("gd/config"),
+        format!("[core]\n\tworktree = {}/wt\n", root.display()),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("wt/.git"),
+        format!("gitdir: {}/gd\n", root.display()),
+    )
+    .unwrap();
+    let wt = root.join("wt");
+    std::fs::set_permissions(&wt, PermissionsExt::from_mode(0o300)).unwrap();
+
+    let err = refused(&wt);
+    std::fs::set_permissions(&wt, PermissionsExt::from_mode(0o700)).unwrap();
+    assert!(
+        err.message.contains("does not name this working tree back"),
+        "{err:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

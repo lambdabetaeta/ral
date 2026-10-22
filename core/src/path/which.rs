@@ -41,7 +41,7 @@ fn locate_at(
     // amplification to amortise, and a caller naming a file usually means
     // "is it there *now*": a binary this very run built.
     if names_a_path(name) {
-        let candidate = anchor_to_cwd(PathBuf::from(name), cwd);
+        let candidate = anchor_to_cwd(PathBuf::from(name), cwd)?;
         return is_executable_file(&candidate).then_some(candidate);
     }
     let path_value = path_value?;
@@ -208,30 +208,23 @@ pub(crate) fn names_a_path_for(name: &str, rules: PathRules) -> bool {
 /// The fold is not cosmetic: a resolved path travels on to the OS sandbox
 /// profile via [`SandboxProjection::of`](crate::sandbox::SandboxProjection::of), which
 /// matches literally, and the `/work/./bin/git` an unfolded `./bin` yields
-/// is covered by no `/work/bin/` the profile names.
-fn anchor_to_cwd(p: PathBuf, cwd: Option<&CwdPath>) -> PathBuf {
+/// is covered by no `/work/bin/` the profile names.  With no cwd a relative
+/// entry names nothing: there is no "here" to read it against.
+fn anchor_to_cwd(p: PathBuf, cwd: Option<&CwdPath>) -> Option<PathBuf> {
     let joined = match cwd {
-        Some(c) if !super::lex::is_absolute(&p) => c.as_path().join(p),
-        _ => p,
+        _ if super::lex::is_absolute(&p) => p,
+        Some(c) => c.as_path().join(p),
+        None => return None,
     };
-    super::lex::fold_dots(&joined)
+    Some(super::lex::fold_dots(&joined))
 }
 
 /// The one directory list behind [`locate`] and [`search`]; relative
-/// entries (`./bin`) anchor to `cwd`.
-///
-/// An **empty element is dropped, on every platform**.  POSIX reads one as the
-/// cwd — the forty-year-old implicit-`.`-on-`PATH` foot-gun — and on Windows a
-/// trailing `;` is ubiquitous noise, so honouring it would put every file of
-/// every directory the user `cd`s into on the search list; off Unix, where
-/// [`is_executable_file`] calls any file executable, that is every file
-/// outright.  A user who wants the cwd searched writes `.`, which
-/// [`anchor_to_cwd`] honours deliberately.  The filter runs on the element as
-/// written, before anchoring turns `""` into the cwd itself.
+/// entries (`./bin`) anchor to `cwd`, and with no cwd are dropped, as a
+/// grant's `path` selector and the bwrap search read `PATH`.
 pub fn path_dirs(path_value: impl AsRef<OsStr>, cwd: Option<&CwdPath>) -> Vec<PathBuf> {
     path_entries(path_value.as_ref())
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .map(|dir| anchor_to_cwd(dir, cwd))
+        .filter_map(|dir| anchor_to_cwd(dir, cwd))
         .collect()
 }
 
@@ -243,21 +236,19 @@ pub fn ral_path_entries(env: &EnvVars) -> Vec<PathBuf> {
     path_entries(OsStr::new(&raw)).collect()
 }
 
-/// [`path_dirs`] for a caller with no cwd to anchor to: the absolute
-/// entries alone, a relative or empty one dropped.  What a grant's `path`
-/// selector freezes and the sandbox walks for bwrap, neither of which has a
-/// shell's "here" to read a relative entry against.
-pub(crate) fn path_dirs_absolute(path_value: impl AsRef<OsStr>) -> Vec<PathBuf> {
-    path_entries(path_value.as_ref())
-        .filter(|dir| super::lex::is_absolute(dir))
-        .collect()
-}
-
 /// The entries of a `PATH`-style list, in order and as written, split on the
 /// host's separator (`:`, or `;` on Windows): the one place such a list is
 /// split.
-pub(crate) fn path_entries(path_value: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
-    std::env::split_paths(path_value)
+///
+/// An **empty element is dropped, on every platform**.  POSIX reads one as the
+/// cwd — the forty-year-old implicit-`.`-on-`PATH` foot-gun — and on Windows a
+/// trailing `;` is ubiquitous noise, so honouring it would put every file of
+/// every directory the user `cd`s into on the search list; off Unix, where
+/// [`is_executable_file`] calls any file executable, that is every file
+/// outright.  A user who wants the cwd searched writes `.`, which
+/// [`anchor_to_cwd`] honours deliberately.
+pub fn path_entries(path_value: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
+    std::env::split_paths(path_value).filter(|dir| !dir.as_os_str().is_empty())
 }
 
 #[allow(
@@ -827,6 +818,27 @@ mod tests {
             dirs,
             [Path::new("/usr/bin"), Path::new("/w/b"), Path::new("/abs")]
         );
+    }
+
+    #[test]
+    fn a_relative_path_entry_is_read_only_against_a_cwd() {
+        let _guard = super::memo_tests::cache_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("bin")).unwrap();
+        touch(&tmp.path().join("bin/tool"), 0o755);
+        assert_eq!(locate("tool", Some("bin"), None), None);
+        assert_eq!(
+            locate("tool", Some("bin"), Some(&cwd_at(tmp.path()))),
+            Some(tmp.path().join("bin/tool"))
+        );
+        let path = format!("bin:{}", tmp.path().display());
+        assert_eq!(path_dirs(path, None), [tmp.path()]);
+    }
+
+    #[test]
+    fn an_empty_element_is_dropped_by_path_entries() {
+        let entries: Vec<_> = path_entries(OsStr::new(":/a::")).collect();
+        assert_eq!(entries, [Path::new("/a")]);
     }
 
     /// The 126 case, and the only platform that has one: the presence half

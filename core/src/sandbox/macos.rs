@@ -433,9 +433,9 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::{BASE_PROFILE, NET_PROFILE, Profile, build_profile, withheld_doors};
-    use crate::capability::{ExecAllow, ExecDeny, Extent, FsAllow, GrantPath, Rule};
+    use crate::capability::{ExecAllow, ExecDeny, FsAllow, GrantPath, Rule};
     use crate::path::proper_ancestors;
-    use crate::path::{Excluded, FrozenPath, command_name_key};
+    use crate::path::{Excluded, FrozenPath, Trace, command_name_key};
     use crate::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
     use crate::test_helper::trace;
 
@@ -455,7 +455,7 @@ mod tests {
         let written = FrozenPath::from_surface(path);
         if allow {
             Rule::Allow(ExecAllow::Dir(
-                GrantPath::<Extent>::allowing(written).expect("a directory walks"),
+                GrantPath::<Trace>::walk(written).expect("a directory walks"),
             ))
         } else {
             Rule::Deny(Box::new(ExecDeny::Dir(
@@ -493,13 +493,16 @@ mod tests {
 
     fn prefix(path: &str) -> FsAllow {
         FsAllow::Prefix(
-            GrantPath::<Extent>::allowing(FrozenPath::from_surface(path)).expect("a prefix walks"),
+            GrantPath::<Trace>::walk(FrozenPath::from_surface(path)).expect("a prefix walks"),
         )
     }
 
     fn frozen(paths: &[&str]) -> Vec<GrantPath<Excluded>> {
         (paths.iter())
-            .map(|p| GrantPath::walk(FrozenPath::from_surface(p)).expect("an exclusion walks"))
+            .map(|p| {
+                GrantPath::<Excluded>::walk(FrozenPath::from_surface(p))
+                    .expect("an exclusion walks")
+            })
             .collect()
     }
 

@@ -434,6 +434,18 @@ mod tests {
         std::fs::write(dir.path().join("file"), b"x").expect("fixture");
         assert!(Manifest::of_folder(&dir.path().join("gone")).is_err());
         assert!(Manifest::of_folder(&dir.path().join("file")).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = dir.path().join("locked");
+            std::fs::create_dir(&locked).expect("fixture");
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+                .expect("fixture");
+            let result = Manifest::of_folder(&locked);
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
+                .expect("fixture");
+            assert!(result.is_err());
+        }
     }
 
     /// Listed, then gone: unread, never a deletion and never a failure.

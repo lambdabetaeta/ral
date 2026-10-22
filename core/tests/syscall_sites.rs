@@ -47,7 +47,14 @@
 //!      call that no tagged item contains fails, so a file with one tagged
 //!      allow cannot hide a second constructor.  It also catches
 //!      platform-`cfg`-gated sites a single-target clippy run on one OS would
-//!      miss.
+//!      miss.  A `Path` syscall method (`exists`, `metadata`, `read_dir`, …;
+//!      the inherent methods `clippy.toml` bans) counts as a call where an
+//!      *untagged* allow covers it: outside an allow clippy proves the
+//!      receiver is not a `Path`, inside a tagged one the site is reviewed,
+//!      inside an untagged one it is hidden from both gates.  An import of
+//!      `libc::{open, openat}`, a `rustix::fs` wrapper, a cap-primitives
+//!      function, `std::process::Command` or a Win32 constructor binds a
+//!      name, aliased or not, and each bare use of that name is a call.
 //!   4. **A single-door token appears only at its door.**  Fact (3) is met by
 //!      any tagged allow, so for a token with exactly one legitimate caller,
 //!      [`SINGLE_DOORS`] names that file and no other production file may
@@ -115,6 +122,7 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("core/src/path/walk/macos.rs", "silent:walk-step"),
     ("core/src/path/walk/macos.rs", "silent:walk-stored-name"),
     ("core/src/path/walk/macos.rs", "surface:walk-reopen"),
+    ("core/src/path/walk/macos.rs", "surface:walk-reopen-special"),
     ("core/src/path/walk/unix.rs", "silent:discard-device"),
     ("core/src/path/walk/unix.rs", "silent:walk-abandon"),
     ("core/src/path/walk/unix.rs", "silent:walk-access"),
@@ -409,55 +417,115 @@ const RAW_WRAPPERS: &[&str] = &[
     "mkdirat",
 ];
 
+/// The inherent `Path` methods `clippy.toml` bans, each a syscall by name.
+/// Outside an allow clippy proves such a call is not `Path`'s; under a
+/// tagged allow it is a reviewed site; under an *untagged* allow it is the
+/// one shape both gates would miss, so there it counts as a call.
+const PATH_SYSCALLS: &[&str] = &[
+    ".exists(",
+    ".try_exists(",
+    ".is_file(",
+    ".is_dir(",
+    ".is_symlink(",
+    ".metadata(",
+    ".symlink_metadata(",
+    ".read_dir(",
+    ".read_link(",
+    ".canonicalize(",
+];
+
+/// The `libc` constructors the walk could be built from, imported by name.
+const LIBC_OPENERS: &[&str] = &["open", "openat"];
+
+/// The Win32/NT constructors, for an aliased import.
+const WIN32_OPENERS: &[&str] = &[
+    "CreateFileW",
+    "NtCreateFile",
+    "GetFinalPathNameByHandleW",
+    "GetNamedSecurityInfoW",
+    "SetNamedSecurityInfoW",
+];
+
+/// The identifier words of `text`: what is left of a `use` item once its
+/// braces, commas and `::` are taken away.
+fn words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|w| !w.is_empty())
+}
+
+/// The names a `use` item binds, as `(original, bound)`: `w as a` binds `a`
+/// to `w`, any other identifier word binds itself.  The keywords and the
+/// module-path words every import carries are no names.
+fn bound_names(import: &str) -> Vec<(&str, &str)> {
+    const NOT_NAMES: &[&str] = &[
+        "use",
+        "pub",
+        "crate",
+        "self",
+        "super",
+        "std",
+        "rustix",
+        "fs",
+        "cap_primitives",
+        "cap_fs_ext",
+        "as",
+    ];
+    let mut words = words(import).peekable();
+    let mut names = Vec::new();
+    while let Some(word) = words.next() {
+        if NOT_NAMES.contains(&word) {
+            continue;
+        }
+        let bound = if words.next_if_eq(&"as").is_some() {
+            words.next().unwrap_or(word)
+        } else {
+            word
+        };
+        names.push((word, bound));
+    }
+    names
+}
+
 /// The names `use` items import from a module that makes calls by name: the
-/// wrappers of `rustix::fs`, `Command` of `std::process`, the functions of
-/// `cap_primitives::fs`.  Each is a call wherever the file then uses it bare.
+/// wrappers of `rustix::fs`, the openers of `libc` and `windows_sys`,
+/// `Command` of `std::process`, the functions of `cap_primitives::fs`.  Each
+/// is a call wherever the file then uses the name it bound, an alias
+/// included, bare.
 fn bare_calls(code: &str) -> Vec<(usize, String)> {
     let mut found = Vec::new();
-    for (at, import) in use_items(code) {
-        let words: Vec<&str> = import
-            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .filter(|w| !w.is_empty())
-            .collect();
-        let names: Vec<&str> = if import.contains("rustix::fs") {
-            words
-                .iter()
-                .copied()
-                .filter(|w| RAW_WRAPPERS.contains(w))
-                .collect()
-        } else if import.contains("cap_primitives::fs") || import.contains("cap_fs_ext") {
-            words
-                .iter()
-                .copied()
-                .filter(|w| w.starts_with(char::is_lowercase))
-                .collect()
-        } else {
-            Vec::new()
+    for (_, import) in use_items(code) {
+        let imports = |word: &str| words(import).any(|w| w == word);
+        let makes_calls = |original: &str| {
+            if import.contains("rustix::fs") {
+                RAW_WRAPPERS.contains(&original)
+            } else if imports("libc") {
+                LIBC_OPENERS.contains(&original)
+            } else if import.contains("cap_primitives::fs") || import.contains("cap_fs_ext") {
+                original.starts_with(char::is_lowercase)
+            } else if imports("windows_sys") {
+                WIN32_OPENERS.contains(&original)
+            } else {
+                false
+            }
         };
-        for name in names.iter().filter(|n| {
-            ![
-                "use",
-                "pub",
-                "crate",
-                "self",
-                "super",
-                "std",
-                "rustix",
-                "fs",
-                "cap_primitives",
-                "cap_fs_ext",
-                "as",
-            ]
-            .contains(n)
-        }) {
-            found.extend(bare_uses(code, &format!("{name}(")).map(|at| (at, format!("{name}(…)"))));
+        for (original, bound) in bound_names(import) {
+            let named = if original == bound {
+                original.to_string()
+            } else {
+                format!("{original} as {bound}")
+            };
+            if makes_calls(original) {
+                found.extend(
+                    bare_uses(code, &format!("{bound}(")).map(|at| (at, format!("{named}(…)"))),
+                );
+            }
+            if import.contains("process") && original == "Command" {
+                found.extend(
+                    bare_uses(code, &format!("{bound}::new("))
+                        .map(|at| (at, format!("{named}::new"))),
+                );
+            }
         }
-        if import.contains("process") && words.contains(&"Command") {
-            found.extend(
-                bare_uses(code, "Command::new(").map(|at| (at, "Command::new".to_string())),
-            );
-        }
-        let _ = at;
     }
     found
 }
@@ -494,18 +562,21 @@ fn imports_banned(code: &str) -> Option<&'static str> {
     use_items(code).into_iter().find_map(|(_, import)| {
         let tok = BANNED_TOKENS.iter().find(|t| import.contains(**t)).copied();
         tok.or_else(|| {
-            (import.contains("process")
-                && import
-                    .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-                    .any(|w| w == "Command"))
-            .then_some("process::Command")
+            (import.contains("process") && words(import).any(|w| w == "Command"))
+                .then_some("process::Command")
         })
         .or_else(|| {
-            (import.contains("rustix::fs")
-                && import
-                    .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-                    .any(|w| RAW_WRAPPERS.contains(&w)))
-            .then_some("rustix::fs::{…}")
+            (import.contains("rustix::fs") && words(import).any(|w| RAW_WRAPPERS.contains(&w)))
+                .then_some("rustix::fs::{…}")
+        })
+        .or_else(|| {
+            (words(import).any(|w| w == "libc") && words(import).any(|w| LIBC_OPENERS.contains(&w)))
+                .then_some("libc::{…}")
+        })
+        .or_else(|| {
+            (words(import).any(|w| w == "windows_sys")
+                && words(import).any(|w| WIN32_OPENERS.contains(&w)))
+            .then_some("windows_sys::{…}")
         })
     })
 }
@@ -892,6 +963,17 @@ fn calls(code: &str) -> Vec<(usize, String)> {
     found
 }
 
+/// Every `Path` syscall method token of `code`, as `(offset, token)`, in
+/// order.
+fn path_syscalls(code: &str) -> Vec<(usize, &'static str)> {
+    let mut found: Vec<_> = PATH_SYSCALLS
+        .iter()
+        .flat_map(|tok| code.match_indices(tok).map(move |(at, _)| (at, *tok)))
+        .collect();
+    found.sort_unstable();
+    found
+}
+
 #[test]
 fn every_production_disallowed_allow_is_a_tagged_site() {
     let root = workspace_root();
@@ -912,9 +994,10 @@ fn every_production_disallowed_allow_is_a_tagged_site() {
         // explanation).  Untagged allows belong to the other
         // disallowed-methods disciplines and are not this test's concern;
         // fact (3) below is what stops an fs/process site hiding behind one.
-        let mut tagged = Vec::new();
+        let (mut tagged, mut untagged) = (Vec::new(), Vec::new());
         for allow in &allows {
             let Some(tag) = allow.reason.as_deref().and_then(parse_tag) else {
+                untagged.push(allow);
                 continue;
             };
             if !matches!(tag.kind.as_str(), "surface" | "silent" | "test") {
@@ -953,6 +1036,20 @@ fn every_production_disallowed_allow_is_a_tagged_site() {
                      tagged allow.\n    → route it through a reviewed syscall site, or give the \
                      item an `#[allow(clippy::disallowed_methods, reason = \"[silent:<slug>] …\")]` \
                      and a row in SYSCALL_SITES.",
+                    line_of(&text, at)
+                ));
+            }
+        }
+        for (at, tok) in path_syscalls(&scan) {
+            if tagged.iter().any(|a| a.covers.contains(&at)) {
+                continue;
+            }
+            if untagged.iter().any(|a| a.covers.contains(&at)) {
+                failures.push(format!(
+                    "{rel_str}:{}: calls a `Path` syscall method (`{tok}`) under an untagged \
+                     `disallowed_methods` allow, where clippy cannot see it.\n    → a stat by \
+                     name is a `[silent:<slug>]` site: tag the item and add its row, or split \
+                     the item so the untagged allow covers the lexical work alone.",
                     line_of(&text, at)
                 ));
             }
@@ -1101,4 +1198,70 @@ fn the_string_containment_helpers_gain_no_caller() {
          RealPath::{{contains, rebased, ancestors_within}} instead, and the sequel plan deletes the \
          helpers — update STRING_CONTAINMENT_CALLERS only when a caller goes."
     );
+}
+
+#[test]
+fn the_scanner_sees_an_imported_libc_opener() {
+    let code = "use libc::openat;\nfn f() { let _ = openat(1, 2, 3); }";
+    assert!(
+        calls(code).iter().any(|(_, tok)| tok == "openat(…)"),
+        "{:?}",
+        calls(code)
+    );
+    assert_eq!(imports_banned(code), Some("libc::{…}"));
+}
+
+#[test]
+fn the_scanner_sees_an_aliased_wrapper() {
+    let named = |code: &str, name: &str| {
+        calls(code)
+            .iter()
+            .any(|(_, tok)| tok.starts_with(name) && tok.contains(" as "))
+    };
+    assert!(named(
+        "use rustix::fs::openat as o;\nfn f() { o(1); }",
+        "openat"
+    ));
+    assert!(named(
+        "use std::process::Command as C;\nfn f() { C::new(\"x\"); }",
+        "Command"
+    ));
+    assert!(named(
+        "use windows_sys::Win32::Storage::FileSystem::CreateFileW as cf;\nfn f() { cf(); }",
+        "CreateFileW"
+    ));
+}
+
+/// The allows of `text`, and the offsets of its `.exists(` and `.read_dir(`.
+fn path_syscall_fixture(reason: &str) -> (Vec<Allow>, usize, usize) {
+    let text = format!(
+        "#[allow(clippy::disallowed_methods, reason = \"{reason}\")]\n\
+         fn f(p: &std::path::Path) -> bool {{ p.exists() }}\n\
+         fn g(d: &Dir) {{ d.read_dir(); }}"
+    );
+    let code = blanked(&text);
+    let offsets = path_syscalls(&code);
+    let at = |token: &str| offsets.iter().find(|(_, t)| *t == token).unwrap().0;
+    (allows(&text, &code), at(".exists("), at(".read_dir("))
+}
+
+#[test]
+fn a_path_syscall_under_an_untagged_allow_is_a_call() {
+    let (allows, exists, read_dir) = path_syscall_fixture("path-form: x");
+    let [allow] = &allows[..] else {
+        panic!("one allow")
+    };
+    assert!(allow.reason.as_deref().and_then(parse_tag).is_none());
+    assert!(allow.covers.contains(&exists));
+    assert!(!allow.covers.contains(&read_dir));
+}
+
+#[test]
+fn a_path_syscall_under_a_tagged_allow_is_a_site() {
+    let (allows, exists, _) = path_syscall_fixture("[silent:x] a reviewed stat");
+    let [allow] = &allows[..] else {
+        panic!("one allow")
+    };
+    assert!(allow.reason.as_deref().and_then(parse_tag).is_some());
+    assert!(allow.covers.contains(&exists));
 }

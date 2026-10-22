@@ -219,12 +219,12 @@ fn ipc_roundtrip_preserves_a_frozen_grant_stack() {
 
 /// `p` as an allowance in force.
 fn allowing(p: &FrozenPath) -> GrantPath<Extent> {
-    GrantPath::allowing(p.clone()).expect("a test spelling walks")
+    GrantPath::<Trace>::walk(p.clone()).expect("a test spelling walks")
 }
 
 /// `p` as an exclusion in force.
 fn excluding(p: &FrozenPath) -> GrantPath<Excluded> {
-    GrantPath::walk(p.clone()).expect("a test spelling walks")
+    GrantPath::<Excluded>::walk(p.clone()).expect("a test spelling walks")
 }
 
 fn fs_policy(p: &FrozenPath) -> FsPolicy {
@@ -1495,4 +1495,15 @@ fn a_root_directory_runs_files_not_tools_and_reads_what_it_runs() {
         ..Capabilities::default()
     })]);
     assert!(reads_only_what_it_runs.read(&floor, &trace(&bin_t)).is_ok());
+}
+
+/// The root spelling is the allowance everywhere on every host, made with no
+/// walk; as an exclusion it is refused.
+#[test]
+fn the_root_key_resolves_with_no_walk() {
+    let before = crate::test_access::walk_steps();
+    let root = GrantPath::<Trace>::walk(FrozenPath::root()).unwrap();
+    assert_eq!(root.real, Extent::Everywhere);
+    assert_eq!(crate::test_access::walk_steps(), before);
+    assert!(GrantPath::<Excluded>::walk(FrozenPath::root()).is_err());
 }

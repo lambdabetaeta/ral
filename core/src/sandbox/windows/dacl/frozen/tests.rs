@@ -23,14 +23,12 @@ fn a_real_directory_is_held() {
     assert!(pin.is_some());
 }
 
-/// `path`, a verbatim drive path, as its drive's administrative share names
-/// it: `\\localhost\C$\…`.
+/// `path`, a drive path in either spelling, as its drive's administrative
+/// share names it: `\\localhost\C$\…`.
 fn through_share(path: &Path) -> PathBuf {
     let text = path.to_str().unwrap();
-    let (drive, rest) = text
-        .strip_prefix(r"\\?\")
-        .and_then(|local| local.split_once(':'))
-        .expect("a verbatim drive path");
+    let local = text.strip_prefix(r"\\?\").unwrap_or(text);
+    let (drive, rest) = local.split_once(':').expect("a drive path");
     PathBuf::from(format!(r"\\localhost\{drive}${rest}"))
 }
 

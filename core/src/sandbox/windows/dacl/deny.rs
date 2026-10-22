@@ -212,8 +212,10 @@ impl Drop for ContainerAccess {
 /// name and judged there.
 ///
 /// The exclusion is held, a file or a directory, and every object beneath it
-/// is held in its parent, each read for its descriptor through a handle of its
-/// own, derived from the held one: ral must be able to reopen each for
+/// is held in its parent and classified by what the hold acquired, never by
+/// what the listing said: a directory found where a file was listed is
+/// descended.  Each is read for its descriptor through a handle of its own,
+/// derived from the held one: ral must be able to reopen each for
 /// `READ_CONTROL` and list each directory; where it cannot, nothing is proven
 /// and the launch is refused.
 pub(crate) fn ensure_unreachable(
@@ -269,7 +271,10 @@ pub(crate) fn ensure_unreachable(
                 }
             } else {
                 match dir.locate(entry.name(), LeafMode::NoFollow) {
-                    Ok(held) => check(held.reopen(READ_CONTROL), &at)?,
+                    Ok(held) => match held.into_dir() {
+                        Ok(child) => pending.push(child),
+                        Err(file) => check(file.reopen(READ_CONTROL), &at)?,
+                    },
                     Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                     Err(e) => return Err(walk_error(at.as_path(), &e)),
                 }

@@ -1,5 +1,5 @@
 error[E0624]: method `open_nofollow` is private
- --> tests/markers/open_nofollow_needs_a_token.rs:7:22
+ --> tests/markers/installing/open_nofollow_needs_a_token.rs:7:22
   |
 7 |       let _ = position.open_nofollow();
   |                        ^^^^^^^^^^^^^ private method

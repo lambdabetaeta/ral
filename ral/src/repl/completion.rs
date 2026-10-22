@@ -92,8 +92,8 @@ impl Sources<'_> {
     /// [`matching`] re-sorts.
     ///
     /// The one place `PATH` is enumerated, if this is the first request since
-    /// the scan was dropped.  It walks `locate`'s own directory list, and
-    /// requires the executable bit.  Dispatch still goes through the fresh
+    /// the scan was dropped.  It walks `PATH`'s entries as written, each
+    /// anchored by the engine, and requires the executable bit.  Dispatch still goes through the fresh
     /// `locate`, so a scan gone stale can only misinform a menu, never
     /// misdirect a spawn.
     fn command_names(&self) -> Vec<&String> {
@@ -104,8 +104,7 @@ impl Sources<'_> {
                 .path
                 .as_deref()
                 .map(|path| {
-                    ral_core::path::path_dirs(path, None)
-                        .into_iter()
+                    ral_core::path::path_entries(std::ffi::OsStr::new(path))
                         .flat_map(|dir| entries(self.engine, &dir))
                         .filter_map(|e| e.exec.then_some(e.name))
                         .collect()

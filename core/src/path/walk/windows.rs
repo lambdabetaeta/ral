@@ -1,9 +1,12 @@
-//! The Windows host: a step opens its child relative to the directory held,
-//! without delete sharing where the child is a directory, and reads
-//! everything about it from the handle it gets back.  What pins a held
-//! directory in place is that no handle on it shares delete, so its path is
-//! the one the walk recorded when it opened it, and the stored name of a
-//! child, which is read from the child, is checked against that path.
+//! The Windows host: a step opens its child relative to the directory held
+//! and reads everything about it from the handle it gets back.  A directory
+//! step holds the directory itself in place: it asks the traverse right and
+//! shares no delete, which an attribute-only open would not enforce
+//! (MS-FSA 2.1.5.1.2.2); a leaf step blocks no one.  So a held directory's
+//! path is the one the walk recorded when it opened it, and the stored name
+//! of a child, which is read from the child, is checked against that path.
+//! Every create is relative to a held handle (`NtCreateFile` with
+//! `RootDirectory`), and no path is ever derived from a handle.
 
 use super::{
     Access, Child, EntryName, Held, Kind, ObjectId, RootName, Seen, Sharing, Stat, Step, Visibility,
@@ -17,29 +20,37 @@ use std::io;
 use std::marker::PhantomData;
 use std::mem::offset_of;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::os::windows::io::{AsRawHandle, FromRawHandle};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::PathBuf;
+use std::ptr::null;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::vec::IntoIter;
-use windows_sys::Wdk::Storage::FileSystem::SYMLINK_FLAG_RELATIVE;
+use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+use windows_sys::Wdk::Storage::FileSystem::{
+    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+    NtCreateFile, SYMLINK_FLAG_RELATIVE,
+};
 use windows_sys::Win32::Foundation::{
-    ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, ERROR_NO_MORE_FILES, GENERIC_READ, GENERIC_WRITE,
-    INVALID_HANDLE_VALUE,
+    ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, ERROR_NO_MORE_FILES,
+    ERROR_NOT_SUPPORTED, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE, OBJ_CASE_INSENSITIVE,
+    RtlNtStatusToDosError, STATUS_SUCCESS, UNICODE_STRING,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN,
-    FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
-    FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_WRITE,
-    FILE_ID_BOTH_DIR_INFO, FILE_ID_EXTD_DIR_INFO, FILE_ID_INFO, FILE_INFO_BY_HANDLE_CLASS,
-    FILE_LIST_DIRECTORY, FILE_NAME_INFO, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FILE_WRITE_DATA, FileAttributeTagInfo,
-    FileBasicInfo, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
+    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_WRITE, FILE_ID_BOTH_DIR_INFO, FILE_ID_EXTD_DIR_INFO,
+    FILE_ID_INFO, FILE_INFO_BY_HANDLE_CLASS, FILE_LIST_DIRECTORY, FILE_NAME_INFO,
+    FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_STANDARD_INFO, FILE_TRAVERSE, FILE_WRITE_DATA, FileAttributeTagInfo, FileBasicInfo,
+    FileDispositionInfo, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
     FileIdExtdDirectoryInfo, FileIdExtdDirectoryRestartInfo, FileIdInfo, FileNormalizedNameInfo,
     FileRenameInfoEx, FileStandardInfo, GetDriveTypeW, GetFileInformationByHandle,
     GetFileInformationByHandleEx, GetFinalPathNameByHandleW, MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
-    ReOpenFile, SetFileInformationByHandle, VOLUME_NAME_GUID,
+    ReOpenFile, SYNCHRONIZE, SetFileInformationByHandle, VOLUME_NAME_GUID,
 };
-use windows_sys::Win32::System::IO::DeviceIoControl;
+use windows_sys::Win32::System::IO::{DeviceIoControl, IO_STATUS_BLOCK};
 use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
 use windows_sys::Win32::System::SystemServices::{
     IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK,
@@ -223,29 +234,59 @@ pub(super) fn open_root(root: &RootName) -> io::Result<Held> {
         path: normalized(&file)?,
         volume: seen(&file)?.id.volume,
     };
-    Ok(Held { file, info })
+    Ok(Held {
+        file: Arc::new(file),
+        info,
+    })
 }
 
-/// The entry `name` of `dir`, with attribute access alone — so an ancestor
-/// the user may traverse and not list is walked — never following a final
-/// link.  A directory shares no delete, which holds the directory itself in
-/// place; a leaf blocks no one.
+/// The entry `name` of `dir`, never following a final link.  A directory step
+/// asks the traverse right, the one data-class right every passable directory
+/// grants, and shares no delete: that is what makes the sharing check hold the
+/// directory in place (MS-FSA 2.1.5.1.2.2 ignores an attribute-only open).  A
+/// leaf asks attributes alone and shares delete, so it blocks nobody.  Where
+/// the traverse right is refused, attributes alone say what the entry is: a
+/// directory is unenterable, and anything else is handed on for the engine to
+/// classify.
+///
+/// # Errors
+/// `PermissionDenied` for a directory the user may not traverse; the open's.
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:walk-step] Opens one component relative to a held directory and never follows it, to reach the object a grant will judge: path resolution, not the model's data I/O; the card belongs to the site that then opens the leaf."
 )]
 fn open_entry(dir: &File, name: &OsStr, sharing: Sharing) -> io::Result<File> {
-    let share = match sharing {
-        Sharing::Directory => FILE_SHARE_READ | FILE_SHARE_WRITE,
-        Sharing::Leaf => FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    const LEAF: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    let open = |access, share| {
+        let mut options = OpenOptions::new();
+        options
+            .access_mode(access)
+            .share_mode(share)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .follow(FollowSymlinks::No);
+        cap_primitives::fs::open(dir, name.as_ref(), &options)
     };
-    let mut options = OpenOptions::new();
-    options
-        .access_mode(FILE_READ_ATTRIBUTES)
-        .share_mode(share)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .follow(FollowSymlinks::No);
-    cap_primitives::fs::open(dir, name.as_ref(), &options)
+    match sharing {
+        Sharing::Leaf => open(FILE_READ_ATTRIBUTES, LEAF),
+        Sharing::Directory => match open(
+            FILE_READ_ATTRIBUTES | FILE_TRAVERSE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+        ) {
+            Err(e) if e.raw_os_error() == i32::try_from(ERROR_ACCESS_DENIED).ok() => {
+                let file = open(FILE_READ_ATTRIBUTES, LEAF)?;
+                let basic: FILE_BASIC_INFO = query(&file, FileBasicInfo)?;
+                let tag = reparse_tag(&file, basic.FileAttributes)?;
+                if kind_of(basic.FileAttributes, tag) == Kind::Dir {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!("{} cannot be traversed", shown(name)),
+                    ));
+                }
+                Ok(file)
+            }
+            opened => opened,
+        },
+    }
 }
 
 /// The entry `name` of `parent`, opened and then named as `parent` stores it.
@@ -390,30 +431,65 @@ impl Raw {
     }
 }
 
-/// The 64-bit index `GetFileInformationByHandle` answers, which a volume with
-/// no 128-bit ids still has.
-fn file_index(f: &File) -> io::Result<u64> {
+/// The serial and 64-bit index `GetFileInformationByHandle` answers, which a
+/// volume with no 128-bit ids still has.
+fn by_handle(f: &File) -> io::Result<(u32, u64)> {
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     // SAFETY: `f` is a live handle and `info` the struct the call fills.
     if unsafe { GetFileInformationByHandle(f.as_raw_handle(), &raw mut info) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(u64::from(info.nFileIndexHigh) << 32 | u64::from(info.nFileIndexLow))
+    Ok((
+        info.dwVolumeSerialNumber,
+        u64::from(info.nFileIndexHigh) << 32 | u64::from(info.nFileIndexLow),
+    ))
+}
+
+/// Whether `e` is a volume's refusal of an information class, as FAT answers
+/// the ones NTFS and `ReFS` add.
+pub(super) fn unsupported_class(e: &io::Error) -> bool {
+    [ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED]
+        .into_iter()
+        .any(|code| e.raw_os_error() == i32::try_from(code).ok())
 }
 
 /// `FileIdInfo`, or the 64-bit index where the volume's 128-bit id is zero.
+/// On a volume that refuses the class both the serial and the index come from
+/// `BY_HANDLE_FILE_INFORMATION`; every identity on that volume is read the
+/// same way, so they agree with one another, and identity is only ever
+/// compared negatively.
 fn object_id(f: &File) -> io::Result<ObjectId> {
-    let info: FILE_ID_INFO = query(f, FileIdInfo)?;
-    let id = u128::from_le_bytes(info.FileId.Identifier);
-    let id = if id == 0 {
-        u128::from(file_index(f)?)
-    } else {
-        id
-    };
-    Ok(ObjectId {
-        volume: info.VolumeSerialNumber,
-        id,
-    })
+    match query::<FILE_ID_INFO>(f, FileIdInfo) {
+        Ok(info) => {
+            let id = u128::from_le_bytes(info.FileId.Identifier);
+            Ok(ObjectId {
+                volume: info.VolumeSerialNumber,
+                id: if id == 0 {
+                    u128::from(by_handle(f)?.1)
+                } else {
+                    id
+                },
+            })
+        }
+        Err(e) if unsupported_class(&e) => {
+            let (serial, index) = by_handle(f)?;
+            Ok(ObjectId {
+                volume: u64::from(serial),
+                id: u128::from(index),
+            })
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// The reparse tag of `f`, whose `FileBasicInfo` attributes are `attributes`:
+/// a volume that cannot answer a tag has no reparse points.
+fn reparse_tag(f: &File, attributes: u32) -> io::Result<u32> {
+    match query::<FILE_ATTRIBUTE_TAG_INFO>(f, FileAttributeTagInfo) {
+        Ok(tag) => Ok(tag.ReparseTag),
+        Err(e) if unsupported_class(&e) && attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0 => Ok(0),
+        Err(e) => Err(e),
+    }
 }
 
 /// What `f` is: `FileBasicInfo`, `FileAttributeTagInfo` and
@@ -421,11 +497,11 @@ fn object_id(f: &File) -> io::Result<ObjectId> {
 /// its identity.
 pub(super) fn seen(f: &File) -> io::Result<Seen> {
     let basic: FILE_BASIC_INFO = query(f, FileBasicInfo)?;
-    let tag: FILE_ATTRIBUTE_TAG_INFO = query(f, FileAttributeTagInfo)?;
+    let tag = reparse_tag(f, basic.FileAttributes)?;
     let standard: FILE_STANDARD_INFO = query(f, FileStandardInfo)?;
     let raw = Raw {
         attributes: basic.FileAttributes,
-        tag: tag.ReparseTag,
+        tag,
         len: standard.EndOfFile,
         btime: basic.CreationTime,
         atime: basic.LastAccessTime,
@@ -603,16 +679,62 @@ pub(super) fn create_sibling(dir: &File, name: &EntryName) -> io::Result<File> {
     cap_primitives::fs::open(dir, name.as_os_str().as_ref(), &options)
 }
 
+/// Make the directory `name` in `dir`: `NtCreateFile` with `RootDirectory`
+/// the held handle, so the entry lands under it whatever its path is, a share
+/// or a volume with no drive letter included.  The handle it opens is closed
+/// at once; the caller steps onto the name.
+///
+/// # Errors
+/// `AlreadyExists` where the name is taken; the create's.
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:walk-mkdir] Makes an absent entry of a held directory, which the caller judged as the absent leaf it is; the directory is then stepped onto."
 )]
 pub(super) fn mkdir(dir: &File, name: &EntryName, _visibility: Visibility) -> io::Result<()> {
-    cap_primitives::fs::create_dir(
-        dir,
-        name.as_os_str().as_ref(),
-        &cap_primitives::fs::DirOptions::new(),
-    )
+    let mut units: Vec<u16> = name.as_os_str().encode_wide().collect();
+    let bytes = u16::try_from(units.len() * size_of::<u16>())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidFilename))?;
+    let object = UNICODE_STRING {
+        Length: bytes,
+        MaximumLength: bytes,
+        Buffer: units.as_mut_ptr(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: u32::try_from(size_of::<OBJECT_ATTRIBUTES>()).expect("a struct is small"),
+        RootDirectory: dir.as_raw_handle(),
+        ObjectName: &raw const object,
+        Attributes: OBJ_CASE_INSENSITIVE,
+        SecurityDescriptor: null(),
+        SecurityQualityOfService: null(),
+    };
+    let mut handle = INVALID_HANDLE_VALUE;
+    let mut block = IO_STATUS_BLOCK::default();
+    // SAFETY: `dir` is a live handle, and `attributes` names `object`, whose
+    // buffer `units` holds, `bytes` long; all outlive the call, which fills
+    // `handle` and `block`.
+    let status = unsafe {
+        NtCreateFile(
+            &raw mut handle,
+            FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            &raw const attributes,
+            &raw mut block,
+            null(),
+            FILE_ATTRIBUTE_NORMAL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_CREATE,
+            FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+            null(),
+            0,
+        )
+    };
+    if status != STATUS_SUCCESS {
+        // SAFETY: a plain conversion of a status code.
+        let code = unsafe { RtlNtStatusToDosError(status) };
+        return Err(io::Error::from_raw_os_error(code.cast_signed()));
+    }
+    // SAFETY: `handle` is a fresh handle this call owns.
+    drop(unsafe { OwnedHandle::from_raw_handle(handle) });
+    Ok(())
 }
 
 /// Rename `sibling`, the staged object, over the entry `to` of `dir`, by its
@@ -672,12 +794,29 @@ pub(super) fn rename_over(
     Ok(())
 }
 
+/// Mark the staged `sibling` for deletion by its own handle: it was created
+/// with `DELETE` access, and its name goes when the handle closes.  No name
+/// is resolved.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[silent:walk-abandon] Reasoned-silent rollback of the atomic `>`: unlink the staged sibling for a write that will not land.  The aborted write is the surface; this removal raises none of its own."
+    reason = "[silent:walk-abandon] Reasoned-silent rollback of the atomic `>`: discard the staged sibling, by its own handle, for a write that will not land.  The aborted write is the surface; this removal raises none of its own."
 )]
-pub(super) fn unlink(dir: &File, name: &EntryName) -> io::Result<()> {
-    cap_primitives::fs::remove_file(dir, name.as_os_str().as_ref())
+pub(super) fn discard(_dir: &File, sibling: &File, _name: &EntryName) -> io::Result<()> {
+    let info = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // SAFETY: `sibling` is a live handle, and `info` is the struct the class
+    // names, of the size the call is told.
+    let ok = unsafe {
+        SetFileInformationByHandle(
+            sibling.as_raw_handle(),
+            FileDispositionInfo,
+            (&raw const info).cast(),
+            u32::try_from(size_of::<FILE_DISPOSITION_INFO>()).expect("an info struct is small"),
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Whether the entry `name` of `dir` may be opened for writing, following a
@@ -841,7 +980,7 @@ pub(super) fn list(dir: &File) -> io::Result<Lister<'_>> {
     let listed = match extd {
         Ok(listed) if listed.iter().all(|row| row.id != 0) => listed,
         Ok(_) => both(&reader)?,
-        Err(e) if e.raw_os_error() == i32::try_from(ERROR_INVALID_PARAMETER).ok() => both(&reader)?,
+        Err(e) if unsupported_class(&e) => both(&reader)?,
         Err(e) => return Err(e),
     };
     let mut entries: Vec<(EntryName, io::Result<Seen>)> = listed

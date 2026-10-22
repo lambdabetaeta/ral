@@ -11,11 +11,12 @@ use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 pub(super) use super::unix::{
-    DirInfo, Lister, copy_mode, create, create_sibling, is_writable, list, mkdir, open_discard,
-    rename_over, sync_dir, unlink,
+    DirInfo, Lister, copy_mode, create, create_sibling, discard, is_writable, list, mkdir,
+    open_discard, rename_over, sync_dir,
 };
 
 /// The identity a by-name `stat` reports, for a caller comparing it with
@@ -42,7 +43,7 @@ pub(super) fn open_root(_root: &RootName) -> io::Result<Held> {
         Mode::empty(),
     )?);
     Ok(Held {
-        file,
+        file: Arc::new(file),
         info: DirInfo,
     })
 }

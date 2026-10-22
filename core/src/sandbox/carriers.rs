@@ -305,8 +305,9 @@ mod tests {
         assert_eq!(shebang(&file(&root, "a", "#!/bin/sh")), None);
     }
 
-    /// The launched program's `#!` line is the admitted object's, though its
-    /// name holds another script by the time it is read.
+    /// The launched program's `#!` line is the admitted object's where the host
+    /// can read through the handle, and nothing at all where it cannot: never
+    /// the script now at its name.
     #[test]
     fn a_launched_programs_interpreter_is_read_through_the_judged_handle() {
         use crate::capability::Program;
@@ -314,13 +315,17 @@ mod tests {
         let script = file(&root, "run", "#!/bin/sh\nbody\n");
         let admitted =
             super::super::launch::admitted(Program::file(script.clone()).expect("a script"), &[]);
-        std::fs::rename(file(&root, "other", "#!/bin/other\n"), &script).expect("swap");
-
-        assert_eq!(shebang(&script), Some(PathBuf::from("/bin/other")));
         let Program::File { located, .. } = admitted.program() else {
             panic!("a script is a file")
         };
         assert_eq!(launched_shebang(located), Some(PathBuf::from("/bin/sh")));
+        std::fs::rename(file(&root, "other", "#!/bin/other\n"), &script).expect("swap");
+
+        assert_eq!(shebang(&script), Some(PathBuf::from("/bin/other")));
+        // Linux reads the held object; macOS opens the name, verifies it against
+        // the held identity, and refuses the one that now leads elsewhere.
+        let expected = (!cfg!(target_os = "macos")).then(|| PathBuf::from("/bin/sh"));
+        assert_eq!(launched_shebang(located), expected);
     }
 
     /// macOS ends the `#!` line at a `#`; Linux reads it as part of the name.

@@ -29,6 +29,24 @@ pub(super) fn around_link_read(at: Around) {
     });
 }
 
+#[cfg(target_os = "macos")]
+thread_local! {
+    /// What a test does to the disk between the macOS step's lookup of a name
+    /// and its open of it.
+    pub(super) static LOOKED: RefCell<Option<Box<dyn FnMut()>>> =
+        const { RefCell::new(None) };
+}
+
+/// The test's step, if it set one.
+#[cfg(target_os = "macos")]
+pub(super) fn after_lookup() {
+    LOOKED.with(|hook| {
+        if let Some(step) = hook.borrow_mut().as_mut() {
+            step();
+        }
+    });
+}
+
 /// What these tests hold: the walk's own handles, which judge nothing, so the
 /// tests retag them with a door only this module has.  The grant's own door,
 /// and what it refuses, are `capability/fs.rs`'s to test.

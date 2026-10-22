@@ -35,6 +35,7 @@ Submodules:
   [[design/capability-freeze|freeze boundary]]), holding its rules and nothing
   beside them; `GrantPath<R> { written, real }`, a spelling and what its walk
   made of it, `R` an `Extent` (`Everywhere` or `Under(RealPath)`) for an allowance
+  (`Everywhere` is the root spelling `/` on any host, or a Unix walk that reached `/`)
   and an `Excluded` for an exclusion; `Net` (`Offline`, the one opinion a layer
   holds on the network), the verb sets `BTreeSet<EditorVerb>` and
   `BTreeSet<ShellVerb>` (each `Option`: absent inherits), `GrantStack` (with
@@ -157,7 +158,9 @@ grant string becomes a frozen path.
   deny layer fails closed; the tags `absolute`,
   `cwd`, `home`, `tempdir`, `gitdir` and `xdg-*`, `PolicyError`, the `gitdir`
   refusals (`From<BadPointer>`), `Selector` (`Path | Toolchain(Toolchain)`) and
-  the `path` selector (`path_dirs`, over the pure `path_dirs_in`), and
+  the `path` selector (`path_dirs`, over the pure `path_dirs_in`, which
+  classifies each absolute `PATH` entry raw, as an `absolute` payload, before
+  the freeze folds it), and
   `refuse_the_world`, the guard both it and the toolchain overrides call;
   `FrozenPath::freeze` refuses a path that is not Unicode;
 - `toolchains.rs` — every other directory selector as one table: `enum
@@ -282,7 +285,9 @@ of it, anchored as `anchor` takes it, so a script under a directory named
 and its paths resolve against the cwd.
 
 (`which::ral_path_entries` lists `RAL_PATH`; `use` searches it through the
-shell's resolver, and the plugin loader folds it into its own candidates.)
+shell's resolver, and the plugin loader folds it into its own candidates.  The
+name beside the script is `use`'s first candidate; a candidate is chosen by kind
+and judged, a denied one passed over.)
 
 `tree/walk.rs` is the one directory-tree walk, `Walk`: ral enumerates, with
 `Dir::read_dir` and `Dir::open_dir`, depth first in name order, and `ignore` only
@@ -316,7 +321,7 @@ door, so no call site can choose "here" for itself**
   `search`; it **drops empty `PATH` elements on every platform**, so a trailing
   `;` or `:` never means the cwd. `.` and `./bin` are honoured, as written.
   `locate_in` is the same walk off Windows, unmemoised, over directories a
-  caller already holds (`path_dirs_absolute` for bwrap's pin), so no list is
+  caller already holds (`path_dirs(…, None)` for bwrap's pin, absolute entries alone), so no list is
   re-joined into a string to be split again.
 - `search` returns `PathSearch::{Executable, FoundNotExecutable, Missing}` from
   one traversal — the executable half memoised, the presence half not — so

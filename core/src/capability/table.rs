@@ -297,8 +297,8 @@ mod tests {
             .map(|path| FrozenPath::from_surface(crate::path::utf8(&path).unwrap()))
             .map(|path| {
                 (
-                    GrantPath::allowing(path.clone()).unwrap(),
-                    GrantPath::walk(path).unwrap(),
+                    GrantPath::<Trace>::walk(path.clone()).unwrap(),
+                    GrantPath::<Excluded>::walk(path).unwrap(),
                 )
             })
             .collect()
@@ -378,7 +378,7 @@ mod tests {
         let nowhere = Tree::nowhere();
         let at = |p: &str| trace(nowhere.path(p));
         let everywhere = || FsRules::new([FsAllow::Prefix(GrantPath::everywhere())], []);
-        let prefix = GrantPath::allowing(FrozenPath::from_surface(&nowhere.at("/work")));
+        let prefix = GrantPath::<Trace>::walk(FrozenPath::from_surface(&nowhere.at("/work")));
         let work = FsRules::new([FsAllow::Prefix(prefix.unwrap())], []);
         let met = everywhere().meet(work);
         assert!(met.evidence(Subject::Access(&at("/work"))).permits());

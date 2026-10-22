@@ -16,7 +16,9 @@
 use super::freeze::{Home, PolicyError, Selector, refuse_the_world};
 use crate::capability::GrantPath;
 use crate::capability::Polar;
-use crate::path::{FrozenPath, Kind, Trace, is_absolute, join_slash, path_entries, shown};
+use crate::path::{
+    FrozenPath, Kind, RealPath, Trace, is_absolute, join_slash, path_entries, shown,
+};
 use crate::path::{XdgKind, resolve_xdg_in};
 use std::path::PathBuf;
 use strum::{EnumString, IntoStaticStr, VariantArray};
@@ -373,12 +375,18 @@ impl Base {
     }
 }
 
+/// The variable that chose a directory, and its value as given.
+type Via = (&'static str, PathBuf);
+
+/// A directory walked, beside the override that chose it.
+type Found<W> = (GrantPath<W>, Option<Via>);
+
 /// A directory a location chooses, before anything is walked: and, where the
 /// environment chose it, the variable that did and its value as given.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Chosen {
     pub(super) dir: PathBuf,
-    via: Option<(&'static str, PathBuf)>,
+    via: Option<Via>,
 }
 
 impl Location {
@@ -412,6 +420,27 @@ pub(super) fn chosen(
         .collect()
 }
 
+/// Each directory `toolchain` chooses, walked as `W` walks, beside the
+/// override that chose it; one absent or no directory is dropped.
+///
+/// # Errors
+/// A directory whose walk fails, or that no grant can hold.
+fn walked<W: Polar>(
+    toolchain: Toolchain,
+    env: impl Fn(&str) -> Option<String>,
+    home: Option<&str>,
+) -> Result<Vec<Found<W>>, PolicyError> {
+    let mut kept = Vec::new();
+    for Chosen { dir, via } in chosen(toolchain, env, home) {
+        let written = FrozenPath::freeze(&dir).map_err(PolicyError::new)?;
+        let walked = GrantPath::<W>::walked(written)?;
+        if walked.real.followed().kind() == Some(Kind::Dir) {
+            kept.push((walked, via));
+        }
+    }
+    Ok(kept)
+}
+
 /// The directories `toolchain` expands to over an injected environment and
 /// home, each walked as polarity `W` walks: an override that names the
 /// filesystem root, the home or an ancestor of it is refused, and a directory
@@ -425,26 +454,23 @@ pub(crate) fn expand_in<W: Polar>(
     toolchain: Toolchain,
     env: impl Fn(&str) -> Option<String>,
     home: Option<&Home>,
-) -> Result<Vec<GrantPath<W>>, PolicyError> {
-    let mut kept = Vec::new();
-    for Chosen { dir, via } in chosen(toolchain, env, home.map(|h| h.spelled.as_str())) {
-        let written = FrozenPath::freeze(&dir).map_err(PolicyError::new)?;
-        let walked = GrantPath::<W>::walk(written)?;
-        if let Some((var, value)) = via {
-            let subject = format!("{var} is {}", shown(&value));
-            refuse_the_world(
-                Selector::Toolchain(toolchain),
-                &subject,
-                var,
-                walked.real.followed(),
-                home,
-            )?;
-        }
-        if walked.real.followed().kind() == Some(Kind::Dir) {
-            kept.push(walked);
-        }
-    }
-    Ok(kept)
+) -> Result<Vec<GrantPath<W::Grant>>, PolicyError> {
+    walked::<W>(toolchain, env, home.map(|h| h.spelled.as_str()))?
+        .into_iter()
+        .map(|(dir, via)| {
+            if let Some((var, value)) = via {
+                let subject = format!("{var} is {}", shown(&value));
+                refuse_the_world(
+                    Selector::Toolchain(toolchain),
+                    &subject,
+                    var,
+                    dir.real.followed(),
+                    home,
+                )?;
+            }
+            W::grant(dir)
+        })
+        .collect()
 }
 
 /// [`expand_in`] over the host environment and filesystem, as the spellings
@@ -461,29 +487,42 @@ pub fn expand(toolchain: Toolchain, home: Option<&str>) -> Result<Vec<PathBuf>, 
         .collect())
 }
 
-/// The [`FLOOR`] rows' directories outside `home`, walked: a prefix an
-/// override puts in the home is the user's, to be read only where granted.  A
-/// row that fails is dropped.
+/// The [`FLOOR`] rows' directories, walked: a walk that fails refuses the
+/// floor, named, since a host that cannot resolve its own floor cannot run
+/// anything (§4.3).
+///
+/// # Errors
+/// A directory whose walk fails, or that no grant can hold.
 pub(crate) fn floor_in(
     env: impl Fn(&str) -> Option<String>,
     home: Option<&Home>,
-) -> Vec<GrantPath<Trace>> {
+) -> Result<Vec<GrantPath<Trace>>, PolicyError> {
     let held = home.and_then(|h| h.real.as_ref());
-    FLOOR
-        .into_iter()
-        .filter_map(|t| expand_in::<Trace>(t, &env, home).ok())
-        .flatten()
-        .filter(|dir| held.is_none_or(|h| !h.contains(dir.real.real())))
-        .collect()
+    // The floor is what lies outside the user's home and is not the world: a
+    // prefix an override puts in, at or above the home is the user's, read
+    // only where granted; one naming the root is no floor.  Dropped, never
+    // refused: a grant that names it is refused instead.
+    let floor = |dir: &RealPath| {
+        !dir.is_universal() && held.is_none_or(|h| !h.contains(dir) && !dir.contains(h))
+    };
+    let mut kept = Vec::new();
+    for toolchain in FLOOR {
+        for (dir, _) in walked::<Trace>(toolchain, &env, home.map(|h| h.spelled.as_str()))? {
+            if floor(dir.real.real()) {
+                kept.push(dir);
+            }
+        }
+    }
+    Ok(kept)
 }
 
 /// [`floor_in`] over the host environment and filesystem.
 ///
 /// # Errors
-/// A home that cannot be walked.
+/// A home that cannot be walked; as [`floor_in`].
 pub(crate) fn floor(home: Option<&str>) -> Result<Vec<GrantPath<Trace>>, String> {
     let home = home.map(Home::of).transpose().map_err(|e| e.message)?;
-    Ok(floor_in(|k| std::env::var(k).ok(), home.as_ref()))
+    floor_in(|k| std::env::var(k).ok(), home.as_ref()).map_err(|e| e.message)
 }
 
 #[cfg(test)]
@@ -530,7 +569,7 @@ mod tests {
     #[cfg(unix)]
     fn floor_of(env: impl Fn(&str) -> Option<String>, home: &str) -> Vec<String> {
         let home = Home::of(home).unwrap();
-        let dirs = floor_in(env, Some(&home));
+        let dirs = floor_in(env, Some(&home)).unwrap();
         dirs.iter().map(|d| d.written.as_str().to_owned()).collect()
     }
 
@@ -888,6 +927,42 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn a_floor_directory_whose_walk_fails_refuses_the_floor() {
+        let (_tmp, root) = tree(&[]);
+        let looped = format!("{root}/loop");
+        std::os::unix::fs::symlink("loop", &looped).unwrap();
+        let err = floor_in(env(&[("HOMEBREW_PREFIX", &looped)]), None).unwrap_err();
+        assert!(err.message.contains(&looped), "{}", err.message);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_override_naming_the_world_or_the_home_is_no_floor_and_no_error() {
+        let (_tmp, root) = tree(&["h"]);
+        let home_dir = format!("{root}/h");
+        let home = Home::of(&home_dir).unwrap();
+        let held = home.real.clone().unwrap();
+        let kept = |prefix: &str, home: Option<&Home>| {
+            floor_in(env(&[("HOMEBREW_PREFIX", prefix)]), home).unwrap()
+        };
+        assert!(
+            kept("/", None)
+                .iter()
+                .all(|d| !d.real.real().is_universal())
+        );
+        for prefix in [home_dir.as_str(), root.as_str()] {
+            let floor = kept(prefix, Some(&home));
+            assert!(
+                floor
+                    .iter()
+                    .all(|d| !held.contains(d.real.real()) && !d.real.real().contains(&held)),
+                "{prefix}: {floor:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn system_is_kept_by_existence_and_carries_no_homebrew() {
         let (_tmp, root) = tree(&["Git/usr", "real"]);
         let git = format!("{root}/Git/usr/bin");
@@ -926,7 +1001,7 @@ mod tests {
         assert!(
             roots
                 .iter()
-                .any(|r| r.clone().extent().real.contains(Subject::Access(&cargo))),
+                .any(|r| r.real.contains(Subject::Access(&cargo))),
             "{roots:?}"
         );
     }

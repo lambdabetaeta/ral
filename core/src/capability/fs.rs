@@ -21,7 +21,7 @@
 //! spawn, because that is when the OS profile is written.
 
 use super::exec::ExecRules;
-use super::lattice::{Extent, GrantPath};
+use super::lattice::{Extent, GrantPath, Polar};
 use super::table::{Allows, Denies, Table, Withheld};
 use super::{FsPolicy, GrantLayer, GrantStack, Join, Meet};
 use crate::guard::freeze::PolicyError;
@@ -110,17 +110,13 @@ impl FsLayer {
             write_prefixes,
             deny_paths,
         } = policy;
-        let allowing = |paths: Vec<FrozenPath>| {
-            (paths.into_iter())
-                .map(GrantPath::allowing)
-                .collect::<Result<Vec<_>, _>>()
-        };
+        fn walk<W: Polar>(paths: Vec<FrozenPath>) -> Result<Vec<GrantPath<W::Grant>>, PolicyError> {
+            paths.into_iter().map(GrantPath::<W>::walk).collect()
+        }
         Ok(Self::new(
-            allowing(read_prefixes)?,
-            allowing(write_prefixes)?,
-            (deny_paths.into_iter())
-                .map(GrantPath::walk)
-                .collect::<Result<Vec<_>, _>>()?,
+            walk::<Trace>(read_prefixes)?,
+            walk::<Trace>(write_prefixes)?,
+            walk::<Excluded>(deny_paths)?,
         ))
     }
 
@@ -672,8 +668,8 @@ mod tests {
 
     fn table(allows: &[FrozenPath], denies: &[FrozenPath]) -> FsRules {
         FsRules::new(
-            (allows.iter().cloned()).map(|p| FsAllow::Prefix(GrantPath::allowing(p).unwrap())),
-            (denies.iter().cloned()).map(|p| FsDeny(GrantPath::walk(p).unwrap())),
+            (allows.iter().cloned()).map(|p| FsAllow::Prefix(GrantPath::<Trace>::walk(p).unwrap())),
+            (denies.iter().cloned()).map(|p| FsDeny(GrantPath::<Excluded>::walk(p).unwrap())),
         )
     }
 
@@ -683,7 +679,7 @@ mod tests {
 
     fn prefixes(paths: &[&str]) -> Vec<FsAllow> {
         (paths.iter())
-            .map(|p| FsAllow::Prefix(GrantPath::allowing(lit(p)).unwrap()))
+            .map(|p| FsAllow::Prefix(GrantPath::<Trace>::walk(lit(p)).unwrap()))
             .collect()
     }
 
@@ -757,7 +753,9 @@ mod tests {
         assert_eq!(
             region.withheld(Subject::Access(&access)),
             Some(Withheld::Excluded {
-                scope: Box::new(FsDeny(GrantPath::walk(lit("/d/Secrets")).unwrap())),
+                scope: Box::new(FsDeny(
+                    GrantPath::<Excluded>::walk(lit("/d/Secrets")).unwrap()
+                )),
                 matched_by: MatchedBy::FoldedName
             })
         );
@@ -828,7 +826,7 @@ mod tests {
     /// `C:`, the shape GitHub's Windows runners have.
     #[test]
     fn the_root_is_the_universal_prefix() {
-        let root = GrantPath::<Extent>::allowing(FrozenPath::root()).unwrap();
+        let root = GrantPath::<Trace>::walk(FrozenPath::root()).unwrap();
         assert_eq!(root.real, Extent::Everywhere);
         let region = table(&[FrozenPath::root()], &[]);
         // A drive spelling is a path only on Windows, and `D:` may not exist.
@@ -861,7 +859,7 @@ mod tests {
         assert_eq!(
             floor.allows().collect::<Vec<_>>(),
             [&FsAllow::Prefix(
-                GrantPath::allowing(spelled(&fine)).unwrap()
+                GrantPath::<Trace>::walk(spelled(&fine)).unwrap()
             )]
         );
     }
@@ -1153,32 +1151,56 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn the_meet_admits_a_windows_verbatim_prefix_variant() {
-        let sub = native(r"\\?\C:\work\sub");
-        let met = table(&[native(r"C:\work")], &[]).meet(table(std::slice::from_ref(&sub), &[]));
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let sub = native(&format!(r"\\?\{}\sub", utf8(&work).unwrap()));
+        let met = table(&[spelled(&work)], &[]).meet(table(std::slice::from_ref(&sub), &[]));
         assert_eq!(
             live(&met),
-            [FsAllow::Prefix(GrantPath::allowing(sub).unwrap())]
+            [FsAllow::Prefix(GrantPath::<Trace>::walk(sub).unwrap())]
         );
     }
 
-    /// An allow holds a name as stored: the meet folds the separator and the
-    /// drive letter's case, as `windows_stored_components` does, and nothing
-    /// else, so `c:/work/sub` lies within `C:\work` while `C:\WORK\sub` does
-    /// not.  Gated like the verbatim test above.
+    /// A present directory's spellings normalise equally, whatever their
+    /// separator, drive letter's case or, on a case-insensitive volume, name
+    /// case; absent components keep the case written and so differ.  Gated
+    /// like the verbatim test above.
     #[cfg(windows)]
     #[test]
-    fn the_meet_folds_a_windows_separator_and_drive_letter_but_not_other_case() {
-        let outer = || table(&[native(r"C:\work")], &[]);
-
-        let sub = native("c:/work/sub");
+    fn the_meet_folds_a_windows_spelling_of_a_present_directory_and_keeps_an_absent_name_s_case() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let outer = || table(&[spelled(&work)], &[]);
+        let s = utf8(&work).unwrap();
+        // `c:/…/work/sub`: separator and drive case fold.
+        let slashed = format!(
+            "{}{}/sub",
+            s[..1].to_ascii_lowercase(),
+            s[1..].replace('\\', "/")
+        );
+        let sub = native(&slashed);
         let met = outer().meet(table(std::slice::from_ref(&sub), &[]));
         assert_eq!(
             live(&met),
-            [FsAllow::Prefix(GrantPath::allowing(sub).unwrap())]
+            [FsAllow::Prefix(GrantPath::<Trace>::walk(sub).unwrap())]
         );
-
-        let met = outer().meet(table(&[native(r"C:\WORK\sub")], &[]));
-        assert_eq!(live(&met), Vec::<FsAllow>::new());
+        // `…\WORK\sub`: a present directory is held under its stored name, so
+        // the spelling's case is the volume's business and the allow survives.
+        let upper = native(&format!("{}\\WORK\\sub", utf8(tmp.path()).unwrap()));
+        let met = outer().meet(table(std::slice::from_ref(&upper), &[]));
+        assert_eq!(
+            live(&met),
+            [FsAllow::Prefix(GrantPath::<Trace>::walk(upper).unwrap())]
+        );
+        // Absent components keep the case written: `ABSENT` is not `absent`.
+        let absent = || table(&[spelled(&tmp.path().join("absent"))], &[]);
+        let other = native(&format!("{}\\ABSENT\\sub", utf8(tmp.path()).unwrap()));
+        assert_eq!(
+            live(&absent().meet(table(&[other], &[]))),
+            Vec::<FsAllow>::new()
+        );
     }
 
     /// A stack that reads under `root` but for the `denied` names of it.

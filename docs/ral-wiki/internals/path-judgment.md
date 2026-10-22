@@ -34,12 +34,17 @@ between steps changes which child is obtained and the transcript says which.
   `freadlink`, the reparse buffer) and its target walked from the link's own
   directory, so no name is read twice. A `..` climbs out of the link's target,
   not out of the link's place, and pops the cursor rather than opening the
-  kernel's parent.
+  kernel's parent. From a held directory — a link the tree walk follows, an
+  ignore file found beneath it — a `..` climbs the directories the walk opened
+  above that directory, never the names a caller descended by, and at the root
+  stays.
 - **The stored name is the one the host can prove.** Linux: the name `openat`
-  resolved. macOS: the name the parent's listing shows for that identity.
-  Windows: the normalized name of the handle, checked against the parent's own
-  path. On Windows the walked prefix cannot be renamed while held, because
-  directories are opened without `FILE_SHARE_DELETE`.
+  resolved. macOS: the name asked where the lookup answers that spelling, else
+  the one entry of that identity the parent's listing shows under the name's
+  fold. Windows: the normalized name of the handle, checked against the
+  parent's own path. On Windows the walked prefix cannot be renamed while held,
+  because directories are opened with the traverse right and without
+  `FILE_SHARE_DELETE`; every create is relative to the held handle.
 - **Anchoring is not folding.** A logical consumer (`cd`, `within [dir: …]`,
   `absolute-path`, a display base) folds `.` and `..` explicitly
   (`LexicalPath::folded`); what reaches the disk is handed unfolded
@@ -107,7 +112,8 @@ function of its layers.**
   keeps its rules and nothing beside them; each spelling is a `GrantPath`:
   as written, and what its walk made of it.
 - **An allowance is an `Extent`**: `Everywhere` where the spelling is, or walks
-  to, the root; otherwise a position. It holds nothing and resolves anywhere.
+  to, the root; otherwise a position. It holds nothing and resolves anywhere
+  — on every host; the Windows sandbox side refuses to project it at launch.
 - **An exclusion is an `Excluded`, made by `walk_excluded`**: the spelling walked
   without following its last component; where that is a link, its target read
   through the link's handle and walked on. Both are held: the link is an object
@@ -212,8 +218,10 @@ position; the kernel judges current ancestry. The residuals:
   On Windows the rename is by the staging handle.
 - **macOS opens a held leaf by name** for data before verifying it; a device
   substituted at the name is opened with `O_NOCTTY` and, for a regular file,
-  `O_NONBLOCK`. A leaf its permissions refused is *stated* (one `getattrlistat`)
-  and never opened, so `read` fails there.
+  `O_NONBLOCK`. A leaf its permissions refused, and a special file (FIFO,
+  socket, device), is *stated* (one `getattrlistat`) and never held; a refused
+  file is never opened, a special file is opened by name under the held
+  directory for a stream, which must find a special file there.
 - **A file moved or hard-linked out of a denied directory** by a process that may
   write it is a new name, judged on its own. A secret that must follow its
   moves is denied by its own name.
@@ -223,7 +231,8 @@ position; the kernel judges current ancestry. The residuals:
   and ReFS ids are not reused in practice. Ancestors are recorded, not held.
   FUSE, NFS, overlayfs without `xino` and FAT can reuse or fail to keep ids; an
   exclusion there can over-deny and position still holds. No volume refuses an
-  exclusion.
+  exclusion. FAT answers neither `FileIdInfo` nor a reparse tag; the 64-bit
+  index and a tag of zero stand in.
 - **Probes by name**: `is_writable`, the `+x` test of a `PATH` candidate, the
   diagnostic probes after a failed exec, and git's session-start reading of
   `.git` answer by name and grant nothing. A casefolded Linux directory stores

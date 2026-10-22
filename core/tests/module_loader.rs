@@ -146,3 +146,83 @@ fn ral_path_candidates_are_judged_for_reading() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// The source of `use 'm.ral'` from `here` over `ral_path`, under a grant that
+/// reads all of `root` but the local name `here/m.ral`, present or not: the
+/// cwd is read, its candidate is not.
+fn use_denying_the_local_name(
+    root: &std::path::Path,
+    here: &std::path::Path,
+    ral_path: &str,
+) -> String {
+    format!(
+        "grant [fs: [read: [`absolute '{}'], deny: [`absolute '{}']]] \
+         {{ within [dir: '{}', env: [RAL_PATH: '{ral_path}']] {{ use 'm.ral' }} }}",
+        root.display(),
+        here.join("m.ral").display(),
+        here.display()
+    )
+}
+
+/// The name beside the script is the first candidate of one search, so an
+/// absent one under a deny is passed over like a denied one.
+#[test]
+fn an_absent_local_name_under_a_deny_still_searches_ral_path() {
+    let root = scratch("absent-denied");
+    let (here, d1) = (root.join("here"), root.join("d1"));
+    for dir in [&here, &d1] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(d1.join("m.ral"), "let answer = 1\n").unwrap();
+    let source = use_denying_the_local_name(&root, &here, &d1.display().to_string());
+    let found = top_level(&mut fresh_shell(), &source).expect("RAL_PATH is searched");
+    assert_eq!(answer_of(&found), 1);
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// A present local name the grant refuses yields to a `RAL_PATH` module, as a
+/// denied `execvp` candidate does.
+#[test]
+fn a_denied_local_name_yields_to_ral_path() {
+    let root = scratch("denied-yields");
+    let (here, d1) = (root.join("here"), root.join("d1"));
+    for dir in [&here, &d1] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(here.join("m.ral"), "let answer = 9\n").unwrap();
+    std::fs::write(d1.join("m.ral"), "let answer = 1\n").unwrap();
+    let source = use_denying_the_local_name(&root, &here, &d1.display().to_string());
+    let found = top_level(&mut fresh_shell(), &source).expect("the library module is read");
+    assert_eq!(answer_of(&found), 1);
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// Where `RAL_PATH` has nothing, the local name's refusal is the error,
+/// present or absent: the denial does not say which.
+#[test]
+fn a_denied_local_name_is_the_error_where_ral_path_has_nothing() {
+    let root = scratch("denied-error");
+    let here = root.join("here");
+    std::fs::create_dir_all(&here).unwrap();
+    let local = here.join("m.ral");
+    let source = use_denying_the_local_name(&root, &here, "");
+    let mut shell = fresh_shell();
+
+    std::fs::write(&local, "let answer = 9\n").unwrap();
+    let present = top_level(&mut shell, &source).expect_err("the local name is denied");
+    assert!(
+        present.to_string().contains(&local.display().to_string()),
+        "{present}"
+    );
+
+    std::fs::remove_file(&local).unwrap();
+    let absent = top_level(&mut shell, &source).expect_err("the absent name is denied alike");
+    assert!(
+        absent.to_string().contains(&local.display().to_string()),
+        "{absent}"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}

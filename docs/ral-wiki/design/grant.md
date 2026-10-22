@@ -119,9 +119,10 @@ launch hardening.
   override can still choose one (`HOMEBREW_PREFIX` on a home Linuxbrew), so the
   floor keeps only chosen directories outside the process's home, the floor
   having no `FreezeCtx`; such a prefix is run, and read by running, wherever
-  `homebrew` is granted, and is not floored. The floor drops a row that fails to
-  freeze, where the selector raises the error. The floor is an allowance like any
-  other, so it renders frozen and a redirected root shows nothing.
+  `homebrew` is granted, and is not floored. A floor directory whose walk
+  fails refuses the floor, so boot fails and names it; an override naming the
+  world or the home is no floor and no error. The floor is an allowance like
+  any other, so it renders frozen and a redirected root shows nothing.
   An exclusion means "not allowed", never "not included": a profile that merely
   leaves something unlisted does not exclude it.
 - **A refusal says why, in one of a few shapes.** *Missing allowance* names the

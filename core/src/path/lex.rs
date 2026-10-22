@@ -23,8 +23,7 @@ use super::{CwdPath, EntryName, LexicalPath, NotAnEntryName, PathRules};
 /// heads count as absolute there too.  Whether such a head is eligible as a
 /// grant is a separate question, which `guard::freeze` asks first.
 ///
-/// [`anchor`] and [`path_dirs_absolute`](super::which::path_dirs_absolute),
-/// through [`is_absolute`], and [`join_under`], rely on a
+/// [`anchor`], through [`is_absolute`], and [`join_under`], rely on a
 /// [`HeadKind::Device`] or [`HeadKind::Malformed`] path counting as absolute
 /// under Windows: the kernel never reads one against a cwd, so neither may
 /// they, joining it onto one or dropping it as relative.

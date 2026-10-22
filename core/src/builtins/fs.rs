@@ -153,7 +153,7 @@ fn made_in(
     let failed = |e: &dyn std::fmt::Display| sig(format!("{ctx}: {e}"));
     loop {
         let name = EntryName::fresh("ral-tmp-").map_err(|e| failed(&e))?;
-        let target = parent.absent(name).map_err(|e| failed(&e))?;
+        let target = parent.absent(name);
         let target = shell.judge::<Writing>(target)?;
         match make(target) {
             Ok(made) => return Ok(Value::string(made)),

@@ -49,8 +49,7 @@ use crate::path::lex::relative_suffix;
 use crate::path::sigil::SigilHead;
 use crate::path::{
     CwdPath, FrozenPath, GrantRefusal, LeafMode, LexicalPath, PathRules, RealPath, SubpathRefusal,
-    Trace, XdgKind, classify_subpath, grant_eligibility, path_dirs_absolute, resolve_xdg_in, shown,
-    walk, walk_lenient,
+    Trace, XdgKind, classify_subpath, grant_eligibility, resolve_xdg_in, shown, walk, walk_lenient,
 };
 use crate::syntax::quote::quote_word;
 use crate::text::code;
@@ -237,6 +236,19 @@ impl PolicyError {
             "To withhold every path, grant none: leave the fs `read` and `write` lists empty.",
         )
     }
+
+    /// A file key naming the filesystem root, a directory, not a program.
+    pub(crate) fn root_program(written: &FrozenPath) -> Self {
+        Self::new(format!(
+            "'{}' is the filesystem root, a directory, so as an exec target it names a binary \
+             that cannot exist",
+            written.shown()
+        ))
+        .with_hint(
+            "To run every program write `every`; for every program beneath a directory write \
+             `dir` before the place.",
+        )
+    }
 }
 
 impl From<PolicyError> for Break {
@@ -328,6 +340,34 @@ fn unreadable_message(dot_git: &Path, error: &std::io::Error) -> PolicyError {
     )
 }
 
+/// A place frozen and walked as polarity `W` walks, or the root spelling,
+/// which no host walks: `/` is a grant by polarity alone ([`Polar::root`]).
+pub(crate) enum Placed<W: Polar> {
+    Root,
+    Walked(GrantPath<W>),
+}
+
+impl<W: Polar> Placed<W> {
+    /// What the polarity makes of it.
+    ///
+    /// # Errors
+    /// What the polarity refuses of the root.
+    pub(crate) fn grant(self) -> Result<GrantPath<W::Grant>, PolicyError> {
+        match self {
+            Self::Root => W::root(FrozenPath::root()),
+            Self::Walked(path) => W::grant(path),
+        }
+    }
+
+    /// The spelling, as written and frozen.
+    pub(crate) fn written(&self) -> FrozenPath {
+        match self {
+            Self::Root => FrozenPath::root(),
+            Self::Walked(path) => path.written.clone(),
+        }
+    }
+}
+
 /// The anchor a grant is frozen against, once rather than per access: the
 /// [`Resolver`](crate::path::Resolver) pair.
 ///
@@ -386,7 +426,7 @@ impl FreezeCtx {
     /// # Errors
     /// As [`walked`](Self::walked).
     pub fn place(&self, place: &Place) -> Result<Option<FrozenPath>, PolicyError> {
-        Ok(self.walked::<Trace>(place)?.map(|walked| walked.written))
+        Ok(self.walked::<Trace>(place)?.map(|placed| placed.written()))
     }
 
     /// Freeze one place and walk it as polarity `W` walks: an allowance's
@@ -399,19 +439,24 @@ impl FreezeCtx {
     /// `HOME` under a home-relative place, an anchored place that freezes
     /// relative, a `.git` pointer no git directory claims, a spelling whose
     /// walk fails, or an exclusion of the root.
-    pub(crate) fn walked<W: Polar>(
-        &self,
-        place: &Place,
-    ) -> Result<Option<GrantPath<W>>, PolicyError> {
+    pub(crate) fn walked<W: Polar>(&self, place: &Place) -> Result<Option<Placed<W>>, PolicyError> {
         let tag = place.tag();
         let sub = |s| subpath(&tag, s);
         let frozen = match place {
             Place::Absolute(raw) => {
-                if names_the_root(raw) {
-                    return W::root(FrozenPath::root()).map(Some);
+                // The root spelling names everywhere on every host and is
+                // classified by neither host's rules; every other payload is
+                // classified before it is folded, so no foreign or malformed
+                // spelling can fold to `/` here.
+                if raw == "/" {
+                    return Ok(Some(Placed::Root));
                 }
                 return live_absolute(raw, PathRules::HOST)?
-                    .then(|| freeze(raw).and_then(GrantPath::<W>::walk))
+                    .then(|| {
+                        freeze(raw)
+                            .and_then(GrantPath::<W>::walked)
+                            .map(Placed::Walked)
+                    })
                     .transpose();
             }
             Place::Cwd(s) => join_sub(self.cwd.as_path(), sub(s)?)?,
@@ -428,7 +473,9 @@ impl FreezeCtx {
             }
             Place::Xdg(kind, s) => return self.xdg::<W>(*kind, sub(s)?).map(Some),
         };
-        GrantPath::walk(anchored(&tag, frozen)?).map(Some)
+        GrantPath::<W>::walked(anchored(&tag, frozen)?)
+            .map(Placed::Walked)
+            .map(Some)
     }
 
     /// The directories a selector names, each walked as polarity `W` walks.
@@ -441,12 +488,12 @@ impl FreezeCtx {
     pub(crate) fn selector<W: Polar>(
         &self,
         selector: Selector,
-    ) -> Result<Vec<GrantPath<W>>, PolicyError> {
+    ) -> Result<Vec<GrantPath<W::Grant>>, PolicyError> {
         let home = self.home_dir()?;
         match selector {
-            Selector::Path => path_dirs(home.as_ref()),
+            Selector::Path => path_dirs::<W>(home.as_ref()),
             Selector::Toolchain(t) => {
-                toolchains::expand_in(t, |k| std::env::var(k).ok(), home.as_ref())
+                toolchains::expand_in::<W>(t, |k| std::env::var(k).ok(), home.as_ref())
             }
         }
     }
@@ -463,7 +510,7 @@ impl FreezeCtx {
     /// That guard is stated in `home`'s terms, so an unknown home leaves an
     /// `xdg-*` grant unanswerable, an absolute `XDG_*_HOME` included, since
     /// there would then be nothing to contain it.
-    fn xdg<W: Polar>(&self, kind: XdgKind, sub: &str) -> Result<GrantPath<W>, PolicyError> {
+    fn xdg<W: Polar>(&self, kind: XdgKind, sub: &str) -> Result<Placed<W>, PolicyError> {
         let spelled = self.home();
         let (Some(spelled), Some(base)) = (
             spelled.as_deref(),
@@ -472,11 +519,11 @@ impl FreezeCtx {
             return Err(home_unknown());
         };
         let tag = format!("xdg-{}", <&str>::from(kind));
-        let resolved = GrantPath::<W>::walk(anchored(&tag, join_sub(base, sub)?)?)?;
+        let resolved = GrantPath::<W>::walked(anchored(&tag, join_sub(base, sub)?)?)?;
         let lands = resolved.real.followed().real();
         let home = Home::of(spelled)?;
         if home.real.as_ref().is_some_and(|home| home.contains(lands)) {
-            return Ok(resolved);
+            return Ok(Placed::Walked(resolved));
         }
         let var = kind.env_var();
         let val = self.env.get_or_host(var).unwrap_or_default();
@@ -534,15 +581,6 @@ impl Home {
             real,
         })
     }
-}
-
-/// Whether the raw `absolute` payload folds to the filesystem root, which
-/// the polarity decides on every host, live or not.
-fn names_the_root(raw: &str) -> bool {
-    crate::path::lex::is_bare_root(
-        crate::path::lex::fold_dots_under(raw, PathRules::HOST),
-        PathRules::HOST,
-    )
 }
 
 /// An anchored place must freeze absolute: a relative `HOME` or `TMPDIR`
@@ -792,15 +830,16 @@ pub(super) fn refuse_the_world(
 }
 
 /// [`path_dirs_in`] over the host's `$PATH`.
-fn path_dirs<W: Polar>(home: Option<&Home>) -> Result<Vec<GrantPath<W>>, PolicyError> {
+fn path_dirs<W: Polar>(home: Option<&Home>) -> Result<Vec<GrantPath<W::Grant>>, PolicyError> {
     #[allow(clippy::disallowed_methods, reason = "PATH, not an XDG basedir")]
     let path = std::env::var_os("PATH").unwrap_or_default();
-    path_dirs_in(&path, home)
+    path_dirs_in::<W>(&path, home)
 }
 
-/// The absolute entries of `path` ([`path_dirs_absolute`]), each frozen as
-/// the host-held path it is ([`host_absolute`]) and walked.  A relative entry
-/// is the environment's business, not the grant author's, so unlike a relative
+/// The absolute entries of `path` as written, each classified on its raw
+/// spelling as an `absolute` payload is ([`host_absolute`]), then frozen and
+/// walked: [`path_dirs`](crate::path::path_dirs) folds, and a fold before the
+/// classification would read `///x` as `/x`.  A relative entry is the environment's business, not the grant author's, so unlike a relative
 /// grant path it is dropped in silence; one naming the world is not
 /// ([`refuse_the_world`]), nor one [`host_absolute`] refuses, absolute to
 /// the kernel but under a malformed or mixed head, or not UTF-8: the
@@ -808,9 +847,9 @@ fn path_dirs<W: Polar>(home: Option<&Home>) -> Result<Vec<GrantPath<W>>, PolicyE
 fn path_dirs_in<W: Polar>(
     path: &OsStr,
     home: Option<&Home>,
-) -> Result<Vec<GrantPath<W>>, PolicyError> {
-    let dirs: Vec<_> = path_dirs_absolute(path)
-        .into_iter()
+) -> Result<Vec<GrantPath<W::Grant>>, PolicyError> {
+    let dirs: Vec<_> = crate::path::path_entries(path)
+        .filter(|entry| crate::path::is_absolute(entry))
         .map(|entry| {
             let subject = format!("PATH holds {}", shown(&entry));
             let held = host_absolute(&entry).map_err(|e| {
@@ -820,9 +859,9 @@ fn path_dirs_in<W: Polar>(
                     e.message
                 ))
             })?;
-            let dir = GrantPath::<W>::walk(held)?;
-            refuse_the_world(Selector::Path, &subject, "PATH", dir.real.followed(), home)
-                .map(|()| dir)
+            let dir = GrantPath::<W>::walked(held)?;
+            refuse_the_world(Selector::Path, &subject, "PATH", dir.real.followed(), home)?;
+            W::grant(dir)
         })
         .collect::<Result<_, _>>()?;
     if dirs.is_empty() {
@@ -842,6 +881,8 @@ fn path_dirs_in<W: Polar>(
 )]
 mod tests {
     use super::*;
+    use crate::capability::Extent;
+    use crate::path::Excluded;
     use crate::path::lex::fold_dots;
     use crate::path::sigil::expand_path_prefix;
 
@@ -924,6 +965,11 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStrExt;
+            assert!(
+                err.message.contains("PATH holds ///x/bin"),
+                "the entry is named as written, unfolded: {}",
+                err.message
+            );
             let err =
                 path_dirs_in::<Trace>(OsStr::from_bytes(b"/usr/bin:/\xff"), None).unwrap_err();
             assert!(err.message.contains("is not UTF-8"), "{}", err.message);
@@ -1298,6 +1344,67 @@ mod tests {
     fn a_foreign_rooted_absolute_is_dead_on_this_host() {
         let foreign = if cfg!(windows) { "/x" } else { r"C:\x" };
         assert!(ctx("/h", "/cwd").place(&abs(foreign)).unwrap().is_none());
+    }
+
+    /// Why `place` is refused as polarity `W`.
+    fn refused_as<W: Polar>(place: &Place) -> String {
+        match ctx("/h", "/w")
+            .walked::<W>(place)
+            .and_then(|placed| placed.map(Placed::grant).transpose())
+        {
+            Err(e) => e.message,
+            Ok(_) => panic!("{place:?} was not refused"),
+        }
+    }
+
+    /// A foreign spelling that folds to `/` under host rules is classified
+    /// first, so it is dead and no root.
+    #[cfg(unix)]
+    #[test]
+    fn a_foreign_spelling_that_folds_to_the_root_is_dead_not_universal() {
+        for raw in ["//?/C:/../..", "//?/C:/..", r"\\?\C:\..\.."] {
+            let ctx = ctx("/h", "/w");
+            assert!(matches!(ctx.walked::<Trace>(&abs(raw)), Ok(None)), "{raw}");
+            assert!(
+                matches!(ctx.walked::<Excluded>(&abs(raw)), Ok(None)),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_root_is_refused_before_any_fold() {
+        for refusal in [
+            refused_as::<Trace>(&abs("//")),
+            refused_as::<Excluded>(&abs("//")),
+        ] {
+            assert!(refusal.contains("server and a share"), "{refusal}");
+        }
+    }
+
+    #[test]
+    fn the_root_spelling_is_everywhere_on_every_host() {
+        let root = ctx("/h", "/w").walked::<Trace>(&abs("/")).unwrap().unwrap();
+        assert_eq!(root.grant().unwrap().real, Extent::Everywhere);
+        assert!(refused_as::<Excluded>(&abs("/")).contains("filesystem root"));
+        #[cfg(windows)]
+        assert!(matches!(
+            ctx("/h", "/w").walked::<Trace>(&abs("/x")),
+            Ok(None)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_spelling_that_folds_to_the_root_is_the_root() {
+        for raw in ["/..", "/./"] {
+            let root = ctx("/h", "/w").walked::<Trace>(&abs(raw)).unwrap().unwrap();
+            assert_eq!(root.grant().unwrap().real, Extent::Everywhere, "{raw}");
+            assert!(
+                refused_as::<Excluded>(&abs(raw)).contains("filesystem root"),
+                "{raw}"
+            );
+        }
     }
 
     /// A path the host holds has no other platform: where a payload would

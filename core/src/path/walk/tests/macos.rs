@@ -1,5 +1,5 @@
-//! The walk on macOS: the stored-name rule, a leaf the user cannot hold, and
-//! links read through the descriptor that opened them.
+//! The walk on macOS: the stored-name rule, a leaf the user cannot hold or a
+//! special file, and links read through the descriptor that opened them.
 
 #![allow(
     clippy::disallowed_methods,
@@ -7,15 +7,18 @@
 )]
 
 use super::super::*;
+use super::LOOKED;
 use super::unix::{id, located_with, name, root, root_user, spelled};
-use std::io::Read;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::ffi::OsString;
+use std::io::{Read, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// A directory held as the walk holds one.
 fn held(path: &Path) -> Held {
     Held {
-        file: File::open(path).unwrap(),
+        file: Arc::new(File::open(path).unwrap()),
         info: host::DirInfo,
     }
 }
@@ -26,8 +29,58 @@ fn read_all(path: &Path) -> String {
     text
 }
 
-/// The first branch: a spelling of the name asked, under every fold a
-/// filesystem applies, is the entry's own, and is what the directory stores.
+/// A volume mounted from a disk image, detached when it drops.
+struct Volume(PathBuf);
+
+impl Volume {
+    fn attach(dir: &Path, fs: &str) -> Self {
+        let (image, mount) = (dir.join("volume.dmg"), dir.join("mount"));
+        std::fs::create_dir(&mount).unwrap();
+        hdiutil(&[
+            "create".as_ref(),
+            "-quiet".as_ref(),
+            "-size".as_ref(),
+            "8m".as_ref(),
+            "-fs".as_ref(),
+            fs.as_ref(),
+            "-volname".as_ref(),
+            "ral-hold".as_ref(),
+            image.as_os_str(),
+        ]);
+        hdiutil(&[
+            "attach".as_ref(),
+            "-quiet".as_ref(),
+            "-nobrowse".as_ref(),
+            "-mountpoint".as_ref(),
+            mount.as_os_str(),
+            image.as_os_str(),
+        ]);
+        Self(mount)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Volume {
+    fn drop(&mut self) {
+        hdiutil(&[
+            "detach".as_ref(),
+            "-quiet".as_ref(),
+            "-force".as_ref(),
+            self.0.as_os_str(),
+        ]);
+    }
+}
+
+fn hdiutil(args: &[&OsStr]) {
+    let status = Command::new("hdiutil").args(args).status().unwrap();
+    assert!(status.success(), "hdiutil {args:?}");
+}
+
+/// A spelling of the name asked, under every fold a filesystem applies, is
+/// the entry's own where the directory stores that spelling.
 #[test]
 fn a_case_variant_is_recorded_at_the_spelling_the_directory_stores() {
     let tmp = tempfile::tempdir().unwrap();
@@ -43,10 +96,11 @@ fn a_case_variant_is_recorded_at_the_spelling_the_directory_stores() {
     assert_eq!(step.name().as_os_str(), "Secret");
 }
 
-/// The rule over what a lookup answered, branch by branch, with two hard links
-/// `a` and `b` in one directory: an answer that spells the name asked is
-/// taken; the other link's name is replaced by the listing's entry for the
-/// object held; and no such entry, or a directory that will not list, refuses.
+/// The rule over what a lookup answered, with two hard links `a` and `b` in
+/// one directory: an answer spelled as the name asked is taken without a
+/// listing; any other is decided by the listing's entries of the object held,
+/// the byte-equal name first; none, or a directory that will not list,
+/// refuses.
 #[test]
 fn the_stored_name_rule_takes_a_spelling_and_lists_for_another_links_name() {
     let tmp = tempfile::tempdir().unwrap();
@@ -56,20 +110,14 @@ fn the_stored_name_rule_takes_a_spelling_and_lists_for_another_links_name() {
     let held = held(&dir);
     let wanted = id(&dir.join("a"));
 
-    let kept = host::settle(&held.file, &name("a"), wanted, OsStr::new("A")).unwrap();
-    assert_eq!(
-        kept.as_os_str(),
-        "A",
-        "the spelling answered is the entry's"
-    );
-
+    let byte_present = host::settle(&held.file, &name("a"), wanted, OsStr::new("A")).unwrap();
+    assert_eq!(byte_present.as_os_str(), "a", "the name asked is listed");
     let listed = host::settle(&held.file, &name("a"), wanted, OsStr::new("b")).unwrap();
     assert_eq!(
         listed.as_os_str(),
         "a",
         "the other link's name is not adopted"
     );
-
     let err = host::settle(&held.file, &name("c"), wanted, OsStr::new("b")).unwrap_err();
     assert!(err.to_string().contains("moved during the walk"), "{err}");
 
@@ -77,8 +125,14 @@ fn the_stored_name_rule_takes_a_spelling_and_lists_for_another_links_name() {
         return;
     }
     std::fs::set_permissions(&dir, PermissionsExt::from_mode(0o311)).unwrap();
+    let asked = host::settle(&held.file, &name("a"), wanted, OsStr::new("a"));
     let blind = host::settle(&held.file, &name("a"), wanted, OsStr::new("b"));
     std::fs::set_permissions(&dir, PermissionsExt::from_mode(0o755)).unwrap();
+    assert_eq!(
+        asked.unwrap().as_os_str(),
+        "a",
+        "an answer spelled as asked lists nothing"
+    );
     let err = blind.unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
     assert!(
@@ -87,69 +141,214 @@ fn the_stored_name_rule_takes_a_spelling_and_lists_for_another_links_name() {
     );
 }
 
-/// A walk of `a` records `a` whichever name the vnode carries, so a `>` on it
-/// lands on `a` and leaves `b` its own object, while another thread keeps the
-/// vnode's name moving by looking up `b`.
+/// A walk of `walked` records `walked` whichever name the vnode carries, so a
+/// `>` on it lands on it and leaves `other` its own object, while another
+/// thread keeps the vnode's name moving by looking up `other`.
+fn walks_stay_off_the_other_link(dir: &Path, walked: &str, other: &str) {
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !stop.load(Ordering::Relaxed) {
+                let _ = std::fs::symlink_metadata(dir.join(other));
+            }
+        });
+        for _ in 0..500 {
+            let loc = located_with(&dir.join(walked), LeafMode::Follow).unwrap();
+            assert_eq!(loc.real().as_path(), dir.join(walked));
+        }
+        stop.store(true, Ordering::Relaxed);
+    });
+    let loc = located_with(&dir.join(walked), LeafMode::Follow).unwrap();
+    let mut staged = loc.stage().unwrap();
+    staged.file().write_all(b"new").unwrap();
+    staged.publish().unwrap();
+    assert_eq!(read_all(&dir.join(walked)), "new");
+    assert_eq!(read_all(&dir.join(other)), "old");
+}
+
 #[test]
 fn a_hard_link_is_recorded_under_the_name_it_was_opened_by() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = root(&tmp);
     std::fs::write(dir.join("a"), b"old").unwrap();
     std::fs::hard_link(dir.join("a"), dir.join("b")).unwrap();
-    let stop = AtomicBool::new(false);
-    std::thread::scope(|scope| {
-        scope.spawn(|| {
-            while !stop.load(Ordering::Relaxed) {
-                let _ = std::fs::symlink_metadata(dir.join("b"));
-            }
-        });
-        for _ in 0..500 {
-            let loc = located_with(&dir.join("a"), LeafMode::Follow).unwrap();
-            assert_eq!(loc.real().as_path(), dir.join("a"));
-        }
-        stop.store(true, Ordering::Relaxed);
-    });
-    let loc = located_with(&dir.join("a"), LeafMode::Follow).unwrap();
-    let mut staged = loc.stage().unwrap();
-    std::io::Write::write_all(staged.file(), b"new").unwrap();
-    staged.publish().unwrap();
-    assert_eq!(read_all(&dir.join("a")), "new");
-    assert_eq!(read_all(&dir.join("b")), "old");
+    walks_stay_off_the_other_link(&dir, "a", "b");
 }
 
-/// An entry that moved between its open and the check is refused, never
-/// adopted: renamed within its directory the lookup no longer finds it,
-/// replaced the lookup finds another object, and moved to another directory
-/// it is not an entry of this one.
+/// On a case-sensitive volume `a` and `A` are two entries of one object, and
+/// no fold makes them one.
 #[test]
-fn a_component_that_moved_before_its_name_was_checked_is_refused() {
+fn a_case_sensitive_volume_keeps_two_links_apart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let volume = Volume::attach(&root(&tmp), "Case-sensitive APFS");
+    std::fs::write(volume.path().join("a"), b"old").unwrap();
+    std::fs::hard_link(volume.path().join("a"), volume.path().join("A")).unwrap();
+    walks_stay_off_the_other_link(volume.path(), "a", "A");
+}
+
+/// Two entries of one object that fold alike, neither spelled as asked, are
+/// not guessed between.
+#[test]
+fn an_ambiguous_fold_refuses() {
+    let tmp = tempfile::tempdir().unwrap();
+    let volume = Volume::attach(&root(&tmp), "Case-sensitive APFS");
+    let mount = volume.path();
+    std::fs::write(mount.join("\u{e1}"), b"x").unwrap();
+    std::fs::hard_link(mount.join("\u{e1}"), mount.join("\u{c1}")).unwrap();
+    let err = host::settle(
+        &held(mount).file,
+        &name("a\u{301}"),
+        id(&mount.join("\u{e1}")),
+        OsStr::new("\u{e1}"),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("spellings of one object"), "{err}");
+}
+
+#[test]
+fn pick_takes_the_byte_equal_name_then_the_unique_fold() {
+    let entries = |names: &[&str]| names.iter().map(OsString::from).collect::<Vec<_>>();
+    let picked = |names: &[&str], asked: &str| host::pick(&entries(names), &name(asked));
+    assert_eq!(picked(&["a", "A"], "A").unwrap(), name("A"));
+    assert_eq!(picked(&["Desktop"], "desktop").unwrap(), name("Desktop"));
+    let err = picked(&["\u{e1}", "\u{c1}"], "a\u{301}").unwrap_err();
+    assert!(err.to_string().contains("2 spellings"), "{err}");
+    let err = picked(&["b"], "a").unwrap_err();
+    assert!(err.to_string().contains("moved during the walk"), "{err}");
+}
+
+/// What the kernel packs for one entry: its length, the returned set, the
+/// name as a reference to bytes past the fixed fields `rest`, which follow it.
+fn packed(common: u32, name: &str, rest: &[u8]) -> Vec<u8> {
+    let at = 4 + 5 * 4;
+    let offset = i32::try_from(8 + rest.len()).unwrap();
+    let length = u32::try_from(at + 8 + rest.len() + name.len() + 1).unwrap();
+    let mut packed = length.to_ne_bytes().to_vec();
+    packed.extend(common.to_ne_bytes());
+    packed.extend([0; 16]);
+    packed.extend(offset.to_ne_bytes());
+    packed.extend(u32::try_from(name.len() + 1).unwrap().to_ne_bytes());
+    packed.extend(rest);
+    packed.extend(name.as_bytes());
+    packed.push(0);
+    packed
+}
+
+/// A lookup is read by the set it returned: a volume without timestamps
+/// answers without them, and one that does not answer an identity is refused.
+#[test]
+fn parse_lookup_reads_by_the_returned_set() {
+    const TIMES: u32 = libc::ATTR_CMN_CRTIME | libc::ATTR_CMN_MODTIME | libc::ATTR_CMN_ACCTIME;
+    const SET: u32 = libc::ATTR_CMN_RETURNED_ATTRS
+        | libc::ATTR_CMN_NAME
+        | libc::ATTR_CMN_DEVID
+        | libc::ATTR_CMN_OBJTYPE
+        | libc::ATTR_CMN_ACCESSMASK
+        | libc::ATTR_CMN_FILEID;
+    let reply = |common: u32| {
+        let mut rest = Vec::new();
+        rest.extend(7u32.to_ne_bytes());
+        rest.extend(1u32.to_ne_bytes());
+        if common & TIMES == TIMES {
+            for _ in 0..3 {
+                rest.extend(1_000i64.to_ne_bytes());
+                rest.extend(0i64.to_ne_bytes());
+            }
+        }
+        rest.extend(0o100_644u32.to_ne_bytes());
+        if common & libc::ATTR_CMN_FILEID != 0 {
+            rest.extend(42u64.to_ne_bytes());
+        }
+        packed(common, "x", &rest)
+    };
+
+    let full = host::parse_lookup(&reply(SET | TIMES)).unwrap();
+    assert_eq!(full.name, "x");
+    assert_eq!((full.seen.id.dev, full.seen.id.ino), (7, 42));
+    assert_eq!(
+        (full.seen.stat.kind, full.seen.stat.mode),
+        (Kind::File, 0o644)
+    );
+    let stat = full.seen.stat;
+    assert!(stat.btime.is_some() && stat.mtime.is_some() && stat.atime.is_some());
+
+    let bare = host::parse_lookup(&reply(SET)).unwrap();
+    assert_eq!((bare.seen.id.dev, bare.seen.id.ino), (7, 42));
+    assert_eq!(
+        (bare.seen.stat.kind, bare.seen.stat.mode),
+        (Kind::File, 0o644)
+    );
+    let stat = bare.seen.stat;
+    assert!(stat.btime.is_none() && stat.mtime.is_none() && stat.atime.is_none());
+
+    let err = host::parse_lookup(&reply(SET & !libc::ATTR_CMN_FILEID))
+        .err()
+        .unwrap();
+    assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+}
+
+/// A record of an entry the kernel could not stat carries its name alone: it
+/// is skipped, the record after it is read.
+#[test]
+fn parse_bulk_skips_a_record_without_identity() {
+    let nameless = libc::ATTR_CMN_RETURNED_ATTRS | libc::ATTR_CMN_NAME;
+    let identified = nameless | libc::ATTR_CMN_DEVID | libc::ATTR_CMN_FILEID;
+    let mut rest = Vec::new();
+    rest.extend(7u32.to_ne_bytes());
+    rest.extend(42u64.to_ne_bytes());
+    let mut buf = packed(nameless, "broken", &[]);
+    buf.extend(packed(identified, "whole", &rest));
+    let found = host::parse_bulk(&buf, 2).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].0, "whole");
+    assert_eq!((found[0].1.dev, found[0].1.ino), (7, 42));
+}
+
+/// An entry that moved between the lookup and the open is refused, never
+/// adopted: replaced, the open finds another object; renamed within its
+/// directory or moved to another, it finds none.
+#[test]
+fn an_object_replaced_between_lookup_and_open_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = root(&tmp);
     std::fs::create_dir(dir.join("a")).unwrap();
     std::fs::create_dir(dir.join("b")).unwrap();
-    std::fs::write(dir.join("a/x"), b"x").unwrap();
     let parent = held(&dir.join("a"));
-    let opened = id(&dir.join("a/x"));
-    assert_eq!(
-        host::stored_name(&parent.file, &name("x"), opened)
-            .unwrap()
-            .as_os_str(),
-        "x"
+    let stepped = |moves: Box<dyn FnMut()>| {
+        std::fs::write(dir.join("a/x"), b"x").unwrap();
+        LOOKED.with(|looked| *looked.borrow_mut() = Some(moves));
+        let stepped = host::step(&parent, &name("x"), Sharing::Leaf);
+        LOOKED.with(|looked| looked.borrow_mut().take());
+        let Err(refused) = stepped else {
+            panic!("the entry moved before it was opened");
+        };
+        refused
+    };
+    let at = |path: &str| dir.join(path);
+
+    let replaced = stepped(Box::new({
+        let x = at("a/x");
+        move || {
+            std::fs::remove_file(&x).unwrap();
+            std::fs::write(&x, b"another").unwrap();
+        }
+    }));
+    assert!(
+        replaced.to_string().contains("moved during the walk"),
+        "{replaced}"
     );
 
-    let refused = |entry: &str| {
-        host::stored_name(&parent.file, &name(entry), opened)
-            .unwrap_err()
-            .to_string()
-    };
-    std::fs::rename(dir.join("a/x"), dir.join("a/y")).unwrap();
-    assert!(refused("x").contains("moved during the walk"));
+    let renamed = stepped(Box::new({
+        let (x, y) = (at("a/x"), at("a/y"));
+        move || std::fs::rename(&x, &y).unwrap()
+    }));
+    assert_eq!(renamed.kind(), io::ErrorKind::NotFound);
 
-    std::fs::write(dir.join("a/x"), b"another").unwrap();
-    assert!(refused("x").contains("moved during the walk"));
-
-    std::fs::rename(dir.join("a/y"), dir.join("b/y")).unwrap();
-    assert!(refused("y").contains("moved during the walk"));
+    let elsewhere = stepped(Box::new({
+        let (x, moved) = (at("a/x"), at("b/x"));
+        move || std::fs::rename(&x, &moved).unwrap()
+    }));
+    assert_eq!(elsewhere.kind(), io::ErrorKind::NotFound);
 }
 
 /// `freadlink` reads a link's target through the `O_SYMLINK` descriptor that
@@ -271,44 +470,14 @@ fn an_exclusion_holds_its_leaf_by_the_walks_own_o_evtonly_descriptor() {
 #[test]
 fn an_unmounted_volume_leaves_an_exclusion_unheld_by_position() {
     use crate::path::{Depth, MatchedBy, Subject};
-    use std::process::Command;
-    let hdiutil = |args: &[&std::ffi::OsStr]| {
-        let status = Command::new("hdiutil").args(args).status().unwrap();
-        assert!(status.success(), "hdiutil {args:?}");
-    };
     let tmp = tempfile::tempdir().unwrap();
-    let dir = root(&tmp);
-    let (image, mount) = (dir.join("volume.dmg"), dir.join("mount"));
-    std::fs::create_dir(&mount).unwrap();
-    hdiutil(&[
-        "create".as_ref(),
-        "-quiet".as_ref(),
-        "-size".as_ref(),
-        "8m".as_ref(),
-        "-fs".as_ref(),
-        "APFS".as_ref(),
-        "-volname".as_ref(),
-        "ral-hold".as_ref(),
-        image.as_os_str(),
-    ]);
-    hdiutil(&[
-        "attach".as_ref(),
-        "-quiet".as_ref(),
-        "-nobrowse".as_ref(),
-        "-mountpoint".as_ref(),
-        mount.as_os_str(),
-        image.as_os_str(),
-    ]);
+    let volume = Volume::attach(&root(&tmp), "APFS");
+    let mount = volume.path().to_path_buf();
     std::fs::write(mount.join("secret"), b"s").unwrap();
     let mut excluded = walk_excluded(&spelled(&mount.join("secret"))).unwrap();
     assert!(excluded.named.handle.is_some());
 
-    hdiutil(&[
-        "detach".as_ref(),
-        "-quiet".as_ref(),
-        "-force".as_ref(),
-        mount.as_os_str(),
-    ]);
+    drop(volume);
     excluded.rehold();
     assert!(excluded.named.handle.is_none());
     let access = walk_lenient(&spelled(&mount.join("secret")), LeafMode::Follow).unwrap();
@@ -316,4 +485,79 @@ fn an_unmounted_volume_leaves_an_exclusion_unheld_by_position() {
         excluded.matches(Subject::Access(&access), Depth::Within),
         Some(MatchedBy::Name)
     );
+}
+
+fn mkfifo(path: &Path) {
+    assert!(Command::new("mkfifo").arg(path).status().unwrap().success());
+}
+
+/// macOS cannot hold a special file without opening it, so the walk states
+/// one: a FIFO keeps no reader of ours, an exclusion on it holds nothing, and
+/// a socket walks, exists and is not readable through a data handle.
+#[test]
+fn a_special_file_is_stated_and_never_held() {
+    use std::os::unix::net::UnixListener;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    let derived = || host::DERIVED.with(std::cell::Cell::get);
+    let before = derived();
+    let stated = |loc: &Located<Judged<Writing>>| matches!(&loc.leaf, Leaf::Stated { stat, .. } if stat.kind == Kind::Other);
+
+    mkfifo(&dir.join("pipe"));
+    let loc = located_with(&dir.join("pipe"), LeafMode::Follow).unwrap();
+    assert!(stated(&loc));
+    let writer = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits().cast_signed())
+        .open(dir.join("pipe"));
+    assert_eq!(
+        writer.unwrap_err().raw_os_error(),
+        Some(rustix::io::Errno::NXIO.raw_os_error()),
+        "no reader of ours"
+    );
+    let excluded = walk_excluded(&spelled(&dir.join("pipe"))).unwrap();
+    assert!(excluded.named.handle.is_none());
+
+    let _listener = UnixListener::bind(dir.join("sock")).unwrap();
+    let loc = located_with(&dir.join("sock"), LeafMode::Follow).unwrap();
+    assert!(stated(&loc));
+    assert!(loc.stat().is_some());
+    assert!(loc.read().is_err());
+    assert_eq!(derived(), before, "nothing was opened");
+}
+
+/// A stream to a stated FIFO is opened by name under the held directory, and
+/// must find a special file there.
+#[test]
+fn a_stream_to_a_fifo_is_opened_by_name_and_must_find_a_fifo() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    mkfifo(&dir.join("pipe"));
+    // A reader first: a write open on a FIFO with nobody to meet would block.
+    let mut sink = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits().cast_signed())
+        .open(dir.join("pipe"))
+        .unwrap();
+    let mut streamed = located_with(&dir.join("pipe"), LeafMode::Follow)
+        .unwrap()
+        .open_streaming(Streaming::Truncate)
+        .unwrap();
+    streamed.file().write_all(b"through").unwrap();
+    let mut body = [0; 7];
+    sink.read_exact(&mut body).unwrap();
+    assert_eq!(&body, b"through");
+
+    mkfifo(&dir.join("pipe2"));
+    let loc = located_with(&dir.join("pipe2"), LeafMode::Follow).unwrap();
+    std::fs::remove_file(dir.join("pipe2")).unwrap();
+    std::fs::write(dir.join("pipe2"), b"kept").unwrap();
+    let Err(refused) = loc.open_streaming(Streaming::Append) else {
+        panic!("a regular file is no FIFO");
+    };
+    assert!(
+        refused.to_string().contains("moved during the walk"),
+        "{refused}"
+    );
+    assert_eq!(read_all(&dir.join("pipe2")), "kept");
 }

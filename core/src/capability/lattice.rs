@@ -27,7 +27,7 @@
 use super::exec::ExecRules;
 use super::fs::FsLayer;
 use crate::guard::freeze::PolicyError;
-use crate::path::{Excluded, FrozenPath, PathRules, RealPath, Subject, Trace, Walked};
+use crate::path::{Excluded, FrozenPath, RealPath, Subject, Trace, Walked};
 use crate::syntax::quote::quote_word;
 use crate::types::EnvVars;
 use serde::{Deserialize, Serialize};
@@ -402,8 +402,9 @@ impl Flag {
     }
 }
 
-/// Where an allowance holds: everywhere (the root spelling, or a spelling
-/// whose walk reached the root), or under a position.
+/// Where an allowance holds: everywhere (the root spelling `/`, on every
+/// host, or a spelling whose walk reached the root on a host whose root is
+/// `/`), or under a position.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Extent {
     Everywhere,
@@ -456,21 +457,6 @@ impl GrantPath<Extent> {
             real: Extent::Everywhere,
         }
     }
-
-    /// The allowance a spelling makes, the root spelling being everywhere
-    /// with no walk to make (Windows has no `/` to walk).
-    ///
-    /// # Errors
-    /// The walk's, naming the spelling.
-    pub(crate) fn allowing(written: FrozenPath) -> Result<Self, PolicyError> {
-        if written.is_root() {
-            return Ok(Self {
-                written,
-                real: Extent::Everywhere,
-            });
-        }
-        GrantPath::<Trace>::walk(written).map(GrantPath::extent)
-    }
 }
 
 impl GrantPath<Trace> {
@@ -489,68 +475,77 @@ impl GrantPath<Trace> {
     }
 }
 
-/// A grant's polarity, which decides what the root makes: polarity is a
-/// grant notion, and the walk has none.
+/// A grant's polarity, which decides what a spelling resolves to: polarity
+/// is a grant notion, and the walk has none.  `Grant` is what the layer
+/// keeps: an allowance's extent, an exclusion's holds.
 pub trait Polar: Walked {
-    /// The grant of the root spelling, which Windows has no `/` to walk.
+    type Grant;
+
+    /// The grant of the root spelling `/`, which names everywhere on every
+    /// host and which no host walks.
     ///
     /// # Errors
     /// What the polarity refuses of the root.
-    fn root(written: FrozenPath) -> Result<GrantPath<Self>, PolicyError>;
+    fn root(written: FrozenPath) -> Result<GrantPath<Self::Grant>, PolicyError>;
 
     /// The grant of a spelling walked, which may have reached the root.
     ///
     /// # Errors
     /// What the polarity refuses of a walk that reached the root.
-    fn walked(path: GrantPath<Self>) -> Result<GrantPath<Self>, PolicyError>;
+    fn grant(walked: GrantPath<Self>) -> Result<GrantPath<Self::Grant>, PolicyError>;
 }
 
 impl Polar for Trace {
-    /// Walked as any spelling where `/` is a root; Windows has none.
-    fn root(written: FrozenPath) -> Result<GrantPath<Self>, PolicyError> {
-        if PathRules::HOST != PathRules::Posix {
-            let why = std::io::Error::other("this host has no `/`; a path here starts at a drive");
-            return Err(PolicyError::unwalkable(&written, &why));
-        }
-        GrantPath::walked(written)
+    type Grant = Extent;
+
+    fn root(written: FrozenPath) -> Result<GrantPath<Extent>, PolicyError> {
+        Ok(GrantPath {
+            written,
+            real: Extent::Everywhere,
+        })
     }
 
-    fn walked(path: GrantPath<Self>) -> Result<GrantPath<Self>, PolicyError> {
-        Ok(path)
+    fn grant(walked: GrantPath<Self>) -> Result<GrantPath<Extent>, PolicyError> {
+        Ok(walked.extent())
     }
 }
 
 impl Polar for Excluded {
+    type Grant = Self;
+
     /// The root holds no object to name and means `deny_all`.
     fn root(written: FrozenPath) -> Result<GrantPath<Self>, PolicyError> {
         Err(PolicyError::root_exclusion(&written))
     }
 
     /// A link to the root is the root under another name.
-    fn walked(path: GrantPath<Self>) -> Result<GrantPath<Self>, PolicyError> {
-        if path.real.followed().real().is_universal() {
-            return Err(PolicyError::root_exclusion(&path.written));
+    fn grant(walked: GrantPath<Self>) -> Result<GrantPath<Self>, PolicyError> {
+        if walked.real.followed().real().is_universal() {
+            return Err(PolicyError::root_exclusion(&walked.written));
         }
-        Ok(path)
+        Ok(walked)
     }
 }
 
 impl<W: Polar> GrantPath<W> {
-    /// `written` walked as its polarity walks: an allowance's transcript, an
-    /// exclusion's holds.
+    /// `written` resolved as its polarity resolves it: the root spelling by
+    /// polarity alone, every other walked.
     ///
     /// # Errors
     /// A spelling whose walk fails for any reason but an absent or
     /// unenterable tail, named; what the polarity refuses of the root.
-    pub(crate) fn walk(written: FrozenPath) -> Result<Self, PolicyError> {
+    pub(crate) fn walk(written: FrozenPath) -> Result<GrantPath<W::Grant>, PolicyError> {
         if written.is_root() {
-            return W::root(written);
+            W::root(written)
+        } else {
+            W::grant(Self::walked(written)?)
         }
-        W::walked(Self::walked(written)?)
     }
 
-    /// `written` walked, the root spelling included where the host walks it.
-    fn walked(written: FrozenPath) -> Result<Self, PolicyError> {
+    /// `written` walked, as far as the disk goes, the root included where
+    /// the host has one (`/` on Unix); the refusals that read a trace ask
+    /// this and convert with `W::grant` after.
+    pub(crate) fn walked(written: FrozenPath) -> Result<Self, PolicyError> {
         let real =
             W::walk(&written.lexical()).map_err(|e| PolicyError::unwalkable(&written, &e))?;
         Ok(Self { written, real })

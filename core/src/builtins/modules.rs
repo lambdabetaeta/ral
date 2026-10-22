@@ -9,7 +9,7 @@
 
 use crate::evaluator::Mode;
 use crate::load::{ModuleLoad, check_source, module_phrases};
-use crate::path::{Judged, LeafMode, Located, Reading};
+use crate::path::{Judged, LexicalPath, Located, Reading};
 use crate::source::{SourceFile, SourceOrigin};
 use crate::ty::Site;
 use crate::types::{Break, Error, Mooring, Settled, Shell, Value, sig};
@@ -17,14 +17,16 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// Read and normalise the module `located` holds, which the grant judged for
-/// reading; `shown` names it in errors.
+/// reading; `shown` names it in errors.  The handle ends here, by signature.
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:module-load] `use` module loading reads program text from disk, gated by `locate`. The documented reasoned-silent residual: code-loading is visible as its own statement, not turn-time model data I/O, so it raises no surface card."
 )]
-fn read_and_normalize(located: &Located<Judged<Reading>>, shown: &str) -> Settled<String> {
+fn read_and_normalize(located: Located<Judged<Reading>>, shown: &str) -> Settled<String> {
     let what = format!("use: {shown}");
-    let mut file = located.read().map_err(|e| Error::io(&what, &e))?;
+    let read = located.read();
+    drop(located);
+    let mut file = read.map_err(|e| Error::io(&what, &e))?;
     let mut source = String::new();
     std::io::Read::read_to_string(&mut file, &mut source).map_err(|e| Error::io(&what, &e))?;
     Ok(crate::source::normalize_source_text(source))
@@ -59,19 +61,18 @@ pub(crate) fn builtin_use(
 ) -> Settled<Value> {
     let path = args[0].as_str("use")?.to_owned();
     let target = resolve_in_current_script(&path, shell)?;
-    // `use` falls back to a RAL_PATH search for a bare name, and failing
-    // both reads the target itself, to report why it cannot.
-    let located = match shell.locate_existing::<Reading>(&target, LeafMode::Follow)? {
+    // The name beside the script is the first candidate; the `RAL_PATH` ones
+    // follow, each chosen by kind and judged, a denied one passed over as
+    // `execvp` does.  Failing every candidate, the target itself says why.
+    let candidates = std::iter::once(target.clone()).chain(ral_path_candidates(&path, shell));
+    let located = match shell.locate_first::<Reading>(candidates)? {
         Some(found) => found,
-        None => match find_on_ral_path(&path, shell)? {
-            Some(found) => found,
-            None => shell.locate::<Reading>(&target)?,
-        },
+        None => shell.locate::<Reading>(&target)?,
     };
 
     let file = SourceFile::new(located.real().as_path().to_path_buf())
         .map_err(|e| sig(format!("use: {e}")))?;
-    let source = read_and_normalize(&located, &crate::path::shown(file.path()))?;
+    let source = read_and_normalize(located, &crate::path::shown(file.path()))?;
     let origin = SourceOrigin::File(file);
     let top = check_source(&source, &origin, shell, None).map_err(tag_loader_error)?;
 
@@ -98,18 +99,14 @@ pub(crate) fn builtin_use(
     Ok(record)
 }
 
-/// The first `$dir/$name` over `RAL_PATH` that is a regular file the grant
-/// lets be read, held; relative entries read against the shell's cwd.
-///
-/// # Errors
-/// [`Shell::locate_first`]'s.
-fn find_on_ral_path(name: &str, shell: &mut Shell) -> Settled<Option<Located<Judged<Reading>>>> {
+/// `$dir/$name` over `RAL_PATH`, relative entries read against the shell's
+/// cwd.
+fn ral_path_candidates(name: &str, shell: &Shell) -> Vec<LexicalPath> {
     let resolver = shell.context.resolver();
-    let candidates: Vec<_> = crate::path::ral_path_entries(shell.context.env_overrides())
+    crate::path::ral_path_entries(shell.context.env_overrides())
         .into_iter()
         .map(|dir| resolver.anchor(&dir.join(name)))
-        .collect();
-    shell.locate_first(candidates)
+        .collect()
 }
 
 /// Resolve `path` as written in the innermost load in flight — the top of

@@ -53,6 +53,8 @@ pub(crate) fn answer(shell: &Shell, probe: &Probe) -> FOValue {
         Probe::Grants => shell.context.grants.summary().encode(),
         #[cfg(feature = "test-util")]
         Probe::WorkerCount => shell.worker_count().encode(),
+        #[cfg(feature = "test-util")]
+        Probe::GrantDepth => (shell.context.grants.len() as u64).encode(),
     }
 }
 

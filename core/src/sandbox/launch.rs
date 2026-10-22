@@ -320,21 +320,21 @@ mod tests {
     use crate::capability::{ExecAllow, ExecDeny, Rule};
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     use crate::{
-        capability::{Extent, FsAllow, GrantPath, Program},
-        path::{Excluded, FrozenPath},
+        capability::{FsAllow, GrantPath, Program},
+        path::{Excluded, FrozenPath, Trace},
         sandbox::{ExecProjection, FsProjection, FsRules},
     };
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn prefix(path: &str) -> FsAllow {
         FsAllow::Prefix(
-            GrantPath::<Extent>::allowing(FrozenPath::from_surface(path)).expect("a prefix walks"),
+            GrantPath::<Trace>::walk(FrozenPath::from_surface(path)).expect("a prefix walks"),
         )
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn excluding(path: &str) -> GrantPath<Excluded> {
-        GrantPath::walk(FrozenPath::from_surface(path)).expect("an exclusion walks")
+        GrantPath::<Excluded>::walk(FrozenPath::from_surface(path)).expect("an exclusion walks")
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -685,8 +685,8 @@ mod tests {
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .expect("chmod");
         let projection = if by_exec {
-            let shell =
-                GrantPath::walk(FrozenPath::from_surface("/bin/sh")).expect("/bin/sh walks");
+            let shell = GrantPath::<Excluded>::walk(FrozenPath::from_surface("/bin/sh"))
+                .expect("/bin/sh walks");
             let exec = [
                 Rule::Allow(ExecAllow::Any),
                 Rule::Deny(Box::new(ExecDeny::File(shell))),
