@@ -259,9 +259,7 @@ fn check_is_manifest(val: &Value) -> Result<(), Error> {
 }
 
 /// Locate a plugin name or path: the first of these that is a file and the
-/// grant lets be read, held.  A file the grant refuses is passed over, as
-/// `execvp` does, and the first refusal is the error if none is admitted.
-/// Searches:
+/// grant lets be read, held.  Searches:
 /// 1. `<config>/ral/plugins/<name>.ral`
 /// 2. Each directory in `RAL_PATH`: `$dir/<name>.ral`
 /// 3. The literal path, then `<name>.ral`
@@ -288,24 +286,9 @@ fn resolve_plugin_path(name_or_path: &str, shell: &mut Shell) -> Settled<Located
         .map(|cand| shell.anchor(&cand))
         .chain(written)
         .collect();
-    let mut first_denial = None;
-    for cand in &candidates {
-        let Ok(located) = ral_core::path::walk(cand, ral_core::path::LeafMode::Follow) else {
-            continue;
-        };
-        if located.trace().kind() != Some(ral_core::path::Kind::File) {
-            continue;
-        }
-        match shell.judge::<Reading>(located) {
-            Ok(found) => return Ok(found),
-            Err(denial) => {
-                first_denial.get_or_insert(denial);
-            }
-        }
-    }
-    Err(first_denial.unwrap_or_else(|| {
-        load_err("not found; is it in <config>/ral/plugins or RAL_PATH?").into()
-    }))
+    shell
+        .locate_first(candidates)?
+        .ok_or_else(|| load_err("not found; is it in <config>/ral/plugins or RAL_PATH?").into())
 }
 
 #[cfg(test)]

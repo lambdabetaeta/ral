@@ -4,9 +4,9 @@
 //! [`Program`] a grant judges and the launcher runs, found from the head's
 //! native target and never from the spelling — and is taken by `super::vet`,
 //! which moves the program into the `Admitted`, so classification, guard and
-//! spawn see one program held once, and `PATH` is walked once.  A head that names nothing runnable has no program: its
-//! [`Missing`] is the 127 or 126 `super::vet` reports, read off this walk
-//! rather than re-probed.
+//! spawn see one program held once, and `PATH` is walked once.  A head that
+//! names nothing runnable has no program: its [`Missing`] is the 127 or 126
+//! `super::vet` reports, read off this walk rather than re-probed.
 
 use crate::capability::Program;
 use crate::ir::CommandName;

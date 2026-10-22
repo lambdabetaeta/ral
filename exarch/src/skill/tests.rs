@@ -10,11 +10,7 @@ fn boot<'a>(
     env: &'a EnvVars,
     cwd: &'a CwdPath,
 ) -> Boot<'a> {
-    Boot {
-        grants,
-        floor,
-        resolver: Resolver::at(env, cwd),
-    }
+    Boot::new(grants, floor, env, cwd)
 }
 
 /// The skill whose directory is `dir`, found as the boot finds one.

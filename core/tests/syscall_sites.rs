@@ -54,10 +54,15 @@
 //!      contain the token at all.
 //!   5. **The string containment helpers gain no caller.**
 //!      [`STRING_CONTAINMENT_CALLERS`] pins, outside `path/`, each file that
-//!      calls `starts_with_identity`, `path_within_str`, `Rendered::holds` or
-//!      `proper_ancestors`, and how often.  They stay for the sandbox
-//!      renderers that call them today; the plan that moves those renderers
-//!      onto `RealPath` deletes the helpers, and finds no new caller.
+//!      calls `starts_with_identity`, `path_within_str`, `proper_ancestors` or
+//!      `Rendered::{holds, under, rebased}`, and how often.  They stay for
+//!      the sandbox renderers that call them today; the plan that moves those
+//!      renderers onto `RealPath` deletes the helpers, and finds no new caller.
+//!   6. **The ungoverned door gains no caller.**  [`UNGOVERNED_CALLERS`] pins
+//!      each production file that reads through `capability::Ungoverned`, the
+//!      user's own authority with no grant over it, and how often: a read
+//!      ral makes for itself (its own tree, a manifest, a review), never one
+//!      a grant judges.
 //!
 //! ## Updating the manifest when you add a legitimate new site
 //!
@@ -276,7 +281,6 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     // Provider declarations written back to the app's own config directory by
     // synod's accounts screen; addresses and protocols, never keys.
     ("exarch/src/config.rs", "silent:config-write"),
-    ("core/src/path/git.rs", "silent:git-read"),
     ("exarch/src/provider/state.rs", "silent:state-read"),
     ("exarch/src/provider/state.rs", "silent:state-write"),
     ("exarch/src/tui/terminal.rs", "silent:editor-compose"),
@@ -512,13 +516,28 @@ const SINGLE_DOORS: &[(&str, &str)] = &[("os_pipe::pipe(", "core/src/process/spa
 
 /// The string containment helpers, which `path/` exports for the sandbox
 /// renderers that still hold names as strings: each file outside `path/` that
-/// calls one, with the helper and how many times.  `Rendered::holds` is
-/// counted as `.holds(` in a file that names `Rendered`.  Nothing new may
-/// join this list.
+/// calls one, with the helper and how many times.  `Rendered::{holds, under,
+/// rebased}` are counted as `.holds(`, `.under(` and `.rebased(` in a file
+/// that names `Rendered`.  Nothing new may join this list.
 const STRING_CONTAINMENT_CALLERS: &[(&str, &str, usize)] = &[
     ("core/src/sandbox/linux.rs", ".holds(", 2),
-    ("core/src/sandbox/linux/landlock.rs", ".holds(", 2),
+    ("core/src/sandbox/linux.rs", ".rebased(", 1),
+    ("core/src/sandbox/linux/landlock.rs", ".holds(", 1),
+    ("core/src/sandbox/linux/landlock.rs", ".under(", 1),
     ("core/src/sandbox/macos.rs", "proper_ancestors", 2),
+];
+
+/// What `Rendered` lends a renderer, counted in a file that names it.
+const RENDERED_NAME_HELPERS: &[&str] = &[".holds(", ".under(", ".rebased("];
+
+/// Every production file that reads through `Ungoverned`, and how often.
+const UNGOVERNED_CALLERS: &[(&str, usize)] = &[
+    ("core/src/guard/freeze.rs", 1),
+    ("core/src/path/tree.rs", 1),
+    ("core/src/sandbox/carriers.rs", 1),
+    ("synod/src/grant.rs", 1),
+    ("synod/src/shell/review.rs", 3),
+    ("synod/src/workspace/manifest.rs", 2),
 ];
 
 /// The helpers `STRING_CONTAINMENT_CALLERS` counts, by name.
@@ -1021,6 +1040,33 @@ fn single_door_tokens_appear_only_at_their_door() {
 }
 
 #[test]
+fn the_ungoverned_door_gains_no_caller() {
+    let root = workspace_root();
+    let mut counted: BTreeMap<String, usize> = BTreeMap::new();
+    for rel in production_files(&root) {
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if rel_str == "core/src/capability/fs.rs" {
+            continue;
+        }
+        let text = std::fs::read_to_string(root.join(&rel))
+            .unwrap_or_else(|e| panic!("read {rel_str}: {e}"));
+        let n = blanked(&text).matches("Ungoverned::").count();
+        if n > 0 {
+            counted.insert(rel_str, n);
+        }
+    }
+    let pinned: BTreeMap<String, usize> = UNGOVERNED_CALLERS
+        .iter()
+        .map(|(f, n)| (f.to_string(), *n))
+        .collect();
+    assert_eq!(
+        counted, pinned,
+        "a read through `Ungoverned` was added or removed: a read a grant should judge goes \
+         through `GrantStack::judge`; update UNGOVERNED_CALLERS only for ral's own reads."
+    );
+}
+
+#[test]
 fn the_string_containment_helpers_gain_no_caller() {
     let root = workspace_root();
     let mut counted: BTreeMap<(String, &str), usize> = BTreeMap::new();
@@ -1033,10 +1079,10 @@ fn the_string_containment_helpers_gain_no_caller() {
         let text = std::fs::read_to_string(root.join(&rel))
             .unwrap_or_else(|e| panic!("read {rel_str}: {e}"));
         let code = blanked(&text);
-        let names_rendered = code.contains("Rendered");
+        let rendered = code.contains("Rendered");
         for name in STRING_CONTAINMENT_HELPERS
             .iter()
-            .chain(names_rendered.then_some(&".holds("))
+            .chain(RENDERED_NAME_HELPERS.iter().filter(|_| rendered))
         {
             let n = code.matches(name).count();
             if n > 0 {

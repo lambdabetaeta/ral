@@ -12,7 +12,7 @@
 
 use super::{ExecProjection, FsProjection, RenderedRules, SandboxProjection};
 use crate::capability::{ExecAllow, ExecDeny};
-use crate::path::{Object, RealPath, Rendered, Walked, render_real, rendered_ancestors};
+use crate::path::{Excluded, Object, RealPath, Rendered, render_real, rendered_ancestors};
 use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
 use std::fmt;
@@ -235,6 +235,16 @@ fn exec_clauses(allow: bool, path: &RealPath, dir: bool) -> Result<Vec<String>, 
     Ok(render_real(path)?.iter().map(clause).collect())
 }
 
+/// Deny clauses at each position `excluded` holds, its name's and its link's
+/// target's, as the fs renderers render an exclusion.
+fn excluded_clauses(excluded: &Excluded, dir: bool) -> Result<Vec<String>, String> {
+    let holds = std::iter::once(excluded.named()).chain(excluded.target());
+    let clauses: Vec<_> = holds
+        .map(|held| exec_clauses(false, held.real(), dir))
+        .collect::<Result<_, _>>()?;
+    Ok(clauses.concat())
+}
+
 /// Render the `process-exec` rules.  `Unrestricted` is a wildcard.
 /// `Restricted` admits every positive scope (`Any` as the wildcard), then
 /// every negative one, so that an exclusion reaches everything above it:
@@ -254,13 +264,13 @@ fn emit_exec_rules(profile: &mut Profile, exec: &ExecProjection) -> Result<(), S
     };
     let positives = rules.allows().map(|scope| match scope {
         ExecAllow::Any => Ok(vec![ANY_EXEC.to_string()]),
-        ExecAllow::Dir(dir) => exec_clauses(true, &dir.real.real(), true),
+        ExecAllow::Dir(dir) => exec_clauses(true, &dir.real.position(), true),
         ExecAllow::File { real, .. } => exec_clauses(true, real, false),
         ExecAllow::Tool(_) => Ok(Vec::new()),
     });
     let negatives = rules.denies().map(|scope| match scope {
-        ExecDeny::Dir(dir) => exec_clauses(false, dir.real.followed().real(), true),
-        ExecDeny::File(file) => exec_clauses(false, file.real.followed().real(), false),
+        ExecDeny::Dir(dir) => excluded_clauses(&dir.real, true),
+        ExecDeny::File(file) => excluded_clauses(&file.real, false),
         ExecDeny::Name(name) => Ok(vec![exec_clause(false, Filter::Regex(name))]),
     });
     for clauses in positives.chain(negatives) {
@@ -269,7 +279,7 @@ fn emit_exec_rules(profile: &mut Profile, exec: &ExecProjection) -> Result<(), S
     let granted = rules
         .live()
         .filter_map(|scope| match scope {
-            ExecAllow::Dir(dir) => Some(render_real(&dir.real.real())),
+            ExecAllow::Dir(dir) => Some(render_real(&dir.real.position())),
             ExecAllow::File { real, .. } => Some(render_real(real)),
             _ => None,
         })

@@ -90,7 +90,8 @@ pub trait ReadName {
 
 impl ReadName for FsAllow {
     fn real_name(&self) -> String {
-        self.real().to_string()
+        self.real()
+            .map_or_else(|| "/".to_string(), ToString::to_string)
     }
 }
 
@@ -125,7 +126,7 @@ pub fn exec_projection_rules(projection: &SandboxProjection) -> Option<Vec<Kerne
     let positives = rules.allows().filter_map(|scope| match scope {
         ExecAllow::Any => Some(KernelExecRule::Any { allow: true }),
         ExecAllow::Dir(dir) => Some(KernelExecRule::Dir {
-            path: dir.real.real().to_string(),
+            path: dir.real.position().to_string(),
             allow: true,
         }),
         ExecAllow::File { real, .. } => Some(KernelExecRule::File {

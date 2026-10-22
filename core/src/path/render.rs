@@ -1,12 +1,13 @@
-//! The one door from a path *string* to the names an OS sandbox rule may
-//! mention.
+//! The names an OS sandbox rule may mention, rendered from the positions a
+//! frozen grant holds.
 //!
 //! A rule denotes a set of VFS objects; a path is one name for such an
 //! object, and on macOS one object answers to several.  Splicing a raw
 //! string into a rule therefore under-enforces on every other spelling — a
 //! deny of `/tmp/evil` never matching the `/private/tmp/evil` `execve`
-//! checks.  [`Rendered`] is all the emitters accept and [`render_paths`]
-//! all that mints one, so the gap cannot reopen.
+//! checks.  [`Rendered`] is all the emitters accept, and [`render_real`],
+//! [`render_objects`] and [`render_excluded`] all that mint one, each from a
+//! position, never re-resolved, so the gap cannot reopen.
 
 /// One spelling of a VFS object: a member of a fully expanded name class.
 ///
@@ -18,12 +19,10 @@
 /// serialising one a compile error rather than a leak of one machine's
 /// canonical forms into another's rules.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct Rendered(String);
 
 impl Rendered {
     /// The spelling itself, for the emitter splicing it into an OS rule.
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -33,6 +32,33 @@ impl Rendered {
     pub(crate) fn holds(&self, spelled: &str) -> bool {
         super::identity::path_within_str(spelled, &self.0)
     }
+
+    /// Whether this name, taken as written, is `spelled` or lies under it.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn under(&self, spelled: &str) -> bool {
+        super::identity::path_within_str(&self.0, spelled)
+    }
+
+    /// This name as a mount of `from` shows it at `onto`; `None` where `from`
+    /// does not hold it.  Lexical: the kernel's names, not a judgment.
+    #[cfg(target_os = "linux")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "path-form: rebases one rendered name onto another, in the one module that mints them"
+    )]
+    pub(crate) fn rebased(&self, from: &Self, onto: &Self) -> Option<Self> {
+        let beneath = std::path::Path::new(&self.0).strip_prefix(&from.0).ok()?;
+        if beneath.as_os_str().is_empty() {
+            return Some(onto.clone());
+        }
+        let shown = std::path::Path::new(&onto.0).join(beneath);
+        Some(Self(
+            shown
+                .into_os_string()
+                .into_string()
+                .expect("two rendered names join to one"),
+        ))
+    }
 }
 
 impl AsRef<str> for Rendered {
@@ -41,34 +67,13 @@ impl AsRef<str> for Rendered {
     }
 }
 
-/// Every name by which a kernel sandbox hook might present the objects at
-/// `paths`, resolved ones, deduped, each blessed as [`Rendered`].
-///
-/// # Errors
-///
-/// An OS rule is a string literal, so a path that is not valid Unicode
-/// would be rendered lossily as a different inode; a grant that cannot be
-/// expressed faithfully is refused, not approximated.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "path-form: lifts resolved strings for `match_variants_paths` to name"
-)]
-#[cfg(test)]
-pub(crate) fn render_paths<S: AsRef<str>>(paths: &[S]) -> Result<Vec<Rendered>, String> {
-    Ok(
-        super::canon::match_variants_paths(paths.iter().map(|p| std::path::Path::new(p.as_ref())))?
-            .into_iter()
-            .map(Rendered)
-            .collect(),
-    )
-}
-
 /// One object a frozen allowance names: its real path, and the other names
 /// the kernel presents it by or it is shown at: its firmlink twin on macOS,
 /// the surface spelling it was granted by on Linux, a destination there.
-#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Object {
+    /// The position the allowance holds, for the renderer that opens it.
+    pub(crate) position: super::RealPath,
     pub(crate) real: Rendered,
     pub(crate) spellings: Vec<Rendered>,
     /// What a lookup of each surface it was granted by stats on the way, on
@@ -77,7 +82,6 @@ pub(crate) struct Object {
     pub(crate) walk: Vec<Rendered>,
 }
 
-#[cfg(unix)]
 impl Object {
     /// Every name of the object, the real path first.
     pub(crate) fn names(&self) -> impl Iterator<Item = &Rendered> {
@@ -92,13 +96,12 @@ impl Object {
 ///
 /// # Errors
 ///
-/// As [`render_paths`].
-#[cfg(unix)]
+/// As [`render_real`].
 pub(crate) fn render_objects<'a>(
     grants: impl IntoIterator<Item = (&'a super::RealPath, Option<&'a super::FrozenPath>)>,
 ) -> Result<Vec<Object>, String> {
     use std::collections::{BTreeMap, BTreeSet};
-    let mut objects = BTreeMap::<Rendered, [BTreeSet<Rendered>; 2]>::new();
+    let mut objects = BTreeMap::<Rendered, (super::RealPath, [BTreeSet<Rendered>; 2])>::new();
     for (position, surface) in grants {
         let mut names = render_real(position)?.into_iter();
         let Some(real) = names.next() else { continue };
@@ -109,13 +112,16 @@ pub(crate) fn render_objects<'a>(
         let walk = surface
             .filter(|_| cfg!(target_os = "macos"))
             .map(|surface| render_walk(surface, position));
-        let [spellings, walked] = objects.entry(real).or_default();
+        let (_, [spellings, walked]) = objects
+            .entry(real)
+            .or_insert_with(|| (position.clone(), Default::default()));
         spellings.extend(names.chain(shown));
         walked.extend(walk.transpose()?.into_iter().flatten());
     }
     Ok(objects
         .into_iter()
-        .map(|(real, [spellings, walk])| Object {
+        .map(|(real, (position, [spellings, walk]))| Object {
+            position,
             real,
             spellings: spellings.into_iter().collect(),
             walk: walk.into_iter().collect(),
@@ -125,7 +131,6 @@ pub(crate) fn render_objects<'a>(
 
 /// Every name a lookup of `real`, granted by `surface`, stats
 /// ([`lookup_walk`](super::canon::lookup_walk)), with firmlink twins.
-#[cfg(unix)]
 fn render_walk(
     surface: &super::FrozenPath,
     real: &super::RealPath,
@@ -146,8 +151,9 @@ fn render_walk(
 ///
 /// # Errors
 ///
-/// As [`render_paths`].
-#[cfg_attr(not(unix), allow(dead_code))]
+/// An OS rule is a string literal, so a position that is not valid Unicode
+/// would be rendered lossily as a different inode; a grant that cannot be
+/// expressed faithfully is refused, not approximated.
 pub(crate) fn render_real(real: &super::RealPath) -> Result<Vec<Rendered>, String> {
     let names = std::iter::once(real.as_path());
     Ok(super::canon::spelled(names, |p| {
@@ -182,7 +188,6 @@ pub(crate) fn rendered_ancestors<'a>(
 
 /// The positions an exclusion holds: its name's and, where that is a link,
 /// the link's target's.
-#[cfg(unix)]
 fn held(excluded: &super::Excluded) -> impl Iterator<Item = &super::RealPath> {
     std::iter::once(excluded.named().real()).chain(excluded.target().map(super::Trace::real))
 }
@@ -194,7 +199,6 @@ fn held(excluded: &super::Excluded) -> impl Iterator<Item = &super::RealPath> {
 /// # Errors
 ///
 /// As [`render_real`].
-#[cfg(unix)]
 pub(crate) fn render_excluded<'a>(
     denies: impl IntoIterator<Item = &'a super::Excluded>,
 ) -> Result<Vec<Rendered>, String> {
@@ -214,7 +218,6 @@ pub(crate) fn render_excluded<'a>(
 /// # Errors
 ///
 /// As [`render_real`].
-#[cfg(unix)]
 pub(crate) fn pinned_dirs<'a>(
     denies: impl IntoIterator<Item = &'a super::Excluded>,
     writes: &[super::RealPath],
@@ -240,21 +243,27 @@ pub(crate) fn pinned_dirs<'a>(
 mod tests {
     use super::*;
 
+    fn rendered(position: &str) -> Vec<String> {
+        render_real(&super::super::RealPath::unwalked_for_test(position))
+            .expect("an ASCII position renders")
+            .into_iter()
+            .map(|r| r.as_str().to_owned())
+            .collect()
+    }
+
     #[test]
-    fn rendering_always_keeps_the_name_the_author_wrote() {
-        let v = render_paths(&["/some/non/existent/path"]).expect("ASCII path must be Ok");
-        assert!(v.iter().any(|r| r.as_str() == "/some/non/existent/path"));
+    fn rendering_keeps_the_position() {
+        assert!(
+            rendered("/some/non/existent/path").contains(&"/some/non/existent/path".to_owned())
+        );
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn rendering_a_firmlinked_path_yields_both_spellings() {
-        let v = render_paths(&["/tmp/ral-render-probe"]).expect("ASCII path must be Ok");
-        assert!(v.iter().any(|r| r.as_str() == "/tmp/ral-render-probe"));
-        assert!(
-            v.iter()
-                .any(|r| r.as_str() == "/private/tmp/ral-render-probe")
-        );
+    fn rendering_a_firmlinked_position_yields_both_spellings() {
+        let v = rendered("/tmp/ral-render-probe");
+        assert!(v.contains(&"/tmp/ral-render-probe".to_owned()));
+        assert!(v.contains(&"/private/tmp/ral-render-probe".to_owned()));
     }
 
     /// A name the renderer cannot express faithfully must be refused, never
@@ -284,7 +293,6 @@ mod tests {
 
     /// A frozen real path whose name has since become a symlink renders to
     /// that name alone, never to where the link now leads.
-    #[cfg(unix)]
     #[allow(clippy::disallowed_methods, reason = "[test] fs scaffolding")]
     #[test]
     fn a_real_path_since_symlinked_never_renders_its_new_target() {
@@ -327,6 +335,7 @@ mod tests {
             objects,
             [Object {
                 real: shown(real.as_path()),
+                position: real,
                 spellings: vec![Rendered(link.as_str().to_owned())],
                 walk: Vec::new(),
             }]

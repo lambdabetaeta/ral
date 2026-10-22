@@ -195,14 +195,14 @@ pub(super) struct Lister<'a> {
     reason = "[silent:walk-list] `list-dir`'s enumeration of a held directory, relative to its own handle.  A listing predicate, not turn-time model data I/O: the caller still judges each entry and raises no card."
 )]
 pub(super) fn list(dir: &File) -> io::Result<Lister<'_>> {
-    let mut names: Vec<EntryName> = rustix::fs::Dir::new(reopen(dir)?)?
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let name = entry.file_name().to_bytes();
-            (name != b"." && name != b"..")
-                .then(|| EntryName::parse(OsStr::from_bytes(name)).ok())?
-        })
-        .collect();
+    let mut names = Vec::new();
+    for entry in rustix::fs::Dir::new(reopen(dir)?)? {
+        let entry = entry?;
+        let name = entry.file_name().to_bytes();
+        if name != b"." && name != b".." {
+            names.push(EntryName::parse(OsStr::from_bytes(name))?);
+        }
+    }
     names.sort();
     Ok(Lister {
         dir,

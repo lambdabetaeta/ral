@@ -92,8 +92,7 @@ fn worker_panic_preserves_completed_bindings_and_clean_context() {
     let emit = Emitter::new(tx, session.agent.id);
     let _ = session.attend(&emit);
 
-    // No grant frame leaked out of the panicking call's
-    // `with_capabilities`.  Read before the scope probe below, which is
+    // No grant frame leaked out of the panicking call's `with_layer`.  Read before the scope probe below, which is
     // itself a call.
     assert_eq!(
         probe_count(&session, ral_core::test_access::grant_depth),

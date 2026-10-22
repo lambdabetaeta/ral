@@ -39,8 +39,8 @@ use std::sync::{LazyLock, Mutex};
 use windows_sys::Win32::Security::{PSID, SID_AND_ATTRIBUTES};
 use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
 
-use crate::capability::{Extent, FsAllow, GrantPath};
-use crate::path::{Dir, Excluded, Installing, Kind, RealPath, shown};
+use crate::capability::{FsAllow, GrantPath};
+use crate::path::{Excluded, RealPath, shown};
 use crate::process::Launch;
 use crate::process::cancel::Scope;
 use crate::sandbox::Refusal;
@@ -245,17 +245,17 @@ pub(crate) fn confine(
     // an unattenuated projection asks for nothing and rests on the ambient
     // ALL APPLICATION PACKAGES grants.
     let rules = projection.fs.rules().cloned().unwrap_or_default();
-    refuse_universal_prefix(&rules)?;
+    let (read, write) = (
+        positions(&rules.read, &rules)?,
+        positions(&rules.write, &rules)?,
+    );
     let denied: Vec<RealPath> = rules.deny.iter().map(excluded_real).collect();
-    let readwrite: Vec<RealPath> = rules.write.iter().map(real_path).collect();
-    let readonly: Vec<RealPath> = rules
-        .read
-        .iter()
-        .map(real_path)
-        .filter(|p| !readwrite.contains(p))
+    let readwrite: Vec<RealPath> = write.iter().map(|&p| p.clone()).collect();
+    let readonly: Vec<RealPath> = (read.iter().filter(|p| !write.contains(p)))
+        .map(|&p| p.clone())
         .collect();
-    let readwrite = carve::carve(&readwrite, &denied, &mut open, &mut listing)?;
-    let mut readonly = carve::carve(&readonly, &denied, &mut open, &mut listing)?;
+    let readwrite = carve::carve(&readwrite, &denied)?;
+    let mut readonly = carve::carve(&readonly, &denied)?;
     readonly.whole.retain(|p| !readwrite.whole.contains(p));
     if let Some(image) = program_image
         && !readwrite.whole.contains(image)
@@ -265,9 +265,15 @@ pub(crate) fn confine(
     }
     let granted: Vec<&RealPath> = readwrite.whole.iter().chain(&readonly.whole).collect();
     refuse_deny_meeting_grant(&granted, &denied)?;
+    let as_paths = |positions: &[&RealPath]| -> Vec<PathBuf> {
+        positions
+            .iter()
+            .map(|p| p.as_path().to_path_buf())
+            .collect()
+    };
     let key = ProjectionKey {
-        read: real_paths(&rules.read),
-        write: real_paths(&rules.write),
+        read: as_paths(&read),
+        write: as_paths(&write),
         deny: denied.iter().map(|p| p.as_path().to_path_buf()).collect(),
     };
     sandbox.ensure_projection(&key)?;
@@ -428,32 +434,27 @@ fn ensure_allows(
     Ok(())
 }
 
-/// Refuse "every path, less exclusions". The universal prefix means every
-/// path on every volume, and an `AppContainer` reaches only what is stamped for
-/// it; stamped as a path it would narrow to one drive and stamp that whole.
-/// The root is refused however it arrives (a prefix, a run place), since the
-/// drive it opens is stamped, or walked, whole; an exclusion of it is already
-/// no exclusion (`deny_all`), and never reaches here. Run before anything is
-/// stamped, so the guard alone judges.
-fn refuse_universal_prefix(rules: &FsRules) -> Result<(), Refusal> {
-    let bare = |p: &Path| crate::path::lex::is_bare_root(p, crate::path::PathRules::HOST);
-    let universal = |s: &FsAllow| match s {
-        FsAllow::Prefix(p) => p.real == Extent::Everywhere,
-        FsAllow::RunPlace(r) => bare(r.as_path()),
-    };
-    if !rules.read.iter().chain(&rules.write).any(universal) {
-        return Ok(());
-    }
-    let allows = if rules.deny.is_empty() {
-        "every path"
-    } else {
-        "every path except some exclusions"
-    };
-    Err(Refusal::Unavailable(format!(
-        "this grant allows {allows}, which Windows cannot enforce: a sandboxed program \
-         reaches only folders stamped for it, and ral will not stamp every drive; grant \
-         the folders the program needs instead"
-    )))
+/// The positions of `region`'s allowances, which the stamps and capability
+/// names key on, never re-resolved.  Refused where one holds "every path,
+/// less exclusions": the universal prefix means every path on every volume,
+/// and an `AppContainer` reaches only what is stamped for it; stamped as a
+/// path it would narrow to one drive and stamp that whole.  An exclusion of
+/// the root is already no exclusion (`deny_all`), and never reaches here.
+/// Run before anything is stamped, so the guard alone judges.
+fn positions<'a>(region: &'a [FsAllow], rules: &FsRules) -> Result<Vec<&'a RealPath>, Refusal> {
+    let positions: Option<Vec<_>> = region.iter().map(FsAllow::real).collect();
+    positions.ok_or_else(|| {
+        let allows = if rules.deny.is_empty() {
+            "every path"
+        } else {
+            "every path except some exclusions"
+        };
+        Refusal::Unavailable(format!(
+            "this grant allows {allows}, which Windows cannot enforce: a sandboxed program \
+             reaches only folders stamped for it, and ral will not stamp every drive; grant \
+             the folders the program needs instead"
+        ))
+    })
 }
 
 /// Refuse what carving leaves: an exclusion meeting an allowance granted
@@ -484,62 +485,14 @@ fn refuse_deny_meeting_grant(granted: &[&RealPath], denied: &[RealPath]) -> Resu
     Ok(())
 }
 
-/// Why carving could not list `at`, as a refusal.
-fn unlisted(at: &RealPath, e: &std::io::Error) -> Refusal {
-    Refusal::Launch(format!(
-        "sandbox: cannot list '{}' to grant around an exclusion in it: {e}",
-        shown(at.as_path())
-    ))
-}
-
-/// The allowance at `at`, held through the sandbox side's own door: the walk
-/// with every link refused.
-fn open(at: &RealPath) -> Result<Option<Dir<Installing>>, Refusal> {
-    at.open_dir_nofollow(&crate::sandbox::TOKEN)
-        .map_err(|e| unlisted(at, &e))
-}
-
-/// The listing [`carve::carve`] asks for, read from the held directory
-/// without following links, and each subdirectory opened from it: a name
-/// surrogate (a symlink, a junction) is a link, any other reparse point (a
-/// cloud placeholder) the object it is.
-fn listing(dir: &Dir<Installing>) -> Result<Vec<carve::Entry>, Refusal> {
-    let here = |e: &std::io::Error| unlisted(dir.real(), e);
-    dir.read_dir()
-        .map_err(|e| here(&e))?
-        .map(|entry| {
-            let kind = entry.seen().map_err(here)?.stat.kind;
-            Ok::<_, Refusal>(match kind {
-                Kind::Symlink => carve::Entry::Link(entry.real()),
-                Kind::Dir => carve::Entry::Directory(Box::new(
-                    dir.open_dir(entry.name())
-                        .map_err(|e| unlisted(&entry.real(), &e))?,
-                )),
-                _ => carve::Entry::Other(entry.real()),
-            })
-        })
-        .collect()
-}
-
-/// Where an exclusion lies: the object its name reaches, which a link there
-/// leads to, as the stamps and carving read it.
+/// Where an exclusion lies: its link's target where its name is one, else
+/// the object at its name.  One position, not both as the Unix renderers
+/// render (`render_excluded`): the DACL side judged the followed path alone
+/// before, carving never grants a link entry anyway, and `ensure_unreachable`
+/// holds a position with every link refused, which the link's own would fail.
 fn excluded_real(deny: &GrantPath<Excluded>) -> RealPath {
     let held = deny.real.target().unwrap_or_else(|| deny.real.named());
     held.real().clone()
-}
-
-/// A scope's frozen real path, which the stamps and capability names key on,
-/// never re-resolved.
-fn real_path(scope: &FsAllow) -> RealPath {
-    scope.real()
-}
-
-/// A region's frozen real paths.
-fn real_paths(region: &[FsAllow]) -> Vec<PathBuf> {
-    region
-        .iter()
-        .map(|scope| real_path(scope).as_path().to_path_buf())
-        .collect()
 }
 
 /// Recovery failures are logged; they do not prevent session startup.

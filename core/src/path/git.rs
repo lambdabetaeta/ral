@@ -6,11 +6,12 @@
 //! following it asks the other direction too: the git directory must name this
 //! working tree back ([`claims`]).  A pointer that does not, or cannot be read,
 //! is a [`BadPointer`]; why that is a refusal and not a wider grant, and how it
-//! is worded, is the freeze's.
+//! is worded, is the freeze's.  Every file is read through the caller's
+//! `read`, which judges it: the freeze's reads nothing governs, the tree
+//! walk's refuses what its region refuses.
 
-use crate::capability::{Floor, GrantStack, LocateError};
 use crate::path::lex::{fold_dots, parent_or_cwd};
-use crate::path::{LeafMode, LexicalPath, Reading, shown, walk};
+use crate::path::{LeafMode, LexicalPath, shown, walk};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -63,31 +64,20 @@ pub(crate) struct BadPointer {
     pub why: Pointer,
 }
 
-/// The git directory `cwd` belongs to.
+/// The git directory `cwd` belongs to, each file read through `read`.
 ///
 /// A plain clone's `.git` as it stands, or the target of a `.git` pointer file
 /// that claims this working tree.  `None` when no `.git` lies at or above `cwd`,
 /// which leaves the sigil's fallback to its caller.
 ///
-/// This is session start: what it reads, no grant yet governs.
-///
 /// # Errors
 /// A `.git` file that names no git directory (unreadable, or no `gitdir:`
 /// line), or one whose target does not claim the working tree.
-pub(crate) fn discover_git_dir(cwd: &Path) -> Result<Option<PathBuf>, BadPointer> {
-    discover_git_dir_with(cwd, ungoverned)
-}
-
-/// [`discover_git_dir`] reading through `read`: the tree walk's judges what it
-/// reads, and a file it refuses is a file that is not there.
-///
-/// # Errors
-/// As [`discover_git_dir`].
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:git-dot-git] asks whether the .git entry session-start discovery found is a directory or a pointer file; ral's own repository discovery, not a name the model gave"
 )]
-pub(crate) fn discover_git_dir_with(
+pub(crate) fn discover_git_dir(
     cwd: &Path,
     mut read: impl FnMut(&LexicalPath) -> io::Result<String>,
 ) -> Result<Option<PathBuf>, BadPointer> {
@@ -142,22 +132,6 @@ pub(crate) fn info_exclude(
         common_dir(&read_pointer(dot_git, &mut read).ok()?, &mut read)
     };
     LexicalPath::absolute(&shared.join("info").join("exclude"))
-}
-
-/// The file at `path`, read under no grant: what session start reads, since
-/// no grant yet governs it.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:git-read] reads a worktree's .git pointer, its git directory's answering back-pointer and config, at session startup, to discover the actual git directory; the root stack judges nothing, and it is not turn-time I/O"
-)]
-fn ungoverned(path: &LexicalPath) -> io::Result<String> {
-    let file = GrantStack::root()
-        .locate::<Reading>(&Floor::default(), path)
-        .map_err(|e| match e {
-            LocateError::Io(e) => e,
-            LocateError::Refused(_) => io::ErrorKind::PermissionDenied.into(),
-        })?;
-    io::read_to_string(file.read()?)
 }
 
 /// `read` of the absolute path `path`.

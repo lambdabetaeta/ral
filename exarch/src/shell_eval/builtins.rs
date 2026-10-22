@@ -872,10 +872,10 @@ fn builtin_find_files(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> 
 /// The grant-checked root of a walk; a missing one is an error, not an empty walk.
 fn walk_root(shell: &mut Shell, who: &str, path: &str) -> Settled<LexicalPath> {
     let root = shell.resolve(path);
-    let found = shell
+    if shell
         .locate_existing::<Reading>(&root, LeafMode::Follow)?
-        .is_some_and(|held| held.stat().is_some());
-    if !found {
+        .is_none()
+    {
         return Err(sig(format!(
             "{who}: {path} does not exist; the path is a file or directory, relative to the cwd or absolute."
         )));

@@ -111,11 +111,8 @@ pub(super) fn builtin_list_dir(args: &[Value], shell: &mut Shell) -> Settled<Val
         // position the region judges, by what the listing saw of it.  Drop a
         // denied entry rather than abort, as `grep-files` and `explore-dir`
         // do, and one the listing could not state: a listing is not a manifest.
-        let admitted = entry.listed().map_or_else(
-            || region.admits_unseen(&entry),
-            |listed| region.admits_listed(&listed),
-        );
-        if let (true, Ok(seen)) = (admitted, entry.seen()) {
+        let Ok(seen) = entry.seen() else { continue };
+        if region.admits(&entry) {
             entries.push(DirEntry::of(entry.name(), &seen.stat));
         }
     }
@@ -239,7 +236,6 @@ pub(super) fn builtin_resolve_path(args: &[Value], shell: &mut Shell) -> Settled
     let rp = shell.resolve(s);
     let located = shell
         .locate_existing::<Reading>(&rp, LeafMode::Follow)?
-        .filter(|located| located.stat().is_some())
         .ok_or_else(|| sig(format!("resolve-path: {s}: no such file or directory")))?;
     Ok(Value::string(shown(located.real().as_path())))
 }
@@ -264,59 +260,67 @@ pub(super) fn builtin_abbreviate_home(args: &[Value], shell: &Shell) -> Settled<
 /// families: `Follow` gives `test -f`/`test -d`/`test -r` semantics, where a
 /// link to a file is `is-file` and a dangling link fails every probe;
 /// `NoFollow` gives `exists`/`is-link`, where a dangling link still exists and
-/// a link is a link.  `probe` sees `None` when the path is missing or under a
-/// directory that does not exist, so every predicate answers `false` there
-/// rather than raising.
+/// a link is a link.  Every predicate answers `false` where nothing is at the
+/// name rather than raising.
 fn fs_probe(
     name: &str,
     args: &[Value],
     shell: &mut Shell,
     leaf: LeafMode,
-    probe: impl FnOnce(Option<Stat>) -> bool,
+    probe: impl FnOnce(&Located<Judged<Reading>>) -> bool,
 ) -> Settled<Value> {
     let rp = shell.resolve(args[0].as_str(name)?);
-    let stat = shell
-        .locate_existing::<Reading>(&rp, leaf)?
-        .and_then(|located| located.stat().cloned());
-    Ok(Value::Bool(probe(stat)))
+    let held = shell.locate_existing::<Reading>(&rp, leaf)?;
+    Ok(Value::Bool(held.is_some_and(|located| probe(&located))))
+}
+
+/// A predicate on the kind the probe stated.
+fn is_kind(kind: Kind) -> impl FnOnce(&Located<Judged<Reading>>) -> bool {
+    move |located| located.stat().is_some_and(|stat| stat.kind == kind)
 }
 
 pub(super) fn builtin_exists(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe("exists", args, shell, LeafMode::NoFollow, |s| s.is_some())
+    fs_probe("exists", args, shell, LeafMode::NoFollow, |_| true)
 }
 
 pub(super) fn builtin_is_file(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe("is-file", args, shell, LeafMode::Follow, |s| {
-        s.is_some_and(|s| s.kind == Kind::File)
-    })
+    fs_probe(
+        "is-file",
+        args,
+        shell,
+        LeafMode::Follow,
+        is_kind(Kind::File),
+    )
 }
 
 pub(super) fn builtin_is_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe("is-dir", args, shell, LeafMode::Follow, |s| {
-        s.is_some_and(|s| s.kind == Kind::Dir)
-    })
+    fs_probe("is-dir", args, shell, LeafMode::Follow, is_kind(Kind::Dir))
 }
 
 pub(super) fn builtin_is_link(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe("is-link", args, shell, LeafMode::NoFollow, |s| {
-        s.is_some_and(|s| s.kind == Kind::Symlink)
-    })
+    fs_probe(
+        "is-link",
+        args,
+        shell,
+        LeafMode::NoFollow,
+        is_kind(Kind::Symlink),
+    )
 }
 
 pub(super) fn builtin_is_readable(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     // Exact on Windows, where `readonly` governs writes alone; on Unix an
     // approximation of `test -r`, the truth needing uid/gid/acl logic.
-    fs_probe("is-readable", args, shell, LeafMode::Follow, |s| {
-        s.is_some()
-    })
+    fs_probe("is-readable", args, shell, LeafMode::Follow, |_| true)
 }
 
 pub(super) fn builtin_is_writable(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let rp = shell.resolve(args[0].as_str("is-writable")?);
-    let writable = shell
-        .locate_existing::<Reading>(&rp, LeafMode::Follow)?
-        .is_some_and(|located| located.is_writable());
-    Ok(Value::Bool(writable))
+    fs_probe(
+        "is-writable",
+        args,
+        shell,
+        LeafMode::Follow,
+        Located::is_writable,
+    )
 }
 
 #[cfg(all(test, unix))]

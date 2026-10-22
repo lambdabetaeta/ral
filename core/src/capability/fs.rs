@@ -27,8 +27,8 @@ use super::{FsPolicy, GrantLayer, GrantStack, Join, Meet};
 use crate::guard::freeze::PolicyError;
 use crate::guard::toolchains;
 use crate::path::{
-    Depth, Dir, DirEntry, Excluded, FrozenPath, Judged, LeafMode, LexicalPath, Listed, Located,
-    MatchedBy, Op, Reading, RealPath, Subject, Trace, walk, walk_lenient,
+    Depth, Dir, DirEntry, Excluded, FrozenPath, Judged, LeafMode, LexicalPath, Located, MatchedBy,
+    Op, Reading, RealPath, Subject, Trace, walk, walk_dir, walk_lenient,
 };
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -44,8 +44,9 @@ pub enum FsOp {
 }
 
 /// The grant stack's say-so for the op `O`: what turns an unjudged handle into
-/// a judged one.  Its field is private to this module, so [`GrantStack::judge`]
-/// and [`ReadRegion`] alone make one, and this is the construction to audit.
+/// a judged one.  Its field is private to this module, so [`GrantStack::judge`],
+/// [`ReadRegion`] and [`Ungoverned`] alone make one, and these are the
+/// constructions to audit.
 pub(crate) struct Verdict<O: Op>(PhantomData<O>);
 
 /// An allowance of an fs table: a prefix as the author wrote it and resolved,
@@ -185,11 +186,11 @@ impl super::Axis for FsLayer {
 }
 
 impl FsAllow {
-    /// The position this allowance holds from, `/` for everywhere.
-    pub(crate) fn real(&self) -> RealPath {
+    /// The position this allowance holds from; `None` for everywhere.
+    pub(crate) fn real(&self) -> Option<&RealPath> {
         match self {
             Self::Prefix(prefix) => prefix.real.real(),
-            Self::RunPlace(place) => place.clone(),
+            Self::RunPlace(place) => Some(place),
         }
     }
 }
@@ -357,7 +358,13 @@ impl Floor {
                 )
             })?;
             if trace.kind().is_some() {
-                floor.push(FsAllow::Prefix(GrantPath::of(written, &trace)));
+                floor.push(FsAllow::Prefix(
+                    GrantPath {
+                        written,
+                        real: trace,
+                    }
+                    .extent(),
+                ));
             }
         }
         Ok(Self(floor))
@@ -382,33 +389,39 @@ fn meet_onto<T: Meet>(acc: &mut Option<T>, next: T) {
 /// the guard is unrestricted and the projection needs no fs rules; a layer
 /// that opined and admitted nothing withholds support beyond the floor.
 pub(crate) fn region(grants: &GrantStack, op: &FsOp, floor: &Floor) -> Option<FsRules> {
-    fold(grants, op, false, floor)
+    fold(grants, op, floor).map(|f| f.plain)
 }
 
 /// The read table where each layer also reads the run places of the exec meet
 /// over it and the layers beneath it: no layer makes anything readable for
 /// those beneath it.
 pub(crate) fn running_region(grants: &GrantStack, floor: &Floor) -> Option<FsRules> {
-    fold(grants, &FsOp::Read, true, floor)
+    fold(grants, &FsOp::Read, floor).map(|f| f.placed)
 }
 
-fn fold(grants: &GrantStack, op: &FsOp, places: bool, floor: &Floor) -> Option<FsRules> {
+/// Both tables for `op` in one pass over the layers.
+fn fold(grants: &GrantStack, op: &FsOp, floor: &Floor) -> Option<Folded> {
     let layers: Vec<&GrantLayer> = grants.layers().collect();
     let last = layers.iter().rposition(|l| l.fs().is_some())?;
     let mut run: Option<ExecRules> = None;
-    let mut met: Option<FsRules> = None;
+    let (mut plain, mut placed): (Option<FsRules>, Option<FsRules>) = (None, None);
     for layer in &layers[..=last] {
-        if places && let Some(exec) = layer.exec() {
+        if let Some(exec) = layer.exec() {
             meet_onto(&mut run, exec.clone());
         }
         let Some(fs) = layer.fs() else { continue };
-        let placed = run.iter().flat_map(ExecRules::places);
-        meet_onto(&mut met, fs.table(op).clone().join(Table::new(placed, [])));
+        let table = fs.table(op).clone();
+        let places = run.iter().flat_map(ExecRules::places);
+        meet_onto(&mut placed, table.clone().join(Table::new(places, [])));
+        meet_onto(&mut plain, table);
     }
-    let met = met?;
-    Some(match op {
+    let floored = |met: FsRules| match op {
         FsOp::Read => met.join(Table::new(floor.allows().cloned(), [])),
         FsOp::Write => met,
+    };
+    Some(Folded {
+        plain: floored(plain?),
+        placed: floored(placed?),
     })
 }
 
@@ -416,27 +429,45 @@ fn fold(grants: &GrantStack, op: &FsOp, places: bool, floor: &Floor) -> Option<F
 pub(crate) type Returned = Box<(Located, Withheld<FsDeny>)>;
 
 /// The read and running regions folded once, for a walk that judges many
-/// objects.
-///
-/// A permit or an exclusion of the first, which holds no run places, is final
-/// with the same witness; only a missing allowance asks the second, whose run
-/// places add positive evidence alone.
-pub struct ReadRegion {
-    plain: Option<FsRules>,
-    placed: Option<FsRules>,
+/// objects; `None` where no layer held an fs opinion.
+pub struct ReadRegion(Option<Folded>);
+
+/// A table and the same with each layer's run places joined.  A permit or an
+/// exclusion of `plain`, which holds no run places, is final with the same
+/// witness; only a missing allowance asks `placed`, whose run places add
+/// positive evidence alone.
+struct Folded {
+    plain: FsRules,
+    placed: FsRules,
+}
+
+/// The user's own authority: no grant governs these reads.  The second
+/// minting door beside [`GrantStack::judge`], read-only; `syscall_sites`
+/// counts its callers.
+pub struct Ungoverned;
+
+impl Ungoverned {
+    pub fn read(l: Located) -> Located<Judged<Reading>> {
+        l.judged(Verdict(PhantomData))
+    }
+
+    pub fn read_dir(d: Dir) -> Dir<Judged<Reading>> {
+        d.judged(Verdict(PhantomData))
+    }
+
+    pub fn region() -> ReadRegion {
+        ReadRegion(None)
+    }
 }
 
 impl ReadRegion {
-    fn withheld(&self, access: Subject<'_>) -> Result<(), Withheld<FsDeny>> {
-        let Some(plain) = &self.plain else {
+    fn withheld(&self, s: Subject<'_>) -> Result<(), Withheld<FsDeny>> {
+        let Some(Folded { plain, placed }) = &self.0 else {
             return Ok(());
         };
-        match plain.withheld(access) {
+        match plain.withheld(s) {
             None => Ok(()),
-            Some(Withheld::MissingAllowance) => {
-                let placed = (self.placed.as_ref()).expect("a region held an fs opinion before");
-                placed.withheld(access).map_or(Ok(()), Err)
-            }
+            Some(Withheld::MissingAllowance) => placed.withheld(s).map_or(Ok(()), Err),
             Some(excluded) => Err(excluded),
         }
     }
@@ -461,16 +492,15 @@ impl ReadRegion {
         }
     }
 
-    /// A name a listing shows, judged by what the listing saw of it.
-    pub(crate) fn admits_listed(&self, l: &Listed<'_>) -> bool {
-        self.withheld(Subject::Listed(l)).is_ok()
-    }
-
-    /// A listing entry that was not seen: its position is all it has.  Takes
-    /// the entry, not a position, so no caller can judge an object it holds
-    /// by position alone.
-    pub(crate) fn admits_unseen(&self, e: &DirEntry<'_>) -> bool {
-        self.withheld(Subject::Position(&e.real())).is_ok()
+    /// A listing entry, judged by what the listing saw of it; one it did not
+    /// see by its position alone.  Takes the entry, not a position, so no
+    /// caller can judge an object it holds by position alone.
+    pub fn admits(&self, e: &DirEntry<'_>) -> bool {
+        match e.listed() {
+            Some(listed) => self.withheld(Subject::Listed(&listed)),
+            None => self.withheld(Subject::Position(&e.real())),
+        }
+        .is_ok()
     }
 }
 
@@ -499,44 +529,58 @@ impl GrantStack {
 
     /// The read and running regions, folded now.
     pub fn read_region(&self, floor: &Floor) -> ReadRegion {
-        ReadRegion {
-            plain: region(self, &FsOp::Read, floor),
-            placed: running_region(self, floor),
-        }
+        ReadRegion(fold(self, &FsOp::Read, floor))
     }
 
-    /// The fold for `op` on the access `trace`.
-    pub(crate) fn fold_fs(
+    /// The decision on `op` for the access `trace`: under `Write`, first the
+    /// pinned-binary veto, before the stack, since an empty stack is exactly
+    /// the case it must catch; then the fold for `op`.  The exclusions it
+    /// decides against are the ones their walks held; the sandbox's
+    /// projection folds the same tables once, at spawn.
+    ///
+    /// # Errors
+    /// [`Refused`], the veto's or the stack's.
+    pub(crate) fn refusal_fs(
         &self,
         floor: &Floor,
         op: &FsOp,
         trace: &Trace,
-    ) -> Result<(), Withheld<FsDeny>> {
-        match op {
+    ) -> Result<(), Refused> {
+        let withheld = match op {
+            FsOp::Write => {
+                if let Some(pinned) = trace.leaf_id().and_then(crate::sandbox::pinned_binary) {
+                    return Err(Refused::Guarded(pinned));
+                }
+                self.write(floor, trace)
+            }
             FsOp::Read => self.read(floor, trace),
-            FsOp::Write => self.write(floor, trace),
-        }
+        };
+        withheld.map_err(Refused::Withheld)
     }
 
-    /// Judge `l` for `O`: under `Writing`, first the pinned-binary veto, then
-    /// the fold for `O::FS`; then, admitted, the handle vouched for.  The one
-    /// door from evidence to authority, with [`ReadRegion`].
+    /// [`refusal_fs`](Self::refusal_fs) as a plain bool, for a caller with
+    /// nothing to audit through or a side read it may forgo.
+    pub fn admits_fs(&self, floor: &Floor, op: &FsOp, trace: &Trace) -> bool {
+        self.refusal_fs(floor, op, trace).is_ok()
+    }
+
+    /// Judge `l` for `O`: [`refusal_fs`](Self::refusal_fs), then, admitted,
+    /// the handle vouched for.  The one door from evidence to authority, with
+    /// [`ReadRegion`] and [`Ungoverned`].
     ///
     /// # Errors
     /// [`Refused`], the veto's or the stack's.
     pub fn judge<O: Op>(&self, floor: &Floor, l: Located) -> Result<Located<Judged<O>>, Refused> {
-        crate::guard::fs_judge(self, floor, l.trace(), &O::FS)?;
+        self.refusal_fs(floor, &O::FS, l.trace())?;
         Ok(l.judged(Verdict(PhantomData)))
     }
 
-    /// [`judge`](Self::judge) for a directory, which no veto guards: nothing
-    /// writes a directory's bytes.
+    /// [`judge`](Self::judge) for a directory.
     ///
     /// # Errors
-    /// What withholds it.
+    /// As [`judge`](Self::judge).
     pub fn judge_dir<O: Op>(&self, floor: &Floor, d: Dir) -> Result<Dir<Judged<O>>, Refused> {
-        self.fold_fs(floor, &O::FS, d.trace())
-            .map_err(Refused::Withheld)?;
+        self.refusal_fs(floor, &O::FS, d.trace())?;
         Ok(d.judged(Verdict(PhantomData)))
     }
 
@@ -551,6 +595,19 @@ impl GrantStack {
     ) -> Result<Located<Judged<O>>, LocateError> {
         let located = walk(rp, LeafMode::Follow).map_err(LocateError::Io)?;
         self.judge(floor, located).map_err(LocateError::Refused)
+    }
+
+    /// [`locate`](Self::locate) for a directory entered.
+    ///
+    /// # Errors
+    /// As [`locate`](Self::locate).
+    pub fn locate_dir<O: Op>(
+        &self,
+        floor: &Floor,
+        rp: &LexicalPath,
+    ) -> Result<Dir<Judged<O>>, LocateError> {
+        let dir = walk_dir(rp).map_err(LocateError::Io)?;
+        self.judge_dir(floor, dir).map_err(LocateError::Refused)
     }
 
     /// The write judgment: may the access `trace` be written?
@@ -1175,10 +1232,7 @@ mod tests {
         let judged: Vec<_> = listing
             .map(|entry| {
                 let name = entry.name().as_os_str().to_str().unwrap().to_owned();
-                match entry.listed() {
-                    Some(listed) => (name, true, region.admits_listed(&listed)),
-                    None => (name, false, region.admits_unseen(&entry)),
-                }
+                (name, entry.listed().is_some(), region.admits(&entry))
             })
             .collect();
         let expected = [

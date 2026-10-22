@@ -5,27 +5,29 @@
 //! No open lives here.  Every one goes through [`Shell::locate`] into
 //! `path::walk`, so the object authorised is the object the handle then
 //! names — the door never re-walks a string the guard has already judged.
-//! Staging the write is pure and lives beside it (`stage`).
 
 pub(crate) mod scope;
-mod stage;
 
 use crate::capability::FsOp;
 use crate::fact::Read;
 use crate::ir::{StdinSource, WriteMode};
 use crate::path::walk::Kind;
-use crate::path::{Reading, Streamed, Streaming, Trace, Writing};
+use crate::path::{Reading, StagedWrite, Streamed, Streaming, Trace, Writing};
 use crate::types::{Break, Error, Mooring, Observed, Settled, Shell};
-use stage::{PendingWrite, read_capped};
 use std::fs::File;
-use std::io;
+use std::io::{self, Read as _, Seek as _};
+
+/// Cap on the bytes a preview reads, so a large file is never pulled into
+/// memory whole to show a change.
+const PREVIEW_CAP: u64 = 64 * 1024;
 
 /// A write redirect's target as opened, held until its frame settles so the
 /// frame can report what the write did to it.  No `Located` remains: the
 /// object is the handles.
 pub(crate) enum OpenedWrite {
-    /// `>` onto a regular file, staged beside it until commit.
-    Atomic(PendingWrite),
+    /// `>` onto a regular file, staged beside it until commit; dropped, the
+    /// staging file is unlinked.
+    Atomic(StagedWrite),
     /// Every other shape: bytes land as they are written.
     Stream(Streamed),
 }
@@ -36,8 +38,13 @@ impl OpenedWrite {
     /// an object with no reader.
     pub(crate) fn before(&mut self, shell: &Shell) -> Option<Vec<u8>> {
         match self {
-            Self::Atomic(pending) => {
-                admitted(shell, pending.target().trace()).then(|| pending.before())?
+            Self::Atomic(staged) => {
+                let target = staged.target();
+                admitted(shell, target.trace()).then(|| match target.stat() {
+                    None => Some(Vec::new()),
+                    Some(s) if s.kind == Kind::File => read_capped(&mut target.read().ok()?),
+                    Some(_) => None,
+                })?
             }
             Self::Stream(streamed) => admitted(shell, streamed.trace()).then(|| {
                 if streamed.created() {
@@ -51,10 +58,12 @@ impl OpenedWrite {
 
     /// What the write leaves standing: what ral wrote, read through the
     /// staging handle or the stream's own reader.  Never a read of the name,
-    /// which may hold another object by now.
+    /// which may hold another object by now: on Unix the rename takes the
+    /// sibling's *name*, so what lands at the target is not this write's to
+    /// assert.
     pub(crate) fn after(&mut self, shell: &Shell) -> Option<Vec<u8>> {
         match self {
-            Self::Atomic(pending) => pending.staged(),
+            Self::Atomic(staged) => read_capped(staged.file()),
             Self::Stream(streamed) => {
                 admitted(shell, streamed.trace()).then(|| read_capped(streamed.reader()?))?
             }
@@ -65,6 +74,18 @@ impl OpenedWrite {
 /// Whether the live grant lets ral read what `trace` names.
 fn admitted(shell: &Shell, trace: &Trace) -> bool {
     shell.admits_fs(&FsOp::Read, trace)
+}
+
+/// `file` whole, from its start.  `None` past [`PREVIEW_CAP`], judged on the
+/// open handle so the size read is the size of the bytes read.
+fn read_capped(file: &mut File) -> Option<Vec<u8>> {
+    if file.metadata().ok()?.len() > PREVIEW_CAP {
+        return None;
+    }
+    file.rewind().ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    Some(bytes)
 }
 
 /// Open a write redirect's target, and the before-image of it where `heard`
@@ -100,8 +121,10 @@ pub(crate) fn open_write(
         let file = streamed.file().try_clone().map_err(io)?;
         (file, OpenedWrite::Stream(streamed))
     } else {
-        let (file, pending) = PendingWrite::stage(target).map_err(io)?;
-        (file, OpenedWrite::Atomic(pending))
+        let mut staged = target.stage().map_err(io)?;
+        // The writer's handle shares the staging handle's offset.
+        let file = staged.file().try_clone().map_err(io)?;
+        (file, OpenedWrite::Atomic(staged))
     };
     let before = heard.then(|| opened.before(shell)).flatten();
     if let (OpenedWrite::Stream(streamed), Some(Streaming::Truncate)) = (&opened, streaming) {
@@ -137,9 +160,9 @@ impl Shell {
         let (mut file, opened, _) = open_write(path, WriteMode::Write, false, self)?;
         file.write_all(bytes).map_err(|e| Error::io(path, &e))?;
         drop(file);
-        if let Some(OpenedWrite::Atomic(pending)) = opened {
-            pending
-                .commit()
+        if let Some(OpenedWrite::Atomic(staged)) = opened {
+            staged
+                .publish()
                 .map_err(|e| Error::io("atomic write", &e))?;
         }
         Ok(())

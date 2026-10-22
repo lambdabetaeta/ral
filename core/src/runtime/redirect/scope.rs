@@ -81,7 +81,7 @@ fn open_redirect_sink(
     Ok(Sink::File(std::sync::Arc::new(file)))
 }
 
-/// Reports one write per intent, committing or dropping each atomic one by
+/// Reports one write per intent, publishing or dropping each atomic one by
 /// `fate`; dropping is what unlinks its staging file.  Returns the first
 /// commit failure.
 fn settle(
@@ -102,11 +102,8 @@ fn settle(
         // Read before the commit consumes the staged write.
         let after = heard.then(|| opened.after(shell)).flatten();
         let (outcome, landed) = match (opened, fate) {
-            (OpenedWrite::Atomic(pending), WriteFate::Abort) => {
-                pending.discard();
-                (WriteOutcome::Aborted, false)
-            }
-            (OpenedWrite::Atomic(commit), WriteFate::Commit) => match commit.commit() {
+            (OpenedWrite::Atomic(_), WriteFate::Abort) => (WriteOutcome::Aborted, false),
+            (OpenedWrite::Atomic(staged), WriteFate::Commit) => match staged.publish() {
                 Ok(()) => (WriteOutcome::Committed, true),
                 Err(e) => {
                     if commit_err.is_ok() {

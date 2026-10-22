@@ -92,7 +92,6 @@ pub(crate) fn detach(
     // uncommitted, gives the slot straight back. A failed spawn refunds it too;
     // only a born survivor, named or not, spends one.
     let mut launch = build_launch(
-        &shown,
         admitted,
         crate::sandbox::Ownership::Surrendered,
         shell,

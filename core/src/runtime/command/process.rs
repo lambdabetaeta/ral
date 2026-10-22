@@ -12,21 +12,16 @@ impl From<Refusal> for Break {
     }
 }
 
-/// Build a launch for the `admitted` call `shown` and apply the shell's scoped
-/// env and cwd.  The [`Admitted`] is taken and dropped here, so the launch
-/// holds no judged program nor its directory handle.  Stdio and `pre_exec`
-/// hooks are the caller's: they differ between the standalone and pipeline
+/// Build a launch for the `admitted` call and apply the shell's scoped env
+/// and cwd.  The [`Admitted`] is taken and dropped here, so the launch holds
+/// no judged program nor its directory handle.  Stdio and `pre_exec` hooks
+/// are the caller's: they differ between the standalone and pipeline
 /// contexts.
 ///
 /// `ownership` reaches the Linux bwrap backend, which ties the envelope to
 /// this process's death unless the child is being surrendered, and the guest
 /// jail, which seats a surrendered child outside this engine's cgroup tree.
 pub(crate) fn build_launch(
-    #[cfg_attr(
-        not(windows),
-        expect(unused_variables, reason = "a cancelled Windows stamp names it")
-    )]
-    shown: &str,
     admitted: Admitted,
     ownership: crate::sandbox::Ownership,
     shell: &Shell,
@@ -55,12 +50,7 @@ pub(crate) fn build_launch(
         )
         .map_err(|refusal| match refusal {
             #[cfg(windows)]
-            Refusal::Cancelled(cause) => Break::of_child(
-                shown,
-                crate::process::ChildEnd::Cancelled(cause),
-                cancel,
-                shell,
-            ),
+            Refusal::Cancelled(cause) => Break::cancelled(cause, cancel),
             other => Break::from(other),
         })?
     } else {
@@ -332,7 +322,6 @@ mod judged_program {
 
     fn stdout_of(plan: SpawnPlan, shell: &Shell) -> String {
         let mut cmd = build_launch(
-            &plan.shown,
             plan.admitted,
             crate::sandbox::Ownership::Kept,
             shell,

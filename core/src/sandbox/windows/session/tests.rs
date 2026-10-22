@@ -1,6 +1,6 @@
 use super::{
-    FsAllow, FsRules, GrantKind, ProjectionKey, filter_out_granted, listing, open, profile_name,
-    refuse_deny_meeting_grant, refuse_universal_prefix,
+    FsAllow, FsRules, GrantKind, ProjectionKey, filter_out_granted, profile_name,
+    refuse_deny_meeting_grant,
 };
 use crate::capability::{Extent, GrantPath};
 use crate::path::{FrozenPath, RealPath};
@@ -92,6 +92,13 @@ impl Drop for SessionGuard {
     }
 }
 
+/// Both regions' positions, as `confine` asks them.
+fn refuse_universal_prefix(rules: &FsRules) -> Result<(), Refusal> {
+    super::positions(&rules.read, rules)?;
+    super::positions(&rules.write, rules)?;
+    Ok(())
+}
+
 #[test]
 fn the_universal_prefix_is_refused_in_either_region() {
     for rules in [
@@ -106,16 +113,6 @@ fn the_universal_prefix_is_refused_in_either_region() {
         .unwrap_err()
         .to_string();
     assert!(why.contains("every path except some exclusions"), "{why}");
-}
-
-#[test]
-fn the_root_is_refused_as_a_place() {
-    let place = FsRules {
-        read: vec![FsAllow::RunPlace(RealPath::universal())],
-        ..rules(&[], &[], &[])
-    };
-    let why = refuse_universal_prefix(&place).unwrap_err().to_string();
-    assert!(why.contains("ral will not stamp every drive"), "{why}");
 }
 
 #[test]
@@ -230,13 +227,7 @@ fn carving_meets_a_junction_and_a_symlink_as_links() {
 
     let real = |at: PathBuf| walked(&at);
     let allowance = real(cfg.clone());
-    let mut carved = carve(
-        std::slice::from_ref(&allowance),
-        &[real(cfg.join("gh"))],
-        &mut open,
-        &mut listing,
-    )
-    .unwrap();
+    let mut carved = carve(std::slice::from_ref(&allowance), &[real(cfg.join("gh"))]).unwrap();
     carved.whole.sort();
     let mut whole = vec![real(cfg.join("keep")), real(cfg.join("other.txt"))];
     whole.sort();

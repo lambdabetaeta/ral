@@ -159,11 +159,11 @@ fn read_cause(shown: &str, program: &Program, why: &Withheld<FsDeny>) -> String 
             ),
         ),
     };
-    match (why, program) {
-        (Withheld::MissingAllowance, _) => {
+    match why {
+        Withheld::MissingAllowance => {
             format!("{lead}{subject} may run, but it is not readable under the active grant")
         }
-        (Withheld::Excluded { scope, matched_by }, _) => format!(
+        Withheld::Excluded { scope, matched_by } => format!(
             "{lead}{}",
             excluded(subject, format_args!("the fs deny '{scope}'"), *matched_by)
         ),
@@ -214,43 +214,6 @@ pub(crate) fn deny_head(
     exec_denial(shown, program, why, None, error)
 }
 
-/// Judge the access `trace` by `op`'s table: an exclusion beats every
-/// allowance, and a path no allowance supports is withheld.  `Ok` exactly when
-/// no layer held an `fs` opinion or some allowance supports the path alone.
-/// A write onto a binary the sandbox pinned at boot is [`Refused::Guarded`]
-/// first, no grant deciding it, the twin of the discard device, which is
-/// admitted before the stack is.
-///
-/// The exclusions this decides against are the ones their walks held; the
-/// sandbox's projection folds the same tables once, at spawn, because that is
-/// when the OS profile is written.
-pub(crate) fn fs_judge(
-    grants: &GrantStack,
-    floor: &Floor,
-    trace: &Trace,
-    op: &FsOp,
-) -> Result<(), Refused> {
-    // Before the stack: an empty stack is exactly the case it must catch.
-    if matches!(op, FsOp::Write)
-        && let Some(pinned) = trace.leaf_id().and_then(crate::sandbox::pinned_binary)
-    {
-        return Err(Refused::Guarded(pinned));
-    }
-    grants.fold_fs(floor, op, trace).map_err(Refused::Withheld)
-}
-
-impl GrantStack {
-    /// The fs guard's verdict as a plain bool, for callers with no [`Context`]
-    /// to audit through: exarch's boot-time skill discovery asks it of a
-    /// stack.  The same [`fs_judge`] the guard runs, of the access a walk
-    /// found.  The [`LexicalPath::is_discard`] exemption is the Shell door's
-    /// alone: it excuses a discard device from an *access*, and this door
-    /// decides membership, not access.
-    pub fn admits_fs(&self, floor: &Floor, op: &FsOp, trace: &Trace) -> bool {
-        fs_judge(self, floor, trace, op).is_ok()
-    }
-}
-
 /// Refuse a name the host would read as a DOS device (Windows only).  No grant
 /// can admit it: it names no object to judge.
 pub(crate) fn check_device_name(path: &LexicalPath) -> Settled<()> {
@@ -258,15 +221,15 @@ pub(crate) fn check_device_name(path: &LexicalPath) -> Settled<()> {
         .map_or(Ok(()), |m| Err(sig(m)))
 }
 
-/// Decide an `op` on the access a walk found: [`fs_judge`] is the decision,
-/// [`fs_denial`] the wording and the fact around it.
+/// Decide an `op` on the access a walk found: [`GrantStack::refusal_fs`] is
+/// the decision, [`fs_denial`] the wording and the fact around it.
 pub(crate) fn check_fs_exact(
     ctx: &Context,
     floor: &Floor,
     trace: &Trace,
     op: &FsOp,
 ) -> Result<(), Box<Denial>> {
-    fs_judge(&ctx.grants, floor, trace, op)
+    (ctx.grants.refusal_fs(floor, op, trace))
         .map_err(|refused| fs_denial(ctx, refused, op, trace.real()))
 }
 

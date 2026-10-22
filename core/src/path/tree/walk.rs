@@ -533,11 +533,7 @@ impl Entries {
                 b".git" => marks.git = true,
                 _ => {}
             }
-            let admitted = entry.listed().map_or_else(
-                || self.region.admits_unseen(&entry),
-                |listed| self.region.admits_listed(&listed),
-            );
-            if admitted {
+            if self.region.admits(&entry) {
                 let seen = match entry.seen() {
                     Ok(seen) => Ok((seen.stat.clone(), seen.id)),
                     Err(e) => Err(io::Error::new(e.kind(), e.to_string())),
@@ -572,20 +568,19 @@ impl Entries {
         self.assemble(depth, marks, dot_git.as_ref(), within, read)
     }
 
-    /// The rules the directory `real`, above the root, adds: read by name,
-    /// since no handle on it is held.
-    fn above(&self, real: &Path, within: bool) -> Layer {
+    /// The rules the directory `real`, above the root, adds, `dot_git` its
+    /// `.git`: read by name, since no handle on it is held.
+    fn above(&self, real: &Path, dot_git: Option<&(LexicalPath, bool)>, within: bool) -> Layer {
         let marks = Marks {
             ignore: true,
             gitignore: true,
             git: true,
         };
-        let dot_git = self.dot_git_at(real);
         let read = |name: &str| {
             let at = LexicalPath::absolute(&real.join(name))?;
             self.read_named(&at).ok().map(ignore::text)
         };
-        self.assemble(normals(real).len(), &marks, dot_git.as_ref(), within, read)
+        self.assemble(normals(real).len(), &marks, dot_git, within, read)
     }
 
     fn assemble(
@@ -622,10 +617,15 @@ impl Entries {
     fn ancestry(&self, root: &Dir<Judged<Reading>>) -> Rules {
         let real = root.real();
         let mut rules = Rules::new(normals(real.as_path()));
-        let above: Vec<&Path> = real.as_path().ancestors().skip(1).collect();
-        let nearest = above.iter().position(|at| self.dot_git_at(at).is_some());
-        for (i, at) in above.iter().enumerate().rev() {
-            rules.push(self.above(at, nearest.is_some_and(|n| i <= n)));
+        let above: Vec<(&Path, Option<(LexicalPath, bool)>)> = real
+            .as_path()
+            .ancestors()
+            .skip(1)
+            .map(|at| (at, self.dot_git_at(at)))
+            .collect();
+        let nearest = above.iter().position(|(_, dot_git)| dot_git.is_some());
+        for (i, (at, dot_git)) in above.iter().enumerate().rev() {
+            rules.push(self.above(at, dot_git.as_ref(), nearest.is_some_and(|n| i <= n)));
         }
         rules
     }

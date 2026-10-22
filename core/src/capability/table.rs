@@ -385,11 +385,11 @@ mod tests {
         assert!(met.evidence(Subject::Access(&at("/work/f"))).permits());
         assert!(!met.evidence(Subject::Access(&at("/secret"))).permits());
         let met = everywhere().meet(FsRules::default());
-        let (work, secret, root) = (at("/work"), at("/secret"), RealPath::universal());
+        let (work, secret) = (at("/work"), at("/secret"));
         for subject in [
             Subject::Access(&work),
             Subject::Access(&secret),
-            Subject::Position(&root),
+            Subject::Position(work.real()),
             Subject::Everywhere,
         ] {
             assert_eq!(met.evidence(subject), Evidence::NEITHER);

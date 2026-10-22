@@ -72,8 +72,8 @@ impl Context {
         self.cwd().as_path().to_path_buf()
     }
 
-    /// A [`Resolver`] bound to this layer's environment and cwd — grant-prefix
-    /// resolution, deny-path canonicalisation, and the fs guards all mint one here.
+    /// A [`Resolver`] bound to this layer's environment and cwd: what anchors
+    /// a written path before its walk.
     pub(crate) fn resolver(&self) -> Resolver<'_> {
         Resolver::at(&self.env_overrides, self.cwd())
     }

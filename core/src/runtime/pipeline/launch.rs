@@ -142,7 +142,6 @@ fn launch_external_stage_direct(
     let SpawnPlan { shown, admitted } = command::vet(head, args, cx.shell)?;
     let args = admitted.args().to_vec();
     let mut cmd = command::build_launch(
-        &shown,
         admitted,
         crate::sandbox::Ownership::Kept,
         cx.shell,

@@ -8,7 +8,7 @@
 )]
 
 use super::super::*;
-use super::unix::{root, spelled};
+use super::unix::{entered, root, spelled};
 use super::{Around, LINK_READ};
 use crate::path::{Depth, MatchedBy, Subject};
 use std::os::unix::fs::{MetadataExt, symlink};
@@ -137,8 +137,7 @@ fn a_moved_absent_name_is_held_under_every_spelling_of_its_tail() {
 fn a_listed_entry_is_held_by_its_identity() {
     let (_tmp, dir, excluded) = secret();
     std::fs::hard_link(dir.join("d/secret"), dir.join("elsewhere/h")).unwrap();
-    let listed = walk_dir(&spelled(&dir.join("elsewhere"))).unwrap();
-    let listed = super::writable(listed);
+    let listed = entered(&dir.join("elsewhere")).unwrap();
     let entries: Vec<_> = listed.read_dir().unwrap().collect();
     let entry = entries.first().expect("the link is listed");
     let record = entry.listed().expect("it was seen");

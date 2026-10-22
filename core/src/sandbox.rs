@@ -21,7 +21,7 @@ use crate::path::ObjectId;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod carriers;
-#[cfg(any(windows, test))]
+#[cfg(any(windows, all(test, target_os = "linux")))]
 mod carve;
 mod diag;
 mod launch;
@@ -153,13 +153,12 @@ pub(crate) fn pinned_binary(id: ObjectId) -> Option<&'static str> {
 /// `RealPath::open_nofollow` and `open_dir_nofollow` ask for before they hold
 /// a position as `Installing`.  The field is private to this module and its
 /// children, and the one `static` below is its one construction site: a
-/// renderer lends it, and nothing outside `sandbox` can name it.
+/// renderer lends it, and nothing outside `sandbox` can name it.  No macOS
+/// renderer holds a position.
+#[cfg(any(target_os = "linux", windows))]
 pub(crate) struct InstallToken(());
 
-#[cfg_attr(
-    all(target_os = "macos", not(test)),
-    expect(dead_code, reason = "no macOS renderer holds a position")
-)]
+#[cfg(any(target_os = "linux", windows))]
 static TOKEN: InstallToken = InstallToken(());
 
 /// Whether this host builds a `Restricted` envelope at all.

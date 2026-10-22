@@ -13,12 +13,13 @@
 //! depth.  Every list denotes a set: a repeat adds nothing and is no error.
 
 use super::freeze::{Anchor, FreezeCtx, Place, PolicyError, Selector};
+use crate::capability::Polar;
 use crate::capability::{
     EditorVerb, ExecRules, FsLayer, GrantLayer, GrantPath, Keyed, Net, Rule, ShellVerb, name_rules,
 };
 use crate::path::lex::has_drive;
 use crate::path::sigil::SigilHead;
-use crate::path::{Excluded, Kind, PathRules, Trace, Walked, names_a_path_for};
+use crate::path::{Excluded, Kind, PathRules, Trace, names_a_path_for};
 use crate::syntax::quote::quote_word;
 use crate::text::{indefinite, near_names};
 use crate::typecheck::contract::{
@@ -169,10 +170,7 @@ fn decode_place(value: &Value) -> Result<Place, PolicyError> {
 }
 
 /// The places of an fs list, each walked as polarity `W` walks.
-fn freeze_places<W: Walked>(
-    list: &List,
-    ctx: &FreezeCtx,
-) -> Result<Vec<GrantPath<W>>, PolicyError> {
+fn freeze_places<W: Polar>(list: &List, ctx: &FreezeCtx) -> Result<Vec<GrantPath<W>>, PolicyError> {
     list.iter()
         .filter_map(|item| {
             decode_place(&item)

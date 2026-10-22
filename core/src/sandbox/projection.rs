@@ -174,7 +174,13 @@ impl SandboxProjection {
                 pinned_dirs: _,
             }) => {
                 let holds = || deny.iter().map(|deny| &deny.real);
-                let prefixes: Vec<_> = write.iter().map(FsAllow::real).collect();
+                let prefixes: Vec<_> = (write.iter())
+                    .map(|scope| {
+                        scope
+                            .real()
+                            .map_or_else(RealPath::universal, RealPath::clone)
+                    })
+                    .collect();
                 FsProjection::Restricted(FsRules {
                     read: objects(read)?,
                     pinned_dirs: pinned_dirs(holds(), &prefixes)?,
@@ -208,13 +214,6 @@ impl SandboxProjection {
         floor: &Floor,
         admitted: Option<&Admitted>,
     ) -> Option<Self> {
-        // Traced because this fold is not the pure reduction it reads as:
-        // re-freezing exclusions canonicalises against the filesystem, and
-        // compiling the exec table walks the host `PATH` for every bare key, so
-        // its cost tracks the host's fs latency and is paid again on each
-        // rebuild.
-        #[cfg(debug_assertions)]
-        let t_fold = std::time::Instant::now();
         // Zipped because the two regions are `Some` on the same condition,
         // some layer held an `fs` opinion, so there is no mixed case to weigh.
         let regions = running_region(grants, floor)
@@ -234,11 +233,6 @@ impl SandboxProjection {
         let exec_triggers_sandbox = crate::sandbox::EXEC_ENFORCED && table.is_some();
 
         if regions.is_none() && online && !exec_triggers_sandbox {
-            crate::dbg_trace!(
-                "sandbox-proj",
-                "fold unrestricted in {:?} (no OS sandbox needed)",
-                t_fold.elapsed()
-            );
             return None;
         }
 
@@ -264,13 +258,11 @@ impl SandboxProjection {
             }
             None => FsProjection::Unrestricted,
         };
-        let projection = Self {
+        Some(Self {
             fs,
             net: online,
             exec,
-        };
-        crate::dbg_trace!("sandbox-proj", "fold restricted in {:?}", t_fold.elapsed());
-        Some(projection)
+        })
     }
 }
 

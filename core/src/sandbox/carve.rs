@@ -27,15 +27,52 @@
 //! An exclusion equal to an allowance, or around one, is not carving's to
 //! answer: that allowance is passed on whole, for the backend to refuse.
 //!
-//! Pure over an injected lister, so the plan is judged on one set of rules;
-//! the paths are the frozen real paths the backend stamps. The lister opens
-//! each directory it lists, and each entry is judged by its position.
+//! The paths are the frozen real paths the backend stamps; a directory is
+//! held through the sandbox side's own door and listed from the handle, and
+//! each entry is judged by its position.
 
-use crate::path::{Dir, Installing, RealPath};
+use crate::path::{Dir, Installing, Kind, RealPath, shown};
+use crate::sandbox::TOKEN;
+use std::fmt;
+use std::io;
 
-/// One directory entry, as the lister reads it without following it: a
-/// directory comes with the handle the lister opened on it.
-pub(crate) enum Entry {
+/// A directory on the way to an exclusion that could not be held or listed:
+/// what cannot be listed cannot be carved, and is not granted whole instead.
+#[derive(Debug)]
+pub(crate) struct Unlisted {
+    at: RealPath,
+    why: String,
+}
+
+impl Unlisted {
+    fn at(at: &RealPath, e: &io::Error) -> Self {
+        Self {
+            at: at.clone(),
+            why: e.to_string(),
+        }
+    }
+}
+
+impl fmt::Display for Unlisted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "sandbox: cannot list '{}' to grant around an exclusion in it: {}",
+            shown(self.at.as_path()),
+            self.why
+        )
+    }
+}
+
+impl From<Unlisted> for super::Refusal {
+    fn from(unlisted: Unlisted) -> Self {
+        Self::Launch(unlisted.to_string())
+    }
+}
+
+/// One directory entry, read without following it: a directory comes with
+/// the handle opened on it.
+enum Entry {
     Directory(Box<Dir<Installing>>),
     /// Anything else that is itself an object to grant: a file, or a
     /// reparse point that redirects nowhere (a cloud placeholder).
@@ -53,6 +90,28 @@ impl Entry {
     }
 }
 
+/// The entries of `dir`, read from the held directory without following
+/// links, and each subdirectory opened from it: a name surrogate (a symlink,
+/// a junction) is a link, any other reparse point (a cloud placeholder) the
+/// object it is.
+fn entries(dir: &Dir<Installing>) -> Result<Vec<Entry>, Unlisted> {
+    let here = |e: &io::Error| Unlisted::at(dir.real(), e);
+    dir.read_dir()
+        .map_err(|e| here(&e))?
+        .map(|entry| {
+            let kind = entry.seen().map_err(here)?.stat.kind;
+            Ok(match kind {
+                Kind::Symlink => Entry::Link(entry.real()),
+                Kind::Dir => Entry::Directory(Box::new(
+                    dir.open_dir(entry.name())
+                        .map_err(|e| Unlisted::at(&entry.real(), &e))?,
+                )),
+                Kind::File | Kind::Other => Entry::Other(entry.real()),
+            })
+        })
+        .collect()
+}
+
 /// The allowances as granted, once carved.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Carving {
@@ -64,16 +123,11 @@ pub(crate) struct Carving {
 }
 
 /// Carve every exclusion out of `allowances`, listing a directory only where
-/// an exclusion lies strictly beneath it. `open` holds an allowance's
-/// position, `None` where it is absent or no directory; `list` reads one
-/// directory's entries. Either's error ends the plan: what cannot be listed
-/// cannot be carved, and is not granted whole instead.
-pub(crate) fn carve<E>(
-    allowances: &[RealPath],
-    exclusions: &[RealPath],
-    open: &mut impl FnMut(&RealPath) -> Result<Option<Dir<Installing>>, E>,
-    list: &mut impl FnMut(&Dir<Installing>) -> Result<Vec<Entry>, E>,
-) -> Result<Carving, E> {
+/// an exclusion lies strictly beneath it.
+///
+/// # Errors
+/// A directory that cannot be held or listed ends the plan.
+pub(crate) fn carve(allowances: &[RealPath], exclusions: &[RealPath]) -> Result<Carving, Unlisted> {
     let mut carving = Carving::default();
     for allowance in allowances {
         if exclusions.iter().any(|e| e.contains_folded(allowance)) {
@@ -87,10 +141,13 @@ pub(crate) fn carve<E>(
             continue;
         }
         // Absent: nothing to grant. Not a directory: nothing to carve.
-        let mut pending: Vec<_> = open(allowance)?.into_iter().collect();
+        let held = allowance
+            .open_dir_nofollow(&TOKEN)
+            .map_err(|e| Unlisted::at(allowance, &e))?;
+        let mut pending: Vec<_> = held.into_iter().collect();
         while let Some(dir) = pending.pop() {
             carving.entries.push(dir.real().clone());
-            for entry in list(&dir)? {
+            for entry in entries(&dir)? {
                 if exclusions.iter().any(|e| e.contains_folded(entry.real())) {
                     continue;
                 }

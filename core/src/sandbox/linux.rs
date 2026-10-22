@@ -35,8 +35,8 @@ use super::{FsProjection, RenderedProjection};
 use crate::Role;
 use crate::capability::Floor;
 use crate::path::{
-    Dir, Installing, Kind, LeafMode, LexicalPath, Located, Object, RealPath, Rendered, is_loop,
-    render_real, walk_lenient,
+    Dir, Installing, Kind, LeafMode, LexicalPath, Located, Object, RealPath, Rendered, Trace,
+    is_loop, render_real, walk_lenient,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -291,7 +291,7 @@ pub(crate) fn bwrap_argv(
         denied.sort();
         for path in denied {
             let mask = DenyMask::over(path);
-            for name in binds.names(path)? {
+            for name in binds.names(path) {
                 if name.holds("/proc") {
                     return Err(format!(
                         "sandbox: the grant denies {}, which hides /proc, and the envelope \
@@ -331,16 +331,19 @@ pub(crate) struct Bind {
     layer: Layer,
     access: Access,
     dest: Rendered,
+    /// The object's real name, and its position, held when the binds open.
     object: Rendered,
+    position: RealPath,
 }
 
 impl Bind {
-    fn read_only(layer: Layer, dest: Rendered, object: Rendered) -> Self {
+    fn read_only(layer: Layer, dest: Rendered, (position, object): (RealPath, Rendered)) -> Self {
         Self {
             layer,
             access: Access::ReadOnly,
             dest,
             object,
+            position,
         }
     }
 
@@ -364,11 +367,8 @@ impl Bind {
     }
 
     /// Where this bind shows `name`, if its object holds it.
-    fn shows(&self, name: &RealPath) -> Option<RealPath> {
-        name.rebased(
-            &RealPath::rendered(&self.object),
-            &RealPath::rendered(&self.dest),
-        )
+    fn shows(&self, name: &Rendered) -> Option<Rendered> {
+        name.rebased(&self.object, &self.dest)
     }
 }
 
@@ -391,21 +391,21 @@ impl Binds {
             ..
         } = shown;
         if let Some(tree) = cgroup_tree(env.host)
-            && let (Some(object), Some(dest)) = (object(&tree)?, object(CGROUP)?)
+            && let (Some(object), Some((_, dest))) = (object(&tree)?, object(CGROUP)?)
         {
             planned.push(Bind::read_only(Layer::Over, dest, object));
         }
         let mut opened = BTreeMap::new();
-        for Bind { object, .. } in &planned {
-            if !opened.contains_key(object) {
-                let held = open_object(object, tolerated.contains(object))?;
-                opened.insert(object.clone(), held);
+        for bind in &planned {
+            if !opened.contains_key(&bind.position) {
+                let held = open_object(&bind.position, tolerated.contains(&bind.position))?;
+                opened.insert(bind.position.clone(), held);
             }
         }
         let (mut binds, mut handles) = (Vec::new(), Vec::new());
         for bind in planned {
             // Absent: a name that shows nothing binds nothing.
-            if let Some(Some(held)) = opened.get(&bind.object) {
+            if let Some(Some(held)) = opened.get(&bind.position) {
                 let copy = |why: &dyn fmt::Display| {
                     format!(
                         "sandbox: cannot copy the handle on {}: {why}",
@@ -417,8 +417,8 @@ impl Binds {
                 binds.push(bind);
             }
         }
-        for (dest, handle) in pinned([env.bwrap, env.trampoline])? {
-            binds.push(Bind::read_only(Layer::Over, dest.clone(), dest));
+        for (bind, handle) in pinned([env.bwrap, env.trampoline])? {
+            binds.push(bind);
             handles.push(handle);
         }
         let slots = usize::from(u16::MAX) + 1;
@@ -449,17 +449,14 @@ impl Binds {
     /// Every name the envelope shows `name` at: itself, and wherever a
     /// `Shown` bind of an object holding it puts it.  A mount laid at one
     /// does not show at another.
-    fn names(&self, name: &Rendered) -> Result<Vec<Rendered>, String> {
-        let at = RealPath::rendered(name);
-        let mut shown: Vec<_> = (self.layer(Layer::Shown))
-            .filter_map(|(_, bind)| bind.shows(&at))
+    fn names(&self, name: &Rendered) -> Vec<Rendered> {
+        let mut names: Vec<_> = (self.layer(Layer::Shown))
+            .filter_map(|(_, bind)| bind.shows(name))
+            .chain([name.clone()])
             .collect();
-        shown.push(at);
-        let mut names = BTreeSet::new();
-        for real in &shown {
-            names.extend(render_real(real)?);
-        }
-        Ok(names.into_iter().collect())
+        names.sort();
+        names.dedup();
+        names
     }
 
     fn render(&self, c: &mut Options, layer: Layer) {
@@ -478,7 +475,7 @@ impl Binds {
 pub(crate) struct Shown {
     binds: Vec<Bind>,
     /// The floor's objects, which a host may keep from this user.
-    tolerated: BTreeSet<Rendered>,
+    tolerated: BTreeSet<RealPath>,
     /// The deduped objects the view is rooted at: every shown object under a
     /// restricted fs, `/` under an unrestricted one.
     pub(crate) roots: Vec<RealPath>,
@@ -501,12 +498,8 @@ impl Shown {
             });
         };
         let tolerated = (rules.read.iter())
-            .map(|object| &object.real)
-            .filter(|real| {
-                floor
-                    .allows()
-                    .any(|f| f.real().as_path().as_os_str() == std::ffi::OsStr::new(real.as_str()))
-            })
+            .map(|object| &object.position)
+            .filter(|position| floor.allows().any(|f| f.real() == Some(*position)))
             .cloned()
             .collect();
         let mut names: Vec<_> = binds(&rules.read, Access::ReadOnly)
@@ -518,10 +511,10 @@ impl Shown {
             .filter(|inner| !names.iter().any(|outer| outer.covers(inner)))
             .cloned()
             .collect();
-        let roots = (binds.iter().map(|bind| &bind.object))
+        let roots = (binds.iter().map(|bind| &bind.position))
             .collect::<BTreeSet<_>>()
             .into_iter()
-            .map(RealPath::rendered)
+            .cloned()
             .collect();
         Ok(Self {
             binds,
@@ -539,26 +532,31 @@ fn binds(objects: &[Object], access: Access) -> impl Iterator<Item = Bind> {
             access,
             dest: dest.clone(),
             object: object.real.clone(),
+            position: object.position.clone(),
         })
     })
 }
 
-/// `name` as the one object it reaches; `None` where it names nothing.
-fn object(name: &str) -> Result<Option<Rendered>, String> {
+/// `name` as the one object it reaches, its position and its real name;
+/// `None` where it names nothing.
+fn object(name: &str) -> Result<Option<(RealPath, Rendered)>, String> {
     let Some(spelling) = LexicalPath::absolute(&PathBuf::from(name)) else {
         return Ok(None);
     };
     match RealPath::of(&spelling) {
-        Ok(real) => Ok(render_real(&real)?.into_iter().next()),
+        Ok(real) => {
+            let rendered = render_real(&real)?.into_iter().next();
+            Ok(rendered.map(|name| (real, name)))
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("sandbox: cannot resolve {name}: {e}")),
     }
 }
 
-/// `object`, held in the host to be mounted; `None` where it names nothing,
-/// or is `optional` and kept from this user.
-fn open_object(object: &Rendered, optional: bool) -> Result<Option<Located<Installing>>, String> {
-    match open_nofollow(&RealPath::rendered(object)) {
+/// The object at `position`, held in the host to be mounted; `None` where
+/// nothing is there, or it is `optional` and kept from this user.
+fn open_object(position: &RealPath, optional: bool) -> Result<Option<Located<Installing>>, String> {
+    match open_nofollow(position) {
         Err(OpenError::Failed { source, .. })
             if optional && source.kind() == io::ErrorKind::PermissionDenied =>
         {
@@ -654,8 +652,8 @@ pub(crate) fn seccomp_programs() -> Result<Vec<&'static [u8]>, String> {
 /// projection bound: no confined child rewrites a pinned inode in place, nor
 /// moves it, a mountpoint being unrenamable.  An unlinked pin has no name to
 /// lock, and runs by descriptor all the same.
-fn pinned(pins: [&Pinned; 2]) -> Result<Vec<(Rendered, OwnedFd)>, String> {
-    let mut locked: Vec<(Rendered, OwnedFd)> = Vec::new();
+fn pinned(pins: [&Pinned; 2]) -> Result<Vec<(Bind, OwnedFd)>, String> {
+    let mut locked: Vec<(Bind, OwnedFd)> = Vec::new();
     for pin in pins {
         let what = crate::path::shown(pin.arg0());
         let names = pin
@@ -673,11 +671,16 @@ fn pinned(pins: [&Pinned; 2]) -> Result<Vec<(Rendered, OwnedFd)>, String> {
                 crate::path::shown(&name)
             )
         })?;
-        let Some(dest) = object(name)? else { continue };
-        if locked.iter().all(|(at, _)| *at != dest) {
+        let Some((position, dest)) = object(name)? else {
+            continue;
+        };
+        if locked.iter().all(|(bind, _)| bind.dest != dest) {
             let handle = (pin.fd().try_clone_to_owned())
                 .map_err(|e| format!("sandbox: cannot copy the pin on {what}: {e}"))?;
-            locked.push((dest, handle));
+            locked.push((
+                Bind::read_only(Layer::Over, dest.clone(), (position, dest)),
+                handle,
+            ));
         }
     }
     Ok(locked)
@@ -793,7 +796,7 @@ impl InfoFd {
 ///
 /// Every mask goes over a name that already exists: a mount bwrap must first
 /// `mkdir` is not available to us, for the reason [`Self::LeftAbsent`] gives.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum DenyMask {
     /// An empty directory with no permission bits, which refuse the owner as
     /// much as anyone.  The bits are the whole of it: the tmpfs is the
@@ -817,13 +820,13 @@ enum DenyMask {
 }
 
 impl DenyMask {
-    /// The mask `path` needs, from what stands there, never followed; a name
-    /// that cannot be walked stands nothing.
+    /// The mask `path` needs, from what stands there.
     fn over(path: &Rendered) -> Self {
-        let name = LexicalPath::absolute(&PathBuf::from(path.as_str()));
-        let kind = name
-            .and_then(|name| walk_lenient(&name, LeafMode::NoFollow).ok())
-            .and_then(|trace| trace.kind());
+        Self::of(standing(path).and_then(|stood| stood.kind()))
+    }
+
+    /// The mask an object of `kind` needs; a name that stands nothing, none.
+    fn of(kind: Option<Kind>) -> Self {
         match kind {
             Some(Kind::Symlink) => Self::OnItsTarget,
             Some(Kind::File | Kind::Other) => Self::UnopenableNode,
@@ -844,6 +847,13 @@ impl DenyMask {
             Self::OnItsTarget | Self::LeftAbsent => {}
         }
     }
+}
+
+/// What stands at the rendered `name` now, never followed; `None` where it
+/// cannot be walked.
+fn standing(name: &Rendered) -> Option<Trace> {
+    let name = LexicalPath::absolute(&PathBuf::from(name.as_str()))?;
+    walk_lenient(&name, LeafMode::NoFollow).ok()
 }
 
 #[cfg(test)]
@@ -1371,10 +1381,8 @@ mod tests {
         let dir = workdir("binds-eacces");
         let locked = dir.join("locked");
         std::fs::create_dir_all(locked.join("inner")).unwrap();
+        let inner = crate::test_helper::real(locked.join("inner"));
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let inner = crate::path::render_paths(&[locked.join("inner").to_string_lossy()])
-            .expect("renders")
-            .remove(0);
         let opened = super::open_object(&inner, false);
         if opened.is_ok() {
             eprintln!("skipping: this user reaches through a mode-0 directory");

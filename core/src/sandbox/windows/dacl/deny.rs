@@ -42,7 +42,7 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}
 use super::super::local::Local;
 use super::acl::{win32_err, win32_err_str};
 use super::{DaclError, cancelled};
-use crate::path::{Kind, LeafMode, RealPath};
+use crate::path::{Kind, LeafMode, Located, RealPath};
 use crate::process::cancel::Scope;
 use crate::sandbox::TOKEN;
 
@@ -236,13 +236,13 @@ pub(crate) fn ensure_unreachable(
         }
     };
     let mut pending = Vec::new();
-    match denied.open_dir_nofollow(&TOKEN) {
-        Ok(Some(dir)) => pending.push(dir),
-        Ok(None) => match denied.open_nofollow(&TOKEN) {
-            Ok(Some(file)) => check(file.reopen(READ_CONTROL), file.real())?,
-            Ok(None) => {}
-            Err(e) => return Err(walk_error(denied.as_path(), &e)),
-        },
+    match denied
+        .open_nofollow(&TOKEN)
+        .map(|held| held.map(Located::into_dir))
+    {
+        Ok(Some(Ok(dir))) => pending.push(dir),
+        Ok(Some(Err(file))) => check(file.reopen(READ_CONTROL), file.real())?,
+        Ok(None) => {}
         Err(e) => return Err(walk_error(denied.as_path(), &e)),
     }
     while let Some(dir) = pending.pop() {

@@ -22,18 +22,14 @@ fn spelled(path: &Path) -> LexicalPath {
     Resolver::at(&crate::types::EnvVars::new(), &cwd).anchor(path)
 }
 
-/// [`walk`] and [`walk_dir`] as these tests ask them: what they hold is
-/// retagged as judged for writing, since the tests judge nothing.
-fn walk(rp: &LexicalPath, mode: LeafMode) -> io::Result<Located<Judged<Writing>>> {
-    super::super::walk(rp, mode).map(writing)
-}
-
-fn walk_dir(rp: &LexicalPath) -> io::Result<Dir<Judged<Writing>>> {
-    super::super::walk_dir(rp).map(writable)
-}
-
+/// `path` walked, and the directory `path` entered, as these tests hold
+/// them: retagged as judged for writing, since the tests judge nothing.
 fn walked(path: &Path) -> Located<Judged<Writing>> {
-    walk(&spelled(path), LeafMode::Follow).unwrap()
+    writing(walk(&spelled(path), LeafMode::Follow).unwrap())
+}
+
+fn entered(path: &Path) -> Dir<Judged<Writing>> {
+    writable(walk_dir(&spelled(path)).unwrap())
 }
 
 fn name(raw: &str) -> EntryName {
@@ -131,7 +127,7 @@ fn an_identity_is_the_file_id_of_the_handle() {
     assert_eq!(ids("f"), ids("linked"));
     assert_ne!(ids("f"), ids("other"));
     assert_eq!(walked(&tmp.path().join("f")).trace().last_id(), ids("f"));
-    let dir = walk_dir(&spelled(tmp.path())).unwrap();
+    let dir = entered(tmp.path());
     for entry in dir.read_dir().unwrap() {
         let name = entry.name().as_os_str().to_owned();
         assert_eq!(entry.seen().unwrap().id, ids(&name.to_string_lossy()));
@@ -168,7 +164,7 @@ fn a_held_prefix_refuses_a_rename_while_it_lives() {
     std::fs::create_dir_all(tmp.path().join("a/b")).unwrap();
     std::fs::write(tmp.path().join("a/b/f"), b"x").unwrap();
 
-    let dir = walk_dir(&spelled(&tmp.path().join("a/b"))).unwrap();
+    let dir = entered(&tmp.path().join("a/b"));
     assert!(std::fs::rename(tmp.path().join("a/b"), tmp.path().join("a/c")).is_err());
     assert!(std::fs::rename(tmp.path().join("a"), tmp.path().join("z")).is_err());
     drop(dir);
@@ -193,7 +189,7 @@ fn a_listing_without_128_bit_ids_falls_back_to_the_64_bit_id() {
     let tmp = tempfile::tempdir_in(volume).unwrap();
     std::fs::write(tmp.path().join("f"), b"body").unwrap();
     std::fs::create_dir(tmp.path().join("d")).unwrap();
-    let dir = walk_dir(&spelled(tmp.path())).unwrap();
+    let dir = entered(tmp.path());
     let mut listed = 0;
     for entry in dir.read_dir().unwrap() {
         let file = File::open(tmp.path().join(entry.name().as_os_str())).unwrap();
@@ -210,7 +206,7 @@ fn a_stat_carries_the_length() {
     std::fs::write(tmp.path().join("f"), b"12345").unwrap();
     let located = walked(&tmp.path().join("f"));
     assert_eq!(located.stat().unwrap().len, 5);
-    let dir = walk_dir(&spelled(tmp.path())).unwrap();
+    let dir = entered(tmp.path());
     let entry = dir.read_dir().unwrap().next().unwrap();
     assert_eq!(entry.seen().unwrap().stat.len, 5);
 }
@@ -302,7 +298,7 @@ fn a_component_renamed_is_adopted_and_one_moved_is_refused() {
     std::fs::create_dir(tmp.path().join("d")).unwrap();
     std::fs::create_dir(tmp.path().join("e")).unwrap();
     std::fs::write(tmp.path().join("d/old"), b"x").unwrap();
-    let parent = walk_dir(&spelled(&tmp.path().join("d"))).unwrap();
+    let parent = entered(&tmp.path().join("d"));
     let child = host::step(&parent.handle, &name("old"), Sharing::Leaf).unwrap();
     let file = child.handle.as_ref().unwrap();
     let volume = child.step.id.volume;

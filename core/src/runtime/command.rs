@@ -51,7 +51,6 @@ pub(crate) fn run(
     // with it and is read again on the way out: a wall that expired mid-stamp
     // must not be discovered only once the child is already running.
     let mut command = build_launch(
-        &cmd_name,
         admitted,
         crate::sandbox::Ownership::Kept,
         shell,

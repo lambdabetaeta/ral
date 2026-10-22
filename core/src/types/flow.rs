@@ -57,11 +57,8 @@ impl Break {
         })
     }
 
-    /// A child's end: `Failed` is the command's error; `Cancelled` is a stop
-    /// carrying the join on `scope`, the current scope the child was waited
-    /// under.  The join is `None` when the cause came from a collector's own
-    /// `sent` alone (an anchor's death, written on an external stage): the
-    /// stop is then unnamed, nobody's but the host's.
+    /// A child's end: `Failed` is the command's error; `Cancelled` is
+    /// [`Self::cancelled`].
     pub(crate) fn of_child(
         cmd: &str,
         end: ChildEnd,
@@ -72,10 +69,19 @@ impl Break {
             ChildEnd::Failed(failure) => {
                 Self::Error(Error::from_command_failure(cmd, failure, shell))
             }
-            ChildEnd::Cancelled(cause) => match scope.in_force() {
-                Some((join, owner)) => Self::stopped(join, Some(owner)),
-                None => Self::stopped(cause, None),
-            },
+            ChildEnd::Cancelled(cause) => Self::cancelled(cause, scope),
+        }
+    }
+
+    /// A child cancelled under `scope`, the current scope it was waited
+    /// under: a stop carrying the join on it.  The join is `None` when the
+    /// cause came from a collector's own `sent` alone (an anchor's death,
+    /// written on an external stage): the stop is then unnamed, nobody's but
+    /// the host's.
+    pub(crate) fn cancelled(cause: CancelCause, scope: &Scope) -> Self {
+        match scope.in_force() {
+            Some((join, owner)) => Self::stopped(join, Some(owner)),
+            None => Self::stopped(cause, None),
         }
     }
 

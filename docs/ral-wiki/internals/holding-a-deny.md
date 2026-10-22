@@ -207,3 +207,10 @@ the Seatbelt rule and the DACL carve are placed at the resolved real paths
 and judge names ([[design/two-enforcers|two-enforcers]]). Seatbelt's pinned
 ancestors are `RealPath::ancestors_within` of the positions each exclusion
 holds.
+
+The Unix renderers place an exclusion at both positions it holds, its name's
+and its link's target's. The Windows DACL side places it at one, the target
+where the name is a link (`session.rs::excluded_real`): it judged the followed
+path alone before, carving never grants a link entry anyway, and
+`ensure_unreachable` holds a position with every link refused, which the
+link's own position would fail.

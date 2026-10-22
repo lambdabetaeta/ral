@@ -28,10 +28,9 @@
 //! path names nothing.  One substitution, in one function, which is why
 //! the construction lives here and is not scattered across the session.
 
-use ral_core::capability::{Capabilities, Evidence, ExecKey, Floor, FsPolicy, GrantStack};
+use ral_core::capability::{Capabilities, Evidence, ExecKey, FsPolicy, Ungoverned};
 use ral_core::path::{
-    FrozenPath, GuestPath, LeafMode, LexicalPath, Reading, RealPath, Resolver, shown, walk_dir,
-    walk_lenient,
+    FrozenPath, GuestPath, LeafMode, LexicalPath, RealPath, Resolver, shown, walk_dir, walk_lenient,
 };
 use ral_core::types::EnvVars;
 use std::collections::BTreeSet;
@@ -189,9 +188,6 @@ impl Grant {
     /// read, or is so large a choice (`/`, the home folder, anything
     /// containing it) that it is far likelier to be a slip than an
     /// intention.  Every refusal says what to pick instead.
-    ///
-    /// # Panics
-    /// If the root stack withholds anything, which it never does.
     pub fn open(folder: &Path) -> Result<Self, String> {
         let shown = shown(folder);
         let dir = walk_dir(&spelled(folder)?).map_err(|e| match e.kind() {
@@ -214,12 +210,9 @@ impl Grant {
         // Readability is a separate question from existence: a folder can
         // sit on a share the user can see but not list.  Ask now, plainly,
         // rather than let the first exchange fail halfway through the work.
-        // The root stack, whose judgment is floor-independent: no grant
-        // exists yet, and the question is the user's own permission, which
-        // the handle answers.
-        GrantStack::root()
-            .judge_dir::<Reading>(&Floor::default(), dir)
-            .expect("the root stack withholds nothing")
+        // No grant exists yet: the question is the user's own permission,
+        // which the handle answers.
+        Ungoverned::read_dir(dir)
             .read_dir()
             .map_err(|e| {
                 format!(
@@ -434,8 +427,8 @@ impl Grant {
     }
 }
 
-/// The parts of this user's computer a grant is judged against, resolved
-/// once and canonicalised so they compare with the canonical root.
+/// The parts of this user's computer a grant is judged against, each walked
+/// once to the position the root is compared with.
 ///
 /// Built from the real host by [`Territory::of_this_host`]; the tests build
 /// their own, so no refusal test depends on the machine it runs on.
@@ -557,6 +550,8 @@ mod tests {
     use crate::test_fixture::workshop;
     #[cfg(unix)]
     use ral_core::capability::FsOp;
+    #[cfg(unix)]
+    use ral_core::path::Reading;
 
     /// Whether `sh` admits a write at `path`, walked leniently as a name.
     #[cfg(unix)]

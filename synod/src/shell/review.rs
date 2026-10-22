@@ -14,12 +14,12 @@
 //! is no status to distinguish, nothing to put back, and no conflict a
 //! put-back could discover.
 
-use ral_core::path::{basename, extension, is_stream_or_drive, shown};
-use std::path::{Component, Path, PathBuf};
+use ral_core::path::{basename, extension, shown};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use ral_core::capability::{Floor, GrantStack};
-use ral_core::path::{Kind, LeafMode, Reading, Stat, walk, walk_dir};
+use ral_core::capability::Ungoverned;
+use ral_core::path::{EntryName, Kind, LeafMode, Stat, descendant, walk_dir};
 use ral_core::sync::LockExt;
 use serde::Serialize;
 use synod::grant::spelled;
@@ -161,34 +161,13 @@ pub(crate) fn open_as(rel: &str) -> OpenAs {
     }
 }
 
-/// Join `rel`, a name the report gives relative to `folder`, onto it, or
-/// refuse when the name could reach outside: every part must be an ordinary
-/// name, never a root, a drive, `..` or `.`, and on Windows none may carry a
-/// colon, which there names an alternate stream.
-///
-/// This checks only the name.  [`file_to_open`] also asks the disk, because
-/// a link inside the folder can still point out of it.
-fn inside(folder: &Path, rel: &str) -> Result<PathBuf, String> {
-    let refuse = || format!("Synod will not open {rel}: its name points outside your folder.");
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "path: splitting a name the change report already holds into its parts, \
-                  to refuse any that is not a plain name; nothing is resolved here"
-    )]
-    let parts = Path::new(rel).components();
-    let mut joined = folder.to_path_buf();
-    let mut any = false;
-    for part in parts {
-        let Component::Normal(name) = part else {
-            return Err(refuse());
-        };
-        if is_stream_or_drive(name) {
-            return Err(refuse());
-        }
-        joined.push(name);
-        any = true;
-    }
-    if any { Ok(joined) } else { Err(refuse()) }
+/// `rel`, a name the report gives relative to the folder, as the entries it
+/// descends through, or a refusal when the name could reach outside: every
+/// part must be an ordinary name, never a root, a drive, `..` or `.`, and on
+/// Windows none may carry a colon, which there names an alternate stream.
+fn inside(rel: &str) -> Result<Vec<EntryName>, String> {
+    descendant(rel)
+        .map_err(|_| format!("Synod will not open {rel}: its name points outside your folder."))
 }
 
 /// A file a card's button may act on, found by the shell itself.
@@ -206,9 +185,10 @@ pub(crate) struct Target {
 /// the name it showed there, so a report that has moved on since the card
 /// was drawn is caught rather than acted on for a different file.  The path
 /// itself is the shell's own: the held folder joined to the held name.  The
-/// file must be a plain file, never a link or other reparse point that would
-/// send the system somewhere the card does not name, and must still be
-/// inside the folder once every link on the way to it is followed.
+/// file is reached from the held folder one name at a time, no link on the
+/// way followed, so it is inside the folder by construction; it must be a
+/// plain file, never a link or other reparse point that would send the
+/// system somewhere the card does not name.
 ///
 /// # Errors
 /// A plain sentence naming the file when any of that does not hold.
@@ -228,21 +208,22 @@ pub(crate) fn file_to_open(review: &Review, index: usize, shown: &str) -> Result
     let Some(how) = open else {
         return Err(format!("{rel} was deleted, so there is nothing to open."));
     };
-    let path = inside(&folder, &rel)?;
+    let names = inside(&rel)?;
+    let (last, above) = names.split_last().expect("a descendant has a name");
 
-    // The root stack: this is the user's own folder, and what the handle
-    // answers is the kind of object the name is.
-    let (stack, floor) = (GrantStack::root(), Floor::default());
+    // The user's own folder, no grant over it; what the handle answers is
+    // the kind of object the name is.
     let missing =
         |e: &dyn std::fmt::Display| format!("Synod could not find {rel} in your folder ({e}).");
-    let dir = walk_dir(&spelled(&folder)?).map_err(|e| missing(&e))?;
-    let dir = stack
-        .judge_dir::<Reading>(&floor, dir)
-        .expect("the root stack withholds nothing");
-    let located = walk(&spelled(&path)?, LeafMode::NoFollow).map_err(|e| missing(&e))?;
-    let located = stack
-        .judge::<Reading>(&floor, located)
-        .expect("the root stack withholds nothing");
+    let held = walk_dir(&spelled(&folder)?).map_err(|e| missing(&e))?;
+    let dir = above
+        .iter()
+        .try_fold(held, |dir, name| Ungoverned::read_dir(dir).open_dir(name))
+        .map_err(|e| missing(&e))?;
+    let located = Ungoverned::read_dir(dir)
+        .locate(last, LeafMode::NoFollow)
+        .map(Ungoverned::read)
+        .map_err(|e| missing(&e))?;
     let stat = located
         .stat()
         .ok_or_else(|| missing(&std::io::ErrorKind::NotFound))?;
@@ -254,11 +235,9 @@ pub(crate) fn file_to_open(review: &Review, index: usize, shown: &str) -> Result
     if stat.kind != Kind::File {
         return Err(format!("{rel} is not a file, so there is nothing to open."));
     }
-    if !dir.real().contains(located.real()) {
-        return Err(format!(
-            "{rel} leads outside your folder, so synod will not open it."
-        ));
-    }
+    let path = names
+        .iter()
+        .fold(folder, |at, name| at.join(name.as_os_str()));
     Ok(Target { path, how })
 }
 
@@ -365,16 +344,15 @@ mod tests {
 
     #[test]
     fn a_plain_relative_name_stays_inside_the_folder() {
-        let folder = PathBuf::from("granted");
+        let names = inside("sub/report.pdf").expect("plain name");
         assert_eq!(
-            inside(&folder, "sub/report.pdf").expect("plain name"),
-            folder.join("sub").join("report.pdf")
+            names.iter().map(EntryName::as_os_str).collect::<Vec<_>>(),
+            ["sub", "report.pdf"]
         );
     }
 
     #[test]
     fn a_name_that_climbs_or_is_rooted_is_refused() {
-        let folder = PathBuf::from("granted");
         for name in [
             "../outside.pdf",
             "sub/../../x.pdf",
@@ -382,21 +360,20 @@ mod tests {
             "./x.pdf",
             "",
         ] {
-            assert!(inside(&folder, name).is_err(), "{name}");
+            assert!(inside(name).is_err(), "{name}");
         }
     }
 
     #[cfg(windows)]
     #[test]
     fn a_drive_share_or_stream_name_is_refused_on_windows() {
-        let folder = PathBuf::from("granted");
         for name in [
             r"C:\Windows\notepad.exe",
             r"\host\share\x.exe",
             r"sub\..\..\x.pdf",
             "tool.exe:notes.txt",
         ] {
-            assert!(inside(&folder, name).is_err(), "{name}");
+            assert!(inside(name).is_err(), "{name}");
         }
     }
 

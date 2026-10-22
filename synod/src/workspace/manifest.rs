@@ -11,9 +11,9 @@
 //! the folder is the user's own and the walk is judged by the root stack.
 
 use crate::grant::spelled;
-use ral_core::capability::{Floor, GrantStack};
+use ral_core::capability::Ungoverned;
 use ral_core::path::tree::walk::{Found, Unentered, Walk, WalkEntry};
-use ral_core::path::{Kind, LeafMode, LexicalPath, Reading, Stat, relative_key, shown, walk};
+use ral_core::path::{Kind, LeafMode, LexicalPath, Stat, relative_key, shown, walk};
 use ral_core::process::{CancelCause, DurableRoot, Scope};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -126,10 +126,12 @@ impl Manifest {
     )]
     pub fn of_folder_via(root: &Path, stop: &Stop, progress: Progress<'_>) -> Result<Self, String> {
         let named = spelled(root)?;
-        let region = GrantStack::root().read_region(&Floor::default());
         let mut manifest = Self::default();
         let mut files: u64 = 0;
-        for entry in Walk::all(&named).readable_by(region).entries(stop.scope()) {
+        for entry in Walk::all(&named)
+            .readable_by(Ungoverned::region())
+            .entries(stop.scope())
+        {
             let entry = entry.map_err(|_| {
                 "Synod stopped reading this folder before it had finished, so it cannot say what \
                  changed."
@@ -261,14 +263,11 @@ fn target_text(target: &Path, link: &WalkEntry) -> Result<String, String> {
     })
 }
 
-/// The target of the link at `at`, read through the held leaf.  The root
-/// stack judges it: the folder is the user's own, and the manifest is synod's
-/// bookkeeping, not the model's I/O.
+/// The target of the link at `at`, read through the held leaf.  Ungoverned:
+/// the folder is the user's own, and the manifest is synod's bookkeeping, not
+/// the model's I/O.
 fn link_target(at: &LexicalPath) -> io::Result<PathBuf> {
-    GrantStack::root()
-        .judge::<Reading>(&Floor::default(), walk(at, LeafMode::NoFollow)?)
-        .expect("the root stack withholds nothing")
-        .read_link()
+    Ungoverned::read(walk(at, LeafMode::NoFollow)?).read_link()
 }
 
 /// A file's Unix permission bits; `0` on a host with no such notion.

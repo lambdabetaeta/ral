@@ -18,5 +18,5 @@ mod shell;
 pub mod toolchains;
 
 pub use decode::decode_capability_map;
-pub(crate) use enforce::{Denial, deny_head, fs_judge};
+pub(crate) use enforce::{Denial, deny_head};
 pub use grant::{GrantNarrower, SpawnGrant};

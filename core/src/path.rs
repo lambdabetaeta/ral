@@ -1,26 +1,19 @@
-//! Path resolution for grant matching.
+//! Paths: a name is never authority, one walk resolves it, and the judgment
+//! consumes the transcript.
 //!
-//! Five stages: sigil expansion of `~`/`xdg:` at the head (`sigil`),
-//! cwd-anchoring, and the `.`/`..` fold a logical consumer asks for (`lex`),
-//! `realpath` or the walk's lenient form (`canon`), alias-aware containment
-//! (`identity::path_within`), and — only where a name is about to be *written
-//! through* — symlink-free location of the object itself (`walk`), so the
-//! guard judges what the kernel will touch.  Beside the stages, `tree`
-//! enumerates a directory tree, judging each entry by its own path.
-//!
-//! Stage 2 mints a [`LexicalPath`], which the disk reads unfolded; the grant
-//! side mints a [`FrozenPath`] from a folded spelling, and the two meet on
-//! their real forms.
+//! `sigil` and `lex` are lexical: a `~` or `xdg:` head expanded, a relative
+//! spelling anchored on the cwd as a [`LexicalPath`], which the disk reads
+//! unfolded, and the `.`/`..` fold a [`FrozenPath`] shows.  `walk` is the one
+//! resolver: a spelling walked from the root through directory handles to the
+//! object it names, with the [`Trace`] of every object opened, which the grant
+//! judges and the handle then acts on.  `identity` holds the containment and
+//! matching kernel over positions and traces; `canon` and `render` give the
+//! names a kernel sandbox rule may mention; `tree` enumerates a directory
+//! tree, judging each entry as it goes.
 //!
 //! `walk` imports `Verdict` (`capability/fs.rs`) and `InstallToken`
 //! (`sandbox.rs`): two inverted edges, each a token whose field only its own
 //! module can make, so neither constructor may be widened to straighten them.
-//!
-//! `identity::path_within` and its string twin are `pub(super)` here, so the
-//! containment kernel does not leave this module: a prefix carries two
-//! forms, and *which* one a question is asked of is settled here, not by a
-//! caller — both fs (`FrozenPath::contains`) and exec (`RealPath::within`,
-//! over a prefix's frozen `real` form) judge the object.
 
 pub(crate) mod basedir;
 pub(crate) mod canon;
@@ -31,6 +24,7 @@ pub mod git;
 pub(crate) mod identity;
 pub mod lex;
 mod namespace;
+#[cfg(unix)]
 pub(crate) mod render;
 pub(crate) mod resolver;
 mod show;
@@ -55,12 +49,10 @@ pub(crate) use identity::{Depth, Subject};
 pub(crate) use lex::proper_ancestors;
 pub(crate) use lex::{GrantRefusal, SubpathRefusal, classify_subpath, grant_eligibility};
 pub use lex::{
-    NotUtf8, basename, exists, extension, is_absolute, is_dir, is_stream_or_drive, join_slash,
-    relative_key, strip_appended_suffix, utf8, with_appended_suffix,
+    NotUtf8, basename, descendant, extension, is_absolute, join_slash, relative_key,
+    strip_appended_suffix, utf8, with_appended_suffix,
 };
 pub use namespace::{EnginePath, GuestPath};
-#[cfg(all(test, target_os = "linux"))]
-pub(crate) use render::render_paths;
 #[cfg(unix)]
 pub(crate) use render::render_real;
 #[cfg(target_os = "macos")]
@@ -73,9 +65,10 @@ pub(crate) use walk::is_loop;
 pub use walk::{
     Authority, Dir, DirEntry, EntryName, Excluded, Hold, Installing, Judged, Kind, LeafMode,
     Listing, Lists, Located, NotAnEntryName, ObjectId, Op, Peeks, Reading, Reads, RealPath,
-    RootName, Stat, Step, Trace, Unjudged, Walked, Writing, walk, walk_dir, walk_lenient,
+    RootName, Stat, Step, Trace, Unjudged, Walked, Writing, exists, is_dir, walk, walk_dir,
+    walk_lenient,
 };
-pub(crate) use walk::{Listed, StagedWrite, Streamed, Streaming, Visibility, open_discard};
+pub(crate) use walk::{StagedWrite, Streamed, Streaming, Visibility, open_discard};
 #[cfg(windows)]
 pub(crate) use which::is_batch_image;
 pub(crate) use which::is_executable_file;

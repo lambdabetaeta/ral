@@ -19,11 +19,9 @@
 
 use super::super::Refusal;
 use super::super::warrant::Slot;
-use super::{DenyMask, OpenError, leaf_fd, open_dir_nofollow, open_nofollow};
+use super::{DenyMask, OpenError, leaf_fd, open_dir_nofollow, open_nofollow, standing};
 use crate::capability::{ExecDeny, ExecRules, Subject};
-use crate::path::{
-    Dir, Installing, Kind, LeafMode, Located, Object, ObjectId, RealPath, Rendered, Trace,
-};
+use crate::path::{Dir, Installing, Kind, LeafMode, Located, Object, ObjectId, RealPath, Trace};
 use crate::sandbox::{ExecProjection, RenderedFs};
 use libc::{c_int, c_uint};
 use std::collections::BTreeSet;
@@ -359,12 +357,18 @@ fn admit_exec(
     let sink = &mut |admit: Admit<'_>| ruleset.admit(admit.fd, Access::EXECUTE);
     admit_files(table, sink)?;
     let walks = vetoes_walk(table, fs);
-    let masks: Vec<_> = (fs.rules().into_iter().flat_map(|rules| &rules.deny))
-        .filter(|path| matches!(DenyMask::over(path), DenyMask::EmptyDir))
-        .cloned()
-        .collect();
-    expand(table, roots, &walks, &masks, sink)?;
+    expand(table, roots, &walks, &masked(fs), sink)?;
     Ok(())
+}
+
+/// The positions the envelope masks with a scratch tmpfs: each deny that
+/// stands as a directory now.
+fn masked(fs: &RenderedFs) -> Vec<RealPath> {
+    (fs.rules().into_iter().flat_map(|rules| &rules.deny))
+        .filter_map(standing)
+        .filter(|stood| DenyMask::of(stood.kind()) == DenyMask::EmptyDir)
+        .map(|stood| stood.real().clone())
+        .collect()
 }
 
 /// Each file `table` allows, as itself, into `sink`.
@@ -410,8 +414,7 @@ fn written(fs: &RenderedFs, dir: &RealPath) -> bool {
     let Some(name) = dir.as_path().to_str() else {
         return false;
     };
-    (rules.write.iter().flat_map(Object::names))
-        .any(|w| w.holds(name) || dir.contains(&RealPath::rendered(w)))
+    (rules.write.iter().flat_map(Object::names)).any(|w| w.holds(name) || w.under(name))
 }
 
 /// The objects a live directory admission puts a rule on.  A rule on `dir`
@@ -455,7 +458,7 @@ fn expand(
     table: &ExecRules,
     roots: &[RealPath],
     walks: &dyn Fn(&RealPath) -> bool,
-    masks: &[Rendered],
+    masks: &[RealPath],
     sink: &mut dyn FnMut(Admit<'_>) -> io::Result<()>,
 ) -> Result<(), Error> {
     let mut walk = Walk {
@@ -466,10 +469,10 @@ fn expand(
         spine: Vec::new(),
     };
     for root in lowered(table, roots) {
-        if let Some(dir) = open_dir_nofollow(&root)? {
-            walk.dir(&dir)?;
-        } else if let Some(file) = open_nofollow(&root)? {
-            walk.file(&file)?;
+        match open_nofollow(&root)?.map(Located::into_dir) {
+            Some(Ok(dir)) => walk.dir(&dir)?,
+            Some(Err(file)) => walk.file(&file)?,
+            None => {}
         }
     }
     Ok(())
@@ -477,12 +480,10 @@ fn expand(
 
 /// Whether a rule could speak strictly beneath `d` other than through `d`'s
 /// own evidence: an exclusion of a directory or file strictly within `d`
-/// under `Deny`'s identity (over-listing is cost, never a hole), a masked
+/// under the folded reading (over-listing is cost, never a hole), a masked
 /// directory likewise, or any name veto where vetoes `walks` `d`.
-fn listed(table: &ExecRules, masks: &[Rendered], d: &RealPath, walks: bool) -> bool {
-    let masked = masks
-        .iter()
-        .any(|m| d.contains_folded(&RealPath::rendered(m)) && !held(m, d));
+fn listed(table: &ExecRules, masks: &[RealPath], d: &RealPath, walks: bool) -> bool {
+    let masked = masks.iter().any(|m| d.contains_folded(m) && !m.contains(d));
     masked
         || table.denies().any(|scope| match scope {
             ExecDeny::Dir(p) | ExecDeny::File(p) => {
@@ -495,22 +496,12 @@ fn listed(table: &ExecRules, masks: &[Rendered], d: &RealPath, walks: bool) -> b
         })
 }
 
-/// Whether `mask` holds `path`; a name that is not Unicode lies in no
-/// rendered one.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "native: a name that is not Unicode lies in no rendered mask"
-)]
-fn held(mask: &Rendered, path: &RealPath) -> bool {
-    path.as_path().to_str().is_some_and(|name| mask.holds(name))
-}
-
 /// One expansion in progress.  Every handle is opened relative to its
 /// parent's, never through a symlink, handed to the sink, and closed.
 struct Walk<'w> {
     table: &'w ExecRules,
     walks: &'w dyn Fn(&RealPath) -> bool,
-    masks: &'w [Rendered],
+    masks: &'w [RealPath],
     sink: &'w mut dyn FnMut(Admit<'_>) -> io::Result<()>,
     /// The identity of each directory being listed, so a bind mount looping
     /// back onto one ends the descent there.
@@ -522,7 +513,7 @@ impl Walk<'_> {
     /// listed only where a rule could speak beneath it.
     fn dir(&mut self, d: &Dir<Installing>) -> Result<(), Error> {
         let at = crate::path::Subject::Position(d.real());
-        let masked = self.masks.iter().any(|m| held(m, d.real()));
+        let masked = self.masks.iter().any(|m| m.contains(d.real()));
         if masked || !self.table.evidence(Subject::Dir(at)).permits() {
             return Ok(());
         }
@@ -652,7 +643,7 @@ impl From<Error> for String {
 mod tests {
     use super::*;
     use crate::capability::{ExecAllow, ExecDeny, Extent, GrantPath, Rule};
-    use crate::path::{Excluded, FrozenPath, render_objects, render_paths, utf8};
+    use crate::path::{Excluded, FrozenPath, render_objects, utf8};
     use crate::sandbox::{FsProjection, FsRules};
     use crate::test_helper::{Tree, place, real};
     use rustix::fs::FileType;
@@ -886,7 +877,7 @@ mod tests {
         rules: &[Rule],
         roots: &[RealPath],
         walks: bool,
-        masks: &[Rendered],
+        masks: &[RealPath],
     ) -> Result<BTreeSet<(PathBuf, bool)>, Error> {
         use std::os::unix::fs::MetadataExt;
         let mut seen = BTreeSet::new();
@@ -1159,9 +1150,7 @@ mod tests {
     #[test]
     fn a_masked_directory_under_an_admitted_one_is_covered_by_no_rule() {
         let (_tmp, d) = tree();
-        let mask = |rel: &str| {
-            render_paths(&[d.join(rel).to_string_lossy().into_owned()]).expect("renders")
-        };
+        let mask = |rel: &str| vec![real(d.join(rel))];
         let rules = [allow(&d, true)];
         let seen = expanded_masking(&rules, &whole(), false, &mask("s")).expect("expands");
         assert_eq!(

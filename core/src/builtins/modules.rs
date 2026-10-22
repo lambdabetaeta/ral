@@ -9,7 +9,7 @@
 
 use crate::evaluator::Mode;
 use crate::load::{ModuleLoad, check_source, module_phrases};
-use crate::path::{Judged, Kind, LeafMode, Located, Reading, walk};
+use crate::path::{Judged, LeafMode, Located, Reading};
 use crate::source::{SourceFile, SourceOrigin};
 use crate::ty::Site;
 use crate::types::{Break, Error, Mooring, Settled, Shell, Value, sig};
@@ -62,8 +62,8 @@ pub(crate) fn builtin_use(
     // `use` falls back to a RAL_PATH search for a bare name, and failing
     // both reads the target itself, to report why it cannot.
     let located = match shell.locate_existing::<Reading>(&target, LeafMode::Follow)? {
-        Some(found) if found.stat().is_some() => found,
-        _ => match find_on_ral_path(&path, shell)? {
+        Some(found) => found,
+        None => match find_on_ral_path(&path, shell)? {
             Some(found) => found,
             None => shell.locate::<Reading>(&target)?,
         },
@@ -99,36 +99,17 @@ pub(crate) fn builtin_use(
 }
 
 /// The first `$dir/$name` over `RAL_PATH` that is a regular file the grant
-/// lets be read, held; relative entries read against the shell's cwd.  A
-/// directory of that name does not end the walk, or it would shadow a real
-/// file further down; nor does a file the grant refuses, as with `execvp`:
-/// the search goes on, and the first refusal is the error if nothing is
-/// admitted.  `None` where no candidate is a file.
+/// lets be read, held; relative entries read against the shell's cwd.
 ///
 /// # Errors
-/// The first candidate's refusal, where none was admitted.
+/// [`Shell::locate_first`]'s.
 fn find_on_ral_path(name: &str, shell: &mut Shell) -> Settled<Option<Located<Judged<Reading>>>> {
     let resolver = shell.context.resolver();
     let candidates: Vec<_> = crate::path::ral_path_entries(shell.context.env_overrides())
         .into_iter()
         .map(|dir| resolver.anchor(&dir.join(name)))
         .collect();
-    let mut first_denial = None;
-    for cand in &candidates {
-        let Ok(located) = walk(cand, LeafMode::Follow) else {
-            continue;
-        };
-        if located.trace().kind() != Some(Kind::File) {
-            continue;
-        }
-        match shell.judge::<Reading>(located) {
-            Ok(found) => return Ok(Some(found)),
-            Err(denial) => {
-                first_denial.get_or_insert(denial);
-            }
-        }
-    }
-    first_denial.map_or(Ok(None), Err)
+    shell.locate_first(candidates)
 }
 
 /// Resolve `path` as written in the innermost load in flight — the top of

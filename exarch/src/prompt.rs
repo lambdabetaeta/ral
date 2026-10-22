@@ -4,11 +4,9 @@
 pub mod host;
 
 use crate::policy::Invocation;
-use crate::skill;
-use ral_core::capability::{
-    ExecSummary, Floor, GrantStack, GrantSummary, LayerSummary, LocateError,
-};
-use ral_core::path::{CwdPath, Reading, Resolver};
+use crate::skill::{self, Boot};
+use ral_core::capability::{ExecSummary, Floor, GrantSummary, LayerSummary, LocateError};
+use ral_core::path::CwdPath;
 use ral_core::types::EnvVars;
 use std::collections::BTreeSet;
 use std::fmt::Write;
@@ -57,7 +55,7 @@ pub fn assemble(
     edit: EditScheme,
 ) -> Result<String, String> {
     let env = EnvVars::new();
-    let reader = Reader::new(&invocation.stack, floor, &env, cwd);
+    let mut reader = Boot::new(&invocation.stack, floor, &env, cwd);
     let mut sections: Vec<(Option<&str>, String)> = Vec::new();
     // Persona is the only section `--system` replaces; the rest stand.
     sections.push((
@@ -87,7 +85,7 @@ pub fn assemble(
     if !agents.is_empty() {
         sections.push((Some("Workspace"), agents));
     }
-    let skills = skill::discover_metadata(cwd, config_dir, &invocation.stack, floor);
+    let skills = skill::discover_metadata(cwd.as_path(), config_dir, &mut reader);
     if !skills.is_empty() {
         sections.push((Some("Skills"), skills_section(&skills)));
     }
@@ -128,39 +126,6 @@ pub(crate) fn with_grant(template: &str, session: &GrantSummary, ceiling: &Grant
     template.replace(GRANT_PLACEHOLDER, &grant_summary(layers))
 }
 
-/// Reads the boot's files for the prompt through handles `stack` judges for
-/// reading, with the floor of the runtime the boot built, as every other read
-/// of the boot is.
-struct Reader<'a> {
-    stack: &'a GrantStack,
-    floor: &'a Floor,
-    resolver: Resolver<'a>,
-}
-
-impl<'a> Reader<'a> {
-    /// `env` is empty: there is no shell, and a candidate is `cwd` or
-    /// `config_dir` joined, or a path the operator wrote, so the resolver's
-    /// home is never consulted.
-    fn new(stack: &'a GrantStack, floor: &'a Floor, env: &'a EnvVars, cwd: &'a CwdPath) -> Self {
-        Self {
-            stack,
-            floor,
-            resolver: Resolver::at(env, cwd),
-        }
-    }
-
-    /// The whole of the file `path` names.
-    fn read(&self, path: &Path) -> Result<String, LocateError> {
-        let held = self
-            .stack
-            .locate::<Reading>(self.floor, &self.resolver.anchor(path))?;
-        let mut text = String::new();
-        std::io::Read::read_to_string(&mut held.read().map_err(LocateError::Io)?, &mut text)
-            .map_err(LocateError::Io)?;
-        Ok(text)
-    }
-}
-
 /// The `AGENTS.md` chain's text, outermost first so the most specific file's
 /// recency dominates: the operator's `<config>/AGENTS.md` — the trusted XDG
 /// root [`crate::config`] loads `config.ral` from — then every `AGENTS.md`
@@ -175,7 +140,7 @@ impl<'a> Reader<'a> {
 ///
 /// # Errors
 /// A file that exists and cannot be read.
-fn read_agents(cwd: &Path, config_dir: &Path, reader: &Reader<'_>) -> Result<String, String> {
+fn read_agents(cwd: &Path, config_dir: &Path, reader: &Boot<'_>) -> Result<String, String> {
     let chain = std::iter::once(config_dir).chain(ral_core::path::work_tree_chain(cwd));
     let mut texts = Vec::new();
     for file in chain.map(|dir| dir.join("AGENTS.md")) {
@@ -196,7 +161,7 @@ fn read_agents(cwd: &Path, config_dir: &Path, reader: &Reader<'_>) -> Result<Str
 
 /// Concatenate the `--system` files into one section body, blank-line
 /// separated in the order given.
-fn read_files(files: &[PathBuf], reader: &Reader<'_>) -> Result<String, String> {
+fn read_files(files: &[PathBuf], reader: &Boot<'_>) -> Result<String, String> {
     let texts: Result<Vec<_>, _> = files
         .iter()
         .map(|path| {
@@ -439,7 +404,7 @@ mod tests {
         reason = "[test] fixtures build the tree the chain is read from"
     )]
     fn an_agents_link_to_a_denied_file_is_skipped_and_one_under_an_allowance_is_read() {
-        use ral_core::capability::{Capabilities, FsPolicy};
+        use ral_core::capability::{Capabilities, FsPolicy, GrantStack};
         use ral_core::path::{FrozenPath, utf8};
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
@@ -461,7 +426,7 @@ mod tests {
             })])
         };
         let agents = |stack: &GrantStack| {
-            let reader = Reader::new(stack, &floor, &env, &cwd);
+            let reader = Boot::new(stack, &floor, &env, &cwd);
             read_agents(&work, &root.join("config"), &reader)
         };
         assert_eq!(agents(&reading(Vec::new())), Ok("linked text".to_owned()));

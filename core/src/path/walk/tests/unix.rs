@@ -19,22 +19,18 @@ pub(super) fn spelled(path: &Path) -> LexicalPath {
     Resolver::at(&EnvVars::new(), &cwd).anchor(path)
 }
 
-/// [`walk`] and [`walk_dir`] as these tests ask them: what they hold is
-/// retagged as judged for writing, since the tests judge nothing.
-fn walk(rp: &LexicalPath, mode: LeafMode) -> io::Result<Located<Judged<Writing>>> {
-    super::super::walk(rp, mode).map(writing)
-}
-
-fn walk_dir(rp: &LexicalPath) -> io::Result<Dir<Judged<Writing>>> {
-    super::super::walk_dir(rp).map(writable)
+/// `path` walked, and the directory `path` entered, as these tests hold
+/// them: retagged as judged for writing, since the tests judge nothing.
+pub(super) fn located_with(path: &Path, mode: LeafMode) -> io::Result<Located<Judged<Writing>>> {
+    walk(&spelled(path), mode).map(writing)
 }
 
 fn located(path: &Path) -> io::Result<Located<Judged<Writing>>> {
     located_with(path, LeafMode::Follow)
 }
 
-pub(super) fn located_with(path: &Path, mode: LeafMode) -> io::Result<Located<Judged<Writing>>> {
-    walk(&spelled(path), mode)
+pub(super) fn entered(path: &Path) -> io::Result<Dir<Judged<Writing>>> {
+    walk_dir(&spelled(path)).map(writable)
 }
 
 /// The temp root as the walk resolves it: macOS hands out `/var/folders/…`,
@@ -357,16 +353,13 @@ fn a_directory_spelling_is_the_directory_entered() {
             "{spelling:?}"
         );
 
-        let entered = walk_dir(&spelled(&spelling)).unwrap();
-        assert_eq!(entered.trace(), loc.trace(), "{spelling:?}");
-        assert_eq!(ObjectId::of(&entered.handle.file).unwrap(), id(&leaf));
-        assert_eq!(entered.stat().kind, Kind::Dir);
+        let held = entered(&spelling).unwrap();
+        assert_eq!(held.trace(), loc.trace(), "{spelling:?}");
+        assert_eq!(ObjectId::of(&held.handle.file).unwrap(), id(&leaf));
+        assert_eq!(held.stat().kind, Kind::Dir);
     }
     assert_eq!(
-        walk_dir(&spelled(&dir.join("missing/")))
-            .err()
-            .unwrap()
-            .kind(),
+        entered(&dir.join("missing/")).err().unwrap().kind(),
         io::ErrorKind::NotFound
     );
 }
@@ -387,7 +380,7 @@ fn a_directory_spelling_of_a_file_or_a_missing_name_is_refused() {
         panic!("missing/ is nothing");
     };
     assert_eq!(err.kind(), io::ErrorKind::NotFound);
-    let Err(err) = walk_dir(&spelled(&dir.join("f"))) else {
+    let Err(err) = entered(&dir.join("f")) else {
         panic!("a file is not entered");
     };
     assert_eq!(err.kind(), io::ErrorKind::NotADirectory);
@@ -428,7 +421,7 @@ fn a_dotdot_in_a_link_target_pops_one_step() {
     std::fs::write(dir.join("a/f"), b"").unwrap();
     symlink("../f", dir.join("a/b/l")).unwrap();
     let located = located(&dir.join("a/b/l")).unwrap();
-    let plain = super::super::walk(&spelled(&dir.join("a/f")), LeafMode::Follow).unwrap();
+    let plain = walk(&spelled(&dir.join("a/f")), LeafMode::Follow).unwrap();
     assert_eq!(located.trace(), plain.trace());
     assert_eq!(located.real().as_path(), dir.join("a/f"));
 }
@@ -787,7 +780,7 @@ fn a_relative_target_continues_from_the_held_directory() {
     let dir = root(&tmp);
     std::fs::create_dir_all(dir.join("d/original")).unwrap();
     symlink("original", dir.join("d/l")).unwrap();
-    let held = walk_dir(&spelled(&dir.join("d"))).unwrap();
+    let held = entered(&dir.join("d")).unwrap();
     let wanted = id(&dir.join("d/original"));
 
     std::fs::rename(dir.join("d"), dir.join("moved")).unwrap();
@@ -810,7 +803,7 @@ fn a_dotdot_in_a_target_pops_the_chain_and_stops_at_its_end() {
     std::fs::create_dir(dir.join("a/c")).unwrap();
     symlink("../c", dir.join("a/b/up")).unwrap();
     symlink("../../a/c", dir.join("a/b/far")).unwrap();
-    let above = walk_dir(&spelled(&dir.join("a"))).unwrap();
+    let above = entered(&dir.join("a")).unwrap();
     let below = writable(above.open_dir(&name("b")).unwrap());
 
     let entered = below.open_dir_via_link(&name("up"), &[&above]).unwrap();
@@ -837,7 +830,7 @@ fn open_dir_enters_a_directory_and_nothing_else() {
     std::fs::create_dir(dir.join("d")).unwrap();
     std::fs::write(dir.join("f"), b"").unwrap();
     symlink("d", dir.join("l")).unwrap();
-    let held = walk_dir(&spelled(&dir)).unwrap();
+    let held = entered(&dir).unwrap();
     let entered = held.open_dir(&name("d")).unwrap();
     assert_eq!(entered.real().as_path(), dir.join("d"));
     assert_eq!(
@@ -862,7 +855,7 @@ fn locate_holds_an_entry_by_its_mode() {
     let dir = root(&tmp);
     std::fs::write(dir.join("f"), b"body").unwrap();
     symlink("f", dir.join("l")).unwrap();
-    let held = walk_dir(&spelled(&dir)).unwrap();
+    let held = entered(&dir).unwrap();
     let file = held.locate(&name("f"), LeafMode::Follow).unwrap();
     assert_eq!(file.real().as_path(), dir.join("f"));
     let followed = held.locate(&name("l"), LeafMode::Follow).unwrap();
@@ -886,7 +879,7 @@ fn a_listing_is_sorted_and_stated_as_it_is_yielded() {
     }
     std::fs::create_dir(dir.join("d")).unwrap();
     symlink("a", dir.join("l")).unwrap();
-    let held = walk_dir(&spelled(&dir)).unwrap();
+    let held = entered(&dir).unwrap();
 
     let listed: Vec<(String, Kind)> = held
         .read_dir()
@@ -929,7 +922,7 @@ fn a_listed_entry_records_its_identity_beneath_its_directory() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = root(&tmp);
     std::fs::write(dir.join("f"), b"").unwrap();
-    let held = walk_dir(&spelled(&dir)).unwrap();
+    let held = entered(&dir).unwrap();
     let entries: Vec<_> = held.read_dir().unwrap().collect();
     let [entry] = entries.as_slice() else {
         panic!("one entry");
@@ -952,7 +945,7 @@ fn listing_a_search_only_directory_fails_at_the_reopen_not_at_the_walk() {
     let dir = root(&tmp);
     std::fs::create_dir(dir.join("gate")).unwrap();
     std::fs::set_permissions(dir.join("gate"), PermissionsExt::from_mode(0o111)).unwrap();
-    let held = walk_dir(&spelled(&dir.join("gate")));
+    let held = entered(&dir.join("gate"));
     let listed = held.as_ref().map(|d| d.read_dir().err().map(|e| e.kind()));
     std::fs::set_permissions(dir.join("gate"), PermissionsExt::from_mode(0o755)).unwrap();
     assert_eq!(
@@ -1046,10 +1039,6 @@ fn a_dropped_staged_write_leaves_no_sibling() {
     drop(staged);
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
     assert_eq!(std::fs::read(dir.join("f")).unwrap(), b"old");
-
-    let staged = located(&dir.join("f")).unwrap().stage().unwrap();
-    staged.discard().unwrap();
-    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
 }
 
 #[test]
@@ -1101,7 +1090,7 @@ fn sync_dir_succeeds_on_linux() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = root(&tmp);
     std::fs::write(dir.join("f"), b"").unwrap();
-    host::sync_dir(&walk_dir(&spelled(&dir)).unwrap().handle.file).unwrap();
+    host::sync_dir(&entered(&dir).unwrap().handle.file).unwrap();
 }
 
 /// Reads and writes go through the leaf the walk held, and a leaf absent at
@@ -1202,7 +1191,7 @@ fn an_absent_entry_is_made_in_the_directory_held() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = root(&tmp);
     std::fs::create_dir(dir.join("d")).unwrap();
-    let held = walk_dir(&spelled(&dir.join("d"))).unwrap();
+    let held = entered(&dir.join("d")).unwrap();
     std::fs::rename(dir.join("d"), dir.join("moved")).unwrap();
 
     let target = writing(held.absent(name("sub")).unwrap());

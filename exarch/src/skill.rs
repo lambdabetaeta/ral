@@ -11,9 +11,10 @@
 use gray_matter::Matter;
 use gray_matter::engine::YAML;
 use ral_core::Shell;
+use ral_core::capability::LocateError;
 use ral_core::capability::{Floor, GrantStack};
 use ral_core::path::{
-    CwdPath, Dir, Judged, Kind, LeafMode, LexicalPath, Located, Reading, Resolver, walk_dir,
+    CwdPath, Dir, Judged, Kind, LeafMode, LexicalPath, Located, Reading, Resolver,
 };
 use ral_core::types::EnvVars;
 use std::collections::HashSet;
@@ -69,13 +70,46 @@ impl Doors for Shell {
     }
 }
 
-/// The boot's doors: no shell exists yet, so the stack this agent will run
-/// under judges, with the floor of the runtime the boot built, and the two
-/// doors agree by construction.
-struct Boot<'a> {
+/// The boot's reader: no shell exists yet, so the stack this agent will run
+/// under judges every read of the boot, with the floor of the runtime the
+/// boot built, and the doors agree by construction.
+pub(crate) struct Boot<'a> {
     grants: &'a GrantStack,
     floor: &'a Floor,
     resolver: Resolver<'a>,
+}
+
+impl<'a> Boot<'a> {
+    /// `env` is empty at the boot: there is no shell, and a candidate is
+    /// `cwd` or `config_dir` joined, or a path the operator wrote, so the
+    /// resolver's home is never consulted.
+    pub(crate) fn new(
+        grants: &'a GrantStack,
+        floor: &'a Floor,
+        env: &'a EnvVars,
+        cwd: &'a CwdPath,
+    ) -> Self {
+        Self {
+            grants,
+            floor,
+            resolver: Resolver::at(env, cwd),
+        }
+    }
+
+    /// The whole of the file `path` names.
+    ///
+    /// # Errors
+    /// The walk's, the read's, or the stack's refusal.
+    pub(crate) fn read(&self, path: &Path) -> Result<String, LocateError> {
+        let held = self
+            .grants
+            .locate::<Reading>(self.floor, &self.resolver.anchor(path))?;
+        let mut text = String::new();
+        (held.read().map_err(LocateError::Io)?)
+            .read_to_string(&mut text)
+            .map_err(LocateError::Io)?;
+        Ok(text)
+    }
 }
 
 impl Doors for Boot<'_> {
@@ -89,8 +123,7 @@ impl Doors for Boot<'_> {
     }
 
     fn dir(&mut self, rp: &LexicalPath) -> Option<Dir<Judged<Reading>>> {
-        let dir = walk_dir(rp).ok()?;
-        self.grants.judge_dir::<Reading>(self.floor, dir).ok()
+        self.grants.locate_dir::<Reading>(self.floor, rp).ok()
     }
 }
 
@@ -122,21 +155,8 @@ pub(crate) fn discover_all(cwd: &Path, config_dir: &Path, doors: &mut impl Doors
 /// Runs once at boot, before a `Shell` exists, so it judges by the session's
 /// whole grant stack ([`Boot`]), the one this agent will run under, as
 /// `skill-list` and `skill` judge by the shell.
-pub fn discover_metadata(
-    cwd: &CwdPath,
-    config_dir: &Path,
-    grants: &GrantStack,
-    floor: &Floor,
-) -> Vec<Skill> {
-    // No shell: every candidate is `cwd`/`config_dir` joined, and so the
-    // resolver's home is never consulted.
-    let env = EnvVars::new();
-    let mut boot = Boot {
-        grants,
-        floor,
-        resolver: Resolver::at(&env, cwd),
-    };
-    discover_all(cwd.as_path(), config_dir, &mut boot)
+pub(crate) fn discover_metadata(cwd: &Path, config_dir: &Path, boot: &mut Boot<'_>) -> Vec<Skill> {
+    discover_all(cwd, config_dir, boot)
         .iter()
         .filter_map(|found| parse_skill(found).ok())
         .collect()

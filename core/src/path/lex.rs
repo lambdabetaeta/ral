@@ -8,7 +8,7 @@
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
-use super::{CwdPath, Kind, LeafMode, LexicalPath, PathRules, walk};
+use super::{CwdPath, EntryName, LexicalPath, NotAnEntryName, PathRules};
 
 /// Whether `path` is absolute under `rules`: answers both whether `path` is
 /// fully qualified under `rules` and whether [`anchor`] must not join `path`
@@ -940,30 +940,6 @@ pub(crate) fn parent_or_cwd(path: &Path) -> &Path {
         .unwrap_or_else(|| Path::new("."))
 }
 
-/// Whether the absolute spelling `path` reaches an object, a final link
-/// followed: its walk.  A relative one reaches nothing: no cwd is asked.
-pub fn exists(path: &str) -> bool {
-    reaches(path).is_some()
-}
-
-/// Whether the absolute spelling `path` reaches a directory, a link to one
-/// seen through.
-///
-/// Exec grants spell their two kinds of path key apart by
-/// trailing slash, and `guard::decode` checks that spelling against disk.
-pub fn is_dir(path: &str) -> bool {
-    reaches(path) == Some(Kind::Dir)
-}
-
-#[allow(
-    clippy::disallowed_methods,
-    reason = "path-form: the string a caller holds, taken as a spelling"
-)]
-fn reaches(path: &str) -> Option<Kind> {
-    let spelled = LexicalPath::absolute(Path::new(path))?;
-    walk(&spelled, LeafMode::Follow).ok()?.trace().kind()
-}
-
 /// `shown` relative to `root`, its names slash-joined: a manifest's key,
 /// lexical history that needs no live root to be compared.  `None` where
 /// `shown` is not beneath `root` or a name is not UTF-8.
@@ -1048,14 +1024,19 @@ pub fn extension(path: &str) -> Option<&str> {
     Path::new(path).extension().and_then(|e| e.to_str())
 }
 
-/// Whether the path component `name` names something besides an entry of
-/// its directory under the host's rules.
+/// `rel`, a name given relative to a directory, as the entry names it
+/// descends through.
 ///
-/// On Windows a `:` makes it a drive (`C:`) or an alternate data stream of
-/// some other file (`a.txt:s`); elsewhere a `:` is a filename byte, and
-/// nothing does.
-pub fn is_stream_or_drive(name: &OsStr) -> bool {
-    PathRules::HOST == PathRules::Windows && name.as_encoded_bytes().contains(&b':')
+/// Each piece between separators is an [`EntryName`], so an empty piece (a
+/// root, a trailing separator), `.`, `..` and on Windows a drive or a stream
+/// are refused.
+///
+/// # Errors
+/// [`NotAnEntryName`] for the first piece that is not one.
+pub fn descendant(rel: &str) -> Result<Vec<EntryName>, NotAnEntryName> {
+    rel.split(|c| PathRules::HOST.is_separator(c))
+        .map(|name| EntryName::parse(OsStr::new(name)))
+        .collect()
 }
 
 /// Proper ancestors of `paths`, sorted, dedup'd across inputs, root excluded.
@@ -2233,12 +2214,30 @@ mod tests {
         }
     }
 
+    /// A descendant name is entry names alone: a root, a dot, an empty
+    /// piece and, on Windows, a drive or a stream are refused.
     #[test]
-    fn only_windows_reads_a_colon_as_a_stream_or_drive() {
-        for raw in ["C:", "a.txt:s"] {
-            assert_eq!(is_stream_or_drive(raw.as_ref()), cfg!(windows), "{raw}");
+    fn a_descendant_is_entry_names_alone() {
+        let names = |rel: &str| {
+            descendant(rel).map(|names| {
+                names
+                    .iter()
+                    .map(|n| super::super::shown(n.as_os_str()))
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(names("a/b.txt").unwrap(), ["a", "b.txt"]);
+        assert_eq!(names("a").unwrap(), ["a"]);
+        for refused in ["", "/a", "a/", "a//b", "./a", "../a", "a/../b", "."] {
+            assert!(names(refused).is_err(), "{refused:?}");
         }
-        assert!(!is_stream_or_drive("a.txt".as_ref()));
+        for windows_only in ["C:", "a.txt:s", r"a\b"] {
+            assert_eq!(
+                names(windows_only).is_err(),
+                cfg!(windows),
+                "{windows_only}"
+            );
+        }
     }
 
     #[test]

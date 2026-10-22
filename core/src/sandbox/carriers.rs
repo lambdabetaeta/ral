@@ -10,10 +10,8 @@
 
 use crate::path::walk::{Kind, Vetted, walk_with};
 use crate::path::{
-    CwdPath, Judged, LeafMode, LexicalPath, Located, ObjectId, Reading, RealPath, Resolver, Trace,
-    is_absolute,
+    Judged, LeafMode, LexicalPath, Located, ObjectId, Reading, RealPath, Trace, is_absolute,
 };
-use crate::types::EnvVars;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs::File;
@@ -57,7 +55,7 @@ pub(crate) fn linkers() -> Vec<RealPath> {
 /// admit a command directory.
 #[cfg(target_os = "linux")]
 pub(crate) fn linkers() -> Vec<RealPath> {
-    use crate::capability::{Floor, GrantStack};
+    use crate::capability::Ungoverned;
     const PATTERNS: &[&str] = &[
         "/lib/ld*.so*",
         "/lib64/ld*.so*",
@@ -70,14 +68,15 @@ pub(crate) fn linkers() -> Vec<RealPath> {
         "/usr/lib/*/ld*.so*",
     ];
     let scope = crate::process::Scope::clone(&crate::process::DurableRoot::default());
-    let region = || GrantStack::root().read_region(&Floor::default());
     let found: BTreeSet<RealPath> = PATTERNS
         .iter()
-        .filter_map(|p| crate::path::tree::glob::Glob::parse(&spelled(&PathBuf::from(*p))?).ok())
+        .filter_map(|p| {
+            crate::path::tree::glob::Glob::parse(&LexicalPath::absolute(&PathBuf::from(*p))?).ok()
+        })
         .map(std::sync::Arc::new)
         .flat_map(|g| {
             g.walk()
-                .readable_by(region())
+                .readable_by(Ungoverned::region())
                 .entries(scope.clone())
                 .filter_map(Result::ok)
                 .map(|entry| entry.shown)
@@ -108,7 +107,8 @@ fn hops(program: &RealPath) -> Vec<PathBuf> {
 /// tree.
 pub(crate) fn trusted_real(path: &Path) -> Option<Trace> {
     let me = rustix::process::geteuid().as_raw();
-    let located = walk_with(&spelled(path)?, LeafMode::Follow, |v| system_only(v, me)).ok()?;
+    let at = LexicalPath::absolute(path)?;
+    let located = walk_with(&at, LeafMode::Follow, |v| system_only(v, me)).ok()?;
     (located.trace().kind() == Some(Kind::File)).then(|| located.trace().clone())
 }
 
@@ -116,15 +116,8 @@ pub(crate) fn trusted_real(path: &Path) -> Option<Trace> {
 #[cfg(target_os = "linux")]
 fn file(path: &Path) -> Option<RealPath> {
     use crate::path::walk;
-    let located = walk(&spelled(path)?, LeafMode::Follow).ok()?;
+    let located = walk(&LexicalPath::absolute(path)?, LeafMode::Follow).ok()?;
     (located.trace().kind() == Some(Kind::File)).then(|| located.real().clone())
-}
-
-/// `path`, which is absolute, as the spelling a walk takes: anchored on `/`,
-/// which an absolute path never reads.
-fn spelled(path: &Path) -> Option<LexicalPath> {
-    let root = CwdPath::new(PathBuf::from("/")).ok()?;
-    Some(Resolver::at(&EnvVars::new(), &root).anchor(path))
 }
 
 /// Whether only the system can have made the object `v` offers what it is:
@@ -207,7 +200,9 @@ pub(super) fn shims(program: &RealPath) -> Vec<PathBuf> {
     if program.as_path().as_os_str() == "/bin/sh" {
         return vec![PathBuf::from("/private/var/select/sh")];
     }
-    let real = |name: &str| spelled(&PathBuf::from(name)).and_then(|at| RealPath::of(&at).ok());
+    let real = |name: &str| {
+        LexicalPath::absolute(&PathBuf::from(name)).and_then(|at| RealPath::of(&at).ok())
+    };
     let (Some(usr_bin), Some(name)) = (real("/usr/bin"), program.as_path().file_name()) else {
         return Vec::new();
     };

@@ -28,13 +28,13 @@ pub(crate) const FIRMLINKS: &[(&str, &str)] = &[];
 /// version, but `(subpath "/var/select")` does; other syscalls behave the
 /// inverse way.  Granting both removes the guess without enlarging the trust
 /// surface — the two names already reach the same inode.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn match_variants(real: &Path) -> Vec<PathBuf> {
     with_firmlink_twins(vec![real.to_path_buf()])
 }
 
 /// `names` and the firmlink toggle of each.
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg(unix)]
 pub(crate) fn with_firmlink_twins(mut names: Vec<PathBuf>) -> Vec<PathBuf> {
     let toggles: Vec<PathBuf> = names.iter().filter_map(|q| firmlink_toggle(q)).collect();
     names.extend(toggles);
@@ -60,13 +60,11 @@ pub(crate) fn lookup_walk(surface: &Path, real: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Engine behind [`render_paths`](super::render_paths), whose paths are
-/// resolved ones.  Dedup keys on the exact path bytes, never a lossy
-/// rendering: two distinct non-UTF-8 paths decode to the same U+FFFD string,
-/// and collapsing them would attribute one path's grant to the other.
-/// Separate from `render_paths` because that function's `S: AsRef<str>` bound
-/// means a test can never hand it a non-UTF-8 [`Path`].
-#[cfg(test)]
+/// [`spelled`] over [`match_variants`], for the tests below: dedup keys on
+/// the exact path bytes, never a lossy rendering, since two distinct
+/// non-UTF-8 paths decode to the same U+FFFD string, and collapsing them
+/// would attribute one path's grant to the other.
+#[cfg(all(test, unix))]
 pub(crate) fn match_variants_paths<'a>(
     paths: impl Iterator<Item = &'a Path>,
 ) -> Result<Vec<String>, String> {
@@ -74,7 +72,7 @@ pub(crate) fn match_variants_paths<'a>(
 }
 
 /// The names `variants` gives each path, deduped and refused unless UTF-8.
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg(unix)]
 pub(crate) fn spelled<'a>(
     paths: impl Iterator<Item = &'a Path>,
     variants: impl Fn(&Path) -> Vec<PathBuf>,
@@ -134,7 +132,7 @@ pub(crate) fn firmlink_toggle(p: &Path) -> Option<PathBuf> {
     None
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[allow(
     clippy::disallowed_methods,
     reason = "[test] fixtures build literal and non-UTF-8 paths"
@@ -202,7 +200,6 @@ mod tests {
     /// Security regression: two distinct non-UTF-8 paths that decode to the
     /// same U+FFFD string must not collapse into one entry, which would
     /// attribute one path's grant to the other.
-    #[cfg(unix)]
     #[test]
     fn match_variants_paths_does_not_collide_distinct_non_utf8_paths() {
         use std::ffi::OsStr;
@@ -227,7 +224,6 @@ mod tests {
     /// A path the renderer cannot express faithfully must produce an `Err`,
     /// never a lossy `(subpath …)` rule naming the wrong inode.  Touching no
     /// firmlink root isolates this from the toggle above.
-    #[cfg(unix)]
     #[test]
     fn match_variants_paths_fails_closed_on_non_utf8_variant() {
         use std::ffi::OsStr;

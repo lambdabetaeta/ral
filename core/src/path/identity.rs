@@ -1,8 +1,10 @@
-//! Path identity: which spellings of a name are one name, and the
-//! alias-aware containment the grant matcher folds over it.
+//! Path identity: which spellings of a name are one name, and how a rule
+//! holds a subject — a position containing another ([`RealPath::contains`]),
+//! and an exclusion's holds matching an access by position or by the
+//! identities its walk passed ([`Excluded::matches`]).
 //!
-//! The firmlink table both sides share lives in [`super::canon`], so matcher
-//! and canonicaliser can never see different aliases.
+//! The firmlink table lives in [`super::canon`], so the matcher and the
+//! renderers can never see different aliases.
 
 use std::borrow::Cow;
 use std::ffi::OsStr;
@@ -17,11 +19,8 @@ use super::lex::parse_bytes;
 use super::walk::{EntryName, Excluded, Hold, Listed, ObjectId, RealPath, Step, Trace};
 
 /// `p` plus any alternate spelling the host treats as the same file
-/// (`/tmp/foo` ↔ `/private/tmp/foo` on macOS; just `[p]` elsewhere).
-///
-/// The matcher needs this because `canonicalize` cannot always bridge the
-/// two forms: under Seatbelt `realpath(3)` can fail on `/tmp` itself, so a
-/// grant authored in one spelling still covers an access in the other.
+/// (`/tmp/foo` ↔ `/private/tmp/foo` on macOS; just `[p]` elsewhere), so a
+/// position recorded in one spelling still holds a subject in the other.
 fn path_aliases(p: &Path) -> Vec<PathBuf> {
     let mut out = vec![p.to_path_buf()];
     out.extend(super::canon::firmlink_toggle(p));
@@ -104,7 +103,7 @@ impl RealPath {
     /// How this exclusion holds `path`, if it does: `Name` as stored,
     /// `FoldedName` only under another spelling of a name.  `Within` holds
     /// this position and everything beneath it, `Exact` this position alone.
-    pub(crate) fn matched_by(&self, path: &Path, depth: Depth) -> Option<MatchedBy> {
+    fn matched_by(&self, path: &Path, depth: Depth) -> Option<MatchedBy> {
         let holds = |identity| {
             path_within(path, self.as_path(), identity)
                 && (depth == Depth::Within || path_within(self.as_path(), path, identity))
@@ -255,12 +254,11 @@ pub(super) fn collision_fold(s: &str) -> String {
 ///
 /// Every authority judgment, fs and exec, decides containment through it.
 ///
-/// Private: the kernel is form-blind, and *which* of a prefix's two forms a
-/// containment question is asked of, under which identity, is settled by the
-/// methods beside it — [`RealPath::contains`] and
-/// [`contains_folded`](RealPath::contains_folded) for positions,
-/// [`Excluded::matches`] for exclusions — and never by a caller holding two
-/// bare paths.
+/// Private: the kernel is form-blind, and under which identity a containment
+/// question is asked is settled by the methods beside it —
+/// [`RealPath::contains`] and [`contains_folded`](RealPath::contains_folded)
+/// for positions, [`Excluded::matches`] for exclusions — and never by a
+/// caller holding two bare paths.
 #[allow(
     clippy::disallowed_methods,
     reason = "path-form: the containment kernel's byte-wise prefix test"

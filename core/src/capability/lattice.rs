@@ -27,7 +27,7 @@
 use super::exec::ExecRules;
 use super::fs::FsLayer;
 use crate::guard::freeze::PolicyError;
-use crate::path::{FrozenPath, RealPath, Subject, Trace, Walked};
+use crate::path::{Excluded, FrozenPath, PathRules, RealPath, Subject, Trace, Walked};
 use crate::syntax::quote::quote_word;
 use crate::types::EnvVars;
 use serde::{Deserialize, Serialize};
@@ -411,16 +411,6 @@ pub enum Extent {
 }
 
 impl Extent {
-    /// Where the walk `trace` left a spelling: everywhere if it reached the
-    /// root, as the root spelling does, else the position it reached.
-    pub(crate) fn of(trace: &Trace) -> Self {
-        if trace.real().is_universal() {
-            Self::Everywhere
-        } else {
-            Self::Under(trace.real().clone())
-        }
-    }
-
     /// Whether this extent contains `subject`: everywhere contains every
     /// subject, a position what lies beneath it and never everywhere.
     pub(crate) fn contains(&self, subject: Subject<'_>) -> bool {
@@ -430,12 +420,23 @@ impl Extent {
         }
     }
 
-    /// The position this extent holds from, `/` for everywhere.
-    pub(crate) fn real(&self) -> RealPath {
+    /// The position this extent holds from; `None` for everywhere, which no
+    /// walk makes on Windows.
+    pub(crate) fn real(&self) -> Option<&RealPath> {
         match self {
-            Self::Everywhere => RealPath::universal(),
-            Self::Under(position) => position.clone(),
+            Self::Everywhere => None,
+            Self::Under(position) => Some(position),
         }
+    }
+
+    /// The position this extent holds from, `/` for everywhere: a position
+    /// where `/` is a root.
+    #[cfg(unix)]
+    pub(crate) fn position(&self) -> std::borrow::Cow<'_, RealPath> {
+        self.real().map_or_else(
+            || std::borrow::Cow::Owned(RealPath::universal()),
+            std::borrow::Cow::Borrowed,
+        )
     }
 }
 
@@ -456,14 +457,6 @@ impl GrantPath<Extent> {
         }
     }
 
-    /// `written`, which the walk `trace` left at its extent.
-    pub(crate) fn of(written: FrozenPath, trace: &Trace) -> Self {
-        Self {
-            real: Extent::of(trace),
-            written,
-        }
-    }
-
     /// The allowance a spelling makes, the root spelling being everywhere
     /// with no walk to make (Windows has no `/` to walk).
     ///
@@ -481,32 +474,85 @@ impl GrantPath<Extent> {
 }
 
 impl GrantPath<Trace> {
-    /// This walk read as an allowance's extent.
+    /// This walk read as an allowance's extent: everywhere if it reached the
+    /// root, as the root spelling does, else the position it reached.
     pub(crate) fn extent(self) -> GrantPath<Extent> {
+        let real = self.real.real();
         GrantPath {
-            real: Extent::of(&self.real),
+            real: if real.is_universal() {
+                Extent::Everywhere
+            } else {
+                Extent::Under(real.clone())
+            },
             written: self.written,
         }
     }
 }
 
-impl<W: Walked> GrantPath<W> {
+/// A grant's polarity, which decides what the root makes: polarity is a
+/// grant notion, and the walk has none.
+pub trait Polar: Walked {
+    /// The grant of the root spelling, which Windows has no `/` to walk.
+    ///
+    /// # Errors
+    /// What the polarity refuses of the root.
+    fn root(written: FrozenPath) -> Result<GrantPath<Self>, PolicyError>;
+
+    /// The grant of a spelling walked, which may have reached the root.
+    ///
+    /// # Errors
+    /// What the polarity refuses of a walk that reached the root.
+    fn walked(path: GrantPath<Self>) -> Result<GrantPath<Self>, PolicyError>;
+}
+
+impl Polar for Trace {
+    /// Walked as any spelling where `/` is a root; Windows has none.
+    fn root(written: FrozenPath) -> Result<GrantPath<Self>, PolicyError> {
+        if PathRules::HOST != PathRules::Posix {
+            let why = std::io::Error::other("this host has no `/`; a path here starts at a drive");
+            return Err(PolicyError::unwalkable(&written, &why));
+        }
+        GrantPath::walked(written)
+    }
+
+    fn walked(path: GrantPath<Self>) -> Result<GrantPath<Self>, PolicyError> {
+        Ok(path)
+    }
+}
+
+impl Polar for Excluded {
+    /// The root holds no object to name and means `deny_all`.
+    fn root(written: FrozenPath) -> Result<GrantPath<Self>, PolicyError> {
+        Err(PolicyError::root_exclusion(&written))
+    }
+
+    /// A link to the root is the root under another name.
+    fn walked(path: GrantPath<Self>) -> Result<GrantPath<Self>, PolicyError> {
+        if path.real.followed().real().is_universal() {
+            return Err(PolicyError::root_exclusion(&path.written));
+        }
+        Ok(path)
+    }
+}
+
+impl<W: Polar> GrantPath<W> {
     /// `written` walked as its polarity walks: an allowance's transcript, an
     /// exclusion's holds.
     ///
     /// # Errors
     /// A spelling whose walk fails for any reason but an absent or
-    /// unenterable tail, named; an exclusion of the root, which holds no
-    /// object to name and means `deny_all`.
+    /// unenterable tail, named; what the polarity refuses of the root.
     pub(crate) fn walk(written: FrozenPath) -> Result<Self, PolicyError> {
-        if W::EXCLUDES && written.is_root() {
-            return Err(PolicyError::root_exclusion(&written));
+        if written.is_root() {
+            return W::root(written);
         }
+        W::walked(Self::walked(written)?)
+    }
+
+    /// `written` walked, the root spelling included where the host walks it.
+    fn walked(written: FrozenPath) -> Result<Self, PolicyError> {
         let real =
             W::walk(&written.lexical()).map_err(|e| PolicyError::unwalkable(&written, &e))?;
-        if W::EXCLUDES && real.followed().real().is_universal() {
-            return Err(PolicyError::root_exclusion(&written));
-        }
         Ok(Self { written, real })
     }
 }
@@ -704,6 +750,12 @@ impl GrantStack {
     /// `Shell::has_active_capabilities` reports.
     pub fn is_restrictive(&self) -> bool {
         self.0.iter().any(GrantLayer::is_restrictive)
+    }
+
+    /// Whether every layer is the ambient root: a stack that holds no position
+    /// and no identity, so means the same on every host.
+    pub fn is_root(&self) -> bool {
+        self.0.iter().all(|l| *l == GrantLayer::root())
     }
 
     /// Whether no layer restricts exec: the one question of exec denoting `t`.

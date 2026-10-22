@@ -8,6 +8,7 @@ use super::enforce::{
     Denial, check_device_name, check_exec, check_flag, check_fs_exact, fs_denial,
 };
 use crate::capability::{Admitted, Flag, Floor, FsOp, GrantLayer, GrantStack, Program};
+use crate::path::walk::Kind;
 use crate::path::{
     Dir, Judged, LeafMode, LexicalPath, Located, Op, Trace, walk, walk_dir, walk_lenient,
 };
@@ -73,30 +74,17 @@ impl Shell {
         self.judged(verdict)
     }
 
-    /// `located`, judged for `O` by the live stack, and by the root stack
-    /// where the walk was of the discard device, which no grant judges.
-    fn vouch<O: Op>(&mut self, located: Located, discard: bool) -> Settled<Located<Judged<O>>> {
-        let real = located.real().clone();
-        let root;
-        let grants = if discard {
-            root = GrantStack::root();
-            &root
-        } else {
-            &self.context.grants
-        };
-        let verdict = grants
-            .judge::<O>(self.floor(), located)
-            .map_err(|refused| fs_denial(&self.context, refused, &O::FS, &real));
-        self.judged(verdict)
-    }
-
-    /// An object a door already holds, judged for `O` as it is: the absent
-    /// leaf a name ral invents is, before anything makes it.
+    /// An object a door already holds, judged for `O` by the live stack: the
+    /// absent leaf a name ral invents is, before anything makes it.
     ///
     /// # Errors
     /// The grant's refusal.
     pub fn judge<O: Op>(&mut self, located: Located) -> Settled<Located<Judged<O>>> {
-        self.vouch(located, false)
+        let real = located.real().clone();
+        let verdict = (self.context.grants)
+            .judge::<O>(self.floor(), located)
+            .map_err(|refused| fs_denial(&self.context, refused, &O::FS, &real));
+        self.judged(verdict)
     }
 
     /// The fs door: walk `path` to the object it names, symlink-free, and
@@ -113,7 +101,7 @@ impl Shell {
         check_device_name(path)?;
         let located =
             walk(path, LeafMode::Follow).map_err(|e| crate::types::Error::io(path.shown(), &e))?;
-        self.vouch(located, path.is_discard())
+        self.judge(located)
     }
 
     /// [`locate`](Self::locate) for a directory entered: `walk_dir`, then the
@@ -133,13 +121,14 @@ impl Shell {
     }
 
     /// [`locate`](Self::locate) for a probe, which must tell *absent* from
-    /// *refused*: `Ok(None)` where the walk finds nothing, so `exists` and its
-    /// siblings answer `false` rather than raising, while a grant refusal is
-    /// still an `Err`.
+    /// *refused*: `Ok(None)` where nothing is at the name, so `exists` and
+    /// its siblings answer `false` rather than raising, while a grant refusal
+    /// is still an `Err`.
     ///
-    /// The refusal is judged on the object where there is one, and on the
-    /// name where the walk found nothing — otherwise a denied path that does
-    /// not exist would leak the difference by reading as merely absent.
+    /// The refusal is judged on what the walk found, the absent leaf
+    /// included, and on the name where the walk found nothing — otherwise a
+    /// denied path that does not exist would leak the difference by reading
+    /// as merely absent.
     ///
     /// # Errors
     /// The grant's refusal, on the object or on the name; or the refusal of a
@@ -154,7 +143,40 @@ impl Shell {
             self.check_named::<O>(path)?;
             return Ok(None);
         };
-        self.vouch(located, false).map(Some)
+        let held = self.judge::<O>(located)?;
+        Ok(held.stat().is_some().then_some(held))
+    }
+
+    /// The first of `candidates` that is a regular file the live stack admits
+    /// for `O`, held.  A denied candidate is passed over, as `execvp` does,
+    /// and the first denial is the error where none is admitted; `Ok(None)`
+    /// where no candidate is a file.
+    ///
+    /// # Errors
+    /// The first candidate's refusal, where none was admitted; or the refusal
+    /// of a reserved device name.
+    pub fn locate_first<O: Op>(
+        &mut self,
+        candidates: impl IntoIterator<Item = LexicalPath>,
+    ) -> Settled<Option<Located<Judged<O>>>> {
+        let mut first = None;
+        for cand in candidates {
+            check_device_name(&cand)?;
+            let Ok(located) = walk(&cand, LeafMode::Follow) else {
+                continue;
+            };
+            if located.trace().kind() != Some(Kind::File) {
+                continue;
+            }
+            let real = located.real().clone();
+            match (self.context.grants).judge::<O>(self.floor(), located) {
+                Ok(found) => return Ok(Some(found)),
+                Err(refused) => {
+                    first.get_or_insert_with(|| fs_denial(&self.context, refused, &O::FS, &real));
+                }
+            }
+        }
+        first.map_or(Ok(None), |denial| Err(self.refused(*denial)))
     }
 
     /// [`locate`](Self::locate) as a predicate: `None` where the walk fails

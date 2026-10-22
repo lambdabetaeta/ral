@@ -42,15 +42,15 @@
 //! given, `TMPDIR` being the launching user's to set.
 
 use super::toolchains::{self, Toolchain};
-use crate::capability::GrantPath;
+use crate::capability::{GrantPath, Polar, Ungoverned};
 use crate::path::git::{BadPointer, Pointer, discover_git_dir};
 use crate::path::identity::windows_identity_components;
 use crate::path::lex::relative_suffix;
 use crate::path::sigil::SigilHead;
 use crate::path::{
-    CwdPath, FrozenPath, GrantRefusal, LeafMode, PathRules, RealPath, SubpathRefusal, Trace,
-    Walked, XdgKind, classify_subpath, grant_eligibility, path_dirs_absolute, resolve_xdg_in,
-    shown, walk_lenient,
+    CwdPath, FrozenPath, GrantRefusal, LeafMode, LexicalPath, PathRules, RealPath, SubpathRefusal,
+    Trace, XdgKind, classify_subpath, grant_eligibility, path_dirs_absolute, resolve_xdg_in, shown,
+    walk, walk_lenient,
 };
 use crate::syntax::quote::quote_word;
 use crate::text::code;
@@ -271,6 +271,13 @@ impl From<BadPointer> for PolicyError {
     }
 }
 
+/// The file at `path`, read under no grant: what git discovery reads at
+/// session start, before any grant governs.
+fn ungoverned(path: &LexicalPath) -> std::io::Result<String> {
+    let file = Ungoverned::read(walk(path, LeafMode::Follow)?);
+    std::io::read_to_string(file.read()?)
+}
+
 fn unclaimed_message(dot_git: &Path, target: &Path) -> PolicyError {
     PolicyError::new(format!(
         "the .git file at '{dot_git}' points at '{target}', but that directory \
@@ -392,7 +399,7 @@ impl FreezeCtx {
     /// `HOME` under a home-relative place, an anchored place that freezes
     /// relative, a `.git` pointer no git directory claims, a spelling whose
     /// walk fails, or an exclusion of the root.
-    pub(crate) fn walked<W: Walked>(
+    pub(crate) fn walked<W: Polar>(
         &self,
         place: &Place,
     ) -> Result<Option<GrantPath<W>>, PolicyError> {
@@ -400,8 +407,8 @@ impl FreezeCtx {
         let sub = |s| subpath(&tag, s);
         let frozen = match place {
             Place::Absolute(raw) => {
-                if W::EXCLUDES && names_the_root(raw) {
-                    return Err(PolicyError::root_exclusion(&FrozenPath::root()));
+                if names_the_root(raw) {
+                    return W::root(FrozenPath::root()).map(Some);
                 }
                 return live_absolute(raw, PathRules::HOST)?
                     .then(|| freeze(raw).and_then(GrantPath::<W>::walk))
@@ -412,7 +419,7 @@ impl FreezeCtx {
             Place::Gitdir(s) => {
                 let sub = sub(s)?;
                 let cwd = self.cwd.as_path();
-                let base = discover_git_dir(cwd)?.unwrap_or_else(|| cwd.to_path_buf());
+                let base = discover_git_dir(cwd, ungoverned)?.unwrap_or_else(|| cwd.to_path_buf());
                 join_sub(base, sub)?
             }
             Place::Home(s) => {
@@ -431,7 +438,7 @@ impl FreezeCtx {
     /// # Errors
     /// `path` over a `$PATH` with no absolute entry, or a `$PATH` entry or
     /// toolchain override that names the filesystem root or the home.
-    pub(crate) fn selector<W: Walked>(
+    pub(crate) fn selector<W: Polar>(
         &self,
         selector: Selector,
     ) -> Result<Vec<GrantPath<W>>, PolicyError> {
@@ -456,7 +463,7 @@ impl FreezeCtx {
     /// That guard is stated in `home`'s terms, so an unknown home leaves an
     /// `xdg-*` grant unanswerable, an absolute `XDG_*_HOME` included, since
     /// there would then be nothing to contain it.
-    fn xdg<W: Walked>(&self, kind: XdgKind, sub: &str) -> Result<GrantPath<W>, PolicyError> {
+    fn xdg<W: Polar>(&self, kind: XdgKind, sub: &str) -> Result<GrantPath<W>, PolicyError> {
         let spelled = self.home();
         let (Some(spelled), Some(base)) = (
             spelled.as_deref(),
@@ -529,8 +536,8 @@ impl Home {
     }
 }
 
-/// Whether the raw `absolute` payload folds to the filesystem root, which an
-/// exclusion refuses on every host, live or not.
+/// Whether the raw `absolute` payload folds to the filesystem root, which
+/// the polarity decides on every host, live or not.
 fn names_the_root(raw: &str) -> bool {
     crate::path::lex::is_bare_root(
         crate::path::lex::fold_dots_under(raw, PathRules::HOST),
@@ -785,7 +792,7 @@ pub(super) fn refuse_the_world(
 }
 
 /// [`path_dirs_in`] over the host's `$PATH`.
-fn path_dirs<W: Walked>(home: Option<&Home>) -> Result<Vec<GrantPath<W>>, PolicyError> {
+fn path_dirs<W: Polar>(home: Option<&Home>) -> Result<Vec<GrantPath<W>>, PolicyError> {
     #[allow(clippy::disallowed_methods, reason = "PATH, not an XDG basedir")]
     let path = std::env::var_os("PATH").unwrap_or_default();
     path_dirs_in(&path, home)
@@ -798,7 +805,7 @@ fn path_dirs<W: Walked>(home: Option<&Home>) -> Result<Vec<GrantPath<W>>, Policy
 /// ([`refuse_the_world`]), nor one [`host_absolute`] refuses, absolute to
 /// the kernel but under a malformed or mixed head, or not UTF-8: the
 /// selector fails whole rather than freeze a path it cannot read.
-fn path_dirs_in<W: Walked>(
+fn path_dirs_in<W: Polar>(
     path: &OsStr,
     home: Option<&Home>,
 ) -> Result<Vec<GrantPath<W>>, PolicyError> {

@@ -15,7 +15,8 @@
 
 use super::freeze::{Home, PolicyError, Selector, refuse_the_world};
 use crate::capability::GrantPath;
-use crate::path::{FrozenPath, Kind, Trace, Walked, is_absolute, join_slash, path_entries, shown};
+use crate::capability::Polar;
+use crate::path::{FrozenPath, Kind, Trace, is_absolute, join_slash, path_entries, shown};
 use crate::path::{XdgKind, resolve_xdg_in};
 use std::path::PathBuf;
 use strum::{EnumString, IntoStaticStr, VariantArray};
@@ -420,7 +421,7 @@ pub(super) fn chosen(
 /// # Errors
 /// An override that names the world; a directory whose walk fails, or that no
 /// grant can hold.
-pub(crate) fn expand_in<W: Walked>(
+pub(crate) fn expand_in<W: Polar>(
     toolchain: Toolchain,
     env: impl Fn(&str) -> Option<String>,
     home: Option<&Home>,

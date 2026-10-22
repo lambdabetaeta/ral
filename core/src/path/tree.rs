@@ -1,6 +1,6 @@
 //! Directory trees: the one walk over them, glob patterns enumerated by it, and their size.
 
-use crate::capability::{Floor, GrantStack};
+use crate::capability::Ungoverned;
 use crate::path::LexicalPath;
 use crate::process::{DurableRoot, Scope};
 use std::path::Path;
@@ -21,9 +21,8 @@ pub fn bytes(root: &Path) -> u64 {
     let Some(root) = LexicalPath::absolute(root) else {
         return 0;
     };
-    let region = GrantStack::root().read_region(&Floor::default());
     Walk::all(&root)
-        .readable_by(region)
+        .readable_by(Ungoverned::region())
         .entries(Scope::clone(&DurableRoot::default()))
         .filter_map(Result::ok)
         .filter(|entry| entry.depth > 0)

@@ -125,7 +125,7 @@ fn a_symlink_spelled_deny_covers_its_target() {
 /// stored, though the deepest deny holds it only by a fold.
 #[test]
 fn a_deny_holding_the_stored_name_refuses_plainly() {
-    use super::{Refused, fs_judge};
+    use crate::capability::Refused;
     use crate::capability::Withheld;
     use crate::path::MatchedBy;
     let tmp = tempfile::tempdir().unwrap();
@@ -141,7 +141,7 @@ fn a_deny_holding_the_stored_name_refuses_plainly() {
     };
     let matched_by = |grants: &GrantStack| {
         let access = root.join("d/secrets/f");
-        match fs_judge(grants, &Floor::default(), &trace(&access), &FsOp::Read) {
+        match grants.refusal_fs(&Floor::default(), &FsOp::Read, &trace(&access)) {
             Err(Refused::Withheld(Withheld::Excluded { matched_by, .. })) => matched_by,
             _ => panic!("an exclusion holds the access"),
         }
@@ -154,7 +154,7 @@ fn a_deny_holding_the_stored_name_refuses_plainly() {
 /// the one way the refusal is cited by identity.
 #[test]
 fn a_deny_holding_a_hard_link_cites_the_object_under_another_name() {
-    use super::{Refused, fs_judge};
+    use crate::capability::Refused;
     use crate::capability::Withheld;
     use crate::path::MatchedBy;
     let tmp = tempfile::tempdir().unwrap();
@@ -168,13 +168,9 @@ fn a_deny_holding_a_hard_link_cites_the_object_under_another_name() {
         )],
         ..FsPolicy::default()
     });
-    let refused = fs_judge(
-        &grants,
-        &Floor::default(),
-        &trace(root.join("alias")),
-        &FsOp::Read,
-    )
-    .expect_err("the alias is the denied object");
+    let refused = grants
+        .refusal_fs(&Floor::default(), &FsOp::Read, &trace(root.join("alias")))
+        .expect_err("the alias is the denied object");
     assert!(
         matches!(
             refused,
@@ -190,6 +186,41 @@ fn a_deny_holding_a_hard_link_cites_the_object_under_another_name() {
             && refused.to_string().contains("under another name"),
         "{refused}"
     );
+}
+
+/// The discard device is exempt by name alone: a spelling that folds to it
+/// lexically but walks elsewhere is judged where it walks.  `l` is a link
+/// deep enough that `..` back to `/` lexically lands inside the tree, where
+/// `dev/null` is a link to the secret.
+#[test]
+fn a_spelling_folding_to_the_discard_device_is_judged_where_it_walks() {
+    use crate::path::{LexicalPath, Reading};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let depth = root.components().count() - 1;
+    let deep: std::path::PathBuf = std::iter::repeat_n("a", depth + 1).collect();
+    std::fs::create_dir_all(root.join("work").join(&deep)).unwrap();
+    std::os::unix::fs::symlink(root.join("work").join(&deep), root.join("work/l")).unwrap();
+    std::fs::create_dir(root.join("dev")).unwrap();
+    std::fs::write(root.join("secret"), "key").unwrap();
+    std::os::unix::fs::symlink(root.join("secret"), root.join("dev/null")).unwrap();
+    let ups: std::path::PathBuf = std::iter::repeat_n("..", depth + 2).collect();
+    let spelling = root.join("work/l").join(ups).join("dev/null");
+    let rp = LexicalPath::absolute(&spelling).unwrap();
+    assert!(rp.is_discard(), "{}", spelling.display());
+    let frozen = |p: &std::path::Path| FrozenPath::from_surface(crate::path::utf8(p).unwrap());
+    let layer = layer(Capabilities {
+        fs: Some(FsPolicy {
+            read_prefixes: vec![frozen(&root)],
+            deny_paths: vec![frozen(&root.join("secret"))],
+            ..FsPolicy::default()
+        }),
+        ..Capabilities::default()
+    });
+    let mut shell = crate::test_helper::core_shell();
+    let refused = shell.with_layer(layer, |sh| sh.locate::<Reading>(&rp).err());
+    let refused = refused.expect("the walk lands on the denied secret");
+    assert!(refused.to_string().contains("denied"), "{refused}");
 }
 
 mod words {

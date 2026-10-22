@@ -9,13 +9,13 @@
 //! and the sandbox renders the table it judged with.
 
 use super::fs::{Floor, FsAllow, FsDeny};
-use super::lattice::{Extent, GrantPath};
+use super::lattice::{Extent, GrantPath, Polar};
 use super::table::{Allows, Denies, Table, Withheld};
 use super::{ExecGrant, ExecKey, ExecSummary, GrantStack, Join, Meet};
 use crate::guard::freeze::PolicyError;
 use crate::path::{
     self, Authority, Depth, Excluded, FrozenPath, Judged, Located, MatchedBy, Reading, RealPath,
-    Trace, Unjudged, Walked, command_name_key,
+    Trace, Unjudged, command_name_key,
 };
 use crate::syntax::quote::quote_word;
 use crate::types::EnvVars;
@@ -101,8 +101,8 @@ impl GrantStack {
 
     /// Why a head is refused, for a refusal raised before [`GrantStack::admit`].
     pub(crate) fn refusal(&self, floor: &Floor, program: &Program) -> Option<ExecDenial> {
-        if let Some(why) = rules(self).and_then(|r| r.withheld(program.subject())) {
-            return Some(ExecDenial::Run(why));
+        if let Some(why) = run_withheld(rules(self).as_ref(), program) {
+            return Some(why);
         }
         let read = match program {
             Program::File { located, .. } => self.read(floor, located.trace()),
@@ -120,8 +120,8 @@ impl GrantStack {
         rules: Option<&ExecRules>,
         program: Program,
     ) -> Result<Program<Judged<Reading>>, Box<(Program, ExecDenial)>> {
-        if let Some(why) = rules.and_then(|r| r.withheld(program.subject())) {
-            return Err(Box::new((program, ExecDenial::Run(why))));
+        if let Some(why) = run_withheld(rules, &program) {
+            return Err(Box::new((program, why)));
         }
         match program {
             Program::Tool(name) => match self.tool_read(floor) {
@@ -149,6 +149,13 @@ impl GrantStack {
     fn tool_read(&self, floor: &Floor) -> Result<(), Withheld<FsDeny>> {
         ral_binary().map_or(Ok(()), |own| self.read_not_excluded(floor, own))
     }
+}
+
+/// Why a supplied exec table withholds `program`'s run, before what running
+/// it reads is asked.
+fn run_withheld(rules: Option<&ExecRules>, program: &Program) -> Option<ExecDenial> {
+    let why = rules?.withheld(program.subject())?;
+    Some(ExecDenial::Run(why))
 }
 
 /// What a grant judges, and what the launcher runs.
@@ -378,7 +385,7 @@ impl FromIterator<Rule> for ExecRules {
 
 /// How a walked key becomes a rule, by the polarity that walked it: an
 /// allowance keeps the position, an exclusion the holds.
-pub(crate) trait Keyed: Walked {
+pub(crate) trait Keyed: Polar {
     fn file(path: GrantPath<Self>) -> Rule;
     fn dir(path: GrantPath<Self>) -> Rule;
     /// A bare name: the tool bundled under it and the file found on the
@@ -522,7 +529,7 @@ impl ExecRules {
     #[cfg(target_os = "linux")]
     pub(crate) fn allowed_dirs(&self) -> impl Iterator<Item = RealPath> {
         self.live().filter_map(|scope| match scope {
-            ExecAllow::Dir(dir) => Some(dir.real.real()),
+            ExecAllow::Dir(dir) => Some(dir.real.position().into_owned()),
             _ => None,
         })
     }
@@ -548,10 +555,6 @@ fn key_rules<W: Keyed>(key: &ExecKey, path: Option<&str>) -> Result<Vec<Rule>, P
     Ok(match key {
         ExecKey::Name(name) => name_rules::<W>(name, path, cfg!(unix))?,
         ExecKey::Path(file) => vec![W::file(GrantPath::walk(file.clone())?)],
-        ExecKey::Dir(dir) if dir.is_root() && !W::EXCLUDES => {
-            let everywhere = GrantPath::allowing(dir.clone())?;
-            vec![Rule::Allow(ExecAllow::Dir(everywhere))]
-        }
         ExecKey::Dir(dir) => vec![W::dir(GrantPath::walk(dir.clone())?)],
     })
 }

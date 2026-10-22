@@ -169,8 +169,8 @@ fn a_link_is_read_through_its_o_symlink_descriptor() {
 }
 
 /// A present file the user cannot read is stated, not held: the probes
-/// `exists` and `file-info` answer from its stat, and `read` is refused
-/// without a data handle having been opened.
+/// `exists` and `file-info` answer from its stat, and `read` and `stage` are
+/// refused without a data handle having been opened or a sibling staged.
 #[test]
 fn a_file_the_user_cannot_read_is_stated_and_never_opened() {
     if root_user() {
@@ -193,6 +193,15 @@ fn a_file_the_user_cannot_read_is_stated_and_never_opened() {
         assert_eq!(
             loc.read().unwrap_err().kind(),
             io::ErrorKind::PermissionDenied
+        );
+        let Err(refused) = loc.stage() else {
+            panic!("{mode:?}: a stated leaf was staged");
+        };
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied, "{mode:?}");
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "nothing staged"
         );
     }
     assert_eq!(derived(), before, "nothing was opened");
