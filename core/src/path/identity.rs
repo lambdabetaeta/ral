@@ -14,7 +14,7 @@ use icu_normalizer::DecomposingNormalizerBorrowed;
 
 use super::PathRules;
 use super::lex::parse_bytes;
-use super::walk::{Excluded, Hold, Listed, RealPath, Trace};
+use super::walk::{EntryName, Excluded, Hold, Listed, ObjectId, RealPath, Step, Trace};
 
 /// `p` plus any alternate spelling the host treats as the same file
 /// (`/tmp/foo` ↔ `/private/tmp/foo` on macOS; just `[p]` elsewhere).
@@ -117,19 +117,79 @@ impl RealPath {
     }
 }
 
+/// What an access passed: the identity of every object it opened, the root
+/// first, and the names it spelled below the root, one per step and then the
+/// tail.  The names past the `j`th object are `names[j..]`.
+struct Passed<'a> {
+    ids: Vec<ObjectId>,
+    names: Vec<&'a EntryName>,
+}
+
+impl<'a> Passed<'a> {
+    fn of(trace: &'a Trace) -> Self {
+        let steps = trace.steps();
+        Self {
+            ids: std::iter::once(trace.root_id())
+                .chain(steps.iter().map(Step::id))
+                .collect(),
+            names: steps.iter().map(Step::name).chain(trace.tail()).collect(),
+        }
+    }
+
+    /// A listing's record: the parent's trace plus its one step.
+    fn listed(listed: &'a Listed<'a>) -> Self {
+        let mut passed = Self::of(listed.parent());
+        passed.ids.push(listed.step().id());
+        passed.names.push(listed.step().name());
+        passed
+    }
+}
+
+/// Whether `rule`'s names are a prefix of `access`'s under `collision_key`
+/// (the whole of them under `Exact`).
+fn names_fit(rule: &[&EntryName], access: &[&EntryName], depth: Depth) -> bool {
+    fn key<'a>(name: &'a &EntryName) -> Cow<'a, [u8]> {
+        encoded_collision_key(name.as_os_str().as_encoded_bytes())
+    }
+    let long_enough = match depth {
+        Depth::Within => rule.len() <= access.len(),
+        Depth::Exact => rule.len() == access.len(),
+    };
+    long_enough && rule.iter().zip(access).all(|(r, a)| key(r) == key(a))
+}
+
 impl Hold {
-    /// How this hold covers `subject`, by position alone.
+    /// How this hold covers `subject`: by position, else by identity.  For
+    /// each step `k` of the rule and each object `j` the access passed (the
+    /// root counted) with the same identity, the rule's names past `k` fit
+    /// the access's past `j`.  The rule's root is never matched: every walk
+    /// shares it, and a match there is the position.
     fn matches(&self, subject: Subject<'_>, depth: Depth) -> Option<MatchedBy> {
         let position = subject.position()?;
-        self.trace().real().matched_by(position.as_path(), depth)
+        let by_position = self.trace().real().matched_by(position.as_path(), depth);
+        by_position.or_else(|| {
+            let access = match subject {
+                Subject::Access(trace) => Passed::of(trace),
+                Subject::Listed(listed) => Passed::listed(listed),
+                Subject::Position(_) | Subject::Everywhere => return None,
+            };
+            let rule = Passed::of(self.trace());
+            let reaches = rule.ids.iter().enumerate().skip(1).any(|(k, id)| {
+                let at = |j: usize| names_fit(&rule.names[k..], &access.names[j..], depth);
+                (access.ids.iter().enumerate()).any(|(j, other)| other == id && at(j))
+            });
+            reaches.then_some(MatchedBy::Identity)
+        })
     }
 }
 
 impl Excluded {
     /// Whether this exclusion covers `subject`, by either of its holds: the
     /// least [`MatchedBy`] of the two.  `Within`: the subject at or beneath
-    /// the rule; `Exact`: the rule's position itself.  A `Position` is read
-    /// positionally alone; `Everywhere` is excluded by nothing.
+    /// the rule; `Exact`: the rule's position itself, or the identity reading
+    /// with the rule's remaining names matching the whole rest of the
+    /// subject's.  A `Position` is read positionally alone; `Everywhere` is
+    /// excluded by nothing.
     pub(crate) fn matches(&self, subject: Subject<'_>, depth: Depth) -> Option<MatchedBy> {
         self.holds()
             .filter_map(|hold| hold.matches(subject, depth))

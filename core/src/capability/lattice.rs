@@ -751,6 +751,18 @@ impl GrantStack {
         self.0.iter_mut().for_each(GrantLayer::rehold);
     }
 
+    /// The identity of every object the fs exclusions hold, `None` where one
+    /// is unheld: what a test asks of a receiver's `rehold`.
+    #[cfg(all(test, unix))]
+    pub(crate) fn held_ids(&self) -> Vec<Option<crate::path::ObjectId>> {
+        let denies = self
+            .fs()
+            .flat_map(|fs| fs.table(&super::FsOp::Read).denies());
+        denies
+            .flat_map(|deny| deny.grant().real.held_ids())
+            .collect()
+    }
+
     /// Layers with no opinion are skipped, here and in `fs` and `net` below:
     /// the folds intersect what remains, and an empty run means no attenuation.
     pub(crate) fn exec(&self) -> impl Iterator<Item = &ExecRules> {

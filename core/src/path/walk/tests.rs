@@ -4,7 +4,34 @@
 //! will, so a Windows test build leaves those as unused as a host build does:
 //! their `expect(dead_code)` stands unless the build is `all(test, unix)`.
 
+use std::cell::RefCell;
+
 use super::{Dir, Judged, Located, Writing};
+
+/// Where `walk_excluded` stands around its read of a held link's target.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Around {
+    Before,
+    After,
+}
+
+type Hook = Box<dyn FnMut(Around)>;
+
+thread_local! {
+    /// What a test does to the disk between the walk's hold of a link and its
+    /// read of the target, and again after it.
+    pub(super) static LINK_READ: RefCell<Option<Hook>> =
+        const { RefCell::new(None) };
+}
+
+/// The test's step, if it set one.
+pub(super) fn around_link_read(at: Around) {
+    LINK_READ.with(|hook| {
+        if let Some(step) = hook.borrow_mut().as_mut() {
+            step(at);
+        }
+    });
+}
 
 /// What these tests hold: the walk's own handles, which judge nothing, so the
 /// tests retag them with a door only this module has.  The grant's own door,
@@ -17,6 +44,8 @@ pub(super) fn writable(d: Dir) -> Dir<Judged<Writing>> {
     d.marked()
 }
 
+#[cfg(unix)]
+mod holds;
 #[cfg(target_os = "macos")]
 mod macos;
 mod markers;

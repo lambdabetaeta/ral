@@ -340,3 +340,24 @@ fn publish_through_file_rename_info_ex_lands_the_file() {
     names.sort();
     assert_eq!(names, ["f", "g"]);
 }
+
+/// Windows holds nothing: a file removed and made again at its name is met by
+/// the deny's position, and its id is not the old object's.
+#[test]
+fn a_recreated_file_meets_the_deny_by_position_under_another_id() {
+    use crate::path::{Depth, MatchedBy, Subject};
+    let tmp = tempfile::tempdir().unwrap();
+    let secret = tmp.path().join("secret");
+    std::fs::write(&secret, "old").unwrap();
+    let excluded = walk_excluded(&spelled(&secret)).unwrap();
+    let old = excluded.named().last_id();
+    std::fs::remove_file(&secret).unwrap();
+    std::fs::write(&secret, "new").unwrap();
+
+    let met = walk_lenient(&spelled(&secret), LeafMode::Follow).unwrap();
+    assert_ne!(met.last_id(), old);
+    assert_eq!(
+        excluded.matches(Subject::Access(&met), Depth::Within),
+        Some(MatchedBy::Name)
+    );
+}

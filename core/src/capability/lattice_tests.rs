@@ -1421,6 +1421,44 @@ fn a_bundled_tool_reads_ral_s_binary() {
     );
 }
 
+/// A bundled tool reads ral's binary, so an fs deny of that file under another
+/// name — a hard link beside it — refuses the tool: the exclusion holds the
+/// object, not the spelling.
+#[cfg(unix)]
+#[test]
+fn a_bundled_tool_is_refused_when_ral_s_binary_is_denied_through_a_hard_link() {
+    crate::sandbox::pin();
+    let Some(own) = ral_binary() else { return };
+    let beside = tempfile::tempdir_in(own.real().as_path().parent().unwrap()).unwrap();
+    let link = beside.path().join("ral-linked");
+    if std::fs::hard_link(own.real().as_path(), &link).is_err() {
+        eprintln!("skip: ral's binary cannot be hard-linked beside itself here");
+        return;
+    }
+    let floor = Floor::default();
+    let tool = |fs: FsPolicy| {
+        let stack = test_helper::stack([with_fs(fs)]);
+        stack
+            .admit(&floor, Program::Tool("ls".into()), vec![])
+            .is_ok()
+    };
+    assert!(
+        !tool(FsPolicy {
+            read_prefixes: vec![FrozenPath::root()],
+            deny_paths: vec![spelled(&link)],
+            ..FsPolicy::default()
+        }),
+        "the binary is denied under the link's name"
+    );
+    assert!(
+        tool(FsPolicy {
+            read_prefixes: vec![FrozenPath::root()],
+            ..FsPolicy::default()
+        }),
+        "and the link alone, undenied, refuses nothing"
+    );
+}
+
 /// `dir /` runs every program beneath it, narrowed by what it meets, and runs
 /// no bundled tool; alone it reads what it runs (law 7) with no fs grant.
 #[test]

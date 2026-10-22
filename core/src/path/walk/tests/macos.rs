@@ -241,3 +241,70 @@ fn a_dangling_link_under_follow_is_a_create_target_with_no_real_path() {
     let err = RealPath::of(&spelled(&dir.join("dangling"))).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::NotFound);
 }
+
+/// A leaf is held by the walk's own `O_EVTONLY` descriptor: the object is
+/// kept, though every name of it is gone, while the exclusion stands.
+#[test]
+fn an_exclusion_holds_its_leaf_by_the_walks_own_o_evtonly_descriptor() {
+    use std::os::unix::fs::MetadataExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("secret"), b"s").unwrap();
+    let excluded = walk_excluded(&spelled(&dir.join("secret"))).unwrap();
+    let held = excluded.named.handle.as_ref().expect("the leaf is held");
+    assert_eq!(ObjectId::of(held).unwrap(), excluded.named.trace.last_id());
+    std::fs::remove_file(dir.join("secret")).unwrap();
+    assert_eq!(held.metadata().unwrap().nlink(), 0, "the vnode is kept");
+}
+
+/// An unmount revokes an `O_EVTONLY` hold rather than failing: the exclusion
+/// stands unheld, by its position, where the volume was and is not.
+#[test]
+fn an_unmounted_volume_leaves_an_exclusion_unheld_by_position() {
+    use crate::path::{Depth, MatchedBy, Subject};
+    use std::process::Command;
+    let hdiutil = |args: &[&std::ffi::OsStr]| {
+        let status = Command::new("hdiutil").args(args).status().unwrap();
+        assert!(status.success(), "hdiutil {args:?}");
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    let (image, mount) = (dir.join("volume.dmg"), dir.join("mount"));
+    std::fs::create_dir(&mount).unwrap();
+    hdiutil(&[
+        "create".as_ref(),
+        "-quiet".as_ref(),
+        "-size".as_ref(),
+        "8m".as_ref(),
+        "-fs".as_ref(),
+        "APFS".as_ref(),
+        "-volname".as_ref(),
+        "ral-hold".as_ref(),
+        image.as_os_str(),
+    ]);
+    hdiutil(&[
+        "attach".as_ref(),
+        "-quiet".as_ref(),
+        "-nobrowse".as_ref(),
+        "-mountpoint".as_ref(),
+        mount.as_os_str(),
+        image.as_os_str(),
+    ]);
+    std::fs::write(mount.join("secret"), b"s").unwrap();
+    let mut excluded = walk_excluded(&spelled(&mount.join("secret"))).unwrap();
+    assert!(excluded.named.handle.is_some());
+
+    hdiutil(&[
+        "detach".as_ref(),
+        "-quiet".as_ref(),
+        "-force".as_ref(),
+        mount.as_os_str(),
+    ]);
+    excluded.rehold();
+    assert!(excluded.named.handle.is_none());
+    let access = walk_lenient(&spelled(&mount.join("secret")), LeafMode::Follow).unwrap();
+    assert_eq!(
+        excluded.matches(Subject::Access(&access), Depth::Within),
+        Some(MatchedBy::Name)
+    );
+}

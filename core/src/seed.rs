@@ -490,6 +490,140 @@ mod tests {
         }
     }
 
+    /// A layer reading everything and denying `deny`.
+    #[cfg(unix)]
+    fn denying(deny: &std::path::Path) -> crate::capability::GrantLayer {
+        use crate::capability::{Capabilities, FsPolicy};
+        crate::test_helper::layer(Capabilities {
+            fs: Some(FsPolicy {
+                read_prefixes: vec![crate::path::FrozenPath::root()],
+                deny_paths: vec![crate::path::FrozenPath::from_surface(
+                    crate::path::utf8(deny).expect("a test path is UTF-8"),
+                )],
+                ..FsPolicy::default()
+            }),
+            ..Capabilities::default()
+        })
+    }
+
+    /// A stack crosses the seed as its traces, so it arrives unheld; the
+    /// decode takes hold of what is still where it was.
+    #[cfg(unix)]
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] a tempdir tree whose files are replaced under the stack"
+    )]
+    fn a_stack_through_the_seed_arrives_unheld_and_is_held_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let secret = crate::test_helper::real(tmp.path())
+            .as_path()
+            .join("secret");
+        std::fs::write(&secret, "s").unwrap();
+        let mut parent = booted();
+        parent.context.grants.push(denying(&secret));
+        let sent = parent.bequeath(SpawnGrant::Inherit);
+        let held = sent.image.context.grants.held_ids();
+        assert_eq!(held, [Some(crate::test_helper::trace(&secret).last_id())]);
+
+        let seed = seal(&sent).expect("seal").unseal().expect("unseal");
+        assert_eq!(seed.context.grants.held_ids(), [None]);
+        let received = seed.decode(&runtime()).expect("decode");
+        assert_eq!(received.image.context.grants.held_ids(), held);
+    }
+
+    /// An exclusion whose object was replaced at its position before the
+    /// decode is unheld, refuses nothing, and still holds the position and,
+    /// through another name, the old object.
+    #[cfg(unix)]
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] a tempdir tree whose files are replaced under the stack"
+    )]
+    fn an_exclusion_replaced_before_the_decode_keeps_its_position_and_old_identity() {
+        use crate::capability::{Floor, FsOp};
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = crate::test_helper::real(tmp.path()).as_path().to_path_buf();
+        let (secret, kept, other) = (dir.join("secret"), dir.join("kept"), dir.join("other"));
+        std::fs::write(&secret, "s").unwrap();
+        std::fs::write(&other, "o").unwrap();
+        std::fs::hard_link(&secret, &kept).unwrap();
+        let mut parent = booted();
+        parent.context.grants.push(denying(&secret));
+        let seed = seal(&parent.bequeath(SpawnGrant::Inherit))
+            .expect("seal")
+            .unseal()
+            .expect("unseal");
+        std::fs::remove_file(&secret).unwrap();
+        std::fs::write(&secret, "new").unwrap();
+
+        let received = seed.decode(&runtime()).expect("nothing is refused");
+        let grants = received.image.context.grants;
+        assert_eq!(grants.held_ids(), [None]);
+        let reads = |path: &std::path::Path| {
+            grants.admits_fs(
+                &Floor::default(),
+                &FsOp::Read,
+                &crate::test_helper::trace(path),
+            )
+        };
+        assert!(!reads(&secret), "the position stays denied");
+        assert!(!reads(&kept), "so does the object it was");
+        assert!(reads(&other));
+    }
+
+    /// An allowance holds by position, resolved where the grant was made: a
+    /// link retargeted after leaves the child the old target only.
+    #[cfg(unix)]
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] a tempdir tree whose files are replaced under the stack"
+    )]
+    fn a_child_bequeathed_a_retargeted_allowance_link_admits_the_old_target_only() {
+        use crate::capability::{Capabilities, Floor, FsOp, FsPolicy};
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = crate::test_helper::real(tmp.path()).as_path().to_path_buf();
+        for target in ["old", "new"] {
+            std::fs::create_dir(dir.join(target)).unwrap();
+            std::fs::write(dir.join(target).join("f"), "").unwrap();
+        }
+        std::os::unix::fs::symlink("old", dir.join("alink")).unwrap();
+        let mut parent = booted();
+        parent
+            .context
+            .grants
+            .push(crate::test_helper::layer(Capabilities {
+                fs: Some(FsPolicy {
+                    read_prefixes: vec![crate::path::FrozenPath::from_surface(
+                        crate::path::utf8(&dir.join("alink")).unwrap(),
+                    )],
+                    ..FsPolicy::default()
+                }),
+                ..Capabilities::default()
+            }));
+        let sent = parent.bequeath(SpawnGrant::Inherit);
+        std::fs::remove_file(dir.join("alink")).unwrap();
+        std::os::unix::fs::symlink("new", dir.join("alink")).unwrap();
+
+        let child = Shell::child_of(
+            runtime().into(),
+            through_the_wire(&sent, &runtime()),
+            no_base,
+        )
+        .expect("a child");
+        let reads = |path: std::path::PathBuf| {
+            let access = crate::test_helper::trace(path);
+            child
+                .context
+                .grants
+                .admits_fs(&Floor::default(), &FsOp::Read, &access)
+        };
+        assert!(reads(dir.join("old/f")));
+        assert!(!reads(dir.join("new/f")));
+    }
+
     /// Rows are per closure: `big` rides the session's row and `h`'s, and
     /// `f` and `g`, mentioning nothing, share the one empty row.
     #[test]

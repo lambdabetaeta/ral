@@ -56,6 +56,8 @@ use std::marker::PhantomData;
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsFd, BorrowedFd};
 use std::path::{Component, Path, PathBuf};
+#[cfg(unix)]
+use std::sync::Arc;
 use std::time::SystemTime;
 use strum::{IntoStaticStr, VariantArray};
 
@@ -767,7 +769,6 @@ impl Trace {
     }
 }
 
-#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "used from step 10"))]
 impl Trace {
     /// What `identity.rs` reads, nothing outside `path/`.
     pub(super) fn steps(&self) -> &[Step] {
@@ -776,6 +777,10 @@ impl Trace {
 
     pub(super) fn tail(&self) -> &[EntryName] {
         &self.tail
+    }
+
+    pub(super) fn root_id(&self) -> ObjectId {
+        self.root_id
     }
 }
 
@@ -839,12 +844,18 @@ impl<'de> Deserialize<'de> for Trace {
 
 /// An exclusion's hold on the last object its walk opened.
 ///
-/// For now its trace alone, which is what `Serialize` writes and
-/// `Deserialize` reads, and what `Eq` and `Ord` compare.  The handle that
-/// makes it a hold is step 10's.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// On Unix `handle` is the walk's own, `Some` while that object was found at its
+/// position; `None` is the unheld state: after a `rehold` that found another
+/// object there or none, after a `Deserialize` (the wire carries the trace
+/// alone), or (macOS) a hold the object's permissions refused.  Windows holds
+/// nothing.  Unheld is sound: the trace's positions and identities still
+/// match, and a recycled identity over-denies.  `Serialize` as the trace;
+/// `Deserialize` unheld; `PartialEq`, `Eq`, `Ord` by trace.
+#[derive(Clone, Debug)]
 pub struct Hold {
     trace: Trace,
+    #[cfg(unix)]
+    handle: Option<Arc<File>>,
 }
 
 impl Hold {
@@ -852,10 +863,65 @@ impl Hold {
         &self.trace
     }
 
-    /// Take hold of the object again on this host.  Nothing is held yet, so
-    /// there is nothing to take again.
-    #[allow(clippy::unused_self, reason = "nothing is held yet: step 10")]
-    pub(crate) fn rehold(&mut self) {}
+    fn unheld(trace: Trace) -> Self {
+        Self {
+            trace,
+            #[cfg(unix)]
+            handle: None,
+        }
+    }
+
+    /// Take hold of the object again on this host: walk `trace.real()`
+    /// without following the leaf, and keep the handle where the walk's trace
+    /// has as many steps and the same last identity; else unheld.  The
+    /// recorded trace stays whatever the walk found, and a walk error is the
+    /// unheld state.
+    #[cfg_attr(
+        windows,
+        allow(
+            clippy::unused_self,
+            reason = "Windows holds nothing, so nothing is taken again"
+        )
+    )]
+    pub(crate) fn rehold(&mut self) {
+        #[cfg(unix)]
+        {
+            let trace = &self.trace;
+            self.handle = finish(
+                trace.real().as_path(),
+                Mode::NoFollow,
+                OnMissing::Stop,
+                Links::Splice,
+                |_| true,
+            )
+            .ok()
+            .filter(|found| {
+                found.trace.steps.len() == trace.steps.len()
+                    && found.trace.last_id() == trace.last_id()
+            })
+            .and_then(|found| found.into_hold().handle);
+        }
+    }
+}
+
+impl PartialEq for Hold {
+    fn eq(&self, other: &Self) -> bool {
+        self.trace == other.trace
+    }
+}
+
+impl Eq for Hold {}
+
+impl PartialOrd for Hold {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Hold {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.trace.cmp(&other.trace)
+    }
 }
 
 impl Serialize for Hold {
@@ -866,7 +932,7 @@ impl Serialize for Hold {
 
 impl<'de> Deserialize<'de> for Hold {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Trace::deserialize(d).map(|trace| Self { trace })
+        Trace::deserialize(d).map(Self::unheld)
     }
 }
 
@@ -890,6 +956,14 @@ impl Excluded {
     pub(crate) fn rehold(&mut self) {
         self.named.rehold();
         self.target.iter_mut().for_each(Hold::rehold);
+    }
+
+    /// The identity of each object held, the name's first, `None` where
+    /// unheld.
+    #[cfg(all(test, unix))]
+    pub(crate) fn held_ids(&self) -> Vec<Option<ObjectId>> {
+        let held = |hold: &Hold| hold.handle.as_deref().map(|f| ObjectId::of(f).unwrap());
+        self.holds().map(held).collect()
     }
 
     /// The holds, the name's first.
@@ -1423,6 +1497,14 @@ impl Listed<'_> {
     pub(crate) fn real(&self) -> RealPath {
         self.parent.real.child(&self.step.name)
     }
+
+    pub(super) fn parent(&self) -> &Trace {
+        self.parent
+    }
+
+    pub(super) fn step(&self) -> &Step {
+        &self.step
+    }
 }
 
 /// An object named exactly: the handle of its directory, its trace, its leaf.
@@ -1454,8 +1536,6 @@ enum Leaf {
         info: host::DirInfo,
     },
     Stated {
-        #[expect(dead_code, reason = "used from step 10")]
-        id: ObjectId,
         stat: Stat,
     },
 }
@@ -1491,6 +1571,22 @@ impl<A: Authority> Located<A> {
         match &self.leaf {
             Leaf::Absent => None,
             Leaf::Held { stat, .. } | Leaf::Stated { stat, .. } => Some(stat),
+        }
+    }
+
+    /// The object the walk ended on, as an exclusion holds it: its trace and,
+    /// on Unix, the handle the walk opened on the deepest object it reached,
+    /// which an absent leaf's is its directory.  A `Stated` leaf has none.
+    fn into_hold(self) -> Hold {
+        Hold {
+            #[cfg(unix)]
+            handle: match self.leaf {
+                Leaf::Held { file, .. } => Some(file),
+                Leaf::Absent => Some(self.dir.file),
+                Leaf::Stated { .. } => None,
+            }
+            .map(Arc::new),
+            trace: self.trace,
         }
     }
 
@@ -2170,10 +2266,7 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
                 stat: child.stat,
                 info: child.info,
             },
-            None => Leaf::Stated {
-                id: child.step.id,
-                stat: child.stat,
-            },
+            None => Leaf::Stated { stat: child.stat },
         };
         Located {
             dir: self.cursor.into_top(),
@@ -2320,7 +2413,9 @@ pub fn walk_lenient(rp: &LexicalPath, mode: LeafMode) -> io::Result<Trace> {
 /// A grant exclusion: the spelling walked leniently without following its
 /// last component, and where that is a link, the target read through the
 /// link's own handle and walked, following links, from the directory the
-/// walk left the cursor in; the spelling is never walked a second time.
+/// walk left the cursor in; the spelling is never walked a second time.  Each
+/// leaf is held by the walk's own handle (§2), the link before its target is
+/// read, so what the link named is what the held link names.
 ///
 /// # Errors
 /// What ends no steps, as [`walk_lenient`]'s.
@@ -2332,9 +2427,6 @@ pub(crate) fn walk_excluded(rp: &LexicalPath) -> io::Result<Excluded> {
         Links::Splice,
         |_| true,
     )?;
-    let hold = |located: Located| Hold {
-        trace: located.trace,
-    };
     match walker.advance()? {
         Ended::Leaf(child) if child.step.kind == Kind::Symlink => {
             let (name, named) = (
@@ -2343,18 +2435,26 @@ pub(crate) fn walk_excluded(rp: &LexicalPath) -> io::Result<Excluded> {
             );
             let (link, ..) = child.held()?;
             walker.mode = Mode::Follow;
-            let spliced = host::read_link(&link.file).and_then(|target| walker.splice(&target));
-            let target = match spliced {
+            #[cfg(test)]
+            tests::around_link_read(tests::Around::Before);
+            let read = host::read_link(&link.file);
+            #[cfg(test)]
+            tests::around_link_read(tests::Around::After);
+            let target = match read.and_then(|target| walker.splice(&target)) {
                 Ok(()) => walker.run()?,
                 Err(e) => walker.stopped(name, e)?,
             };
             Ok(Excluded {
-                named: Hold { trace: named },
-                target: Some(hold(target)),
+                named: Hold {
+                    trace: named,
+                    #[cfg(unix)]
+                    handle: Some(Arc::new(link.file)),
+                },
+                target: Some(target.into_hold()),
             })
         }
         ended => Ok(Excluded {
-            named: hold(walker.conclude(ended)?),
+            named: walker.conclude(ended)?.into_hold(),
             target: None,
         }),
     }

@@ -150,6 +150,48 @@ fn a_deny_holding_the_stored_name_refuses_plainly() {
     assert_eq!(matched_by(&under(&["d", "d/Secrets"])), MatchedBy::Name);
 }
 
+/// A hard link to a denied file is refused as the object under another name:
+/// the one way the refusal is cited by identity.
+#[test]
+fn a_deny_holding_a_hard_link_cites_the_object_under_another_name() {
+    use super::{Refused, fs_judge};
+    use crate::capability::Withheld;
+    use crate::path::MatchedBy;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    std::fs::write(root.join("secret"), "s").unwrap();
+    std::fs::hard_link(root.join("secret"), root.join("alias")).unwrap();
+    let grants = stack(FsPolicy {
+        read_prefixes: vec![FrozenPath::from_surface(crate::path::utf8(&root).unwrap())],
+        deny_paths: vec![FrozenPath::from_surface(
+            crate::path::utf8(&root.join("secret")).unwrap(),
+        )],
+        ..FsPolicy::default()
+    });
+    let refused = fs_judge(
+        &grants,
+        &Floor::default(),
+        &trace(root.join("alias")),
+        &FsOp::Read,
+    )
+    .expect_err("the alias is the denied object");
+    assert!(
+        matches!(
+            refused,
+            Refused::Withheld(Withheld::Excluded {
+                matched_by: MatchedBy::Identity,
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+    assert!(
+        refused.to_string().contains("is the denied object")
+            && refused.to_string().contains("under another name"),
+        "{refused}"
+    );
+}
+
 mod words {
     use super::*;
     use crate::capability::{Evidence, ExecGrant, ExecKey, Program};

@@ -922,6 +922,45 @@ fn a_session_ceiling_pushed_in_a_run_outlives_it() {
     assert_ceiling_survives(narrowing_shell(), narrow);
 }
 
+/// A `Run`'s `caps` arrive as traces, unheld; `run_framed` takes hold of
+/// their exclusions before the body runs.
+#[cfg(unix)]
+#[test]
+fn a_framed_run_holds_its_exclusions_again_before_the_body_runs() {
+    use crate::capability::{Capabilities, FsPolicy};
+    let tmp = tempfile::tempdir().unwrap();
+    let secret = crate::test_helper::real(tmp.path())
+        .as_path()
+        .join("secret");
+    std::fs::write(&secret, "s").unwrap();
+    let stack = crate::test_helper::stack([crate::test_helper::layer(Capabilities {
+        fs: Some(FsPolicy {
+            deny_paths: vec![crate::path::FrozenPath::from_surface(
+                crate::path::utf8(&secret).unwrap(),
+            )],
+            ..FsPolicy::default()
+        }),
+        ..Capabilities::default()
+    })]);
+    let caps: GrantStack = serde_json::from_str(&serde_json::to_string(&stack).unwrap()).unwrap();
+    assert_eq!(caps.held_ids(), [None]);
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = crate::test_helper::core_runtime();
+    let at_body = seen.clone();
+    install_act(&mut runtime, "held-ids", move |_, shell| {
+        *at_body.lock().unwrap() = shell.context.grants.held_ids();
+    });
+    let mut shell = Shell::root(runtime.into(), crate::test_helper::process_cwd());
+    let mut run = Run::captured("held-ids", test_origin());
+    run.caps = caps;
+    shell.run(run).expect_ran();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [Some(crate::test_helper::trace(&secret).last_id())]
+    );
+}
+
 /// The same inside a `grant { }` block: its frame leaves by position, not
 /// by count, so the ceiling pushed above it stays.
 #[test]
