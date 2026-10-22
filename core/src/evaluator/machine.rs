@@ -811,7 +811,7 @@ impl Machine {
                 Ok(Focus::Return(Terminal::Value(v)))
             }
             Resolution::External(head) => {
-                let v = command_call::run_external(&head, &argv, &redirs, span, mooring, shell)?;
+                let v = command_call::run_external(head, &argv, &redirs, span, mooring, shell)?;
                 Ok(Focus::Return(Terminal::Value(v)))
             }
         }

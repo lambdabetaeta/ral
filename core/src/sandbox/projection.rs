@@ -302,7 +302,7 @@ fn live_support(
 ) -> BTreeSet<RealPath> {
     use crate::capability::Program;
     let launched = admitted.and_then(|a| match a.program() {
-        Program::File { trace, .. } => Some(trace.real()),
+        Program::File { located, .. } => Some(located.real()),
         Program::Tool(_) => None,
     });
     let files = table.into_iter().flat_map(ExecRules::allowed_files);

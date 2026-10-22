@@ -121,11 +121,11 @@ fn windows_sandboxed_command(
     // mirroring the Linux backend binding the program path into the bwrap argv.
     let (mut launch, image): (crate::process::Launch, Option<crate::path::RealPath>) =
         match admitted.program() {
-            Program::File { path, trace } => {
-                let mut launch = crate::process::Launch::new(trace.real().as_path());
-                launch.arg0(path);
+            Program::File { arg0, located } => {
+                let mut launch = crate::process::Launch::new(located.real().as_path());
+                launch.arg0(arg0);
                 launch.args(args);
-                (launch, Some(trace.real().clone()))
+                (launch, Some(located.real().clone()))
             }
             Program::Tool(tool) => {
                 let mut launch = super::reexec::launch(Role::BundledTool).map_err(|e| {

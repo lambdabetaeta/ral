@@ -24,7 +24,6 @@ use crate::first_order::FOValue;
 use crate::ir::{CaseArm, Comp, CompKind, Exec, Val, ValListElem};
 #[cfg(unix)]
 use crate::path::Walked;
-use crate::path::{LeafMode, LexicalPath, walk_lenient};
 use crate::protocol::Frame;
 use crate::protocol::channel::{WireChannel, WireStream};
 use crate::protocol::probe::Probe;
@@ -166,14 +165,12 @@ pub fn exec_projection_files(projection: &SandboxProjection) -> Vec<String> {
     }
 }
 
-/// A host file whose real path, and launch path, is `real`: walked leniently,
-/// so a path the test names need not exist.
+/// A host file whose real path, and launch path, is `real`, which exists: a
+/// program is the object a walk holds.
 fn file(real: &str) -> Program {
-    let path = std::path::PathBuf::from(real);
-    let spelled = LexicalPath::absolute(&path).expect("a test names an absolute file");
     Program::File {
-        trace: walk_lenient(&spelled, LeafMode::Follow).expect("a test file walks"),
-        path,
+        located: Box::new(crate::test_helper::located(real)),
+        arg0: real.into(),
     }
 }
 

@@ -125,14 +125,15 @@ pub(crate) fn run_base_frame(
 
 /// An external's door, with its redirects installed inside it.
 pub(crate) fn run_external(
-    head: &Head,
+    head: Head,
     args: &[Value],
     redirects: &Redirects<String>,
     span: Option<Span>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    call_external(&head.shown, args, mooring, shell, |shell| {
+    let shown = head.shown.clone();
+    call_external(&shown, args, mooring, shell, |shell| {
         with_redirects(redirects, span, mooring, shell, |shell| {
             command::run(head, args, mooring, shell)
         })

@@ -23,7 +23,7 @@ use super::linux::landlock::Landlocked;
 use super::{ExecProjection, SandboxProjection};
 use crate::Role;
 use crate::capability::{Admitted, Program, Subject, Withheld};
-use crate::path::{Deny, RealPath, shown};
+use crate::path::{Deny, Judged, Located, Reading, RealPath, shown};
 use crate::process::SpawnFailure;
 use crate::syntax::quote::quote_word;
 use libc::c_int;
@@ -211,10 +211,10 @@ impl Run {
     fn of(admitted: &Admitted, projection: &SandboxProjection) -> Self {
         let args = admitted.args().iter().map(OsString::from).collect();
         match admitted.program() {
-            Program::File { path, trace } => Self::File {
-                real: trace.real().as_path().to_path_buf(),
-                arg0: path.clone(),
-                excluded: interpreter_exclusion(trace.real(), projection),
+            Program::File { arg0, located } => Self::File {
+                real: located.real().as_path().to_path_buf(),
+                arg0: arg0.clone(),
+                excluded: interpreter_exclusion(located, projection),
                 args,
             },
             Program::Tool(tool) => Self::Tool(tool.clone(), args),
@@ -223,10 +223,13 @@ impl Run {
 }
 
 /// The exclusion, on either axis, that covers the interpreter of the `#!`
-/// script at `real`.  For the hint alone: support is the projection's, and
-/// nothing here is evidence.
-fn interpreter_exclusion(real: &RealPath, projection: &SandboxProjection) -> Option<String> {
-    let interpreter = RealPath::of_path(&super::carriers::shebang(real.as_path())?).ok()?;
+/// script `program`, read through the handle that was judged.  For the hint
+/// alone: support is the projection's, and nothing here is evidence.
+fn interpreter_exclusion(
+    program: &Located<Judged<Reading>>,
+    projection: &SandboxProjection,
+) -> Option<String> {
+    let interpreter = RealPath::of_path(&super::carriers::launched_shebang(program)?).ok()?;
     let exec = match &projection.exec {
         ExecProjection::Restricted(rules) => rules.withheld(Subject::Program(
             crate::path::Subject::Position(&interpreter),

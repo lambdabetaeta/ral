@@ -4,7 +4,7 @@
 //!
 //! Each test drives `Shell::with_layer` and `sandbox_projection` over
 //! the public API, and the in-process exec guard through `test_access`'s doors, which
-//! judge a file by the real path a test names.  The policies and their
+//! judge a file a test lays on disk in a tempdir.  The policies and their
 //! meet/extension semantics are the contract.
 
 use ral_core::capability::{Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy};
@@ -12,20 +12,15 @@ use ral_core::path::FrozenPath;
 use ral_core::test_access::check_file;
 #[cfg(unix)]
 use ral_core::test_access::{KernelExecRule, exec_projection_files, exec_projection_rules};
-use ral_core::test_helper::layer;
+use ral_core::test_helper::{Tree, layer};
 #[cfg(unix)]
 use std::path::Path;
 
-/// `p` as an absolute path on the host, which for Windows needs a drive.
-/// Rooted at `/ral-test`, which no host has, so a frozen key resolves to
-/// itself and names the file a test judges.
-fn host(p: &str) -> String {
-    let p = format!("/ral-test{p}");
-    if cfg!(windows) {
-        format!("C:{}", p.replace('/', r"\"))
-    } else {
-        p
-    }
+/// `names` laid in a tempdir: a program is judged as the file a walk holds.
+fn laid(names: &[&str]) -> (tempfile::TempDir, Tree) {
+    let tmp = tempfile::tempdir().unwrap();
+    let tree = Tree::lay(tmp.path(), names);
+    (tmp, tree)
 }
 
 fn names(entries: &[(&str, Evidence)]) -> impl Iterator<Item = (ExecKey, Evidence)> {
@@ -34,16 +29,22 @@ fn names(entries: &[(&str, Evidence)]) -> impl Iterator<Item = (ExecKey, Evidenc
         .map(|(name, v)| (ExecKey::Name((*name).to_string()), *v))
 }
 
-fn paths(entries: &[(&str, Evidence)]) -> impl Iterator<Item = (ExecKey, Evidence)> {
+fn paths<'a>(
+    tree: &'a Tree,
+    entries: &'a [(&str, Evidence)],
+) -> impl Iterator<Item = (ExecKey, Evidence)> + 'a {
     entries
         .iter()
-        .map(|(path, v)| (ExecKey::Path(FrozenPath::from_surface(&host(path))), *v))
+        .map(|(path, v)| (ExecKey::Path(FrozenPath::from_surface(&tree.at(path))), *v))
 }
 
-fn dirs(entries: &[(&str, bool)]) -> impl Iterator<Item = (ExecKey, Evidence)> {
+fn dirs<'a>(
+    tree: &'a Tree,
+    entries: &'a [(&str, bool)],
+) -> impl Iterator<Item = (ExecKey, Evidence)> + 'a {
     entries.iter().map(|(dir, v)| {
         (
-            ExecKey::Dir(FrozenPath::from_surface(&host(dir))),
+            ExecKey::Dir(FrozenPath::from_surface(&tree.at(dir))),
             if *v { Evidence::ALLOW } else { Evidence::DENY },
         )
     })
@@ -60,15 +61,16 @@ fn exec_only(exec: ExecGrant) -> Capabilities {
 /// the inner directory is refused though the outer admits.
 #[test]
 fn an_excluded_dir_carves_a_hole_in_an_allowed_dir() {
+    let (_tmp, tree) = laid(&["/bin/ls", "/bin/sensitive/payload"]);
     let mut shell = ral_core::test_helper::core_shell();
-    let grant = exec_only(dirs(&[("/bin", true), ("/bin/sensitive", false)]).collect());
+    let grant = exec_only(dirs(&tree, &[("/bin", true), ("/bin/sensitive", false)]).collect());
     shell
         .with_layer(layer(grant.clone()), |sh| {
-            check_file(sh, &host("/bin/ls"), &[])
+            check_file(sh, &tree.at("/bin/ls"), &[])
         })
         .expect("ls under the allow dir should be admitted");
     let result = shell.with_layer(layer(grant), |sh| {
-        check_file(sh, &host("/bin/sensitive/payload"), &[])
+        check_file(sh, &tree.at("/bin/sensitive/payload"), &[])
     });
     assert!(result.is_err(), "the exclusion should beat the allowed dir");
 }
@@ -77,21 +79,23 @@ fn an_excluded_dir_carves_a_hole_in_an_allowed_dir() {
 /// of that name.
 #[test]
 fn a_bare_allow_admits_no_other_file_of_its_name() {
+    let (_tmp, tree) = laid(&["/fake-bin/git"]);
     let mut shell = ral_core::test_helper::core_shell();
     let grant = exec_only(names(&[("git", Evidence::ALLOW)]).collect());
     let result = shell.with_layer(layer(grant), |shell| {
-        check_file(shell, &host("/fake-bin/git"), &["status".into()])
+        check_file(shell, &tree.at("/fake-bin/git"), &["status".into()])
     });
     assert!(result.is_err());
 }
 
 #[test]
 fn a_path_key_admits_its_file() {
+    let (_tmp, tree) = laid(&["/fake-bin/git"]);
     let mut shell = ral_core::test_helper::core_shell();
-    let grant = exec_only(paths(&[("/fake-bin/git", Evidence::ALLOW)]).collect());
+    let grant = exec_only(paths(&tree, &[("/fake-bin/git", Evidence::ALLOW)]).collect());
     shell
         .with_layer(layer(grant), |shell| {
-            check_file(shell, &host("/fake-bin/git"), &["status".into()])
+            check_file(shell, &tree.at("/fake-bin/git"), &["status".into()])
         })
         .expect("a path key should admit the file it names");
 }
@@ -168,13 +172,16 @@ fn sandbox_projection_does_not_leak_outer_raw_prefix() {
 /// still denied, however the head spelled it.
 #[test]
 fn a_bare_deny_vetoes_its_name_under_an_allow_dir() {
+    let (_tmp, tree) = laid(&["/bin/bash"]);
     let mut shell = ral_core::test_helper::core_shell();
     let grant = exec_only(
         names(&[("bash", Evidence::DENY)])
-            .chain(dirs(&[("/bin", true)]))
+            .chain(dirs(&tree, &[("/bin", true)]))
             .collect(),
     );
-    let result = shell.with_layer(layer(grant), |sh| check_file(sh, &host("/bin/bash"), &[]));
+    let result = shell.with_layer(layer(grant), |sh| {
+        check_file(sh, &tree.at("/bin/bash"), &[])
+    });
     assert!(
         result.is_err(),
         "a bare bash: deny must veto a bash under an allow dir"
@@ -185,9 +192,10 @@ fn a_bare_deny_vetoes_its_name_under_an_allow_dir() {
 /// the host's `rg`, and `evil/rg` is another file.
 #[test]
 fn a_bare_allow_does_not_admit_a_planted_file_of_its_name() {
+    let (_tmp, tree) = laid(&["/evil/rg"]);
     let mut shell = ral_core::test_helper::core_shell();
     let grant = exec_only(names(&[("rg", Evidence::ALLOW)]).collect());
-    let result = shell.with_layer(layer(grant), |sh| check_file(sh, &host("/evil/rg"), &[]));
+    let result = shell.with_layer(layer(grant), |sh| check_file(sh, &tree.at("/evil/rg"), &[]));
     assert!(
         result.is_err(),
         "a bare rg: allow must not admit a planted evil/rg"
@@ -197,13 +205,14 @@ fn a_bare_allow_does_not_admit_a_planted_file_of_its_name() {
 /// A path key's deny beats the allow dir the file sits in.
 #[test]
 fn a_path_key_deny_beats_a_covering_allow_dir() {
+    let (_tmp, tree) = laid(&["/bin/git"]);
     let mut shell = ral_core::test_helper::core_shell();
     let grant = exec_only(
-        paths(&[("/bin/git", Evidence::DENY)])
-            .chain(dirs(&[("/bin", true)]))
+        paths(&tree, &[("/bin/git", Evidence::DENY)])
+            .chain(dirs(&tree, &[("/bin", true)]))
             .collect(),
     );
-    let result = shell.with_layer(layer(grant), |sh| check_file(sh, &host("/bin/git"), &[]));
+    let result = shell.with_layer(layer(grant), |sh| check_file(sh, &tree.at("/bin/git"), &[]));
     assert!(result.is_err(), "a path key's deny must veto its file");
 }
 
@@ -238,9 +247,10 @@ fn with_fs(exec: ExecGrant) -> Capabilities {
 #[cfg(unix)]
 #[test]
 fn sandbox_projection_admits_a_path_key_covered_by_a_sibling_dir() {
-    let outer = with_fs(dirs(&[("/bin", true)]).collect());
-    let inner = with_fs(paths(&[("/bin/git", Evidence::ALLOW)]).collect());
-    let git = host("/bin/git");
+    let (_tmp, tree) = laid(&["/bin/git"]);
+    let outer = with_fs(dirs(&tree, &[("/bin", true)]).collect());
+    let inner = with_fs(paths(&tree, &[("/bin/git", Evidence::ALLOW)]).collect());
+    let git = tree.at("/bin/git");
 
     let mut shell = ral_core::test_helper::core_shell();
     let projection = shell.with_layer(layer(outer.clone()), |sh| {
@@ -291,19 +301,28 @@ fn kernel_admits(rules: Option<&[KernelExecRule]>, real: &str) -> bool {
 #[cfg(unix)]
 #[test]
 fn exec_projection_never_out_permits_the_guard() {
-    let allow_dir = |d: &str| dirs(&[(d, true)]).collect::<ExecGrant>();
+    let (_tmp, tree) = laid(&[
+        "/bin/git",
+        "/bin/ls",
+        "/bin/sudo",
+        "/bin/bash",
+        "/bin/nested/bash",
+        "/opt/bin/tool",
+        "/evil",
+    ]);
+    let allow_dir = |d: &str| dirs(&tree, &[(d, true)]).collect::<ExecGrant>();
     let cases: Vec<(ExecGrant, ExecGrant, Vec<&str>)> = vec![
         // A path key admitted by inner, covered only by outer's allow dir.
         (
             allow_dir("/bin"),
-            paths(&[("/bin/git", Evidence::ALLOW)]).collect(),
+            paths(&tree, &[("/bin/git", Evidence::ALLOW)]).collect(),
             vec!["/bin/git", "/bin/ls", "/evil"],
         ),
         // A path key's deny carves a hole in a shared allow dir.
         (
             allow_dir("/bin"),
-            paths(&[("/bin/sudo", Evidence::DENY)])
-                .chain(dirs(&[("/bin", true)]))
+            paths(&tree, &[("/bin/sudo", Evidence::DENY)])
+                .chain(dirs(&tree, &[("/bin", true)]))
                 .collect(),
             vec!["/bin/ls", "/bin/sudo"],
         ),
@@ -311,15 +330,15 @@ fn exec_projection_never_out_permits_the_guard() {
         (
             allow_dir("/bin"),
             names(&[("bash", Evidence::DENY)])
-                .chain(dirs(&[("/bin", true)]))
+                .chain(dirs(&tree, &[("/bin", true)]))
                 .collect(),
             vec!["/bin/ls", "/bin/bash", "/bin/nested/bash"],
         ),
         // A path key's deny must veto a file both dirs would admit.
         (
             allow_dir("/bin"),
-            paths(&[("/bin/bash", Evidence::DENY)])
-                .chain(dirs(&[("/bin", true)]))
+            paths(&tree, &[("/bin/bash", Evidence::DENY)])
+                .chain(dirs(&tree, &[("/bin", true)]))
                 .collect(),
             vec!["/bin/ls", "/bin/bash"],
         ),
@@ -340,7 +359,7 @@ fn exec_projection_never_out_permits_the_guard() {
         });
         let kernel = exec_projection_rules(&projection);
         for probe in probes {
-            let real = host(probe);
+            let real = tree.at(probe);
             let mut shell = ral_core::test_helper::core_shell();
             let guard_ok = shell
                 .with_layer(layer(outer.clone()), |sh| {

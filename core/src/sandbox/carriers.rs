@@ -9,7 +9,10 @@
 //! never consults them.
 
 use crate::path::walk::{Kind, Vetted, walk_with};
-use crate::path::{CwdPath, LeafMode, LexicalPath, ObjectId, RealPath, Resolver, is_absolute};
+use crate::path::{
+    CwdPath, Judged, LeafMode, LexicalPath, Located, ObjectId, Reading, RealPath, Resolver,
+    is_absolute,
+};
 use crate::types::EnvVars;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -142,7 +145,7 @@ fn system_only(v: &Vetted<'_>, me: u32) -> bool {
 /// trampoline's hint names the interpreter.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[silent:carrier-shebang] reads the head of an admitted program to learn its interpreter, as the kernel will; sandbox rendering, not the model's data I/O"
+    reason = "[silent:carrier-shebang] reads the head of a seed, a hop or a refused exec's target by name to learn its interpreter, as the kernel will; sandbox rendering, not the model's data I/O"
 )]
 pub(crate) fn shebang(path: &Path) -> Option<PathBuf> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -156,6 +159,13 @@ pub(crate) fn shebang(path: &Path) -> Option<PathBuf> {
         .ok()?
         .is_file()
         .then(|| head_shebang(file))?
+}
+
+/// The interpreter on the `#!` line of the program that was judged, read
+/// through its own handle: the object the launch is admitted for, whatever the
+/// name holds by now.
+pub(crate) fn launched_shebang(program: &Located<Judged<Reading>>) -> Option<PathBuf> {
+    head_shebang(program.read().ok()?)
 }
 
 fn head_shebang(file: File) -> Option<PathBuf> {
@@ -286,6 +296,24 @@ mod tests {
     fn a_line_with_no_end_in_the_buffer_yields_nothing() {
         let (_dir, root) = temp_root();
         assert_eq!(shebang(&file(&root, "a", "#!/bin/sh")), None);
+    }
+
+    /// The launched program's `#!` line is the admitted object's, though its
+    /// name holds another script by the time it is read.
+    #[test]
+    fn a_launched_programs_interpreter_is_read_through_the_judged_handle() {
+        use crate::capability::Program;
+        let (_dir, root) = temp_root();
+        let script = file(&root, "run", "#!/bin/sh\nbody\n");
+        let admitted =
+            super::super::launch::admitted(Program::file(script.clone()).expect("a script"), &[]);
+        std::fs::rename(file(&root, "other", "#!/bin/other\n"), &script).expect("swap");
+
+        assert_eq!(shebang(&script), Some(PathBuf::from("/bin/other")));
+        let Program::File { located, .. } = admitted.program() else {
+            panic!("a script is a file")
+        };
+        assert_eq!(launched_shebang(located), Some(PathBuf::from("/bin/sh")));
     }
 
     /// macOS ends the `#!` line at a `#`; Linux reads it as part of the name.

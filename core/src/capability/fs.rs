@@ -405,6 +405,9 @@ fn fold(grants: &GrantStack, op: &FsOp, places: bool, floor: &Floor) -> Option<F
     })
 }
 
+/// An object a judgment refused, handed back with what withheld it.
+pub(crate) type Returned = Box<(Located, Withheld<FsDeny>)>;
+
 /// The read and running regions folded once, for a walk that judges many
 /// objects.  A permit or an exclusion of the first, which holds no run
 /// places, is final with the same witness; only a missing allowance asks the
@@ -441,13 +444,12 @@ impl ReadRegion {
     /// Judge the object `l` for reading.
     ///
     /// # Errors
-    /// What withholds it.
-    pub(crate) fn judge_file(
-        &self,
-        l: Located,
-    ) -> Result<Located<Judged<Reading>>, Withheld<FsDeny>> {
-        self.withheld(Subject::Access(l.trace()))?;
-        Ok(l.judged(Verdict(PhantomData)))
+    /// What withholds it, with `l` handed back.
+    pub(crate) fn judge_file(&self, l: Located) -> Result<Located<Judged<Reading>>, Returned> {
+        match self.withheld(Subject::Access(l.trace())) {
+            Ok(()) => Ok(l.judged(Verdict(PhantomData))),
+            Err(why) => Err(Box::new((l, why))),
+        }
     }
 
     /// A name a listing shows, judged by what the listing saw of it.
@@ -576,7 +578,7 @@ mod tests {
     use crate::capability::Evidence;
     use crate::capability::{Capabilities, ExecDenial, ExecGrant, ExecKey, Program};
     use crate::path::{test_absolute, utf8};
-    use crate::test_helper::{core_runtime, layer, stack, trace};
+    use crate::test_helper::{core_runtime, layer, located, stack, trace};
     use std::path::{Path, PathBuf};
 
     /// A spelling taken as written, on this host.
@@ -966,8 +968,8 @@ mod tests {
         std::fs::write(system.join("prog"), "").unwrap();
         let floor = Floor::resolve([system.clone()]).unwrap();
         let program = Program::File {
-            trace: trace(system.join("prog")),
-            path: system.join("prog"),
+            located: Box::new(located(system.join("prog"))),
+            arg0: system.join("prog"),
         };
         let reads_nothing = stack([fs_layer(FsPolicy::default())]);
         assert!(reads_nothing.admits(&floor, &program));

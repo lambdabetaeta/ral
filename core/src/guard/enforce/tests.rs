@@ -10,7 +10,7 @@
 use super::FsOp;
 use crate::capability::{Capabilities, Floor, FsPolicy, GrantStack};
 use crate::path::FrozenPath;
-use crate::test_helper::{layer, trace};
+use crate::test_helper::{Tree, layer, located, trace};
 
 fn stack(fs: FsPolicy) -> GrantStack {
     crate::test_helper::stack([layer(Capabilities {
@@ -171,8 +171,8 @@ mod words {
 
     fn file(real: &str) -> Program {
         Program::File {
-            path: real.into(),
-            trace: trace(real),
+            arg0: real.into(),
+            located: Box::new(located(real)),
         }
     }
 
@@ -191,12 +191,15 @@ mod words {
     /// more than one layer supplies the axis.
     #[test]
     fn a_missing_allowance_mentions_an_enclosing_grant_only_when_nested() {
-        let only = exec(&[(dir("/other"), Evidence::ALLOW)]);
-        let one = refusal(&ctx([only.clone()]), "/x/t");
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = Tree::lay(tmp.path(), &["/x/t", "/other/"]);
+        let t = tree.at("/x/t");
+        let only = exec(&[(dir(&tree.at("/other")), Evidence::ALLOW)]);
+        let one = refusal(&ctx([only.clone()]), &t);
         assert!(one.message.contains("lets it run"), "{}", one.message);
         assert!(!one.hint.unwrap().contains("enclosing grant"));
-        let outer = exec(&[(dir("/x"), Evidence::ALLOW)]);
-        let two = refusal(&ctx([outer, only]), "/x/t");
+        let outer = exec(&[(dir(&tree.at("/x")), Evidence::ALLOW)]);
+        let two = refusal(&ctx([outer, only]), &t);
         assert!(
             two.message
                 .contains("some layer's exec `allow` list does not let it run"),
@@ -210,9 +213,13 @@ mod words {
     /// offered against it.
     #[test]
     fn an_exclusion_is_named_and_no_allowance_is_suggested() {
-        let both = exec(&[(dir("/x"), Evidence::ALLOW), (dir("/x"), Evidence::DENY)]);
-        let e = refusal(&ctx([both]), "/x/t");
-        assert!(e.message.contains("`dir `absolute /x"), "{}", e.message);
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = Tree::lay(tmp.path(), &["/x/t"]);
+        let x = tree.at("/x");
+        let both = exec(&[(dir(&x), Evidence::ALLOW), (dir(&x), Evidence::DENY)]);
+        let e = refusal(&ctx([both]), &tree.at("/x/t"));
+        let named = format!("`dir `absolute {}", crate::path::shown(&x));
+        assert!(e.message.contains(&named), "{}", e.message);
         assert!(
             e.message.contains("cannot override an exclusion"),
             "{}",
@@ -247,18 +254,21 @@ mod words {
     /// so the fs layer sits beneath the exec layer.
     #[test]
     fn an_unreadable_program_is_refused_for_what_it_reads() {
-        let runs = exec(&[(dir("/x"), Evidence::ALLOW)]);
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = Tree::lay(tmp.path(), &["/x/t"]);
+        let (x, t) = (tree.at("/x"), tree.at("/x/t"));
+        let runs = exec(&[(dir(&x), Evidence::ALLOW)]);
         let reads = Capabilities {
             fs: Some(FsPolicy::default()),
             ..Capabilities::default()
         };
-        let e = refusal(&ctx([reads, runs.clone()]), "/x/t");
+        let e = refusal(&ctx([reads, runs.clone()]), &t);
         assert!(
             e.message.contains("may run, but it is not readable"),
             "{}",
             e.message
         );
-        let unrestricted = check_exec(&ctx([runs]), &Floor::default(), "t", file("/x/t"), vec![]);
+        let unrestricted = check_exec(&ctx([runs]), &Floor::default(), "t", file(&t), vec![]);
         assert!(unrestricted.is_ok());
     }
 

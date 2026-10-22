@@ -2,7 +2,7 @@
 //! thread, or a direct external spawned into the pipeline's process group.
 
 use super::super::command;
-use super::super::command::Head;
+use super::super::command::{Head, SpawnPlan};
 use super::collect::Slot;
 use super::group::PipelineGroup;
 use super::resolve::{StageLaunch, StageSpec};
@@ -100,10 +100,11 @@ pub(super) struct LaunchCx<'a> {
     pub(super) holds_terminal: bool,
 }
 
-/// Dispatch one stage per its resolve-time [`StageLaunch`].
+/// Dispatch one stage per its resolve-time [`StageLaunch`], which a direct
+/// stage's head leaves by value: nothing holds the program after it launches.
 pub(super) fn spawn_stage(
     stage: &Arc<crate::ir::Comp>,
-    spec: &StageSpec,
+    spec: StageSpec,
     route: StageRoute,
     cx: &mut LaunchCx<'_>,
     slot: Slot,
@@ -113,13 +114,13 @@ pub(super) fn spawn_stage(
         stdout,
         held,
     } = route;
-    let kind = match &spec.launch {
+    let kind = match spec.launch {
         StageLaunch::Direct { head, args } => StageKind::External(launch_external_stage_direct(
-            head, args, stdin, stdout, cx, &slot,
+            head, &args, stdin, stdout, cx, &slot,
         )?),
         StageLaunch::Thread => StageKind::Thread(launch_thread_stage(
             stage,
-            spec,
+            &spec,
             stdin,
             stdout,
             cx,
@@ -131,16 +132,18 @@ pub(super) fn spawn_stage(
 
 /// Spawn an external stage with no thread hosting it.
 fn launch_external_stage_direct(
-    head: &Head,
+    head: Head,
     args: &[Value],
     stdin: ByteIn,
     stdout: ByteOut,
     cx: &mut LaunchCx<'_>,
     slot: &Slot,
 ) -> Settled<ExternalStage> {
-    let rc = command::vet(head, args, cx.shell)?;
+    let SpawnPlan { shown, admitted } = command::vet(head, args, cx.shell)?;
+    let args = admitted.args().to_vec();
     let mut cmd = command::build_launch(
-        &rc,
+        &shown,
+        admitted,
         crate::sandbox::Ownership::Kept,
         cx.shell,
         &cx.shell.scope,
@@ -154,7 +157,7 @@ fn launch_external_stage_direct(
     let (mut child, leader, jail) = command::spawn(
         &mut cmd,
         PgidPolicy::Join(cx.group.leader_pgid()),
-        &rc.shown,
+        &shown,
         cx.shell,
     )?;
     let pumps = pumps.start(&mut child, &cx.shell.scope);
@@ -162,8 +165,8 @@ fn launch_external_stage_direct(
     // leads a session of its own out of the pipeline group's reach.
     Ok(ExternalStage {
         watch: slot.watch(child),
-        name: rc.shown,
-        args: rc.admitted.args().to_vec(),
+        name: shown,
+        args,
         jail,
         pumps,
         envelope: leader,

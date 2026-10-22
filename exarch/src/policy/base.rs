@@ -384,18 +384,26 @@ mod tests {
         }
     }
 
+    /// A directory outside every root `minimal` admits by place: `/tmp` and
+    /// the scratch dir are admitted wholesale, so a fixture in either proves
+    /// nothing.
+    #[cfg(unix)]
+    fn outside_tmp() -> tempfile::TempDir {
+        tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("a fixture dir beside the crate")
+    }
+
     /// End-to-end: once freeze rewrites `cwd` into the working directory, a
     /// path-style exec beneath it is admitted.
     #[cfg(unix)]
     #[test]
     fn freeze_admits_relative_exec_under_cwd_sigil() {
-        let work = std::path::Path::new("/work/proj");
-        let home = host_home();
-        let ctx = ctx_at(&home, work);
+        let work = outside_tmp();
+        let tree = ral_core::test_helper::Tree::lay(work.path(), ["/configure"]);
+        let ctx = ctx_at(&host_home(), tree.root());
         let layer = load("minimal", MINIMAL_RAL, &ctx);
 
         assert!(
-            admits(layer, "/work/proj/configure"),
+            admits(layer, &tree.at("/configure")),
             "./configure under `cwd` must be admitted"
         );
     }
@@ -525,15 +533,25 @@ mod tests {
     #[test]
     fn minimal_admits_system_git_not_homebrew() {
         let home = host_home();
+        let elsewhere = outside_tmp();
+        let tree = ral_core::test_helper::Tree::lay(elsewhere.path(), ["/opt/homebrew/bin/git"]);
         let ctx = ctx_at(&home, "/work");
         assert!(
-            admits(load("minimal", MINIMAL_RAL, &ctx), "/usr/bin/git"),
-            "minimal admits the system git via the /usr/bin/ subpath"
-        );
-        assert!(
-            !admits(load("minimal", MINIMAL_RAL, &ctx), "/opt/homebrew/bin/git"),
+            !admits(
+                load("minimal", MINIMAL_RAL, &ctx),
+                &tree.at("/opt/homebrew/bin/git")
+            ),
             "minimal does not admit a Homebrew git: brew trees are opt-in"
         );
+        // `system` names `/usr/bin` itself, so the system git is judged where it is.
+        if ral_core::path::exists("/usr/bin/git") {
+            assert!(
+                admits(load("minimal", MINIMAL_RAL, &ctx), "/usr/bin/git"),
+                "minimal admits the system git via the /usr/bin/ subpath"
+            );
+        } else {
+            eprintln!("skipped: /usr/bin/git is absent on this host");
+        }
         let extended =
             load("minimal", MINIMAL_RAL, &ctx).extend(fragment("git-ext", GIT_EXTENSION_RAL, &ctx));
         if let Some(git) = host_real("git") {

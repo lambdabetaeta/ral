@@ -443,7 +443,7 @@ mod tests {
     use crate::path::command_name_key;
     use crate::path::{RealPath, utf8};
     #[cfg(unix)]
-    use crate::test_helper::{stack, trace};
+    use crate::test_helper::{located, stack, trace};
 
     fn bare(label: &str) -> Value {
         Value::variant(label, None)
@@ -667,8 +667,8 @@ mod tests {
             grants.refusal(
                 &floor,
                 &Program::File {
-                    trace: trace(at),
-                    path: at.to_path_buf(),
+                    located: Box::new(located(at)),
+                    arg0: at.to_path_buf(),
                 },
             )
         };

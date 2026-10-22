@@ -43,6 +43,76 @@ pub fn stack(
     stack
 }
 
+/// The object at the absolute `path`, held as the walk holds it: what a
+/// program is made of.
+///
+/// # Panics
+/// If `path` is not absolute or names nothing the walk reaches.
+pub fn located(path: impl AsRef<std::path::Path>) -> crate::path::Located {
+    let spelled =
+        crate::path::LexicalPath::absolute(path.as_ref()).expect("a test names an absolute path");
+    crate::path::walk(&spelled, crate::path::LeafMode::Follow).expect("a test names a file")
+}
+
+/// Empty files and directories laid on disk, for a test to judge programs at.
+///
+/// A program is the object a walk holds, and no walk holds a path that is
+/// nowhere.  A name is spelled `/`-rooted, as a grant writes it.
+#[derive(Debug)]
+pub struct Tree(std::path::PathBuf);
+
+impl Tree {
+    /// Lays `names` under `dir`, a directory the caller owns (a tempdir): each
+    /// a directory when it ends in `/` and an empty file otherwise, its parents
+    /// made.  A name the volume folds onto another is the same object.
+    ///
+    /// # Panics
+    /// If `dir` is missing or a name cannot be laid.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[test] a fixture tree on disk, laid by name"
+    )]
+    pub fn lay(dir: &std::path::Path, names: impl IntoIterator<Item: AsRef<str>>) -> Self {
+        let root = crate::path::RealPath::of_path(dir).expect("a test tree's root exists");
+        let tree = Self(root.as_path().to_path_buf());
+        for name in names {
+            let name = name.as_ref();
+            let at = tree.path(name);
+            let parent = if name.ends_with('/') {
+                Some(&*at)
+            } else {
+                at.parent()
+            };
+            std::fs::create_dir_all(parent.expect("a name has a place")).expect("a test dir");
+            if !name.ends_with('/') {
+                std::fs::write(&at, "").expect("a test file");
+            }
+        }
+        tree
+    }
+
+    /// The real path of the tree's root.
+    pub fn root(&self) -> &std::path::Path {
+        &self.0
+    }
+
+    /// Where the `/`-rooted `spelled` lies on disk.
+    pub fn path(&self, spelled: &str) -> std::path::PathBuf {
+        let parts = spelled.split('/').filter(|part| !part.is_empty());
+        parts.fold(self.0.clone(), |path, part| path.join(part))
+    }
+
+    /// [`Self::path`] as the text a grant or a check names it by.
+    ///
+    /// # Panics
+    /// If the path is not UTF-8, which a tempdir's is.
+    pub fn at(&self, spelled: &str) -> String {
+        crate::path::utf8(&self.path(spelled))
+            .expect("a test tree is UTF-8")
+            .to_owned()
+    }
+}
+
 /// The walk of the absolute `path`, leniently: the transcript an access to it
 /// would be judged by.
 ///

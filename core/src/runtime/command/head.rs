@@ -2,9 +2,9 @@
 //!
 //! [`Head`] freezes the answer at dispatch — the spelling we show, and the
 //! [`Program`] a grant judges and the launcher runs, found from the head's
-//! native target and never from the spelling — and is threaded down to
-//! launch, so classification, guard and spawn see one program and `PATH` is
-//! walked once.  A head that names nothing runnable has no program: its
+//! native target and never from the spelling — and is taken by `super::vet`,
+//! which moves the program into the `Admitted`, so classification, guard and
+//! spawn see one program held once, and `PATH` is walked once.  A head that names nothing runnable has no program: its
 //! [`Missing`] is the 127 or 126 `super::vet` reports, read off this walk
 //! rather than re-probed.
 
@@ -16,7 +16,7 @@ use crate::types::{Context, Error};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct Head {
     /// The command as ral names it, to the guard and in what it reports: a
     /// bare name as written, a `~` head as
@@ -84,7 +84,8 @@ impl Head {
 
 impl Program {
     /// The file `path` names, which the launcher will run by its real path,
-    /// seen as `path` by the program.
+    /// seen as `path` by the program.  Whether it may be run is not asked
+    /// here: a program is judged before it is looked at.
     pub(crate) fn file(path: PathBuf) -> Result<Self, Missing> {
         let missing = || Missing::NotFound(Some(path.clone()));
         let spelled = LexicalPath::absolute(&path).ok_or_else(missing)?;
@@ -95,12 +96,9 @@ impl Program {
         if located.trace().kind().is_none() {
             return Err(missing());
         }
-        if !is_executable_file(&path) {
-            return Err(Missing::NotExecutable(path));
-        }
         Ok(Self::File {
-            trace: located.trace().clone(),
-            path,
+            arg0: path,
+            located: Box::new(located),
         })
     }
 }
@@ -214,7 +212,7 @@ mod tests {
 
     fn file_of(head: &Head) -> (&Path, &crate::path::RealPath) {
         match &head.program {
-            Ok(Program::File { path, trace }) => (path, trace.real()),
+            Ok(Program::File { arg0, located }) => (arg0, located.real()),
             other => panic!("expected a host file, got {other:?}"),
         }
     }
@@ -284,24 +282,6 @@ mod tests {
         let head = tmp.path().join(name).to_string_lossy().into_owned() + "/";
         let head = Head::resolve(&CommandName::Path(head), &shell.context);
         assert!(matches!(head.program, Err(Missing::NotFound(_))));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_path_head_that_cannot_be_run_is_not_executable() {
-        use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::tempdir().unwrap();
-        let file = tmp.path().join("plain");
-        std::fs::write(&file, "").unwrap();
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let shell = crate::test_helper::core_shell();
-        for head in [file.as_path(), tmp.path()] {
-            let head = Head::resolve(&path_head(head), &shell.context);
-            assert!(
-                matches!(head.program, Err(Missing::NotExecutable(_))),
-                "{head:?}"
-            );
-        }
     }
 
     /// There is nothing to judge in an absent file: classification lets the

@@ -14,8 +14,8 @@ use super::table::{Allows, Denies, Table, Withheld};
 use super::{ExecGrant, ExecKey, ExecSummary, GrantStack, Join, Meet};
 use crate::guard::freeze::PolicyError;
 use crate::path::{
-    self, Depth, Excluded, FrozenPath, LeafMode, LexicalPath, MatchedBy, RealPath, Trace, Walked,
-    command_name_key, walk_lenient,
+    self, Authority, Depth, Excluded, FrozenPath, Judged, LeafMode, LexicalPath, Located,
+    MatchedBy, Reading, RealPath, Trace, Unjudged, Walked, command_name_key, walk_lenient,
 };
 use crate::syntax::quote::quote_word;
 use crate::types::EnvVars;
@@ -26,17 +26,17 @@ use std::sync::LazyLock;
 
 /// A program the stack admitted with these arguments, and the table that
 /// admitted it.  Only [`GrantStack::admit`] makes one, so nothing launches
-/// unjudged.
+/// unjudged: a file is held as vouched for reading, which running it does.
 #[derive(Debug)]
 #[must_use]
 pub(crate) struct Admitted {
-    program: Program,
+    program: Program<Judged<Reading>>,
     args: Vec<String>,
     rules: Option<ExecRules>,
 }
 
 impl Admitted {
-    pub(crate) fn program(&self) -> &Program {
+    pub(crate) fn program(&self) -> &Program<Judged<Reading>> {
         &self.program
     }
 
@@ -79,7 +79,7 @@ pub(crate) fn ral_binary() -> Option<&'static Trace> {
 
 impl GrantStack {
     /// Judge a program and its argv against the stack's exec rules, then what
-    /// running it reads.
+    /// running it reads, which vouches for the file held.
     pub(crate) fn admit(
         &self,
         floor: &Floor,
@@ -87,13 +87,16 @@ impl GrantStack {
         args: Vec<String>,
     ) -> Result<Admitted, Box<Refused>> {
         let rules = rules(self);
-        match self.judge_run(floor, rules.as_ref(), &program) {
-            None => Ok(Admitted {
+        match self.judge_run(floor, rules.as_ref(), program) {
+            Ok(program) => Ok(Admitted {
                 program,
                 args,
                 rules,
             }),
-            Some(why) => Err(Box::new(Refused { program, args, why })),
+            Err(denied) => {
+                let (program, why) = *denied;
+                Err(Box::new(Refused { program, args, why }))
+            }
         }
     }
 
@@ -104,58 +107,98 @@ impl GrantStack {
 
     /// Why a head is refused, for a refusal raised before [`GrantStack::admit`].
     pub(crate) fn refusal(&self, floor: &Floor, program: &Program) -> Option<ExecDenial> {
-        self.judge_run(floor, rules(self).as_ref(), program)
+        if let Some(why) = rules(self).and_then(|r| r.withheld(program.subject())) {
+            return Some(ExecDenial::Run(why));
+        }
+        let read = match program {
+            Program::File { located, .. } => self.read(floor, located.trace()),
+            Program::Tool(_) => self.tool_read(floor),
+        };
+        read.err().map(ExecDenial::Read)
     }
 
     /// `↓run = ↓exec ∧ ↓read` (law 7): a supplied exec table must support the
-    /// program, then what running it reads must be readable.  A bundled tool
-    /// runs ral's image, which only an fs exclusion withholds.
+    /// program, then what running it reads must be readable, and a file is
+    /// vouched for by that read judgment.  A refusal hands the program back.
     fn judge_run(
         &self,
         floor: &Floor,
         rules: Option<&ExecRules>,
-        program: &Program,
-    ) -> Option<ExecDenial> {
+        program: Program,
+    ) -> Result<Program<Judged<Reading>>, Box<(Program, ExecDenial)>> {
         if let Some(why) = rules.and_then(|r| r.withheld(program.subject())) {
-            return Some(ExecDenial::Run(why));
+            return Err(Box::new((program, ExecDenial::Run(why))));
         }
-        let read = match program {
-            Program::File { trace, .. } => self.read(floor, trace),
-            Program::Tool(_) => {
-                ral_binary().map_or(Ok(()), |own| self.read_not_excluded(floor, own))
-            }
-        };
-        read.err().map(ExecDenial::Read)
+        match program {
+            Program::Tool(name) => match self.tool_read(floor) {
+                Ok(()) => Ok(Program::Tool(name)),
+                Err(why) => Err(Box::new((Program::Tool(name), ExecDenial::Read(why)))),
+            },
+            Program::File { arg0, located } => match self.read_region(floor).judge_file(*located) {
+                Ok(located) => Ok(Program::File {
+                    arg0,
+                    located: Box::new(located),
+                }),
+                Err(denied) => {
+                    let (located, why) = *denied;
+                    let program = Program::File {
+                        arg0,
+                        located: Box::new(located),
+                    };
+                    Err(Box::new((program, ExecDenial::Read(why))))
+                }
+            },
+        }
+    }
+
+    /// A bundled tool runs ral's image, which only an fs exclusion withholds.
+    fn tool_read(&self, floor: &Floor) -> Result<(), Withheld<FsDeny>> {
+        ral_binary().map_or(Ok(()), |own| self.read_not_excluded(floor, own))
     }
 }
 
 /// What a grant judges, and what the launcher runs.
-#[derive(Clone, Debug)]
-pub(crate) enum Program {
+pub(crate) enum Program<A: Authority = Unjudged> {
     /// A bundled tool, run as ral itself.
     Tool(String),
-    /// A host file: `trace` is the walk that found it, judged and run; `path`
-    /// is the spelling, which the program sees as `argv[0]`. A `#!` script
-    /// sees its real path as its script name: the kernel hands the
+    /// A host file, the one holder of the object the walk found, judged and
+    /// run: `arg0` is the spelling, which the program sees as `argv[0]`.  A
+    /// `#!` script sees its real path as its script name: the kernel hands the
     /// interpreter the exec path.
-    File { path: PathBuf, trace: Trace },
+    File {
+        arg0: PathBuf,
+        located: Box<Located<A>>,
+    },
 }
 
-impl Program {
+impl<A: Authority> Program<A> {
     pub(crate) fn subject(&self) -> Subject<'_> {
         match self {
             Self::Tool(name) => Subject::Tool(name),
-            Self::File { trace, .. } => Subject::Program(path::Subject::Access(trace)),
+            Self::File { located, .. } => Subject::Program(path::Subject::Access(located.trace())),
+        }
+    }
+}
+
+impl<A: Authority> std::fmt::Debug for Program<A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tool(name) => f.debug_tuple("Tool").field(name).finish(),
+            Self::File { arg0, located } => f
+                .debug_struct("File")
+                .field("arg0", arg0)
+                .field("trace", located.trace())
+                .finish(),
         }
     }
 }
 
 /// A file by its real path, a bundled tool by name.
-impl std::fmt::Display for Program {
+impl<A: Authority> std::fmt::Display for Program<A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Tool(name) => write!(f, "bundled {name}"),
-            Self::File { trace, .. } => trace.real().fmt(f),
+            Self::File { located, .. } => located.real().fmt(f),
         }
     }
 }

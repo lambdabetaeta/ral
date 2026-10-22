@@ -150,7 +150,7 @@ fn exec_error(grants: &GrantStack, shown: &str, program: &Program, why: &ExecDen
 /// bundled tool ral's binary, which it runs.
 fn read_cause(shown: &str, program: &Program, why: &Withheld<FsDeny>) -> String {
     let (lead, subject) = match program {
-        Program::File { trace, .. } => (String::new(), format!("'{}'", trace.real())),
+        Program::File { located, .. } => (String::new(), format!("'{}'", located.real())),
         Program::Tool(_) => (
             format!("'{shown}' is built into ral, and "),
             ral_binary().map_or_else(

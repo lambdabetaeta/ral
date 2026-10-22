@@ -25,7 +25,7 @@ pub(super) enum TerminalPlan {
 /// re-evaluates its own inside the thread, so doing it here too would run
 /// effectful arguments twice.  Args stay `Value`s so launch-time
 /// `command::vet` applies the same shape rejection single-command exec does.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(super) enum StageLaunch {
     Direct { head: Head, args: Vec<Value> },
     Thread,
@@ -34,7 +34,7 @@ pub(super) enum StageLaunch {
 /// Per-stage analysis.  Edge transport is deliberately absent: the allocator
 /// `route::open_stage_routes` derives each edge from the stage's position
 /// alone.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(super) struct StageSpec {
     pub(super) launch: StageLaunch,
     /// So a parent-side error points at this stage, not the whole pipeline.

@@ -966,13 +966,17 @@ mod tests {
                 "the office toolbox must admit {tool}"
             );
         }
+        let cuts = ["cc", "gcc", "make", "cargo", "sh", "bash", "apt"];
+        let tmp = tempfile::tempdir().unwrap();
+        let bin =
+            ral_core::test_helper::Tree::lay(tmp.path(), cuts.map(|cut| format!("/usr/bin/{cut}")));
         let mut shell = ral_core::test_helper::core_shell();
         shell.with_layer(ral_core::test_helper::layer(caps), |sh| {
             // The image cuts these on purpose: what has to be built from
             // source on a machine that forgets it at reboot is a delay,
             // not a capability.
-            for cut in ["cc", "gcc", "make", "cargo", "sh", "bash", "apt"] {
-                let path = format!("/usr/bin/{cut}");
+            for cut in cuts {
+                let path = bin.at(&format!("/usr/bin/{cut}"));
                 assert!(
                     !ral_core::test_access::admits_file(sh, &path),
                     "the office grant must not admit {cut}"

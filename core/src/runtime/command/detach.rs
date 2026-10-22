@@ -22,7 +22,7 @@ use crate::types::{
 
 use super::head::Head;
 use super::process::build_launch;
-use super::vet::vet;
+use super::vet::{SpawnPlan, vet};
 
 /// `detach <desc> <cmd> <args…>`, with `desc` already vetted by
 /// [`crate::builtins::concurrency`].  The head is an exec image by
@@ -65,7 +65,8 @@ pub(crate) fn detach(
     // Existence (127/126), argv shape, the grant's verdict on the whole call:
     // the same judgments an ordinary external passes, so a bundled uutils tool
     // falls out as its own image with no special case here.
-    let plan = vet(&Head::resolve(&name, &shell.context), argv, shell)?;
+    let SpawnPlan { shown, admitted } = vet(Head::resolve(&name, &shell.context), argv, shell)?;
+    let args = admitted.args().to_vec();
 
     let Some(policy) = shell.detach_policy() else {
         return Err(sig(
@@ -91,7 +92,8 @@ pub(crate) fn detach(
     // uncommitted, gives the slot straight back. A failed spawn refunds it too;
     // only a born survivor, named or not, spends one.
     let mut launch = build_launch(
-        &plan,
+        &shown,
+        admitted,
         crate::sandbox::Ownership::Surrendered,
         shell,
         &shell.scope,
@@ -101,13 +103,13 @@ pub(crate) fn detach(
     launch.stderr(StdioSpec::null());
     let survivor = launch
         .spawn_detached()
-        .map_err(|e| sig(format!("detach: cannot launch '{}': {e}", plan.shown)))?;
+        .map_err(|e| sig(format!("detach: cannot launch '{shown}': {e}")))?;
     reservation.commit();
     shell.observe(
         mooring,
         Observed::Command(Command::new(
-            &plan.shown,
-            plan.admitted.args().to_vec(),
+            &shown,
+            args,
             0,
             CommandOrigin::Detached,
             AuditIo::default(),
@@ -120,8 +122,7 @@ pub(crate) fn detach(
             desc: desc.into(),
         })),
         Survivor::Unnamed(why) => Err(sig(format!(
-            "detach: '{}' was started and is running, but its pid was lost ({why}); it cannot be stopped by pid",
-            plan.shown
+            "detach: '{shown}' was started and is running, but its pid was lost ({why}); it cannot be stopped by pid"
         ))),
     }
 }

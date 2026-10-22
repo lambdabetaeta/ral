@@ -1,12 +1,10 @@
-//! Turn a [`SpawnPlan`] into a launchable child, spawn it through the
+//! Turn an [`Admitted`] call into a launchable child, spawn it through the
 //! canonical pgid + sandbox funnel, and render spawn failures as [`Break`]s.
 //! Stdio routing lives in `stdio` and `redirect`, layered on before spawn.
 
-use crate::capability::Program;
+use crate::capability::{Admitted, Program};
 use crate::sandbox::Refusal;
 use crate::types::{Break, Error, Settled, Shell, sig};
-
-use super::vet::SpawnPlan;
 
 impl From<Refusal> for Break {
     fn from(refusal: Refusal) -> Self {
@@ -14,15 +12,22 @@ impl From<Refusal> for Break {
     }
 }
 
-/// Build a launch for `plan` and apply the shell's scoped env and cwd.  Stdio
-/// and `pre_exec` hooks are the caller's: they differ between the standalone
-/// and pipeline contexts.
+/// Build a launch for the `admitted` call `shown` and apply the shell's scoped
+/// env and cwd.  The [`Admitted`] is taken and dropped here, so the launch
+/// holds no judged program nor its directory handle.  Stdio and `pre_exec`
+/// hooks are the caller's: they differ between the standalone and pipeline
+/// contexts.
 ///
 /// `ownership` reaches the Linux bwrap backend, which ties the envelope to
 /// this process's death unless the child is being surrendered, and the guest
 /// jail, which seats a surrendered child outside this engine's cgroup tree.
 pub(crate) fn build_launch(
-    plan: &SpawnPlan,
+    #[cfg_attr(
+        not(windows),
+        expect(unused_variables, reason = "a cancelled Windows stamp names it")
+    )]
+    shown: &str,
+    admitted: Admitted,
     ownership: crate::sandbox::Ownership,
     shell: &Shell,
     cancel: &crate::process::cancel::Scope,
@@ -31,12 +36,11 @@ pub(crate) fn build_launch(
     // user namespaces and the guest boots with `user.max_user_namespaces = 0`.
     // The in-process guard in `vet` runs either way.
     let jail = crate::process::jail::guest();
-    let admitted = &plan.admitted;
     let mut cmd = if jail.is_none()
         && let Some(projection) = crate::sandbox::SandboxProjection::of(
             &shell.context.grants,
             shell.floor(),
-            Some(admitted),
+            Some(&admitted),
         ) {
         // A `grant` body evaluates in this process unconfined; spawned children
         // are the only thing an OS sandbox reaches, and this is where it does.
@@ -44,7 +48,7 @@ pub(crate) fn build_launch(
         crate::sandbox::sandboxed_command(
             &projection,
             shell.floor(),
-            admitted,
+            &admitted,
             ownership,
             &shell.cwd(),
             cancel,
@@ -52,7 +56,7 @@ pub(crate) fn build_launch(
         .map_err(|refusal| match refusal {
             #[cfg(windows)]
             Refusal::Cancelled(cause) => Break::of_child(
-                &plan.shown,
+                shown,
                 crate::process::ChildEnd::Cancelled(cause),
                 cancel,
                 shell,
@@ -61,9 +65,9 @@ pub(crate) fn build_launch(
         })?
     } else {
         match admitted.program() {
-            Program::File { path, trace } => {
-                let mut cmd = crate::process::Launch::new(trace.real().as_path());
-                cmd.arg0(path);
+            Program::File { arg0, located } => {
+                let mut cmd = crate::process::Launch::new(located.real().as_path());
+                cmd.arg0(arg0);
                 cmd.args(admitted.args());
                 cmd
             }
@@ -76,6 +80,9 @@ pub(crate) fn build_launch(
             }
         }
     };
+    // The judged object and its directory handle end here: a launch holds a
+    // name, never the object it was admitted for.
+    drop(admitted);
     apply_env(&mut cmd, shell);
     #[cfg(unix)]
     if shell.has_active_capabilities() {
@@ -321,12 +328,13 @@ mod judged_program {
     fn judge(shell: &mut Shell, args: &[&str]) -> SpawnPlan {
         let head = Head::resolve(&CommandName::Path("tools/build".into()), &shell.context);
         let args: Vec<_> = args.iter().map(|arg| Value::string(*arg)).collect();
-        vet(&head, &args, shell).expect("an unrestricted shell admits the file")
+        vet(head, &args, shell).expect("an unrestricted shell admits the file")
     }
 
-    fn stdout_of(plan: &SpawnPlan, shell: &Shell) -> String {
+    fn stdout_of(plan: SpawnPlan, shell: &Shell) -> String {
         let mut cmd = build_launch(
-            plan,
+            &plan.shown,
+            plan.admitted,
             crate::sandbox::Ownership::Kept,
             shell,
             &DurableRoot::default().worker(),
@@ -352,7 +360,7 @@ mod judged_program {
             let (tmp, mut shell) = workdir();
             point_build_at(tmp.path(), &plant(tmp.path(), who));
             assert_eq!(
-                stdout_of(&judge(&mut shell, &[]), &shell),
+                stdout_of(judge(&mut shell, &[]), &shell),
                 format!("{who}\n")
             );
         }
@@ -373,7 +381,7 @@ mod judged_program {
             RealPath::of_path(&b).unwrap(),
             "the link moved"
         );
-        assert_eq!(stdout_of(&plan, &shell), "a\n");
+        assert_eq!(stdout_of(plan, &shell), "a\n");
     }
 
     /// A `#!` script reached through a link is handed its real path by the
@@ -397,7 +405,7 @@ mod judged_program {
         let plan = judge(&mut shell, &[]);
         let real = std::fs::canonicalize(&tool).unwrap();
         assert_eq!(
-            stdout_of(&plan, &shell),
+            stdout_of(plan, &shell),
             format!("{}\nSIBLING\n", real.display())
         );
     }
@@ -408,6 +416,20 @@ mod judged_program {
         let link = point_build_at(tmp.path(), Path::new("/bin/sh"));
 
         let plan = judge(&mut shell, &["-c", r#"printf %s "$0""#]);
-        assert_eq!(stdout_of(&plan, &shell), link.to_string_lossy());
+        assert_eq!(stdout_of(plan, &shell), link.to_string_lossy());
+    }
+
+    /// The residual, stated: a program is started by its real name, so a
+    /// native ELF replaced at that name between `admit` and the exec is what
+    /// runs.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_native_elf_replaced_at_its_name_after_admit_runs_the_replacement() {
+        let (tmp, mut shell) = workdir();
+        let tool = tmp.path().join("tools/build");
+        std::fs::copy("/bin/sh", &tool).unwrap();
+        let plan = judge(&mut shell, &["-c", "echo admitted"]);
+        std::fs::rename(plant(tmp.path(), "replacement"), &tool).unwrap();
+        assert_eq!(stdout_of(plan, &shell), "replacement\n");
     }
 }

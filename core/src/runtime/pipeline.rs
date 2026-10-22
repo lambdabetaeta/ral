@@ -94,7 +94,7 @@ impl PipeNode {
             group: &node.group,
             holds_terminal: node.collect.holds_terminal(),
         };
-        for (ix, ((stage, spec), route)) in stages.iter().zip(&plan.specs).zip(routes).enumerate() {
+        for (ix, ((stage, spec), route)) in stages.iter().zip(plan.specs).zip(routes).enumerate() {
             cx.shell.poll()?;
             let handle = spawn_stage(stage, spec, route, &mut cx, Slot { ix, tx: tx.clone() })?;
             node.collect.push(handle);

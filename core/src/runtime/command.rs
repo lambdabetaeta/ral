@@ -25,7 +25,7 @@ pub(crate) use detach::detach;
 pub(crate) use head::Head;
 pub(crate) use process::{brake, build_launch, spawn, with_denials};
 pub(crate) use stdio::{ChildIo, ChildOut, TtyInputPermit, wire_stdio};
-pub(crate) use vet::vet;
+pub(crate) use vet::{SpawnPlan, vet};
 
 use child::WaitedChild;
 use foreground::ForegroundDecision;
@@ -35,18 +35,28 @@ use stdio::inherit_tty;
 /// coreutils/diffutils/ripgrep head takes the same path as any host
 /// executable: its image is `ral --ral-bundled-tool <tool>`.
 pub(crate) fn run(
-    head: &Head,
+    head: Head,
     args: &[Value],
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    let rc = vet(head, args, shell)?;
-    let cmd_name = rc.shown.clone();
+    let SpawnPlan {
+        shown: cmd_name,
+        admitted,
+    } = vet(head, args, shell)?;
+    #[cfg(debug_assertions)]
+    let program = admitted.program().to_string();
 
     // Confinement can run for minutes on Windows, so the run's scope goes in
     // with it and is read again on the way out: a wall that expired mid-stamp
     // must not be discovered only once the child is already running.
-    let mut command = build_launch(&rc, crate::sandbox::Ownership::Kept, shell, &shell.scope)?;
+    let mut command = build_launch(
+        &cmd_name,
+        admitted,
+        crate::sandbox::Ownership::Kept,
+        shell,
+        &shell.scope,
+    )?;
     shell.poll()?;
 
     let inherit_tty = inherit_tty(shell);
@@ -62,10 +72,7 @@ pub(crate) fn run(
     let confinement = command.confinement();
     let fg = ForegroundDecision::for_standalone(shell, needs_pump, confinement.is_some(), mooring);
     #[cfg(debug_assertions)]
-    {
-        let program = rc.admitted.program().to_string();
-        trace_io_wiring(&cmd_name, &program, inherit_tty, needs_pump, &fg, shell);
-    }
+    trace_io_wiring(&cmd_name, &program, inherit_tty, needs_pump, &fg, shell);
 
     announce_command_title(&cmd_name, shell);
 

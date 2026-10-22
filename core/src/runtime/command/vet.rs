@@ -1,38 +1,43 @@
 //! Pre-spawn vetting: a [`Head`] and its argv values become a [`SpawnPlan`],
 //! or a focused refusal.
 //!
-//! Existence, then argv shape, then grant policy through `Shell::check_exec`
-//! — the order is diagnostic priority: "does this command exist?" outranks
-//! "is this argument the right shape?".  Both single-command exec and
-//! pipeline stages consume the plan, so the rules live in exactly one place.
+//! Existence, then argv shape, then grant policy through `Shell::check_exec`,
+//! then whether the admitted program can be run at all — the order is
+//! diagnostic priority: "does this command exist?" outranks "is this argument
+//! the right shape?", and a program is judged before it is looked at, so a
+//! denied file is refused as denied, never as unexecutable.  Both
+//! single-command exec and pipeline stages consume the plan, so the rules
+//! live in exactly one place.
 
-use crate::capability::Admitted;
+use crate::capability::{Admitted, Program};
 use crate::ty::RefusedArg;
 use crate::types::{Break, Error, Settled, Shell, Value};
 
-use super::head::Head;
+use super::head::{Head, Missing};
 
-/// A vetted call, ready for [`super::process::build_launch`].  `shown` is the
+/// A vetted call, taken by [`super::process::build_launch`].  `shown` is the
 /// name diagnostics and audit report; `admitted` is what runs, with what.
 pub(crate) struct SpawnPlan {
     pub(crate) shown: String,
     pub(crate) admitted: Admitted,
 }
 
-/// Vet a resolved [`Head`] for spawn: 127 when it names nothing, 126 when
-/// the walk stopped at a file lacking `+x` — read off the head's own walk,
-/// never re-probed.
-pub(crate) fn vet(head: &Head, args: &[Value], shell: &mut Shell) -> Settled<SpawnPlan> {
-    let program = head
-        .program
-        .as_ref()
-        .map_err(|missing| Break::Error(missing.error(&head.shown)))?;
-    let args = validate_argv(&head.shown, args)?;
-    let admitted = shell.check_exec(&head.shown, program.clone(), args)?;
-    Ok(SpawnPlan {
-        shown: head.shown.clone(),
-        admitted,
-    })
+/// Vet a resolved [`Head`] for spawn, taking it: 127 when it names nothing,
+/// 126 when the walk stopped at a file lacking `+x` or the admitted file
+/// cannot be run — read off the head's own walk, never re-probed.  The
+/// program moves into the [`Admitted`], the one holder of the object.
+pub(crate) fn vet(head: Head, args: &[Value], shell: &mut Shell) -> Settled<SpawnPlan> {
+    let Head { shown, program } = head;
+    let program = program.map_err(|missing| Break::Error(missing.error(&shown)))?;
+    let args = validate_argv(&shown, args)?;
+    let admitted = shell.check_exec(&shown, program, args)?;
+    if let Program::File { located, .. } = admitted.program()
+        && !located.is_executable()
+    {
+        let found = located.real().as_path().to_path_buf();
+        return Err(Break::Error(Missing::NotExecutable(found).error(&shown)));
+    }
+    Ok(SpawnPlan { shown, admitted })
 }
 
 /// Stringify `args`, refusing any shape the syscall boundary cannot carry.
@@ -95,7 +100,7 @@ mod tests {
     }
 
     /// The exit code `vet` refuses `head` with.
-    fn refused(head: &Head, shell: &mut Shell) -> Error {
+    fn refused(head: Head, shell: &mut Shell) -> Error {
         match vet(head, &[], shell) {
             Err(Break::Error(e)) => e,
             Err(other) => panic!("expected a refusal, got {other:?}"),
@@ -124,7 +129,7 @@ mod tests {
             .set_env_var("PATH", format!("{};", elsewhere.path().to_string_lossy()));
 
         let head = Head::resolve(&CommandName::Bare(name.into()), &shell.context);
-        let e = refused(&head, &mut shell);
+        let e = refused(head, &mut shell);
         assert_eq!(e.code(), 127);
         assert!(
             !format!("{e:?}").contains("permission denied"),
@@ -146,7 +151,7 @@ mod tests {
         );
 
         let head = Head::resolve(&CommandName::Path(r".\zztool".into()), &shell.context);
-        let e = refused(&head, &mut shell);
+        let e = refused(head, &mut shell);
         assert_eq!(e.code(), 127);
         assert_eq!(e.hint.as_deref(), Some(r"did you mean '.\zztool.bat'?"));
     }
@@ -171,16 +176,16 @@ mod tests {
         );
         let head = Head::resolve(&CommandName::Bare(name.as_str().into()), &shell.context);
         assert!(
-            matches!(&head.program, Ok(Program::File { path, .. }) if *path == bin.join(&name))
+            matches!(&head.program, Ok(Program::File { arg0, .. }) if *arg0 == bin.join(&name))
         );
-        vet(&head, &[], &mut shell).expect("a resolved name must vet");
+        vet(head, &[], &mut shell).expect("a resolved name must vet");
 
         shell.seed_cwd(
             crate::path::CwdPath::new(elsewhere.path().to_path_buf())
                 .expect("a tempdir is a working directory"),
         );
         let head = Head::resolve(&CommandName::Bare(name.into()), &shell.context);
-        assert_eq!(refused(&head, &mut shell).code(), 127);
+        assert_eq!(refused(head, &mut shell).code(), 127);
     }
 
     /// Bundled names short-circuit the disk probe: `ls` vets on an empty
@@ -195,8 +200,55 @@ mod tests {
             .set_env_var("PATH", dir.path().to_string_lossy().into_owned());
 
         let head = Head::resolve(&CommandName::Bare("ls".into()), &shell.context);
-        let plan = vet(&head, &[], &mut shell).expect("bundled name must not 127");
+        let plan = vet(head, &[], &mut shell).expect("bundled name must not 127");
         assert_eq!(plan.shown, "ls");
+    }
+
+    /// The 126 case of a path head: a file lacking `+x`, or a directory,
+    /// which only the admitted program is asked about.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_head_that_cannot_be_run_is_not_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("plain");
+        std::fs::write(&file, "").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut shell = crate::test_helper::core_shell();
+        for head in [file.as_path(), tmp.path()] {
+            let head = Head::resolve(
+                &CommandName::Path(head.to_string_lossy().into_owned()),
+                &shell.context,
+            );
+            let e = refused(head, &mut shell);
+            assert_eq!(e.code(), 126, "{e:?}");
+            assert!(!e.message.contains("denied by active grant"), "{e:?}");
+        }
+    }
+
+    /// A program is judged before it is looked at, so a file the grant denies
+    /// is refused as denied whether or not it could have run: the refusal
+    /// does not tell what a denied path is.
+    #[cfg(unix)]
+    #[test]
+    fn a_denied_non_executable_is_refused_as_denied_not_as_non_executable() {
+        use crate::capability::{Capabilities, ExecGrant};
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("plain");
+        std::fs::write(&file, "").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut shell = crate::test_helper::core_shell();
+        let nothing = crate::test_helper::layer(Capabilities {
+            exec: Some(ExecGrant::default()),
+            ..Capabilities::default()
+        });
+        let head = Head::resolve(
+            &CommandName::Path(file.to_string_lossy().into_owned()),
+            &shell.context,
+        );
+        let e = shell.with_layer(nothing, |shell| refused(head, shell));
+        assert!(e.message.contains("denied by active grant"), "{e:?}");
     }
 
     /// A path head naming no file is a missing command, and the refusal names
@@ -209,7 +261,7 @@ mod tests {
             &CommandName::Path(head.to_string_lossy().into_owned()),
             &shell.context,
         );
-        let e = refused(&head, &mut shell);
+        let e = refused(head, &mut shell);
         assert_eq!(e.code(), 127);
         assert!(e.message.contains("no-such-dir"), "{}", e.message);
     }
@@ -227,7 +279,7 @@ mod tests {
             &CommandName::Bare("definitely-not-a-real-tool-xyz".into()),
             &shell.context,
         );
-        assert_eq!(refused(&head, &mut shell).code(), 127);
+        assert_eq!(refused(head, &mut shell).code(), 127);
     }
 
     /// A value and its type earn one verdict: the property the shared

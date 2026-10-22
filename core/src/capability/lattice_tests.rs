@@ -13,7 +13,7 @@ use super::*;
 use crate::guard::decode_capability_map;
 use crate::guard::freeze::{FreezeCtx, PolicyError};
 use crate::path::{self, Excluded, FrozenPath, RealPath, Trace};
-use crate::test_helper::{self, layer, trace};
+use crate::test_helper::{self, Tree, layer, trace};
 use crate::types::Value;
 use std::collections::BTreeSet;
 use std::fmt::Debug;
@@ -108,17 +108,17 @@ fn exec_layer(rules: ExecRules) -> GrantLayer {
     GrantLayer::new(None, Some(rules), None, None, None)
 }
 
-/// A host file at `real`, which is also its launch path.
-fn file(real: &str) -> Program {
-    let path = at(real);
+/// A host file at `real`, which exists and is also its launch path.
+fn file(real: impl AsRef<Path>) -> Program {
+    let path = real.as_ref().to_path_buf();
     Program::File {
-        trace: trace(&path),
-        path,
+        located: Box::new(test_helper::located(&path)),
+        arg0: path,
     }
 }
 
 /// Whether `grants` admits running the file at `real`.
-fn admits(grants: &GrantStack, real: &str) -> bool {
+fn admits(grants: &GrantStack, real: impl AsRef<Path>) -> bool {
     grants.admits(&Floor::default(), &file(real))
 }
 
@@ -322,10 +322,10 @@ fn deny_all_withholds_every_verb() {
 }
 
 /// What a stack decides: each verb, an exec admission, and the net opinions.
-fn judgments(stack: &GrantStack) -> (Vec<bool>, bool, Vec<Net>) {
+fn judgments(stack: &GrantStack, ls: &str) -> (Vec<bool>, bool, Vec<Net>) {
     (
         every_flag().into_iter().map(|f| stack.permits(f)).collect(),
-        admits(stack, "/ral-lattice/bin/ls"),
+        admits(stack, ls),
         stack.net().collect(),
     )
 }
@@ -356,13 +356,15 @@ fn neutral_layers() -> [GrantLayer; 4] {
 /// authority does, and leave a stack inactive.
 #[test]
 fn neutral_layers_judge_as_ambient_and_leave_it_inactive() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ls = Tree::lay(tmp.path(), ["/bin/ls"]).at("/bin/ls");
     let ambient = GrantStack::root();
     for layer in neutral_layers() {
         assert!(!layer.is_restrictive(), "{layer:?} must be neutral");
         let mut stack = GrantStack::root();
         stack.push(layer);
         assert!(!stack.is_restrictive());
-        assert_eq!(judgments(&stack), judgments(&ambient));
+        assert_eq!(judgments(&stack, &ls), judgments(&ambient, &ls));
     }
 }
 
@@ -370,12 +372,14 @@ fn neutral_layers_judge_as_ambient_and_leave_it_inactive() {
 /// the activation of a stack withholding a shell verb and the net.
 #[test]
 fn neutral_layers_leave_a_restrictive_stack_as_it_was() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ls = Tree::lay(tmp.path(), ["/bin/ls"]).at("/bin/ls");
     let mut base = GrantStack::root();
     base.push(layer(Capabilities {
         net: Some(Net::Offline),
         ..shell_of(&[ShellVerb::Chdir])
     }));
-    let judged = judgments(&base);
+    let judged = judgments(&base, &ls);
     assert!(base.is_restrictive() && !base.permits(Flag::Shell(ShellVerb::Detach)));
 
     let mut nested = base.clone();
@@ -385,7 +389,7 @@ fn neutral_layers_leave_a_restrictive_stack_as_it_was() {
         nested.push(layer);
         for stack in [&stack, &nested] {
             assert!(stack.is_restrictive());
-            assert_eq!(judgments(stack), judged);
+            assert_eq!(judgments(stack, &ls), judged);
         }
     }
 }
@@ -843,13 +847,15 @@ fn join_is_a_semilattice_over_the_prefix_universe() {
 /// whichever is joined first.
 #[test]
 fn joining_an_allowance_and_an_exclusion_is_both() {
-    let x = nprefix("/ral-lattice/x");
+    let tmp = tempfile::tempdir().unwrap();
+    let tree = Tree::lay(tmp.path(), ["/x/bin"]);
+    let x = spelled(&tree.path("/x"));
     let (allow, deny) = (exec_of(&x), exec_deny_of(&x));
-    let inside = trace(at("/ral-lattice/x/bin"));
+    let inside = trace(tree.path("/x/bin"));
     for joined in [allow.clone().join(deny.clone()), deny.join(allow)] {
         assert_eq!(runs(&joined, &inside), Evidence::BOTH);
         let stack = test_helper::stack([exec_layer(joined)]);
-        assert!(!admits(&stack, "/ral-lattice/x/bin"));
+        assert!(!admits(&stack, tree.path("/x/bin")));
     }
 }
 
@@ -878,10 +884,15 @@ fn extension_reads_omission_by_role() {
 /// less the exclusion".
 #[test]
 fn extension_with_an_exclusion_over_an_omitted_axis_is_every_less_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tree = Tree::lay(tmp.path(), ["/anywhere/else", "/bad/prog", "/secret/f"]);
     let excluding = fragment(Capabilities {
-        exec: Some(grant([(dir_key("/bad"), Evidence::DENY)])),
+        exec: Some(grant([(
+            ExecKey::Dir(spelled(&tree.path("/bad"))),
+            Evidence::DENY,
+        )])),
         fs: Some(FsPolicy {
-            deny_paths: vec![nprefix("/secret")],
+            deny_paths: vec![spelled(&tree.path("/secret"))],
             ..FsPolicy::default()
         }),
         ..Capabilities::default()
@@ -890,12 +901,12 @@ fn extension_with_an_exclusion_over_an_omitted_axis_is_every_less_it() {
     assert!(extended.is_restrictive());
     assert!((extended.exec()).is_some_and(|r| r.allows().any(|a| matches!(a, ExecAllow::Any))));
     let stack = test_helper::stack([extended]);
-    assert!(admits(&stack, "/anywhere/else"));
-    assert!(!admits(&stack, "/bad/prog"));
+    assert!(admits(&stack, tree.path("/anywhere/else")));
+    assert!(!admits(&stack, tree.path("/bad/prog")));
     for op in [FsOp::Read, FsOp::Write] {
         let floor = Floor::default();
-        assert!(stack.admits_fs(&floor, &op, &trace(at("/anywhere"))));
-        assert!(!stack.admits_fs(&floor, &op, &trace(at("/secret/f"))));
+        assert!(stack.admits_fs(&floor, &op, &trace(tree.path("/anywhere"))));
+        assert!(!stack.admits_fs(&floor, &op, &trace(tree.path("/secret/f"))));
     }
 }
 
@@ -964,16 +975,37 @@ fn an_extension_run_allowance_over_an_omitted_exec_reads_what_it_names() {
 
 use super::exec::tests::Rng;
 
-const LAW_DIRS: [&str; 4] = ["/lawtest/a", "/lawtest/a/b", "/lawtest/z", "/lawtest/Z"];
+const LAW_DIRS: [&str; 4] = ["/a", "/a/b", "/z", "/Z"];
 const LAW_NAMES: [&str; 3] = ["x", "ls", "cat"];
-const LAW_FILES: [&str; 6] = [
-    "/lawtest/a/x",
-    "/lawtest/a/b/x",
-    "/lawtest/a/b/c/x",
-    "/lawtest/z/x",
-    "/lawtest/q/x",
-    "/lawtest/Z/x",
-];
+const LAW_FILES: [&str; 6] = ["/a/x", "/a/b/x", "/a/b/c/x", "/z/x", "/q/x", "/Z/x"];
+
+/// The random policies' universe, laid on disk: the directories they name and
+/// the files they judge, one of each object the volume holds.  A volume that
+/// folds case holds `z` and `Z` as one, and the laws run over that one.
+struct Universe {
+    _tmp: tempfile::TempDir,
+    dirs: Vec<String>,
+    files: Vec<String>,
+}
+
+impl Universe {
+    fn lay() -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = LAW_DIRS.map(|dir| format!("{dir}/"));
+        let tree = Tree::lay(tmp.path(), dirs.iter().map(String::as_str).chain(LAW_FILES));
+        let objects = |spelled: &[&str]| {
+            let mut seen = BTreeSet::new();
+            let held = spelled.iter().map(|name| tree.at(name));
+            held.filter(|path| seen.insert(trace(path).leaf_id()))
+                .collect()
+        };
+        Self {
+            dirs: objects(&LAW_DIRS),
+            files: objects(&LAW_FILES),
+            _tmp: tmp,
+        }
+    }
+}
 
 fn some(rng: &mut Rng, n: usize) -> bool {
     rng.below(n) == 0
@@ -981,7 +1013,7 @@ fn some(rng: &mut Rng, n: usize) -> bool {
 
 /// A random exec grant over the universe, `every` set one time in four where
 /// the grant is a policy and not an authored fragment.
-fn rand_exec(rng: &mut Rng, every_ok: bool) -> Option<ExecGrant> {
+fn rand_exec(u: &Universe, rng: &mut Rng, every_ok: bool) -> Option<ExecGrant> {
     if some(rng, 3) {
         return None;
     }
@@ -994,14 +1026,14 @@ fn rand_exec(rng: &mut Rng, every_ok: bool) -> Option<ExecGrant> {
         ])
     };
     let mut entries = Vec::new();
-    for d in LAW_DIRS {
+    for d in &u.dirs {
         if some(rng, 3) {
-            entries.push((ExecKey::Dir(nprefix(d)), evidence(rng)));
+            entries.push((ExecKey::Dir(FrozenPath::from_surface(d)), evidence(rng)));
         }
     }
-    for f in LAW_FILES {
+    for f in &u.files {
         if some(rng, 4) {
-            entries.push((ExecKey::Path(nprefix(f)), evidence(rng)));
+            entries.push((ExecKey::Path(FrozenPath::from_surface(f)), evidence(rng)));
         }
     }
     for n in LAW_NAMES {
@@ -1017,15 +1049,14 @@ fn rand_exec(rng: &mut Rng, every_ok: bool) -> Option<ExecGrant> {
     })
 }
 
-fn rand_fs(rng: &mut Rng) -> Option<FsPolicy> {
+fn rand_fs(u: &Universe, rng: &mut Rng) -> Option<FsPolicy> {
     if some(rng, 3) {
         return None;
     }
     let pick = |rng: &mut Rng, n| {
-        LAW_DIRS
-            .iter()
+        (u.dirs.iter())
             .filter(|_| some(rng, n))
-            .map(|p| nprefix(p))
+            .map(|p| FrozenPath::from_surface(p))
             .collect::<Vec<_>>()
     };
     Some(FsPolicy {
@@ -1044,13 +1075,13 @@ fn rand_layer_of(exec: Option<ExecGrant>, fs: Option<FsPolicy>) -> GrantLayer {
     })
 }
 
-fn rand_layer(rng: &mut Rng) -> GrantLayer {
-    rand_layer_of(rand_exec(rng, true), rand_fs(rng))
+fn rand_layer(u: &Universe, rng: &mut Rng) -> GrantLayer {
+    rand_layer_of(rand_exec(u, rng, true), rand_fs(u, rng))
 }
 
-fn rand_stack(rng: &mut Rng) -> GrantStack {
+fn rand_stack(u: &Universe, rng: &mut Rng) -> GrantStack {
     let mut stack = GrantStack::default();
-    (0..=rng.below(3)).for_each(|_| stack.push(rand_layer(rng)));
+    (0..=rng.below(3)).for_each(|_| stack.push(rand_layer(u, rng)));
     stack
 }
 
@@ -1065,21 +1096,24 @@ fn rand_verbs<V: VariantArray + Ord + Copy>(rng: &mut Rng) -> Option<BTreeSet<V>
 }
 
 fn exec_permits(stack: &GrantStack, real: &str) -> bool {
-    rules(stack).is_none_or(|r| runs(&r, &trace(at(real))).permits())
+    rules(stack).is_none_or(|r| runs(&r, &trace(real)).permits())
 }
 
 /// Law 4 on exec: an allowance never removes authority, an exclusion always
 /// wins, and nothing is permitted that neither side supports.
 #[test]
 fn law_4_extension_invariant_on_exec() {
-    let mut rng = Rng(0x1357_9bdf_2468_ace0);
+    let (u, mut rng) = (Universe::lay(), Rng(0x1357_9bdf_2468_ace0));
     for _ in 0..1500 {
-        let (base, fragment_exec) = (rand_exec(&mut rng, true), rand_exec(&mut rng, false));
+        let (base, fragment_exec) = (
+            rand_exec(&u, &mut rng, true),
+            rand_exec(&u, &mut rng, false),
+        );
         let base_layer = rand_layer_of(base.clone(), None);
         let frag = rand_layer_of(fragment_exec.clone(), None);
         let extended = base_layer.clone().extend(Fragment::of(frag.clone()));
-        for f in LAW_FILES {
-            let fe = (frag.exec()).map_or(Evidence::NEITHER, |t| runs(t, &trace(at(f))));
+        for f in &u.files {
+            let fe = (frag.exec()).map_or(Evidence::NEITHER, |t| runs(t, &trace(f)));
             let (b, e) = (
                 exec_permits(&test_helper::stack([base_layer.clone()]), f),
                 exec_permits(&test_helper::stack([extended.clone()]), f),
@@ -1098,10 +1132,10 @@ fn law_4_extension_invariant_on_exec() {
 /// Law 4 on fs, for each op, with no exec in play.
 #[test]
 fn law_4_extension_invariant_on_fs() {
-    let mut rng = Rng(0x0fed_cba9_8765_4321);
+    let (u, mut rng) = (Universe::lay(), Rng(0x0fed_cba9_8765_4321));
     let floor = Floor::default();
     for _ in 0..1500 {
-        let (base, frag) = (rand_fs(&mut rng), rand_fs(&mut rng));
+        let (base, frag) = (rand_fs(&u, &mut rng), rand_fs(&u, &mut rng));
         let (base_layer, frag_layer) = (
             rand_layer_of(None, base.clone()),
             rand_layer_of(None, frag.clone()),
@@ -1109,10 +1143,10 @@ fn law_4_extension_invariant_on_fs() {
         let extended = base_layer.clone().extend(Fragment::of(frag_layer.clone()));
         let evidence = |layer: &GrantLayer, op: &FsOp, f: &str| {
             let stack = test_helper::stack([layer.clone()]);
-            region(&stack, op, &floor).map(|r| r.evidence(path::Subject::Access(&trace(at(f)))))
+            region(&stack, op, &floor).map(|r| r.evidence(path::Subject::Access(&trace(f))))
         };
         for op in [FsOp::Read, FsOp::Write] {
-            for f in LAW_FILES {
+            for f in &u.files {
                 let fe = evidence(&frag_layer, &op, f).unwrap_or(Evidence::NEITHER);
                 let permits =
                     |layer: &GrantLayer| evidence(layer, &op, f).is_none_or(Evidence::permits);
@@ -1133,21 +1167,21 @@ fn law_4_extension_invariant_on_fs() {
 /// exec supplies are reads, and its fs exclusions still win.
 #[test]
 fn law_4_extension_invariant_on_reads_with_run_places() {
-    let mut rng = Rng(0x0bad_cafe_f00d_5eed);
+    let (u, mut rng) = (Universe::lay(), Rng(0x0bad_cafe_f00d_5eed));
     let floor = Floor::default();
     for _ in 0..1500 {
-        let base = rand_layer_of(rand_exec(&mut rng, true), rand_fs(&mut rng));
-        let (frag_exec, frag_fs) = (rand_exec(&mut rng, false), rand_fs(&mut rng));
+        let base = rand_layer_of(rand_exec(&u, &mut rng, true), rand_fs(&u, &mut rng));
+        let (frag_exec, frag_fs) = (rand_exec(&u, &mut rng, false), rand_fs(&u, &mut rng));
         let frag = rand_layer_of(frag_exec.clone(), frag_fs.clone());
         let extended = base.clone().extend(Fragment::of(frag));
         let own = rand_layer_of(frag_exec.clone(), Some(frag_fs.clone().unwrap_or_default()));
         let read = |layer: &GrantLayer, f: &str| {
             running_region(&test_helper::stack([layer.clone()]), &floor)
                 .map_or(Evidence::ALLOW, |r| {
-                    r.evidence(path::Subject::Access(&trace(at(f))))
+                    r.evidence(path::Subject::Access(&trace(f)))
                 })
         };
-        for f in LAW_FILES {
+        for f in &u.files {
             let (fe, b, e) = (
                 read(&own, f),
                 read(&base, f).permits(),
@@ -1253,13 +1287,13 @@ fn activation_is_denotational() {
 /// an exclusion that applies; law 7 for a host file and for a bundled tool.
 #[test]
 fn the_read_and_run_judgments_agree_with_their_regions() {
-    let mut rng = Rng(0x9876_5432_10fe_dcba);
+    let (u, mut rng) = (Universe::lay(), Rng(0x9876_5432_10fe_dcba));
     let floor = Floor::default();
     for _ in 0..800 {
-        let stack = rand_stack(&mut rng);
+        let stack = rand_stack(&u, &mut rng);
         let full = running_region(&stack, &floor);
-        for f in LAW_FILES {
-            let access = trace(at(f));
+        for f in &u.files {
+            let access = trace(f);
             let subject = path::Subject::Access(&access);
             let read = stack.read(&floor, &access);
             let want = full.as_ref().is_none_or(|r| r.evidence(subject).permits());
@@ -1288,12 +1322,12 @@ fn the_read_and_run_judgments_agree_with_their_regions() {
 /// Law 8: whatever the stack lets be written, it lets be read.
 #[test]
 fn law_8_writing_reads() {
-    let mut rng = Rng(0x0bad_cafe_f00d_1234);
+    let (u, mut rng) = (Universe::lay(), Rng(0x0bad_cafe_f00d_1234));
     let floor = Floor::default();
     for _ in 0..1000 {
-        let stack = rand_stack(&mut rng);
-        for f in LAW_FILES {
-            let access = trace(at(f));
+        let stack = rand_stack(&u, &mut rng);
+        for f in &u.files {
+            let access = trace(f);
             assert!(
                 stack.write(&floor, &access).is_err() || stack.read(&floor, &access).is_ok(),
                 "{f}\nstack = {stack:?}"
@@ -1306,14 +1340,14 @@ fn law_8_writing_reads() {
 /// reading and writing alike.
 #[test]
 fn law_10_restriction_attenuates() {
-    let mut rng = Rng(0x5555_aaaa_3333_cccc);
+    let (u, mut rng) = (Universe::lay(), Rng(0x5555_aaaa_3333_cccc));
     let floor = Floor::default();
     for _ in 0..1000 {
-        let stack = rand_stack(&mut rng);
+        let stack = rand_stack(&u, &mut rng);
         let mut pushed = stack.clone();
-        pushed.push(rand_layer(&mut rng));
-        for f in LAW_FILES {
-            let access = trace(at(f));
+        pushed.push(rand_layer(&u, &mut rng));
+        for f in &u.files {
+            let access = trace(f);
             let msg = format!("{f}\nstack = {stack:?}\npushed = {pushed:?}");
             assert!(
                 pushed.admit(&floor, file(f), vec![]).is_err()
@@ -1336,22 +1370,17 @@ fn law_10_restriction_attenuates() {
 /// `File(s)` makes `s` neither readable nor runnable.
 #[test]
 fn a_nested_run_allowance_cannot_make_what_the_ceiling_withholds_readable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tree = Tree::lay(tmp.path(), ["/opt/prog"]);
+    let prog = tree.path("/opt/prog");
     let mut stack = test_helper::stack([with_fs(FsPolicy::default())]);
     stack.push(with_exec(grant([(
-        path_key("/ral-lattice/opt/prog"),
+        ExecKey::Path(spelled(&prog)),
         Evidence::ALLOW,
     )])));
     let floor = Floor::default();
-    assert!(
-        stack
-            .read(&floor, &trace(at("/ral-lattice/opt/prog")))
-            .is_err()
-    );
-    assert!(
-        stack
-            .admit(&floor, file("/ral-lattice/opt/prog"), vec![])
-            .is_err()
-    );
+    assert!(stack.read(&floor, &trace(&prog)).is_err());
+    assert!(stack.admit(&floor, file(&prog), vec![]).is_err());
 }
 
 /// A bundled tool runs wherever exec permits it and no fs exclusion covers
@@ -1400,8 +1429,8 @@ fn a_root_directory_runs_files_not_tools_and_reads_what_it_runs() {
     let (opt_t, bin_t) = (root.join("opt/t"), root.join("usr/bin/t"));
     let floor = Floor::default();
     let program = |p: &Path| Program::File {
-        trace: trace(p),
-        path: p.to_path_buf(),
+        located: Box::new(test_helper::located(p)),
+        arg0: p.to_path_buf(),
     };
     let under_root = ExecKey::Dir(FrozenPath::root());
     let runs_anywhere = with_exec(grant([(under_root.clone(), Evidence::ALLOW)]));
