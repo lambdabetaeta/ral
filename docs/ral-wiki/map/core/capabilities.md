@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f56fff48
-generated_at_date: 2026-10-21
+generated_at_commit: ba7dd300
+generated_at_date: 2026-10-23
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/guard/, core/src/guard.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs, core/src/own.rs]
 ---
 
@@ -423,7 +423,11 @@ is already confined by the [[map/core/io-process|spawn jail]] (a fresh
 unprivileged uid and a per-exec cgroup), the daemon disables the
 unprivileged user namespaces bwrap needs, and the guest has no network
 device for `net` to govern; the in-process guards apply unchanged
-(`docs/SPEC.md` §12.11).
+(`docs/SPEC.md` §12.11). Unchanged means head-only: `build_launch`
+(`runtime/command/process.rs`) builds no projection under a jail, so a grant's
+fs and exec tables bind the command head and nothing an admitted program then
+spawns (`rg --pre`, `env`, `find -exec`). The jail, the uid, the cgroup and the
+VM boundary are the only confinement of grandchildren.
 
 - `pin()` and `boot()` — startup: `pin` pins ral's own executable (`reexec::OWN`) and, on Linux, the bwrap
   envelope (`linux::pin_envelope`, walked on the process's own `PATH`

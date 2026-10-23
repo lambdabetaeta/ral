@@ -848,14 +848,16 @@ fn freeze(path: impl AsRef<Path>) -> Result<FrozenPath, PolicyError> {
     FrozenPath::freeze(path.as_ref()).map_err(PolicyError::new)
 }
 
-/// A directory chosen for `selector` that is the root, the home or an
+/// A directory chosen for `selector` that is a root, the home or an
 /// ancestor of it would make running reads a read of everything, `~/.ssh`
-/// included.  Judged on where the directory's walk landed, by containment of
-/// positions as [`FreezeCtx::xdg`] judges, so a home that is a symlink is
-/// still caught.  `subject` says what chose it; `var` is what to check.
+/// included.  A root is any filesystem's, a drive's under Windows rules,
+/// home bound or not.  Judged on where the directory's walk landed, by
+/// containment of positions as [`FreezeCtx::xdg`] judges, so a home that is
+/// a symlink is still caught.  `subject` says what chose it; `var` is what
+/// to check.
 ///
 /// # Errors
-/// `dir` is the filesystem root, the home or an ancestor of it.
+/// `dir` is a filesystem root, the home or an ancestor of it.
 pub(super) fn refuse_the_world(
     selector: Selector,
     subject: &str,
@@ -866,7 +868,7 @@ pub(super) fn refuse_the_world(
     let dir = dir.real();
     let home = home.and_then(|h| h.real.as_ref());
     let what = match home {
-        _ if dir.is_universal() => "the filesystem root",
+        _ if dir.is_root() => "the filesystem root",
         Some(home) if dir.contains(home) && home.contains(dir) => "the home directory itself",
         Some(home) if dir.contains(home) => "an ancestor of the home directory",
         _ => return Ok(()),
@@ -1000,6 +1002,22 @@ mod tests {
                     "PATH holds {entry}, {what}, so `` `dir `path `` would run and read all \
                      of it. Is PATH set correctly?"
                 ),
+            );
+        }
+    }
+
+    /// A drive root holds its whole drive, so it is refused home bound or not.
+    // Windows-only: the host's roots are what the refusal reads.
+    #[cfg(windows)]
+    #[test]
+    fn path_entries_naming_a_drive_root_are_refused() {
+        let home = Home::of(r"C:\Users\h").unwrap();
+        for home in [None, Some(&home)] {
+            let err = path_dirs_in::<Trace>(OsStr::new(r"C:\Windows;C:\"), home).unwrap_err();
+            assert!(
+                err.message.contains("C:/, the filesystem root"),
+                "{}",
+                err.message
             );
         }
     }

@@ -26,7 +26,8 @@ engine (`bootstrap::APPS`). `policy::for_invocation` then denies them **after**
 composition, as its own layer, on the same footing as a `--restrict` file's own
 path ([[map/exarch/policy|policy]]). No profile can forget the deny, no
 `--extend` can widen past it, and every spawned child's layer can only
-narrow beneath it ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]).
+narrow beneath it, wherever the parent's stack carries it
+([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]).
 
 Synod's files are named by the engine (`bootstrap::SYNOD`), not by synod. The
 deny and the directory therefore cannot drift apart. Synod's own agent runs in a
@@ -72,6 +73,13 @@ depend on a policy.
   wherever some fs restricts: name a `--restrict` file, or extend `dangerous`
   with an fs exclusion, and the deny comes with it; a positive-only fs
   restricts nothing and gets none.
+- **A child a `dangerous` parent's spawn narrows carries no file deny either.**
+  A spawn forks the parent's stack and pushes one layer without passing through
+  `for_invocation`, so a parent with no credential layer leaves its child none,
+  and the child reads the key files. The process seal still holds. The cost
+  is accepted: the parent could read them already
+  ([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]],
+  decision 10).
 - **The vault is reachable from an unconfined session.** The macOS profile
   admits no `securityd`, and the Linux envelope binds no session bus unless a
   grant reads `/run/user`. Outside those, the credential manager answers any

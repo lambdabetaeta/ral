@@ -12,7 +12,7 @@
 //! polymorphically.  A reference resolves to the nearest preceding definition
 //! of the name, or to the first if every definition follows it.  Groups are
 //! emitted dependencies-first, which can lift a `let` ahead of its source
-//! position.
+//! position; a group's independent dependencies keep their source order.
 
 use crate::source::Spanned;
 use crate::syntax::ast::{Ast, Stmt};
@@ -87,26 +87,32 @@ pub(crate) fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup<'_>> {
         members.sort_by_key(|&di| def_list[di].0);
     }
 
-    // The condensation: edge A→B when some node of A references one of B.
-    let mut scc_deps: Vec<HashSet<usize>> = vec![HashSet::new(); num_sccs];
+    let scc_first_stmt: Vec<usize> = scc_members
+        .iter()
+        .map(|members| def_list[members[0]].0)
+        .collect();
+
+    // The condensation: edge A→B when some node of A references one of B,
+    // each SCC's edges in source order so the traversal is deterministic.
+    let mut scc_deps: Vec<Vec<usize>> = vec![Vec::new(); num_sccs];
     for (di, edges) in adj.iter().enumerate() {
         let from = scc_id[di];
         for &dj in edges {
             let to = scc_id[dj];
             if from != to {
-                scc_deps[from].insert(to);
+                scc_deps[from].push(to);
             }
         }
+    }
+    for deps in &mut scc_deps {
+        deps.sort_unstable_by_key(|&cid| scc_first_stmt[cid]);
+        deps.dedup();
     }
 
     // Entering the DFS in source order keeps the topo order as close to the
     // written order as the dependencies allow.
     let mut topo: Vec<usize> = Vec::with_capacity(num_sccs);
     let mut topo_visited: Vec<bool> = vec![false; num_sccs];
-    let mut scc_first_stmt: Vec<usize> = vec![0; num_sccs];
-    for cid in 0..num_sccs {
-        scc_first_stmt[cid] = def_list[scc_members[cid][0]].0;
-    }
     let mut entry_order: Vec<usize> = (0..num_sccs).collect();
     entry_order.sort_by_key(|&cid| scc_first_stmt[cid]);
     for cid in entry_order {
@@ -163,17 +169,12 @@ pub(crate) fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup<'_>> {
 /// Push `start`'s dependencies onto `topo` before `start` itself.  Iterative,
 /// because a dependency chain of tens of thousands of bindings would recurse
 /// as deep as the chain and overflow the host stack.
-fn topo_dfs(
-    start: usize,
-    scc_deps: &[HashSet<usize>],
-    visited: &mut [bool],
-    topo: &mut Vec<usize>,
-) {
+fn topo_dfs(start: usize, scc_deps: &[Vec<usize>], visited: &mut [bool], topo: &mut Vec<usize>) {
     if visited[start] {
         return;
     }
     visited[start] = true;
-    let mut stack: Vec<(usize, std::collections::hash_set::Iter<'_, usize>)> =
+    let mut stack: Vec<(usize, std::slice::Iter<'_, usize>)> =
         vec![(start, scc_deps[start].iter())];
     while let Some((node, deps)) = stack.last_mut() {
         match deps.next() {
@@ -369,6 +370,19 @@ mod tests {
     fn acyclic_forward_reference_splits_into_singles_in_dependency_order() {
         let groups = groups_of("let g = { f }\nlet f = { |x| f $x }\nreturn ()");
         assert_eq!(groups, vec!["rec [f]", "let g", "stmt"]);
+    }
+
+    #[test]
+    fn independent_dependencies_are_emitted_in_source_order() {
+        let src = "let a = { b; c; d; e }\nlet b = { return 1 }\nlet c = { return 2 }\n\
+                   let d = { return 3 }\nlet e = { return 4 }\na";
+        // Hash order varies per run; one pass would succeed by luck.
+        for _ in 0..16 {
+            assert_eq!(
+                groups_of(src),
+                vec!["let b", "let c", "let d", "let e", "let a", "stmt"]
+            );
+        }
     }
 
     #[test]

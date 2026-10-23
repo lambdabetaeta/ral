@@ -347,22 +347,23 @@ impl Bind {
         }
     }
 
-    /// A name other than its object's own: the host shows a symlink there.
-    fn is_spelling(&self) -> bool {
-        self.dest != self.object
+    /// Whether `inner`'s name is the host's own symlink beneath `self`: the
+    /// mount shows `inner`'s object elsewhere.
+    fn spells(&self, inner: &Self) -> bool {
+        self.shows(&inner.object).as_ref() != Some(&inner.dest)
     }
 
     /// Whether `self` already shows `inner`.  A read-only bind laid inside a
     /// writable one would deny writes the grant admits, so only a writable
-    /// bind covers a writable object; a spelling within any bind is the
-    /// host's own symlink there, onto which bwrap will not mount.
+    /// bind covers a writable object; the host's own symlink within any bind
+    /// is covered too, as bwrap will not mount onto one.
     fn covers(&self, inner: &Self) -> bool {
         if self.dest == inner.dest {
             return self.access == Access::Writable && inner.access == Access::ReadOnly;
         }
         self.dest.holds(inner.dest.as_str())
             && (inner.access == Access::ReadOnly
-                || inner.is_spelling()
+                || self.spells(inner)
                 || self.access == Access::Writable)
     }
 
@@ -1292,6 +1293,30 @@ mod tests {
         assert_eq!(
             shown_within(&covered, &dir),
             [(name(&dir), Access::ReadOnly)]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A writable bind beneath a symlinked ancestor is a mount of its own,
+    /// not the host's symlink: the read-only bind at the link does not cover
+    /// it.
+    #[test]
+    fn a_write_beneath_a_linked_ancestor_stays_writable() {
+        let dir = workdir("binds-linked-ancestor");
+        let dir = std::fs::canonicalize(&dir).expect("the work dir is real");
+        let (real, link) = (dir.join("real"), dir.join("link"));
+        std::fs::create_dir_all(real.join("target")).unwrap();
+        std::os::unix::fs::symlink("real", &link).unwrap();
+        let name = |p: &std::path::Path| p.to_string_lossy().into_owned();
+        let binds = binds(&restricted(&[&link], &[&link.join("target")], &[]), WHOLE);
+        assert_eq!(
+            shown_within(&binds, &dir),
+            [
+                (name(&link), Access::ReadOnly),
+                (name(&real), Access::ReadOnly),
+                (name(&link.join("target")), Access::Writable),
+                (name(&real.join("target")), Access::Writable),
+            ]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

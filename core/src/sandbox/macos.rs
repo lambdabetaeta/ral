@@ -48,16 +48,21 @@ pub(super) fn apply_profile(profile: &str) -> std::io::Result<()> {
         )
     };
     if rc != 0 {
-        if std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) {
-            return Err(std::io::Error::other(ALREADY_PROFILED));
-        }
+        let already_profiled = std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
         let message = if errorbuf.is_null() {
             "sandbox_init_with_parameters failed".to_string()
         } else {
-            unsafe { CStr::from_ptr(errorbuf) }
-                .to_string_lossy()
-                .into_owned()
+            // SAFETY: Seatbelt set `errorbuf` to a NUL-terminated message it
+            // owns, which is freed once, after the copy.
+            unsafe {
+                let message = CStr::from_ptr(errorbuf).to_string_lossy().into_owned();
+                sandbox_free_error(errorbuf);
+                message
+            }
         };
+        if already_profiled {
+            return Err(std::io::Error::other(ALREADY_PROFILED));
+        }
         return Err(std::io::Error::other(message));
     }
     Ok(())
@@ -428,6 +433,7 @@ unsafe extern "C" {
         parameters: *const *const c_char,
         errorbuf: *mut *mut c_char,
     ) -> c_int;
+    fn sandbox_free_error(errorbuf: *mut c_char);
 }
 
 #[cfg(test)]

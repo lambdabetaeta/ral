@@ -21,8 +21,8 @@ use windows_sys::Win32::Security::Authorization::{
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, AddMandatoryAce, CONTAINER_INHERIT_ACE,
-    DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetLengthSid, INHERITED_ACE, InitializeAcl,
-    IsValidSid, LABEL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE, PSID,
+    DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetLengthSid, INHERIT_ONLY_ACE, INHERITED_ACE,
+    InitializeAcl, IsValidSid, LABEL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE, PSID,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_TAG_INFO, FileAttributeTagInfo,
@@ -47,6 +47,14 @@ const ACL_CB: u32 = std::mem::size_of::<ACL>() as u32;
     reason = "INHERITED_ACE is 0x10, and AceFlags (the field it is tested against) is a single byte"
 )]
 pub(super) const INHERITED_ACE_FLAG: u8 = INHERITED_ACE as u8;
+
+/// [`INHERIT_ONLY_ACE`] as an `AceFlags` byte, for the same reason as
+/// [`INHERITED_ACE_FLAG`].
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "INHERIT_ONLY_ACE is 0x8, and AceFlags (the field it is tested against) is a single byte"
+)]
+const INHERIT_ONLY_ACE_FLAG: u8 = INHERIT_ONLY_ACE as u8;
 
 /// `OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE` as the `u8` an `ACE_HEADER`'s
 /// `AceFlags` field is, for the same reason as [`INHERITED_ACE_FLAG`].
@@ -555,7 +563,8 @@ fn well_known_ac_sids() -> &'static [OwnedSid] {
 
 /// What [`WELL_KNOWN_AC_SIDS`] alone grant on `path`: inherited ACEs count,
 /// explicit grants to a specific `AppContainer` SID do not, since the caller
-/// is deciding whether such a grant is still needed. The walk follows
+/// is deciding whether such a grant is still needed, and inherit-only ACEs
+/// do not, as they apply to children, not to `path`. The walk follows
 /// Windows' own access check — a matching deny marks bits off, and a later
 /// allow can only add bits not already denied. A NULL or empty DACL yields 0,
 /// "grants nothing", so the caller tries the real grant instead of assuming.
@@ -566,6 +575,9 @@ fn compute_appcontainer_effective_access(target: Target<'_>) -> Result<u32, Dacl
     let mut denied = 0;
     for ace in security.aces() {
         let ace = ace.map_err(|e| win32_err_str(path, &format!("GetAce: {e}")))?;
+        if ace.0.AceFlags & INHERIT_ONLY_ACE_FLAG != 0 {
+            continue;
+        }
         let Some(kind) = ace.kind() else { continue };
         let Some(mask) = well_known_ac_sids()
             .iter()

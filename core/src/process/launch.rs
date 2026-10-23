@@ -581,6 +581,7 @@ mod windows_args {
 #[cfg(windows)]
 mod windows {
     use super::{EnvEdit, Launch, StdioSpec, windows_args};
+    use crate::process::outcome::KILL_EXIT_CODE;
     use crate::process::{ChildHandle, Pgid, PgidPolicy};
     use crate::sync::LockExt as _;
     use std::ffi::{OsStr, OsString};
@@ -1097,7 +1098,7 @@ mod windows {
             let ok = unsafe {
                 windows_sys::Win32::System::Threading::TerminateProcess(
                     self.raw_process_handle(),
-                    1,
+                    KILL_EXIT_CODE as u32,
                 )
             };
             if ok == 0 {

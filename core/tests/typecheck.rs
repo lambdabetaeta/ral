@@ -310,6 +310,27 @@ fn toplevel_rec_group_members_generalise_independently() {
     );
 }
 
+/// The independent dependencies of one binding are checked in source order,
+/// so the first error is the earliest, not whichever the hasher puts first.
+#[test]
+fn independent_dependencies_are_checked_in_source_order() {
+    let src = [
+        "let a = { b; c; d; e }",
+        "let b = { return $[1 + 'x'] }",
+        "let c = { return $[2 + 'y'] }",
+        "let d = { return $[3 + 'z'] }",
+        "let e = { return $[4 + 'w'] }",
+        "a",
+    ]
+    .join("\n");
+    // Hash order varies per run; one pass would succeed by luck.
+    for _ in 0..16 {
+        let at = raw_errors(&src)[0].pos.expect("a located error").start as usize;
+        let line = src[..at].matches('\n').count() + 1;
+        assert_eq!(line, 2, "the first error is `b`'s, on line 2");
+    }
+}
+
 /// A partial application's RHS resolves to `Fun`, so `annotate` η-expands it:
 /// `let g = f 1` becomes `Return(Thunk(Lam x. App { f, [1, x] }))`,
 /// whose body `Comp::arrow` reads as a `Lam`, and `g`'s scheme is

@@ -15,6 +15,7 @@ use crate::path::{
 use crate::sandbox::SandboxProjection;
 use crate::types::{Break, Check, Resource, Settled, Shell};
 use std::collections::BTreeMap;
+use std::io;
 
 impl Shell {
     /// Check a boolean capability: `Err` if a layer of the active stack
@@ -57,9 +58,9 @@ impl Shell {
         self.session.runtime.floor()
     }
 
-    /// Judge `path` as a name, walked leniently, for `O`: what a probe asks
-    /// where the walk found nothing, so a denied name that does not exist
-    /// reads as denied, not as absent.  A [discard device](LexicalPath::is_discard)
+    /// Judge `path` as a name, walked leniently, for `O`: what a door asks
+    /// where its walk found nothing or failed, so a denied name that does not
+    /// exist reads as denied, not as absent.  A [discard device](LexicalPath::is_discard)
     /// is exempt from both regions, and a [reserved device name](check_device_name)
     /// is refused before either, asked before the walk, since the question is
     /// about the name and not about what is on the disk under it.
@@ -87,6 +88,20 @@ impl Shell {
         self.judged(verdict)
     }
 
+    /// A walk's outcome, its failure reported only once the name is judged
+    /// for `O`: a denied path must read as denied, never as absent or no
+    /// directory.
+    fn named_on_failure<O: Op, T>(
+        &mut self,
+        path: &LexicalPath,
+        walked: io::Result<T>,
+    ) -> Settled<T> {
+        walked.or_else(|e| {
+            self.check_named::<O>(path)?;
+            Err(crate::types::Error::io(path.shown(), &e).into())
+        })
+    }
+
     /// The fs door: walk `path` to the object it names, symlink-free, and
     /// authorise *that object* for `O`.  The handle handed back performs
     /// every operation relative to the object's directory handle, so what was
@@ -95,12 +110,12 @@ impl Shell {
     /// write in ral comes through here.
     ///
     /// # Errors
-    /// The walk's I/O error, phrased with the name as written; the grant's
-    /// refusal; or the refusal of a reserved device name.
+    /// The grant's refusal, of the name where the walk fails; else the walk's
+    /// I/O error, phrased with the name as written; or the refusal of a
+    /// reserved device name.
     pub fn locate<O: Op>(&mut self, path: &LexicalPath) -> Settled<Located<Judged<O>>> {
         check_device_name(path)?;
-        let located =
-            walk(path, LeafMode::Follow).map_err(|e| crate::types::Error::io(path.shown(), &e))?;
+        let located = self.named_on_failure::<O, _>(path, walk(path, LeafMode::Follow))?;
         self.judge(located)
     }
 
@@ -108,11 +123,10 @@ impl Shell {
     /// directory judged.
     ///
     /// # Errors
-    /// The walk's I/O error, phrased with the name as written; the grant's
-    /// refusal; or the refusal of a reserved device name.
+    /// As [`locate`](Self::locate).
     pub fn locate_dir<O: Op>(&mut self, path: &LexicalPath) -> Settled<Dir<Judged<O>>> {
         check_device_name(path)?;
-        let dir = walk_dir(path).map_err(|e| crate::types::Error::io(path.shown(), &e))?;
+        let dir = self.named_on_failure::<O, _>(path, walk_dir(path))?;
         let real = dir.real().clone();
         let verdict = (self.context.grants)
             .judge_dir::<O>(self.floor(), dir)

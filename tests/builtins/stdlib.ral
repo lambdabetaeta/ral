@@ -62,4 +62,22 @@ echo !{first-where { |x| $[$x > 2] } [1, 2, 3, 4]}
 echo !{flat-map { |x| return [$x, $x] } [1, 2]}
 # Expected: [1, 1, 2, 2]
 
+# extension — `.` and `..` have none; a dotfile has none, `foo.` an empty one
+let show-ext = { |path|
+    case !{extension $path} [
+        `some: { |e| echo "$path: some [$e]" },
+        `none: { |_| echo "$path: none" }
+    ]
+}
+show-ext '..'
+show-ext '/a/..'
+show-ext '.'
+show-ext 'a/.'
+show-ext '.bashrc'
+show-ext 'foo.txt'
+show-ext 'a.tar.gz'
+show-ext 'foo.'
+show-ext '..hidden'
+# Expected: none for the first five, then some [txt], some [gz], some [], some [hidden]
+
 echo 'stdlib tests done'

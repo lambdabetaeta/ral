@@ -116,6 +116,12 @@ fn anchor_death(_: crate::process::WaitOutcome) -> Event {
     Event::AnchorDied
 }
 
+/// `Child::drop` neither kills nor reaps, so a child not handed on goes here.
+fn discard(child: &mut crate::process::ChildHandle) {
+    let _ = child.kill();
+    let _ = child.reap();
+}
+
 impl AnchorProcess {
     /// Spawn the anchor and start its witness in one act: the report reader
     /// and the reaper's `Watch` on the anchor's pid are both live on `tx`
@@ -149,9 +155,7 @@ impl AnchorProcess {
             command::brake(&mut child, PgidPolicy::NewLeader, leader)?;
         }
         let Some(pgid) = leader else {
-            // `Child::drop` neither kills nor reaps.
-            let _ = child.kill();
-            let _ = child.reap();
+            discard(&mut child);
             return Err(sig("pipeline anchor: failed to establish a process group"));
         };
         #[cfg(unix)]
@@ -170,15 +174,17 @@ impl AnchorProcess {
                 }
             });
             if let Err(e) = readiness {
-                let _ = child.kill();
-                let _ = child.reap();
+                discard(&mut child);
                 return Err(Error::io("pipeline anchor did not become ready", &e).into());
             }
             let report_tx = tx.clone();
             let reporter = std::thread::Builder::new()
                 .name("ral pipeline anchor report reader".to_string())
                 .spawn(move || read_anchor_reports(report, &report_tx))
-                .map_err(|e| Error::io("pipeline anchor", &e))?;
+                .map_err(|e| {
+                    discard(&mut child);
+                    Error::io("pipeline anchor", &e)
+                })?;
             (child.into_watch(tx, anchor_death), reporter)
         };
         Ok(Self {

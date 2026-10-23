@@ -202,6 +202,42 @@ fn a_denied_absent_name_is_refused_not_reported_absent() {
     }
 }
 
+/// A walk that fails under a denied tree, at a missing component or a file
+/// where a directory is due, is refused by the grant, in a write redirect as
+/// in a read: the error never says what is there.  Under an allowance it is
+/// still the walk's.
+#[cfg(unix)]
+#[test]
+fn a_walk_failing_under_a_denied_tree_is_refused_by_the_grant() {
+    let (_tmp, dir) = fixture();
+    std::fs::create_dir_all(dir.join("allowed")).unwrap();
+    std::fs::create_dir_all(dir.join("denied/sub")).unwrap();
+    std::fs::write(dir.join("denied/sub/f"), "").unwrap();
+    let run = |body: &str| {
+        let body =
+            format!("grant [fs: [read: [`cwd allowed], write: [`cwd allowed]]] {{ {body} }}");
+        let err = run_in(&dir, &body).expect_err("the walk must fail");
+        format!("{err:?}")
+    };
+    for body in [
+        "from-string < denied/sub/f",
+        "from-string < denied/sub/nosuch",
+        "from-string < denied/nosuch/f",
+        "from-string < denied/sub/f/x",
+        "exists denied/nosuch/f",
+        "echo x > denied/nosuch/f",
+        "echo x > denied/sub/f/x",
+    ] {
+        let message = run(body);
+        assert!(
+            message.contains("denied by grant"),
+            "{body} must be refused by the grant, got: {message}"
+        );
+    }
+    let message = run("from-string < allowed/nosuch/f");
+    assert!(message.contains("no such file or directory"), "{message}");
+}
+
 /// `within [dir: d]` enters the directory `d` is: refused where a deny holds
 /// it, however spelled, and under an allowance the cwd is its real position.
 #[cfg(unix)]

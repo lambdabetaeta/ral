@@ -16,4 +16,13 @@ foo
 `none
 `some 3
 [1, 1, 2, 2]
+..: none
+/a/..: none
+.: none
+a/.: none
+.bashrc: none
+foo.txt: some [txt]
+a.tar.gz: some [gz]
+foo.: some []
+..hidden: some [hidden]
 stdlib tests done

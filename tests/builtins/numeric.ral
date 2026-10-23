@@ -24,6 +24,9 @@ refusal { round 3.14 -1; return () }
 refusal { round 3.14 400; return () }
 refusal { int 1.0e300; return () }
 
+# int does not round: a fractional Float is refused
+refusal { int 3.7; return () }
+
 # range checks its arithmetic
 refusal { range -2 9223372036854775807; return () }
 

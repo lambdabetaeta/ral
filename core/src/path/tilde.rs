@@ -39,14 +39,17 @@ impl TildePath {
         })
     }
 
-    /// The native expansion, as the OS takes it: `home` followed by the
-    /// suffix, in `home`'s own spelling, lifted to a path and never read for
-    /// a sigil again.
+    /// The native expansion, as the OS takes it, lifted to a path and never
+    /// read for a sigil again: exactly one separator stands between `home`
+    /// and the suffix, which keeps its written spelling.
     pub(crate) fn expand(&self, home: &str) -> PathBuf {
-        PathBuf::from(format!(
-            "{home}{}",
-            self.suffix.as_deref().unwrap_or_default()
-        ))
+        match self.suffix.as_deref() {
+            None => PathBuf::from(home),
+            Some(suffix) => {
+                let home = home.trim_end_matches(|c| PathRules::HOST.is_separator(c));
+                PathBuf::from(format!("{home}{suffix}"))
+            }
+        }
     }
 
     /// The expansion as ral shows it: [`Self::expand`] shown
@@ -161,6 +164,27 @@ mod tests {
     fn expansion_appends_the_suffix_to_home() {
         assert_eq!(tilde(None).expand("/h"), PathBuf::from("/h"));
         assert_eq!(tilde(Some("/sub")).expand("/h"), PathBuf::from("/h/sub"));
+    }
+
+    /// A home that ends in a separator, `/` alone included, gains none: `//`
+    /// would open a UNC head under Windows rules.  A lone `~` is `home` as is.
+    #[test]
+    fn expansion_puts_one_separator_between_home_and_suffix() {
+        for (suffix, home, want) in [
+            (Some("/bin/tool"), "/", "/bin/tool"),
+            (Some("/bin/tool"), "/h/", "/h/bin/tool"),
+            (Some("/bin/tool"), "/h", "/h/bin/tool"),
+            (Some("/"), "/", "/"),
+            (Some("/"), "/h", "/h/"),
+            (Some("/"), "/h/", "/h/"),
+            (None, "/", "/"),
+        ] {
+            assert_eq!(
+                tilde(suffix).expand(home),
+                PathBuf::from(want),
+                "{suffix:?} {home}"
+            );
+        }
     }
 
     #[test]

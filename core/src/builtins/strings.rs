@@ -7,14 +7,11 @@ use std::borrow::Cow;
 use super::util::regex_err;
 use super::util::{lossy_line_list, read_lines};
 
-/// Parse a `Value` as a `usize` index; junk errors rather than coercing to zero.
+/// Decode a `Value` as a `usize` index.
 fn as_index(v: &Value, ctx: &str) -> Settled<usize> {
     match v {
         Value::Int(n) => usize::try_from(*n)
             .map_err(|_| sig(format!("{ctx}: index must be non-negative, got {n}"))),
-        Value::String(s) => s
-            .parse::<usize>()
-            .map_err(|_| sig(format!("{ctx}: '{s}' is not a non-negative integer"))),
         other => Err(sig(format!(
             "{ctx}: expected Int, got {}",
             other.type_name()
@@ -292,6 +289,10 @@ pub(super) fn builtin_to_int(args: &[Value]) -> Settled<Value> {
             .to_i64()
             .map(Value::Int)
             .ok_or_else(|| sig(format!("int: {f} is outside the integer range"))),
+        Value::Float(f) => Err(sig_hint(
+            format!("int: {f} is not integral"),
+            "convert with floor, ceil or trunc, which return an Int",
+        )),
         Value::String(s) => s.trim().parse::<i64>().map(Value::Int).map_err(|_| {
             sig_hint(
                 format!("int: '{s}' is not a valid integer"),
@@ -324,7 +325,10 @@ pub(super) fn builtin_to_float(args: &[Value]) -> Settled<Value> {
             )),
         },
         other => Err(sig_hint(
-            format!("float: expected String or Int, got {}", other.type_name()),
+            format!(
+                "float: expected String, Int, or Float, got {}",
+                other.type_name()
+            ),
             "e.g. float '3.14'",
         )),
     }
@@ -336,5 +340,44 @@ pub(super) fn builtin_to_string(args: &[Value]) -> Value {
     match &args[0] {
         s @ Value::String(_) => s.clone(),
         v => Value::string(v.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Break;
+
+    fn refusal(result: Settled<Value>) -> String {
+        match result {
+            Err(Break::Error(e)) => e.message,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slice_takes_int_indices_not_numeric_text() {
+        let args = [Value::string("hello"), Value::string("1"), Value::Int(3)];
+        assert_eq!(
+            refusal(builtin_slice(&args)),
+            "slice start: expected Int, got String"
+        );
+    }
+
+    #[test]
+    fn int_of_a_fractional_float_says_it_is_not_integral() {
+        let f = Finite::new(3.7).expect("finite");
+        assert_eq!(
+            refusal(builtin_to_int(&[Value::Float(f)])),
+            "int: 3.7 is not integral"
+        );
+    }
+
+    #[test]
+    fn float_of_a_non_number_lists_every_type_it_takes() {
+        assert_eq!(
+            refusal(builtin_to_float(&[Value::Bool(true)])),
+            "float: expected String, Int, or Float, got Bool"
+        );
     }
 }

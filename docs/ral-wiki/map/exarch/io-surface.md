@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 61c288f
-generated_at_date: 2026-10-21
+generated_at_commit: ba7dd300
+generated_at_date: 2026-10-23
 covers_paths: [core/src/types/audit/observation.rs, exarch/src/tui/group.rs, core/src/types/audit/fan_out.rs, core/src/evaluator/call.rs, core/src/runtime/command_call.rs, core/src/path/walk.rs, core/src/guard/shell.rs, core/src/runtime/redirect.rs, core/src/runtime/redirect/stage.rs, core/src/runtime/command/detach.rs, core/src/runtime/pipeline/collect.rs, core/src/runtime/redirect/scope.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, core/src/path/tree/walk.rs, clippy.toml, lint/site.rs, core/tests/sites.rs]
 ---
 
@@ -321,7 +321,9 @@ callers genuinely need different answers:
 | `locate_existing` | `Ok(None)` | `Err` |
 | `locate_if_admitted` | `None` | `None` |
 
-`locate` is the syscall site proper. `locate_existing` is what `exists`/`is-file` and
+`locate` is the syscall site proper; where its walk fails it judges the name
+first, as `locate_existing` does, so a denied path's `Err` is the grant's and
+not the walk's. `locate_existing` is what `exists`/`is-file` and
 their siblings need: an absent path is `false`, a denied one still raises —
 and where the walk found nothing to judge, the refusal falls back to the name,
 so a denied path that does not exist cannot leak the difference by reading as

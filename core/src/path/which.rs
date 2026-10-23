@@ -213,12 +213,12 @@ pub(crate) fn names_a_path_for(name: &str, rules: PathRules) -> bool {
 /// is covered by no `/work/bin/` the profile names.  With no cwd a relative
 /// entry names nothing: there is no "here" to read it against.
 fn anchor_to_cwd(p: PathBuf, cwd: Option<&CwdPath>) -> Option<PathBuf> {
-    let joined = match cwd {
-        _ if super::lex::is_absolute(&p) => p,
-        Some(c) => c.as_path().join(p),
+    let anchored = match cwd {
+        Some(c) => super::lex::anchor(c, &p),
+        None if super::lex::is_absolute(&p) => p,
         None => return None,
     };
-    Some(super::lex::fold_dots(&joined))
+    Some(super::lex::fold_dots(&anchored))
 }
 
 /// The one directory list behind [`locate`] and [`search`]; relative
@@ -693,6 +693,18 @@ mod windows_tests {
             forget_located_commands();
             assert!(locate("build", Some(&path_value), None).is_some());
         });
+    }
+
+    /// `C:bin` on a `PATH` of ral's cwd drive is read against ral's cwd, not
+    /// left for the process's per-drive directory to answer: `Path::join`
+    /// would hand back `C:bin` unchanged.
+    #[test]
+    fn a_drive_relative_entry_on_the_cwd_drive_anchors_to_the_cwd() {
+        let cwd = CwdPath::new(PathBuf::from(r"C:\w\p")).unwrap();
+        assert_eq!(
+            path_dirs(r"C:bin;C:.\tool", Some(&cwd)),
+            [PathBuf::from(r"C:\w\p\bin"), PathBuf::from(r"C:\w\p\tool")],
+        );
     }
 }
 

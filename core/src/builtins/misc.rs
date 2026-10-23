@@ -138,14 +138,13 @@ pub(super) fn builtin_fail(args: &[Value]) -> Break {
 }
 
 pub(super) fn builtin_exit(args: &[Value], _env: &mut Shell) -> Settled<Value> {
-    let code = match &args[0] {
-        Value::Int(n) => status_i32("exit", *n)?,
-        v => v
-            .to_string()
-            .parse::<i32>()
-            .map_err(|_| sig("exit: status must be an integer"))?,
+    let Value::Int(n) = &args[0] else {
+        return Err(sig(format!(
+            "exit: expected Int, got {}",
+            args[0].type_name()
+        )));
     };
-    Err(Break::Escape(Escape::Exit(code)))
+    Err(Break::Escape(Escape::Exit(status_i32("exit", *n)?)))
 }
 
 /// Hand the event to the host's structured-event sink, or to nothing when none
@@ -251,6 +250,15 @@ mod tests {
             ("message".into(), Value::string("m")),
             ("reason".into(), reason),
         ])
+    }
+
+    #[test]
+    fn exit_takes_an_int_not_numeric_text() {
+        let mut shell = crate::test_helper::core_shell();
+        match builtin_exit(&[Value::string("3")], &mut shell) {
+            Err(Break::Error(e)) => assert_eq!(e.message, "exit: expected Int, got String"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
     }
 
     #[test]

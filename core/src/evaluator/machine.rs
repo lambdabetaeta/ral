@@ -162,7 +162,10 @@ fn bare_lambda_error() -> Error {
         "tried to evaluate a bare lambda in computation position: a function value must be \
          applied to arguments or held as a thunk",
     )
-    .with_hint("either call this function with arguments, or bind it as `Thunk(...)` to pass it as a value")
+    .with_hint(
+        "either call this function with all its arguments, or hold it in a block with a \
+         parameter, such as `{ |x| f 1 $x }`, to pass it as a value",
+    )
 }
 
 /// `t as Value else Halt(bare lambda)` — the `F`-holed frames' shared move.
@@ -828,7 +831,7 @@ impl Machine {
     ) -> Settled<Focus> {
         match frame {
             Frame::To { bind, env } => {
-                let v = as_value(t)?;
+                let v = as_value(t).map_err(|b| stamp(b, bind.span))?;
                 let CompKind::Bind { pattern, rest, .. } = &bind.item else {
                     unreachable!("a To frame's `bind` is always a Bind comp")
                 };
