@@ -134,8 +134,8 @@ replaced (`Shell::write_sink`) and propagates the halt. Which computations a val
 demand wraps in it is decided by the checker, not here
 ([[decisions/260930_graded-f|graded-f]]).
 
-`a ? b ? c` has no frame of its own: it elaborates to nested `try` (kernel
-`_؟_`, `CK.Derived`), right-associated so the last arm stays in tail
+`a ? b ? c` has no frame of its own: it elaborates to nested `try`,
+right-associated so the last arm stays in tail
 position.
 
 **Tail calls push nothing.** β binds the parameter into the closure's
@@ -228,6 +228,5 @@ See also [[design/cbpv|cbpv]], [[design/scoping|scoping]],
 [[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]];
 code maps [[map/core/evaluator|evaluator]],
 [[map/core/shell-state|shell-state]], [[map/core/runtime|runtime]]. The
-formal account is `docs/SPEC.md` §17.8. The Agda kernel (`dev/agda`) is a
-substitution-based CK machine and stays one: a closure machine is a
-refinement to be proved against it, not its foundation.
+formal account is `docs/SPEC.md` §17.8. The Agda core
+(`dev/agda/Ral/Machine.agda`) is the same machine, intrinsically typed, one per thread.

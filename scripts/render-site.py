@@ -272,7 +272,12 @@ def doc_page(title: str, current: str, body: str, source: str,
 
 # ── highlighting ───────────────────────────────────────────────────────────
 
-_CELL_RE = re.compile(r"<td class=line>(.*?)</td>", re.DOTALL)
+# `tree-sitter highlight --html --layout fragment` (CLI 0.27+) emits the
+# highlighted code as one `<pre><code>` block inside a `<div class="highlight">`.
+_HIGHLIGHT_BLOCK_RE = re.compile(
+    r'<div class="highlight">\n<pre><code>(.+)</code></pre>\n</div>\n',
+    re.DOTALL,
+)
 
 
 def ensure_tree_sitter() -> None:
@@ -312,21 +317,25 @@ def highlight_ral(source: str) -> str:
     """Highlight ral source through the grammar, returning class-tagged HTML.
 
     The grammar is associated by file extension, so the source goes to a
-    temporary `.ral` file.  `highlight --html` emits one table row per line;
-    the highlighted code lives in the `<td class=line>` cells, which join back
-    into the original source.
+    temporary `.ral` file.  `highlight --html --layout fragment` wraps the
+    highlighted code in a single `<div class="highlight"><pre><code>` block;
+    its content is returned: newline-separated lines with no trailing newline,
+    which join back into the original source.
     """
     tmp = GRAMMAR_DIR / ".render-site.ral"
     tmp.write_text(source.rstrip("\n") + "\n", encoding="utf-8")
     try:
-        out = run(["tree-sitter", "highlight", "--html", "--css-classes", str(tmp)],
+        out = run(["tree-sitter", "highlight", "--html",
+                   "--layout", "fragment", "--style", "classes", str(tmp)],
                   "highlighting failed").stdout
     finally:
         tmp.unlink(missing_ok=True)
-    cells = _CELL_RE.findall(out)
-    if not cells:
-        raise SystemExit("render-site: tree-sitter returned no highlighted lines")
-    return "".join(cells).rstrip("\n")
+    block = _HIGHLIGHT_BLOCK_RE.fullmatch(out)
+    if block is None:
+        raise SystemExit(
+            "render-site: tree-sitter returned no highlighted code "
+            f"(the CLI must be 0.27 or newer): {out[:200]!r}")
+    return block[1]
 
 
 SH_KEYWORDS = {

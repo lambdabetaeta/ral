@@ -228,7 +228,7 @@ worker's escape is data on its `` `done `` card.
 ## Denotation
 
 A sketch, to be stated over the Agda's existing semantics, not a replacement
-for it. The signature is the kernel's extended by `fail e`, `exit n`, `stop ν
+for it. (The CK development cited here was retired on 2026-10-23; see `dev/agda/README.md`.) The signature is the kernel's extended by `fail e`, `exit n`, `stop ν
 c` and `poll : 1 → L⊥`: `poll`, `write` and `exec` are input operations whose
 response the world chooses, and `poll` has *no equations of its own*. It is
 not a reader: `poll; poll ≠ poll`, the world advancing between two readings.
@@ -348,7 +348,7 @@ lands, when a mask ends, and for a process which write is first dead.
 - The Agda's obligations: `Esc` instantiated with `exit n | stop ν? c`, the
   world extended with the node store and a clock, a non-focal `ξpoll`, `βstop`
   consuming by name, and `_⊕_` refined to the cause order
-  (`dev/agda/CK/RUST.md`).
+  (`dev/agda/CK/RUST.md`). (The CK development cited here was retired on 2026-10-23; see `dev/agda/README.md`.)
 - Windows has no sliced pipe wait: a thread stage's blocked I/O is
   interrupted (`CancelSynchronousIo`) when the collector writes its node and
   each pass while its chain carries a cause, and a pump each slice of
@@ -378,7 +378,7 @@ lands, when a mask ends, and for a process which write is first dead.
   name and running its cleanup before `report`, so law 6 is a theorem; (4)
   `shield!⟨since, grace⟩` as a `mask-layer` instance over a monotone clock,
   `CleanupPreempts` the base law 3 extends; (5) `fail`'s faithfulness as a
-  lemma about the record projection. See `dev/agda/CK/RUST.md`.
+  lemma about the record projection. See `dev/agda/CK/RUST.md`. (The CK development cited here was retired on 2026-10-23; see `dev/agda/README.md`.)
 - **A nursery**: a scoped `spawn` whose node is the call's, so a stop, an
   `exit` or a failure leaving the scope reaches its workers through the chain
   and the scope frame joins them; Trio's nursery is the precedent. Until then

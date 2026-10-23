@@ -182,23 +182,10 @@ is why neither view can carry a sequence. Data that must keep an order is a
 list; data needing an order *and* a type per key is neither, and ral has no
 third carrier for it.
 
-The Agda foundation uses the same sorted association-list container for
-record rows and homogeneous maps, with distinct static types. Certified map
-construction preserves exactly its inputs, refuses repeated keys and makes
-equal contents propositionally equal regardless of input order. Key checking
-is separate from insertion: the evaluator must reject a repeated computed key
-before evaluating its value (`eval_map`, `core/src/evaluator/assemble.rs`).
-Runtime maps use validated Unicode text keys through a key-order instance of
-the shared container. Typed primitive interpretations construct raised-error
-records for missing and repeated keys; successful insertion preserves all
-old entries and makes the new value retrievable. Runtime erasure maps both
-types to one dictionary carrier with code-point-list keys; typed value
-evaluation agrees with its untyped evaluator. The CEK machine executes key
-checks before subsequent payload computations; a checked insertion sequence
-refuses a duplicate before a payload exit, while a fresh key reaches that exit.
-General source-elaboration/error-order preservation and primitive/computation erasure agreement remain
-(`dev/agda/CEK/Map.agda`, `dev/agda/CEK/RuntimeErasure.agda`,
-`dev/agda/CEK/MachinePrimitiveExamples.agda`, `dev/docs/agda-progress.md`).
+The Agda core keeps a runtime map as an association list strictly sorted by key
+(`dev/agda/Ral/Map.agda`). Key checking is separate from insertion: the evaluator must reject a
+repeated computed key before evaluating its value (`eval_map`, `core/src/evaluator/assemble.rs`;
+`explicit` in `dev/agda/Ral/Data.agda`).
 
 ## Why both, not one
 

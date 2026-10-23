@@ -45,39 +45,10 @@ The cleanup forms differ only in what they do with the original failure:
   ([[decisions/261016_a-cleanup-is-shielded-within-its-grace|a-cleanup-is-shielded-within-its-grace]]);
 - the prelude's `attempt` discards both result and failure.
 
-The kernel model carries both forms as of 2026-08-19. In `dev/agda` a failure is
-a term — `halt`, spelled `fail` when it carries an error and `exit` when it
-carries an escape — and every stack frame answers one. `try` and `guard` are the
-two frames that answer with more than a pop, and the pair of rules `βtry-err` /
-`βtry-esc` is the whole of "catches recoverable runtime errors and nothing
-else": one pattern match on the signal, catching the error and letting the
-escape walk past. `guard` is not sugar for `try` there either — it reduces to
-its cleanup resumed in front of the body's outcome (`βguard-halt`, the detour
-through `؛`), so a cleanup that halts pre-empts that outcome, which is the rule
-above read on the other side: one rule for both signals, and the shell and the
-calculus now say it in the same words. `?` needs no form of its own there: it is
-`try` with a handler that drops the error it binds, and the model proves the
-equation that makes that a definition rather than a resemblance — `fail W ? N`
-is `N`.
-
-**Recovery and cleanup preserve the dynamic scope of their caller.** The
-scoped Agda fundamental theorem covers both constructs alongside higher-order
-CBPV and recursion. A returned thunk remains usable after recovery and cleanup;
-a checked example forces it after leaving an environment overlay and reads
-the restored caller environment. For two halting computations under `guard`,
-`CleanupPreempts` proves that every finite machine behaviour is a prefix of
-the cleanup's halt, for arbitrary error/escape signals and ambient scope
-layers. These results concern the covered finite-behaviour model; handler
-invocation and Rust refinement remain separate obligations.
-
-The active CEK direct-command model derives `status` and `reason` from one
-process outcome. Exit zero returns unit; nonzero exit, signal, not-found and
-not-runnable become ordinary errors. Exit 129 and signal 1 have equal statuses
-but different reasons. Source `exit` stays an escape. Checked command traces
-retain stdout/stderr and the stdin remainder on failure, preserve the command's
-syntax-stamped site, and carry an error across generalisation into recovery.
-This covers the atomic direct-command layer; named dispatch, capture and
-pipeline failure rules remain open (`dev/agda/CEK/CommandExamples.agda`).
+The Agda core (`dev/agda/Ral/Machine.agda`) models both as frames on a stack a halt walks:
+`try` pops and runs its handler on the error (`halt-to`), and `guard` runs its cleanup in front of
+the body's outcome (`cleanup`), so a cleanup that halts replaces that outcome, as above. It has no
+`exit`.
 
 Failure propagates predictably through the rest of the grammar:
 

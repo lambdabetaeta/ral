@@ -86,7 +86,7 @@ former, and it is where the Agda model carries the failure clause.
 > kernel has handlers, and a decode that cannot read raises a signal that climbs
 > the stack until a `try` catches it or the run ends at the `abort` leaf. The
 > paragraph below records what was true on 2026-08-12 and is kept for the
-> record; `dev/agda/CK/README.md` is the current account.
+> record. (The CK development cited here was retired on 2026-10-23; see `dev/agda/README.md`.)
 
 The model carries it as of 2026-08-12. `dev/agda` gained a `String` base type
 with `str` as its introduction form, a `decode` former over a *computation* —

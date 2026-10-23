@@ -83,7 +83,7 @@ The elaboration is total, syntactic and decided once, so the verdict and every
 printed type are independent of statement order. Every clause but the first two
 is a law of the kernel: β for a literal thunk, associativity of `to`, the fact
 that a form which forces one of its thunks has that thunk's result, and the fact
-that a pipeline's value is its final stage's. The kernel (`dev/agda`) proves
+that a pipeline's value is its final stage's. The kernel (`dev/agda`) proved
 them for the route-free calculus: type soundness (`soundness`, `progress`);
 capture, in two halves — a terminating `M` has `capture M` return exactly the
 bytes `M` wrote and write nothing itself, a halting one halts with the same
@@ -91,7 +91,7 @@ signal after writing what `M` wrote (`capture-returns`, `capture-halts`);
 η for `F`, `M to x. return x ≈ M` (`to-η` in `Bisim`), false of the route
 calculus because a write could walk past a capture as chatter; and
 associativity and β (`to-assoc`, `؛-assoc`, `force-thunk`). The kernel covers
-this ruling only: it has no kinds, rows, weak variables or boundaries.
+this ruling only: it has no kinds, rows, weak variables or boundaries. (The CK development cited here was retired on 2026-10-23; see `dev/agda/README.md`.)
 
 ## What it costs
 

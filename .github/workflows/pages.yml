@@ -31,7 +31,7 @@ jobs:
       # no node/bun is required on the runner.
       - name: Install tree-sitter CLI
         run: |
-          curl -fsSL https://github.com/tree-sitter/tree-sitter/releases/download/v0.26.9/tree-sitter-linux-x64.gz \
+          curl -fsSL https://github.com/tree-sitter/tree-sitter/releases/download/v0.27.1/tree-sitter-linux-x64.gz \
             | gunzip > /usr/local/bin/tree-sitter
           chmod +x /usr/local/bin/tree-sitter
 

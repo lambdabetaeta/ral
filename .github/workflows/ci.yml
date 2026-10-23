@@ -92,7 +92,7 @@ jobs:
       - name: Install tree-sitter CLI
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
-          curl -fsSL https://github.com/tree-sitter/tree-sitter/releases/download/v0.26.9/tree-sitter-${{ matrix.tree_sitter }}.gz \
+          curl -fsSL https://github.com/tree-sitter/tree-sitter/releases/download/v0.27.1/tree-sitter-${{ matrix.tree_sitter }}.gz \
             | gunzip > "$RUNNER_TEMP/bin/tree-sitter"
           chmod +x "$RUNNER_TEMP/bin/tree-sitter"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"

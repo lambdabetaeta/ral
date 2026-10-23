@@ -47,7 +47,7 @@ people to write two-descriptor arithmetic where one verb would do.
 
 ## What it buys the model
 
-The Agda kernel's stderr-redirect parcel, revised the same day, is smaller by
+The Agda kernel's stderr-redirect parcel (the CK development was retired on 2026-10-23; see `dev/agda/README.md`), revised the same day, is smaller by
 exactly this redirect:
 
 - no `cross!` frame and no `crosses` constructor of `AnswerErr` — the
