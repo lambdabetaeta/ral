@@ -31,8 +31,8 @@ returned, or installed as an effect handler. Currying desugars to nested
 lambdas, so partial and under-application are uniform.
 
 `dev/agda/Ral/` mechanises the core: intrinsically typed syntax and a CEK machine per thread
-(`Machine.agda`, `step`), with preservation by indexing and progress for a pool of such machines
-(`Progress.agda`, `progress`). `dev/agda/Core/Semantics/` gives finite behaviours with sequencing,
+(`Machine.agda`, `step`), with preservation by indexing and progress and deadlock-freedom for a pool
+of such machines (`Progress.agda`, `progress`). `dev/agda/Core/Semantics/` gives finite behaviours with sequencing,
 capture and least fixed points of continuous process operators. Contextual equivalence and the βη
 laws are not mechanised. The map is `dev/agda/README.md`.
 
