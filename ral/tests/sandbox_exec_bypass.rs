@@ -1,5 +1,5 @@
+#![allow(clippy::disallowed_methods, reason = "test code")]
 #![cfg(target_os = "macos")]
-#![allow(clippy::disallowed_methods)]
 
 //! An exec grant is enforced by the kernel, not merely rendered.
 //!

@@ -5,8 +5,10 @@
 //! `trunc` map a Float to the Int in their direction.  All four take a Float
 //! only (an Int is a static type error — it is already rounded).  The harness
 //! mirrors `comparison.rs`: bootstrap a prelude-registered `Shell` and drive
-//! each source string through the public `run` door like a REPL
+//! each source string through the public `run` entry like a REPL
 //! run.
+
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 mod common;
 

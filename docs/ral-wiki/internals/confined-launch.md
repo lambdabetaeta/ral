@@ -115,7 +115,9 @@ the session's `SessionSandbox`.
   and a cloud-files placeholder passes, which `OBJ_DONT_REPARSE` would have
   refused. The leaf's stamping handle is derived from the walk's by
   `ReOpenFile`, and a share is refused by asking that handle for its volume
-  (`dacl/frozen.rs`).
+  (`dacl/frozen.rs`). A position that is not Unicode is refused there too, as
+  `DaclError::NotUnicode`: the capability name is a hash of the position's text,
+  and a grant that cannot be expressed faithfully is refused, not approximated.
 - **The check comes before every filter, on every launch.** Three filters drop
   paths before anything is stamped: the projection's memo of what it granted,
   existence, and the ambient-access probe. A path granted at an earlier launch and

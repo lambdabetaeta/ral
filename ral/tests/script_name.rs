@@ -1,9 +1,9 @@
+#![allow(clippy::disallowed_methods, reason = "test code")]
 #![cfg(target_os = "linux")]
 #![allow(
     clippy::disallowed_macros,
     reason = "[test] libtest captures print macros"
 )]
-#![allow(clippy::disallowed_methods)]
 
 //! A `#!` script launched through ral sees its own real path as `$0`, so the
 //! lexical idiom for finding its siblings works: unconfined, under an

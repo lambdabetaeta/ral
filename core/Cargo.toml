@@ -38,7 +38,7 @@ diffutils = ["dep:diffutils", "dep:same-file"]
 ripgrep   = ["dep:ral-ripgrep-core"]
 
 # Everything core's own test binaries need and no host may: the heavier
-# sandbox integration targets, and `test_access`'s doors onto internals the
+# sandbox integration targets, and `test_access`'s entries onto internals the
 # tests assert on.  Off for a host build — that is the point, since an item
 # only a test reaches is then `pub(crate)` and `dead_code` can see it — and
 # on for every dev target of this package, via the self-dev-dependency below.
@@ -62,6 +62,9 @@ serde         = { workspace = true }
 serde_json    = { workspace = true }
 base64        = { workspace = true }
 serde_stacker = "0.1"
+# Path digests: the sandbox's persistent DACL capability names, and the
+# identity suffix of `path::project_slug`.
+sha2          = { workspace = true }
 strsim = "0.11"
 strum         = { version = "0.28", features = ["derive"] }
 ryu           = "1"
@@ -154,8 +157,6 @@ seccompiler = "0.5"
 
 [target.'cfg(windows)'.dependencies]
 ctrlc        = "3"
-# Path -> capability-name digest for the sandbox's persistent DACL stamps.
-sha2         = { workspace = true }
 windows-sys  = { workspace = true, features = [
     # NtCreateFile: component-wise opens relative to a held parent directory.
     "Wdk_Foundation",

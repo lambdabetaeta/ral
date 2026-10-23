@@ -5,6 +5,7 @@
 use crate::app::Scratch;
 use crate::cancel::InterruptTarget;
 use crate::shell_eval::builtins;
+use crate::site::{Silent, site};
 use ral_core::carrier::{IdentityTransport, ProbeError, Severed, Transport};
 use ral_core::engine::EngineInstaller;
 use ral_core::path::EnginePath;
@@ -63,11 +64,7 @@ impl Seat {
         terminal: ral_core::terminal::TerminalState,
         scratch: Arc<Scratch>,
     ) -> Result<Self, Severed> {
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "host-env: the engine's home is the launching user's HOME"
-        )]
-        let home = ral_core::host::home().unwrap_or_default();
+        let home = site!(Silent::EngineHome, ral_core::host::home()).unwrap_or_default();
         let attach = Attach::root(
             EngineSpec::new(builtins::INSTALLER_TAG, EnginePath::Host(home.into())),
             Root::new(EnginePath::Host(cwd)).with_env(scratch.env()),
@@ -142,17 +139,17 @@ impl Seat {
         self.transport().severed()
     }
 
-    /// Take one reading through `door`. A refusal is a protocol fault here —
+    /// Take one reading through `probe`. A refusal is a protocol fault here —
     /// probes are asked only at run boundaries — so it severs the seat.
     ///
     /// # Errors
     /// The engine's severance.
     pub(crate) fn read<T>(
         &self,
-        door: impl FnOnce(&dyn Transport) -> Result<T, ProbeError>,
+        probe: impl FnOnce(&dyn Transport) -> Result<T, ProbeError>,
     ) -> Result<T, Severed> {
         let t = self.transport();
-        door(t).map_err(|e| match e {
+        probe(t).map_err(|e| match e {
             ProbeError::Severed(cause) => cause,
             ProbeError::Rejected(why) => t.sever(Severed::Faulted(why)),
         })
@@ -194,8 +191,5 @@ impl Seat {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

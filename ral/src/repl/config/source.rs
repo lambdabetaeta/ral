@@ -1,4 +1,4 @@
-//! Startup-file sourcing, run inside the boot door: the login profiles, then
+//! Startup-file sourcing, run inside the boot builtin: the login profiles, then
 //! the rc.
 //!
 //! Each kind of file has one contract on its return value: a profile is a
@@ -7,14 +7,15 @@
 //! ends the session with its status. Any other failure is reported and the
 //! boot goes on — a broken startup file must not strand the user at no shell.
 
+use ral_core::own::UserFile;
 use ral_core::path::shown;
 use ral_core::source::{SourceFile, SourceOrigin};
 use ral_core::types::{Break, Escape, Map, Mooring, Settled};
 use ral_core::{Shell, Value, terminal};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::super::errfmt::report_failed_load;
-use super::{RcPlan, RcSettings, create_default_rc, find_ralrc};
+use super::{RcPlan, RcSettings, rc};
 
 /// Why a startup file stopped.
 #[derive(Debug, PartialEq)]
@@ -42,36 +43,43 @@ fn tolerate<T>(outcome: Result<T, Stop>, fallback: T) -> Settled<T> {
 /// `~/.ral_profile`, and then the rc — `$XDG_CONFIG_HOME/ral/rc` or
 /// `~/.ralrc`, created from the default skeleton when neither exists.
 /// What the rc settled; the defaults when it settled nothing.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:rc-exists] asks whether ral's own rc file is there before sourcing it; ral's config, not a model's name"
-)]
 pub(crate) fn source_startup_files(
     login: bool,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<RcSettings> {
     if login {
-        let user = ral_core::host::home_dot(".ral_profile");
-        for path in [Some(PathBuf::from("/etc/ral/profile")), user]
-            .into_iter()
-            .flatten()
+        for profile in [
+            Some(UserFile::fixed("/etc/ral", "profile")),
+            UserFile::home(".ral_profile"),
+        ]
+        .into_iter()
+        .flatten()
         {
-            if path.exists() {
-                tolerate(source_profile(&path, mooring, shell), ())?;
+            let text = profile.read().map_err(|e| Stop::Failed(e.to_string()));
+            if let Some(text) = tolerate(text, None)? {
+                tolerate(source_profile(profile.path(), text, mooring, shell), ())?;
             }
         }
     }
-    match find_ralrc().or_else(create_default_rc) {
-        Some(path) => tolerate(source_rc(&path, mooring, shell), RcSettings::default()),
+    match rc() {
+        Some((file, text)) => tolerate(
+            source_rc(file.path(), text, mooring, shell),
+            RcSettings::default(),
+        ),
         None => Ok(RcSettings::default()),
     }
 }
 
 /// Anything but `()` is refused, a configuration map included: discarding it
 /// would let a misplaced `[theme: …]` do nothing without a word.
-fn source_profile(path: &Path, mooring: &Mooring, shell: &mut Shell) -> Result<(), Stop> {
-    match evaluate(path, None, mooring, shell)? {
+fn source_profile(
+    path: &Path,
+    text: String,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Result<(), Stop> {
+    match evaluate(path, text, None, mooring, shell)? {
         Value::Unit => Ok(()),
         v => Err(Stop::Failed(format!(
             "{}: profile must return (); got {}; configuration belongs in the rc file",
@@ -83,8 +91,13 @@ fn source_profile(path: &Path, mooring: &Mooring, shell: &mut Shell) -> Result<(
 
 /// Decode the rc's map, then commit it. A broken file or a refused map
 /// leaves the defaults and changes nothing.
-fn source_rc(path: &Path, mooring: &Mooring, shell: &mut Shell) -> Result<RcSettings, Stop> {
-    let plan = RcPlan::decode(&rc_config(path, mooring, shell)?, shell)
+fn source_rc(
+    path: &Path,
+    text: String,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Result<RcSettings, Stop> {
+    let plan = RcPlan::decode(&rc_config(path, text, mooring, shell)?, shell)
         .map_err(|msg| Stop::Failed(format!("{}: {msg}", shown(path))))?;
     plan.apply(mooring, shell).map_err(|b| match b {
         Break::Escape(Escape::Exit(code)) => Stop::Exit(code),
@@ -92,9 +105,9 @@ fn source_rc(path: &Path, mooring: &Mooring, shell: &mut Shell) -> Result<RcSett
     })
 }
 
-fn rc_config(path: &Path, mooring: &Mooring, shell: &mut Shell) -> Result<Map, Stop> {
+fn rc_config(path: &Path, text: String, mooring: &Mooring, shell: &mut Shell) -> Result<Map, Stop> {
     let contract = ral_core::typecheck::contract::declared(ral_core::typecheck::Form::Rc);
-    match evaluate(path, Some(contract), mooring, shell)? {
+    match evaluate(path, text, Some(contract), mooring, shell)? {
         Value::Map(pairs) => Ok(pairs),
         Value::Unit => Ok(Map::new()),
         other => Err(Stop::Failed(format!(
@@ -106,25 +119,21 @@ fn rc_config(path: &Path, mooring: &Mooring, shell: &mut Shell) -> Result<Map, S
     }
 }
 
-/// Read and evaluate one startup file for its caller's contract, checked
+/// Evaluate the `text` of one startup file for its caller's contract, checked
 /// against the live session, so an earlier file's bindings are in scope for a
 /// later one. `contract` holds the returned row to a declared table in the
-/// same check.  The file is read, and its source identified, by its native
-/// `path`, and named by its shown one in every message.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:config-read] reads an rc/profile file during session boot; not turn-time model I/O"
-)]
+/// same check.  The source is identified by the file's native `path`, and
+/// named by its shown one in every message.
 fn evaluate(
     path: &Path,
+    text: String,
     contract: Option<ral_core::typecheck::ReturnContract>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Result<Value, Stop> {
     let name = shown(path);
     let file = SourceFile::new(path).map_err(|e| Stop::Failed(e.to_string()))?;
-    let src = std::fs::read_to_string(path).map_err(|e| Stop::Failed(format!("{name}: {e}")))?;
-    let src = ral_core::source::normalize_source_text(src);
+    let src = ral_core::source::normalize_source_text(text);
     let origin = SourceOrigin::File(file);
     match ral_core::load::evaluate_source(mooring, shell, &src, &origin, contract) {
         Ok(v) => Ok(v),
@@ -141,13 +150,13 @@ fn evaluate(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "[test] test fs scaffolding")]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 
     /// Write `src` as a startup file, returning the tempdir (keeping the
     /// file alive) and its path.
-    fn startup_file(src: &str) -> (tempfile::TempDir, PathBuf) {
+    fn startup_file(src: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("startup.ral");
         std::fs::write(&path, src).unwrap();
@@ -166,12 +175,22 @@ mod tests {
 
     fn profile(src: &str) -> Result<(), Stop> {
         let (_dir, path) = startup_file(src);
-        source_profile(&path, &Mooring::adrift(), &mut booted_shell())
+        source_profile(
+            &path,
+            src.to_owned(),
+            &Mooring::adrift(),
+            &mut booted_shell(),
+        )
     }
 
     fn rc(src: &str) -> Result<Map, Stop> {
         let (_dir, path) = startup_file(src);
-        rc_config(&path, &Mooring::adrift(), &mut booted_shell())
+        rc_config(
+            &path,
+            src.to_owned(),
+            &Mooring::adrift(),
+            &mut booted_shell(),
+        )
     }
 
     fn failure(outcome: Result<impl std::fmt::Debug, Stop>) -> String {

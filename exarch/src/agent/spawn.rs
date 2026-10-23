@@ -122,7 +122,7 @@ pub(crate) fn spawn_async(
     // watches.
     let child_emit = if emit.spawns_live_children() {
         let born = Born {
-            log_dir: child.log_dir().to_path_buf(),
+            log_dir: child.log_dir().clone(),
             name: name.clone(),
             parent: child.agent.role.parent().map(|p| p.id),
             resumed,

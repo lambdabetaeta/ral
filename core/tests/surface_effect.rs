@@ -1,8 +1,8 @@
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 //! The `surface` effect: a value handed to the builtin reaches the
 //! host-installed sink unchanged, and with no sink installed the builtin
-//! is the identity.  Drives the public `Shell::run` door the
+//! is the identity.  Drives the public `Shell::run` entry the
 //! same way `ral` and `exarch` do — including installing the name, which
 //! core withholds for each host to carry.
 

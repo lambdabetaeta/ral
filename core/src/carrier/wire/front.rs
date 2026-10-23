@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
 use std::time::Duration;
 
-use crate::carrier::{ControlSender, Door, EventReceiver, forbid_reentry};
+use crate::carrier::{ControlRoute, ControlSender, EventReceiver, forbid_reentry};
 use crate::carrier::{
     Ends, Host, ProbeError, READER_SEVERS_FIRST, Severed, Transport, mint_dispatch_id, sever,
     write_through,
@@ -232,7 +232,7 @@ impl WireTransport {
         let (event_tx, event_rx) = mpsc::channel();
         let attached = Arc::new((Mutex::new(false), Condvar::new()));
         let write_tx = Arc::new(Mutex::new(writer));
-        let control = ControlSender::new(Door::Wire((write_tx.clone(), severance.clone())));
+        let control = ControlSender::new(ControlRoute::Wire((write_tx.clone(), severance.clone())));
         let ends = Ends::new(control, EventReceiver::new(event_rx), severance);
         // Darwin refuses options on a socket whose peer is already gone:
         // the death Linux learns at the first read, learnt here.
@@ -445,4 +445,5 @@ impl Transport for WireTransport {
 }
 
 #[cfg(all(test, unix))]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

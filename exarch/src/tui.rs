@@ -45,7 +45,7 @@ mod terminal;
 mod text;
 mod tui_loop;
 
-use std::path::Path;
+use ral_core::own::OwnDir;
 use std::time::Duration;
 
 pub(super) use app::App;
@@ -56,12 +56,12 @@ pub use terminal::TerminalGuard;
 pub use tui_loop::run;
 
 /// Take the terminal for the TUI — raw mode, the alternate screen, and fd 2
-/// redirected to `run_dir`'s `stderr.log` — before the first thing it shows.
+/// redirected to `run`'s `stderr.log` — before the first thing it shows.
 ///
 /// # Errors
 /// If the terminal cannot be put into those modes, or the log not opened.
-pub fn enter(run_dir: &Path) -> Result<TerminalGuard, String> {
-    TerminalGuard::enter(&run_dir.join("stderr.log")).map_err(|e| format!("ratatui init: {e}"))
+pub fn enter(run: &OwnDir) -> Result<TerminalGuard, String> {
+    TerminalGuard::enter(run).map_err(|e| format!("ratatui init: {e}"))
 }
 
 /// How long a dead subagent's tab survives in the bar, so its last frame is

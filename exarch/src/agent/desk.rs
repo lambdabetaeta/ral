@@ -73,7 +73,7 @@ impl DeskAct {
 }
 
 /// What this `ral` call has committed, in the order it landed: one entry per
-/// act that landed, minted at [`HostServices::commit_act`] — the door every
+/// act that landed, minted at [`HostServices::commit_act`] — the one place every
 /// acting handler funnels through — and read back once the call has failed.
 ///
 /// A call the wall cut short still started what it started and delivered what
@@ -131,7 +131,7 @@ pub(crate) struct HostServices {
 }
 
 impl HostServices {
-    /// The one door every acting handler commits an attempt through: the
+    /// The one place every acting handler commits an attempt through: the
     /// rail row always, the fragment only when `refused` is false, so a verb
     /// cannot draw one and miss the other.
     fn commit_act(&self, act: DeskAct, subject: Option<&str>, payload: String, refused: bool) {
@@ -161,7 +161,7 @@ pub(crate) struct ExarchDesk {
 
 impl ExarchDesk {
     /// Decode one enquiry and answer it. The decode is the vocabulary's, so
-    /// an ill-shaped request is refused here in the words its door would use.
+    /// an ill-shaped request is refused here in the words its builtin would use.
     ///
     /// # Errors
     /// The decoder's refusal, or the addressed handler's.
@@ -245,8 +245,5 @@ mod pins;
 mod schedules;
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

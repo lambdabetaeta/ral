@@ -1,11 +1,6 @@
 //! The tree walk, on a real filesystem: its options, its ignore rules and
 //! what a grant takes from it.
 
-#![allow(
-    clippy::disallowed_methods,
-    reason = "[test] fixtures laid, linked and removed by name"
-)]
-
 use super::*;
 use crate::capability::{Capabilities, Floor, FsPolicy, GrantStack};
 use crate::path::{FrozenPath, relative_key, utf8};

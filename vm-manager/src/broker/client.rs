@@ -16,6 +16,7 @@ use std::os::windows::io::{FromRawSocket, OwnedSocket};
 use std::path::{Path, PathBuf};
 
 use super::{PIPE, Reply, Request, VERSION, frame};
+use crate::site::{Silent, site};
 use crate::{Error, Hypervisor, Machine, MachineSpec};
 
 /// The name shown to a user, and to [`Hypervisor::name`].
@@ -213,17 +214,13 @@ impl Drop for BrokeredGuest {
 /// one instance at a time, so a client arriving between a connection and the
 /// next instance finds none free.  Retrying is what the platform expects of a
 /// client, and there is nothing else to do about it.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: opening the broker's pipe — the client half of an IPC door, not a \
-              file the model named. Host-side, before any machine exists; no shell, no run, no \
-              card."
-)]
 fn connect() -> io::Result<std::fs::File> {
     use std::fs::OpenOptions;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
-        match OpenOptions::new().read(true).write(true).open(PIPE) {
+        match site!(Silent::BrokerPipeConnect, &options => open(PIPE)) {
             Ok(pipe) => return Ok(pipe),
             Err(cause) if std::time::Instant::now() >= deadline => return Err(cause),
             Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),

@@ -7,6 +7,8 @@
 //! the same dispatch.
 
 use crate::cli::Mode;
+#[cfg(unix)]
+use crate::site::{Silent, site};
 use ral_core::errln;
 use std::ffi::OsString;
 use std::process::ExitCode;
@@ -27,11 +29,7 @@ pub(crate) fn refuse_setuid() {
     #[cfg(unix)]
     if rustix::process::geteuid() != rustix::process::getuid() {
         errln!("ral: refusing to run setuid");
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "`main`'s first statement, asked before any re-exec child is served: nothing is booted yet, so nothing is held"
-        )]
-        std::process::exit(1);
+        site!(Silent::SetuidExit, std::process::exit(1));
     }
 }
 
@@ -66,12 +64,14 @@ fn text_args(argv: Vec<OsString>) -> Result<Vec<String>, String> {
         .enumerate()
         .map(|(i, arg)| {
             arg.into_string().map_err(|arg| {
+                // `{arg:?}`, not `.display()`: `Display` would paper over the
+                // fault with the very U+FFFD substitution being refused.
                 #[allow(
-                    clippy::disallowed_methods,
-                    reason = "native: argv text that is not UTF-8, quoted lossily to say so"
+                    clippy::unnecessary_debug_formatting,
+                    reason = "the escaped, lossless spelling is what names a non-UTF-8 argument"
                 )]
-                let text = arg.to_string_lossy();
-                format!("ral: argument {} is not UTF-8 text: {text}", i + 1)
+                let quoted = format!("{arg:?}");
+                format!("ral: argument {} is not UTF-8 text: {quoted}", i + 1)
             })
         })
         .collect()
@@ -80,7 +80,7 @@ fn text_args(argv: Vec<OsString>) -> Result<Vec<String>, String> {
 /// What an engine of this binary boots into: `repl` for the interactive
 /// session, `batch` for a script.
 pub(crate) mod engine {
-    use crate::boot_door;
+    use crate::boot_builtin;
     use ral_core::Runtime;
     use ral_core::boot::boot_runtime;
     use ral_core::engine::EngineInstaller;
@@ -107,24 +107,24 @@ pub(crate) mod engine {
     pub(crate) const BATCH: &str = "batch";
 
     /// The REPL surface: the batch surface plus the editor builtins and the
-    /// plugin doors.
+    /// plugin load builtins.
     fn repl_surface() -> ral_core::HostSurface {
         let mut surface = batch_surface();
         surface
             .statics
-            .extend([crate::repl::ED_BUILTINS, crate::repl::PLUGIN_DOORS]);
+            .extend([crate::repl::ED_BUILTINS, crate::repl::PLUGIN_LOAD_BUILTINS]);
         surface
     }
 
     /// The batch surface: core plus `watch` and `surface` (their docs say why
-    /// they are host-installed) and the boot door. `--check` types against
+    /// they are host-installed) and the boot builtin. `--check` types against
     /// the same value, so the two agree by construction.
     pub(crate) fn batch_surface() -> ral_core::HostSurface {
         ral_core::HostSurface {
             statics: vec![
                 ral_core::builtins::WATCH_BUILTIN,
                 ral_core::builtins::SURFACE_BUILTIN,
-                boot_door::DOOR,
+                boot_builtin::BUILTINS,
             ],
             captured: Vec::new(),
         }
@@ -141,7 +141,7 @@ pub(crate) mod engine {
         shell.set_interactive(true);
         let terminal = ral_core::Value::from(&shell.terminal());
         shell.set_var("TERMINAL".into(), terminal);
-        boot_door::register(shell)
+        boot_builtin::register(shell)
     }
 
     /// The batch session's process half.
@@ -154,7 +154,7 @@ pub(crate) mod engine {
         let config = BatchConfig::decode(&root.config)?;
         shell.set_exit_hints(crate::platform::load_exit_hints());
         shell.set_args(config.args);
-        boot_door::register(shell)
+        boot_builtin::register(shell)
     }
 
     /// The `batch` installer's `Root.config`.
@@ -172,7 +172,7 @@ pub(crate) mod engine {
     /// rather than silently admitted.
     fn no_seeded_children(
         _grant: &str,
-        _cwd: &std::path::Path,
+        _ctx: &ral_core::guard::freeze::FreezeCtx,
     ) -> Result<ral_core::capability::GrantLayer, String> {
         Err(
             "the ral shell's engine spawns no child engines, so it has no grant policy to hold \

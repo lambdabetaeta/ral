@@ -1,13 +1,13 @@
-//! The fan-out door: one observation, broadcast to whoever is listening.
+//! The fan-out: one observation, broadcast to whoever is listening.
 //!
 //! [`Shell::observe_stamped`] reports to both consumers and judges neither's
 //! interest: the host decides what the rail draws, and `audit { }` decides
 //! what the trail keeps.  It judges only whether anything happened at all:
-//! a redirect onto the discard device is not a write.  Every door that
+//! a redirect onto the discard device is not a write.  Every site that
 //! settles a fact routes through it; one holding no [`Mooring`] reaches the
 //! trail alone.
 //!
-//! With nobody listening the recorders are no-ops, so a door can call them
+//! With nobody listening the recorders are no-ops, so a site can call them
 //! unconditionally.
 
 use super::epoch_us;
@@ -25,15 +25,15 @@ pub(crate) struct AuditStart {
 
 impl Shell {
     /// `what`, stamped now at the current dispatch site and principal.  `pub`
-    /// for a host door that builds its own fact (a grep walk, a read outside
-    /// any redirect): it needs the stamp core's own doors carry.
+    /// for a host entry that builds its own fact (a grep walk, a read outside
+    /// any redirect): it needs the stamp core's own entries carry.
     pub fn observation(&self, what: Observed) -> Observation {
         Observation::instant(self.call_site(), self.context.principal(), what)
     }
 
     /// Whether an observation would reach anyone: a trail collecting it, or a
-    /// host on the other end of the sink.  Doors whose facts cost something
-    /// to gather, the write door's before/after snapshots, ask this first.
+    /// host on the other end of the sink.  Sites whose facts cost something
+    /// to gather, the write's before/after snapshots, ask this first.
     pub(crate) fn listening(&self, mooring: &Mooring) -> bool {
         self.local.audit.active() || mooring.has_surface()
     }
@@ -46,7 +46,7 @@ impl Shell {
     /// left the world as it found it, so there is nothing to report: no card,
     /// no rail barrier, and no trail line claiming a file was written.  The
     /// predicate `Shell::locate` asks, of the same resolver, is
-    /// asked here, at the one door every seam passes through.
+    /// asked here, at the one place every seam passes through.
     pub(crate) fn observe_stamped(&mut self, mooring: Option<&Mooring>, obs: Observation) {
         if let Observed::Write(w) = &obs.what
             && self.resolve(&w.path).is_discard()
@@ -59,7 +59,7 @@ impl Shell {
         self.local.audit.push(obs);
     }
 
-    /// An instantaneous door: stamped now, at the current dispatch site.
+    /// An instantaneous observation: stamped now, at the current dispatch site.
     pub(crate) fn observe(&mut self, mooring: &Mooring, what: Observed) {
         if self.listening(mooring) {
             let obs = self.observation(what);
@@ -82,7 +82,7 @@ impl Shell {
     }
 
     /// Record a check worth reporting: a refusal, or a deputy admitted but
-    /// flagged.  An admitted check is never recorded.  A door holding no
+    /// flagged.  An admitted check is never recorded.  A site holding no
     /// `Mooring` passes `None`, and the check reaches the trail alone.
     pub(crate) fn record_check(&mut self, mooring: Option<&Mooring>, check: Check) {
         if self.local.audit.active() || mooring.is_some_and(Mooring::has_surface) {

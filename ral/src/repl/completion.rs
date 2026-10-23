@@ -36,6 +36,8 @@ use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::site::{Silent, site};
+
 // ── Candidate / Sources ─────────────────────────────────────────────────────
 
 /// One completion candidate: the text shown in a menu (`display`) and the
@@ -228,7 +230,7 @@ impl SourceCache {
         // and drops the enclosing scope's answer.
         let key = PathKey {
             path: engine.env_var("PATH").ok().flatten(),
-            cwd: engine.cwd().unwrap_or_default(),
+            cwd: engine.cwd().ok().flatten().unwrap_or_default(),
         };
         let aged = self
             .scan
@@ -333,12 +335,8 @@ pub(super) fn complete(line: &str, pos: usize, sources: &Sources<'_>) -> (usize,
 }
 
 /// The launching user's home, for a typed `~`.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "host-env: completion completes for the launching user, outside any shell overlay"
-)]
 fn home() -> Option<String> {
-    ral_core::host::home()
+    site!(Silent::CompletionHome, ral_core::host::home())
 }
 
 /// One offerable name, borrowed from the pool it was gathered from.
@@ -518,7 +516,7 @@ pub(super) fn parse_at(text: &str, cursor: usize) -> Option<CommandAt> {
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "[test] test fs scaffolding")]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 

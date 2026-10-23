@@ -8,18 +8,33 @@
 //! other state.  A signed bundle is read-only, so the rootfs can never
 //! live inside it; the cache is the only writable home it has.
 //!
-//! # On the filesystem calls below
+//! # On the filesystem
 //!
-//! Every one here readies the rootfs before any guest exists: checking a
-//! prior inflate's marker, making the cache directory, and writing the
-//! marker back once the checksum verifies. Host-side one-time setup, the
-//! same standing as `vm_manager::hcs::vhd`'s, allowed call by call.
+//! The media are the program's own installed files, looked for and read by
+//! name ([`own::kind_named`], [`own::read_named`]): nothing a grant judges.
+//! What readying the rootfs keeps is synod's own state, held as an
+//! [`OwnDir`]: the cache folder, and the marker that vouches for the inflated
+//! image in it.  The image itself reaches `vm_manager` by its path
+//! ([`OwnDir::path`]), which resolves it again.
 
 use std::path::{Path, PathBuf};
 
+use ral_core::own::{self, OwnDir};
+use ral_core::path::{Kind, Visibility, XdgKind, spelled_parent};
 use vm_manager::{Act, Error, HostFile};
 
 use crate::session::SYNOD;
+use crate::site::{Silent, site};
+
+/// The cache's folder under synod's own cache directory.
+const CACHE: &str = "boot";
+
+/// The inflated rootfs, in the cache.
+const IMAGE: &str = "rootfs.img";
+
+/// The marker beside the image, named for it: the checksum the image was
+/// verified against.
+const MARKER: &str = "rootfs.img.verified";
 
 /// Boot media located on this computer, with the rootfs in one of two
 /// states: already a plain image (a development build, or a bundle whose
@@ -34,14 +49,10 @@ pub(crate) struct BootPlan {
 enum Rootfs {
     /// A plain image, ready to attach.
     Ready(PathBuf),
-    /// A zstd archive to inflate to `target`, verified against `checksum`
+    /// A zstd archive to inflate into the cache, verified against `checksum`
     /// (a `sha256sum` sidecar holding the expected hash of the inflated
     /// image).
-    Compressed {
-        archive: PathBuf,
-        checksum: PathBuf,
-        target: PathBuf,
-    },
+    Compressed { archive: PathBuf, checksum: PathBuf },
 }
 
 /// The boot media this build ships, if this computer holds it.
@@ -61,17 +72,12 @@ enum Rootfs {
 /// this computer answers the question by not being there.  `None` — no media
 /// anywhere — is not an error this function raises: [`vm_manager::detect`]
 /// turns it into the refusal a synod with nothing to boot must give.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:boot-media] looks beside synod's own executable, in its bundle or the checkout it was built in, for the boot media that are files; synod's own files, not names any grant judges"
-)]
 pub(crate) fn boot_media() -> Option<BootPlan> {
     let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
+    let dir = spelled_parent(&exe)?;
 
     for boot in [
-        dir.parent()
-            .map(|contents| contents.join("Resources").join("boot")),
+        spelled_parent(dir).map(|contents| contents.join("Resources").join("boot")),
         Some(dir.join("boot")),
     ]
     .into_iter()
@@ -79,7 +85,7 @@ pub(crate) fn boot_media() -> Option<BootPlan> {
     {
         let kernel = boot.join("kernel");
         let initramfs = boot.join("initramfs.img");
-        if !kernel.is_file() || !initramfs.is_file() {
+        if !is_file(&kernel) || !is_file(&initramfs) {
             continue;
         }
         // Either spelling of the rootfs is a shipped bundle: both packages carry
@@ -99,18 +105,17 @@ pub(crate) fn boot_media() -> Option<BootPlan> {
         // below takes it.
         let archive = boot.join("rootfs.img.zst");
         let plain = boot.join("rootfs.img");
-        if archive.is_file() {
+        if is_file(&archive) {
             return Some(BootPlan {
                 kernel,
                 initramfs,
                 rootfs: Rootfs::Compressed {
                     archive,
                     checksum: boot.join("rootfs.img.sha256"),
-                    target: cache_boot_dir().join("rootfs.img"),
                 },
             });
         }
-        if plain.is_file() {
+        if is_file(&plain) {
             return Some(BootPlan {
                 kernel,
                 initramfs,
@@ -121,15 +126,15 @@ pub(crate) fn boot_media() -> Option<BootPlan> {
 
     // The development layout: the image pipeline's output, rootfs plain.
     let mut cursor = dir;
-    while let Some(parent) = cursor.parent() {
+    while let Some(parent) = spelled_parent(cursor) {
         if parent.file_name().is_some_and(|name| name == "target") {
-            let out = parent.parent()?.join("vm-image").join("out");
+            let out = spelled_parent(parent)?.join("vm-image").join("out");
             let kernel = out.join("boot").join("kernel");
             let initramfs = out.join("boot").join("initramfs.img");
             let rootfs = out.join("rootfs").join("rootfs.img");
             return [&kernel, &initramfs, &rootfs]
                 .iter()
-                .all(|f| f.is_file())
+                .all(|f| is_file(f))
                 .then_some(BootPlan {
                     kernel,
                     initramfs,
@@ -141,23 +146,25 @@ pub(crate) fn boot_media() -> Option<BootPlan> {
     None
 }
 
+/// Whether `path` names a file, as the boot media do, through any link.
+fn is_file(path: &Path) -> bool {
+    site!(Silent::InstallTree, own::kind_named(path)) == Some(Kind::File)
+}
+
 impl BootPlan {
     /// Ready the media for booting, inflating the rootfs if it ships
     /// compressed, and hand back the artifact [`vm_manager::detect`] wants.
     ///
     /// # Errors
-    /// Returns [`Error::HostFile`] if the rootfs's checksum cannot be read, its
-    /// cache cannot be made, it cannot be inflated, or its marker cannot be
-    /// written, and [`Error::CorruptGuestImage`] if the inflated image does not
-    /// match its checksum.
+    /// Returns [`Error::HostFile`] if the rootfs's checksum cannot be read, it
+    /// cannot be inflated, or its marker cannot be written,
+    /// [`Error::HostFileUnplaced`] if its cache cannot be made, and
+    /// [`Error::CorruptGuestImage`] if the inflated image does not match its
+    /// checksum.
     pub(crate) fn realise(self) -> Result<vm_manager::BootArtifact, Error> {
         let rootfs = match self.rootfs {
             Rootfs::Ready(path) => path,
-            Rootfs::Compressed {
-                archive,
-                checksum,
-                target,
-            } => ensure_inflated(&archive, &checksum, &target)?,
+            Rootfs::Compressed { archive, checksum } => ensure_inflated(&archive, &checksum)?,
         };
         Ok(vm_manager::BootArtifact {
             kernel: self.kernel,
@@ -167,12 +174,24 @@ impl BootPlan {
     }
 }
 
-fn cache_boot_dir() -> PathBuf {
-    SYNOD.xdg_dir(ral_core::path::XdgKind::Cache).join("boot")
+/// Synod's boot cache, `$XDG_CACHE_HOME/synod/boot/`, made where absent.
+///
+/// # Errors
+/// [`Error::HostFileUnplaced`] if the cache cannot be made: the cause is the
+/// [`OwnError`](ral_core::own::OwnError) itself, which spells the paths it has.
+fn cache_boot_dir() -> Result<OwnDir, Error> {
+    SYNOD
+        .own(XdgKind::Cache)
+        .and_then(|cache| cache.make_dir(CACHE))
+        .map_err(|cause| Error::HostFileUnplaced {
+            file: HostFile::ImageCache,
+            act: Act::Make,
+            cause: cause.to_string(),
+        })
 }
 
-/// The rootfs at `target`, inflating `archive` into it if it is not already
-/// present and matching `checksum`.
+/// The rootfs in synod's boot cache, inflating `archive` into it if it is not
+/// already present and matching `checksum`.
 ///
 /// A prior launch's inflated image is trusted without re-hashing its two
 /// gigabytes: a marker file beside it records the checksum it was verified
@@ -180,63 +199,36 @@ fn cache_boot_dir() -> PathBuf {
 /// inflate itself always verifies, and writes to a temporary file renamed
 /// into place only on success, so an interrupted launch never leaves a
 /// half-written image that a later one would trust.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "path-form: the boot directory above synod's own rootfs cache file, not a name any grant judges"
-)]
-fn ensure_inflated(archive: &Path, checksum: &Path, target: &Path) -> Result<PathBuf, Error> {
+fn ensure_inflated(archive: &Path, checksum: &Path) -> Result<PathBuf, Error> {
     let expected = read_checksum(checksum)?;
-    let marker = ral_core::path::with_appended_suffix(target, "verified");
+    let boot = cache_boot_dir()?;
+    let target = boot.path().join(IMAGE);
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:rootfs-marker-read]: reads a prior inflate's marker — host-side rootfs-cache plumbing before any guest \
-                  exists; no shell, no run, no card. See the module docs."
-    )]
-    let verified = target.is_file()
-        && std::fs::read_to_string(&marker).is_ok_and(|seen| seen.trim() == expected);
-    if verified {
-        return Ok(target.to_path_buf());
+    let present = boot
+        .stat(IMAGE)
+        .is_some_and(|image| image.kind == Kind::File);
+    // A marker that cannot be read, or is not a checksum, reads as none: the
+    // image is inflated again.
+    let seen = boot.load::<String>(MARKER).ok().flatten();
+    if present && seen.as_deref() == Some(expected.as_str()) {
+        return Ok(target);
     }
 
-    let boot = target
-        .parent()
-        .expect("the rootfs cache path always has a boot-directory parent");
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:rootfs-cache-dir]: makes the cache directory — host-side rootfs-cache plumbing before any guest \
-                  exists; no shell, no run, no card. See the module docs."
-    )]
-    std::fs::create_dir_all(boot).map_err(Error::host_file(
-        HostFile::ImageCache,
-        Act::Make,
-        boot,
-    ))?;
+    vm_manager::media::inflate(archive, &target, Some(&expected))?;
 
-    vm_manager::media::inflate(archive, target, Some(&expected))?;
-
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:rootfs-marker-write]: writes the marker back once the checksum verifies — host-side rootfs-cache plumbing before any guest \
-                  exists; no shell, no run, no card. See the module docs."
-    )]
-    std::fs::write(&marker, &expected).map_err(Error::host_file(
-        HostFile::UnpackMarker,
-        Act::Write,
-        &marker,
-    ))?;
-    Ok(target.to_path_buf())
+    boot.store(MARKER, &expected, Visibility::Public)
+        .map_err(Error::host_file(
+            HostFile::UnpackMarker,
+            Act::Write,
+            &boot.path().join(MARKER),
+        ))?;
+    Ok(target)
 }
 
 /// The hash from a `sha256sum` sidecar: the first whitespace-delimited token
 /// of its one line.
 fn read_checksum(path: &Path) -> Result<String, Error> {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:rootfs-checksum-read]: reads the shipped checksum sidecar — host-side rootfs-cache plumbing before any guest \
-                  exists; no shell, no run, no card. See the module docs."
-    )]
-    let line = std::fs::read_to_string(path).map_err(Error::host_file(
+    let line = site!(Silent::InstallTree, own::read_named(path)).map_err(Error::host_file(
         HostFile::ImageChecksum,
         Act::Read,
         path,

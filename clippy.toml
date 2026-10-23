@@ -1,90 +1,122 @@
-# Each ban below names the helper that replaces it; a legitimate exception
-# carries `#[allow(clippy::disallowed_methods, reason = "…")]` at the call
-# site.  Call sites are deliberately not listed here — every such list this
-# file has carried drifted out of date — so the reasons at the sites are the
-# enumeration, and the durable rationale is in the wiki.
+# Each ban below names the helper that replaces it.  A legitimate exception is
+# a typed site, `site!(Silent::Variant, call)` (`lint/site.rs`): it wraps one
+# call, and its `Surface` (raises a card) or `Silent` (raises none) variant
+# names the place and documents why it is exempt.  The exemption is an
+# `#[expect]`, so a site that wraps no banned call is an error.  Call sites are
+# deliberately not listed here, since every such list this file has carried
+# drifted out of date: the enums of each crate are the enumeration, and the
+# durable rationale is in the wiki.
+#
+# Test, example and build code is not what the bans protect, and carries one
+# blanket `#[allow]` per unit (an integration-test crate root, a `#[cfg(test)]`
+# module, an example, a build script), never one inside it.
+# `core/tests/sites.rs` checks that no other exemption exists.
 #
 # Syscall sites: every filesystem and process constructor is banned, so each
-# call that turns an outside name into a handle is a reviewed site.  The
-# handle is the capability, so banning construction suffices.  `cap_primitives`
-# is banned entire rather than the part `path/walk.rs` uses today: a ban naming
-# only the current callers is what let the fs site move out from under this
-# list once already.  A `reason` opens with `[surface:<slug>]` (raises a card),
-# `[silent:<slug>]` (raises none, and says why), or `[test]`, so `reason = "["`
-# finds every site and `core/tests/syscall_sites.rs` pins the set.
+# call that turns an outside name into a handle is a typed site.  The handle is
+# the capability, so banning construction suffices.  `cap_primitives` is banned
+# entire rather than the part `path/walk.rs` uses today: a ban naming only the
+# current callers is what let the fs site move out from under this list once
+# already.
+#
+# The files a program touches on its own account, outside any shell, go through
+# `ral_core::own`: what it keeps for itself, what the user writes at the places
+# it chooses, and what the user names to it.  Every `std::fs` ban points there.
+# The four calls that take a name the user gave (`read_named`, `open_named`,
+# `kind_named`, `create_named`) are banned in turn: each caller is a typed site
+# that says whose name it is.
+# A name a model gives is opened only by the walk, `crate::path::walk`.  The
+# host's environment is read only through `ral_core::host::{var, var_os,
+# vars_os}`, so every `std::env` ban points there.
 #
 # `PathBuf::from` and `EnvVars::home` are disciplines with no
 # ban: each resolves through a trait impl clippy cannot scope to a single
-# reachable function, so an entry would never fire.  Enforced by review.
-#
-# So is the rule that a syscall's allow carries a tag.  `disallowed_methods` is
-# one lint for every ban in this file, and an allow names the lint, not the
-# ban, so a `path-form:` or `native:` allow over an `fs::read` silences it too,
-# and no tag reaches the manifest.  A reviewer reading a new untagged allow
-# checks that it covers no syscall.
+# reachable function, so an entry would never fire.  Enforced by review.  So is
+# reading, through `host::var`, a variable that the `host::home` and
+# `host::user` bans guard.
 #
 # `libc::_exit` is unbanned on purpose, despite `exit` and `abort` below: it is
 # mandatory in a signal handler and in a post-`fork` child, where `exit` would
 # run atexit hooks under a handler or destructors over the parent's state.
 # Both callers are in `core/src/process/signal/unix.rs`.
 #
-# `allow-invalid` marks an entry that resolves on one OS only.  The ban still
-# has to be written for the OS where the call is real, so the entry stays and
-# the unresolvable-here case is declared rather than warned about.
+# `allow-invalid` marks an entry that resolves on one OS only, or only where a
+# crate's features reach it (a `windows_sys` function that a crate's
+# `windows-sys` features do not enable is unreachable in that crate).  The ban
+# still has to be written for the OS and the crate where the call is real, so
+# the entry stays and the unresolvable-here case is declared rather than warned
+# about.
 #
 # Enforced workspace-wide by `[workspace.lints.clippy]` in the root Cargo.toml.
 # The vendored `ral-ripgrep-core` opts out with `[lints.clippy] all = "allow"`
 # to stay upstream-diffable.
 disallowed-methods = [
-    { path = "std::fs::canonicalize", reason = "A name resolves in one place: crate::path::{walk, RealPath::of}, where the grant judges the object the walk opens." },
+    { path = "std::fs::canonicalize", reason = "A name resolves in one place: crate::path::{walk, RealPath::of}, where the grant judges the object the walk opens; a program's own files are reached through ral_core::own." },
     { path = "std::env::current_dir", reason = "Use Shell::cwd(). Process CWD is OS-global and races every parallel ral thread; caching it in a shell-scoped store is how PWD went stale across thunks." },
     { path = "std::env::set_current_dir", reason = "ral's `cd` mutates Shell::logical_cwd, not the process cwd. A process-cwd write is subprocess setup only." },
-    { path = "std::path::Path::new", reason = "Use a named helper in crate::path (is_absolute / exists / basename / path_within_str / …) so the resolution rule lives in one place. FFI glue and env-var lifting #[allow] with a reason." },
+    { path = "std::path::Path::new", reason = "Use a named helper in crate::path (is_absolute / exists / basename / path_within_str / …) so the resolution rule lives in one place. FFI glue and env-var lifting use a typed site." },
     { path = "std::path::Path::starts_with", reason = "Use RealPath::contains (a position holding another) or Rendered::holds (a kernel name holding a spelling); a containment of two paths decides authority only in crate::path." },
     { path = "std::path::Path::strip_prefix", reason = "Use RealPath::relative_to (a position past a root) or Rendered::rebased (a kernel name moved from one mount to another); a rebasing of two paths happens only in crate::path." },
-    { path = "std::path::Path::ancestors", reason = "Use RealPath::ancestors_within (the positions between a root and a leaf); an ancestor walk of two paths happens only in crate::path." },
+    { path = "std::path::Path::ancestors", reason = "Use RealPath::ancestors_within (the positions between a root and a leaf); an ancestor walk of two paths happens only in crate::path. The parent of a program's own file is ral_core::path::spelled_parent." },
     { path = "std::path::Path::components", reason = "Use RealPath::relative_to and the walk's steps; a component count or scan of a path happens only in crate::path." },
-    { path = "std::path::Path::parent", reason = "Use RealPath::parent (the position one name up, which no link can lie about); a path's parent by spelling happens only in crate::path." },
+    { path = "std::path::Path::parent", reason = "Use RealPath::parent (the position one name up, which no link can lie about); a path's parent by spelling happens only in crate::path. For a program's own layout (the folder a file it writes sits in) use ral_core::path::spelled_parent." },
     { path = "std::path::Path::is_absolute", reason = "Use ral_core::path::is_absolute — the kernel's rule read on the string (lex::absolute_under the host's rules), the one absoluteness ral asks, so a string and a held path cannot part company over it." },
     { path = "std::path::Path::is_relative", reason = "Use !ral_core::path::is_absolute: is_relative is std's is_absolute negated, banned with it." },
-    { path = "std::path::Path::exists", reason = "A name resolves in one place: crate::path::{walk, RealPath::of}, where the grant judges the object; a stat by name elsewhere is a `[silent:<slug>]` site." },
-    { path = "std::path::Path::try_exists", reason = "A name resolves in one place: crate::path::{walk, RealPath::of}, where the grant judges the object; a stat by name elsewhere is a `[silent:<slug>]` site." },
-    { path = "std::path::Path::is_file", reason = "A name resolves in one place: crate::path::{walk, RealPath::of}, where the grant judges the object; a stat by name elsewhere is a `[silent:<slug>]` site." },
-    { path = "std::path::Path::is_dir", reason = "A name resolves in one place: crate::path::{walk, RealPath::of}, where the grant judges the object; a stat by name elsewhere is a `[silent:<slug>]` site." },
-    { path = "std::path::Path::is_symlink", reason = "A name resolves in one place: crate::path::{walk, RealPath::of}, where the grant judges the object; a stat by name elsewhere is a `[silent:<slug>]` site." },
-    { path = "std::path::Path::metadata", reason = "A name resolves in one place: crate::path::{walk, RealPath::of}, where the grant judges the object; a stat by name elsewhere is a `[silent:<slug>]` site." },
-    { path = "std::path::Path::symlink_metadata", reason = "A name resolves in one place: crate::path::{walk, RealPath::of}, where the grant judges the object; a stat by name elsewhere is a `[silent:<slug>]` site." },
-    { path = "std::path::Path::read_dir", reason = "A name resolves in one place: crate::path::{walk, RealPath::of}, where the grant judges the object; a stat by name elsewhere is a `[silent:<slug>]` site." },
-    { path = "std::path::Path::read_link", reason = "A name resolves in one place: crate::path::{walk, RealPath::of}, where the grant judges the object; a stat by name elsewhere is a `[silent:<slug>]` site." },
-    { path = "std::path::Path::canonicalize", reason = "A name resolves in one place: crate::path::{walk, RealPath::of}, where the grant judges the object; a stat by name elsewhere is a `[silent:<slug>]` site." },
-    { path = "std::path::Path::display", reason = "Use ral_core::path::shown: ral shows every path `/`-separated. A path handed to the OS #[allow]s with a reason opening `native:`." },
-    { path = "std::path::Path::to_string_lossy", reason = "Use ral_core::path::shown to display a path; a native conversion (handed to the OS, an env value, a non-UTF-8 check) #[allow]s with a reason opening `native:`." },
-    { path = "std::path::Path::to_str", reason = "Use ral_core::path::shown to display a path; a native conversion (handed to the OS, an env value, a non-UTF-8 check) #[allow]s with a reason opening `native:`." },
-    { path = "std::ffi::OsStr::to_string_lossy", reason = "Use ral_core::path::shown to display a path; a native conversion (handed to the OS, an env value, a non-UTF-8 check) #[allow]s with a reason opening `native:`." },
-    { path = "std::ffi::OsStr::to_str", reason = "Use ral_core::path::shown to display a path; a native conversion (handed to the OS, an env value, a non-UTF-8 check) #[allow]s with a reason opening `native:`." },
+    { path = "std::path::Path::exists", reason = "A name resolves in one place: crate::path::{walk, RealPath::of}, where the grant judges the object; a program's own file is statted or listed through ral_core::own, and any other stat by name is a typed site." },
+    { path = "std::path::Path::try_exists", reason = "A name resolves in one place: crate::path::{walk, RealPath::of}, where the grant judges the object; a program's own file is statted or listed through ral_core::own, and any other stat by name is a typed site." },
+    { path = "std::path::Path::is_file", reason = "A name resolves in one place: crate::path::{walk, RealPath::of}, where the grant judges the object; a program's own file is statted or listed through ral_core::own, and any other stat by name is a typed site." },
+    { path = "std::path::Path::is_dir", reason = "A name resolves in one place: crate::path::{walk, RealPath::of}, where the grant judges the object; a program's own file is statted or listed through ral_core::own, and any other stat by name is a typed site." },
+    { path = "std::path::Path::is_symlink", reason = "A name resolves in one place: crate::path::{walk, RealPath::of}, where the grant judges the object; a program's own file is statted or listed through ral_core::own, and any other stat by name is a typed site." },
+    { path = "std::path::Path::metadata", reason = "A name resolves in one place: crate::path::{walk, RealPath::of}, where the grant judges the object; a program's own file is statted or listed through ral_core::own, and any other stat by name is a typed site." },
+    { path = "std::path::Path::symlink_metadata", reason = "A name resolves in one place: crate::path::{walk, RealPath::of}, where the grant judges the object; a program's own file is statted or listed through ral_core::own, and any other stat by name is a typed site." },
+    { path = "std::path::Path::read_dir", reason = "A name resolves in one place: crate::path::{walk, RealPath::of}, where the grant judges the object; a program's own file is statted or listed through ral_core::own, and any other stat by name is a typed site." },
+    { path = "std::path::Path::read_link", reason = "A name resolves in one place: crate::path::{walk, RealPath::of}, where the grant judges the object; a program's own file is statted or listed through ral_core::own, and any other stat by name is a typed site." },
+    { path = "std::path::Path::canonicalize", reason = "A name resolves in one place: crate::path::{walk, RealPath::of}, where the grant judges the object; a program's own file is statted or listed through ral_core::own, and any other stat by name is a typed site." },
+    { path = "std::path::Path::display", reason = "Use ral_core::path::shown: ral shows every path `/`-separated. A path handed to the OS is a typed site." },
+    { path = "std::path::Path::to_string_lossy", reason = "Use ral_core::path::shown to display a path, or ral_core::path::utf8 where it must travel as text; a native conversion (handed to the OS, an env value) is a typed site." },
+    { path = "std::path::Path::to_str", reason = "Use ral_core::path::shown to display a path, or ral_core::path::utf8 where it must travel as text; a native conversion (handed to the OS, an env value) is a typed site." },
+    { path = "std::ffi::OsStr::to_string_lossy", reason = "Use ral_core::path::shown to display a path, or ral_core::path::utf8 where it must travel as text; a native conversion (handed to the OS, an env value) is a typed site." },
+    { path = "std::ffi::OsStr::to_str", reason = "Use ral_core::path::shown to display a path, or ral_core::path::utf8 where it must travel as text; a native conversion (handed to the OS, an env value) is a typed site." },
     { path = "std::process::Child::wait", reason = "Use crate::process::ChildHandle::{into_watch, reap} — the reaper owns the wait and answers a stop itself; reap is the blocking reap after a confirmed kill." },
     { path = "std::process::Child::try_wait", reason = "Use crate::process::ChildHandle::into_watch: the reaper owns every child wait and answers a stop itself. A raw try_wait reports a stopped child as still running (no WUNTRACED)." },
-    { path = "std::env::var_os", reason = "An XDG basedir read goes through crate::host::xdg, which ignores a relative override per the spec. Other path-valued env reads #[allow] with a reason." },
+    { path = "std::env::var_os", reason = "Use ral_core::host::var_os, the one reader of the host environment as the OS holds it; an XDG basedir goes through ral_core::host::xdg, which ignores a relative override per the spec. Under a shell read its EnvVars instead: a `within [env: …]` overlay never reaches the host." },
+    { path = "std::env::var", reason = "Use ral_core::host::var, the one reader of a host variable as Unicode; an XDG basedir goes through ral_core::host::xdg, which ignores a relative override per the spec. Under a shell read its EnvVars instead: a `within [env: …]` overlay never reaches the host." },
+    { path = "std::env::vars", reason = "Use ral_core::host::vars_os, the one reader of the host's whole environment, which holds every variable as the OS does and cannot panic on one that is not Unicode." },
+    { path = "std::env::vars_os", reason = "Use ral_core::host::vars_os, the one reader of the host's whole environment; a `within [env: …]` overlay never reaches the host, so code holding a shell reads its EnvVars instead." },
+    { path = "std::env::temp_dir", reason = "Use ral_core::host::temp_dir, the one reader of the host's temp directory. A program's own files live under an XDG base, through ral_core::own, never in temp." },
+    { path = "std::env::home_dir", reason = "Use ral_core::host::home for a `~` (EnvVars::home under a shell). The account's home is the AccountHome fallback inside ral_core::host::xdg and home_dot, which read it only where no HOME is bound; the HOME variable itself is read through ral_core::host::var." },
     { path = "ral_core::host::home", reason = "Host-only HOME read — a `within [env: …]` overlay does not apply. In language semantics thread the shell's overlay through EnvVars::home instead." },
     { path = "ral_core::host::user", reason = "Host-only USER read — a `within [env: …]` overlay does not apply. In language semantics thread the shell's overlay through EnvVars::user instead." },
+    { path = "ral_core::own::read_named", reason = "Reads a name the user gave (an argument, a command typed at a front end) or the program's install tree: a typed site that says which, never a model's name." },
+    { path = "ral_core::own::open_named", reason = "Opens a name the user gave (an argument, a command typed at a front end) or the program's install tree: a typed site that says which, never a model's name." },
+    { path = "ral_core::own::kind_named", reason = "Stats a name the user gave (an argument, a command typed at a front end) or the program's install tree: a typed site that says which, never a model's name." },
+    { path = "ral_core::own::create_named", reason = "Makes a name the user gave (an argument, a command typed at a front end) or the program's install tree: a typed site that says which, never a model's name." },
     { path = "ignore::WalkBuilder::build", reason = "Use ral_core::path::tree::walk::Walk: ral enumerates, judges every entry against the grant and polls the cancel scope per entry. `ignore` stays as a matcher alone (`ignore::gitignore`), never a walker." },
-    { path = "std::fs::File::open", reason = "A model read is the redirect site that surfaces a read card; any other open is reasoned-silent." },
-    { path = "std::fs::File::create", reason = "A model write is the redirect site that reports it; any other create is reasoned-silent." },
-    { path = "std::fs::File::create_new", reason = "Exclusive create: #[allow] with a reason naming the surface or the silence." },
-    { path = "std::fs::OpenOptions::open", reason = "The redirect sites build their own OpenOptions; any other one #[allow]s with a reason." },
-    { path = "std::fs::read", reason = "grep and edit read surfacing in exarch::shell_eval::builtins; every other one-shot read is reasoned-silent." },
-    { path = "std::fs::read_to_string", reason = "Module loading (source/use) is the documented silent residual; other sites #[allow] with a reason." },
-    { path = "std::fs::write", reason = "A model write surfaces at the redirect and edit sites; every other one-shot write is reasoned-silent." },
-    { path = "std::fs::read_dir", reason = "`list-dir` and other directory reads are silent stat sites, not turn-time data I/O." },
-    { path = "std::fs::metadata", reason = "The atomic-write mode-preservation stat is a write site's sub-step; predicate stats are silent." },
-    { path = "std::fs::symlink_metadata", reason = "The atomic-commit mode-preservation stat is a write site's sub-step; other symlink stats are silent." },
-    { path = "std::fs::read_link", reason = "Symlink reads are silent path-resolution work." },
-    { path = "std::fs::remove_file", reason = "Removal is silent infrastructure — temp cleanup, atomic-write rollback — not turn-time model I/O." },
-    { path = "std::fs::remove_dir_all", reason = "Recursive removal is silent infrastructure." },
-    { path = "std::fs::create_dir_all", reason = "Directory creation is silent infrastructure — basedir and scratch setup — not model I/O." },
-    { path = "std::fs::rename", reason = "The atomic-commit rename is a write site's commit step; other renames are silent." },
-    { path = "std::fs::copy", reason = "A copy is silent infrastructure unless it is the model's own exec image." },
-    { path = "std::fs::set_permissions", reason = "The atomic-commit mode restore is a write site's sub-step; other chmods are silent." },
+    { path = "std::fs::File::open", reason = "A model read is the redirect site that surfaces a read card. A file the program keeps or the user writes is opened through ral_core::own, and one the user names through ral_core::own::open_named at a typed site; any other open is a typed site." },
+    { path = "std::fs::File::create", reason = "A model write is the redirect site that reports it. A file the program keeps is made through ral_core::own (OwnDir::{store, append, open_write, create_fresh}), and a new file the user names through ral_core::own::create_named at a typed site; any other create is a typed site." },
+    { path = "std::fs::File::create_new", reason = "Exclusive create: ral_core::own makes a file exclusively (OwnDir::create_fresh, and create_named at a typed site); any other is a typed site." },
+    { path = "std::fs::OpenOptions::open", reason = "The redirect sites build their own OpenOptions; a file the program keeps or the user writes is opened through ral_core::own, and one the user names through ral_core::own::open_named at a typed site; any other is a typed site." },
+    { path = "std::fs::read", reason = "grep and edit read surfacing in exarch::shell_eval::builtins; a file the program keeps or the user writes is read through ral_core::own (OwnDir::{read, load}, UserFile::read), and one the user names through ral_core::own::read_named at a typed site; every other one-shot read is a typed site." },
+    { path = "std::fs::read_to_string", reason = "Module loading (source/use) is the documented silent residual; a file the program keeps or the user writes is read through ral_core::own, and one the user names through ral_core::own::read_named at a typed site; other reads are typed sites." },
+    { path = "std::fs::write", reason = "A model write surfaces at the redirect and edit sites; a program's own file is written through ral_core::own (OwnDir::store replaces it whole, atomically); every other one-shot write is a typed site." },
+    { path = "std::fs::read_dir", reason = "`list-dir` and other directory reads are silent stat sites, not turn-time data I/O; a program's own directory is listed through ral_core::own (OwnDir::list); any other is a typed site." },
+    { path = "std::fs::metadata", reason = "The atomic-write mode-preservation stat is a write site's sub-step; a program's own file is statted through ral_core::own (OwnDir::stat); a predicate stat is a typed site." },
+    { path = "std::fs::symlink_metadata", reason = "The atomic-commit mode-preservation stat is a write site's sub-step; a program's own file is statted through ral_core::own (OwnDir::stat); any other is a typed site." },
+    { path = "std::fs::read_link", reason = "A link is read by the walk (crate::path::walk), one name at a time; ral_core::own reads none, and any other read is a typed site." },
+    { path = "std::fs::remove_file", reason = "Removal is silent infrastructure — temp cleanup, atomic-write rollback — not turn-time model I/O: a program's own file is removed through ral_core::own (OwnDir::remove); any other is a typed site." },
+    { path = "std::fs::remove_dir_all", reason = "Recursive removal is silent infrastructure: ral_core::own does it (OwnDir::remove, which unlinks a link and never follows it); any other is a typed site." },
+    { path = "std::fs::create_dir_all", reason = "Directory creation is silent infrastructure — basedir and scratch setup — not model I/O: a program's own directories are made through ral_core::own (OwnDir::{xdg, make_dir}), each absent name owner-only; any other is a typed site." },
+    { path = "std::fs::rename", reason = "The atomic-commit rename is a write site's commit step; a program's own rotation is ral_core::own (OwnDir::rename); other renames are typed sites." },
+    { path = "std::fs::copy", reason = "A copy is silent infrastructure unless it is the model's own exec image; ral_core::own copies nothing, so any copy is a typed site." },
+    { path = "std::fs::set_permissions", reason = "The atomic-commit mode restore is a write site's sub-step; ral_core::own sets an owner-only mode as it makes a file (Visibility::Secret); other chmods are typed sites." },
+    { path = "std::fs::create_dir", reason = "A directory the program keeps is made through ral_core::own (OwnDir::make_dir); any other is made by the walk, in crate::path::walk, or is a typed site." },
+    { path = "std::fs::remove_dir", reason = "Use ral_core::own (OwnDir::remove), which removes a directory with everything beneath it, a link as the link." },
+    { path = "std::fs::hard_link", reason = "No file the program keeps is a hard link: ral_core::own makes none, and the walk in crate::path::walk makes none." },
+    { path = "std::fs::soft_link", reason = "No file the program keeps is a link: ral_core::own makes none, and the walk in crate::path::walk makes none." },
+    { path = "std::fs::DirBuilder::create", reason = "A directory the program keeps is made through ral_core::own (OwnDir::make_dir); any other is made by the walk, in crate::path::walk, or is a typed site." },
+    { path = "std::os::unix::fs::symlink", allow-invalid = true, reason = "No file the program keeps is a link: ral_core::own makes none, and the walk in crate::path::walk makes none." },
+    { path = "std::os::windows::fs::symlink_file", allow-invalid = true, reason = "No file the program keeps is a link: ral_core::own makes none, and the walk in crate::path::walk makes none." },
+    { path = "std::os::windows::fs::symlink_dir", allow-invalid = true, reason = "No file the program keeps is a link: ral_core::own makes none, and the walk in crate::path::walk makes none." },
     # `cap_primitives::fs` is `std::fs` with the walk made explicit: every entry
     # takes the directory handle to act relative to.
     { path = "cap_primitives::fs::access", reason = "Route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
@@ -150,42 +182,42 @@ disallowed-methods = [
     { path = "libc::open", reason = "A raw wrapper the walk is made of: route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
     { path = "libc::openat", allow-invalid = true, reason = "A raw wrapper the walk is made of: route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
     { path = "windows_sys::Win32::Storage::FileSystem::CreateFileW", reason = "A raw wrapper the walk is made of: route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
-    { path = "windows_sys::Wdk::Storage::FileSystem::NtCreateFile", reason = "A raw wrapper the walk is made of: route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
+    { path = "windows_sys::Wdk::Storage::FileSystem::NtCreateFile", allow-invalid = true, reason = "A raw wrapper the walk is made of: route it through crate::path::walk, where Shell::locate judges the object the handle then opens." },
     { path = "windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW", reason = "A name the kernel reads back off a handle: no path is derived from a handle outside crate::path::walk, which asks it only of its volume." },
-    { path = "windows_sys::Win32::Security::Authorization::GetNamedSecurityInfoW", reason = "A raw wrapper that resolves a name: act on a handle the walk holds (crate::path::walk) instead." },
-    { path = "windows_sys::Win32::Security::Authorization::SetNamedSecurityInfoW", reason = "A raw wrapper that resolves a name: act on a handle the walk holds (crate::path::walk) instead." },
-    { path = "std::process::Command::new", reason = "The model's external exec is the site at crate::process::Launch::new that surfaces an exec card; sandbox respawn, which probes and infra subprocesses are reasoned-silent." },
+    { path = "windows_sys::Win32::Security::Authorization::GetNamedSecurityInfoW", allow-invalid = true, reason = "A raw wrapper that resolves a name: act on a handle the walk holds (crate::path::walk) instead." },
+    { path = "windows_sys::Win32::Security::Authorization::SetNamedSecurityInfoW", allow-invalid = true, reason = "A raw wrapper that resolves a name: act on a handle the walk holds (crate::path::walk) instead." },
+    { path = "std::process::Command::new", reason = "The model's external exec is the site at crate::process::Launch::new that surfaces an exec card; sandbox respawn, probes and infra subprocesses are typed sites." },
     { path = "os_pipe::pipe", reason = "Use crate::process::cloexec_pipe — Apple sets CLOEXEC after pipe(), and a concurrent fork on another thread inherits the window." },
     { path = "std::os::unix::net::UnixStream::pair", allow-invalid = true, reason = "Use crate::process::cloexec_socketpair — same window." },
     { path = "std::process::Command::spawn", reason = "Use crate::process::spawn; see spawn_lock.rs." },
     { path = "std::process::Command::output", reason = "Use crate::process::output — spawns under the lock and waits outside it; see spawn_lock.rs." },
     { path = "std::process::Command::status", reason = "Use crate::process::status — spawns under the lock and waits outside it; see spawn_lock.rs." },
-    { path = "std::os::unix::process::CommandExt::exec", allow-invalid = true, reason = "An exec image replaces the process, so it must be a reviewed site. The sandbox respawn exec is silent: the surface fired before the handoff." },
-    { path = "std::net::TcpStream::connect", reason = "A host:port is an outside name and the socket is the capability — the same shape as an open. Every dial is a reviewed site." },
+    { path = "std::os::unix::process::CommandExt::exec", allow-invalid = true, reason = "An exec image replaces the process, so it must be a typed site. The sandbox respawn exec is silent: the surface fired before the handoff." },
+    { path = "std::net::TcpStream::connect", reason = "A host:port is an outside name and the socket is the capability — the same shape as an open. Every dial is a typed site." },
     { path = "std::net::TcpStream::connect_timeout", reason = "The bounded dial. A separate path: clippy does not fold it into connect." },
-    { path = "std::net::TcpListener::bind", reason = "A bound port is an inbound capability. The loopback wire pair and the OAuth callback receiver #[allow] with a reason." },
+    { path = "std::net::TcpListener::bind", reason = "A bound port is an inbound capability. The loopback wire pair and the OAuth callback receiver are typed sites." },
     { path = "std::net::UdpSocket::bind", reason = "Same ground as TcpListener::bind. No site holds one today, so the first is a decision rather than an import." },
     { path = "std::net::ToSocketAddrs::to_socket_addrs", reason = "Resolution turns the name into the addresses the dial is judged against. The CONNECT proxy's vet is the one site." },
-    { path = "reqwest::Client::builder", reason = "An HTTPS client is a dial door. Build it from exarch::provider::tls, whose bundled roots work where the host ships no trust store." },
-    { path = "reqwest::Client::new", reason = "The same door with the host's trust store and no liveness bounds — never what this tree wants." },
-    { path = "std::process::exit", reason = "exit runs no destructor: a held TerminalLease is never returned, a watched child never reaped, an atomic write's staged sibling never unlinked. #[allow] with a reason naming the fact that makes exiting safe here — not that it is top-level." },
-    { path = "std::process::abort", reason = "Same missing destructors as exit, plus SIGABRT and no atexit flush. #[allow] with a reason saying why crashing beats any recovery." },
-    { path = "std::sync::Mutex::lock", reason = "Use crate::sync::LockExt::lock_ignore_poison — poison marks an unrelated panic, and propagating it disables the lock for every later run rather than the one that panicked. A lock whose guarded state restates something outside the process (a frame boundary, a file offset) is the exception and #[allow]s with a reason saying what tears." },
+    { path = "reqwest::Client::builder", reason = "An HTTPS client dials out. Build it from exarch::provider::tls, whose bundled roots work where the host ships no trust store." },
+    { path = "reqwest::Client::new", reason = "The same dial, with the host's trust store and no liveness bounds — never what this tree wants." },
+    { path = "std::process::exit", reason = "exit runs no destructor: a held TerminalLease is never returned, a watched child never reaped, an atomic write's staged sibling never unlinked. A typed site whose variant names the fact that makes exiting safe here, not that it is top-level." },
+    { path = "std::process::abort", reason = "Same missing destructors as exit, plus SIGABRT and no atexit flush. A typed site whose variant says why crashing beats any recovery." },
+    { path = "std::sync::Mutex::lock", reason = "Use crate::sync::LockExt::lock_ignore_poison — poison marks an unrelated panic, and propagating it disables the lock for every later run rather than the one that panicked. A lock whose guarded state restates something outside the process (a frame boundary, a file offset) uses crate::sync::LockExt::lock_strict, which keeps poison; the lock's own doc says what tears." },
     { path = "std::sync::RwLock::read", reason = "Use crate::sync::RwLockExt::read_ignore_poison — a reader tears nothing, so there is never a reason to refuse one." },
-    { path = "std::sync::RwLock::write", reason = "Use crate::sync::RwLockExt::write_ignore_poison — same policy as Mutex::lock above; an exception #[allow]s with a reason saying what tears." },
-    { path = "std::sync::Condvar::wait", reason = "Use crate::sync::CondvarExt::wait_ignore_poison — wait re-acquires the mutex, so it is a second acquisition of the same lock and must answer poison the way lock_ignore_poison does. An exception #[allow]s with a reason saying what tears." },
-    { path = "std::sync::Condvar::wait_timeout", reason = "Use crate::sync::CondvarExt::wait_timeout_ignore_poison — same door, and the WaitTimeoutResult is handed back unchanged." },
-    { path = "std::sync::Condvar::wait_while", reason = "No door yet: no site needs one. Add wait_while_ignore_poison to crate::sync rather than reaching past the policy." },
-    { path = "std::sync::Condvar::wait_timeout_while", reason = "No door yet, on the same terms as wait_while above." },
+    { path = "std::sync::RwLock::write", reason = "Use crate::sync::RwLockExt::write_ignore_poison — same policy as Mutex::lock above; an exception is a typed site whose variant says what tears." },
+    { path = "std::sync::Condvar::wait", reason = "Use crate::sync::CondvarExt::wait_ignore_poison — wait re-acquires the mutex, so it is a second acquisition of the same lock and must answer poison the way lock_ignore_poison does. An exception is a typed site whose variant says what tears." },
+    { path = "std::sync::Condvar::wait_timeout", reason = "Use crate::sync::CondvarExt::wait_timeout_ignore_poison — same policy, and the WaitTimeoutResult is handed back unchanged." },
+    { path = "std::sync::Condvar::wait_while", reason = "No helper yet: no site needs one. Add wait_while_ignore_poison to crate::sync rather than reaching past the policy." },
+    { path = "std::sync::Condvar::wait_timeout_while", reason = "No helper yet, on the same terms as wait_while above." },
     { path = "std::sync::Mutex::into_inner", reason = "Use crate::sync::LockExt::into_inner_ignore_poison — into_inner consumes the mutex, so the caller is its sole owner: poison can only record a panic that already finished, and there is no live writer left to tear anything." },
-    { path = "std::sync::RwLock::into_inner", reason = "No door yet: no site needs one. Add into_inner_ignore_poison to RwLockExt rather than reaching past the policy." },
+    { path = "std::sync::RwLock::into_inner", reason = "No helper yet: no site needs one. Add into_inner_ignore_poison to RwLockExt rather than reaching past the policy." },
 ]
 
 # The shell's own output goes through `outln!` / `errln!` (crate::terminal),
 # which drop a failed write: once the terminal hangs up, `println!` and
-# `eprintln!` panic on EIO or EPIPE.  A site that is not the shell's own
-# output (a tool's `--help`, a test) `#[allow]`s with a reason opening `[test]`
-# or `[silent:<slug>]`.
+# `eprintln!` panic on EIO or EPIPE.  A print that is not the shell's own
+# output (a tool's `--help`, a test) is allowed with a reason, in prose, saying
+# why.
 disallowed-macros = [
     { path = "std::println", reason = "Use ral_core::outln!, which drops a failed write rather than panicking on EPIPE." },
     { path = "std::eprintln", reason = "Use ral_core::errln!, which drops a failed write rather than panicking on EPIPE." },

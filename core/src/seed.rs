@@ -210,6 +210,7 @@ impl EngineSeed {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use crate::boot::BakedPrelude;
@@ -250,7 +251,10 @@ mod tests {
     }
 
     /// A narrower no test here may reach: only a Base grant consults one.
-    fn no_base(_: &str, _: &std::path::Path) -> Result<crate::capability::GrantLayer, String> {
+    fn no_base(
+        _: &str,
+        _: &crate::guard::freeze::FreezeCtx,
+    ) -> Result<crate::capability::GrantLayer, String> {
         panic!("only a Base grant consults the narrower")
     }
 
@@ -431,6 +435,20 @@ mod tests {
         assert_eq!(b.grant, d.grant);
     }
 
+    /// The scratch is a spelling, one of the session's terms: a child built
+    /// from the bequest itself and one built from its decoding both have it.
+    #[test]
+    fn a_child_has_the_scratch_from_either_bequest() {
+        let mut parent = parent();
+        parent.set_scratch("/the/session/scratch");
+        let b = parent.bequeath(SpawnGrant::Inherit);
+        let decoded = through_the_wire(&b, &runtime());
+        for (arm, bequest) in [("the bequest", b), ("the decoded bequest", decoded)] {
+            let child = Shell::child_of(runtime().into(), bequest, no_base).expect("a child");
+            assert_eq!(child.scratch(), Some("/the/session/scratch"), "{arm}");
+        }
+    }
+
     /// A child is the same whichever seat built it: from the bequest itself,
     /// or from its decoding.
     #[test]
@@ -510,10 +528,6 @@ mod tests {
     /// decode takes hold of what is still where it was.
     #[cfg(unix)]
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] a tempdir tree whose files are replaced under the stack"
-    )]
     fn a_stack_through_the_seed_arrives_unheld_and_is_held_again() {
         let tmp = tempfile::tempdir().unwrap();
         let secret = crate::test_helper::real(tmp.path())
@@ -537,10 +551,6 @@ mod tests {
     /// through another name, the old object.
     #[cfg(unix)]
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] a tempdir tree whose files are replaced under the stack"
-    )]
     fn an_exclusion_replaced_before_the_decode_keeps_its_position_and_old_identity() {
         use crate::capability::{Floor, FsOp};
         let tmp = tempfile::tempdir().unwrap();
@@ -577,10 +587,6 @@ mod tests {
     /// link retargeted after leaves the child the old target only.
     #[cfg(unix)]
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] a tempdir tree whose files are replaced under the stack"
-    )]
     fn a_child_bequeathed_a_retargeted_allowance_link_admits_the_old_target_only() {
         use crate::capability::{Capabilities, Floor, FsOp, FsPolicy};
         let tmp = tempfile::tempdir().unwrap();

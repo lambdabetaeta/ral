@@ -3,21 +3,20 @@ use crate::bus::{BusReceiver, FleetSink, UsageMeter, channel};
 use crate::provider::ProviderError;
 use crate::record::AgentId;
 use crate::record::Record;
+use ral_core::own::{OwnDir, TestDir};
 
-fn emitter() -> (Emitter, BusReceiver) {
-    let path = std::env::temp_dir().join(format!(
-        "exarch-commit-test-{}-{:?}.jsonl",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let emit = Emitter::create(&path).expect("temp record log");
+/// The emitter over a log in a directory of its own, which comes back with it
+/// and must be held: dropping it deletes the log.
+fn emitter() -> (TestDir, Emitter, BusReceiver) {
+    let dir = OwnDir::for_test("commit").expect("a test directory");
+    let emit = Emitter::create(&dir).expect("temp record log");
     let (tx, rx) = channel();
     emit.attach(Box::new(FleetSink {
         id: AgentId::new(0),
         tx: tx.downgrade(),
         meter: UsageMeter::default(),
     }));
-    (emit, rx)
+    (dir, emit, rx)
 }
 
 fn drain_display(rx: &BusReceiver) -> Vec<Display> {
@@ -36,7 +35,7 @@ fn drain_display(rx: &BusReceiver) -> Vec<Display> {
 /// chopper had already recorded and the tail it had not.
 #[test]
 fn a_reasoning_run_records_ahead_of_all_the_prose_that_follows_it() {
-    let (emit, rx) = emitter();
+    let (_dir, emit, rx) = emitter();
     let mut stream = Stream::default();
     stream.push(&emit, Delta::Think("weighing the cases\n"));
     stream.push(&emit, Delta::Say("First paragraph.\n\n"));
@@ -60,7 +59,7 @@ fn a_reasoning_run_records_ahead_of_all_the_prose_that_follows_it() {
 /// attempt's reasoning is a separate record, never a continuation of it.
 #[test]
 fn a_retry_seals_the_failed_attempts_lanes() {
-    let (emit, rx) = emitter();
+    let (_dir, emit, rx) = emitter();
     let mut stream = Stream::default();
     let cause = ProviderError::local_transient("model response body read timed out");
     stream.push(&emit, Delta::Think("first try"));
@@ -92,7 +91,7 @@ fn a_retry_seals_the_failed_attempts_lanes() {
 /// seam to flush at, so the boundary flushes it.
 #[test]
 fn a_wordless_step_seals_its_reasoning_at_the_boundary() {
-    let (emit, rx) = emitter();
+    let (_dir, emit, rx) = emitter();
     let mut stream = Stream::default();
     stream.push(&emit, Delta::Think("straight to the shell\n"));
     stream.close(&emit).unwrap();
@@ -108,7 +107,7 @@ fn a_wordless_step_seals_its_reasoning_at_the_boundary() {
 /// between two of them.
 #[test]
 fn the_records_reassemble_the_whole_stream() {
-    let (emit, rx) = emitter();
+    let (_dir, emit, rx) = emitter();
     let mut stream = Stream::default();
     let deltas = ["first\n\n", "\n\n", "second\n\n", "tail"];
     for delta in deltas {
@@ -135,7 +134,7 @@ fn the_records_reassemble_the_whole_stream() {
 /// back together.
 #[test]
 fn a_line_records_where_it_completes_and_the_open_line_waits() {
-    let (emit, rx) = emitter();
+    let (_dir, emit, rx) = emitter();
     let mut stream = Stream::default();
     stream.push(&emit, Delta::Say("```ral\nlet x = 1"));
     match drain_display(&rx).as_slice() {
@@ -155,7 +154,7 @@ fn a_line_records_where_it_completes_and_the_open_line_waits() {
 /// reader never meets a block holding nothing.
 #[test]
 fn whitespace_alone_waits_for_the_words_after_it() {
-    let (emit, rx) = emitter();
+    let (_dir, emit, rx) = emitter();
     let mut stream = Stream::default();
     stream.push(&emit, Delta::Say("\n\n"));
     assert!(

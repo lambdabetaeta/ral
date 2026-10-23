@@ -1,12 +1,12 @@
 ---
 generated_at_commit: 958d7af7
 generated_at_date: 2026-10-06
-covers_paths: [ral/src/main.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/boot_door.rs, ral/src/platform.rs, ral/build.rs]
+covers_paths: [ral/src/main.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/boot_builtin.rs, ral/src/platform.rs, ral/build.rs]
 ---
 
 # Map: repl / startup
 
-The `ral` binary startup is a four-part front door: **`startup.rs` decides what
+The `ral` binary startup has four parts: **`startup.rs` decides what
 kind of process this is and holds the binary's engine installers, `cli.rs`
 distils argv into a `Mode`, `main.rs` dispatches the answer, and `batch.rs`
 runs non-interactive programs through an engine it boots, speaking only the
@@ -65,7 +65,7 @@ dispositions. Then, per role:
     holds two `EngineInstaller`s: `repl` (`boot_repl` over the REPL surface,
     configured by nothing) and `batch`
     (`boot_batch` over the batch surface, decoding `BatchConfig {args}`), each
-    registering the boot door. Both share one grant policy, a refusal
+    registering the boot builtin. Both share one grant policy, a refusal
     (`no_seeded_children`), because the shell spawns no child engines and has
     no base-tag lexicon to resolve a grant against.
   - **Bundled tool** (`serve_bundled_tool`, `--ral-bundled-tool <tool> …`) —
@@ -81,9 +81,9 @@ The roles that are not the shell exit here, never reaching clap.
 
 ## Modes
 
-`ral/src/cli.rs` owns the clap surface, and `Mode::from_argv` is the one door
+`ral/src/cli.rs` owns the clap surface, and `Mode::from_argv` is the one entry
 through it: terminator injection, clap, then `Cli::into_mode`. The mode tests
-enter by the same door, so the parse they exercise cannot drift from the one
+enter by the same entry, so the parse they exercise cannot drift from the one
 `startup::identify` performs. `Cli::into_mode` distils the parsed flags into a
 `Mode`: `Interactive(InteractiveOpts)`, `Script`, or `Command` — login is not a
 mode of its own but a flag on `InteractiveOpts` (`login`, set by `-l` or a
@@ -121,7 +121,7 @@ rides every mode; `BatchOpts` adds `--audit` / `--pretty` / `halt: Option<Halt>`
 `ral/src/batch.rs` owns the whole non-interactive pipeline, from the source
 text inwards: `run_file` reads a script path, `run_stdin` reads a piped script,
 and both meet `-c` at `run_source`, which is therefore where line endings are
-normalised — one door, one rule. Batch holds no `Shell`: it boots an
+normalised — one place, one rule. Batch holds no `Shell`: it boots an
 `IdentityTransport` from the `batch` installer and speaks only the protocol,
 through `dispatch_to_report` under the mute host `()`, so it shares the REPL's
 one ending law and one typecheck
@@ -134,18 +134,18 @@ one ending law and one typecheck
 - **Boot, stage one.** `IdentityTransport::boot` with the `batch` installer
   (the table is not `cfg(unix)`-gated, only `run_engine` is), whose recipe
   decodes `Root.config` — `{args}` — strictly, boots the batch surface, sets
-  exit hints and args, and registers the boot door. `platform::local_attach`
+  exit hints and args, and registers the boot builtin. `platform::local_attach`
   builds the attach at this process's cwd and home, the probed terminal in
   `EngineSpec.terminal`, and batch adds its config. A refusal exits 2 with its
   sentence on stderr.
 - **Boot, stage two.** The first dispatch is `Program::Hook` on
-  `Session "boot"`, the `_ral-boot` builtin itself (`ral/src/boot_door.rs`),
+  `Session "boot"`, the `_ral-boot` builtin itself (`ral/src/boot_builtin.rs`),
   applied to the REPL's own record, `{login: false, no-rc: true,
-  recursion-limit, capabilities}`. The door is one-shot — it unregisters its
+  recursion-limit, capabilities}`. The builtin is one-shot — it unregisters its
   own hook — sources no startup file here, sets the recursion limit, and
   applies `--capabilities` under its own mooring. Each profile path reaches
   it absolute, anchored at the invocation cwd by `Boot::profiles`, so no
-  profile's `cd` can redirect a later one. `boot_door::settle` reads
+  profile's `cd` can redirect a later one. `boot_builtin::settle` reads
   its `Ending`: a load failure is `Raised` status 2, an `exit N` is
   `Exited(N)`, and either stops batch there, exactly as it stops the REPL.
 - **The run.** The script is a `Program::Source` dispatch under
@@ -177,10 +177,10 @@ underlying machine is a separate concern, owned by `ral_core::host`.
 
 `build.rs` is the git-hash block — stamping `RAL_VERSION_SUFFIX` (`+<hash>`
 in a git checkout, empty in a release tarball) into the version string — plus
-one call to `ral_core::boot::bake_prelude_to_out_dir`, which
+one call to `ral_core::boot::bake_prelude`, which
 parses, elaborates, and `bake_prelude`s `prelude.ral` (annotating each top-level
-bind with its inferred scheme in one checked pass), then serialises the
-*annotated* `Comp` into `OUT_DIR`. This is the consumer half of core's schema-less prelude discipline
+bind with its inferred scheme in one checked pass) and returns the
+*annotated* `Comp` serialised, which the script writes into `OUT_DIR`. This is the consumer half of core's schema-less prelude discipline
 ([[map/core|core]]): a crate's build script cannot depend on the crate it builds,
 so core cannot bake its own prelude, and each embedding host bakes it from core's
 source. Evaluating the annotated prelude installs each binding's scheme into
@@ -202,9 +202,9 @@ prelude.
 Builtins are shell-scoped: each mode declares its surface as one
 `HostSurface` value and hands it to `boot_shell`, so the checker surface and
 the runtime surface cannot drift. Batch's surface is core plus
-`WATCH_BUILTIN`, `SURFACE_BUILTIN` and the boot door, and the same value seeds `--check`'s builtin table
+`WATCH_BUILTIN`, `SURFACE_BUILTIN` and the boot builtin, and the same value seeds `--check`'s builtin table
 (`HostSurface::manifest`, the checker's Σ with no live shell); the REPL's
-adds the [[map/repl/plugins|`_ed-*` doors and the plugin load doors]], all
+adds the [[map/repl/plugins|`_ed-*` builtins and the plugin load builtins]], all
 static. Both ral front-ends print a watched worker's lines, so `watch` is the
 ral hosts' to install
 ([[decisions/260617_watch-repl-builtin|watch-repl-builtin]]).

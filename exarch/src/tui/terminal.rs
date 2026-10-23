@@ -1,5 +1,5 @@
-use std::io::{self, Stdout};
-use std::path::Path;
+use std::fs::File;
+use std::io::{self, Stdout, Write as _};
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -16,7 +16,15 @@ use crossterm::{
         supports_keyboard_enhancement,
     },
 };
+use ral_core::own::OwnDir;
+use ral_core::path::{Visibility, XdgKind};
 use ratatui::{Terminal, backend::CrosstermBackend};
+
+use crate::app::EXARCH;
+use crate::site::{Silent, site};
+
+/// The TUI's debug log, in the run's directory: what fd 2 is redirected to.
+const STDERR_LOG: &str = "stderr.log";
 
 pub type Term = Terminal<CrosstermBackend<Stdout>>;
 
@@ -36,7 +44,6 @@ pub(super) fn install_panic_restore_hook() {
             previous(info);
             // Flush before `TerminalGuard::drop` restores fd 2, or the panic
             // message dies in the log file's buffer on abort.
-            use std::io::Write;
             let _ = std::io::stderr().flush();
         }));
     });
@@ -116,8 +123,8 @@ pub(super) fn pick_editor_spec(
 /// Resolve the editor to launch for `C-x C-e`.  Split on whitespace so a spec
 /// like `emacsclient -t` keeps its arguments.
 pub(super) fn editor_command() -> (String, Vec<String>) {
-    let visual = std::env::var("VISUAL").ok();
-    let editor = std::env::var("EDITOR").ok();
+    let visual = ral_core::host::var("VISUAL");
+    let editor = ral_core::host::var("EDITOR");
     let spec = pick_editor_spec(visual.as_deref(), editor.as_deref(), DEFAULT_EDITOR);
     let mut parts = spec.split_whitespace().map(str::to_string);
     let program = parts
@@ -126,41 +133,46 @@ pub(super) fn editor_command() -> (String, Vec<String>) {
     (program, parts.collect())
 }
 
-/// Compose `draft` in the user's `$EDITOR`: scratch file, suspend the terminal
-/// modes so the child owns the tty, run, re-enter, read back.  One trailing
-/// newline is trimmed, the prompt being newline-joined.  `None` keeps the
-/// original draft; only failure to re-enter the modes propagates.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:editor-compose] writes the prompt draft to a scratch file, spawns the user's $EDITOR on it, and reads it back for the C-x C-e hatch; a UI action on a temp file, not turn-time model I/O"
-)]
+/// Compose `draft` in the user's `$EDITOR`: a draft file in the app's cache
+/// directory, owner-only, under a name of its own invention; suspend the
+/// terminal modes so the child owns the tty, run, re-enter, read back.  One
+/// trailing newline is trimmed, the prompt being newline-joined.  `None` keeps
+/// the original draft; only failure to re-enter the modes propagates.
 pub(super) fn edit_text_in_editor(draft: &str) -> io::Result<Option<String>> {
-    let path = std::env::temp_dir().join(format!("exarch-prompt-{}.md", std::process::id()));
-    if std::fs::write(&path, draft).is_err() {
+    let Ok(cache) = EXARCH.own(XdgKind::Cache) else {
+        return Ok(None);
+    };
+    let Ok((name, mut file)) = cache.create_fresh("prompt-", ".md", Visibility::Private) else {
+        return Ok(None);
+    };
+    let written = file.write_all(draft.as_bytes());
+    drop(file);
+    if written.is_err() {
+        let _ = cache.remove(&name);
         return Ok(None);
     }
     let (program, args) = editor_command();
 
     restore_terminal_modes();
-    let mut cmd = std::process::Command::new(&program);
-    cmd.args(&args).arg(&path);
+    let mut cmd = site!(Silent::EditorCompose, std::process::Command::new(&program));
+    cmd.args(&args).arg(cache.path().join(&name));
     let status = ral_core::process::status(&mut cmd);
     if let Err(e) = apply_terminal_modes() {
-        let _ = std::fs::remove_file(&path);
+        let _ = cache.remove(&name);
         return Err(e);
     }
 
     let edited = match status {
-        Ok(s) if s.success() => match std::fs::read_to_string(&path) {
-            Ok(text) => {
+        Ok(s) if s.success() => match cache.read(&name).map(String::from_utf8) {
+            Ok(Ok(text)) => {
                 let text = text.strip_suffix('\n').unwrap_or(&text);
                 Some(text.strip_suffix('\r').unwrap_or(text).to_string())
             }
-            Err(_) => None,
+            Ok(Err(_)) | Err(_) => None,
         },
         _ => None,
     };
-    let _ = std::fs::remove_file(&path);
+    let _ = cache.remove(&name);
     Ok(edited)
 }
 
@@ -178,12 +190,13 @@ pub struct TerminalGuard {
 }
 
 impl TerminalGuard {
-    /// Redirect fd 2 to `stderr_log`, then enter the terminal modes.
+    /// Redirect fd 2 to `stderr.log` in `run`, then enter the terminal modes.
     ///
     /// # Errors
     /// If the log cannot be opened or the terminal cannot enter its modes;
     /// either way nothing is left half-done.
-    pub fn enter(stderr_log: &Path) -> io::Result<Self> {
+    pub fn enter(run: &OwnDir) -> io::Result<Self> {
+        let stderr_log = run.append(STDERR_LOG)?;
         install_panic_restore_hook();
         TUI_ACTIVE.store(true, Ordering::Release);
         let mut stderr_backup = Some(match redirect_stderr_to_file(stderr_log) {
@@ -227,19 +240,17 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// Alias `path` onto fd 2, returning a cloexec backup of the original.  The
+/// Alias `file` onto fd 2, returning a cloexec backup of the original.  The
 /// backup must not leak into a child; the redirect itself is inherited on
 /// purpose, so a re-execed sandbox helper's traces join the same log.
 #[cfg(unix)]
 #[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:stderr-log] opens the TUI debug log for fd-2 redirect; trace infra, not turn-time data I/O"
+    clippy::needless_pass_by_value,
+    reason = "the redirect takes the file whole on every host: Windows hands its handle on, and Unix closes it here once fd 2 holds the log"
 )]
-pub(super) fn redirect_stderr_to_file(path: &Path) -> io::Result<std::os::fd::OwnedFd> {
-    use std::fs::OpenOptions;
+pub(super) fn redirect_stderr_to_file(file: File) -> io::Result<std::os::fd::OwnedFd> {
     use std::os::fd::AsFd;
 
-    let file = OpenOptions::new().create(true).append(true).open(path)?;
     let backup =
         rustix::io::fcntl_dupfd_cloexec(rustix::stdio::stderr(), 0).map_err(io::Error::from)?;
     // SAFETY: fd 2 is a live process-global slot, all `clobber_slot` asks.
@@ -291,12 +302,7 @@ unsafe impl Send for WindowsStderrBackup {}
 /// exarch writes and every child spawned with `Stdio::inherit()`; it leaves the
 /// CRT fd table alone, which linked C code uses — hence the `_dup2` too.
 #[cfg(windows)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:stderr-log-windows] opens the TUI debug log for fd-2 redirect; trace infra, not turn-time data I/O"
-)]
-pub(super) fn redirect_stderr_to_file(path: &Path) -> io::Result<WindowsStderrBackup> {
-    use std::fs::OpenOptions;
+pub(super) fn redirect_stderr_to_file(file: File) -> io::Result<WindowsStderrBackup> {
     use std::os::windows::io::IntoRawHandle;
     use windows_sys::Win32::Foundation::{
         CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, FALSE, HANDLE,
@@ -304,7 +310,6 @@ pub(super) fn redirect_stderr_to_file(path: &Path) -> io::Result<WindowsStderrBa
     use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, SetStdHandle};
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
-    let file = OpenOptions::new().create(true).append(true).open(path)?;
     // Handed out without running `File`'s `Drop`; ownership passes to the
     // `WindowsStderrBackup`, whose doc says why it must stay open.
     let log_handle = file.into_raw_handle() as HANDLE;

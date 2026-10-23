@@ -1,9 +1,4 @@
 //! Test fixtures shared across the crate: a private temp directory per test.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "[test] test-fixture scratch directories, made and read only by \
-              the tests themselves."
-)]
 
 /// A directory for one test, deleted when the returned guard falls.  Hold the
 /// guard: binding only its path deletes the directory on the spot.

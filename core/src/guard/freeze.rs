@@ -3,9 +3,9 @@
 //!
 //! A grant names no host's home, XDG layout or working directory: a place is
 //! a tag and a subpath, `absolute /usr`, `cwd src`, `home .ssh`,
-//! `tempdir .`, `gitdir .` or `xdg-NAME sub`, and the anchor is read here,
-//! once, so a later `chdir` or `TMPDIR` change cannot retroactively widen a
-//! grant.  A selector names directories the environment chooses, and is
+//! `tempdir .`, `scratch .`, `gitdir .` or `xdg-NAME sub`, and the anchor is
+//! read here, once, so a later `chdir` or `TMPDIR` change cannot
+//! retroactively widen a grant.  A selector names directories the environment chooses, and is
 //! exec-only: its expansion is held under no `home`, but a toolchain
 //! override or `$PATH` entry may not name the world.  XDG uses the Linux
 //! defaults on every platform, macOS included ([`crate::host`]).
@@ -28,8 +28,8 @@
 //! Two anchors read a source the session does not own, and each guards it in
 //! the terms of what would otherwise author the grant.  An `xdg-*` grant must
 //! land under `home`, not merely under its XDG base directory (`cwd`, `home`,
-//! `tempdir` and `gitdir` permit `..` to climb past their anchor, whereas
-//! `xdg-*` checks the resolved path against `home`): an `XDG_*_HOME` set to
+//! `tempdir`, `scratch` and `gitdir` permit `..` to climb past their anchor,
+//! whereas `xdg-*` checks the resolved path against `home`): an `XDG_*_HOME` set to
 //! `/etc`, or a `..` subpath escaping `home`, would otherwise widen an
 //! `xdg-data` grant to `/etc`.  And a `.git` *file* names its git directory in
 //! the working tree's own words, so a `gitdir` that followed the pointer alone
@@ -38,8 +38,10 @@
 //! git directory must name this working tree back, as a linked worktree's
 //! `gitdir` file does and as `core.worktree` does for a repository split off
 //! with `--separate-git-dir`.  A pointer no git directory claims is a
-//! [`PolicyError`], never a wider grant.  `tempdir` alone trusts its source as
-//! given, `TMPDIR` being the launching user's to set.
+//! [`PolicyError`], never a wider grant.  `tempdir` trusts its source as
+//! given, `TMPDIR` being the launching user's to set; `scratch` reads no
+//! environment at all, being the directory the host made for the session and
+//! handed to the [`FreezeCtx`], which a host that made none refuses.
 
 use super::toolchains::{self, Toolchain};
 use crate::capability::{GrantPath, Polar, Ungoverned};
@@ -67,6 +69,7 @@ pub enum Place {
     Cwd(String),
     Home(String),
     Tempdir(String),
+    Scratch(String),
     Gitdir(String),
     Xdg(XdgKind, String),
 }
@@ -80,6 +83,7 @@ pub enum Anchor {
     Cwd,
     Home,
     Tempdir,
+    Scratch,
     Gitdir,
     Xdg(XdgKind),
 }
@@ -92,6 +96,7 @@ impl Anchor {
             Self::Cwd,
             Self::Home,
             Self::Tempdir,
+            Self::Scratch,
             Self::Gitdir,
         ]
         .into_iter()
@@ -105,6 +110,7 @@ impl Anchor {
             Self::Cwd => "cwd".into(),
             Self::Home => "home".into(),
             Self::Tempdir => "tempdir".into(),
+            Self::Scratch => "scratch".into(),
             Self::Gitdir => "gitdir".into(),
             Self::Xdg(kind) => format!("xdg-{}", <&str>::from(kind)).into(),
         }
@@ -120,6 +126,7 @@ impl Anchor {
             Self::Cwd => Place::Cwd(sub),
             Self::Home => Place::Home(sub),
             Self::Tempdir => Place::Tempdir(sub),
+            Self::Scratch => Place::Scratch(sub),
             Self::Gitdir => Place::Gitdir(sub),
             Self::Xdg(kind) => Place::Xdg(kind, sub),
         }
@@ -133,6 +140,7 @@ impl Place {
             Self::Cwd(_) => Anchor::Cwd,
             Self::Home(_) => Anchor::Home,
             Self::Tempdir(_) => Anchor::Tempdir,
+            Self::Scratch(_) => Anchor::Scratch,
             Self::Gitdir(_) => Anchor::Gitdir,
             Self::Xdg(kind, _) => Anchor::Xdg(*kind),
         }
@@ -149,6 +157,7 @@ impl Place {
             | Self::Cwd(s)
             | Self::Home(s)
             | Self::Tempdir(s)
+            | Self::Scratch(s)
             | Self::Gitdir(s)
             | Self::Xdg(_, s) => s,
         }
@@ -372,27 +381,52 @@ impl<W: Polar> Placed<W> {
 /// [`Resolver`](crate::path::Resolver) pair.
 ///
 /// `home` and `xdg-*` read the environment (overlay, then host), `tempdir`
-/// the host's, `gitdir` the disk from `cwd`; no `HOME` refuses a home-relative
-/// place rather than resolve it against a stand-in.
+/// the host's, `scratch` the spelling of the session's scratch directory the
+/// context carries (as `home` is carried: stated, never read from the
+/// overlay), `gitdir` the disk from `cwd`; no `HOME` refuses a home-relative
+/// place rather than resolve it against a stand-in, and no scratch refuses a
+/// `scratch` place likewise.
 #[derive(Debug, Clone)]
 pub struct FreezeCtx {
     env: EnvVars,
     cwd: CwdPath,
+    scratch: Option<String>,
 }
 
 impl FreezeCtx {
-    /// The shell's own anchor: the environment its override chain binds and
-    /// its logical cwd, so every freeze of one session agrees.
+    /// The shell's own anchor: the environment its override chain binds, its
+    /// logical cwd and the scratch its front end made for it, so every freeze
+    /// of one session agrees.
     pub fn of(shell: &Shell) -> Self {
         Self::at(
             shell.context.env_overrides().clone(),
             shell.context.cwd().clone(),
         )
+        .with_scratch(shell.scratch())
     }
 
     /// An anchor at `env` and `cwd`, for a caller with no shell.
     pub fn at(env: EnvVars, cwd: CwdPath) -> Self {
-        Self { env, cwd }
+        Self {
+            env,
+            cwd,
+            scratch: None,
+        }
+    }
+
+    /// This anchor with `scratch`, the spelling of the session's own scratch
+    /// directory (which the host made before the policy froze), as the
+    /// directory `scratch` places anchor to; with `None`, no such directory.
+    #[must_use]
+    pub fn with_scratch(mut self, scratch: Option<impl Into<String>>) -> Self {
+        self.scratch = scratch.map(Into::into);
+        self
+    }
+
+    /// The spelling of the directory `scratch` places anchor to, if the anchor
+    /// has one.
+    pub fn scratch(&self) -> Option<&str> {
+        self.scratch.as_deref()
     }
 
     /// The directory `cwd` and `gitdir` places anchor to.
@@ -436,9 +470,10 @@ impl FreezeCtx {
     ///
     /// # Errors
     /// A malformed payload, an `XDG_*_HOME` that escapes `HOME`, an unset
-    /// `HOME` under a home-relative place, an anchored place that freezes
-    /// relative, a `.git` pointer no git directory claims, a spelling whose
-    /// walk fails, or an exclusion of the root.
+    /// `HOME` under a home-relative place, no scratch under a `scratch`
+    /// place, an anchored place that freezes relative, a `.git` pointer no git
+    /// directory claims, a spelling whose walk fails, or an exclusion of the
+    /// root.
     pub(crate) fn walked<W: Polar>(&self, place: &Place) -> Result<Option<Placed<W>>, PolicyError> {
         let tag = place.tag();
         let sub = |s| subpath(&tag, s);
@@ -460,7 +495,11 @@ impl FreezeCtx {
                     .transpose();
             }
             Place::Cwd(s) => join_sub(self.cwd.as_path(), sub(s)?)?,
-            Place::Tempdir(s) => join_sub(std::env::temp_dir(), sub(s)?)?,
+            Place::Tempdir(s) => join_sub(crate::host::temp_dir(), sub(s)?)?,
+            Place::Scratch(s) => {
+                let sub = sub(s)?;
+                join_sub(self.scratch().ok_or_else(scratch_unknown)?, sub)?
+            }
             Place::Gitdir(s) => {
                 let sub = sub(s)?;
                 let cwd = self.cwd.as_path();
@@ -493,7 +532,7 @@ impl FreezeCtx {
         match selector {
             Selector::Path => path_dirs::<W>(home.as_ref()),
             Selector::Toolchain(t) => {
-                toolchains::expand_in::<W>(t, |k| std::env::var(k).ok(), home.as_ref())
+                toolchains::expand_in::<W>(t, crate::host::var, home.as_ref())
             }
         }
     }
@@ -778,6 +817,15 @@ fn home_unknown() -> PolicyError {
     ))
 }
 
+fn scratch_unknown() -> PolicyError {
+    PolicyError::new(format!(
+        "this session has no scratch directory, so {} places in the policy can't be \
+         resolved.  Replace them with {} paths.",
+        code("`scratch"),
+        code("`absolute"),
+    ))
+}
+
 fn unknown_xdg_message(entry: &str) -> String {
     format!(
         "unknown xdg token '{entry}'; the places are {}. \
@@ -794,7 +842,7 @@ fn join_sub(base: impl AsRef<Path>, sub: &str) -> Result<FrozenPath, PolicyError
     freeze(base.as_ref().join(sub))
 }
 
-/// The grant door of [`FrozenPath`]: a grant is serialized as text, so a
+/// The one place a grant's path becomes a [`FrozenPath`]: a grant is serialized as text, so a
 /// spelling that is not Unicode is refused here.
 fn freeze(path: impl AsRef<Path>) -> Result<FrozenPath, PolicyError> {
     FrozenPath::freeze(path.as_ref()).map_err(PolicyError::new)
@@ -831,8 +879,7 @@ pub(super) fn refuse_the_world(
 
 /// [`path_dirs_in`] over the host's `$PATH`.
 fn path_dirs<W: Polar>(home: Option<&Home>) -> Result<Vec<GrantPath<W::Grant>>, PolicyError> {
-    #[allow(clippy::disallowed_methods, reason = "PATH, not an XDG basedir")]
-    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = crate::host::var_os("PATH").unwrap_or_default();
     path_dirs_in::<W>(&path, home)
 }
 
@@ -875,10 +922,7 @@ fn path_dirs_in<W: Polar>(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] fixtures build real directories and symlinks to freeze grants against"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use crate::capability::Extent;
@@ -1029,6 +1073,35 @@ mod tests {
         assert_eq!(paths[1], fold(&temp.join("scratch")));
     }
 
+    #[test]
+    fn freeze_expands_scratch_place_from_the_scratch_the_context_carries() {
+        let scratch = std::env::temp_dir().join("a-session-scratch");
+        let ctx = ctx("/h", "/cwd").with_scratch(Some(scratch.to_str().unwrap()));
+        let places = [Place::Scratch(".".into()), Place::Scratch("cache".into())];
+        let paths = frozen(&places, &ctx).unwrap();
+        let fold = |p: &Path| fold_dots(p).to_string_lossy().into_owned();
+        assert_eq!(paths[0], fold(&scratch));
+        assert_eq!(paths[1], fold(&scratch.join("cache")));
+    }
+
+    #[test]
+    fn a_shells_context_carries_the_scratch_its_front_end_set() {
+        let scratch = std::env::temp_dir().join("a-shells-scratch");
+        let mut shell = crate::test_helper::core_shell();
+        shell.set_scratch(scratch.to_str().unwrap());
+        let paths = frozen(&[Place::Scratch(".".into())], &FreezeCtx::of(&shell)).unwrap();
+        assert_eq!(paths[0], fold_dots(&scratch).to_string_lossy());
+        let bare = crate::test_helper::core_shell();
+        let err = refusal(&Place::Scratch(".".into()), &FreezeCtx::of(&bare));
+        assert!(err.contains("no scratch directory"), "{err}");
+    }
+
+    #[test]
+    fn a_scratch_place_with_no_scratch_is_refused() {
+        let err = refusal(&Place::Scratch(".".into()), &ctx("/h", "/cwd"));
+        assert!(err.contains("no scratch directory"), "{err}");
+    }
+
     // Unix-only: `/tmp` is dead on Windows.
     #[cfg(unix)]
     #[test]
@@ -1158,12 +1231,14 @@ mod tests {
     /// everywhere.
     #[test]
     fn a_bad_subpath_is_refused_under_every_tag() {
-        let ctx = ctx("/h", "/cwd");
+        let scratch = std::env::temp_dir().join("a-session-scratch");
+        let ctx = ctx("/h", "/cwd").with_scratch(Some(scratch.to_str().unwrap()));
         for sub in ["", "/x", r"\x", "C:x", r"C:\x", "c:/x"] {
             for place in [
                 cwd(sub),
                 Place::Home(sub.into()),
                 Place::Tempdir(sub.into()),
+                Place::Scratch(sub.into()),
                 Place::Gitdir(sub.into()),
                 xdg(XdgKind::Cache, sub),
             ] {

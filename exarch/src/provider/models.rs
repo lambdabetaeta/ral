@@ -19,10 +19,11 @@ use crate::provider::oauth;
 use genai::Client;
 use genai::resolver::{AuthData, Endpoint, ProviderConfig};
 use native::Native;
+use ral_core::own::OwnDir;
+use ral_core::path::{Visibility, XdgKind};
 use ral_core::sync::LockExt;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -32,6 +33,9 @@ mod native;
 const TTL: Duration = Duration::from_hours(6);
 
 const PLAN_MODELS_URL: &str = "https://api.openai.com/v1/models";
+
+/// The cache's file in the app's cache directory.
+const CACHE_FILE: &str = "models.json";
 
 /// A model a listing names, with the context window its provider reports.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -347,8 +351,9 @@ struct CacheFile {
 /// per-process memo so an account's list is fetched at most once a session.
 pub struct ModelCatalog<S: ModelSource> {
     source: S,
-    /// `None` disables the disk cache; `Some` is `<xdg cache>/models.json`.
-    cache_path: Option<PathBuf>,
+    /// `None` disables the disk cache; `Some` is the app's XDG cache
+    /// directory, which holds [`CACHE_FILE`].
+    cache: Option<OwnDir>,
     memo: BTreeMap<AccountId, Vec<Listed>>,
     /// Keyed by `OpenRouter` model id. Memo-only: serving-provider availability
     /// is volatile and the fetch cheap, so it is refetched, never persisted.
@@ -356,11 +361,11 @@ pub struct ModelCatalog<S: ModelSource> {
 }
 
 impl<S: ModelSource> ModelCatalog<S> {
-    /// A catalog persisting to `app`'s XDG cache path, when one resolves.
+    /// A catalog persisting to `app`'s XDG cache directory, when one resolves.
     pub fn new(source: S, app: crate::app::App) -> Self {
         Self {
             source,
-            cache_path: cache_path(app),
+            cache: cache_dir(app),
             memo: BTreeMap::new(),
             endpoints_memo: BTreeMap::new(),
         }
@@ -371,7 +376,7 @@ impl<S: ModelSource> ModelCatalog<S> {
     pub fn memo_only(source: S) -> Self {
         Self {
             source,
-            cache_path: None,
+            cache: None,
             memo: BTreeMap::new(),
             endpoints_memo: BTreeMap::new(),
         }
@@ -422,8 +427,7 @@ impl<S: ModelSource> ModelCatalog<S> {
 
     /// `None` when the cache is absent, unreadable, missing `account`, or stale.
     fn fresh_from_disk(&self, account: &AccountId) -> Option<Vec<Listed>> {
-        let path = self.cache_path.as_ref()?;
-        let file = read_cache(path)?;
+        let file = read_cache(self.cache.as_ref()?)?;
         let entry = file.providers.get(account.as_str())?;
         let age = crate::app::now_secs().saturating_sub(entry.fetched_at);
         (age < TTL.as_secs()).then(|| entry.models.clone())
@@ -431,15 +435,11 @@ impl<S: ModelSource> ModelCatalog<S> {
 
     /// Best-effort: a cache the process cannot write is not fatal, since the
     /// memo still serves the session.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:models-cache-write] persists the model catalog cache; registry infra, not turn-time data I/O"
-    )]
     fn write_disk(&self, account: &AccountId, models: &[Listed]) {
-        let Some(path) = self.cache_path.as_ref() else {
+        let Some(cache) = self.cache.as_ref() else {
             return;
         };
-        let mut file = read_cache(path).unwrap_or_default();
+        let mut file = read_cache(cache).unwrap_or_default();
         file.providers.insert(
             account.as_str().to_string(),
             CacheEntry {
@@ -447,12 +447,7 @@ impl<S: ModelSource> ModelCatalog<S> {
                 models: models.to_vec(),
             },
         );
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(json) = serde_json::to_string_pretty(&file) {
-            let _ = std::fs::write(path, json);
-        }
+        let _ = cache.store(CACHE_FILE, &file, Visibility::Public);
     }
 }
 
@@ -488,20 +483,16 @@ pub fn listing_of<S: ModelSource + Clone>(
     Ok(listed)
 }
 
-/// `None` when no cache base resolves (`HOME` unset, no absolute override) —
-/// the catalog then runs memo-only.
-fn cache_path(app: crate::app::App) -> Option<PathBuf> {
-    let dir = app.xdg_dir(ral_core::path::XdgKind::Cache);
-    ral_core::path::is_absolute(&dir).then(|| dir.join("models.json"))
+/// `None` when no cache directory can be had (no base resolves, or the walk
+/// to it fails) — the catalog then runs memo-only.
+fn cache_dir(app: crate::app::App) -> Option<OwnDir> {
+    app.own(XdgKind::Cache).ok()
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:models-cache-read] reads the model catalog cache; registry infra, not turn-time data I/O"
-)]
-fn read_cache(path: &PathBuf) -> Option<CacheFile> {
-    let bytes = std::fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+fn read_cache(cache: &OwnDir) -> Option<CacheFile> {
+    // A cache: an unreadable or corrupt file reads as empty, and the next
+    // listing writes it afresh.
+    cache.load(CACHE_FILE).ok().flatten()
 }
 
 fn no_provider_error() -> String {

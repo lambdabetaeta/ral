@@ -1,11 +1,11 @@
-//! The workspace's poison policy, in one door.
+//! The workspace's poison policy, in one place.
 //!
 //! [`LockExt`] for a `Mutex`, [`RwLockExt`] for an `RwLock`, [`CondvarExt`] for
-//! the `Condvar` parked on one. The reasoning is [`LockExt`]'s, and a lock that
-//! does not meet it stays on `std`'s propagating spelling with a written reason
-//! at the call site.
+//! the `Condvar` parked on one. The reasoning is [`LockExt`]'s, and a mutex
+//! that does not meet it takes [`lock_strict`](LockExt::lock_strict), which
+//! keeps poison; the lock's own doc says what tears.
 //!
-//! A third spelling is neither this door nor an exception to it. Where a `Mutex`
+//! A third spelling is neither this policy nor an exception to it. Where a `Mutex`
 //! exists for interior mutability through an `Arc` and one thread by
 //! construction is the only one that can hold the guard, `try_lock` with a panic
 //! on `WouldBlock` is an *assertion*: contention is impossible, so `WouldBlock`
@@ -16,9 +16,14 @@
 //! `exarch/src/fleet/desk.rs`, are the three; each states the single-holder
 //! invariant that earns it in its own doc.
 
+use std::fmt;
+use std::io;
+
+use crate::site::{Silent, site};
+
 /// Lock, recovering the guard if a prior holder panicked.
 ///
-/// Every mutation under a lock reached through this door is total — a
+/// Every mutation under a lock reached through this helper is total — a
 /// `HashMap`/`VecDeque` entry, an `Option` swap, an `Instant` overwrite — so
 /// poison marks an unrelated panic rather than torn data, and propagating it
 /// would disable the lock for everyone thereafter rather than the one run that
@@ -30,10 +35,11 @@
 /// so an update touching many fields through those is total, while a lone write
 /// fed by something fallible may not be.
 ///
-/// A lock whose mutation is *not* total has no business here: the wire writer
-/// is the standing exception, since a panic mid-frame leaves a partial frame on
-/// the socket and resuming into a torn stream is worse than refusing. Its own
-/// doc carries that reasoning.
+/// A lock whose mutation is *not* total has no business here: it takes
+/// [`lock_strict`](Self::lock_strict).  The wire writer is the standing example,
+/// since a panic mid-frame leaves a partial frame on the socket and resuming
+/// into a torn stream is worse than refusing. Its own doc carries that
+/// reasoning.
 pub trait LockExt<T> {
     fn lock_ignore_poison(&self) -> std::sync::MutexGuard<'_, T>;
 
@@ -45,47 +51,75 @@ pub trait LockExt<T> {
     /// is no live writer left to tear anything, and nothing to protect the
     /// value from.
     fn into_inner_ignore_poison(self) -> T;
+
+    /// The other policy, poison kept: for a lock whose guarded state restates
+    /// something outside the process — a frame on a socket, a file's length —
+    /// so a panic between the outside change and its restatement leaves the two
+    /// disagreeing.  The lock's own doc says what tears.
+    ///
+    /// # Errors
+    /// [`Torn`] where a prior holder panicked.
+    fn lock_strict(&self) -> Result<std::sync::MutexGuard<'_, T>, Torn>;
+}
+
+/// A lock refused because a holder panicked under it: what the state it
+/// guards restates outside the process may no longer agree with it.
+#[derive(Debug)]
+pub struct Torn;
+
+impl fmt::Display for Torn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a thread panicked while holding this lock, so the state it guards may be torn")
+    }
+}
+
+impl std::error::Error for Torn {}
+
+impl From<Torn> for io::Error {
+    fn from(torn: Torn) -> Self {
+        Self::other(torn)
+    }
 }
 
 impl<T> LockExt<T> for std::sync::Mutex<T> {
-    #[allow(clippy::disallowed_methods, reason = "the door itself")]
     fn lock_ignore_poison(&self) -> std::sync::MutexGuard<'_, T> {
-        self.lock()
+        site!(Silent::IgnorePoison, self => lock())
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    #[expect(clippy::disallowed_methods, reason = "the recovery itself")]
     fn into_inner_ignore_poison(self) -> T {
-        self.into_inner()
+        site!(Silent::IgnorePoison, self => into_inner())
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn lock_strict(&self) -> Result<std::sync::MutexGuard<'_, T>, Torn> {
+        site!(Silent::KeepPoison, self => lock()).map_err(|_| Torn)
     }
 }
 
-/// The same door for an `RwLock`, on the same reading of poison.
+/// The same policy for an `RwLock`, on the same reading of poison.
 ///
 /// A reader cannot tear anything, so `read_ignore_poison` is the only sane
 /// spelling; `write_ignore_poison` carries the totality obligation the mutex
-/// door does.
+/// helper does.
 pub trait RwLockExt<T> {
     fn read_ignore_poison(&self) -> std::sync::RwLockReadGuard<'_, T>;
     fn write_ignore_poison(&self) -> std::sync::RwLockWriteGuard<'_, T>;
 }
 
 impl<T> RwLockExt<T> for std::sync::RwLock<T> {
-    #[allow(clippy::disallowed_methods, reason = "the door itself")]
     fn read_ignore_poison(&self) -> std::sync::RwLockReadGuard<'_, T> {
-        self.read()
+        site!(Silent::IgnorePoison, self => read())
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    #[allow(clippy::disallowed_methods, reason = "the door itself")]
     fn write_ignore_poison(&self) -> std::sync::RwLockWriteGuard<'_, T> {
-        self.write()
+        site!(Silent::IgnorePoison, self => write())
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
-/// The same door for a `Condvar`, which needs one of its own.
+/// The same policy for a `Condvar`, which needs a trait of its own.
 ///
 /// `wait` re-acquires the mutex before it returns, so it is a second acquisition
 /// of that very lock and observes poison exactly as `lock` does. A policy
@@ -116,32 +150,68 @@ pub trait CondvarExt {
 }
 
 impl CondvarExt for std::sync::Condvar {
-    #[allow(clippy::disallowed_methods, reason = "the door itself")]
     fn wait_ignore_poison<'a, T>(
         &self,
         guard: std::sync::MutexGuard<'a, T>,
     ) -> std::sync::MutexGuard<'a, T> {
-        self.wait(guard)
+        site!(Silent::IgnorePoison, self => wait(guard))
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    #[allow(clippy::disallowed_methods, reason = "the door itself")]
     fn wait_timeout_ignore_poison<'a, T>(
         &self,
         guard: std::sync::MutexGuard<'a, T>,
         dur: std::time::Duration,
     ) -> (std::sync::MutexGuard<'a, T>, std::sync::WaitTimeoutResult) {
-        self.wait_timeout(guard, dur)
+        site!(Silent::IgnorePoison, self => wait_timeout(guard, dur))
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    #[allow(clippy::disallowed_methods, reason = "the door itself")]
     fn wait_while_ignore_poison<'a, T>(
         &self,
         guard: std::sync::MutexGuard<'a, T>,
         condition: impl FnMut(&mut T) -> bool,
     ) -> std::sync::MutexGuard<'a, T> {
-        self.wait_while(guard, condition)
+        site!(Silent::IgnorePoison, self => wait_while(guard, condition))
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// A mutex some thread panicked under, holding its guard.
+    fn poisoned() -> Arc<Mutex<u8>> {
+        let lock = Arc::new(Mutex::new(1));
+        let holder = Arc::clone(&lock);
+        let joined = std::thread::spawn(move || {
+            let _guard = holder.lock_ignore_poison();
+            panic!("a holder panics under the lock");
+        })
+        .join();
+        assert!(joined.is_err());
+        lock
+    }
+
+    #[test]
+    fn strict_keeps_the_poison_that_the_other_policy_recovers() {
+        let lock = poisoned();
+        assert!(lock.lock_strict().is_err());
+        assert_eq!(*lock.lock_ignore_poison(), 1);
+    }
+
+    #[test]
+    fn strict_locks_a_sound_mutex() {
+        let lock = Mutex::new(7);
+        assert_eq!(lock.lock_strict().map(|guard| *guard).ok(), Some(7));
+    }
+
+    #[test]
+    fn torn_reads_as_an_io_error_that_says_so() {
+        let e = io::Error::from(Torn);
+        assert!(e.to_string().contains("torn"), "{e}");
     }
 }

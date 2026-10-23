@@ -67,12 +67,13 @@
 //! [`recover_orphaned_state`] sweeps a crashed session's ledger at the next
 //! boot, deleting its registered profiles.
 
+use crate::own::OwnError;
 use crate::path::lex::is_volume_guid;
 use crate::path::shown;
 use crate::process::cancel::{CancelCause, Scope};
 use std::fmt::Write as _;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
 };
@@ -84,6 +85,7 @@ mod ledger;
 mod mutex;
 mod stamp;
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;
 
 use acl::{
@@ -167,6 +169,9 @@ pub(crate) enum DaclError {
     /// A frozen allowance on a share, a removable drive or a volume that has
     /// no GUID path: no DACL a stamp may key.
     NotLocal(PathBuf),
+    /// A frozen allowance whose path is not Unicode: a Windows grant names its
+    /// object by text, so it is refused where it is pinned.
+    NotUnicode(PathBuf),
     /// A frozen allowance whose path now meets a reparse point at `at`,
     /// which is `granted` itself or an ancestor of it.
     Redirected {
@@ -213,6 +218,12 @@ impl std::fmt::Display for DaclError {
                 f,
                 "'{}' is not on a local fixed volume (a network share, a removable \
                  drive and an unnamed volume cannot be granted); grant a folder on a local disk",
+                shown(p)
+            ),
+            Self::NotUnicode(p) => write!(
+                f,
+                "'{}' is not valid Unicode, and a Windows grant names its object by text: \
+                 a grant that cannot be expressed faithfully is refused, not approximated",
                 shown(p)
             ),
             Self::Redirected {
@@ -289,6 +300,16 @@ impl From<io::Error> for DaclError {
     }
 }
 
+impl From<OwnError> for DaclError {
+    /// JSON that is not a ledger is a parse error; anything else is the I/O's.
+    fn from(e: OwnError) -> Self {
+        match e {
+            OwnError::Json { .. } => Self::LedgerParse(e.to_string()),
+            e => Self::LedgerIo(e.into()),
+        }
+    }
+}
+
 /// The stamp loops' poll point: a chain of atomic loads, so it costs nothing
 /// against the security write it guards.
 fn cancelled(cancel: &Scope) -> Result<(), DaclError> {
@@ -303,22 +324,19 @@ fn cancelled(cancel: &Scope) -> Result<(), DaclError> {
 /// paid once and matched forever — and collision-resistant, since two paths
 /// sharing a name would silently merge their authority: the name embeds 128
 /// bits of the canonical path's SHA-256, short enough to stay well inside any
-/// capability-name length the OS might enforce. The canonical spelling is
-/// hashed as-is, not case-folded: canonicalisation already yields one
-/// spelling per object, and folding would merge two genuinely distinct names
-/// in an NTFS case-sensitive directory into one authority.
-pub(crate) fn fs_capability_name(canonical: &Path, kind: GrantKind) -> String {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "native: the canonical spelling the OS returned, hashed as-is into a capability name; hashed by name until the sequel plan narrows what the sandbox side does by name"
-    )]
-    let key = canonical.to_string_lossy();
-    let digest = <sha2::Sha256 as sha2::Digest>::digest(key.as_bytes());
-    let mut name = format!("ral.fs.{}.", kind.tag());
+/// capability-name length the OS might enforce. The canonical spelling, as the
+/// text [`FrozenPin::name`] holds, is hashed as-is, not case-folded:
+/// canonicalisation already yields one spelling per object, and folding would
+/// merge two genuinely distinct names in an NTFS case-sensitive directory into
+/// one authority. It is keyed by name until the sequel plan narrows what the
+/// sandbox side does by name.
+pub(crate) fn fs_capability_name(name: &str, kind: GrantKind) -> String {
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(name.as_bytes());
+    let mut capability = format!("ral.fs.{}.", kind.tag());
     for b in &digest[..16] {
-        let _ = write!(name, "{b:02x}");
+        let _ = write!(capability, "{b:02x}");
     }
-    name
+    capability
 }
 
 /// Ensure the persistent ACE for a frozen allowance's `kind` under `sid_str` —
@@ -360,7 +378,7 @@ pub(crate) fn ensure_frozen_grant(
     if kind == GrantKind::ReadWrite && inheritable {
         ensure_low_integrity_label(target)?;
     }
-    let key = stamp_key(canonical, kind);
+    let key = stamp_key(pin.name(), kind);
     // Serialize the witness with the mutation, including an interrupted retry.
     let _guard = PathMutexGuard::acquire(canonical)?;
     if stamp_recorded(&key) && capability_ace_present(target, sid_str, kind, inheritable) {
@@ -379,7 +397,7 @@ pub(crate) fn ensure_frozen_grant(
 /// namespace, so the two mutations' idempotency never entangles, and its own
 /// probe, so a label removed or never stamped is seen whatever the DACL says.
 fn ensure_low_integrity_label(target: Target<'_>) -> Result<(), DaclError> {
-    let key = label_stamp_key(target.path);
+    let key = label_stamp_key(target.name);
     if stamp_recorded(&key) && low_integrity_label_present(target) {
         return Ok(());
     }

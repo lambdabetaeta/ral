@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 //! Negative coverage for the **child-owned** filesystem bucket of the
 //! safety invariant in
@@ -110,7 +110,7 @@ fn restrict_to(dir: &str) -> Capabilities {
     }
 }
 
-/// Route `src` through the public `run` door under `caps`, mirroring
+/// Route `src` through the public `run` entry under `caps`, mirroring
 /// exarch's per-tool flow: the run carries the attenuated capability
 /// ceiling in its request and compiles against the live bindings.
 fn top_level_under(shell: &mut Shell, caps: Capabilities, src: &str) -> Settled<Value> {

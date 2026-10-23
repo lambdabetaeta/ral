@@ -1,5 +1,6 @@
 //! A sample of the live process table.
 
+use crate::site::{Silent, site};
 use std::collections::{HashMap, HashSet};
 
 /// The live descendants of `root`, `root` itself excluded: one `/bin/ps` sample
@@ -7,12 +8,8 @@ use std::collections::{HashMap, HashSet};
 ///
 /// Denial records carry only `(comm, pid)`, so a PID set is the only way to tell
 /// our subprocess tree from a system service that ran in the same wall second.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:ps-sample] sandbox diagnostics: shells out to `/bin/ps` to sample the live process tree for denial attribution; a diagnostic probe, not turn-time model data I/O, raises no surface card."
-)]
 pub(crate) fn sample_descendants(root: u32) -> HashSet<u32> {
-    let mut cmd = std::process::Command::new("/bin/ps");
+    let mut cmd = site!(Silent::PsSample, std::process::Command::new("/bin/ps"));
     cmd.args(["-axo", "pid=,ppid="]);
     let Ok(out) = super::output(&mut cmd) else {
         return HashSet::new();

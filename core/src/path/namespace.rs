@@ -10,6 +10,8 @@
 
 use super::PathRules;
 use super::lex::{Rerooting, absolute_under, join_under};
+use super::site::Silent;
+use crate::site::site;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::fmt;
@@ -98,12 +100,7 @@ impl EnginePath {
     pub(crate) fn native(&self) -> &Path {
         match self {
             Self::Host(path) => path,
-            #[allow(
-                clippy::disallowed_methods,
-                reason = "native: a guest path read by the guest's own engine, whose OS spells it \
-                          as the guest does"
-            )]
-            Self::Guest(path) => Path::new(path.as_str()),
+            Self::Guest(path) => site!(Silent::GuestNative, Path::new(path.as_str())),
         }
     }
 }

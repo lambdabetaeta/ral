@@ -34,10 +34,7 @@
     clippy::disallowed_macros,
     reason = "[silent:example] an example prints its result"
 )]
-#![allow(
-    clippy::disallowed_methods,
-    reason = "example binary: its `main` owns the process, so an `exit` unwinds nothing another owner needs"
-)]
+#![allow(clippy::disallowed_methods, reason = "example program")]
 
 use ral_core::path::shown;
 use vm_manager::MachineSpec;

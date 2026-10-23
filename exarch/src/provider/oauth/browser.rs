@@ -4,6 +4,7 @@
 use super::{
     AGENT_NAME, AUTHORIZE_URL, DYNAMIC_CLIENT, Granted, LoginPhase, RESOURCE, SCOPE, SignIn,
 };
+use crate::site::{Silent, site};
 use std::io::BufRead;
 use std::io::Write;
 use std::net::TcpListener;
@@ -69,14 +70,13 @@ pub(super) async fn run(
     })
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:callback-listener] binds the loopback port the authorize page redirects back to: 1455 by convention, else any free one; only the port may vary. Sign-in machinery the user started, on this machine only, and no turn is running to card it: the browser handoff beside it is silent on the same ground."
-)]
 fn bind_listener() -> Result<TcpListener, String> {
-    TcpListener::bind("127.0.0.1:1455")
-        .or_else(|_| TcpListener::bind("127.0.0.1:0"))
-        .map_err(|e| format!("could not bind a callback listener on 127.0.0.1: {e}"))
+    site!(
+        Silent::CallbackListener,
+        TcpListener::bind("127.0.0.1:1455")
+    )
+    .or_else(|_| site!(Silent::CallbackListener, TcpListener::bind("127.0.0.1:0")))
+    .map_err(|e| format!("could not bind a callback listener on 127.0.0.1: {e}"))
 }
 
 fn authorize_url(
@@ -123,12 +123,8 @@ fn authorize_url(
 }
 
 #[cfg(target_os = "macos")]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:browser-launch] opens the OAuth authorize URL in the platform browser; not turn-time data I/O"
-)]
 fn launch_browser(url: &str) -> Result<(), String> {
-    let mut cmd = std::process::Command::new("open");
+    let mut cmd = site!(Silent::BrowserLaunch, std::process::Command::new("open"));
     cmd.arg(url);
     ral_core::process::spawn(&mut cmd)
         .map(|_| ())
@@ -136,12 +132,11 @@ fn launch_browser(url: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:browser-launch-linux] opens the OAuth authorize URL via xdg-open; not turn-time data I/O"
-)]
 fn launch_browser(url: &str) -> Result<(), String> {
-    let mut cmd = std::process::Command::new("xdg-open");
+    let mut cmd = site!(
+        Silent::BrowserLaunchLinux,
+        std::process::Command::new("xdg-open")
+    );
     cmd.arg(url);
     ral_core::process::spawn(&mut cmd)
         .map(|_| ())

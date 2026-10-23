@@ -1,5 +1,5 @@
+#![allow(clippy::disallowed_methods, reason = "test code")]
 #![cfg(any(target_os = "linux", target_os = "macos"))]
-#![allow(clippy::disallowed_methods)]
 
 mod common;
 
@@ -20,7 +20,8 @@ fn command(dir: &TempDir, surface: &str) -> Command {
         .env("TERM", "xterm-256color")
         .env("RAL_INTERACTIVE_MODE", "full")
         .env("HOME", dir.path())
-        .env("XDG_CONFIG_HOME", dir.path());
+        .env("XDG_CONFIG_HOME", dir.path())
+        .env("XDG_STATE_HOME", dir.path());
     cmd
 }
 

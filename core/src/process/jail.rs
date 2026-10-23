@@ -46,14 +46,10 @@ static GUEST: OnceLock<Option<Arc<GuestJail>>> = OnceLock::new();
 /// only ral-daemon's closed environment sets, so every engine is jailed alike.
 /// Its value is the cgroup root the jail places commands under.
 /// Called by `Engine::boot` alone, so no recipe learns that jails exist.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "RAL_GUEST is the daemon-set cgroup root, not an XDG path"
-)]
 pub(crate) fn install_guest() {
     GUEST.get_or_init(|| {
         #[cfg(target_os = "linux")]
-        if let Some(root) = std::env::var_os("RAL_GUEST") {
+        if let Some(root) = crate::host::var_os("RAL_GUEST") {
             return Some(Arc::new(GuestJail::new(
                 PathBuf::from(root),
                 100_000,
@@ -199,6 +195,7 @@ impl GuestJail {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 
@@ -264,10 +261,6 @@ mod tests {
         assert_ne!(b.uid, 0);
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] the plan roots its cgroup where the jail says"
-    )]
     #[test]
     fn plan_roots_the_cgroup_and_carries_the_jails_limits() {
         let Some(plan) = unwrap_or_skip(jail().plan(Ownership::Kept)) else {
@@ -277,10 +270,6 @@ mod tests {
         assert_eq!(plan.limits, JailLimits::default());
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] the engine's cgroup lies where the plan puts it"
-    )]
     #[cfg(unix)]
     #[test]
     fn plan_puts_a_survivor_beyond_every_engines_tree() {

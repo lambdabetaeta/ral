@@ -1,7 +1,7 @@
 ---
 generated_at_commit: 61c288f
 generated_at_date: 2026-10-21
-covers_paths: [core/src/types/audit/observation.rs, exarch/src/tui/group.rs, core/src/types/audit/door.rs, core/src/evaluator/call.rs, core/src/runtime/command_call.rs, core/src/path/walk.rs, core/src/guard/shell.rs, core/src/runtime/redirect.rs, core/src/runtime/redirect/stage.rs, core/src/runtime/command/detach.rs, core/src/runtime/pipeline/collect.rs, core/src/runtime/redirect/scope.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, core/src/path/tree/walk.rs, clippy.toml, core/tests/syscall_sites.rs]
+covers_paths: [core/src/types/audit/observation.rs, exarch/src/tui/group.rs, core/src/types/audit/fan_out.rs, core/src/evaluator/call.rs, core/src/runtime/command_call.rs, core/src/path/walk.rs, core/src/guard/shell.rs, core/src/runtime/redirect.rs, core/src/runtime/redirect/stage.rs, core/src/runtime/command/detach.rs, core/src/runtime/pipeline/collect.rs, core/src/runtime/redirect/scope.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, core/src/path/tree/walk.rs, clippy.toml, lint/site.rs, core/tests/sites.rs]
 ---
 
 # Map: exarch / io surface
@@ -44,8 +44,8 @@ else**, held not by a flag but by *where code lives* (below). See the decision,
 
 Three operation classes, each hooked at the sites that realise it. Every site
 builds one `Observation` (`types/audit/observation.rs`) and hands it to
-`Shell::observe` (`types/audit/door.rs`), the single fan-out point; `Shell::observation`
-stamps the call site and principal every door fetches. It judges nothing: the
+`Shell::observe` (`types/audit/fan_out.rs`), the single fan-out point; `Shell::observation`
+stamps the call site and principal every site fetches. It judges nothing: the
 observation goes to the run's `Mooring::surface` (`types/mooring.rs`) and onto
 the open [[design/audit|audit trail]], each already inert when its consumer is
 absent. **Which observations matter is the host's call**, made once in
@@ -67,9 +67,9 @@ either way, as a failed command observation carrying the denial message.
 
 With nobody listening — no sink installed and no trail open — a site builds no
 observation at all, so it pays for neither the `epoch_us()` syscall nor the
-`script` and `principal` clones. With a host attached it pays them per door —
+`script` and `principal` clones. With a host attached it pays them per observation —
 an external's dispatch, a redirect, a birth — and never per builtin
-application, which is no door at all.
+application, which is no observation at all.
 
 - **Redirects** open through `open_file` and `install_stdin_redirect`
   (`runtime/redirect.rs`). A **read** (`< file`, fd 0) emits eagerly
@@ -119,7 +119,7 @@ application, which is no door at all.
   one constructor, `Command::new` — the rule that index 0
   is the shown name lives there and nowhere else. A **builtin** application
   is no command observation at all: its frame (`BuiltinEntry::framed`) stamps nothing
-  and tees nothing, and whatever it did to the world arrives from the door it
+  and tees nothing, and whatever it did to the world arrives from the operation it
   did it through — `edit-hash` as the `` `write `` its `atomic_write`
   commits, `spawn` as its `` `worker `` ([[design/audit|audit]]).
 
@@ -139,7 +139,7 @@ collect phase being pure over its events — deciding emission there would
 judge an interest it cannot see, having no `Mooring`. Either
 way the parent reports each merged observation rather than folding it
 straight into the trail, so a stage's writes and commands reach the host
-exactly as anything run locally does, and the fold's one door asks the sink
+exactly as anything run locally does, and the fold's one entry asks the sink
 and the trail each on its own terms. They arrive at stage settle, not at
 their original instant, but each observation's own `start`/`end` still carry
 its true timestamp.
@@ -309,7 +309,7 @@ exarch's readers, editors and grep all reach the filesystem through a
 `Located` rather than by re-walking a string the in-process guard already judged. The one
 exception is the discard device, which has no object to locate — on Windows
 it is the device-namespace name `\\.\NUL`, no entry in any directory. Any
-other path ending in a DOS reserved device name is refused at the door rather
+other path ending in a DOS reserved device name is refused at the check rather
 than opened.
 
 Three entry points, differing only in how they answer a refusal, because the
@@ -331,56 +331,110 @@ whole listing.
 
 ## Enforcement — every syscall site is accounted for
 
-That "all I/O surfaces" holds is the conjunction of two mechanically-checked
-facts, in the `clippy.toml` style already set for canonicalisation, cwd, and
-child-wait.
+**That "all I/O surfaces" holds is the conjunction of mechanically checked
+facts: a ban on the constructors, a typed site for every exception, and checks
+for what clippy cannot state.**
 
-- **All I/O goes through a reviewed syscall site (clippy).** `disallowed-methods` bans the
+- **All I/O goes through a named site (clippy).** `disallowed-methods` bans the
   fs/process *constructors* — `File::{open,create,create_new}`,
   `OpenOptions::open`, the one-shot `fs::{read,read_to_string,write,read_dir,
   metadata,symlink_metadata,read_link,remove_file,remove_dir_all,create_dir_all,
-  rename,copy,set_permissions}`, `Command::new`, `CommandExt::exec`, and
+  create_dir,remove_dir,hard_link,soft_link,rename,copy,set_permissions}`,
+  `DirBuilder::create`, the symlink makers, `env::{var,vars,vars_os,temp_dir,
+  home_dir}`, the four user-named functions of `ral_core::own`, `Command::new`,
+  `CommandExt::exec`, and
   `ignore::WalkBuilder::build` (every directory walk roots at the one
   cancellable site, core's `path/tree/walk.rs`, beneath `glob` and exarch's
-  `grep-files`, `explore-dir` and `find-files`). The whole `cap_primitives::fs` surface is banned alongside it,
-  not just the entries `path/walk.rs` uses today: a ban naming only the
-  current callers is exactly what let the fs site move out from under this
-  list once already, when the opens migrated from `runtime/command/redirect.rs`
-  to the handle-relative walk and every tag went with them. Enforcement rides the pre-existing
+  `grep-files`, `explore-dir` and `find-files`). The whole `cap_primitives::fs`
+  surface is banned alongside it, not just the entries `path/walk.rs` uses
+  today: a ban naming only the current callers is exactly what lets the fs site
+  move out from under the list. Enforcement rides the pre-existing
   `[workspace.lints.clippy] disallowed_methods = "deny"` table, which all ten
-  crates opt into via `[lints] workspace = true`; plain `cargo clippy --workspace
-  --all-targets` checks it (`scripts/ci.sh`'s `lint` step runs it on the Unix hosts, `windows.yml`'s clippy step on Windows). A call site is then a reviewed
-  syscall site or a lint
-  failure *in the crates that do not switch the lint off again at their own
-  root*: `ral-daemon/src/lib.rs` and `ral-initramfs/src/lib.rs` each carry a
-  crate-level `#![allow(clippy::disallowed_methods, …)]` on the grounds of being
-  a guest's init rather than the ral shell, so inside them the site set rests on
-  the meta-test's per-file check and on review, never on the compiler. exarch
-  and synod carry none. Whether that boundary is the discipline's real edge or an artefact of
-  which crates existed when it was drawn is open. The ADR's literal `-D
+  crates opt into via `[lints] workspace = true`, which a test checks of every
+  member; plain `cargo clippy
+  --workspace --all-targets` checks it (`scripts/ci.sh`'s `lint` step runs it on
+  the Unix hosts, `windows.yml`'s clippy step on Windows). A call is then a
+  typed site or a lint failure *in the crates that do not switch the lint off
+  again at their own root*: `ral-daemon/src/lib.rs` and
+  `ral-initramfs/src/lib.rs` each carry a crate-level
+  `#![allow(clippy::disallowed_methods, …)]` on the grounds of being a guest's
+  init rather than the ral shell, so inside them the site set rests on review,
+  never on the compiler. exarch and synod carry no crate-level allow. Whether
+  that boundary is the discipline's real edge or an artefact of which crates
+  existed when it was drawn is open. The ADR's literal `-D
   clippy::disallowed_methods` is *not* used: a command-line `-D` escalates the
   lint onto the vendored `ral-ripgrep-core`, which deliberately opts out, and
   would break the build on vendored code.
-- **Each site is accounted for, surfacing or silent (reasoned allow).** Each
-  allowlisted site carries an `#[allow(clippy::disallowed_methods, reason = …)]`
-  whose reason opens with a stable tag — `[surface:<slug>]` (the open
-  and the atomic-write steps in `path/walk.rs`, plus the exec site, that
-  fuse a surface into the operation),
-  `[silent:<slug>]` (fs work that is not the model's data I/O —
-  canonicalisation, `which` probes, module loading, stat predicates, the
-  tree walk (`grep-files` raises its one card above it), capability
-  load, sandbox respawn/exec, prelude bake, exarch/ral infra), or `[test]`
-  (test scaffolding, blanket-allowed and not a syscall site). The slug is
-  unique within its file, so the tag is stable across line shifts, and
-  `reason = "[` is the one grep that finds the whole discipline. So silence is
-  a written decision, not an omission.
+- **A program's own files are no site at all.** What a program keeps for itself
+  and what the user writes at the places it chooses go through `ral_core::own`,
+  whose every syscall is a walk primitive, so the module holds no `site!`; every
+  `std::fs` ban points there, and the env bans point at
+  `ral_core::host::{var, var_os, vars_os}`. What the user names to it
+  (`read_named`, `open_named`, `kind_named`, `create_named`) takes any path, so it
+  is banned: each caller is a typed site whose variant says why the name is the
+  user's (a CLI argument, a TUI command, the install tree), never a model's
+  ([[decisions/261022_own-files|own-files]]).
+- **Each exception is a typed site, surfacing or silent.** `site!`
+  (`lint/site.rs`) exempts exactly one call, in one of two shapes:
+  `site!(Silent::ArgvBeforeMain, std::fs::read("/proc/self/cmdline"))` or, for a
+  method, `site!(Silent::WhichStat, &candidate => is_file())`. The ban names
+  the call; the site names the place.
+  - *The first argument is a variant, and the enums are the manifest.* Each
+    crate that has sites defines the enums it uses, `Surface` and `Silent`, in
+    its `site.rs`, which `include!`s the one macro file. `Surface` lists the
+    sites that raise a card — the exec site that fuses an exec observation into
+    the launch, and the open, staging and publish steps of the walk
+    (`path/walk/`); `Silent` lists those that raise none — canonicalisation,
+    `which` probes, module loading, stat predicates, the tree walk
+    (`grep-files` raises its one card above it), capability load, sandbox
+    respawn/exec, prelude bake, exarch/ral infrastructure. A variant's doc says what the place is and why it is
+    exempt, so silence is a written decision, not an omission. The enums are
+    crate-private, derive `Clone, Copy` alone and carry no list of themselves,
+    so `dead_code` reports a variant no site uses.
+  - *One exemption covers one call.* The receiver and every argument are
+    evaluated outside it, so a banned call nested in an argument still fires,
+    and a chain is split into one site per banned call.
+  - *A stale site is an error.* The macro emits `#[expect]`, not `#[allow]`: a
+    site that no longer wraps a banned call is reported as
+    `unfulfilled_lint_expectations`, so an exemption cannot outlive its call.
+    The decision is [[decisions/261022_typed-sites|typed-sites]].
+- **Test, example and build code carries one blanket per unit.** Each file
+  directly under `<crate>/tests/` opens with an inner
+  `#![allow(clippy::disallowed_methods, reason = "test code")]`; a
+  `#[cfg(test)]` module carries the outer `#[allow(…, reason = "test code")]`
+  beside its `#[cfg]`; an example and a `build.rs` carry the inner allow with
+  their own reason. Nothing finer is written inside them.
+- **A scan states what clippy cannot: nothing else exists.** Clippy checks that
+  every banned call is exempt, and cannot check *how*: the lint is one for every
+  ban, and an allow names the lint, not the ban, so a hand-written allow over an
+  `fs::read` passes it as readily as a site does. `core/tests/sites.rs` reads
+  the Rust sources of every workspace member but `vendor/`, comments stripped,
+  and fails on any occurrence of `clippy::disallowed_methods` that is not one of
+  four: (a) in `lint/site.rs`; (b) an inner allow among the leading attributes of
+  an integration-test crate root, an example, a `build.rs`, or the two guest
+  crate roots; (c) an outer `reason = "test code"` allow on a `mod` item whose
+  own `#[cfg(…)]` predicate implies `test` (exactly `test`, an `all(…)` with a
+  `test` conjunct, or exactly `any(test, feature = "test-util")`; `any(test, unix)`
+  holds in a production build and is refused); (d) the one third-party-codegen
+  exception, the `#[expect]` on `tauri::generate_context!()` in
+  `synod/src/main.rs`, pinned by file and by the `generate_context!` it
+  precedes. Its expansion exits the process on a panic, and `site!` wraps
+  calls, not macro invocations. A failure names `file:line` and the rule it
+  breaks. Two more checks close the other ways round the lint's name. A test over
+  the same sources flags every attribute that names `clippy::style`, where the lint is
+  filed, or `clippy::all`, which holds it, and is not a `deny` or a `forbid`,
+  since an `allow`, `expect` or `warn` of either group silences every ban
+  without naming it. And a test reads the `Cargo.toml` of every workspace member
+  but `vendor/`'s and fails one without `[lints]` with `workspace = true`, since
+  a member outside the workspace's lints is outside the bans. The test file
+  also pins two caller sets that a ban cannot say, since clippy scopes a ban to
+  no module and counts nothing: the production files that read through
+  `capability::Ungoverned`, and the files outside `path/` that call the string
+  containment helpers.
 
-A meta-test pins it: `core/tests/syscall_sites.rs` walks the production `src/`,
-checks every tagged allow is well-formed, and asserts the surface/silent site set
-equals a checked-in manifest keyed by `(file, tag)` — stable across line shifts,
-so only adding or removing a site perturbs it. A constructor call under no
-allow fails clippy; one under an untagged allow written for another discipline
-passes both, and is review's to catch
+A constructor under no site fails clippy, and an allow in place of a site fails
+the scan, so outside the blankets and the one Tauri exception no exemption
+exists that a variant does not name
 ([[decisions/260614_structural-bug-prevention|structural bug prevention]]). What
 the lint cannot reach — the syscalls inside `ignore`/`tempfile`/bundled `uutils`,
 and what *spawned children* do — is confined by the OS sandbox

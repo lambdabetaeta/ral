@@ -6,7 +6,7 @@
 //! the `tests/reject/` corpus; these tests pin what only the binary shows: the
 //! agreement of `--check` with a real run, and the rc-skip-but-boot policy.
 
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 mod common;
 

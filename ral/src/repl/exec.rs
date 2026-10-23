@@ -139,7 +139,7 @@ pub(super) fn step(
     theme: &OutputTheme,
 ) -> Step {
     let src = pre_exec(t, host, trimmed.to_owned());
-    let before = t.cwd().ok();
+    let before = t.cwd().ok().flatten();
 
     let (report, _) = host.dispatch(t, line_run(&src), None);
     let (status, step) = match report {
@@ -170,7 +170,7 @@ pub(super) fn step(
         }
     };
 
-    if let (Some(old), Ok(new)) = (before, t.cwd())
+    if let (Some(old), Ok(Some(new))) = (before, t.cwd())
         && old != new
     {
         let path = |p: std::path::PathBuf| ral_core::path::shown(p).encode();
@@ -199,7 +199,7 @@ pub(super) fn step(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "[test] test scaffolding")]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use crate::repl::plugin::load::harness::dressed;

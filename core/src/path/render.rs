@@ -9,6 +9,11 @@
 //! [`render_objects`] and [`render_excluded`] all that mint one, each from a
 //! position, never re-resolved, so the gap cannot reopen.
 
+#[cfg(target_os = "linux")]
+use super::site::Silent;
+#[cfg(target_os = "linux")]
+use crate::site::site;
+
 /// One spelling of a VFS object: a member of a fully expanded name class.
 ///
 /// Private field, no public constructor — bare strings in, opaque names
@@ -33,25 +38,36 @@ impl Rendered {
         super::identity::path_within_str(spelled, &self.0)
     }
 
-    /// Whether this name, taken as written, is `spelled` or lies under it.
+    /// Whether `position` is this name or lies under it.
     #[cfg(target_os = "linux")]
-    pub(crate) fn under(&self, spelled: &str) -> bool {
-        super::identity::path_within_str(&self.0, spelled)
+    pub(crate) fn holds_position(&self, position: &super::RealPath) -> bool {
+        super::identity::path_within(
+            position.as_path(),
+            self.0.as_ref(),
+            super::identity::Identity::Stored,
+        )
+    }
+
+    /// Whether this name is `position` or lies under it.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn under_position(&self, position: &super::RealPath) -> bool {
+        super::identity::path_within(
+            self.0.as_ref(),
+            position.as_path(),
+            super::identity::Identity::Stored,
+        )
     }
 
     /// This name as a mount of `from` shows it at `onto`; `None` where `from`
     /// does not hold it.  Lexical: the kernel's names, not a judgment.
     #[cfg(target_os = "linux")]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "path-form: rebases one rendered name onto another, in the one module that mints them"
-    )]
     pub(crate) fn rebased(&self, from: &Self, onto: &Self) -> Option<Self> {
-        let beneath = std::path::Path::new(&self.0).strip_prefix(&from.0).ok()?;
+        let name = site!(Silent::RenderedRebase, std::path::Path::new(&self.0));
+        let beneath = site!(Silent::RenderedRebase, name => strip_prefix(&from.0)).ok()?;
         if beneath.as_os_str().is_empty() {
             return Some(onto.clone());
         }
-        let shown = std::path::Path::new(&onto.0).join(beneath);
+        let shown = site!(Silent::RenderedRebase, std::path::Path::new(&onto.0)).join(beneath);
         Some(Self(
             shown
                 .into_os_string()
@@ -240,6 +256,7 @@ pub(crate) fn pinned_dirs<'a>(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 
@@ -274,10 +291,6 @@ mod tests {
     /// engine's own refusal tests in `canon` stand in.
     #[cfg(target_os = "linux")]
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] a non-UTF-8 fixture path handed to the renderer"
-    )]
     fn rendering_refuses_a_position_that_is_not_utf8() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
@@ -293,7 +306,6 @@ mod tests {
 
     /// A frozen real path whose name has since become a symlink renders to
     /// that name alone, never to where the link now leads.
-    #[allow(clippy::disallowed_methods, reason = "[test] fs scaffolding")]
     #[test]
     fn a_real_path_since_symlinked_never_renders_its_new_target() {
         let tmp = tempfile::tempdir().expect("temp dir");
@@ -318,7 +330,6 @@ mod tests {
     /// names, shown at the spelling it was granted by, however many grants
     /// name the object.
     #[cfg(target_os = "linux")]
-    #[allow(clippy::disallowed_methods, reason = "[test] fs scaffolding")]
     #[test]
     fn a_frozen_prefix_is_its_real_object_shown_at_its_surface() {
         let tmp = tempfile::tempdir().expect("temp dir");

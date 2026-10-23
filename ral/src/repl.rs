@@ -10,7 +10,7 @@
 //! - [`complete`] -- The rustyline adapter over [`completion`]: completer,
 //!   ghost-text hinter, and plugin syntax highlighting.
 //! - [`config`]   -- RC file discovery, sourcing, and application, run
-//!   engine-side inside the boot door.
+//!   engine-side inside the boot builtin.
 //! - [`cursor`]   -- The zsh-style partial-line marker before each prompt.
 //! - [`enquiry`]  -- The `repl-editor` and `repl-plugin` enquiry classes.
 //! - [`errfmt`]   -- REPL-specific error formatting helpers.
@@ -19,7 +19,7 @@
 //! - [`host`]     -- The REPL's `Host`: enquiries, surfaces, hook dispatch.
 //! - [`keybinding`] -- Plugin keybinding dispatch.
 //! - [`plugin`]   -- Plugin runtime state and hook machinery, host-side,
-//!   plus the engine-side `_ed-*` builtins and load doors.
+//!   plus the engine-side `_ed-*` builtins and load builtins.
 //! - [`prompt`]   -- Prompt rendering.
 //! - [`session`]  -- The REPL state machine driving the loop.
 //! - [`theme`]    -- REPL value-output styling (configurable from rc).
@@ -45,7 +45,7 @@ pub(crate) use config::RcSettings;
 pub(crate) use config::source::source_startup_files;
 pub(crate) use frontend::Surface;
 pub(crate) use plugin::ed_builtins::ED_BUILTINS;
-pub(crate) use plugin::load::DOORS as PLUGIN_DOORS;
+pub(crate) use plugin::load::BUILTINS as PLUGIN_LOAD_BUILTINS;
 pub(crate) use prompt::install_default_prompt;
 use session::Session;
 use std::process::ExitCode;
@@ -131,27 +131,31 @@ pub(crate) fn engine_at(
 #[cfg(test)]
 pub(crate) const TEST_TAG: &str = "test";
 
-/// [`engine_at`], seated in the temp dir.
-#[cfg(test)]
-pub(crate) fn engine(
-    runtime: ral_core::Runtime,
-    dress: impl FnOnce(&mut ral_core::Shell) + 'static,
-) -> ral_core::carrier::IdentityTransport {
-    let temp = std::env::temp_dir();
-    engine_at(
-        &ral_core::protocol::Attach::new(
-            TEST_TAG,
-            ral_core::path::EnginePath::Host(temp.clone()),
-            ral_core::path::EnginePath::Host(temp),
-        ),
-        runtime,
-        dress,
-    )
-}
-
 /// Dispatch `src` as an input line under the mute host.
 #[cfg(test)]
 pub(crate) fn run_line(t: &dyn ral_core::carrier::Transport, src: &str) {
     ral_core::carrier::dispatch_to_report(t, exec::line_run(src), std::sync::Arc::new(()))
         .expect("the engine is attached");
+}
+
+/// A test engine seated in the host's temp dir.
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+pub(crate) mod in_temp {
+    /// [`engine_at`](super::engine_at), seated in the temp dir.
+    pub(crate) fn engine(
+        runtime: ral_core::Runtime,
+        dress: impl FnOnce(&mut ral_core::Shell) + 'static,
+    ) -> ral_core::carrier::IdentityTransport {
+        let temp = std::env::temp_dir();
+        super::engine_at(
+            &ral_core::protocol::Attach::new(
+                super::TEST_TAG,
+                ral_core::path::EnginePath::Host(temp.clone()),
+                ral_core::path::EnginePath::Host(temp),
+            ),
+            runtime,
+            dress,
+        )
+    }
 }

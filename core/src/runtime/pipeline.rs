@@ -119,10 +119,7 @@ impl PipeNode {
 }
 
 #[cfg(all(test, unix))]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use crate::process::{CancelCause, ScopeNode};
     use crate::test_helper::eventually;

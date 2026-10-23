@@ -10,14 +10,16 @@
 
 use super::model::{Context, ItemKind, Linked, Model, Residue, Span, validate_result_ids};
 use super::{
-    EditAuthority, Fold as _, Forensic, Memory, Protocol, QuiesceReason, Record, Recorded,
+    EditAuthority, Fold as _, Forensic, Memory, Protocol, QuiesceReason, RECORD, Record, Recorded,
     RecordedAccount, RecordedModel, Refusal, Role, ToolResult, Voice,
 };
 use crate::record::AgentId;
 use genai::chat::{ChatMessage, ChatRole};
-use std::fs;
+#[cfg(test)]
+use ral_core::own::TestDir;
+use ral_core::own::{Entry, OwnDir};
+use ral_core::path::Kind;
 use std::io;
-use std::path::{Path, PathBuf};
 
 /// One line of one message that matched `` exarch-transcript `grep ``'s pattern.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,12 +105,12 @@ pub struct Resumed {
 /// `dev/docs/plans/260814_one_seam_one_log.md`.
 pub struct AgentLog {
     id: AgentId,
-    dir: PathBuf,
-    /// `<scratch>/sessions/`, under which `fork` makes each child's dir.
-    sessions_root: PathBuf,
+    dir: OwnDir,
+    /// `<run>/sessions/`, under which `fork` makes each child's dir.
+    sessions_root: OwnDir,
     /// The directory a test's log has to itself, dropped with the log.
     #[cfg(test)]
-    _scratch: Option<tempfile::TempDir>,
+    _scratch: Option<TestDir>,
     /// The model fold's own structure over `record.jsonl` — the type every
     /// query in this file answers from; advanced inline through
     /// [`Self::advance`] on every protocol fact this log authors.
@@ -143,7 +145,7 @@ impl AgentLog {
     /// failed — or `inherited` names a turn its ancestor's file will not read
     /// back.
     pub fn root(
-        sessions_root: &Path,
+        sessions_root: &OwnDir,
         session_id: AgentId,
         name: &str,
         model: &RecordedModel,
@@ -151,7 +153,7 @@ impl AgentLog {
         system: &str,
         inherited: Option<Inherited>,
     ) -> io::Result<Self> {
-        let mut log = Self::open_fresh(sessions_root.to_path_buf(), session_id)?;
+        let mut log = Self::open_fresh(sessions_root.clone(), session_id)?;
         log.open(None, name, model, account, system, inherited)?;
         Ok(log)
     }
@@ -169,19 +171,9 @@ impl AgentLog {
         model: &str,
         account: &RecordedAccount,
     ) -> io::Result<Self> {
-        let scratch = tempfile::Builder::new()
-            .prefix("exarch-agent-log-test-")
-            .tempdir()?;
+        let scratch = OwnDir::for_test("agent-log")?;
         let model = RecordedModel::for_test(model);
-        let log = Self::root(
-            scratch.path(),
-            session_id,
-            "test",
-            &model,
-            account,
-            "",
-            None,
-        )?;
+        let log = Self::root(&scratch, session_id, "test", &model, account, "", None)?;
         Ok(Self {
             _scratch: Some(scratch),
             ..log
@@ -227,34 +219,31 @@ impl AgentLog {
     /// # Errors
     /// Returns an error when the log is missing, malformed, foreign, or
     /// cannot be reopened after validation.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:resume-record] asks whether the session directory exarch itself recorded holds its record, before resuming it; exarch's own directory, not a model's name"
-    )]
-    pub fn resume(sessions_root: &Path, session_id: AgentId) -> io::Result<Self> {
-        let dir = Self::dir_of(sessions_root, session_id);
-        let record_path = dir.join("record.jsonl");
-        if !record_path.exists() {
+    pub fn resume(sessions_root: &OwnDir, session_id: AgentId) -> io::Result<Self> {
+        let dir = sessions_root.dir(&session_id.to_string())?;
+        let record_path = dir.path().join(RECORD);
+        if dir.stat(RECORD).is_none() {
             return Err(io::Error::other(format!(
                 "cannot resume {}: no record.jsonl was found here; was this session started with an older exarch, or is {} the right directory to resume?",
                 ral_core::path::shown(&record_path),
-                ral_core::path::shown(&dir)
+                dir
             )));
         }
-        let (context, selection) = crate::record::model::resume(&record_path).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!(
-                    "cannot resume {}: {error}",
-                    ral_core::path::shown(&record_path)
-                ),
-            )
-        })?;
-        let seam = crate::record::Emitter::append_to(&record_path)?;
+        let (context, selection) = crate::record::model::resume(sessions_root, session_id)
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "cannot resume {}: {error}",
+                        ral_core::path::shown(&record_path)
+                    ),
+                )
+            })?;
+        let seam = crate::record::Emitter::append_to(&dir)?;
         let mut resumed = Self {
             id: session_id,
             dir,
-            sessions_root: sessions_root.to_path_buf(),
+            sessions_root: sessions_root.clone(),
             #[cfg(test)]
             _scratch: None,
             context,
@@ -272,13 +261,8 @@ impl AgentLog {
         self.learned.as_ref()
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:record-size] stats record.jsonl for the resumed summary; event-log infra, not turn-time data I/O"
-    )]
     pub fn resumed_summary(&self) -> Resumed {
-        let bytes =
-            fs::metadata(self.dir.join("record.jsonl")).map_or(0, |metadata| metadata.len());
+        let bytes = self.dir.stat(RECORD).map_or(0, |stat| stat.len);
         Resumed {
             turn: self.context.current_turn().unwrap_or(0),
             bytes,
@@ -341,30 +325,17 @@ impl AgentLog {
         self.id
     }
 
-    /// Where session `id`'s log lives under `sessions_root`, before it opens.
-    pub(crate) fn dir_of(sessions_root: &Path, id: AgentId) -> PathBuf {
-        sessions_root.join(id.to_string())
-    }
-
     /// Every session directory under `sessions_root`, in id order.
     ///
     /// # Errors
-    /// The directory exists but cannot be read.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:session-ids] lists the session directories under a run; event-log infra, not turn-time data I/O"
-    )]
-    pub(crate) fn session_ids(sessions_root: &Path) -> io::Result<Vec<AgentId>> {
-        let entries = match fs::read_dir(sessions_root) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(error),
-        };
-        let mut ids: Vec<AgentId> = entries
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let id = entry.file_name().into_string().ok()?.parse().ok()?;
-                entry.file_type().ok()?.is_dir().then_some(AgentId::new(id))
+    /// The directory cannot be read.
+    pub(crate) fn session_ids(sessions_root: &OwnDir) -> io::Result<Vec<AgentId>> {
+        let mut ids: Vec<AgentId> = sessions_root
+            .list()?
+            .into_iter()
+            .filter_map(|Entry { name, stat }| {
+                let id = name.parse().ok()?;
+                (stat.kind == Kind::Dir).then_some(AgentId::new(id))
             })
             .collect();
         ids.sort_unstable();
@@ -379,12 +350,11 @@ impl AgentLog {
     /// `sessions_root` exists but cannot be read, or a session's record
     /// cannot: one unreadable record is named rather than skipped, since
     /// skipping it would resume the others as if it had never been open.
-    pub fn live_roots(sessions_root: &Path) -> io::Result<Vec<(AgentId, String)>> {
+    pub fn live_roots(sessions_root: &OwnDir) -> io::Result<Vec<(AgentId, String)>> {
         Self::session_ids(sessions_root)?
             .into_iter()
             .filter_map(|id| {
-                let record = Self::dir_of(sessions_root, id).join("record.jsonl");
-                live_root(&record)
+                live_root(sessions_root, id)
                     .map_err(|error| {
                         io::Error::new(
                             error.kind(),
@@ -400,8 +370,15 @@ impl AgentLog {
     }
 
     /// The per-session directory `<sessions_root>/<id>/`.
-    pub fn dir(&self) -> &Path {
+    pub fn dir(&self) -> &OwnDir {
         &self.dir
+    }
+
+    /// The run's `sessions/` directory this log's session is in, for a test that
+    /// folds a child of it.
+    #[cfg(test)]
+    pub(crate) fn sessions_root(&self) -> &OwnDir {
+        &self.sessions_root
     }
 
     /// The model fold this log advances: every query about the context is
@@ -626,25 +603,18 @@ impl AgentLog {
 
     // ── Internal helpers ──────────────────────────────────────────────────
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:session-dir] (re)creates the session log dir; event-log infra, not turn-time data I/O"
-    )]
-    fn open_fresh(sessions_root: PathBuf, session_id: AgentId) -> io::Result<Self> {
-        let dir = Self::dir_of(&sessions_root, session_id);
-        if dir.exists() {
-            fs::remove_dir_all(&dir)?;
-        }
-        fs::create_dir_all(&dir)?;
-        let source = dir.join("record.jsonl");
-        let seam = crate::record::Emitter::create(&source)?;
+    fn open_fresh(sessions_root: OwnDir, session_id: AgentId) -> io::Result<Self> {
+        let name = session_id.to_string();
+        sessions_root.remove(&name)?;
+        let dir = sessions_root.make_dir(&name)?;
+        let seam = crate::record::Emitter::create(&dir)?;
         Ok(Self {
             id: session_id,
             dir,
+            context: Context::new(session_id, sessions_root.clone()),
             sessions_root,
             #[cfg(test)]
             _scratch: None,
-            context: Context::new(source),
             learned: None,
             seam,
         })
@@ -671,7 +641,7 @@ impl AgentLog {
                 label: account.label.clone(),
                 service: account.service.clone(),
                 account: account.id.clone(),
-                log_dir: self.dir.clone(),
+                log_dir: self.dir.path().to_path_buf(),
                 at_unix_ms: crate::app::now_unix_ms(),
             })
             .map(drop)?;
@@ -704,17 +674,21 @@ impl AgentLog {
     }
 }
 
-/// The name `record` was opened under if it heads a root and was never closed.
-/// A directory with no record is no session, hence not live.
+/// The name session `id`'s record was opened under if it heads a root and was
+/// never closed.  A directory with no record is no session, hence not live.
 ///
 /// # Errors
 /// The record exists but cannot be opened, or holds a line that is not a
 /// record.
-fn live_root(record: &Path) -> io::Result<Option<String>> {
-    let mut records = match super::log::Log::read(record) {
+fn live_root(sessions: &OwnDir, id: AgentId) -> io::Result<Option<String>> {
+    let opened = sessions
+        .dir(&id.to_string())
+        .and_then(|session| session.open(RECORD).map(|file| (session, file)));
+    let (session, file) = match opened {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        records => records?,
+        opened => opened?,
     };
+    let mut records = super::log::Log::read(file, &session.path().join(RECORD))?;
     let Some(head) = records.next().transpose()? else {
         return Ok(None);
     };
@@ -744,6 +718,7 @@ pub(crate) fn role_label(role: &ChatRole) -> &'static str {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 #[allow(
     unused_results,
     clippy::wildcard_enum_match_arm,

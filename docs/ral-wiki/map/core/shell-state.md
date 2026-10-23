@@ -46,7 +46,7 @@ everything `crate::types::*`.
   `pub(crate)` mutators go through `Arc::make_mut`. `string.rs` / `bytes.rs` — `Str` and
   `Bytes`, newtypes over `Arc<String>` / `Arc<Vec<u8>>`, so an owned buffer
   moves in without a copy. `Value::string` / `Value::bytes` are their one
-  construction door, as `Value::list` is a list's. **Cloning a `Value` copies
+  constructor, as `Value::list` is a list's. **Cloning a `Value` copies
   no payload**: a string, a byte string, a list or map spine and a closure's
   scope are all shared, and `Env` and variable lookup rely on it.
 - `flow.rs` — the whole control-flow surface, four declarations:
@@ -57,7 +57,7 @@ everything `crate::types::*`.
   [[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]). No `Option`/null appears;
   optionality is open variants ([[invariants/optionality-via-variants|optionality-via-variants]]).
 - `error.rs` — `Error` and `Status` (`Raised(i32) | Cancelled(CancelCause) |
-  Process(CommandFailure)`, one constructor per fact whichever door reports
+  Process(CommandFailure)`, one constructor per fact, whoever reports
   it; `Status::code` delegates to each failure's own `code`).
   `audit.rs` — the
   `Audit` collector, over `observation.rs`'s `Observation` / `Observed` — the
@@ -101,8 +101,8 @@ stack's verdicts, not a `Capabilities::meet`
 ([[decisions/260906_object-not-name|object-not-name]]); a scoped push —
 `with_layer`, `with_layers`, `Frame::Grant` — removes its own frames by
 position (`GrantStack::remove`) rather than popping the top, so a session
-frame `push_session_capabilities` lays inside it, as the boot door's
-`--capabilities` does inside its run, survives it), `SandboxProjection`,
+frame `push_session_capabilities` lays inside it, as the boot builtin's
+`--capabilities` (`apply_session_profiles`) does inside its run, survives it), `SandboxProjection`,
 and `GrantLayer::extend`, which adds an `--extend` `Fragment` to a base once (tested in
 `capability/lattice_tests.rs`). `Meet` survives only where evidence genuinely narrows by
 intersection, not as a whole-layer operation.
@@ -119,8 +119,8 @@ never checkpointed since nothing but boot and the one prelude bake ever
 writes it) and `context` (dynamic context — `cd`, aliases) — three
 flat fields, since a step's focus carries its own environment and there is no
 ambient `scope` for a bundle to snapshot — plus `Io`, `SessionState`, and
-`LocalState` below. The run door checkpoints and rolls back the `(env,
-context)` pair around every run (`Shell::run_under`), so a panicking run
+`LocalState` below. `Shell::run_under` checkpoints and rolls back the `(env,
+context)` pair around every run, so a panicking run
 reports as a failed run instead of corrupting the store; `sig` needs no
 checkpoint, since a run never writes it.
 - **`Io`** — the run's *byte streams*, and the only part of the frame the
@@ -266,7 +266,7 @@ What a run *fixes* is not on the `Shell` at all. The eight run-invariant
 members are a **`Mooring`**: the `surface` sink, the `deferred` sink (a
 worker's completion delivery — `None` outside an agent host), the
 `desk` answering the run's enquiries
-([[map/core/engine-protocol|engine-protocol]]), the `fork` door
+([[map/core/engine-protocol|engine-protocol]]), the `fork` route
 naming how a forked session reaches the desk that adopts it (`None` outside a
 host that installs one; like `desk`, never given to a deferred worker), the
 owner's node `home` (the base of the run's scope tree: what a heard key, a
@@ -275,12 +275,12 @@ wall or a `cancel` strikes, never what is polled), the
 policy, from `Run::cleanup_grace`), the
 `worker_cap` admission bound (`Some(cap)` refuses a spawn while
 `cap` workers are `running`, `stopping`, or reserved; `None` admits freely), and the run's
-`terminal_access`. It is an owned local on the run
-door's own Rust stack frame, and reaches every callee as an explicit
+`terminal_access`. It is an owned local on the run's
+own Rust stack frame (`run_built`), and reaches every callee as an explicit
 `&Mooring`, placed immediately before the `&Shell` / `&mut Shell` in every
 signature.
 
-The `fork` door is a two-armed sum, `Fork` (`mooring.rs`), read through
+The `fork` route is a two-armed sum, `Fork` (`mooring.rs`), read through
 `Mooring::fork`:
 
 - **`Fork::Park(Nursery)`** — in-process. The reentrancy law bars a
@@ -310,11 +310,11 @@ loan). **Borrow when you can, loan when you must.**
 `&Mooring` and `&mut Shell` are disjoint borrows, so a builtin body can surface
 an event while holding the shell mutably. `Mooring` is not `Clone`:
 `lend_terminal` is the one lawful derivation, so the raise-never-mint rule on
-`TerminalAccess` lives in one door rather than in every bulk copy. Outside
+`TerminalAccess` lives in one function rather than in every bulk copy. Outside
 core only `home`, `Mooring::surface`, `Mooring::lend_terminal`,
 `Mooring::fork`, and `Mooring::adrift` are reachable —
 `adrift()` being the mooring a host builds to call a builtin body outside any
-run (no surface, no rail, no desk, no fork door, and a scope under a root
+run (no surface, no rail, no desk, no fork route, and a scope under a root
 nothing else holds, so cancelling it is how such a caller drives the body's poll points).
 
 A worker or stage thread *rebuilds* rather than sharing
@@ -322,7 +322,7 @@ A worker or stage thread *rebuilds* rather than sharing
 grace and worker cap, takes the thread's own `home` scope node and `surface`
 (a buffering `DeferredSurface` for a session worker, the parent's live surface
 for a gather-owned worker or a pipeline stage thread), and gets neither desk
-nor fork door — both barred to a child thread.
+nor fork route — both barred to a child thread.
 
 ### Surface
 
@@ -331,13 +331,13 @@ The `surface` sink (`Mooring::surface`, `Option<SurfaceSink>` where
 [[map/core/io-process|Io]] sinks. `EventSink` is a *synchronous* trait taking a
 borrowed first-order `FOValue`
 ([[map/core/engine-protocol|engine-protocol]]); the `Mooring::surface`
-method takes a borrowed `Value`, encodes it once at that door, and forwards onto
+method takes a borrowed `Value`, encodes it once, in that method, and forwards onto
 the installed sink — inert when none is present (a bare REPL).
 `Mooring::surface_data` is its `FOValue`-typed sibling, for a caller that
-already holds the wire form: `Shell::observe_stamped` (`types/audit/door.rs`) reaches it
+already holds the wire form: `Shell::observe_stamped` (`types/audit/fan_out.rs`) reaches it
 with `Observation::to_surface`, tagged `` `observed `` so a host dispatches on
 the tag alone without re-encoding a `Value` it never had. Run-scoped, not
-a persistent capability — a run door installs it, so a clone of it has no
+a persistent capability — a run installs it, so a clone of it has no
 liveness role and can never decide a run is over. A session worker does not receive the live sink: its surface is a
 `DeferredSurface` (`types/handle/surface.rs`) that buffers and, through the
 worker's `CompletionPermit` on every exit after the handle reaches its terminal
@@ -400,7 +400,7 @@ Methods on `Shell` live by concern, one submodule each:
   the one snapshot law's whole mechanism, below), `modules.rs`, `detached.rs`
   (the `detach` budget), `hooks.rs` (the session-lived hook table of named
   run-entry points — prompt render, startup, plugin hooks — each a block, a
-  lambda or a builtin, resolved by the run door's hook-program arm under the hook's
+  lambda or a builtin, resolved by the `Program::Hook` arm of `Shell::run` under the hook's
   registered `DefaultPolicy`: terminal authority, capture, and `aside`; a
   fault in a hook run is labelled by `HookName::fault_label`, and a hook run
   is no ready boundary); the table is an `Option<HookTable>`, `Some` only on the booted session (every child holds `None`), and carries the [[map/repl|REPL]]'s plugin ledger beside the hooks.
@@ -444,7 +444,7 @@ fixings:
   from the spawning shell's session, built on the spawning thread; the body's
   capture rides in its closure, and nothing flows back. Both rebuild their
   mooring through `Mooring::for_thread(home, surface)` on the calling thread
-  (so the door can hand the caller the child's scope) and move it into the
+  (so the caller keeps the child's scope) and move it into the
   thread: a worker's `home` is a child of its cradle — the durable root in a
   run, so a run timeout or Esc does not reach it; inside a gather its entry
   scope, the parent worker's node inside a worker or the run's scope at a
@@ -458,7 +458,7 @@ fixings:
   `context`, source cursor, builtin table, and Σ (`sig`, by `Arc` clone)
   without touching its IO / audit / REPL scratch; no flow-back. It shares the
   parent's cancel root, so code there is interruptible while it runs and older
-  interrupts stay out of its reach; the run door runs a hook there when its
+  interrupts stay out of its reach; the `Program::Hook` arm of `Shell::run` runs a hook there when its
   registered `DefaultPolicy` says `aside` (the REPL's buffer-change hooks).
   It shares the detach budget and fixings too, but holds a roster of its own
   and an unarmed ledger.
@@ -474,7 +474,7 @@ fixings:
   fixings. A sealed child takes the same path: its `EngineSeed` is the
   bequest in wire form ([[map/core/transport|transport]]), and no recipe runs.
   The round-trip test is a codec test and a constructor test.
-  `bequeath` is the door every sub-agent fork passes through: one
+  `bequeath` is the function every sub-agent fork passes through: one
   `Scrub` over every root the fork holds — the session scope and each
   handler frame's arms (`HandlerFrame::values_mut`). A fork's hook table is
   empty by construction: hooks are session state, never inherited. The scrub replaces each `Value::Handle` it reaches with an

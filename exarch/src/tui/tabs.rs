@@ -2,7 +2,6 @@
 //! in id order.  [`super::App`]'s `tabs` field.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -12,6 +11,7 @@ use crate::agent::Agent;
 use crate::agent::fleet::Fleet;
 use crate::card::Card;
 use crate::record::{AgentId, AgentState, Born, Emitter as Recorder};
+use ral_core::own::OwnDir;
 
 use super::dial::Detail;
 use super::scrollback::Scrollback;
@@ -96,7 +96,7 @@ pub(super) struct Tab {
     status: Status,
     /// The session's directory, kept past death and bar expiry so
     /// [`Tabs::log_dirs`] can still name it.
-    log_dir: PathBuf,
+    log_dir: OwnDir,
     life: Life,
 }
 
@@ -273,7 +273,7 @@ impl Tabs {
     }
 
     /// The live agent behind `id`, for one handler's duration — the frontend's
-    /// one door onto an agent, and never held past the statement that opens it.
+    /// one way onto an agent, and never held past the statement that opens it.
     pub(super) fn agent(&self, id: AgentId) -> Option<Arc<Agent>> {
         self.tab(id)?.live(&self.fleet)
     }
@@ -427,12 +427,12 @@ impl Tabs {
     }
 
     /// Every session's directory, in id order, stable across runs.
-    pub(super) fn log_dirs(&self) -> Vec<PathBuf> {
+    pub(super) fn log_dirs(&self) -> Vec<OwnDir> {
         self.tabs.iter().map(|t| t.log_dir.clone()).collect()
     }
 
     /// The focused session's directory, where its `record.jsonl` lives.
-    pub(super) fn focused_log_dir(&self) -> &Path {
+    pub(super) fn focused_log_dir(&self) -> &OwnDir {
         &self.focused_tab().log_dir
     }
 

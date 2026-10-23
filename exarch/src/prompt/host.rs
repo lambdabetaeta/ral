@@ -4,16 +4,15 @@
 //! That is why synod, whose agent lives in a guest VM where none hold,
 //! composes its own section instead.
 
+use crate::site::{Silent, site};
+
 /// Markdown list: `os`, `now`, `cwd`, `user`, `home`, `git`, `exarch logs`.
 ///
 /// An empty probe drops its line rather than erroring, so bare and exotic
 /// hosts still yield a well-formed prompt; baked once at boot with the rest
-/// of the prompt, so `now` names boot time.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "host-env: the Host section reports host truths by definition"
-)]
-pub fn snapshot(exarch_state: &std::path::Path) -> String {
+/// of the prompt, so `now` names boot time.  A host with no state directory
+/// has no `exarch logs` to name.
+pub fn snapshot(exarch_state: Option<&std::path::Path>) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     let _ = writeln!(out, "- os: {}", os_line());
@@ -23,20 +22,18 @@ pub fn snapshot(exarch_state: &std::path::Path) -> String {
     if let Some(cwd) = ral_core::host::cwd() {
         let _ = writeln!(out, "- cwd: {}", ral_core::path::shown(&cwd));
     }
-    if let Some(user) = ral_core::host::user() {
+    if let Some(user) = site!(Silent::HostSection, ral_core::host::user()) {
         let _ = writeln!(out, "- user: {user}");
     }
-    if let Some(home) = ral_core::host::home() {
+    if let Some(home) = site!(Silent::HostSection, ral_core::host::home()) {
         let _ = writeln!(out, "- home: {}", ral_core::path::shown(home));
     }
     if let Some(g) = git_line() {
         let _ = writeln!(out, "- git: {g}");
     }
-    let _ = writeln!(
-        out,
-        "- exarch logs: {}",
-        ral_core::path::shown(exarch_state)
-    );
+    if let Some(state) = exarch_state {
+        let _ = writeln!(out, "- exarch logs: {}", ral_core::path::shown(state));
+    }
     out
 }
 
@@ -64,13 +61,11 @@ pub fn now() -> Option<String> {
 }
 
 /// `branch (clean)` or `branch (dirty)`; `None` outside a git working tree.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:git-launch] shells out to git(1) to probe the working tree; best-effort host info, not turn-time data I/O"
-)]
 fn git_line() -> Option<String> {
     let git = |args: &[&str]| {
-        let out = ral_core::process::output(std::process::Command::new("git").args(args)).ok()?;
+        let mut cmd = site!(Silent::GitLaunch, std::process::Command::new("git"));
+        cmd.args(args);
+        let out = ral_core::process::output(&mut cmd).ok()?;
         out.status.success().then_some(out.stdout)
     };
     let branch = String::from_utf8(git(&["rev-parse", "--abbrev-ref", "HEAD"])?).ok()?;

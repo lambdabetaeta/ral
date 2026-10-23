@@ -12,13 +12,10 @@
 //! pipeline, which nothing here could check — so it is refused rather than
 //! packaged unchecked.
 
+#![allow(clippy::disallowed_methods, reason = "example program")]
 #![allow(
     clippy::disallowed_macros,
     reason = "[silent:example] an example prints its result"
-)]
-#![allow(
-    clippy::disallowed_methods,
-    reason = "[silent:boot-contract-build] Packaging scaffolding reading the media's own manifest, not turn-time model data I/O."
 )]
 
 use std::path::PathBuf;

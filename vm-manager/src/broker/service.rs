@@ -56,6 +56,7 @@ use windows_sys::Win32::System::Pipes::{
 
 use super::{PIPE, Reply, Request, VERSION, frame};
 use crate::hcs::{backend, document_text, plain};
+use crate::site::{Silent, site};
 use crate::{BootArtifact, Error, Hypervisor, Machine, MachineSpec};
 
 /// Who may talk to the broker.
@@ -83,14 +84,12 @@ const PIPE_BUFFER: u32 = 4 * 1024;
 /// `SYSTEM`'s own profile — technically writable and semantically wrong. The
 /// wrapped rootfs is identical for every user of the computer, so it is written
 /// once, here, rather than once per profile.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: lifting one path-valued environment variable for the service's own \
-              machine-wide state directory; no shell, no run, no card."
-)]
 pub fn cache() -> PathBuf {
-    std::env::var_os("ProgramData")
-        .map_or_else(std::env::temp_dir, PathBuf::from)
+    site!(Silent::ProgramDataVar, std::env::var_os("ProgramData"))
+        .map_or_else(
+            || site!(Silent::ProgramDataFallback, std::env::temp_dir()),
+            PathBuf::from,
+        )
         .join("Synod")
         .join("Machine")
 }
@@ -121,10 +120,6 @@ pub fn cache() -> PathBuf {
 /// # Errors
 /// Returns [`Error::ServiceUnlocated`] if this executable's own location cannot
 /// be read, and [`Error::NoGuestImage`] if no image is found where it should be.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "path-form: the ancestors of this service's own executable, to find the checkout it was built in; a host tool whose names no grant judges"
-)]
 pub fn media() -> Result<BootArtifact, Error> {
     let exe = std::env::current_exe().map_err(|cause| Error::ServiceUnlocated {
         cause: cause.to_string(),
@@ -132,7 +127,7 @@ pub fn media() -> Result<BootArtifact, Error> {
 
     let boot = exe.with_file_name("boot");
     let installed = artifact(&boot);
-    if installed.kernel.is_file() {
+    if site!(Silent::BootMediaProbe, &installed.kernel => is_file()) {
         return Ok(installed);
     }
     // Not installed, so this is a service registered out of a checkout — what
@@ -145,18 +140,17 @@ pub fn media() -> Result<BootArtifact, Error> {
     //
     // A checkout is recognised by the `target` directory somewhere above the
     // one this program was built into, and only the first such is asked.
-    let checkout = exe
-        .ancestors()
+    let checkout = site!(Silent::CheckoutRoot, &exe => ancestors())
         .skip(2)
         .find(|dir| dir.file_name().is_some_and(|name| name == "target"))
-        .and_then(Path::parent);
+        .and_then(|target: &Path| site!(Silent::CheckoutRoot, target => parent()));
     if let Some(root) = checkout {
         let out = root.join("vm-image").join("out");
         let development = BootArtifact {
             rootfs: rootfs_in(&out),
             ..artifact(&out.join("boot"))
         };
-        if development.kernel.is_file() {
+        if site!(Silent::BootMediaProbe, &development.kernel => is_file()) {
             return Ok(development);
         }
     }
@@ -182,13 +176,9 @@ fn artifact(boot: &Path) -> BootArtifact {
 /// `rootfs.img.zst`, while a checkout that has built the image holds *both*, and
 /// preferring the archive would make it inflate two and a half gigabytes it
 /// already has lying there uncompressed.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: the broker's own install directory, a name no grant judges; vm-manager deliberately does not depend on ral-core."
-)]
 fn rootfs_in(dir: &Path) -> PathBuf {
     let plain = dir.join("rootfs.img");
-    if plain.is_file() {
+    if site!(Silent::BootMediaProbe, &plain => is_file()) {
         plain
     } else {
         dir.join("rootfs.img.zst")
@@ -461,14 +451,17 @@ impl Granted {
         // more unless the token has the backup privilege enabled, which a
         // standard user's does not.
         let raw = unsafe {
-            CreateFileW(
-                wide.as_ptr(),
-                rights_for(read_only),
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                std::ptr::null(),
-                OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-                std::ptr::null_mut(),
+            site!(
+                Silent::ClientFolderOpen,
+                CreateFileW(
+                    wide.as_ptr(),
+                    rights_for(read_only),
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                    std::ptr::null_mut(),
+                )
             )
         };
         if raw == INVALID_HANDLE_VALUE {
@@ -614,11 +607,14 @@ fn final_path(handle: &OwnedHandle) -> io::Result<PathBuf> {
         // SAFETY: the handle is live, and `buffer` is writable for `capacity`
         // wide characters.
         let written = unsafe {
-            GetFinalPathNameByHandleW(
-                handle.as_raw_handle(),
-                buffer.as_mut_ptr(),
-                capacity,
-                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+            site!(
+                Silent::HeldFolderPath,
+                GetFinalPathNameByHandleW(
+                    handle.as_raw_handle(),
+                    buffer.as_mut_ptr(),
+                    capacity,
+                    FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+                )
             )
         };
         if written == 0 {
@@ -765,11 +761,7 @@ fn close(handle: HANDLE) {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: test scaffolding names literal paths and reads the cache location \
-              back; no shell, no run, no card."
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 

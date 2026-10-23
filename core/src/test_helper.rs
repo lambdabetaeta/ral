@@ -24,7 +24,7 @@ pub fn core_schemes() -> crate::typecheck::SessionSchemes {
 }
 
 /// A layer resolved from `caps`, a bare name found on the host's `PATH`: the
-/// door a test authors a layer through.  A path the grant names need not
+/// helper a test authors a layer through.  A path the grant names need not
 /// exist, for the walk ends its steps where the disk does.
 ///
 /// # Panics
@@ -68,10 +68,6 @@ impl Tree {
     ///
     /// # Panics
     /// If `dir` is missing or a name cannot be laid.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] a fixture tree on disk, laid by name"
-    )]
     pub fn lay(dir: &std::path::Path, names: impl IntoIterator<Item: AsRef<str>>) -> Self {
         let tree = Self(real(dir).as_path().to_path_buf());
         for name in names {

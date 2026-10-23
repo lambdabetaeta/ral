@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_methods)]
 //! Windows-only pipeline integration tests.
 //!
 //! Cover the surfaces that the Windows port had to grow from scratch:
@@ -22,6 +21,7 @@
 //! On other platforms the file compiles to nothing so cross-builds stay
 //! clean.
 
+#![allow(clippy::disallowed_methods, reason = "test code")]
 #![cfg(windows)]
 
 mod common;

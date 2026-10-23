@@ -17,8 +17,10 @@
 //! `tests/lang/argv.ral`; the tests below keep what a golden cannot say, the
 //! hint on the refusal and the absence of a static diagnostic.
 //!
-//! Everything here drives the public `run` door, so each test is the session a
+//! Everything here drives the public `run` entry, so each test is the session a
 //! user has.
+
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 mod common;
 
@@ -32,7 +34,7 @@ use ral_core::types::{Break, Value};
 
 /// A session as every front end builds one: prelude registered, env seeded,
 /// capabilities at root.
-/// One top-level dispatch through the public door, stdout captured — the report
+/// One top-level dispatch through the public entry, stdout captured — the report
 /// as a front end receives it, diagnosed or run.
 fn report(src: &str) -> RunReport {
     fresh_shell().run(Run::captured(src, SourceOrigin::named("<argv-convention>")))

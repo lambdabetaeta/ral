@@ -12,27 +12,29 @@ use crate::provider::accounts::{
 };
 use crate::provider::identity::{Account, Auth};
 use crate::provider::keychain::Keychain;
+use ral_core::own::{OwnError, UserFile};
 use ral_core::sync::LockExt;
-use std::path::PathBuf;
 
 /// Where one product keeps what its accounts screen changes: keys in its
 /// vault, declared endpoints in its declarations file.
 pub struct Wallet {
     pub keychain: Keychain,
-    pub declarations: PathBuf,
+    pub declarations: UserFile,
     /// How the declarations file names itself when it has a complaint.
     pub label: &'static str,
 }
 
 impl Wallet {
     /// Exarch's own wallet: its vault, its declarations file.
-    #[must_use]
-    pub fn exarch() -> Self {
-        Self {
+    ///
+    /// # Errors
+    /// [`config::file`]'s.
+    pub fn exarch() -> Result<Self, OwnError> {
+        Ok(Self {
             keychain: Keychain::for_app(crate::app::EXARCH),
-            declarations: config::path(),
+            declarations: config::file()?,
             label: config::LABEL,
-        }
+        })
     }
 
     /// Save `key` for the account named `id`, in force at once unless the

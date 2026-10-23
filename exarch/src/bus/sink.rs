@@ -182,4 +182,5 @@ pub(crate) fn panic_msg(p: &Box<dyn std::any::Any + Send>) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

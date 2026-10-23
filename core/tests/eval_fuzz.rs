@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 //! Evaluator tests that need the Rust harness: direct `Value` and IR
 //! inspection, `Shell` API configuration, timing, and `coreutils`-gated
@@ -13,7 +13,7 @@ use ral_core::run::RunReport;
 use ral_core::source::SourceOrigin;
 use ral_core::types::{Break, Shell, Value};
 
-/// Evaluate `input` through the public run door on an already-configured
+/// Evaluate `input` through the public run entry on an already-configured
 /// `shell` — parse, elaborate, typecheck against the prelude schemes, run
 /// the phrases.
 fn run_on(shell: &mut Shell, input: &str) -> ral_core::types::Settled<Value> {

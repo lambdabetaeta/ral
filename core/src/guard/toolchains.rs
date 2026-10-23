@@ -480,7 +480,7 @@ pub(crate) fn expand_in<W: Polar>(
 /// As [`expand_in`]; a home that cannot be walked.
 pub fn expand(toolchain: Toolchain, home: Option<&str>) -> Result<Vec<PathBuf>, PolicyError> {
     let home = home.map(Home::of).transpose()?;
-    let kept = expand_in::<Trace>(toolchain, |k| std::env::var(k).ok(), home.as_ref())?;
+    let kept = expand_in::<Trace>(toolchain, crate::host::var, home.as_ref())?;
     Ok(kept
         .iter()
         .map(|dir| PathBuf::from(dir.written.as_str()))
@@ -522,14 +522,11 @@ pub(crate) fn floor_in(
 /// A home that cannot be walked; as [`floor_in`].
 pub(crate) fn floor(home: Option<&str>) -> Result<Vec<GrantPath<Trace>>, String> {
     let home = home.map(Home::of).transpose().map_err(|e| e.message)?;
-    floor_in(|k| std::env::var(k).ok(), home.as_ref()).map_err(|e| e.message)
+    floor_in(crate::host::var, home.as_ref()).map_err(|e| e.message)
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] fixtures build real directories and links, and probe them by name"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use crate::guard::freeze::Anchor;

@@ -596,10 +596,7 @@ pub(crate) fn rules(grants: &GrantStack) -> Option<ExecRules> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs scaffolding: a tempdir file and a link to it"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 pub(super) mod tests {
     use super::*;
     use crate::capability::Evidence;

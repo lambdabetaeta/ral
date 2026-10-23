@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+use crate::site::{Silent, site};
 use crate::{Act, Error, HostFile};
 
 /// Decompress the zstd `archive` into `out`, verifying the result against
@@ -29,18 +30,9 @@ use crate::{Act, Error, HostFile};
 /// if the `.part` file cannot be written or renamed into place; and
 /// [`Error::CorruptGuestImage`] if `verify` is given and does not match the
 /// inflated bytes.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: host-side disk plumbing before any engine exists — the archive \
-              read, the part file written, renamed into place, or removed; no shell, no run, no \
-              card. See hcs::vhd's module docs for the fuller argument this shares."
-)]
 pub fn inflate(archive: &Path, out: &Path, verify: Option<&str>) -> Result<u64, Error> {
-    let source = std::fs::File::open(archive).map_err(Error::host_file(
-        HostFile::GuestImage,
-        Act::Open,
-        archive,
-    ))?;
+    let source = site!(Silent::RootfsInflate, std::fs::File::open(archive))
+        .map_err(Error::host_file(HostFile::GuestImage, Act::Open, archive))?;
     let mut decoder = ruzstd::decoding::StreamingDecoder::new_with_max_window_size(
         std::io::BufReader::new(source),
         crate::ROOTFS_WINDOW,
@@ -53,7 +45,9 @@ pub fn inflate(archive: &Path, out: &Path, verify: Option<&str>) -> Result<u64, 
 
     let mut land = || -> Result<u64, Error> {
         let unwritten = || Error::host_file(HostFile::UnpackedImage, Act::Write, &part);
-        let mut sink = std::io::BufWriter::new(std::fs::File::create(&part).map_err(unwritten())?);
+        let mut sink = std::io::BufWriter::new(
+            site!(Silent::RootfsInflate, std::fs::File::create(&part)).map_err(unwritten())?,
+        );
         let mut hasher = verify.map(|_| Sha256::new());
         let mut bytes = 0u64;
         let mut buf = vec![0u8; 1 << 20];
@@ -84,7 +78,7 @@ pub fn inflate(archive: &Path, out: &Path, verify: Option<&str>) -> Result<u64, 
             }
         }
 
-        std::fs::rename(&part, out).map_err(Error::host_file(
+        site!(Silent::RootfsInflate, std::fs::rename(&part, out)).map_err(Error::host_file(
             HostFile::UnpackedImage,
             Act::Place,
             out,
@@ -95,7 +89,7 @@ pub fn inflate(archive: &Path, out: &Path, verify: Option<&str>) -> Result<u64, 
     // short by a full disk would otherwise squat gigabytes on the disk that
     // just ran out.
     land().inspect_err(|_| {
-        let _ = std::fs::remove_file(&part);
+        let _ = site!(Silent::RootfsInflate, std::fs::remove_file(&part));
     })
 }
 

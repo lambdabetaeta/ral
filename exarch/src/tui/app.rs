@@ -169,7 +169,7 @@ impl App {
             overlay_gen: 0,
             jobs,
             gesture: GestureState::new(),
-            clipboard: Clipboard::default(),
+            clipboard: Clipboard::new(ral_core::host::var("SSH_CONNECTION").is_some()),
             matrix: Matrix::Watching,
             cwd_basename,
             last_title: String::new(),
@@ -655,4 +655,5 @@ impl App {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 pub(super) mod tests;

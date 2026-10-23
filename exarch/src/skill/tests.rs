@@ -1,9 +1,7 @@
-#![allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
-
 use super::*;
 
-/// The doors the boot reads by, under a stack that restricts nothing, so a
-/// fixture is judged by the real door and refused by none.
+/// A [`Boot`] under a stack that restricts nothing, so a
+/// fixture is judged by the real checks and refused by none.
 fn boot<'a>(
     grants: &'a GrantStack,
     floor: &'a Floor,
@@ -17,8 +15,8 @@ fn boot<'a>(
 fn found(dir: &Path) -> Found {
     let (grants, floor, env) = (GrantStack::root(), Floor::default(), EnvVars::new());
     let cwd = CwdPath::new(dir.to_path_buf()).unwrap();
-    let mut doors = boot(&grants, &floor, &env, &cwd);
-    let file = doors.file(&doors.anchor(&dir.join("SKILL.md"))).unwrap();
+    let mut reader = boot(&grants, &floor, &env, &cwd);
+    let file = reader.file(&reader.anchor(&dir.join("SKILL.md"))).unwrap();
     let name = dir.file_name().unwrap().to_str().unwrap().to_owned();
     Found {
         name,
@@ -110,7 +108,7 @@ fn local_overrides_global() {
     let at = CwdPath::new(cwd.path().to_path_buf()).unwrap();
     let all = discover_all(
         cwd.path(),
-        config.path(),
+        Some(config.path()),
         &mut boot(&grants, &floor, &env, &at),
     );
     let dup: Vec<_> = all.iter().filter(|found| found.name == "dup").collect();
@@ -149,7 +147,7 @@ fn discovery_under_a_restricted_stack_finds_only_what_it_may_read() {
     })]);
     let (floor, env) = (Floor::default(), EnvVars::new());
     let at = CwdPath::new(work.clone()).unwrap();
-    let all = discover_all(&work, &config, &mut boot(&grants, &floor, &env, &at));
+    let all = discover_all(&work, Some(&config), &mut boot(&grants, &floor, &env, &at));
     let names: Vec<_> = all.iter().map(|found| found.name.as_str()).collect();
     assert_eq!(names, ["alpha"]);
 }

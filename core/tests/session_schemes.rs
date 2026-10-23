@@ -5,7 +5,9 @@
 //! bindings (and the alias arms' schemes on the persistent handler frames),
 //! so run *N+1*'s check sees them.  The harness mirrors the REPL loop in
 //! `ral/src/repl/exec.rs`: `check` seeds `compile_and_typecheck` from the
-//! live `session_schemes()`, and `run` drives the public `run` door.
+//! live `session_schemes()`, and `run` drives the public `run` entry.
+
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 mod common;
 
@@ -21,7 +23,7 @@ fn shell() -> Shell {
     common::prelude_shell()
 }
 
-/// One REPL run through the public `run` door, which checks `src`
+/// One REPL run through the public `run` entry, which checks `src`
 /// against the live session before evaluating it.  Panics on parse / type
 /// failure — callers that expect a clean run pick source that compiles;
 /// callers probing an *eval* failure get the body's `Settled` back.

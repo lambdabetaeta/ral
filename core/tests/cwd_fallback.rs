@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 //! A shell is constructed at a working directory, and the process cwd is one
 //! only while the OS can name it: a removed directory gives none, so a front

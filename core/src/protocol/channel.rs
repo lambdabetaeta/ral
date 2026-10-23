@@ -9,6 +9,7 @@
 //! a stream for an address — the one question that would expose the pretence.
 
 use super::Frame;
+use crate::sync::LockExt as _;
 use std::io;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -49,13 +50,16 @@ impl WireChannel {
     /// # Errors
     /// Returns the socket error if the loopback pair cannot be established.
     #[cfg(all(windows, test))]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:wire-pair-windows] the Windows twin of `process::cloexec_socketpair` ([silent:cloexec-socketpair]): the same one-connection-for-a-process-tree, spelled as a loopback bind-connect-accept because Windows has no socketpair(2). No outside name is reached (the port is ephemeral and the peer is this process), so it is silent for the same reason its Unix hemisphere is."
-    )]
     pub(crate) fn pair() -> io::Result<(Self, Self)> {
-        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
-        let a = std::net::TcpStream::connect(listener.local_addr()?)?;
+        use crate::site::{Silent, site};
+        let listener = site!(
+            Silent::WirePairWindows,
+            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        )?;
+        let a = site!(
+            Silent::WirePairWindows,
+            std::net::TcpStream::connect(listener.local_addr()?)
+        )?;
         let (b, _peer) = listener.accept()?;
         a.set_nodelay(true)?;
         b.set_nodelay(true)?;
@@ -171,14 +175,14 @@ pub(crate) enum WriteError {
     Severed,
 }
 
-/// The one write door under the severance law: write `frame`, and if the
+/// The one write under the severance law: write `frame`, and if the
 /// write fails, record it through `record` and shut the channel down before
 /// the lock is released.
 ///
 /// Both ends of the protocol pass through here — the front-end's
 /// `write_through` records a `Severed` cause, the engine's `engine_write`
 /// raises its fault flag — so the ordering the law states is enforced once
-/// rather than restated at each door. What it buys: nothing can append a
+/// rather than restated at each end. What it buys: nothing can append a
 /// fresh frame after a truncated one, and no window exists in which the
 /// record still calls an already-shut socket healthy.
 ///
@@ -187,26 +191,24 @@ pub(crate) enum WriteError {
 /// [`WriteError::Unencodable`] with the wire still whole, for the writer to
 /// answer where it stands.
 ///
-/// Deliberately outside [`LockExt`](crate::sync::LockExt)'s recover-poison
-/// policy: a panic between `put` and `shutdown` can leave a partial
-/// frame on the socket that neither `record` nor a shutdown has sealed off,
-/// and letting the next writer resume into that torn stream is worse than
+/// Taken with [`lock_strict`](crate::sync::LockExt::lock_strict), the
+/// poison-keeping policy: a panic between `put` and `shutdown` can leave a
+/// partial frame on the socket that neither `record` nor a shutdown has sealed
+/// off, and letting the next writer resume into that torn stream is worse than
 /// the panic propagating; a poisoned channel must stay poisoned.
 ///
 /// # Errors
 /// Returns why the frame did not cross, so a caller that must react further —
 /// the heartbeat's `Ping` arm breaking its loop — can, without severing again.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "the wire writer: a panic between put and shutdown leaves a partial frame on the socket that neither the severance record nor shutdown has sealed off, so a recovered guard would append the next frame onto a torn one"
-)]
 pub(crate) fn write_or_sever(
     ch: &Mutex<WireChannel>,
     frame: &Frame,
     record: impl FnOnce(&io::Error),
 ) -> Result<(), WriteError> {
     let encoded = crate::frame::encode(frame).map_err(WriteError::Unencodable)?;
-    let mut guard = ch.lock().unwrap();
+    let mut guard = ch
+        .lock_strict()
+        .expect("a poisoned wire channel stays poisoned");
     guard.put(&encoded).map_err(|e| {
         record(&e);
         guard.shutdown();

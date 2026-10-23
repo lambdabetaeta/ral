@@ -2,15 +2,17 @@
 //! channel — the sealed engine seed and the engine wire in
 //! [`crate::protocol::channel`].
 
-use crate::path::shown;
+use crate::own::OwnDir;
+use crate::path::{Visibility, XdgKind, shown};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::io::{self, Read, Write};
+use std::path::PathBuf;
 
 /// Checked before the body is allocated, so no peer names a huge buffer.
 const MAX_FRAME_LEN: u32 = 256 * 1024 * 1024;
 
-/// The frame fuse, stated once and judged by both doors: the encoder refuses a
+/// The frame fuse, stated once and judged by both ends: the encoder refuses a
 /// frame past it, with a sentence, before a byte is written, so the wire stays
 /// whole; the reader still severs on an oversize frame, a peer protocol
 /// violation.
@@ -98,54 +100,25 @@ fn decode_body<T: DeserializeOwned>(body: &[u8]) -> io::Result<T> {
         .and_then(|value| de.end().map(|()| value))
     {
         Ok(value) => Ok(value),
-        Err(e) => {
-            let path = std::env::temp_dir().join(format!(
-                "ral-frame-{}-{}.json",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_nanos()),
-            ));
-            let _ = dump_frame(&path, body);
-            Err(io::Error::other(format!(
-                "{e} (raw frame written to {})",
-                shown(&path)
-            )))
-        }
+        Err(e) => Err(io::Error::other(match dump_frame(body) {
+            Ok(path) => format!("{e} (raw frame written to {})", shown(&path)),
+            Err(dump) => format!("{e} (raw frame not kept: {dump})"),
+        })),
     }
 }
 
-/// Owner-only, not the umask default: a frame body is unredacted payload.
-#[cfg(unix)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:frame-dump] frame codec: writes a post-mortem frame dump for debugging a frame IPC channel; an IPC diagnostic artifact, not turn-time model data I/O, raises no surface card."
-)]
-fn dump_frame(path: &std::path::Path, body: &[u8]) -> io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(body)
-}
-
-#[cfg(not(unix))]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:frame-dump-nonunix] frame codec: writes a post-mortem frame dump for debugging a frame IPC channel; an IPC diagnostic artifact, not turn-time model data I/O, raises no surface card."
-)]
-fn dump_frame(path: &std::path::Path, body: &[u8]) -> io::Result<()> {
-    std::fs::write(path, body)
+/// The body kept in the program's state directory under a fresh name, and
+/// where it is.  Owner-only, not the umask default: a frame body is
+/// unredacted payload.
+fn dump_frame(body: &[u8]) -> io::Result<PathBuf> {
+    let state = OwnDir::xdg("ral", XdgKind::State)?;
+    let (name, mut file) = state.create_fresh("frame-", ".json", Visibility::Secret)?;
+    file.write_all(body)?;
+    Ok(state.path().join(name))
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 
@@ -187,10 +160,10 @@ mod tests {
         );
     }
 
-    /// Both doors judge a body by the one fuse, so an oversized frame fails
+    /// Both ends judge a body by the one fuse, so an oversized frame fails
     /// at the writer rather than killing the peer that reads it.
     #[test]
-    fn the_fuse_is_the_same_on_both_doors() {
+    fn the_fuse_is_the_same_at_both_ends() {
         assert_eq!(fuse(MAX_FRAME_LEN as usize).unwrap(), MAX_FRAME_LEN);
         let err = fuse(MAX_FRAME_LEN as usize + 1).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
@@ -269,18 +242,25 @@ mod tests {
     fn decode_failure_dump_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
 
-        let mut framed = Vec::new();
-        put(&mut framed, &encode(&"not a number").unwrap()).unwrap();
-        let mut reader = std::io::Cursor::new(framed);
-        let err = read_frame::<_, u32>(&mut reader).unwrap_err();
+        let state = OwnDir::for_test("frame-dump").unwrap();
+        let base = crate::path::utf8(state.path()).unwrap();
+        let err = crate::test_env::with_var("XDG_STATE_HOME", Some(base), || {
+            let mut framed = Vec::new();
+            put(&mut framed, &encode(&"not a number").unwrap()).unwrap();
+            let mut reader = std::io::Cursor::new(framed);
+            read_frame::<_, u32>(&mut reader).unwrap_err()
+        });
 
         let message = err.to_string();
         let path = message
             .rsplit_once("written to ")
             .and_then(|(_, tail)| tail.strip_suffix(')'))
             .expect("error names the dump path");
+        assert!(
+            std::path::Path::new(path).starts_with(state.path()),
+            "the dump lands in the state directory: {path}"
+        );
         let mode = std::fs::metadata(path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "dump must not be group/world-readable");
-        let _ = std::fs::remove_file(path);
     }
 }

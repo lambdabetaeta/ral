@@ -61,7 +61,7 @@ static LANGUAGE_DOCS: &[(&str, &str)] = &[
          A grant may contain `exec`, `fs`, `net`, `editor`, and `shell`. Omitted fields inherit their surrounding authority. A written field restricts it, nested grants intersect, and no grant can restore authority withheld outside it. `grant [] { body }` changes nothing. Work spawned inside inherits the active grant.\n\n\
          The outer brackets are syntax, not a collection literal: write the option names there, with no bound bundle or spread (`grant $caps { ... }` is a parse error). Option values may be computed; a misspelled option is a static error. `[]` is the empty option set; `[:]` names no options either. The capability fields also describe the record an exarch sub-agent's `grant: `restrict` takes.\n\n\
          `exec` is `[allow: targets, deny: targets]`; once present, only allowed targets may run and any deny wins. A target is a bare command (`name git), one executable at a place (`cwd tools/lint), or every executable under a place or selector (`dir `cwd tools, `dir `path, `dir `system, or a package manager such as `dir `rustup or `dir `homebrew). There is no argument filtering.\n\n\
-         `fs` is `[read: places, write: places, deny: places]`; `write` also permits reading, and `deny` wins. A present `fs` table grants no unlisted reads or writes. Places are tagged anchors: `absolute /path, `cwd relative, `home relative, `tempdir relative, `gitdir relative, and `xdg-config relative, `xdg-data relative, `xdg-cache relative, `xdg-state relative, or `xdg-bin relative. Relative anchors and symlinks are resolved when the grant begins.\n\n\
+         `fs` is `[read: places, write: places, deny: places]`; `write` also permits reading, and `deny` wins. A present `fs` table grants no unlisted reads or writes. Places are tagged anchors: `absolute /path, `cwd relative, `home relative, `tempdir relative, `scratch relative, `gitdir relative, and `xdg-config relative, `xdg-data relative, `xdg-cache relative, `xdg-state relative, or `xdg-bin relative. Relative anchors and symlinks are resolved when the grant begins.\n\n\
          Write `net: `offline` to deny child networking. `editor` is a list drawn from `read, `write, and `tui. `shell` is a list drawn from `chdir and `detach. Lists are sets. An empty written list withholds every verb in that dimension; `shell: [`chdir]` withholds `detach`.\n\n\
          Allow named commands and system executables, exclude `rm` and `.git`, and write only under `build`:\n  grant [\n    exec: [allow: [`name git, `name rg, `dir `system], deny: [`name rm]],\n    fs: [read: [`cwd .], write: [`cwd build], deny: [`cwd .git]],\n    net: `offline,\n    editor: [`read, `write, `tui],\n    shell: [`chdir],\n  ] {\n    rg TODO src\n  }\n\n\
          Compute a path while keeping the option names explicit; `.` names an anchor itself:\n  let subtree = 'src'\n  grant [fs: [read: [`cwd $subtree]], net: `offline] {\n    from-string < \"$subtree/lib.rs\"\n  }",
@@ -588,7 +588,7 @@ mod tests {
         );
     }
 
-    /// [`Runtime::install_library_docs`] is the one door onto
+    /// [`Runtime::install_library_docs`] is the one way onto
     /// `runtime.library_docs`.
     #[test]
     fn installed_library_docs_surface_in_help_and_explain() {

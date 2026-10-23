@@ -387,11 +387,7 @@ struct ComPort {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: test scaffolding names the literal paths a document would carry; \
-              no shell, no run, no card."
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use serde_json::Value;

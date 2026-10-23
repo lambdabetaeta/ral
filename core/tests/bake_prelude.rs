@@ -6,6 +6,8 @@
 //! they reach every top-level `let`, and that the checked pass's interior
 //! annotations (`Capture`, a pipeline's yield) land on the baked tree.
 
+#![allow(clippy::disallowed_methods, reason = "test code")]
+
 mod common;
 
 use ral_core::ir::{CompKind, Phrase, Toplevel};

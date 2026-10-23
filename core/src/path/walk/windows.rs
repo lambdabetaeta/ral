@@ -12,6 +12,8 @@ use super::{
     Access, Child, EntryName, Held, Kind, ObjectId, RootName, Seen, Sharing, Stat, Step, Visibility,
 };
 use crate::path::shown;
+use crate::path::site::{Silent, Surface};
+use crate::site::site;
 use cap_fs_ext::OpenOptionsFollowExt;
 use cap_primitives::fs::{FollowSymlinks, OpenOptions, OpenOptionsExt};
 use std::ffi::{OsStr, OsString, c_void};
@@ -20,35 +22,38 @@ use std::io;
 use std::marker::PhantomData;
 use std::mem::offset_of;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::path::PathBuf;
+use std::os::windows::io::{AsRawHandle, FromRawHandle};
+use std::path::{Path, PathBuf};
 use std::ptr::null;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::vec::IntoIter;
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
-    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
-    NtCreateFile, SYMLINK_FLAG_RELATIVE,
+    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT,
+    FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile, SYMLINK_FLAG_RELATIVE,
 };
 use windows_sys::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, ERROR_NO_MORE_FILES,
-    ERROR_NOT_SUPPORTED, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE, OBJ_CASE_INSENSITIVE,
-    RtlNtStatusToDosError, STATUS_SUCCESS, UNICODE_STRING,
+    ERROR_NOT_SUPPORTED, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, NTSTATUS,
+    OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError, STATUS_SUCCESS, UNICODE_STRING,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN,
     FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_DISPOSITION_FLAG_DELETE,
+    FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_WRITE, FILE_ID_BOTH_DIR_INFO, FILE_ID_EXTD_DIR_INFO,
     FILE_ID_INFO, FILE_INFO_BY_HANDLE_CLASS, FILE_LIST_DIRECTORY, FILE_NAME_INFO,
     FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     FILE_STANDARD_INFO, FILE_TRAVERSE, FILE_WRITE_DATA, FileAttributeTagInfo, FileBasicInfo,
-    FileDispositionInfo, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
-    FileIdExtdDirectoryInfo, FileIdExtdDirectoryRestartInfo, FileIdInfo, FileNormalizedNameInfo,
-    FileRenameInfoEx, FileStandardInfo, GetDriveTypeW, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, GetFinalPathNameByHandleW, MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
-    ReOpenFile, SYNCHRONIZE, SetFileInformationByHandle, VOLUME_NAME_GUID,
+    FileDispositionInfo, FileDispositionInfoEx, FileIdBothDirectoryInfo,
+    FileIdBothDirectoryRestartInfo, FileIdExtdDirectoryInfo, FileIdExtdDirectoryRestartInfo,
+    FileIdInfo, FileNormalizedNameInfo, FileRenameInfoEx, FileStandardInfo, GetDriveTypeW,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
+    MAXIMUM_REPARSE_DATA_BUFFER_SIZE, ReOpenFile, SYNCHRONIZE, SetFileInformationByHandle,
+    VOLUME_NAME_GUID,
 };
 use windows_sys::Win32::System::IO::{DeviceIoControl, IO_STATUS_BLOCK};
 use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
@@ -183,21 +188,20 @@ pub(super) fn reopen_shared(f: &File, access: u32) -> io::Result<File> {
 /// Whether the object `f` holds is on a local fixed volume: the volume's GUID
 /// path asked of the handle, then that volume's drive type.  A share has no
 /// GUID path, so it is not local, nor is a volume that cannot be named.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-volume] asks a held handle for the GUID path of its volume, to say whether the volume is local; the handle's own answer, no name is resolved"
-)]
 pub(super) fn is_local(f: &File) -> bool {
     let mut path = vec![0u16; 512];
     let len = loop {
         let capacity = u32::try_from(path.len()).expect("a path buffer is under four gibibytes");
         // SAFETY: `f` is a live handle, and `path` is `capacity` units long.
         let len = unsafe {
-            GetFinalPathNameByHandleW(
-                f.as_raw_handle(),
-                path.as_mut_ptr(),
-                capacity,
-                VOLUME_NAME_GUID,
+            site!(
+                Silent::WalkVolume,
+                GetFinalPathNameByHandleW(
+                    f.as_raw_handle(),
+                    path.as_mut_ptr(),
+                    capacity,
+                    VOLUME_NAME_GUID,
+                )
             )
         } as usize;
         match len {
@@ -224,12 +228,11 @@ pub(super) fn is_local(f: &File) -> bool {
 
 /// The root a walk descends from, held without delete sharing, with its own
 /// normalized path and volume recorded.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-root] Opens a drive, share or volume root as a directory handle, the root every walk descends from: path resolution, not the model's data I/O."
-)]
 pub(super) fn open_root(root: &RootName) -> io::Result<Held> {
-    let file = cap_primitives::fs::open_ambient_dir(&root.0, cap_primitives::ambient_authority())?;
+    let file = site!(
+        Silent::WalkRoot,
+        cap_primitives::fs::open_ambient_dir(&root.0, cap_primitives::ambient_authority())
+    )?;
     let info = DirInfo {
         path: normalized(&file)?,
         volume: seen(&file)?.id.volume,
@@ -251,10 +254,6 @@ pub(super) fn open_root(root: &RootName) -> io::Result<Held> {
 ///
 /// # Errors
 /// `PermissionDenied` for a directory the user may not traverse; the open's.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-step] Opens one component relative to a held directory and never follows it, to reach the object a grant will judge: path resolution, not the model's data I/O; the card belongs to the site that then opens the leaf."
-)]
 fn open_entry(dir: &File, name: &OsStr, sharing: Sharing) -> io::Result<File> {
     const LEAF: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
     let open = |access, share| {
@@ -264,7 +263,11 @@ fn open_entry(dir: &File, name: &OsStr, sharing: Sharing) -> io::Result<File> {
             .share_mode(share)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .follow(FollowSymlinks::No);
-        cap_primitives::fs::open(dir, name.as_ref(), &options)
+        let name: &Path = name.as_ref();
+        site!(
+            Silent::WalkStep,
+            cap_primitives::fs::open(dir, name, &options)
+        )
     };
     match sharing {
         Sharing::Leaf => open(FILE_READ_ATTRIBUTES, LEAF),
@@ -515,10 +518,6 @@ pub(super) fn seen(f: &File) -> io::Result<Seen> {
 
 /// A link's target, read from the reparse buffer of the handle that opened
 /// it.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-link-read] Reads a link's target through the handle that opened it, to splice into the remaining name: path resolution, not data I/O."
-)]
 pub(super) fn read_link(link: &File) -> io::Result<PathBuf> {
     let mut buf = Buf::new(MAXIMUM_REPARSE_DATA_BUFFER_SIZE as usize);
     let mut written = 0u32;
@@ -607,10 +606,6 @@ fn rights(access: Access) -> u32 {
 /// again; a reparse point that names no path, a cloud placeholder, is
 /// instead opened by `name` under `dir` and verified against the held
 /// handle's identity.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[surface:walk-reopen] The one open of a held leaf, derived from its handle so no name is resolved twice.  Every caller surfaces it, each in its own way: a redirect's card is fused on by the frame that wrapped the locate, exarch's readers speak their own card, and a write's before- and after-images ride the card of the operation that asked for them."
-)]
 pub(super) fn derive(
     leaf: &File,
     dir: &File,
@@ -626,71 +621,43 @@ pub(super) fn derive(
     options
         .access_mode(rights(access))
         .follow(FollowSymlinks::No);
-    let file = cap_primitives::fs::open(dir, name.as_os_str().as_ref(), &options)?;
+    let path: &Path = name.as_os_str().as_ref();
+    let file = site!(
+        Surface::Reopen,
+        cap_primitives::fs::open(dir, path, &options)
+    )?;
     if ObjectId::of(&file)? != ObjectId::of(leaf)? {
         return Err(moved(name));
     }
     Ok(file)
 }
 
-/// The options of a data open of `access`, never following.
-fn data_options(access: Access) -> OpenOptions {
-    let mut options = OpenOptions::new();
-    match access {
-        Access::Read => options.read(true),
-        Access::Append => options.append(true),
-        Access::Write => options.write(true),
+/// The security descriptor `visibility` asks of a file it makes: the
+/// owner-only one for `Secret`, none for the others, which inherit the
+/// directory's ACL.
+fn descriptor_for(visibility: Visibility) -> io::Result<Option<owner_only::OwnerOnly>> {
+    match visibility {
+        Visibility::Secret => owner_only::OwnerOnly::new().map(Some),
+        Visibility::Public | Visibility::Private => Ok(None),
     }
-    .follow(FollowSymlinks::No);
-    options
 }
 
-/// The entry `name` made exclusively for `access`: what a leaf absent at the
-/// walk becomes.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[surface:walk-create] Creates an absent leaf exclusively beside the directory the walk holds, so a file that appeared since the walk is refused, never written.  The write that follows surfaces it."
-)]
-pub(super) fn create(
-    dir: &File,
-    name: &EntryName,
-    access: Access,
-    _visibility: Visibility,
-) -> io::Result<File> {
-    let mut options = data_options(access);
-    options.create_new(true);
-    cap_primitives::fs::open(dir, name.as_os_str().as_ref(), &options)
-}
-
-/// A fresh sibling, read and write, that no one else has, with `DELETE`
-/// access, which renaming it by handle needs.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[surface:walk-stage] The atomic `>` staging create: a fresh exclusive sibling in the target's own directory, holding the write until the rename publishes it.  A sub-step of the write site; the reported write is the operation's surface."
-)]
-pub(super) fn create_sibling(dir: &File, name: &EntryName) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE)
-        .follow(FollowSymlinks::No);
-    cap_primitives::fs::open(dir, name.as_os_str().as_ref(), &options)
-}
-
-/// Make the directory `name` in `dir`: `NtCreateFile` with `RootDirectory`
-/// the held handle, so the entry lands under it whatever its path is, a share
-/// or a volume with no drive letter included.  The handle it opens is closed
-/// at once; the caller steps onto the name.
+/// The entry `name` of `dir` made by `call`, an `NtCreateFile` with
+/// `RootDirectory` the held handle, so the entry lands under it whatever its
+/// path is, a share or a volume with no drive letter included.  `call` is
+/// handed what the function takes: the handle to fill, the attributes naming
+/// the entry (with `descriptor`, where there is one, as its security), and the
+/// status block; it answers the status.  Each caller makes the call itself, so
+/// each is its own site.
 ///
 /// # Errors
 /// `AlreadyExists` where the name is taken; the create's.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-mkdir] Makes an absent entry of a held directory, which the caller judged as the absent leaf it is; the directory is then stepped onto."
-)]
-pub(super) fn mkdir(dir: &File, name: &EntryName, _visibility: Visibility) -> io::Result<()> {
+fn made_under(
+    dir: &File,
+    name: &EntryName,
+    descriptor: Option<&owner_only::OwnerOnly>,
+    call: impl FnOnce(*mut HANDLE, *const OBJECT_ATTRIBUTES, *mut IO_STATUS_BLOCK) -> NTSTATUS,
+) -> io::Result<File> {
     let mut units: Vec<u16> = name.as_os_str().encode_wide().collect();
     let bytes = u16::try_from(units.len() * size_of::<u16>())
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidFilename))?;
@@ -704,55 +671,164 @@ pub(super) fn mkdir(dir: &File, name: &EntryName, _visibility: Visibility) -> io
         RootDirectory: dir.as_raw_handle(),
         ObjectName: &raw const object,
         Attributes: OBJ_CASE_INSENSITIVE,
-        SecurityDescriptor: null(),
+        SecurityDescriptor: descriptor.map_or(null(), owner_only::OwnerOnly::as_ptr),
         SecurityQualityOfService: null(),
     };
     let mut handle = INVALID_HANDLE_VALUE;
     let mut block = IO_STATUS_BLOCK::default();
-    // SAFETY: `dir` is a live handle, and `attributes` names `object`, whose
-    // buffer `units` holds, `bytes` long; all outlive the call, which fills
-    // `handle` and `block`.
-    let status = unsafe {
-        NtCreateFile(
-            &raw mut handle,
-            FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-            &raw const attributes,
-            &raw mut block,
-            null(),
-            FILE_ATTRIBUTE_NORMAL,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            FILE_CREATE,
-            FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
-            null(),
-            0,
-        )
-    };
+    let status = call(&raw mut handle, &raw const attributes, &raw mut block);
     if status != STATUS_SUCCESS {
         // SAFETY: a plain conversion of a status code.
         let code = unsafe { RtlNtStatusToDosError(status) };
         return Err(io::Error::from_raw_os_error(code.cast_signed()));
     }
-    // SAFETY: `handle` is a fresh handle this call owns.
-    drop(unsafe { OwnedHandle::from_raw_handle(handle) });
-    Ok(())
+    // SAFETY: `handle` is a fresh handle the call filled, and this owns it.
+    Ok(unsafe { File::from_raw_handle(handle) })
 }
 
-/// Rename `sibling`, the staged object, over the entry `to` of `dir`, by its
-/// handle: `FileRenameInfoEx` with `RootDirectory` the held directory, so the
-/// rename lands in it whatever its name now is, replacing the target and
-/// leaving a handle on it open.  The sibling's name is not asked.  A volume
-/// or host that refuses the class fails the write with that error; nothing
-/// falls back to a rename by name.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[surface:walk-publish] The atomic `>` commit step: rename the staged sibling over the target's name within the one directory handle.  The write surface fires when the write settles, committed once this returns Ok."
-)]
-pub(super) fn rename_over(
+/// What a created file asks beyond its `rights`: the synchronize right its
+/// synchronous handle needs, and the attributes right a stat of it needs, as
+/// `CreateFileW` adds both.
+const MADE: u32 = SYNCHRONIZE | FILE_READ_ATTRIBUTES;
+
+/// Every sharing a file made here allows, as `std` opens one.
+const SHARED: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+
+/// The entry `name` made exclusively for `access`: what a leaf absent at the
+/// walk becomes.  `FILE_CREATE` fails on a taken name, a link included, which
+/// `FILE_OPEN_REPARSE_POINT` keeps from being followed.  A `Secret` file is
+/// made with the owner-only descriptor, so it never exists under the
+/// directory's inherited ACL.
+pub(super) fn create(
     dir: &File,
-    sibling: &File,
-    _from: &EntryName,
-    to: &EntryName,
-) -> io::Result<()> {
+    name: &EntryName,
+    access: Access,
+    visibility: Visibility,
+) -> io::Result<File> {
+    let descriptor = descriptor_for(visibility)?;
+    made_under(
+        dir,
+        name,
+        descriptor.as_ref(),
+        |handle, attributes, block| {
+            // SAFETY: `made_under` hands the call a handle and a status block to
+            // fill and attributes that name the entry under `dir`, all of which
+            // outlive it.
+            unsafe {
+                site!(
+                    Surface::Create,
+                    NtCreateFile(
+                        handle,
+                        rights(access) | MADE,
+                        attributes,
+                        block,
+                        null(),
+                        FILE_ATTRIBUTE_NORMAL,
+                        SHARED,
+                        FILE_CREATE,
+                        FILE_NON_DIRECTORY_FILE
+                            | FILE_SYNCHRONOUS_IO_NONALERT
+                            | FILE_OPEN_REPARSE_POINT,
+                        null(),
+                        0,
+                    )
+                )
+            }
+        },
+    )
+}
+
+/// A fresh sibling, read and write, that no one else has, with `DELETE`
+/// access, which renaming it by handle needs; made as [`create`] makes a file.
+pub(super) fn create_sibling(
+    dir: &File,
+    name: &EntryName,
+    visibility: Visibility,
+) -> io::Result<File> {
+    let descriptor = descriptor_for(visibility)?;
+    made_under(
+        dir,
+        name,
+        descriptor.as_ref(),
+        |handle, attributes, block| {
+            // SAFETY: as in `create`.
+            unsafe {
+                site!(
+                    Surface::Stage,
+                    NtCreateFile(
+                        handle,
+                        GENERIC_READ | GENERIC_WRITE | DELETE | MADE,
+                        attributes,
+                        block,
+                        null(),
+                        FILE_ATTRIBUTE_NORMAL,
+                        SHARED,
+                        FILE_CREATE,
+                        FILE_NON_DIRECTORY_FILE
+                            | FILE_SYNCHRONOUS_IO_NONALERT
+                            | FILE_OPEN_REPARSE_POINT,
+                        null(),
+                        0,
+                    )
+                )
+            }
+        },
+    )
+}
+
+/// Make the directory `name` in `dir` ([`made_under`]).  The handle it opens
+/// is closed at once; the caller steps onto the name.  The directory inherits
+/// the held one's ACL, whatever the visibility.
+///
+/// # Errors
+/// `AlreadyExists` where the name is taken; the create's.
+pub(super) fn mkdir(dir: &File, name: &EntryName, _visibility: Visibility) -> io::Result<()> {
+    made_under(dir, name, None, |handle, attributes, block| {
+        // SAFETY: as in `create`.
+        unsafe {
+            site!(
+                Silent::WalkMkdir,
+                NtCreateFile(
+                    handle,
+                    FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                    attributes,
+                    block,
+                    null(),
+                    FILE_ATTRIBUTE_NORMAL,
+                    SHARED,
+                    FILE_CREATE,
+                    FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+                    null(),
+                    0,
+                )
+            )
+        }
+    })
+    .map(drop)
+}
+
+/// `error`, with what `class` needs said where the volume or the OS refuses it
+/// as an invalid parameter, which is how a class they lack answers.
+fn class_refused(error: io::Error, what: &str, class: &str) -> io::Error {
+    if error.raw_os_error() == i32::try_from(ERROR_INVALID_PARAMETER).ok() {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "{what} needs {class}, which Windows 10 1809 and NTFS or ReFS answer ({error})"
+            ),
+        )
+    } else {
+        error
+    }
+}
+
+/// Rename the object `handle` holds to the entry `to` of `dir`:
+/// `FileRenameInfoEx` with `RootDirectory` the held directory, so the rename
+/// lands in it whatever its name now is, replacing the target and leaving a
+/// handle on it open.  `handle` needs `DELETE` access.  A volume or host that
+/// refuses the class fails with that error, said as `what` needs it; nothing
+/// falls back to a rename by name.
+fn rename_by_handle(handle: &File, dir: &File, to: &EntryName, what: &str) -> io::Result<()> {
     let name: Vec<u16> = to.as_os_str().encode_wide().collect();
     let name_bytes = name.len() * size_of::<u16>();
     let mut buf = Buf::new(size_of::<FILE_RENAME_INFO>() + name_bytes);
@@ -771,25 +847,85 @@ pub(super) fn rename_over(
         );
     }
     let size = buf.size();
-    // SAFETY: `sibling` is a live handle, and `info` is the struct the class
+    // SAFETY: `handle` is a live handle, and `info` is the struct the class
     // names, `size` bytes of it.
     let ok = unsafe {
-        SetFileInformationByHandle(sibling.as_raw_handle(), FileRenameInfoEx, info.cast(), size)
+        SetFileInformationByHandle(handle.as_raw_handle(), FileRenameInfoEx, info.cast(), size)
     };
     if ok == 0 {
-        let error = io::Error::last_os_error();
-        return Err(
-            if error.raw_os_error() == i32::try_from(ERROR_INVALID_PARAMETER).ok() {
-                io::Error::new(
-                    error.kind(),
-                    format!(
-                        "the atomic write needs FileRenameInfoEx, which Windows 10 1809 and NTFS or ReFS answer ({error})"
-                    ),
-                )
-            } else {
-                error
-            },
-        );
+        return Err(class_refused(
+            io::Error::last_os_error(),
+            what,
+            "FileRenameInfoEx",
+        ));
+    }
+    Ok(())
+}
+
+/// Rename `sibling`, the staged object, over the entry `to` of `dir`, by its
+/// handle ([`rename_by_handle`]).  The sibling's name is not asked.
+pub(super) fn rename_over(
+    dir: &File,
+    sibling: &File,
+    _from: &EntryName,
+    to: &EntryName,
+) -> io::Result<()> {
+    rename_by_handle(sibling, dir, to, "the atomic write")
+}
+
+/// The handle the walk holds on the entry, which Windows acts through.  A
+/// Windows leaf that is present is always held.
+fn held(leaf: Option<&File>) -> io::Result<&File> {
+    leaf.ok_or_else(|| io::Error::other("the walk holds no handle on the entry"))
+}
+
+/// Rename the entry the walk holds by `leaf` to `to` in `dir`, over whatever
+/// `to` is: `leaf` reopened with `DELETE`, which a held leaf shares, then
+/// renamed as a staged sibling is ([`rename_by_handle`]).  `from` is not
+/// asked: no name is resolved.
+pub(super) fn rename(
+    dir: &File,
+    leaf: Option<&File>,
+    _from: &EntryName,
+    to: &EntryName,
+) -> io::Result<()> {
+    let renamed = reopen_shared(held(leaf)?, DELETE)?;
+    rename_by_handle(&renamed, dir, to, "the rename")
+}
+
+/// Remove the entry the walk holds by `leaf`, by its handle: reopened with
+/// `DELETE`, which a held leaf shares, then marked for deletion with POSIX
+/// semantics, so its name goes at once, whoever else still has it open, and a
+/// read-only entry goes too.  A directory goes only once it is empty.  `dir`,
+/// `name` and `kind` are not asked: no name is resolved.
+pub(super) fn remove(
+    _dir: &File,
+    leaf: Option<&File>,
+    _name: &EntryName,
+    _kind: Kind,
+) -> io::Result<()> {
+    let doomed = reopen_shared(held(leaf)?, DELETE)?;
+    let info = FILE_DISPOSITION_INFO_EX {
+        Flags: FILE_DISPOSITION_FLAG_DELETE
+            | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
+            | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+    };
+    // SAFETY: `doomed` is a live handle, and `info` is the struct the class
+    // names, of the size the call is told.
+    let ok = unsafe {
+        SetFileInformationByHandle(
+            doomed.as_raw_handle(),
+            FileDispositionInfoEx,
+            (&raw const info).cast(),
+            u32::try_from(size_of::<FILE_DISPOSITION_INFO_EX>()).expect("an info struct is small"),
+        )
+    };
+    if ok == 0 {
+        return Err(class_refused(
+            io::Error::last_os_error(),
+            "the removal",
+            "FileDispositionInfoEx",
+        ));
     }
     Ok(())
 }
@@ -797,10 +933,6 @@ pub(super) fn rename_over(
 /// Mark the staged `sibling` for deletion by its own handle: it was created
 /// with `DELETE` access, and its name goes when the handle closes.  No name
 /// is resolved.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-abandon] Reasoned-silent rollback of the atomic `>`: discard the staged sibling, by its own handle, for a write that will not land.  The aborted write is the surface; this removal raises none of its own."
-)]
 pub(super) fn discard(_dir: &File, sibling: &File, _name: &EntryName) -> io::Result<()> {
     let info = FILE_DISPOSITION_INFO { DeleteFile: true };
     // SAFETY: `sibling` is a live handle, and `info` is the struct the class
@@ -821,34 +953,29 @@ pub(super) fn discard(_dir: &File, sibling: &File, _name: &EntryName) -> io::Res
 
 /// Whether the entry `name` of `dir` may be opened for writing, following a
 /// link.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-access] The `is-writable` predicate: whether a write open would be granted, by name under the held directory.  A permission predicate, not turn-time model data I/O."
-)]
 pub(super) fn is_writable(dir: &File, name: &OsStr) -> bool {
-    cap_primitives::fs::access(
-        dir,
-        name.as_ref(),
-        cap_primitives::fs::AccessType::Access(cap_primitives::fs::AccessModes {
-            readable: false,
-            writable: true,
-            executable: false,
-        }),
-        FollowSymlinks::Yes,
+    let name: &Path = name.as_ref();
+    site!(
+        Silent::WalkAccess,
+        cap_primitives::fs::access(
+            dir,
+            name,
+            cap_primitives::fs::AccessType::Access(cap_primitives::fs::AccessModes {
+                readable: false,
+                writable: true,
+                executable: false,
+            }),
+            FollowSymlinks::Yes,
+        )
     )
     .is_ok()
 }
 
 /// The discard device, by its fixed name.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:discard-device] `\\\\.\\NUL` opened by its fixed name: no bytes reach or leave the model, and no grant region can contain a device that is not a file."
-)]
 pub(super) fn open_discard() -> io::Result<File> {
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(r"\\.\NUL")
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true);
+    site!(Silent::DiscardDevice, &options => open(r"\\.\NUL"))
 }
 
 /// One entry of a directory pass: its name, what it answered, and its id.
@@ -959,10 +1086,6 @@ pub(super) struct Lister<'a> {
 /// 128-bit id, or refuses the class, the pass is made again as
 /// `FileIdBothDirectoryInfo`, whose 64-bit id is the one [`ObjectId::of`]
 /// falls back to.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-list] `list-dir`'s enumeration of a held directory, relative to its own handle.  A listing predicate, not turn-time model data I/O: the caller still judges each entry and raises no card."
-)]
 pub(super) fn list(dir: &File) -> io::Result<Lister<'_>> {
     let reader = reopen(
         dir,
@@ -1015,5 +1138,179 @@ impl Iterator for Lister<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.entries.next()
+    }
+}
+
+/// The security descriptor of a file only its owner may reach: one entry
+/// granting the process's owner full control and nobody else anything, the
+/// DACL protected so the parent directory's inheritable entries are not merged
+/// in.  It rides in on the create's object attributes, so the file never
+/// exists, not even for an instant, under an inherited ACL.
+pub(super) mod owner_only {
+    use std::io;
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+    use windows_sys::Win32::Foundation::{ERROR_SUCCESS, FALSE, HANDLE, LocalFree, TRUE};
+    use windows_sys::Win32::Security::Authorization::{
+        EXPLICIT_ACCESS_W, GRANT_ACCESS, NO_MULTIPLE_TRUSTEE, SetEntriesInAclW, TRUSTEE_IS_SID,
+        TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
+    };
+    use windows_sys::Win32::Security::{
+        ACL, InitializeSecurityDescriptor, NO_INHERITANCE, PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED,
+        SECURITY_DESCRIPTOR, SetSecurityDescriptorControl, SetSecurityDescriptorDacl, TOKEN_QUERY,
+        TOKEN_USER, TokenUser,
+    };
+    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    /// The only revision Win32 defines (`winnt.h`), restated rather than
+    /// pulling in another `windows-sys` feature for one ABI constant.
+    const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
+
+    /// The current process's owner SID, in the layout `GetTokenInformation`
+    /// hands back: a `TOKEN_USER` followed inline by its SID bytes.
+    ///
+    /// The buffer counts `u64`s though the API counts bytes, because the
+    /// caller reads a pointer-leading `TOKEN_USER` back out of it. `Vec<u8>`
+    /// is byte-aligned *as a type*; counting in `u64` makes that read sound
+    /// by construction rather than by allocator luck.
+    pub(in crate::path::walk) fn current_process_owner() -> io::Result<Vec<u64>> {
+        use windows_sys::Win32::Security::GetTokenInformation;
+
+        let mut raw_token: HANDLE = std::ptr::null_mut();
+        // SAFETY: `GetCurrentProcess` returns a pseudo-handle needing no
+        // close; `raw_token` is an out-param this call fills on success.
+        let ok = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut raw_token) };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `OpenProcessToken` succeeded, so `raw_token` is an open
+        // handle that nothing else owns; the guard closes it exactly once, so
+        // the early returns below need no `CloseHandle` of their own.
+        let token = unsafe { OwnedHandle::from_raw_handle(raw_token) };
+
+        let mut needed: u32 = 0;
+        // SAFETY: a null buffer of zero length is the documented sizing
+        // query; `needed` is filled despite the expected failure.
+        unsafe {
+            GetTokenInformation(
+                token.as_raw_handle(),
+                TokenUser,
+                std::ptr::null_mut(),
+                0,
+                &raw mut needed,
+            );
+        }
+        if needed == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut buf = vec![0u64; (needed as usize).div_ceil(size_of::<u64>())];
+        // SAFETY: `buf` holds at least the `needed` bytes the sizing call
+        // reported, rounded up to whole `u64`s.
+        let ok = unsafe {
+            GetTokenInformation(
+                token.as_raw_handle(),
+                TokenUser,
+                buf.as_mut_ptr().cast(),
+                needed,
+                &raw mut needed,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(buf)
+    }
+
+    /// A single-ACE ACL granting the process owner full control and nobody
+    /// else anything. The caller owns the allocation and frees it once the
+    /// create has copied the descriptor into the new file object.
+    fn owner_only_acl() -> io::Result<*mut ACL> {
+        let owner_buf = current_process_owner()?;
+        // SAFETY: `owner_buf` holds a populated `TOKEN_USER` in a `u64`
+        // buffer, so aligned for it, and outlives every use of the `PSID`.
+        let owner_sid = unsafe { (*owner_buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+
+        let trustee = TRUSTEE_W {
+            pMultipleTrustee: std::ptr::null_mut(),
+            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_UNKNOWN,
+            // The trustee-by-SID form reinterprets this field as the PSID;
+            // both are raw `*mut _` here, so the cast preserves bits.
+            // `trustee_for` in ral-core's `sandbox::windows::dacl` does the same.
+            ptstrName: owner_sid.cast::<u16>(),
+        };
+        let ea = EXPLICIT_ACCESS_W {
+            grfAccessPermissions: FILE_ALL_ACCESS,
+            grfAccessMode: GRANT_ACCESS,
+            grfInheritance: NO_INHERITANCE,
+            Trustee: trustee,
+        };
+
+        let mut acl: *mut ACL = std::ptr::null_mut();
+        // SAFETY: `ea` outlives the call; a null prior ACL builds a fresh one
+        // holding only this entry, merging in nothing inherited.
+        let rc = unsafe { SetEntriesInAclW(1, &raw const ea, std::ptr::null(), &raw mut acl) };
+        if rc != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(rc.cast_signed()));
+        }
+        Ok(acl)
+    }
+
+    /// The descriptor and the ACL it points at, which this owns and frees.
+    pub(in crate::path::walk) struct OwnerOnly {
+        descriptor: SECURITY_DESCRIPTOR,
+        acl: *mut ACL,
+    }
+
+    impl OwnerOnly {
+        /// The owner-only descriptor, with `SE_DACL_PROTECTED` in force.
+        ///
+        /// # Errors
+        /// The OS's, as a token, an ACL or a descriptor refuses.
+        pub(in crate::path::walk) fn new() -> io::Result<Self> {
+            let mut owner = Self {
+                descriptor: SECURITY_DESCRIPTOR::default(),
+                acl: owner_only_acl()?,
+            };
+            let sd: PSECURITY_DESCRIPTOR = (&raw mut owner.descriptor).cast();
+            // SAFETY: `sd` is the descriptor `owner` holds, which
+            // `InitializeSecurityDescriptor` fills in place.
+            if unsafe { InitializeSecurityDescriptor(sd, SECURITY_DESCRIPTOR_REVISION) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: `sd` was just initialised; `owner.acl` is freed only
+            // when `owner` drops, after any create has copied the descriptor.
+            if unsafe { SetSecurityDescriptorDacl(sd, TRUE, owner.acl, FALSE) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // Protecting the DACL is what stops a create merging in the
+            // parent directory's inheritable ACEs.
+            // SAFETY: `sd` carries the DACL just attached above.
+            if unsafe { SetSecurityDescriptorControl(sd, SE_DACL_PROTECTED, SE_DACL_PROTECTED) }
+                == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(owner)
+        }
+
+        /// The descriptor, as the `SecurityDescriptor` of an object's
+        /// attributes; good as long as `self` is.
+        pub(in crate::path::walk) fn as_ptr(&self) -> *const SECURITY_DESCRIPTOR {
+            &raw const self.descriptor
+        }
+    }
+
+    impl Drop for OwnerOnly {
+        fn drop(&mut self) {
+            // SAFETY: `acl` came from `SetEntriesInAclW`, which allocates
+            // through `LocalAlloc`, and is freed here and nowhere else.  A
+            // create has copied the descriptor by the time this runs, so
+            // nothing reads it through the pointer.
+            unsafe {
+                LocalFree(self.acl.cast());
+            }
+        }
     }
 }

@@ -2,7 +2,6 @@
 //! severance codes.
 use super::*;
 
-#[allow(clippy::disallowed_methods, reason = "test scaffolding")]
 mod event_receiver_tests {
     use super::*;
 
@@ -11,7 +10,7 @@ mod event_receiver_tests {
         (EventReceiver::new(rx), tx)
     }
 
-    /// The stash precedence `recv` gives, proven on the non-blocking door.
+    /// The stash precedence `recv` gives, proven on the non-blocking path.
     #[test]
     fn try_recv_drains_the_stash_before_the_channel() {
         let (receiver, tx) = receiver();

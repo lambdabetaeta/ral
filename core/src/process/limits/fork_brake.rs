@@ -69,10 +69,7 @@ fn live_processes(capacity: libc::rlim_t) -> io::Result<libc::rlim_t> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 

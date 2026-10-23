@@ -5,11 +5,6 @@
 //! says nothing was left out.  `.jj` repositories are the one known
 //! difference, and the corpus has none.
 
-#![allow(
-    clippy::disallowed_methods,
-    reason = "[test] a corpus laid by name, and the walker it is held against"
-)]
-
 use super::tests::{lay, lexical, open, scope, tmp};
 use super::*;
 use crate::path::relative_key;
@@ -161,7 +156,6 @@ impl Corpus {
 }
 
 /// What `ignore` yields beneath `root`, by the names it reached them by.
-#[allow(clippy::disallowed_methods, reason = "[test] the walker held against")]
 fn theirs(root: &Path) -> BTreeSet<String> {
     let mut walker = ::ignore::WalkBuilder::new(root);
     walker.git_global(false);

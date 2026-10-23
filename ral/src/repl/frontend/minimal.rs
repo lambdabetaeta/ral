@@ -12,20 +12,21 @@ use ral_core::syntax::parser::needs_continuation;
 use ral_core::terminal;
 use rustyline::history::{FileHistory, History};
 use std::io::Write;
+use std::path::PathBuf;
 
 use super::super::prompt::PromptText;
 use super::{EditBuffer, Frontend, Read};
 
 pub(in crate::repl) struct MinimalFrontend {
     history: FileHistory,
-    path: Option<String>,
+    path: Option<PathBuf>,
 }
 
 impl MinimalFrontend {
-    pub(in crate::repl) fn new(path: Option<String>) -> Self {
+    pub(in crate::repl) fn new(path: Option<PathBuf>) -> Self {
         let mut history = FileHistory::new();
         if let Some(p) = &path {
-            let _ = history.load(p.as_ref());
+            let _ = history.load(p);
         }
         Self { history, path }
     }
@@ -131,9 +132,12 @@ impl Frontend for MinimalFrontend {
         let Some(path) = &self.path else {
             return Ok(());
         };
-        self.history
-            .append(path.as_ref())
-            .map_err(|e| format!("could not save history to {path}: {e}"))
+        self.history.append(path).map_err(|e| {
+            format!(
+                "could not save history to {}: {e}",
+                ral_core::path::shown(path)
+            )
+        })
     }
 }
 

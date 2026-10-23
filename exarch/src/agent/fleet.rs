@@ -36,13 +36,16 @@ use crate::provider::roles::Roles;
 use ral_core::capability::GrantStack;
 use ral_core::carrier::Severed;
 use ral_core::engine::EngineInstaller;
+use ral_core::own::OwnDir;
+#[cfg(test)]
+use ral_core::own::TestDir;
 use ral_core::process::{self, CancelCause};
 use ral_core::sync::{CondvarExt, LockExt};
 use ral_core::terminal::TerminalState;
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -83,9 +86,16 @@ pub(crate) struct Launch {
     pub fuel: u32,
     /// The egress verdict on hosted web search.
     pub search: bool,
-    /// Where `sessions/<id>/` hang.
-    pub sessions_root: PathBuf,
+    /// The run's directory: exarch's own, where the engine's captured output
+    /// and the lock live.
+    pub run_dir: OwnDir,
+    /// Where `sessions/<id>/` hang: under `run_dir`.
+    pub sessions_root: OwnDir,
     pub genesis: Option<Genesis>,
+    /// The directory a test launch's run has to itself, dropped with the
+    /// launch.
+    #[cfg(test)]
+    pub(crate) _scratch: Option<TestDir>,
 }
 
 /// What a fresh root's engine boots from; `None` on a wire host, which boots none.
@@ -114,12 +124,8 @@ impl Genesis {
 
 impl Launch {
     /// The run's directory, which `sessions_root` hangs in: exarch's own.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "path-form: exarch's own run directory above its own sessions directory, not a name any grant judges"
-    )]
-    pub(crate) fn run_dir(&self) -> Option<&Path> {
-        self.sessions_root.parent()
+    pub(crate) fn run_dir(&self) -> &OwnDir {
+        &self.run_dir
     }
 
     /// A fresh root's seat.
@@ -176,6 +182,7 @@ impl Launch {
     /// A launch with nothing granted and nothing to reach: what a fleet-level
     /// test's synthetic agents share.
     pub(crate) fn for_test() -> Self {
+        let scratch = OwnDir::for_test("launch").expect("a test run directory");
         Self {
             trunk: Trunk::Headless,
             allow_schedule: false,
@@ -195,8 +202,10 @@ impl Launch {
             caps: GrantStack::root(),
             fuel: 0,
             search: false,
-            sessions_root: PathBuf::new(),
+            run_dir: OwnDir::clone(&scratch),
+            sessions_root: scratch.make_dir("sessions").expect("a test sessions root"),
             genesis: None,
+            _scratch: Some(scratch),
         }
     }
 }
@@ -322,7 +331,7 @@ impl Fleet {
 
     /// Bring a newborn `agent` into the fleet under the name `claim` holds:
     /// hang it under its parent or push it onto [`Self::roots`]. Construction
-    /// is the only join door, and every name requires a claim.
+    /// is the only way to join, and every name requires a claim.
     ///
     /// # Errors
     /// [`Unborn::SessionDead`] when the parent is already terminated — a spawn
@@ -416,7 +425,7 @@ pub enum Unborn {
     SessionDead,
     /// Carries the offending name, so the caller can refuse didactically.
     NameTaken(String),
-    /// Carries [`check_name`]'s own sentence, so every door refuses in the
+    /// Carries [`check_name`]'s own sentence, so every caller refuses in the
     /// same words.
     NameMalformed(String),
 }

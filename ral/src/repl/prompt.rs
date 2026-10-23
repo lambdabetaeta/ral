@@ -15,7 +15,7 @@ use std::sync::Arc;
 use super::host::{Outcome, ReplHost};
 use super::plugin::{lock, manifest::HookEvent};
 
-/// The default prompt.  The boot door registers it as the `Session/"prompt"`
+/// The default prompt.  The boot builtin registers it as the `Session/"prompt"`
 /// hook; a failing prompt falls back to it directly.  The session survives a
 /// broken prompt: it is the place where the user rebinds the prompt to fix it.
 pub(super) const DEFAULT_PROMPT: &str = "❯ ";
@@ -146,7 +146,7 @@ mod tests {
     /// the session prompt, through the transport.
     fn render_src(src: &str) -> String {
         let src = src.to_owned();
-        let t = crate::repl::engine(crate::repl::prelude_runtime(), move |shell| {
+        let t = crate::repl::in_temp::engine(crate::repl::prelude_runtime(), move |shell| {
             let prompt = crate::repl::eval(shell, &src);
             shell
                 .register_hook(

@@ -1,7 +1,7 @@
 ---
 verified_at_commit: f0b81686
 verified_at_date: 2026-10-17
-anchors: [apply_profile, build_profile, Profile, emit_fs_restricted, emit_exec_rules, Clause, Filter, emit_ancestor_metadata, withheld_doors, rendered_ancestors, pinned_dirs, step]
+anchors: [apply_profile, build_profile, Profile, emit_fs_restricted, emit_exec_rules, Clause, Filter, emit_ancestor_metadata, withheld_services, rendered_ancestors, pinned_dirs, step]
 ---
 
 # The Seatbelt profile: an object policy in a name language
@@ -123,7 +123,7 @@ descendants, and `capability::deputy` names such folders
 
 **net.** Enforced by absence. The base admits `network-outbound` for nothing;
 only a grant that does not say ``net: `offline`` appends `macos-net.sbpl` — the wholesale `(allow network*)`,
-Seatbelt having no per-address rules, and the Mach doors that *are* the
+Seatbelt having no per-address rules, and the Mach services that *are* the
 network: configd (proxies, DNS servers), the dnssd port, trustd. That silence
 is what closes DNS: `getaddrinfo` reaches mDNSResponder over the UNIX socket
 `/private/var/run/mDNSResponder`, which Seatbelt gates as `network-outbound`,
@@ -144,7 +144,7 @@ beside `process-exec` since Seatbelt gates the two separately — with paths
 inlined at build time rather than passed as scalar `(param …)`s, a grant's
 admits being variable-length.
 
-- **Mach doors are named, never wholesale.** A Mach name is a door to a daemon
+- **Mach services are named, never wholesale.** A Mach name reaches a daemon
   that acts on your behalf *outside* the profile. Named: `com.apple.dyld`
   (dyld locates the shared cache through launchd; without it the child aborts
   before `main`), the notification center (libnotify, on the first
@@ -152,7 +152,7 @@ admits being variable-length.
   `~`, `whoami`, `id`), and the loggers (`os_log`; a denial is survivable, but
   every libSystem process hits it and would drown the denial log
   `sandbox::diag` reads). Withheld, each with its reason as *data* in
-  `withheld_doors` so the denial hint can quote it — a comment cannot reach the
+  `withheld_services` so the denial hint can quote it — a comment cannot reach the
   agent holding the EPERM, and a deliberate `no` read as an accident is chased
   instead of worked around: `launchservicesd` (and `lsd.*`) would spawn
   whatever `/usr/bin/open` names as an unconfined child of launchd — `open -a
@@ -164,7 +164,7 @@ admits being variable-length.
   securityd and, denied, fails as `ssl handshake -9808` and blames a missing
   revision; Apple's `curl` and `git` reach trust through trustd alone. So
   exarch tells cargo to fetch through the `git` binary
-  (`app::CONFINED_TOOL_SETTINGS`) rather than admit a door that hands the
+  (`app::CONFINED_TOOL_SETTINGS`) rather than admit a service that hands the
   agent the login keychain. `mac_profile_names_every_mach_service` holds the
   shape.
 - **`(allow signal (target same-sandbox))`** binds sending only: a timeout's
@@ -209,7 +209,7 @@ admits being variable-length.
 
 `sandbox::diag` turns a kernel denial into a hint per operand class — a path
 to `read`, `write` or `exec`, a network operand to the `net:` bit, a Mach or IPC
-operand to nothing, since a door is the base's to decide and no grant widens one
+operand to nothing, since a service is the base's to decide and no grant widens one
 ([[map/core/capabilities|capabilities]]).
 
 Entry has one diagnosis of its own. A lineage already inside a profile —

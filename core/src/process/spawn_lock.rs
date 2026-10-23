@@ -16,8 +16,9 @@
 //! side at once.
 //!
 //! The lock guards an `RwLock<()>`: poison carries no information, since there
-//! is no state to tear, so it goes through the workspace's poison door.
+//! is no state to tear, so it goes through the workspace's poison policy.
 
+use crate::site::{Silent, site};
 #[cfg(target_vendor = "apple")]
 use crate::sync::RwLockExt as _;
 
@@ -29,14 +30,10 @@ static LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
 ///
 /// # Errors
 /// Returns the pipe's own creation error.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:cloexec-pipe] the one door to a pipe; wraps os_pipe::pipe() under the spawn lock's shared side"
-)]
 pub fn cloexec_pipe() -> std::io::Result<(os_pipe::PipeReader, os_pipe::PipeWriter)> {
     #[cfg(target_vendor = "apple")]
     let _guard = LOCK.read_ignore_poison();
-    os_pipe::pipe()
+    site!(Silent::CloexecPipe, os_pipe::pipe())
 }
 
 /// A socketpair whose two ends are never open across an unsynchronised fork
@@ -45,34 +42,29 @@ pub fn cloexec_pipe() -> std::io::Result<(os_pipe::PipeReader, os_pipe::PipeWrit
 /// # Errors
 /// Returns the socketpair's own creation error.
 #[cfg(unix)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:cloexec-socketpair] the one door to a socketpair; wraps UnixStream::pair() under the spawn lock's shared side"
-)]
 pub fn cloexec_socketpair() -> std::io::Result<(
     std::os::unix::net::UnixStream,
     std::os::unix::net::UnixStream,
 )> {
     #[cfg(target_vendor = "apple")]
     let _guard = LOCK.read_ignore_poison();
-    std::os::unix::net::UnixStream::pair()
+    site!(
+        Silent::CloexecSocketpair,
+        std::os::unix::net::UnixStream::pair()
+    )
 }
 
-/// The fork door: the lock is held around `Command::spawn` and nothing else.
+/// The one fork: the lock is held around `Command::spawn` and nothing else.
 ///
 /// `.output()`/`.status()` are fork *plus wait-for-exit*, so a caller needing
 /// either must call this and wait outside it — see [`output`] and [`status`].
 ///
 /// # Errors
 /// Returns `Command::spawn`'s own error.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:spawn-door] the one fork door; every other production fork goes through this or the output/status helpers below"
-)]
 pub fn spawn(cmd: &mut std::process::Command) -> std::io::Result<std::process::Child> {
     #[cfg(target_vendor = "apple")]
     let _guard = LOCK.write_ignore_poison();
-    cmd.spawn()
+    site!(Silent::ForkSpawn, cmd => spawn())
 }
 
 /// `Command::output`, with the wait for exit outside the fork lock: stdout
@@ -92,10 +84,7 @@ pub fn output(cmd: &mut std::process::Command) -> std::io::Result<std::process::
 ///
 /// # Errors
 /// Returns `spawn`'s error, or the child's own wait error.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "`Command::status`'s own wait: a child nobody parks, so a stop is not a case here"
-)]
 pub fn status(cmd: &mut std::process::Command) -> std::io::Result<std::process::ExitStatus> {
-    spawn(cmd)?.wait()
+    let mut child = spawn(cmd)?;
+    site!(Silent::StatusWait, &mut child => wait())
 }

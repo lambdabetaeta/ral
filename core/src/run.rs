@@ -60,13 +60,13 @@ fn render_spanless(e: &Error) -> (String, i32) {
     (report.plain(), e.code())
 }
 
-// ── The run entry: one synchronous, runtime-agnostic host door ──────────────
+// ── The run entry: one synchronous, runtime-agnostic host entry ──────────────
 //
 // Hosts describe *policy*; core owns *resources*. The reduction primitive
-// behind the door is crate-private, so no host can start an unframed
+// behind the entry is crate-private, so no host can start an unframed
 // evaluation that would foreground or capture against a stale frame.
 
-/// The engine door for one run: the protocol [`Run`] plus the live,
+/// The engine entry for one run: the protocol [`Run`] plus the live,
 /// non-transportable handles the host lends it.
 ///
 /// Composition, not mirroring — a field added to [`Run`] reaches the engine
@@ -79,7 +79,7 @@ pub struct RunRequest {
     /// to; `None` drops a worker's surface.
     pub deferred: Option<Arc<dyn DeferredSink>>,
     /// Run-local enquiry desk. Same-thread children inherit it, as they do the
-    /// fork door below; deferred workers get neither.
+    /// fork handle below; deferred workers get neither.
     pub desk: Option<Desk>,
     /// How a forked session reaches this run's desk; `None` adopts none.
     pub fork: Option<Fork>,
@@ -87,7 +87,7 @@ pub struct RunRequest {
 
 impl From<Run> for RunRequest {
     /// A request lending the host's run nothing: no surface, deferred sink,
-    /// desk or fork door.
+    /// desk or fork handle.
     fn from(run: Run) -> Self {
         Self {
             run,
@@ -210,7 +210,7 @@ fn arm_wall(
 }
 
 impl Shell {
-    /// Run one whole [`Run`] synchronously and report it — the run door for a
+    /// Run one whole [`Run`] synchronously and report it — the run entry for a
     /// host with no run in hand and nothing to cancel it with but the session.
     ///
     /// Completion is *this call returning*, never a channel disconnecting: a
@@ -225,8 +225,8 @@ impl Shell {
 
     /// Run `req` with its frame under a scope the host minted with
     /// [`Shell::run_cancel_handle`] rather than under the session anchor — the
-    /// door a host takes when it must be able to cancel this run from another
-    /// thread, including before the run has begun.  [`Shell::run`] is this door
+    /// entry a host takes when it must be able to cancel this run from another
+    /// thread, including before the run has begun.  [`Shell::run`] is this entry
     /// with the anchor.
     ///
     /// A dispatch that asks for a trail (`req.run.trail: Some`) gets its
@@ -429,7 +429,7 @@ fn classify_ending(result: Settled<Value>, status: i32, compact: Option<FileId>)
     }
 }
 
-// ── The spine behind the door: compile, build, install, classify ────────────
+// ── The spine behind the entry: compile, build, install, classify ────────────
 
 /// Holds what a run takes on loan from the shell — the byte streams, the
 /// current scope, `session.root_file`, `local.audit.call_site` — and restores it on `Drop`, so
@@ -650,5 +650,5 @@ impl Shell {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "test scaffolding")]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 pub(crate) mod tests;

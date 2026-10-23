@@ -3,7 +3,7 @@
 //! surface core itself should not own.
 
 use crate::card::{Diff, encode_edit};
-use crate::skill::{self, Doors as _};
+use crate::skill::{self, Judge as _};
 use grep::matcher::LineTerminator;
 use grep::regex::RegexMatcherBuilder;
 use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
@@ -414,7 +414,7 @@ const fn grep_name(hidden: bool) -> &'static str {
 /// streaming each file once.  Beneath `path` the walk skips hidden and
 /// ignored entries, or with `hidden` only `.git`, and never leaves `path`'s
 /// filesystem; `path` itself is always searched.  A file is read through the
-/// door on the object it names, binary detection quits at NUL, and a file
+/// guard on the object it names, binary detection quits at NUL, and a file
 /// whose read fails midway is noted on stderr and skipped; this is the one
 /// site both grep builtins compose over.  A hit names its file as its
 /// admitted [`Walk`] does.
@@ -680,7 +680,7 @@ fn surface_edit(mooring: &Mooring, path: &str, old: &str, new: &str) {
     }
 }
 
-/// The witness layer's shared read door, gating on the live grant as a `< path`
+/// The witness layer's shared read helper, gating on the live grant as a `< path`
 /// redirect would but staying in Rust, below the redirect frame — so each caller
 /// owns its own surface.  `tool` names the calling builtin in the error.  The
 /// text comes back decoded through its [`Eol`], which the writer re-encodes.
@@ -711,7 +711,7 @@ fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<(Eol, St
 
 /// `edit-replace PATH FROM TO` — replace the one literal occurrence of `FROM`, so
 /// 0 or >1 matches errors and leaves the file untouched.  Composed over the same
-/// doors as `edit-hash`: a silent read, then [`Shell::atomic_write`], surfacing
+/// helpers as `edit-hash`: a silent read, then [`Shell::atomic_write`], surfacing
 /// one whole-file diff.
 fn builtin_edit_replace(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let path = args[0].as_str("edit-replace")?;
@@ -984,7 +984,7 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
     }
     let cwd = shell.cwd();
     let config_dir = crate::app::EXARCH.xdg_dir(ral_core::path::XdgKind::Config);
-    for root in skill::skill_roots(&cwd, &config_dir) {
+    for root in skill::skill_roots(&cwd, config_dir.as_deref()) {
         let dir = root.join(name);
         let sk_md = dir.join("SKILL.md");
         // A root that lacks the skill, or may not be read, is not a miss for
@@ -1032,7 +1032,7 @@ fn builtin_skill_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
     let cwd = shell.cwd();
     let config_dir = crate::app::EXARCH.xdg_dir(ral_core::path::XdgKind::Config);
     let (mut entries, mut errors) = (Vec::new(), Vec::new());
-    for found in skill::discover_all(&cwd, &config_dir, shell) {
+    for found in skill::discover_all(&cwd, config_dir.as_deref(), shell) {
         match skill::parse_skill(&found) {
             Ok(s) => entries.push(format!("{}: {}", s.name, s.description)),
             Err(why) => errors.push(format!(
@@ -1133,4 +1133,5 @@ static EXARCH_BUILTINS_ARR: [BuiltinEntry; 11] = [
 pub static EXARCH_BUILTINS: &[BuiltinEntry] = &EXARCH_BUILTINS_ARR;
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

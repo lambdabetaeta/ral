@@ -15,6 +15,7 @@ mod lattice;
 mod table;
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod lattice_tests;
 
 pub use deputy::deputy_prefixes;

@@ -8,6 +8,9 @@
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
+use crate::site::site;
+
+use super::site::Silent;
 use super::{CwdPath, EntryName, LexicalPath, NotAnEntryName, PathRules};
 
 /// Whether `path` is absolute under `rules`: answers both whether `path` is
@@ -638,7 +641,7 @@ pub(crate) fn is_working_directory(path: impl AsRef<OsStr>) -> bool {
 /// canonicalising it anchors it to whichever drive the process happens to be
 /// running from — while a grant prefix naming the root means "everywhere",
 /// the ceiling a policy attenuates down from.  The two readings part company
-/// on exactly this path and nowhere else, so the doors that must not anchor
+/// on exactly this path and nowhere else, so the callers that must not anchor
 /// it ask here rather than matching a root apiece.
 ///
 /// Byte logic, as [`parse_bytes`] is,
@@ -799,14 +802,13 @@ pub(crate) fn names_a_dir(path: &Path) -> bool {
 /// that descends or climbs it by its components would move it there, onto
 /// a path the kernel never reads it as; such steps refuse it.  Never true
 /// off Windows, where every absolute path opens with the one root.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "path-form: the one reading of a head std finds no prefix in"
-)]
 pub(crate) fn is_unparsed_head(path: &Path) -> bool {
     PathRules::HOST == PathRules::Windows
         && is_absolute(path)
-        && !matches!(path.components().next(), Some(Component::Prefix(_)))
+        && !matches!(
+            site!(Silent::UnparsedHead, path => components()).next(),
+            Some(Component::Prefix(_))
+        )
 }
 
 /// A subpath that would not join *onto* its base but replace it, as
@@ -929,27 +931,29 @@ pub fn strip_appended_suffix(path: &Path, ext: &str) -> Option<PathBuf> {
 /// Callers feeding the result to a `*_in(parent)` API
 /// (`tempfile::Builder::tempfile_in`, opening the directory to fsync it)
 /// therefore don't choke on a bare filename.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "path-form: `.` stands in lexically for an empty parent"
-)]
 pub(crate) fn parent_or_cwd(path: &Path) -> &Path {
-    path.parent()
+    site!(Silent::ParentOrCwd, path => parent())
         .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
+        .unwrap_or_else(|| site!(Silent::ParentOrCwd, Path::new(".")))
+}
+
+/// `path` with its last name dropped, by spelling alone.
+///
+/// No link is seen through and no `..` folded, so it is the parent only of a
+/// path whose names are the ones on disk.  For a program's own layout (the
+/// folder a file it writes sits in, its install tree, a run folder it made),
+/// never for a name a grant judges.
+#[must_use]
+pub fn spelled_parent(path: &Path) -> Option<&Path> {
+    site!(Silent::SpelledParent, path => parent())
 }
 
 /// `shown` relative to `root`, its names slash-joined: a manifest's key,
 /// lexical history that needs no live root to be compared.  `None` where
 /// `shown` is not beneath `root` or a name is not UTF-8.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "path-form: a spelling's names, the one slash-joined key over traversal names"
-)]
 pub fn relative_key(shown: &LexicalPath, root: &LexicalPath) -> Option<String> {
-    let rest = shown.as_path().strip_prefix(root.as_path()).ok()?;
-    let names: Option<Vec<&str>> = rest
-        .components()
+    let rest = site!(Silent::RelativeKey, shown.as_path() => strip_prefix(root.as_path())).ok()?;
+    let names: Option<Vec<&str>> = site!(Silent::RelativeKey, rest => components())
         .map(|c| match c {
             Component::Normal(name) => utf8(name.as_ref()).ok(),
             _ => None,
@@ -981,46 +985,32 @@ impl std::error::Error for NotUtf8 {}
 
 /// `path`'s native spelling as text, when it is UTF-8.
 ///
-/// The one door for a path that must travel as a string and be lifted back
+/// The one conversion for a path that must travel as a string and be lifted back
 /// unchanged, so a name no string can hold is refused where it enters, not
 /// lost to a lossy decode or a serializer's late refusal.
 ///
 /// # Errors
 /// [`NotUtf8`], naming `path`.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "native: the UTF-8 check itself; the text is the path's native spelling, lifted back unchanged"
-)]
 pub fn utf8(path: &Path) -> Result<&str, NotUtf8> {
-    path.to_str().ok_or_else(|| NotUtf8(path.to_path_buf()))
+    site!(Silent::Utf8, path => to_str()).ok_or_else(|| NotUtf8(path.to_path_buf()))
 }
 
 /// Final component of `path`, falling back to `path` itself when there is no
 /// file name or it is not UTF-8.  For callers that key on a command basename
 /// (exit hints, login-shell detection).
 pub fn basename(path: &str) -> &str {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "path-form: this is the `basename` helper the ban names"
-    )]
-    let name = Path::new(path).file_name();
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "native: a name that is not UTF-8 falls back to the whole path"
-    )]
-    let name = name.and_then(|n| n.to_str());
+    let name = site!(Silent::Basename, Path::new(path)).file_name();
+    let name = name.and_then(|n| site!(Silent::Basename, n => to_str()));
     name.unwrap_or(path)
 }
 
 /// The extension of `path`'s final component, as `Path::extension` reads it
 /// under the host's rules: after its last `.`, `None` for a name with none
 /// or a dotfile such as `.pdf`.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "path-form: an extension, read lexically off the name, and a `str` again since it is a slice of one"
-)]
 pub fn extension(path: &str) -> Option<&str> {
-    Path::new(path).extension().and_then(|e| e.to_str())
+    site!(Silent::Extension, Path::new(path))
+        .extension()
+        .and_then(|e| site!(Silent::Extension, e => to_str()))
 }
 
 /// `rel`, a name given relative to a directory, as the entry names it
@@ -1043,12 +1033,11 @@ pub fn descendant(rel: &str) -> Result<Vec<EntryName>, NotAnEntryName> {
 pub(crate) fn proper_ancestors<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     let mut out = std::collections::BTreeSet::new();
     for path in paths {
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "path-form: ancestors are a lexical walk up the name; nothing is resolved"
-        )]
-        for ancestor in Path::new(path).ancestors().skip(1) {
-            if ancestor == Path::new("/") || ancestor.as_os_str().is_empty() {
+        let path = site!(Silent::ProperAncestors, Path::new(path));
+        for ancestor in site!(Silent::ProperAncestors, path => ancestors()).skip(1) {
+            if ancestor == site!(Silent::ProperAncestors, Path::new("/"))
+                || ancestor.as_os_str().is_empty()
+            {
                 break;
             }
             out.insert(super::shown(ancestor));
@@ -1058,10 +1047,7 @@ pub(crate) fn proper_ancestors<'a>(paths: impl IntoIterator<Item = &'a str>) -> 
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] fixtures compare literal paths"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use HeadKind::*;

@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 //! Byte-pipeline boundaries that need the harness: what a forced thunk reads
 //! from the process's own stdin, and what stays on standard error.  The rest
 //! of the capture and value-edge rules are goldens in `tests/lang`

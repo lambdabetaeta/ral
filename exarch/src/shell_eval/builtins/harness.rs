@@ -3,10 +3,10 @@
 //! them. A returning agent's reply is a tag of `exarch-agents`
 //! (`` `reply ``), not a builtin of its own — the fleet is one family.
 //!
-//! Each door reads the model's argument as a [`Request`] before it enquires,
+//! Each builtin reads the model's argument as a [`Request`] before it enquires,
 //! so a malformed call never reaches the host, and is refused in the words
 //! the desk would use. `exarch-agents`'s `` `start `` tag forks this shell and
-//! tells the host how to reach the fork, which is what the run's [`Fork`] door
+//! tells the host how to reach the fork, which is what the run's [`Fork`]
 //! says: an in-process host adopts a bequest parked in the run's nursery,
 //! since the reentrancy law bars a desk handler from holding `&mut Shell` to
 //! fork one itself; a host across a wire is named a sealed bequest, and builds
@@ -106,7 +106,7 @@ fn agents(args: &[Value], mooring: &Mooring, shell: &Shell) -> Settled<Value> {
 }
 
 /// Fork this shell and enquire `request` of the fork's receipt, through the
-/// door this run's [`Fork`] names: parked in process, or sealed across a
+/// route this run's [`Fork`] names: parked in process, or sealed across a
 /// wire.
 fn fork_then_enquire(
     grant: SpawnGrant,
@@ -129,11 +129,11 @@ fn fork_then_enquire(
     ask(AGENTS, request(claim), mooring, shell)
 }
 
-/// A family door's scheme.  `first_order` refuses a block or handle at any
+/// A family builtin's scheme.  `first_order` refuses a block or handle at any
 /// depth of the argument, so the type variables the argument mentions are
 /// data and its row variables deep; `answers` are the result's, which the
-/// door admits against what it sent.
-fn door(data: &[TyVar], answers: &[TyVar], rows: &[RowVar], ty: Ty) -> Scheme {
+/// boundary admits against what it sent.
+fn family_scheme(data: &[TyVar], answers: &[TyVar], rows: &[RowVar], ty: Ty) -> Scheme {
     let vars: Vec<_> = data
         .iter()
         .map(|&v| (v, Kind::DATA))
@@ -146,7 +146,7 @@ fn door(data: &[TyVar], answers: &[TyVar], rows: &[RowVar], ty: Ty) -> Scheme {
 /// `exarch-agents :: ∀β:data α ρ1^d ρ2^d ρ3^d ρ4^d. <list | start [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2, model: Variant ρ3] | message [to: Str, text: Str] | cancel Str | reply β | read Str | ρ4> → F α`
 ///
 /// The outer tag row is open (`ρ4`) so an unrecognised tag reaches the
-/// runtime door that names the legal ones, rather than dying as a
+/// runtime decoder that names the legal ones, rather than dying as a
 /// row-unification mismatch.
 ///
 /// The answer is not one fixed shape: `` `list `` answers the roster
@@ -155,7 +155,7 @@ fn door(data: &[TyVar], answers: &[TyVar], rows: &[RowVar], ty: Ty) -> Scheme {
 /// and `` `read `` the value a
 /// descendant handed up, whose shape this call cannot know — so `α` is left
 /// free rather than fixed to one of these. This is the
-/// `` `exarch-pins `read `` / `from-json` move ([`scheme_pins`]): the door
+/// `` `exarch-pins `read `` / `from-json` move ([`scheme_pins`]): the boundary
 /// admits whichever shape [`Request::owed`] names for the tag it sent.
 ///
 /// `start`'s and `message`'s record rows are closed because a record
@@ -165,7 +165,7 @@ fn door(data: &[TyVar], answers: &[TyVar], rows: &[RowVar], ty: Ty) -> Scheme {
 /// open, because a literal tag infers its own open row: closing them would
 /// make `` `bogus `` a bare row-mismatch diagnostic that never reaches the
 /// vocabulary's decoders, which enumerate the legal labels.
-/// `reply`'s `β` is likewise trusted first-order data, checked at the door
+/// `reply`'s `β` is likewise trusted first-order data, checked at the boundary
 /// rather than by the row.
 fn scheme_agents(u: &mut Unifier) -> Scheme {
     let type_row = u.fresh_row_var();
@@ -174,7 +174,7 @@ fn scheme_agents(u: &mut Unifier) -> Scheme {
     let tag_row = u.fresh_row_var();
     let reply_ty = u.fresh_tyvar();
     let answer_ty = u.fresh_tyvar();
-    door(
+    family_scheme(
         &[reply_ty],
         &[answer_ty],
         &[type_row, grant_row, model_row, tag_row],
@@ -210,15 +210,15 @@ fn scheme_agents(u: &mut Unifier) -> Scheme {
 /// `exarch-schedules :: ∀ρ1 ρ2. <list | add [trigger: Variant ρ1, label: Str, prompt: Str] | remove Str | ρ2> → F [[label: Str, trigger: Str, next-s: Int, fires: Int]]`
 ///
 /// Same shape as [`scheme_agents`]: an open outer tag row so an unknown tag
-/// reaches the door naming the three legal ones, a closed `add` record row
+/// reaches the decoder naming the three legal ones, a closed `add` record row
 /// so a missing or misspelled field is static, and an open `trigger` row
-/// inside it so an unrecognised trigger reaches the door, which names the
+/// inside it so an unrecognised trigger reaches the decoder, which names the
 /// legal shapes. `label` is a plain `Str` — every schedule names
 /// itself, so there is no shape left to leave open.
 fn scheme_schedules(u: &mut Unifier) -> Scheme {
     let trigger_row = u.fresh_row_var();
     let tag_row = u.fresh_row_var();
-    door(
+    family_scheme(
         &[],
         &[],
         &[trigger_row, tag_row],
@@ -246,10 +246,10 @@ fn scheme_schedules(u: &mut Unifier) -> Scheme {
 /// `exarch-pins :: ∀α ρ1^d ρ2^d. <set [key: Str, body: <| ρ1>] | clear Str | read Str | list | ρ2> → F α`
 ///
 /// Same shape as [`scheme_agents`]: the outer tag row is open (`ρ2`) so an
-/// unrecognised tag reaches the door, and `set`'s record row is closed since
+/// unrecognised tag reaches the decoder, and `set`'s record row is closed since
 /// a record literal infers an exact one. `body` is an open variant, the card
 /// type `surface_op` takes, with a deep row: the label check stays
-/// `Card::decode`'s, so one door owns it. `` `read ``'s
+/// `Card::decode`'s, so one decoder owns it. `` `read ``'s
 /// answer is `α`, the `from-json`/`` `read `` precedent
 /// ([`ral_core::typecheck::builtins::scheme::from_json`]): trusted, not
 /// checked, since only the desk's own decoder can judge whether the card
@@ -258,7 +258,7 @@ fn scheme_pins(u: &mut Unifier) -> Scheme {
     let card_row = u.fresh_row_var();
     let tag_row = u.fresh_row_var();
     let answer_ty = u.fresh_tyvar();
-    door(
+    family_scheme(
         &[],
         &[answer_ty],
         &[card_row, tag_row],
@@ -289,17 +289,17 @@ fn scheme_pins(u: &mut Unifier) -> Scheme {
 /// `exarch-context :: ∀ρ. <survey | evict [from: Int, to: Int, note: Str] | ρ> → F [rows: [[from: Int, to: Int, role: Str, kind: Str, label: Str, bytes: Int]], total-bytes: Int]`
 ///
 /// Same shape as [`scheme_agents`] and [`scheme_schedules`]: an open outer
-/// tag row so an unknown tag reaches the door naming the two legal ones.
+/// tag row so an unknown tag reaches the decoder naming the two legal ones.
 ///
 /// `evict`'s record is closed, `note` included: a residue stands on its note.
-/// The door refuses an empty, oversized, or multi-line one.
+/// The decoder refuses an empty, oversized, or multi-line one.
 ///
 /// One answer for both tags: an edit changes what is addressable, so the
 /// survey the transition leaves behind is what the next edit must be written
 /// against.
 fn scheme_context(u: &mut Unifier) -> Scheme {
     let tag_row = u.fresh_row_var();
-    door(
+    family_scheme(
         &[],
         &[],
         &[tag_row],
@@ -313,7 +313,7 @@ fn scheme_context(u: &mut Unifier) -> Scheme {
 /// `exarch-transcript :: ∀α ρ. <index | read [turns: [Int]] | grep [pattern: Str, turns: <all | only [Int]>] | ρ> → F α`
 ///
 /// The outer tag row is open (`ρ`) so an unrecognised tag reaches the
-/// runtime door that names the three legal ones, rather than dying as a
+/// runtime decoder that names the three legal ones, rather than dying as a
 /// row-unification mismatch.
 ///
 /// Each tag answers its own shape — a listing, one record per turn a read
@@ -329,7 +329,7 @@ fn scheme_context(u: &mut Unifier) -> Scheme {
 fn scheme_transcript(u: &mut Unifier) -> Scheme {
     let tag_row = u.fresh_row_var();
     let answer_ty = u.fresh_tyvar();
-    door(
+    family_scheme(
         &[],
         &[answer_ty],
         &[tag_row],
@@ -655,8 +655,5 @@ complete diagnostic or script, and check current files before reusing old code."
 pub static HARNESS_BUILTINS: &[BuiltinEntry] = &HARNESS_BUILTINS_ARR;
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

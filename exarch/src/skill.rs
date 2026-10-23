@@ -28,19 +28,19 @@ pub struct Skill {
     pub description: String,
 }
 
-/// The two skill roots in precedence order: the cwd's `.exarch/skills/`, then
-/// the user's `$XDG_CONFIG_HOME/exarch/skills/`.
-pub(crate) fn skill_roots(cwd: &Path, config_dir: &Path) -> [PathBuf; 2] {
-    [
-        cwd.join(".exarch").join("skills"),
-        config_dir.join("skills"),
-    ]
+/// The skill roots in precedence order: the cwd's `.exarch/skills/`, then the
+/// user's `$XDG_CONFIG_HOME/exarch/skills/` where the host names a config
+/// directory.
+pub(crate) fn skill_roots(cwd: &Path, config_dir: Option<&Path>) -> Vec<PathBuf> {
+    std::iter::once(cwd.join(".exarch").join("skills"))
+        .chain(config_dir.map(|dir| dir.join("skills")))
+        .collect()
 }
 
 /// Who judges a skill read: a shell at call time, where a refusal is the
 /// trail's, and at boot a stack and the floor of the runtime the boot built.
-pub(crate) trait Doors {
-    /// `path` as the spelling the doors walk.
+pub(crate) trait Judge {
+    /// `path` as the spelling the judge walks.
     fn anchor(&self, path: &Path) -> LexicalPath;
     /// The regular file `rp` names, held for reading; `None` where it is
     /// absent, not a file, or refused.
@@ -54,7 +54,7 @@ fn is_file(held: &Located<Judged<Reading>>) -> bool {
     held.stat().is_some_and(|stat| stat.kind == Kind::File)
 }
 
-impl Doors for Shell {
+impl Judge for Shell {
     fn anchor(&self, path: &Path) -> LexicalPath {
         Self::anchor(self, path)
     }
@@ -72,7 +72,7 @@ impl Doors for Shell {
 
 /// The boot's reader: no shell exists yet, so the stack this agent will run
 /// under judges every read of the boot, with the floor of the runtime the
-/// boot built, and the doors agree by construction.
+/// boot built, and the two judges agree by construction.
 pub(crate) struct Boot<'a> {
     grants: &'a GrantStack,
     floor: &'a Floor,
@@ -112,7 +112,7 @@ impl<'a> Boot<'a> {
     }
 }
 
-impl Doors for Boot<'_> {
+impl Judge for Boot<'_> {
     fn anchor(&self, path: &Path) -> LexicalPath {
         self.resolver.anchor(path)
     }
@@ -135,13 +135,17 @@ pub(crate) struct Found {
     pub file: Located<Judged<Reading>>,
 }
 
-/// Every readable skill directory under both roots; on a collision the cwd
+/// Every readable skill directory under the roots; on a collision the cwd
 /// root shadows the config one.  Reads no file contents.
-pub(crate) fn discover_all(cwd: &Path, config_dir: &Path, doors: &mut impl Doors) -> Vec<Found> {
+pub(crate) fn discover_all(
+    cwd: &Path,
+    config_dir: Option<&Path>,
+    judge: &mut impl Judge,
+) -> Vec<Found> {
     let mut seen = HashSet::new();
     let mut skills = Vec::new();
     for root in skill_roots(cwd, config_dir) {
-        for found in scan_dir(&root, doors) {
+        for found in scan_dir(&root, judge) {
             if seen.insert(found.name.clone()) {
                 skills.push(found);
             }
@@ -155,7 +159,11 @@ pub(crate) fn discover_all(cwd: &Path, config_dir: &Path, doors: &mut impl Doors
 /// Runs once at boot, before a `Shell` exists, so it judges by the session's
 /// whole grant stack ([`Boot`]), the one this agent will run under, as
 /// `skill-list` and `skill` judge by the shell.
-pub(crate) fn discover_metadata(cwd: &Path, config_dir: &Path, boot: &mut Boot<'_>) -> Vec<Skill> {
+pub(crate) fn discover_metadata(
+    cwd: &Path,
+    config_dir: Option<&Path>,
+    boot: &mut Boot<'_>,
+) -> Vec<Skill> {
     discover_all(cwd, config_dir, boot)
         .iter()
         .filter_map(|found| parse_skill(found).ok())
@@ -164,7 +172,7 @@ pub(crate) fn discover_metadata(cwd: &Path, config_dir: &Path, boot: &mut Boot<'
 
 /// Parse a `SKILL.md`'s frontmatter, accepting it only when the declared `name`
 /// is valid and matches its directory.  I/O-free by design: callers do their own
-/// read, keeping the startup door and the surface turn-time door distinct
+/// read, keeping the startup judge and the surface turn-time one distinct
 /// while sharing this parse.
 fn skill_from_frontmatter(raw: &str, dir_name: &str) -> Result<Skill, String> {
     let matter = Matter::<YAML>::new();
@@ -219,8 +227,8 @@ pub(crate) fn read_skill_body(found: &Found) -> Result<String, String> {
 
 /// The skills of `root`: each entry that is a directory holding a `SKILL.md`,
 /// found by walking it as the entry's name says, so a link to one is one.
-fn scan_dir(root: &Path, doors: &mut impl Doors) -> Vec<Found> {
-    let Some(dir) = doors.dir(&doors.anchor(root)) else {
+fn scan_dir(root: &Path, judge: &mut impl Judge) -> Vec<Found> {
+    let Some(dir) = judge.dir(&judge.anchor(root)) else {
         return Vec::new();
     };
     let Ok(entries) = dir.read_dir() else {
@@ -231,7 +239,7 @@ fn scan_dir(root: &Path, doors: &mut impl Doors) -> Vec<Found> {
         .filter(|name| !name.starts_with('.'))
         .filter_map(|name| {
             let dir = root.join(&name);
-            let file = doors.file(&doors.anchor(&dir.join("SKILL.md")))?;
+            let file = judge.file(&judge.anchor(&dir.join("SKILL.md")))?;
             Some(Found { name, dir, file })
         })
         .collect()
@@ -265,4 +273,5 @@ pub(crate) fn valid_skill_name(name: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

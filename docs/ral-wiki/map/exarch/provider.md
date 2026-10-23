@@ -11,7 +11,7 @@ or scripted `Backend`. The transcript owns
 history; the provider only sends bytes and parses replies. Invariants are
 local below the facade: `provider/identity.rs` owns selectable identity,
 `request.rs` per-request `ChatOptions` and tuning (`Tuning`, the
-`EFFORT_LADDER` rungs — the TUI keeps only the glyphs), `wire.rs` the one door
+`EFFORT_LADDER` rungs — the TUI keeps only the glyphs), `wire.rs` the one place
 that turns the transcript's `ChatMessage`s into an owned `genai::ChatRequest` (below),
 `transport.rs` credential binding and caching, `stream.rs` completion
 execution, `retry.rs` recovery timing, `usage.rs` accounting,
@@ -36,7 +36,7 @@ the flattened design never went wrong there.
 
 `provider/identity.rs` owns both, and the two newtypes that keep them apart:
 
-- `ServiceName` has two doors, because its sources differ in trust: the
+- `ServiceName` has two constructors, because its sources differ in trust: the
   built-in table is known good, a declaration is input. `declared` refuses an
   empty, colon-bearing, or control-bearing name, each with its own sentence.
   A declared name equal to a built-in's is refused at load, naming it: an
@@ -180,12 +180,13 @@ last reading, at `Allowance::percent` — the figure the card shows, so a
 warning and the card never disagree. Success responses carry usage too, but genai does not expose
 their headers; when it does, they are one more input to `settle`.
 
-On disk the login store is persisted through one door, `write_private`
-(`provider/secret_file.rs`), and the file is *born* owner-private: the Unix arm
-opens it mode `0600`; the Windows arm passes an owner-only,
-inheritance-protected DACL in the `SECURITY_ATTRIBUTES` of `CreateFileW`
-itself, so at no instant does the token file wear the parent directory's
-inherited ACL. The document holds the host id and an object keyed by the rendering of an
+On disk the login store is persisted through `OwnDir::store` with
+`Visibility::Secret` (`provider/oauth/mod.rs`): the file is replaced whole and
+atomically, and *born* owner-private whatever was there before. The Unix arm
+creates it mode `0600`; the Windows arm gives it an owner-only,
+inheritance-protected DACL at creation, so at no instant does the token file wear
+the parent directory's inherited ACL. A store that cannot be read is never
+written over: a failed read aborts the write and returns its error. The document holds the host id and an object keyed by the rendering of an
 `AccountId`, one entry per account; an entry whose key disagrees with its own
 fields is dropped with a warning rather than trusted, the key being an index
 and the fields the truth.
@@ -249,10 +250,9 @@ Each launch reads the vault once per key-bearing account:
   base profiles read the `` `xdg-config ``/`` `xdg-state `` places wholesale and would otherwise
   hand the agent the key that pays for its own turn — see
   [[invariants/a-grant-never-reaches-its-own-key|a-grant-never-reaches-its-own-key]].
-- `provider/secret_file.rs` — `write_private`, the owner-only writer the
-  `ChatGPT` token store and that fallback file share: one implementation of
-  the `0600`-at-`open` and owner-only-DACL-at-`CreateFileW` promise instead of
-  two copies.
+- the `ChatGPT` token store and that fallback file are both written through
+  `ral_core::own`'s `OwnDir::store` with `Visibility::Secret`: one implementation
+  of the owner-only promise, in the walk, instead of two copies.
 
 The store's mid-session mutators exist for an accounts screen: `known` (every
 account, bound or not, since one with no key is precisely the one a user has
@@ -273,7 +273,7 @@ derivation (`entries`) both products draw from: the source in force
 its key, the last four of a vault key the environment's outranks
 (`shadowed`), and the variable a key is read from. `wallet.rs`, above both
 `config` and `provider`, holds **`Wallet { keychain, declarations, label }`**:
-the one door through which a product changes its keys and declarations
+the one route through which a product changes its keys and declarations
 (`set_key`, `forget_key`, `add_endpoint`, `forget_endpoint`), each checking
 everything before writing anything, touching the vault with the store
 unlocked, and applying the change live through `Holdings::change`.
@@ -311,7 +311,7 @@ genai `Client`:
   access token as the bearer, read live from the shared cell so a mid-session
   refresh is picked up without rebuilding. There is no endpoint override and
   no extra header: requests go to genai's default, `api.openai.com/v1/responses`.
-  `refresh_cell_if_stale` is the common renewal door for inference and catalog
+  `refresh_cell_if_stale` is the common renewal path for inference and catalog
   requests, upserting just that account's entry. A refresh may rename the
   account — fresh claims update the handle's ingredients — but never re-keys
   it: the issued id is pinned to the current token's, since every map keys on
@@ -342,7 +342,7 @@ catalog fold, which writes the disk cache under its lock.
 **Lock discipline**, synod's own rule inherited: locked briefly, never across
 a network call, a picker frame, or a machine boot; and the converse, that a UI
 thread never holds either while waiting on an agent thread. `Bureau::admit` is
-the one door that takes both at once, store first. The `/model` overlay's
+the one call that takes both at once, store first. The `/model` overlay's
 `drive` therefore takes the catalog per fold — to open the `Listing`,
 to pump it, to record endpoints, to clone the fetch seam — and never around
 the fetch itself; `Bureau` carries `Arc<Bureau>` on `RootConfig` and from
@@ -388,7 +388,7 @@ disk-caches both paths:
   authenticated by their live OAuth cell after the common stale-token check;
   only entries whose `visibility` is `"list"` are kept, in server order, with
   each entry's `context_window`.
-- `Bureau::build` is the one door a selection passes, and takes a `Choice`:
+- `Bureau::build` is the one place a selection passes, and takes a `Choice`:
   an account, one of its models, and the `Via` it is served through, if any.
   It refuses a via on a service that does not route, or one naming an upstream
   the model's endpoints do not list; a via's window is the least its
@@ -405,7 +405,7 @@ disk-caches both paths:
   draws an unknown window as `?`.
 - `/login` admits an account mid-session through `provider::admit_login`,
   which runs `CredentialStore::add_oauth` inside `Holdings::change`: every
-  change to the store goes through that one door, which hands the catalog the
+  change to the store goes through that one route, which hands the catalog the
   store's fresh `Roster` (`ModelCatalog::set_roster`), so a key saved, a key
   forgotten and an endpoint withdrawn reach the listing as a login does.
   Re-login updates the cell in place; a login that has since learnt its email
@@ -586,7 +586,7 @@ panic (X8).
   account's listing reports none) for startup and picker decisions. Offline
   starts degrade to `—`.
 
-## The wire door
+## The wire request
 
 `provider/wire.rs` is the one place an owned `genai::ChatRequest` is built —
 [[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]] is the

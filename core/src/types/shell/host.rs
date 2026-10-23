@@ -61,6 +61,21 @@ impl Shell {
         self.session.exit_hints = Arc::new(hints);
     }
 
+    /// The spelling of the directory the session's front end made for it,
+    /// which a `scratch` place anchors to; `None` where it made none.
+    pub fn scratch(&self) -> Option<&str> {
+        self.session.scratch.as_deref()
+    }
+
+    /// Record `scratch`, the spelling of the directory the front end made for
+    /// the session, once, at boot: every child inherits it, so a grant frozen
+    /// anywhere in the session can name it.  The front end states it from its
+    /// own record of the directory, never from the overlay environment, which a
+    /// `within [env: …]` could redirect.
+    pub fn set_scratch(&mut self, scratch: impl Into<String>) {
+        self.session.scratch = Some(scratch.into());
+    }
+
     /// Terminal state probed once at startup (isatty / ANSI / mode bits).
     pub fn terminal(&self) -> TerminalState {
         self.io.terminal
@@ -144,7 +159,7 @@ impl Shell {
         self.local.workers.take_reap_notices()
     }
 
-    /// Arm settled-worker retention, in ral calls — the boot door beside
+    /// Arm settled-worker retention, in ral calls — the boot call beside
     /// [`Self::arm_binding_lease`].  An entry whose unclaimed result has sat
     /// settled a full `retention` of calls expires with a
     /// [`ReapCause::Retention`] notice; a host that never arms (the REPL) keeps

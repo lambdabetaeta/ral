@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 //! The path contracts at the shell boundary: an access is resolved as the
 //! kernel resolves it, a grant prefix is a logical spelling, and the root

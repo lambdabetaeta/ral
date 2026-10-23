@@ -2,11 +2,6 @@
 //! name the object takes, by the walk's own descriptor against the
 //! identity's reuse, and by position where the object is gone.
 
-#![allow(
-    clippy::disallowed_methods,
-    reason = "[test] fixtures build the tree the exclusion is asked about"
-)]
-
 use super::super::*;
 use super::unix::{entered, root, spelled};
 use super::{Around, LINK_READ};

@@ -4,7 +4,6 @@ use crate::tui::palette::{READ_W, content_w};
 use crate::tui::{rail, text};
 use std::path::PathBuf;
 
-#[allow(clippy::disallowed_methods, reason = "[test] a fixed fixture path")]
 fn sample(base: &'static str) -> SessionInfo<'static> {
     SessionInfo {
         system_size: 4096,

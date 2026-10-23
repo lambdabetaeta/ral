@@ -16,7 +16,9 @@ use icu_normalizer::DecomposingNormalizerBorrowed;
 
 use super::PathRules;
 use super::lex::parse_bytes;
+use super::site::Silent;
 use super::walk::{EntryName, Excluded, Hold, Listed, ObjectId, RealPath, Step, Trace};
+use crate::site::site;
 
 /// `p` plus any alternate spelling the host treats as the same file
 /// (`/tmp/foo` ↔ `/private/tmp/foo` on macOS; just `[p]` elsewhere), so a
@@ -30,7 +32,7 @@ fn path_aliases(p: &Path) -> Vec<PathBuf> {
 /// Which spellings of a name count as one name.  A positive reading is under
 /// [`Stored`](Self::Stored), a negative one under [`Collision`](Self::Collision).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Identity {
+pub(super) enum Identity {
     /// The name as stored, with Windows heads and separators normalised.
     Stored,
     /// Every name some filesystem takes for the same: `collision_key` per
@@ -49,7 +51,7 @@ pub enum MatchedBy {
 /// What a rule is asked about: an access, by its transcript; a listing's
 /// record of an entry, for a name shown; a position, for a scope's own
 /// subject and a listing entry never seen; everywhere, the universal
-/// allowance's own subject.  `Listed` is not `Access`: a door that mints
+/// allowance's own subject.  `Listed` is not `Access`: a call that mints
 /// authority takes a `Located`, so a listing's record can reach `admits` and
 /// never `judge`.
 #[derive(Clone, Copy)]
@@ -229,11 +231,7 @@ impl Excluded {
 /// name a directory answers is a spelling of the name asked.
 #[cfg(any(target_os = "macos", test))]
 pub(super) fn collision_key(name: &OsStr) -> Cow<'_, OsStr> {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "native: a name that is not UTF-8 is its own key"
-    )]
-    let Some(s) = name.to_str() else {
+    let Some(s) = site!(Silent::CollisionKey, name => to_str()) else {
         return Cow::Borrowed(name);
     };
     Cow::Owned(collision_fold(s).into())
@@ -268,12 +266,8 @@ pub(super) fn collision_fold(s: &str) -> String {
 
 /// The names of `p`, without a head or a root: a verbatim UNC head carries a
 /// root that a plain one lacks.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "path-form: a path's names, the one place a component scan is made"
-)]
 fn normal_names(p: &Path) -> Vec<&OsStr> {
-    p.components()
+    site!(Silent::NormalNames, p => components())
         .filter_map(|c| match c {
             Component::Normal(n) => Some(n),
             _ => None,
@@ -287,12 +281,13 @@ fn normal_names(p: &Path) -> Vec<&OsStr> {
 ///
 /// Every authority judgment, fs and exec, decides containment through it.
 ///
-/// Private: the kernel is form-blind, and under which identity a containment
-/// question is asked is settled by the methods beside it —
-/// [`RealPath::contains`] and [`contains_folded`](RealPath::contains_folded)
-/// for positions, [`Excluded::matches`] for exclusions — and never by a
-/// caller holding two bare paths.
-fn path_within(path: &Path, prefix: &Path, identity: Identity) -> bool {
+/// Private to `crate::path`: the kernel is form-blind, and under which
+/// identity a containment question is asked is settled by the methods beside
+/// it — [`RealPath::contains`] and [`contains_folded`](RealPath::contains_folded)
+/// for positions, [`Excluded::matches`] for exclusions, and
+/// `Rendered::holds_position` for kernel names — and never by a caller holding
+/// two bare paths.
+pub(super) fn path_within(path: &Path, prefix: &Path, identity: Identity) -> bool {
     let qs = path_aliases(prefix);
     path_aliases(path)
         .iter()
@@ -306,16 +301,12 @@ fn path_within(path: &Path, prefix: &Path, identity: Identity) -> bool {
 /// `to_string_lossy` forms: two distinct names that are not Unicode (bytes
 /// off Windows, an unpaired surrogate on it) can decode to one
 /// replacement-character string, and the matcher would call them one.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "path-form: the containment kernel's byte-wise prefix test"
-)]
 fn within_one(p: &Path, q: &Path, identity: Identity) -> bool {
     let rules = PathRules::HOST;
     match identity {
         Identity::Stored if rules == PathRules::Windows => windows_stored_components(p.as_os_str())
             .starts_with(&windows_stored_components(q.as_os_str())),
-        Identity::Stored => p.starts_with(q),
+        Identity::Stored => site!(Silent::ContainmentPrefix, p => starts_with(q)),
         Identity::Collision => starts_with_collision(p, q, rules),
     }
 }
@@ -323,30 +314,25 @@ fn within_one(p: &Path, q: &Path, identity: Identity) -> bool {
 /// [`path_within`] on strings, names as stored, for the renderers that hold the
 /// kernel's names.
 #[cfg(target_os = "linux")]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "path-form: lifts both strings for `path_within`; nothing is resolved"
-)]
 pub(super) fn path_within_str(path: &str, prefix: &str) -> bool {
-    path_within(Path::new(path), Path::new(prefix), Identity::Stored)
+    path_within(
+        site!(Silent::ContainmentStr, Path::new(path)),
+        site!(Silent::ContainmentStr, Path::new(prefix)),
+        Identity::Stored,
+    )
 }
 
 /// Component-wise prefix test under `collision_key`: split as
 /// [`starts_with_identity`] splits under Windows rules, by
 /// [`Path::components`] otherwise, then compared key by key, so no fold
 /// crosses a component boundary (`/w/secretsx` is not within `/w/Secrets`).
-#[allow(
-    clippy::disallowed_methods,
-    reason = "path-form: the containment kernel's component-wise key"
-)]
 fn starts_with_collision(path: &Path, prefix: &Path, rules: PathRules) -> bool {
     let keys = |p: &Path| -> Vec<Vec<u8>> {
         match rules {
             PathRules::Windows => windows_components(p.as_os_str().as_encoded_bytes())
                 .map(|c| encoded_collision_key(c).into_owned())
                 .collect(),
-            PathRules::Posix => p
-                .components()
+            PathRules::Posix => site!(Silent::CollisionComponents, p => components())
                 .map(|c| encoded_collision_key(c.as_os_str().as_encoded_bytes()).into_owned())
                 .collect(),
         }
@@ -367,13 +353,13 @@ fn starts_with_collision(path: &Path, prefix: &Path, rules: PathRules) -> bool {
 ///
 /// String logic rather than `std::path::Path`, whose separator and prefix
 /// parsing are fixed at compile time to the build target.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "path-form: POSIX identity is `Path::starts_with` itself, byte-exact per component"
-)]
 pub(crate) fn starts_with_identity(path: &str, prefix: &str, rules: PathRules) -> bool {
     if rules == PathRules::Posix {
-        return Path::new(path).starts_with(Path::new(prefix));
+        let (path, prefix) = (
+            site!(Silent::PosixIdentity, Path::new(path)),
+            site!(Silent::PosixIdentity, Path::new(prefix)),
+        );
+        return site!(Silent::PosixIdentity, path => starts_with(prefix));
     }
     let path = windows_identity_components(path);
     let prefix = windows_identity_components(prefix);
@@ -473,10 +459,7 @@ pub(crate) fn windows_head(p: &str) -> &str {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] fixtures compare literal paths"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 

@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 //! What a top-level run leaves in the session across calls — the one thing an
 //! in-script golden cannot observe — with and without an active sandbox
@@ -10,7 +10,7 @@
 //! does between consecutive tool calls and what the ral REPL's
 //! `execute_input` does between consecutive prompt runs: hold a single
 //! [`Shell`] across calls and route each body through the public
-//! `run` door, which checks against the live session before running.
+//! `run` entry, which checks against the live session before running.
 
 mod common;
 
@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 // ── Harness ─────────────────────────────────────────────────────────────
 
-/// Run one top-level run against `shell` through the public `run` door under
+/// Run one top-level run against `shell` through the public `run` entry under
 /// `caps`, carried into the [`RunRequest`] exactly as exarch attenuates its
 /// tool runs.  Returns whatever the body returned (or the body's error).  Every
 /// test below picks source it expects to compile, so a static diagnostic is a
@@ -87,7 +87,7 @@ fn shown_dir(path: &Path) -> String {
 /// Two sequential top-level calls share state: a `let` from the first
 /// call is visible in the second.  This is the load-bearing property of
 /// the run's install-mobile-on-Ok rule, and the whole reason exarch's
-/// tool-call harness routes through the top-level run door instead of
+/// tool-call harness routes through the top-level run entry instead of
 /// the block boundary.
 #[test]
 fn top_level_let_persists_across_calls() {
@@ -130,7 +130,7 @@ fn top_level_partial_effects_persist_on_error() {
     }
 }
 
-/// A destructuring bind is all-or-nothing even across the run door.  The
+/// A destructuring bind is all-or-nothing even across the run entry.  The
 /// outer pattern's first element matches and would stage `matched_x`; the
 /// second fails.  Since a top-level run installs its mobile on error (the
 /// sibling test above), a stage-as-you-recurse regression would leak

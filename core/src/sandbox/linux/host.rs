@@ -10,6 +10,7 @@ use crate::Role;
 use crate::path::RealPath;
 use crate::sandbox::reexec::Pinned;
 use crate::sandbox::warrant::{Handoff, Slot};
+use crate::site::{Silent, site};
 use std::os::fd::AsFd;
 use std::process::Stdio;
 use std::sync::OnceLock;
@@ -89,10 +90,6 @@ impl Builds {
 /// `handoff`, and execs `trampoline` in it by descriptor, as a launch does;
 /// as a pipeline anchor, it reads its empty stdin and exits.  bwrap's own
 /// words where not, for the one probe that reports them.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:bwrap-host-probe] setup-time host capability probe running ral's own pin as an anchor, not a model exec image"
-)]
 fn bwrap_builds<'a>(
     bwrap: &Pinned,
     trampoline: &'a Pinned,
@@ -110,7 +107,8 @@ fn bwrap_builds<'a>(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     handoff.install(&mut cmd)?;
-    let out = cmd.output().map_err(|e| format!("it did not start: {e}"))?;
+    let out = site!(Silent::BwrapHostProbe, &mut cmd => output())
+        .map_err(|e| format!("it did not start: {e}"))?;
     if out.status.success() {
         return Ok(());
     }

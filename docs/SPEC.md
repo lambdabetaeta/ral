@@ -3242,6 +3242,7 @@ A *place* names one path. It is resolved when the grant is frozen, against the a
 | `` `cwd S `` | `S` against the working directory at decode time |
 | `` `home S `` | `S` against the effective home |
 | `` `tempdir S `` | `S` against the platform temporary directory at decode time |
+| `` `scratch S `` | `S` against the session's scratch directory, the one its host made for it and carries as a spelling; refused, as an error naming the place, where the host made none |
 | `` `gitdir S `` | `S` against the current repository's real Git directory, or the working directory outside a repository |
 | `` `xdg-config S ``, `` `xdg-data S ``, `` `xdg-cache S ``, `` `xdg-state S ``, `` `xdg-bin S `` | `S` against that XDG base |
 
@@ -3670,8 +3671,8 @@ not make the link's own directory sufficient — and the grant's matching `read`
 or `write` set; a denied executable names the path and the grant's `exec`
 allow-list, the only layer a re-exec such as `sh -c` or `find -exec` reaches; a
 denied socket names the ``net: `offline`` grant as the whole of the remedy; and a
-denied Mach or IPC lookup names the door itself, quoting the base profile's own
-recorded reason for withholding it where one exists — an unexplained door is
+denied Mach or IPC lookup names the service itself, quoting the base profile's own
+recorded reason for withholding it where one exists — an unexplained service is
 still named, since it is usually a harmless probe rather than the failure's
 real cause. On Linux, the kernel log carries only the seccomp deny-set: a
 denied syscall is described by that deny-set's own reason where it has one,
@@ -3806,8 +3807,8 @@ what: `command [argv: [String], status: Int, origin: <`external | `detached>,
                 payload: String, refused: Bool]
 ```
 
-`grep` and `act` are raised by host doors — exarch's `grep-files` and its
-committed harness acts — not by any door in core itself.
+`grep` and `act` are raised by host-side code — exarch's `grep-files` and its
+committed harness acts — not by core itself.
 
 A `` `command `` observation records an external or bundled command, or a
 `detach` birth:
@@ -3816,7 +3817,7 @@ A `` `command `` observation records an external or bundled command, or a
 |---|---|---|
 | `argv` | `[String]` | the shown name first, then its evaluated arguments |
 | `status` | `Int` | the outcome's status: 0 for a command that returned, otherwise its error's exit code |
-| `origin` | `` `external \| `detached `` | the door the command came through |
+| `origin` | `` `external \| `detached `` | the way the command was launched |
 | `stdout` | `Bytes` | retained prefix of fd 1, at most 1 MiB |
 | `stdout-total` | `Int` | bytes written to fd 1, 0 without byte capture |
 | `stderr` | `Bytes` | retained prefix of fd 2, at most 1 MiB |
@@ -3893,9 +3894,9 @@ rendered to strings as part of `argv`.
 
 A builtin application is not an observation. The language's own value
 fragment — builtins, prelude functions, lexical bindings — performs no effect,
-and a builtin that reaches the world does so through a door the trail already
+and a builtin that reaches the world does so through an operation the trail already
 watches: a redirect, an atomic write, a worker's birth, a capability check. The
-door records the effect there, as the `` `write ``, `` `read ``, `` `worker ``
+operation records the effect there, as the `` `write ``, `` `read ``, `` `worker ``
 or `` `check `` it is, so `==` evaluated a million times inside `audit { }`
 adds nothing to the trail and a file edit lands once, as the write it made.
 
@@ -4451,8 +4452,9 @@ extending the typed text are listed alphabetically; only when none does in the
 whole request does matching fall back to fuzzy, best first.
 A new binding is visible at the next prompt.
 
-History is persisted in the ral configuration directory, with a legacy
-`~/.ral_history` fallback. Consecutive duplicate entries are omitted. Saving
+History is persisted in ral's state directory, `$XDG_STATE_HOME/ral/history`,
+normally `~/.local/state/ral/history`; a host with no such directory keeps
+none. Consecutive duplicate entries are omitted. Saving
 appends the current session's new entries instead of replacing the file, so
 concurrent sessions do not erase each other's history.
 
@@ -4894,10 +4896,10 @@ The emitted JSON is one report for the whole batch run, its `trail` a flat list
 in settlement order. `` `command `` observations exist only for external or
 bundled command executions and `detach` births; a builtin application records
 nothing of its own, its effects landing through the write, read, and worker
-doors (§13.3). Function application, control forms such as `if`, `case`,
+observations (§13.3). Function application, control forms such as `if`, `case`,
 `try`, `guard`, `within`, `grant`, `audit`, `spawn`, and `gather`, and loop
 iterations record nothing of their own either (a session `spawn`'s birth
-lands through the worker door); the commands executed inside them land in the
+lands through the worker observation); the commands executed inside them land in the
 open trail directly. Each observation carries its evaluated arguments, status,
 source location, timing, and principal, plus the bytes it captured.
 
@@ -5274,11 +5276,11 @@ treated as free in the environment: the mark is permanent for the unit, is
 inherited by any variable unified with a weak one, and is never quantified, so
 every use of the name shares one type for it. There is no value restriction. A
 scheme that leaves a weak variable unquantified keeps it weak in later runs, where
-it is re-seeded as a fresh weak variable. A *boundary* — a door through which a
+it is re-seeded as a fresh weak variable. A *boundary* — a place where a
 value of a shape the program did not decide enters typed code: the decoders,
 `use`, the exarch host's answers, `_ed-state` — makes the
 variables of its result weak and records the result type on the call. Once the
-unit is solved that type is frozen as a *site* on the call, which the door
+unit is solved that type is frozen as a *site* on the call, which the boundary
 admits the value against: each position's head, each free variable's kind, and
 for one `comparable` variable, number or text, agreed across the unit. A
 session data binding with weak residuals is admitted again, against this unit's
@@ -5805,7 +5807,7 @@ the report: the body's outcome, `` `ok `` of its value or `` `err `` of `E`,
 beside the trail. An ordinary body error settles into `` `err ``; an escape
 propagates past the report. Within the trail, `` `command `` observations are
 recorded only for external or bundled commands and `detach` births; a builtin
-application is not an observation, and its effects are recorded at the doors
+application is not an observation, and its effects are recorded at the sites
 they pass through (§13.3). User-function application, control scopes, and
 iteration machinery are transparent: they record no observation of their own,
 while the commands, reads, and writes reached inside them remain visible.

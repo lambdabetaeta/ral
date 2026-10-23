@@ -20,10 +20,6 @@ pub(crate) fn env_guard() -> MutexGuard<'static, ()> {
 
 /// Runs `f` under [`env_guard`] with `key` set to `val` (`None` removes it),
 /// restoring the prior value after.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] serialised env mutation for tests, guarded by env_guard"
-)]
 pub(crate) fn with_var<R>(key: &str, val: Option<&str>, f: impl FnOnce() -> R) -> R {
     let _lock = env_guard();
     // Declared after `_lock`, so it drops (restores) first, before the lock is released.
@@ -33,10 +29,6 @@ pub(crate) fn with_var<R>(key: &str, val: Option<&str>, f: impl FnOnce() -> R) -
 }
 
 /// Runs `f` under [`env_guard`] with every var in `keys` removed, restoring them after.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] serialised env mutation for tests, guarded by env_guard"
-)]
 pub(crate) fn with_vars_cleared<R>(keys: &[&str], f: impl FnOnce() -> R) -> R {
     let _lock = env_guard();
     // Declared after `_lock`, so it drops (restores) first, before the lock is released.
@@ -62,10 +54,6 @@ impl Drop for Restore {
     }
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] serialised env mutation for tests, guarded by env_guard"
-)]
 fn set_or_remove(key: &str, val: Option<&str>) {
     match val {
         Some(v) => unsafe { std::env::set_var(key, v) },
@@ -73,10 +61,6 @@ fn set_or_remove(key: &str, val: Option<&str>) {
     }
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] serialised env mutation for tests, guarded by env_guard"
-)]
 fn restore(key: &str, prev: Option<OsString>) {
     match prev {
         Some(v) => unsafe { std::env::set_var(key, v) },

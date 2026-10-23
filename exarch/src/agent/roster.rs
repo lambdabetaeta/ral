@@ -24,7 +24,7 @@ impl AgentInfo {
                 .role
                 .parent()
                 .map_or(Spawner::Root, |up| Spawner::Agent(up.name.clone())),
-            log_dir: agent.log_dir.clone(),
+            log_dir: agent.log_dir.path().to_path_buf(),
             elapsed: agent.elapsed(),
             state,
             idle: rest.map_or(Duration::ZERO, |at| at.elapsed()),

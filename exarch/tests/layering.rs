@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
@@ -41,8 +41,11 @@ fn module_of(src: &Path, file: &Path) -> String {
 }
 
 fn production_code(text: &str) -> String {
+    // The first inline test module ends the production code: they close their file.
+    // Attributes may sit between its `#[cfg(test)]` and `mod`, as the test-code allow does.
     let inline_tests =
-        Regex::new(r"#\[cfg\(test\)\]\s*(pub(\([a-z]+\))?\s+)?mod\s+\w+\s*\{").unwrap();
+        Regex::new(r"#\[cfg\(test\)\]\s*(#\[[^\]]*\]\s*)*(pub(\([a-z]+\))?\s+)?mod\s+\w+\s*\{")
+            .unwrap();
     let live = inline_tests.find(text).map_or(text, |m| &text[..m.start()]);
     live.lines()
         .map(|line| line.split("//").next().unwrap())

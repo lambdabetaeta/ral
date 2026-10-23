@@ -1,20 +1,18 @@
-#![allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
-
 use super::*;
 use crate::provider::Tuning;
 use crate::record::model::{ItemKind, Location};
 use crate::record::{Spent, TurnKind};
 use genai::chat::{ContentPart, ToolCall};
+use ral_core::own::TestDir;
 use regex::Regex;
+use std::fs;
 use std::io::Write as _;
+use std::path::PathBuf;
 
 /// A sessions root for one test, deleted when the returned guard falls.
 /// Hold the guard: binding only its path deletes the directory on the spot.
-fn sessions_root(tag: &str) -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix(&format!("exarch-event-test-{tag}-"))
-        .tempdir()
-        .expect("sessions root")
+fn sessions_root(tag: &str) -> TestDir {
+    OwnDir::for_test(&format!("event-{tag}")).expect("sessions root")
 }
 
 fn fresh_root() -> AgentLog {
@@ -64,7 +62,7 @@ fn under(from: u64, to: u64) -> Location {
 }
 
 fn record_path(log: &AgentLog) -> PathBuf {
-    log.dir().join("record.jsonl")
+    log.dir().path().join(RECORD)
 }
 
 fn records(log: &AgentLog) -> Vec<Record> {
@@ -226,7 +224,7 @@ fn evict_refuses_the_unclosed_turn_the_unknown_and_a_run_cutting_a_residue() {
 /// addressed by its own `turn` field rather than by argument order. A
 /// turn marker carries no model content, so it contributes no message.
 #[test]
-fn the_door_answers_one_element_per_turn() {
+fn a_transcript_read_answers_one_element_per_turn() {
     let mut s = fresh_root();
     s.append_user("first prompt".into(), None, Voice::Human)
         .unwrap();
@@ -280,7 +278,7 @@ fn the_door_answers_one_element_per_turn() {
 fn a_rewind_withdraws_the_anchor_on_and_the_next_prompt_takes_the_next_id() {
     let sessions = sessions_root("rewind");
     let mut s = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -344,7 +342,7 @@ fn a_rewind_withdraws_the_anchor_on_and_the_next_prompt_takes_the_next_id() {
     let expected = serde_json::to_vec(&s.context().rendered().iter().collect::<Vec<_>>()).unwrap();
     let index = s.context().transcript_index();
     drop(s);
-    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume after rewinds");
+    let resumed = AgentLog::resume(&sessions, AgentId::new(0)).expect("resume after rewinds");
     assert_eq!(
         serde_json::to_vec(&resumed.context().rendered().iter().collect::<Vec<_>>()).unwrap(),
         expected
@@ -360,7 +358,7 @@ fn a_rewind_withdraws_the_anchor_on_and_the_next_prompt_takes_the_next_id() {
 fn a_clear_withdraws_every_turn_in_the_same_file() {
     let sessions = sessions_root("clear");
     let mut s = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -375,7 +373,7 @@ fn a_clear_withdraws_every_turn_in_the_same_file() {
 
     s.clear().expect("clear");
     assert_eq!(
-        fs::read_dir(s.dir())
+        fs::read_dir(s.dir().path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect::<Vec<_>>(),
@@ -439,7 +437,7 @@ fn the_newest_withdrawn_turn_reads_back() {
 fn resume_after_a_clear_and_a_rewind_yields_the_live_table() {
     let sessions = sessions_root("resume-withdrawals");
     let mut live = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -462,7 +460,7 @@ fn resume_after_a_clear_and_a_rewind_yields_the_live_table() {
         serde_json::to_vec(&live.context().rendered().iter().collect::<Vec<_>>()).unwrap();
     drop(live);
 
-    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
+    let resumed = AgentLog::resume(&sessions, AgentId::new(0)).expect("resume");
     assert_eq!(resumed.context().transcript_index(), rows);
     assert_eq!(resumed.context().residues(), residues);
     assert_eq!(&**resumed.context().system(), "sys");
@@ -530,7 +528,7 @@ fn evict_of_evict_nests_both_residues_and_keeps_the_suffix() {
 fn head_residue_is_a_pure_function_of_the_log() {
     let sessions = sessions_root("head-residue-purity");
     let mut live = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -548,7 +546,7 @@ fn head_residue_is_a_pure_function_of_the_log() {
     assert_eq!(head_residue(&live).as_ref(), Some(&first));
     drop(live);
 
-    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
+    let resumed = AgentLog::resume(&sessions, AgentId::new(0)).expect("resume");
     assert_eq!(head_residue(&resumed), Some(first));
 }
 
@@ -705,10 +703,10 @@ fn transcript_index_lists_every_item_with_how_it_is_held() {
     );
 }
 
-/// The one turn no door reads back is the one being written; the closed
+/// The one turn no read returns is the one being written; the closed
 /// turns beside it read back like any other.
 #[test]
-fn the_door_refuses_the_turn_being_written() {
+fn a_transcript_read_refuses_the_turn_being_written() {
     let mut s = fresh_root();
     s.append_user("work".into(), None, Voice::Human).unwrap();
     s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
@@ -1019,7 +1017,7 @@ fn record_jsonl_round_trip_carries_the_cut() {
 fn resume_refuses_an_eviction_of_a_turn_not_in_the_context() {
     let sessions = sessions_root("resume-foreign-eviction");
     let mut live = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -1044,7 +1042,7 @@ fn resume_refuses_an_eviction_of_a_turn_not_in_the_context() {
     file.write_all(b"\n").unwrap();
     file.flush().unwrap();
 
-    let error = AgentLog::resume(sessions.path(), AgentId::new(0))
+    let error = AgentLog::resume(&sessions, AgentId::new(0))
         .err()
         .expect("an eviction of a turn not in the context is foreign data");
     let text = error.to_string();
@@ -1117,7 +1115,7 @@ fn a_departed_turn_keeps_no_resident_state() {
 fn resume_replays_a_scripted_history_and_preserves_the_context() {
     let sessions = sessions_root("resume-round-trip");
     let mut live = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -1135,7 +1133,7 @@ fn resume_replays_a_scripted_history_and_preserves_the_context() {
         serde_json::to_vec(&live.context().rendered().iter().collect::<Vec<_>>()).unwrap();
     drop(live);
 
-    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
+    let resumed = AgentLog::resume(&sessions, AgentId::new(0)).expect("resume");
     assert!(resumed.context().is_ready());
     assert_eq!(
         serde_json::to_vec(&resumed.context().rendered().iter().collect::<Vec<_>>()).unwrap(),
@@ -1147,7 +1145,7 @@ fn resume_replays_a_scripted_history_and_preserves_the_context() {
 fn resume_quiesces_a_torn_turn_after_reopening_append_mode() {
     let sessions = sessions_root("resume-mid-turn");
     let mut live = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -1162,7 +1160,7 @@ fn resume_quiesces_a_torn_turn_after_reopening_append_mode() {
         .unwrap();
     drop(live);
 
-    let mut resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
+    let mut resumed = AgentLog::resume(&sessions, AgentId::new(0)).expect("resume");
     assert!(resumed.context().is_ready());
     let recorded = records(&resumed);
     assert!(
@@ -1184,7 +1182,7 @@ fn resume_quiesces_a_torn_turn_after_reopening_append_mode() {
 fn resume_quarantines_only_an_unterminated_final_fragment() {
     let sessions = sessions_root("resume-tail");
     let live = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -1201,8 +1199,7 @@ fn resume_quarantines_only_an_unterminated_final_fragment() {
     file.write_all(fragment).unwrap();
     file.flush().unwrap();
 
-    let resumed =
-        AgentLog::resume(sessions.path(), AgentId::new(0)).expect("torn tail is recoverable");
+    let resumed = AgentLog::resume(&sessions, AgentId::new(0)).expect("torn tail is recoverable");
     assert!(resumed.context().is_ready());
     assert_eq!(fs::read(&path).unwrap(), prefix);
     assert_eq!(
@@ -1215,7 +1212,7 @@ fn resume_quarantines_only_an_unterminated_final_fragment() {
 fn resume_refuses_a_complete_garbage_line_without_mutating_the_file() {
     let sessions = sessions_root("resume-garbage");
     let live = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -1232,11 +1229,11 @@ fn resume_refuses_a_complete_garbage_line_without_mutating_the_file() {
     let before = fs::read(&path).unwrap();
 
     assert!(
-        AgentLog::resume(sessions.path(), AgentId::new(0)).is_err(),
+        AgentLog::resume(&sessions, AgentId::new(0)).is_err(),
         "garbage is not a crash tail"
     );
     assert!(
-        AgentLog::live_roots(sessions.path()).is_err(),
+        AgentLog::live_roots(&sessions).is_err(),
         "a session that does not parse is named, not hidden"
     );
     assert_eq!(fs::read(&path).unwrap(), before);
@@ -1246,7 +1243,7 @@ fn resume_refuses_a_complete_garbage_line_without_mutating_the_file() {
 fn resume_refuses_foreign_protocol_data_without_mutating_the_file() {
     let sessions = sessions_root("resume-foreign");
     let live = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -1270,7 +1267,7 @@ fn resume_refuses_foreign_protocol_data_without_mutating_the_file() {
     file.flush().unwrap();
     let before = fs::read(&path).unwrap();
 
-    let error = AgentLog::resume(sessions.path(), AgentId::new(0))
+    let error = AgentLog::resume(&sessions, AgentId::new(0))
         .err()
         .expect("foreign data must refuse");
     let text = error.to_string();
@@ -1282,7 +1279,7 @@ fn resume_refuses_foreign_protocol_data_without_mutating_the_file() {
 fn resume_refuses_a_steering_line_with_no_turn_to_steer() {
     let sessions = sessions_root("resume-steering-no-turn");
     let live = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -1303,7 +1300,7 @@ fn resume_refuses_a_steering_line_with_no_turn_to_steer() {
     file.write_all(b"\n").unwrap();
     file.flush().unwrap();
 
-    let error = AgentLog::resume(sessions.path(), AgentId::new(0))
+    let error = AgentLog::resume(&sessions, AgentId::new(0))
         .err()
         .expect("a steering line with no turn is foreign data");
     let text = error.to_string();
@@ -1317,7 +1314,7 @@ fn resume_refuses_a_steering_line_with_no_turn_to_steer() {
 fn resume_refuses_a_stale_id_as_foreign_data() {
     let sessions = sessions_root("resume-stale-id");
     let mut live = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -1342,7 +1339,7 @@ fn resume_refuses_a_stale_id_as_foreign_data() {
     file.flush().unwrap();
     let before = fs::read(&path).unwrap();
 
-    let error = AgentLog::resume(sessions.path(), AgentId::new(0))
+    let error = AgentLog::resume(&sessions, AgentId::new(0))
         .err()
         .expect("a stale id is foreign data");
     let text = error.to_string();
@@ -1355,7 +1352,7 @@ fn resume_refuses_a_stale_id_as_foreign_data() {
 fn resume_refuses_a_child_log() {
     let sessions = sessions_root("resume-child");
     let parent = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -1375,7 +1372,7 @@ fn resume_refuses_a_child_log() {
         )
         .unwrap();
     drop((parent, child));
-    let error = AgentLog::resume(sessions.path(), AgentId::new(1))
+    let error = AgentLog::resume(&sessions, AgentId::new(1))
         .err()
         .expect("a child log has a parent, so it is no root");
     assert!(
@@ -1391,7 +1388,7 @@ fn resume_refuses_a_pre_plan_session_with_no_record_log() {
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("events.jsonl"), b"").unwrap();
 
-    let error = AgentLog::resume(sessions.path(), AgentId::new(0))
+    let error = AgentLog::resume(&sessions, AgentId::new(0))
         .err()
         .expect("a directory with no record.jsonl must refuse, not start empty");
     let text = error.to_string();
@@ -1406,7 +1403,7 @@ fn resume_refuses_a_pre_plan_session_with_no_record_log() {
 fn resume_refuses_an_interior_tool_answer_lost_from_disk() {
     let sessions = sessions_root("resume-interior-seam");
     let mut live = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -1435,7 +1432,7 @@ fn resume_refuses_an_interior_tool_answer_lost_from_disk() {
     }
     fs::write(&path, &torn).unwrap();
 
-    let error = AgentLog::resume(sessions.path(), AgentId::new(0))
+    let error = AgentLog::resume(&sessions, AgentId::new(0))
         .err()
         .expect("an interior gap is a hand-edited file");
     let text = error.to_string();
@@ -1452,7 +1449,7 @@ fn resume_matches_live_after_a_small_edit_sequence_family() {
     for pattern in 0..9 {
         let sessions = sessions_root(&format!("resume-edits-{pattern}"));
         let mut live = AgentLog::root(
-            sessions.path(),
+            &sessions,
             AgentId::new(0),
             "main",
             &RecordedModel::for_test("model"),
@@ -1513,8 +1510,7 @@ fn resume_matches_live_after_a_small_edit_sequence_family() {
         let expected =
             serde_json::to_vec(&live.context().rendered().iter().collect::<Vec<_>>()).unwrap();
         drop(live);
-        let resumed =
-            AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume edit sequence");
+        let resumed = AgentLog::resume(&sessions, AgentId::new(0)).expect("resume edit sequence");
         assert!(resumed.context().is_ready());
         assert_eq!(
             serde_json::to_vec(&resumed.context().rendered().iter().collect::<Vec<_>>()).unwrap(),
@@ -1530,7 +1526,7 @@ fn resume_matches_live_after_a_small_edit_sequence_family() {
 fn resume_rebuilds_the_same_rows_and_residues() {
     let sessions = sessions_root("fold-equals-memo-evict");
     let mut live = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -1555,7 +1551,7 @@ fn resume_rebuilds_the_same_rows_and_residues() {
     let residues = live.context().residues();
     drop(live);
 
-    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
+    let resumed = AgentLog::resume(&sessions, AgentId::new(0)).expect("resume");
     assert_eq!(resumed.context().transcript_index(), rows);
     assert_eq!(resumed.context().residues(), residues);
 }
@@ -1567,7 +1563,7 @@ fn resume_rebuilds_the_same_rows_and_residues() {
 fn a_departed_turn_reads_back_after_resume() {
     let sessions = sessions_root("resume-departed-read");
     let mut live = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -1586,7 +1582,7 @@ fn a_departed_turn_reads_back_after_resume() {
     );
     drop(live);
 
-    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
+    let resumed = AgentLog::resume(&sessions, AgentId::new(0)).expect("resume");
     assert_eq!(
         survey(&resumed),
         [(1, 2), (3, 3), (4, 4)],
@@ -1689,13 +1685,13 @@ fn a_seed_cut_never_owes_a_tool_result_with_no_edit() {
 
 /// A turn's transcript copy is where it was first recorded. The seed cuts
 /// in front of the dangling tool call, so the child's own copy of that
-/// turn is short — and the door still answers the call, off the parent's
+/// turn is short — and the read still answers the call, off the parent's
 /// file, before and after the child evicts the turn.
 #[test]
 fn a_seeded_turn_reads_back_from_its_origin() {
     let sessions = sessions_root("lineage-origin");
     let mut parent = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -1761,7 +1757,7 @@ fn openings(read: &[TranscriptTurn]) -> Vec<&str> {
 fn a_mnemon_child_reads_an_ancestors_evicted_turns_and_mints_ids_above_it() {
     let sessions = sessions_root("lineage-read");
     let mut parent = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -1819,7 +1815,7 @@ fn a_mnemon_child_reads_an_ancestors_evicted_turns_and_mints_ids_above_it() {
 fn turns_split_across_a_fork_read_back_out_of_both_files() {
     let sessions = sessions_root("lineage-split");
     let mut parent = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -1878,7 +1874,7 @@ fn turns_split_across_a_fork_read_back_out_of_both_files() {
 fn an_empty_parent_context_still_floors_the_childs_first_id() {
     let sessions = sessions_root("lineage-floor");
     let mut parent = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -1906,7 +1902,7 @@ fn an_empty_parent_context_still_floors_the_childs_first_id() {
 fn admission_refuses_inherited_after_the_first_turn() {
     let sessions = sessions_root("lineage-late-link");
     let mut live = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -1928,7 +1924,7 @@ fn admission_refuses_inherited_after_the_first_turn() {
     file.write_all(b"\n").unwrap();
     file.flush().unwrap();
 
-    let error = AgentLog::resume(sessions.path(), AgentId::new(0))
+    let error = AgentLog::resume(&sessions, AgentId::new(0))
         .err()
         .expect("a late link is foreign data");
     let text = error.to_string();
@@ -1944,7 +1940,7 @@ fn admission_refuses_inherited_after_the_first_turn() {
 fn a_broken_ancestry_link_is_refused_by_path_and_fault() {
     let sessions = sessions_root("lineage-broken");
     let mut parent = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -1999,15 +1995,63 @@ fn a_broken_ancestry_link_is_refused_by_path_and_fault() {
     );
 }
 
+/// A pointer names its session by id and is read back against the run's
+/// `sessions/` directory, so a run moved whole still resumes and its inherited
+/// turns still read back. What resumes is a root that inherited, as `/branch`
+/// makes one: a fork's child is no root, and refuses.
+#[test]
+fn a_moved_run_resumes_and_reads_its_inherited_turns_back() {
+    let root = sessions_root("moved-run");
+    let sessions = root.make_dir("sessions").unwrap();
+    let mut parent = AgentLog::root(
+        &sessions,
+        AgentId::new(0),
+        "main",
+        &RecordedModel::for_test("model"),
+        &RecordedAccount::for_test("provider"),
+        "",
+        None,
+    )
+    .unwrap();
+    for prompt in ["one", "two"] {
+        complete_round(&mut parent, prompt, prompt);
+    }
+    parent
+        .evict(span(1, 2), None, EditAuthority::Harness)
+        .unwrap();
+    let branch = AgentLog::root(
+        &sessions,
+        AgentId::new(1),
+        "branch",
+        &RecordedModel::for_test("model"),
+        &RecordedAccount::for_test("provider"),
+        "",
+        Some(parent.inherited_context()),
+    )
+    .unwrap();
+    // Every handle on the run let go first: Windows moves no held directory.
+    drop((branch, parent, sessions));
+    fs::rename(root.path().join("sessions"), root.path().join("moved")).expect("the run moves");
+
+    let moved = root.dir("moved").unwrap();
+    let resumed = AgentLog::resume(&moved, AgentId::new(1)).expect("the moved run resumes");
+    let read = resumed
+        .context()
+        .read_transcript(&[1, 2])
+        .expect("the inherited turns read back from the run's new place");
+    assert_eq!(read.len(), 2);
+}
+
 /// The link is folded, not just recorded: replaying it rebuilds the
 /// parent's rows and its residues, so a resume covers an inherited context
 /// as it covers an evicted one — and the residue at the child's head, being
-/// that same projection, carries the parent's own note.
+/// that same projection, carries the parent's own note. The ancestor is a
+/// session of the same run, since a pointer names its session by id.
 #[test]
 fn resume_rebuilds_the_same_rows_and_residues_across_a_link() {
-    let ancestry = sessions_root("fold-equals-memo-ancestor");
+    let sessions = sessions_root("fold-equals-memo-link");
     let mut ancestor = AgentLog::root(
-        ancestry.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -2027,10 +2071,9 @@ fn resume_rebuilds_the_same_rows_and_residues_across_a_link() {
         )
         .unwrap();
 
-    let sessions = sessions_root("fold-equals-memo-inherited");
     let mut live = AgentLog::root(
-        sessions.path(),
-        AgentId::new(0),
+        &sessions,
+        AgentId::new(1),
         "main",
         &RecordedModel::for_test("model"),
         &RecordedAccount::for_test("provider"),
@@ -2056,7 +2099,7 @@ fn resume_rebuilds_the_same_rows_and_residues_across_a_link() {
     let residues = live.context().residues();
     drop(live);
 
-    let resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).expect("resume");
+    let resumed = AgentLog::resume(&sessions, AgentId::new(1)).expect("resume");
     assert_eq!(resumed.context().transcript_index(), rows);
     assert_eq!(resumed.context().residues(), residues);
 }
@@ -2068,7 +2111,7 @@ fn resume_rebuilds_the_same_rows_and_residues_across_a_link() {
 fn transcript_index_carries_the_inherited_table() {
     let sessions = sessions_root("lineage-index");
     let mut parent = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -2117,7 +2160,7 @@ fn transcript_index_carries_the_inherited_table() {
 fn grep_walks_resident_then_freed_then_ancestors() {
     let sessions = sessions_root("lineage-grep");
     let mut parent = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -2166,7 +2209,7 @@ fn grep_walks_resident_then_freed_then_ancestors() {
 fn an_unnarrowed_grep_passes_over_an_unreadable_file() {
     let sessions = sessions_root("lineage-unreadable");
     let mut parent = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -2206,7 +2249,7 @@ fn an_unnarrowed_grep_passes_over_an_unreadable_file() {
 fn resume_replays_a_learned_window_until_a_selection_forgets_it() {
     let sessions = sessions_root("resume-learned");
     let live = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("m"),
@@ -2219,8 +2262,8 @@ fn resume_replays_a_learned_window_until_a_selection_forgets_it() {
         .emit_or_report(Forensic::WindowNarrowed {
             context_window: 250_000,
         });
-    let learned = |sessions: &tempfile::TempDir| {
-        AgentLog::resume(sessions.path(), AgentId::new(0))
+    let learned = |sessions: &TestDir| {
+        AgentLog::resume(sessions, AgentId::new(0))
             .expect("resume")
             .learned_window()
             .cloned()
@@ -2271,7 +2314,7 @@ fn a_log_opens_with_started_then_inherited_then_system() {
 fn record_resumed_records_the_system_prompt_only_when_it_changed() {
     let sessions = sessions_root("resume-system");
     let log = AgentLog::root(
-        sessions.path(),
+        &sessions,
         AgentId::new(0),
         "main",
         &RecordedModel::for_test("model"),
@@ -2294,7 +2337,7 @@ fn record_resumed_records_the_system_prompt_only_when_it_changed() {
         RecordedModel::for_test("model"),
         RecordedAccount::for_test("provider"),
     );
-    let mut resumed = AgentLog::resume(sessions.path(), AgentId::new(0)).unwrap();
+    let mut resumed = AgentLog::resume(&sessions, AgentId::new(0)).unwrap();
     resumed.record_resumed(&model, &account, "same", 1).unwrap();
     assert_eq!(systems(&resumed), ["same"]);
     resumed
@@ -2390,6 +2433,8 @@ fn a_forks_resident_rows_are_read_through_their_pointers() {
 }
 
 /// A parent that no longer reads back refuses the fork by naming its file.
+/// The orphan opens in the parent's run: a pointer names its session by id,
+/// against the run's `sessions/`.
 #[test]
 fn an_unreadable_parent_refuses_the_fork_by_file() {
     let mut parent = fresh_root();
@@ -2397,9 +2442,8 @@ fn an_unreadable_parent_refuses_the_fork_by_file() {
     let source = record_path(&parent);
     let inherited = parent.inherited_context();
     fs::remove_file(&source).unwrap();
-    let sessions = sessions_root("unreadable-parent");
     let error = AgentLog::root(
-        sessions.path(),
+        parent.sessions_root(),
         AgentId::new(5),
         "orphan",
         &RecordedModel::for_test("model"),

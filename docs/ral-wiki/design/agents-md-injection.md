@@ -8,12 +8,13 @@ of what it can cause: it can cause nothing.
 
 ## Discovery
 
-`discover_agents(cwd, config_dir)` (`exarch/src/prompt.rs`) gathers the files
+`read_agents(cwd, config_dir, reader)` (`exarch/src/prompt.rs`) gathers the files
 *outermost first*, so the most specific file is read last and its recency
 dominates:
 
 - **The operator's `<config>/AGENTS.md` leads** — from the trusted
-  [[design/exarch-config-dir|config dir]], the same root `config.ral` loads from.
+  [[design/exarch-config-dir|config dir]], the same root `config.ral` loads from;
+  it is absent where the host names no config base.
 - **Then every repo `AGENTS.md` from the git root down to `cwd`**, deepest last.
   The chain is `path::work_tree_chain`, stopping at the first directory holding
   a `.git` *entry* — file or directory, so worktrees and submodules count — which bounds discovery to the
@@ -28,9 +29,10 @@ dominates:
   ordered after the `Host` section and before optional `Skills`/`Surfacing`
   sections, and is loaded *regardless of* `--system` — orthogonal to the
   persona and to interactive surfacing.
-- **Existence is the only gate**, checked through `ral_core::path::exists`; the
-  reads reuse `read_files`'s `[silent:system-prompt-files]` site — no new
-  syscall site is opened for `AGENTS.md`.
+- **Each file is a read the grant stack judges**, through `Boot::read`, the same
+  reader `--system` files use; a file that is not there is skipped, one the stack
+  refuses is skipped and said so, and any other failure is an error. No syscall
+  site belongs to `AGENTS.md`: the read is the stack's, not a program's own file.
 
 ## The authority distinction
 

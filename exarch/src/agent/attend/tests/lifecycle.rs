@@ -65,7 +65,7 @@ fn engaged_child_answers_a_second_steer_with_no_focus_involved() {
             )])),
     )));
     child.seed("say hi".into());
-    let log_dir = child.log_dir().to_path_buf();
+    let log_dir = child.log_dir().path().to_path_buf();
     let child_agent = child.agent.clone();
     let _keepalive = keepalive(&parent.fleet, &child_agent);
     let handle = attend_and_deliver(child);

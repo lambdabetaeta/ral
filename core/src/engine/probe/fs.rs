@@ -73,10 +73,7 @@ pub(super) fn bytes(shell: &Shell, root: &Path) -> u64 {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] fixtures build a real tree to list and count"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use crate::capability::{Capabilities, FsPolicy};

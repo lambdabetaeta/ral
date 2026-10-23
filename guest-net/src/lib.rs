@@ -21,6 +21,7 @@
 pub mod connect;
 pub mod device;
 pub mod pipe;
+mod site;
 pub mod stack;
 pub mod vet;
 

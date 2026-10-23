@@ -41,8 +41,13 @@ pub fn engine_runtime(spec: &EngineSpec) -> Result<Runtime, String> {
 }
 
 /// Exarch's root-only recipe: the agent library, hints, the detach budget,
-/// and the root's env seeded as bindings before the ledgers arm. The
-/// scratch is the host's, named by the root.
+/// and the root's env seeded as bindings before the ledgers arm.
+///
+/// The scratch is the host's, named by the root, and the shell carries its
+/// spelling, so that a `scratch` place in any grant frozen in this session
+/// anchors to it, on the host and in a guest alike.  The root's attach is
+/// authored by the host and is where it is read from, never the overlay, which
+/// a `within [env: …]` could redirect.
 ///
 /// A root whose config is not unit carries the ceiling its host authored for
 /// this engine, resolved here, on the host it runs on, and pushed as a session
@@ -55,11 +60,12 @@ pub fn engine_runtime(spec: &EngineSpec) -> Result<Runtime, String> {
 /// Panics if the embedded agent library fails to load.
 pub fn engine_root(root: &Root, shell: &mut Shell) -> Result<(), String> {
     let var = EXARCH.scratch_var();
-    if !root.env.iter().any(|(name, _)| *name == var) {
+    let Some((_, scratch)) = root.env.iter().find(|(name, _)| *name == var) else {
         return Err(format!(
             "exarch engine: the root attach names no ${var}: the host owns the scratch and names it in every root attach"
         ));
-    }
+    };
+    shell.set_scratch(scratch.as_str());
     if !matches!(root.config, FOValue::Unit) {
         let ceiling = Capabilities::decode(&root.config)
             .map_err(|e| format!("exarch engine: the root's ceiling does not decode: {e}"))?;
@@ -86,52 +92,6 @@ pub fn engine_root(root: &Root, shell: &mut Shell) -> Result<(), String> {
     Ok(())
 }
 
-/// The engine and root a test attaches, the root naming the scratch.
-#[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] a temp dir lifted into the scratch env var"
-)]
-pub(crate) fn test_attach() -> (EngineSpec, Root) {
-    let temp = std::env::temp_dir();
-    (
-        EngineSpec::new(
-            builtins::INSTALLER_TAG,
-            ral_core::path::EnginePath::Host(temp.clone()),
-        ),
-        Root::new(ral_core::path::EnginePath::Host(temp.clone())).with_env(vec![(
-            EXARCH.scratch_var(),
-            temp.to_string_lossy().into_owned(),
-        )]),
-    )
-}
-
-/// A dressed shell for a test, over no scratch of its own.
-#[cfg(test)]
-pub(crate) fn test_shell() -> Shell {
-    let (spec, root) = test_attach();
-    let mut shell = Shell::root(
-        engine_runtime(&spec)
-            .expect("a test host resolves its floor")
-            .into(),
-        ral_core::test_helper::process_cwd(),
-    );
-    ral_core::boot::seed_host_env(&mut shell);
-    engine_root(&root, &mut shell).expect("test_attach names the scratch");
-    shell
-}
-
-/// An identity engine for a test, booted through the one recipe.
-#[cfg(test)]
-pub(crate) fn test_transport() -> ral_core::carrier::IdentityTransport {
-    let (spec, root) = test_attach();
-    ral_core::carrier::IdentityTransport::boot(
-        &crate::INSTALLERS,
-        &ral_core::protocol::Attach::root(spec, root),
-    )
-    .expect("the recipe boots a test engine")
-}
-
 /// Suppress ANSI colour at the source.  A tool call's stdout is a pipe, never a
 /// TTY, so these only have to beat config that *forces* colour;
 /// [`crate::agent::digest`]'s strip covers the tools that honour neither.
@@ -140,7 +100,64 @@ pub(crate) fn seed_no_color(shell: &mut Shell) {
     shell.set_env_var("CLICOLOR_FORCE", "0");
 }
 
+#[cfg(all(test, unix))]
+pub(crate) use testkit::test_attach;
 #[cfg(test)]
+pub(crate) use testkit::{test_shell, test_transport};
+
+/// The engines and shells a test boots: over the temp directory, naming it as
+/// the scratch, so none holds a scratch directory of its own.
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod testkit {
+    use super::{EXARCH, builtins, engine_root, engine_runtime};
+    use ral_core::Shell;
+    use ral_core::protocol::{EngineSpec, Root};
+
+    /// The engine and root a test attaches, the root naming the scratch.
+    pub(crate) fn test_attach() -> (EngineSpec, Root) {
+        let temp = std::env::temp_dir();
+        (
+            EngineSpec::new(
+                builtins::INSTALLER_TAG,
+                ral_core::path::EnginePath::Host(temp.clone()),
+            ),
+            Root::new(ral_core::path::EnginePath::Host(temp.clone())).with_env(vec![(
+                EXARCH.scratch_var(),
+                ral_core::path::utf8(&temp)
+                    .expect("a temp dir is Unicode")
+                    .to_owned(),
+            )]),
+        )
+    }
+
+    /// A dressed shell for a test, over no scratch of its own.
+    pub(crate) fn test_shell() -> Shell {
+        let (spec, root) = test_attach();
+        let mut shell = Shell::root(
+            engine_runtime(&spec)
+                .expect("a test host resolves its floor")
+                .into(),
+            ral_core::test_helper::process_cwd(),
+        );
+        ral_core::boot::seed_host_env(&mut shell);
+        engine_root(&root, &mut shell).expect("test_attach names the scratch");
+        shell
+    }
+
+    /// An identity engine for a test, booted through the one recipe.
+    pub(crate) fn test_transport() -> ral_core::carrier::IdentityTransport {
+        let (spec, root) = test_attach();
+        ral_core::carrier::IdentityTransport::boot(
+            &crate::INSTALLERS,
+            &ral_core::protocol::Attach::root(spec, root),
+        )
+        .expect("the recipe boots a test engine")
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::{engine_root, engine_runtime, test_shell};
     use crate::app::{EXARCH, Scratch};
@@ -148,7 +165,7 @@ mod tests {
     use ral_core::path::EnginePath;
     use ral_core::protocol::{EngineSpec, Root};
 
-    /// Cargo's own TLS wants a door no profile admits, so a confined session
+    /// Cargo's own TLS wants a Mach service no profile admits, so a confined session
     /// must hand it the `git` binary instead — invisible in every log, hence
     /// asserted here.
     #[test]
@@ -160,6 +177,38 @@ mod tests {
             shell.env_var("CARGO_NET_GIT_FETCH_WITH_CLI"),
             Some("true".to_string())
         );
+    }
+
+    /// The shell carries the scratch its root names, as a spelling, so a grant
+    /// frozen in that session can anchor a `scratch` place to it: from the
+    /// root's attach alone, so a `within [env: …]` cannot redirect it.
+    #[test]
+    fn a_shell_carries_the_scratch_its_root_names_whatever_the_overlay_says() {
+        use ral_core::guard::freeze::{FreezeCtx, Place};
+        let scratch = std::env::temp_dir().join("a-session-scratch");
+        let named = ral_core::path::utf8(&scratch).expect("a test path is Unicode");
+        let spec = EngineSpec::new(
+            crate::shell_eval::builtins::INSTALLER_TAG,
+            EnginePath::Host(scratch.clone()),
+        );
+        let mut shell = Shell::root(
+            engine_runtime(&spec)
+                .expect("a test host resolves its floor")
+                .into(),
+            ral_core::test_helper::process_cwd(),
+        );
+        let root = Root::new(EnginePath::Host(scratch.clone()))
+            .with_env(vec![(EXARCH.scratch_var(), named.to_owned())]);
+        engine_root(&root, &mut shell).expect("the root names a scratch");
+        assert_eq!(shell.scratch(), Some(named));
+
+        shell.set_env_var(EXARCH.scratch_var(), "/elsewhere");
+        let frozen = FreezeCtx::of(&shell)
+            .place(&Place::Scratch("cache".into()))
+            .expect("the place freezes")
+            .expect("the place is live");
+        assert!(frozen.as_str().contains("a-session-scratch"), "{frozen:?}");
+        assert!(!frozen.as_str().contains("elsewhere"), "{frozen:?}");
     }
 
     #[test]

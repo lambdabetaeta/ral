@@ -4,7 +4,13 @@
 //!
 //! `guest-net`'s proxy is the only writer of records.
 
-use std::io::Write;
+#[cfg(any(test, feature = "test-util"))]
+use ral_core::own::TestDir;
+use ral_core::own::{OwnDir, OwnError};
+use ral_core::path::XdgKind;
+use ral_core::sync::LockExt as _;
+use std::fs::File;
+use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
 /// One CONNECT attempt's verdict, then, on close, what it carried.
@@ -26,8 +32,19 @@ fn now_secs() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// Past this, the next write rotates the live file aside to `.1` first.
+/// Past this, the next write rotates the live file aside to [`ROTATED`] first.
 const ROTATE_AT_BYTES: u64 = 32 * 1024 * 1024;
+
+/// The ledger's name in the app's state directory.
+pub const LEDGER: &str = "net-audit.jsonl";
+
+/// What the ledger is renamed to once it outgrows [`ROTATE_AT_BYTES`].
+const ROTATED: &str = "net-audit.jsonl.1";
+
+/// The file every process on one ledger locks across the whole
+/// check-size/rotate/write sequence, so two racing the size check cannot each
+/// rotate and destroy the other's history.
+const ROTATION_LOCK: &str = "net-audit.jsonl.lock";
 
 /// The durable, append-only network ledger, one compact JSON object per line:
 /// an append-mode `write()` lands atomically at the end, so concurrent
@@ -35,116 +52,81 @@ const ROTATE_AT_BYTES: u64 = 32 * 1024 * 1024;
 #[derive(Clone)]
 pub struct AuditLog(Arc<Mutex<LedgerFile>>);
 
+/// What [`AuditLog`] locks, with poison kept (`lock_strict`): the guard spans
+/// the rotation that swaps `file` and the append that follows it, so a panic
+/// between them leaves the handle and the bytes on disk disagreeing; and an
+/// unauditable proxy must stop proxying rather than resume writing into a
+/// ledger nobody can vouch for.
 struct LedgerFile {
-    path: std::path::PathBuf,
-    file: std::fs::File,
-    #[cfg(unix)]
-    rotation_lock: std::fs::File,
+    /// The directory the ledger and its rotation lock are in.
+    state: OwnDir,
+    file: File,
+    /// Held, between processes as well as threads, across a rotation and the
+    /// write after it: on every host, since only a lock on a file reaches
+    /// another process.
+    rotation: File,
     /// The directory this ledger has to itself, when a test double made it:
     /// dropped with the log, taking the ledger and its rotation lock along.
     /// A real ledger lives under XDG state and owns no directory.
-    _scratch: Option<tempfile::TempDir>,
+    #[cfg(any(test, feature = "test-util"))]
+    _scratch: Option<TestDir>,
 }
 
-/// Held across the whole check-size/rotate/write sequence, between processes
-/// as well as threads, so two racing the size check cannot each rotate and
-/// destroy the other's history. Locks a dup'd fd so the borrow of the
-/// `LedgerFile` it came from ends before `record` mutates it.
-#[cfg(unix)]
-struct RotationGuard(std::fs::File);
-
-#[cfg(unix)]
-impl RotationGuard {
-    fn take(file: &std::fs::File) -> std::io::Result<Self> {
-        let dup = file.try_clone()?;
-        rustix::fs::flock(&dup, rustix::fs::FlockOperation::LockExclusive)?;
-        Ok(Self(dup))
+impl LedgerFile {
+    /// The ledger and its rotation lock in `state`, made where absent.
+    fn open(state: OwnDir) -> Result<Self, OwnError> {
+        let file = state.append(LEDGER)?;
+        let rotation = state.open_write(ROTATION_LOCK)?;
+        Ok(Self {
+            state,
+            file,
+            rotation,
+            #[cfg(any(test, feature = "test-util"))]
+            _scratch: None,
+        })
     }
-}
-
-#[cfg(unix)]
-impl Drop for RotationGuard {
-    fn drop(&mut self) {
-        let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::Unlock);
-    }
-}
-
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:net-audit-open] opens the per-installation network audit ledger under XDG state, appended to once per tunnel; infra bookkeeping, not turn-time model data I/O."
-)]
-fn open_audit_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-}
-
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:net-audit-rotate] rotates the network audit ledger once it exceeds its size cap."
-)]
-fn rotate(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    let rotated = ral_core::path::with_appended_suffix(path, "1");
-    std::fs::rename(path, &rotated)?;
-    open_audit_file(path)
 }
 
 impl AuditLog {
-    fn at(path: &std::path::Path) -> std::io::Result<Self> {
-        Self::at_in(path, None)
-    }
-
-    fn at_in(path: &std::path::Path, scratch: Option<tempfile::TempDir>) -> std::io::Result<Self> {
-        let file = open_audit_file(path)?;
-        #[cfg(unix)]
-        let rotation_lock = open_audit_file(&ral_core::path::with_appended_suffix(path, "lock"))?;
-        Ok(Self(Arc::new(Mutex::new(LedgerFile {
-            path: path.to_path_buf(),
-            file,
-            #[cfg(unix)]
-            rotation_lock,
-            _scratch: scratch,
-        }))))
-    }
-
     /// Open this app's ledger at `$XDG_STATE_HOME/<app>/net-audit.jsonl`.
     ///
     /// # Errors
-    /// Returns `Err` if the ledger cannot be created or opened.
-    pub fn open(app: crate::app::App) -> std::io::Result<Self> {
-        let path = app
-            .xdg_dir(ral_core::path::XdgKind::State)
-            .join("net-audit.jsonl");
-        Self::at(&path)
+    /// Returns `Err` if the state directory, the ledger or its rotation lock
+    /// cannot be made or opened.
+    pub fn open(app: crate::app::App) -> Result<Self, OwnError> {
+        Ok(Self::over(LedgerFile::open(app.own(XdgKind::State)?)?))
     }
 
-    /// A ledger at a caller-chosen path, for a test that reads it back.  The
-    /// caller owns the directory, and so decides when the ledger goes.
+    fn over(ledger: LedgerFile) -> Self {
+        Self(Arc::new(Mutex::new(ledger)))
+    }
+
+    /// A ledger in `state`, for a test that reads it back.  The caller owns the
+    /// directory, and so decides when the ledger goes.
     ///
     /// # Panics
-    /// Panics if the file cannot be created.
+    /// Panics if the ledger cannot be created.
+    #[cfg(any(test, feature = "test-util"))]
     #[must_use]
-    pub fn for_test(path: &std::path::Path) -> Self {
-        Self::at(path).expect("test audit ledger")
+    pub fn for_test(state: &OwnDir) -> Self {
+        Self::over(LedgerFile::open(OwnDir::clone(state)).expect("test audit ledger"))
     }
 
     /// A ledger in a directory of its own, for a test double with no reason to
-    /// name a path.  Both the ledger and its rotation lock go when the log does.
+    /// name one.  Both the ledger and its rotation lock go when the log does.
     ///
     /// # Panics
     /// Panics if the directory or the file cannot be created.
+    #[cfg(any(test, feature = "test-util"))]
     #[must_use]
     pub fn in_scratch() -> Self {
-        let scratch = tempfile::Builder::new()
-            .prefix("exarch-egress-test-")
-            .tempdir()
-            .expect("test ledger scratch");
-        let path = scratch.path().join("net-audit.jsonl");
-        Self::at_in(&path, Some(scratch)).expect("test audit ledger")
+        let scratch = OwnDir::for_test("egress").expect("test ledger scratch");
+        let state = OwnDir::clone(&scratch);
+        let ledger = LedgerFile {
+            _scratch: Some(scratch),
+            ..LedgerFile::open(state).expect("test audit ledger")
+        };
+        Self::over(ledger)
     }
 
     /// Append one record. `Err` means the gate must close: an unauditable
@@ -152,15 +134,7 @@ impl AuditLog {
     ///
     /// # Errors
     /// Returns `Err` on a poisoned lock, a failed rotation, or a failed write.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:net-audit-size] checks the ledger's on-disk size before deciding whether to rotate it."
-    )]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "outside the poison door on purpose: the guard spans the rotation that swaps `file` and the append that follows it, so a panic between them leaves the ledger handle and the bytes on disk disagreeing; and an unauditable proxy must stop proxying rather than resume writing into a ledger nobody can vouch for"
-    )]
-    pub fn record(&self, r: Record<'_>) -> std::io::Result<()> {
+    pub fn record(&self, r: Record<'_>) -> io::Result<()> {
         let mut line = match r {
             Record::Tunnel {
                 host,
@@ -182,17 +156,24 @@ impl AuditLog {
         }
         .to_string();
         line.push('\n');
-        let mut ledger = self
-            .0
-            .lock()
-            .map_err(|_| std::io::Error::other("network audit ledger lock poisoned"))?;
-        // Off Unix only the mutex above serialises, and only within this process.
-        #[cfg(unix)]
-        let _rotation_guard = RotationGuard::take(&ledger.rotation_lock)?;
-        if ledger.file.metadata()?.len() + line.len() as u64 > ROTATE_AT_BYTES {
-            ledger.file = rotate(&ledger.path)?;
-        }
-        ledger.file.write_all(line.as_bytes())
+        let mut ledger = self.0.lock_strict()?;
+        let LedgerFile {
+            state,
+            file,
+            rotation,
+            ..
+        } = &mut *ledger;
+        rotation.lock()?;
+        let written = (|| -> io::Result<()> {
+            if file.metadata()?.len() + line.len() as u64 > ROTATE_AT_BYTES {
+                state.rename(LEDGER, ROTATED)?;
+                *file = state.append(LEDGER)?;
+            }
+            file.write_all(line.as_bytes())
+        })();
+        let unlocked = rotation.unlock();
+        drop(ledger);
+        written.and(unlocked)
     }
 }
 
@@ -233,6 +214,7 @@ impl Egress {
     ///
     /// # Panics
     /// Panics if either fixture host fails to parse; both are valid literals.
+    #[cfg(any(test, feature = "test-util"))]
     #[must_use]
     pub fn for_test() -> Self {
         let policy = crate::net_policy::NetPolicy {
@@ -252,6 +234,7 @@ impl Egress {
 
     /// [`Self::for_test`] with the provider's own web search denied — the
     /// policy verdict a searchless fixture is built from.
+    #[cfg(any(test, feature = "test-util"))]
     #[must_use]
     pub fn for_test_without_search() -> Self {
         Self {
@@ -265,26 +248,31 @@ impl Egress {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 
-    /// A ledger path in a directory of this test's own.  The guard comes back
-    /// with it and must be held: dropping it deletes the directory, and the
-    /// ledger, the rotation lock and any rotated `.jsonl.1` with it.
-    fn tmp_path(tag: &str) -> (tempfile::TempDir, std::path::PathBuf) {
-        let dir = tempfile::Builder::new()
-            .prefix(&format!("exarch-egress-test-{tag}-"))
-            .tempdir()
-            .expect("test ledger scratch");
-        let path = dir.path().join("net-audit.jsonl");
-        (dir, path)
+    /// A ledger directory of this test's own.  The guard must be held:
+    /// dropping it deletes the directory, and the ledger, the rotation lock
+    /// and any rotated `.jsonl.1` with it.
+    fn tmp(tag: &str) -> TestDir {
+        OwnDir::for_test(&format!("egress-{tag}")).expect("test ledger scratch")
+    }
+
+    /// A ledger as it stands, in lines.
+    fn lines_of(state: &OwnDir, name: &str) -> Vec<String> {
+        let bytes = state.read(name).expect("ledger readable");
+        String::from_utf8(bytes)
+            .expect("ledger is text")
+            .lines()
+            .map(str::to_owned)
+            .collect()
     }
 
     #[test]
-    #[allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
     fn audit_log_records_two_independently_parseable_lines() {
-        let (_dir, path) = tmp_path("audit-two-lines");
-        let log = AuditLog::for_test(&path);
+        let state = tmp("audit-two-lines");
+        let log = AuditLog::for_test(&state);
         log.record(Record::Tunnel {
             host: "a.example",
             addr: Some("93.184.216.34:443".parse().unwrap()),
@@ -303,8 +291,7 @@ mod tests {
             down: None,
         })
         .expect("write must succeed");
-        let text = std::fs::read_to_string(&path).expect("audit file readable");
-        let lines: Vec<&str> = text.lines().collect();
+        let lines = lines_of(&state, LEDGER);
         assert_eq!(lines.len(), 2, "each record is its own line");
         for line in &lines {
             let _: serde_json::Value =
@@ -315,16 +302,16 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
     fn a_ledger_that_exceeds_its_cap_rotates_and_keeps_appending() {
-        let (_dir, path) = tmp_path("audit-rotate");
-        let rotated = ral_core::path::with_appended_suffix(&path, "1");
+        let state = tmp("audit-rotate");
         // Through a write handle, before the ledger opens: an append-mode
         // handle carries no write access on Windows, which refuses `set_len`.
-        std::fs::File::create(&path)
+        state
+            .open_write(LEDGER)
+            .map_err(io::Error::from)
             .and_then(|f| f.set_len(ROTATE_AT_BYTES))
             .expect("oversized ledger");
-        let log = AuditLog::at(&path).expect("test ledger");
+        let log = AuditLog::for_test(&state);
         log.record(Record::Tunnel {
             host: "a.example",
             addr: None,
@@ -334,31 +321,30 @@ mod tests {
             down: None,
         })
         .expect("write must succeed after rotation");
-        assert!(rotated.exists(), "the oversized file must be rotated aside");
-        let text = std::fs::read_to_string(&path).expect("fresh ledger readable");
+        assert!(
+            state.stat(ROTATED).is_some(),
+            "the oversized file must be rotated aside"
+        );
         assert_eq!(
-            text.lines().count(),
+            lines_of(&state, LEDGER).len(),
             1,
             "the fresh file holds only the new record"
         );
     }
 
-    /// Two `AuditLog` handles on one path stand in for two racing processes:
-    /// each has its own mutex, so only the `flock` can serialise them — and
-    /// only on Unix, where `RotationGuard` exists.
-    #[cfg(unix)]
+    /// Two `AuditLog` handles on one directory stand in for two racing
+    /// processes: each has its own mutex, so only the lock on the rotation
+    /// file can serialise them.
     #[test]
-    #[allow(clippy::disallowed_methods, reason = "[test] fixtures")]
     fn rotation_under_cross_process_contention_loses_no_record() {
-        let (_dir, path) = tmp_path("audit-race");
-        let rotated = ral_core::path::with_appended_suffix(&path, "1");
-
-        let log_a = AuditLog::at(&path).expect("test ledger a");
-        let log_b = AuditLog::at(&path).expect("test ledger b");
-        {
-            let ledger = log_a.0.lock().unwrap();
-            ledger.file.set_len(ROTATE_AT_BYTES - 1).unwrap();
-        }
+        let state = tmp("audit-race");
+        state
+            .open_write(LEDGER)
+            .map_err(io::Error::from)
+            .and_then(|f| f.set_len(ROTATE_AT_BYTES - 1))
+            .expect("a ledger one byte short of its cap");
+        let log_a = AuditLog::for_test(&state);
+        let log_b = AuditLog::for_test(&state);
 
         const PER_THREAD: usize = 20;
         let race = |log: AuditLog, tag: &'static str| {
@@ -382,9 +368,9 @@ mod tests {
         ta.join().unwrap();
         tb.join().unwrap();
 
-        let mut combined = std::fs::read_to_string(&path).expect("live file readable");
-        if rotated.exists() {
-            combined.push_str(&std::fs::read_to_string(&rotated).expect("rotated file readable"));
+        let mut combined = lines_of(&state, LEDGER).join("\n");
+        if state.stat(ROTATED).is_some() {
+            combined.push_str(&lines_of(&state, ROTATED).join("\n"));
         }
         for tag in ["a", "b"] {
             for i in 0..PER_THREAD {
@@ -400,13 +386,9 @@ mod tests {
     }
 
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] a poisoned lock is the test's own failure"
-    )]
     fn a_record_that_cannot_be_written_reports_err() {
-        let (_dir, path) = tmp_path("audit-poisoned");
-        let log = AuditLog::at(&path).expect("test ledger");
+        let state = tmp("audit-poisoned");
+        let log = AuditLog::for_test(&state);
         let guard = log.clone();
         let _ = std::thread::spawn(move || {
             let _lock = guard.0.lock().unwrap();

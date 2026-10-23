@@ -212,8 +212,11 @@ fn apply_model_switch(app: &mut App, ctx: &CommandCtx<'_>, tab: AgentId, pick: &
     let saved = state::State::of(&built, &available);
     let context_window = built.context_window();
     provider.swap(built);
-    let state_dir = crate::app::EXARCH.project_dir(ctx.info.cwd);
-    if let Err(e) = state::save(&state_dir, &saved) {
+    let persisted = crate::app::EXARCH
+        .project(ctx.info.cwd)
+        .map_err(String::from)
+        .and_then(|project| state::save(&project, &saved));
+    if let Err(e) = persisted {
         app.push_error(focused, &format!("could not persist selection: {e}"));
     }
     if let Some(sb) = app.tabs.scrollback(tab) {

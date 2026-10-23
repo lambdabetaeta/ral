@@ -5,16 +5,18 @@
 //! A [`FrozenPath`] is a spelling and nothing else: folded, shown, ordered.
 //! What it names is the walk's to say, once, when the grant is made
 //! (`GrantPath { written, real }`); no containment or resolution is asked of
-//! the spelling.  There is no `From<&str>` sugar: the doors, [`from_surface`]
+//! the spelling.  There is no `From<&str>` sugar: the constructors, [`from_surface`]
 //! and [`freeze`], keep the fold in one place.
 //!
 //! [`from_surface`]: FrozenPath::from_surface
 //! [`freeze`]: FrozenPath::freeze
 
 use super::lex::{is_absolute, is_working_directory, utf8};
-use super::walk::RealPath;
+use super::site::Silent;
+use super::walk::{EntryName, RealPath};
 use super::{GuestPath, PathRules};
 use crate::path::shown;
+use crate::site::site;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -28,7 +30,7 @@ use std::path::{Path, PathBuf};
 /// root-relative or a drive-relative path, lands on that root and comes out
 /// absolute.
 ///
-/// Checked at its door, [`new`](Self::new), which a copy read off the wire
+/// Checked at its constructor, [`new`](Self::new), which a copy read off the wire
 /// passes through again; there is no other.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "PathBuf", into = "PathBuf")]
@@ -118,7 +120,7 @@ pub struct LexicalPath(PathBuf);
 impl LexicalPath {
     /// Wrap the output of [`super::lex::anchor`], asserting exactly what
     /// that kernel guarantees — no further normalisation happens here.  The
-    /// public doors are [`super::Resolver::resolve`] and
+    /// public entries are [`super::Resolver::resolve`] and
     /// [`super::Resolver::anchor`].
     ///
     /// Asserted rather than checked, because the kernel is total on what it
@@ -166,6 +168,13 @@ impl LexicalPath {
         self.0
     }
 
+    /// The spelling of the entry `name` of the directory this spells: the one
+    /// name more, and no resolution.
+    #[must_use]
+    pub(crate) fn join(&self, name: &EntryName) -> Self {
+        Self::from_lexed(self.0.join(name.as_os_str()))
+    }
+
     /// This path, [folded](Self::folded), as a working directory, for `cd`,
     /// `within [dir: …]`, or a script's own directory.
     ///
@@ -185,32 +194,32 @@ impl LexicalPath {
     /// Unix, `\\.\NUL` on Windows ([`super::device::is_discard_device`] holds both
     /// tables).
     ///
-    /// The one question two doors ask about such a write: the in-process
+    /// The one question two checks ask about such a write: the in-process
     /// guard (`Shell::locate`), which calls it no *access*, and the
     /// observation fan-out (`Shell::observe_stamped`), which calls
     /// it no *mutation* — nothing changed in the world, so nothing is
     /// reported.
     pub(crate) fn is_discard(&self) -> bool {
-        super::device::is_discard_device(&self.folded_name(), PathRules::HOST)
+        super::device::is_discard_device(
+            self.folded_name().as_os_str().as_encoded_bytes(),
+            PathRules::HOST,
+        )
     }
 
     /// The refusal owed this path if, on Windows, its last component is a DOS
     /// reserved device name ([`super::device::reserved_device_refusal`]); `None`
-    /// everywhere else.  The fs doors ask it of every name they are about to
+    /// everywhere else.  The fs operations ask it of every name they are about to
     /// act on, as they ask [`is_discard`](Self::is_discard).
     pub(crate) fn reserved_device_refusal(&self) -> Option<String> {
-        super::device::reserved_device_refusal(&self.folded_name(), PathRules::HOST)
+        super::device::reserved_device_refusal(
+            self.folded_name().as_os_str().as_encoded_bytes(),
+            PathRules::HOST,
+        )
     }
 
     /// The folded name as the device tables match it: a device is a name.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "native: the host-spelled name the device tables match"
-    )]
-    fn folded_name(&self) -> String {
+    fn folded_name(&self) -> PathBuf {
         super::lex::fold_dots(&self.0)
-            .to_string_lossy()
-            .into_owned()
     }
 }
 
@@ -286,12 +295,8 @@ impl FrozenPath {
     }
 
     /// The surface form as a `Path`, for [`lexical`](Self::lexical).
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "lexical Path::new over a surface already in normal form: no I/O behind it"
-    )]
     pub(super) fn surface_path(&self) -> &Path {
-        Path::new(&self.surface)
+        site!(Silent::SurfaceLift, Path::new(&self.surface))
     }
 
     /// This spelling as the walk takes one: absolute and folded already, as
@@ -362,6 +367,7 @@ impl PartialEq<String> for FrozenPath {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::{FrozenPath, GuestPath};
     #[cfg(unix)]
@@ -374,10 +380,6 @@ mod tests {
     /// when it was walked before.
     #[cfg(unix)]
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] a real link is retargeted at a name that is not UTF-8"
-    )]
     fn a_live_exclusion_holds_a_target_that_is_not_unicode() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
@@ -460,10 +462,6 @@ mod tests {
     /// Linux alone can lay one: APFS refuses a name that is not UTF-8.
     #[cfg(target_os = "linux")]
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] a file whose name is not UTF-8"
-    )]
     fn a_non_utf8_byte_is_not_its_replacement_character() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
@@ -487,10 +485,6 @@ mod tests {
     /// decodes to, and is no command name.
     #[cfg(windows)]
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] a file whose name holds an unpaired surrogate"
-    )]
     fn an_unpaired_surrogate_is_not_its_replacement_character() {
         use std::os::windows::ffi::OsStringExt;
         let tmp = tempfile::tempdir().unwrap();

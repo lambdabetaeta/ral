@@ -205,10 +205,7 @@ fn survivor_pid(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::{Survivor, spawn_detached};
 

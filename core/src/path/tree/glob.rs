@@ -5,7 +5,9 @@
 //! component names a dotfile.
 
 use super::walk::Walk;
+use crate::path::site::Silent;
 use crate::path::{LexicalPath, shown};
+use crate::site::site;
 use globset::{GlobBuilder, GlobMatcher};
 use std::ffi::{OsStr, OsString};
 use std::iter::successors;
@@ -29,13 +31,9 @@ impl Glob {
     /// # Errors
     /// A wildcard component beginning with `.`, one `globset` rejects, or
     /// a `..` after a wildcard, which no walked entry carries.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "path-form: the glob's literal components, where the walk starts"
-    )]
     pub(crate) fn parse(pattern: &LexicalPath) -> Result<Self, String> {
         let (mut root, mut steps) = (PathBuf::new(), Vec::new());
-        for c in pattern.as_path().components() {
+        for c in site!(Silent::GlobComponents, pattern.as_path() => components()) {
             if c == Component::ParentDir && !steps.is_empty() {
                 return Err(format!(
                     "'{}': a walk never climbs '..' after a wildcard; glob from the directory it climbs to, as in `glob '../x'`?",
@@ -74,26 +72,19 @@ impl Glob {
     /// The steps the entry `shown` can have reached, closed under `**`
     /// matching nothing: it is named as the walk reached it, through any link.
     /// A name outside the root reaches none.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "path-form: the steps a walked name reached, counted from the glob's literal root"
-    )]
     fn reach(&self, shown: &LexicalPath) -> Vec<usize> {
-        shown
-            .as_path()
-            .strip_prefix(self.root.as_path())
-            .map_or_else(
-                |_| Vec::new(),
-                |rel| {
-                    rel.components().fold(self.close([0]), |states, c| {
-                        self.close(
-                            states
-                                .into_iter()
-                                .filter_map(|i| self.advance(i, c.as_os_str())),
-                        )
-                    })
-                },
-            )
+        site!(Silent::GlobReach, shown.as_path() => strip_prefix(self.root.as_path())).map_or_else(
+            |_| Vec::new(),
+            |rel| {
+                site!(Silent::GlobReach, rel => components()).fold(self.close([0]), |states, c| {
+                    self.close(
+                        states
+                            .into_iter()
+                            .filter_map(|i| self.advance(i, c.as_os_str())),
+                    )
+                })
+            },
+        )
     }
 
     fn advance(&self, i: usize, name: &OsStr) -> Option<usize> {
@@ -122,11 +113,9 @@ impl Glob {
 
 fn step(c: Component<'_>) -> Result<Step, String> {
     let os = c.as_os_str();
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "native: a component that is not UTF-8 holds no wildcard"
-    )]
-    let Some(s) = os.to_str().filter(|s| s.contains(['*', '?', '[', '{'])) else {
+    let Some(s) =
+        site!(Silent::GlobWildcard, os => to_str()).filter(|s| s.contains(['*', '?', '[', '{']))
+    else {
         return Ok(Step::Name(os.to_owned()));
     };
     if s == "**" {

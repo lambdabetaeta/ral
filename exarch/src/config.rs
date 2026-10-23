@@ -20,6 +20,8 @@ use crate::provider::identity::{adapter_for_protocol, key_var, protocol_for_adap
 use crate::provider::{Auth, Service, ServiceName, built_in};
 use ral_core::Shell;
 use ral_core::capability::{Capabilities, GrantLayer};
+use ral_core::own::{OwnError, UserFile};
+use ral_core::path::XdgKind;
 use ral_core::source::{SourceFile, SourceOrigin};
 use ral_core::types::{Break, EnvVars, Escape, Mooring, Value};
 
@@ -35,23 +37,24 @@ pub(crate) const LABEL: &str = "exarch config";
 /// # Errors
 /// A present but unparseable value is a hard error, not a silent disable.
 pub fn disk_warn_bytes() -> Result<Option<u64>, String> {
-    match std::env::var("EXARCH_DISK_WARN_BYTES") {
-        Ok(s) => s
+    match ral_core::host::var("EXARCH_DISK_WARN_BYTES") {
+        Some(s) => s
             .parse()
             .map(Some)
             .map_err(|e| format!("EXARCH_DISK_WARN_BYTES: '{s}' is not a byte count: {e}")),
-        Err(_) => Ok(None),
+        None => Ok(None),
     }
 }
 
-/// Where exarch's declarations live.
-pub fn path() -> std::path::PathBuf {
-    crate::app::EXARCH
-        .xdg_dir(ral_core::path::XdgKind::Config)
-        .join(CONFIG_FILE)
+/// Where exarch's declarations live: `config.ral` in its config home.
+///
+/// # Errors
+/// [`OwnError::NoBase`] where the host names no config base.
+pub fn file() -> Result<UserFile, OwnError> {
+    UserFile::xdg(crate::app::EXARCH.name(), XdgKind::Config, CONFIG_FILE)
 }
 
-/// The service declarations in `path`, an absent file being the empty list.
+/// The service declarations in `file`, an absent file being the empty list.
 ///
 /// It evaluates in a throwaway shell, never the session shell: a value to
 /// compute, not bindings to leak into the agent's scope — as
@@ -63,12 +66,13 @@ pub fn path() -> std::path::PathBuf {
 /// A present file that is unreadable, whose path is not UTF-8, that raises,
 /// or that fails to decode is a hard error: a mistyped endpoint is a
 /// misdirected agent, not a recoverable default.
-pub fn load_declared(path: &std::path::Path, label: &str) -> Result<Vec<Service>, String> {
-    let Some(source) = read_optional_file(path, label)? else {
+pub fn load_declared(file: &UserFile, label: &str) -> Result<Vec<Service>, String> {
+    let Some(source) = read_optional_file(file, label)? else {
         return Ok(Vec::new());
     };
     let source = ral_core::source::normalize_source_text(source);
-    let origin = SourceOrigin::File(SourceFile::new(path).map_err(|e| format!("{label} {e}"))?);
+    let origin =
+        SourceOrigin::File(SourceFile::new(file.path()).map_err(|e| format!("{label} {e}"))?);
     let cwd = ral_core::host::cwd()
         .ok_or_else(|| format!("{label} cannot load: the working directory is unavailable"))?;
     let mut shell = ral_core::HostSurface::default()
@@ -81,25 +85,23 @@ pub fn load_declared(path: &std::path::Path, label: &str) -> Result<Vec<Service>
     )
 }
 
-/// Write `services` back to `path` as the very source [`load_declared`]
+/// Write `services` back to `file` as the very source [`load_declared`]
 /// reads — a file a program wrote and a person can still edit.
 ///
 /// A `key` field is written only for a server that checks none; this file
-/// carries no secret and needs no special permissions.
+/// carries no secret and needs no special permissions.  It is replaced whole,
+/// through any link a dotfiles manager keeps it by.
 ///
 /// # Errors
 /// Returns a plain sentence if a name or endpoint could not be written as a
 /// quoted string without lying about its contents, or if the file could not
-/// be created.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:config-write] writes the provider declarations back to the app's own config directory; configuration, not turn-time model data I/O"
-)]
-pub fn save_declared(
-    path: &std::path::Path,
-    services: &[Service],
-    label: &str,
-) -> Result<(), String> {
+/// be replaced.
+pub fn save_declared(file: &UserFile, services: &[Service], label: &str) -> Result<(), String> {
+    Ok(file.replace(&declarations_source(services, label)?)?)
+}
+
+/// `services` as the source [`load_declared`] reads back.
+fn declarations_source(services: &[Service], label: &str) -> Result<String, String> {
     let declarations: String = services
         .iter()
         .map(|service| -> Result<String, String> {
@@ -129,14 +131,7 @@ pub fn save_declared(
             ))
         })
         .collect::<Result<_, _>>()?;
-    let source = format!("{PREAMBLE}return [\n{declarations}]\n");
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("could not make {}: {e}", ral_core::path::shown(parent)))?;
-    }
-    std::fs::write(path, source)
-        .map_err(|e| format!("could not write {}: {e}", ral_core::path::shown(path)))
+    Ok(format!("{PREAMBLE}return [\n{declarations}]\n"))
 }
 
 const PREAMBLE: &str = "\
@@ -170,19 +165,8 @@ fn quoted(text: &str, field: &str, label: &str) -> Result<String, String> {
 /// Read a trusted `.ral` config or policy file, `Ok(None)` when it is absent. A
 /// present-but-unreadable file is an error, never silently treated as absent.
 /// Shared with [`crate::net_policy::load`].
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:config-load] reads a trusted configuration or policy file (the unusual-provider config, or the network policy) from a fixed path to set up transport/egress rules; configuration loading at setup, not turn-time model data I/O."
-)]
-pub(crate) fn read_optional_file(
-    path: &std::path::Path,
-    label: &str,
-) -> Result<Option<String>, String> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("{label} {}: {e}", ral_core::path::shown(path))),
-    }
+pub(crate) fn read_optional_file(file: &UserFile, label: &str) -> Result<Option<String>, String> {
+    file.read().map_err(|e| format!("{label}: {e}"))
 }
 
 /// Evaluate `source` under a [`Capabilities::deny_all`] layer, so the config can
@@ -293,6 +277,7 @@ fn string_field(value: Option<&Value>, field: &str, where_: &str) -> Result<Stri
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use genai::adapter::AdapterKind;
@@ -316,16 +301,7 @@ mod tests {
     /// What a window writes, the decoder reads back — the same three fields,
     /// the same protocol, and a keyless entry still keyless.
     #[test]
-    #[allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
-    fn declarations_round_trip_through_the_file() {
-        let dir = std::env::temp_dir().join(format!(
-            "exarch-declared-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let path = dir.join("providers.ral");
-
+    fn declarations_round_trip_through_the_source() {
         let written = vec![
             Service::declared(
                 ServiceName::declared("house-llm").unwrap(),
@@ -340,29 +316,22 @@ mod tests {
                 Auth::Keyless,
             ),
         ];
-        save_declared(&path, &written, LABEL).expect("write");
-        let read = load_declared(&path, LABEL).expect("read back");
-        assert_eq!(read, written);
-
-        std::fs::remove_dir_all(&dir).ok();
+        let source = declarations_source(&written, LABEL).expect("write");
+        assert_eq!(parse(&source), Ok(written));
     }
 
     /// An absent file is no providers, not a failure — the state every
     /// computer starts in.
     #[test]
-    #[allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
     fn an_absent_file_declares_nothing() {
-        let path = std::env::temp_dir().join("exarch-declared-absent-none.ral");
-        std::fs::remove_file(&path).ok();
-        assert_eq!(load_declared(&path, LABEL), Ok(Vec::new()));
+        let file = UserFile::fixed("/exarch-declared-absent", "providers.ral");
+        assert_eq!(load_declared(&file, LABEL), Ok(Vec::new()));
     }
 
     /// A name with a quote in it is asked about, not escaped into the file.
     #[test]
     fn a_quote_in_a_name_is_refused_with_a_question() {
-        let path = std::env::temp_dir().join("exarch-declared-quote.ral");
-        let err = save_declared(
-            &path,
+        let err = declarations_source(
             &[Service::declared(
                 ServiceName::declared("it's-llm").unwrap(),
                 "https://x.example/v1/".into(),
@@ -473,10 +442,6 @@ mod tests {
     /// and as the bundled-tool frame that would otherwise run in its image.
     #[cfg(unix)]
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] the test binary's own path"
-    )]
     fn no_authority_grant_denies_the_current_executable() {
         let exe = std::env::current_exe().expect("the test binary has a path");
         for call in [

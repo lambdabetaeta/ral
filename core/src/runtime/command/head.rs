@@ -12,6 +12,7 @@ use crate::capability::Program;
 use crate::ir::CommandName;
 use crate::path::{LeafMode, LexicalPath, PathSearch, is_executable_file, walk};
 use crate::process::{SpawnFailure, Unrunnable};
+use crate::site::{Silent, site};
 use crate::types::{Context, Error};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -124,18 +125,14 @@ impl Missing {
 
 /// What stands at `found`, which the walk would not spawn.  A file the stat
 /// cannot reach, or one carrying `+x`, is refused by the OS: permission.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:head-refusal] metadata questions of an admitted program's real path, by name, after its exec failed: is it a directory, does it exist, is it executable; they grant nothing"
-)]
 fn refusal(shown: &str, found: &Path) -> SpawnFailure {
     let not_a_program = |kind| SpawnFailure::NotAProgram {
         found: (!crate::path::names_a_path(shown)).then(|| found.into()),
         kind,
     };
-    if found.is_dir() {
+    if site!(Silent::HeadRefusal, found => is_dir()) {
         not_a_program(Unrunnable::Directory)
-    } else if found.exists() && !is_executable_file(found) {
+    } else if site!(Silent::HeadRefusal, found => exists()) && !is_executable_file(found) {
         not_a_program(Unrunnable::File)
     } else {
         SpawnFailure::PermissionDenied {
@@ -147,17 +144,18 @@ fn refusal(shown: &str, found: &Path) -> SpawnFailure {
 /// On Windows, a path head written without its extension: `shown` with the
 /// first executable extension that names a file beside `file`, the one it
 /// looked for.  A bare name has already tried them all on `PATH`.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:head-suffixed] which extension names a sibling of an admitted program's real path, by name, after its exec failed; it grants nothing"
-)]
 fn suffixed(shown: &str, file: &Path) -> Option<String> {
     if !cfg!(windows) || !crate::path::names_a_path(shown) {
         return None;
     }
     crate::path::WINDOWS_EXEC_EXTENSIONS
         .iter()
-        .find(|ext| crate::path::with_appended_suffix(file, ext).exists())
+        .find(|ext| {
+            site!(
+                Silent::HeadSuffixed,
+                &crate::path::with_appended_suffix(file, ext) => exists()
+            )
+        })
         .map(|ext| format!("{shown}.{ext}"))
 }
 
@@ -175,10 +173,7 @@ fn launch_path(target: &Path, ctx: &Context) -> PathBuf {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use crate::capability::{Capabilities, Evidence, ExecGrant, ExecKey, Floor, GrantStack};

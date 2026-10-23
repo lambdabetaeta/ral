@@ -8,6 +8,9 @@ use super::mirror::Mirror;
 use super::palette::AgentSlot;
 use super::text::is_blank;
 use crate::record::{Fold, Record, Recorded, Refusal, replay};
+use crate::site::{Silent, site};
+use ral_core::own::create_named;
+use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
 
@@ -70,11 +73,12 @@ impl Fold for Export<'_> {
     }
 }
 
-/// Render `record` (a `record.jsonl`) to `out` as the scrollback reads.
+/// Render `record` (a `record.jsonl` open for reading, named `name` in
+/// messages) to `out` as the scrollback reads.
 ///
 /// # Errors
 /// If the log will not read back, or `out` will not take the text.
-pub fn export(record: &Path, out: &mut dyn Write, format: Format) -> io::Result<()> {
+pub fn export(record: File, name: &Path, out: &mut dyn Write, format: Format) -> io::Result<()> {
     let mut out = io::BufWriter::new(out);
     let render: Box<dyn Render + '_> = match format {
         Format::Plain => Box::new(Plain {
@@ -91,7 +95,7 @@ pub fn export(record: &Path, out: &mut dyn Write, format: Format) -> io::Result<
         mirror,
         mut render,
         failed,
-    } = replay::<Export>(record, memo).map_err(io::Error::other)?;
+    } = replay::<Export>(record, name, memo).map_err(io::Error::other)?;
     if let Some(error) = failed {
         return Err(error);
     }
@@ -107,13 +111,15 @@ pub fn export(record: &Path, out: &mut dyn Write, format: Format) -> io::Result<
 ///
 /// # Errors
 /// As [`export`], or if `dest` exists or cannot be created.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:export] creates the user-chosen transcript file; output infra, not turn-time data I/O"
-)]
-pub fn export_to(record: &Path, dest: &Path, format: Format) -> io::Result<()> {
-    export(record, &mut std::fs::File::create_new(dest)?, format)
+pub fn export_to(record: File, name: &Path, dest: &Path, format: Format) -> io::Result<()> {
+    export(
+        record,
+        name,
+        &mut site!(Silent::ExportDestination, create_named(dest))?,
+        format,
+    )
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

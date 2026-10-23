@@ -168,11 +168,8 @@ static TOKEN: InstallToken = InstallToken(());
 /// Test-only: a spawning test on such a host proves nothing either way, so
 /// callers skip rather than assert.
 #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:restricted-envelope-probe] host capability probe for tests, not a grant spawn"
-)]
 pub fn restricted_envelope_launches() -> bool {
+    use crate::site::{Silent, site};
     use std::sync::OnceLock;
     static LAUNCHES: OnceLock<bool> = OnceLock::new();
     *LAUNCHES.get_or_init(|| {
@@ -199,10 +196,12 @@ pub fn restricted_envelope_launches() -> bool {
             launch::Ownership::Surrendered,
         )
         .is_ok_and(|(mut cmd, _no_info_fd)| {
-            cmd.stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok_and(|status| status.success())
+            site!(
+                Silent::RestrictedEnvelopeProbe,
+                cmd.stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null()) => status()
+            )
+            .is_ok_and(|status| status.success())
         })
     })
 }
@@ -239,6 +238,7 @@ pub fn teardown_session() {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::{
         ExecProjection, FsProjection, NET_ENFORCED, SandboxProjection, projection_enforceable,
@@ -284,10 +284,6 @@ mod tests {
     /// `RealPath::open_nofollow` and `open_dir_nofollow`, which only the sandbox
     /// side may call: it holds the token, so these tests lend it.
     #[cfg(any(target_os = "linux", windows))]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] fixtures build the tree the positions are held in"
-    )]
     mod nofollow {
         use crate::path::{Dir, Installing, Located, ObjectId, RealPath};
         use crate::sandbox::TOKEN;

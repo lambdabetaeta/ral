@@ -1,8 +1,3 @@
-#![allow(
-    clippy::disallowed_methods,
-    reason = "[test] Windows junction fixtures and real ACL regressions"
-)]
-
 use super::super::ensure_frozen_grant;
 use super::super::tests::{junction, labelled, mklink, pin, real, with_scoped_state_dir};
 use super::*;

@@ -7,11 +7,13 @@
 //! fixed system path, never a per-user one, and evaluated under the same
 //! no-authority grant as [`crate::config::load_declared`].
 
+use ral_core::own::UserFile;
 use ral_core::source::{SourceFile, SourceOrigin};
 use ral_core::types::Value;
 
-/// A system path, deliberately: the sandboxed guest writes only cwd and scratch.
-const POLICY_PATH: &str = "/etc/exarch/net-policy.ral";
+/// A system place, deliberately: the sandboxed guest writes only cwd and scratch.
+const POLICY_DIR: &str = "/etc/exarch";
+const POLICY_FILE: &str = "net-policy.ral";
 
 const DEFAULT_POLICY_RAL: &str = include_str!("net_policy/default-policy.ral");
 
@@ -112,22 +114,18 @@ impl NetPolicy {
     }
 }
 
-/// Load the policy: the file at [`POLICY_PATH`] if present, else the
-/// embedded default.
+/// Load the policy: the file [`POLICY_FILE`] in [`POLICY_DIR`] if present, else
+/// the embedded default.
 ///
 /// # Errors
 /// Returns `Err` if the file is present but unreadable, if evaluating it
 /// raises, or if its terminal map fails to decode.
 pub fn load() -> Result<NetPolicy, String> {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "path-form: a fixed absolute config path"
-    )]
-    let path = std::path::Path::new(POLICY_PATH);
-    let (source, origin) = match crate::config::read_optional_file(path, LABEL)? {
+    let file = UserFile::fixed(POLICY_DIR, POLICY_FILE);
+    let (source, origin) = match crate::config::read_optional_file(&file, LABEL)? {
         Some(text) => (
             text,
-            SourceOrigin::File(SourceFile::new(path).map_err(|e| format!("{LABEL} {e}"))?),
+            SourceOrigin::File(SourceFile::new(file.path()).map_err(|e| format!("{LABEL} {e}"))?),
         ),
         None => (
             DEFAULT_POLICY_RAL.to_string(),

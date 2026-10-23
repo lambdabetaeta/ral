@@ -145,6 +145,7 @@ use objc2_virtualization::{
     VZVirtualMachine, VZVirtualMachineConfiguration, VZVirtualMachineState,
 };
 
+use crate::site::{Silent, site};
 use crate::{Act, BootArtifact, Error, HostFile, Hypervisor, Machine, MachineSpec};
 
 /// The virtiofs tag under which the granted folder is exported to the guest.
@@ -340,8 +341,8 @@ struct Plan {
 /// the configuration reaches a machine.
 ///
 /// # Errors
-/// Returns [`Error::NotUnicode`] if a path the configuration would name is
-/// not Unicode ([`file_url`]), [`Error::HostFile`] carrying macOS's own words
+/// Returns [`Error::NotAFileUrl`] if a path the configuration would name has
+/// no file URL ([`file_url`]), [`Error::HostFile`] carrying macOS's own words
 /// if a disk image cannot be opened, and [`Error::Backend`] carrying them if
 /// the shared folder cannot be opened or the workspace tag is rejected.
 fn build_configuration(plan: &Plan) -> Result<Retained<VZVirtualMachineConfiguration>, Error> {
@@ -444,8 +445,8 @@ fn validate(config: &VZVirtualMachineConfiguration) -> Result<(), Error> {
 /// # Errors
 /// Returns [`Error::HostFile`] if the image cannot be opened — most often
 /// because it is not there, which the tests rely on to prove the attachment
-/// really touches the file.  Returns [`Error::NotUnicode`] if its path is not
-/// UTF-8 ([`file_url`]).
+/// really touches the file.  Returns [`Error::NotAFileUrl`] if its path has no
+/// file URL ([`file_url`]).
 fn block_device(
     image: &Path,
     read_only: bool,
@@ -527,23 +528,14 @@ fn clamp_memory(memory_mib: u32) -> u64 {
 
 /// A `file:` URL for a host path, or the refusal that it has none.
 ///
-/// The URL is made from the path as text, and a path that is not UTF-8 has
-/// none: rendered lossily it would name some *other* file or folder, with
-/// U+FFFD where its own bytes were — one that may exist, and may be a link to
-/// anywhere.  So it is refused, never approximated, the same law the Windows
-/// backend's document keeps (`hcs::document_text`).
+/// The URL is made from the path's own bytes, so a name that is not UTF-8 is
+/// carried as it is and never approximated.  Only an empty path, or one that
+/// holds a NUL character, has no URL.
 ///
 /// # Errors
-/// Returns [`Error::NotUnicode`] if `path` is not UTF-8.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "native: the path handed to Foundation as the text an `NSURL` is made from"
-)]
+/// Returns [`Error::NotAFileUrl`] if `path` is empty or holds a NUL character.
 fn file_url(path: &Path) -> Result<Retained<NSURL>, Error> {
-    let text = path
-        .to_str()
-        .ok_or_else(|| Error::NotUnicode(path.to_path_buf()))?;
-    Ok(NSURL::fileURLWithPath(&NSString::from_str(text)))
+    NSURL::from_file_path(path).ok_or_else(|| Error::NotAFileUrl(path.to_path_buf()))
 }
 
 /// macOS's own words for a framework error.
@@ -571,24 +563,14 @@ fn unix_seconds() -> u64 {
 ///
 /// # Errors
 /// Returns [`Error::HostFile`] if the image cannot be created or sized.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: creating the per-session disk before any engine exists. \
-              This is host-side session setup, not a model's turn-time write: there is no \
-              Shell to route through a redirect door and no run to raise a card in, exactly \
-              as with `MachineSpec::resolve`'s canonicalisation above."
-)]
 fn create_session_image(dir: &Path) -> Result<PathBuf, Error> {
     let path = dir.join(format!(
         "ral-session-{}-{}.img",
         std::process::id(),
         unix_seconds()
     ));
-    let file = std::fs::File::create(&path).map_err(Error::host_file(
-        HostFile::SessionDisk,
-        Act::Create,
-        &path,
-    ))?;
+    let file = site!(Silent::SessionDiskCreate, std::fs::File::create(&path))
+        .map_err(Error::host_file(HostFile::SessionDisk, Act::Create, &path))?;
     file.set_len(SESSION_IMAGE_BYTES).map_err(Error::host_file(
         HostFile::SessionDisk,
         Act::Size,
@@ -1005,13 +987,8 @@ fn new_listener(readiness: &Retained<SocketReadiness>) -> Retained<VZVirtioSocke
 }
 
 /// Remove a session disk once its machine is gone, best-effort.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: releasing the per-session disk after power-off. Infrastructure \
-              teardown, not a model's turn-time write; no Shell, no run, no card."
-)]
 fn remove_session_image(path: &Path) -> std::io::Result<()> {
-    std::fs::remove_file(path)
+    site!(Silent::SessionDiskRelease, std::fs::remove_file(path))
 }
 
 /// The delegate object that turns the guest's first connection on one wire
@@ -1038,10 +1015,6 @@ define_class!(
 
     unsafe impl VZVirtioSocketListenerDelegate for SocketReadiness {
         #[unsafe(method(listener:shouldAcceptNewConnection:fromSocketDevice:))]
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "a poisoned announce refuses this connection, which is the same benign path a failed dup takes: the announce stays unspent and the guest daemon redials"
-        )]
         fn should_accept(
             &self,
             _listener: &VZVirtioSocketListener,
@@ -1063,7 +1036,7 @@ define_class!(
             // Only on a successful dup is the one-shot announce spent, and
             // only then is the connection accepted.
             if let Ok(control_socket) = dup
-                && let Ok(mut slot) = self.ivars().announce.lock()
+                && let Ok(mut slot) = site!(Silent::AnnounceLock, &self.ivars().announce => lock())
                 && let Some(announce) = slot.take()
             {
                 let _ = announce.send(Ready::Connected(self.ivars().port, control_socket));
@@ -1221,11 +1194,7 @@ impl Drop for Guest {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: test scaffolding writes the dummy kernel, images, and folder it \
-              then builds a configuration from; no shell, no run, no card."
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 

@@ -98,6 +98,14 @@ pub enum Error {
         path: PathBuf,
         cause: String,
     },
+    /// As [`Error::HostFile`], for a failure whose `cause` already says where:
+    /// an error that spells its own paths, or one about a base with no path to
+    /// spell.
+    HostFileUnplaced {
+        file: HostFile,
+        act: Act,
+        cause: String,
+    },
     /// The machine service could not open the granted folder as the account
     /// that asked for it — for changes, unless `read_only`.
     FolderForbidden {
@@ -125,6 +133,10 @@ pub enum Error {
     /// Refused rather than approximated: a lossy spelling is the name of some
     /// *other* file or folder, which may exist, and may be a link to anywhere.
     NotUnicode(#[serde(with = "crate::os_path")] PathBuf),
+    /// A path the hypervisor would be handed has no `file:` URL, because it
+    /// is empty or holds a NUL character, and the hypervisor is told every
+    /// file as a URL (macOS only).
+    NotAFileUrl(#[serde(with = "crate::os_path")] PathBuf),
     /// The client and the machine service speak different versions of the
     /// broker's protocol (Windows only).
     ///
@@ -406,6 +418,14 @@ impl fmt::Display for Worded<'_> {
                 spell(path),
                 act.participle()
             ),
+            Error::HostFileUnplaced { file, act, cause } => {
+                write!(
+                    f,
+                    "{} could not be {}: {cause}",
+                    file.noun(),
+                    act.participle()
+                )
+            }
             Error::FolderForbidden {
                 path,
                 read_only: true,
@@ -447,6 +467,12 @@ impl fmt::Display for Worded<'_> {
                 "{} cannot be handed to the virtual machine: its name holds characters that are \
                  not valid Unicode, and the machine is told every path as text. Renaming it, or \
                  whichever folder above it has such a name, lets synod use it",
+                spell(path)
+            ),
+            Error::NotAFileUrl(path) => write!(
+                f,
+                "the path {} cannot be handed to the virtual machine: it is empty or holds a \
+                 NUL character, so it has no file URL, and the machine is told every file as one",
                 spell(path)
             ),
             Error::VersionSkew { client, service } => write!(
@@ -556,15 +582,12 @@ fn quoted(lines: &[String]) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 
     /// A spelling no platform uses, so a test can see that every path in a
     /// sentence went through it.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] a fixture's ASCII file name, read back to mark it"
-    )]
     fn marked(path: &Path) -> String {
         format!(
             "<{}>",
@@ -619,15 +642,28 @@ mod tests {
         );
     }
 
+    /// A host file whose cause names every path it has is worded without a path
+    /// of its own, and crosses the pipe the same.
+    #[test]
+    fn a_host_file_with_no_path_of_its_own_is_worded_by_its_cause() {
+        let error = Error::HostFileUnplaced {
+            file: HostFile::ImageCache,
+            act: Act::Make,
+            cause: "no cache directory".to_string(),
+        };
+        let wire = serde_json::to_string(&error).unwrap();
+        let back: Error = serde_json::from_str(&wire).unwrap();
+        assert_eq!(
+            back.worded(marked).to_string(),
+            "the guest image cache could not be made: no cache directory"
+        );
+    }
+
     /// A path that is not Unicode crosses the pipe whole — in a variant of its
     /// own and inside a console's log alike — rather than failing the frame
     /// that was to carry the refusal.
     #[cfg(unix)]
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] asserting the fixture really is not Unicode"
-    )]
     fn a_path_that_is_not_unicode_crosses_a_pipe() {
         use std::os::unix::ffi::OsStrExt;
 
@@ -662,10 +698,6 @@ mod tests {
     /// unpaired surrogate that no `str` can.
     #[cfg(windows)]
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] asserting the fixture really is not Unicode"
-    )]
     fn a_path_that_is_not_unicode_crosses_a_pipe() {
         use std::os::windows::ffi::OsStringExt;
 

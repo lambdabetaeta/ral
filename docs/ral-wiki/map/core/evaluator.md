@@ -9,7 +9,7 @@ covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 `core/src/evaluator/` runs the CBPV [[map/core/ir|IR]] as one CEK machine
 (`machine.rs`) — the full narrative is
 [[internals/evaluator-machine|the evaluator machine]]. **Evaluation is
-entered only through framed run doors; the machine's own verbs are
+entered only through the framed run (`Shell::run`); the machine's own verbs are
 crate-private.** Three reach outside the module — `evaluate`, `apply`, and its
 argument-free twin `force`:
 
@@ -24,16 +24,16 @@ argument-free twin `force`:
   ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]],
   [[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]]).
   Hosts call none of the four directly: they enter through the framed
-  `Shell::run` door and the run spine behind it, both in `core/src/run.rs`,
+  `Shell::run` and the run spine behind it, both in `core/src/run.rs`,
   the sole way into evaluation — its `Run` (`core/src/protocol.rs`) carries
-  a `Program` of source text or a registered hook. The run door checkpoints
+  a `Program` of source text or a registered hook. `Shell::run_under` checkpoints
   and rolls back `(env, context)` around every run, so a
   panicking run reports as a failed run instead of corrupting the store.
 - `machine::apply(f, args, mooring, shell)` (`pub(crate)`) — the same, from a
   closed value meeting arguments (`Machine::applying` sets the first state);
-  `machine::force(v, mooring, shell)` is its argument-free twin, the door of a
-  hook's arity-0 entry and of a worker's body.
-  A host reaches it only through the run door's hook-program arm or the
+  `machine::force(v, mooring, shell)` is its argument-free twin, the entry for a
+  hook's arity-0 call and for a worker's body (`worker_body`).
+  A host reaches it only through the `Program::Hook` arm of `Shell::run` or the
   in-frame builtin wrapper (a native applying a user function — collection
   combinators, hook dispatch — runs a *nested* machine on the host stack,
   capped by `NESTED_MACHINE_LIMIT`), so an unframed reduction is
@@ -196,7 +196,7 @@ Internals:
 - `call.rs` — `run_native`, the one call site for every native: it runs the
   body in `BuiltinEntry::framed`'s frame, the only minter of the `Frame` proof
   `call_body` demands. A builtin application is no observation; the fan-out
-  is `types::audit::door`.
+  is `types::audit::fan_out`.
 - A `~`-path (`CompKind::Tilde`, [[map/core/ir|ir]]) is read in `machine.rs`
   through `Context::require_home` and shown by `TildePath::shown`
   (the one spelling `~`, `home` and a `~/…` command head share). The six ambient reads (`cwd`, `env`,

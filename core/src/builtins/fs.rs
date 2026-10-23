@@ -129,7 +129,7 @@ pub(super) fn builtin_list_dir(args: &[Value], shell: &mut Shell) -> Settled<Val
 /// entry is kept and handed back as a string, which a name no string holds
 /// would leave naming some other path, and the entry itself unreachable.
 fn writable_temp_dir(ctx: &str, shell: &mut Shell) -> Settled<Dir<Judged<Writing>>> {
-    let rp = shell.anchor(&std::env::temp_dir());
+    let rp = shell.anchor(&crate::host::temp_dir());
     let dir = shell.locate_dir::<Writing>(&rp)?;
     crate::path::utf8(dir.real().as_path()).map_err(|e| {
         sig(format!(
@@ -183,8 +183,9 @@ fn temp_dir_in(shell: &mut Shell, parent: &Dir<Judged<Writing>>) -> Settled<Valu
 
 fn temp_file_in(shell: &mut Shell, parent: &Dir<Judged<Writing>>) -> Settled<Value> {
     made_in("temp-file", shell, parent, |target| {
-        let made = target.create_file(Visibility::Private)?;
-        Ok(shown(made.real().as_path()))
+        let made = shown(target.real().as_path());
+        target.create_file(Visibility::Private)?;
+        Ok(made)
     })
 }
 
@@ -324,10 +325,7 @@ pub(super) fn builtin_is_writable(args: &[Value], shell: &mut Shell) -> Settled<
 }
 
 #[cfg(all(test, unix))]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] fixtures build the tree the temp entries are made in"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;

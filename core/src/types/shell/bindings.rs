@@ -73,7 +73,7 @@ impl std::fmt::Display for LargeBindingNotice {
 /// called [`Shell::arm_binding_lease`](super::Shell::arm_binding_lease).
 struct Armed {
     lease: BindingLease,
-    /// The committed-run clock. Ticks once per source-door run.
+    /// The committed-run clock. Ticks once per source run.
     epoch: u64,
     /// Every name visible anywhere in the scope chain at arm time — prelude,
     /// agent library, rc bindings, host seed vars — never a candidate. This
@@ -88,7 +88,7 @@ struct Armed {
 
 /// Per-`Shell` binding-lease ledger. `Default` is the inert state: a host
 /// that never arms it (REPL, batch, worker shells, pipeline children) pays a
-/// branch per run door and observes no expiry ever.
+/// branch per run and observes no expiry ever.
 #[derive(Default)]
 pub(crate) struct BindingLedger(Option<Armed>);
 
@@ -362,13 +362,10 @@ mod tests {
 /// are recorded nowhere, and a committed run's referenced names renew at both
 /// harvest seams — `run`'s own compiled program, and `check_source`'s
 /// runtime-compiled loads. Driven through the public
-/// `run` door, no exarch involved: the same harness shape as
+/// `run`, no exarch involved: the same harness shape as
 /// `core/tests/top_level_vs_block.rs`.
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod chokepoint_tests {
     use crate::RunIo;
     use crate::boot::BakedPrelude;
@@ -403,7 +400,7 @@ mod chokepoint_tests {
         shell
     }
 
-    /// One top-level run through the public door. Every source below must
+    /// One top-level run through the public entry. Every source below must
     /// compile; a `Static` report is a test bug.
     fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
         shell
@@ -617,7 +614,7 @@ mod chokepoint_tests {
     /// `run`'s `Program::Hook` arm is not a tool call: it ticks no epoch and
     /// renews nothing, even a name its body reads.
     #[test]
-    fn hook_door_neither_ticks_nor_renews() {
+    fn hook_run_neither_ticks_nor_renews() {
         let mut shell = armed_shell(64);
         top_level(&mut shell, "let hook_x = 1").expect("define");
         top_level(&mut shell, "let hook_thunk = { $hook_x }").expect("define the hook body");
@@ -860,7 +857,7 @@ mod chokepoint_tests {
     }
 
     /// A ledger entry whose install a panic rollback undid — simulated with
-    /// the same env save/restore motion the run door performs — is
+    /// the same env save/restore motion the run performs — is
     /// dropped silently at the next prune: no notice, no error.
     #[test]
     fn orphan_entry_dropped_silently() {

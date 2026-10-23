@@ -9,13 +9,17 @@ use ral_core::types::{Observation, Observed};
 /// The root is returned alongside its `App` because the frontend resolves
 /// it through the fleet only: dropping it here would settle the agent mid-test.
 pub(in crate::tui) fn app() -> (App, BusReceiver, Arc<Agent>) {
+    app_born(&Born::for_test("main", None))
+}
+
+/// [`app`] over a root announced as `born`.
+pub(in crate::tui) fn app_born(born: &Born) -> (App, BusReceiver, Arc<Agent>) {
     let (_tx, rx) = crate::bus::channel();
     let fleet = Fleet::for_test();
     let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("a fresh root");
-    let born = Born::for_test("main", None);
     let app = App::new(
         root.id,
-        &born,
+        born,
         fleet,
         UsageMeter::default(),
         false,
@@ -29,7 +33,6 @@ pub(in crate::tui) fn app() -> (App, BusReceiver, Arc<Agent>) {
 pub(in crate::tui) fn ctx() -> CommandCtx<'static> {
     static BUREAU: Bureau = Bureau::Scripted;
     // Lazy, as `Path::new` is no `const fn`.
-    #[allow(clippy::disallowed_methods, reason = "[test] a fixed fixture path")]
     static INFO: std::sync::LazyLock<SessionInfo<'static>> =
         std::sync::LazyLock::new(|| SessionInfo {
             system_size: 0,
@@ -274,14 +277,14 @@ fn a_clear_wipes_the_pins_and_the_state() {
     use crate::bus::Signal;
     use crate::record::{Emitter as Recorder, Protocol, Voice};
 
-    let dir = tempfile::tempdir().expect("a temp dir");
-    let recorder = Recorder::create(&dir.path().join("record.jsonl")).expect("a record log");
+    let dir = ral_core::own::OwnDir::for_test("clear").expect("a test directory");
+    let recorder = Recorder::create(&dir).expect("a record log");
     let (tx, rx) = crate::bus::channel();
     recorder.attach(crate::bus::Emitter::new(tx, AgentId::new(0)).fleet_sink());
     let fleet = Fleet::for_test();
     let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("a fresh root");
     let born = Born {
-        log_dir: dir.path().into(),
+        log_dir: ral_core::own::OwnDir::clone(&dir),
         recorder: recorder.clone(),
         ..Born::for_test("main", None)
     };

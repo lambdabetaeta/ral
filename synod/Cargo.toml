@@ -45,7 +45,10 @@ guest-net  = { path = "../guest-net" }
 ral-daemon = { path = "../ral-daemon" }
 
 [dev-dependencies]
-# `test_access`'s exec doors, for the office grant's tests.
+# `test_access`'s exec entries, for the office grant's tests.
 ral-core = { path = "../core", features = ["test-util"] }
+# The test doubles synod's tests and examples build on: `Scratch::for_test`,
+# `Egress::for_test`.
+exarch = { path = "../exarch", features = ["test-util"] }
 # `test_fixture::workshop`'s per-test directory, which deletes itself.
 tempfile = { workspace = true }

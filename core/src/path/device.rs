@@ -11,11 +11,11 @@ use super::lex::{HeadKind, parse_bytes};
 ///
 /// The platform gate sits at the sole call site,
 /// [`LexicalPath::is_discard`](super::LexicalPath::is_discard).
-pub(crate) fn is_discard_device(path: &str, rules: PathRules) -> bool {
+pub(crate) fn is_discard_device(path: &[u8], rules: PathRules) -> bool {
     match rules {
-        PathRules::Posix => path == "/dev/null",
+        PathRules::Posix => path == b"/dev/null",
         PathRules::Windows => {
-            let parsed = parse_bytes(path.as_bytes(), PathRules::Windows);
+            let parsed = parse_bytes(path, PathRules::Windows);
             parsed.kind == HeadKind::Device
                 && parsed
                     .namespace_tail()
@@ -37,18 +37,21 @@ pub(crate) fn is_discard_device(path: &str, rules: PathRules) -> bool {
 ///
 /// The gate is
 /// [`LexicalPath::reserved_device_refusal`](super::LexicalPath::reserved_device_refusal).
-pub(crate) fn reserved_device_refusal(path: &str, rules: PathRules) -> Option<String> {
+pub(crate) fn reserved_device_refusal(path: &[u8], rules: PathRules) -> Option<String> {
     if rules == PathRules::Posix || is_discard_device(path, rules) {
         return None;
     }
     let last = path
-        .rsplit(|c| rules.is_separator(c))
+        .rsplit(|&b| rules.is_separator(char::from(b)))
         .find(|c| !c.is_empty())?;
-    let stem = win32_trimmed(last).split('.').next()?.trim_end_matches(' ');
+    // The stem holds no `.`, so trimming it drops the blanks before one.
+    let stem = win32_trimmed(win32_trimmed(last).split(|&b| b == b'.').next()?);
     if !is_reserved_device_stem(stem) {
         return None;
     }
-    Some(if stem.eq_ignore_ascii_case("nul") {
+    // Display only: the text names the component, it does not decide on it.
+    let last = String::from_utf8_lossy(last);
+    Some(if stem.eq_ignore_ascii_case(b"nul") {
         format!(
             "`{last}` is a DOS device name, which ral does not treat as a device. \
              Did you mean `\\\\.\\NUL`? \
@@ -67,23 +70,27 @@ pub(crate) fn reserved_device_refusal(path: &str, rules: PathRules) -> Option<St
 /// name, so `NUL.` opens the device and `run.bat .` runs the batch file.
 /// The one copy of that rule, for every check that names a component by
 /// what Windows will make of it.
-pub(crate) fn win32_trimmed(name: &str) -> &str {
-    name.trim_end_matches(['.', ' '])
+pub(crate) fn win32_trimmed(mut name: &[u8]) -> &[u8] {
+    while let [rest @ .., b'.' | b' '] = name {
+        name = rest;
+    }
+    name
 }
 
-fn is_reserved_device_stem(stem: &str) -> bool {
+fn is_reserved_device_stem(stem: &[u8]) -> bool {
     let upper = stem.to_ascii_uppercase();
-    matches!(upper.as_str(), "NUL" | "CON" | "PRN" | "AUX")
+    matches!(upper.as_slice(), b"NUL" | b"CON" | b"PRN" | b"AUX")
         || upper
-            .strip_prefix("COM")
-            .or_else(|| upper.strip_prefix("LPT"))
+            .strip_prefix(b"COM")
+            .or_else(|| upper.strip_prefix(b"LPT"))
             .is_some_and(is_port_digit)
 }
 
 /// A port number Windows reserves: one digit `1`-`9`, or one of the
-/// ISO 8859-1 superscripts `¹`, `²`, `³`, which it reads as digits.
-fn is_port_digit(n: &str) -> bool {
-    matches!(n.as_bytes(), [b'1'..=b'9']) || matches!(n, "\u{b9}" | "\u{b2}" | "\u{b3}")
+/// ISO 8859-1 superscripts `¹`, `²`, `³`, which it reads as digits.  The
+/// superscripts are the two UTF-8 bytes `C2 B9`, `C2 B2` and `C2 B3`.
+fn is_port_digit(n: &[u8]) -> bool {
+    matches!(n, [b'1'..=b'9'] | [0xC2, 0xB9 | 0xB2 | 0xB3])
 }
 
 #[cfg(test)]
@@ -98,7 +105,7 @@ mod tests {
     #[test]
     fn discard_device_table() {
         for p in [r"\\.\NUL", r"\\.\nul", "//./NUL", r"\/.\Nul"] {
-            assert!(is_discard_device(p, W), "{p}");
+            assert!(is_discard_device(p.as_bytes(), W), "{p}");
         }
         for p in [
             "NUL",
@@ -114,11 +121,11 @@ mod tests {
             r"\\.\NUL.txt",
             "/dev/null",
         ] {
-            assert!(!is_discard_device(p, W), "{p}");
+            assert!(!is_discard_device(p.as_bytes(), W), "{p}");
         }
-        assert!(is_discard_device("/dev/null", P));
+        assert!(is_discard_device(b"/dev/null", P));
         for p in ["/dev/null/x", "/tmp/nul", "NUL", r"\\.\NUL"] {
-            assert!(!is_discard_device(p, P), "{p}");
+            assert!(!is_discard_device(p.as_bytes(), P), "{p}");
         }
     }
 
@@ -142,7 +149,7 @@ mod tests {
             "C:/x/aux",
             r"\\?\C:\denied\nul.txt",
         ] {
-            assert!(reserved_device_refusal(p, W).is_some(), "{p}");
+            assert!(reserved_device_refusal(p.as_bytes(), W).is_some(), "{p}");
         }
     }
 
@@ -167,26 +174,26 @@ mod tests {
             "...",
             "",
         ] {
-            assert_eq!(reserved_device_refusal(p, W), None, "{p}");
+            assert_eq!(reserved_device_refusal(p.as_bytes(), W), None, "{p}");
         }
     }
 
     #[test]
     fn nothing_is_refused_off_windows() {
         for p in ["NUL", "con", "/tmp/aux.c"] {
-            assert_eq!(reserved_device_refusal(p, P), None, "{p}");
+            assert_eq!(reserved_device_refusal(p.as_bytes(), P), None, "{p}");
         }
     }
 
     #[test]
     fn nul_refusal_names_the_component_and_the_discard() {
         assert_eq!(
-            reserved_device_refusal(r"C:\x\NUL", W).as_deref(),
+            reserved_device_refusal(br"C:\x\NUL", W).as_deref(),
             Some(
                 r"`NUL` is a DOS device name, which ral does not treat as a device. Did you mean `\\.\NUL`? (A file named `NUL` would be unusable from most Windows tools.)"
             )
         );
-        let verbatim = reserved_device_refusal(r"\\?\C:\denied\nul.txt", W).unwrap();
+        let verbatim = reserved_device_refusal(br"\\?\C:\denied\nul.txt", W).unwrap();
         assert!(
             verbatim.starts_with("`nul.txt` is a DOS device name"),
             "{verbatim}"
@@ -196,7 +203,7 @@ mod tests {
     #[test]
     fn other_reserved_names_suggest_no_discard() {
         assert_eq!(
-            reserved_device_refusal("COM1.log", W).as_deref(),
+            reserved_device_refusal(b"COM1.log", W).as_deref(),
             Some(
                 "`COM1.log` is a reserved DOS device name, and ral refuses reserved device names as file names"
             )

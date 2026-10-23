@@ -21,7 +21,7 @@ use crate::{
     },
     bus::{BusReceiver, FleetBus, Pass, Signal},
     provider::Bureau,
-    record::Resumed,
+    record::{RECORD, Resumed},
 };
 use std::sync::mpsc::TryRecvError;
 
@@ -108,7 +108,7 @@ pub fn run(
     // rather than the alt screen.
     drop(tui);
     for dir in &logs {
-        ral_core::outln!("Session log: {}/record.jsonl", ral_core::path::shown(dir));
+        ral_core::outln!("Session log: {}/{RECORD}", dir);
     }
     ral_core::outln!("render one with `exarch export <dir>`");
     ral_core::outln!("{usage}");

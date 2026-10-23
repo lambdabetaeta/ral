@@ -1,7 +1,7 @@
 //! The one sentence every edge says about a severed engine.
 
 use ral_core::carrier::Severed;
-use std::path::{Path, PathBuf};
+use ral_core::own::OwnDir;
 
 /// A start failure is worth retrying; a mid-session death is not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,29 +24,29 @@ pub struct EngineLost {
     phase: EnginePhase,
     cause: Severed,
     /// The run's directory, not the session's: a start failure has no session.
-    log_dir: Option<PathBuf>,
+    log_dir: OwnDir,
 }
 
 impl EngineLost {
-    pub fn starting(cause: &Severed, log_dir: Option<&Path>) -> Self {
+    pub fn starting(cause: &Severed, log_dir: &OwnDir) -> Self {
         Self::new(EnginePhase::Starting, cause, log_dir)
     }
 
-    pub fn running(cause: &Severed, log_dir: Option<&Path>) -> Self {
+    pub fn running(cause: &Severed, log_dir: &OwnDir) -> Self {
         Self::new(EnginePhase::Running, cause, log_dir)
     }
 
-    fn new(phase: EnginePhase, cause: &Severed, log_dir: Option<&Path>) -> Self {
+    fn new(phase: EnginePhase, cause: &Severed, log_dir: &OwnDir) -> Self {
         Self {
             phase,
             cause: cause.clone(),
-            log_dir: log_dir.map(Path::to_path_buf),
+            log_dir: log_dir.clone(),
         }
     }
 
     #[must_use]
-    pub fn log_dir(&self) -> Option<&Path> {
-        self.log_dir.as_deref()
+    pub fn log_dir(&self) -> &OwnDir {
+        &self.log_dir
     }
 
     #[must_use]
@@ -80,10 +80,7 @@ impl std::fmt::Display for EngineLost {
             }
         };
         f.write_str(sentence)?;
-        match &self.log_dir {
-            Some(dir) => write!(f, " (details in {})", ral_core::path::shown(dir)),
-            None => Ok(()),
-        }
+        write!(f, " (details in {})", self.log_dir)
     }
 }
 

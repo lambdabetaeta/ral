@@ -507,8 +507,8 @@ fn heard(rx: &crate::bus::BusReceiver) -> Vec<Recorded<Record>> {
 /// then hears again only once, and reads past a gap rather than skip it.
 #[test]
 fn a_late_mirror_catches_up_hears_nothing_twice_and_reads_past_a_gap() {
-    let dir = tempfile::tempdir().expect("a temp dir");
-    let recorder = Recorder::create(&dir.path().join("record.jsonl")).expect("a record log");
+    let dir = ral_core::own::OwnDir::for_test("scrollback").expect("a test directory");
+    let recorder = Recorder::create(&dir).expect("a record log");
     let emit = |text| {
         let _recorded = recorder.emit(prompt(text)).expect("the log appends");
     };
@@ -535,8 +535,8 @@ fn a_late_mirror_catches_up_hears_nothing_twice_and_reads_past_a_gap() {
 /// draws the opening again, and reads on from where it was.
 #[test]
 fn a_cleared_record_starts_the_mirror_over_and_keeps_the_cursor() {
-    let dir = tempfile::tempdir().expect("a temp dir");
-    let recorder = Recorder::create(&dir.path().join("record.jsonl")).expect("a record log");
+    let dir = ral_core::own::OwnDir::for_test("scrollback").expect("a test directory");
+    let recorder = Recorder::create(&dir).expect("a record log");
     let rx = on_air(&recorder);
     let _recorded = recorder.emit(prompt("before")).expect("the log appends");
     let opening = Card(vec![Mark::heading("the session card")]);

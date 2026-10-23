@@ -2,11 +2,6 @@
 //! forms on both sides, so a symlink-spelled grant covers its target, in
 //! both directions.
 
-#![allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs scaffolding: tempdir trees and symlinks for containment pins"
-)]
-
 use super::FsOp;
 use crate::capability::{Capabilities, Floor, FsPolicy, GrantStack};
 use crate::path::FrozenPath;
@@ -48,7 +43,7 @@ fn a_symlink_spelled_read_prefix_admits_its_target() {
 
 /// The threat is a stack with no `fs` opinion at all — the one shape
 /// the fold answers `Ok` before consulting anything — so the
-/// guard is tested on exactly that stack, through the typed door, and by
+/// guard is tested on exactly that stack, through the typed entry, and by
 /// inode: a hard link is the same file under another name.
 #[test]
 fn a_write_onto_a_pinned_binary_is_guarded_before_any_grant_is_consulted() {

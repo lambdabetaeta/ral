@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 //! The `use` module loader walks `RAL_PATH` past a directory named like the
 //! module, and a file at the logical cwd wins over the walk.  The rest of the
@@ -15,7 +15,7 @@ use ral_core::protocol::Run;
 use ral_core::source::SourceOrigin;
 use ral_core::types::{Settled, Shell};
 
-/// Run one top-level run of `source` through the public `run` door
+/// Run one top-level run of `source` through the public `run` entry
 /// and return the body's `Settled<Value>`.  Every test below picks source
 /// it expects to compile, so a static diagnostic is a test bug.
 fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {

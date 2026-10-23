@@ -1,5 +1,5 @@
 //! The active model selection, persisted as JSON in the project's state
-//! directory ([`crate::app::App::project_dir`]) beside that project's
+//! directory ([`crate::app::App::project`]) beside that project's
 //! session logs.
 //!
 //! That directory is keyed by where exarch was launched, and sits outside
@@ -11,8 +11,9 @@ use crate::provider::models::{
     ListFailure, Listed, resolve_account, resolve_model_provider, resolve_pinned_provider,
 };
 use crate::provider::{Choice, Provider, Via};
+use ral_core::own::OwnDir;
+use ral_core::path::Visibility;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 
 const STATE_FILE: &str = "state.json";
 
@@ -150,56 +151,33 @@ pub(crate) fn named(
     })
 }
 
-fn path_in(dir: &Path) -> PathBuf {
-    dir.join(STATE_FILE)
+/// The selection saved in `project`; `None` when the file is absent or
+/// unreadable or malformed.
+pub fn load(project: &OwnDir) -> Option<State> {
+    // A remembered choice: a corrupt file reads as no selection rather than
+    // bricking startup.
+    project.load(STATE_FILE).ok().flatten()
 }
 
-/// The selection saved in `dir`; `None` when the file is absent or malformed —
-/// a corrupt file reads as no selection rather than bricking startup.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:state-read] reads the persisted picker selection; recoverable session state, not turn-time data I/O"
-)]
-pub fn load(dir: &Path) -> Option<State> {
-    let bytes = std::fs::read(path_in(dir)).ok()?;
-    serde_json::from_slice(&bytes).ok()
-}
-
-/// Persist `state` to `dir/state.json`, creating `dir` if needed. Failure is
-/// returned, not fatal: the switch already took effect in memory, so
-/// `tui::model_picker` merely notes it.
+/// Replace `project/state.json` with `state`. Failure is returned, not fatal:
+/// the switch already took effect in memory, so `tui::model_picker` merely
+/// notes it.
 ///
 /// # Errors
-/// Returns `Err` if creating `dir`, serialising, or writing fails.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:state-write] persists the picker selection; recoverable session state, not turn-time data I/O"
-)]
-pub fn save(dir: &Path, state: &State) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", ral_core::path::shown(dir)))?;
-    let path = path_in(dir);
-    let json =
-        serde_json::to_string_pretty(state).map_err(|e| format!("serialise {STATE_FILE}: {e}"))?;
-    std::fs::write(&path, json).map_err(|e| format!("{}: {e}", ral_core::path::shown(&path)))
+/// Returns `Err` if serialising or writing fails.
+pub fn save(project: &OwnDir, state: &State) -> Result<(), String> {
+    Ok(project.store(STATE_FILE, state, Visibility::Public)?)
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use crate::provider::identity::{Auth, Service, ServiceName};
+    use ral_core::own::TestDir;
 
-    fn tmp_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "exarch-state-test-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id(),
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn tmp_dir() -> TestDir {
+        OwnDir::for_test("state").expect("a test project directory")
     }
 
     fn choice(account: &Account, model: &str) -> Choice {
@@ -220,7 +198,6 @@ mod tests {
         let loaded = load(&dir).expect("state should load");
         assert_eq!(loaded, state);
         assert_eq!(loaded.account(&available), Some(deepseek));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -238,7 +215,6 @@ mod tests {
         let loaded = load(&dir).expect("state should load");
         assert_eq!(loaded.provider, "local-llama");
         assert_eq!(loaded.account(&available), Some(llama));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -256,7 +232,6 @@ mod tests {
         );
         save(&dir, &state).unwrap();
         assert_eq!(load(&dir), Some(state));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -265,24 +240,21 @@ mod tests {
         let anthropic = Account::built_in("anthropic");
         save(&dir, &saved(&anthropic, "model-a")).unwrap();
         let json: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(path_in(&dir)).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(dir.path().join(STATE_FILE)).unwrap()).unwrap();
         assert!(json.get("via").is_none(), "{json}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn absent_file_is_none() {
         let dir = tmp_dir();
         assert!(load(&dir).is_none());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn malformed_file_is_none() {
         let dir = tmp_dir();
-        std::fs::write(path_in(&dir), b"{ not json").unwrap();
+        std::fs::write(dir.path().join(STATE_FILE), b"{ not json").unwrap();
         assert!(load(&dir).is_none());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -305,7 +277,7 @@ mod tests {
     fn a_pre_change_state_file_still_resolves() {
         let dir = tmp_dir();
         std::fs::write(
-            path_in(&dir),
+            dir.path().join(STATE_FILE),
             br#"{"provider":"anthropic","model":"model-a","effort":"high"}"#,
         )
         .unwrap();
@@ -316,7 +288,6 @@ mod tests {
             loaded.account(&available),
             Some(Account::built_in("anthropic"))
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn saved(account: &Account, model: &str) -> State {

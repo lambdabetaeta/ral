@@ -314,4 +314,5 @@ pub(super) fn legend_panel(width: u16) -> Vec<Line<'static>> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

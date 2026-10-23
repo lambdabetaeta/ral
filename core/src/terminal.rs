@@ -8,6 +8,7 @@
 //!
 //! [`seat`]: TerminalState::seat
 
+use crate::host;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
@@ -123,22 +124,14 @@ impl TerminalState {
     /// Probe in the mode `RAL_INTERACTIVE_MODE` names.  The env var is read
     /// here, beside the type defining the modes, rather than respelled in each
     /// frontend.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "RAL_INTERACTIVE_MODE selects a mode; it names no directory, so the XDG rule `crate::path::resolve_xdg_in` enforces has nothing to say about it"
-    )]
     pub fn probe_from_env() -> (InteractiveMode, Self, Option<String>) {
-        let raw = std::env::var("RAL_INTERACTIVE_MODE").ok();
+        let raw = host::var("RAL_INTERACTIVE_MODE");
         let (mode, warn) = InteractiveMode::parse(raw.as_deref());
         (mode, Self::probe_with_mode(mode), warn)
     }
 
     /// Query the OS and environment.  Callers [`seat`](Self::seat) the result
     /// so process-wide colour gating agrees with this snapshot.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "TMUX and ASCIINEMA_REC are read for presence alone: the value is never a path, so there is no relative override for the XDG rule to ignore"
-    )]
     pub(crate) fn probe_with_mode(mode: InteractiveMode) -> Self {
         let (startup_stdin_tty, startup_stdout_tty, startup_stderr_tty) = probe_isatty();
         let startup_foreground = probe_foreground(startup_stdin_tty);
@@ -157,8 +150,8 @@ impl TerminalState {
             supports_ansi,
             stderr_ansi_capable,
             no_color: anstyle_query::no_color(),
-            is_tmux: std::env::var_os("TMUX").is_some(),
-            is_asciinema: std::env::var_os("ASCIINEMA_REC").is_some(),
+            is_tmux: host::var_os("TMUX").is_some(),
+            is_asciinema: host::var_os("ASCIINEMA_REC").is_some(),
             is_ci: anstyle_query::is_ci(),
             truecolor: env.advertises_truecolor(),
             hyperlinks: modern_osc,
@@ -288,18 +281,14 @@ struct TerminalEnv {
 }
 
 impl TerminalEnv {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "KITTY_WINDOW_ID and WT_SESSION are read for presence alone, on the same ground as `probe_with_mode`'s pair above"
-    )]
     fn from_process() -> Self {
         Self {
-            term: std::env::var("TERM").ok(),
-            term_program: std::env::var("TERM_PROGRAM").ok(),
-            colorterm: std::env::var("COLORTERM").ok(),
-            vte_version: std::env::var("VTE_VERSION").ok(),
-            kitty_window_id: std::env::var_os("KITTY_WINDOW_ID").is_some(),
-            wt_session: std::env::var_os("WT_SESSION").is_some(),
+            term: host::var("TERM"),
+            term_program: host::var("TERM_PROGRAM"),
+            colorterm: host::var("COLORTERM"),
+            vte_version: host::var("VTE_VERSION"),
+            kitty_window_id: host::var_os("KITTY_WINDOW_ID").is_some(),
+            wt_session: host::var_os("WT_SESSION").is_some(),
         }
     }
 

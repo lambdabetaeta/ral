@@ -243,7 +243,7 @@ not stamp every drive; grant the folders the program needs instead. The
 in-process guard still judges, and in-process work is unaffected.
 
 Each file is frozen as it loads: the places `` `home ``, `` `xdg-* ``, `` `cwd ``,
-`` `tempdir ``, `` `gitdir ``, and the `dir` selectors (`` `path ``, `` `system ``, the package managers) resolve to
+`` `tempdir ``, `` `scratch ``, `` `gitdir ``, and the `dir` selectors (`` `path ``, `` `system ``, the package managers) resolve to
 fixed paths for that session before the capabilities are composed. Changing the environment later cannot move those grants.
 
 Two of them are read from a source the session does not author, and each is
@@ -367,9 +367,9 @@ One further variable is forced, though it relocates nothing:
 | `CARGO_NET_GIT_FETCH_WITH_CLI` | Cargo | `true` |
 
 Cargo's bundled git speaks TLS through macOS SecureTransport, whose handshake
-reaches securityd — the keychain door no profile admits — so a git dependency
+reaches securityd — the keychain service no profile admits — so a git dependency
 otherwise fails as `ssl handshake -9808`, which cargo reports as a missing
-revision. The `git` binary's TLS needs no such door, so cargo fetches through
+revision. The `git` binary's TLS needs no such service, so cargo fetches through
 it. A profile that denies `git`, such as `edit-only`, therefore cannot resolve
 git dependencies at all.
 

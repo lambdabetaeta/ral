@@ -25,8 +25,10 @@ use crate::types::DeferredSink;
 
 mod identity;
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 pub(crate) mod testkit;
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;
 mod wire;
 
@@ -134,7 +136,7 @@ impl Host for () {
 // ── The front-end's state ─────────────────────────────────────────────
 
 /// What both carriers hold of the front-end's side of one connection: its
-/// control door, the events it drains, the cause that ended it, and the
+/// control sender, the events it drains, the cause that ended it, and the
 /// session sink.
 pub struct Ends {
     control: ControlSender,
@@ -148,7 +150,7 @@ pub struct Ends {
 
 impl Ends {
     /// Ends over `control` and `events`, whose severance is `severance`: the
-    /// cell `control`'s own door records into, if it writes a wire.
+    /// cell `control`'s own route records into, if it writes a wire.
     fn new(
         control: ControlSender,
         events: EventReceiver,
@@ -185,7 +187,7 @@ pub trait Transport: Send + Sync {
     /// transport uses it.
     fn dispatch(&self, id: DispatchId, run: Run, host: &Arc<dyn Host>);
 
-    /// Read session state at a run boundary, synchronously. The typed doors
+    /// Read session state at a run boundary, synchronously. The typed methods
     /// below are the way to ask.
     ///
     /// # Errors
@@ -240,12 +242,13 @@ pub trait Transport: Send + Sync {
         *self.ends().deferred_sink.lock_ignore_poison() = Some(sink);
     }
 
-    /// The engine's logical cwd.
+    /// The engine's logical cwd, or `None` when it cannot travel as text: the
+    /// same reading as a failed probe.
     ///
     /// # Errors
     /// [`ProbeError`]: a refusal, or the severance an ill-shaped answer causes.
-    fn cwd(&self) -> Result<PathBuf, ProbeError> {
-        read::<String>(self, &Probe::Cwd).map(PathBuf::from)
+    fn cwd(&self) -> Result<Option<PathBuf>, ProbeError> {
+        read::<Option<String>>(self, &Probe::Cwd).map(|cwd| cwd.map(PathBuf::from))
     }
 
     /// The engine's `HOME`, through its own env overlay.
@@ -490,22 +493,23 @@ fn mint_dispatch_id() -> DispatchId {
 
 // ── Senders and receivers ─────────────────────────────────────────────
 
-/// A wire sender's write door and the severance cell a failed write records
+/// A wire sender's write channel and the severance cell a failed write records
 /// into.
 type WireControl = (Arc<Mutex<WireChannel>>, Arc<OnceLock<Severed>>);
 
-/// The out-of-band control door: [`Control`]'s verbs, meaning the same under
+/// The out-of-band control sender: [`Control`]'s verbs, meaning the same under
 /// either carrier.
 #[derive(Clone)]
 pub struct ControlSender {
-    door: Door,
+    route: ControlRoute,
     /// The dispatch this front-end has in flight, and the
     /// [`interrupt_epoch`](crate::process::interrupt_epoch) it was sent at.
     in_flight: Arc<Mutex<Option<(DispatchId, u64)>>>,
 }
 
+/// How a [`ControlSender`] delivers a [`Control`].
 #[derive(Clone)]
-enum Door {
+enum ControlRoute {
     /// In-process: straight onto the engine's own scopes.
     Identity(Arc<Scopes>),
     /// A `Control` frame, recording into the transport's severance cell, so a
@@ -514,9 +518,9 @@ enum Door {
 }
 
 impl ControlSender {
-    fn new(door: Door) -> Self {
+    fn new(route: ControlRoute) -> Self {
         Self {
-            door,
+            route,
             in_flight: Arc::default(),
         }
     }
@@ -558,8 +562,8 @@ impl ControlSender {
     /// Hear this process's signals as this session's `Control` until the
     /// guard drops: no engine folds them itself.
     pub fn forward_signals(&self) -> crate::process::AmbientForward {
-        let door = self.clone();
-        crate::process::forward_ambient(move |ambient| door.hear(ambient))
+        let sender = self.clone();
+        crate::process::forward_ambient(move |ambient| sender.hear(ambient))
     }
 
     /// Aim this front-end's interrupts at `id` until the guard drops.
@@ -576,12 +580,12 @@ impl ControlSender {
     }
 
     fn send(&self, control: Control) {
-        match &self.door {
-            Door::Identity(scopes) => scopes.apply(control),
+        match &self.route {
+            ControlRoute::Identity(scopes) => scopes.apply(control),
             // A control frame that cannot be written is as fatal as a dispatch
             // that cannot: the peer is gone, and waiting on the reader's
             // eventual EOF to say so leaves a cancel silently lost meanwhile.
-            Door::Wire((ch, severance)) => {
+            ControlRoute::Wire((ch, severance)) => {
                 if let Err(WriteError::Unencodable(e)) =
                     write_through(ch, severance, &Frame::Control(control))
                 {

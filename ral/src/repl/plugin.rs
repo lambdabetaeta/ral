@@ -146,7 +146,7 @@ pub(super) struct DeferredDiagnostics {
 /// rustyline requires `ConditionalEventHandler: Send + Sync`; the
 /// substructs themselves are owned by value here.
 ///
-/// `plugins` is the canonical list, told by the engine's load doors.
+/// `plugins` is the canonical list, told by the engine's load builtins.
 /// `keybindings_dirty` signals the next readline iteration that rustyline
 /// should re-register key handlers.
 #[derive(Default)]
@@ -472,7 +472,7 @@ impl PluginRuntime {
         }
     }
 
-    /// Take what a load door says: admit a manifest, re-validated, or let a
+    /// Take what a load builtin says: admit a manifest, re-validated, or let a
     /// plugin go.  The engine's own admission checks do not excuse these.
     pub(super) fn note(&mut self, note: PluginNote) -> Result<(), String> {
         match note {
@@ -521,7 +521,7 @@ impl PluginRuntime {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "[test] test scaffolding")]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::load::harness::dressed;
     use super::*;

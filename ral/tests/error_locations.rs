@@ -7,7 +7,7 @@
 //! is drawn wherever they point, which is the whole answer when the text is
 //! not the text the user just typed.
 
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 mod common;
 

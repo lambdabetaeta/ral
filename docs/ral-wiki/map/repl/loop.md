@@ -1,7 +1,7 @@
 ---
 generated_at_commit: 61c288f
 generated_at_date: 2026-10-21
-covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/host.rs, ral/src/repl/enquiry.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/config/, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/boot_door.rs, ral/src/surface.rs]
+covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/host.rs, ral/src/repl/enquiry.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/config/, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/boot_builtin.rs, ral/src/surface.rs]
 ---
 
 # Map: repl / loop
@@ -27,15 +27,15 @@ no job table: ral does not suspend
 
 - `Session::boot` is two-staged. Stage one is `IdentityTransport::boot` with
   `startup::engine::INSTALLERS` and an `Attach` that configures nothing —
-  login matters only to the boot door's profile sourcing; the `repl` recipe
+  login matters only to the boot builtin's profile sourcing; the `repl` recipe
   does what precedes rc (below). A
   refusal prints its sentence and exits 2. Stage two is the host's first
   dispatch: `Program::Hook` on the `Session "boot"` hook, the `_ral-boot`
-  door, applied to `Boot {login, no-rc, recursion-limit, capabilities}`
-  (`ral/src/boot_door.rs`). `capabilities` holds absolute paths:
+  builtin, applied to `Boot {login, no-rc, recursion-limit, capabilities}`
+  (`ral/src/boot_builtin.rs`). `capabilities` holds absolute paths:
   `Boot::profiles` anchors each argument at the invocation cwd before the
-  door runs, since the rc and earlier profiles may `cd` first, and the door
-  refuses a relative one before sourcing anything. `boot_door::settle` reads its `Ending`: `Settled`
+  builtin runs, since the rc and earlier profiles may `cd` first, and the builtin
+  refuses a relative one before sourcing anything. `boot_builtin::settle` reads its `Ending`: `Settled`
   carries the rc's `RcSettings`, a `--capabilities` failure is `Raised`
   status 2, a profile's `exit N` is `Exited(N)`, and either ends the session
   there. The host then applies `--surface` over the rc's choice, keeps the
@@ -75,7 +75,7 @@ the frontend the rc settles on after it: `setup_signals` (the whole Unix
 disposition table in one place — SIGINT `interrupt_handler`, which raises the
 foreground interrupt and nothing else, SIGQUIT root-abort, SIGTERM/SIGHUP term
 handler, SIGTSTP/SIGTTOU/SIGTTIN/SIGPIPE ignore — every entry set through
-core's `process::ignore` / `process::install`, the one door that snapshots the
+core's `process::ignore` / `process::install`, the one place that snapshots the
 inherited `SIG_IGN`s before the first change so `reset_child_signals` can hand
 them on: the nohup rule), `claim_terminal` (run after
 SIGTTOU is ignored, since its `tcsetpgrp` runs from a group not yet in the
@@ -86,24 +86,28 @@ left one, which hands the terminal back on drop — else a parent doing no job
 control, `vim`'s `:sh` or `su`, stops on its next terminal read),
 `setup_panic_hook` (restore the
 pre-raw terminal state — termios on Unix, console mode on Windows — then write
-a crash log, to a state-dir path resolved at install time so a changed `HOME`
-cannot redirect it), and `create_frontend`.
+a crash log, a new file `crash-<ts>-<random>.log` in ral's state directory
+(`$XDG_STATE_HOME/ral`), held as an `OwnDir` from install time so a changed
+`HOME` cannot redirect it; with no state base, the panic message goes to
+stderr), and `create_frontend`, which hands the line editor its history file,
+`$XDG_STATE_HOME/ral/history` (`config::dirs_history`; none without a state
+base, and then no history).
 
 ## The boot, engine-side
 
 The `repl` installer's recipe (`startup::engine::boot_repl`) boots the REPL
-surface — the batch surface plus the [[map/repl/plugins|`_ed-*` doors and
-the plugin load doors]] — through `boot_shell`, so the typechecker and the
+surface — the batch surface plus the [[map/repl/plugins|`_ed-*` builtins and
+the plugin load builtins]] — through `boot_shell`, so the typechecker and the
 runtime see one surface by construction; then exit hints, the
-interactive flag, `$TERMINAL`, and the boot door's registration. The umask
+interactive flag, `$TERMINAL`, and the boot builtin's registration. The umask
 is the login's own, set by `login(1)` or PAM; the shell does not touch it.
 
-The boot door (`_ral-boot`, one-shot: it unregisters its own hook) does the
+The boot builtin (`_ral-boot`, one-shot: it unregisters its own hook) does the
 rest in a run, since startup files evaluate ral: `source_startup_files`
 (`config/source.rs` — login profiles, then the rc), the CLI's
 `--recursion-limit` after the rc, `--capabilities` through
 `load::profile::apply_session_profiles` (the user's ceiling is the last word,
-and a session frame it pushes survives the door's run), and
+and a session frame it pushes survives the builtin's run), and
 `install_default_prompt` (register the default `Session/"prompt"` hook,
 `{ return "❯ " }`, only when no rc `prompt:` key registered one). It answers
 the rc's `RcSettings {edit-mode, bell, surface, theme, startup}` — the only
@@ -143,7 +147,7 @@ the `Session/"startup"` hook, and the host dispatches it as a hook run under
 ## Every evaluation is a dispatch
 
 **Each line, prompt, and hook is one `Run` through `dispatch_to_report` with
-the REPL host, and the engine's door compiles, typechecks, and runs it against
+the REPL host, and the engine's run entry compiles, typechecks, and runs it against
 the live session** ([[internals/a-turn-end-to-end|a run, end to end]]).
 
 `exec.rs::step` is the per-line entry. `line_run` builds the `Run` —
@@ -155,10 +159,10 @@ plugins' `pre-exec` hooks over the typed line in load order, each dispatched
 with `{src}`: a `Str` result is the next hook's line and, last, the line
 `line_run` carries; `()`, an `exit`, a fault or a wrong-shaped value
 ([[map/repl/plugins|plugins]]) leaves it. After, `fire` runs `chpwd`
-with `{old, new}` if the `cwd` reading
-differs from the one taken before the line — the session is the working
-directory's outermost handler, so a `cd` a `within [dir:]` undid fires
-nothing — then `post-exec` with
+with `{old, new}` if the `cwd` readings, taken before and after the line, are
+both present and differ (a working directory that cannot travel as text reads
+as none) — the session is the working directory's outermost handler, so a `cd`
+a `within [dir:]` undid fires nothing — then `post-exec` with
 `{src, status}`, `src` being the line that ran — for every line, a static
 failure's status included. An `Err(Severed)` prints the cause and ends the
 session.
@@ -175,7 +179,7 @@ It matches the one flat `Report`:
   `Stopped` is a cancellation, not a process stop: ral does not suspend
   ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
 
-The same door backs every host program the REPL holds as a value: the prompt
+The same entry backs every host program the REPL holds as a value: the prompt
 body, an rc startup block, and a plugin hook are *registered hooks* run as
 `Program::Hook` runs ([[map/repl/plugins|plugins]]), whose registered policy
 decides capture, terminal authority, and whether the run is taken aside. A
@@ -185,7 +189,7 @@ hook is ignored.
 
 ## The host
 
-`host.rs::ReplHost` is the REPL's `Host`, and the one door every hook
+`host.rs::ReplHost` is the REPL's `Host`, and the one place every hook
 dispatch goes through (`dispatch`, `run_hook` → `HookResult {outcome,
 captured, ctx}`, the `Outcome` one of `Settled(value)`, `Exited`,
 `Faulted(text)`, `Walled(text)`, the text trimmed and labelled once there).
@@ -236,7 +240,7 @@ and completion live in
   `Session/"prompt"` hook — `bindings`, `aliases`, `edit-mode`, `bell`,
   `surface`, `recursion-limit`, `plugins`, `startup`, `theme`) are declared
   once, in `Form::Rc`'s table, and `RcPlan::decode` judges them all engine-side,
-  inside the boot door, before `RcPlan::apply` commits to the shell and the
+  inside the boot builtin, before `RcPlan::apply` commits to the shell and the
   `RcSettings` it answers; a refused rc has changed nothing. The first-run
   skeleton is written with `create_new`, so a concurrent rc is never truncated. A
   wrong type at one of the scalar keys is the table's static failure, above;

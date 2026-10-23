@@ -186,10 +186,7 @@ fn join_stderr(command: &mut crate::process::Launch, stdout: &Sink) -> Settled<O
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::{StdinRoute, wire_stdin};
     use crate::io::Source;

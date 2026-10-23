@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 //! A command's value is its output: where a value is wanted, a command is
 //! captured; where a command is wanted, a command runs.  Each case binds
 //! something and renders it with `to-json`, so the value and what escaped to

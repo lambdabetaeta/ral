@@ -28,8 +28,9 @@ use crate::guard::freeze::PolicyError;
 use crate::guard::toolchains;
 use crate::path::{
     Depth, Dir, DirEntry, Excluded, FrozenPath, Judged, LeafMode, LexicalPath, Located, MatchedBy,
-    Op, Reading, RealPath, Subject, Trace, walk, walk_dir, walk_lenient,
+    Op, Reading, RealPath, Subject, Trace, Writing, walk, walk_dir, walk_lenient,
 };
+use crate::site::{Silent, site};
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::marker::PhantomData;
@@ -45,7 +46,8 @@ pub enum FsOp {
 
 /// The grant stack's say-so for the op `O`: what turns an unjudged handle into
 /// a judged one.  Its field is private to this module, so [`GrantStack::judge`],
-/// [`ReadRegion`] and [`Ungoverned`] alone make one, and these are the
+/// [`ReadRegion`] and [`Ungoverned`] alone make one (the last with a read side
+/// and a write side, which only [`crate::own`] calls), and these are the
 /// constructions to audit.
 pub(crate) struct Verdict<O: Op>(PhantomData<O>);
 
@@ -256,11 +258,7 @@ impl Floor {
     /// A floor spelling whose walk fails, named: a host that cannot resolve
     /// its own floor cannot run anything.
     pub(crate) fn of_host() -> Result<Self, String> {
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "the floor has no FreezeCtx: its home is the process's, as `home` places default to"
-        )]
-        let home = crate::host::home();
+        let home = site!(Silent::FloorHome, crate::host::home());
         Self::of_home(home.as_deref())
     }
 
@@ -271,7 +269,7 @@ impl Floor {
     pub(crate) fn of_home(home: Option<&str>) -> Result<Self, String> {
         #[cfg(windows)]
         let listed = ["SystemRoot", "ProgramFiles", "ProgramFiles(x86)"]
-            .map(|k| std::env::var(k).unwrap_or_default());
+            .map(|k| crate::host::var(k).unwrap_or_default());
         #[cfg(target_os = "linux")]
         let listed = [
             "/bin",
@@ -437,9 +435,11 @@ struct Folded {
     placed: FsRules,
 }
 
-/// The user's own authority: no grant governs these reads.  The second
-/// minting door beside [`GrantStack::judge`], read-only; `syscall_sites`
-/// counts its callers.
+/// The user's own authority: no grant governs these reads and writes.
+///
+/// The second minting point beside [`GrantStack::judge`]; `core/tests/sites.rs`
+/// counts its callers.  Its read side is public; its write side is
+/// crate-private, and [`crate::own`] is its one caller.
 pub struct Ungoverned;
 
 impl Ungoverned {
@@ -453,6 +453,19 @@ impl Ungoverned {
 
     pub fn region() -> ReadRegion {
         ReadRegion(None)
+    }
+
+    /// The write side of the user's own authority: the program's own
+    /// directories, the files the user writes at its places, and the one new
+    /// file a user names.  [`crate::own`] is the one caller, and
+    /// `core/tests/sites.rs` counts it.
+    pub(crate) fn write(l: Located) -> Located<Judged<Writing>> {
+        l.judged(Verdict(PhantomData))
+    }
+
+    /// [`write`](Self::write), for a directory.
+    pub(crate) fn write_dir(d: Dir) -> Dir<Judged<Writing>> {
+        d.judged(Verdict(PhantomData))
     }
 }
 
@@ -561,7 +574,7 @@ impl GrantStack {
     }
 
     /// Judge `l` for `O`: [`refusal_fs`](Self::refusal_fs), then, admitted,
-    /// the handle vouched for.  The one door from evidence to authority, with
+    /// the handle vouched for.  The one place evidence becomes authority, with
     /// [`ReadRegion`] and [`Ungoverned`].
     ///
     /// # Errors
@@ -631,10 +644,7 @@ impl GrantStack {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] a tempdir tree with real links; fixture paths already in normal form"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use crate::capability::Evidence;

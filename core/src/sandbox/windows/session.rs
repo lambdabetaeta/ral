@@ -422,7 +422,7 @@ fn ensure_allows(
     cancel: &Scope,
 ) -> Result<(), Refusal> {
     for pin in pins {
-        let name = dacl::fs_capability_name(pin.path(), kind);
+        let name = dacl::fs_capability_name(pin.name(), kind);
         let cap = derive(fs_cap_sids, &name)?;
         dacl::ensure_frozen_grant(&pin, &cap.sid_string, kind, cancel)?;
         // The memo is a hint, never the check: `confine` pins every allowance
@@ -583,13 +583,16 @@ fn io_refusal(context: &str, e: &std::io::Error) -> Refusal {
 
 /// A cancel mid-stamp is not a sandbox failure, so it stays a cancellation
 /// and never reads as `sandbox: fs grant failed`; nor does a redirected
-/// allowance, which says what it is; and an exclusion the token could still
-/// reach is confinement this host cannot establish.
+/// allowance, which says what it is; nor does a position that is not Unicode;
+/// and an exclusion the token could still reach is confinement this host
+/// cannot establish.
 impl From<DaclError> for Refusal {
     fn from(e: DaclError) -> Self {
         match e {
             DaclError::Cancelled(cause) => Self::Cancelled(cause),
-            e @ DaclError::Redirected { .. } => Self::Launch(e.to_string()),
+            e @ (DaclError::Redirected { .. } | DaclError::NotUnicode(_)) => {
+                Self::Launch(e.to_string())
+            }
             e @ DaclError::Reachable { .. } => Self::Unavailable(e.to_string()),
             e => Self::Launch(format!("sandbox: fs grant failed: {e}")),
         }
@@ -597,4 +600,5 @@ impl From<DaclError> for Refusal {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

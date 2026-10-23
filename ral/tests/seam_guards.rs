@@ -1,8 +1,8 @@
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 //! Architecture grep guards for the run host-API cutover.
 //!
-//! [[decisions/260618_run-turn-is-host-api]] makes the run door
+//! [[decisions/260618_run-turn-is-host-api]] makes the run entry
 //! (`Shell::run`) / `RunRequest` / `RunReport` the only host-facing
 //! evaluation seam. These source-text scans hold two lexical consequences of
 //! that boundary:
@@ -11,8 +11,8 @@
 //!     is a synchronous `EventSink` taking a `Value`, and the host owns its
 //!     concurrency model.
 //!   - host crates (`ral`, `exarch`) name no `arm_lifetime` — a host states a
-//!     wall clock in its `RunRequest` and the door arms the process lifetime
-//!     from it, so no host reaches past the door into core's reaper to time a
+//!     wall clock in its `RunRequest` and core arms the process lifetime
+//!     from it, so no host reaches past it into core's reaper to time a
 //!     run by hand.
 //!
 //! The invariant being guarded is itself lexical — "this name does not occur
@@ -28,7 +28,6 @@ use std::path::{Path, PathBuf};
 /// "env-var lifting" adapter site the path-construction discipline in
 /// `clippy.toml` exempts. Test scaffolding for a source scan, not a shell
 /// path-resolution site, so the named `crate::path` helpers do not apply.
-#[allow(clippy::disallowed_methods)]
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -115,9 +114,9 @@ fn ral_core_names_no_async_runtime() {
     assert_absent("core/src", "spawn_blocking");
 }
 
-/// Hosts are request suppliers: they build a `RunRequest`, call a run door,
+/// Hosts are request suppliers: they build a `RunRequest`, call the run entry,
 /// and render a `RunReport`. A run's wall clock rides the request, and the
-/// door arms the process lifetime from it — so `arm_lifetime`, which core
+/// core arms the process lifetime from it — so `arm_lifetime`, which core
 /// exports for its own use, must never be reached from a host.
 #[test]
 fn hosts_do_not_arm_process_lifetimes() {

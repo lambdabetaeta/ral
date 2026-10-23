@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 //! Regression: a grant that holds an opinion about `exec` alone still yields
 //! an OS-renderable projection, wherever a backend carries the exec allow-list

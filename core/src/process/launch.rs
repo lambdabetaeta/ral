@@ -4,6 +4,8 @@
 //! `CreateProcessW` itself, because handle admission and Job Object
 //! membership must be creation-time facts.
 
+#[cfg(not(windows))]
+use crate::site::{Surface, site};
 use std::ffi::OsStr;
 #[cfg(windows)]
 use std::ffi::OsString;
@@ -61,7 +63,7 @@ struct SecurityCapabilitiesAttr {
 #[cfg(windows)]
 #[derive(Clone, Eq)]
 struct EnvKey {
-    folded: String,
+    folded: Vec<u8>,
     original: OsString,
 }
 
@@ -199,11 +201,7 @@ impl Launch {
 #[cfg(not(windows))]
 impl Launch {
     pub fn new(program: impl AsRef<OsStr>) -> Self {
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "[surface:process-launch] Builds the external exec image at ral's owned launch boundary; `finish_command` builds the exec observation, wrapping the whole dispatch, with the resolved argv and status."
-        )]
-        let cmd = std::process::Command::new(program);
+        let cmd = site!(Surface::ProcessLaunch, std::process::Command::new(program));
         Self {
             cmd,
             jail: None,
@@ -502,13 +500,9 @@ impl Launch {
 }
 
 #[cfg(windows)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "native: an environment key, folded as Windows compares env names"
-)]
 fn env_key(key: &OsStr) -> EnvKey {
     EnvKey {
-        folded: key.to_string_lossy().to_ascii_uppercase(),
+        folded: key.as_encoded_bytes().to_ascii_uppercase(),
         original: key.to_os_string(),
     }
 }
@@ -580,10 +574,7 @@ mod windows_args {
     // Non-BMP text through the argv UTF-16 conversion, so a wide-char
     // regression is caught apart from a quoting one.  Windows CI only.
     #[cfg(test)]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] the expected text is built from fixtures that are UTF-8 by construction"
-    )]
+    #[allow(clippy::disallowed_methods, reason = "test code")]
     mod tests;
 }
 
@@ -595,17 +586,13 @@ mod windows {
     use std::ffi::{OsStr, OsString};
     use std::io;
     use std::os::windows::ffi::OsStrExt;
-    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::ptr::{null, null_mut};
     use std::sync::Mutex;
     use windows_sys::Win32::Foundation::{
         HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_OBJECT_0,
     };
     use windows_sys::Win32::Security::SECURITY_CAPABILITIES;
-    use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, OPEN_EXISTING,
-    };
     use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
     use windows_sys::Win32::System::Threading::{
         CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
@@ -840,7 +827,7 @@ mod windows {
                         },
                     };
                     if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-                        return Self::null(stream);
+                        return Self::null();
                     }
                     Ok(Self {
                         child: handle,
@@ -849,7 +836,7 @@ mod windows {
                         _owned_child: None,
                     })
                 }
-                StdioSpec::Null => Self::null(stream),
+                StdioSpec::Null => Self::null(),
                 StdioSpec::Piped => Self::piped(stream),
                 StdioSpec::Handle(handle) => {
                     let raw = handle.as_raw_handle() as HANDLE;
@@ -863,12 +850,8 @@ mod windows {
             }
         }
 
-        fn null(stream: Stream) -> io::Result<Self> {
-            let access = match stream {
-                Stream::Stdin => FILE_GENERIC_READ,
-                Stream::Stdout | Stream::Stderr => FILE_GENERIC_WRITE,
-            };
-            let handle = open_nul(access)?;
+        fn null() -> io::Result<Self> {
+            let handle = OwnedHandle::from(crate::path::open_discard()?);
             let raw = handle.as_raw_handle() as HANDLE;
             Ok(Self {
                 child: raw,
@@ -912,30 +895,6 @@ mod windows {
                 }
             }
         }
-    }
-
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:nul-device] opens the NUL device as a child's stand-in stdio; the name is the OS's own constant, not a model's"
-    )]
-    fn open_nul(access: u32) -> io::Result<OwnedHandle> {
-        let name = wide_null(OsStr::new("NUL"))?;
-        let handle = unsafe {
-            CreateFileW(
-                name.as_ptr(),
-                access,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                null(),
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                null_mut(),
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: `CreateFileW` returned a fresh owning handle.
-        Ok(unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) })
     }
 
     fn pipe_reader_to_owned(reader: os_pipe::PipeReader) -> OwnedHandle {
@@ -1073,7 +1032,7 @@ mod windows {
         edits: &std::collections::BTreeMap<super::EnvKey, EnvEdit>,
     ) -> io::Result<Vec<u16>> {
         let mut env = std::collections::BTreeMap::<super::EnvKey, OsString>::new();
-        for (k, v) in std::env::vars_os() {
+        for (k, v) in crate::host::vars_os() {
             env.insert(super::env_key(&k), v);
         }
         for (k, edit) in edits {
@@ -1192,9 +1151,6 @@ mod windows {
     // The other two UTF-16 conversions: `wide_null` for the program path and
     // cwd, `environment_block` for the env block.
     #[cfg(test)]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] the expected text is built from fixtures that are UTF-8 by construction"
-    )]
+    #[allow(clippy::disallowed_methods, reason = "test code")]
     mod tests;
 }

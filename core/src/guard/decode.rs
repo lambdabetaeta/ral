@@ -394,7 +394,7 @@ fn unknown_exec_key(key: &str, value: &Value) -> PolicyError {
 /// `GrantLayer` has every spelling already resolved" holds by construction
 /// whoever comes through.  Unknown keys error here and in each dimension's
 /// decoder rather than being silently dropped; the keyset is `grant`'s own
-/// declared table, so this door and the checker cannot drift apart.
+/// declared table, so this decoder and the checker cannot drift apart.
 ///
 /// # Errors
 /// A [`PolicyError`] naming the key whose shape or value it will not read, or
@@ -432,10 +432,7 @@ pub fn decode_capability_map(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs scaffolding: FreezeCtx cwds and tempdir files"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use crate::capability::{ExecAllow, ExecDeny, FsAllow, FsOp};

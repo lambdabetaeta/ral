@@ -10,6 +10,7 @@ use crate::agent::Avatar;
 use crate::latch::Latch;
 use crate::provider::{Provider, Served, Usage};
 use crate::record::{Forensic, Span};
+use crate::site::{Silent, site};
 use ral_core::carrier::Severed;
 use std::io;
 use std::path::Path;
@@ -242,11 +243,9 @@ impl Avatar {
         let Some(scratch) = self.seat.read(|t| t.env_var("EXARCH_SCRATCH"))? else {
             return Ok(None);
         };
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "path-form: the scratch variable's value lifted to the path it names, which the engine anchors"
-        )]
-        let bytes = self.seat.read(|t| t.path_bytes(Path::new(&scratch)))?;
+        let bytes = self
+            .seat
+            .read(|t| t.path_bytes(site!(Silent::ScratchPath, Path::new(&scratch))))?;
         Ok(Some((scratch, bytes)))
     }
 
@@ -324,7 +323,7 @@ impl Avatar {
         if !self.readings.gauges.disk_due() {
             return Ok(None);
         }
-        let mut total = ral_core::path::tree::bytes(self.log.borrow().dir());
+        let mut total = ral_core::path::tree::bytes(self.log.borrow().dir().path());
         if let Some((_, bytes)) = self.scratch_bytes()? {
             total += bytes;
         }
@@ -333,8 +332,5 @@ impl Avatar {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

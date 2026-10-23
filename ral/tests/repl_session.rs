@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 //! End-to-end tests of a live REPL session: the rc file on disk, the
 //! settings it resolves, the plugins it loads, the worker table the prompt
@@ -95,7 +95,7 @@ fn rc_theme_bindings_and_startup_reach_a_live_session() {
 /// runs at all: the whole rc is skipped, not merely that one key — the
 /// keys around it do not survive either.  A *map* rc is refused the same way,
 /// statically; the same mistake through a decoded rc, whose type the checker
-/// cannot see, is the runtime door's (`rc_unknown_key_in_a_decoded_rc_fails_the_whole_file`).
+/// cannot see, is the runtime check's (`rc_unknown_key_in_a_decoded_rc_fails_the_whole_file`).
 #[test]
 fn rc_bad_literal_key_fails_the_whole_file() {
     let (_dir, env) = rc_home("return [edit-mode: 42, bindings: [okname: 'yes']]");

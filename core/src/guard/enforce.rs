@@ -6,7 +6,7 @@
 //! never one frame.  The judgments are the model's ([`GrantStack::admit`],
 //! [`GrantStack::read`]); this module words their refusals and, for the exec and fs
 //! guards, which reach a real OS resource, builds the [`Denial`] the Shell's
-//! door records.  The sandbox projects the same authority off the same folds,
+//! records.  The sandbox projects the same authority off the same folds,
 //! so the two cannot drift.
 
 use crate::capability::{
@@ -308,4 +308,5 @@ pub(crate) fn check_flag(ctx: &Context, flag: Flag, who: &str) -> Settled<()> {
 }
 
 #[cfg(all(test, unix))]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

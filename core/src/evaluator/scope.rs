@@ -186,6 +186,7 @@ impl WithinUndo {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use crate::path::shown;
@@ -407,8 +408,8 @@ mod tests {
         assert_eq!(out, Value::Unit);
     }
 
-    /// A key the table declares but the door lacks an arm for would reach
-    /// the door's `unreachable!`, so walking the table is what turns "new
+    /// A key the table declares but the parser lacks an arm for would reach
+    /// the parser's `unreachable!`, so walking the table is what turns "new
     /// key, no arm" into a test failure.
     #[test]
     fn every_declared_within_key_is_handled_by_parse() {

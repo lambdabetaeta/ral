@@ -40,8 +40,8 @@ fmt-check:
     cargo fmt --all --check
 
 # No `-- -D warnings`: it'd override vendored ral-ripgrep-core's `all = "allow"`
-# opt-out. Pedantry (pedantic + nursery, I/O-door denylist) lives in RUSTFLAGS
-# and `[workspace.lints.clippy]` instead.
+# opt-out. Pedantry (pedantic + nursery, the clippy.toml I/O bans) lives in
+# RUSTFLAGS and `[workspace.lints.clippy]` instead.
 
 # Clippy across the workspace, warnings as errors; no em dash in string literals.
 lint $RUSTFLAGS=deny:

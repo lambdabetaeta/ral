@@ -1,13 +1,10 @@
+#![allow(clippy::disallowed_methods, reason = "build script")]
 #![allow(
     clippy::disallowed_macros,
     reason = "[silent:build-script] cargo reads these lines as directives"
 )]
 use std::process::Command;
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:git-probe] build-time git probe for the version hash; not turn-time model I/O"
-)]
 fn main() {
     println!("cargo:rerun-if-changed=../.git/HEAD");
     println!("cargo:rerun-if-changed=../.git/refs/heads");
@@ -31,5 +28,10 @@ fn main() {
         println!("cargo:rustc-link-arg-bins=/STACK:8388608");
     }
 
-    ral_core::boot::bake_prelude_to_out_dir();
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
+    std::fs::write(
+        out.join("prelude_baked.bin"),
+        ral_core::boot::bake_prelude(),
+    )
+    .expect("failed to write prelude_baked.bin");
 }

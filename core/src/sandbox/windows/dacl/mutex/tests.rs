@@ -7,10 +7,6 @@
 // crash recovery only reclaims profiles. Ported units keep upstream's names
 // so each diffs against the one it was taken from.
 
-#![allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
 use super::*;
 use std::path::PathBuf;
 #[test]

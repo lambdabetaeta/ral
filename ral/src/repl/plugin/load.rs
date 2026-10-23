@@ -1,5 +1,5 @@
 //! Plugin loading and unloading, engine-side: the `load-plugin` and
-//! `unload-plugin` doors.
+//! `unload-plugin` builtins.
 //!
 //! A load resolves a plugin file under `~/.config/ral/plugins/` or
 //! `RAL_PATH`, evaluates it under its own registered source, applies
@@ -24,7 +24,7 @@ use super::super::enquiry::{Enquiry, PluginNote};
 use super::load_err;
 use super::manifest::{self, HookEvent, ManifestHandlers};
 
-fn load_door(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+fn load_plugin_builtin(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     // No options: `load-plugin` takes a name alone, so a plugin loaded
     // through it stands on its own defaults.
     let name = args[0].as_str("load-plugin")?;
@@ -36,7 +36,7 @@ fn load_door(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Va
         })
 }
 
-fn unload_door(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+fn unload_plugin_builtin(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let name = args[0].as_str("unload-plugin")?;
     unload_plugin(name, mooring, shell)
         .map(|()| Value::Unit)
@@ -46,21 +46,21 @@ fn unload_door(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<
         })
 }
 
-static DOORS_ARR: [BuiltinEntry; 2] = [
+static BUILTINS_ARR: [BuiltinEntry; 2] = [
     BuiltinEntry::new(
         Cow::Borrowed("load-plugin"),
         scheme::string_to_unit,
         "load-plugin <name>  — load a REPL plugin by name or path.",
-        BuiltinBody::Static(load_door),
+        BuiltinBody::Static(load_plugin_builtin),
     ),
     BuiltinEntry::new(
         Cow::Borrowed("unload-plugin"),
         scheme::string_to_unit,
         "unload-plugin <name>  — unload a previously loaded REPL plugin.",
-        BuiltinBody::Static(unload_door),
+        BuiltinBody::Static(unload_plugin_builtin),
     ),
 ];
-pub(crate) static DOORS: &[BuiltinEntry] = &DOORS_ARR;
+pub(crate) static BUILTINS: &[BuiltinEntry] = &BUILTINS_ARR;
 
 /// The plugin's source, read through the judged handle, which ends here:
 /// nothing of the load after the read holds the file or its directory.
@@ -296,6 +296,7 @@ fn resolve_plugin_path(name_or_path: &str, shell: &mut Shell) -> Settled<Located
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 
@@ -354,10 +355,6 @@ mod tests {
     /// one it refuses is passed over for the next, and where every one is
     /// refused the plugin is not found.
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] fixtures build the candidates the search is made over"
-    )]
     fn the_candidate_search_passes_over_what_the_grant_refuses() {
         use ral_core::capability::{Capabilities, FsPolicy};
         use ral_core::path::{FrozenPath, utf8};
@@ -402,7 +399,7 @@ mod tests {
 /// A plugin bench: an engine with a `record` sink and plugins whose hooks
 /// register as in production.
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "[test] test scaffolding")]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 pub(in crate::repl) mod harness {
     use super::*;
     use crate::repl::host::ReplHost;
@@ -450,7 +447,7 @@ pub(in crate::repl) mod harness {
             .collect();
         let mut runtime = crate::repl::prelude_runtime();
         runtime.install_captured_builtins(&vec![recorder].into());
-        let t = crate::repl::engine(runtime, move |shell| {
+        let t = crate::repl::in_temp::engine(runtime, move |shell| {
             for (plugin, event, src) in &owned {
                 let handlers = ManifestHandlers {
                     hooks: vec![(*event, crate::repl::eval(shell, src))],

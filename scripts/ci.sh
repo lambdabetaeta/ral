@@ -102,7 +102,7 @@ fi
 # formatting is the one drift every later step is happy to build straight past.
 step fmt-check
 
-# Clippy's I/O-door denylist (clippy.toml) needs no `-D` flag: the
+# The clippy.toml I/O bans need no `-D` flag: the
 # `[workspace.lints.clippy] disallowed_methods = "deny"` table already makes a
 # stray fs/process constructor a build break.
 step lint

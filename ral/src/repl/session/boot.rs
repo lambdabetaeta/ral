@@ -3,6 +3,8 @@
 //! claim, panic hook — and the frontend the rc settles on after it.
 
 use ral_core::carrier::Transport;
+use ral_core::own::OwnDir;
+use ral_core::path::{Visibility, XdgKind};
 use ral_core::terminal::{self, InteractiveMode, TerminalState};
 use rustyline::config::BellStyle;
 use std::sync::Arc;
@@ -174,7 +176,7 @@ pub(super) fn setup_panic_hook() {
                     rustix::termios::OptionalActions::Now,
                     &t,
                 );
-                write_crash_log(&crash_dir, info);
+                write_crash_log(crash_dir.as_ref(), info);
             }));
         }
     }
@@ -185,44 +187,46 @@ pub(super) fn setup_panic_hook() {
             let crash_dir = crash_log_dir();
             std::panic::set_hook(Box::new(move |info| {
                 ral_core::terminal::restore_console_mode(mode);
-                write_crash_log(&crash_dir, info);
+                write_crash_log(crash_dir.as_ref(), info);
             }));
         }
     }
 }
 
-/// Crash-log directory (`$XDG_STATE_HOME/ral`), resolved at hook-install
-/// time so an unset or changed `HOME` mid-session cannot redirect the
-/// crash log.
-fn crash_log_dir() -> std::path::PathBuf {
-    // A crash report must land somewhere: the host's, outside any shell
-    // overlay, and never under the cwd.
-    ral_core::path::app_dir_or_temp(ral_core::path::XdgKind::State, "ral")
+/// Crash-log directory (`$XDG_STATE_HOME/ral`), held from hook-install time
+/// so an unset or changed `HOME` mid-session cannot redirect the crash log.
+/// `None` where the host has no state base: a crash then leaves no log.
+fn crash_log_dir() -> Option<OwnDir> {
+    OwnDir::xdg("ral", XdgKind::State).ok()
 }
 
-/// Write the panic report both platform hooks share: `dir/crash-<unix-ts>.
-/// log` holding the panic message and a captured backtrace, after the
-/// terminal/console has already been restored by the caller.  Every write
-/// (including the stderr notice) ignores errors — a panic hook must not
-/// panic.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:crashlog-write] panic hook creates the state dir and writes a crash log; not turn-time model I/O"
-)]
-fn write_crash_log(dir: &std::path::Path, info: &std::panic::PanicHookInfo<'_>) {
+/// Write the panic report both platform hooks share: a new file in `dir`,
+/// `crash-<unix-ts>-<random>.log`, holding the panic message and a captured
+/// backtrace, after the terminal/console has already been restored by the
+/// caller.  Where no log could be kept, the panic message goes to stderr in its
+/// place.  Every write (including the stderr notice) ignores errors — a panic
+/// hook must not panic.
+fn write_crash_log(dir: Option<&OwnDir>, info: &std::panic::PanicHookInfo<'_>) {
     use std::io::Write as _;
-    let _ = std::fs::create_dir_all(dir);
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    let path = dir.join(format!("crash-{ts}.log"));
     let bt = std::backtrace::Backtrace::force_capture();
-    let _ = std::fs::write(&path, format!("{info}\n\n{bt}"));
-    let _ = writeln!(
-        std::io::stderr(),
-        "ral: panic; crash log: {}",
-        ral_core::path::shown(&path)
-    );
+    let kept = dir.and_then(|dir| {
+        let (name, mut file) = dir
+            .create_fresh(&format!("crash-{ts}-"), ".log", Visibility::Private)
+            .ok()?;
+        let _ = file.write_all(format!("{info}\n\n{bt}").as_bytes());
+        Some(dir.path().join(name))
+    });
+    let _ = match kept {
+        Some(path) => writeln!(
+            std::io::stderr(),
+            "ral: panic; crash log: {}",
+            ral_core::path::shown(&path)
+        ),
+        None => writeln!(std::io::stderr(), "ral: panic: {info}"),
+    };
 }
 
 /// Build the line-editing frontend from the resolved [`RcSettings`] —
@@ -240,7 +244,7 @@ pub(super) fn create_frontend(
     engine: Arc<dyn Transport>,
     host: Arc<ReplHost>,
     terminal: TerminalState,
-    history: Option<String>,
+    history: Option<std::path::PathBuf>,
 ) -> Box<dyn Frontend> {
     if !matches!(interactive_mode, InteractiveMode::Minimal)
         && matches!(settings.surface, Surface::Readline)

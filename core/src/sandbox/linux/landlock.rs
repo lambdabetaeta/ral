@@ -406,15 +406,8 @@ fn written(fs: &RenderedFs, dir: &RealPath) -> bool {
     let Some(rules) = fs.rules() else {
         return true;
     };
-    // A name that does not render is walked: over-listing is cost.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "native: a name that does not render is walked"
-    )]
-    let Some(name) = dir.as_path().to_str() else {
-        return false;
-    };
-    (rules.write.iter().flat_map(Object::names)).any(|w| w.holds(name) || w.under(name))
+    (rules.write.iter().flat_map(Object::names))
+        .any(|w| w.holds_position(dir) || w.under_position(dir))
 }
 
 /// The objects a live directory admission puts a rule on.  A rule on `dir`
@@ -639,7 +632,7 @@ impl From<Error> for String {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "[test] test fs scaffolding")]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use crate::capability::{ExecAllow, ExecDeny, Extent, GrantPath, Rule};

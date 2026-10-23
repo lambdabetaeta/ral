@@ -152,17 +152,11 @@ impl StageHandle {
         )
     }
 
-    /// A real child nobody watches for, for `step`'s transition-table tests:
-    /// they synthesize the events, so all this owes them is `cut`'s dispatch
-    /// and an already-dead pid to reap.
+    /// A stage over `child`, which nobody watches for, for `step`'s
+    /// transition-table tests: they synthesize the events, so all this owes
+    /// them is `cut`'s dispatch and an already-dead pid to reap.
     #[cfg(test)]
-    #[allow(clippy::disallowed_methods, reason = "[test] test process scaffolding")]
-    pub(super) fn fake_external_for_step_test(slot: Slot) -> Self {
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .expect("spawn a fake stage's child");
-        let _ = child.kill();
+    pub(super) fn fake_external_for_step_test(slot: Slot, child: std::process::Child) -> Self {
         // A throwaway channel: this pid's real exit must not reach the
         // collector, whose own `Ended` the test synthesizes by hand.
         let (tx, _rx) = std::sync::mpsc::channel();

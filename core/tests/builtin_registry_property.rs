@@ -21,6 +21,8 @@
 //! channel no pure call supplies, which is the same reason `RESOURCE_BACKED`
 //! exists — and is covered by `core/tests/argv_convention.rs`.
 
+#![allow(clippy::disallowed_methods, reason = "test code")]
+
 mod common;
 
 use common::fresh_shell;

@@ -12,6 +12,8 @@
 //! `Map String`) and a bound head that is not a block (`HeadBoundToValue`) were
 //! casts in term rules, and `tests/reject` pins both.
 
+#![allow(clippy::disallowed_methods, reason = "test code")]
+
 mod common;
 
 use ral_core::Scheme;

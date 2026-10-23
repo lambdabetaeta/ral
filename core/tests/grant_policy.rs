@@ -1,9 +1,9 @@
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 //! Grant-policy admittance rules at the `Shell` boundary.
 //!
 //! Each test drives `Shell::with_layer` and `sandbox_projection` over
-//! the public API, and the in-process exec guard through `test_access`'s doors, which
+//! the public API, and the in-process exec guard through `test_access`'s entries, which
 //! judge a file a test lays on disk in a tempdir.  The policies and their
 //! meet/extension semantics are the contract.
 

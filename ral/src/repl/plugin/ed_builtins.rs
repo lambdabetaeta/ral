@@ -2,7 +2,7 @@
 //!
 //! Each op (`_ed-get`, `_ed-set`, `_ed-push`, …) is its own builtin so the
 //! type checker sees the actual return type, arity is fixed per op, and the
-//! `_` prefix hides them from `help`.  Each is a thin engine-side door: it
+//! `_` prefix hides them from `help`.  Each is a thin engine-side wrapper: it
 //! keeps its capability and argument checks, and puts the rest to the host
 //! as a `` `repl-editor `` enquiry, which the host answers only while an
 //! editor context is installed for the dispatch — inside a plugin handler.
@@ -569,7 +569,7 @@ mod tests {
     /// determines is a boundary, and `_ed-state` is the editor surface's one.
     #[test]
     fn a_result_only_variable_in_the_editor_surface_is_a_boundary() {
-        for entry in ED_BUILTINS.iter().chain(super::super::load::DOORS) {
+        for entry in ED_BUILTINS.iter().chain(super::super::load::BUILTINS) {
             let scheme = ral_core::test_access::builtin_scheme(entry, &mut Unifier::new());
             assert!(
                 !ral_core::test_access::has_result_only_var(&scheme) || entry.decl.is_boundary(),
@@ -702,7 +702,7 @@ mod tests {
         assert_eq!(asked, 0);
     }
 
-    /// A non-Int cursor is refused at the door, before any request is put.
+    /// A non-Int cursor is refused by the builtin, before any request is put.
     #[test]
     fn ed_set_rejects_non_int_cursor() {
         let arg = Value::map(vec![

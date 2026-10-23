@@ -39,6 +39,8 @@ use std::io::IsTerminal as _;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Command, ExitCode};
 
+use crate::site::{Silent, site};
+
 const NAME: &str = "ral-sh";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -53,11 +55,7 @@ enum Target {
 pub(crate) fn serve() -> Option<ExitCode> {
     let mut argv = std::env::args_os();
     let argv0 = argv.next()?;
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "native: argv[0] is a name only as valid UTF-8"
-    )]
-    let name = ral_core::path::basename(argv0.to_str()?);
+    let name = ral_core::path::basename(ral_core::path::utf8(argv0.as_ref()).ok()?);
     let (login, name) = match name.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, name),
@@ -81,8 +79,8 @@ fn decide(args: &[OsString], stdin_tty: bool, stdout_tty: bool) -> Target {
     let mut interactive = false;
     for arg in args {
         match short_flag_cluster(arg) {
-            Some(cluster) if cluster.contains('c') => return Target::PosixSh,
-            Some(cluster) => interactive |= cluster.contains(['l', 'i']),
+            Some(cluster) if cluster.contains(&b'c') => return Target::PosixSh,
+            Some(cluster) => interactive |= cluster.contains(&b'l') || cluster.contains(&b'i'),
             None if arg == "--login" => interactive = true,
             None => return Target::PosixSh,
         }
@@ -96,25 +94,18 @@ fn decide(args: &[OsString], stdin_tty: bool, stdout_tty: bool) -> Target {
 
 /// The letters of a single-dash cluster (`-l`, `-lc`), or `None` for `--long`
 /// options, bare `-`, and anything non-ASCII or non-letter.
-fn short_flag_cluster(arg: &OsStr) -> Option<&str> {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "native: a flag cluster is ASCII text, so anything not UTF-8 is no cluster"
-    )]
-    let rest = arg.to_str()?.strip_prefix('-')?;
-    (!rest.is_empty() && rest.chars().all(|c| c.is_ascii_alphabetic())).then_some(rest)
+fn short_flag_cluster(arg: &OsStr) -> Option<&[u8]> {
+    let rest = arg.as_encoded_bytes().strip_prefix(b"-")?;
+    (!rest.is_empty() && rest.iter().all(u8::is_ascii_alphabetic)).then_some(rest)
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:respawn-posix-sh] the login-shell bridge hands a POSIX command string to /bin/sh; infra plumbing, not a model exec image"
-)]
 fn exec_posix_sh(login: bool, args: &[OsString]) -> ExitCode {
-    let mut cmd = Command::new("/bin/sh");
+    let mut cmd = site!(Silent::RespawnPosixSh, Command::new("/bin/sh"));
     if login {
         cmd.arg0("-sh");
     }
-    let err = cmd.args(args).exec();
+    cmd.args(args);
+    let err = site!(Silent::RespawnPosixSh, &mut cmd => exec());
     errln!("ral: cannot replace this process with /bin/sh: {err}");
     ExitCode::from(127)
 }

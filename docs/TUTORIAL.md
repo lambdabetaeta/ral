@@ -713,8 +713,10 @@ entry and an allowed check never is, so no inner `grant` can hide a refusal
 from the trail you opened around it.
 
 Places are a tag and a relative subpath: `` `cwd src ``, `` `tempdir . ``,
-`` `gitdir . ``, `` `xdg-config tools ``, `` `home project ``, or
-`` `absolute /usr/share ``. They are fixed when the policy is loaded, so a
+`` `scratch . ``, `` `gitdir . ``, `` `xdg-config tools ``, `` `home project ``,
+or `` `absolute /usr/share ``. (`` `scratch `` is the session's own scratch
+directory, which an embedding host such as exarch makes; plain ral has none and
+refuses it.) They are fixed when the policy is loaded, so a
 later directory or environment change cannot retarget them. Every list is a
 set, so naming something twice changes nothing. Tags are checked before the
 program runs: ``net: true`` and a bare string where a place belongs are errors.

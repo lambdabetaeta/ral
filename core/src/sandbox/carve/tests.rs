@@ -1,8 +1,3 @@
-#![allow(
-    clippy::disallowed_methods,
-    reason = "[test] a real tree with real links is the fixture"
-)]
-
 use super::{Carving, carve};
 use crate::path::{RealPath, shown};
 use std::path::{Path, PathBuf};

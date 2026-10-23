@@ -18,7 +18,7 @@ use crate::agent::fleet::Fleet;
 use crate::bus::{Post, Read, Rewrite};
 use crate::card::{Card, Field, FieldVal, Mark, Readout, Span};
 use crate::provider::allowance::{Allowance, Reading};
-use crate::record::Memory;
+use crate::record::{Memory, RECORD};
 use jiff::Timestamp;
 use prompt_editor::completion::Candidate;
 
@@ -345,10 +345,6 @@ pub(super) fn cmd_copy(app: &mut App) {
 
 /// Render the focused tab's `record.jsonl` to `arg`, never over an existing
 /// file.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:export-overwrite] refuses to overwrite the file the user named to `/export`; the user's own command, not a model's name"
-)]
 pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
     let id = app.tabs.focused();
     let dest = match ral_core::path::CwdPath::new(info.cwd.to_path_buf()) {
@@ -358,23 +354,17 @@ pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
             return;
         }
     };
-    if dest.exists() {
-        app.push_error(
-            id,
-            &format!("refusing to overwrite {}", ral_core::path::shown(&dest)),
-        );
-        return;
-    }
-    let record = app.tabs.focused_log_dir().join("record.jsonl");
-    match export_to(&record, &dest, Format::Plain) {
+    let log_dir = app.tabs.focused_log_dir();
+    let exported = log_dir
+        .open(RECORD)
+        .map_err(std::io::Error::from)
+        .and_then(|record| export_to(record, &log_dir.path().join(RECORD), &dest, Format::Plain));
+    match exported {
         Ok(()) => app.push_note(
             id,
             &format!("[exported transcript to {}]", ral_core::path::shown(&dest)),
         ),
-        Err(e) => app.push_error(
-            id,
-            &format!("could not write {}: {e}", ral_core::path::shown(&dest)),
-        ),
+        Err(e) => app.push_error(id, &e.to_string()),
     }
 }
 
@@ -492,7 +482,7 @@ pub(super) fn route_submit(text: String, app: &mut App, ctx: &CommandCtx<'_>) {
         // model as one.
         None => match unrecognized_command(trimmed) {
             Some(head) => app.push_error(focused, &format!("unknown command: {head} (see /help)")),
-            // `steer` is the one delivery door: it renews the agent's idle
+            // `steer` is the one delivery path: it renews the agent's idle
             // lease, and the line is dropped if that agent died since it was
             // focused.
             None => {
@@ -548,4 +538,5 @@ fn run(command: Command, app: &mut App, ctx: &CommandCtx<'_>) {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

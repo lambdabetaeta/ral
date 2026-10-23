@@ -76,7 +76,7 @@
 
 #![allow(
     clippy::disallowed_methods,
-    reason = "ral-daemon is a guest's init, not the ral shell; the clippy.toml doors govern ral-core's Shell path/cwd/fs discipline, and PID 1's whole job is the syscalls they route"
+    reason = "a guest init program: its whole job is the syscalls the bans route, and it links no ral shell"
 )]
 
 pub mod boot;

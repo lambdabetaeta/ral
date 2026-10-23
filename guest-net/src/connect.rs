@@ -1,4 +1,4 @@
-//! The CONNECT door: the one HTTP surface a guest speaks to this proxy.
+//! The CONNECT endpoint: the one HTTP surface a guest speaks to this proxy.
 //!
 //! [`decode`] is a pure decision over bytes an adversary chose — no I/O, no
 //! DNS, no policy lookup. It admits `CONNECT host:443 HTTP/1.1` with a
@@ -167,6 +167,7 @@ pub fn decode(buf: &[u8]) -> Result<Option<Connect>, Refusal> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 
@@ -421,10 +422,6 @@ mod tests {
     /// The seed corpus `cargo-fuzz` would run this target against, replayed
     /// here so the same inputs are exercised by the normal test suite.
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] a test-only replay of the crate's own checked-in fuzz corpus, not turn-time model I/O"
-    )]
     fn the_fuzz_corpus_never_panics_the_parser() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/corpus/connect");
         let Ok(entries) = std::fs::read_dir(&dir) else {

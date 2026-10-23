@@ -20,10 +20,6 @@ use std::sync::Arc;
 const HOST: &str = "a test host resolves its floor";
 
 #[ctor::ctor(unsafe)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "a re-exec stage that has served its request, in a ctor before main: no shell, reaper or staged write exists in the process yet"
-)]
 fn init_test_binary() {
     if let Some(code) = ral_core::invocation::serve_process_before_main(&[]) {
         std::process::exit(i32::from(code));

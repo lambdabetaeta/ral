@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods, reason = "build script")]
 #![allow(
     clippy::disallowed_macros,
     reason = "[silent:build-script] cargo reads these lines as directives"
@@ -99,10 +100,6 @@ fn render(entries: &BTreeMap<&str, Option<String>>) -> String {
     )
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:prelude-bake-build] Build-time read of src/prelude.ral to bake the prelude manifest into the crate. Build scaffolding, not turn-time model data I/O — raises no surface card."
-)]
 fn main() {
     println!("cargo:rerun-if-changed=src/prelude.ral");
     // std has no argv before `main` here; see `invocation::argv_before_main`.

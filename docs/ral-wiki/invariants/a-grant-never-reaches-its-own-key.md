@@ -15,7 +15,7 @@ Most profiles (`reasonable`, `read-only`, `edit-only`) read `` `xdg-config . `` 
 profiles accept that risk by name, denying `gh`, `op` and `gcloud` by hand. Our
 own credentials sit inside that region:
 
-- `$XDG_CONFIG_HOME/<app>/keys.json`, the keychain fallback, which is the normal
+- `$XDG_STATE_HOME/<app>/keys.json`, the keychain fallback, which is the normal
   path on any host with no Secret Service (`provider/keychain.rs`);
 - `$XDG_STATE_HOME/exarch/oauth.json`, a ChatGPT login's tokens
   (`provider/oauth/`).

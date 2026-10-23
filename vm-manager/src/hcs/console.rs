@@ -65,7 +65,8 @@
 //! guest has not booted yet: making the cache directory, opening this machine's
 //! log, sweeping the ones nobody kept.  There is no `Shell` to route it through
 //! and no run to raise a card in — the same standing [`super::vhd`]'s disk
-//! writing has, and so the same allow, carried by each function making one.
+//! writing has, and so the same kind of typed site (`crate::site`) at each
+//! call.
 #![allow(
     clippy::disallowed_macros,
     reason = "[silent:windows-host] a host diagnostic with no ral shell to print through"
@@ -79,6 +80,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
+use crate::site::{Silent, site};
 use crate::{Act, Error, HostFile};
 
 use windows_sys::Win32::Foundation::{
@@ -230,14 +232,8 @@ impl Console {
     /// A pump that panicked mid-line poisons the lock, and its words are read
     /// out anyway: whatever the guest managed to say before the reader broke is
     /// exactly what a failing boot needs quoted.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:windows-host] poison answered by hand as `lock_ignore_poison` would — \
-                  this crate has no ral-core — since the ring a panicked pump left tears nothing"
-    )]
     pub(super) fn tail(&self) -> Vec<String> {
-        self.tail
-            .lock()
+        site!(Silent::ConsoleRingLock, &self.tail => lock())
             .unwrap_or_else(PoisonError::into_inner)
             .lines()
     }
@@ -247,14 +243,9 @@ impl Console {
     ///
     /// Best-effort, and deliberately not called on the failing path — there the
     /// error names this file, so it has a reader still to come.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "REASONED-SILENT: removing this machine's own console log once nothing is owed \
-                  to a reader; no shell, no run, no card. See the module docs."
-    )]
     pub(super) fn discard(&self) {
         if let Some(path) = &self.log {
-            let _ = std::fs::remove_file(path);
+            let _ = site!(Silent::ConsoleLogDiscard, std::fs::remove_file(path));
         }
     }
 
@@ -271,14 +262,17 @@ impl Console {
         // which is all a wake-up needs, and the returned handle is adopted so it
         // closes immediately.
         let client = unsafe {
-            CreateFileW(
-                wide.as_ptr(),
-                0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                std::ptr::null(),
-                OPEN_EXISTING,
-                0,
-                std::ptr::null_mut(),
+            site!(
+                Silent::ConsolePipeWake,
+                CreateFileW(
+                    wide.as_ptr(),
+                    0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    0,
+                    std::ptr::null_mut(),
+                )
             )
         };
         if client != INVALID_HANDLE_VALUE && !client.is_null() {
@@ -358,21 +352,19 @@ impl Tail {
 /// # Errors
 /// Returns [`Error::HostFile`] if the cache cannot be made or the file cannot
 /// be created.  Its caller carries on without a log.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: making the machine cache and this machine's console log in it; no \
-              shell, no run, no card. See the module docs."
-)]
 fn open_log(cache: &Path, id: &str) -> Result<(PathBuf, File), Error> {
-    std::fs::create_dir_all(cache).map_err(Error::host_file(
+    site!(Silent::ConsoleLogOpen, std::fs::create_dir_all(cache)).map_err(Error::host_file(
         HostFile::MachineCache,
         Act::Make,
         cache,
     ))?;
     sweep(cache);
     let path = cache.join(format!("{LOG_PREFIX}{id}{LOG_SUFFIX}"));
-    let file =
-        File::create(&path).map_err(Error::host_file(HostFile::ConsoleLog, Act::Create, &path))?;
+    let file = site!(Silent::ConsoleLogOpen, File::create(&path)).map_err(Error::host_file(
+        HostFile::ConsoleLog,
+        Act::Create,
+        &path,
+    ))?;
     Ok((path, file))
 }
 
@@ -381,19 +373,15 @@ fn open_log(cache: &Path, id: &str) -> Result<(PathBuf, File), Error> {
 /// Only files of this module's own naming, only those older than
 /// [`LOG_LIFETIME`], and every failure ignored: a sweep is housekeeping done on
 /// the way past, and a log that will not go is a log to try again next boot.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: sweeping the console logs nobody kept from the machine cache; no \
-              shell, no run, no card. See the module docs. Each entry's name is read as text \
-              (native) only to match it against this module's own naming."
-)]
 fn sweep(cache: &Path) {
-    let Ok(entries) = std::fs::read_dir(cache) else {
+    let Ok(entries) = site!(Silent::ConsoleLogSweep, std::fs::read_dir(cache)) else {
         return;
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
+        let Some(name) = site!(Silent::ConsoleLogSweep, &name => to_str()) else {
+            continue;
+        };
         if !name.starts_with(LOG_PREFIX) || !name.ends_with(LOG_SUFFIX) {
             continue;
         }
@@ -404,7 +392,7 @@ fn sweep(cache: &Path) {
             .and_then(|when| SystemTime::now().duration_since(when).ok())
             .is_some_and(|age| age > LOG_LIFETIME);
         if stale {
-            let _ = std::fs::remove_file(entry.path());
+            let _ = site!(Silent::ConsoleLogSweep, std::fs::remove_file(entry.path()));
         }
     }
 }
@@ -488,13 +476,7 @@ fn spawn_pump(server: OwnedHandle, log: Option<File>, tail: Arc<Mutex<Tail>>) {
                 // encoding it was built with, a chunk may end mid-character,
                 // and a replacement character in one quoted word is a far
                 // smaller loss than dropping the line it was in.
-                #[allow(
-                    clippy::disallowed_methods,
-                    reason = "[silent:windows-host] poison answered by hand as \
-                              `lock_ignore_poison` would — this crate has no ral-core — since \
-                              a ring torn mid-line still holds the guest's earlier words"
-                )]
-                tail.lock()
+                site!(Silent::ConsoleRingLock, &tail => lock())
                     .unwrap_or_else(PoisonError::into_inner)
                     .absorb(&String::from_utf8_lossy(chunk));
             }
@@ -527,6 +509,7 @@ fn keep_logging(sink: &mut Option<(File, u64)>, chunk: &[u8]) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 
@@ -534,11 +517,6 @@ mod tests {
     /// two sessions never share one — and keeps its log beside the session
     /// disks, named after the same machine, so a reader can tell whose it is.
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] the log's file name compared as the ASCII text the console named it; \
-                  never shown"
-    )]
     fn each_machine_gets_its_own_pipe_and_its_own_log() {
         let dir = tempfile::tempdir().expect("a cache");
         let a = Console::create("0000-a", dir.path()).expect("a pipe is created");
@@ -646,11 +624,6 @@ mod tests {
     /// whole point of the tee, exercised over a real pipe by standing in for
     /// the machine's end of it.  A clean teardown then takes the log with it.
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "REASONED-SILENT: test scaffolding reads back the console log it just had \
-                  written; no shell, no run, no card."
-    )]
     fn the_guests_words_reach_both_the_log_and_the_ring() {
         let dir = tempfile::tempdir().expect("a cache");
         let console = Console::create("0000-tee", dir.path()).expect("a pipe and a log");
@@ -696,11 +669,6 @@ mod tests {
     /// Stand in for the compute service: dial this console as the machine does
     /// and say something on it.  The handle is returned so a caller can choose
     /// when the guest falls silent.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "REASONED-SILENT: test scaffolding dials the console's pipe as the machine \
-                  would; no shell, no run, no card."
-    )]
     fn speak(console: &Console, words: &[u8]) -> File {
         let mut machine = File::options()
             .write(true)

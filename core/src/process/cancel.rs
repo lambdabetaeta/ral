@@ -483,16 +483,13 @@ impl Default for DurableRoot {
 pub(crate) struct Serial(std::sync::Mutex<()>);
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "test scaffolding")]
 impl Serial {
     pub(crate) const fn new() -> Self {
         Self(std::sync::Mutex::new(()))
     }
 
     pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::sync::LockExt::lock_ignore_poison(&self.0)
     }
 }
 
@@ -503,7 +500,7 @@ impl Serial {
 pub(crate) static REQUEST_SERIAL: Serial = Serial::new();
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "test scaffolding")]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 

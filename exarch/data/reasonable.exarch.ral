@@ -29,6 +29,8 @@ return [
   #     env vars with the Linux defaults universally.
   #   * `cwd SUB` — SUB under the working directory at session start.
   #   * `tempdir SUB` — SUB under `std::env::temp_dir()`.
+  #   * `scratch SUB` — SUB under the session's own scratch directory, the one
+  #     `$EXARCH_SCRATCH` names; the host makes it before any profile freezes.
   #   * `gitdir SUB` — SUB under the git directory of the repository the cwd is in.
   #     Where `.git` is a *file* naming that directory, the directory must
   #     name this working tree back (a linked worktree's `gitdir` file, or
@@ -62,6 +64,7 @@ return [
       `gitdir .,             # the actual git directory (handles worktrees)
       `absolute /tmp,
       `tempdir .,            # `$TMPDIR` on macOS — distinct from /tmp
+      `scratch .,            # the session's own scratch (`$EXARCH_SCRATCH`)
       `xdg-config .,         # ${XDG_CONFIG_HOME:-~/.config}
       `xdg-data .,           # ${XDG_DATA_HOME:-~/.local/share}
       `xdg-cache .,          # ${XDG_CACHE_HOME:-~/.cache}
@@ -84,9 +87,9 @@ return [
       # xdg variant covers `git config --global` when XDG_CONFIG_HOME
       # is set.  SSH keys (~/.ssh) and GPG keys (~/.gnupg) stay
       # unreadable, so SSH push and signed commits fail by lack of
-      # admit.  HTTPS push fails too, by a door rather than a path:
+      # admit.  HTTPS push fails too, by a service rather than a path:
       # osxkeychain asks securityd, which the base profile withholds
-      # because the same door hands out keychain items.
+      # because the same service hands out keychain items.
       `home .gitconfig,
       `home .gitignore_global,  # path `core.excludesfile` points at by default
       `xdg-config git,
@@ -118,6 +121,7 @@ return [
       `cwd .,
       `absolute /tmp,
       `tempdir .,
+      `scratch .,
       `gitdir .,
     ],
 
@@ -164,6 +168,7 @@ return [
       `dir `cwd .,                    # scripts the agent drops into the project tree
       `dir `absolute /tmp,            # scratch builds (autotools `./configure`, ad-hoc scripts)
       `dir `tempdir .,                # `$TMPDIR` on macOS — distinct from /tmp
+      `dir `scratch .,                # the session's own scratch (`$EXARCH_SCRATCH`)
 
       # Every other selector of the table in core/src/guard/toolchains.rs,
       # by ecosystem: what a manager installs and its shims dispatch into.

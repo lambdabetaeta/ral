@@ -34,16 +34,21 @@ pub mod record;
 pub mod schedule;
 pub mod shell_eval;
 pub(crate) mod signals;
+mod site;
 pub mod skill;
 #[cfg(all(unix, test))]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 pub(crate) mod test_helper;
 pub mod tui;
 pub mod wallet;
 
+use crate::site::{Silent, site};
 use agent::Avatar;
 use clap::Parser;
 use provider::state::{Opening, opening};
 use provider::{Bureau, Choice, Engine, Holdings};
+use ral_core::own::{self, OwnDir};
+use ral_core::path::{Kind, XdgKind};
 use std::sync::Arc;
 
 /// The one boot recipe table, for the identity seat and the `--engine` child
@@ -56,32 +61,17 @@ pub static INSTALLERS: [ral_core::engine::EngineInstaller; 1] =
         narrow: policy::base_layer,
     }];
 
-/// The exit a served re-exec role calls for, or a return when there is none.
-///
-/// `Some(code)` means this process is a re-exec child that should exit now.
-/// The one place either entry point below exits, so the two `main`s over this
-/// crate and every [`pre_main_ctor!`] cannot drift on what makes exiting here
-/// safe.
-fn exit_on(served: Option<u8>) {
-    if let Some(code) = served {
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "a re-exec child, served before any CLI: the anchor drains a pipe, the sandbox stage has already exec'd or refused. None boots a shell, so none holds a lease, a watched child or a staged write; and in the `#[ctor]` form nothing at all is booted yet"
-        )]
-        std::process::exit(i32::from(code));
-    }
-}
-
 /// The full pre-`main` dispatch for a `main`: core's
 /// [`serve_process`](ral_core::invocation::serve_process) over exarch's
-/// [`INSTALLERS`], and the exit its answer calls for.
+/// [`INSTALLERS`], and the exit its answer calls for
+/// ([`exit_if_served`](ral_core::invocation::exit_if_served)).
 ///
 /// Returns only when this process is no re-exec child, so a `main` calls it as
 /// its first real statement.  A `#[ctor]` calls
 /// [`exit_if_re_exec_child_before_main`] instead, which differs only in where
 /// it reads argv.
 pub fn exit_if_re_exec_child() {
-    exit_on(ral_core::invocation::serve_process(&INSTALLERS));
+    ral_core::invocation::exit_if_served(ral_core::invocation::serve_process(&INSTALLERS));
 }
 
 /// [`exit_if_re_exec_child`] for a `#[ctor]`: core's
@@ -95,7 +85,9 @@ pub fn exit_if_re_exec_child() {
 /// [`pre_main_ctor!`] and not otherwise called.
 #[doc(hidden)]
 pub fn exit_if_re_exec_child_before_main() {
-    exit_on(ral_core::invocation::serve_process_before_main(&INSTALLERS));
+    ral_core::invocation::exit_if_served(ral_core::invocation::serve_process_before_main(
+        &INSTALLERS,
+    ));
 }
 
 /// Emit the `#[ctor]` running [`exit_if_re_exec_child_before_main`].
@@ -123,31 +115,6 @@ pub struct SessionInfo<'a> {
     pub extend: Option<&'a std::path::Path>,
     pub restrict_files: &'a [std::path::PathBuf],
     pub cwd: &'a std::path::Path,
-}
-
-/// The `record.jsonl` that `exarch export` is asked for: `session` itself, or
-/// the one inside it where it is a session directory.
-///
-/// # Errors
-/// Where no such record is there.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:export-target] the session directory or record file the user names to `exarch export` on the command line; no shell, no grant, not a model's name"
-)]
-fn export_record(session: std::path::PathBuf) -> Result<std::path::PathBuf, String> {
-    let record = if session.is_dir() {
-        session.join("record.jsonl")
-    } else {
-        session
-    };
-    if record.is_file() {
-        Ok(record)
-    } else {
-        Err(format!(
-            "no record.jsonl at {}; is this a session directory under $XDG_STATE_HOME/exarch?",
-            ral_core::path::shown(&record)
-        ))
-    }
 }
 
 /// The binary's entry point, lifted into the library so integration tests can
@@ -184,10 +151,22 @@ pub fn run() -> Result<(), String> {
                 Ok(())
             }
             cli::Command::Export { session, out } => {
-                let record = export_record(session)?;
+                // The session directory the user names, or the record itself.
+                let record = match site!(Silent::CliArgument, own::kind_named(&session)) {
+                    Some(Kind::Dir) => session.join(record::RECORD),
+                    _ => session,
+                };
+                let file = site!(Silent::CliArgument, own::open_named(&record)).map_err(|e| {
+                    format!("{e}; is this a session directory under $XDG_STATE_HOME/exarch?")
+                })?;
                 match &out {
-                    Some(dest) => tui::export_to(&record, dest, tui::Format::Plain),
-                    None => tui::export(&record, &mut std::io::stdout().lock(), tui::Format::Plain),
+                    Some(dest) => tui::export_to(file, &record, dest, tui::Format::Plain),
+                    None => tui::export(
+                        file,
+                        &record,
+                        &mut std::io::stdout().lock(),
+                        tui::Format::Plain,
+                    ),
                 }
                 .map_err(|e| format!("could not export {}: {e}", ral_core::path::shown(&record)))
             }
@@ -195,7 +174,7 @@ pub fn run() -> Result<(), String> {
     }
     let seed = cli::load_seed(c.prompt, c.file)?;
 
-    let wallet = wallet::Wallet::exarch();
+    let wallet = wallet::Wallet::exarch()?;
     let custom = config::load_declared(&wallet.declarations, wallet.label)?;
     let disk_warn_bytes = config::disk_warn_bytes()?;
     // Opened once at the trunk; every spawned child inherits this ledger.
@@ -216,7 +195,7 @@ pub fn run() -> Result<(), String> {
     }
 
     let launch_cwd = ral_core::host::cwd().ok_or("launch cwd: unavailable")?;
-    let state_dir = app::EXARCH.project_dir(launch_cwd.as_path());
+    let state_dir = app::EXARCH.project(launch_cwd.as_path())?;
 
     let holdings = Holdings::new(store, app::EXARCH);
     let saved = provider::state::load(&state_dir);
@@ -240,21 +219,23 @@ pub fn run() -> Result<(), String> {
         |account| provider::models::listing_of(&holdings.catalog, &account.id),
     )?;
 
+    // Before the policy freezes: a `scratch` place in a profile anchors to it.
+    let scratch =
+        Arc::new(app::Scratch::new(app::EXARCH).map_err(|e| format!("scratch dir: {e}"))?);
     let invocation = policy::for_invocation(
         launch_cwd.as_path(),
+        scratch.spelling(),
         &c.base,
         c.extend.as_deref(),
         &c.restrict,
     )?;
-    let scratch =
-        Arc::new(app::Scratch::new(app::EXARCH).map_err(|e| format!("scratch dir: {e}"))?);
     let (_mode, terminal, _warn) = ral_core::terminal::TerminalState::probe_from_env();
     boot::face_process_signals(&terminal);
     // Held for the whole run: the lock is the launcher's, not the node's.
-    let (run_dir, _run_lock, resumes) = resolve_run(launch_cwd.as_path(), c.resume)?;
+    let (run, _run_lock, resumes) = resolve_run(launch_cwd.as_path(), c.resume)?;
     if headless && resumes {
-        let open = record::AgentLog::live_roots(&run_dir.join("sessions"))
-            .map_err(|e| format!("could not inspect {}: {e}", ral_core::path::shown(&run_dir)))?
+        let open = record::AgentLog::live_roots(&run.dir("sessions")?)
+            .map_err(|e| format!("could not inspect {run}: {e}"))?
             .len();
         if open != 1 {
             return Err(format!(
@@ -262,7 +243,7 @@ pub fn run() -> Result<(), String> {
             ));
         }
     }
-    let config_dir = app::EXARCH.xdg_dir(ral_core::path::XdgKind::Config);
+    let config_dir = app::EXARCH.xdg_dir(XdgKind::Config);
     // The boot's own reads are judged under the floor of a runtime built here,
     // before any is made; a host that cannot resolve its floor boots nothing.
     let boot_floor =
@@ -277,7 +258,7 @@ pub fn run() -> Result<(), String> {
             boot_floor.floor(),
             app::EXARCH,
             &launch_cwd,
-            &config_dir,
+            config_dir.as_deref(),
             !headless,
             c.edit,
         )?
@@ -291,7 +272,7 @@ pub fn run() -> Result<(), String> {
     let (provider, screen) = open(
         opening,
         &tuning,
-        (!headless).then_some(run_dir.as_path()),
+        (!headless).then_some(&run),
         &bureau,
         c.max_tokens,
     )?;
@@ -303,7 +284,7 @@ pub fn run() -> Result<(), String> {
     let config = agent::RootConfig {
         system,
         caps: invocation.stack,
-        run_dir: run_dir.clone(),
+        run_dir: run.clone(),
         // An attended trunk parks for the human; a headless one terminates
         // once its seeded work is idle.
         trunk: if headless {
@@ -357,7 +338,7 @@ pub fn run() -> Result<(), String> {
     } else {
         let screen = match screen {
             Some(screen) => screen,
-            None => tui::enter(&run_dir)?,
+            None => tui::enter(&run)?,
         };
         tui::run(screen, roots, &info, &bureau, seed, c.vi)
     }
@@ -366,6 +347,9 @@ pub fn run() -> Result<(), String> {
 /// Resolve a fresh or resumable run directory, retaining the lock for the
 /// process that owns it; the flag says whether its open sessions are to be
 /// resumed.
+///
+/// A named run is reopened from the held state directory ([`OwnDir::within`]),
+/// so only a run exarch keeps is accepted.
 #[allow(
     clippy::option_option,
     reason = "the CLI distinguishes absent, bare, and named resume"
@@ -373,67 +357,71 @@ pub fn run() -> Result<(), String> {
 fn resolve_run(
     cwd: &std::path::Path,
     resume: Option<Option<std::path::PathBuf>>,
-) -> Result<(std::path::PathBuf, app::RunLock, bool), String> {
+) -> Result<(OwnDir, app::RunLock, bool), String> {
     if let Some(target) = resume {
-        let explicit = target.is_some();
-        let candidates = match target {
-            Some(target) => vec![app::normalize_resume_target(&target)?],
-            None => app::EXARCH
-                .resume_candidates(cwd)
-                .map_err(|error| format!("could not inspect resumable runs: {error}"))?,
-        };
-        for run_dir in candidates {
-            let open =
-                record::AgentLog::live_roots(&run_dir.join("sessions")).map_err(|error| {
-                    format!(
-                        "cannot inspect {}: {error}",
-                        ral_core::path::shown(&run_dir)
-                    )
-                })?;
-            if open.is_empty() {
-                if explicit {
-                    return Err(format!(
-                        "--resume target {} has no open session; pass a run directory with a sessions/<n>/record.jsonl that was not closed with /close",
-                        ral_core::path::shown(&run_dir)
-                    ));
-                }
-                continue;
-            }
-            match app::RunLock::try_acquire(&run_dir) {
-                Ok(lock) => return Ok((run_dir, lock, true)),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if explicit {
-                        return Err(format!(
-                            "--resume target {} is already running; run.lock is held by another exarch",
-                            ral_core::path::shown(&run_dir)
-                        ));
-                    }
-                }
-                Err(error) => {
-                    return Err(format!(
-                        "cannot resume {}: could not acquire {}: {error}",
-                        ral_core::path::shown(&run_dir),
-                        ral_core::path::shown(run_dir.join("run.lock"))
-                    ));
-                }
+        if let Some(target) = target {
+            let run = app::EXARCH
+                .own(XdgKind::State)?
+                .within(&app::normalize_resume_target(&target)?)?;
+            return match lock_resumable(&run)? {
+                Ok(lock) => Ok((run, lock, true)),
+                Err(Declined::NoOpenSession) => Err(format!(
+                    "--resume target {run} has no open session; pass a run directory with a sessions/<n>/{} that was not closed with /close",
+                    record::RECORD
+                )),
+                Err(Declined::InUse) => Err(format!(
+                    "--resume target {run} is already running; its lock is held by another exarch"
+                )),
+            };
+        }
+        let project = app::EXARCH.project(cwd)?;
+        let candidates = app::resume_candidates(&project)
+            .map_err(|error| format!("could not inspect resumable runs: {error}"))?;
+        for name in candidates {
+            let run = project.dir(&name)?;
+            if let Ok(lock) = lock_resumable(&run)? {
+                return Ok((run, lock, true));
             }
         }
         return Err(format!(
-            "--resume found no unlocked run with an open session under {}",
-            ral_core::path::shown(app::EXARCH.project_dir(cwd))
+            "--resume found no unlocked run with an open session under {project}"
         ));
     }
 
-    let run_dir = app::EXARCH
-        .log_run_dir(cwd)
+    let run = app::EXARCH
+        .new_run(cwd)
         .map_err(|error| format!("log dir: {error}"))?;
-    let lock = app::RunLock::try_acquire(&run_dir).map_err(|error| {
-        format!(
-            "could not lock {}: {error}",
-            ral_core::path::shown(&run_dir)
-        )
-    })?;
-    Ok((run_dir, lock, false))
+    let lock = app::RunLock::try_acquire(&run)
+        .map_err(|error| format!("could not lock {run}: {error}"))?;
+    Ok((run, lock, false))
+}
+
+/// Why a run is not to be resumed.
+enum Declined {
+    /// Every session of it was closed, or none recorded.
+    NoOpenSession,
+    /// Another exarch holds its lock.
+    InUse,
+}
+
+/// `run`'s lock, taken to resume it: the lock, or why the run is declined.
+///
+/// # Errors
+/// A run that cannot be inspected or locked.
+fn lock_resumable(run: &OwnDir) -> Result<Result<app::RunLock, Declined>, String> {
+    let open = run
+        .dir("sessions")
+        .map_err(std::io::Error::from)
+        .and_then(|sessions| record::AgentLog::live_roots(&sessions))
+        .map_err(|error| format!("cannot inspect {run}: {error}"))?;
+    if open.is_empty() {
+        return Ok(Err(Declined::NoOpenSession));
+    }
+    match app::RunLock::try_acquire(run) {
+        Ok(lock) => Ok(Ok(lock)),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(Err(Declined::InUse)),
+        Err(error) => Err(format!("cannot resume {run}: {error}")),
+    }
 }
 
 /// The provider a launch opens with: `opening` built, or — when it names no
@@ -447,19 +435,19 @@ fn resolve_run(
 fn open(
     opening: Opening,
     tuning: &provider::Tuning,
-    attended: Option<&std::path::Path>,
+    attended: Option<&OwnDir>,
     bureau: &Bureau,
     max_tokens: Option<u32>,
 ) -> Result<(Arc<provider::Provider>, Option<tui::TerminalGuard>), String> {
     let build = |choice: Choice| bureau.build(choice, tuning, max_tokens);
     let choose = |among, why: Option<String>| {
-        let Some(run_dir) = attended else {
+        let Some(run) = attended else {
             return Err(format!(
                 "{}: pass --model NAME for a headless run",
                 why.as_deref().unwrap_or("no model chosen")
             ));
         };
-        let mut screen = tui::enter(run_dir)?;
+        let mut screen = tui::enter(run)?;
         let pick = tui::choose(&mut screen, bureau, among, tuning, why)?;
         let provider = bureau.build(pick.choice, &pick.tuning, max_tokens)?;
         Ok((provider, Some(screen)))

@@ -1,11 +1,6 @@
 //! The walk on macOS: the stored-name rule, a leaf the user cannot hold or a
 //! special file, and links read through the descriptor that opened them.
 
-#![allow(
-    clippy::disallowed_methods,
-    reason = "[test] fixtures build the tree the walk is asked about"
-)]
-
 use super::super::*;
 use super::LOOKED;
 use super::unix::{id, located_with, name, root, root_user, spelled};
@@ -165,7 +160,7 @@ fn walks_stay_off_the_other_link(dir: &Path, walked: &str, other: &str) {
         stop.store(true, Ordering::Relaxed);
     });
     let loc = located_with(&dir.join(walked), LeafMode::Follow).unwrap();
-    let mut staged = loc.stage().unwrap();
+    let mut staged = loc.stage(Visibility::Public).unwrap();
     staged.file().write_all(b"new").unwrap();
     staged.publish().unwrap();
     assert_eq!(read_all(&dir.join(walked)), "new");
@@ -393,7 +388,7 @@ fn a_file_the_user_cannot_read_is_stated_and_never_opened() {
             loc.read().unwrap_err().kind(),
             io::ErrorKind::PermissionDenied
         );
-        let Err(refused) = loc.stage() else {
+        let Err(refused) = loc.stage(Visibility::Public) else {
             panic!("{mode:?}: a stated leaf was staged");
         };
         assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied, "{mode:?}");

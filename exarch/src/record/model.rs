@@ -33,13 +33,15 @@ mod transcript;
 pub use resume::resume;
 pub use span::Span;
 
-use super::{EditAuthority, Fold, Locus, Protocol, Record, Recorded, Refusal, Role, TurnKind};
+use super::{
+    AgentId, EditAuthority, Fold, Locus, Protocol, Record, Recorded, Refusal, Role, TurnKind,
+};
 use genai::chat::{ChatMessage, ChatRole, ContentPart, ToolResponse};
+use ral_core::own::OwnDir;
 use render::residue_label;
 use serde::{Deserialize, Serialize};
 use state::State;
 pub(super) use state::validate_result_ids;
-use std::path::PathBuf;
 use std::sync::Arc;
 use table::{Item, Table};
 
@@ -156,10 +158,14 @@ pub struct Residue {
     pub by: EditAuthority,
 }
 
-/// Where a turn's records lie: a file, and their loci in it.
+/// Where a turn's records lie: the session whose `record.jsonl` holds them,
+/// and their loci in it.
+///
+/// The session is named by its id and resolved against the run's `sessions/`
+/// directory, so a run can be moved and every pointer in it still reads back.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Pointer {
-    pub source: PathBuf,
+    pub source: AgentId,
     pub loci: Vec<Locus>,
 }
 
@@ -300,12 +306,13 @@ fn resident_messages(records: &[Recorded<Protocol>]) -> Vec<ChatMessage> {
 }
 
 impl Context {
-    /// The one constructor: `source` is `record.jsonl`'s path, fixed for this
-    /// structure's life.
+    /// The one constructor: `source` is the session whose `record.jsonl` this
+    /// structure folds, fixed for its life, and `sessions` the run's directory
+    /// that holds it and every ancestor's, which a pointer is read back from.
     #[must_use]
-    pub fn new(source: PathBuf) -> Self {
+    pub fn new(source: AgentId, sessions: OwnDir) -> Self {
         Self {
-            table: Table::new(source),
+            table: Table::new(source, sessions),
             state: State::default(),
             system: Arc::default(),
             len: 0,
@@ -361,7 +368,7 @@ impl Context {
     /// Where records recorded in this log's own file lie.
     fn pointer(&self, records: &[Recorded<Protocol>]) -> Pointer {
         Pointer {
-            source: self.table.source().to_path_buf(),
+            source: self.table.source(),
             loci: records
                 .iter()
                 .map(|recorded| recorded.locus().clone())

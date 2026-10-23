@@ -49,7 +49,7 @@ Entry points (`typecheck.rs`):
   `HeadBoundToValue` (T0072)
   ([[internals/type-inference|type-inference]]).
 - `bake_prelude(phrases, &Manifest) -> Toplevel` — called by
-  `boot::bake_prelude_to_out_dir` from each host's build script: returns the
+  `boot::bake_prelude` from each host's build script: returns the
   annotated prelude `Toplevel` and nothing else. Every phrase already carries
   its schemes, and `SessionSchemes::from_prelude` reads them back through
   `Toplevel::exported_schemes`, so no second blob of schemes is baked.
@@ -106,7 +106,7 @@ Internals:
 - `Site` (data in `core/src/ty/site.rs`, built by `typecheck/site.rs`, walked
   and admitted by `core/src/types/admit.rs`) — the type solved at a boundary
   call, frozen at the unit's end by `InferCtx::snapshot_sites` and written onto
-  the `Exec` by `annotate`; `Site::exports` hands the module door one scratch
+  the `Exec` by `annotate`; `Site::exports` hands the module check one scratch
   unifier over a whole export record, so export types that share variables are
   checked together; the unifier keeps the span that first bound each variable so a
   refusal can point at the use that imposed what the value met;
@@ -126,7 +126,7 @@ Internals:
 - `generalize.rs`;
 - `env.rs` — `TyEnv`, `InferCtx`;
 - `site.rs` — `impl Site { snapshot, instantiate, exports }`: freezing the solved
-  type at a boundary, and the scratch unifier the module door checks exports in;
+  type at a boundary, and the scratch unifier the module check uses for exports;
   type display is `Display` for `Ty` and `Scheme` (`core/src/ty/fmt.rs`);
 - `builtins.rs` — Σ: `Decl`, a manifest row minus its body (name, `Convention`,
   doc, type rule, diagnostic, `boundary`, and one lazily computed `Spine` of arity
@@ -161,7 +161,7 @@ Internals:
   pending labels settle and before the contract ascription (a map or `()` where
   a nested table belongs is refused as a non-record). The one-shot sessions
   drop their queue unread. A clash at a closed row names the row's tags and the
-  nearest one. It is the single registration point, so the runtime doors that read the same
+  nearest one. It is the single registration point, so the runtime decoders that read the same
   keysets — `RcPlan::decode`, `LoadedPlugin::parse`, `decode_capability_map` —
   dispatch off it rather than each keeping a copy. No table reaches the
   unifier ([[decisions/260930_a-table-never-enters-the-unifier|a-table-never-enters-the-unifier]]).
@@ -285,7 +285,7 @@ under `name`, else `[String] → Command`; `Reason::StandsIn(Standing)` names
 which (`Standing::{Command, Own, EveryCommand}`). `catch_all_stands_in` is the
 same check for the catch-all `handler:`. `alias_arm_scheme`
 (`typecheck.rs`) and the free `catch_all_stands_in` apply them at the install
-door, and `HandlerEntry::vet` / `parse_catch_all` render the error through
+site, and `HandlerEntry::vet` / `parse_catch_all` render the error through
 `types::refused_arm`.
 
 ## Display and diagnostics

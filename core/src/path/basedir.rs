@@ -84,17 +84,6 @@ pub fn app_dir(kind: XdgKind, app: &str) -> Option<PathBuf> {
     crate::host::xdg(kind).map(|base| base.join(app))
 }
 
-/// [`app_dir`], under the temp dir when the host has no base.
-///
-/// For state that must land somewhere absolute: a run still records and
-/// configures, losing that state on reboot, where defaulting under the cwd
-/// would scatter it through the working tree a sandboxed agent is editing.
-pub fn app_dir_or_temp(kind: XdgKind, app: &str) -> PathBuf {
-    crate::host::xdg(kind)
-        .unwrap_or_else(std::env::temp_dir)
-        .join(app)
-}
-
 // Unix-only: the resolver is platform-agnostic, the asserted literals are not.
 #[cfg(all(test, unix))]
 mod tests {

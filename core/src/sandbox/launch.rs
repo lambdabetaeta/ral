@@ -168,25 +168,8 @@ fn linux_sandboxed_command(
 ) -> Result<(Command, Option<super::linux::InfoFd>), Refusal> {
     let bwrap = super::linux::envelope().map_err(|why| Refusal::Unavailable(why.into()))?;
     let own = super::reexec::own()?;
-    let cwd = faithful(cwd, "the working directory")?;
     let env = Envelope::probe(bwrap, own);
     enveloped(&env, projection, floor, admitted, Some(cwd), ownership)
-}
-
-/// `path` as bwrap's argv can carry it: every other name there is a
-/// `Rendered`, which refuses what is not Unicode rather than approximating it.
-#[cfg(target_os = "linux")]
-#[allow(clippy::unnecessary_debug_formatting)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "native: bwrap argv takes a name only as valid UTF-8"
-)]
-fn faithful<'a>(path: &'a Path, what: &str) -> Result<&'a str, Refusal> {
-    path.to_str().ok_or_else(|| {
-        Refusal::Launch(format!(
-            "sandbox: {what} {path:?} is not valid UTF-8, and bwrap cannot be given it faithfully"
-        ))
-    })
 }
 
 /// `env`'s trampoline, handed its warrant and the Landlock ruleset built
@@ -198,7 +181,7 @@ pub(super) fn enveloped(
     projection: &SandboxProjection,
     floor: &Floor,
     admitted: &Admitted,
-    chdir: Option<&str>,
+    chdir: Option<&Path>,
     ownership: Ownership,
 ) -> Result<(Command, Option<super::linux::InfoFd>), Refusal> {
     let rendered = projection.rendered()?;
@@ -302,10 +285,7 @@ pub(super) fn admitted(program: crate::capability::Program, args: &[String]) -> 
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 
@@ -417,10 +397,6 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let mut child = cmd.spawn().expect("spawn sandboxed child");
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "[test] a one-shot child no user code can SIGSTOP; the reaper's one extra service, answering a stop, buys nothing"
-        )]
         let status = child.wait().expect("wait for sandboxed child");
         status.success()
     }

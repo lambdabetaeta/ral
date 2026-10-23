@@ -279,10 +279,10 @@ fn blocking_reap(pid: u32) -> io::Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 #[allow(
-    clippy::disallowed_methods,
     clippy::zombie_processes,
-    reason = "[test] test process scaffolding; the reaper itself reaps these children by raw pid, not through `Child`"
+    reason = "test process scaffolding; the reaper itself reaps these children by raw pid, not through `Child`"
 )]
 mod tests {
     use super::*;

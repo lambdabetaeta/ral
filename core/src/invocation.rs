@@ -10,6 +10,7 @@
 //! other role boots first, the engine included: its grant-confined launches
 //! need the pinned envelope as much as the shell's.
 
+use crate::site::{Silent, site};
 use crate::{Invocation, Role, classify, sandbox, terminal, uutils};
 use std::ffi::OsString;
 
@@ -39,6 +40,19 @@ pub fn serve(
             sandbox::boot();
             None
         }
+    }
+}
+
+/// Exit with `code` where a served re-exec role has run: nothing is booted in
+/// a process that served one, so no lease, watched child or staged write is
+/// left behind.  Returns where none was.
+///
+/// `code` is what [`serve`] answered, and it is the one place a caller
+/// exits on it, so every `main` and every `#[ctor]` over a host cannot drift
+/// on what makes exiting there safe.
+pub fn exit_if_served(code: Option<u8>) {
+    if let Some(code) = code {
+        site!(Silent::ServedRoleExit, std::process::exit(i32::from(code)));
     }
 }
 
@@ -82,18 +96,15 @@ pub fn serve_process_before_main(
 /// constructor that silently saw no role would fail much later, and far from
 /// its cause.
 #[cfg(ctor_without_argv)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:argv-before-main] Bootstrap read of the kernel's copy of this process's own argv, where std has none before `main`. Process bootstrap, not model data I/O."
-)]
 fn argv_before_main() -> Vec<OsString> {
     use std::os::unix::ffi::OsStringExt;
-    let cmdline = std::fs::read("/proc/self/cmdline").unwrap_or_else(|e| {
-        panic!(
-            "a pre-main constructor on a non-glibc Linux has no argv but /proc/self/cmdline, \
-             and it could not be read: {e}"
-        )
-    });
+    let cmdline = site!(Silent::ArgvBeforeMain, std::fs::read("/proc/self/cmdline"))
+        .unwrap_or_else(|e| {
+            panic!(
+                "a pre-main constructor on a non-glibc Linux has no argv but /proc/self/cmdline, \
+                 and it could not be read: {e}"
+            )
+        });
     // Each argument ends in a NUL, so the last piece of a plain split is empty.
     let args = cmdline.strip_suffix(&[0]).unwrap_or(&cmdline);
     args.split(|&b| b == 0)
@@ -119,12 +130,7 @@ fn serve_bundled_tool(args: &[OsString]) -> u8 {
         );
         return 2;
     };
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "native: a tool name from argv, not a path"
-    )]
-    let tool = tool.to_string_lossy();
-    uutils::run(&tool, args.to_vec()).unwrap_or_else(|e| {
+    uutils::run(tool, args.to_vec()).unwrap_or_else(|e| {
         terminal::cmd_error("ral", &e.to_string());
         127
     })

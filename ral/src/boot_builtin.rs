@@ -1,4 +1,4 @@
-//! The boot door: `_ral-boot`, bound as the `Session "boot"` hook, is a
+//! The boot builtin: `_ral-boot`, bound as the `Session "boot"` hook, is a
 //! front-end's first dispatch. It does in a run what must run — startup files
 //! evaluate ral — so its `Ending` carries the status: a `--capabilities`
 //! failure is `Raised` status 2, a profile's `exit N` is `Exited(N)`. It
@@ -30,15 +30,15 @@ pub(crate) fn hook() -> HookName {
     HookName::session("boot")
 }
 
-static DOOR_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
+static BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
     Cow::Borrowed(NAME),
     scheme,
     "_ral-boot <record>  — boot the session: the front-end's first dispatch, once.",
     BuiltinBody::Static(boot),
 )];
-pub(crate) static DOOR: &[BuiltinEntry] = &DOOR_ARR;
+pub(crate) static BUILTINS: &[BuiltinEntry] = &BUILTINS_ARR;
 
-/// `∀ρ. {ρ} → F settings`: the row stays open, since the door checks its own
+/// `∀ρ. {ρ} → F settings`: the row stays open, since the builtin checks its own
 /// fields.
 fn scheme(u: &mut Unifier) -> Scheme {
     let row = u.fresh_row_var();
@@ -49,8 +49,8 @@ fn scheme(u: &mut Unifier) -> Scheme {
     )
 }
 
-/// Register the door as the `Session "boot"` hook, over a shell whose surface
-/// carries [`DOOR`].
+/// Register the builtin as the `Session "boot"` hook, over a shell whose surface
+/// carries [`BUILTINS`].
 pub(crate) fn register(shell: &mut Shell) -> Result<(), String> {
     let entry = shell
         .lookup_builtin(NAME)
@@ -89,7 +89,7 @@ record!(Boot {
 
 impl Boot {
     /// The `--capabilities` profiles as the record carries them: each path
-    /// anchored at the invocation cwd and spelled natively, which the door
+    /// anchored at the invocation cwd and spelled natively, which the builtin
     /// lifts back unchanged.
     ///
     /// A relative argument names a file beside the user who typed it, and the

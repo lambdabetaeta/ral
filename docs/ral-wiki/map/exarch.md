@@ -17,7 +17,7 @@ binary re-execs itself as the [[map/core/capabilities|OS sandbox child]].
 
 The agent is a provider loop over one tool, each run grant-framed — the
 design argument lives in [[design/exarch-architecture|exarch-architecture]].
-This page maps the binary's *front door*: what runs at startup, and how the
+This page maps the binary's *entry point*: what runs at startup, and how the
 system prompt is assembled.
 
 ## Entry and dispatch
@@ -149,7 +149,7 @@ can inherit a live key.**
 
 Two modules hold the once-per-process pieces; nothing here is per-run.
 `app.rs` is the apps and their directories (`App`, `EXARCH`, `SYNOD`, the XDG
-and project dirs, `Scratch`, `RunLock`, the time and slug helpers); `boot.rs` is
+and project dirs, `Scratch`, `RunLock`, the resume list, the time and slug helpers); `boot.rs` is
 the shell every seat starts from.
 
 - **`engine_runtime` and `engine_root`** (`boot.rs`) — the installer's two
@@ -171,8 +171,11 @@ the shell every seat starts from.
   there, `cwd`, `user` and `home` come from `ral_core::host`; best-effort, a missing
   value drops its line.
 - **`Scratch`** — the disposable per-session directory, exposed under its
-  `App`'s own name (`$EXARCH_SCRATCH`; synod's is `$SYNOD_SCRATCH`), with every
-  cache a session writes redirected into it: `TOOL_HOMES`, one table of
+  `App`'s own name (`$EXARCH_SCRATCH`; synod's is `$SYNOD_SCRATCH`). It is an
+  `OwnDir` under `$XDG_CACHE_HOME/<app>/scratch/`, on disk and beside no one
+  else's files, never in the temp dir, with a lock file named for it that the
+  session holds for as long as it runs. Every cache a session writes is
+  redirected into it: `TOOL_HOMES`, one table of
   variables, each replacing the inherited value with a subdirectory of the
   scratch (`XDG_CACHE_HOME`, `CARGO_HOME`, `GOPATH`, `GOCACHE`, the pnpm, Bun and
   Yarn stores, …) or, for Maven, which has no such variable, `MAVEN_ARGS` set to
@@ -184,27 +187,46 @@ the shell every seat starts from.
   `Seat::root` attaches its identity engine at `EnginePath::Host` paths, the
   launching user's cwd and `HOME`. No profile writes the user's
   caches, so a write lands in the scratch rather than in a denied real one.
+  The profiles grant it as `` `scratch . ``, a place beside `` `tempdir . ``;
+  they cannot spell it `xdg-cache`, since the session rebinds `XDG_CACHE_HOME`.
+  The scratch is made before the policy freezes, and travels as a spelling:
+  `Scratch::spelling` is the `$EXARCH_SCRATCH` of the root's `Attach`, which
+  `engine_root` hands to the shell (`Shell::set_scratch`), so that every grant
+  frozen in the session, a model's nested `grant` included, anchors a `scratch`
+  place to it.
   `RUSTUP_HOME` is not in the table: it holds what runs and stays the host's. A
   `Hold::Session`'s drop deletes the directory, then closes and removes its
-  lock; `reap_unheld` remains for a session killed before its drop runs. Beside
+  lock; `reap_unheld`, run by `Scratch::new`, deletes the scratches no live
+  session's lock answers for, which covers a session killed before its drop runs. Beside
   the table is the one setting the confinement forces without relocating
   anything (`CARGO_NET_GIT_FETCH_WITH_CLI`, because cargo's bundled TLS reaches
-  the keychain door the profile withholds — see
+  the keychain service the profile withholds — see
   [[map/core/capabilities|capabilities]]).
 - **`App`** — the product identity that owns the directory conventions as
   methods, and the engine names every product itself (`EXARCH`, `SYNOD`, over
   `APPS`) rather than each naming its own: composing a grant means carving out
   every product's credential directories, so one place has to know which apps
-  there are. `App::xdg_dir` is the one spelling of
-  `$XDG_<kind>_HOME/<app>/` (over core's `path::app_dir_or_temp`, which ral's
-  own directories share) that the project state, model cache, and trusted
-  config home all build on ([[design/exarch-config-dir|exarch-config-dir]]);
-  `App::project_dir` keys per-project state by a slug of the launch cwd
-  (`ral_core::path::project_slug`), holding the persisted model selection (`state.json`); and
-  `App::log_run_dir` is the durable per-run
+  there are. `App::xdg_dir` is the one spelling, as a name, of
+  `$XDG_<kind>_HOME/<app>/` (core's `path::app_dir`, which ral's own directories
+  share), for the consumers that take a name: a credential deny, a skill root,
+  the `AGENTS.md` chain; it is `None` where the host names no base.
+  `App::own(kind)` is the same directory *held* (`OwnDir::xdg`), which
+  everything that writes goes through: the project state, the model cache, the
+  token store, and the trusted config home, whose `config.ral` is a `UserFile`
+  ([[design/exarch-config-dir|exarch-config-dir]]);
+  `App::project` keys per-project state by a slug of the launch cwd
+  (`ral_core::path::project_slug`: a readable part, then 16 hex digits of the
+  SHA-256 of the cwd's exact OS bytes, so two cwds that differ at all key
+  apart), holding the persisted model selection (`state.json`); and
+  `App::new_run` makes the durable per-run
   [[map/exarch/frontend|session-log]] directory
-  `$XDG_STATE_HOME/<app>/<project>/<run>/`, so logs survive an abnormal exit; each
-  session's `sessions/<id>/` holds `record.jsonl` alone.
+  `$XDG_STATE_HOME/<app>/<project>/<run>/`, `<run>` being
+  `<YYYY-MM-DD-HHMMSS>-<pid>`, so logs survive an abnormal exit and no other
+  live exarch can choose the name; each session's `sessions/<id>/` holds
+  `record.jsonl` alone. `RunLock` is the run's advisory lock, `run.lock`, held
+  with `File::try_lock` for the process's life. None of these falls back to the
+  temp dir where the host has no base: the account's home stands in, and past
+  that `OwnError::NoBase` says what to set ([[decisions/261022_own-files|own-files]]).
 
 ## System prompt
 
@@ -351,15 +373,16 @@ the per-agent index and optional sections still resolve from the stored base.
   Bertin marks decoded once and drawn by one generic interpreter; open card set,
   closed mark set.
 - [[map/exarch/io-surface|io-surface]] — every redirect read/write and exec image as one
-  card: core emits an I/O event at the runtime doors, exarch binds it to a mark; the
-  closed door set is clippy- and meta-test-enforced.
+  card: core emits an I/O event at the runtime sites, exarch binds it to a mark; every
+  exempt site is a typed `site!`, enforced by clippy and by a meta-test
+  ([[decisions/261022_typed-sites|typed-sites]]).
 
 ## Sandbox
 
 exarch does not invent its own sandbox. Each tool call is one transport `Run`
 carrying the **profile's capabilities in `Run.caps`**, dispatched across the
 engine protocol (`shell_eval::run_shell`, → [[map/exarch/shell-eval|shell-eval]]) and
-pushed onto ral's capability stack by core's run door — so the safety
+pushed onto ral's capability stack by core's run entry — so the safety
 boundary *is* ral's [[design/grant|grant]] mechanism — authority attenuated by
 intersection. There is no source-level `grant { … }` the model could escape;
 the frame is installed by the host. Profiles ship as `.exarch.ral` files in

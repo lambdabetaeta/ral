@@ -17,9 +17,9 @@
 # `dangerous + --restrict`: minimal is a curated starting point;
 # dangerous-with-restrict is a bespoke profile written from scratch.
 #
-# `cwd` and `tempdir` places are resolved by the freeze pass at
-# session start, so the per-invocation working directory bakes in
-# without exarch having to inject anything dynamically.
+# `cwd`, `tempdir` and `scratch` places are resolved by the freeze pass at
+# session start, so the per-invocation working directory and scratch
+# directory bake in without exarch having to inject anything dynamically.
 #
 # Edit this file to change what `--base minimal` admits.  The
 # contents are baked into the exarch binary at build time via
@@ -36,11 +36,13 @@ return [
       `cwd .,
       `absolute /tmp,
       `tempdir .,
+      `scratch .,
     ],
     write: [
       `cwd .,
       `absolute /tmp,
       `tempdir .,
+      `scratch .,
     ],
   ],
 
@@ -70,6 +72,7 @@ return [
       `dir `cwd .,
       `dir `absolute /tmp,
       `dir `tempdir .,
+      `dir `scratch .,
     ],
     deny: [
       `name bash,

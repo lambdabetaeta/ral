@@ -64,7 +64,7 @@ pub(super) fn resolve_base(name: &str, ctx: &FreezeCtx) -> Result<GrantLayer, St
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     #[cfg(unix)]
@@ -75,6 +75,7 @@ mod tests {
     use ral_core::guard::freeze::Place;
     #[cfg(unix)]
     use ral_core::path::XdgKind;
+    use std::path::PathBuf;
 
     #[cfg(unix)]
     use std::path::Path;
@@ -113,7 +114,14 @@ mod tests {
             .expect("the layer declares exec")
     }
 
-    /// A freeze anchor whose overlay binds `HOME` alone, at `cwd`.
+    /// The scratch spelling every test anchor carries: no test makes anything
+    /// in it.
+    fn scratch() -> PathBuf {
+        std::env::temp_dir().join("a-session-scratch")
+    }
+
+    /// A freeze anchor whose overlay binds `HOME` alone, at `cwd`, over
+    /// [`scratch`].
     fn ctx_at(home: &str, cwd: impl AsRef<std::path::Path>) -> FreezeCtx {
         let cwd = ral_core::path::CwdPath::new(cwd.as_ref().to_path_buf())
             .expect("a fixture cwd is absolute");
@@ -121,6 +129,7 @@ mod tests {
             std::iter::once(("HOME", home)).collect::<ral_core::types::EnvVars>(),
             cwd,
         )
+        .with_scratch(Some(scratch().to_string_lossy()))
     }
 
     /// Parse *and* freeze a bake-in: the loader resolves places, so a failure
@@ -151,7 +160,7 @@ mod tests {
         .unwrap_or_else(|e| panic!("extension '{name}' failed to load: {e:?}"))
     }
 
-    /// Expect a grant through the door that authored it.  `expand_path_prefix`
+    /// Expect a grant through the path that authored it.  `expand_path_prefix`
     /// is the runtime resolver's infallible twin and normalises differently,
     /// so an equality against it agrees with a frozen grant only by
     /// coincidence — and disagrees exactly where the freeze would have failed.
@@ -355,11 +364,11 @@ mod tests {
         );
     }
 
-    /// The per-invocation working tree and temp dir reach both halves of the
-    /// policy: directory keys in `exec`, plain sigils in `fs`.
+    /// The per-invocation working tree, temp dir and scratch reach both halves
+    /// of the policy: directory keys in `exec`, plain sigils in `fs`.
     #[cfg(unix)]
     #[test]
-    fn minimal_and_reasonable_carry_cwd_and_tempdir_sigils() {
+    fn minimal_and_reasonable_carry_cwd_tempdir_and_scratch_sigils() {
         let home = host_home();
         let cwd = Path::new("/work/proj");
         let ctx = ctx_at(&home, cwd);
@@ -367,17 +376,19 @@ mod tests {
         // compare in the same normal form the frozen keys hold.
         let cwd_resolved = spelled(&cwd.to_string_lossy());
         let tempdir_resolved = spelled(&std::env::temp_dir().to_string_lossy());
+        let scratch_resolved = spelled(&scratch().to_string_lossy());
+        let tokens = [&cwd_resolved, &tempdir_resolved, &scratch_resolved];
         for (name, text) in [("minimal", MINIMAL_RAL), ("reasonable", REASONABLE_RAL)] {
             let layer = load(name, text, &ctx);
             let exec = exec_of(&layer);
-            for token in [&cwd_resolved, &tempdir_resolved] {
+            for token in tokens {
                 assert!(
                     exec.allows.contains(&dir_key(token)),
                     "{name} exec missing resolved {token}"
                 );
             }
             let fs = fs_of(&layer);
-            for token in [&cwd_resolved, &tempdir_resolved] {
+            for token in tokens {
                 assert!(fs.read.contains(token), "{name} fs.read missing {token}");
                 assert!(fs.write.contains(token), "{name} fs.write missing {token}");
             }
@@ -676,7 +687,6 @@ mod tests {
     /// names.  The program sits in a scratch dir, outside the read floor.
     #[cfg(unix)]
     #[test]
-    #[allow(clippy::disallowed_methods, reason = "[test] scratch executable")]
     fn a_run_allowance_beside_every_is_readable_under_an_fs_only_base() {
         let ctx = ctx_at(&host_home(), "/work");
         let base = ral_core::test_helper::layer(Capabilities {

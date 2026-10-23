@@ -112,4 +112,5 @@ impl Drop for PathMutexGuard {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

@@ -32,6 +32,8 @@ httparse = "1"
 http = "1"
 
 [dev-dependencies]
+# The loopback suite's test doubles: `Egress::for_test`, `AuditLog::for_test`.
+exarch = { path = "../exarch", default-features = false, features = ["test-util"] }
 # The loopback suite reads the audit ledger back, one JSON object per line.
 serde_json = { workspace = true }
 # Serializes the loopback suite; see its module doc.

@@ -4,7 +4,7 @@
 //! stdout and stderr captured into buffers rather than streamed: the model
 //! reads them back from history, the user sees only what the rail renders.
 //! There is no source-level `grant { … }` around the model's body — the
-//! boundary is the run door plus the pushed frame, not surface syntax the
+//! boundary is the run entry plus the pushed frame, not surface syntax the
 //! model could evade.
 
 pub mod builtins;
@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Admission cap on concurrently *running* workers per agent, enforced by core
-/// at the spawn door.  A settled entry lingering under retention holds no
+/// at the spawn.  A settled entry lingering under retention holds no
 /// seat.
 pub(crate) const LIVE_WORKER_CAP: usize = 64;
 
@@ -252,8 +252,5 @@ pub(crate) fn user_json(v: &FOValue) -> serde_json::Value {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

@@ -7,18 +7,15 @@
 //! parser below keys off.
 
 use super::Denied;
+use crate::site::{Silent, site};
 use std::time::Duration;
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:log-show] macOS sandbox diagnostics: shells out to `/usr/bin/log show` to read Seatbelt denial records from the unified log; a diagnostic probe, not turn-time model data I/O, raises no surface card."
-)]
 pub(super) fn read_window(elapsed: Duration) -> Option<String> {
     // `--last` rounds to whole seconds, so pad by one or a sub-second call
     // asks for a zero-length window and sees nothing.
     let secs = elapsed.as_secs().saturating_add(1).to_string();
     let last_arg = format!("{secs}s");
-    let mut cmd = std::process::Command::new("/usr/bin/log");
+    let mut cmd = site!(Silent::LogShow, std::process::Command::new("/usr/bin/log"));
     cmd.args([
         "show",
         "--predicate",
@@ -50,7 +47,7 @@ pub(super) fn extract_pid(line: &str) -> Option<u32> {
 /// and the operation decides which remedy class it belongs to — Seatbelt
 /// resolves the paths it logs, so a [`Denied::Read`] path is exactly the one
 /// the grant needs, while a Mach or IPC name reaches the caller as a
-/// [`Denied::Door`] it cannot mistake for one.
+/// [`Denied::Service`] it cannot mistake for one.
 ///
 /// The operation is owned because Linux's counterpart builds a syscall name
 /// rather than borrowing one, and one caller reads both.
@@ -68,7 +65,7 @@ pub(super) fn parse_denial(line: &str) -> Option<(String, Denied<'_>)> {
         Some(o) if op.starts_with("file-write") => Denied::Write(o),
         Some(o) if op.starts_with("file-") => Denied::Read(o),
         Some(o) if op == "process-exec" => Denied::Exec(o),
-        Some(o) if op.starts_with("mach-") || op.starts_with("ipc-") => Denied::Door(o),
+        Some(o) if op.starts_with("mach-") || op.starts_with("ipc-") => Denied::Service(o),
         _ if op.starts_with("network-") => Denied::Socket,
         _ => Denied::Opaque,
     };
@@ -81,9 +78,9 @@ pub(crate) fn describe_denial(_op: &str) -> Option<String> {
     None
 }
 
-/// Why the base profile withholds this door, where it has a reason on record.
-pub(super) fn door_reason(name: &str) -> Option<&'static str> {
-    super::super::macos::withheld_door(name)
+/// Why the base profile withholds this service, where it has a reason on record.
+pub(super) fn service_reason(name: &str) -> Option<&'static str> {
+    super::super::macos::withheld_service(name)
 }
 
 #[cfg(test)]
@@ -158,17 +155,17 @@ mod tests {
         );
     }
 
-    /// A service name reaches the caller as a door, so no wording can offer it
+    /// A service name reaches the caller as a service, so no wording can offer it
     /// as a path to grant.
     #[test]
-    fn parse_denial_calls_a_service_operand_a_door() {
+    fn parse_denial_calls_a_service_operand_a_service() {
         let shm = "kernel[0] (Sandbox) Sandbox: git(58522) deny(1) \
                    ipc-posix-shm-read-data apple.shm.notification_center";
         assert_eq!(
             parse_denial(shm),
             Some((
                 "ipc-posix-shm-read-data".to_string(),
-                Denied::Door("apple.shm.notification_center")
+                Denied::Service("apple.shm.notification_center")
             ))
         );
 
@@ -178,7 +175,7 @@ mod tests {
             parse_denial(mach),
             Some((
                 "mach-lookup".to_string(),
-                Denied::Door("com.apple.system.notification_center")
+                Denied::Service("com.apple.system.notification_center")
             ))
         );
     }
@@ -198,16 +195,16 @@ mod tests {
     }
 
     /// The reason is quoted from the profile's own table, and only for the
-    /// doors it names.
+    /// services it names.
     #[test]
-    fn door_reason_answers_a_withheld_door_and_withholds_it_from_a_probe() {
-        let why = door_reason("com.apple.SecurityServer").expect("securityd is on record");
+    fn service_reason_answers_a_withheld_service_and_withholds_it_from_a_probe() {
+        let why = service_reason("com.apple.SecurityServer").expect("securityd is on record");
         assert!(why.contains("keychain"), "{why:?}");
         assert!(
-            door_reason("com.apple.pasteboard.1").is_some(),
-            "an instance suffix must still match its door"
+            service_reason("com.apple.pasteboard.1").is_some(),
+            "an instance suffix must still match its service"
         );
-        assert_eq!(door_reason("com.apple.metadata.mds"), None);
+        assert_eq!(service_reason("com.apple.metadata.mds"), None);
     }
 
     #[test]

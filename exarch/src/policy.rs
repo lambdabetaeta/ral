@@ -30,8 +30,10 @@ use std::path::{Path, PathBuf};
 /// absolute paths.
 ///
 /// `base_name` selects a bake-in profile from `base`.  Every profile freezes
-/// against the session's `HOME` and working directory as it loads, so the
-/// extension and every layer push run on already-resolved bundles.  Wherever
+/// against the session's `HOME`, working directory and `scratch` (the spelling
+/// of the directory the host made for the session before any policy froze) as
+/// it loads, so the extension and every layer push run on already-resolved
+/// bundles.  Wherever
 /// some layer's `fs` restricts, each restrict file's own path joins a deny
 /// layer, putting the bytes that shape the agent's permissions beyond its
 /// reach; the extend file does not, since extending authority is a
@@ -48,6 +50,7 @@ use std::path::{Path, PathBuf};
 /// that cannot be named.
 pub fn for_invocation(
     cwd: &Path,
+    scratch: &str,
     base_name: &str,
     extension: Option<&Path>,
     restrict_files: &[PathBuf],
@@ -60,7 +63,7 @@ pub fn for_invocation(
         .shell(TerminalState::default(), anchor.clone())
         .map_err(|e| format!("the capability loader cannot start: {e}"))?;
 
-    let ctx = FreezeCtx::at(EnvVars::new(), anchor.clone());
+    let ctx = FreezeCtx::at(EnvVars::new(), anchor.clone()).with_scratch(Some(scratch));
 
     let mut ceiling: GrantLayer = resolve_base(base_name, &ctx)?;
     if let Some(path) = extension {
@@ -140,15 +143,15 @@ pub(crate) const SPAWN_BASES: [&str; 4] = ["confined", "read-only", "edit-only",
 /// the parent's stack, and the narrower every spawn grant naming a base
 /// resolves through.
 ///
-/// Frozen against the child's working directory. The stack is the meet, so a
-/// spawn narrowing a child only ever adds a layer; naming a base looser than
-/// the parent changes nothing once folded.
+/// Frozen against the child's working directory and scratch, which `ctx`
+/// carries. The stack is the meet, so a spawn narrowing a child only ever adds
+/// a layer; naming a base looser than the parent changes nothing once folded.
 ///
 /// # Errors
 /// Unknown `base_name`.
-pub fn base_layer(base_name: &str, cwd: &Path) -> Result<GrantLayer, String> {
-    let anchor = ral_core::path::CwdPath::new(cwd.to_path_buf()).map_err(|e| e.to_string())?;
-    resolve_base(base_name, &FreezeCtx::at(EnvVars::new(), anchor))
+pub fn base_layer(base_name: &str, ctx: &FreezeCtx) -> Result<GrantLayer, String> {
+    let anchor = FreezeCtx::at(EnvVars::new(), ctx.cwd().clone());
+    resolve_base(base_name, &anchor.with_scratch(ctx.scratch()))
 }
 
 /// A deny layer carving `paths` out of an otherwise-unrestricted fs policy:
@@ -205,13 +208,25 @@ fn self_layer() -> Result<GrantLayer, String> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use ral_core::capability::Net;
+
+    /// The scratch spelling every test here freezes `scratch` places against:
+    /// no test makes anything in it.
+    fn scratch() -> String {
+        std::env::temp_dir()
+            .join("a-session-scratch")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// A spawned child's anchor at `cwd`, over [`scratch`].
+    fn ctx_at(cwd: &Path) -> FreezeCtx {
+        let cwd = ral_core::path::CwdPath::new(cwd.to_path_buf()).expect("an absolute cwd");
+        FreezeCtx::at(EnvVars::new(), cwd).with_scratch(Some(scratch()))
+    }
 
     #[test]
     fn an_fs_restricting_restrict_file_is_denied_under_dangerous_base() {
@@ -224,8 +239,14 @@ mod tests {
 
         let cwd = std::env::temp_dir().join(format!("exarch-restrict-cwd-{}", std::process::id()));
         std::fs::create_dir_all(&cwd).unwrap();
-        let Invocation { stack, .. } =
-            for_invocation(&cwd, "dangerous", None, std::slice::from_ref(&path)).unwrap();
+        let Invocation { stack, .. } = for_invocation(
+            &cwd,
+            &scratch(),
+            "dangerous",
+            None,
+            std::slice::from_ref(&path),
+        )
+        .unwrap();
 
         let runtime = ral_core::test_helper::core_runtime();
         assert!(
@@ -246,7 +267,7 @@ mod tests {
     #[test]
     fn a_dangerous_session_restricts_nothing() {
         let Invocation { stack, .. } =
-            for_invocation(&std::env::temp_dir(), "dangerous", None, &[]).unwrap();
+            for_invocation(&std::env::temp_dir(), &scratch(), "dangerous", None, &[]).unwrap();
         assert!(!stack.is_restrictive(), "{stack:?}");
     }
 
@@ -255,14 +276,14 @@ mod tests {
     /// they were pushed.
     #[test]
     fn narrow_cannot_escalate_a_restricted_parent() {
-        let cwd = std::env::temp_dir();
-        let confined = base_layer("confined", &cwd).unwrap();
+        let ctx = ctx_at(&std::env::temp_dir());
+        let confined = base_layer("confined", &ctx).unwrap();
         assert_eq!(
             confined.summary().and_then(|s| s.net),
             Some(Net::Offline),
             "confined layer has net off"
         );
-        let minimal = base_layer("minimal", &cwd).unwrap();
+        let minimal = base_layer("minimal", &ctx).unwrap();
 
         let mut stack = GrantStack::root();
         stack.push(confined);

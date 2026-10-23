@@ -219,13 +219,10 @@ pub(crate) fn apply_env(cmd: &mut crate::process::Launch, shell: &Shell) {
 /// added by a future dyld must not become a hole.
 fn dyld_vars(shell: &Shell) -> Vec<std::ffi::OsString> {
     const PREFIX: &str = "DYLD_";
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "native: an environment variable name, not a path"
-    )]
-    let inherited = std::env::vars_os()
+    let inherited = crate::host::vars_os()
+        .into_iter()
         .map(|(k, _)| k)
-        .filter(|k| k.to_string_lossy().starts_with(PREFIX));
+        .filter(|k| k.as_encoded_bytes().starts_with(PREFIX.as_bytes()));
     let overridden = shell
         .context
         .env_overrides()
@@ -269,10 +266,7 @@ mod tests {
 /// What runs is the file that was judged, by its real path and under the
 /// spelling the user wrote, however the spelling moves in between.
 #[cfg(all(test, unix))]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod judged_program {
     use super::super::{
         head::Head,

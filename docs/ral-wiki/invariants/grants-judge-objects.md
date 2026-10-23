@@ -4,7 +4,7 @@
 walk reached; every authority is judged on `real`.** `fs` authorises the
 objects the kernel touches; `exec` authorises the file a head will execute
 ([[decisions/261004_exec-rules|exec-rules]]), which is the object the kernel
-judges too. The spelling is kept for rendering and display, never a door to
+judges too. The spelling is kept for rendering and display, never a route to
 authority.
 
 A `GrantPath<R>` (`core/src/capability/lattice.rs`) is made once, where a layer
@@ -53,24 +53,32 @@ always judged it.
 The rule is which form, so the only way to get it wrong is to be handed a
 choice. Nothing outside `core/src/path/` is:
 
-- **`path_within`, the form-blind kernel, is private** to `path/identity.rs`
-  and its string twin `pub(super)`; every caller asks `RealPath::contains` or
-  `Excluded::matches`, so no caller re-derives a matcher over whichever form it
-  holds, as exarch's skill check once did.
+- **`path_within`, the form-blind kernel, and its string twin are
+  `pub(super)`** to `path/identity.rs`: they do not leave `core/src/path/`, and
+  outside it every caller asks `RealPath::contains` or `Excluded::matches`, so
+  no caller re-derives a matcher over whichever form it holds, as exarch's skill
+  check once did.
 - **The reading is chosen by the polarity of the type**: an allowance is a
   `GrantPath<Extent>` and has no identity to ask; an exclusion is a
   `GrantPath<Excluded>`.
 - **`Path::{starts_with, strip_prefix, ancestors, components, parent}` are
   banned outside `path/`** (`clippy.toml`), so the renderers and synod take
-  `RealPath`'s operations; so are the inherent `Path` methods that forward to a
+  `RealPath`'s operations, and a program's own layout takes
+  `path::spelled_parent`; so are the inherent `Path` methods that forward to a
   syscall (`exists`, `is_file`, `metadata`, `read_dir`, `canonicalize`, …).
   `clippy.toml` bans the raw `rustix`/`libc`/Win32 wrappers the walk is made
-  of too, resolving aliases and imports, in `synod` as in the rest;
-  `core/tests/syscall_sites.rs` holds each tagged site to its manifest row and
-  pins the callers of the string containment helpers outside `path/` at
-  today's set. That the allow over a syscall is a tagged one is review's: one
-  lint serves every ban, so an untagged allow silences a syscall as readily as
-  the spelling work it was written for.
+  of too, resolving aliases and imports, in `synod` as in the rest.
+- **The one exemption is a typed site.** `site!` (`lint/site.rs`) lifts a ban
+  for exactly one call, and its first argument is a `Surface` or `Silent`
+  variant that names the place and documents why it is exempt; `#[expect]`
+  makes a site that wraps no banned call an error. One lint serves every ban, so
+  a hand-written allow over a syscall would silence it as readily as the
+  spelling work it was written for: `core/tests/sites.rs` fails on any
+  occurrence of `clippy::disallowed_methods` that is neither a site nor one of
+  the blankets for test, example and build code (nor the one Tauri exception),
+  on any `allow`, `expect` or `warn` of the `style` or `all` group, and on a
+  workspace member that does not inherit the workspace's lints, and pins the
+  callers of the string containment helpers outside `path/` at today's set ([[decisions/261022_typed-sites|typed-sites]]).
 
 A guard must ask on the form its check matches. The one time it did not, the
 `xdg-*` freeze guard asked containment of the surface while the check it guarded

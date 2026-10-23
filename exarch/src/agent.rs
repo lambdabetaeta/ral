@@ -27,6 +27,7 @@ pub(crate) mod seat;
 mod shell;
 pub(crate) mod spawn;
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 pub(crate) mod testkit;
 pub(crate) mod tools;
 
@@ -46,10 +47,10 @@ use crate::provider::Provider;
 use crate::record::AgentId;
 use crate::shell_eval;
 use ral_core::first_order::FOValue;
+use ral_core::own::OwnDir;
 use ral_core::process::CancelCause;
 use ral_core::sync::LockExt;
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -60,7 +61,9 @@ pub struct Agent {
     pub id: AgentId,
     /// Unique among live agents, enforced at [`Fleet::claim`].
     pub(crate) name: String,
-    pub(crate) log_dir: PathBuf,
+    pub(crate) log_dir: OwnDir,
+    /// The run's directory, which this agent's `log_dir` hangs under.
+    run_dir: OwnDir,
     started: Instant,
     pub(crate) caps: ral_core::capability::GrantStack,
     pub(crate) role: Role,
@@ -146,7 +149,8 @@ struct Status {
 pub(crate) struct Birth {
     pub id: AgentId,
     pub name: String,
-    pub log_dir: PathBuf,
+    pub log_dir: OwnDir,
+    pub run_dir: OwnDir,
     pub started: Instant,
     pub caps: ral_core::capability::GrantStack,
     pub role: Role,
@@ -237,6 +241,7 @@ impl Agent {
             id,
             name,
             log_dir,
+            run_dir,
             started,
             caps,
             role,
@@ -250,6 +255,7 @@ impl Agent {
             id,
             name,
             log_dir,
+            run_dir,
             started,
             caps,
             role,
@@ -275,14 +281,10 @@ impl Agent {
         self.provider.current()
     }
 
-    /// The run's directory, `<run>/sessions/<id>` read backwards: where the
-    /// engine's captured output and the lock live.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "path-form: exarch's own run directory above its own session directory, not a name any grant judges"
-    )]
-    pub(crate) fn run_dir(&self) -> Option<&Path> {
-        self.log_dir.parent()?.parent()
+    /// The run's directory: where the engine's captured output and the lock
+    /// live.
+    pub(crate) fn run_dir(&self) -> &OwnDir {
+        &self.run_dir
     }
 
     pub(crate) fn elapsed(&self) -> Duration {
@@ -526,12 +528,12 @@ impl Avatar {
     }
 
     /// Where `record.jsonl` and its siblings are written.
-    pub fn log_dir(&self) -> &Path {
+    pub fn log_dir(&self) -> &OwnDir {
         &self.agent.log_dir
     }
 
     /// See [`Agent::run_dir`].
-    pub fn run_dir(&self) -> Option<&Path> {
+    pub fn run_dir(&self) -> &OwnDir {
         self.agent.run_dir()
     }
 

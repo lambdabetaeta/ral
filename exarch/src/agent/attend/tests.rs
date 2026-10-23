@@ -191,7 +191,7 @@ fn host_panic_is_recorded_and_the_next_prompt_still_deliberates() {
     );
     assert!(session.is_ready());
 
-    let parsed = crate::record::read_records(&session.log_dir().join("record.jsonl"))
+    let parsed = crate::record::read_records(&session.log_dir().path().join("record.jsonl"))
         .expect("the panicked exchange must leave a parseable log");
     assert!(
         parsed.iter().any(|r| matches!(

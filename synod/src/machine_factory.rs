@@ -67,6 +67,7 @@ impl Factory for MachineFactory {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use std::io::{Read, Write};
@@ -92,10 +93,6 @@ mod tests {
     /// See the Unix twin above.  Bind-connect-accept on an ephemeral
     /// loopback port, because Windows has no `socketpair(2)`.
     #[cfg(windows)]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:wire-pair-windows] the same in-process loopback pair `ral_core::protocol::channel::WireChannel::pair` stands on, here so a test can hold both ends: the port is ephemeral and the peer is this process, so no outside name is reached."
-    )]
     fn local_pair() -> std::io::Result<(GuestEnd, vm_manager::AgentDial)> {
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
         let host = std::net::TcpStream::connect(listener.local_addr()?)?;

@@ -4,7 +4,10 @@ use crate::guard::SpawnGrant;
 use crate::types::Nursery;
 
 /// A narrower no test here may reach: only a Base grant consults one.
-fn no_base(_: &str, _: &std::path::Path) -> Result<crate::capability::GrantLayer, String> {
+fn no_base(
+    _: &str,
+    _: &crate::guard::freeze::FreezeCtx,
+) -> Result<crate::capability::GrantLayer, String> {
     panic!("only a Base grant consults the narrower")
 }
 

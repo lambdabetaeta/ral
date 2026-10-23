@@ -49,6 +49,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::site::{Silent, site};
+
 #[cfg(windows)]
 pub mod broker;
 mod error;
@@ -56,6 +58,7 @@ mod error;
 pub mod hcs;
 pub mod media;
 mod os_path;
+mod site;
 #[cfg(target_os = "macos")]
 pub mod vz;
 
@@ -140,26 +143,17 @@ impl MachineSpec {
         }
 
         let path = &self.workspace.host_path;
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "REASONED-SILENT: resolving the granted folder before a machine exists. \
-                      This runs on the host, before any engine, so there is no Shell to route \
-                      through `crate::path::canon` and no run to raise a card in; vm-manager \
-                      deliberately does not depend on ral-core."
-        )]
-        let root = std::fs::canonicalize(path).map_err(|cause| match cause.kind() {
-            io::ErrorKind::NotFound => Error::NoSuchFolder(path.clone()),
-            _ => Error::FolderUnreadable {
-                path: path.clone(),
-                cause: cause.to_string(),
-            },
-        })?;
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "REASONED-SILENT: the same host-side resolution, one stat further: the \
-                      folder just resolved must be a directory."
-        )]
-        let is_folder = root.is_dir();
+        let root =
+            site!(Silent::GrantedFolderResolve, std::fs::canonicalize(path)).map_err(|cause| {
+                match cause.kind() {
+                    io::ErrorKind::NotFound => Error::NoSuchFolder(path.clone()),
+                    _ => Error::FolderUnreadable {
+                        path: path.clone(),
+                        cause: cause.to_string(),
+                    },
+                }
+            })?;
+        let is_folder = site!(Silent::GrantedFolderStat, &root => is_dir());
         if is_folder {
             Ok(root)
         } else {
@@ -214,17 +208,13 @@ impl BootArtifact {
     /// # Errors
     /// Returns [`Error::MissingBootFile`] naming the first file that is not
     /// there or cannot be read.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "REASONED-SILENT: resolving the boot media before a machine exists, exactly as \
-                  `MachineSpec::resolve` resolves the granted folder — host-side setup with no \
-                  Shell to route through and no run to raise a card in."
-    )]
     pub fn resolve(&self) -> Result<Self, Error> {
         let resolve_one = |path: &PathBuf| {
-            std::fs::canonicalize(path).map_err(|cause| Error::MissingBootFile {
-                path: path.clone(),
-                cause: cause.to_string(),
+            site!(Silent::BootMediaResolve, std::fs::canonicalize(path)).map_err(|cause| {
+                Error::MissingBootFile {
+                    path: path.clone(),
+                    cause: cause.to_string(),
+                }
             })
         };
         Ok(Self {
@@ -534,10 +524,14 @@ pub fn detect(boot: Option<BootMedia>) -> Result<Box<dyn Hypervisor>, Error> {
     if !vz::entitled() {
         return Err(Error::Unentitled);
     }
-    Ok(Box::new(vz::Vz::new(media()?, std::env::temp_dir())))
+    Ok(Box::new(vz::Vz::new(
+        media()?,
+        site!(Silent::SessionDiskFolder, std::env::temp_dir()),
+    )))
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 
@@ -550,7 +544,6 @@ mod tests {
     /// begin until this passes, so the failure looked like a hypervisor problem
     /// rather than an arithmetic one.
     #[test]
-    #[allow(clippy::disallowed_methods, reason = "[test] a fixture folder's stat")]
     fn a_conventional_spec_resolves_on_this_platform() {
         let dir = tempfile::tempdir().unwrap();
         let spec = MachineSpec::for_folder(dir.path());

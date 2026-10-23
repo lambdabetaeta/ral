@@ -17,6 +17,8 @@
 //! read off `Finite`'s `Display` itself, and the interactive renderer, a library
 //! function with no command name to reach it by.
 
+#![allow(clippy::disallowed_methods, reason = "test code")]
+
 mod common;
 
 use common::fresh_shell;

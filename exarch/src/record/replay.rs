@@ -7,6 +7,7 @@
 use super::log::Log;
 use super::{Fold, Record};
 use std::fmt;
+use std::fs::File;
 use std::io;
 use std::path::Path;
 
@@ -39,17 +40,18 @@ impl From<io::Error> for Refusal {
     }
 }
 
-/// Fold `path` into `seed`, refusing the session at the first record `F`
-/// does not recognise.
+/// Fold `record`, a `record.jsonl` open for reading and named `name` in
+/// messages, into `seed`, refusing the session at the first record `F` does
+/// not recognise.
 ///
 /// The caller brings the seed, since not every memo exists at nothing: the
-/// model fold's needs its log's path.
+/// model fold's needs its session.
 ///
 /// # Errors
 /// Returns [`Refusal`] if the file will not read back, or if `F::step`
 /// refuses one of its records.
-pub fn replay<F: Fold>(path: &Path, seed: F::Memo) -> Result<F::Memo, Refusal> {
-    Log::read(path)?.try_fold(seed, |mut memo, record| {
+pub fn replay<F: Fold>(record: File, name: &Path, seed: F::Memo) -> Result<F::Memo, Refusal> {
+    Log::read(record, name)?.try_fold(seed, |mut memo, record| {
         F::step(&mut memo, record?)?;
         Ok(memo)
     })

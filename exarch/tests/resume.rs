@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 //! Process-boundary resume coverage: a scripted child leaves a mid-exchange
 //! ledger, the parent terminates it, and a fresh root continues the session.
@@ -10,14 +10,22 @@ use exarch::bus::{Emitter, channel};
 use exarch::provider::Provider;
 use exarch::provider::Toolset;
 use exarch::provider::scripted::{Reply, Script};
-use exarch::record::{self, Blocks, Refusal, View, Voice};
-use std::fs::OpenOptions;
+use exarch::record::{self, Blocks, RECORD, Refusal, View, Voice};
+use ral_core::own::OwnDir;
+use ral_core::path::XdgKind;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 exarch::pre_main_ctor!();
+
+/// Set in the scripted child's environment, which is what makes
+/// `resume_child` act: run bare, it does nothing.
+const CHILD_VAR: &str = "EXARCH_RESUME_CHILD";
+
+/// The child's run directory, in the state home the parent made for it.
+const CHILD_RUN: &str = "child-run";
 
 fn scripted(model: &str, script: Script) -> Arc<Provider> {
     Arc::new(Provider::scripted(model, script))
@@ -53,11 +61,11 @@ fn drive(session: &mut Avatar, provider: &Arc<Provider>, prompt: &str) {
     assert!(matches!(outcome, Ok(Outcome::Complete)));
 }
 
-fn root_config(run_dir: &Path) -> RootConfig {
+fn root_config(run_dir: &OwnDir) -> RootConfig {
     RootConfig {
         system: "system".into(),
         caps: ral_core::capability::GrantStack::root(),
-        run_dir: run_dir.to_path_buf(),
+        run_dir: OwnDir::clone(run_dir),
         trunk: Trunk::Attended,
         tools: Toolset::offered(false),
         allow_schedule: false,
@@ -81,17 +89,24 @@ fn identity_seat(tag: &str) -> RootSeat {
 
 #[test]
 fn scripted_run_kill_resume_and_continue() {
-    let root = tempfile::tempdir().expect("run root");
-    let child_dir = root.path().join("child");
+    // A state home of this test's own, with the run made in it: the child
+    // reaches the same directory through `XDG_STATE_HOME`, as exarch's own
+    // launches reach theirs.
+    let state = OwnDir::for_test("resume-state").expect("a state home");
+    let child_dir = state
+        .make_dir(EXARCH.name())
+        .and_then(|app| app.make_dir(CHILD_RUN))
+        .expect("the child's run directory");
     let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"))
         .arg("--exact")
         .arg("resume_child")
         .arg("--nocapture")
-        .env("EXARCH_RESUME_CHILD_DIR", &child_dir)
+        .env("XDG_STATE_HOME", state.path())
+        .env(CHILD_VAR, "1")
         .spawn()
         .expect("spawn scripted child");
 
-    let record_log = child_dir.join("sessions/0/record.jsonl");
+    let record_log = child_dir.path().join("sessions/0/record.jsonl");
     let ready = (0..200).any(|_| {
         if std::fs::read_to_string(&record_log).is_ok_and(|text| text.contains("crash prompt")) {
             true
@@ -128,9 +143,12 @@ fn scripted_run_kill_resume_and_continue() {
     // The bug this whole plan exists for: not the model's memory (asserted
     // above) but the *user's* — the view fold `record.jsonl` folds into,
     // which a resumed TUI seeds its scrollback from (`tui_loop::run`).
-    let record_path = resumed.log_dir().join("record.jsonl");
-    let blocks = record::replay::<View>(&record_path, Blocks::default())
-        .expect("the resumed session's record log replays cleanly");
+    let record_path = resumed.log_dir().path().join(RECORD);
+    let replayed = || {
+        let file = File::open(&record_path).expect("the record opens");
+        record::replay::<View>(file, &record_path, Blocks::default())
+    };
+    let blocks = replayed().expect("the resumed session's record log replays cleanly");
     assert!(
         kind_contains(&blocks, "before kill"),
         "the view fold must carry the pre-kill exchange across the crash and resume too"
@@ -156,8 +174,8 @@ fn scripted_run_kill_resume_and_continue() {
         "the pre-kill exchange must still be present after driving the resumed session further"
     );
 
-    let blocks = record::replay::<View>(&record_path, Blocks::default())
-        .expect("the record log still replays cleanly after driving the resumed session");
+    let blocks =
+        replayed().expect("the record log still replays cleanly after driving the resumed session");
     assert!(
         kind_contains(&blocks, "continued"),
         "the resumed session's own turn joins the view fold"
@@ -173,10 +191,10 @@ fn scripted_run_kill_resume_and_continue() {
 /// vocabulary's own law.
 #[test]
 fn replay_refuses_a_ledger_line_it_does_not_recognise() {
-    let root = tempfile::tempdir().expect("scratch dir");
-    let path = root.path().join("record.jsonl");
+    let dir = OwnDir::for_test("replay-refuses").expect("scratch dir");
+    let path = dir.path().join(RECORD);
     {
-        let emit = record::Emitter::create(&path).expect("fresh record log");
+        let emit = record::Emitter::create(&dir).expect("fresh record log");
         let _ = emit
             .emit(record::Forensic::SystemNote {
                 text: "a genuine record".into(),
@@ -197,7 +215,8 @@ fn replay_refuses_a_ledger_line_it_does_not_recognise() {
     .expect("append a foreign line");
     file.flush().expect("flush the foreign line");
 
-    match record::replay::<View>(&path, Blocks::default()) {
+    let file = File::open(&path).expect("the record opens");
+    match record::replay::<View>(file, &path, Blocks::default()) {
         Err(Refusal::Unreadable(_)) => {}
         Err(other) => panic!("expected an Unreadable refusal, not: {other}"),
         Ok(_) => panic!(
@@ -208,14 +227,17 @@ fn replay_refuses_a_ledger_line_it_does_not_recognise() {
 
 #[test]
 fn resume_child() {
-    let Ok(dir) = std::env::var("EXARCH_RESUME_CHILD_DIR") else {
+    if std::env::var_os(CHILD_VAR).is_none() {
         return;
-    };
-    let dir = std::path::PathBuf::from(dir);
-    // Through the real root, at the run dir the parent chose: the parent
-    // resumes from that ledger after the kill, so it cannot live in a scratch
-    // of this child's own.  A real launch finds its run dir already made.
-    std::fs::create_dir_all(&dir).expect("child run dir");
+    }
+    // Through the real root, at the run dir the parent made in the state home
+    // it named: the parent resumes from that ledger after the kill, so it
+    // cannot live in a scratch of this child's own.  A real launch finds its
+    // run dir already made.
+    let dir = EXARCH
+        .own(XdgKind::State)
+        .and_then(|app| app.dir(CHILD_RUN))
+        .expect("the run dir the parent made");
     let mut session = Avatar::root(
         root_config(&dir),
         identity_seat("resume-child"),
@@ -231,7 +253,7 @@ fn resume_child() {
         text: "crash prompt".into(),
         voice: Voice::Human,
     });
-    let path = dir.join("sessions/0/record.jsonl");
+    let path = dir.path().join("sessions/0/record.jsonl");
     let mut file = OpenOptions::new()
         .append(true)
         .open(&path)

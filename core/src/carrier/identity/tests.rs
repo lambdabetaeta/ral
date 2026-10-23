@@ -1,4 +1,4 @@
-//! The identity carrier's laws: cancel races, enquiry doors, durability and
+//! The identity carrier's laws: cancel races, enquiry hosts, durability and
 //! probes, all through one in-process engine.
 use super::*;
 use crate::carrier::{Dispatching, dispatch_to_report};
@@ -86,15 +86,10 @@ mod identity_cancel_tests {
         let _signals = transport.control().forward_signals();
         let worker = {
             let transport = transport.clone();
-            #[allow(
-                clippy::disallowed_methods,
-                reason = "native: sh reads the command line"
-            )]
             let src = format!("sh -c 'touch {}; exec sleep 30'", marker.display());
             std::thread::spawn(move || crate::carrier::testkit::eval(&transport, &src))
         };
         let deadline = Instant::now() + Duration::from_secs(5);
-        #[allow(clippy::disallowed_methods, reason = "[test] a marker file's stat")]
         while !marker.exists() {
             assert!(
                 Instant::now() < deadline,
@@ -175,8 +170,7 @@ mod identity_cancel_tests {
 }
 
 // Core installs no builtin that enquires, so these install a test builtin
-// that does — the shape a real enquiring door runs under.
-#[allow(clippy::disallowed_methods, reason = "test scaffolding")]
+// that does — the shape a real enquiring host runs under.
 mod enquiry_tests {
     use super::*;
     use crate::run::tests::install_act;
@@ -288,7 +282,7 @@ mod enquiry_tests {
         let _ = shell.enquire(&mooring, FOValue::Unit);
     }
 
-    /// The same guard on the other door.
+    /// The same guard on the other path.
     struct ReentrantDispatchSeam(std::sync::Arc<IdentityTransport>);
     impl Host for ReentrantDispatchSeam {
         fn surface(&self, _val: &FOValue) {}
@@ -309,7 +303,7 @@ mod enquiry_tests {
     }
 }
 
-// ── Run-door durability, seen through the protocol ────────────────────
+// ── Run durability, seen through the protocol ────────────────────
 mod durability_tests {
     use super::*;
 
@@ -344,7 +338,7 @@ mod durability_tests {
         |_, _| Ok(()),
     )];
 
-    /// A panicking run arrives as a `Report::Faulted` — the run door caught it
+    /// A panicking run arrives as a `Report::Faulted` — the run entry caught it
     /// and rolled the shell back — and the same transport dispatches the next
     /// run cleanly.
     #[test]
@@ -376,7 +370,6 @@ mod durability_tests {
 //
 // Identity-only. Engine-busy serialisation needs a second process racing the
 // wire engine's rendezvous, which no unit test can stage.
-#[allow(clippy::disallowed_methods, reason = "[test] test fs scaffolding")]
 mod probe_tests {
     use super::*;
     use crate::carrier::testkit::{BARE, attach, boot, boot_at, eval};

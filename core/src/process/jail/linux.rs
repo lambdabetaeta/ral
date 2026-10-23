@@ -2,6 +2,7 @@
 //! `NO_NEW_PRIVS`.  [`super::JailPlan`] decides; this file only carries it out.
 
 use super::{JailCgroup, JailPlan};
+use crate::site::{Silent, site};
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::Path;
@@ -9,7 +10,7 @@ use std::path::Path;
 /// `EEXIST` is the ordinary case: the jail root outlives any one exec, and a
 /// sibling exec may have raced this one.
 fn mkdir_if_missing(path: &Path) -> io::Result<()> {
-    match std::fs::create_dir(path) {
+    match site!(Silent::JailCgroupMake, std::fs::create_dir(path)) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
         Err(e) => Err(e),
@@ -25,22 +26,20 @@ fn mkdir_if_missing(path: &Path) -> io::Result<()> {
 /// # Errors
 /// Returns the kernel's error for the parent directory's creation, or the
 /// file's open, lock, read, or write.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:jail-seq-file] guest-boot/exec-time jail setup: the guest-global uid/cgroup sequence counter, not model turn-time I/O."
-)]
 pub(crate) fn next_guest_seq(path: &Path) -> io::Result<u64> {
     use std::io::{Read, Seek, SeekFrom, Write};
 
-    if let Some(dir) = path.parent() {
+    if let Some(dir) = crate::path::spelled_parent(path) {
         mkdir_if_missing(dir)?;
     }
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(path)?;
+    let mut file = site!(
+        Silent::JailSeqFile,
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true) => open(path)
+    )?;
     rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;
     let mut text = String::new();
     file.read_to_string(&mut text)?;
@@ -51,12 +50,11 @@ pub(crate) fn next_guest_seq(path: &Path) -> io::Result<u64> {
     Ok(seq)
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:jail-cgroup-write] Cgroup control-file writes are guest-boot/exec-time jail setup, not model turn-time I/O: the limits are policy the host sets, never data the model reads or writes."
-)]
 fn write_control(cgroup: &Path, file: &str, value: &str) -> io::Result<()> {
-    std::fs::write(cgroup.join(file), value)
+    site!(
+        Silent::JailCgroupWrite,
+        std::fs::write(cgroup.join(file), value)
+    )
 }
 
 fn write_cpu_max(cgroup: &Path, quota_pct: u32) -> io::Result<()> {
@@ -82,15 +80,11 @@ const CONTROLLERS: &str = "+memory +pids +cpu";
 /// Returns the kernel's error for any mkdir, and refuses outright when a parent
 /// will not delegate: a jail that cannot be given its limits must not run the
 /// command uncapped instead.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:jail-cgroup-probe] asks whether ral's own cgroup directory exists, and walks up its chain to delegate controllers; the jail, not a name any grant judges"
-)]
 fn make_delegated(cgroup: &Path) -> io::Result<()> {
-    if cgroup.exists() {
+    if site!(Silent::JailCgroupProbe, cgroup => exists()) {
         return Ok(());
     }
-    let parent = cgroup.parent().ok_or_else(|| {
+    let parent = crate::path::spelled_parent(cgroup).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
             format!(
@@ -129,13 +123,10 @@ pub(crate) fn prepare(plan: &JailPlan) -> io::Result<(JailCgroup, OwnedFd)> {
     )?;
     write_control(&plan.cgroup, "pids.max", &plan.limits.pids_max.to_string())?;
     write_cpu_max(&plan.cgroup, plan.limits.cpu_quota_pct)?;
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:jail-cgroup-procs] Opens cgroup.procs to keep across the fork so the pre-exec closure can place the child without a second open post-uid-drop; guest-boot/exec-time jail setup, not model I/O."
-    )]
-    let procs = std::fs::OpenOptions::new()
-        .write(true)
-        .open(plan.cgroup.join("cgroup.procs"))?;
+    let procs = site!(
+        Silent::JailCgroupProcs,
+        std::fs::OpenOptions::new().write(true) => open(plan.cgroup.join("cgroup.procs"))
+    )?;
     Ok((
         JailCgroup {
             path: plan.cgroup.clone(),
@@ -183,7 +174,7 @@ fn write_pid(fd: RawFd, pid: libc::pid_t) -> io::Result<()> {
 }
 
 /// Place the child in its cgroup and drop it to the plan's uid/gid before
-/// `NO_NEW_PRIVS` shuts the door on regaining any of it.  `setresgid` comes
+/// `NO_NEW_PRIVS` forbids regaining any of it.  `setresgid` comes
 /// first: a process cannot change its gid once its uid is unprivileged.
 ///
 /// # Safety
@@ -230,7 +221,7 @@ pub(crate) fn kill(cgroup: &JailCgroup) {
 pub(crate) fn remove(cgroup: &JailCgroup) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
     loop {
-        match std::fs::remove_dir(&cgroup.path) {
+        match site!(Silent::JailCgroupRemove, std::fs::remove_dir(&cgroup.path)) {
             Err(e)
                 if e.raw_os_error() == Some(libc::EBUSY)
                     && std::time::Instant::now() < deadline =>

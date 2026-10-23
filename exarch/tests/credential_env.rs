@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 //! [`CredentialStore::resolve_and_scrub`] scenarios, in their own test
 //! binary.

@@ -1,8 +1,8 @@
 //! The one vocabulary exarch's enquiries speak: every class, tag and field a
-//! harness builtin's door sends and [`super::agent::desk`] answers, and the answers
+//! harness builtin sends and [`super::agent::desk`] answers, and the answers
 //! owed back.
 //!
-//! The door builds a [`Request`] and the desk decodes one, so an
+//! The builtin builds a [`Request`] and the desk decodes one, so an
 //! ill-shaped request is refused in the same words at either end.
 
 use crate::card::{Card, encode_card, value_to_card};
@@ -20,7 +20,7 @@ use regex::Regex;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// One enquiry, as it crosses from a harness builtin's door to the desk.
+/// One enquiry, as it crosses from a harness builtin to the desk.
 pub(crate) enum Request {
     Agents(Agents),
     Schedules(Schedules),
@@ -230,7 +230,7 @@ impl Family for Agents {
 }
 
 /// A model's own `exarch-agents` argument: a whole request, or a spawn's
-/// spec alone, since the fork it needs is its door's to mint.
+/// spec alone, since the fork it needs is its builtin's to mint.
 pub(crate) enum Word {
     Ask(Agents),
     Spawn(Launch),
@@ -308,7 +308,7 @@ record!(Spec {
 /// Non-empty, at most 24 characters, ASCII alphanumeric plus `-`/`_`, since the
 /// tab bar lays a name out as a single token.  Stated here because this is where
 /// a name becomes identity — `Fleet::claim` refuses whatever this refuses,
-/// so no door can mint an agent around it, however a name reached that door.
+/// so no path can mint an agent around it, however a name reached it.
 ///
 /// # Errors
 /// The sentence to show, naming the rule and the name that broke it.
@@ -436,7 +436,7 @@ impl Datum for Selection {
     }
 }
 
-/// How a fork its door minted reaches the desk. Which arm is legal is the
+/// How a fork its builtin minted reaches the desk. Which arm is legal is the
 /// host's fact, not the guest's.
 pub(crate) enum ForkClaim {
     /// Parked in this host's own nursery, under this id.
@@ -1290,10 +1290,7 @@ impl Datum for TranscriptPart {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 
@@ -1437,7 +1434,7 @@ mod tests {
         ]);
     }
 
-    /// A model's `start` names its spec alone: the fork is its door's.
+    /// A model's `start` names its spec alone: the fork is its builtin's.
     #[test]
     fn a_models_start_word_is_the_spec_awaiting_its_fork() {
         let launch = launch(Memory::Amnemon, Selection::Inherit).encode();
@@ -1523,13 +1520,15 @@ mod tests {
     /// not handed.
     #[test]
     fn every_grant_base_resolves_to_a_bake_in_base() {
-        let cwd = std::env::current_dir().unwrap();
+        let cwd = ral_core::path::CwdPath::new(std::env::current_dir().unwrap()).unwrap();
+        let ctx = ral_core::guard::freeze::FreezeCtx::at(ral_core::types::EnvVars::new(), cwd)
+            .with_scratch(Some(std::env::temp_dir().to_string_lossy()));
         for label in crate::policy::SPAWN_BASES {
-            crate::policy::base_layer(label, &cwd)
+            crate::policy::base_layer(label, &ctx)
                 .unwrap_or_else(|e| panic!("grant `{label} must name a bake-in base: {e}"));
         }
         let err =
-            crate::policy::base_layer("bogus", &cwd).expect_err("an unknown base must be refused");
+            crate::policy::base_layer("bogus", &ctx).expect_err("an unknown base must be refused");
         let offered: std::collections::BTreeSet<&str> = err
             .rsplit_once("expected one of: ")
             .unwrap_or_else(|| panic!("the refusal must enumerate the bases, got: {err}"))

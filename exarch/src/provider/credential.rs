@@ -71,10 +71,6 @@ impl CredentialStore {
     ///
     /// SAFETY: call this while the process is still single-threaded (before any
     /// session worker thread exists), so the env scrub races nothing.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "the one read of the key variables, and their scrub"
-    )]
     pub fn resolve_and_scrub(declared: Vec<Service>) -> Self {
         seal();
         let all: Vec<Account> = identity::built_in_services()
@@ -87,7 +83,7 @@ impl CredentialStore {
         let mut scrub = BTreeSet::new();
         for account in &all {
             if let Auth::Key(var) = &account.service.auth
-                && let Ok(raw) = std::env::var(var)
+                && let Some(raw) = ral_core::host::var(var)
             {
                 scrub.insert(var.clone());
                 if let Some(key) = well_formed_key(&raw) {
@@ -285,7 +281,7 @@ impl Roster {
 /// nothing: blank, or carrying a control character — a newline copied along
 /// with the key being the usual way.
 ///
-/// One rule wherever a key arrives, so a secret refused at one door is not
+/// One rule wherever a key arrives, so a secret refused on one route is not
 /// quietly accepted at another: the environment here, a window, or the
 /// computer's credential manager ([`crate::provider::keychain`]).
 pub fn well_formed_key(raw: &str) -> Option<String> {
@@ -312,7 +308,6 @@ fn seal() {}
 ///
 /// SAFETY: no other thread may touch the environment.
 #[cfg(unix)]
-#[allow(clippy::disallowed_methods, reason = "the scrub's one unset")]
 unsafe fn erase(var: &str) {
     let name = std::ffi::CString::new(var).expect("a variable `std::env::var` read holds no NUL");
     // SAFETY: per this function's contract.
@@ -331,13 +326,13 @@ unsafe fn erase(var: &str) {
 }
 
 #[cfg(not(unix))]
-#[allow(clippy::disallowed_methods, reason = "the scrub's one unset")]
 unsafe fn erase(var: &str) {
     // SAFETY: per this function's contract.
     unsafe { std::env::remove_var(var) };
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use genai::adapter::AdapterKind;
@@ -383,7 +378,7 @@ mod tests {
         }
     }
 
-    /// One rule at every door: surrounding whitespace is not part of a key,
+    /// One rule on every route: surrounding whitespace is not part of a key,
     /// and a key carrying a pasted newline authenticates nothing.
     #[test]
     fn a_key_is_trimmed_or_refused_outright() {
@@ -485,10 +480,6 @@ mod tests {
 
     /// The `Arc` a live provider still holds is the one that sees the refresh.
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] a poisoned lock is the test's own failure"
-    )]
     fn add_oauth_relogin_updates_the_shared_cell_in_place() {
         let mut store = CredentialStore::default();
         let account = store.add_oauth(&oauth_token("acc_1", Some("alex@work")));
@@ -531,10 +522,6 @@ mod tests {
     /// Neither may shadow the other, and a refresh of one never reaches the
     /// other's token cell.
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] a poisoned lock is the test's own failure"
-    )]
     fn two_accounts_on_one_email_stay_distinct() {
         let mut store = CredentialStore::default();
 

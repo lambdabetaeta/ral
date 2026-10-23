@@ -322,6 +322,7 @@ fn live_support(
 }
 
 #[cfg(all(test, unix))]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod rendered_tests {
     use super::*;
     use crate::path::{FrozenPath, Trace, utf8};

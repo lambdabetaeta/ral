@@ -143,11 +143,7 @@ impl Baseline {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] a fixture file written so the baseline walk has something \
-              to read; the production code in this file touches no filesystem at all"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use crate::test_fixture::workshop;

@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: 'accepted; its Enforcement section is superseded in part by [[decisions/261022_typed-sites]]'
 ---
 
 # Surface every redirect and exec image; sink library I/O below the ral line

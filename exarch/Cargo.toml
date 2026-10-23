@@ -56,7 +56,6 @@ grep       = "0.4"
 # `transcript `grep`'s pattern dialect, the same one ral's own `re-*` family
 # speaks; ral-core already compiles it, so this adds no build.
 regex      = "1"
-tempfile   = "3.27"
 base64     = { workspace = true }
 sha2       = { workspace = true }
 getrandom  = "0.4"
@@ -76,7 +75,6 @@ gray_matter = { version = "0.3", default-features = false, features = ["yaml"] }
 # Secret Service), behind one entry type; `provider::keychain` is the only
 # caller.
 keyring    = "4.1"
-fd-lock = "4"
 
 # Unix-only bundled tools (id / kill / stat / timeout / test / tac).  Pulled
 # in through `ral-core/coreutils-unix-only` only on Unix targets — the
@@ -84,14 +82,11 @@ fd-lock = "4"
 # which do not compile on Windows.
 [target.'cfg(unix)'.dependencies]
 ral-core = { path = "../core", features = ["coreutils", "coreutils-unix-only"] }
-rustix = { workspace = true, features = ["process", "stdio", "fs"] }
+rustix = { workspace = true, features = ["process", "stdio"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
-    "Win32_Security",
-    "Win32_Security_Authorization",
-    "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_Threading",
     "Win32_UI_Shell",
@@ -104,3 +99,9 @@ ral-core = { path = "../core" }
 [dev-dependencies]
 ral-core = { path = "../core", features = ["test-util"] }
 ctor = "1"
+tempfile = "3.27"
+# cargo's idiom for "this feature is on whenever my own tests build": the test
+# doubles (`Scratch::for_test`, `Avatar::for_test`, `AuditLog::for_test`, ...)
+# are test-only, and the integration tests are targets of this package, so
+# they cannot select it through a dependency line of their own.
+exarch = { path = ".", features = ["test-util"] }

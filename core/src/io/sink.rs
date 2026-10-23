@@ -481,10 +481,7 @@ pub(crate) fn terminator_len(bytes: &[u8]) -> usize {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     #[cfg(unix)]
     use super::WriteStopped;

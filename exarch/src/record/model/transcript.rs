@@ -1,4 +1,4 @@
-//! The transcript door: locate the items a read or grep names under the
+//! The transcript reader: locate the items a read or grep names under the
 //! session lock, then read turns back through their [`Pointer`]s with the
 //! lock gone — each record checked against its [`Locus`] digest before it
 //! is parsed.
@@ -11,23 +11,26 @@ use super::{
 };
 use crate::provider::tools::{COMMAND, RAL_TOOL};
 use crate::record::{
-    Entry, GrepAnswer, GrepHit, Locus, Protocol, Record, Recorded, Refusal, Role,
+    AgentId, Entry, GrepAnswer, GrepHit, Locus, Protocol, RECORD, Record, Recorded, Refusal, Role,
     TranscriptMessage, TranscriptPart, TranscriptTurn, TurnKind,
 };
 use genai::chat::{Binary, BinarySource, ChatMessage, ContentPart, CustomPart, ToolCall};
+use ral_core::own::OwnDir;
 use regex::Regex;
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-/// One handle on a record log, carrying the model fold's syscall-site allow.
-fn open_log(path: &Path) -> io::Result<File> {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:model-fold-pointer-read] reads record.jsonl back by Locus for a departed turn and the model's `exarch-transcript` verb alike; surfaced as a Display::HarnessCall, not the model's own data I/O"
-    )]
-    File::open(path)
+/// One handle on session `source`'s record log under `sessions`: the model
+/// fold's one open of it.
+fn open_log(sessions: &OwnDir, source: AgentId) -> io::Result<File> {
+    Ok(sessions.dir(&source.to_string())?.open(RECORD)?)
+}
+
+/// Session `source`'s record log, as messages name it.
+fn record_name(sessions: &OwnDir, source: AgentId) -> PathBuf {
+    sessions.path().join(source.to_string()).join(RECORD)
 }
 
 fn read_at(reader: &mut File, locus: &Locus) -> io::Result<Protocol> {
@@ -64,7 +67,7 @@ enum Source {
     Located(Pointer),
 }
 
-/// One turn as a door read places it: whose it was, and where its records
+/// One turn as a transcript read places it: whose it was, and where its records
 /// lie.
 struct Placed {
     id: u64,
@@ -110,18 +113,22 @@ fn turn_messages(records: &[Protocol]) -> Vec<ChatMessage> {
     records.iter().flat_map(chat_messages).collect()
 }
 
-/// A placed turn's material, read back through `open`: consecutive turns
-/// naming one log share the one descriptor, so each file is read in a single
-/// pass in locus order.
+/// A placed turn's material, read back through `open` from `sessions`:
+/// consecutive turns naming one log share the one descriptor, so each file is
+/// read in a single pass in locus order.
 ///
 /// # Errors
 /// Names the turn and the file that will not read back.
-fn material(open: &mut Option<(PathBuf, File)>, turn: &Placed) -> Result<Vec<ChatMessage>, String> {
+fn material(
+    open: &mut Option<(AgentId, File)>,
+    sessions: &OwnDir,
+    turn: &Placed,
+) -> Result<Vec<ChatMessage>, String> {
     match &turn.source {
         Source::Held(records) => Ok(turn_messages(records)),
-        Source::Located(Pointer { source, loci }) => read_pointer(open, source, loci)
+        Source::Located(Pointer { source, loci }) => read_pointer(open, sessions, *source, loci)
             .map(|records| turn_messages(&records))
-            .map_err(|error| read_back_refusal(turn.id, source, &error)),
+            .map_err(|error| read_back_refusal(turn.id, &record_name(sessions, *source), &error)),
     }
 }
 
@@ -141,6 +148,7 @@ enum Unreadable {
 /// A fork can leave consecutive turns in two files, so placement is per turn.
 pub(crate) struct TranscriptRead {
     turns: Vec<Placed>,
+    sessions: OwnDir,
 }
 
 impl TranscriptRead {
@@ -150,14 +158,15 @@ impl TranscriptRead {
     /// # Errors
     /// Refuses a turn whose file will not read back.
     pub(crate) fn turns(self) -> Result<Vec<TranscriptTurn>, String> {
+        let Self { turns, sessions } = self;
         let mut open = None;
-        self.turns
+        turns
             .into_iter()
             .map(|turn| {
                 Ok(TranscriptTurn {
                     turn: turn.id,
                     role: turn.role,
-                    messages: material(&mut open, &turn)?
+                    messages: material(&mut open, &sessions, &turn)?
                         .iter()
                         .map(transcript_message)
                         .collect(),
@@ -172,6 +181,7 @@ impl TranscriptRead {
 pub(crate) struct TranscriptSearch {
     items: Vec<Searchable>,
     unreadable: Unreadable,
+    sessions: OwnDir,
 }
 
 impl TranscriptSearch {
@@ -182,7 +192,11 @@ impl TranscriptSearch {
     /// # Errors
     /// Refuses a file that will not read back, where a narrowing named it.
     pub(crate) fn grep(self, pattern: &Regex) -> Result<GrepAnswer, String> {
-        let Self { items, unreadable } = self;
+        let Self {
+            items,
+            unreadable,
+            sessions,
+        } = self;
         let mut open = None;
         let mut tally = Tally::default();
         for item in items {
@@ -190,7 +204,7 @@ impl TranscriptSearch {
                 Searchable::Note(span, note) => {
                     (span, ItemKind::Residue, vec![ChatMessage::user(note)])
                 }
-                Searchable::Turn(kind, turn) => match material(&mut open, &turn) {
+                Searchable::Turn(kind, turn) => match material(&mut open, &sessions, &turn) {
                     Ok(messages) => (Span::single(turn.id), ItemKind::Turn(kind), messages),
                     Err(refusal) => match unreadable {
                         Unreadable::Refuse => return Err(refusal),
@@ -204,22 +218,20 @@ impl TranscriptSearch {
     }
 }
 
-/// Read one turn's records off `source`, reusing the descriptor already open
-/// when consecutive turns name one file — so a lineage of many files costs
-/// one descriptor, never two.
+/// Read one turn's records off session `source`'s log under `sessions`,
+/// reusing the descriptor already open when consecutive turns name one
+/// session — so a lineage of many files costs one descriptor, never two.
 fn read_pointer(
-    open: &mut Option<(PathBuf, File)>,
-    source: &Path,
+    open: &mut Option<(AgentId, File)>,
+    sessions: &OwnDir,
+    source: AgentId,
     loci: &[Locus],
 ) -> io::Result<Vec<Protocol>> {
-    if open
-        .as_ref()
-        .is_none_or(|(path, _)| path.as_path() != source)
-    {
+    if open.as_ref().is_none_or(|(id, _)| *id != source) {
         // Closed before the next is opened.
         drop(open.take());
-        let file = open_log(source)?;
-        *open = Some((source.to_path_buf(), file));
+        let file = open_log(sessions, source)?;
+        *open = Some((source, file));
     }
     let (_, file) = open.as_mut().expect("just opened, or already open");
     loci.iter().map(|locus| read_at(file, locus)).collect()
@@ -227,17 +239,20 @@ fn read_pointer(
 
 /// Each resident row of a link read back through its pointer, and cut to its
 /// admissible prefix, so no dangling `tool_use` reaches the child's wire.
-pub(super) fn read_seeds(turns: &[Linked]) -> Result<Vec<Vec<Recorded<Protocol>>>, Refusal> {
+pub(super) fn read_seeds(
+    sessions: &OwnDir,
+    turns: &[Linked],
+) -> Result<Vec<Vec<Recorded<Protocol>>>, Refusal> {
     let mut open = None;
     turns
         .iter()
         .filter(|linked| linked.row.location == Location::Resident)
         .map(|Linked { row, at }| {
-            let read = read_pointer(&mut open, &at.source, &at.loci).map_err(|error| {
+            let read = read_pointer(&mut open, sessions, at.source, &at.loci).map_err(|error| {
                 Refusal::Unreadable(io::Error::other(format!(
                     "turn {} was inherited from {}, which no longer reads back ({error}); was that session's directory moved, copied or edited?",
                     row.id,
-                    ral_core::path::shown(&at.source)
+                    ral_core::path::shown(record_name(sessions, at.source))
                 )))
             })?;
             let mut records: Vec<_> = at
@@ -287,6 +302,7 @@ impl Context {
                 .into_iter()
                 .filter_map(|id| self.turn(id).map(Placed::of))
                 .collect(),
+            sessions: self.table.sessions().clone(),
         })
     }
 
@@ -387,7 +403,11 @@ impl Context {
                     .map(|note| Searchable::Note(residue.span, note)),
             })
             .collect();
-        Ok(TranscriptSearch { items, unreadable })
+        Ok(TranscriptSearch {
+            items,
+            unreadable,
+            sessions: self.table.sessions().clone(),
+        })
     }
 }
 
@@ -548,7 +568,7 @@ fn transcript_custom(custom: &CustomPart) -> TranscriptPart {
     TranscriptPart::Custom { provider, model }
 }
 
-fn read_back_refusal(turn: u64, path: &Path, error: &io::Error) -> String {
+fn read_back_refusal(turn: u64, path: &std::path::Path, error: &io::Error) -> String {
     format!(
         "turn {turn} could not be read back from {}: {error}",
         ral_core::path::shown(path)

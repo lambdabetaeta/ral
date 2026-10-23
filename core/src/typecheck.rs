@@ -182,7 +182,7 @@ fn close_thunk_scheme(
 /// phrases' own return value, once inference has finished (`contract::ascribe`).  The
 /// *inferred* type is what is checked, so a key misspelled inside a spread is
 /// caught with one written out.  A return typed at a variable, and a plugin
-/// factory's `return { |opts| … }`, stay on the caller's own runtime door,
+/// factory's `return { |opts| … }`, stay on the caller's own runtime check,
 /// which dispatches off the same table.
 ///
 /// # Errors
@@ -223,7 +223,7 @@ pub fn typecheck(
 /// Type-check the prelude IR against `manifest`, returning the annotated
 /// [`Toplevel`].
 ///
-/// Callers (`boot::bake_prelude_to_out_dir`, from each host's build script)
+/// Callers (`boot::bake_prelude`, from each host's build script)
 /// serialise the annotated prelude, so running it installs each binding's
 /// scheme beside its value, and [`SessionSchemes::from_prelude`] reads the
 /// same schemes back off it.  A prelude binding named after a native seeds and

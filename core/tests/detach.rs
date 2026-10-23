@@ -2,7 +2,7 @@
 //! session stops owning.
 //!
 //! Everything here is checked from outside the mechanism — through the
-//! public `run` door, the receipt it hands back, and the kernel — because
+//! public `run` entry, the receipt it hands back, and the kernel — because
 //! the whole point of the verb is that nothing inside this process can name
 //! what it started.  The crown jewel is
 //! [`a_detached_process_outlives_the_full_exit_of_the_host_that_birthed_it`]:
@@ -10,7 +10,7 @@
 //!
 //! Confinement is tested from two sides.  Whether a frame *permits* the
 //! verb is ordinary capability behaviour, checked here through the same
-//! public door as everything else.  What the survivor is confined *to* is
+//! public entry as everything else.  What the survivor is confined *to* is
 //! not: it is one flag in a bwrap argv, so it is checked where that argv is
 //! built (`core/src/sandbox/linux.rs`) rather than by birthing a process
 //! and interrogating a namespace this test cannot enter.
@@ -21,8 +21,8 @@
 //! outcome, so a test asserting either side would be exactly the flake the
 //! ADR warns of; and pid recycling, which no test can provoke on demand.
 
+#![allow(clippy::disallowed_methods, reason = "test code")]
 #![cfg(unix)]
-#![allow(clippy::disallowed_methods)]
 
 mod common;
 

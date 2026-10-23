@@ -1,6 +1,6 @@
 //! The REPL's [`Host`]: it answers the engine's `` `repl-editor ``,
 //! `` `repl-plugin `` and `` `repl-clipboard `` enquiries, renders what the engine surfaces, and is
-//! the one door every plugin hook's dispatch goes through.
+//! the one place every plugin hook's dispatch goes through.
 
 use clipboard::{Clipboard, Copied};
 use ral_core::carrier::{Host, Severed, Transport, dispatch_to_report};
@@ -70,7 +70,9 @@ impl ReplHost {
             editor: Mutex::default(),
             printer: Mutex::default(),
             prompt_fault: Mutex::default(),
-            clipboard: Mutex::default(),
+            clipboard: Mutex::new(Clipboard::new(
+                ral_core::host::var("SSH_CONNECTION").is_some(),
+            )),
         })
     }
 
@@ -306,7 +308,7 @@ mod tests {
         assert_eq!(host.prompt_fault(boom()), boom());
     }
 
-    /// Outside an editor context the host refuses in the words the doors used
+    /// Outside an editor context the host refuses in the words the builtins used
     /// before the context moved host-side.
     #[test]
     fn an_editor_op_outside_a_handler_is_refused() {

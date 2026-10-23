@@ -23,7 +23,7 @@ use super::host::{Outcome, ReplHost, hook_run, teardown_notice};
 use super::plugin::flush_pending_messages;
 use super::prompt::{render as render_prompt, write_terminal_title};
 use super::theme::OutputTheme;
-use crate::boot_door::{self, Boot};
+use crate::boot_builtin::{self, Boot};
 use crate::startup::engine::{INSTALLERS, REPL};
 
 /// Per-iteration loop control: stay in the loop, or break out and return
@@ -61,7 +61,7 @@ pub(super) struct Session {
 }
 
 impl Session {
-    /// Boot the `repl` engine, then dispatch its boot door and the rc's
+    /// Boot the `repl` engine, then dispatch its boot builtin and the rc's
     /// `startup` block. `Err(code)` is a boot that ended the session: a
     /// `--capabilities` failure, or an `exit` in a startup file.
     pub(super) fn boot(opts: &crate::cli::InteractiveOpts) -> Result<Self, ExitCode> {
@@ -113,7 +113,7 @@ impl Session {
             })?,
         };
         let (report, _) = host.dispatch(&*transport, hook_run(boot.program(), None), None);
-        let mut settings = boot_door::settle(report).map_err(exit)?;
+        let mut settings = boot_builtin::settle(report).map_err(exit)?;
         if let Some(surface) = opts.surface {
             settings.surface = surface;
         }
@@ -179,7 +179,7 @@ impl Session {
         // is done, and a stale escalation tick would otherwise creep the
         // next Ctrl-C toward the third-signal force-exit.
         ral_core::process::clear();
-        let cwd = t.cwd().unwrap_or_default();
+        let cwd = t.cwd().ok().flatten().unwrap_or_default();
         write_terminal_title(&self.terminal, &ral_core::path::shown(cwd));
         let prompt = render_prompt(t, &self.host);
 

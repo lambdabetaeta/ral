@@ -109,6 +109,12 @@ pub struct SessionState {
     /// fallback is then `""`, i.e. cwd-relative.
     pub(crate) root_file: Option<FileId>,
     pub(crate) exit_hints: Arc<crate::types::ExitHints>,
+    /// The spelling of the directory the front end that booted the session
+    /// made for it, which the `scratch` place of a grant anchors to, as `home`
+    /// anchors to `HOME`: set once at boot, inherited by every child and
+    /// carried over the wire with the session's terms.  `None` where the host
+    /// made none, and then a `scratch` place is refused.
+    pub(crate) scratch: Option<String>,
     /// What the session's `comparable` variables were fixed to, per unit.
     pub(crate) fixings: Arc<crate::ty::Fixings>,
     /// The binary's half, shared by every session of an engine. Builtin
@@ -140,7 +146,7 @@ pub struct LocalState {
     /// The in-flight audit trail and its byte-capture policy.  `grant`,
     /// `within`, `guard`, `try`, and `audit` are collection boundaries, not
     /// observations; the dispatcher posts one observation per real command
-    /// through `types::audit::door`.
+    /// through `types::audit::fan_out`.
     pub(crate) audit: Audit,
     /// Every worker (`spawn`, `watch`) spawned from this shell.
     /// [`Shell::spawn_thread`] shares the registry into the worker's own shell,
@@ -182,7 +188,7 @@ pub struct LocalState {
 /// Every field is `pub(crate)`, because the partition encodes run safety,
 /// capability attenuation, and wire framing — core's invariant, not an API a
 /// host may reach past.  Hosts drive a session through the intent verbs
-/// ([`mod@host`], plus the scope and context verbs), and the run door
+/// ([`mod@host`], plus the scope and context verbs), and the run entry
 /// ([`Shell::run`]) checkpoints and rolls back `env` and `context` around
 /// each run.
 pub struct Shell {
@@ -247,9 +253,9 @@ impl Shell {
     /// The dispatch register [`Audit`] carries, resolved against the session's
     /// sources.  Returned by value so the caller may hold `&mut audit`
     /// alongside it.
-    /// `pub`, not `pub(crate)`: a host door that builds its own
+    /// `pub`, not `pub(crate)`: a host entry that builds its own
     /// [`crate::types::Observation`] (a grep walk, a read outside any
-    /// redirect) needs the same call site core's own doors stamp.
+    /// redirect) needs the same call site core's own entries stamp.
     pub fn call_site(&self) -> Option<CallSite> {
         self.session.sources.site(self.local.audit.call_site?)
     }
@@ -357,5 +363,5 @@ impl Shell {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "test scaffolding")]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

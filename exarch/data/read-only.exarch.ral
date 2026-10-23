@@ -21,6 +21,7 @@ return [
       `cwd .,                # the project tree the agent is reviewing
       `absolute /tmp,
       `tempdir .,            # `$TMPDIR` on macOS — distinct from /tmp
+      `scratch .,            # the session's own scratch (`$EXARCH_SCRATCH`)
       `xdg-config .,         # ${XDG_CONFIG_HOME:-~/.config}
       `xdg-data .,           # ${XDG_DATA_HOME:-~/.local/share}
       `xdg-cache .,          # ${XDG_CACHE_HOME:-~/.cache}
@@ -51,11 +52,12 @@ return [
     # Writes only to scratch — the project tree is off-limits.  This is
     # the load-bearing difference vs `reasonable`: `cwd .` is read-only,
     # and any tool that wants to modify the tree fails closed.  Tools
-    # that need a workspace can use `$EXARCH_SCRATCH` (under
-    # `tempdir .`) as their scratch root.
+    # that need a workspace can use `$EXARCH_SCRATCH` (`scratch .`) as
+    # their scratch root.
     write: [
       `absolute /tmp,
       `tempdir .,
+      `scratch .,
     ],
 
     # Same credential carve-outs as `reasonable`: these are present in
@@ -86,7 +88,7 @@ return [
       `dir `absolute /usr/sbin,
       `dir `absolute /sbin,
       `dir `cwd .,   # read-only, so nothing can be dropped here to run
-      # No `dir `absolute /tmp` or `dir `tempdir .`: those are this profile's only writable
+      # No `dir `absolute /tmp`, `dir `tempdir .` or `dir `scratch .`: those are this profile's only writable
       # dirs, and a dir that is both writable and exec-admitted makes the
       # denies below advisory — write a copy of `bash` into scratch under
       # another name and the veto, a name veto, never sees it.

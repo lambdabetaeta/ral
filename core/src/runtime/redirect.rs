@@ -1,10 +1,10 @@
-//! Redirects: the doors that open a target (the atomic `>` recipe, the
+//! Redirects: the entries that open a target (the atomic `>` recipe, the
 //! `< file` handoff into `shell.io.stdin`), and the [`scope`] that installs a
 //! redirect list around a body and settles it.
 //!
 //! No open lives here.  Every one goes through [`Shell::locate`] into
 //! `path::walk`, so the object authorised is the object the handle then
-//! names — the door never re-walks a string the guard has already judged.
+//! names — the open never re-walks a string the guard has already judged.
 
 pub(crate) mod scope;
 
@@ -12,7 +12,7 @@ use crate::capability::FsOp;
 use crate::fact::Read;
 use crate::ir::{StdinSource, WriteMode};
 use crate::path::walk::Kind;
-use crate::path::{Reading, StagedWrite, Streamed, Streaming, Trace, Writing};
+use crate::path::{Reading, StagedWrite, Streamed, Streaming, Trace, Visibility, Writing};
 use crate::types::{Break, Error, Mooring, Observed, Settled, Shell};
 use std::fs::File;
 use std::io::{self, Read as _, Seek as _};
@@ -121,7 +121,7 @@ pub(crate) fn open_write(
         let file = streamed.file().try_clone().map_err(io)?;
         (file, OpenedWrite::Stream(streamed))
     } else {
-        let mut staged = target.stage().map_err(io)?;
+        let mut staged = target.stage(Visibility::Public).map_err(io)?;
         // The writer's handle shares the staging handle's offset.
         let file = staged.file().try_clone().map_err(io)?;
         (file, OpenedWrite::Atomic(staged))
@@ -147,7 +147,7 @@ fn open_read(path: &str, shell: &mut Shell) -> Settled<File> {
 impl Shell {
     /// Overwrite `path` through core's whole `>`-redirect recipe —
     /// symlink-resolved, mode-preserving, fsync-durable — while emitting no io
-    /// event: the door for a host builtin (exarch's `edit-hash` /
+    /// event: the entry for a host builtin (exarch's `edit-hash` /
     /// `edit-replace`) that writes *below* the redirect frame and speaks its
     /// own surface, so that it shares the recipe instead of forking a weaker
     /// write that narrows the mode, replaces symlinks, and skips the flush.
@@ -192,7 +192,7 @@ pub(crate) fn install_stdin_redirect(
     let source = match stdin {
         StdinSource::File(path) => {
             let f = open_read(path, shell)?;
-            // Door 1 — READ, recorded eagerly so it precedes the body or
+            // First, the READ, recorded eagerly so it precedes the body or
             // exec it feeds, as in `cat < a`.
             shell.observe(mooring, Observed::Read(Read { path: path.clone() }));
             crate::io::Source::Reader(crate::io::SourceReader::file(f))

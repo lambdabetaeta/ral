@@ -271,7 +271,7 @@ pub fn open_file(
     let target = super::review::file_to_open(&review, index, &path)?;
     mark_from_elsewhere(&target.path);
     match target.how {
-        OpenAs::Open => open_with_default(&app, &target.path),
+        OpenAs::Open => open_with_default(&target.path),
         OpenAs::Reveal => app
             .opener()
             .reveal_item_in_dir(&target.path)
@@ -294,15 +294,14 @@ pub fn open_file(
     reason = "[silent:synod-gui] synod carries no ral shell to print through"
 )]
 fn mark_from_elsewhere(path: &Path) {
+    use crate::site::{Silent, site};
+
     let mut stream = path.as_os_str().to_os_string();
     stream.push(":Zone.Identifier");
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:mark-of-the-web] the Zone.Identifier stream beside a file the guest \
-                  wrote, set by the shell before the user opens it; the file's own bytes are \
-                  untouched"
-    )]
-    let written = std::fs::write(&stream, "[ZoneTransfer]\r\nZoneId=3\r\n");
+    let written = site!(
+        Silent::MarkOfTheWeb,
+        std::fs::write(&stream, "[ZoneTransfer]\r\nZoneId=3\r\n")
+    );
     if let Err(e) = written {
         eprintln!(
             "synod: could not mark {} as from elsewhere: {e}",
@@ -563,15 +562,8 @@ fn converse(
 /// Hand `path` to the user's default application for that file.  The system
 /// runs whatever `path` names, so the one caller, [`open_file`], passes only
 /// a document it has already checked.
-fn open_with_default(app: &AppHandle, path: &Path) -> Result<(), String> {
-    use tauri_plugin_opener::OpenerExt;
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "native: the path is handed to the system's opener"
-    )]
-    let native = path.to_string_lossy();
-    app.opener()
-        .open_path(native, None::<&str>)
+fn open_with_default(path: &Path) -> Result<(), String> {
+    tauri_plugin_opener::open_path(path, None::<&str>)
         .map_err(|e| format!("Could not open {}: {e}", shown(path)))
 }
 

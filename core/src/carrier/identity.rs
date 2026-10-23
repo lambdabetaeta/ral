@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::sync::mpsc;
 
 use super::{
-    ControlSender, Door, Ends, EventReceiver, Host, ProbeError, Severed, Transport, forbid_reentry,
+    ControlRoute, ControlSender, Ends, EventReceiver, Host, ProbeError, Severed, Transport,
+    forbid_reentry,
 };
 use crate::engine::{Engine, EngineInstaller, Rails, Scopes};
 use crate::first_order::FOValue;
@@ -61,7 +62,7 @@ impl IdentityTransport {
         let (event_tx, event_rx) = mpsc::channel();
         let scopes = engine.scopes().clone();
         let runtime = engine.runtime().clone();
-        let control = ControlSender::new(Door::Identity(scopes.clone()));
+        let control = ControlSender::new(ControlRoute::Identity(scopes.clone()));
         Self {
             installer: engine.installer(),
             runtime,
@@ -178,4 +179,5 @@ impl Transport for IdentityTransport {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 1776d222
 verified_at_date: 2026-09-30
-anchors: [compile, compile_and_typecheck, CompileError, SessionSchemes, ReturnContract, contract::Table, bake_prelude, bake_prelude_to_out_dir, BakedPrelude, postcard, annotate, Capture, captured_string, eta_expand_arrow]
+anchors: [compile, compile_and_typecheck, CompileError, SessionSchemes, ReturnContract, contract::Table, bake_prelude, BakedPrelude, postcard, annotate, Capture, captured_string, eta_expand_arrow]
 ---
 
 # The compilation ladder: source to typed IR
@@ -79,7 +79,7 @@ built it, so a key misspelled inside a spread is caught with one written out.
 `()` is the empty keyset; a map, a list, a scalar, or (but for a manifest) a
 function is refused with the spelling to use. A program whose return is a
 variable — `from-json` — or a manifest factory's `Thunk` is left to its
-loader's runtime door, which dispatches off the same table.
+loader's runtime check, which dispatches off the same table.
 
 Each run's check is seeded from the live session — one `SessionSchemes`, the
 scope's name→scheme map plus the alias arms' schemes — so a binding made in one
@@ -90,17 +90,19 @@ so the seed never drifts from the values it describes.
 The prelude is baked once at build time as a schema-less `postcard` blob of this
 same IR, so any field added to `Comp`, `Val`, or `Pattern` invalidates every
 emitted blob — a hazard closed by each host's build-dependency on `ral-core`,
-which reruns `bake_prelude_to_out_dir` (`core/src/boot.rs`), the only encode site, and
-the only decode site (`BakedPrelude`) live there together as the host-embedding
+which reruns the host's build script, whose one call to `boot::bake_prelude`
+(`core/src/boot.rs`) is the only encode site; the only decode site
+(`BakedPrelude`) lives there too, together as the host-embedding
 seam ([[decisions/260610_host-embedding-api|host-embedding-api]]). The bake runs
 the checker: it parses, elaborates, and hands the comp to `bake_prelude`
 (`core/src/typecheck.rs`), which checks it against core's manifest and returns
 the *annotated* prelude; each `Define` already carries its schemes, and
 `SessionSchemes::from_prelude` reads them back, so there is no second list. The
-one blob — annotated IR — lands in `OUT_DIR`; a host embeds it through the
+one blob — annotated IR — is returned as bytes, which the host's build script
+writes to `OUT_DIR`; a host embeds it through the
 `baked_prelude!` macro into a `BakedPrelude`, decoded lazily on first use. The typed IR is then handed to the
 [[internals/evaluator-machine|evaluator]], which a host reaches only through the
-synchronous framed run doors ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).
+synchronous framed run entries ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).
 
 See also [[design/cbpv|cbpv]], [[design/types|types]]; map hub
 [[map/core|core]]. The formal account is `docs/SPEC.md`.

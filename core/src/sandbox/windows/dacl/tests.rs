@@ -7,13 +7,10 @@
 // crash recovery only reclaims profiles. Ported units keep upstream's names
 // so each diffs against the one it was taken from.
 
-#![allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
 use super::*;
 use crate::process::cancel::DurableRoot;
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 use windows_sys::Win32::Security::SID_AND_ATTRIBUTES;
 use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
@@ -47,6 +44,11 @@ pub(super) fn with_scoped_state_dir<R>(f: impl FnOnce() -> R) -> R {
 /// `path`'s real path: the spelling a frozen allowance holds.
 pub(super) fn real(path: &Path) -> PathBuf {
     crate::test_helper::real(path).as_path().to_path_buf()
+}
+
+/// `path` as the text a stamp is keyed by.
+fn text(path: &Path) -> &str {
+    crate::path::utf8(path).unwrap()
 }
 
 /// `mklink /J link target`, as `cmd` reports it.
@@ -106,7 +108,10 @@ fn ensure_grant_stamps_the_ace_and_records_the_witness() {
         ));
         grant(&canonical, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
         assert!(ace_present(&canonical, CAP_SID, GrantKind::ReadWrite, true));
-        assert!(stamp_recorded(&stamp_key(&canonical, GrantKind::ReadWrite)));
+        assert!(stamp_recorded(&stamp_key(
+            text(&canonical),
+            GrantKind::ReadWrite
+        )));
     });
 }
 
@@ -165,7 +170,7 @@ fn a_cancel_in_force_stops_the_stamp_before_it_applies() {
             "the poll must report the cause it saw, not a grant failure"
         );
         assert!(
-            !stamp_recorded(&stamp_key(&canonical, GrantKind::ReadWrite)),
+            !stamp_recorded(&stamp_key(text(&canonical), GrantKind::ReadWrite)),
             "a cancel read before the apply leaves no witness behind"
         );
     });
@@ -183,7 +188,7 @@ fn a_read_only_stamp_does_not_satisfy_a_read_write_probe() {
             "RO_MASK must not cover a read-write probe"
         );
         assert!(!stamp_recorded(&stamp_key(
-            &canonical,
+            text(&canonical),
             GrantKind::ReadWrite
         )));
     });
@@ -204,7 +209,10 @@ fn a_recreated_root_fails_the_probe_and_is_restamped() {
         std::fs::remove_dir_all(&root).unwrap();
         std::fs::create_dir(&root).unwrap();
         let canonical = real(&root);
-        assert!(stamp_recorded(&stamp_key(&canonical, GrantKind::ReadWrite)));
+        assert!(stamp_recorded(&stamp_key(
+            text(&canonical),
+            GrantKind::ReadWrite
+        )));
         assert!(!ace_present(
             &canonical,
             CAP_SID,
@@ -231,9 +239,9 @@ fn inheritance_propagation_applies_without_error() {
 
 #[test]
 fn capability_name_is_deterministic_kind_and_path_keyed() {
-    let a = Path::new(r"\\?\C:\Work\Proj");
-    let a_case = Path::new(r"\\?\c:\work\proj");
-    let b = Path::new(r"\\?\C:\Work\Other");
+    let a = r"\\?\C:\Work\Proj";
+    let a_case = r"\\?\c:\work\proj";
+    let b = r"\\?\C:\Work\Other";
     assert_eq!(
         fs_capability_name(a, GrantKind::ReadWrite),
         fs_capability_name(a, GrantKind::ReadWrite),

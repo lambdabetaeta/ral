@@ -15,11 +15,13 @@
 use super::ignore::{self, Files, Layer, Rules};
 use crate::capability::ReadRegion;
 use crate::path::sigil::literal_relative;
+use crate::path::site::Silent;
 use crate::path::{
     CwdPath, Dir, EntryName, Judged, Kind, LeafMode, LexicalPath, Listing, Located, ObjectId,
     Reading, Stat, git, shown, walk, walk_dir,
 };
 use crate::process::Scope;
+use crate::site::site;
 use crate::types::{Settled, Shell, sig};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read};
@@ -185,40 +187,26 @@ impl WalkEntry {
         self.named(base).map_err(sig)
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "path-form: a walked name taken relative to the cwd the caller named"
-    )]
     fn named(&self, base: Option<&CwdPath>) -> Result<String, String> {
         let path = self.shown.as_path();
         let rel = base
-            .and_then(|base| path.strip_prefix(base).ok())
+            .and_then(|base| site!(Silent::WalkedRelative, path => strip_prefix(base)).ok())
             .unwrap_or(path);
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "native: the refusal of a name no ral string can hold"
-        )]
-        let text = rel.to_str();
+        let text = site!(Silent::Unnameable, rel => to_str());
         text.map(|_| literal_relative(&shown(rel)))
             .ok_or_else(|| unnameable(rel))
     }
 }
 
 #[allow(
-    clippy::disallowed_methods,
-    reason = "path-form: the longest UTF-8 spelling above a name no ral string can hold, to say where it stops"
-)]
-#[allow(
     clippy::unnecessary_debug_formatting,
     reason = "Debug escapes the invalid bytes; Display would mangle them"
 )]
 fn unnameable(shown: &Path) -> String {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "native: the longest ancestor that is UTF-8, to say where the name stops being"
-    )]
-    let dir = shown.ancestors().find_map(Path::to_str).unwrap_or("");
-    let name = shown.strip_prefix(dir).unwrap_or(shown);
+    let dir = site!(Silent::Unnameable, shown => ancestors())
+        .find_map(|above| site!(Silent::Unnameable, above => to_str()))
+        .unwrap_or("");
+    let name = site!(Silent::Unnameable, shown => strip_prefix(dir)).unwrap_or(shown);
     format!("{dir}: {name:?} is not valid UTF-8, so no ral string can hold it; rename it?")
 }
 
@@ -616,19 +604,14 @@ impl Entries {
     /// The rules of every directory above the root, and the names that lead
     /// to it: `.ignore` of each up to the filesystem root, and `.gitignore`
     /// of those within the nearest repository.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "path-form: the spellings above a root already walked, whose ignore files discovery reads"
-    )]
     fn ancestry(&self, root: &Dir<Judged<Reading>>) -> Rules {
         let real = root.real();
         let mut rules = Rules::new(normals(real.as_path()));
-        let above: Vec<(&Path, Option<(LexicalPath, bool)>)> = real
-            .as_path()
-            .ancestors()
-            .skip(1)
-            .map(|at| (at, self.dot_git_at(at)))
-            .collect();
+        let above: Vec<(&Path, Option<(LexicalPath, bool)>)> =
+            site!(Silent::IgnoreAncestry, real.as_path() => ancestors())
+                .skip(1)
+                .map(|at| (at, self.dot_git_at(at)))
+                .collect();
         let nearest = above.iter().position(|(_, dot_git)| dot_git.is_some());
         for (i, (at, dot_git)) in above.iter().enumerate().rev() {
             rules.push(self.above(at, dot_git.as_ref(), nearest.is_some_and(|n| i <= n)));
@@ -675,12 +658,8 @@ fn slurp(file: &Located<Judged<Reading>>) -> io::Result<Vec<u8>> {
 }
 
 /// The names of `path` beneath its root.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "path-form: the names of a root already walked, for ignore discovery"
-)]
 fn normals(path: &Path) -> Vec<OsString> {
-    path.components()
+    site!(Silent::IgnoreNormals, path => components())
         .filter_map(|c| match c {
             Component::Normal(name) => Some(name.to_owned()),
             _ => None,
@@ -733,6 +712,8 @@ fn pruned(stat: Stat) -> Found {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod differential;
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

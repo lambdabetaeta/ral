@@ -6,6 +6,8 @@
 //! corpus of programs under `tests/reject/` and `tests/accept/`, run by
 //! `ral/tests/corpus.rs`.
 
+#![allow(clippy::disallowed_methods, reason = "test code")]
+
 mod common;
 
 use ral_core::ir::{Comp, CompKind, Pattern, Phrase, Toplevel, Unchecked, Val};
@@ -621,7 +623,7 @@ fn return_schema_keeps_a_refused_keys_own_sentence() {
 }
 
 /// A key the table does not name is said in the table's own wording, the one
-/// the runtime doors use.
+/// the runtime checks use.
 #[test]
 fn return_schema_names_an_unknown_key_in_the_tables_words() {
     let errs = schema_errors("return [nn: 1]");
@@ -677,9 +679,9 @@ fn return_schema_reads_unit_as_nothing_to_set() {
     assert_eq!(codes_of(&errs), ["T0021"], "{errs:?}");
 }
 
-/// A return typed at a variable is the runtime door's.
+/// A return typed at a variable is the runtime check's.
 #[test]
-fn return_schema_leaves_a_decoded_value_to_the_runtime_door() {
+fn return_schema_leaves_a_decoded_value_to_the_runtime_check() {
     assert!(contract_errors(declared(Form::Rc), "return !{from-json}").is_empty());
 }
 

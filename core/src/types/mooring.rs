@@ -1,5 +1,5 @@
 //! [`Mooring`]: the frame a run fixes once and never changes — its
-//! structured-event sink, its enquiry desk, its session-[`Fork`] door, and
+//! structured-event sink, its enquiry desk, its session-[`Fork`] handle, and
 //! its terminal-foreground authority.
 
 use super::flow::Settled;
@@ -29,7 +29,7 @@ impl EventSink for () {
 
 /// Shared handle to the run-local structured-event sink.
 ///
-/// Installed only by a run door ([`Shell::run`](crate::Shell::run)), never a
+/// Installed only by a run ([`Shell::run`](crate::Shell::run)), never a
 /// persistent `Shell` capability, and holding no liveness role — a clone
 /// cannot decide a run is over.
 pub type SurfaceSink = Arc<dyn EventSink>;
@@ -146,7 +146,7 @@ pub trait DeferredSink: Send + Sync {
 /// This run's authority to hand the controlling terminal to a child: the
 /// internal form of
 /// [`RequestedTerminalAccess`](crate::process::RequestedTerminalAccess), carrying
-/// the extra `ExplicitLoan` no host can request at a run door.  Read by
+/// the extra `ExplicitLoan` no host can request at a run.  Read by
 /// [`Shell::terminal_lease`](crate::types::Shell::terminal_lease); `Denied` is
 /// the safe [`Default`], so an unstated policy cannot reach the handoff.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -182,7 +182,7 @@ pub enum TitlePolicy {
 /// Deliberately *not* a [`Shell`](crate::Shell) field — `&shell.mooring` would borrow the
 /// whole shell while every callee wants `&mut Shell`, whereas `&Mooring` and
 /// `&mut Shell` are disjoint.  Not [`Clone`]: [`Self::lend_terminal`] is the
-/// one lawful derivation, so raise-never-mint lives in a single door.
+/// one lawful derivation, so raise-never-mint lives in a single place.
 pub struct Mooring {
     /// `None` outside a host, which makes [`Self::surface`] the identity.
     pub(crate) surface: Option<SurfaceSink>,
@@ -201,7 +201,7 @@ pub struct Mooring {
     /// What a `guard` cleanup gets, from the strike, before the stop ends
     /// it: the host's policy, as `wall` is.
     pub(crate) cleanup_grace: Duration,
-    /// Admission cap enforced at the spawn door, counting only *running*
+    /// Admission cap enforced at the spawn, counting only *running*
     /// entries — settled ones lingering under retention never block a birth.
     pub(crate) worker_cap: Option<usize>,
     pub(crate) worker_title: TitlePolicy,
@@ -254,13 +254,13 @@ impl Mooring {
         self.fork.as_ref()
     }
 
-    /// Whether anything is on the other end — what lets a door skip building
+    /// Whether anything is on the other end — what lets a caller skip building
     /// an observation nobody would receive.
     pub(crate) fn has_surface(&self) -> bool {
         self.surface.is_some()
     }
 
-    /// The sink door for a runtime [`Value`], such as a host builtin with no
+    /// The sink entry for a runtime [`Value`], such as a host builtin with no
     /// vocabulary of its own hands in.  Encoded here into the first-order
     /// [`FOValue`](crate::first_order::FOValue) the sink carries; inert with no
     /// sink installed.  Total: a `Handle` or a closure reachable through `ev`
@@ -271,7 +271,7 @@ impl Mooring {
         }
     }
 
-    /// [`Self::surface`] for a host that already holds data.  Every door core
+    /// [`Self::surface`] for a host that already holds data.  Every entry core
     /// owns reaches it through `Shell::observe_stamped` with
     /// [`crate::types::Observation::to_surface`].
     pub fn surface_data(&self, ev: &crate::first_order::FOValue) {
@@ -303,7 +303,7 @@ impl Mooring {
 /// Empties the run's nursery on `Drop`, so a fork never adopted — a refused
 /// enquiry, a run that ended before its handler ran — cannot outlive the run
 /// that parked it.  Holds an `Arc`-shared clone of the run's nursery, so it
-/// clears the same state every callee sees, and lives inside the run door's
+/// clears the same state every callee sees, and lives inside the run's
 /// `catch_unwind`, so it fires on the panic path too.
 pub(crate) struct NurseryGuard(pub(crate) Option<Fork>);
 
@@ -316,7 +316,7 @@ impl Drop for NurseryGuard {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "test scaffolding")]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use crate::first_order::{FOValue, OPAQUE_TAG};

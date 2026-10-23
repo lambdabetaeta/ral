@@ -1,10 +1,5 @@
 //! The walk on a real filesystem with real links.
 
-#![allow(
-    clippy::disallowed_methods,
-    reason = "[test] fixtures build the tree the walk is asked about"
-)]
-
 use super::super::*;
 use super::{writable, writing};
 use crate::path::{CwdPath, Resolver};
@@ -1050,7 +1045,10 @@ fn a_staged_write_publishes_under_the_held_directory() {
     let dir = root(&tmp);
     std::fs::create_dir(dir.join("d")).unwrap();
     std::fs::write(dir.join("d/f"), b"old").unwrap();
-    let mut staged = located(&dir.join("d/f")).unwrap().stage().unwrap();
+    let mut staged = located(&dir.join("d/f"))
+        .unwrap()
+        .stage(Visibility::Public)
+        .unwrap();
     assert_eq!(staged.target().real().as_path(), dir.join("d/f"));
     staged.file().write_all(b"new").unwrap();
     staged.file().sync_all().unwrap();
@@ -1068,7 +1066,10 @@ fn a_staged_write_publishes_under_the_held_directory() {
 fn a_staged_write_over_an_absent_leaf_creates_it() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = root(&tmp);
-    let mut staged = located(&dir.join("fresh")).unwrap().stage().unwrap();
+    let mut staged = located(&dir.join("fresh"))
+        .unwrap()
+        .stage(Visibility::Public)
+        .unwrap();
     staged.file().write_all(b"made").unwrap();
     assert!(!dir.join("fresh").exists());
     staged.publish().unwrap();
@@ -1082,7 +1083,10 @@ fn a_staged_write_carries_the_leafs_mode() {
     let dir = root(&tmp);
     std::fs::write(dir.join("f"), b"").unwrap();
     std::fs::set_permissions(dir.join("f"), PermissionsExt::from_mode(0o640)).unwrap();
-    let mut staged = located(&dir.join("f")).unwrap().stage().unwrap();
+    let mut staged = located(&dir.join("f"))
+        .unwrap()
+        .stage(Visibility::Public)
+        .unwrap();
     let mode = |file: &File| file.metadata().unwrap().mode() & 0o7777;
     assert_eq!(mode(staged.file()), 0o640);
     staged.publish().unwrap();
@@ -1100,7 +1104,10 @@ fn a_sibling_swapped_at_its_name_before_the_rename_is_what_lands() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = root(&tmp);
     std::fs::write(dir.join("f"), b"old").unwrap();
-    let mut staged = located(&dir.join("f")).unwrap().stage().unwrap();
+    let mut staged = located(&dir.join("f"))
+        .unwrap()
+        .stage(Visibility::Public)
+        .unwrap();
     staged.file().write_all(b"staged").unwrap();
     staged.file().sync_all().unwrap();
 
@@ -1116,7 +1123,10 @@ fn a_dropped_staged_write_leaves_no_sibling() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = root(&tmp);
     std::fs::write(dir.join("f"), b"old").unwrap();
-    let staged = located(&dir.join("f")).unwrap().stage().unwrap();
+    let staged = located(&dir.join("f"))
+        .unwrap()
+        .stage(Visibility::Public)
+        .unwrap();
     assert_eq!(
         std::fs::read_dir(&dir).unwrap().count(),
         2,
@@ -1132,7 +1142,10 @@ fn a_failed_publish_leaves_the_target_and_no_sibling() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = root(&tmp);
     std::fs::write(dir.join("f"), b"old").unwrap();
-    let staged = located(&dir.join("f")).unwrap().stage().unwrap();
+    let staged = located(&dir.join("f"))
+        .unwrap()
+        .stage(Visibility::Public)
+        .unwrap();
     std::fs::remove_file(dir.join("f")).unwrap();
     std::fs::create_dir_all(dir.join("f/inside")).unwrap();
     assert!(
@@ -1148,7 +1161,11 @@ fn a_directory_leaf_is_not_staged() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = root(&tmp);
     std::fs::create_dir(dir.join("d")).unwrap();
-    let err = located(&dir.join("d")).unwrap().stage().err().unwrap();
+    let err = located(&dir.join("d"))
+        .unwrap()
+        .stage(Visibility::Public)
+        .err()
+        .unwrap();
     assert_eq!(err.kind(), io::ErrorKind::IsADirectory);
 }
 
@@ -1384,4 +1401,442 @@ fn the_probes_see_through_a_final_link_only_when_they_follow() {
             Kind::Dir
         );
     }
+}
+
+/// What `visibility` asks of a file made or staged: `Secret` and `Private` are
+/// owner-only whatever was there, and `Public` keeps the mode of the leaf it
+/// replaces.  A staged write over a 0644 leaf shows all three.
+#[test]
+fn a_staged_write_is_owner_only_unless_it_is_public() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    for (visibility, mode) in [
+        (Visibility::Public, 0o644),
+        (Visibility::Private, 0o600),
+        (Visibility::Secret, 0o600),
+    ] {
+        let at = dir.join(format!("{visibility:?}"));
+        std::fs::write(&at, b"old").unwrap();
+        std::fs::set_permissions(&at, PermissionsExt::from_mode(0o644)).unwrap();
+        let mut staged = located(&at).unwrap().stage(visibility).unwrap();
+        staged.file().write_all(b"new").unwrap();
+        staged.publish().unwrap();
+        assert_eq!(std::fs::read(&at).unwrap(), b"new", "{visibility:?}");
+        assert_eq!(
+            std::fs::metadata(&at).unwrap().mode() & 0o7777,
+            mode,
+            "{visibility:?}"
+        );
+    }
+}
+
+/// A data open makes an absent leaf with the visibility it is given, and
+/// touches a present one in no way: no truncation, and no change of mode.
+#[test]
+fn a_data_open_makes_an_absent_leaf_as_asked_and_leaves_a_present_one_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    for visibility in [Visibility::Private, Visibility::Secret] {
+        let at = dir.join(format!("{visibility:?}"));
+        let mut file = located(&at)
+            .unwrap()
+            .open_data(Access::Write, visibility)
+            .unwrap();
+        file.write_all(b"made").unwrap();
+        assert_eq!(
+            std::fs::metadata(&at).unwrap().mode() & 0o7777,
+            0o600,
+            "{visibility:?}"
+        );
+    }
+
+    let at = dir.join("present");
+    std::fs::write(&at, b"body").unwrap();
+    std::fs::set_permissions(&at, PermissionsExt::from_mode(0o644)).unwrap();
+    for access in [Access::Read, Access::Append, Access::Write] {
+        located(&at)
+            .unwrap()
+            .open_data(access, Visibility::Secret)
+            .unwrap();
+    }
+    assert_eq!(std::fs::read(&at).unwrap(), b"body");
+    assert_eq!(std::fs::metadata(&at).unwrap().mode() & 0o7777, 0o644);
+
+    let raced = located(&dir.join("raced")).unwrap();
+    std::fs::write(dir.join("raced"), b"first").unwrap();
+    let err = raced
+        .open_data(Access::Write, Visibility::Secret)
+        .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read(dir.join("raced")).unwrap(), b"first");
+}
+
+/// A file made by `create_file` is made as it is told, and never over a
+/// present one.
+#[test]
+fn a_file_made_without_a_handle_is_made_as_asked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    located(&dir.join("secret"))
+        .unwrap()
+        .create_file(Visibility::Secret)
+        .unwrap();
+    assert_eq!(
+        std::fs::metadata(dir.join("secret")).unwrap().mode() & 0o7777,
+        0o600
+    );
+    let again = located(&dir.join("secret"))
+        .unwrap()
+        .create_file(Visibility::Secret)
+        .unwrap_err();
+    assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
+}
+
+/// `create_new` hands back the handle of the file it makes, and answers
+/// `AlreadyExists` for any present leaf, a link included, without making
+/// anything.
+#[test]
+fn create_new_refuses_a_present_leaf_and_hands_back_the_handle_of_an_absent_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    let target = |name: &str| located_with(&dir.join(name), LeafMode::NoFollow).unwrap();
+
+    let mut made = target("new")
+        .create_new(Access::Write, Visibility::Public)
+        .unwrap();
+    made.write_all(b"made").unwrap();
+    assert_eq!(std::fs::read(dir.join("new")).unwrap(), b"made");
+
+    let present = target("new")
+        .create_new(Access::Write, Visibility::Public)
+        .unwrap_err();
+    assert_eq!(present.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read(dir.join("new")).unwrap(), b"made");
+
+    symlink(dir.join("nowhere"), dir.join("l")).unwrap();
+    let linked = target("l")
+        .create_new(Access::Write, Visibility::Public)
+        .unwrap_err();
+    assert_eq!(linked.kind(), io::ErrorKind::AlreadyExists);
+    assert!(
+        std::fs::symlink_metadata(dir.join("nowhere")).is_err(),
+        "nothing was made through the link"
+    );
+}
+
+/// The making walk makes each absent name of the spelling owner-only, steps
+/// onto it, and takes a present name as it is.
+#[test]
+fn the_making_walk_makes_each_absent_name_owner_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("present")).unwrap();
+    std::fs::set_permissions(dir.join("present"), PermissionsExt::from_mode(0o755)).unwrap();
+
+    let made = walk_dir_made(&spelled(&dir.join("present/a/b"))).unwrap();
+    assert_eq!(made.real().as_path(), dir.join("present/a/b"));
+    let mode = |rel: &str| std::fs::metadata(dir.join(rel)).unwrap().mode() & 0o7777;
+    assert_eq!(mode("present"), 0o755);
+    assert_eq!(mode("present/a"), 0o700);
+    assert_eq!(mode("present/a/b"), 0o700);
+
+    let again = walk_dir_made(&spelled(&dir.join("present/a/b"))).unwrap();
+    assert_eq!(again.trace().last_id(), made.trace().last_id());
+
+    std::fs::write(dir.join("file"), b"").unwrap();
+    for under in ["file", "file/sub"] {
+        let err = walk_dir_made(&spelled(&dir.join(under)))
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotADirectory, "{under}");
+    }
+}
+
+/// A link on the way is followed, and what the spelling names past it is made
+/// where the link leads.
+#[test]
+fn the_making_walk_makes_the_spelled_names_where_a_link_leads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("real")).unwrap();
+    symlink("real", dir.join("alias")).unwrap();
+
+    let made = walk_dir_made(&spelled(&dir.join("alias/new/deeper"))).unwrap();
+    assert_eq!(made.real().as_path(), dir.join("real/new/deeper"));
+    assert!(dir.join("real/new/deeper").is_dir());
+
+    let linked = walk_dir_made(&spelled(&dir.join("alias"))).unwrap();
+    assert_eq!(linked.real().as_path(), dir.join("real"));
+}
+
+/// A name a link's target spliced in is never made: a dangling link fails the
+/// walk, as it fails `mkdir -p`, and nothing is made through it.
+#[test]
+fn the_making_walk_refuses_a_dangling_link() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("real")).unwrap();
+    symlink("gone/inside", dir.join("far")).unwrap();
+    symlink("real/missing", dir.join("near")).unwrap();
+    symlink("nowhere", dir.join("middle")).unwrap();
+
+    for (spelling, target) in [
+        ("far", Some("gone/inside")),
+        ("near", Some("real/missing")),
+        ("middle/below", None),
+    ] {
+        let err = walk_dir_made(&spelled(&dir.join(spelling)))
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound, "{spelling}");
+        assert_eq!(dangling(&err), target.map(Path::new), "{spelling}");
+    }
+    for made in ["gone", "real/missing", "nowhere"] {
+        assert!(!dir.join(made).exists(), "{made} was made through a link");
+    }
+}
+
+/// `target` is `locate` that also answers a create target, and through a
+/// dangling link it is the target's, with the link's target said.
+#[test]
+fn target_yields_a_create_target_through_a_dangling_link() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("real")).unwrap();
+    std::fs::write(dir.join("real/present"), b"body").unwrap();
+    symlink("real/made", dir.join("dangling")).unwrap();
+    symlink("real/present", dir.join("live")).unwrap();
+    let held = entered(&dir).unwrap();
+    let target = |entry: &str, mode| held.target(&name(entry), mode).map(writing);
+
+    let through = target("dangling", LeafMode::Follow).unwrap();
+    assert!(through.stat().is_none());
+    assert_eq!(through.real().as_path(), dir.join("real/made"));
+    assert_eq!(through.linked_to(), Some(Path::new("real/made")));
+    through
+        .open_data(Access::Write, Visibility::Secret)
+        .unwrap()
+        .write_all(b"made")
+        .unwrap();
+    assert_eq!(std::fs::read(dir.join("dangling")).unwrap(), b"made");
+    assert_eq!(
+        std::fs::metadata(dir.join("real/made")).unwrap().mode() & 0o7777,
+        0o600
+    );
+    let located = held
+        .locate(&name("dangling"), LeafMode::Follow)
+        .map(writing)
+        .unwrap();
+    assert_eq!(located.stat().unwrap().kind, Kind::File);
+
+    std::fs::remove_file(dir.join("real/made")).unwrap();
+    let refused = held
+        .locate(&name("dangling"), LeafMode::Follow)
+        .err()
+        .unwrap();
+    assert_eq!(refused.kind(), io::ErrorKind::NotFound);
+
+    let live = target("live", LeafMode::Follow).unwrap();
+    assert_eq!(live.stat().unwrap().kind, Kind::File);
+    assert_eq!(live.linked_to(), Some(Path::new("real/present")));
+    let named = target("live", LeafMode::NoFollow).unwrap();
+    assert_eq!(named.stat().unwrap().kind, Kind::Symlink);
+    assert_eq!(named.linked_to(), None, "a link not followed led nowhere");
+    let plain = target("real", LeafMode::Follow).unwrap();
+    assert_eq!(plain.linked_to(), None);
+    let absent = target("nothing", LeafMode::Follow).unwrap();
+    assert_eq!(absent.real().as_path(), dir.join("nothing"));
+    assert_eq!(absent.linked_to(), None);
+}
+
+/// A link into a folder that is not there is a `NotFound` that says where the
+/// link led, whoever walked it; any other error, and a `NotFound` met before
+/// a link at the last name, says nothing of one.
+#[test]
+fn dangling_reads_a_missing_target_folder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    symlink("missing/folder/f", dir.join("l")).unwrap();
+    let held = entered(&dir).unwrap();
+
+    let by_target = held.target(&name("l"), LeafMode::Follow).err().unwrap();
+    let by_walk = walk(&spelled(&dir.join("l")), LeafMode::Follow)
+        .map(|_| ())
+        .unwrap_err();
+    for err in [by_target, by_walk] {
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert_eq!(dangling(&err), Some(Path::new("missing/folder/f")));
+        assert_eq!(
+            err.to_string(),
+            io::Error::from(rustix::io::Errno::NOENT).to_string(),
+            "the walk's own message"
+        );
+    }
+
+    let plain = walk(&spelled(&dir.join("missing/f")), LeafMode::Follow)
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(plain.kind(), io::ErrorKind::NotFound);
+    assert_eq!(dangling(&plain), None);
+    assert_eq!(dangling(&loop_error()), None);
+    assert_eq!(dangling(&io::Error::from(io::ErrorKind::NotFound)), None);
+}
+
+/// `remove` takes a tree with it, a link as the link: what a link leads to is
+/// never entered or touched.
+#[test]
+fn remove_unlinks_links_in_a_tree_and_never_follows_them() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir_all(dir.join("keep/inner")).unwrap();
+    std::fs::write(dir.join("keep/file"), b"kept").unwrap();
+    std::fs::write(dir.join("keep/inner/deep"), b"kept").unwrap();
+    std::fs::create_dir_all(dir.join("tree/sub/deeper")).unwrap();
+    std::fs::write(dir.join("tree/f"), b"").unwrap();
+    std::fs::write(dir.join("tree/sub/g"), b"").unwrap();
+    std::fs::write(dir.join("tree/sub/deeper/h"), b"").unwrap();
+    symlink("../keep", dir.join("tree/to_dir")).unwrap();
+    symlink("../../keep/file", dir.join("tree/sub/to_file")).unwrap();
+    symlink(dir.join("keep"), dir.join("tree/sub/deeper/absolute")).unwrap();
+    symlink("nowhere", dir.join("tree/dangling")).unwrap();
+    symlink("../tree", dir.join("tree/sub/loop")).unwrap();
+
+    located_with(&dir.join("tree"), LeafMode::NoFollow)
+        .unwrap()
+        .remove()
+        .unwrap();
+
+    assert!(!dir.join("tree").exists());
+    assert_eq!(std::fs::read(dir.join("keep/file")).unwrap(), b"kept");
+    assert_eq!(std::fs::read(dir.join("keep/inner/deep")).unwrap(), b"kept");
+    assert_eq!(std::fs::read_dir(dir.join("keep")).unwrap().count(), 2);
+}
+
+/// A file goes, a link goes as the link whatever it leads to, and what is not
+/// there, or is no directory's entry, is refused.
+#[test]
+fn remove_takes_the_entry_and_refuses_what_is_not_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("f"), b"body").unwrap();
+    std::fs::create_dir(dir.join("d")).unwrap();
+    std::fs::write(dir.join("d/inside"), b"body").unwrap();
+    symlink("d", dir.join("to_d")).unwrap();
+
+    located(&dir.join("f")).unwrap().remove().unwrap();
+    assert!(!dir.join("f").exists());
+
+    located_with(&dir.join("to_d"), LeafMode::NoFollow)
+        .unwrap()
+        .remove()
+        .unwrap();
+    assert!(
+        dir.join("d/inside").exists(),
+        "the link's target is untouched"
+    );
+    assert!(std::fs::symlink_metadata(dir.join("to_d")).is_err());
+
+    let absent = located(&dir.join("absent")).unwrap();
+    assert_eq!(absent.remove().unwrap_err().kind(), io::ErrorKind::NotFound);
+    let root = located_with(Path::new("/"), LeafMode::NoFollow).unwrap();
+    assert_eq!(
+        root.present().map(|_| ()).unwrap_err().kind(),
+        io::ErrorKind::InvalidInput
+    );
+}
+
+/// A removal is by the directory handle held: a directory that moved is
+/// still the one removed from.
+#[test]
+fn remove_acts_in_the_directory_held() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("d")).unwrap();
+    std::fs::write(dir.join("d/f"), b"").unwrap();
+    let held = located(&dir.join("d/f")).unwrap();
+    std::fs::rename(dir.join("d"), dir.join("moved")).unwrap();
+    std::fs::create_dir(dir.join("d")).unwrap();
+    std::fs::write(dir.join("d/f"), b"decoy").unwrap();
+
+    held.remove().unwrap();
+    assert!(!dir.join("moved/f").exists());
+    assert_eq!(std::fs::read(dir.join("d/f")).unwrap(), b"decoy");
+}
+
+/// A rename lands over what is at the new name, within the directory held,
+/// and takes a link as the link.
+#[test]
+fn rename_replaces() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("f"), b"new").unwrap();
+    std::fs::write(dir.join("g"), b"old").unwrap();
+    std::fs::write(dir.join("elsewhere"), b"untouched").unwrap();
+    symlink("elsewhere", dir.join("l")).unwrap();
+
+    located(&dir.join("f")).unwrap().rename(&name("g")).unwrap();
+    assert!(!dir.join("f").exists());
+    assert_eq!(std::fs::read(dir.join("g")).unwrap(), b"new");
+
+    located(&dir.join("g"))
+        .unwrap()
+        .rename(&name("fresh"))
+        .unwrap();
+    assert_eq!(std::fs::read(dir.join("fresh")).unwrap(), b"new");
+
+    located_with(&dir.join("l"), LeafMode::NoFollow)
+        .unwrap()
+        .rename(&name("fresh"))
+        .unwrap();
+    assert_eq!(
+        std::fs::read_link(dir.join("fresh")).unwrap(),
+        Path::new("elsewhere")
+    );
+    assert_eq!(std::fs::read(dir.join("elsewhere")).unwrap(), b"untouched");
+
+    std::fs::create_dir(dir.join("d")).unwrap();
+    located(&dir.join("d")).unwrap().rename(&name("e")).unwrap();
+    assert!(dir.join("e").is_dir() && !dir.join("d").exists());
+
+    let absent = located(&dir.join("absent")).unwrap();
+    assert_eq!(
+        absent.rename(&name("x")).unwrap_err().kind(),
+        io::ErrorKind::NotFound
+    );
+}
+
+/// A rename is within the directory held, whatever it is called by then.
+#[test]
+fn rename_acts_in_the_directory_held() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("d")).unwrap();
+    std::fs::write(dir.join("d/f"), b"held").unwrap();
+    let held = located(&dir.join("d/f")).unwrap();
+    std::fs::rename(dir.join("d"), dir.join("moved")).unwrap();
+
+    held.rename(&name("g")).unwrap();
+    assert_eq!(std::fs::read(dir.join("moved/g")).unwrap(), b"held");
+    assert!(!dir.join("d").exists());
+}
+
+/// `exists`, `is_dir` and `kind_of` are one walk, followed to the end.
+#[test]
+fn kind_of_is_what_the_absolute_spelling_reaches() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("d")).unwrap();
+    std::fs::write(dir.join("f"), b"").unwrap();
+    symlink("d", dir.join("to_d")).unwrap();
+    symlink("gone", dir.join("dangling")).unwrap();
+    let at = |rel: &str| shown(dir.join(rel));
+
+    assert_eq!(kind_of(&at("d")), Some(Kind::Dir));
+    assert_eq!(kind_of(&at("f")), Some(Kind::File));
+    assert_eq!(kind_of(&at("to_d")), Some(Kind::Dir));
+    assert_eq!(kind_of(&at("dangling")), None);
+    assert_eq!(kind_of(&at("absent")), None);
+    assert_eq!(kind_of("relative/path"), None);
+    assert!(exists(&at("f")) && !exists(&at("dangling")));
+    assert!(is_dir(&at("to_d")) && !is_dir(&at("f")));
 }

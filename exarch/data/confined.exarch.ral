@@ -19,11 +19,13 @@ return [
     read: [
       `cwd .,          # working tree
       `tempdir .,      # $TMPDIR (per-session scratch)
+      `scratch .,      # the session's own scratch (`$EXARCH_SCRATCH`)
       `absolute /tmp,  # legacy scratch
     ],
     write: [
       `cwd .,  # build artefacts land here
       `tempdir .,
+      `scratch .,
       `absolute /tmp,
     ],
   ],
@@ -42,6 +44,7 @@ return [
       `dir `absolute /usr/local/bin,  # user-installed CLI tools
       `dir `cwd .,                    # ./configure, ./build.sh, etc.
       `dir `tempdir .,                # build-tree-shadowed scratch
+      `dir `scratch .,                # the session's own scratch (`$EXARCH_SCRATCH`)
       `dir `absolute /tmp,
 
       # The coreutils linked into the ral binary (`core/src/uutils.rs`).

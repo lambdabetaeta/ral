@@ -34,7 +34,9 @@
 
 use std::fmt::Write as _;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+use ral_core::own::OwnDir;
 
 /// What the capture is called inside the run directory.
 ///
@@ -55,25 +57,14 @@ const FILE: &str = "engine.log";
 /// already reporting, which is why this hands back an `Option` rather than an
 /// error to be wrapped in another error.
 pub(super) fn capture(
-    run_dir: &Path,
+    run_dir: &OwnDir,
     why: &str,
     console: &vm_manager::GuestConsole,
 ) -> Option<PathBuf> {
-    let path = run_dir.join(FILE);
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:engine-log] writes the run directory's engine.log while a conversation is \
-                  failing to start — host-side diagnostic plumbing beside a session that has no \
-                  shell to route through and no run to raise a card in. See the module docs."
-    )]
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .ok()?;
+    let mut file = run_dir.append(FILE).ok()?;
     file.write_all(render(why, console).as_bytes()).ok()?;
     file.flush().ok()?;
-    Some(path)
+    Some(run_dir.path().join(FILE))
 }
 
 /// The capture's text, split out so it can be read by a test without a

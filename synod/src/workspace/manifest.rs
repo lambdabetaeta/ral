@@ -7,13 +7,15 @@
 //! necessary, since a walk that never reads bytes cannot claim they differ.
 //!
 //! Its keys are lexical history: the names the walk reached each entry by,
-//! past the root, slash-joined.  [`Manifest::of_folder_via`] is the one door;
+//! past the root, slash-joined.  [`Manifest::of_folder_via`] is the one entry;
 //! the folder is the user's own and the walk is judged by the root stack.
 
 use crate::grant::spelled;
 use ral_core::capability::Ungoverned;
 use ral_core::path::tree::walk::{Found, Unentered, Walk, WalkEntry};
-use ral_core::path::{Kind, LeafMode, LexicalPath, Stat, relative_key, shown, walk};
+use ral_core::path::{
+    Kind, LeafMode, LexicalPath, Stat, relative_key, shown, spelled_parent, utf8, walk,
+};
 use ral_core::process::{CancelCause, DurableRoot, Scope};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -120,10 +122,6 @@ impl Manifest {
     /// and every file in the other manifest would answer to that as a
     /// deletion.  Only the root can raise `Vanished` this far: a subfolder
     /// that goes is recorded as unread and walked past.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "path-form: the folder a message names for an entry whose name this computer cannot read"
-    )]
     pub fn of_folder_via(root: &Path, stop: &Stop, progress: Progress<'_>) -> Result<Self, String> {
         let named = spelled(root)?;
         let mut manifest = Self::default();
@@ -144,7 +142,7 @@ impl Manifest {
             let key = relative_key(&entry.shown, &named).ok_or_else(|| {
                 format!(
                     "A file in {} has a name this computer cannot read; please rename it first.",
-                    shown(entry.shown.as_path().parent().unwrap_or(root))
+                    shown(spelled_parent(entry.shown.as_path()).unwrap_or(root))
                 )
             })?;
             if manifest.record(&entry, key)? {
@@ -249,12 +247,7 @@ fn entered(root: &WalkEntry, named: &Path) -> Result<(), String> {
 
 /// A link's target as the text it is recorded by.
 fn target_text(target: &Path, link: &WalkEntry) -> Result<String, String> {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "native: a link target is recorded as text, so one that is not Unicode is \
-                  refused"
-    )]
-    target.to_str().map(str::to_string).ok_or_else(|| {
+    utf8(target).map(str::to_string).map_err(|_| {
         format!(
             "The link {} points at a name this computer cannot read; \
              please fix or remove it first.",
@@ -341,10 +334,7 @@ pub(crate) fn merge_unread(a: &[String], b: &[String]) -> Vec<String> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] the files and folders the walk is then asked to record"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use crate::test_fixture::workshop;

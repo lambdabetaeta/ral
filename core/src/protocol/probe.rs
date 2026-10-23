@@ -238,10 +238,7 @@ record!(PathEntry {
 });
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] a tempdir tree of real directories for the stacks"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 

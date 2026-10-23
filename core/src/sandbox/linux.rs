@@ -38,6 +38,7 @@ use crate::path::{
     Dir, Installing, Kind, LeafMode, LexicalPath, Located, Object, RealPath, Rendered, Trace,
     is_loop, render_real, walk_lenient,
 };
+use crate::site::{Silent, site};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -45,7 +46,7 @@ use std::io;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -64,8 +65,7 @@ pub(super) fn pin_envelope() {
     if ENVELOPE.get().is_some() {
         return;
     }
-    #[allow(clippy::disallowed_methods, reason = "PATH, not an XDG basedir")]
-    let host_path = std::env::var_os("PATH").unwrap_or_default();
+    let host_path = crate::host::var_os("PATH").unwrap_or_default();
     let located = crate::path::locate_in(BWRAP, crate::path::path_dirs(&host_path, None));
     if let Some(pinned) = located.and_then(Pinned::open) {
         let _ = ENVELOPE.set(pinned);
@@ -138,7 +138,7 @@ pub(crate) fn bwrap_command(
     shown: Shown,
     handoff: Handoff<'_>,
     policy: &RenderedProjection,
-    chdir: Option<&str>,
+    chdir: Option<&Path>,
     ownership: Ownership,
 ) -> Result<(Command, Option<InfoFd>), Refusal> {
     let bwrap = crate::path::shown(env.bwrap.arg0());
@@ -234,7 +234,7 @@ pub(crate) fn bwrap_command(
 /// options for a host it is not running on.
 pub(crate) fn bwrap_argv(
     policy: &RenderedProjection,
-    chdir: Option<&str>,
+    chdir: Option<&Path>,
     ownership: Ownership,
     host: HostEnvelope,
     binds: &Binds,
@@ -257,7 +257,7 @@ pub(crate) fn bwrap_argv(
         c.arg("--unshare-net");
     }
     if let Some(dir) = chdir {
-        c.args(["--chdir", dir]);
+        c.arg("--chdir").arg(dir);
     }
     match &policy.fs {
         FsProjection::Restricted(_) => {
@@ -266,8 +266,8 @@ pub(crate) fn bwrap_argv(
             // `--chdir` needs a directory to enter, and a cwd outside the
             // grant has none: an empty unwritable stand-in, as macOS leaves it
             // unreadable.  A bind over the name hides it.
-            if let Some(dir) = chdir.filter(|dir| *dir != "/") {
-                c.args(["--perms", "0555", "--tmpfs", dir]);
+            if let Some(dir) = chdir.filter(|dir| dir.as_os_str() != "/") {
+                c.args(["--perms", "0555", "--tmpfs"]).arg(dir);
             }
             binds.render(&mut c, Layer::Shown);
             // After it, or a prefix of `/` or `/proc` re-binds the host's over these.
@@ -539,8 +539,9 @@ fn binds(objects: &[Object], access: Access) -> impl Iterator<Item = Bind> {
 
 /// `name` as the one object it reaches, its position and its real name;
 /// `None` where it names nothing.
-fn object(name: &str) -> Result<Option<(RealPath, Rendered)>, String> {
-    let Some(spelling) = LexicalPath::absolute(&PathBuf::from(name)) else {
+fn object(name: &(impl AsRef<Path> + ?Sized)) -> Result<Option<(RealPath, Rendered)>, String> {
+    let name = name.as_ref();
+    let Some(spelling) = LexicalPath::absolute(name) else {
         return Ok(None);
     };
     match RealPath::of(&spelling) {
@@ -549,7 +550,10 @@ fn object(name: &str) -> Result<Option<(RealPath, Rendered)>, String> {
             Ok(rendered.map(|name| (real, name)))
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("sandbox: cannot resolve {name}: {e}")),
+        Err(e) => Err(format!(
+            "sandbox: cannot resolve {}: {e}",
+            crate::path::shown(name)
+        )),
     }
 }
 
@@ -660,18 +664,7 @@ fn pinned(pins: [&Pinned; 2]) -> Result<Vec<(Bind, OwnedFd)>, String> {
             .names()
             .map_err(|e| format!("sandbox: cannot find where the pinned {what} lives now: {e}"))?;
         let Some(name) = names else { continue };
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "native: bwrap argv takes a name only as valid UTF-8"
-        )]
-        let name = name.to_str().ok_or_else(|| {
-            format!(
-                "sandbox: the pinned {what} now lives at {}, which is not valid UTF-8, \
-                 and bwrap cannot be given it faithfully",
-                crate::path::shown(&name)
-            )
-        })?;
-        let Some((position, dest)) = object(name)? else {
+        let Some((position, dest)) = object(&name)? else {
             continue;
         };
         if locked.iter().all(|(bind, _)| bind.dest != dest) {
@@ -747,12 +740,12 @@ fn cgroup_tree(host: HostEnvelope) -> Option<String> {
 /// ral's cgroup, `/`-rooted and without its trailing slash, from the one
 /// `0::` line cgroup2 writes to `/proc/self/cgroup`; `None` on a v1 or
 /// hybrid host, whose lines are many and name no single tree.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:own-cgroup] reads ral's own /proc/self/cgroup to re-root the envelope's cgroup tree; envelope construction, not the model's data I/O"
-)]
 fn own_cgroup() -> Option<String> {
-    let table = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let table = site!(
+        Silent::OwnCgroup,
+        std::fs::read_to_string("/proc/self/cgroup")
+    )
+    .ok()?;
     let mut lines = table.lines();
     let own = lines.next()?.strip_prefix("0::")?;
     lines
@@ -857,10 +850,7 @@ fn standing(name: &Rendered) -> Option<Trace> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::{
         Access, Binds, Builds, CGROUP, Envelope, HostEnvelope, Layer, Pinned, Shown, bwrap_argv,
@@ -990,6 +980,7 @@ mod tests {
         let seccomp = seccomp_programs().expect("seccomp programs compile");
         let rendered = policy.rendered().expect("ASCII paths render");
         let binds = binds(policy, host);
+        let chdir = chdir.map(std::path::Path::new);
         bwrap_argv(&rendered, chdir, ownership, host, &binds, seccomp.len())
             .expect("ASCII paths render")
             .iter()

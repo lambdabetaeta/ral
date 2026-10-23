@@ -21,6 +21,7 @@ use crate::protocol::{
     Attach, Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Origin, Report, Root, Run,
     SessionEvent,
 };
+use crate::site::{Silent, site};
 use crate::sync::LockExt;
 use crate::types::{Break, DeferredSink, EnquiryDesk, Error, Fork, Settled};
 
@@ -286,18 +287,13 @@ pub fn run_engine(installers: &'static [EngineInstaller]) -> ! {
     // the engine owns it: no external command a run spawns may inherit the wire.
     if let Err(e) = rustix::io::fcntl_setfd(&stream, rustix::io::FdFlags::CLOEXEC) {
         crate::errln!("engine: failed to set CLOEXEC on the wire fd: {e}");
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "the process has adopted fd 3 and nothing else: no shell is booted, so there is no lease, no watched child and no staged write to unwind"
-        )]
-        std::process::exit(1);
+        site!(Silent::EngineAdoptExit, std::process::exit(1));
     }
     let reader_ch = WireChannel::from_stream(stream);
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "`engine_session`'s teardown settle is the shutdown: it cancels the durable root and waits the worker out before returning here. An engine's stdio is /dev/null, so its session mints no TerminalLease and no TerminalLoan can exist to strand."
-    )]
-    std::process::exit(engine_session(reader_ch, installers, Patience::default()));
+    site!(
+        Silent::EngineSessionExit,
+        std::process::exit(engine_session(reader_ch, installers, Patience::default()))
+    );
 }
 
 /// The process-level half of an attach, which only a carrier that owns its
@@ -305,14 +301,10 @@ pub fn run_engine(installers: &'static [EngineInstaller]) -> ! {
 /// in-process engine attaches with its host's own cwd and HOME, and must not
 /// disturb either. A child restores no cwd: its own rides its seal.
 fn restore_process_dirs(attach: &Attach) {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "engine cwd restore during Attach: sets engine process cwd, not Shell logical cwd"
-    )]
     if let Origin::Root(Root { cwd, .. }) = &attach.origin
         && let cwd = cwd.native()
-        && std::env::current_dir().is_ok_and(|d| d != cwd)
-        && let Err(e) = std::env::set_current_dir(cwd)
+        && crate::host::cwd().is_some_and(|d| d.as_path() != cwd)
+        && let Err(e) = site!(Silent::EngineProcessCwd, std::env::set_current_dir(cwd))
     {
         crate::errln!(
             "engine: failed to set cwd to {}: {e}",
@@ -320,11 +312,10 @@ fn restore_process_dirs(attach: &Attach) {
         );
     }
     let home = attach.engine.home.native();
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "engine HOME restore during Attach: process env, not Shell state"
-    )]
-    if std::env::var_os("HOME").as_deref() != Some(home.as_os_str()) {
+    // The engine process's own HOME: process env, not Shell state, so no
+    // `within [env: …]` overlay applies.  It is compared and set as the OS
+    // holds it, which is why this reads `host::var_os` and not `host::home`.
+    if crate::host::var_os("HOME").as_deref() != Some(home.as_os_str()) {
         // SAFETY: single-threaded engine startup, no other threads
         unsafe {
             std::env::set_var("HOME", home);
@@ -602,7 +593,7 @@ fn engine_session(
 // child is its host binary re-exec'd with `--engine`, a flag only the host
 // binaries handle, so a core test binary would re-run the harness.
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "test scaffolding")]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod wire_desk_tests {
     use super::*;
     use crate::process::{CancelCause, DurableRoot};
@@ -766,6 +757,7 @@ mod wire_desk_tests {
 // process's signals, so every test that runs one must hold `REQUEST_SERIAL`
 // against the siblings that raise an ambient cause.
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod engine_session_tests {
     use super::*;
     use crate::path::EnginePath;
@@ -805,10 +797,6 @@ mod engine_session_tests {
             seen: Vec::new(),
             engine,
         };
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "[test] attach with the test process's own cwd/HOME so the engine's restore is a no-op"
-        )]
         host.send(&Frame::Attach(Attach::new(
             "test",
             EnginePath::Host(std::env::current_dir().expect("test cwd")),

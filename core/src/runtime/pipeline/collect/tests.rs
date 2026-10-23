@@ -345,10 +345,13 @@ fn a_joining_collector_cancel_all_kills_its_externals_and_returns() {
 fn state_with(n: usize) -> CollectState {
     let (mut state, tx) = CollectState::for_step_test();
     for ix in 0..n {
-        state.push(StageHandle::fake_external_for_step_test(Slot {
-            ix,
-            tx: tx.clone(),
-        }));
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a fake stage's child");
+        let _ = child.kill();
+        let slot = Slot { ix, tx: tx.clone() };
+        state.push(StageHandle::fake_external_for_step_test(slot, child));
     }
     state
 }

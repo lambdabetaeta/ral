@@ -377,7 +377,7 @@ run evaluates under a profile's capabilities pushed onto this same stack.
   the name veto for the same reason and to the same small effect. The overlap
   is therefore not merely tolerable but *required* — `cargo build &&
   ./target/debug/app` is exactly this shape, and every bake-in profile makes
-  `` `cwd ``, `/tmp`, and `` `tempdir `` both writable and exec-admitted on purpose.
+  `` `cwd ``, `/tmp`, `` `tempdir `` and `` `scratch `` both writable and exec-admitted on purpose.
   There is no write freeze: an exec allowance never withdraws write
   authority, on any axis. A broad write that covers a run-admitted directory
   (``write: [`home .]`` over `~/.cargo/bin`, or `edit-only` from `~` over

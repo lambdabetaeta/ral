@@ -1,8 +1,3 @@
-#![allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
-
 use super::eliminate::await_handle;
 use super::*;
 use crate::first_order::FOValue;
@@ -387,7 +382,7 @@ fn spawned_worker_never_receives_the_enquiry_desk() {
 }
 
 /// The nursery's twin of `spawned_worker_never_receives_the_enquiry_desk`:
-/// the worker's mooring carries no fork door.
+/// the worker's mooring carries no fork handle.
 #[test]
 fn spawned_worker_never_receives_the_nursery() {
     let mut shell = crate::test_helper::core_shell();
@@ -400,11 +395,11 @@ fn spawned_worker_never_receives_the_nursery() {
     })
     .expect("spawn must succeed");
     wait_settled(&handle);
-    let doorless = rx
+    let forkless = rx
         .recv_timeout(std::time::Duration::from_secs(1))
-        .expect("worker must report its fork door before settling");
+        .expect("worker must report its fork before settling");
     assert!(
-        doorless,
+        forkless,
         "a worker must never reach the spawning run's nursery"
     );
 }
@@ -1664,11 +1659,11 @@ fn running_entries_are_never_stamped_or_expired() {
 
 // ── the admission cap ────────────────────────────────────────────────
 
-/// The cap refuses the (cap+1)th birth at the door, naming `workers` and
+/// The cap refuses the (cap+1)th birth at the entry, naming `workers` and
 /// `cancel` and registering nothing; a cancelled worker still holds its seat
 /// while `stopping` and frees it once execution ends.
 #[test]
-fn worker_cap_rejects_at_the_door_and_frees_on_cancel() {
+fn worker_cap_rejects_at_the_entry_and_frees_on_cancel() {
     let mut shell = crate::test_helper::core_shell();
     let mut m = Mooring::adrift();
     m.worker_cap = Some(2);

@@ -41,12 +41,7 @@ fn now_ms() -> u64 {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] fixtures writing, renaming and deleting files to stand in \
-              for a job, so there is something to report; the production code in this file \
-              touches no filesystem at all"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use crate::test_fixture::workshop;

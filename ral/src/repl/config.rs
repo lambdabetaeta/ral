@@ -10,7 +10,7 @@
 //!
 //! The rc is a plan, decoded then committed: `decode` makes every fallible
 //! judgement reading the shell only, so a refused rc has changed nothing;
-//! `apply` then commits.  All of it runs engine-side, inside the boot door;
+//! `apply` then commits.  All of it runs engine-side, inside the boot builtin;
 //! the host is told only the [`RcSettings`] its frontend needs.
 
 pub(crate) mod source;
@@ -18,14 +18,15 @@ pub(crate) mod source;
 use ral_core::errln;
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::Datum;
+use ral_core::own::{OwnDir, UserFile};
+use ral_core::path::{XdgKind, shown};
 use ral_core::record;
 use ral_core::ty::{Ty, Typed};
 use ral_core::typecheck::Form;
 use ral_core::types::{
     Break, DefaultPolicy, Error, HandlerEntry, Hook, HookName, HookSig, Map, Mooring, Settled,
 };
-use ral_core::{Shell, Value};
-use std::io::Write as _;
+use ral_core::{Shell, Value, terminal};
 use std::path::PathBuf;
 
 use super::errfmt::report_failed_load;
@@ -122,45 +123,6 @@ const DEFAULT_RC: &str = "\
 
 return ()
 ";
-
-/// Write the default RC skeleton to the first resolvable config location,
-/// unless a concurrent boot got there first, in which case that file stands.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:rc-write] persists the default repl config dir + rc file; not turn-time model I/O"
-)]
-pub(super) fn create_default_rc() -> Option<PathBuf> {
-    let (dir, path) = ral_core::path::app_dir(ral_core::path::XdgKind::Config, "ral")
-        .map(|dir| {
-            let file = dir.join("rc");
-            (dir, file)
-        })
-        .or_else(|| {
-            let dot = ral_core::host::home_dot(".ralrc")?;
-            // Legacy single-file layout: the "dir" is the home directory, since
-            // there is no per-app subdirectory to create before
-            // writing `.ralrc` itself.
-            let dir = dot.parent()?.to_path_buf();
-            Some((dir, dot))
-        })?;
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        errln!(
-            "ral: warning: could not create config directory {}: {e}",
-            ral_core::path::shown(&dir)
-        );
-        return None;
-    }
-    let name = ral_core::path::shown(&path);
-    match std::fs::File::create_new(&path).and_then(|mut f| f.write_all(DEFAULT_RC.as_bytes())) {
-        Ok(()) => errln!("note: created {name}"),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(e) => {
-            errln!("ral: warning: could not write {name}: {e}");
-            return None;
-        }
-    }
-    Some(path)
-}
 
 // ── RC config: decoded, then committed ───────────────────────────────────
 
@@ -327,42 +289,44 @@ impl RcPlan {
 
 // ── Config file locations ────────────────────────────────────────────────
 
-/// Search for an existing RC file in the standard locations.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:rc-candidate] picks the first of ral's own rc file locations that exists; ral's config, not a model's name"
-)]
-pub(super) fn find_ralrc() -> Option<PathBuf> {
-    let candidates = [
-        ral_core::path::app_dir(ral_core::path::XdgKind::Config, "ral").map(|d| d.join("rc")),
-        ral_core::host::home_dot(".ralrc"),
-    ];
-    candidates.into_iter().flatten().find(|path| path.exists())
+/// The rc's text and where it is: the first candidate that holds one, else the
+/// skeleton, written where nothing stands at the XDG name.  `None` where
+/// neither: no place for the skeleton, or something at its name that is the
+/// user's.
+pub(super) fn rc() -> Option<(UserFile, String)> {
+    // No config base is no config directory: the rc is then `~/.ralrc` or none.
+    let xdg = UserFile::xdg("ral", XdgKind::Config, "rc").ok();
+    for candidate in xdg.iter().cloned().chain(UserFile::home(".ralrc")) {
+        match candidate.read() {
+            Ok(Some(text)) => return Some((candidate, text)),
+            Ok(None) => {}
+            // A dangling link, say: the next candidate is tried.
+            Err(e) => terminal::cmd_error("ral", &e.to_string()),
+        }
+    }
+    let xdg = xdg?;
+    match xdg.seed(DEFAULT_RC) {
+        Ok(true) => {
+            errln!("note: created {}", shown(xdg.path()));
+            Some((xdg, DEFAULT_RC.into()))
+        }
+        Ok(false) => None,
+        Err(e) => {
+            errln!("ral: warning: {e}");
+            None
+        }
+    }
 }
 
-/// Resolve the history file path, creating the config directory if needed.
-pub(super) fn dirs_history() -> Option<String> {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "native: the history path is handed to the line editor, which opens it"
-    )]
-    let native = |p: std::path::PathBuf| p.to_string_lossy().into_owned();
-    if let Some(dir) = ral_core::path::app_dir(ral_core::path::XdgKind::Config, "ral") {
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "[silent:history-mkdir] ensures the repl config dir exists for the history file; not turn-time model I/O"
-        )]
-        let _ = std::fs::create_dir_all(&dir);
-        return Some(native(dir.join("history")));
-    }
-    ral_core::host::home_dot(".ral_history").map(native)
+/// The history file, `history` in ral's state directory; `None` where the host
+/// has no state base, and a session without one keeps no history.
+pub(super) fn dirs_history() -> Option<PathBuf> {
+    let state = OwnDir::xdg("ral", XdgKind::State).ok()?;
+    Some(state.path().join("history"))
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 
@@ -388,7 +352,7 @@ mod tests {
         }
     }
 
-    /// Decode then commit, as the boot door does.
+    /// Decode then commit, as the boot builtin does.
     fn commit(pairs: &Map, mooring: &Mooring, shell: &mut Shell) -> Result<RcSettings, String> {
         let plan = RcPlan::decode(pairs, shell)?;
         Ok(plan
@@ -416,15 +380,15 @@ mod tests {
         mk_scheme(&[], &[], thunk(pure(ral_core::ty::Ty::Unit)))
     }
 
-    /// Apply `rc_src` inside a dispatch with the REPL host, as the boot door
+    /// Apply `rc_src` inside a dispatch with the REPL host, as the boot builtin
     /// does, so a plugin load has a desk to tell; the host's plugins after.
     fn loaded_plugins(rc_src: &str) -> Vec<String> {
         let rc_src = rc_src.to_owned();
         let pairs: Arc<Mutex<Option<Map>>> = Arc::default();
-        let door = BuiltinEntry::new(
+        let entry = BuiltinEntry::new(
             Cow::Borrowed("_apply-rc"),
             unit_thunk,
-            "_apply-rc  — test door applying one rc map.",
+            "_apply-rc  — test builtin applying one rc map.",
             BuiltinBody::Captured(Arc::new({
                 let pairs = pairs.clone();
                 move |_, mooring, shell| {
@@ -435,8 +399,8 @@ mod tests {
             })),
         );
         let mut runtime = crate::repl::prelude_runtime();
-        runtime.install_captured_builtins(&vec![door].into());
-        let t = crate::repl::engine(runtime, move |shell| {
+        runtime.install_captured_builtins(&vec![entry].into());
+        let t = crate::repl::in_temp::engine(runtime, move |shell| {
             *pairs.lock().unwrap() = Some(rc_map(shell, &rc_src));
         });
         let host = ReplHost::new(Arc::default());
@@ -589,7 +553,7 @@ mod tests {
     }
 
     /// Apply `config` to a fresh shell, expecting `RcPlan::decode` to
-    /// refuse it — the decoded spelling's contract door, exercised the way
+    /// refuse it — the decoded spelling's contract check, exercised the way
     /// `apply_to_fresh_env_full` exercises success.  Returns the shell
     /// (untouched by the refused keys) and the refusal text.
     fn apply_to_fresh_env_rejected(config: Value) -> (Shell, String) {

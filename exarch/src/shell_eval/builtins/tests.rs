@@ -137,10 +137,10 @@ fn window_hashes_are_unique_across_a_long_identical_run() {
     );
 }
 
-/// A family door serialises its argument, so a block anywhere in it is
+/// A family builtin serialises its argument, so a block anywhere in it is
 /// refused where it is written, and data of any shape is not.
 #[test]
-fn a_family_door_refuses_a_block_in_its_argument_statically() {
+fn a_family_builtin_refuses_a_block_in_its_argument_statically() {
     let shell = dressed_shell(&[]);
     let codes = |src: &str| -> Vec<&'static str> {
         match ral_core::compile::compile_and_typecheck(
@@ -236,10 +236,6 @@ fn the_recipe_gains_detach_and_its_budget() {
 /// the verb, and with it the budget the recipe arms in the same act.
 #[cfg(unix)]
 #[test]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] the test process's own cwd"
-)]
 fn clear_reboots_a_shell_that_still_carries_detach() {
     let scratch = std::sync::Arc::new(
         crate::app::Scratch::for_test(crate::app::EXARCH, "detach-clear").expect("scratch dir"),

@@ -16,4 +16,4 @@ On Unix `shown` is the identity.
 
 ## Enforcement
 
-`clippy.toml` bans `Path::display`, `Path::to_string_lossy`, `Path::to_str`, `OsStr::to_string_lossy` and `OsStr::to_str`, each naming `shown` as the replacement. A conversion that is genuinely native (a path handed to the OS, an env value, a non-UTF-8 check) takes a scoped `#[allow(clippy::disallowed_methods, reason = "native: …")]`, so every site that does not show a path is a reviewed one.
+`clippy.toml` bans `Path::display`, `Path::to_string_lossy`, `Path::to_str`, `OsStr::to_string_lossy` and `OsStr::to_str`, each naming `shown` as the replacement: `shown` is the one lossy conversion, for display only, and `path::utf8` the one strict conversion, for a path that must travel as text. A conversion that is genuinely native (a path handed to the OS, an env value, a non-UTF-8 check) is a typed `site!` whose `Silent` variant says why it shows nothing, so every site that does not show a path is a named one ([[decisions/261022_typed-sites|typed-sites]]).

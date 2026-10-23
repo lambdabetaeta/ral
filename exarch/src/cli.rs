@@ -4,6 +4,7 @@
 
 use crate::headless::OutputFormat;
 use crate::prompt::EditScheme;
+use crate::site::{Silent, site};
 use clap::{ArgGroup, Parser, Subcommand};
 
 /// All flags are long-form only: short letters would collide, and there are
@@ -278,20 +279,16 @@ pub enum Command {
 ///
 /// # Errors
 /// Returns `Err` if the `--file` seed prompt cannot be read.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:seed-file] reads the --file seed prompt at CLI parse time; not turn-time I/O"
-)]
 pub fn load_seed(
     prompt: Option<String>,
     file: Option<std::path::PathBuf>,
 ) -> Result<Option<String>, String> {
     let seed = match (prompt, file) {
         (Some(p), _) => Some(p),
-        (None, Some(path)) => Some(
-            std::fs::read_to_string(&path)
-                .map_err(|e| format!("{}: {e}", ral_core::path::shown(&path)))?,
-        ),
+        (None, Some(path)) => Some(site!(
+            Silent::CliArgument,
+            ral_core::own::read_named(&path)
+        )?),
         (None, None) => None,
     };
     Ok(seed.filter(|s| !s.trim().is_empty()))

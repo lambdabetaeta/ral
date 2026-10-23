@@ -53,32 +53,38 @@ impl<'a> Resolver<'a> {
         LexicalPath::from_lexed(lex::anchor(self.cwd, path))
     }
 
-    /// [`Self::resolve`] for a path written in a ral script file in `dir`,
+    /// [`Self::resolve`] for a path written in the ral script file `script`,
     /// which reads it beside itself: `raw` resolved as [`Self::resolve`]
-    /// resolves it, with `dir` for the cwd.
+    /// resolves it, with the directory `script` sits in for the cwd.  A
+    /// `script` with no parent has no directory to read beside, so `raw`
+    /// resolves as [`Self::resolve`] resolves it.
     ///
     /// Sigils come first: `raw` is ral source, so a `~`/`xdg:` head expands
-    /// as in any written path, and only a still-relative result joins `dir`;
-    /// an absolute one, a malformed head included, is kept as `resolve`
-    /// keeps it, never joined onto `dir`, which could lend it a drive.  The
-    /// directory is host-held, so it is anchored as [`Self::anchor`] takes
-    /// one — never read for sigils, a script under a directory named `~`
-    /// staying there.
+    /// as in any written path, and only a still-relative result joins the
+    /// directory; an absolute one, a malformed head included, is kept as
+    /// `resolve` keeps it, never joined onto the directory, which could lend
+    /// it a drive.  The directory is host-held, so it is anchored as
+    /// [`Self::anchor`] takes one — never read for sigils, a script under a
+    /// directory named `~` staying there.
     ///
     /// # Errors
-    /// [`NotACwd`] when `dir`, anchored, is on a malformed or mixed head,
-    /// against which no path can be read.
-    pub(crate) fn resolve_in_script(&self, raw: &str, dir: &Path) -> Result<LexicalPath, NotACwd> {
+    /// [`NotACwd`] when the directory of `script`, anchored, is on a
+    /// malformed or mixed head, against which no path can be read.
+    pub(crate) fn resolve_in_script(
+        &self,
+        raw: &str,
+        script: &Path,
+    ) -> Result<LexicalPath, NotACwd> {
+        let Some(dir) = lex::spelled_parent(script) else {
+            return Ok(self.resolve(raw));
+        };
         let dir = self.anchor(dir).into_cwd()?;
         Ok(Resolver::at(self.env, &dir).resolve(raw))
     }
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] fixtures build literal paths and save and restore `XDG_DATA_HOME`"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use std::path::PathBuf;
@@ -211,6 +217,7 @@ mod tests {
         } else {
             Path::new("/work/proj")
         };
+        let script = dir.join("main.ral");
         let (elsewhere, here) = (elsewhere(), cwd(dir.to_str().expect("UTF-8")));
         let env = std::iter::once(("HOME", "/h")).collect::<EnvVars>();
         let r = Resolver::at(&env, &elsewhere);
@@ -233,7 +240,7 @@ mod tests {
             "~/x",
         ] {
             let in_script = r
-                .resolve_in_script(raw, dir)
+                .resolve_in_script(raw, &script)
                 .expect("the directory is a cwd");
             assert_eq!(
                 in_script.as_path(),

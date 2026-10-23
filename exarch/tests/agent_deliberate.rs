@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 //! End-to-end tests for [`exarch::agent::Avatar::deliberate`] driven through
 //! a scripted provider backend (`exarch::provider::Provider::scripted`).
@@ -405,7 +405,7 @@ fn eviction_fires_at_the_turn_boundary_and_keeps_the_recent_exchange() {
         record: Record,
     }
     let records: Vec<Record> = serde_json::Deserializer::from_reader(std::io::BufReader::new(
-        std::fs::File::open(session.log_dir().join("record.jsonl")).unwrap(),
+        std::fs::File::open(session.log_dir().path().join("record.jsonl")).unwrap(),
     ))
     .into_iter::<Entry>()
     .map(|entry| entry.map(|e| e.record))

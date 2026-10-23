@@ -35,7 +35,7 @@ evaluator item; the evaluator reaches it at
   — with the calling convention fixed by surface position, not inferred from a
   value's runtime shape
   ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
-- `redirect.rs` — the doors that open a redirect target (`open_write`,
+- `redirect.rs` — the functions that open a redirect target (`open_write`,
   `open_read`, `install_stdin_redirect`, and `Shell::atomic_write`, which
   every host write below the redirect frame shares), over `redirect/stage.rs`'s pure
   `PendingWrite` and `Located::stage`/`preview`: staging a write is the path's,
@@ -45,7 +45,7 @@ evaluator item; the evaluator reaches it at
 - `capture.rs` — `with_capture` and the audit tee, both over one `SinkScope`
   that restores the replaced sinks on `Drop`. Audit retains 1 MiB per stream
   as a prefix and a byte total, independently of ordinary capture.
-- `command_call.rs` also holds `call_external`, an external's door: stamp the
+- `command_call.rs` also holds `call_external`, the call of an external: stamp the
   start, tee its streams, name a failure, settle the one `Observed::Command`.
 - `command.rs` — the External arm: vet the resolved head, launch its
   admitted program, wire stdio from the sinks the call's redirects installed, spawn, and reap. `stdio.rs`
@@ -119,11 +119,11 @@ evaluator item; the evaluator reaches it at
     which the standalone command, a direct pipeline stage, and an external a
     stage thread spawns internally all route; the tty-inherit predicate
     (`stdio::inherit_tty`) is likewise shared.
-  - The read door (`< file`), the write door (`> / >> / >|`, settled
-    `committed`/`aborted`/`failed` at frame teardown), and the exec door (Host
+  - The read redirect (`< file`), the write redirect (`> / >> / >|`, settled
+    `committed`/`aborted`/`failed` at frame teardown), and the exec (Host
     and `BundledTool` completion) each build an `Observation`
     (`core/src/types/audit/observation.rs`) and pass it to `Shell::observe`
-    (`core/src/types/audit/door.rs`), the one fan-out door: it reports to the
+    (`core/src/types/audit/fan_out.rs`), the one fan-out: it reports to the
     run's `Mooring` and to the open audit trail alike, judging neither's
     interest — the host filters the rail. It judges only whether anything
     happened: a write onto the discard device is dropped there

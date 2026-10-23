@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 // Integration tests for the argv surface itself: how a script's positional
 // arguments reach `args` / `$SCRIPT`, and how a script piped on stdin is

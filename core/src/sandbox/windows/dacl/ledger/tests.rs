@@ -7,10 +7,6 @@
 // crash recovery only reclaims profiles. Ported units keep upstream's names
 // so each diffs against the one it was taken from.
 
-#![allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
 use super::super::tests::with_scoped_state_dir;
 use super::super::{
     GrantKind,
@@ -77,8 +73,12 @@ fn recovery_ignores_active_pid() {
 
 #[test]
 fn recovery_detects_dead_pid() {
-    assert!(!process_alive_with_image(0, "anything.exe", 0));
-    assert!(!process_alive_with_image(0x7FFF_FFFE, "ral.exe", 0));
+    assert!(!process_alive_with_image(0, OsStr::new("anything.exe"), 0));
+    assert!(!process_alive_with_image(
+        0x7FFF_FFFE,
+        OsStr::new("ral.exe"),
+        0
+    ));
 }
 
 #[test]
@@ -101,7 +101,8 @@ fn recovery_detects_pid_reuse_off_by_one_tick() {
 #[test]
 fn state_dir_honors_xdg_override() {
     with_scoped_state_dir(|| {
-        let dir = ledger_dir();
+        let held = ledger_dir().unwrap();
+        let dir = held.path();
         let env = std::env::var_os("XDG_STATE_HOME").unwrap();
         assert!(dir.starts_with(PathBuf::from(env)));
         assert!(dir.ends_with("ral/sandbox-dacl") || dir.ends_with(r"ral\sandbox-dacl"));
@@ -111,10 +112,10 @@ fn state_dir_honors_xdg_override() {
 #[test]
 fn recovery_leaves_the_stamp_store_unparsed_and_unquarantined() {
     with_scoped_state_dir(|| {
-        let dir = ensure_ledger_dir().unwrap();
-        let key = stamp_key(Path::new(r"C:\somewhere"), GrantKind::ReadWrite);
+        let dir = ledger_dir().unwrap();
+        let key = stamp_key(r"C:\somewhere", GrantKind::ReadWrite);
         record_stamp(&key).unwrap();
-        let stamp_path = dir.join(STAMP_STORE_FILE_NAME);
+        let stamp_path = dir.path().join(STAMP_STORE_FILE_NAME);
         assert!(matches!(stamp_path.try_exists(), Ok(true)));
 
         let report = recover_orphaned_state().unwrap();
@@ -146,11 +147,11 @@ fn record_and_forget_profile_round_trip_the_ledger() {
     with_scoped_state_dir(|| {
         let mut m = DaclManager::new().unwrap();
         m.record_profile("ral.sandbox.s1.p0").unwrap();
-        let persisted = read_ledger(&m.ledger_path).unwrap();
+        let persisted = read_ledger(&m.dir, &m.ledger_name).unwrap();
         assert_eq!(persisted.profiles, vec!["ral.sandbox.s1.p0".to_string()]);
         m.forget_profile("ral.sandbox.s1.p0").unwrap();
         // Nothing recorded — the ledger file is removed outright.
-        assert!(matches!(m.ledger_path.try_exists(), Ok(false)));
+        assert!(m.dir.stat(&m.ledger_name).is_none());
     });
 }
 
@@ -168,8 +169,8 @@ fn recovery_deletes_dead_sessions_profiles() {
                 .expect("test profile creation");
         drop(profile); // frees the in-memory SID; the OS profile stays registered
 
-        let dir = ensure_ledger_dir().unwrap();
-        let synthetic = dir.join("pid-2147483646-profiles.json");
+        let dir = ledger_dir().unwrap();
+        let synthetic = dir.path().join("pid-2147483646-profiles.json");
         let l = Ledger {
             run_id: "pid-2147483646-profiles".into(),
             pid: 0x7FFF_FFFE,
@@ -177,7 +178,7 @@ fn recovery_deletes_dead_sessions_profiles() {
             started_at_filetime: 0,
             profiles: vec![created, ghost],
         };
-        write_ledger(&synthetic, &l).unwrap();
+        write_ledger(&dir, "pid-2147483646-profiles.json", &l).unwrap();
 
         let report = recover_orphaned_state().unwrap();
         assert!(

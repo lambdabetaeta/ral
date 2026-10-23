@@ -29,6 +29,7 @@ pub(crate) mod render;
 pub(crate) mod resolver;
 mod show;
 pub mod sigil;
+mod site;
 mod slug;
 pub mod tilde;
 pub mod tree;
@@ -36,7 +37,7 @@ pub(crate) mod walk;
 pub(crate) mod which;
 
 pub(crate) use basedir::resolve_xdg_in;
-pub use basedir::{XdgKind, app_dir, app_dir_or_temp};
+pub use basedir::{XdgKind, app_dir};
 pub use show::shown;
 pub use slug::project_slug;
 pub use tilde::abbreviate_home;
@@ -50,7 +51,7 @@ pub(crate) use lex::proper_ancestors;
 pub(crate) use lex::{GrantRefusal, SubpathRefusal, classify_subpath, grant_eligibility};
 pub use lex::{
     NotUtf8, basename, descendant, extension, is_absolute, join_slash, relative_key,
-    strip_appended_suffix, utf8, with_appended_suffix,
+    spelled_parent, strip_appended_suffix, utf8, with_appended_suffix,
 };
 pub use namespace::{EnginePath, GuestPath};
 #[cfg(unix)]
@@ -64,10 +65,10 @@ pub(crate) use walk::is_loop;
 pub use walk::{
     Authority, Dir, DirEntry, EntryName, Excluded, Hold, Installing, Judged, Kind, LeafMode,
     Listing, Lists, Located, NotAnEntryName, ObjectId, Op, Peeks, Reading, Reads, RealPath,
-    RootName, Stat, Step, Trace, Unjudged, Walked, Writing, exists, is_dir, walk, walk_dir,
-    walk_lenient,
+    RootName, Stat, Step, Trace, Unjudged, Visibility, Walked, Writing, exists, is_dir, kind_of,
+    walk, walk_dir, walk_lenient,
 };
-pub(crate) use walk::{StagedWrite, Streamed, Streaming, Visibility, open_discard};
+pub(crate) use walk::{StagedWrite, Streamed, Streaming, open_discard};
 #[cfg(windows)]
 pub(crate) use which::is_batch_image;
 pub(crate) use which::is_executable_file;
@@ -80,7 +81,7 @@ pub use which::{forget_located_commands, locate, path_dirs, path_entries, ral_pa
 /// Which platform's path rules a question is asked under.
 ///
 /// A parameter rather than a `cfg!` read, so both tables are pinned by tests
-/// on every host; the gate is [`Self::HOST`], read at the door.
+/// on every host; the gate is [`Self::HOST`], read by the public entry points.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PathRules {
     Posix,

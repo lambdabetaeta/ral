@@ -2,7 +2,9 @@
 //! entry name, none of which resolves a path.  A host module re-exports these
 //! beside the primitives it writes itself (see the seam in `walk.rs`).
 
-use super::{Access, EntryName, Seen, Stat, Visibility, host};
+use super::{Access, EntryName, Kind, Seen, Stat, Visibility, host};
+use crate::path::site::{Silent, Surface};
+use crate::site::site;
 use rustix::fs::{Access as Amode, AtFlags, Mode, OFlags, RawMode};
 use std::ffi::OsStr;
 use std::fs::File;
@@ -40,12 +42,17 @@ fn opened(fd: rustix::io::Result<rustix::fd::OwnedFd>) -> io::Result<File> {
     Ok(File::from(fd?))
 }
 
+/// The permission bits a file of `visibility` is made with, under the umask:
+/// only `Public` leaves the rest to it.
+const fn file_mode(visibility: Visibility) -> RawMode {
+    match visibility {
+        Visibility::Public => 0o666,
+        Visibility::Private | Visibility::Secret => 0o600,
+    }
+}
+
 /// The entry `name` made exclusively for `access`: what a leaf absent at the
 /// walk becomes.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[surface:walk-create] Creates an absent leaf exclusively beside the directory the walk holds, so a file that appeared since the walk is refused, never written.  The write that follows surfaces it."
-)]
 pub(super) fn create(
     dir: &File,
     name: &EntryName,
@@ -53,80 +60,100 @@ pub(super) fn create(
     visibility: Visibility,
 ) -> io::Result<File> {
     let flags = oflags(access) | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let mode = match visibility {
-        Visibility::Public => 0o666,
-        Visibility::Private => 0o600,
-    };
-    opened(rustix::fs::openat(
-        dir,
-        name.as_os_str(),
-        flags,
-        Mode::from_bits_truncate(mode),
+    opened(site!(
+        Surface::Create,
+        rustix::fs::openat(
+            dir,
+            name.as_os_str(),
+            flags,
+            Mode::from_bits_truncate(file_mode(visibility))
+        )
     ))
 }
 
 /// A fresh sibling, read and write, that no one else has.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[surface:walk-stage] The atomic `>` staging create: a fresh exclusive sibling in the target's own directory, holding the write until the rename publishes it.  A sub-step of the write site; the reported write is the operation's surface."
-)]
-pub(super) fn create_sibling(dir: &File, name: &EntryName) -> io::Result<File> {
+pub(super) fn create_sibling(
+    dir: &File,
+    name: &EntryName,
+    visibility: Visibility,
+) -> io::Result<File> {
     let flags = OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    opened(rustix::fs::openat(
-        dir,
-        name.as_os_str(),
-        flags,
-        Mode::from_bits_truncate(0o666),
+    opened(site!(
+        Surface::Stage,
+        rustix::fs::openat(
+            dir,
+            name.as_os_str(),
+            flags,
+            Mode::from_bits_truncate(file_mode(visibility))
+        )
     ))
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-mkdir] Makes an absent entry of a held directory, which the caller judged as the absent leaf it is; the directory is then stepped onto."
-)]
 pub(super) fn mkdir(dir: &File, name: &EntryName, visibility: Visibility) -> io::Result<()> {
     let mode = match visibility {
         Visibility::Public => 0o777,
-        Visibility::Private => 0o700,
+        Visibility::Private | Visibility::Secret => 0o700,
     };
-    Ok(rustix::fs::mkdirat(
-        dir,
-        name.as_os_str(),
-        Mode::from_bits_truncate(mode),
+    Ok(site!(
+        Silent::WalkMkdir,
+        rustix::fs::mkdirat(dir, name.as_os_str(), Mode::from_bits_truncate(mode))
     )?)
 }
 
 /// `renameat` under `dir`: POSIX publishes by name, so `sibling`, the
 /// object, is not asked.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[surface:walk-publish] The atomic `>` commit step: rename the staged sibling over the target's name within the one directory handle.  The write surface fires when the write settles, committed once this returns Ok."
-)]
 pub(super) fn rename_over(
     dir: &File,
     _sibling: &File,
     from: &EntryName,
     to: &EntryName,
 ) -> io::Result<()> {
-    Ok(rustix::fs::renameat(
-        dir,
-        from.as_os_str(),
-        dir,
-        to.as_os_str(),
+    Ok(site!(
+        Surface::Publish,
+        rustix::fs::renameat(dir, from.as_os_str(), dir, to.as_os_str())
     )?)
 }
 
 /// `unlinkat` under `dir`: POSIX discards by name, so `sibling`, the object, is
 /// not asked.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-abandon] Reasoned-silent rollback of the atomic `>`: unlink the staged sibling for a write that will not land.  The aborted write is the surface; this removal raises none of its own."
-)]
 pub(super) fn discard(dir: &File, _sibling: &File, name: &EntryName) -> io::Result<()> {
-    Ok(rustix::fs::unlinkat(
-        dir,
-        name.as_os_str(),
-        AtFlags::empty(),
+    Ok(site!(
+        Silent::WalkAbandon,
+        rustix::fs::unlinkat(dir, name.as_os_str(), AtFlags::empty())
+    )?)
+}
+
+/// `unlinkat` under `dir`: POSIX removes by name, so `leaf`, the object the
+/// walk holds, is not asked.  A directory goes with `REMOVEDIR`, and only once
+/// it is empty.
+pub(super) fn remove(
+    dir: &File,
+    _leaf: Option<&File>,
+    name: &EntryName,
+    kind: Kind,
+) -> io::Result<()> {
+    let flags = if kind == Kind::Dir {
+        AtFlags::REMOVEDIR
+    } else {
+        AtFlags::empty()
+    };
+    Ok(site!(
+        Silent::WalkRemove,
+        rustix::fs::unlinkat(dir, name.as_os_str(), flags)
+    )?)
+}
+
+/// `renameat` under `dir`, over whatever `to` is: POSIX renames by name, so
+/// `leaf`, the object the walk holds, is not asked.
+pub(super) fn rename(
+    dir: &File,
+    _leaf: Option<&File>,
+    from: &EntryName,
+    to: &EntryName,
+) -> io::Result<()> {
+    Ok(site!(
+        Silent::WalkRename,
+        rustix::fs::renameat(dir, from.as_os_str(), dir, to.as_os_str())
     )?)
 }
 
@@ -138,48 +165,38 @@ pub(super) fn sync_dir(dir: &File) -> io::Result<()> {
 
 /// A read handle on the directory `dir` holds, the one a listing, a sync and
 /// macOS's stored-name lookup need.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-reopen-dir] Reopens a held directory for reading, which an `O_PATH` or `O_SEARCH` descriptor cannot do: for a listing and a flush, relative to the directory itself."
-)]
 pub(super) fn reopen(dir: &File) -> io::Result<File> {
-    opened(rustix::fs::openat(
-        dir,
-        ".",
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
+    opened(site!(
+        Silent::WalkReopenDir,
+        rustix::fs::openat(
+            dir,
+            ".",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
     ))
 }
 
 /// `access(2)` against the real uid and gid, as `test -w` asks; follows.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-access] The `is-writable` predicate's `access(2)` against the real uid and gid, by name under the held directory.  A permission predicate, not turn-time model data I/O."
-)]
 pub(super) fn is_writable(dir: &File, name: &OsStr) -> bool {
-    rustix::fs::accessat(dir, name, Amode::WRITE_OK, AtFlags::empty()).is_ok()
+    site!(
+        Silent::WalkAccess,
+        rustix::fs::accessat(dir, name, Amode::WRITE_OK, AtFlags::empty())
+    )
+    .is_ok()
 }
 
 /// `file` given the permission bits `stat` carries.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-chmod] Gives the staged sibling the mode its target had, before anything is written to it.  A sub-step of the write site."
-)]
 pub(super) fn copy_mode(file: &File, stat: &Stat) -> io::Result<()> {
     let bits = RawMode::try_from(stat.mode & 0o7777).unwrap_or_default();
     Ok(rustix::fs::fchmod(file, Mode::from_bits_truncate(bits))?)
 }
 
 /// The discard device, by its fixed name.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:discard-device] `/dev/null` opened by its fixed name: no bytes reach or leave the model, and no grant region can contain a device that is not a file."
-)]
 pub(super) fn open_discard() -> io::Result<File> {
-    opened(rustix::fs::open(
-        "/dev/null",
-        OFlags::RDWR | OFlags::CLOEXEC,
-        Mode::empty(),
+    opened(site!(
+        Silent::DiscardDevice,
+        rustix::fs::open("/dev/null", OFlags::RDWR | OFlags::CLOEXEC, Mode::empty())
     ))
 }
 
@@ -200,10 +217,6 @@ pub(super) fn list(dir: &File) -> io::Result<Lister<'_>> {
 /// The names of `dir`, read through a reopened handle, since the held one
 /// cannot enumerate, and sorted so a listing does not depend on the order the
 /// kernel hands them back.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-list] `list-dir`'s enumeration of a held directory, relative to its own handle.  A listing predicate, not turn-time model data I/O: the caller still judges each entry and raises no card."
-)]
 pub(super) fn names(dir: &File) -> io::Result<Vec<EntryName>> {
     let mut names = Vec::new();
     for entry in rustix::fs::Dir::new(reopen(dir)?)? {

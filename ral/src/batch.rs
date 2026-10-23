@@ -5,6 +5,7 @@ use ral_core::compile::{CompileError, compile_and_typecheck, on_compile_stack};
 use ral_core::elaborator::elaborate;
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::Datum as _;
+use ral_core::own;
 use ral_core::protocol::{Ending, Program, Report, Run};
 use ral_core::run::StaticDiagnostics;
 use ral_core::source::{FileId, Source, SourceFile, SourceOrigin};
@@ -16,9 +17,10 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use crate::boot_door::{self, Boot};
+use crate::boot_builtin::{self, Boot};
 use crate::cli::{BatchOpts, Halt, RunOpts};
 use crate::platform::{exit_byte, local_attach, probe_terminal};
+use crate::site::{Silent, site};
 use crate::startup::engine::{BATCH, BatchConfig, INSTALLERS, batch_surface};
 
 /// Batch's session surface: a watched worker's lines on stdout.
@@ -37,10 +39,6 @@ impl DeferredSink for Stdout {
 }
 
 /// Run the script at `path`.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:script-read] startup read of the script file path; not turn-time model I/O"
-)]
 pub(crate) fn run_file(path: &Path, script_args: Vec<String>, opts: BatchOpts) -> ExitCode {
     let file = match SourceFile::new(path) {
         Ok(file) => file,
@@ -49,10 +47,10 @@ pub(crate) fn run_file(path: &Path, script_args: Vec<String>, opts: BatchOpts) -
             return ExitCode::from(1);
         }
     };
-    match std::fs::read_to_string(path) {
+    match site!(Silent::CliArgument, own::read_named(path)) {
         Ok(source) => run_source(&SourceOrigin::File(file), source, script_args, opts),
         Err(e) => {
-            terminal::cmd_error("ral", &format!("{}: {e}", ral_core::path::shown(path)));
+            terminal::cmd_error("ral", &e.to_string());
             ExitCode::from(1)
         }
     }
@@ -109,12 +107,12 @@ fn emit_audit_report(ending: &Ending, trail: &[ral_core::first_order::FOValue], 
 /// Execute `source`, read from `origin`, non-interactively: a script file, or
 /// the virtual `<stdin>` or `-c`.
 ///
-/// Boots a `batch` engine, dispatches its boot door, then the script; when
+/// Boots a `batch` engine, dispatches its boot builtin, then the script; when
 /// `--audit` is active, reports the script's run as one report envelope on
 /// stderr. `--check`, `--dump-ast` and `--dump-ir` are static, and boot nothing.
 ///
 /// Every batch source passes through here, so line endings are normalised
-/// here too — one door, one rule.
+/// here too — one place, one rule.
 pub(crate) fn run_source(
     origin: &SourceOrigin,
     source: String,
@@ -146,9 +144,7 @@ pub(crate) fn run_source(
     // constants work in batch too.
     let (_, terminal) = probe_terminal(false);
 
-    // RAL_TIMING is a presence probe, not a basedir.
-    #[allow(clippy::disallowed_methods)]
-    let timing = std::env::var_os("RAL_TIMING").is_some();
+    let timing = ral_core::host::var_os("RAL_TIMING").is_some();
     let t0 = std::time::Instant::now();
     let tick = |label: &str| {
         if timing {
@@ -192,7 +188,8 @@ pub(crate) fn run_source(
         capabilities,
     };
     let booted = run(boot.program(), None);
-    if let Err(status) = boot_door::settle(dispatch_to_report(&transport, booted, Arc::new(()))) {
+    if let Err(status) = boot_builtin::settle(dispatch_to_report(&transport, booted, Arc::new(())))
+    {
         return ExitCode::from(exit_byte(status));
     }
     tick("boot");

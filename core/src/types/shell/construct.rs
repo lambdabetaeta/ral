@@ -121,6 +121,9 @@ pub(super) fn natives_and_base(
 pub(crate) struct Terms {
     pub(crate) stack_limit: usize,
     pub(crate) exit_hints: ExitHints,
+    /// The spelling of the session's scratch directory, if its front end made
+    /// one: what a `scratch` place anchors to.
+    pub(crate) scratch: Option<String>,
     pub(crate) lease: Option<BindingLease>,
     pub(crate) retention: Option<u64>,
     pub(crate) detach_budget: Option<u64>,
@@ -133,6 +136,7 @@ impl Terms {
         Self {
             stack_limit: DEFAULT_STACK_LIMIT,
             exit_hints: ExitHints::default(),
+            scratch: None,
             lease: None,
             retention: None,
             detach_budget: None,
@@ -144,6 +148,7 @@ impl Terms {
         Self {
             stack_limit: shell.session.stack_limit,
             exit_hints: ExitHints::clone(&shell.session.exit_hints),
+            scratch: shell.session.scratch.clone(),
             lease: shell.local.bindings.lease(),
             retention: shell.local.workers.retention(),
             detach_budget: shell.local.detach.as_deref().map(|policy| policy.budget),
@@ -223,6 +228,7 @@ impl Shell {
         let Terms {
             stack_limit,
             exit_hints,
+            scratch,
             lease,
             retention,
             detach_budget,
@@ -263,6 +269,7 @@ impl Shell {
                 sources,
                 root_file: None,
                 exit_hints: Arc::new(exit_hints),
+                scratch,
                 fixings: Arc::new(fixings),
                 runtime,
                 terminal_lease,

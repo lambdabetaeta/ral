@@ -12,6 +12,7 @@ use crate::path::walk::{Kind, Vetted, walk_with};
 use crate::path::{
     Judged, LeafMode, LexicalPath, Located, ObjectId, Reading, RealPath, Trace, is_absolute,
 };
+use crate::site::{Silent, site};
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs::File;
@@ -124,10 +125,6 @@ fn file(path: &Path) -> Option<RealPath> {
 /// the entry is still the object the walk holds, which is not owned by `me`
 /// and — unless a symlink, whose own mode the kernel ignores — not writable
 /// by it either.  An object the walk could not hold is refused.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:carrier-system-only] asks, by name under the directory handle the walk holds, whether the entry is still the walked object and beyond the user's write; sandbox rendering over the walk's own names, not a model's data I/O"
-)]
 fn system_only(v: &Vetted<'_>, me: u32) -> bool {
     use rustix::fs::{Access, AtFlags, accessat, fstat, statat};
     let Some(child) = v.child else {
@@ -135,14 +132,22 @@ fn system_only(v: &Vetted<'_>, me: u32) -> bool {
     };
     let (Ok(held), Ok(named)) = (
         fstat(child),
-        statat(v.dir, v.name, AtFlags::SYMLINK_NOFOLLOW),
+        site!(
+            Silent::CarrierSystemOnly,
+            statat(v.dir, v.name, AtFlags::SYMLINK_NOFOLLOW)
+        ),
     ) else {
         return false;
     };
     let is_link = v.step.is_some_and(|step| step.kind() == Kind::Symlink);
     ObjectId::of(child).is_ok_and(|id| id == ObjectId::from(&named))
         && held.st_uid != me
-        && (is_link || accessat(v.dir, v.name, Access::WRITE_OK, AtFlags::EACCESS).is_err())
+        && (is_link
+            || site!(
+                Silent::CarrierSystemOnly,
+                accessat(v.dir, v.name, Access::WRITE_OK, AtFlags::EACCESS)
+            )
+            .is_err())
 }
 
 /// The interpreter on `path`'s `#!` line: the kernels' grammar narrowed to the
@@ -150,18 +155,16 @@ fn system_only(v: &Vetted<'_>, me: u32) -> bool {
 /// at the first `\n` or `#`), blanks skipped, the interpreter running to the
 /// next blank, and absolute.  Any other shape yields no carrier, and the
 /// trampoline's hint names the interpreter.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:carrier-shebang] reads the head of a seed, a hop or a refused exec's target by name to learn its interpreter, as the kernel will; sandbox rendering, not the model's data I/O"
-)]
 pub(crate) fn shebang(path: &Path) -> Option<PathBuf> {
     use std::os::unix::fs::OpenOptionsExt;
     // `O_NONBLOCK` and the regular-file check: a FIFO swapped in must not stall the reader.
-    let file = File::options()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(path)
-        .ok()?;
+    let file = site!(
+        Silent::CarrierShebang,
+        File::options()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK) => open(path)
+    )
+    .ok()?;
     file.metadata()
         .ok()?
         .is_file()
@@ -239,10 +242,7 @@ pub(super) fn system_script() -> Option<(RealPath, RealPath)> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs scaffolding: tempdir programs and their modes"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use crate::test_helper::real;

@@ -9,6 +9,7 @@ use rustyline::config::{BellStyle, Builder, CompletionType};
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
 use rustyline::{Editor, Event, EventHandler, KeyCode, KeyEvent, Modifiers};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::super::complete::RalHelper;
@@ -26,7 +27,7 @@ pub(in crate::repl) struct RustylineFrontend {
     host: Arc<ReplHost>,
     keymap: Keymap,
     terminal: TerminalState,
-    history_path: Option<String>,
+    history_path: Option<PathBuf>,
     printer: Option<Printer>,
     /// The events bound with rustyline, so a sync can unbind them.
     bound: Vec<Event>,
@@ -39,7 +40,7 @@ impl RustylineFrontend {
         terminal: TerminalState,
         keymap: Keymap,
         bell: BellStyle,
-        history_path: Option<String>,
+        history_path: Option<PathBuf>,
     ) -> Result<Self, ReadlineError> {
         let config = Builder::new()
             .edit_mode(keymap.into())
@@ -171,9 +172,12 @@ impl Frontend for RustylineFrontend {
         let Some(path) = &self.history_path else {
             return Ok(());
         };
-        self.rl
-            .append_history(path)
-            .map_err(|e| format!("could not save history to {path}: {e}"))
+        self.rl.append_history(path).map_err(|e| {
+            format!(
+                "could not save history to {}: {e}",
+                ral_core::path::shown(path)
+            )
+        })
     }
 
     fn printer(&mut self) -> Option<Printer> {

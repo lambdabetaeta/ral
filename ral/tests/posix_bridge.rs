@@ -3,10 +3,8 @@
 //! fresh empty directory throughout so no profile a login shell sources can
 //! write to the stdout being asserted on.
 
+#![allow(clippy::disallowed_methods, reason = "test code")]
 #![cfg(unix)]
-// A test binary, not the ral shell: the clippy.toml invariants target
-// ral-core's fs and process discipline, not a harness that spawns one.
-#![allow(clippy::disallowed_methods)]
 
 use std::io::Write as _;
 use std::os::unix::process::CommandExt as _;

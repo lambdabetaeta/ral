@@ -69,7 +69,7 @@ pub(super) fn apply_profile(profile: &str) -> std::io::Result<()> {
 const BASE_PROFILE: &str = include_str!("macos-base.sbpl");
 
 /// The `net: true` rules — the wholesale socket allow and the resolver and
-/// trust-evaluation Mach doors that ride the same bit.
+/// trust-evaluation Mach services that ride the same bit.
 const NET_PROFILE: &str = include_str!("macos-net.sbpl");
 
 /// The profile as sections, in the order Seatbelt reads them.  Last match
@@ -352,10 +352,10 @@ impl fmt::Display for Clause<'_> {
     }
 }
 
-/// Mach doors the base profile withholds on purpose, each with its reason as
+/// Mach services the base profile withholds on purpose, each with its reason as
 /// data: a comment cannot reach the agent holding the `EPERM`, and a deliberate
 /// refusal read as an accident is chased instead of worked around.
-fn withheld_doors() -> &'static [(&'static str, &'static str)] {
+fn withheld_services() -> &'static [(&'static str, &'static str)] {
     &[
         (
             "com.apple.SecurityServer",
@@ -379,10 +379,10 @@ fn withheld_doors() -> &'static [(&'static str, &'static str)] {
 /// [`crate::sandbox::diag`]'s denial hint.  Matched by prefix: Seatbelt logs a
 /// Mach name with the instance suffix the lookup carried
 /// (`com.apple.pasteboard.1`, `com.apple.distributed_notifications@Uv3`).
-pub(super) fn withheld_door(name: &str) -> Option<&'static str> {
-    withheld_doors()
+pub(super) fn withheld_service(name: &str) -> Option<&'static str> {
+    withheld_services()
         .iter()
-        .find(|(door, _)| name.starts_with(door))
+        .find(|(service, _)| name.starts_with(service))
         .map(|(_, why)| *why)
 }
 
@@ -431,8 +431,9 @@ unsafe extern "C" {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
-    use super::{BASE_PROFILE, NET_PROFILE, Profile, build_profile, withheld_doors};
+    use super::{BASE_PROFILE, NET_PROFILE, Profile, build_profile, withheld_services};
     use crate::capability::{ExecAllow, ExecDeny, FsAllow, GrantPath, Rule};
     use crate::path::proper_ancestors;
     use crate::path::{Excluded, FrozenPath, Trace, command_name_key};
@@ -734,10 +735,6 @@ mod tests {
     /// alone: the surface it was written by is only stat-able, so a lookup
     /// may pass the link and reach nothing beneath it.
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] test fs scaffolding: a tempdir tree and a symlink"
-    )]
     fn mac_profile_lets_a_lookup_stat_the_surface_of_a_frozen_allowance() {
         let tmp = tempfile::tempdir().expect("a temp dir");
         let root = crate::test_helper::real(tmp.path());
@@ -1010,8 +1007,8 @@ mod tests {
 
     /// A wholesale `(allow mach-lookup)` hands out launchservicesd, and with
     /// it `/usr/bin/open` — a spawn performed by launchd outside this profile,
-    /// which is an escape and, for a URL, an egress channel.  The door list is
-    /// therefore closed by name, and the resolver's doors ride the `net` bit
+    /// which is an escape and, for a URL, an egress channel.  The service list is
+    /// therefore closed by name, and the resolver's services ride the `net` bit
     /// with the sockets.
     #[test]
     fn mac_profile_names_every_mach_service() {
@@ -1039,14 +1036,14 @@ mod tests {
         .unwrap();
         assert!(
             rules(&open).contains("com.apple.dnssd.service"),
-            "net: true emitted no resolver door:\n{open}"
+            "net: true emitted no resolver service:\n{open}"
         );
-        // A door the hint explains must be one no projection opens, or the
-        // reason is quoted about a door the child actually holds.
-        for (door, _) in withheld_doors() {
+        // A service the hint explains must be one no projection opens, or the
+        // reason is quoted about a service the child actually holds.
+        for (service, _) in withheld_services() {
             assert!(
-                !closed.contains(door) && !rules(&open).contains(door),
-                "{door} carries a withheld-door reason yet some profile admits it"
+                !closed.contains(service) && !rules(&open).contains(service),
+                "{service} carries a withheld-service reason yet some profile admits it"
             );
         }
     }
@@ -1185,10 +1182,6 @@ mod tests {
     /// it, so `mv top elsewhere` would otherwise move the denied bytes to a
     /// name no deny rule covers.
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] test fs scaffolding: a tempdir tree and a symlink for the alias pin"
-    )]
     fn mac_profile_pins_the_resolved_ancestor_reached_through_an_alias() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let root = dir.path();

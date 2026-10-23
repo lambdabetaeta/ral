@@ -1,5 +1,7 @@
 //! Handler self-masking survives a panic mid-body, observable at the
-//! public `run` door.
+//! public `run` entry.
+
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 mod common;
 
@@ -12,7 +14,7 @@ use ral_core::types::{Break, Escape, Mooring, Settled, Shell};
 
 const HOST: &str = "a test host resolves its floor";
 
-/// Run one top-level run of `source` through the public `run` door
+/// Run one top-level run of `source` through the public `run` entry
 /// and return the body's `Settled<Value>`.  Every test below picks source
 /// it expects to compile, so a static diagnostic is a test bug.
 fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {

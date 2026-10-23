@@ -1,5 +1,5 @@
+#![allow(clippy::disallowed_methods, reason = "test code")]
 #![cfg(target_os = "linux")]
-#![allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
 
 mod common;
 

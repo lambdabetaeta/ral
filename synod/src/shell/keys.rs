@@ -44,7 +44,7 @@ pub fn save_key(
     key: String,
 ) -> Result<AccountList, String> {
     let holdings = accounts_state.resolved()?;
-    accounts::wallet().set_key(holdings, &account, &key)?;
+    accounts::wallet()?.set_key(holdings, &account, &key)?;
     Ok(settled(&app, holdings))
 }
 
@@ -61,7 +61,7 @@ pub fn forget_key(
     account: String,
 ) -> Result<AccountList, String> {
     let holdings = accounts_state.resolved()?;
-    accounts::wallet().forget_key(holdings, &account)?;
+    accounts::wallet()?.forget_key(holdings, &account)?;
     Ok(settled(&app, holdings))
 }
 
@@ -82,7 +82,7 @@ pub fn save_endpoint(
     key: Option<String>,
 ) -> Result<AccountList, String> {
     let holdings = accounts_state.resolved()?;
-    accounts::wallet().add_endpoint(holdings, &name, &endpoint, &protocol, key.as_deref())?;
+    accounts::wallet()?.add_endpoint(holdings, &name, &endpoint, &protocol, key.as_deref())?;
     Ok(settled(&app, holdings))
 }
 
@@ -99,7 +99,7 @@ pub fn forget_endpoint(
     account: String,
 ) -> Result<AccountList, String> {
     let holdings = accounts_state.resolved()?;
-    accounts::wallet().forget_endpoint(holdings, &account)?;
+    accounts::wallet()?.forget_endpoint(holdings, &account)?;
     Ok(settled(&app, holdings))
 }
 

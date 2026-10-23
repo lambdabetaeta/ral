@@ -1,24 +1,19 @@
 //! What each authority marker may and may not do, pinned from inside the
-//! crate, where the `pub(crate)` doors are in reach.  The `pub` surface's
+//! crate, where the `pub(crate)` operations are in reach.  The `pub` surface's
 //! compile-fail cases are `core/tests/markers/`.
 //!
-//! A door is *absent* where a call on the handle finds no inherent method of
+//! An operation is *absent* where a call on the handle finds no inherent method of
 //! its name and falls through to [`Fallback`]'s, which answers [`Absent`]:
 //! inherent methods win wherever their impl applies, so a call typed `Absent`
-//! found none, and a call that finds the door stops this module compiling.
-
-#![allow(
-    clippy::disallowed_methods,
-    reason = "[test] fixtures build the tree the handles are walked from, and the source scan reads this crate's own files"
-)]
+//! found none, and a call that finds the method stops this module compiling.
 
 use super::super::*;
 use crate::path::LexicalPath;
 
-/// What a call answers when no door of that name was there.
+/// What a call answers when no method of that name was there.
 struct Absent;
 
-/// Every door the markers withhold, as a method no inherent one shadows.
+/// Every operation the markers withhold, as a method no inherent one shadows.
 trait Fallback {
     fn read(&self) -> Absent {
         Absent
@@ -41,10 +36,25 @@ trait Fallback {
     fn open_streaming<T>(&self, _: T) -> Absent {
         Absent
     }
+    fn create_new<T>(&self, _: T, _: T) -> Absent {
+        Absent
+    }
     fn create_file<T>(&self, _: T) -> Absent {
         Absent
     }
-    fn stage(&self) -> Absent {
+    fn stage<T>(&self, _: T) -> Absent {
+        Absent
+    }
+    fn open_data<T>(&self, _: T, _: T) -> Absent {
+        Absent
+    }
+    fn remove(&self) -> Absent {
+        Absent
+    }
+    fn rename<T>(&self, _: T) -> Absent {
+        Absent
+    }
+    fn target<T>(&self, _: T, _: T) -> Absent {
         Absent
     }
     fn create_dir<T>(&self, _: T) -> Absent {
@@ -89,7 +99,11 @@ fn an_unjudged_object_offers_its_trace_and_nothing_more() {
     let _: Absent = located.stat();
     let _: Absent = located.read_link();
     let _: Absent = located.open_streaming(());
-    let _: Absent = located.stage();
+    let _: Absent = located.stage(());
+    let _: Absent = located.open_data((), ());
+    let _: Absent = located.remove();
+    let _: Absent = located.rename(());
+    let _: Absent = located.create_new((), ());
     let _: Absent = located.create_file(());
     let _: Absent = located.create_dir(());
     let _: Absent = located.leaf_fd();
@@ -106,20 +120,25 @@ fn an_unjudged_directory_lists_nothing_and_states_nothing() {
     let _: Absent = dir.stat();
     let _: Absent = dir.open_dir(());
     let _: Absent = dir.locate((), ());
+    let _: Absent = dir.target((), ());
     let _: Absent = dir.reopen(());
     let _: Absent = dir.is_local();
 }
 
-/// A read judgment buys bytes, metadata and a listing, and no write door.
+/// A read judgment buys bytes, metadata and a listing, and no write operation.
 #[test]
-fn a_read_judged_object_reads_and_states_and_has_no_write_door() {
+fn a_read_judged_object_reads_and_states_and_has_no_write_operation() {
     let (_tmp, located, _) = walked();
     let located: Located<Judged<Reading>> = located.marked();
     let _: io::Result<File> = located.read();
     let _: Option<&Stat> = located.stat();
     let _: io::Result<PathBuf> = located.read_link();
     let _: Absent = located.open_streaming(());
-    let _: Absent = located.stage();
+    let _: Absent = located.stage(());
+    let _: Absent = located.open_data((), ());
+    let _: Absent = located.remove();
+    let _: Absent = located.rename(());
+    let _: Absent = located.create_new((), ());
     let _: Absent = located.create_file(());
     let _: Absent = located.create_dir(());
     let _: Absent = located.leaf_fd();
@@ -157,7 +176,10 @@ fn an_installing_object_states_and_reads_nothing() {
     let _: Option<&Stat> = located.stat();
     let _: Absent = located.read();
     let _: Absent = located.open_streaming(());
-    let _: Absent = located.stage();
+    let _: Absent = located.stage(());
+    let _: Absent = located.open_data((), ());
+    let _: Absent = located.remove();
+    let _: Absent = located.rename(());
 }
 
 /// Whether `T` is `AsFd`, as an associated constant, which an inherent
@@ -237,7 +259,7 @@ fn made_outside(home: &str, token: &str) -> Vec<String> {
 }
 
 /// `Verdict` and `InstallToken` are tokens whose field only their own module
-/// can make, so neither door can be forged from outside it; widening a field
+/// can make, so neither can be forged from outside it; widening a field
 /// would let any file write the constructor, which no compiler objects to.
 #[test]
 fn the_two_tokens_are_made_in_their_own_modules_alone() {

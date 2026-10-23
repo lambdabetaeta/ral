@@ -4,13 +4,13 @@
 //! place rather than ending it; `Drop` is the one exit every life takes.
 
 use crate::agent::EngineLost;
+#[cfg(any(test, feature = "test-util"))]
+use crate::agent::SPAWN_FUEL;
 use crate::agent::factory::Factory;
 use crate::agent::fleet::{AGENT_LEASE_IDLE, Claim, Fleet, Genesis, Launch, Unborn};
 use crate::agent::index::BuiltinIndex;
 use crate::agent::seat::Seat;
-use crate::agent::{
-    Agent, Avatar, Birth, LogCell, ProviderHandle, Readings, ReplyCell, Role, SPAWN_FUEL,
-};
+use crate::agent::{Agent, Avatar, Birth, LogCell, ProviderHandle, Readings, ReplyCell, Role};
 use crate::app::Scratch;
 use crate::bus::{Emitter, Inbox};
 use crate::provider::Provider;
@@ -19,8 +19,8 @@ use crate::record::AgentId;
 use crate::record::{AgentLog, Memory, RecordedAccount, RecordedModel, Resumed};
 use ral_core::carrier::Severed;
 use ral_core::engine::EngineInstaller;
+use ral_core::own::OwnDir;
 use std::io;
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -31,7 +31,7 @@ pub(crate) fn fresh_id() -> AgentId {
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
-fn seed_id_counter(sessions_root: &Path) -> io::Result<()> {
+fn seed_id_counter(sessions_root: &OwnDir) -> io::Result<()> {
     if let Some(last) = AgentLog::session_ids(sessions_root)?.last() {
         NEXT_ID.fetch_max(last.get().saturating_add(1), Ordering::Relaxed);
     }
@@ -101,7 +101,7 @@ pub struct RootConfig {
     pub caps: ral_core::capability::GrantStack,
     /// The run's directory — the one its `sessions/` hangs under, and the
     /// one [`Avatar::resume`] reads back.
-    pub run_dir: std::path::PathBuf,
+    pub run_dir: OwnDir,
     pub trunk: Trunk,
     /// What requests advertise; empty for `--chat`, whose prompt then takes
     /// no builtin surface at all.
@@ -194,14 +194,14 @@ impl Fleet {
                  pass one via RootConfig::factory, or build this root with fuel: 0",
             ));
         }
-        let sessions_root = run_dir.join("sessions");
+        let sessions_root = run_dir.make_dir("sessions")?;
         // A root's attach: nothing has run here yet, so this is a start
         // failure and says so, and it names the run directory it has just
         // made — which is where the engine's own output was captured, if
         // anything was. Carried whole, not flattened: synod downcasts this to
         // tell a dead engine from a log directory it could not make, and only
         // the former has a guest console worth saving.
-        let lost = |s: Severed| io::Error::other(EngineLost::starting(&s, Some(&run_dir)));
+        let lost = |s: Severed| io::Error::other(EngineLost::starting(&s, &run_dir));
         let (seat, genesis) = match root_seat {
             RootSeat::Identity {
                 scratch,
@@ -245,8 +245,11 @@ impl Fleet {
                 fuel,
                 // The policy's one verdict the tree reads; the ledger is the host's.
                 search: egress.policy.search,
+                run_dir,
                 sessions_root,
                 genesis,
+                #[cfg(test)]
+                _scratch: None,
             },
             lease,
         );
@@ -276,7 +279,8 @@ impl Avatar {
         let agent = Agent::new(Birth {
             id: log.id(),
             name: claim.name().to_string(),
-            log_dir: log.dir().to_path_buf(),
+            log_dir: log.dir().clone(),
+            run_dir: fleet.launch.run_dir().clone(),
             started: Instant::now(),
             caps,
             role,
@@ -339,13 +343,13 @@ impl Avatar {
                 "--resume is unavailable for a wire seat: the engine process is gone; resume an identity session instead",
             ));
         }
-        let sessions_root = cfg.run_dir.join("sessions");
+        let sessions_root = cfg.run_dir.dir("sessions")?;
         seed_id_counter(&sessions_root)?;
         let mut live = AgentLog::live_roots(&sessions_root)?.into_iter();
         let Some(first) = live.next() else {
             return Err(io::Error::other(format!(
                 "cannot resume {}: no session is open there; were they all closed with /close?",
-                ral_core::path::shown(&cfg.run_dir)
+                cfg.run_dir
             )));
         };
         let (fleet, first_seat) = Fleet::found(cfg, seat, &crate::INSTALLERS, AGENT_LEASE_IDLE)?;
@@ -442,7 +446,7 @@ impl Avatar {
         claim: Claim,
         seat: Seat,
         provider: Arc<Provider>,
-        open: impl FnOnce(&Path, &RecordedModel, &RecordedAccount, &str) -> io::Result<(AgentLog, T)>,
+        open: impl FnOnce(&OwnDir, &RecordedModel, &RecordedAccount, &str) -> io::Result<(AgentLog, T)>,
     ) -> io::Result<(Self, T)> {
         let launch = &fleet.launch;
         let role = launch.trunk.role();
@@ -596,6 +600,7 @@ impl Avatar {
     ///
     /// # Errors
     /// If the throwaway scratch or the session log inside it cannot be created.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn for_test(system: &str) -> io::Result<Self> {
         Self::for_test_with(TestTrunk::new(system))
     }
@@ -608,10 +613,7 @@ impl Avatar {
     ///
     /// # Panics
     /// If the test process has no cwd.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] a fixture rooted at the test process's own cwd"
-    )]
+    #[cfg(any(test, feature = "test-util"))]
     pub(crate) fn for_test_with(cfg: TestTrunk) -> io::Result<Self> {
         let TestTrunk {
             system,
@@ -647,7 +649,10 @@ impl Avatar {
         };
         let seat = RootSeat::Identity {
             scratch,
-            cwd: std::env::current_dir().expect("test process has a cwd"),
+            cwd: ral_core::host::cwd()
+                .expect("test process has a cwd")
+                .as_path()
+                .to_path_buf(),
             terminal: ral_core::terminal::TerminalState::default(),
         };
         let provider = Arc::new(Provider::scripted(
@@ -659,6 +664,7 @@ impl Avatar {
 }
 
 /// What a unit test may vary about a [`Avatar::for_test`] trunk.
+#[cfg(any(test, feature = "test-util"))]
 pub(crate) struct TestTrunk {
     pub(crate) system: String,
     pub(crate) allow_schedule: bool,
@@ -672,6 +678,7 @@ pub(crate) struct TestTrunk {
     pub(crate) installers: &'static [ral_core::engine::EngineInstaller],
 }
 
+#[cfg(any(test, feature = "test-util"))]
 impl TestTrunk {
     pub(crate) fn new(system: &str) -> Self {
         Self {
@@ -707,8 +714,5 @@ impl Drop for Avatar {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

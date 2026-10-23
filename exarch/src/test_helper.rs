@@ -1,5 +1,4 @@
 //! A real engine on a local socket, shared by wire tests.
-#![allow(clippy::disallowed_methods, reason = "[test] wire-engine fixture")]
 
 use ral_core::carrier::WireTransport;
 use ral_core::protocol::channel::Liveness;

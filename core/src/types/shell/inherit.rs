@@ -26,9 +26,9 @@ struct Holding {
 
 impl Shell {
     /// This shell's child, built on the parent's thread: it inherits the
-    /// lexical scope, context, Σ, builtin table, source registry, call site
-    /// and the session's exit hints, so it resolves, renders and describes as
-    /// the parent does, and differs from its siblings only in its
+    /// lexical scope, context, Σ, builtin table, source registry, call site,
+    /// and the session's exit hints and scratch, so it resolves, renders and
+    /// describes as the parent does, and differs from its siblings only in its
     /// [`Holding`].  Everything else is fresh: control counters, since a child
     /// continues no call stack; no hooks, since a worker or a stage dispatches
     /// none; stdin `Empty`, since a child must not `tcgetpgrp` whoever owns
@@ -54,6 +54,7 @@ impl Shell {
                 sources: self.session.sources.clone(),
                 root_file: self.session.root_file,
                 exit_hints: Arc::clone(&self.session.exit_hints),
+                scratch: self.session.scratch.clone(),
                 fixings: Arc::clone(&self.session.fixings),
                 runtime: Arc::clone(&self.session.runtime),
                 terminal_lease: None,
@@ -262,6 +263,25 @@ mod tests {
 
         let hints = join.join().expect("worker thread");
         assert!(Arc::ptr_eq(&hints, &parent.session.exit_hints));
+    }
+
+    /// The scratch the session's front end made for it reaches every child:
+    /// a worker, a stage and an aside freeze a `scratch` place against it.
+    #[test]
+    fn a_child_inherits_the_scratch() {
+        let mut parent = crate::test_helper::core_shell();
+        parent.set_scratch("/the/session/scratch");
+        let aside = parent.join_session();
+        assert_eq!(aside.scratch(), Some("/the/session/scratch"));
+        let join = parent
+            .spawn_thread(Mooring::adrift(), "test-worker", |_, child| {
+                child.scratch().map(str::to_owned)
+            })
+            .expect("spawn_thread");
+        assert_eq!(
+            join.join().expect("worker thread").as_deref(),
+            Some("/the/session/scratch")
+        );
     }
 
     /// An aside is the same session: it shares the detach policy and leases

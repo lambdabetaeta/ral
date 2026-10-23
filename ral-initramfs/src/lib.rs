@@ -23,9 +23,7 @@
 
 #![allow(
     clippy::disallowed_methods,
-    reason = "ral-initramfs is the guest's /init, run before ral-daemon or any userland exists; \
-              the reviewed syscall sites govern ral-core's Shell path/cwd/fs discipline, and \
-              this program's whole job is the syscalls and process spawns they route"
+    reason = "a guest init program: its whole job is the syscalls the bans route, and it links no ral shell"
 )]
 
 #[cfg(target_os = "linux")]

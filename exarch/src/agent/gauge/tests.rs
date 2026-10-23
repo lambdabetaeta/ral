@@ -101,7 +101,11 @@ fn disk_warning_walks_the_log_dir() {
         ..TestTrunk::new("system")
     })
     .expect("a trunk under a disk-warn ceiling");
-    std::fs::write(session.log_dir().join("big.txt"), vec![0u8; 1024 * 1024]).unwrap();
+    std::fs::write(
+        session.log_dir().path().join("big.txt"),
+        vec![0u8; 1024 * 1024],
+    )
+    .unwrap();
     assert!(
         session
             .disk_warning()

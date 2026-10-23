@@ -206,10 +206,7 @@ impl std::os::windows::io::AsRawHandle for Fd {
 }
 
 #[cfg(all(test, unix))]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};

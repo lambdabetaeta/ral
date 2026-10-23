@@ -1,10 +1,10 @@
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 #![cfg(unix)]
 
 //! Surface observations: core pushes a plain `Value` onto the run's
-//! `surface` sink at every redirect read/write door and every external
-//! command completion door — a builtin dispatch never reaches the rail.
-//! These tests drive the public `Shell::run` door (exactly as
+//! `surface` sink at every redirect read/write and every external
+//! command completion — a builtin dispatch never reaches the rail.
+//! These tests drive the public `Shell::run` entry (exactly as
 //! `surface_effect.rs` does) with a recording sink and assert the emitted
 //! observation records, each fact tagged by its `what` variant.  Decoding
 //! these into cards is exarch's job and out of scope here — we only check the
@@ -41,7 +41,7 @@ fn recording() -> (Arc<Mutex<Vec<Value>>>, SurfaceSink) {
 
 /// Run one run of `source` with a recording surface sink and return the
 /// settled value alongside the captured events.  Unlike `surface_effect.rs`'s
-/// helper this tolerates a failing run result, since several I/O doors
+/// helper this tolerates a failing run result, since several I/O operations
 /// (a failed exec, an aborted write) emit their event *and* surface an
 /// error.
 fn run(shell: &mut Shell, source: &str) -> (Settled<Value>, Vec<Value>) {
@@ -59,7 +59,7 @@ fn run(shell: &mut Shell, source: &str) -> (Settled<Value>, Vec<Value>) {
 
 /// The fact of the single observation tagged `kind` among the captured
 /// events, asserting exactly one fired.  Core reports every dispatch it makes,
-/// so a door test names the kind it is about rather than counting the whole
+/// so a test of one observation names the kind it is about rather than counting the whole
 /// stream.
 fn single_observation(events: &[Value], kind: &str) -> ral_core::types::Map {
     let facts: Vec<ral_core::types::Map> = events
@@ -90,10 +90,10 @@ fn s(v: &str) -> Value {
     Value::string(v)
 }
 
-// ── COMMAND door ─────────────────────────────────────────────────────────
+// ── COMMAND ──────────────────────────────────────────────────────────────
 //
 // A builtin dispatch never reaches the rail — only a command that actually
-// crossed a door (external, detached) surfaces.  Redirect and command
+// left the shell (external, detached) surfaces.  Redirect and command
 // observations in the audit trail are goldened in `tests/unix/audit-trail.ral`;
 // this one pins delivery through the surface sink itself.
 
@@ -117,7 +117,7 @@ fn external_success_emits_command_observation() {
     assert_eq!(m.get("status").as_deref(), Some(&Value::Int(0)));
 }
 
-// ── WRITE door ───────────────────────────────────────────────────────────
+// ── WRITE ────────────────────────────────────────────────────────────────
 //
 // A write's images are read through the handles the redirect opened — the
 // staging file, the target's own object — so a name replaced while the body

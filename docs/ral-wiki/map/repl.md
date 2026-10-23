@@ -19,9 +19,9 @@ holds a `Shell`.
   shell at all and holds the binary's two engine installers (`repl`,
   `batch`), `main.rs` is the thin dispatch over the answer, and `batch.rs`
   runs the non-interactive modes.
-- *One boot, one door.* Batch and the REPL both boot an `IdentityTransport`
-  from their installer, then dispatch the `_ral-boot` door
-  (`ral/src/boot_door.rs`) as their first run, so both keep `exit N` and the
+- *One boot, one builtin.* Batch and the REPL both boot an `IdentityTransport`
+  from their installer, then dispatch the `_ral-boot` builtin
+  (`ral/src/boot_builtin.rs`) as their first run, so both keep `exit N` and the
   `--capabilities` status 2 identically; every evaluation after it — a line,
   a script, a prompt, a hook — is one dispatch through `dispatch_to_report`,
   and every read of engine state is a typed probe.
@@ -33,7 +33,7 @@ holds a `Shell`.
 
 The frontend is a layer *above* the engine. Editor state is host-side, in the
 REPL's `ReplHost` and `PluginRuntime`; the `_ed-*` builtins are thin
-engine-side doors that ask the host for it through the `` `repl-editor ``
+engine-side builtins that ask the host for it through the `` `repl-editor ``
 enquiry, and core holds no editor state at all
 ([[decisions/260514_repl-builtins-stay-in-repl|repl-builtins-stay-in-repl]]).
 A guiding constraint: ral's top-level runs carry persistent state, and the
@@ -43,7 +43,7 @@ REPL makes that state the thing the loop threads.
 
 - [[map/repl/startup|startup]] — argv → `Mode`, the engine installers, batch
   execution over its own engine, the build-baked prelude, platform glue
-  (`ral/src/main.rs`, `startup.rs`, `cli.rs`, `batch.rs`, `boot_door.rs`,
+  (`ral/src/main.rs`, `startup.rs`, `cli.rs`, `batch.rs`, `boot_builtin.rs`,
   `platform.rs`, `build.rs`).
 - [[map/repl/loop|loop]] — the `Session` state machine and one-dispatch
   cycle: the two-stage boot, the `ReplHost`, prompt, rc/profile sourcing
@@ -55,8 +55,8 @@ REPL makes that state the thing the loop threads.
   completion engine and shared highlight table
   (`ral/src/repl/frontend*`, `completion.rs`, `complete.rs`,
   `cursor.rs`, `highlight_style.rs`).
-- [[map/repl/plugins|plugins]] — the plugin runtime, the `_ed-*` editor doors,
-  the plugin load doors, and the one ordered keybinding router
+- [[map/repl/plugins|plugins]] — the plugin runtime, the `_ed-*` editor builtins,
+  the plugin load builtins, and the one ordered keybinding router
   (chord, guard, first match, built-in tail) every frontend dispatches
   through; hooks and aliases live engine-side, editor state host-side, and
   every hook run is a dispatch

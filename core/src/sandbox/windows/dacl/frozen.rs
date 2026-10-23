@@ -24,20 +24,24 @@ use windows_sys::Win32::Storage::FileSystem::{
 
 use super::acl::{Target, appcontainer_already_grants};
 use super::{DaclError, GrantKind};
-use crate::path::{RealPath, is_loop};
+use crate::path::{RealPath, is_loop, utf8};
 use crate::sandbox::TOKEN;
+use crate::site::{Silent, site};
 
-/// A frozen real path, its leaf held open.
+/// A frozen real path, its leaf held open, and the text of its name: a
+/// Windows grant names its object by text.
 pub(crate) struct FrozenPin {
     real: RealPath,
+    name: String,
     leaf: OwnedHandle,
 }
 
 impl FrozenPin {
-    /// Hold `real`, refusing a reparse point on it or on any ancestor, and a
-    /// position that is not on a local fixed volume; `None` is a path that is
-    /// not on disk. `kind` picks the rights the leaf is reopened with: a
-    /// read-write directory also needs `WRITE_OWNER`, for its label.
+    /// Hold `real`, refusing a reparse point on it or on any ancestor, a
+    /// position that is not Unicode, and a position that is not on a local
+    /// fixed volume; `None` is a path that is not on disk, whatever its name.
+    /// `kind` picks the rights the leaf is reopened with: a read-write
+    /// directory also needs `WRITE_OWNER`, for its label.
     pub(crate) fn open(real: &RealPath, kind: GrantKind) -> Result<Option<Self>, DaclError> {
         let held = match real.open_nofollow(&TOKEN) {
             Ok(Some(held)) => held,
@@ -45,6 +49,9 @@ impl FrozenPin {
             Err(e) if is_loop(&e) => return Err(redirected(real)),
             Err(e) => return Err(unheld(real.as_path(), &e)),
         };
+        let name = utf8(real.as_path())
+            .map_err(|_| DaclError::NotUnicode(real.as_path().to_path_buf()))?
+            .to_owned();
         if !held.is_local().map_err(|e| unheld(real.as_path(), &e))? {
             return Err(DaclError::NotLocal(real.as_path().to_path_buf()));
         }
@@ -67,6 +74,7 @@ impl FrozenPin {
             .map_err(|e| unheld(real.as_path(), &e))?;
         Ok(Some(Self {
             real: real.clone(),
+            name,
             leaf: leaf.into(),
         }))
     }
@@ -75,10 +83,17 @@ impl FrozenPin {
         self.real.as_path()
     }
 
+    /// The text of the path, which the capability name and the stamp keys are
+    /// taken from.
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
     pub(super) fn target(&self) -> Target<'_> {
         Target {
             handle: &self.leaf,
             path: self.real.as_path(),
+            name: &self.name,
         }
     }
 }
@@ -87,10 +102,6 @@ impl FrozenPin {
 /// on its way that is itself refused, with where it leads. A position is
 /// refused exactly when it is a link or lies beneath one, so the refusals run
 /// from `real` up to that link.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:dacl-frozen-link] Names the target of the link that redirected a frozen allowance, for the refusal. Sandbox setup, not model data I/O."
-)]
 fn redirected(real: &RealPath) -> DaclError {
     let root = std::iter::successors(Some(real.clone()), RealPath::parent)
         .last()
@@ -102,7 +113,7 @@ fn redirected(real: &RealPath) -> DaclError {
         .unwrap_or_else(|| real.clone());
     DaclError::Redirected {
         granted: real.as_path().to_path_buf(),
-        target: fs::read_link(at.as_path()).ok(),
+        target: site!(Silent::DaclFrozenLink, fs::read_link(at.as_path())).ok(),
         at: at.as_path().to_path_buf(),
     }
 }
@@ -141,4 +152,5 @@ impl AsRef<Path> for FrozenPin {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

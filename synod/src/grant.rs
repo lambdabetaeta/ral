@@ -28,6 +28,7 @@
 //! path names nothing.  One substitution, in one function, which is why
 //! the construction lives here and is not scattered across the session.
 
+use crate::site::{Silent, site};
 use ral_core::capability::{Capabilities, Evidence, ExecKey, FsPolicy, Ungoverned};
 use ral_core::path::{
     FrozenPath, GuestPath, LeafMode, LexicalPath, RealPath, Resolver, shown, walk_dir, walk_lenient,
@@ -395,7 +396,7 @@ impl Grant {
     pub fn capabilities(&self) -> Capabilities {
         // Minted by the guest's rule, not this host's: `from_guest` folds
         // `/work` in the namespace the guard will match it in.  The ordinary
-        // door would fold it with the *host's* kernel, which on Windows
+        // constructor would fold it with the *host's* kernel, which on Windows
         // rebuilds it as `\work` — and the agent would then be denied the
         // one folder it was given, by a grant that reads as if it had been
         // granted.  The same distinction `MachineSpec::resolve` draws when
@@ -447,17 +448,12 @@ struct Territory {
 
 impl Territory {
     /// The territory of the user running synod.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "host-env: the territory being protected is the launching user's real home and \
-                  application-data folders, read from this process's own environment"
-    )]
     fn of_this_host() -> Result<Self, String> {
-        let home = ral_core::host::home().map(PathBuf::from);
+        let home = site!(Silent::HostTerritory, ral_core::host::home()).map(PathBuf::from);
         Self::of(
             home.as_deref(),
-            |name| std::env::var_os(name),
-            &std::env::temp_dir(),
+            ral_core::host::var_os,
+            &ral_core::host::temp_dir(),
         )
     }
 
@@ -540,11 +536,7 @@ fn settings_trees(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fixtures write and read scratch files; no model in \
-              the loop"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use crate::test_fixture::workshop;
@@ -889,8 +881,8 @@ mod tests {
         let layer = ral_core::test_helper::layer(grant.capabilities());
 
         let mut shell = ral_core::test_helper::core_shell();
-        // Read asks the probe door, write asks the stack directly: the write
-        // door is `locate`, which walks the name first and would fail on
+        // Read asks the probe, write asks the stack directly: the write
+        // path is `locate`, which walks the name first and would fail on
         // these paths for not existing, long before it reached the grant.
         shell.with_layer(layer, |sh| {
             for admitted in ["/work/letter.docx", "/tmp/draft.docx"] {

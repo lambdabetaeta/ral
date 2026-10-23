@@ -169,17 +169,21 @@ stays visible until quiescence.
   carry on, and every earlier turn stays in the log, withdrawn from the context.
 
 A session directory holds `record.jsonl` alone, under the durable per-run log
-directory (`App::log_run_dir`, `app.rs`,
-`$XDG_STATE_HOME/exarch/<project>/<run>/sessions/<id>/`). A transcript is
-rendered from it on demand: `tui/export.rs`'s `export_to(record, dest, format)`
-is the one place a transcript file is created, and both `/export`
-(`tui/commands.rs`, which resolves and guards the destination) and
+directory (`App::new_run`, `app.rs`,
+`$XDG_STATE_HOME/exarch/<project>/<run>/sessions/<id>/`), held as an `OwnDir`
+from the moment the session is born. A transcript is
+rendered from it on demand: `tui/export.rs`'s
+`export_to(record, name, dest, format)`, which takes the record's open handle and
+its name (for messages) and makes the destination with `own::create_named`, under a
+typed site that says the name is the user's, is the one place a transcript file is created: it is a new file, and an existing one is
+refused, never overwritten. Both `/export` (`tui/commands.rs`, which resolves
+the destination against the session's cwd) and
 `exarch export <session> [--out FILE]` call it. It replays the record through a
 `tui/mirror.rs` `Mirror` — the record-to-`Block` half of `Scrollback`, shared with
 the live view — and hands each block the mirror lets go to a `Render`er behind
 the `Format` seam (`Plain` today). At session end the TUI prints one
 `Session log: <dir>/record.jsonl` line per session
-(`Tabs::log_dirs`) and the `exarch export <dir>` hint
+(`Tabs::log_dirs`, the held directories) and the `exarch export <dir>` hint
 ([[internals/session-record|session-record]]).
 
 On resume, a resumed root's `Born` carries its `Resumed` summary, whose
@@ -421,7 +425,7 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  ([[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]).
  Once `LINGER` elapses, `Tabs::tick` turns the tab `Life::Gone`: the
  scrollback (blocks and their render memos, streaming buffers) is dropped
- and the `Status` is reset, releasing its pins; only the session directory
+ and the `Status` is reset, releasing its pins; only the held session directory
  stays (`Tabs::log_dirs`), which `Tabs::status` and
  `status_mut` no longer answer for. Every live
  scrollback is bounded by exactly one window, the view fold's own:
@@ -459,7 +463,8 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  on the UI thread; `/help` answers with a framed card of `(command, gloss)`
  rows, and `/copy` answers where every copy does — the transient corner
  toast of `gesture::Toast`, never a block in the transcript; copies go
- through the `clipboard` crate, native locally and OSC 52 over ssh;
+ through the `clipboard` crate, native locally and OSC 52 over ssh
+ (`Clipboard::new(remote)`, its caller reading `SSH_CONNECTION`);
  session commands are parsed at submit into a `Read` (`/new` and `/branch`
  first typed as the one `Command::Hatch(Memory, Option<name>)`, mirroring
  `Read::Hatch`; `/context`, `/resources`) or a `Rewrite` (`/clear`, `/close`, `/evict`,

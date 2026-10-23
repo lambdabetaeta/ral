@@ -140,10 +140,7 @@ mod cancels_exchange_tests {
 }
 
 #[cfg(all(test, unix))]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     //! Tests for exarch's signal dispositions.
     //!

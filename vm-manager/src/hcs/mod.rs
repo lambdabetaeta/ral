@@ -49,6 +49,7 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::site::{Silent, site};
 use crate::{
     Act, BootArtifact, Error, GuestConsole, HostFile, Hypervisor, Machine, MachineFiles,
     MachineSpec, Wire, Wires,
@@ -177,15 +178,12 @@ impl Hyperv {
     /// directory layer knows, deliberately: this crate does not depend on
     /// `ral-core`, and a machine layer that reached into the application's
     /// bootstrap for a path would be the wrong way round.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "REASONED-SILENT: lifting one path-valued environment variable. This is not an \
-                  XDG basedir read — it is Windows' own cache location, and this crate \
-                  deliberately does not depend on ral-core's basedir layer (see the doc above)."
-    )]
     pub fn default_cache() -> PathBuf {
-        std::env::var_os("LOCALAPPDATA")
-            .map_or_else(std::env::temp_dir, PathBuf::from)
+        site!(Silent::LocalAppDataVar, std::env::var_os("LOCALAPPDATA"))
+            .map_or_else(
+                || site!(Silent::LocalAppDataFallback, std::env::temp_dir()),
+                PathBuf::from,
+            )
             .join("Synod")
             .join("Machine")
     }
@@ -656,12 +654,8 @@ pub(crate) fn plain(path: PathBuf) -> PathBuf {
 ///
 /// # Errors
 /// Returns [`Error::NotUnicode`] if `path` is not Unicode.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "native: the path as the JSON text the compute service opens it by; never shown"
-)]
 pub(crate) fn document_text(path: &Path) -> Result<&str, Error> {
-    path.to_str()
+    site!(Silent::DocumentText, path => to_str())
         .ok_or_else(|| Error::NotUnicode(path.to_path_buf()))
 }
 
@@ -728,15 +722,10 @@ fn release(session: &Path) {
 /// # Errors
 /// Returns the last refusal Windows gave if the disk is still there when
 /// [`REMOVE_GRACE`] runs out.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: releasing the per-session disk after power-off. Infrastructure \
-              teardown, not a model's turn-time write; no Shell, no run, no card."
-)]
 fn remove(path: &Path) -> std::io::Result<()> {
     let deadline = Instant::now() + REMOVE_GRACE;
     loop {
-        match std::fs::remove_file(path) {
+        match site!(Silent::SessionDiskRelease, std::fs::remove_file(path)) {
             Ok(()) => return Ok(()),
             Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             // The deadline is read after the attempt, never before it, so the
@@ -751,13 +740,9 @@ fn remove(path: &Path) -> std::io::Result<()> {
 /// How big a file is, in whole mebibytes, for a sentence to quote — nought if
 /// it cannot be measured, which is not worth a second complaint inside the
 /// first.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: measuring a file synod itself made, to say how much of someone's \
-              disk it is holding. No shell, no run, no card."
-)]
 fn mebibytes(path: &Path) -> u64 {
-    std::fs::metadata(path).map_or(0, |file| file.len() / (1024 * 1024))
+    site!(Silent::SessionDiskMeasure, std::fs::metadata(path))
+        .map_or(0, |file| file.len() / (1024 * 1024))
 }
 
 /// Delete session disks left in `cache` by earlier runs, and say how much came
@@ -781,15 +766,8 @@ fn mebibytes(path: &Path) -> u64 {
 /// rootfs, its marker, and the part file of a wrap in progress therefore cannot
 /// be swept by accident: they are not session disks, and this cannot name what
 /// it does not recognise.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: reading synod's own machine cache and deleting the session disks it \
-              leaked there. Host-side housekeeping before any guest exists; no shell, no run, no \
-              card. Each entry's name is read as text (native) only to match it against the \
-              session disks' own naming."
-)]
 fn sweep_orphans(cache: &Path) {
-    let Ok(entries) = std::fs::read_dir(cache) else {
+    let Ok(entries) = site!(Silent::SessionDiskSweep, std::fs::read_dir(cache)) else {
         // No cache yet, or none this user may read: either way there is nothing
         // to reclaim and nothing to report.
         return;
@@ -797,7 +775,10 @@ fn sweep_orphans(cache: &Path) {
     let now = unix_seconds();
     let (mut swept, mut reclaimed) = (0usize, 0u64);
     for entry in entries.flatten() {
-        let Some(born) = session_disk_epoch(&entry.file_name().to_string_lossy()) else {
+        let name = entry.file_name();
+        let Some(born) =
+            session_disk_epoch(&site!(Silent::SessionDiskSweep, &name => to_string_lossy()))
+        else {
             continue;
         };
         if now.saturating_sub(born) < ORPHAN_AGE.as_secs() {
@@ -805,7 +786,7 @@ fn sweep_orphans(cache: &Path) {
         }
         let path = entry.path();
         let bytes = entry.metadata().map_or(0, |file| file.len());
-        if std::fs::remove_file(&path).is_ok() {
+        if site!(Silent::SessionDiskSweep, std::fs::remove_file(&path)).is_ok() {
             swept += 1;
             reclaimed += bytes;
         }
@@ -832,14 +813,8 @@ fn report_swept(cache: &Path, swept: usize, reclaimed: u64) {
 /// shows it; these lines are not reports but asides to whoever runs the
 /// process — a checkout's terminal, or a service's output that goes nowhere —
 /// and no front-end ever reads them.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:windows-host] a host diagnostic with no ral shell to print through: the \
-              machine layer's own aside to whoever runs it, which no front-end words and so no \
-              front-end's spelling reaches"
-)]
 fn aside_spelling(path: &Path) -> String {
-    path.display().to_string()
+    site!(Silent::AsideSpelling, path => display()).to_string()
 }
 
 /// The Unix second a session disk's *name* says it was made, if the name is a
@@ -861,11 +836,7 @@ fn session_disk_epoch(name: &str) -> Option<u64> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: test scaffolding names literal paths and reads the cache location \
-              back; no shell, no run, no card."
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 

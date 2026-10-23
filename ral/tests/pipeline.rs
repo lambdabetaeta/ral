@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_methods)]
 // Integration tests for pipeline mechanics: process groups, signal routing,
 // broken pipes, concurrent spawned pipelines, and output correctness.
 //
@@ -11,6 +10,7 @@
 // head, wc) and Unix process-group / signal semantics.  What needs no harness
 // — stage dispatch, redirects, statuses, capture rules — is the golden
 // `tests/unix/pipeline-stages.ral` and `tests/lang/pipeline-values.ral`.
+#![allow(clippy::disallowed_methods, reason = "test code")]
 #![cfg(unix)]
 
 mod common;

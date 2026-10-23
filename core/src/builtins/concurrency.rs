@@ -10,6 +10,7 @@
 mod birth;
 mod eliminate;
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;
 
 #[cfg(unix)]
@@ -129,7 +130,7 @@ pub(super) fn builtin_watch(
 /// The one concurrency verb whose axis is *ownership*: the others reify a
 /// [`Value::Handle`] over work that dies with this process, while a detached
 /// program is double-forked away and reparented to init, so no eliminator
-/// applies and no teardown here can reach it.  This door is the surface
+/// applies and no teardown here can reach it.  This builtin is the surface
 /// discipline only; resolution, vetting, and the receipt live at the exec
 /// boundary (`runtime::command::detach`).  Installed only by a host that arms a
 /// detach policy ([`Shell::arm_detach`]).

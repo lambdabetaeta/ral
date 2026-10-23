@@ -31,7 +31,7 @@ pub(super) mod platform;
 pub(super) mod platform;
 
 /// What a denial's record names, and so which remedy the hint owes.  A service
-/// never arrives as a path, so no wording can offer a door as something to
+/// never arrives as a path, so no wording can offer one as something to
 /// grant — the confusion this taxonomy exists to make unsayable.
 #[cfg(not(windows))]
 #[cfg_attr(
@@ -54,7 +54,7 @@ pub(super) enum Denied<'a> {
     /// A Mach or IPC name.  The base profile decides these, so no grant
     /// widens one, and most such denials are a library probing a service it
     /// can do without.
-    Door(&'a str),
+    Service(&'a str),
     /// A socket.  The grant's `net:` bit is the whole remedy, so the endpoint
     /// the record names is not worth repeating.
     Socket,
@@ -142,12 +142,12 @@ fn build_hint(denials: &[&str]) -> String {
 
 /// One remedy per class of denial present, because the classes have different
 /// answers and only some are the grant's: a path it can admit, a binary its
-/// `exec` set can admit, a door it cannot open at all, a socket that is the
+/// `exec` set can admit, a service it cannot open at all, a socket that is the
 /// `net:` bit alone.  Leading with whichever line happened to carry a path is
-/// what once offered a startup plist as the cure for a withheld keychain door.
+/// what once offered a startup plist as the cure for a withheld keychain service.
 #[cfg(not(windows))]
 fn remedies(denials: &[&str]) -> Vec<String> {
-    let (mut reads, mut writes, mut execs, mut doors) = (vec![], vec![], vec![], vec![]);
+    let (mut reads, mut writes, mut execs, mut services) = (vec![], vec![], vec![], vec![]);
     let mut socket = false;
     let mut opaque = None;
     for (op, denied) in denials
@@ -158,20 +158,20 @@ fn remedies(denials: &[&str]) -> Vec<String> {
             Denied::Read(path) => note(&mut reads, path),
             Denied::Write(path) => note(&mut writes, path),
             Denied::Exec(path) => note(&mut execs, path),
-            Denied::Door(name) => note(&mut doors, name),
+            Denied::Service(name) => note(&mut services, name),
             Denied::Socket => socket = true,
             Denied::Opaque => opaque = opaque.or(Some(op)),
         }
     }
     let mut out = Vec::new();
-    // A door the profile can explain leads, because it is the one class the
+    // A service the profile can explain leads, because it is the one class the
     // reader cannot act on: left below a grantable path, it reads as an aside
     // while the path it cannot help gets granted in vain.
-    let explained = doors
+    let explained = services
         .iter()
-        .any(|door| platform::door_reason(door).is_some());
+        .any(|service| platform::service_reason(service).is_some());
     if explained {
-        out.push(door_remedy(&doors));
+        out.push(service_remedy(&services));
     }
     if !reads.is_empty() {
         out.push(path_remedy(&reads, "read"));
@@ -182,8 +182,8 @@ fn remedies(denials: &[&str]) -> Vec<String> {
     if !execs.is_empty() {
         out.push(exec_remedy(&execs));
     }
-    if !doors.is_empty() && !explained {
-        out.push(door_remedy(&doors));
+    if !services.is_empty() && !explained {
+        out.push(service_remedy(&services));
     }
     if socket {
         out.push(NET_REMEDY.to_string());
@@ -259,26 +259,26 @@ fn exec_remedy(paths: &[&str]) -> String {
     out
 }
 
-/// Doors carrying a stated reason first: a refusal the profile can explain is
+/// Services carrying a stated reason first: a refusal the profile can explain is
 /// worth more than the startup probes that outnumber it.
 #[cfg(not(windows))]
-fn door_remedy(doors: &[&str]) -> String {
-    let mut ranked: Vec<(&str, Option<&'static str>)> = doors
+fn service_remedy(services: &[&str]) -> String {
+    let mut ranked: Vec<(&str, Option<&'static str>)> = services
         .iter()
-        .map(|door| (*door, platform::door_reason(door)))
+        .map(|service| (*service, platform::service_reason(service)))
         .collect();
     ranked.sort_by_key(|(_, why)| why.is_none());
     let mut out = String::from(
-        "the base profile withheld a door no grant opens: a Mach or IPC name is the \
+        "the base profile withheld a service no grant opens: a Mach or IPC name is the \
          profile's to decide, and the grant's fs, net and exec sets do not reach one:",
     );
-    for (door, why) in ranked.iter().take(MAX_DENIAL_LINES) {
+    for (service, why) in ranked.iter().take(MAX_DENIAL_LINES) {
         match why {
             Some(why) => {
-                let _ = write!(out, "\n  {door}: {why}");
+                let _ = write!(out, "\n  {service}: {why}");
             }
             None => {
-                let _ = write!(out, "\n  {door}");
+                let _ = write!(out, "\n  {service}");
             }
         }
     }
@@ -287,7 +287,7 @@ fn door_remedy(doors: &[&str]) -> String {
     }
     if ranked.iter().any(|(_, why)| why.is_none()) {
         out.push_str(
-            "\nA door with no reason given is usually harmless: a library probes a service \
+            "\nA name with no reason given is usually harmless: a library probes a service \
              it can do without, and the denial is noise beside whatever actually failed.",
         );
     }
@@ -348,7 +348,8 @@ mod tests {
     }
 
     /// Each class present answers for itself: the path is offered to the fs
-    /// set, the service named as a door, and neither is dressed as the other.
+    /// set, the Mach name reported as a service, and neither is dressed as
+    /// the other.
     #[cfg(target_os = "macos")]
     #[test]
     fn hint_answers_every_class_of_denial_it_was_given() {
@@ -363,7 +364,7 @@ mod tests {
         );
         assert!(
             hint.contains("no grant opens") && hint.contains("apple.shm.notification_center"),
-            "hint must name the IPC operand as a door, not a path; got {hint:?}"
+            "hint must name the IPC operand as a service, not a path; got {hint:?}"
         );
         assert!(
             !hint.contains("fs.read:\n  apple.shm"),
@@ -375,24 +376,24 @@ mod tests {
         );
     }
 
-    /// A withheld door is answered by the profile's own reason, not by an fs
+    /// A withheld service is answered by the profile's own reason, not by an fs
     /// widening no grant could perform — the securityd case that offered a
     /// startup plist as the cure.
     #[cfg(target_os = "macos")]
     #[test]
-    fn hint_quotes_the_profile_reason_for_a_withheld_door() {
+    fn hint_quotes_the_profile_reason_for_a_withheld_service() {
         let plist = "2026-06-19 12:00:00.000 kernel[0] (Sandbox) Sandbox: cargo(1) deny(1) \
                      file-read-data /Users/me/Library/Preferences/.GlobalPreferences.plist";
-        let door = "2026-06-19 12:00:00.100 kernel[0] (Sandbox) Sandbox: cargo(1) deny(1) \
+        let service = "2026-06-19 12:00:00.100 kernel[0] (Sandbox) Sandbox: cargo(1) deny(1) \
                     mach-lookup com.apple.SecurityServer";
-        let hint = build_hint(&[plist, door]);
+        let hint = build_hint(&[plist, service]);
         assert!(
             hint.contains("keychain") && hint.contains("git-fetch-with-cli"),
-            "a withheld door must carry the profile's reason; got {hint:?}"
+            "a withheld service must carry the profile's reason; got {hint:?}"
         );
         assert!(
             hint.contains("com.apple.SecurityServer:"),
-            "the reason must be attached to the door that has one; got {hint:?}"
+            "the reason must be attached to the service that has one; got {hint:?}"
         );
     }
 

@@ -158,11 +158,13 @@ impl OwnedSid {
 }
 
 /// The object a security operation reaches: the very one a held handle
-/// names, so what was checked is what is stamped; the path is for messages.
+/// names, so what was checked is what is stamped; the path is for messages,
+/// and `name` is the text of it a stamp is keyed by.
 #[derive(Clone, Copy)]
 pub(super) struct Target<'a> {
     pub(super) handle: &'a OwnedHandle,
     pub(super) path: &'a Path,
+    pub(super) name: &'a str,
 }
 
 impl Target<'_> {
@@ -592,4 +594,5 @@ pub(super) fn appcontainer_already_grants(target: Target<'_>, needed_mask: u32) 
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

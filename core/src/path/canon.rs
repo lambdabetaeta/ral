@@ -3,6 +3,10 @@
 //! ([`lookup_walk`]).  All lexical: what the object is, and where a surface
 //! reaches it, is the walk's to say.
 
+#[cfg(unix)]
+use super::site::Silent;
+#[cfg(unix)]
+use crate::site::site;
 use std::path::{Path, PathBuf};
 
 /// macOS firmlinks bridging the read-only system volume to the data volume,
@@ -45,16 +49,11 @@ pub(crate) fn with_firmlink_twins(mut names: Vec<PathBuf>) -> Vec<PathBuf> {
 /// its way, the root apart: the ancestors of `surface`, itself included where it
 /// differs from `real` (an authored link is passed, never followed), and the
 /// proper ancestors of `real`.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "path-form: the names a lookup stats, rendered for a kernel sandbox"
-)]
 #[cfg(unix)]
 pub(crate) fn lookup_walk(surface: &Path, real: &Path) -> Vec<PathBuf> {
-    surface
-        .ancestors()
+    site!(Silent::LookupWalk, surface => ancestors())
         .filter(|a| *a != real)
-        .chain(real.ancestors().skip(1))
+        .chain(site!(Silent::LookupWalk, real => ancestors()).skip(1))
         .filter(|a| a.file_name().is_some())
         .map(Path::to_path_buf)
         .collect()
@@ -85,14 +84,10 @@ pub(crate) fn spelled<'a>(
                 // `{v:?}`, not `.display()`: `Display` would paper over the
                 // fault with the very U+FFFD substitution being refused.
                 #[allow(clippy::unnecessary_debug_formatting)]
-                #[allow(
-                    clippy::disallowed_methods,
-                    reason = "native: the non-UTF-8 refusal this renders for Seatbelt"
-                )]
-                let s = v.to_str().ok_or_else(|| {
+                let s = site!(Silent::RuleText, &v => to_str()).ok_or_else(|| {
                     format!(
                         "ral: sandbox grant path is not valid UTF-8, refusing to render \
-                         it into a Seatbelt rule that could name the wrong path: {v:?}"
+                         it into a sandbox rule that could name the wrong path: {v:?}"
                     )
                 })?;
                 out.push(s.to_string());
@@ -133,10 +128,7 @@ pub(crate) fn firmlink_toggle(p: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(all(test, unix))]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] fixtures build literal and non-UTF-8 paths"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use std::path::Path;

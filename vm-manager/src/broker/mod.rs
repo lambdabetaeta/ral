@@ -272,6 +272,7 @@ mod frame {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 
@@ -382,11 +383,6 @@ mod tests {
     /// Skipped when a real service is installed: the pipe has one name, and
     /// stealing it from a running broker would be a poor way to test it.
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "REASONED-SILENT: test scaffolding makes the folder it then grants; no shell, no \
-                  run, no card."
-    )]
     fn the_broker_answers_a_client_over_a_real_pipe() {
         use crate::{Hypervisor, MachineSpec};
 

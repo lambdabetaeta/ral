@@ -155,6 +155,7 @@ impl Drop for SignalMask {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 
@@ -166,10 +167,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] signal dispositions need an isolated process"
-    )]
     fn shutdown_retries_after_an_early_interrupt() {
         use std::io::{Read as _, Write as _};
         use std::os::fd::AsRawFd as _;

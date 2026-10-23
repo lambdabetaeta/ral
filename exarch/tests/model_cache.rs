@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 //! [`ModelCatalog`]'s on-disk half, in its own test binary.
 //!

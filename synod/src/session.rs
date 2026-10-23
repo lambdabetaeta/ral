@@ -215,11 +215,10 @@ impl Conversation {
             .to_string();
 
         let run_dir = SYNOD
-            .log_run_dir(grant.root())
+            .new_run(grant.root())
             .map_err(|e| format!("could not make a log folder: {e}"))?;
         let run_lock = exarch::app::RunLock::try_acquire(&run_dir)
-            .map_err(|e| format!("could not lock the log folder {}: {e}", shown(&run_dir)))?;
-        let config_dir = SYNOD.xdg_dir(ral_core::path::XdgKind::Config);
+            .map_err(|e| format!("could not lock the log folder {run_dir}: {e}"))?;
 
         // The two slow arms of an opening wait on different things
         // entirely: the boot on a guest kernel coming up, the baseline on
@@ -246,7 +245,7 @@ impl Conversation {
         // the guest's namespace: the engine lives there, and the host path
         // of the folder names nothing inside it.
         let caps = grant.capabilities();
-        let system = crate::prompt::assemble(machine.workspace_path(), &grant.name(), &config_dir)?;
+        let system = crate::prompt::assemble(machine.workspace_path(), &grant.name())?;
 
         // Synod's engine is per-conversation; the credentials, catalog, and
         // allowance record it draws on are the application's, held for its
@@ -390,9 +389,7 @@ impl Conversation {
         };
         let run_dir = self.agent.run_dir();
         let lost = exarch::agent::EngineLost::running(&cause, run_dir);
-        if let Some(run_dir) = run_dir {
-            engine_log::capture(run_dir, &lost.logged(), &self.factory.console());
-        }
+        engine_log::capture(run_dir, &lost.logged(), &self.factory.console());
         let sentence = lost.to_string();
         self.ended = Some(sentence.clone());
         Err(sentence)
@@ -522,13 +519,10 @@ fn start_failed(factory: &crate::machine_factory::MachineFactory, why: &std::io:
     else {
         return format!("the assistant could not be set up: {why}");
     };
-    let sentence = lost.to_string();
-    if let Some(run_dir) = lost.log_dir() {
-        // `logged`, not the sentence: the file is where the engine's own
-        // account of itself belongs, having been kept out of the window's.
-        engine_log::capture(run_dir, &lost.logged(), &factory.console());
-    }
-    sentence
+    // `logged`, not the sentence: the file is where the engine's own account of
+    // itself belongs, having been kept out of the window's.
+    engine_log::capture(lost.log_dir(), &lost.logged(), &factory.console());
+    lost.to_string()
 }
 
 /// Recover `agent`'s machine from `factory`, ending the agent first.

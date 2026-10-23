@@ -7,17 +7,15 @@
 
 use super::PathRules;
 use super::lex::parse_bytes;
+use super::site::Silent;
+use crate::site::site;
 use std::borrow::Cow;
 use std::path::Path;
 
 /// `p` as ral shows it.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "native: the one conversion every shown path goes through"
-)]
 pub fn shown(p: impl AsRef<Path>) -> String {
     fold_for(
-        &dunce::simplified(p.as_ref()).to_string_lossy(),
+        &site!(Silent::Shown, dunce::simplified(p.as_ref()) => to_string_lossy()),
         PathRules::HOST,
     )
     .into_owned()

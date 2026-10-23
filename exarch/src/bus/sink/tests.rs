@@ -9,10 +9,6 @@ use std::time::{Duration, Instant};
 /// clone — a live sender — past the worker's return, as a `spawn`ed server
 /// that never terminates would.
 #[test]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] a poisoned lock is the test's own failure"
-)]
 fn pump_returns_on_worker_done_not_sender_disconnect() {
     struct CountSink(usize);
     impl Sink for CountSink {

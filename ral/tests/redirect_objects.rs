@@ -1,7 +1,7 @@
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 #![cfg(unix)]
 
-//! The fs door authorises the *object* a redirect lands on, not the name
+//! The fs guard authorises the *object* a redirect lands on, not the name
 //! written: a symlink is judged at its target, dangling or not, and a
 //! before-image is a read the grant must admit.
 
@@ -17,7 +17,7 @@ struct Fixture {
 impl Fixture {
     /// `root/work` writable, `root` readable, `deny` denied.
     fn new(name: &str, read: &[&str], deny: &[&str]) -> Self {
-        let root = common::fresh_tmp_path(&format!("fs_door_{name}"), "d");
+        let root = common::fresh_tmp_path(&format!("redirect_objects_{name}"), "d");
         std::fs::create_dir_all(root.join("work/inner")).unwrap();
         std::fs::create_dir_all(root.join("outside")).unwrap();
         let list = |items: &[String]| {
@@ -36,7 +36,7 @@ impl Fixture {
             list(&[abs("work")]),
             list(&deny),
         );
-        let profile = common::fresh_tmp_path(&format!("fs_door_{name}"), "ral");
+        let profile = common::fresh_tmp_path(&format!("redirect_objects_{name}"), "ral");
         std::fs::write(&profile, body).unwrap();
         Self { root, profile }
     }

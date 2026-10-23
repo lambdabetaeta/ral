@@ -1,26 +1,30 @@
-#![allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
-
 use super::*;
 use crate::record::{Display, Forensic};
+use ral_core::own::TestDir;
+use std::fs::OpenOptions;
 
-fn temp_path(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "exarch-log-test-{name}-{}-{:?}.jsonl",
-        std::process::id(),
-        std::thread::current().id()
-    ))
+/// A directory of this test's own for its log; held for as long as the test
+/// reads the log back.
+fn temp_dir(name: &str) -> TestDir {
+    OwnDir::for_test(&format!("log-{name}")).expect("a test directory")
+}
+
+/// What [`Log::read`] is handed for the record at `path`.
+fn read(path: &Path) -> io::Result<impl Iterator<Item = io::Result<Recorded<Record>>> + use<>> {
+    Log::read(File::open(path)?, path)
 }
 
 #[test]
 fn a_record_round_trips_through_the_entry_envelope() {
-    let path = temp_path("round-trip");
-    let log = Log::create(&path).expect("temp record log");
+    let dir = temp_dir("round-trip");
+    let path = dir.path().join(RECORD);
+    let log = Log::create(&dir).expect("temp record log");
     let record = Record::Forensic(Forensic::Error {
         text: "boom".into(),
     });
     let _locus = log.append(&record).expect("append");
 
-    let back: Vec<_> = Log::read(&path).expect("read back").collect();
+    let back: Vec<_> = read(&path).expect("read back").collect();
     assert_eq!(back.len(), 1);
     let recorded = back.into_iter().next().unwrap().expect("parses");
     assert!(matches!(
@@ -42,8 +46,9 @@ fn a_large_observation_replays_exactly_from_compact_bytes() {
     use ral_core::first_order::datum::Datum as _;
     use ral_core::types::AuditIo;
 
-    let path = temp_path("compact-observation");
-    let log = Log::create(&path).unwrap();
+    let dir = temp_dir("compact-observation");
+    let path = dir.path().join(RECORD);
+    let log = Log::create(&dir).unwrap();
     let bytes: Vec<u8> = (0..=255).cycle().take(1024 * 1024).collect();
     let observation = Observation::instant(
         None,
@@ -67,7 +72,7 @@ fn a_large_observation_replays_exactly_from_compact_bytes() {
         }))
         .unwrap();
     assert!(std::fs::metadata(&path).unwrap().len() < 1_400_000);
-    let records: Vec<_> = Log::read(&path).unwrap().collect::<Result<_, _>>().unwrap();
+    let records: Vec<_> = read(&path).unwrap().collect::<Result<_, _>>().unwrap();
     assert_eq!(records.len(), 1);
     let Record::Display(Display::Observation { value }) =
         records.into_iter().next().unwrap().into_value()
@@ -79,7 +84,8 @@ fn a_large_observation_replays_exactly_from_compact_bytes() {
 
 #[test]
 fn a_pre_envelope_line_is_refused_by_name() {
-    let path = temp_path("pre-envelope");
+    let dir = temp_dir("pre-envelope");
+    let path = dir.path().join(RECORD);
     let record = Record::Forensic(Forensic::Error {
         text: "boom".into(),
     });
@@ -87,9 +93,7 @@ fn a_pre_envelope_line_is_refused_by_name() {
     line.push(b'\n');
     std::fs::write(&path, &line).unwrap();
 
-    let back: Vec<_> = Log::read(&path)
-        .expect("the file itself reads back")
-        .collect();
+    let back: Vec<_> = read(&path).expect("the file itself reads back").collect();
     assert_eq!(back.len(), 1);
     let error = back.into_iter().next().unwrap().expect_err("no envelope");
     let text = error.to_string();
@@ -99,8 +103,9 @@ fn a_pre_envelope_line_is_refused_by_name() {
 
 #[test]
 fn a_locus_round_trips_identically_through_append_and_read() {
-    let path = temp_path("locus-round-trip");
-    let log = Log::create(&path).expect("temp record log");
+    let dir = temp_dir("locus-round-trip");
+    let path = dir.path().join(RECORD);
+    let log = Log::create(&dir).expect("temp record log");
     let first = log
         .append(&Record::Forensic(Forensic::Error {
             text: "first".into(),
@@ -112,7 +117,7 @@ fn a_locus_round_trips_identically_through_append_and_read() {
         }))
         .expect("append");
 
-    let back: Vec<_> = Log::read(&path).expect("read back").collect();
+    let back: Vec<_> = read(&path).expect("read back").collect();
     assert_eq!(back.len(), 2);
     let mut back = back.into_iter();
     let first_back = back.next().unwrap().expect("parses");
@@ -123,15 +128,16 @@ fn a_locus_round_trips_identically_through_append_and_read() {
 
 #[test]
 fn a_mismatched_body_misses_the_digest() {
-    let path = temp_path("digest-mismatch");
-    let log = Log::create(&path).expect("temp record log");
+    let dir = temp_dir("digest-mismatch");
+    let path = dir.path().join(RECORD);
+    let log = Log::create(&dir).expect("temp record log");
     let _locus = log
         .append(&Record::Forensic(Forensic::Error {
             text: "boom".into(),
         }))
         .expect("append");
 
-    let recorded = Log::read(&path)
+    let recorded = read(&path)
         .expect("read back")
         .next()
         .expect("one record")
@@ -144,8 +150,9 @@ fn a_mismatched_body_misses_the_digest() {
 
 #[test]
 fn read_ignores_an_unterminated_tail() {
-    let path = temp_path("torn-tail");
-    let log = Log::create(&path).expect("temp record log");
+    let dir = temp_dir("torn-tail");
+    let path = dir.path().join(RECORD);
+    let log = Log::create(&dir).expect("temp record log");
     let _locus = log
         .append(&Record::Forensic(Forensic::Error {
             text: "whole".into(),
@@ -156,8 +163,11 @@ fn read_ignores_an_unterminated_tail() {
     file.write_all(br#"{"at_unix_ms":0,"record":{"Forensic":{"kind":"er"#)
         .unwrap();
 
-    assert_eq!(Log::complete_len(&path).unwrap(), whole);
-    let back: Vec<_> = Log::read(&path).expect("read back").collect();
+    assert_eq!(
+        Log::complete_len(&mut File::open(&path).unwrap()).unwrap(),
+        whole
+    );
+    let back: Vec<_> = read(&path).expect("read back").collect();
     assert_eq!(back.len(), 1, "the torn tail is never parsed");
     assert!(back.into_iter().next().unwrap().is_ok());
 }

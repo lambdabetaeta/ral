@@ -4,6 +4,7 @@
 use crate::fact::Reason;
 use crate::first_order::{FOValue, datum::Datum};
 use crate::process::{CommandFailure, Signal, SpawnFailure, WorkerStop};
+use crate::site::{Silent, site};
 use crate::types::{
     Break, CallSite, Error, Escape, Map, Mooring, Settled, Shell, Status, Value, sig,
 };
@@ -181,10 +182,6 @@ pub(super) fn builtin_warn(args: &[Value], shell: &mut Shell) -> Settled<Value> 
 
 // Opens the controlling terminal rather than using the shell's stdio, so the
 // prompt still reaches the user under redirection.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:ask-tty] `ask` builtin opens the controlling terminal device (/dev/tty or CON) to prompt and read one line direct from the user, bypassing redirection; a terminal-device interaction, not turn-time model data I/O."
-)]
 pub(super) fn builtin_ask(args: &[Value]) -> Result<Value, Error> {
     let prompt = args
         .first()
@@ -199,14 +196,16 @@ pub(super) fn builtin_ask(args: &[Value]) -> Result<Value, Error> {
     const CON_IN: &str = "CONIN$";
 
     use std::io::{BufRead, Write};
-    let mut out = std::fs::OpenOptions::new()
-        .write(true)
-        .open(CON_OUT)
-        .map_err(|e| Error::new(format!("ask: {e}")))?;
+    let mut out = site!(
+        Silent::AskTty,
+        std::fs::OpenOptions::new().write(true) => open(CON_OUT)
+    )
+    .map_err(|e| Error::new(format!("ask: {e}")))?;
     write!(out, "{prompt}").ok();
     out.flush().ok();
     drop(out);
-    let inp = std::fs::File::open(CON_IN).map_err(|e| Error::new(format!("ask: {e}")))?;
+    let inp = site!(Silent::AskTty, std::fs::File::open(CON_IN))
+        .map_err(|e| Error::new(format!("ask: {e}")))?;
     let mut line = String::new();
     let n = std::io::BufReader::new(inp)
         .read_line(&mut line)

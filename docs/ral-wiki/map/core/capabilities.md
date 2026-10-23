@@ -1,7 +1,7 @@
 ---
 generated_at_commit: f56fff48
 generated_at_date: 2026-10-21
-covers_paths: [core/src/capability/, core/src/capability.rs, core/src/guard/, core/src/guard.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
+covers_paths: [core/src/capability/, core/src/capability.rs, core/src/guard/, core/src/guard.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs, core/src/own.rs]
 ---
 
 # Map: core / capabilities & sandbox
@@ -68,8 +68,8 @@ Submodules:
   with every exclusion; `region(stack, op, floor)`, each supplying layer's
   tables met (writing reads) and the `Floor` joined; `ReadRegion`, the read and
   the running regions (run places `P≤L`) folded once for a walk that judges many
-  objects. `GrantStack::judge`, `judge_dir` and `locate` are the one door from
-  evidence to authority: the pinned-binary veto (`Refused::Guarded`) first, then
+  objects. `GrantStack::judge`, `judge_dir` and `locate` are the one place
+  evidence becomes authority: the pinned-binary veto (`Refused::Guarded`) first, then
   the fold, then the handle `Judged<O>`; `GrantStack::read` is the read
   judgment, `region` then the running region only on a missing allowance;
 - `exec.rs` — the exec instance
@@ -132,10 +132,10 @@ grant string becomes a frozen path.
   `floor`, `locate`, `locate_dir`, `locate_existing`, `locate_if_admitted`
   (each excusing the discard device `LexicalPath::is_discard` and refusing a
   reserved device name before either region is consulted), `judge` (an object a
-  door already holds), `admits_fs`, `sandbox_projection`, and the grant scope
+  caller already holds), `admits_fs`, `sandbox_projection`, and the grant scope
   guards (`with_layer`, `with_layers`, `push_session_capabilities`,
   `audit_deputy_prefixes`, `has_active_capabilities`). `Shell::locate` is the
-  door every read and open takes: the name refusal, `path::walk` to the object,
+  one path every read and open takes: the name refusal, `path::walk` to the object,
   then `GrantStack::judge` on its transcript, handing back the handle vouched
   for. `Shell::refused` mints a `Denial`'s `Break` and records its check
   through `Shell::record_check` with no `Mooring`, so on the trail alone;
@@ -156,7 +156,7 @@ grant string becomes a frozen path.
   native text and frozen as an `absolute` grant, refused with
   `GrantRefusal::ForeignOrRelative` where a payload would be dead, so exarch's
   deny layer fails closed; the tags `absolute`,
-  `cwd`, `home`, `tempdir`, `gitdir` and `xdg-*`, `PolicyError`, the `gitdir`
+  `cwd`, `home`, `tempdir`, `scratch`, `gitdir` and `xdg-*`, `PolicyError`, the `gitdir`
   refusals (`From<BadPointer>`), `Selector` (`Path | Toolchain(Toolchain)`) and
   the `path` selector (`path_dirs`, over the pure `path_dirs_in`, which
   classifies each absolute `PATH` entry raw, as an `absolute` payload, before
@@ -188,8 +188,9 @@ Path resolution is `core/src/path/`: lexical stages, then one walk, plus
 `which.rs` for PATH search.
 
 - expand — `sigil.rs` (run-time `~` and `xdg:` expansion of ordinary paths,
-  never in a grant; the places `cwd`, `tempdir`, `gitdir` are policy-only,
-  expanded at freeze by `guard::freeze`; `git.rs` backs `gitdir` discovery, following a `.git` pointer file only to a
+  never in a grant; the places `cwd`, `tempdir`, `scratch`, `gitdir` are policy-only,
+  expanded at freeze by `guard::freeze` (`scratch` against the spelling of the
+  session's scratch that the `FreezeCtx` carries, which plain ral has none of); `git.rs` backs `gitdir` discovery, following a `.git` pointer file only to a
   git directory whose `gitdir` back-pointer or `core.worktree` names the working
   tree back, judged by the positions the two walks reach, never by identity; a bad pointer is a path-level `BadPointer`, phrased as a grant error by the caller), `tilde.rs` (`~` and `~/sub` only; an unset `HOME` is `None`,
   and each caller picks its own honest answer; `TildePath::shown` is the one
@@ -203,7 +204,7 @@ Path resolution is `core/src/path/`: lexical stages, then one walk, plus
   component, or a share or namespace head opening it — would re-root the join, so `expand_path_prefix` leaves the whole path as written: it fails
   closed, a prefix matching nothing rather than a fabricated path, while a
   grant refuses the gap outright in `guard::freeze`;
-- lex — `lex.rs`: one structural parser, `parse_bytes`, reading a byte slice under `PathRules` into `Parsed { raw, rules, kind: HeadKind, spelling: HeadSpelling, head_len }`, from which resolution, `.`/`..` folding and every head judgment project. `HeadKind` names the structural head (`Posix`, `Drive { letter, volume }`, `Unc { volume }`, `Driveless`, `DriveRelative { letter }`, `Relative`, `Device` for `\\.\`, and `Malformed` for a two-separator or `\\?\` head that is no well-formed drive, share or device); `HeadSpelling` records the opening separator and namespace facts once (`namespace: Option<Namespace>` — `Verbatim { exact }` for `\\?\`, `Device { exact }` for `\\.\`, `Object` for `\??\`, with `exact` / `Namespace::is_exact` true when all three separator bytes of that 4-byte prefix are `\` — `mixed_opening` for `/\` or `\/`, and `opens_with_slash`). `fold_dots_under` (over `fold_bytes`) is one kernel under either rules from any host, `fold_dots` its host instance on a held path: `head_len` marks where the head ends and only the names past it fold, joined with the rules' separator, so a fold preserves `HeadKind`, `volume` and (save when `..` climbs into the `??` component of a `\??\` driveless path) `HeadSpelling::namespace`; under Windows rules a non-namespace `Drive`, `Unc`, `Driveless`, `DriveRelative` or `Relative` head (`Parsed::respell_head`) is respelled with `\` too (`C:/a/b` folds to `C:\a\b`, `//srv/sh` to `\\srv\sh`), so such a path has one separator throughout, while every head whose kind or meaning turns on its spelling is kept as written: a `Posix` `/` (as `\` it would be `Driveless`), a slash-spelled verbatim head (`//?/C:/x` is a device path Win32 normalises, so its tail past `head_len` folds), and a `Device` or `Malformed` path, or an exact `\\?\` verbatim path (`Namespace::is_exact`, `head_len == raw.len()`: Win32 hands its rest to the kernel uninterpreted, `/` a name byte and `.`/`..` names), all head and kept whole, `..` included; a relative path's drive-shaped first name keeps a `.\` before it; `is_unparsed_head`, a Windows path absolute to the kernel in which `std::path` finds no prefix and so would descend or climb from the current drive, which the walk refuses. Every head predicate projects from `parse_bytes`: whether a path is absolute under either rules set (`absolute_under` / `Parsed::is_absolute`: POSIX, `HeadKind::Posix`; Windows, `Drive`, `Unc`, `Device` or `Malformed`) and on this host (`is_absolute`, `absolute_under` the host's rules, the one absoluteness ral asks, `anchor` included; `Path::is_absolute` is banned in clippy.toml in its favour); `is_working_directory` (`Posix`, or `Drive` / `Unc` under Windows); `is_bare_root` (one separator alone under the given `PathRules`); `has_drive` (non-namespace `Drive` or `DriveRelative`); `Parsed::is_mixed_head` and `Parsed::is_nt_object`, shared by `grant_eligibility` and `classify_subpath` (`SubpathRefusal`), which `guard::freeze` maps to its messages; `is_network` (`HeadKind::Unc`), `is_verbatim_drive` (`Namespace::Verbatim` + `HeadKind::Drive`) and `is_volume_guid` (`has_os_namespace_head` with a `Volume{` `namespace_tail`), which the Windows DACL backend asks rather than parsing prefixes itself; `Parsed::has_os_namespace_head` (`Namespace::is_exact`), what `show` leaves unfolded; `Parsed::without_verbatim_prefix`, what the Windows identity fold slices; and `Parsed::namespace_tail`, what the discard device check reads under `HeadKind::Device`; `utf8`, a path's native spelling as text or `NotUtf8` naming it, the one door for a path that must travel as a string (`--capabilities` profiles, `SourceFile`); a final component's `extension`, and whether a component is a Windows drive or stream (`is_stream_or_drive`); `relative_suffix` strips a sub-path's leading separators under the rules, and `join_under` joins a sub-path onto a base string one component at a time
+- lex — `lex.rs`: one structural parser, `parse_bytes`, reading a byte slice under `PathRules` into `Parsed { raw, rules, kind: HeadKind, spelling: HeadSpelling, head_len }`, from which resolution, `.`/`..` folding and every head judgment project. `HeadKind` names the structural head (`Posix`, `Drive { letter, volume }`, `Unc { volume }`, `Driveless`, `DriveRelative { letter }`, `Relative`, `Device` for `\\.\`, and `Malformed` for a two-separator or `\\?\` head that is no well-formed drive, share or device); `HeadSpelling` records the opening separator and namespace facts once (`namespace: Option<Namespace>` — `Verbatim { exact }` for `\\?\`, `Device { exact }` for `\\.\`, `Object` for `\??\`, with `exact` / `Namespace::is_exact` true when all three separator bytes of that 4-byte prefix are `\` — `mixed_opening` for `/\` or `\/`, and `opens_with_slash`). `fold_dots_under` (over `fold_bytes`) is one kernel under either rules from any host, `fold_dots` its host instance on a held path: `head_len` marks where the head ends and only the names past it fold, joined with the rules' separator, so a fold preserves `HeadKind`, `volume` and (save when `..` climbs into the `??` component of a `\??\` driveless path) `HeadSpelling::namespace`; under Windows rules a non-namespace `Drive`, `Unc`, `Driveless`, `DriveRelative` or `Relative` head (`Parsed::respell_head`) is respelled with `\` too (`C:/a/b` folds to `C:\a\b`, `//srv/sh` to `\\srv\sh`), so such a path has one separator throughout, while every head whose kind or meaning turns on its spelling is kept as written: a `Posix` `/` (as `\` it would be `Driveless`), a slash-spelled verbatim head (`//?/C:/x` is a device path Win32 normalises, so its tail past `head_len` folds), and a `Device` or `Malformed` path, or an exact `\\?\` verbatim path (`Namespace::is_exact`, `head_len == raw.len()`: Win32 hands its rest to the kernel uninterpreted, `/` a name byte and `.`/`..` names), all head and kept whole, `..` included; a relative path's drive-shaped first name keeps a `.\` before it; `is_unparsed_head`, a Windows path absolute to the kernel in which `std::path` finds no prefix and so would descend or climb from the current drive, which the walk refuses. Every head predicate projects from `parse_bytes`: whether a path is absolute under either rules set (`absolute_under` / `Parsed::is_absolute`: POSIX, `HeadKind::Posix`; Windows, `Drive`, `Unc`, `Device` or `Malformed`) and on this host (`is_absolute`, `absolute_under` the host's rules, the one absoluteness ral asks, `anchor` included; `Path::is_absolute` is banned in clippy.toml in its favour); `is_working_directory` (`Posix`, or `Drive` / `Unc` under Windows); `is_bare_root` (one separator alone under the given `PathRules`); `has_drive` (non-namespace `Drive` or `DriveRelative`); `Parsed::is_mixed_head` and `Parsed::is_nt_object`, shared by `grant_eligibility` and `classify_subpath` (`SubpathRefusal`), which `guard::freeze` maps to its messages; `is_network` (`HeadKind::Unc`), `is_verbatim_drive` (`Namespace::Verbatim` + `HeadKind::Drive`) and `is_volume_guid` (`has_os_namespace_head` with a `Volume{` `namespace_tail`), which the Windows DACL backend asks rather than parsing prefixes itself; `Parsed::has_os_namespace_head` (`Namespace::is_exact`), what `show` leaves unfolded; `Parsed::without_verbatim_prefix`, what the Windows identity fold slices; and `Parsed::namespace_tail`, what the discard device check reads under `HeadKind::Device`; `utf8`, a path's native spelling as text or `NotUtf8` naming it, the one strict conversion for a path that must travel as a string (`--capabilities` profiles, `SourceFile`), as `shown` is the one lossy conversion, for display only; `spelled_parent`, a path with its last name dropped by spelling alone, for a program's own layout (the folder a file it writes sits in, its install tree, a run folder it made) and never for a name a grant judges, which asks `RealPath::parent`; a final component's `extension`, and whether a component is a Windows drive or stream (`is_stream_or_drive`); `relative_suffix` strips a sub-path's leading separators under the rules, and `join_under` joins a sub-path onto a base string one component at a time
   with the separator of the given rules, on every host alike (`GuestPath::join`
   is it under Posix rules), and refuses (`Rerooting`) a sub-path naming a volume
   of its own under Windows rules — absolute there, or a drive at any component;
@@ -216,7 +217,10 @@ Path resolution is `core/src/path/`: lexical stages, then one walk, plus
   (typed `~` kept, `/`-separated; expanded via `TildePath::shown` only when the
   spelling must be quoted);
 - slug — `slug.rs`, `project_slug`: a launch cwd as one directory-name
-  component (`/Users/x/proj` → `-Users-x-proj`), for keying per-project state;
+  component, for keying per-project state. It is a readable part (`/Users/x/proj`
+  → `-Users-x-proj`, lossy, for a person scanning a listing), a `-`, and 16 hex
+  digits of the SHA-256 of the cwd's exact OS bytes (UTF-16 units on Windows), so
+  two cwds that differ at all key apart: `-Users-x-proj-25cf7293a3713b73`;
 - canon — `canon.rs`, the names one object answers to for the kernel
   sandboxes: firmlink twins (`match_variants`) and the lexical `lookup_walk`
   set, the ancestors of a spelling (itself included where it differs from its
@@ -237,7 +241,7 @@ Path resolution is `core/src/path/`: lexical stages, then one walk, plus
   directory or with an unparsed head is refused as the name itself would be.
   `walk_dir`, `walk_lenient` (a grant spelling's transcript, as far as the disk
   goes), `walk_excluded` (an exclusion's `Excluded`, the link and its target
-  held) and `open_discard` are the other doors; `Dir`, `Located` and `Hold` are
+  held) and `open_discard` are the other entries; `Dir`, `Located` and `Hold` are
   the three holders and `Unjudged`, `Judged<O>` and `Installing` who vouched
   ([[internals/path-judgment|path-judgment]]);
 - match — `identity.rs`: `RealPath::contains`, an allowance by position, names
@@ -257,7 +261,7 @@ Path resolution is `core/src/path/`: lexical stages, then one walk, plus
   any extension, trailing dots and blanks trimmed — is *refused*, not
   excused: `device::reserved_device_refusal` phrases the error (for `NUL`, as the
   question "did you mean `\\.\NUL`?"), and `guard::check_device_name`
-  asks it at the fs doors, `Shell::locate` and its siblings, ahead of any
+  asks it at the fs entries, `Shell::locate` and its siblings, ahead of any
   grant. A resolved path keeps its last
   component, so the check needs no raw spelling. Like the identity rules above
   both take `windows` as a parameter rather than reading `cfg!`, so neither
@@ -276,7 +280,7 @@ the `XDG_*_HOME` of `env` through `get_or_host`, so a `within [env: …]` overla
 reaches both. `Resolver::at` builds one for a caller with no shell to mint one; `resolve_in_script` is
 `resolve` for a path written in a ral script, which reads it beside itself:
 it is `resolve` itself with the script's directory for the cwd, so the two
-doors agree: sigils expand first, only a still-relative result joins the
+agree: sigils expand first, only a still-relative result joins the
 script's directory, and an absolute one, a malformed head included, is kept
 as `resolve` keeps it, never lent the directory's drive. The directory is
 the native parent of the file's `SourceOrigin`, never a re-parsed rendering
@@ -308,7 +312,7 @@ for. `glob` and exarch's `grep-files`, `grep-hidden`, `find-files` and
 
 `which.rs` is the one `PATH` walk. **Its anchor is an `Option<&CwdPath>`: the
 shell's cwd cell, or `None` for a shell-less caller — and `CwdPath` has one
-door, so no call site can choose "here" for itself**
+constructor, so no call site can choose "here" for itself**
 ([[decisions/260731_one-walk-one-anchor|one-walk-one-anchor]]).
 
 - `names_a_path` is the one answer to "is this command name a path?": it
@@ -338,8 +342,8 @@ ordered; a guest spelling is minted by `from_guest` from a `GuestPath`
 when the layer is decoded: `GrantPath { written, real }`.
 [[invariants/grants-judge-objects|Every authority is judged on `real`]]:
 `RealPath::contains` for an allowance, `Excluded::matches` for an exclusion —
-and no other door: `path_within` is private to `identity.rs` and its string twin
-`pub(super)`, so the form-blind kernel does not leave `core/src/path/`, and
+and no other way: `path_within` and its string twin are `pub(super)` to
+`identity.rs`, so the form-blind kernel does not leave `core/src/path/`, and
 outside the module a spelling leaves the type only as a *string* (`as_str`,
 `into_string`) for rendering. That is enforced rather than documented because the
 `xdg-*` freeze guard once chose the form for itself — asking on the surface while
@@ -352,15 +356,38 @@ spelling question stays here. `RealPath` (`walk.rs`) is the position a walk
 ends at and the identity of a run place, ordered as the host identifies files.
 
 XDG base directories resolve through one resolver, `path/basedir.rs`
-(`XdgKind`, the pure `resolve_xdg_in`; `host::xdg` reads the host env, the `xdg:` sigil and the freeze an `EnvVars`; `app_dir` and `app_dir_or_temp` spell an application's own `$XDG_<kind>_HOME/<app>/` for ral and exarch alike): an absolute `XDG_*_HOME` override else the
+(`XdgKind`, the pure `resolve_xdg_in`; `host::xdg` reads the host env, the `xdg:` sigil and the freeze an `EnvVars`; `app_dir` spells an application's own `$XDG_<kind>_HOME/<app>/` for ral and exarch alike): an absolute `XDG_*_HOME` override else the
 home-joined Linux default on every platform, and `None` where there is neither
 — a host fact answers with an `Option`, so each caller picks its own fallback
-rather than inheriting a fabricated home (state that must land somewhere —
-exarch's directories, ral's crash log, the Windows sandbox ledger — takes the
-temp dir through `app_dir_or_temp`, keeping itself out of the cwd). Both the `xdg-*` grant places
+rather than inheriting a fabricated home. For the program's own layout alone
+(`host::xdg` and `host::home_dot`) the home falls back, where no `HOME` is bound, to
+the account's own from the user database (the `AccountHome` site), so `app_dir`,
+`OwnDir`, `UserFile` and the credential denies all see the same base; a `~` in a
+script (`host::home`) is unchanged. Where even that fails, `own` refuses with an
+error naming what to set, and no temp dir stands in. Both the `xdg-*` grant places
 (`sigil.rs`, `guard::freeze`) and the host's own config/data loaders (`host::xdg`) defer to
 it, so a grant and the rc/history/plugin paths can never name different
 directories — [[decisions/260601_xdg-resolver-consolidation|xdg-resolver-consolidation]].
+
+The files a program touches on its own account, outside any shell, are
+`core/src/own.rs`'s, under one authority, the crate-private write side of
+`capability::Ungoverned`:
+
+- `OwnDir` — what the program keeps for itself (state, tokens, logs, caches,
+  records, scratches): a held directory reached from an XDG root, one entry name
+  per operation, no link followed beneath it;
+- `UserFile` — a file the user writes at a place the program chooses (the rc,
+  `config.ral`, house rules): links followed, a replace staged beside the link's
+  target so the link survives, `seed` writing only where nothing stands;
+- `read_named`, `open_named`, `kind_named`, `create_named` — a file the user
+  names, the one write being a new file. They take any path, so `clippy.toml`
+  bans them, and each caller is a typed site that says why the name is the
+  user's: a CLI argument, a TUI command, the install tree.
+
+`own.rs` holds no `site!`: each syscall it needs is a walk primitive
+(`walk_dir_made`, `Located::{remove, rename, open_data}`, and `Visibility`'s
+`Public`, `Private` and `Secret`). The config home holds only what the user
+writes ([[decisions/261022_own-files|own-files]]).
 
 ## OS sandbox — `core/src/sandbox/`
 
@@ -425,7 +452,7 @@ device for `net` to govern; the in-process guards apply unchanged
   methods are `arg0` (the on-disk path, `argv[0]` of every exec), `exec_path`
   (what `execve` is handed), on Linux `fd` (the pinned descriptor) and `names`
   (the inode's current name, `None` once unlinked), and on macOS `verify`;
-  `reexec::launch(role)` is the one launch door for the unconfined
+  `reexec::launch(role)` is the one launch entry for the unconfined
   re-execs (the pipeline anchor, a bundled tool), through the pin when there is
   one, and `reexec::own()` is ral's own pin as a
   `Result`, so a sandboxed launch refuses when ral could not pin itself. The `Pin`
@@ -452,7 +479,7 @@ device for `net` to govern; the in-process guards apply unchanged
   `ExecRules::for_kernel` of the `Admitted`'s own table joined with the live
   support (`sandbox::carriers`), so the profile renders the table that judged
   the launch rather than a second compile. It takes no `Shell`;
-  `Shell::sandbox_projection` (`guard/shell.rs`) is the door.
+  `Shell::sandbox_projection` (`guard/shell.rs`) is the entry.
 - `projection_enforceable` (`sandbox.rs`) — rejects an offline (`` net: `offline ``)
   projection on a backend with no kernel network enforcement, so an unenforceable
   request fails closed rather than running ignored.
@@ -545,8 +572,9 @@ device for `net` to govern; the in-process guards apply unchanged
   descriptors, read-only at the names their inodes hold now (`pinned`, over
   `Pinned::names`), an unlinked pin binding nothing. `bwrap_argv` emits
   `--ro-bind-fd`/`--bind-fd` from the same vector, `Shown`,
-  before `/proc` and `/dev`, `Over` after. `--chdir` refuses
-  non-UTF-8, and so does every rendered name, rather than go lossy into
+  before `/proc` and `/dev`, `Over` after. `--chdir` carries
+  the working directory's own bytes, as bwrap's argv does, while every rendered
+  name refuses a position that is not Unicode rather than go lossy into
   bwrap's argv. Windows builds the
   target's `Launch` directly and `windows::session::confine` attaches its
   projection's AppContainer LowBox `SECURITY_CAPABILITIES`, so the parent's own
@@ -580,7 +608,9 @@ device for `net` to govern; the in-process guards apply unchanged
   LowBox `SECURITY_CAPABILITIES`; `dacl/mod.rs` exposes the path-derived
   capability-SID engine; `session.rs` composes them). Within `dacl/`,
   `stamp.rs` owns completion witnesses, `mutex.rs` per-path locks (named by the path's Windows collision key, folded beyond ASCII and at least as far as NTFS folds, where the witness and capability name are not: a lock errs toward merging, a witness toward splitting, and the stamp store is locked by an environment-spelled path two sessions may spell apart), `ledger.rs`
-  profile recovery, and `acl.rs` queried descriptors and borrowed ACEs.
+  profile recovery, and `acl.rs` queried descriptors and borrowed ACEs. Both
+  files keep their JSON in one held `OwnDir`, `$XDG_STATE_HOME/ral/sandbox-dacl/`
+  (`ledger_dir`), each replaced whole by `OwnDir::store`.
   `windows/local.rs` owns Win32 local allocations. Kernel handles use
   `OwnedHandle`; the path mutex guard stays on its acquiring thread.
   Ported units retain their MXC provenance.
@@ -599,7 +629,7 @@ check runs before the `AppContainer` pass, and an unlabeled object defaults to
 `ensure_low_integrity_label` also stamps a `Low` `SYSTEM_MANDATORY_LABEL_ACE`,
 asked *before* the ACE's witness is consulted and witnessed under its own stamp
 key and its own SACL probe. For each mutation two witnesses gate skipping it —
-the completion store (`stamps.json`, atomic tmp+rename, per-path
+the completion store (`stamps.json` in that directory, replaced whole and atomically by `OwnDir::store`, per-path
 named-mutex merge) recording completed propagations, and a probe of the root's
 own DACL confirming its ACE remains. Before an ACE is reapplied, its old
 completion witness is removed under the path mutex; recording follows
@@ -612,7 +642,7 @@ object and Windows does not re-inherit on a same-volume rename, so stamped
 authority is object-sticky where a grant rule is path-based — `dacl/mod.rs`'s module
 header records the resulting drift in both directions
 ([[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]]).
-Every frozen allowance is checked before any stamp filter and stamped through a held handle on the very object checked, no redirecting reparse point on its path (a redirected one refuses the launch; a name surrogate redirects, a cloud placeholder does not; [[internals/confined-launch|confined-launch]]); the projection key covers the whole `read` list, places and live support included; and a launch whose fs projection holds the universal prefix is refused before anything is stamped.
+Every frozen allowance is checked before any stamp filter and stamped through a held handle on the very object checked, no redirecting reparse point on its path (a redirected one refuses the launch; a name surrogate redirects, a cloud placeholder does not; [[internals/confined-launch|confined-launch]]), and a position that is not Unicode refused as `DaclError::NotUnicode`, since a Windows grant names its object by text; the projection key covers the whole `read` list, places and live support included; and a launch whose fs projection holds the universal prefix is refused before anything is stamped.
 Within that shape: an AppContainer profile is still minted per *distinct fs
 projection* (`SessionSandbox` maps `bind_spec` identity to profile) for the
 deny-by-default token and named-object namespace separation, carrying no fs
@@ -665,10 +695,10 @@ class decides the remedy, and the hint answers once per class present**: a
 to `write` (advice that fails twice, otherwise), a `process-exec` path to the
 `exec` set — the layer a re-exec through `sh -c` or `find -exec` reaches, and
 the only one that sees it — a `network-*` denial to the `net` axis alone, and a
-`mach-*`/`ipc-*` operand to nothing at all, because a door is the base
+`mach-*`/`ipc-*` operand to nothing at all, because a service is the base
 profile's to decide and no grant widens one. `Denied` is that taxonomy as a
-type, so a service name cannot arrive where a path is expected; withheld doors
-carrying a reason (`macos.rs::withheld_doors`, the `.sbpl`'s prose as data) are
+type, so a service name cannot arrive where a path is expected; withheld services
+carrying a reason (`macos.rs::withheld_services`, the `.sbpl`'s prose as data) are
 quoted with it and lead the hint, since they are the one class the reader
 cannot act on — the securityd denial that broke `cargo fetch` was once ranked
 below a `.GlobalPreferences.plist` probe and answered with a grant that would
@@ -697,15 +727,21 @@ That single binary carrying both ral and its coreutils is part of why ral
 is a [[invariants/single-binary|single-binary]]. `docs/SPEC.md` gives the
 formal capability calculus.
 
-Every `fs`/process constructor in this layer is a reviewed *syscall site*: the
-workspace bans the raw constructors via clippy `disallowed_methods`, so each call
-site carries an `#[allow(… reason = "[…]")]` classifying it as a surfaced
-exec image (`Launch::new`), silent infrastructure (the self re-exec, the
+Every `fs`/process constructor in this layer is a *typed site*: the workspace
+bans the raw constructors via clippy `disallowed_methods`, so each call is
+wrapped in `site!` with a variant that names it, a `Surface` one for the exec
+image that raises a card (`Launch::new`, `Surface::ProcessLaunch`) and a
+`Silent` one for infrastructure (the self re-exec, the
 pinned binaries' exec (`Pinned::command`), the `ps` denial sampler, the
-boot-time binary pin, the stamp-store and profile-ledger lifecycle), or
-test scaffolding. The site
+boot-time binary pin); test code
+carries one blanket per module. The enums are the list: `core/src/site.rs`, and
+`core/src/path/site.rs` for the path module's own, each variant documenting why
+its place is exempt. A program's own files carry none: `core/src/own.rs` holds no
+site, since every syscall it needs is a walk primitive
+([[decisions/261022_own-files|own-files]]). The site
 shapes and their rail rendering live in [[map/exarch/io-surface|io-surface]]; here
 the sites are only declared and accounted, with clippy failing CI on a
-constructor under no allow, and `core/tests/syscall_sites.rs` on a tagged site
-missing from its manifest; that a constructor's allow is tagged at all is left
-to review.
+constructor under no site and on a site that no longer wraps one, and
+`core/tests/sites.rs` on any other exemption, on a lint group that silences the
+lint, and on a member outside the workspace's lints
+([[decisions/261022_typed-sites|typed-sites]]).

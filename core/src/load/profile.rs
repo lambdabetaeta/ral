@@ -151,10 +151,7 @@ fn wrap(origin: &SourceOrigin, e: Break) -> Break {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] fixtures write a capability file to load"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use crate::capability::{ExecAllow, ExecDeny, FsAllow, FsOp};
@@ -329,7 +326,7 @@ mod tests {
     }
 
     /// An env-scoped `HOME` reaches `home` freezing here exactly as it reaches
-    /// `grant`'s: one home for both freeze doors.
+    /// `grant`'s: one home for both freezes.
     #[test]
     fn session_profiles_freeze_home_against_the_shell_home() {
         let home = tempfile::tempdir().unwrap();

@@ -1,9 +1,11 @@
 use super::*;
+use crate::record::RECORD;
 use crate::record::{
     BlockId, Display, EditAuthority, Emitter as Recorder, Protocol, Residue, Span, Verdict, Voice,
 };
 use ral_core::fact::Read;
 use ral_core::first_order::datum::Datum as _;
+use ral_core::own::OwnDir;
 use ral_core::types::{Observation, Observed};
 
 fn prompt(turn: u64, text: &str) -> Protocol {
@@ -16,14 +18,15 @@ fn prompt(turn: u64, text: &str) -> Protocol {
 
 fn rendered(record: &Path) -> String {
     let mut out = Vec::new();
-    export(record, &mut out, Format::Plain).expect("the log exports");
+    let file = std::fs::File::open(record).expect("the log opens");
+    export(file, record, &mut out, Format::Plain).expect("the log exports");
     String::from_utf8(out).expect("the transcript is text")
 }
 
 /// A session that asks, reads, is evicted from, is cleared, and asks again.
-fn session(dir: &Path) -> (Recorder, std::path::PathBuf) {
-    let path = dir.join("record.jsonl");
-    let recorder = Recorder::create(&path).expect("a record log");
+fn session(dir: &OwnDir) -> (Recorder, std::path::PathBuf) {
+    let path = dir.path().join(RECORD);
+    let recorder = Recorder::create(dir).expect("a record log");
     let emit = |record: Record| recorder.emit(record).expect("the log appends");
     let _ = emit(prompt(1, "first prompt").into());
     let _ = emit(
@@ -79,8 +82,8 @@ fn session(dir: &Path) -> (Recorder, std::path::PathBuf) {
 /// is exported, then the clear, then what came after.
 #[test]
 fn a_clear_keeps_the_transcript_before_it() {
-    let dir = tempfile::tempdir().expect("a temp dir");
-    let (_recorder, path) = session(dir.path());
+    let dir = OwnDir::for_test("export").expect("a test directory");
+    let (_recorder, path) = session(&dir);
     let text = rendered(&path);
     let at = |needle: &str| {
         text.find(needle)
@@ -102,10 +105,9 @@ fn a_clear_keeps_the_transcript_before_it() {
 
 /// A write the process died in the middle of is not a record.
 #[test]
-#[allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
 fn a_torn_tail_is_ignored() {
-    let dir = tempfile::tempdir().expect("a temp dir");
-    let (_recorder, path) = session(dir.path());
+    let dir = OwnDir::for_test("export").expect("a test directory");
+    let (_recorder, path) = session(&dir);
     let whole = rendered(&path);
     let mut file = std::fs::OpenOptions::new()
         .append(true)

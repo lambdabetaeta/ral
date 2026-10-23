@@ -1,12 +1,7 @@
 //! Lattice-algebra tests for the capability types.
 //!
 //! In-crate rather than under `core/tests/` because these reach crate-private
-//! doors: `decode_capability_map`, the layers' tables, `Fragment::of`.
-
-#![allow(
-    clippy::disallowed_methods,
-    reason = "[test] a tempdir tree of real links; probes are lexical paths already in normal form"
-)]
+//! entries: `decode_capability_map`, the layers' tables, `Fragment::of`.
 
 use super::exec::{ExecRules, Subject};
 use super::*;

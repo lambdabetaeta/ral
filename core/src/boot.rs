@@ -4,8 +4,8 @@
 //! Probing the host *machine* (cwd, user, home, XDG bases) is [`crate::host`];
 //! evaluating on the booted shell is [`crate::run`].
 //!
-//! The prelude arrives baked: a host's build script calls
-//! [`bake_prelude_to_out_dir`], and the host embeds the blob it wrote with
+//! The prelude arrives baked: a host's build script writes the blob
+//! [`bake_prelude`] returns to its `OUT_DIR`, and the host embeds it with
 //! [`baked_prelude!`](crate::baked_prelude).  Core cannot bake its own — a
 //! build script cannot depend on the crate it is building — so a test
 //! binary takes [`BakedPrelude::runtime`] instead.
@@ -14,6 +14,7 @@ use crate::capability::Floor;
 use crate::evaluator::{Mode, run_phrases};
 use crate::ir::{CompKind, Phrase, Toplevel};
 use crate::path::CwdPath;
+use crate::site::{Silent, site};
 use crate::terminal::TerminalState;
 use crate::typecheck::Manifest;
 use crate::types::{
@@ -186,11 +187,12 @@ fn describe_comp(kind: &CompKind) -> &'static str {
     }
 }
 
-/// Expand in a host crate whose build script called
-/// [`bake_prelude_to_out_dir`](crate::boot::bake_prelude_to_out_dir).
+/// Expand in a host crate whose build script wrote the blob
+/// [`bake_prelude`](crate::boot::bake_prelude) returns to `prelude_baked.bin`
+/// in its `OUT_DIR`.
 ///
 /// A macro, because `include_bytes!` has to expand against the *host's*
-/// `OUT_DIR`; keeping it here keeps the filenames beside the writer.
+/// `OUT_DIR`.
 #[macro_export]
 macro_rules! baked_prelude {
     () => {
@@ -333,19 +335,14 @@ pub fn boot_shell(
 /// cwd cell, which `apply_env` in `core/src/runtime/command/process.rs`
 /// threads into each child.  A host fact nothing binds stays unbound: seeding
 /// `HOME=.` once made every `~` in the session mean "here".
-#[allow(
-    clippy::disallowed_methods,
-    reason = "host-env: seeding the baseline `env` at boot; the host process env is the source the overlay later shadows"
-)]
 pub fn seed_host_env(shell: &mut Shell) {
-    let user = crate::host::user();
-    let shlvl = std::env::var("SHLVL")
-        .ok()
+    let user = site!(Silent::HostEnvSeed, crate::host::user());
+    let shlvl = crate::host::var("SHLVL")
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(0)
         .saturating_add(1);
     let base = [
-        ("HOME", crate::host::home()),
+        ("HOME", site!(Silent::HostEnvSeed, crate::host::home())),
         ("USER", user.clone()),
         (
             "PATH",
@@ -378,7 +375,7 @@ pub fn seed_host_env(shell: &mut Shell) {
         "TERM_PROGRAM",
         "TERM_PROGRAM_VERSION",
     ]
-    .map(|key| (key, std::env::var(key).ok()));
+    .map(|key| (key, crate::host::var(key)));
     // Compile-time facts, in `env` so rc can branch on the machine without
     // shelling out to `uname`.
     let facts = [
@@ -398,20 +395,15 @@ pub fn seed_host_env(shell: &mut Shell) {
 /// The host's `key`, else `default()` where the host binds nothing. A value
 /// that is not UTF-8 is `None`: no overlay entry, so children inherit its
 /// bytes rather than a default in their place.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "host-env: seeding the baseline `env` at boot"
-)]
 fn inherited(key: &str, default: impl FnOnce() -> Option<String>) -> Option<String> {
-    match std::env::var(key) {
-        Ok(v) => Some(v),
-        Err(std::env::VarError::NotPresent) => default(),
-        Err(std::env::VarError::NotUnicode(_)) => None,
+    match crate::host::var_os(key) {
+        None => default(),
+        Some(v) => v.into_string().ok(),
     }
 }
 
-/// The build-script half of the bake: write the postcard blob into the
-/// calling host's `OUT_DIR`.
+/// The build-script half of the bake: the prelude as the postcard blob a host
+/// embeds with [`baked_prelude!`](crate::baked_prelude).
 ///
 /// postcard carries no schema, so a field added to
 /// [`CompKind`](crate::ir::CompKind), [`Val`](crate::ir::Val),
@@ -422,18 +414,10 @@ fn inherited(key: &str, default: impl FnOnce() -> Option<String>) -> Option<Stri
 /// script read from disk without core compiling it would need a line.
 ///
 /// # Panics
-/// Panics if the prelude fails to parse, elaborate or type-check, if `OUT_DIR`
-/// is unset, or if serialising or writing the blob fails: a build script has
-/// no better way to report.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:prelude-bake] build-script prelude bake: writes the postcard IR blob to OUT_DIR during host setup; build-time artifact emission, not turn-time model data I/O, raises no surface card."
-)]
-pub fn bake_prelude_to_out_dir() {
-    let ir_bytes = postcard::to_allocvec(&bake()).expect("prelude IR serialization failed");
-    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    std::fs::write(out.join("prelude_baked.bin"), ir_bytes)
-        .expect("failed to write prelude_baked.bin");
+/// Panics if the prelude fails to parse, elaborate or type-check, or if
+/// serialising the blob fails: a build script has no better way to report.
+pub fn bake_prelude() -> Vec<u8> {
+    postcard::to_allocvec(&bake()).expect("prelude IR serialization failed")
 }
 
 #[cfg(test)]

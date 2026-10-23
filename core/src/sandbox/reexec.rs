@@ -18,6 +18,8 @@
 
 use crate::Role;
 use crate::path::{LeafMode, LexicalPath, Located, ObjectId, Trace, walk};
+#[cfg(unix)]
+use crate::site::{Silent, site};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -73,13 +75,12 @@ impl Pinned {
     /// Linux is not.  The program is an absolute path, so the child's `PATH`
     /// — the shell's override included — is never consulted.
     #[cfg(unix)]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:pinned-exec] Builds the Command for a boot-pinned sandbox binary (the ral re-exec for helpers and bundled tools, the bwrap envelope). Infrastructure spawn, not a model exec image: the model's exec surfaces at command::run, not here."
-    )]
     pub(super) fn command(&self) -> std::process::Command {
         use std::os::unix::process::CommandExt;
-        let mut cmd = std::process::Command::new(self.exec_path());
+        let mut cmd = site!(
+            Silent::PinnedExec,
+            std::process::Command::new(self.exec_path())
+        );
         cmd.arg0(self.arg0());
         cmd
     }
@@ -88,12 +89,8 @@ impl Pinned {
     /// mount meant for the file we exec lands on that file and not on
     /// whatever has since taken its name; `None` once it has no name.
     #[cfg(target_os = "linux")]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:pin-locate] Reads the `/proc/self/fd/<N>` magic link of a boot-pinned sandbox binary to find the inode's current path for the envelope's own read-only bind. Sandbox exe-pinning infrastructure, not the model's data I/O: raises no card."
-    )]
     pub(super) fn names(&self) -> std::io::Result<Option<PathBuf>> {
-        let name = std::fs::read_link(self.exec_path())?;
+        let name = site!(Silent::PinLocate, std::fs::read_link(self.exec_path()))?;
         // Counted after the read, so an unlink in between reads as none,
         // never as ` (deleted)`.
         Ok((rustix::fs::fstat(self.fd())?.st_nlink > 0).then_some(name))
@@ -223,14 +220,14 @@ pub(super) fn own() -> Result<&'static Pinned, String> {
 /// a helper stays bound to the boot-time build even if the on-disk path is
 /// swapped.
 #[cfg(unix)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:self-reexec] Builds the ral-re-exec Command for helper subprocesses (pipeline anchor, bundled-tool multicall). Infrastructure spawn, not a model exec image: the model's exec surfaces at command::run, not here."
-)]
 pub(crate) fn launch(role: Role) -> std::io::Result<crate::process::Launch> {
-    let mut cmd = match OWN.get() {
-        Some(own) => own.command(),
-        None => std::process::Command::new(std::env::current_exe()?),
+    let mut cmd = if let Some(own) = OWN.get() {
+        own.command()
+    } else {
+        site!(
+            Silent::SelfReexec,
+            std::process::Command::new(std::env::current_exe()?)
+        )
     };
     cmd.arg(role.flag());
     Ok(crate::process::Launch::from_command(cmd))
@@ -239,10 +236,6 @@ pub(crate) fn launch(role: Role) -> std::io::Result<crate::process::Launch> {
 /// [`launch`] on Windows, which has no sandbox-pinned self-path: it takes the
 /// live `current_exe` and would follow an on-disk swap between launch and exec.
 #[cfg(windows)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:self-reexec-windows] Builds the ral-re-exec Command for Windows pipeline-anchor / bundled-tool multicall subprocesses. Infrastructure spawn, not a model exec image: the model's exec surfaces at command::run, not here."
-)]
 pub(crate) fn launch(role: Role) -> std::io::Result<crate::process::Launch> {
     let mut cmd = crate::process::Launch::new(std::env::current_exe()?);
     cmd.arg(role.flag());
@@ -270,14 +263,10 @@ pub(super) fn pin_self() {
 /// failure, which the caller reads as "leave this binary unpinned".  The
 /// file opened must be the object `trace` holds.
 #[cfg(target_os = "linux")]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:pin-open] Opens a boot-time sandbox binary (ral itself, the bwrap envelope) to pin it by fd, immune to on-disk swaps. Sandbox exe-pinning infrastructure, not the model's data I/O: raises no card."
-)]
 fn build_pin(arg0: &Path, trace: &Trace) -> Option<(Pin, PathBuf)> {
     use std::os::fd::{AsRawFd, OwnedFd};
 
-    let file = std::fs::File::open(arg0).ok()?;
+    let file = site!(Silent::PinOpen, std::fs::File::open(arg0)).ok()?;
     let id = ObjectId::of(&file).ok()?;
     if trace.leaf_id() != Some(id) {
         return None;

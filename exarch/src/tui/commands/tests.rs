@@ -5,7 +5,9 @@ use super::{
 };
 use crate::card::Mark;
 use crate::provider::allowance::{Allowance, Consumption, Reading};
-use crate::tui::app::tests::{app, ctx, text};
+use crate::record::{Born, RECORD};
+use crate::tui::app::tests::{app, app_born, ctx, text};
+use ral_core::own::OwnDir;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -116,7 +118,6 @@ fn the_argument_hint_shows_but_is_never_spliced() {
 // (`/tmp/out.txt` is not absolute on Windows), so each host pins its own.
 #[cfg(unix)]
 #[test]
-#[allow(clippy::disallowed_methods, reason = "[test] fixed fixture paths")]
 fn export_path_resolves_absolute_and_relative() {
     let cwd = &ral_core::path::CwdPath::new(PathBuf::from("/Users/me/proj"))
         .expect("an absolute fixture");
@@ -132,7 +133,6 @@ fn export_path_resolves_absolute_and_relative() {
 
 #[cfg(windows)]
 #[test]
-#[allow(clippy::disallowed_methods, reason = "[test] fixed fixture paths")]
 fn export_path_resolves_absolute_and_relative() {
     let cwd = &ral_core::path::CwdPath::new(PathBuf::from(r"C:\Users\me\proj"))
         .expect("an absolute fixture");
@@ -186,14 +186,26 @@ fn all_unmetered_collapses_to_one_sentence_naming_the_accounts() {
 
 /// `/export` writes a new file only; the one already there is left alone.
 #[test]
-#[allow(clippy::disallowed_methods, reason = "[test] filesystem fixtures")]
 fn export_refuses_to_overwrite() {
-    let (mut app, _rx, root) = app();
-    let dir = tempfile::tempdir().expect("a temp dir");
+    let dir = OwnDir::for_test("export-overwrite").expect("a test directory");
+    // A record to export, so that it is the destination that refuses.
+    dir.append(RECORD).expect("an empty record");
+    let born = Born {
+        log_dir: OwnDir::clone(&dir),
+        ..Born::for_test("main", None)
+    };
+    let (mut app, _rx, root) = app_born(&born);
     let dest = dir.path().join("out.txt");
     std::fs::write(&dest, "keep me").expect("a file to protect");
     cmd_export(&mut app, &ral_core::path::shown(&dest), ctx().info);
     assert_eq!(std::fs::read_to_string(&dest).expect("it reads"), "keep me");
-    let all = text(&mut app, root.id);
-    assert!(all.contains("refusing to overwrite"), "{all:?}");
+    // The card wraps at the window's width, and the path it names is long.
+    let all = text(&mut app, root.id)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        all.contains("already exists, and is never overwritten: choose another name"),
+        "{all:?}"
+    );
 }

@@ -134,7 +134,7 @@ impl Context {
             Protocol::System { text } => self.system = text.as_str().into(),
             Protocol::Inherited { turns, residues } => {
                 // Read first: a failure leaves the structure as it was.
-                let seeds = read_seeds(turns)?;
+                let seeds = read_seeds(self.table.sessions(), turns)?;
                 self.table.install(turns, residues, seeds);
             }
             Protocol::Evicted { residue } => {

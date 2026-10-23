@@ -12,7 +12,9 @@
 //! reads nothing governs, the tree walk's refuses what its region refuses.
 
 use crate::path::lex::{fold_dots, parent_or_cwd};
+use crate::path::site::Silent;
 use crate::path::{LeafMode, LexicalPath, shown, walk};
+use crate::site::site;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -24,24 +26,16 @@ fn find_git_entry(cwd: &Path) -> Option<PathBuf> {
 
 /// The first ancestor of `cwd`, itself included, holding a `.git` entry —
 /// file or directory, so a worktree or submodule is a root of its own.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:git-root] probes each ancestor of the cwd for a .git entry at session start, before any grant governs; ral's own repository discovery, not a name the model gave"
-)]
 fn work_tree_root(cwd: &Path) -> Option<&Path> {
-    cwd.ancestors().find(|dir| dir.join(".git").exists())
+    site!(Silent::GitRoot, cwd => ancestors())
+        .find(|dir| site!(Silent::GitRoot, dir.join(".git") => exists()))
 }
 
 /// The directories from the working tree's root down to `cwd`, root first.
 /// Outside a working tree, `cwd` alone.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "path-form: the spellings from a root already found down to the cwd"
-)]
 pub fn work_tree_chain(cwd: &Path) -> Vec<&Path> {
     let mut chain: Vec<&Path> = match work_tree_root(cwd) {
-        Some(root) => cwd
-            .ancestors()
+        Some(root) => site!(Silent::GitWorkTreeChain, cwd => ancestors())
             .take_while(|dir| *dir != root)
             .chain([root])
             .collect(),
@@ -74,10 +68,6 @@ pub(crate) struct BadPointer {
 /// # Errors
 /// A `.git` file that names no git directory (unreadable, or no `gitdir:`
 /// line), or one whose target does not claim the working tree.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:git-dot-git] asks whether the .git entry session-start discovery found is a directory or a pointer file; ral's own repository discovery, not a name the model gave"
-)]
 pub(crate) fn discover_git_dir(
     cwd: &Path,
     mut read: impl FnMut(&LexicalPath) -> io::Result<String>,
@@ -85,7 +75,7 @@ pub(crate) fn discover_git_dir(
     let Some(dot_git) = find_git_entry(cwd) else {
         return Ok(None);
     };
-    if dot_git.is_dir() {
+    if site!(Silent::GitDotGit, &dot_git => is_dir()) {
         return Ok(Some(dot_git));
     }
     let target = read_pointer(&dot_git, &mut read).map_err(|why| BadPointer {

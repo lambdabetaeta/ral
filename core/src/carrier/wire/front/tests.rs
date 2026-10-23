@@ -4,10 +4,6 @@
 //! genuine silence past the deadline is death. Margins are deliberately loose,
 //! since the dev fleet includes a jittery VM — nothing here asserts a tight
 //! upper bound, only that death is or is not reached within seconds of slack.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
 use super::*;
 use crate::path::EnginePath;
 use crate::protocol::{Ending, PROTOCOL_VERSION, Report};

@@ -11,9 +11,9 @@
 
 use super::log::Log;
 use super::{Cursor, Publish, Record, Recorded, Transient};
+use ral_core::own::OwnDir;
 use std::fmt;
 use std::io;
-use std::path::Path;
 use std::sync::Arc;
 
 /// A cheap, cloneable handle onto one session's record log — the handle a
@@ -30,24 +30,24 @@ impl fmt::Debug for Emitter {
 }
 
 impl Emitter {
-    /// Open `path` for a fresh record log.
+    /// Start a fresh record log in the session directory `dir`.
     ///
     /// # Errors
     /// Returns `Err` if the log file cannot be created.
-    pub fn create(path: &Path) -> io::Result<Self> {
+    pub fn create(dir: &OwnDir) -> io::Result<Self> {
         Ok(Self {
-            log: Arc::new(Log::create(path)?),
+            log: Arc::new(Log::create(dir)?),
         })
     }
 
-    /// Reopen `path` for append — resume — with stamps continuing the file's
-    /// own numbering.  The caller quarantines any torn tail first.
+    /// Reopen the record in `dir` for append — resume — with stamps continuing
+    /// the file's own numbering.  The caller quarantines any torn tail first.
     ///
     /// # Errors
     /// Returns `Err` if the file cannot be read or reopened.
-    pub fn append_to(path: &Path) -> io::Result<Self> {
+    pub fn append_to(dir: &OwnDir) -> io::Result<Self> {
         Ok(Self {
-            log: Arc::new(Log::append_to(path)?),
+            log: Arc::new(Log::append_to(dir)?),
         })
     }
 
@@ -121,6 +121,7 @@ impl Emitter {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use crate::bus::{FleetSink, Signal, UsageMeter, channel};
@@ -128,12 +129,8 @@ mod tests {
 
     #[test]
     fn a_seam_fault_reaches_the_screen_as_a_transient() {
-        let path = std::env::temp_dir().join(format!(
-            "exarch-seam-fault-test-{}-{:?}.jsonl",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let emit = Emitter::create(&path).expect("temp record log");
+        let dir = OwnDir::for_test("seam-fault").expect("a test directory");
+        let emit = Emitter::create(&dir).expect("temp record log");
         let (tx, rx) = channel();
         emit.attach(Box::new(FleetSink {
             id: AgentId::new(7),

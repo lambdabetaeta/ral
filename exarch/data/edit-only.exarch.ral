@@ -20,6 +20,7 @@ return [
       `cwd .,                # the project tree the agent is editing
       `absolute /tmp,
       `tempdir .,            # `$TMPDIR` on macOS — distinct from /tmp
+      `scratch .,            # the session's own scratch (`$EXARCH_SCRATCH`)
       `xdg-config .,         # ${XDG_CONFIG_HOME:-~/.config}
       `xdg-data .,           # ${XDG_DATA_HOME:-~/.local/share}
       `xdg-cache .,          # ${XDG_CACHE_HOME:-~/.cache}
@@ -53,6 +54,7 @@ return [
       `cwd .,
       `absolute /tmp,
       `tempdir .,
+      `scratch .,
     ],
 
     # Same credential denies as `reasonable` — gh, op, gcloud tokens
@@ -71,8 +73,8 @@ return [
   # mutations succeed.
   #
   # And unlike either, no directory this profile can *write* is
-  # admitted here: `reasonable`'s `dir `cwd .`, `dir `absolute /tmp`
-  # and `dir `tempdir .` admits are absent.  A directory that is both writable and
+  # admitted here: `reasonable`'s `dir `cwd .`, `dir `absolute /tmp`,
+  # `dir `tempdir .` and `dir `scratch .` admits are absent.  A directory that is both writable and
   # exec-admitted makes every deny below advisory — `cp $(which git)
   # ./g` and run `./g`, a copy no name veto and no `#"/git$"` regex
   # ever sees.  An editing agent runs tools, not the tree it edits, so

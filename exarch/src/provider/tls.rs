@@ -4,6 +4,7 @@
 //! liveness bounds here turn a silent or black-holed connection into a
 //! retryable error.
 
+use crate::site::{Silent, site};
 use std::time::Duration;
 
 /// Longest genai waits for a stream's response headers: room for a slow upstream to open.
@@ -51,12 +52,8 @@ const TCP_KEEP_ALIVE: Duration = Duration::from_secs(30);
 /// the model listing so neither builds its own against the host trust store.
 /// It sets no *total* request timeout: [`READ_TIMEOUT`] and the keep-alives
 /// are what bound a hung request, so a slow one is never cut off.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:provider-client] the one HTTPS client the genai transport and the model listing share. Per-turn machinery carrying the conversation to the provider, which the transcript already is; a card here would card the transcript's own delivery."
-)]
 pub(crate) fn client() -> reqwest::Client {
-    reqwest::Client::builder()
+    site!(Silent::ProviderClient, reqwest::Client::builder())
         .use_preconfigured_tls(config())
         .read_timeout(READ_TIMEOUT)
         .tcp_keepalive(TCP_KEEP_ALIVE)

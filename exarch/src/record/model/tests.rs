@@ -2,7 +2,8 @@ use super::render::render_residue;
 use super::table::holder;
 use super::*;
 use crate::record::{
-    AgentId, AgentLog, GrepHit, Inherited, RecordedAccount, Seq, ToolResult, Voice,
+    AgentId, AgentLog, GrepHit, Inherited, RECORD, RecordedAccount, Seq, ToolResult, Voice,
+    fixture_dir,
 };
 use regex::Regex;
 
@@ -27,7 +28,7 @@ fn there(id: u64, holder: Span, role: Role, label: &str, bytes: usize) -> Turn {
     Turn {
         body: Body::There {
             at: Pointer {
-                source: PathBuf::from("record.jsonl"),
+                source: AgentId::new(0),
                 loci: Vec::new(),
             },
             departure: Departure::Under(holder),
@@ -38,8 +39,8 @@ fn there(id: u64, holder: Span, role: Role, label: &str, bytes: usize) -> Turn {
 
 fn context(turns: Vec<Turn>, residues: Vec<Residue>) -> Context {
     Context {
-        table: Table::seeded(PathBuf::from("record.jsonl"), turns, residues),
-        ..Context::new(PathBuf::from("record.jsonl"))
+        table: Table::seeded(AgentId::new(0), fixture_dir(), turns, residues),
+        ..Context::new(AgentId::new(0), fixture_dir())
     }
 }
 
@@ -139,7 +140,7 @@ fn call(context: &mut Context, result: &str) {
 
 /// `n` closed exchanges through the live fold: leaves `1..=2n`, prompts odd.
 fn exchanges(n: u64) -> Context {
-    let mut context = Context::new(PathBuf::from("record.jsonl"));
+    let mut context = Context::new(AgentId::new(0), fixture_dir());
     for k in 1..=n {
         prompt(&mut context, &format!("prompt {k}"));
         reply(&mut context, &format!("reply {k}"));
@@ -377,7 +378,7 @@ fn a_run_cutting_a_residue_is_refused() {
 
 #[test]
 fn a_prompt_may_leave_alone() {
-    let mut context = Context::new(PathBuf::from("record.jsonl"));
+    let mut context = Context::new(AgentId::new(0), fixture_dir());
     prompt(&mut context, "where is the duplicate flag?");
     call(&mut context, "lexer.rs: none");
     reply(&mut context, "in the parser");
@@ -595,7 +596,7 @@ fn an_inherited_table_keeps_residues() {
         ]
     );
     let link = |turns, residues| Protocol::Inherited { turns, residues };
-    let child = || Context::new(PathBuf::from("child.jsonl"));
+    let child = || Context::new(AgentId::new(1), parent.sessions_root().clone());
 
     let mut inherited = child();
     step(&mut inherited, link(turns.clone(), residues.clone())).expect("the parent's own link");
@@ -634,7 +635,7 @@ fn fold_equals_memo_across_nested_evictions() {
     cut(&mut live, 2, 5, Some("outer"));
     cut(&mut live, 1, 6, None);
     rounds(&mut live, 1);
-    let (memo, _) = resume(&live.dir().join("record.jsonl")).expect("replay");
+    let (memo, _) = resume(live.sessions_root(), live.id()).expect("replay");
     assert_eq!(wire(&memo), wire(live.context()));
     assert_eq!(memo.history_bytes(), live.context().history_bytes());
     assert_eq!(memo.transcript_index(), live.context().transcript_index());
@@ -713,7 +714,7 @@ fn a_prompt_is_read_off_role_and_order() {
 /// A log that has minted no id has no newest turn to name.
 #[test]
 fn an_empty_log_has_no_current_turn() {
-    let empty = Context::new(PathBuf::from("record.jsonl"));
+    let empty = Context::new(AgentId::new(0), fixture_dir());
     assert_eq!(empty.current_turn(), None);
     assert_eq!(empty.current_prompt(), None);
 }
@@ -722,7 +723,7 @@ fn an_empty_log_has_no_current_turn() {
 /// the one datum that says whose it was.
 #[test]
 fn an_import_opens_a_turn_in_its_messages_voice() {
-    let mut context = Context::new(PathBuf::from("record.jsonl"));
+    let mut context = Context::new(AgentId::new(0), fixture_dir());
     step(
         &mut context,
         Protocol::Import {
@@ -895,7 +896,7 @@ fn a_clear_withdraws_every_turn_and_keeps_the_system_prompt() {
 /// `System` is folded, and neither opens a turn nor moves the automaton.
 #[test]
 fn a_system_prompt_is_folded_and_sequencing_neutral() {
-    let mut context = Context::new(PathBuf::from("record.jsonl"));
+    let mut context = Context::new(AgentId::new(0), fixture_dir());
     assert_eq!(&**context.system(), "");
     context.state = State::AwaitingToolResults {
         pending_ids: vec!["call".into()],
@@ -972,8 +973,9 @@ fn a_forced_eviction_may_take_the_prompt_but_not_the_newest_turn() {
 /// by the file's name, and leaves the structure as it was.
 #[test]
 fn an_unreadable_parent_refuses_the_link_and_changes_nothing() {
-    let source = PathBuf::from("/nonexistent/parent/record.jsonl");
-    let mut context = Context::new(PathBuf::from("record.jsonl"));
+    let source = AgentId::new(7);
+    let sessions = OwnDir::for_test("unreadable-parent").expect("a test directory");
+    let mut context = Context::new(AgentId::new(0), sessions.clone());
     let link = Protocol::Inherited {
         turns: vec![Linked {
             row: TurnRow {
@@ -985,7 +987,7 @@ fn an_unreadable_parent_refuses_the_link_and_changes_nothing() {
                 location: Location::Resident,
             },
             at: Pointer {
-                source: source.clone(),
+                source,
                 loci: vec![Locus::placeholder(Seq::new(1))],
             },
         }],
@@ -994,8 +996,9 @@ fn an_unreadable_parent_refuses_the_link_and_changes_nothing() {
     let Err(Refusal::Unreadable(error)) = step(&mut context, link) else {
         panic!("a missing parent file is unreadable")
     };
+    let named = sessions.path().join(source.to_string()).join(RECORD);
     assert!(
-        error.to_string().contains(&ral_core::path::shown(&source)),
+        error.to_string().contains(&ral_core::path::shown(&named)),
         "{error}"
     );
     assert_eq!(context.log_len(), 0);

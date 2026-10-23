@@ -7,23 +7,26 @@ use super::{
     Body, Departure, Linked, Location, Pointer, Residue, Span, Standing, Turn, message_bytes,
     resident_messages,
 };
-use crate::record::{Protocol, Recorded};
+use crate::record::{AgentId, Protocol, Recorded};
 use crate::record::{Role, TurnKind};
+use ral_core::own::OwnDir;
 use std::cmp::Reverse;
-use std::path::{Path, PathBuf};
 
 pub(super) struct Table {
     turns: Vec<Turn>,
     /// One per eviction, in creation order. Laminar: any two spans are nested
     /// or disjoint, a later one never strictly inside an earlier one.
     residues: Vec<Standing>,
-    /// Own `record.jsonl`: where a turn first recorded here points once it
-    /// leaves.
+    /// Own session, whose `record.jsonl` is where a turn first recorded here
+    /// points once it leaves.
     ///
     /// Reading a completed record by byte range from the file this process is
     /// still appending to is safe: a `Locus` exists only once the seam has
     /// written the whole record under its lock.
-    source: PathBuf,
+    source: AgentId,
+    /// The run's `sessions/` directory, held: what every pointer's session is
+    /// resolved against.
+    sessions: OwnDir,
 }
 
 /// One item of the frontier or the index: a turn, or a residue.
@@ -72,11 +75,12 @@ pub(super) fn holder(span: Span, later: impl IntoIterator<Item = Span>) -> Optio
 }
 
 impl Table {
-    pub(super) fn new(source: PathBuf) -> Self {
+    pub(super) fn new(source: AgentId, sessions: OwnDir) -> Self {
         Self {
             turns: Vec::new(),
             residues: Vec::new(),
             source,
+            sessions,
         }
     }
 
@@ -85,7 +89,12 @@ impl Table {
     /// means stating the structure rather than folding a log to reach it.
     /// Every residue seeded is resident.
     #[cfg(test)]
-    pub(super) fn seeded(source: PathBuf, turns: Vec<Turn>, residues: Vec<Residue>) -> Self {
+    pub(super) fn seeded(
+        source: AgentId,
+        sessions: OwnDir,
+        turns: Vec<Turn>,
+        residues: Vec<Residue>,
+    ) -> Self {
         Self {
             turns,
             residues: residues
@@ -96,6 +105,7 @@ impl Table {
                 })
                 .collect(),
             source,
+            sessions,
         }
     }
 
@@ -109,8 +119,12 @@ impl Table {
         self.residues.iter().map(|standing| &standing.residue)
     }
 
-    pub(super) fn source(&self) -> &Path {
-        &self.source
+    pub(super) fn source(&self) -> AgentId {
+        self.source
+    }
+
+    pub(super) fn sessions(&self) -> &OwnDir {
+        &self.sessions
     }
 
     pub(super) fn turn(&self, id: u64) -> Option<&Turn> {
@@ -271,7 +285,7 @@ impl Table {
     /// Every item `leaving` names departs, stamped `departure`; one already
     /// departed keeps its stamp unless this is a withdrawal, which dominates.
     /// The address a departing turn keeps is its `origin` where it has one,
-    /// else this log's own file and the loci its records were measured at.
+    /// else this log's own session and the loci its records were measured at.
     fn depart(&mut self, leaving: impl Fn(Span) -> bool, departure: Departure) {
         let dominates = departure == Departure::Withdrawn;
         for standing in self
@@ -283,7 +297,7 @@ impl Table {
                 standing.departure = Some(departure);
             }
         }
-        let source = &self.source;
+        let source = self.source;
         for turn in self
             .turns
             .iter_mut()
@@ -291,7 +305,7 @@ impl Table {
         {
             let at = match &mut turn.body {
                 Body::Here { records, origin } => origin.take().unwrap_or_else(|| Pointer {
-                    source: source.clone(),
+                    source,
                     loci: records
                         .iter()
                         .map(|recorded| recorded.locus().clone())

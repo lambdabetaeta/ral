@@ -143,8 +143,8 @@ pub(crate) fn greps_listing(greps: &[&Grep]) -> Listing {
 
 /// A capability check's heading, `check <resource> <decision> <fields…>`. The
 /// decision roles `Role::Bad` when denied — the only decision the rail ever
-/// surfaces, per [`Landed::of`]: core's door (`Shell::observe_stamped` in
-/// `core/src/types/audit/door.rs`) broadcasts every fact and leaves the rail's
+/// surfaces, per [`Landed::of`]: core's fan-out (`Shell::observe_stamped` in
+/// `core/src/types/audit/fan_out.rs`) broadcasts every fact and leaves the rail's
 /// policy to the host. The
 /// trailing fields are core's own `fields` map (`name`/`resolved`/`args` for
 /// `exec`, `op`/`path` for `fs`, `prefix` for `deputy`) rendered as

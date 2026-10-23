@@ -1,4 +1,4 @@
-//! The transport's control door, driven the way a front-end drives it: an
+//! The transport's control sender, driven the way a front-end drives it: an
 //! interrupt arriving mid-dispatch must actually stop the run.
 //!
 //! `ControlSender::interrupt` aims at the dispatch this front-end has in
@@ -8,6 +8,7 @@
 //! the ceiling asserted here.  A SIGINT reaches the engine the same way,
 //! forwarded by its host as this very `Control::Interrupt`.
 
+#![allow(clippy::disallowed_methods, reason = "test code")]
 #![cfg(unix)]
 
 use ral_core::HostSurface;
@@ -30,7 +31,7 @@ static BARE: [EngineInstaller; 1] = [EngineInstaller {
 }];
 
 #[test]
-fn an_interrupt_through_the_control_door_stops_an_in_flight_run() {
+fn an_interrupt_through_the_control_sender_stops_an_in_flight_run() {
     let temp = std::env::temp_dir();
     let transport = IdentityTransport::boot(
         &BARE,

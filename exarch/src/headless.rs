@@ -522,11 +522,7 @@ pub fn run(
     {
         r = Err(format!("writing reply: {e}"));
     }
-    let _ = writeln!(
-        headless.err,
-        "Agent log: {}",
-        ral_core::path::shown(session.log_dir())
-    );
+    let _ = writeln!(headless.err, "Agent log: {}", session.log_dir());
     let _ = writeln!(
         headless.err,
         "[done] {} turns · {:.1}s · {}",
@@ -667,8 +663,5 @@ pub fn converse_settled<S: Sink>(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs scaffolding for a throwaway run dir"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

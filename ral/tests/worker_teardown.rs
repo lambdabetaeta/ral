@@ -11,8 +11,8 @@
 // before its first instruction, which is long enough for any wall-clock guard
 // to expire while the tree it was guarding does not yet exist.
 
+#![allow(clippy::disallowed_methods, reason = "test code")]
 #![cfg(unix)]
-#![allow(clippy::disallowed_methods)] // fixture and pid-file scaffolding, not a door
 
 mod common;
 

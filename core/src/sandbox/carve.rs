@@ -28,7 +28,7 @@
 //! answer: that allowance is passed on whole, for the backend to refuse.
 //!
 //! The paths are the frozen real paths the backend stamps; a directory is
-//! held through the sandbox side's own door and listed from the handle, and
+//! held through the sandbox side's own entry and listed from the handle, and
 //! each entry is judged by its position.
 
 use crate::path::{Dir, Installing, Kind, RealPath, shown};
@@ -165,4 +165,5 @@ pub(crate) fn carve(allowances: &[RealPath], exclusions: &[RealPath]) -> Result<
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

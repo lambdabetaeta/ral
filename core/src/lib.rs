@@ -33,6 +33,7 @@ pub mod invocation;
 pub mod io;
 pub mod ir;
 pub mod load;
+pub mod own;
 pub mod path;
 /// Names exported by `prelude.ral`, harvested from its top-level `let`
 /// bindings by `build.rs`.
@@ -46,6 +47,7 @@ pub mod run;
 pub(crate) mod runtime;
 pub mod sandbox;
 pub mod seed;
+mod site;
 pub mod source;
 pub mod sync;
 pub mod syntax;
@@ -53,8 +55,10 @@ pub mod terminal;
 #[cfg(feature = "test-util")]
 pub mod test_access;
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 pub(crate) mod test_env;
 #[cfg(any(test, feature = "test-util"))]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 pub mod test_helper;
 pub mod text;
 pub mod ty;
@@ -82,11 +86,5 @@ pub use types::{
 #[cfg(test)]
 #[ctor::ctor(unsafe)]
 fn init_lib_test_binary() {
-    if let Some(code) = invocation::serve_process_before_main(&[]) {
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "a re-exec stage has finished and dropped whatever shell it booted"
-        )]
-        std::process::exit(i32::from(code));
-    }
+    invocation::exit_if_served(invocation::serve_process_before_main(&[]));
 }

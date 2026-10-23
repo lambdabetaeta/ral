@@ -7,17 +7,17 @@
 //! and the caller just sees ENOENT.
 
 use super::Denied;
+use crate::site::{Silent, site};
 use std::time::Duration;
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:journal-read] Spawns journalctl/dmesg to harvest the kernel's seccomp-denial audit window for a sandbox diagnostic. A post-mortem diagnostic probe, not the model's exec image: raises no exec card."
-)]
 pub(super) fn read_window(elapsed: Duration) -> Option<String> {
     // Pad by a second so a sub-second call still spans its own denials.
     let secs = elapsed.as_secs().saturating_add(1).to_string();
     let since = format!("{secs} seconds ago");
-    let mut journal_cmd = std::process::Command::new("journalctl");
+    let mut journal_cmd = site!(
+        Silent::JournalRead,
+        std::process::Command::new("journalctl")
+    );
     journal_cmd.args([
         "-k",
         "--since",
@@ -31,7 +31,7 @@ pub(super) fn read_window(elapsed: Duration) -> Option<String> {
     {
         return Some(String::from_utf8_lossy(&out.stdout).into_owned());
     }
-    let mut dmesg_cmd = std::process::Command::new("dmesg");
+    let mut dmesg_cmd = site!(Silent::JournalRead, std::process::Command::new("dmesg"));
     dmesg_cmd.args(["--since", since.as_str()]);
     let dmesg = crate::process::output(&mut dmesg_cmd).ok()?;
     Some(String::from_utf8_lossy(&dmesg.stdout).into_owned())
@@ -92,9 +92,9 @@ pub(super) fn parse_denial(line: &str) -> Option<(String, Denied<'_>)> {
     Some((op, Denied::Opaque))
 }
 
-/// A seccomp record names a syscall, never a door; the deny-set's own words
+/// A seccomp record names a syscall, never a service; the deny-set's own words
 /// are all this platform has to add.
-pub(super) fn door_reason(_name: &str) -> Option<&'static str> {
+pub(super) fn service_reason(_name: &str) -> Option<&'static str> {
     None
 }
 

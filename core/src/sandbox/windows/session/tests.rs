@@ -165,7 +165,6 @@ fn an_exclusion_apart_from_every_whole_grant_is_kept() {
 }
 
 #[test]
-#[allow(clippy::disallowed_methods, reason = "[test] junction fixture")]
 fn a_redirected_allowance_refuses_the_launch_before_the_memo_is_consulted() {
     use crate::process::Launch;
     use crate::process::cancel::DurableRoot;
@@ -210,7 +209,6 @@ fn a_redirected_allowance_refuses_the_launch_before_the_memo_is_consulted() {
 /// following either: each is a link, never granted, and what they lead to is
 /// neither listed nor granted through them.
 #[test]
-#[allow(clippy::disallowed_methods, reason = "[test] link fixtures")]
 fn carving_meets_a_junction_and_a_symlink_as_links() {
     let td = tempfile::tempdir().unwrap();
     let root = walked(td.path());
@@ -254,10 +252,6 @@ fn carving_meets_a_junction_and_a_symlink_as_links() {
 /// stamp writes at a deleted tempdir. What it leaves behind is one
 /// stamp-store key naming a dead tempdir, inert.
 #[test]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] e2e sandbox spawn scaffolding"
-)]
 fn confined_child_writes_inside_the_grant_and_not_outside() {
     let _env = crate::test_env::env_guard();
     use crate::process::cancel::DurableRoot;
@@ -346,7 +340,6 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
 
 /// Run `f` with the stamp store under its own `XDG_STATE_HOME`, so these
 /// stamps never land in the user's state or in another test's.
-#[allow(clippy::disallowed_methods, reason = "[test] env fixture")]
 fn with_scoped_state(f: impl FnOnce()) {
     let state = tempfile::tempdir().unwrap();
     crate::test_env::with_var("XDG_STATE_HOME", Some(state.path().to_str().unwrap()), f);
@@ -370,7 +363,6 @@ const DARK: &str = r"D\dark\key.txt";
 /// The `ALL APPLICATION PACKAGES` SID: an ACE naming it admits every sandbox.
 const ALL_APPLICATION_PACKAGES: &str = "S-1-15-2-1";
 
-#[allow(clippy::disallowed_methods, reason = "[test] icacls fixture")]
 fn icacls(path: &Path, args: &[&str]) {
     let output = std::process::Command::new(r"C:\Windows\System32\icacls.exe")
         .arg(path)
@@ -389,7 +381,6 @@ struct Tree {
 }
 
 impl Tree {
-    #[allow(clippy::disallowed_methods, reason = "[test] fs fixture")]
     fn new() -> Self {
         let tree = Self {
             root: tempfile::tempdir().unwrap(),
@@ -401,7 +392,6 @@ impl Tree {
     }
 
     /// `relative` under the root, created holding `secret`.
-    #[allow(clippy::disallowed_methods, reason = "[test] fs fixture")]
     fn write(&self, relative: &str) -> PathBuf {
         let file = self.at(relative);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -448,7 +438,6 @@ fn projection(read: &[&str], deny: &[&str]) -> crate::sandbox::SandboxProjection
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "[test] the fixed system image")]
 fn cmd() -> &'static Path {
     Path::new(r"C:\Windows\System32\cmd.exe")
 }
@@ -479,7 +468,6 @@ fn confined(
 
 /// Run `type relative` confined under `projection` from `cwd`, and assert it
 /// reads `secret` exactly when `readable`.
-#[allow(clippy::disallowed_methods, reason = "[test] confined child pipes")]
 fn assert_reads(
     projection: &crate::sandbox::SandboxProjection,
     cwd: &Path,
@@ -492,7 +480,6 @@ fn assert_reads(
 
 /// Spawn `launch`, a confined `type relative`, and assert it reads `secret`
 /// exactly when `readable`.
-#[allow(clippy::disallowed_methods, reason = "[test] confined child pipes")]
 fn assert_launch_reads(mut launch: crate::process::Launch, relative: &str, readable: bool) {
     use crate::process::PgidPolicy;
     use std::io::Read;
@@ -620,7 +607,6 @@ fn a_deny_apart_from_every_grant_launches_and_stays_dark() {
 /// whose own DACL admits every sandbox, and a hard link carrying a granted
 /// file's ACE to a name inside the exclusion. Either refuses the launch.
 #[test]
-#[allow(clippy::disallowed_methods, reason = "[test] hard link fixture")]
 fn a_deny_the_token_reaches_anyway_is_refused() {
     with_scoped_state(|| {
         let tree = Tree::new();

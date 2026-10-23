@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 // Unix-only: the fixtures are Unix path shapes, and the no-repository
 // fallback anchors at `/`.
 #![cfg(unix)]

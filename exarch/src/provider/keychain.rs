@@ -1,4 +1,4 @@
-//! The computer's own credential manager, behind one door.
+//! The computer's own credential manager, behind one type.
 //!
 //! The macOS Keychain, the Windows Credential Manager, or the freedesktop
 //! Secret Service, reached through a [`keyring`] entry named
@@ -11,8 +11,10 @@
 //! A headless box has no credential manager, and asking it is an error,
 //! not a lie to paper over: [`Keychain::vault`] answers where secrets on
 //! *this* computer actually land, so the window can say so rather than
-//! implying a protection that is not there.  The fallback is a `0600` file
-//! written through [`secret_file::write_private`].
+//! implying a protection that is not there.  The fallback is an owner-only
+//! file in the app's state directory, replaced whole as a
+//! [`Visibility::Secret`] [`OwnDir::store`]: it is made again owner-only
+//! whatever was there, and a crash leaves the old file or the new.
 //!
 //! Nothing here reads or writes the environment: a key from the
 //! environment is [`super::credential`]'s business, and outranks this one.
@@ -20,7 +22,8 @@
 use crate::app::App;
 use crate::provider::credential::SecretVault;
 use crate::provider::identity::Account;
-use crate::provider::secret_file;
+use ral_core::own::{OwnDir, OwnError};
+use ral_core::path::{Visibility, XdgKind};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -30,15 +33,19 @@ const FALLBACK_FILE: &str = "keys.json";
 /// verbatim, so both arms read as the end of the sentence "kept in …".
 pub enum Vault {
     Os(&'static str),
-    /// No credential manager could be reached; this owner-only file instead.
-    File(PathBuf),
+    /// No credential manager could be reached; this owner-only file instead,
+    /// which has no spelling where the process has no state directory.
+    File(Option<PathBuf>),
 }
 
 impl std::fmt::Display for Vault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Os(name) => f.write_str(name),
-            Self::File(path) => write!(f, "the file {}", ral_core::path::shown(path)),
+            Self::File(Some(path)) => write!(f, "the file {}", ral_core::path::shown(path)),
+            Self::File(None) => f.write_str(
+                "an owner-only file, but this process has no state directory to put it in",
+            ),
         }
     }
 }
@@ -72,7 +79,8 @@ impl Keychain {
     pub fn read(self, id: &str) -> Option<String> {
         let raw = match self.entry(id).ok()? {
             Some(entry) => entry.get_password().ok()?,
-            None => self.read_fallback().remove(id)?,
+            // A query: a fallback file that cannot be read holds no key.
+            None => self.read_fallback().ok()?.remove(id)?,
         };
         super::credential::well_formed_key(&raw)
     }
@@ -81,10 +89,11 @@ impl Keychain {
     ///
     /// # Errors
     /// Returns a plain sentence naming the vault that refused it — a locked
-    /// keychain, a read-only config directory — never a bare error code.
+    /// keychain, a read-only state directory, a fallback file that cannot be
+    /// read and so is not written over — never a bare error code.
     pub fn store(self, id: &str, key: &str) -> Result<(), String> {
         let Some(entry) = self.entry(id)? else {
-            let mut keys = self.read_fallback();
+            let mut keys = self.read_fallback()?;
             keys.insert(id.to_string(), key.to_string());
             return self.write_fallback(&keys);
         };
@@ -98,10 +107,11 @@ impl Keychain {
     ///
     /// # Errors
     /// Returns a plain sentence if the vault held the key and would not
-    /// give it up.
+    /// give it up, or if the fallback file cannot be read and so is not
+    /// written over.
     pub fn forget(self, id: &str) -> Result<(), String> {
         let Some(entry) = self.entry(id)? else {
-            let mut keys = self.read_fallback();
+            let mut keys = self.read_fallback()?;
             if keys.remove(id).is_none() {
                 return Ok(());
             }
@@ -137,45 +147,36 @@ impl Keychain {
         keyring::Entry::store_status().is_ok()
     }
 
-    /// Where this app's keys land with no credential manager to hold them.
+    /// Where this app's keys land with no credential manager to hold them,
+    /// as a spelling: `None` where the host names no state base.
     /// `pub(crate)` so [`super::credential_files`] can deny it: the file is a
-    /// plain `0600` JSON map, and a `0600` file is no protection from an agent
-    /// running as the user who owns it.
-    pub(crate) fn fallback_path(self) -> PathBuf {
+    /// plain owner-only JSON map, and an owner-only file is no protection from
+    /// an agent running as the user who owns it.
+    pub(crate) fn fallback_path(self) -> Option<PathBuf> {
         self.app
-            .xdg_dir(ral_core::path::XdgKind::Config)
-            .join(FALLBACK_FILE)
+            .xdg_dir(XdgKind::State)
+            .map(|dir| dir.join(FALLBACK_FILE))
     }
 
-    /// The fallback file's contents, or an empty map — an unreadable or
-    /// malformed file reads as no keys, since the window's next `store`
-    /// rewrites it wholesale and a hard error here would leave the user
-    /// unable to enter one at all.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:key-read] reads the owner-only fallback key file; credential store infra, not turn-time data I/O"
-    )]
-    fn read_fallback(self) -> BTreeMap<String, String> {
-        std::fs::read(self.fallback_path())
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+    /// The fallback file's keys, an empty map where there is no file.
+    ///
+    /// # Errors
+    /// [`OwnError`] where the state directory, or the file in it, cannot be
+    /// read as a key map.  A caller that writes the map back stops here: a
+    /// file that could not be read is never written over.
+    fn read_fallback(self) -> Result<BTreeMap<String, String>, OwnError> {
+        Ok(self.state()?.load(FALLBACK_FILE)?.unwrap_or_default())
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:key-write] creates the app's config directory for the owner-only fallback key file; credential store infra, not turn-time data I/O"
-    )]
     fn write_fallback(self, keys: &BTreeMap<String, String>) -> Result<(), String> {
-        let path = self.fallback_path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("could not make {}: {e}", ral_core::path::shown(parent)))?;
-        }
-        let json = serde_json::to_string_pretty(keys)
-            .map_err(|e| format!("could not write out the keys: {e}"))?;
-        secret_file::write_private(&path, json.as_bytes())
-            .map_err(|e| format!("could not write {}: {e}", ral_core::path::shown(&path)))
+        Ok(self
+            .state()?
+            .store(FALLBACK_FILE, keys, Visibility::Secret)?)
+    }
+
+    /// Where the fallback file lives: this app's state directory.
+    fn state(self) -> Result<OwnDir, OwnError> {
+        self.app.own(XdgKind::State)
     }
 }
 

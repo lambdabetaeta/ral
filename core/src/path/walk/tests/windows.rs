@@ -1,24 +1,26 @@
 //! The walk on a Windows volume.
 
-#![allow(
-    clippy::disallowed_methods,
-    reason = "[test] fixtures build the file whose short alias the walk is asked about"
-)]
-
 use super::super::*;
 use super::{writable, writing};
 use crate::path::Resolver;
 use std::io::{Read, Write};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::AsRawHandle;
 use windows_sys::Wdk::Storage::FileSystem::SYMLINK_FLAG_RELATIVE;
 use windows_sys::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, ERROR_SHARING_VIOLATION,
+    ERROR_SUCCESS, LocalFree,
+};
+use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+use windows_sys::Win32::Security::{
+    ACCESS_ALLOWED_ACE, ACL, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
+    GetSecurityDescriptorControl, PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED, TOKEN_USER,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    GetVolumeNameForVolumeMountPointW,
+    DELETE, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, GetVolumeNameForVolumeMountPointW, READ_CONTROL,
 };
 use windows_sys::Win32::System::SystemServices::{
     IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK,
@@ -290,7 +292,7 @@ fn a_listing_without_128_bit_ids_falls_back_to_the_64_bit_id() {
             .unwrap(),
     );
     assert!(at("made").is_dir());
-    let mut staged = walked(&at("f")).stage().unwrap();
+    let mut staged = walked(&at("f")).stage(Visibility::Public).unwrap();
     staged.file().write_all(b"new").unwrap();
     assert!(staged.publish().is_err());
     assert_eq!(names_in(tmp.path()), ["d", "f", "made"]);
@@ -386,12 +388,12 @@ fn a_dropped_or_failed_staged_write_leaves_no_sibling() {
     let f = tmp.path().join("f");
     std::fs::write(&f, b"old").unwrap();
 
-    drop(walked(&f).stage().unwrap());
+    drop(walked(&f).stage(Visibility::Public).unwrap());
     assert_eq!(names_in(tmp.path()), ["f"]);
 
     // The staged write holds `f`, so its name is moved aside rather than
     // deleted, which would stay pending until that handle closes.
-    let mut staged = walked(&f).stage().unwrap();
+    let mut staged = walked(&f).stage(Visibility::Public).unwrap();
     staged.file().write_all(b"new").unwrap();
     let old = tmp.path().join("old");
     std::fs::rename(&f, &old).unwrap();
@@ -539,7 +541,7 @@ fn publish_through_file_rename_info_ex_lands_the_file() {
     for (leaf, before) in [("f", "old"), ("g", "")] {
         let located = walked(&tmp.path().join(leaf));
         assert_eq!(located.stat().is_some(), !before.is_empty());
-        let mut staged = located.stage().unwrap();
+        let mut staged = located.stage(Visibility::Public).unwrap();
         staged.file().write_all(b"new").unwrap();
         staged.publish().unwrap();
         assert_eq!(read_all(&tmp.path().join(leaf)), "new");
@@ -571,4 +573,212 @@ fn a_recreated_file_meets_the_deny_by_position_under_another_id() {
         excluded.matches(Subject::Access(&met), Depth::Within),
         Some(MatchedBy::Name)
     );
+}
+
+/// What the DACL of `path` holds: whether it is protected from inheritance,
+/// and for each entry whether it allows, whether it names the process's owner,
+/// and the rights it grants.
+fn dacl_of(path: &Path) -> (bool, Vec<(bool, bool, u32)>) {
+    let file = std::fs::OpenOptions::new()
+        .access_mode(READ_CONTROL)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .unwrap();
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `file` is a live handle with `READ_CONTROL`, and `dacl` and `sd`
+    // are the out-parameters the call fills.
+    let rc = unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &raw mut dacl,
+            std::ptr::null_mut(),
+            &raw mut sd,
+        )
+    };
+    assert_eq!(rc, ERROR_SUCCESS, "{path:?}");
+    let (mut control, mut revision) = (0u16, 0u32);
+    // SAFETY: `sd` is the descriptor `GetSecurityInfo` allocated.
+    let ok = unsafe { GetSecurityDescriptorControl(sd, &raw mut control, &raw mut revision) };
+    assert_ne!(ok, 0);
+    let owner = host::owner_only::current_process_owner().unwrap();
+    // SAFETY: `owner` holds a populated `TOKEN_USER` in a `u64` buffer.
+    let owner_sid = unsafe { (*owner.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    // SAFETY: a non-null `dacl` is part of the descriptor `sd`.
+    let count = if dacl.is_null() {
+        0
+    } else {
+        unsafe { (*dacl).AceCount }
+    };
+    let aces = (0..count)
+        .map(|index| {
+            let mut ace = std::ptr::null_mut();
+            // SAFETY: the index is in range and `sd` outlives the entry.
+            assert_ne!(unsafe { GetAce(dacl, u32::from(index), &raw mut ace) }, 0);
+            let ace = ace.cast::<ACCESS_ALLOWED_ACE>();
+            // SAFETY: allow and deny ACEs share this prefix, and each ACE
+            // is DWORD-aligned inside the ACL.
+            unsafe {
+                let sid = (&raw mut (*ace).SidStart).cast();
+                (
+                    (*ace).Header.AceType == 0,
+                    EqualSid(sid, owner_sid) != 0,
+                    (*ace).Mask,
+                )
+            }
+        })
+        .collect();
+    // SAFETY: `sd` came from `GetSecurityInfo`, which allocates through
+    // `LocalAlloc`, and nothing reads it after this.
+    unsafe { LocalFree(sd) };
+    (control & SE_DACL_PROTECTED != 0, aces)
+}
+
+/// `Secret` is a protected DACL naming the owner alone, over a leaf that
+/// inherits whatever its directory hands down; `Public` and `Private` inherit.
+#[test]
+fn a_staged_write_is_owner_only_when_it_is_secret() {
+    let tmp = tempfile::tempdir().unwrap();
+    for (visibility, owner_only) in [
+        (Visibility::Public, false),
+        (Visibility::Private, false),
+        (Visibility::Secret, true),
+    ] {
+        let at = tmp.path().join(format!("{visibility:?}"));
+        std::fs::write(&at, b"old").unwrap();
+        assert!(!dacl_of(&at).0, "the leaf inherits before it is replaced");
+        let mut staged = walked(&at).stage(visibility).unwrap();
+        staged.file().write_all(b"new").unwrap();
+        staged.publish().unwrap();
+        assert_eq!(read_all(&at), "new");
+        let (protected, aces) = dacl_of(&at);
+        assert_eq!(protected, owner_only, "{visibility:?}");
+        if owner_only {
+            assert_eq!(aces, [(true, true, FILE_ALL_ACCESS)]);
+        }
+    }
+}
+
+/// A file made at an absent leaf is made as asked, with no instant under an
+/// inherited ACL, and a taken name is refused, a link included.
+#[test]
+fn a_data_open_makes_an_absent_leaf_as_asked() {
+    let tmp = tempfile::tempdir().unwrap();
+    for (visibility, owner_only) in [
+        (Visibility::Public, false),
+        (Visibility::Private, false),
+        (Visibility::Secret, true),
+    ] {
+        let at = tmp.path().join(format!("{visibility:?}"));
+        let mut file = walked(&at).open_data(Access::Write, visibility).unwrap();
+        file.write_all(b"made").unwrap();
+        drop(file);
+        assert_eq!(read_all(&at), "made");
+        let (protected, aces) = dacl_of(&at);
+        assert_eq!(protected, owner_only, "{visibility:?}");
+        if owner_only {
+            assert_eq!(aces, [(true, true, FILE_ALL_ACCESS)]);
+        }
+    }
+
+    let absent = walked(&tmp.path().join("raced"));
+    std::fs::write(tmp.path().join("raced"), b"first").unwrap();
+    let err = absent
+        .open_data(Access::Write, Visibility::Secret)
+        .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{err}");
+    assert_eq!(read_all(&tmp.path().join("raced")), "first");
+
+    let appended = tmp.path().join("appended");
+    let mut file = walked(&appended)
+        .open_data(Access::Append, Visibility::Private)
+        .unwrap();
+    file.write_all(b"a").unwrap();
+    file.write_all(b"b").unwrap();
+    drop(file);
+    assert_eq!(read_all(&appended), "ab");
+}
+
+/// The making walk makes each absent name of the spelling and steps onto it,
+/// and takes a present name as it is.
+#[test]
+fn the_making_walk_makes_each_absent_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(tmp.path().join("present")).unwrap();
+
+    let made = walk_dir_made(&spelled(&tmp.path().join("present/a/b"))).unwrap();
+    assert!(
+        made.real().as_path().ends_with(Path::new("present/a/b")),
+        "{}",
+        made.real()
+    );
+    assert!(tmp.path().join("present/a/b").is_dir());
+    let again = walk_dir_made(&spelled(&tmp.path().join("present/a/b"))).unwrap();
+    assert_eq!(again.trace().last_id(), made.trace().last_id());
+
+    std::fs::write(tmp.path().join("file"), b"").unwrap();
+    let err = walk_dir_made(&spelled(&tmp.path().join("file/sub")))
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::NotADirectory, "{err}");
+}
+
+/// A removal is by the handle the walk holds: a tree goes with everything in
+/// it, a read-only file and a file someone else holds open included, since the
+/// name goes at once.
+#[test]
+fn remove_takes_a_tree_by_handle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tree = tmp.path().join("tree");
+    std::fs::create_dir_all(tree.join("sub/deeper")).unwrap();
+    std::fs::write(tree.join("f"), b"").unwrap();
+    std::fs::write(tree.join("sub/g"), b"").unwrap();
+    std::fs::write(tree.join("sub/deeper/h"), b"").unwrap();
+    let mut permissions = std::fs::metadata(tree.join("sub/g")).unwrap().permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(tree.join("sub/g"), permissions).unwrap();
+    let open = std::fs::File::open(tree.join("f")).unwrap();
+    std::fs::write(tmp.path().join("kept"), b"kept").unwrap();
+
+    walked(&tree).remove().unwrap();
+    assert!(!tree.exists());
+    drop(open);
+    assert_eq!(read_all(&tmp.path().join("kept")), "kept");
+
+    std::fs::write(tmp.path().join("one"), b"").unwrap();
+    walked(&tmp.path().join("one")).remove().unwrap();
+    assert!(!tmp.path().join("one").exists());
+    let err = walked(&tmp.path().join("absent")).remove().unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::NotFound, "{err}");
+}
+
+/// A rename is by the handle the walk holds, in the directory it is in, over
+/// whatever is at the new name, even a file someone else holds open.
+#[test]
+fn rename_replaces_by_handle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let at = |entry: &str| tmp.path().join(entry);
+    std::fs::write(at("f"), b"new").unwrap();
+    std::fs::write(at("g"), b"old").unwrap();
+    let open = std::fs::File::open(at("g")).unwrap();
+
+    walked(&at("f")).rename(&name("g")).unwrap();
+    assert!(!at("f").exists());
+    assert_eq!(read_all(&at("g")), "new");
+    drop(open);
+
+    walked(&at("g")).rename(&name("fresh")).unwrap();
+    assert_eq!(read_all(&at("fresh")), "new");
+    assert_eq!(names_in(tmp.path()), ["fresh"]);
+
+    std::fs::create_dir(at("d")).unwrap();
+    walked(&at("d")).rename(&name("e")).unwrap();
+    assert!(at("e").is_dir() && !at("d").exists());
+
+    let err = walked(&at("absent")).rename(&name("x")).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::NotFound, "{err}");
 }

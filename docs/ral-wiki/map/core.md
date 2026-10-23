@@ -8,11 +8,11 @@ covers_paths: [core/src/lib.rs]
 
 **`core/` is the `ral-core` crate — the language engine — and a host reaches it
 through two narrow crate-root seams: a compile-then-typecheck pipeline that turns
-source into typed IR, and the framed run door that is the only entry into
+source into typed IR, and the framed run entry that is the only way into
 evaluation.** It is the bulk of the codebase (~100k lines of Rust); both
 binaries, `ral` and [[map/exarch|exarch]], embed it.
 
-`core/src/lib.rs` is the front door. The compilation ladder is *source → tokens →
+`core/src/lib.rs` is the crate root. The compilation ladder is *source → tokens →
 flat AST → CBPV IR → typed IR*, bundled as `compile::compile_and_typecheck` (parse →
 elaborate → typecheck, failing with a `CompileError` of `Parse` or `Types`)
 and, crate-privately, `compile`
@@ -28,13 +28,13 @@ outside the crate names it, `pub(crate)` otherwise, so `dead_code` can name an
 internal whose last caller went away
 ([[decisions/260909_pub-crate-by-default|pub-crate-by-default]]). Core's own
 integration tests link `ral-core` as an external crate and reach internals
-through one gated door, `core::test_access` — its engine reads go through
+through one gated module, `core::test_access` — its engine reads go through
 `IdentityTransport::inspect`, the one `test-util`-only read of an identity
 engine's shell; core's unit tests boot engines through `engine::testkit`.
 
 ## The evaluation seam
 
-Evaluation enters only through the *framed run door* on `Shell`, never the
+Evaluation enters only through the *framed run entry* on `Shell`, never the
 reduction primitive behind it. A host states policy; core owns resources.
 
 - `Shell::run(RunRequest)` runs one whole `Run`, synchronously and
@@ -49,7 +49,7 @@ reduction primitive behind it. A host states policy; core owns resources.
   (Attach/Dispatch/Event/Control) a front-end speaks, run in-process as the
   identity transport or across a socket to the `engine` child
   ([[map/core/engine-protocol|engine-protocol]]).
-- The reduction host behind the door is crate-private, so a host cannot start an
+- The reduction host behind the entry is crate-private, so a host cannot start an
   unframed evaluation that would foreground or capture against a stale frame.
 
 ## host and boot
@@ -58,21 +58,30 @@ The crate splits driving a `Shell` from probing the machine it runs on.
 
 - `boot` embeds a `Shell` in a host process. `Shell::root(runtime)` constructs over a `Runtime`, the surface a
   host chooses through `HostSurface::runtime` or `boot_runtime`, so every
-  shell chooses its surface through a door:
+  shell chooses its surface through one of two constructors:
   `HostSurface::shell` (core's `CORE_SETS`, then the host's sets, no env, no
   prelude: a loader's scaffold) or `boot_shell`, which adds the host env and
   seats a `BakedPrelude` whole (`BakedPrelude::seat`). A half-dressed
   production shell is unrepresentable, and `HostSurface::manifest` hands the
   checker the same list. The prelude is baked ahead of time
   into a schema-less `postcard` blob whose single encode site
-  (`boot::bake_prelude_to_out_dir`) and single decode site
+  (`boot::bake_prelude`, returning the blob for a host's build script to write) and single decode site
   (`boot::BakedPrelude`) sit together, and the build-dependency edge from each
   host to `ral-core` reruns the bake, so the schema-evolution hazard has one guard rather than three that must
   agree ([[decisions/260610_host-embedding-api|host-embedding-api]],
   [[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
 - `host` probes the underlying machine: `git()`, `os_name`/`arch`/`family`,
-  wall-clock `now()`, and re-exports of cwd/user/home. exarch's host snapshot is
-  a formatter over it.
+  wall-clock `now()`, and re-exports of cwd/user/home. It is also the one reader
+  of the host's environment (`var`, `var_os`, `vars_os`, `temp_dir`), and of the
+  XDG bases (`xdg`, with the account's home as the program's own fallback).
+  exarch's host snapshot is a formatter over it.
+- `own` is the files a program touches on its own account, outside any shell:
+  `OwnDir` (what it keeps), `UserFile` (what the user writes at its places) and the
+  user-named `read_named`, `open_named`, `kind_named` and `create_named` (banned,
+  so each caller is a typed site that says why the name is the user's), over the
+  walk and one authority, with no site of its own
+  ([[map/core/capabilities|capabilities]],
+  [[decisions/261022_own-files|own-files]]).
 
 ## The pipeline, by judgment
 

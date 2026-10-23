@@ -24,11 +24,10 @@ pub(crate) fn answer(shell: &Shell, probe: &Probe) -> FOValue {
         Probe::LeasedBindingCount => shell.leased_binding_count().encode(),
         Probe::LargestBindingBytes => shell.largest_binding_shallow_size().encode(),
         Probe::EnvVar(name) => shell.env_var(name).encode(),
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "native: the host reads it back as a PathBuf"
-        )]
-        Probe::Cwd => shell.cwd().display().to_string().encode(),
+        Probe::Cwd => crate::path::utf8(&shell.cwd())
+            .ok()
+            .map(str::to_owned)
+            .encode(),
         Probe::Home => shell.context.home().encode(),
         Probe::BuiltinNames => shell
             .builtin_names()

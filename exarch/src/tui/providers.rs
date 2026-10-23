@@ -555,10 +555,13 @@ pub(super) fn providers(app: &mut App, ctx: &CommandCtx<'_>) {
         return;
     };
     let table = entries(&holdings.store.lock_ignore_poison());
-    app.open(Overlay::Providers(ProvidersOverlay::new(
-        table,
-        Wallet::exarch(),
-    )));
+    match Wallet::exarch() {
+        Ok(wallet) => app.open(Overlay::Providers(ProvidersOverlay::new(table, wallet))),
+        Err(e) => {
+            let focused = app.tabs.focused();
+            app.push_error(focused, &e.to_string());
+        }
+    }
 }
 
 /// Apply one input and the [`Action`] it asks for; the overlay closes on its

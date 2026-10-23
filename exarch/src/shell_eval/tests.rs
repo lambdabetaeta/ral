@@ -1423,7 +1423,7 @@ fn edit_replace_preserves_the_target_file_mode() {
 
 /// `skill NAME`'s charset check *is* its path-traversal guard: the name is
 /// joined straight onto a skills root, so anything that could climb out of
-/// one must be refused at the door, unread.
+/// one must be refused at the check, unread.
 #[test]
 fn skill_name_validation_confines_the_join_to_the_skills_root() {
     let engine = fresh();
@@ -1594,7 +1594,7 @@ fn scratch_file(tag: &str, name: &str, body: &str) -> (tempfile::TempDir, String
     (dir, disp)
 }
 
-/// The READ door end to end: one `<` redirect raises exactly one `Read`
+/// The READ path end to end: one `<` redirect raises exactly one `Read`
 /// event, and no exec card — `from-string` is a builtin, not an image.
 #[test]
 fn bare_read_redirect_surfaces_one_read_card() {
@@ -1685,7 +1685,7 @@ fn a_write_over_a_file_too_large_to_read_shows_no_diff() {
     assert!(change.diff.is_none());
 }
 
-/// The EXEC door end to end: a bare external raises exactly one `Command`
+/// The EXEC path end to end: a bare external raises exactly one `Command`
 /// observation, carrying the resolved argv and exit status.
 #[cfg(unix)]
 #[test]
@@ -1758,7 +1758,7 @@ fn view_is_a_helper_not_an_exec_image() {
 }
 
 /// `cat < a` is two operations: the redirect's READ, then the EXEC over
-/// that stdin.  The read comes first because the door announces eagerly on
+/// that stdin.  The read comes first because the redirect announces eagerly on
 /// install, before the body it feeds runs.
 #[cfg(unix)]
 #[test]
@@ -2007,9 +2007,15 @@ mod self_layer {
     #[test]
     fn exarch_is_refused_in_a_reasonable_session() {
         let Some(f) = fixture() else { return };
-        let crate::policy::Invocation { stack, .. } =
-            crate::policy::for_invocation(&f.cwd, "reasonable", Some(&f.extend), &[])
-                .expect("reasonable composes");
+        let scratch = f.cwd.join("scratch");
+        let crate::policy::Invocation { stack, .. } = crate::policy::for_invocation(
+            &f.cwd,
+            &scratch.to_string_lossy(),
+            "reasonable",
+            Some(&f.extend),
+            &[],
+        )
+        .expect("reasonable composes");
         refuses_exarch(&f, &stack);
         bundled_tool_runs(&f, &stack);
     }
@@ -2019,9 +2025,15 @@ mod self_layer {
     #[test]
     fn a_spawned_child_inherits_the_self_layer() {
         let Some(f) = fixture() else { return };
-        let crate::policy::Invocation { stack: parent, .. } =
-            crate::policy::for_invocation(&f.cwd, "reasonable", Some(&f.extend), &[])
-                .expect("reasonable composes");
+        let scratch = f.cwd.join("scratch");
+        let crate::policy::Invocation { stack: parent, .. } = crate::policy::for_invocation(
+            &f.cwd,
+            &scratch.to_string_lossy(),
+            "reasonable",
+            Some(&f.extend),
+            &[],
+        )
+        .expect("reasonable composes");
         let ctx = ral_core::guard::freeze::FreezeCtx::at(
             ral_core::types::EnvVars::new(),
             ral_core::path::CwdPath::new(f.cwd.clone()).expect("the fixture cwd is absolute"),

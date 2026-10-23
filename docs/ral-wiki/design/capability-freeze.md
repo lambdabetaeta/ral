@@ -4,7 +4,7 @@
 every spelling once and returns a `GrantLayer`, whose rules hold what the walks
 reached — positions for allowances, held objects for exclusions — and nothing
 beside them.** The boundary between *syntactic profile* and *resolved
-authority* is a type split with one door: nothing authored reaches the dynamic
+authority* is a type split with one crossing: nothing authored reaches the dynamic
 stack or the IPC wire, because a `GrantLayer` keeps no authored copy for
 anything to disagree with.
 
@@ -22,7 +22,7 @@ The types (`core/src/capability/lattice.rs`):
   ([[design/authority-tables|authority-tables]]); `GrantLayer::extend` joins a
   base with a `Fragment` into one ceiling layer.
 
-## `decode` is the one-way door
+## `decode` is the one-way crossing
 
 The sole non-trivial constructor is `decode_capability_map`
 (`core/src/guard/decode.rs`), the single `Value::Map → GrantLayer`
@@ -30,13 +30,15 @@ function. It walks a `.ral` profile's terminal record — or the inline
 `grant [...] { body }` record — into a layer, resolving each spelling by the
 walk as it freezes it. In doing so it:
 
-- **resolves** every place (`` `cwd ``, `` `home ``, `` `tempdir ``, `` `gitdir ``,
-  `` `xdg-* ``, `` `absolute ``) and every selector (`` `path ``, `` `system ``, the package managers)
+- **resolves** every place (`` `cwd ``, `` `home ``, `` `tempdir ``, `` `scratch ``,
+  `` `gitdir ``, `` `xdg-* ``, `` `absolute ``) and every selector (`` `path ``, `` `system ``, the package managers)
   against a `FreezeCtx` (owned `home` and `cwd`, `FreezeCtx::of(&Shell)`;
-  `` `tempdir `` against the process temp dir). The freeze is `guard/freeze.rs`:
+  `` `tempdir `` against the host's temp dir; `` `scratch `` against the spelling
+  of the session's scratch the context carries, which a host that made none
+  refuses). The freeze is `guard/freeze.rs`:
   `FreezeCtx::place` is the one place a grant's place becomes a `FrozenPath`,
   `FreezeCtx::selector` the one place a selector becomes many, and
-  `FrozenPath::from_surface` the one minting door
+  `FrozenPath::from_surface` the one minting entry
   ([[decisions/261006_capability-is-data|capability-is-data]]);
 - **classifies** an `absolute` payload on the raw string, before any folding,
   host first, so one profile loads on both platforms: a path absolute under the
@@ -148,7 +150,7 @@ through `RealPath::contains` or `Excluded::matches`. No caller elsewhere holds
 two paths and picks.
 
 This is *fail-closed*: the honest reading for a defence-in-depth control is that
-the offending input is refused at the door, not that its rejection depends on
+the offending input is refused at the boundary, not that its rejection depends on
 what survives the lattice. Error attribution is per-profile — exarch's loader
 prepends `--restrict <path>` (or `--extend`), so the message names the file
 that carried the bad token.
@@ -170,7 +172,7 @@ legitimately lies outside the tree, so no region bounds it. What bounds it is
   config of a repository split off with `--separate-git-dir`, the two records git
   itself keeps. Both ends must agree, and only one end is writable from inside
   the tree.
-- A pointer nothing claims is a `PolicyError` at the door (`guard::freeze`, which holds the three `gitdir` refusals), like an escaping
+- A pointer nothing claims is a `PolicyError` at the boundary (`guard::freeze`, which holds the three `gitdir` refusals), like an escaping
   `xdg-*` place. Silently narrowing to the cwd would be safe and unreadable — the same
   fail-closed-and-say-so reading the XDG guard takes.
 

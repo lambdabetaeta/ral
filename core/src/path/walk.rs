@@ -14,10 +14,9 @@
 //! it ([`Authority`]): the grant stack, by `GrantStack::judge`, or the OS
 //! sandbox side, at a position it is installing rules at.
 //!
-//! This is the one file that opens a model-named object, so the reviewed
-//! syscall sites (`core/tests/syscall_sites.rs`) can be read off it and its
-//! host modules: [`open_discard`] is the sole exception, a device with no
-//! object to locate.
+//! This is the one file that opens a model-named object, so the typed sites
+//! (`path/site.rs`) can be read off it and its host modules: [`open_discard`]
+//! is the sole exception, a device with no object to locate.
 //!
 //! # The host seam
 //!
@@ -34,13 +33,13 @@
 //!   `Lister`, which name the identity, kind and stat of an object, a link's
 //!   target through its handle, a data handle derived from a held leaf, and a
 //!   listing;
-//! - `create`, `create_sibling`, `mkdir`, `rename_over`,
-//!   `discard`, `is_writable` and `open_discard`, which write, and on Unix
-//!   `sync_dir` and `copy_mode`, which Windows has no use for;
+//! - `create`, `create_sibling`, `mkdir`, `rename_over`, `discard`,
+//!   `remove`, `rename`, `is_writable` and `open_discard`, which write, and on
+//!   Unix `sync_dir` and `copy_mode`, which Windows has no use for;
 //! - on Unix, `seen_at`, which stats a listed entry by name, and `impl
 //!   From<&rustix::fs::Stat> for ObjectId`, the identity a by-name `stat`
 //!   reports, which `carriers` compares with [`ObjectId::of`];
-//! - on Windows, `reopen_shared` and `is_local`, which the `Installing` doors
+//! - on Windows, `reopen_shared` and `is_local`, which the `Installing` methods
 //!   of the same names ask.
 
 use serde::de::Error as _;
@@ -60,8 +59,10 @@ use std::time::SystemTime;
 use strum::{IntoStaticStr, VariantArray};
 
 use super::lex::{is_absolute, is_unparsed_head, names_a_dir};
+use super::site::Silent;
 use super::{LexicalPath, PathRules, shown};
 use crate::label;
+use crate::site::site;
 // Inverted edge, deliberate: `Verdict`'s field is private to its module, which `pub(in ..)` cannot name from a sibling.
 use crate::capability::{FsOp, Verdict};
 // Inverted edge, deliberate: the twin of `Verdict`, its field private to `sandbox.rs`.
@@ -87,6 +88,7 @@ mod windows;
 use windows as host;
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;
 
 #[cfg(any(test, feature = "test-util"))]
@@ -142,6 +144,36 @@ fn loop_error() -> io::Error {
 pub(crate) fn is_loop(e: &io::Error) -> bool {
     e.get_ref()
         .is_some_and(<dyn std::error::Error + Send + Sync>::is::<Looped>)
+}
+
+/// A walk's refusal where the link at the spelling's last name leads nowhere:
+/// the `NotFound` met past it, and the target the link named.  Shows as that
+/// `NotFound`.
+#[derive(Debug)]
+struct Dangling {
+    target: PathBuf,
+    error: io::Error,
+}
+
+impl fmt::Display for Dangling {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for Dangling {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+/// The target a link at the spelling's last name named, as the link spelled
+/// it, where the walk could not reach it: read off its `NotFound`, as
+/// [`is_loop`] reads `ELOOP`.  `None` for any other error.
+pub(crate) fn dangling(e: &io::Error) -> Option<&Path> {
+    e.get_ref()?
+        .downcast_ref::<Dangling>()
+        .map(|d| d.target.as_path())
 }
 
 /// What every name of an object shares and no other object has while the
@@ -281,7 +313,7 @@ impl From<NotAnEntryName> for io::Error {
 ///
 /// A single normal component: non-empty, not `.` or `..`, holding no
 /// separator, and on Windows no `:` (a stream is reached through its file; no
-/// listing shows one and ral has no door for one).  [`parse`](Self::parse) is
+/// listing shows one and ral has no way to name one).  [`parse`](Self::parse) is
 /// the one constructor and checks that; the walk's parse of a spelling, a
 /// listing, [`fresh`](Self::fresh) and `Deserialize` all go through it, so
 /// [`Dir::open_dir`] cannot be handed `../x` or `a/b`.  Crosses the wire as
@@ -323,15 +355,23 @@ impl EntryName {
         &self.0
     }
 
+    /// `prefix`, sixteen random alphanumerics, `suffix`: the text of a name
+    /// ral invents.  The one place that rule is written; it is not yet
+    /// judged to be an entry name.
+    pub(crate) fn fresh_text(prefix: &str, suffix: &str) -> String {
+        let mut text = String::from(prefix);
+        text.extend((0..16).map(|_| fastrand::alphanumeric()));
+        text.push_str(suffix);
+        text
+    }
+
     /// `prefix` plus sixteen random alphanumerics: a name ral invents.
     /// `prefix` is parsed, so a caller cannot smuggle a separator in it.
     ///
     /// # Errors
     /// [`NotAnEntryName`] where the name made is not one.
     pub(crate) fn fresh(prefix: &str) -> Result<Self, NotAnEntryName> {
-        let mut name = String::from(prefix);
-        name.extend((0..16).map(|_| fastrand::alphanumeric()));
-        Self::parse(OsStr::new(&name))
+        Self::parse(OsStr::new(&Self::fresh_text(prefix, "")))
     }
 }
 
@@ -377,18 +417,34 @@ impl<'de> Deserialize<'de> for RootName {
 }
 
 /// `raw` as a path, read lexically: no disk, no fold.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "path-form: lifts a name the wire or the walk holds for a lexical split; nothing is resolved"
-)]
 fn lexical(raw: &OsStr) -> &Path {
-    Path::new(raw)
+    site!(Silent::LexicalLift, Path::new(raw))
 }
 
-/// One component of a spelling past its root.
+/// Where an entry name came from: the spelling the walk was asked for, or the
+/// target of a link it met.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    Spelled,
+    Spliced,
+}
+
+/// One component of a spelling past its root.  An entry carries its
+/// [`Origin`], which a making walk reads: a name a link's target spliced in is
+/// never made.
 enum Name {
-    Entry(EntryName),
+    Entry(EntryName, Origin),
     Parent,
+}
+
+impl Name {
+    /// This name as a link's target put it in the spelling.
+    fn spliced(self) -> Self {
+        match self {
+            Self::Entry(name, _) => Self::Entry(name, Origin::Spliced),
+            Self::Parent => Self::Parent,
+        }
+    }
 }
 
 /// A spelling split into its root, where it has one, and its names.
@@ -398,19 +454,17 @@ struct Spelling {
 }
 
 /// `path` as its root and the names past it, `.` dropped.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "path-form: the one split of a spelling into its root and names"
-)]
 fn split(path: &Path) -> io::Result<Spelling> {
     let mut root = PathBuf::new();
     let mut names = VecDeque::new();
-    for component in path.components() {
+    for component in site!(Silent::SpellingSplit, path => components()) {
         match component {
             Component::Prefix(_) | Component::RootDir => root.push(component),
             Component::CurDir => {}
             Component::ParentDir => names.push_back(Name::Parent),
-            Component::Normal(name) => names.push_back(Name::Entry(EntryName::parse(name)?)),
+            Component::Normal(name) => {
+                names.push_back(Name::Entry(EntryName::parse(name)?, Origin::Spelled));
+            }
         }
     }
     Ok(Spelling {
@@ -498,7 +552,7 @@ impl RealPath {
         let names = names
             .into_iter()
             .map(|name| match name {
-                Name::Entry(name) => Ok(name),
+                Name::Entry(name, _) => Ok(name),
                 Name::Parent => Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!("{} holds `..`, which no position does", shown(path)),
@@ -604,48 +658,31 @@ impl RealPath {
     /// root, and for a name that is not Unicode, which no command name is.
     /// Never a lossy decoding, which would make such a file the one named
     /// with U+FFFD in its place.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "native: a final component, refused where it is not UTF-8"
-    )]
     pub(crate) fn name(&self) -> Option<&str> {
-        self.0.file_name()?.to_str()
+        site!(Silent::RealName, self.0.file_name()? => to_str())
     }
 
     /// The position above this one, `None` at a root.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "path-form: the position above a position, the one place a path's parent is taken"
-    )]
     #[cfg(any(target_os = "macos", windows))]
     pub(crate) fn parent(&self) -> Option<Self> {
-        self.0.parent().map(|p| Self(p.to_path_buf()))
+        site!(Silent::RealParent, &self.0 => parent()).map(|p| Self(p.to_path_buf()))
     }
 
     /// This position's proper ancestors at or beneath `prefix`, nearest
     /// first: what the Seatbelt profile pins.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "path-form: the ancestors of a position, the one place a path's ancestors are walked"
-    )]
     pub(crate) fn ancestors_within<'a>(
         &'a self,
         prefix: &'a Self,
     ) -> impl Iterator<Item = Self> + 'a {
-        self.0
-            .ancestors()
+        site!(Silent::RealAncestors, &self.0 => ancestors())
             .skip(1)
             .map(|a| Self(a.to_path_buf()))
             .take_while(|a| prefix.contains(a))
     }
 
     /// Whether this position is the root of its filesystem: `/`, `C:\`.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "path-form: whether a position has a parent is whether it is a root"
-    )]
     pub fn is_root(&self) -> bool {
-        self.0.parent().is_none()
+        site!(Silent::RealRoot, &self.0 => parent()).is_none()
     }
 
     /// `/`, the position every path lies beneath.  No walk makes it on
@@ -1001,7 +1038,7 @@ pub enum LeafMode {
     NoFollow,
 }
 
-/// How the walk treats a link anywhere: splice it (every door but two), or
+/// How the walk treats a link anywhere: splice it (every operation but two), or
 /// refuse the walk (the position is already real, and a link met now is a
 /// redirection).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1108,13 +1145,16 @@ impl From<LeafMode> for Mode {
 }
 
 /// What the walk does at a name it cannot enter: refuse (an open names an
-/// object that is there; a last name that is absent is a create target), or
-/// stop and fold the names left onto it lexically, resuming the walk where
-/// they fold it away ([`Walker::stopped`]).
+/// object that is there; a last name that is absent is a create target), stop
+/// and fold the names left onto it lexically, resuming the walk where they
+/// fold it away ([`Walker::stopped`]), or make it a directory and step onto
+/// it ([`Walker::open`]).  A name a link's target spliced in is never made.
+/// `Make` is for [`Mode::Enter`] alone: every name it takes is a directory.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OnMissing {
     Fail,
     Stop,
+    Make,
 }
 
 /// How a child is opened where a host shares by handle: a directory step
@@ -1126,9 +1166,10 @@ enum Sharing {
     Leaf,
 }
 
-/// What a data open is for.  Private: the public methods are its values.
+/// What a data open is for: [`Located::open_data`]'s argument, and what each
+/// of the walk's other data opens asks.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Access {
+pub(crate) enum Access {
     Read,
     Append,
     Write,
@@ -1240,13 +1281,13 @@ impl<A: Authority> Dir<A> {
         self.trace.real()
     }
 
-    /// This directory, vouched for: the one door from `Unjudged` to
+    /// This directory, vouched for: the one place `Unjudged` becomes
     /// `Judged<O>`, through the token only `capability/fs.rs` can make.
     pub(crate) fn judged<O: Op>(self, _: Verdict<O>) -> Dir<Judged<O>> {
         self.marked()
     }
 
-    /// The same directory under another marker: a door of this file's.
+    /// The same directory under another marker: this file's own step.
     fn marked<B: Authority>(self) -> Dir<B> {
         Dir {
             node: self.node,
@@ -1343,7 +1384,23 @@ impl<A: Lists> Dir<A> {
     /// # Errors
     /// The walk's; `NotFound` where there is no entry `name`.
     pub fn locate(&self, name: &EntryName, mode: LeafMode) -> io::Result<Located<A::Child>> {
-        let names = VecDeque::from([Name::Entry(name.clone())]);
+        let located = self.target(name, mode)?;
+        match located.leaf {
+            Leaf::Absent { .. } => Err(io::ErrorKind::NotFound.into()),
+            _ => Ok(located),
+        }
+    }
+
+    /// The entry `name` as the object it is or, where nothing is there, the
+    /// create target it would be: under [`LeafMode::Follow`], through a link
+    /// at `name`, the target's, with [`Located::linked_to`] saying where the
+    /// link led.  [`locate`](Self::locate) refuses the second.
+    ///
+    /// # Errors
+    /// The walk's.  Where the link at `name` leads to a name beneath a
+    /// directory that is not there, `NotFound`, which [`dangling`] reads.
+    pub(crate) fn target(&self, name: &EntryName, mode: LeafMode) -> io::Result<Located<A::Child>> {
+        let names = VecDeque::from([Name::Entry(name.clone(), Origin::Spelled)]);
         let walker = Walker::new(
             Cursor::beneath(self),
             names,
@@ -1352,11 +1409,7 @@ impl<A: Lists> Dir<A> {
             Links::Splice,
             |_| true,
         );
-        let located = walker.run()?;
-        match located.leaf {
-            Leaf::Absent { .. } => Err(io::ErrorKind::NotFound.into()),
-            _ => Ok(located.marked()),
-        }
+        walker.run().map(Located::marked)
     }
 
     /// Follow the link entry `name` to the directory it names: the link is
@@ -1409,8 +1462,30 @@ impl Dir<Judged<Writing>> {
             leaf: Leaf::Absent {
                 dir: Arc::clone(&self.node),
             },
+            linked: None,
             _a: PhantomData,
         }
+    }
+
+    /// Remove everything beneath this directory, leaving it empty: each entry
+    /// located without following and removed through this handle, so a link
+    /// goes as the link and its target is never touched.  An entry gone
+    /// before its turn is gone.
+    ///
+    /// # Errors
+    /// The listing's, a locate's other than `NotFound`, an entry's removal.
+    fn empty(&self) -> io::Result<()> {
+        let names: Vec<EntryName> = self.read_dir()?.map(|entry| entry.name().clone()).collect();
+        for name in names {
+            let removed = self
+                .locate(&name, LeafMode::NoFollow)
+                .and_then(|entry| entry.marked::<Judged<Writing>>().remove());
+            match removed {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1478,7 +1553,7 @@ impl DirEntry<'_> {
 
 /// A listing's record of one entry: the parent's trace and one step made from
 /// the listing's kind and identity.  Not a [`Trace`]: its step was stated by
-/// name after the listing, not opened, and the type says so, so no door that
+/// name after the listing, not opened, and the type says so, so nothing that
 /// wants a walk's evidence can be handed a listing's.
 pub(crate) struct Listed<'a> {
     parent: &'a Trace,
@@ -1500,14 +1575,17 @@ impl Listed<'_> {
 }
 
 /// An object named exactly: its trace and its leaf, which carries what the
-/// doors on it need.
+/// operations on it need.
 ///
 /// The leaf is absent exactly when `trace.tail()` is non-empty, and `trace` is
-/// the only copy of the leaf's name.  `A` says who vouched for it.
+/// the only copy of the leaf's name.  `linked` is where a link at the
+/// spelling's last name led, as its target spelled it, where the walk followed
+/// one there.  `A` says who vouched for it.
 #[must_use]
 pub struct Located<A: Authority = Unjudged> {
     trace: Trace,
     leaf: Leaf,
+    linked: Option<PathBuf>,
     _a: PhantomData<A>,
 }
 
@@ -1534,7 +1612,7 @@ enum Leaf {
     Stated { dir: Arc<File>, stat: Stat },
 }
 
-/// What a leaf offers a data door: nothing yet (a create target), the handle
+/// What a leaf offers a data operation: nothing yet (a create target), the handle
 /// held and its stat, or a special file — a FIFO, a socket, a device — which
 /// only macOS states without holding.
 enum Data<'a> {
@@ -1552,17 +1630,24 @@ impl<A: Authority> Located<A> {
         self.trace.real()
     }
 
-    /// This object, vouched for: the one door from `Unjudged` to
+    /// Where a link at the spelling's last name led, as its target spelled it;
+    /// `None` where that name was no link, or was not followed.
+    pub(crate) fn linked_to(&self) -> Option<&Path> {
+        self.linked.as_deref()
+    }
+
+    /// This object, vouched for: the one place `Unjudged` becomes
     /// `Judged<O>`, through the token only `capability/fs.rs` can make.
     pub(crate) fn judged<O: Op>(self, _: Verdict<O>) -> Located<Judged<O>> {
         self.marked()
     }
 
-    /// The same object under another marker: a door of this file's.
+    /// The same object under another marker: this file's own step.
     fn marked<B: Authority>(self) -> Located<B> {
         Located {
             trace: self.trace,
             leaf: self.leaf,
+            linked: self.linked,
             _a: PhantomData,
         }
     }
@@ -1589,7 +1674,6 @@ impl<A: Authority> Located<A> {
     }
 
     /// The leaf's own handle, where the walk holds one.
-    #[cfg(any(target_os = "linux", windows))]
     fn handle(&self) -> Option<&File> {
         match &self.leaf {
             Leaf::Held { file, .. } => Some(file),
@@ -1668,6 +1752,26 @@ impl<A: Authority> Located<A> {
         }
     }
 
+    /// The leaf's kind and its name as an entry of its directory, for what
+    /// acts on the entry: a removal, a rename.
+    ///
+    /// # Errors
+    /// `NotFound` for an absent leaf; `InvalidInput` for a root, which is no
+    /// directory's entry.
+    fn present(&self) -> io::Result<(Kind, &EntryName)> {
+        let kind = self
+            .observed()
+            .map(|stat| stat.kind)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+        let name = self.leaf_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a root is no directory's entry",
+            )
+        })?;
+        Ok((kind, name))
+    }
+
     /// This object as a directory, under the same authority, where the walk
     /// holds it as one, entered or reached as a leaf; handed back otherwise.
     ///
@@ -1677,7 +1781,7 @@ impl<A: Authority> Located<A> {
         clippy::result_large_err,
         reason = "the object handed back is not an error"
     )]
-    pub(crate) fn into_dir(self) -> Result<Dir<A>, Self> {
+    pub fn into_dir(self) -> Result<Dir<A>, Self> {
         match self.leaf {
             Leaf::Dir { node, stat } => Ok(Dir {
                 node,
@@ -1769,13 +1873,13 @@ impl<A: Reads> Located<A> {
     /// file (macOS): opened by name under `dir` and verified against the
     /// identity its step recorded, and to be a special file still.  Any
     /// other stated leaf: `PermissionDenied`, the walk's; nothing is opened.
-    /// Absent: created exclusively for `Append` and `Write`, `NotFound` for
-    /// `Read`.
+    /// Absent: created exclusively with `visibility` for `Append` and `Write`,
+    /// `NotFound` for `Read`.
     ///
     /// # Errors
     /// The open's; `IsADirectory` for a directory leaf, `InvalidInput` for a
     /// link, which has no data.
-    fn open(&self, access: Access) -> io::Result<File> {
+    fn open(&self, access: Access, visibility: Visibility) -> io::Result<File> {
         let named = || {
             self.leaf_name()
                 .expect("a leaf that is not a directory has a name")
@@ -1792,27 +1896,31 @@ impl<A: Reads> Located<A> {
                 "the object could not be held, so nothing is opened through it",
             )),
             (Data::Absent, Access::Read) => Err(io::ErrorKind::NotFound.into()),
-            (Data::Absent, _) => {
-                host::create(self.dir(), self.absent_name()?, access, Visibility::Public)
-            }
+            (Data::Absent, _) => host::create(self.dir(), self.absent_name()?, access, visibility),
         }
     }
 
     /// # Errors
     /// The open's, including `NotFound`.
     pub fn read(&self) -> io::Result<File> {
-        self.open(Access::Read)
+        // A read makes nothing, so no visibility is asked.
+        self.open(Access::Read, Visibility::Public)
     }
 }
 
-/// How an absent leaf is created.  `Public` under the process umask, as a
-/// shell's `>` or `mkdir` make it; `Private` owner-only (0600/0700), as
-/// `mktemp(1)` makes a name the program invented, whatever the umask.
-/// Windows inherits the directory's ACL either way.
-#[derive(Clone, Copy)]
-pub(crate) enum Visibility {
+/// Who may reach a leaf made absent.
+///
+/// `Public` is under the process umask, as a shell's `>` or `mkdir` make it.
+/// `Private` is owner-only (0600/0700), as `mktemp(1)` makes a name the program
+/// invented; Windows inherits the directory's ACL for both.  `Secret` is
+/// owner-only on every host, whatever the directory would hand down: 0600, and
+/// on Windows a protected DACL naming the owner alone.  A directory made on
+/// Windows inherits for all three, and on Unix is 0700 for the last two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Visibility {
     Public,
     Private,
+    Secret,
 }
 
 /// How a streaming write opens its target.
@@ -1883,7 +1991,7 @@ impl Located<Judged<Writing>> {
             Streaming::Truncate => Access::Write,
         };
         let created = matches!(self.leaf, Leaf::Absent { .. });
-        let file = self.open(access)?;
+        let file = self.open(access, Visibility::Public)?;
         let stat = host::seen(&file)?.stat;
         let reader = self
             .leaf_name()
@@ -1899,16 +2007,17 @@ impl Located<Judged<Writing>> {
     }
 
     /// Stage an atomic write beside the leaf: a fresh exclusive sibling in
-    /// `dir`, read and write, with the leaf's mode copied from its stat
-    /// taken at the walk.  Takes `self`: the staged write owns its target
-    /// from here, so a sibling can land only over the leaf it was staged
-    /// beside.
+    /// `dir`, read and write, made with `visibility`.  Only `Public` takes the
+    /// leaf's mode, copied from its stat taken at the walk; the others are
+    /// owner-only whatever the leaf was.  Takes `self`: the staged write owns
+    /// its target from here, so a sibling can land only over the leaf it was
+    /// staged beside.
     ///
     /// # Errors
     /// [`data`](Self::data)'s; `InvalidInput` for a special file, which is
     /// streamed, not replaced; the create's, other than `AlreadyExists`,
     /// which is retried under another name; the mode's.
-    pub(crate) fn stage(self) -> io::Result<StagedWrite> {
+    pub(crate) fn stage(self, visibility: Visibility) -> io::Result<StagedWrite> {
         if matches!(self.data()?, Data::Special) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1917,7 +2026,7 @@ impl Located<Judged<Writing>> {
         }
         let (file, name) = loop {
             let name = EntryName::fresh(".ral-write-")?;
-            match host::create_sibling(self.dir(), &name) {
+            match host::create_sibling(self.dir(), &name, visibility) {
                 Ok(file) => break (file, name),
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(e),
@@ -1932,21 +2041,86 @@ impl Located<Judged<Writing>> {
         };
         // A Windows file carries no mode beyond its create's attributes.
         #[cfg(unix)]
-        if let Some(stat) = staged.target.stat() {
+        if visibility == Visibility::Public
+            && let Some(stat) = staged.target.stat()
+        {
             host::copy_mode(&staged.file, stat)?;
         }
         Ok(staged)
     }
 
-    /// An empty file made exclusively at an absent leaf (`O_CREAT|O_EXCL|
-    /// O_NOFOLLOW`), its handle dropped: the name is made and nothing is
-    /// written.  Takes `self`: after this the object is the file made.
+    /// A data handle for `access`, consuming the object: derived from the held
+    /// leaf, or the absent leaf made exclusively with `visibility`.  Never
+    /// truncates.  After this the object is the handle.
     ///
     /// # Errors
-    /// `AlreadyExists` where the leaf is present; the create's.
-    pub(crate) fn create_file(self, visibility: Visibility) -> io::Result<Trace> {
-        host::create(self.dir(), self.absent_name()?, Access::Write, visibility)?;
-        Ok(self.trace)
+    /// The open's: `AlreadyExists` where the leaf was absent at the walk and
+    /// has appeared since; `IsADirectory` for a directory leaf,
+    /// `InvalidInput` for a link, which has no data.
+    pub(crate) fn open_data(self, access: Access, visibility: Visibility) -> io::Result<File> {
+        self.open(access, visibility)
+    }
+
+    /// A data handle for `access` on an absent leaf, made exclusively
+    /// (`O_CREAT|O_EXCL|O_NOFOLLOW`) with `visibility`: never over anything
+    /// there.  [`open_data`](Self::open_data) makes an absent leaf too, but
+    /// opens a present one; this is the make alone.  Takes `self`: after this
+    /// the object is the handle.
+    ///
+    /// # Errors
+    /// `AlreadyExists` where the leaf is present, a link included, or has
+    /// appeared since the walk; the create's.
+    pub(crate) fn create_new(self, access: Access, visibility: Visibility) -> io::Result<File> {
+        host::create(self.dir(), self.absent_name()?, access, visibility)
+    }
+
+    /// An empty file made exclusively at an absent leaf, its handle dropped:
+    /// the name is made and nothing is written.  Takes `self`: after this the
+    /// object is the file made.
+    ///
+    /// # Errors
+    /// [`create_new`](Self::create_new)'s.
+    pub(crate) fn create_file(self, visibility: Visibility) -> io::Result<()> {
+        self.create_new(Access::Write, visibility).map(drop)
+    }
+
+    /// Remove the leaf from its directory: a file or a link as the entry, a
+    /// directory with everything beneath it, each entry located without
+    /// following and removed through the handle of the directory it is in.
+    /// Takes `self`: after this the object is gone.  The tree is one object
+    /// removed under one judgment, the root's: its entries are not judged
+    /// again.  Where the host removes by handle (Windows), the leaf must have
+    /// been located as a leaf: a directory the walk entered shares no delete.
+    ///
+    /// # Errors
+    /// `NotFound` for an absent leaf, or one gone before it was removed;
+    /// `InvalidInput` for a root; the removal's, a directory that is not
+    /// empty by then included.
+    pub(crate) fn remove(self) -> io::Result<()> {
+        let (kind, name) = self.present()?;
+        if let Leaf::Dir { node, stat } = &self.leaf {
+            Dir::<Judged<Writing>> {
+                node: Arc::clone(node),
+                trace: self.trace.clone(),
+                stat: stat.clone(),
+                _a: PhantomData,
+            }
+            .empty()?;
+        }
+        host::remove(self.dir(), self.handle(), name, kind)
+    }
+
+    /// Rename the leaf to `to` in its own directory, over whatever `to` is.
+    /// Takes `self`: after this the object is at another name.  Where the
+    /// host renames by handle (Windows), the leaf must have been located as a
+    /// leaf: a directory the walk entered shares no delete.
+    ///
+    /// # Errors
+    /// `NotFound` for an absent leaf; `InvalidInput` for a root; the
+    /// rename's.
+    pub(crate) fn rename(self, to: &EntryName) -> io::Result<()> {
+        let (_, from) = self.present()?;
+        host::rename(self.dir(), self.handle(), from, to)
     }
 
     /// `mkdir` on an absent leaf, then one step onto the name made: the
@@ -2121,7 +2295,8 @@ enum Ended {
 }
 
 /// The walk's loop: a cursor, the names still to take, and how to treat the
-/// last one.
+/// last one.  `linked` is the target of the link followed at the spelling's
+/// last name, which a refusal past it reports as a [`Dangling`] one.
 struct Walker<V> {
     cursor: Cursor,
     names: VecDeque<Name>,
@@ -2130,6 +2305,7 @@ struct Walker<V> {
     links: Links,
     vet: V,
     splices: usize,
+    linked: Option<PathBuf>,
 }
 
 impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
@@ -2149,6 +2325,7 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
             links,
             vet,
             splices: 0,
+            linked: None,
         };
         walker.settle_mode();
         walker
@@ -2224,7 +2401,7 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
             self.mode = Mode::Enter;
         }
         for name in names.into_iter().rev() {
-            self.names.push_front(name);
+            self.names.push_front(name.spliced());
         }
         self.settle_mode();
         Ok(())
@@ -2248,7 +2425,7 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
     /// Take `name`: a `..` climbs the cursor, an entry is opened beneath it.
     /// `Break` where the walk ends there.
     fn take(&mut self, name: Name) -> io::Result<ControlFlow<Ended>> {
-        let Name::Entry(name) = name else {
+        let Name::Entry(name, origin) = name else {
             self.cursor.up();
             return Ok(ControlFlow::Continue(()));
         };
@@ -2259,7 +2436,7 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
         } else {
             Sharing::Leaf
         };
-        let child = match step_into(self.cursor.top(), &name, sharing) {
+        let child = match self.open(&name, origin, sharing) {
             Ok(child) => child,
             Err(e) => return self.stopped(name, e),
         };
@@ -2271,7 +2448,12 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
             }
             Kind::Symlink => {
                 let (link, ..) = child.held()?;
-                let spliced = host::read_link(&link.file).and_then(|t| self.splice(&t));
+                let spliced = host::read_link(&link.file).and_then(|target| {
+                    if last && origin == Origin::Spelled {
+                        self.linked = Some(target.clone());
+                    }
+                    self.splice(&target)
+                });
                 if let Err(e) = spliced {
                     return self.stopped(name, e);
                 }
@@ -2285,6 +2467,28 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
             _ => return Ok(ControlFlow::Break(Ended::Leaf(child))),
         }
         Ok(ControlFlow::Continue(()))
+    }
+
+    /// The entry `name` of the directory on top of the cursor, opened.  Where
+    /// it is not there, a making walk makes it a directory first, if the
+    /// spelling named it: `mkdir` under the cursor's handle, a name taken
+    /// meanwhile tolerated, then the step onto what stands there.
+    fn open(&self, name: &EntryName, origin: Origin, sharing: Sharing) -> io::Result<Child> {
+        let top = self.cursor.top();
+        match step_into(top, name, sharing) {
+            Err(e)
+                if self.missing == OnMissing::Make
+                    && origin == Origin::Spelled
+                    && e.kind() == io::ErrorKind::NotFound =>
+            {
+                match host::mkdir(&top.file, name, Visibility::Private) {
+                    Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
+                    _ => {}
+                }
+                step_into(top, name, sharing)
+            }
+            stepped => stepped,
+        }
     }
 
     /// The object the walk ended as, as a [`Located`].
@@ -2324,6 +2528,7 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
         Located {
             trace,
             leaf,
+            linked: self.linked,
             _a: PhantomData,
         }
     }
@@ -2339,6 +2544,7 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
                 node: self.cursor.into_top(),
                 stat,
             },
+            linked: self.linked,
             _a: PhantomData,
         })
     }
@@ -2359,7 +2565,7 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
                 let mut tail = vec![name];
                 while let Some(name) = self.names.pop_front() {
                     match name {
-                        Name::Entry(name) => tail.push(name),
+                        Name::Entry(name, _) => tail.push(name),
                         Name::Parent => {
                             tail.pop();
                             if tail.is_empty() {
@@ -2371,9 +2577,25 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
                 tail
             }
             (OnMissing::Fail, NotFound) if last && self.mode != Mode::Enter => vec![name],
-            _ => return Err(error),
+            _ => return Err(self.unreached(error)),
         };
         Ok(ControlFlow::Break(Ended::Absent(tail)))
+    }
+
+    /// `error`, a refusal of the walk.  A `NotFound` met after a link was
+    /// followed at the spelling's last name is that link's target not being
+    /// there: it carries the target, which [`dangling`] reads.
+    fn unreached(&self, error: io::Error) -> io::Error {
+        match &self.linked {
+            Some(target) if error.kind() == io::ErrorKind::NotFound => io::Error::new(
+                io::ErrorKind::NotFound,
+                Dangling {
+                    target: target.clone(),
+                    error,
+                },
+            ),
+            _ => error,
+        }
     }
 
     /// The walk ended at `tail`, names past the directory on top of the
@@ -2386,12 +2608,13 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
             leaf: Leaf::Absent {
                 dir: self.cursor.into_top(),
             },
+            linked: self.linked,
             _a: PhantomData,
         }
     }
 }
 
-/// The engine behind every door: `rp` walked from its root, `mode` deciding
+/// The engine behind every operation: `rp` walked from its root, `mode` deciding
 /// the last name, `missing` whether a name that cannot be entered fails or
 /// ends the steps, `links` whether a link is spliced or refused, and every
 /// object put to `vet`.  A directory spelling raises `mode` to `Enter`.
@@ -2450,21 +2673,32 @@ pub fn walk(rp: &LexicalPath, mode: LeafMode) -> io::Result<Located> {
 /// # Errors
 /// [`walk`]'s; `NotADirectory` for anything but a directory.
 pub fn walk_dir(rp: &LexicalPath) -> io::Result<Dir> {
-    finish(
-        rp.as_path(),
-        Mode::Enter,
-        OnMissing::Fail,
-        Links::Splice,
-        |_| true,
-    )?
-    .into_dir()
-    .map_err(|_| io::ErrorKind::NotADirectory.into())
+    dir_of(rp, OnMissing::Fail)
+}
+
+/// [`walk_dir`], making each absent name of the spelling owner-only (0700) and
+/// stepping onto it.  A name a link's target spliced in is never made: a
+/// dangling link fails the walk, as it fails `mkdir -p`, with the `NotFound`
+/// that [`dangling`] reads.
+///
+/// # Errors
+/// [`walk_dir`]'s; a make's.
+pub(crate) fn walk_dir_made(rp: &LexicalPath) -> io::Result<Dir> {
+    dir_of(rp, OnMissing::Make)
+}
+
+/// `rp` entered as a directory, a name that cannot be entered treated as
+/// `missing` says.
+fn dir_of(rp: &LexicalPath, missing: OnMissing) -> io::Result<Dir> {
+    finish(rp.as_path(), Mode::Enter, missing, Links::Splice, |_| true)?
+        .into_dir()
+        .map_err(|_| io::ErrorKind::NotADirectory.into())
 }
 
 /// Whether the absolute spelling `path` reaches an object, a final link
 /// followed: its walk.  A relative one reaches nothing: no cwd is asked.
 pub fn exists(path: &str) -> bool {
-    reaches(path).is_some()
+    kind_of(path).is_some()
 }
 
 /// Whether the absolute spelling `path` reaches a directory, a link to one
@@ -2473,16 +2707,20 @@ pub fn exists(path: &str) -> bool {
 /// Exec grants spell their two kinds of path key apart by a trailing slash,
 /// and `guard::decode` checks that spelling against disk.
 pub fn is_dir(path: &str) -> bool {
-    reaches(path) == Some(Kind::Dir)
+    kind_of(path) == Some(Kind::Dir)
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "path-form: the string a caller holds, taken as a spelling"
-)]
-fn reaches(path: &str) -> Option<Kind> {
-    let spelled = LexicalPath::absolute(Path::new(path))?;
-    walk(&spelled, LeafMode::Follow).ok()?.trace().kind()
+/// What the absolute spelling `path` reaches, a final link followed: its
+/// walk.  `None` where nothing is there, and for a relative one, which reaches
+/// nothing: no cwd is asked.
+pub fn kind_of(path: &str) -> Option<Kind> {
+    walk(&spelled(path)?, LeafMode::Follow).ok()?.trace().kind()
+}
+
+/// `path` as a spelling, where absolute: the one lift of a fixed string.  The
+/// walk then resolves it, so the lift opens nothing.
+pub(crate) fn spelled(path: &str) -> Option<LexicalPath> {
+    LexicalPath::absolute(site!(Silent::StrSpelling, Path::new(path)))
 }
 
 /// A grant spelling's transcript: as far as the disk goes, the rest lexical,

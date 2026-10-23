@@ -186,33 +186,44 @@ pub(crate) fn uutils_invoke(tool: &str, args: Vec<std::ffi::OsString>) -> i32 {
 /// Why [`run`] ran nothing.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Unbundled {
-    Tool(String),
+    Tool(std::ffi::OsString),
     Build,
 }
 
 impl std::fmt::Display for Unbundled {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Tool(tool) => write!(f, "'{tool}' is not a bundled tool"),
+            // `{tool:?}`, not `.display()`: `Display` would paper over a name
+            // that is not Unicode with the very U+FFFD substitution it avoids.
+            #[allow(clippy::unnecessary_debug_formatting)]
+            Self::Tool(tool) => write!(f, "{tool:?} is not a bundled tool"),
             Self::Build => f.write_str("no bundled tools are available in this build"),
         }
     }
+}
+
+/// The static spelling of the bundled tool `name` names, which is the tool
+/// [`run`] runs: exactly the tools [`is_uutils_tool`] admits.  Names are
+/// compared as the OS holds them, so no conversion of `name` is needed.
+#[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
+fn bundled_name(name: &std::ffi::OsStr) -> Option<&'static str> {
+    bundled_tools().into_iter().find(|tool| name == *tool)
 }
 
 /// Run bundled `tool` in this process, the body of a re-exec child: the
 /// `Role::BundledTool` multicall, or a confined warrant once confined.  It
 /// inherits its execution context from the exec, so uucore's process-global
 /// exit-code cell is this process's own.
-pub(crate) fn run(tool: &str, args: Vec<std::ffi::OsString>) -> Result<u8, Unbundled> {
+pub(crate) fn run(tool: &std::ffi::OsStr, args: Vec<std::ffi::OsString>) -> Result<u8, Unbundled> {
     #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
     {
+        let Some(tool) = bundled_name(tool) else {
+            return Err(Unbundled::Tool(tool.to_os_string()));
+        };
         // Rust's runtime ignores SIGPIPE, which would turn a write to a closed
         // pipe into an error exit.
         #[cfg(unix)]
         init_signal_dispositions();
-        if !is_uutils_tool(tool) {
-            return Err(Unbundled::Tool(tool.into()));
-        }
         Ok(u8::try_from(invoke(tool, args).clamp(0, 255)).unwrap_or(u8::MAX))
     }
     #[cfg(not(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")))]
@@ -354,6 +365,7 @@ fn cmp_main<I: Iterator<Item = std::ffi::OsString>>(args: I) -> i32 {
 /// of killing the process.  Re-audit against `diff::main` on a bump.
 #[cfg(feature = "diffutils")]
 fn diff_main<I: Iterator<Item = std::ffi::OsString>>(args: I) -> i32 {
+    use crate::site::{Silent, site};
     use diffutilslib::params::{Format, parse_params};
     use diffutilslib::utils::report_failure_to_read_input_file;
     use std::ffi::OsString;
@@ -382,16 +394,12 @@ fn diff_main<I: Iterator<Item = std::ffi::OsString>>(args: I) -> i32 {
         return 0;
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:diff-read] Internal byte-read of the bundled `diff` tool's compared file; the bundled exec is surfaced once at the exec site (`finish_command`) and this internal shuffling rides that visible call, raising no separate read card."
-    )]
     fn read_file_contents(filepath: &OsString) -> io::Result<Vec<u8>> {
         if filepath == "-" {
             let mut content = Vec::new();
             io::stdin().read_to_end(&mut content).and(Ok(content))
         } else {
-            fs::read(filepath)
+            site!(Silent::DiffRead, fs::read(filepath))
         }
     }
     let mut io_error = false;

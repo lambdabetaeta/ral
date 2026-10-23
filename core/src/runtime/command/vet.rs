@@ -69,10 +69,7 @@ fn reject_exec_arg(cmd: &str, arg: &Value) -> Option<Break> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use crate::capability::Program;

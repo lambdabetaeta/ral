@@ -233,10 +233,7 @@ impl<W: Wire> phy::TxToken for TxToken<'_, W> {
 }
 
 #[cfg(all(test, unix))]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use ral_daemon::packet;

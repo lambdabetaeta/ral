@@ -10,6 +10,8 @@
 //! equals `expected`.  When a mistake produces multiple errors we only
 //! pin the first one — that is the entry the user sees first and acts on.
 
+#![allow(clippy::disallowed_methods, reason = "test code")]
+
 mod common;
 
 use ral_core::typecheck::TypeError;

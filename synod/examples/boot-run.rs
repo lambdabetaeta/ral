@@ -40,13 +40,10 @@
 //!
 //! Usage: `boot-run <kernel> <initramfs> <rootfs> <folder>`
 
+#![allow(clippy::disallowed_methods, reason = "example program")]
 #![allow(
     clippy::disallowed_macros,
     reason = "[silent:example] an example prints its result"
-)]
-#![allow(
-    clippy::disallowed_methods,
-    reason = "example binary: its `main` owns the process, so an `exit` unwinds nothing another owner needs"
 )]
 
 use exarch::agent::{RootConfig, SPAWN_FUEL};
@@ -58,6 +55,7 @@ use exarch::provider::{Bureau, Provider, ToolCall};
 use exarch::record::AgentId;
 use exarch::record::{Display, Record, Recorded, Settlement, Transient};
 use ral_core::capability::{Capabilities, GrantStack};
+use ral_core::own::OwnDir;
 use std::path::PathBuf;
 use std::sync::Arc;
 use synod::session::{seat_machine, unseat_machine};
@@ -138,17 +136,13 @@ fn main() {
     let provider = Arc::new(Provider::scripted("test-model", script));
     // Made here, not by `Avatar::root`: it takes the directory as given so that
     // a `--resume` naming one that does not exist fails instead of quietly
-    // starting an empty session.
-    let run_dir = std::env::temp_dir().join(format!("boot-run-{}", std::process::id()));
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:boot-run-run-dir] Scratch setup before the trunk exists, in an example that is its own only caller — not model I/O."
-    )]
-    std::fs::create_dir_all(&run_dir).expect("make the run directory");
+    // starting an empty session.  A directory of its own in the temp folder,
+    // removed when `run` drops.
+    let run = OwnDir::for_test("boot-run").expect("make the run directory");
     let config = RootConfig {
         system: "you are a helpful office assistant".to_string(),
         caps: GrantStack::root(),
-        run_dir,
+        run_dir: OwnDir::clone(&run),
         trunk: exarch::agent::Trunk::Embedded,
         tools: exarch::provider::Toolset::offered(false),
         allow_schedule: false,

@@ -175,7 +175,7 @@ arrived ill-shaped — and `record!` derives it for a record whose keys must be
 exactly its own, answering an unknown key with the one it most likely meant
 (`variant!` and `label!` are its siblings for payload enums and enums of bare tags).
 Probe classes, exarch's enquiries, the REPL's enquiries and an installer's
-`Root.config` all cross through it, so a door and the desk behind it decode
+`Root.config` all cross through it, so a builtin and the desk behind it decode
 with one function and refuse in one wording.
 
 **The frame codec has no depth cap.** Frames are length-prefixed JSON, and
@@ -187,10 +187,10 @@ severs `Faulted`, and the wire engine ends the session `Corrupt`.
 
 **The desk's decode is a trust boundary, not a duplicate check.** Under the
 wire the engine and its shell run inside a guest and the desk runs on the
-host, so a guest can send whatever it likes regardless of what its own door
-already validated. Both ends re-validate: the door refuses early for a fast,
+host, so a guest can send whatever it likes regardless of what its own builtin
+already validated. Both ends re-validate: the builtin refuses early for a fast,
 legible diagnostic; the desk refuses again because a registry's own
-admission check (naming, uniqueness) must hold independent of which door
+admission check (naming, uniqueness) must hold independent of which path
 reached it.
 
 **The guest's end ships in media built earlier.** The warrant between ral and
@@ -245,7 +245,7 @@ this tree). A `Fragment` never crosses: it lives only between loading and
 - **Authority is enforced at the desk**, never by a visibility filter over
   which verbs a builtin index advertises — a filter is not an authority
   check once the engine may be a different machine. The desk refuses, in
-  the same words the builtin's own door would have used.
+  the same words the builtin's own check would have used.
 
 ## Two bindings: a call and a codec
 
@@ -293,16 +293,17 @@ only at a run boundary.
 **A reading is typed once.** Core's `Probe` enum (`protocol/probe.rs`) is
 the frame's payload: each variant states what it takes, so a payload its probe
 does not take is not representable and the engine has nothing to refuse. The
-engine's answer (`engine/probe.rs`) and the host's typed door —
-`t.cwd() -> PathBuf`, `t.workers() -> Vec<WorkerRow>`, one per variant, provided
-methods of `Transport` — match on the one enum, so the two ends of a probe
-cannot disagree about what a probe means. The answer is its own event,
+engine's answer (`engine/probe.rs`) and the host's typed reading —
+`t.cwd() -> Option<PathBuf>`, `t.workers() -> Vec<WorkerRow>`, one per variant,
+provided methods of `Transport` — match on the one enum, so the two ends of a
+probe cannot disagree about what a probe means. A working directory that cannot
+travel as text answers `None`, as no cwd at all. The answer is its own event,
 `Event::Reading`, not a forged run report. The probes span session state
 (`cwd`, `home`, `env-var`, `builtin-names`, `session-ended`),
 the scope (`bindings`, `completion-names`, the binding counts) and the
 engine's filesystem (`path-bytes`, `path-entries`). What a probe answers is *data*,
 never a handle. An answer outside its class's shape is the engine breaking
-the protocol: the typed door severs the transport `Faulted` itself, which is
+the protocol: the typed reading severs the transport `Faulted` itself, which is
 why `Transport::sever` is on the trait, identity included.
 
 A failed probe distinguishes two unrelated causes: a probe the engine would

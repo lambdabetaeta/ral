@@ -7,10 +7,10 @@
 //! thread only *transports* its fragment back to the parent; nothing
 //! decides where an observation "belongs" beyond that flat merge.
 
-mod door;
+mod fan_out;
 mod observation;
 
-pub(crate) use door::AuditStart;
+pub(crate) use fan_out::AuditStart;
 
 use super::{Value, outcome_value};
 use crate::fact::{ErrorRecord, Observation};
@@ -122,7 +122,7 @@ impl Audit {
         }
     }
 
-    /// Append an observation; no-op when inactive, so the emission door need
+    /// Append an observation; no-op when inactive, so the emitter need
     /// not ask.
     pub fn push(&mut self, obs: Observation) {
         if let Some(trail) = self.trail.as_mut() {

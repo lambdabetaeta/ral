@@ -23,7 +23,6 @@ pub(crate) mod reset;
 mod retry;
 pub mod roles;
 pub mod scripted;
-mod secret_file;
 pub mod state;
 mod stream;
 pub mod tls;
@@ -56,9 +55,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use transport::Transport;
 
-/// Every file on this computer holding one of our own credentials: each
-/// product's keychain fallback ([`keychain`]) and the `ChatGPT` tokens
-/// ([`oauth`], exarch's state dir wherever the login was made).
+/// Every file on this computer holding one of our own credentials, as
+/// spellings: each product's keychain fallback ([`keychain`]) and the
+/// `ChatGPT` tokens ([`oauth`]), all in a state directory; none where the
+/// host names no state base.
 ///
 /// [`crate::policy::for_invocation`] denies these to every session whose grant
 /// attenuates the filesystem at all.  They need saying because the profiles
@@ -69,8 +69,8 @@ use transport::Transport;
 pub(crate) fn credential_files() -> Vec<std::path::PathBuf> {
     crate::app::APPS
         .iter()
-        .map(|app| keychain::Keychain::for_app(*app).fallback_path())
-        .chain(std::iter::once(oauth::token_path()))
+        .filter_map(|app| keychain::Keychain::for_app(*app).fallback_path())
+        .chain(oauth::token_path())
         .collect()
 }
 

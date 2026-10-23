@@ -52,8 +52,8 @@ one `deputy` check per flagged prefix when a grant frame is entered
 ([[map/core/capabilities|capabilities]]).
 
 Every profile is *resolved* as it loads — resolving each place (`` `home ``, `` `xdg-* ``, `` `cwd ``,
-`` `tempdir ``, `` `gitdir ``) and the `dir` selectors against the session's home, working
-directory, and the host's live tool roots inside
+`` `tempdir ``, `` `scratch ``, `` `gitdir ``) and the `dir` selectors against the session's home, working
+directory, scratch, and the host's live tool roots inside
 `ral_core::guard`'s decode pass (`guard/decode.rs`, `guard/freeze.rs`) — so composition runs entirely on
 resolved `GrantLayer`s ([[design/capability-freeze|freeze boundary]]).
 An `` `xdg-* `` place escaping `HOME` is rejected at the profile that names it, before
@@ -197,8 +197,9 @@ can't silently widen a jail:
 - `read-only` reads but does not write `` `cwd ``;
 - `confined` is net-off, admits host execs by subpath and only bundled tools by
   bare name, and has no home-reaching prefixes;
-- `` `cwd ``/`` `tempdir `` places freeze into the per-invocation working and temp dirs
-  without exarch injecting them dynamically.
+- `` `cwd ``/`` `tempdir ``/`` `scratch `` places freeze into the per-invocation working,
+  temp and scratch dirs without exarch injecting them dynamically: the scratch is
+  made before the policy freezes, and `FreezeCtx::with_scratch` carries its spelling.
 
 `exarch/examples/git.exarch.ral` is the canonical `--extend` that lifts
 `minimal`/`confined` into a git-capable shape; a test pins that extending `minimal` with it keeps `git` admitted and adds

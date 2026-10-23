@@ -26,7 +26,7 @@ fn augment_stage_failure(err: Error, shell: &Shell, started: Instant) -> Error {
 }
 
 /// Built whether or not anyone is listening: this phase performs no effects,
-/// and `fold` hands the fragment to the one emission door, which is where the
+/// and `fold` hands the fragment to the one emission point, which is where the
 /// interest is judged.
 fn synth_external_stage_audit(
     shell: &Shell,
@@ -746,8 +746,5 @@ impl Drop for CollectState {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

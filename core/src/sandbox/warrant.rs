@@ -25,6 +25,7 @@ use crate::Role;
 use crate::capability::{Admitted, Program, Subject, Withheld};
 use crate::path::{Depth, Judged, LeafMode, LexicalPath, Located, Reading, shown, walk};
 use crate::process::SpawnFailure;
+use crate::site::{Silent, site};
 use crate::syntax::quote::quote_word;
 use libc::c_int;
 use std::borrow::Cow;
@@ -271,7 +272,7 @@ impl Confined {
                 excluded,
                 args,
             } => exec(&real, &arg0, excluded.as_deref(), args),
-            Run::Tool(tool, args) => crate::uutils::run(&tool, args).unwrap_or_else(|e| {
+            Run::Tool(tool, args) => crate::uutils::run(tool.as_ref(), args).unwrap_or_else(|e| {
                 crate::terminal::cmd_error("ral", &e.to_string());
                 127
             }),
@@ -287,17 +288,9 @@ fn exec(
     excluded: Option<&str>,
     args: Vec<OsString>,
 ) -> u8 {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:respawn-spawn] sandbox respawn handoff: builds the Command for the confined re-exec; the surface card fired before this handoff, so the exec itself raises no card."
-    )]
-    let mut cmd = Command::new(real);
+    let mut cmd = site!(Silent::RespawnSpawn, Command::new(real));
     cmd.arg0(arg0).args(args);
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:respawn-exec] sandbox respawn handoff: `exec` replaces this process image with the confined target; the surface card fired before this handoff, so the exec itself raises no card."
-    )]
-    let err = cmd.exec();
+    let err = site!(Silent::RespawnExec, &mut cmd => exec());
     // A kernel refusal of a script is most often its interpreter's, which a
     // script the user can edit cannot carry in with it.
     let hint = (err.kind() == io::ErrorKind::PermissionDenied)

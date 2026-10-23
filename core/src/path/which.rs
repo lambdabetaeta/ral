@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use super::site::Silent;
 use super::{CwdPath, PathRules};
+use crate::site::site;
 use crate::types::EnvVars;
 
 /// Resolve a command head to its executable on disk: a separator-bearing
@@ -184,7 +186,7 @@ fn remember(key: LocateKey, hit: Option<PathBuf>, now: Instant) {
 /// Forget every memoised `PATH` answer, on every thread: the next [`locate`]
 /// walks the disk again.
 ///
-/// The top-level run door calls this, so a caller needs it only to admit a
+/// The top-level run calls this, so a caller needs it only to admit a
 /// *mid-run* change to the filesystem — planting a binary and resolving it in
 /// the same dispatch.  What staleness that leaves is argued at [`LOCATED`].
 pub fn forget_located_commands() {
@@ -251,18 +253,15 @@ pub fn path_entries(path_value: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
     std::env::split_paths(path_value).filter(|dir| !dir.as_os_str().is_empty())
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:which-stat] `which`/PATH probe: stats a candidate to read its executable bit; an executable-probe predicate, not turn-time model data I/O, raises no surface card."
-)]
 pub(crate) fn is_executable_file(p: &Path) -> bool {
-    if !p.is_file() {
+    if !site!(Silent::WhichStat, p => is_file()) {
         return false;
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(p).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+        site!(Silent::WhichStat, std::fs::metadata(p))
+            .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
     }
     #[cfg(not(unix))]
     {
@@ -303,10 +302,6 @@ pub(crate) enum PathSearch {
 /// A separator-bearing name is [`PathSearch::Missing`] outright: it is a
 /// path, not `PATH`'s business, and the kernel gives the better diagnosis at
 /// spawn.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:which-stat-absent] `which`/PATH probe: stats a candidate to tell an unexecutable file from an absent one; an executable-probe predicate, not turn-time model data I/O, raises no surface card."
-)]
 pub(crate) fn search(name: &str, path_value: Option<&str>, cwd: Option<&CwdPath>) -> PathSearch {
     if names_a_path(name) {
         return PathSearch::Missing;
@@ -320,7 +315,7 @@ pub(crate) fn search(name: &str, path_value: Option<&str>, cwd: Option<&CwdPath>
     path_dirs(path_value, cwd)
         .into_iter()
         .map(|dir| dir.join(name))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| site!(Silent::WhichStatAbsent, candidate => is_file()))
         .map_or(PathSearch::Missing, PathSearch::FoundNotExecutable)
 }
 
@@ -348,22 +343,17 @@ const WINDOWS_BATCH_EXTENSIONS: &[&str] = &["bat", "cmd"];
 /// head as well, where Win32 would not: a refusal that over-reads fails
 /// closed.
 ///
-/// The decode is lossy, which cannot change the answer: it replaces only
-/// ill-formed sequences, never an ASCII byte, so a trailing `.bat` survives
-/// it, and no replacement character spells one.
+/// Read on the name's encoded bytes, so nothing is decoded and an ill-formed
+/// name is judged by the suffix it has.
 #[cfg(any(windows, test))]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "native: an image name's ASCII suffix, which survives a lossy decode"
-)]
 pub(crate) fn is_batch_image(program: &OsStr) -> bool {
-    super::device::win32_trimmed(&program.to_string_lossy())
-        .rsplit_once('.')
-        .is_some_and(|(_, ext)| {
-            WINDOWS_BATCH_EXTENSIONS
-                .iter()
-                .any(|batch| ext.eq_ignore_ascii_case(batch))
-        })
+    let trimmed = super::device::win32_trimmed(program.as_encoded_bytes());
+    trimmed.iter().rposition(|&b| b == b'.').is_some_and(|dot| {
+        let ext = &trimmed[dot + 1..];
+        WINDOWS_BATCH_EXTENSIONS
+            .iter()
+            .any(|batch| ext.eq_ignore_ascii_case(batch.as_bytes()))
+    })
 }
 
 /// A command name as a deny holds it: the host's name for it, under every
@@ -387,7 +377,8 @@ fn name_key_on(name: &str, rules: PathRules) -> std::borrow::Cow<'_, str> {
 }
 
 /// The Windows resolver's `%PATHEXT%` suffixes, leading dots stripped, with
-/// the resolver's own default when the variable is unset.
+/// the resolver's own default when the variable is unset.  An entry that is
+/// not Unicode is dropped, since a suffix is appended as text.
 ///
 /// Read once per [`locate`] call rather than once per `PATH` directory: the
 /// list is the same for every directory in a walk, so re-reading and
@@ -396,19 +387,12 @@ fn name_key_on(name: &str, rules: PathRules) -> std::borrow::Cow<'_, str> {
 /// list is also an input to [`LocateKey`], which needs it computed here anyway.
 #[cfg(windows)]
 fn windows_pathext_suffixes() -> Vec<String> {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "PATHEXT is the Windows resolver's suffix list, not an XDG basedir: a PATH-probe env read, allowed at the call site like the other which/PATH probes here"
-    )]
-    let pathext =
-        std::env::var_os("PATHEXT").unwrap_or_else(|| OsStr::new(DEFAULT_PATHEXT).to_os_string());
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "native: an env value, split as text; a suffix that is not Unicode decodes lossily"
-    )]
-    let pathext = pathext.to_string_lossy();
+    let pathext = site!(Silent::Pathext, std::env::var_os("PATHEXT"))
+        .unwrap_or_else(|| OsStr::new(DEFAULT_PATHEXT).to_os_string());
     pathext
-        .split(';')
+        .as_encoded_bytes()
+        .split(|&b| b == b';')
+        .filter_map(|entry| std::str::from_utf8(entry).ok())
         .map(str::trim)
         .filter(|e| !e.is_empty())
         .map(|ext| ext.trim_start_matches('.').to_owned())
@@ -478,10 +462,7 @@ mod batch_tests {
 /// The memo's tests, on every platform — separate from the walk's `tests`
 /// below only because those are written against Unix permission bits.
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod memo_tests {
     use super::*;
     use crate::sync::LockExt as _;
@@ -565,7 +546,7 @@ mod memo_tests {
         let tmp = tempfile::tempdir().unwrap();
         let path_value = as_path_value(tmp.path());
 
-        // A remembered miss must not outlive the run door's forget, or
+        // A remembered miss must not outlive the run's forget, or
         // `cargo install foo` then `foo` still says "not found".
         assert_eq!(locate("runme", Some(&path_value), None), None);
         plant(tmp.path(), "runme");
@@ -663,10 +644,7 @@ mod memo_tests {
 /// the user wrote, and never stand in for one they did.
 #[cfg(test)]
 #[cfg(windows)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod windows_tests {
     use super::*;
 
@@ -782,10 +760,7 @@ mod name_key_tests {
 
 #[cfg(test)]
 #[cfg(unix)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] test fs/process scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

@@ -31,7 +31,8 @@ report is data. An ordinary failure settles into `` `err ``; an
 `kind` string beside it, so there is no second place for the kind to be
 recorded and nowhere for the two to disagree; a reader dispatches with `case`
 and the typechecker decides exhaustiveness. `` `grep `` and `` `act `` are
-raised by host doors, never by a door in core.
+raised by the host, which stamps its own fact with `Shell::observation`,
+never by core itself.
 
 The two questions almost every reader asks — *did it work* and *what ran* —
 are prelude functions rather than idioms to be rediscovered: `succeeded
@@ -39,17 +40,18 @@ $report` and `commands $report`, the latter handing back the `` `command ``
 payloads in order. A `case` on `what` is for the reader who cares about the
 other six tags.
 
-**A builtin application is not an observation.** The trail records facts at
-the doors to the world — an external or detached process, a redirect's read
-or write, a worker's birth, a capability check, a host door — and a builtin
-reaches the world only through one of those doors, which records the effect
-there, typed as what it is: `edit-hash` lands as the `` `write `` its
+**A builtin application is not an observation.** The trail records facts where
+the world is reached — an external or detached process, a redirect's read
+or write, a worker's birth, a capability check, a host's report of its own
+act — and a builtin reaches the world only through one of those, which records
+the effect there, typed as what it is: `edit-hash` lands as the `` `write `` its
 `atomic_write` commits, `spawn` as its `` `worker ``, a `==` comparison as
 nothing, because the pure fragment performs no effect
 ([[design/syscalls-are-effects|syscalls-are-effects]]). The inventory of
-observed doors is the inventory capability enforcement guards —
-`check_fs_op` is asked at the same doors — so a builtin that could change the
-world past both would be a missing door, not a reason to observe its frame.
+observed effects is the inventory capability enforcement guards —
+`Shell::judge` is asked about the same effects — so a builtin that could change
+the world past both would be a gap in that inventory, not a reason to observe
+its frame.
 The rule is what keeps the trail proportional to effects rather than to
 β-reductions: observing every builtin application once retained a stamped,
 teed, argv-rendered record per application, and a `filter` over a few
@@ -67,11 +69,12 @@ gate. Ordinary value capture and worker buffers retain their independent
 
 **Collection is lexical, not temporal, and the trail itself is flat.**
 
-- Two sites delimit a trail, and only two: an `audit { }` and the run door
-  (`ral --audit`, or a dispatching host's tool call). Each owns the trail its
-  body produces — it opens or inherits collection, and everything the body
-  observes lands in that same flat list. Neither builds an observation of its
-  own; they are collection boundaries, not entries in the trail.
+- Two sites delimit a trail, and only two: an `audit { }` and a run that asks
+  for one (`Run.trail: Some` — `ral --audit`, or a dispatching host's tool
+  call). Each owns the trail its body produces — it opens or inherits
+  collection, and everything the body observes lands in that same flat list.
+  Neither builds an observation of its own; they are collection boundaries,
+  not entries in the trail.
 - The other operators — `within` / `grant` / `guard` / `try` — delimit
   nothing. They are transparent to collection, so their bodies' observations
   land in the enclosing trail, and a `try` in particular costs no trail at
@@ -131,7 +134,7 @@ Each observation is self-describing about who and how it happened:
   key: "there was no before-image" is a fact the trail states, not one a reader
   infers from silence. A before-image is a *read*: under a grant that admits
   no read of the target, the write still lands and `old-bytes` is `` `none `` —
-  decided at the door (`Shell::admits_fs`), before the bytes could enter
+  decided by `Shell::admits_fs`, before the bytes could enter
   any observation, never hidden afterwards by a renderer;
 - tail-recursive iteration adds no wrapper: a loop contributes one flat run of
   observations, not a chain as deep as the iteration count, matching how
@@ -170,18 +173,18 @@ What builds up the trail is itself scoped:
 the discard device — `/dev/null`, or `\\.\NUL` on Windows — records nothing: no
 card, no rail barrier, and no line in an agent's trail claiming it wrote a
 file. One predicate says so, `LexicalPath::is_discard`
-(`core/src/path/forms.rs`), asked at both doors that have an opinion: the
+(`core/src/path/forms.rs`), asked in both places that have an opinion: the
 in-process guard, which excuses such a target from an *access*
 ([[internals/path-judgment|path-judgment]]), and
-`Shell::observe_stamped` itself, the one fan-out door, which excuses it from a
-*mutation*. Every redirect seam already passes through that door, so the rule
+`Shell::observe_stamped` itself, the one fan-out, which excuses it from a
+*mutation*. Every redirect seam already passes through that fan-out, so the rule
 is stated once and no seam can forget it.
 
 See also [[design/syscalls-are-effects|syscalls-are-effects]] — an audit trail
 is a trace of the operations performed and the scopes that framed them.
 
 One module owns it all: `core/src/types/audit.rs` is the trail (`Audit`, with
-`TrailScope` carrying the capture policy it displaced), `types/audit/door.rs` the
+`TrailScope` carrying the capture policy it displaced), `types/audit/fan_out.rs` the
 fan-out (`impl Shell { observe, observe_stamped, listening, audit_start,
 record_check }`, and `Shell::observation`, which stamps the call site and
 principal), `types/audit/observation.rs` its constructors; the records themselves are
@@ -190,7 +193,7 @@ yields the encoding, its decoder and its ral type. A `Check` is
 `{ resource, fields }` and takes its decision from the resource, so a denied
 deputy is not representable. `evaluator/call.rs` keeps only the call frame
 ([[map/core/evaluator|evaluator]]);
-the dispatch delimiter is the run door's own scope, held at `Shell::enter` in
+the dispatch delimiter is the run's own scope, held in `Shell::run_under` in
 `core/src/run.rs`, outside the `catch_unwind` a panicking run rolls back
 through — a panic still drains and closes the scope, but reports `Static`
 rather than carrying a trail; `docs/SPEC.md` §13.3 gives the formal

@@ -13,7 +13,8 @@ use crate::capability::GrantLayer;
 use crate::first_order::FOValue;
 use crate::types::{Shell, Value};
 
-/// A base tag and the cwd in, one [`GrantLayer`] out.
+/// A base tag and the anchor to freeze it against (the child's cwd and
+/// scratch), in; one [`GrantLayer`] out.
 ///
 /// Pushed onto the spawned shell's stack rather than folded against what it
 /// already carries: the stack itself is the meet, so the child's own ceiling
@@ -23,7 +24,7 @@ use crate::types::{Shell, Value};
 /// an installer is chosen at `Attach`, before a seed is applied or a fork
 /// adopted, so the policy can be demanded of every host that dresses an engine
 /// instead of left in a slot one of them might forget to fill.
-pub type GrantNarrower = fn(&str, &std::path::Path) -> Result<GrantLayer, String>;
+pub type GrantNarrower = fn(&str, &FreezeCtx) -> Result<GrantLayer, String>;
 
 /// A spawn's grant, as it crosses to a child that has not yet resolved it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -47,7 +48,7 @@ impl SpawnGrant {
     pub fn layer(&self, narrow: GrantNarrower, ctx: &FreezeCtx) -> Result<GrantLayer, String> {
         match self {
             Self::Inherit => Ok(GrantLayer::root()),
-            Self::Base(name) => narrow(name, ctx.cwd().as_path()),
+            Self::Base(name) => narrow(name, ctx),
             Self::Restrict(record) => {
                 decode_capability_map(&Value::from(record.clone()), "grant", ctx).map_err(|e| {
                     match e.hint {
@@ -77,18 +78,14 @@ impl SpawnGrant {
 
 // Unix-only: a frozen `cwd` reads with `\` separators on Windows.
 #[cfg(all(test, unix))]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] literal cwds, named rather than resolved"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use crate::capability::{FsAllow, FsOp};
-    use std::path::Path;
 
     /// A narrower no test here may reach: only [`SpawnGrant::Base`] consults
     /// one, and these cases are the other two arms.
-    fn unreachable_narrower(_grant: &str, _cwd: &Path) -> Result<GrantLayer, String> {
+    fn unreachable_narrower(_grant: &str, _ctx: &FreezeCtx) -> Result<GrantLayer, String> {
         panic!("only a Base grant consults the narrower")
     }
 

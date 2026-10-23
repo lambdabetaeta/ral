@@ -50,7 +50,7 @@ pub fn assemble(
     floor: &Floor,
     app: crate::app::App,
     cwd: &CwdPath,
-    config_dir: &Path,
+    config_dir: Option<&Path>,
     interactive: bool,
     edit: EditScheme,
 ) -> Result<String, String> {
@@ -140,8 +140,10 @@ pub(crate) fn with_grant(template: &str, session: &GrantSummary, ceiling: &Grant
 ///
 /// # Errors
 /// A file that exists and cannot be read.
-fn read_agents(cwd: &Path, config_dir: &Path, reader: &Boot<'_>) -> Result<String, String> {
-    let chain = std::iter::once(config_dir).chain(ral_core::path::work_tree_chain(cwd));
+fn read_agents(cwd: &Path, config_dir: Option<&Path>, reader: &Boot<'_>) -> Result<String, String> {
+    let chain = config_dir
+        .into_iter()
+        .chain(ral_core::path::work_tree_chain(cwd));
     let mut texts = Vec::new();
     for file in chain.map(|dir| dir.join("AGENTS.md")) {
         match reader.read(&file) {
@@ -197,7 +199,7 @@ pub fn host_section(app: crate::app::App) -> String {
     let state = app.xdg_dir(ral_core::path::XdgKind::State);
     format!(
         "You are an agent named '{NAME_PLACEHOLDER}'.\n\n{}\n{GRANT_PLACEHOLDER}- scratch: `${}` = {SCRATCH_PLACEHOLDER}\n",
-        host::snapshot(&state),
+        host::snapshot(state.as_deref()),
         app.scratch_var()
     )
 }
@@ -351,6 +353,7 @@ fn skills_section(skills: &[skill::Skill]) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use ral_core::capability::{EditorVerb, FsSummary, Net};
@@ -399,10 +402,6 @@ mod tests {
     /// stack refuses is skipped, the same link under an allowance is read.
     #[cfg(unix)]
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] fixtures build the tree the chain is read from"
-    )]
     fn an_agents_link_to_a_denied_file_is_skipped_and_one_under_an_allowance_is_read() {
         use ral_core::capability::{Capabilities, FsPolicy, GrantStack};
         use ral_core::path::{FrozenPath, utf8};
@@ -427,7 +426,7 @@ mod tests {
         };
         let agents = |stack: &GrantStack| {
             let reader = Boot::new(stack, &floor, &env, &cwd);
-            read_agents(&work, &root.join("config"), &reader)
+            read_agents(&work, Some(&root.join("config")), &reader)
         };
         assert_eq!(agents(&reading(Vec::new())), Ok("linked text".to_owned()));
         assert_eq!(

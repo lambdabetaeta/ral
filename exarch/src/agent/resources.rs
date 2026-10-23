@@ -271,7 +271,7 @@ impl Avatar {
             Some("shallow estimate; a closure's captures are never chased".to_string()),
         ));
 
-        let log_dir = self.log.borrow().dir().to_path_buf();
+        let log_dir = self.log.borrow().dir().path().to_path_buf();
         rows.push(ProbeRow::new(
             "disk.log_dir",
             ral_core::path::tree::bytes(&log_dir),

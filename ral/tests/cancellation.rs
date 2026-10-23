@@ -1,5 +1,5 @@
+#![allow(clippy::disallowed_methods, reason = "test code")]
 #![cfg(unix)]
-#![allow(clippy::disallowed_methods)] // marker files and signals, not a door
 
 // End-to-end smoke tests of a stop's path from the key (or the closed
 // stdout) to the top of a batch run: `try` does not see it, a `guard`'s

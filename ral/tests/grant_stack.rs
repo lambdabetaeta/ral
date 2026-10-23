@@ -1,8 +1,8 @@
+#![allow(clippy::disallowed_methods, reason = "test code")]
 #![allow(
     clippy::disallowed_macros,
     reason = "[test] libtest captures print macros"
 )]
-#![allow(clippy::disallowed_methods)]
 
 //! A stack's authority is the meet of its layers: exclusions join, allowances
 //! meet by their stored names, and an exclusion beats every allowance however

@@ -2,15 +2,15 @@ use super::*;
 use crate::agent::testkit::*;
 use crate::bus::{Emitter, Item, Next, Post};
 use crate::provider::scripted::Script;
-use crate::record::{Memory, Voice};
+use crate::record::{Memory, RECORD, Voice};
 use genai::chat::ChatMessage;
 use std::fs;
 
-fn root_config(run_dir: &Path, fuel: u32) -> RootConfig {
+fn root_config(run_dir: &OwnDir, fuel: u32) -> RootConfig {
     RootConfig {
         system: "system".into(),
         caps: ral_core::capability::GrantStack::root(),
-        run_dir: run_dir.to_path_buf(),
+        run_dir: OwnDir::clone(run_dir),
         trunk: Trunk::Attended,
         tools: Toolset::offered(false),
         allow_schedule: false,
@@ -161,24 +161,16 @@ fn mnemon_root_imports_context_withholds_reply_and_resumes() {
     assert_eq!(child.agent.caps, parent.agent.caps);
     assert_eq!(child.agent.fuel, parent.agent.fuel, "a root is depth 0");
 
-    let sessions = parent.log_dir().parent().expect("sessions root");
-    let live = AgentLog::live_roots(sessions).expect("live roots");
+    let sessions = parent.fleet.launch.sessions_root.clone();
+    let live = AgentLog::live_roots(&sessions).expect("live roots");
     let names: Vec<_> = live.iter().map(|(_, name)| name.as_str()).collect();
     assert_eq!(names, ["main", "fork"]);
 
-    let dir = child.log_dir().to_path_buf();
+    let id = child.agent.id;
     let before = child.rendered_messages();
     drop(child);
-    let resumed = AgentLog::resume(
-        sessions,
-        AgentId::new(
-            dir.file_name()
-                .and_then(|n| n.to_str())
-                .and_then(|n| n.parse().ok())
-                .expect("numeric session dir"),
-        ),
-    )
-    .expect("a mnemon root's record folds back through resume");
+    let resumed =
+        AgentLog::resume(&sessions, id).expect("a mnemon root's record folds back through resume");
     assert_eq!(
         serde_json::to_vec(&resumed.context().rendered()).unwrap(),
         serde_json::to_vec(&before).unwrap(),
@@ -190,11 +182,7 @@ fn mnemon_root_imports_context_withholds_reply_and_resumes() {
 #[test]
 fn a_closed_root_is_not_resumable() {
     let mut session = Avatar::for_test("system").unwrap();
-    let sessions = session
-        .log_dir()
-        .parent()
-        .expect("sessions root")
-        .to_path_buf();
+    let sessions = session.fleet.launch.sessions_root.clone();
     assert_eq!(AgentLog::live_roots(&sessions).unwrap().len(), 1);
     let (emit, _rx) = crate::bus::dummy_emitter();
     let flow = session.rewrite(&crate::bus::Rewrite::Close, &emit);
@@ -483,7 +471,7 @@ fn fork_child_inherited_scratch_is_baseline() {
 #[test]
 fn resumed_agent_adds_only_the_fresh_shell_note() {
     let dir = tmp("resume-agent");
-    let sessions = dir.path().join("sessions");
+    let sessions = dir.make_dir("sessions").unwrap();
     let mut log = AgentLog::root(
         &sessions,
         AgentId::new(0),
@@ -503,7 +491,7 @@ fn resumed_agent_adds_only_the_fresh_shell_note() {
 
     let [(agent, resumed)] = <[_; 1]>::try_from(
         Avatar::resume(
-            root_config(dir.path(), 0),
+            root_config(&dir, 0),
             identity_seat("resume-agent"),
             &scripted("new-model", Script::new()),
         )
@@ -547,7 +535,7 @@ fn resumed_agent_adds_only_the_fresh_shell_note() {
 fn clear_appends_to_the_one_record_and_shared_emitters_keep_publishing() {
     use crate::record::{Forensic, Protocol, Record};
     let mut session = Avatar::for_test("system").unwrap();
-    let record = session.log_dir().join("record.jsonl");
+    let record = session.log_dir().path().join(RECORD);
     let (tx, rx) = crate::bus::channel();
     session.couple(&Emitter::new(tx, session.agent.id));
     let recorder = session.recorder();
@@ -583,7 +571,7 @@ fn clear_appends_to_the_one_record_and_shared_emitters_keep_publishing() {
 #[test]
 fn resume_seeds_child_ids_past_existing_session_directories() {
     let dir = tmp("resume-id-seed");
-    let sessions = dir.path().join("sessions");
+    let sessions = dir.make_dir("sessions").unwrap();
     let log = AgentLog::root(
         &sessions,
         AgentId::new(0),
@@ -594,24 +582,19 @@ fn resume_seeds_child_ids_past_existing_session_directories() {
         None,
     )
     .unwrap();
-    fs::create_dir_all(sessions.join("1")).unwrap();
-    fs::write(sessions.join("1/sentinel"), b"keep").unwrap();
+    let sentinel = sessions.path().join("1/sentinel");
+    fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+    fs::write(&sentinel, b"keep").unwrap();
     drop(log);
 
     let (root, _) = Avatar::resume(
-        root_config(dir.path(), 1),
+        root_config(&dir, 1),
         identity_seat("resume-id-seed"),
         &scripted("new-model", Script::new()),
     )
     .expect("resumed root")
     .remove(0);
     let child = root.fork().expect("post-resume child");
-    let child_id = child
-        .log_dir()
-        .file_name()
-        .and_then(|name| name.to_str())
-        .and_then(|name| name.parse::<u64>().ok())
-        .expect("numeric child session directory");
-    assert!(child_id >= 2);
-    assert_eq!(fs::read(sessions.join("1/sentinel")).unwrap(), b"keep");
+    assert!(child.agent.id.get() >= 2);
+    assert_eq!(fs::read(&sentinel).unwrap(), b"keep");
 }

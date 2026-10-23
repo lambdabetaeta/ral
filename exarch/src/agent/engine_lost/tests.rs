@@ -3,17 +3,23 @@
 
 use super::{EngineLost, EnginePhase};
 use ral_core::carrier::Severed;
+use ral_core::own::{OwnDir, TestDir};
 
 fn closed() -> Severed {
     Severed::Closed("the engine closed the connection".into())
+}
+
+/// A run directory of this test's own, deleted with the guard.
+fn run_dir() -> TestDir {
+    OwnDir::for_test("engine-lost").expect("a run directory")
 }
 
 /// The bug this replaced: a session that never started was told to start
 /// a new one.  The two phases must not read alike.
 #[test]
 fn a_start_failure_and_a_death_give_different_advice() {
-    let starting = EngineLost::starting(&closed(), None).to_string();
-    let running = EngineLost::running(&closed(), None).to_string();
+    let starting = EngineLost::starting(&closed(), &run_dir()).to_string();
+    let running = EngineLost::running(&closed(), &run_dir()).to_string();
     assert_ne!(starting, running);
     assert!(
         !starting.to_lowercase().contains("start a new"),
@@ -28,8 +34,8 @@ fn a_start_failure_and_a_death_give_different_advice() {
 /// A refusal is deterministic, so a refused start is not told to retry.
 #[test]
 fn a_refused_start_is_not_told_to_try_again() {
-    let shown =
-        EngineLost::starting(&Severed::Refused("protocol version 9".into()), None).to_string();
+    let shown = EngineLost::starting(&Severed::Refused("protocol version 9".into()), &run_dir())
+        .to_string();
     assert!(!shown.to_lowercase().contains("try again"), "{shown}");
 }
 
@@ -38,8 +44,11 @@ fn a_refused_start_is_not_told_to_try_again() {
 /// length.
 #[test]
 fn the_sentence_carries_a_path_and_nothing_else() {
-    let dir = std::path::PathBuf::from("/state/synod/proj/2026-09-16-170235-26184");
-    let shown = EngineLost::starting(&closed(), Some(&dir)).to_string();
+    let root = run_dir();
+    let dir = root
+        .make_dir("2026-09-16-170235-26184")
+        .expect("a run directory");
+    let shown = EngineLost::starting(&closed(), &dir).to_string();
     assert!(shown.contains("2026-09-16-170235-26184"), "{shown}");
     assert!(
         !shown.contains("engine-closed"),
@@ -60,26 +69,11 @@ fn the_sentence_carries_a_path_and_nothing_else() {
     );
 }
 
-/// With nowhere to send a reader the invitation is simply absent — never
-/// a dangling "details in", and never an empty bracket in its place.
-#[test]
-fn a_failure_with_no_log_is_the_sentence_alone() {
-    let lost = EngineLost::running(&Severed::Faulted("junk frame".into()), None);
-    let shown = lost.to_string();
-    assert!(!shown.contains("details in"), "{shown}");
-    assert!(!shown.contains('('), "{shown}");
-    assert!(
-        lost.logged().contains("engine-faulted"),
-        "the code the window dropped is still in the record: {}",
-        lost.logged()
-    );
-}
-
 /// What goes into a record keeps the engine's own account of itself; what
 /// goes into a window does not.  The split is the whole design.
 #[test]
 fn the_logged_form_keeps_what_the_sentence_drops() {
-    let lost = EngineLost::running(&Severed::Refused("protocol version 9".into()), None);
+    let lost = EngineLost::running(&Severed::Refused("protocol version 9".into()), &run_dir());
     let logged = lost.logged();
     assert!(logged.starts_with(&lost.to_string()), "{logged}");
     assert!(

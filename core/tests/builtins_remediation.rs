@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 //! The builtins-remediation checks that need the harness: an `exit` status
 //! is an escape rather than an error, and two shapes are refused by the
@@ -6,7 +6,7 @@
 //! `float`, `from-json`, …) are goldens in `tests/builtins`
 //! (`text-edges`, `numeric`, `codec-errors`, `comparison`).
 //!
-//! Each source string goes through the public `run` door like a REPL run.
+//! Each source string goes through the public `run` entry like a REPL run.
 
 mod common;
 
@@ -17,7 +17,7 @@ use ral_core::run::{RunReport, StaticDiagnostics};
 use ral_core::source::SourceOrigin;
 use ral_core::types::{Break, Escape, Settled, Shell, Value};
 
-/// Run one top-level run of `source` through the public `run` door
+/// Run one top-level run of `source` through the public `run` entry
 /// and return the body's `Settled<Value>`.  Every test below picks source
 /// it expects to compile, so a static diagnostic is a test bug.
 fn eval(shell: &mut Shell, source: &str) -> Settled<Value> {

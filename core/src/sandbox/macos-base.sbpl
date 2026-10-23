@@ -18,11 +18,11 @@
 ;; libdispatch and libmalloc probe these on init and abort if denied.
 (allow sysctl-read)
 
-;; Named, never wholesale: a Mach name is a door to a daemon acting on
+;; Named, never wholesale: a Mach name reaches a daemon acting on
 ;; your behalf outside this profile.  The refusals — launchservicesd,
 ;; the pasteboard, SecurityServer — are data in `macos.rs`'s
-;; `withheld_doors`, so the denial hint can quote them; keep in step.
-;; Not a resolver door: the resolver's socket is `network-outbound`.
+;; `withheld_services`, so the denial hint can quote them; keep in step.
+;; Not a resolver service: the resolver's socket is `network-outbound`.
 (allow mach-lookup
   ;; dyld locates the shared cache through launchd, before main().
   (global-name "com.apple.dyld")

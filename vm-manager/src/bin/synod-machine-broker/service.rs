@@ -22,6 +22,7 @@
 )]
 use std::ffi::c_void;
 
+use crate::site::{Silent, site};
 use windows_sys::Win32::Foundation::NO_ERROR;
 use windows_sys::Win32::System::Services::{
     RegisterServiceCtrlHandlerW, SERVICE_ACCEPT_STOP, SERVICE_CONTROL_SHUTDOWN,
@@ -40,11 +41,7 @@ pub fn start() {
         println!("boot media: {:?}", vm_manager::broker::service::media());
         if let Err(cause) = vm_manager::broker::service::serve() {
             eprintln!("synod machine broker: stopped listening: {cause}");
-            #[allow(
-                clippy::disallowed_methods,
-                reason = "the console listener has already returned; a broker links no ral-core and holds no ral session state"
-            )]
-            std::process::exit(1);
+            site!(Silent::ConsoleListenerStopped, std::process::exit(1));
         }
         return;
     }
@@ -70,11 +67,7 @@ pub fn start() {
             "synod machine broker: this program is a Windows service. Windows starts it; to run \
              it by hand — which is how you watch a guest boot — pass --console."
         );
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "the dispatcher refused the program before it served anything; a broker links no ral-core and holds no ral session state"
-        )]
-        std::process::exit(1);
+        site!(Silent::DispatcherRefused, std::process::exit(1));
     }
 }
 
@@ -123,11 +116,7 @@ unsafe extern "system" fn control(code: u32) {
     if !handle.is_null() {
         report(handle, SERVICE_STOPPED, 0);
     }
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "process exit *is* this service's teardown, as the doc above says: every machine is held by the thread serving its client, and there is no ral session here to unwind"
-    )]
-    std::process::exit(0);
+    site!(Silent::ServiceStop, std::process::exit(0));
 }
 
 /// Tell the controller where the service is in its life.

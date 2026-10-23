@@ -15,8 +15,12 @@ const OSC52_CAP: usize = (100_000 - 8) / 4 * 3;
 /// On X11 the text lives in its owner's process.  A tmux session started
 /// locally keeps its environment when later attached over ssh, so it still
 /// copies locally.
-#[derive(Default)]
-pub struct Clipboard(Option<Sink>);
+pub struct Clipboard {
+    /// Whether the program runs across ssh, where the machine's own clipboard
+    /// is not the user's.
+    remote: bool,
+    sink: Option<Sink>,
+}
 
 enum Sink {
     Native(arboard::Clipboard),
@@ -32,6 +36,12 @@ pub enum Copied {
 }
 
 impl Clipboard {
+    /// A clipboard for a program that runs `remote`ly (across ssh) or not.
+    #[must_use]
+    pub fn new(remote: bool) -> Self {
+        Self { remote, sink: None }
+    }
+
     /// Copy `text`; `terminal` is whether the host terminal may be asked, the
     /// only way across ssh or where the native clipboard will not open.
     ///
@@ -39,8 +49,9 @@ impl Clipboard {
     /// The native write or the write to stdout failed, or the terminal was
     /// needed but not allowed.
     pub fn copy(&mut self, text: &str, terminal: bool) -> io::Result<Copied> {
-        let sink = self.0.get_or_insert_with(|| {
-            if std::env::var("SSH_CONNECTION").is_ok() {
+        let remote = self.remote;
+        let sink = self.sink.get_or_insert_with(|| {
+            if remote {
                 return Sink::Osc52;
             }
             arboard::Clipboard::new().map_or(Sink::Osc52, Sink::Native)

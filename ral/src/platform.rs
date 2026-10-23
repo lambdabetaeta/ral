@@ -7,11 +7,14 @@
 //! explicitly.
 
 use ral_core::first_order::FOValue;
-use ral_core::path::EnginePath;
+use ral_core::own::UserFile;
+use ral_core::path::{EnginePath, XdgKind};
 use ral_core::protocol::{Attach, EngineSpec, Root};
 use ral_core::terminal;
 use ral_core::terminal::{InteractiveMode, TerminalState};
 use ral_core::types::ExitHints;
+
+use crate::site::{Silent, site};
 
 /// Probe the terminal under the active `RAL_INTERACTIVE_MODE`, plumb
 /// it into the diagnostic subsystem, and return both halves.  When
@@ -36,11 +39,7 @@ pub(crate) fn local_attach(
     terminal: TerminalState,
     config: FOValue,
 ) -> Result<Attach, String> {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "host-env: an identity engine's home is this process's own"
-    )]
-    let home = ral_core::host::home().unwrap_or_default();
+    let home = site!(Silent::EngineHome, ral_core::host::home()).unwrap_or_default();
     let cwd = ral_core::host::cwd()
         .ok_or("the working directory is unavailable, so no relative path could be read")?;
     Ok(Attach::root(
@@ -53,14 +52,11 @@ pub(crate) fn local_attach(
 static DEFAULT_EXIT_HINTS: &str = include_str!("../../data/exit-hints.txt");
 
 /// Load exit-code hints: user override in data dir, else the embedded default.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:exit-hints-read] startup read of the optional exit-hints override file; not turn-time model I/O"
-)]
+/// No data base, or an override that cannot be read, is no override.
 pub(crate) fn load_exit_hints() -> ExitHints {
-    let text = ral_core::path::app_dir(ral_core::path::XdgKind::Data, "ral")
-        .map(|d| d.join("exit-hints.txt"))
-        .and_then(|p| std::fs::read_to_string(p).ok())
+    let text = UserFile::xdg("ral", XdgKind::Data, "exit-hints.txt")
+        .ok()
+        .and_then(|file| file.read().ok().flatten())
         .unwrap_or_default();
     let text = if text.is_empty() {
         DEFAULT_EXIT_HINTS

@@ -1,5 +1,5 @@
+#![allow(clippy::disallowed_methods, reason = "test code")]
 #![cfg(unix)]
-#![allow(clippy::disallowed_methods)]
 
 // Integration tests for `ral --audit`: the JSON dumped to stderr must be
 // parseable, and its root must be the same report the `audit { … }` builtin

@@ -61,10 +61,7 @@ fn runnable(exec: &ExecRules) -> FsRules {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] a tempdir tree with a real link; fixture paths already in normal form"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::deputy_prefixes;
     use crate::capability::{

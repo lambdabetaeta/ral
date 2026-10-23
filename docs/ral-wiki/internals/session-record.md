@@ -118,7 +118,7 @@ bookends and nothing else; every other worker emits through the agent's
 The log is the durable structure; `Context` is its fold in memory — the
 vocabulary in `record/model.rs`, the turns and residues in `model/table.rs`, the
 automaton in `model/state.rs`, the fold in `model/fold.rs`, the render in
-`model/render.rs`, the transcript door in `model/transcript.rs`, resume in
+`model/render.rs`, the transcript reader in `model/transcript.rs`, resume in
 `model/resume.rs` — and it holds **every turn the lineage has recorded, and
 where each one is**
 ([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]):
@@ -130,8 +130,9 @@ where each one is**
   the newest user-role turn, `current_prompt` — is what a nudge continues
   ([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]);
 - a turn's `body` is either `Here { records, origin }`, its records in memory,
-  or `There { at, withdrawn }`, a `Pointer` to the file and byte ranges that
-  hold them. A turn that left has left one of two ways: by an eviction, which
+  or `There { at, withdrawn }`, a `Pointer` to the session and byte ranges that
+  hold them: the session by its `AgentId`, resolved against the run's held
+  `sessions/` directory, so a moved run still reads back. A turn that left has left one of two ways: by an eviction, which
   puts it *under* a residue, or by a *withdrawal*, which is never drawn.
   Whether a `There` turn is under a residue is a function of `residues`, not
   stored;
@@ -139,8 +140,10 @@ where each one is**
   the order recorded, never removed — exactly what its `Protocol::Evicted {
   residue }` carries: a span of turn ids and the model's note, `None` for the
   harness's own ([[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]]);
-- `source`, this log's own `record.jsonl`, where a turn recorded here points
-  once it leaves; the system prompt in force (`Context::system`, set by
+- `source`, this session's own `AgentId`, and `sessions`, the run's `sessions/`
+  directory, held: a turn recorded here points at `source` once it leaves, and
+  every pointer's session is read from `sessions/<id>/record.jsonl` through that
+  handle; the system prompt in force (`Context::system`, set by
   `Protocol::System`); the protocol's resting state; and the count of records
   folded, beside the index of the newest context edit.
 
@@ -201,7 +204,7 @@ Everything the model or the human reads off the structure is a pure function
 of it, computed on call and memoised nowhere: `rendered`, `history_bytes`,
 `context_survey` (the frontier's rows), `transcript_index` (every item, by
 `from`, wider span first, later-recorded first, so a residue precedes what it
-covers), `plan_forced_eviction`, and the transcript door's `locate_read` and
+covers), `plan_forced_eviction`, and the transcript reader's `locate_read` and
 `locate_grep`. A read holds only turns; a search holds turns and noted
 residues in index order, so `` `grep ``'s hits come in `` `index ``'s order,
 and the first hundred kept are the oldest.
@@ -232,15 +235,17 @@ items, residues included, merge
 
 **Leaving the context is a change of address, not a deletion.** The table sets
 each departing turn's body to `There { at, departure }`, where `at` is its `origin`
-if it has one and otherwise this log's `source` beside the `Locus` of every
-record it held; the records leave memory and nothing durable is touched. Every
+if it has one and otherwise this session's `source` id beside the `Locus` of every
+record it held; the records leave memory and nothing durable is touched. The id,
+not a path, is what is stored (and persisted in an `Inherited` link), so a run
+directory can be moved and every pointer in it still reads back. Every
 read of a range checks the record's bytes against the digest the `Locus`
 carries, *before* the parse, so a range that no longer names what it
 measured — a copied session directory, an edited log — is
 refused as the mismatch it is rather than answered with whatever now lies at
-those offsets. The door reads a turn at a time, so a search never holds more
+those offsets. The reader reads a turn at a time, so a search never holds more
 than one turn, and it holds one descriptor, reopening only where
-consecutive turns name different logs. The log is thereby the model's
+consecutive turns name different sessions. The log is thereby the model's
 transcript as well as its identity
 ([[decisions/260906_context-rollover|context-rollover]]).
 
@@ -251,7 +256,7 @@ by value, and the child records no copy of
 the parent's messages: its resident rows are *read back through those
 addresses*, each row's `origin` keeping the original copy, so evicting one in
 the child points there. The lineage is flattened at each fork — a grandchild's
-row already names the grandparent's file — so nothing walks an ancestry, and
+row already names the grandparent's session — so nothing walks an ancestry, and
 `Context::sourced` is the whole of "seek in the structure, then the file".
 A residue is rendered from its own record, so the link carries nothing
 rendered; the link's judge checks that its residues are laminar and lie
@@ -349,11 +354,11 @@ and nothing to keep in step.
 
 The price is one build of the context per provider request — once per turn,
 never per loop iteration — on top of the clone per HTTP attempt at the wire
-door, which is where
+request, which is where
 [[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]] put
 it and where it stays: `manufacture` takes `&[ChatMessage]` inside
 `retry_with_backoff`'s per-attempt closure.
-[[map/exarch/provider|the provider map]] describes that one door,
+[[map/exarch/provider|the provider map]] describes that one place,
 `provider/wire.rs`, where those messages become an owned `genai::ChatRequest`.
 
 **The system prompt is a record, not a field.** `Protocol::System { text }` sets
@@ -422,7 +427,7 @@ they land; headless keeps one memo per source agent and prints each opened
 block.
 
 Live and replay use the same view fold. The TUI's `App::fact` and
-`App::transient` are the two distinct doors: durable blocks are fold-backed,
+`App::transient` are the two distinct routes: durable blocks are fold-backed,
 while an open answer/thinking line or chrome row remains provisional until a
 later record or boundary resolves it.
 
@@ -468,7 +473,7 @@ the live bus lifetime. The broader accumulator/fold distinction is in
 [[design/residency|residency]], and the visual projection discipline is in
 [[decisions/260618_tui-transcript-as-graphic|tui-transcript-as-graphic]].
 [[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]] is the
-ADR for the one wire door, and
+ADR for the one wire request, and
 [[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]] for the
 structure every view above projects — the turn as the atom of eviction, and
 the turn's own body as the one statement of where it is, and
@@ -476,5 +481,5 @@ the turn's own body as the one statement of where it is, and
 for the one edit that moves a turn, and
 [[decisions/261019_an-eviction-is-a-span|an-eviction-is-a-span]] for the
 residue it leaves and the frontier the context is;
-[[map/exarch/provider|provider]] covers the one door that turns those messages into an owned wire
+[[map/exarch/provider|provider]] covers the one place that turns those messages into an owned wire
 request.

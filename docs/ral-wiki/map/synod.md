@@ -232,7 +232,7 @@ a job changed, and nothing about putting anything back. It states its
 host-side standing rather than assuming it: `manifest.rs` and `report.rs`
 are each one kind of site — synod's own walk of the granted folder, never
 the model's turn-time I/O, which happens inside the guest — so each says so
-once, at module scope, in the shape `vm-manager/src/hcs/vhd.rs` uses. synod holds no crate-level exemption from the I/O-door and path
+once, at module scope, in the shape `vm-manager/src/hcs/vhd.rs` uses. synod holds no crate-level exemption from the I/O and path
 disciplines in either of its two roots; every exception is named where it is
 taken:
 
@@ -307,7 +307,7 @@ passes to the agent. The window writes that station only for `Working…`;
 it never clears what the shell has said. `keys.rs` is the accounts screen's five
 commands — list, save or forget a key, declare or withdraw an endpoint — each
 returning the fresh list and ending in the same `models-refreshed` event a
-sign-in ends in, so the picker converges the same way whichever door a
+sign-in ends in, so the picker converges the same way whichever route a
 credential arrived through; `sink.rs` is the bridge that streams the
 conversation's narration into the window, and routes by agent id: its
 `Router` takes the first id it ever sees as the trunk's (`Router::root`),
@@ -478,10 +478,12 @@ own units (bytes on Unix, UTF-16 little-endian on Windows) in one base64
 string, so a path that is not Unicode crosses whole rather than failing the
 frame that was to carry the refusal, at a uniform 8/3 bytes per UTF-16 unit
 (`serde_json` would write the units as an array of numbers, up to six bytes
-each). Crossing is not reaching a hypervisor, though: a path either backend
-would have to hand its hypervisor as text — the HCS document, an `NSURL` — and
-that is not Unicode is refused as `NotUnicode`, never spelled lossily into some
-other file's name.
+each). Crossing is not reaching a hypervisor, though: a path the HCS document
+would have to carry as text, and that is not Unicode, is refused as
+`NotUnicode`, never spelled lossily into some other file's name.
+Virtualization.framework is handed an `NSURL` made from the path's own bytes,
+so a name that is not Unicode reaches it whole; only a path with no `file:`
+URL, empty or holding a NUL, is refused, as `NotAFileUrl`.
 
 - `vz.rs` — `Vz`: Virtualization.framework, macOS arm64, bound through
   `objc2-virtualization`. It builds and validates the full configuration —
@@ -584,7 +586,7 @@ blocking I/O.
   `pppppppp-facb-11e6-bd58-64006a7986d3`, which is why a guest that knows
   nothing of Windows can still be dialled. `socket_sddl` names SYSTEM,
   built-in Administrators, and *this user's own SID* — never a wildcard, since
-  this socket is one of two doors into a machine with no network *adapter* of
+  this socket is one of two routes into a machine with no network *adapter* of
   its own (the guest's actual network rides the second `HvSocket` port,
   `NET_PORT`, into a host process — [[design/egress|egress]]) — and
   `fresh_machine_id` draws on `ProcessPrng` because the machine's identifier

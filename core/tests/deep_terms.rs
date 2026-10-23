@@ -1,7 +1,9 @@
 //! Shapes whose depth the parser's nesting cap does not bound, compiled
-//! through the door.  N is past what any walk survives on the 2 MB test
+//! through the public entry.  N is past what any walk survives on the 2 MB test
 //! thread without it (debug frames run to 13 KB a level), and within what the
 //! returned `Toplevel`'s drop glue survives there.
+
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 mod common;
 

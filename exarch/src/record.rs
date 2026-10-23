@@ -34,10 +34,15 @@ pub use session::{
 };
 pub use view::{BLOCKS_WINDOW, Block, BlockKind, Delta, Verdict, View, context_rows_card};
 
+// Defined in `app`, the layer below, whose `resume_candidates` tells a recorded
+// run by it.
+pub use crate::app::RECORD;
+
 use crate::card::{Card, Change, DoneOutcome};
 use crate::provider::{Provider, ProviderError, Tuning, Usage, Via};
 use genai::chat::ChatMessage;
 use ral_core::first_order::FOValue;
+use ral_core::own::OwnDir;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::Range;
@@ -46,7 +51,7 @@ use std::path::PathBuf;
 /// The identity of an agent node — the trunk and every forked child alike.
 ///
 /// Opaque, and what crosses the wire: every `exarch-agents` tag and every `Signal`
-/// names a node by this.  It is a routing key, not a door — an `exarch-agents` tag
+/// names a node by this.  It is a routing key, not an authority — an `exarch-agents` tag
 /// resolves by name through the fleet, and the frontend matches an arriving
 /// id against the tab it was handed at that agent's birth.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
@@ -127,7 +132,7 @@ impl AgentState {
 }
 
 /// Where the seam publishes a fact it has just appended, and the transients
-/// that ride beside them: the one door onto the live channel, attachable after
+/// that ride beside them: the one way onto the live channel, attachable after
 /// the log exists because the log outlives any bus.
 pub(crate) trait Publish: Send {
     fn fact(&self, recorded: Recorded<Record>);
@@ -309,7 +314,7 @@ pub enum Display {
         outcome: Settlement,
         elapsed_ms: u64,
     },
-    /// A fact core observed at a door, carried as its total wire form — the
+    /// A fact core observed, carried as its total wire form — the
     /// one display content the protocol records cannot supply.
     Observation {
         value: FOValue,
@@ -470,8 +475,8 @@ pub enum Forensic {
 #[derive(Debug, Clone)]
 pub struct Born {
     /// What the frontend must still know once the agent has settled: the
-    /// row's label and indentation, the gone agent's log path.
-    pub log_dir: PathBuf,
+    /// row's label and indentation, the gone agent's log directory.
+    pub log_dir: OwnDir,
     pub name: String,
     /// `None` for a root, which opens a session of its own.
     pub parent: Option<AgentId>,
@@ -480,20 +485,6 @@ pub struct Born {
     /// The born agent's own record seam: the frontend records into it, and
     /// catches up from it ([`Emitter::since`]).
     pub recorder: Emitter,
-}
-
-#[cfg(test)]
-impl Born {
-    /// A birth with no log and no replay, for a test's tab.
-    pub(crate) fn for_test(name: &str, parent: Option<AgentId>) -> Self {
-        Self {
-            log_dir: std::env::temp_dir(),
-            name: name.into(),
-            parent,
-            resumed: None,
-            recorder: Emitter::none(),
-        }
-    }
 }
 
 /// The channel's other passenger: content that dies with the channel and
@@ -852,28 +843,13 @@ pub use view::Blocks;
 /// replay refuses the whole session.
 pub trait Fold {
     /// No `Default` bound: a memo the fold cannot build from nothing — the
-    /// model's, which needs its log's path — seeds [`replay()`] by value.
+    /// model's, which needs its session — seeds [`replay()`] by value.
     type Memo;
 
     /// # Errors
     /// Returns [`Refusal`] when this fold does not recognise the record —
     /// during replay that refuses the session rather than skip it silently.
     fn step(memo: &mut Self::Memo, record: Recorded<Record>) -> Result<(), Refusal>;
-}
-
-/// Read `path`'s [`Record`]s back, past their `Entry` envelope, for tests
-/// across the crate that assert on the raw log rather than on a fold's
-/// memo — the one sanctioned exception to this module's own "read the log
-/// back only through [`replay()`]" rule, since what these tests exercise is
-/// the wire shape itself.
-///
-/// # Errors
-/// Returns `Err` under exactly [`log::Log::read`]'s own conditions.
-#[cfg(test)]
-pub(crate) fn read_records(path: &std::path::Path) -> std::io::Result<Vec<Record>> {
-    log::Log::read(path)?
-        .map(|record| record.map(Recorded::into_value))
-        .collect()
 }
 
 /// The other half of [`read_records`]: a test that hand-writes or
@@ -896,4 +872,50 @@ pub(crate) fn envelope_line(record: &Record) -> Vec<u8> {
 #[cfg(test)]
 pub(crate) fn record_from_line(line: &[u8]) -> serde_json::Result<Record> {
     serde_json::from_slice::<Entry<Record>>(line).map(|entry| entry.record)
+}
+
+#[cfg(test)]
+pub(crate) use testkit::{fixture_dir, read_records};
+
+/// What a test of the record needs that touches the host's directories.
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod testkit {
+    use super::{AgentId, Born, Emitter, Record, Recorded, log};
+    use ral_core::own::OwnDir;
+    use std::path::Path;
+
+    /// A directory for the fixtures that name one and make nothing in it: a
+    /// birth's log directory, a bare context's sessions.  It is the host's
+    /// temp directory, held.
+    pub(crate) fn fixture_dir() -> OwnDir {
+        OwnDir::temp_for_test().expect("the temp directory is held")
+    }
+
+    impl Born {
+        /// A birth with no log and no replay, for a test's tab.
+        pub(crate) fn for_test(name: &str, parent: Option<AgentId>) -> Self {
+            Self {
+                log_dir: fixture_dir(),
+                name: name.into(),
+                parent,
+                resumed: None,
+                recorder: Emitter::none(),
+            }
+        }
+    }
+
+    /// Read the [`Record`]s of the log file at `path` back, past their `Entry`
+    /// envelope, for tests across the crate that assert on the raw log rather
+    /// than on a fold's memo — the one sanctioned exception to this module's
+    /// own "read the log back only through [`replay()`](super::replay)" rule,
+    /// since what these tests exercise is the wire shape itself.
+    ///
+    /// # Errors
+    /// Returns `Err` under exactly [`log::Log::read`]'s own conditions.
+    pub(crate) fn read_records(path: &Path) -> std::io::Result<Vec<Record>> {
+        log::Log::read(std::fs::File::open(path)?, path)?
+            .map(|record| record.map(Recorded::into_value))
+            .collect()
+    }
 }

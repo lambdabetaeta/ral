@@ -45,6 +45,11 @@
 )]
 
 mod shell;
+// `lint/site.rs` is crate-local, so the library's `site` module cannot serve
+// the binary; this one is the binary's own, and only Windows has a site in it.
+#[cfg(windows)]
+#[path = "shell/site.rs"]
+mod site;
 
 use shell::{Accounts, commands, highlight, keys, review, signin};
 
@@ -57,10 +62,10 @@ fn main() {
         synod::session::prepare().map(|store| Holdings::new(store, synod::session::SYNOD)),
     );
 
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         clippy::disallowed_macros,
-        reason = "whatever this expands to is Tauri's codegen, not ral's to annotate: the macro bakes the app config and the embedded frontend assets into a Context here"
+        reason = "Tauri's codegen: its expansion exits the process, and prints, when building the context panics; `site!` wraps calls, not a macro invocation"
     )]
     let context = tauri::generate_context!();
 

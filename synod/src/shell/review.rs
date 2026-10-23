@@ -285,10 +285,7 @@ pub fn job_report(review: State<'_, Review>, folder: PathBuf) -> Result<WindowRe
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] scratch folders and files made and read only by these tests"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 

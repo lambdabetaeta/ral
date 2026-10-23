@@ -27,6 +27,8 @@ use exarch::provider::credential::CredentialStore;
 use exarch::provider::identity;
 use exarch::provider::keychain::Keychain;
 use exarch::wallet::Wallet;
+use ral_core::own::{OwnError, UserFile};
+use ral_core::path::XdgKind;
 use ral_core::sync::LockExt;
 use std::sync::Mutex;
 
@@ -38,14 +40,15 @@ const DECLARATIONS_FILE: &str = "providers.ral";
 const LABEL: &str = "provider settings";
 
 /// Synod's own wallet: its vault, its declarations file.
-pub fn wallet() -> Wallet {
-    Wallet {
+///
+/// # Errors
+/// [`OwnError::NoBase`] where the host names no config directory.
+pub fn wallet() -> Result<Wallet, OwnError> {
+    Ok(Wallet {
         keychain: Keychain::for_app(SYNOD),
-        declarations: SYNOD
-            .xdg_dir(ral_core::path::XdgKind::Config)
-            .join(DECLARATIONS_FILE),
+        declarations: UserFile::xdg(SYNOD.name(), XdgKind::Config, DECLARATIONS_FILE)?,
         label: LABEL,
-    }
+    })
 }
 
 /// Resolve every account this computer offers, once, at startup.
@@ -54,15 +57,15 @@ pub fn wallet() -> Wallet {
 /// ([`CredentialStore::read_vault`]).
 ///
 /// # Errors
-/// Returns `Err` if the declarations file is present but cannot be read or
-/// makes no sense; a vault that cannot be reached is not an error here,
-/// only fewer accounts to choose from.
+/// Returns `Err` if the host names no config directory, or the declarations
+/// file is present but cannot be read or makes no sense; a vault that cannot
+/// be reached is not an error here, only fewer accounts to choose from.
 ///
 /// # Panics
 /// Must be called while the process is still single-threaded: the
 /// credential scrub mutates the environment.
 pub fn prepare() -> Result<CredentialStore, String> {
-    let wallet = wallet();
+    let wallet = wallet()?;
     let declared = config::load_declared(&wallet.declarations, wallet.label)?;
     let mut store = CredentialStore::resolve_and_scrub(declared);
     store.read_vault(&wallet.keychain);
@@ -160,7 +163,7 @@ pub fn list(store: &Mutex<CredentialStore>) -> AccountList {
             .into_iter()
             .map(Account::from)
             .collect(),
-        vault: wallet().keychain.vault().to_string(),
+        vault: Keychain::for_app(SYNOD).vault().to_string(),
         protocols: identity::protocols()
             .into_iter()
             .map(str::to_string)

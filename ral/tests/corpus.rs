@@ -1,8 +1,8 @@
+#![allow(clippy::disallowed_methods, reason = "test code")]
 #![allow(
     clippy::disallowed_macros,
     reason = "[test] libtest captures print macros"
 )]
-#![allow(clippy::disallowed_methods)]
 
 //! The static corpora.  A type or parse error aborts a script, so it cannot be
 //! goldened in one; each program here is instead handed whole to `ral --check`.

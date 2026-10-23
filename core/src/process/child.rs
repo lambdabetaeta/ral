@@ -1,17 +1,18 @@
-//! A spawned child, and the one door from it to the reaper.
+//! A spawned child, and the one way from it to the reaper.
 
 use super::outcome::WaitOutcome;
 use super::reaper::{Watch, watch};
+use crate::site::{Silent, site};
 
 // ── Child handle ───────────────────────────────────────────────────────────
 //
 // Bare `Child::wait` / `try_wait` omit `WUNTRACED`: a SIGSTOP'd child reads as
 // "still running" and `wait` blocks forever.  `clippy.toml` disallows the raw
-// pair outside `ChildHandle`; the few exceptions carry an `#[allow]`.
+// pair outside `ChildHandle`; the few exceptions are typed sites.
 
 /// A spawned child.
 ///
-/// [`Self::into_watch`] is the door to the reaper, which owns the wait on
+/// [`Self::into_watch`] is the way to the reaper, which owns the wait on
 /// both platforms; [`Self::reap`] is the blocking wait after a confirmed
 /// kill.
 pub struct ChildHandle(ChildRepr);
@@ -91,19 +92,15 @@ impl ChildHandle {
     ///
     /// # Errors
     /// Returns `Err` if the wait fails.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "reaper: this is `ChildHandle::reap`, the blocking reap after a confirmed kill, around the one raw `wait`"
-    )]
     pub(crate) fn reap(&mut self) -> std::io::Result<std::process::ExitStatus> {
         match &mut self.0 {
-            ChildRepr::Std(child) => child.wait(),
+            ChildRepr::Std(child) => site!(Silent::ChildReap, child => wait()),
             #[cfg(windows)]
             ChildRepr::RawWindows(child) => child.reap(),
         }
     }
 
-    /// The one door from a spawned child to a [`Watch`]: consumes the
+    /// The one way from a spawned child to a [`Watch`]: consumes the
     /// handle, so no later `wait` on this pid is writable behind the
     /// reaper's back.  The stdio ends must already be taken.
     pub(crate) fn into_watch<E: Send + 'static>(

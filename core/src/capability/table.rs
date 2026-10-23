@@ -166,10 +166,7 @@ impl<A: Allows, D: Denies<A>> Join for Table<A, D> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[test] a tempdir tree of real links; probes are lexical paths already in normal form"
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::{Allows, Denies, Table};
     use crate::capability::exec::tests::{Rng, paths, random};

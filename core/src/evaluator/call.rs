@@ -1,8 +1,8 @@
 //! A builtin application is not a fact.  The pure fragment performs no
-//! effect, and a builtin that reaches the world does so through a door (a
+//! effect, and a builtin that reaches the world does so through an operation (a
 //! redirect, `atomic_write`, `spawn_child`) which observes it there, typed as
 //! the effect it is; its body runs in a frame that stamps nothing and tees
-//! nothing ([`BuiltinEntry::framed`]).  The fan-out is `fact::door`.
+//! nothing ([`BuiltinEntry::framed`]).  The fan-out is `types::audit::fan_out`.
 //!
 //! `within`, `grant`, `guard`, `try`, and `audit` are collection boundaries,
 //! not observations.  Only `audit` collects: `evaluator::machine` opens a

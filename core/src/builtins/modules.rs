@@ -13,15 +13,10 @@ use crate::path::{Judged, LexicalPath, Located, Reading};
 use crate::source::{SourceFile, SourceOrigin};
 use crate::ty::Site;
 use crate::types::{Break, Error, Mooring, Settled, Shell, Value, sig};
-use std::path::Path;
 use std::sync::Arc;
 
 /// Read and normalise the module `located` holds, which the grant judged for
 /// reading; `shown` names it in errors.  The handle ends here, by signature.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:module-load] `use` module loading reads program text from disk, gated by `locate`. The documented reasoned-silent residual: code-loading is visible as its own statement, not turn-time model data I/O, so it raises no surface card."
-)]
 fn read_and_normalize(located: Located<Judged<Reading>>, shown: &str) -> Settled<String> {
     let what = format!("use: {shown}");
     let read = located.read();
@@ -120,10 +115,6 @@ fn ral_path_candidates(name: &str, shell: &Shell) -> Vec<LexicalPath> {
 /// # Errors
 /// When the source's directory is no working directory, against which no
 /// path can be read.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "path-form: the directory a script sits in, where a relative `use` name is anchored before the walk judges it"
-)]
 fn resolve_in_current_script(path: &str, shell: &Shell) -> Settled<crate::path::LexicalPath> {
     let origin = shell.context.modules.stack.last().or_else(|| {
         shell
@@ -133,9 +124,9 @@ fn resolve_in_current_script(path: &str, shell: &Shell) -> Settled<crate::path::
             .map(crate::source::Source::origin)
     });
     let resolver = shell.context.resolver();
-    match origin.and_then(SourceOrigin::file).and_then(Path::parent) {
-        Some(dir) => resolver
-            .resolve_in_script(path, dir)
+    match origin.and_then(SourceOrigin::file) {
+        Some(script) => resolver
+            .resolve_in_script(path, script)
             .map_err(|e| sig(format!("use: {e}"))),
         None => Ok(resolver.resolve(path)),
     }

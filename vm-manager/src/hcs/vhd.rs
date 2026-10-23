@@ -46,14 +46,15 @@
 //! exists: making a session disk, wrapping the shipped rootfs into the
 //! application's own cache.  There is no `Shell` to route it through and no run
 //! to raise a card in — the same standing the macOS backend's
-//! `create_session_image` has, and for the same reason.  Each function that
-//! makes one carries the allow, citing this.
+//! `create_session_image` has, and for the same reason.  Each call is a typed
+//! site (`crate::site`), whose variant says what the place is.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::site::{Silent, site};
 use crate::{Act, Error, HostFile};
 
 /// A disk's sector size, and so the footer's own length.
@@ -88,11 +89,6 @@ pub(super) const SESSION_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 /// # Errors
 /// Returns [`Error::HostFile`] if the image cannot be read or inflated, the
 /// cache cannot be made, or the wrapped copy cannot be written.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: host-side disk plumbing before any engine exists; no shell, no \
-              run, no card. See the module docs."
-)]
 pub(super) fn ensure_rootfs_vhd(image: &Path, cache: &Path) -> Result<PathBuf, Error> {
     if image
         .extension()
@@ -104,19 +100,19 @@ pub(super) fn ensure_rootfs_vhd(image: &Path, cache: &Path) -> Result<PathBuf, E
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("zst"));
 
-    let source = std::fs::metadata(image).map_err(Error::host_file(
-        HostFile::GuestImage,
-        Act::Read,
-        image,
-    ))?;
+    let source = site!(Silent::RootfsWrapProbe, std::fs::metadata(image))
+        .map_err(Error::host_file(HostFile::GuestImage, Act::Read, image))?;
     let wrapped = cache.join("rootfs.vhd");
     let marker = cache.join("rootfs.vhd.wrapped");
     let stamp = stamp(image, &source);
-    if wrapped.is_file() && std::fs::read_to_string(&marker).is_ok_and(|seen| seen == stamp) {
+    if site!(Silent::RootfsWrapProbe, &wrapped => is_file())
+        && site!(Silent::RootfsWrapProbe, std::fs::read_to_string(&marker))
+            .is_ok_and(|seen| seen == stamp)
+    {
         return Ok(wrapped);
     }
 
-    std::fs::create_dir_all(cache).map_err(Error::host_file(
+    site!(Silent::RootfsWrap, std::fs::create_dir_all(cache)).map_err(Error::host_file(
         HostFile::ImageCache,
         Act::Make,
         cache,
@@ -139,12 +135,10 @@ pub(super) fn ensure_rootfs_vhd(image: &Path, cache: &Path) -> Result<PathBuf, E
         // one would attach.
         let part = cache.join("rootfs.vhd.part");
         let land = || -> Result<u64, Error> {
-            std::fs::copy(image, &part).map_err(Error::host_file(
-                HostFile::WrappedImage,
-                Act::Write,
-                &part,
-            ))?;
-            std::fs::rename(&part, &wrapped).map_err(Error::host_file(
+            let copied = site!(Silent::RootfsWrap, std::fs::copy(image, &part));
+            copied.map_err(Error::host_file(HostFile::WrappedImage, Act::Write, &part))?;
+            let placed = site!(Silent::RootfsWrap, std::fs::rename(&part, &wrapped));
+            placed.map_err(Error::host_file(
                 HostFile::WrappedImage,
                 Act::Place,
                 &wrapped,
@@ -152,20 +146,20 @@ pub(super) fn ensure_rootfs_vhd(image: &Path, cache: &Path) -> Result<PathBuf, E
             Ok(source.len())
         };
         land().inspect_err(|_| {
-            let _ = std::fs::remove_file(&part);
+            let _ = site!(Silent::RootfsWrap, std::fs::remove_file(&part));
         })?
     };
 
     let unwritten = |act| Error::host_file(HostFile::WrappedImage, act, &wrapped);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .open(&wrapped)
-        .map_err(unwritten(Act::Open))?;
+    let mut options = OpenOptions::new();
+    options.write(true);
+    let mut file =
+        site!(Silent::RootfsWrap, &options => open(&wrapped)).map_err(unwritten(Act::Open))?;
     let disk = pad_to_sector(&file, bytes).map_err(unwritten(Act::Size))?;
     append_footer(&mut file, disk).map_err(unwritten(Act::Write))?;
     drop(file);
 
-    std::fs::write(&marker, &stamp).map_err(Error::host_file(
+    site!(Silent::RootfsWrap, std::fs::write(&marker, &stamp)).map_err(Error::host_file(
         HostFile::WrapMarker,
         Act::Write,
         &marker,
@@ -206,13 +200,8 @@ fn stamp(image: &Path, source: &std::fs::Metadata) -> String {
 ///
 /// # Errors
 /// Returns [`Error::HostFile`] if the disk cannot be created or written.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: host-side disk plumbing before any engine exists; no shell, no \
-              run, no card. See the module docs."
-)]
 pub(super) fn create_session_vhd(dir: &Path) -> Result<PathBuf, Error> {
-    std::fs::create_dir_all(dir).map_err(Error::host_file(
+    site!(Silent::SessionDiskCreate, std::fs::create_dir_all(dir)).map_err(Error::host_file(
         HostFile::SessionDirectory,
         Act::Make,
         dir,
@@ -222,8 +211,8 @@ pub(super) fn create_session_vhd(dir: &Path) -> Result<PathBuf, Error> {
         std::process::id(),
         unix_seconds()
     ));
-    let mut file =
-        File::create(&path).map_err(Error::host_file(HostFile::SessionDisk, Act::Create, &path))?;
+    let mut file = site!(Silent::SessionDiskCreate, File::create(&path))
+        .map_err(Error::host_file(HostFile::SessionDisk, Act::Create, &path))?;
     let write = |file: &mut File, bytes: &[u8]| {
         file.write_all(bytes)
             .map_err(Error::host_file(HostFile::SessionDisk, Act::Write, &path))
@@ -445,11 +434,7 @@ fn unix_seconds() -> u64 {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "REASONED-SILENT: test scaffolding writes the images it then inspects; host-side \
-              file work with no shell, no run, and no card to raise one in."
-)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 

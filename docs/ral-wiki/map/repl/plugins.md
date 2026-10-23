@@ -7,7 +7,7 @@ covers_paths: [ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/keybin
 # Map: repl / plugins
 
 The plugin runtime — the hook model, the `_ed-*` editor builtins,
-keybindings, and the load doors plugins program against. **A plugin is split
+keybindings, and the load builtins plugins program against. **A plugin is split
 at the protocol: its hooks and aliases live engine-side, in the shell's hook
 table, and never cross; its editor state, keybinding table, and first-order
 manifest live host-side, in the REPL's `PluginRuntime`; the two meet only
@@ -23,7 +23,7 @@ the runtime, that page owns the rendering.
 A *hook* is a handler a plugin's manifest names for one of six events (the
 `HookEvent` enum, `manifest.rs`, whose kebab-case names are the manifest keys),
 registered into the shell's hook table under `HookName::plugin(name, event)`
-by the load door, with the policy its event needs
+by the load builtin, with the policy its event needs
 (`load.rs::register_plugin_hooks`, an exhaustive match on the event): all as `HookSig::Hook { kind }`, all
 `Denied` terminal authority, `buffer-change` and `complete` taken `aside`,
 `prompt` taken with capture like the session prompt; a keybinding's
@@ -116,20 +116,20 @@ them from `help`. They split into reads (`_ed-get`, answering the whole `EditorS
 `_ed-highlight`), services (`_ed-tui`, `_ed-history`, `_ed-parse`, `_ed-state`),
 and terminal escapes (`_ed-clipboard` copies natively when local, else by OSC 52; `_ed-hyperlink` is OSC 8).
 
-Each is a **thin engine-side door**: it keeps its own checks — the grant, via
+Each is a **thin engine-side builtin**: it keeps its own checks — the grant, via
 `ask`/`answer` (`Shell::check(op.flag(), name)` then the enquiry), and its
 arguments' shape — and puts the rest to the host as one enquiry, decoding the
 answer strictly. **A grant follows the request**: `enquiry::Gated` names the
 grant a request needs (`flag`) and turns into an `Enquiry`, implemented by
 `EditorOp` (`` `repl-editor ``) and `ClipboardReq` (`` `repl-clipboard ``,
-`editor.write`), so a door checks every grant it needs before its first effect
+`editor.write`), so a builtin checks every grant it needs before its first effect
 — `_ed-state`, whose cell read needs `read` and write `write`, checks `write`
 first, before its updater runs. `_ed-tui` needs `editor.tui` and the terminal, not the
 editor: `Mooring::lend_terminal` is `Some` only from `Leased` (a keybinding
 handler's run), so anywhere else, or nested, it answers status 1 with a
 sentence saying this run holds no terminal to lend. The host answers an editor
 op only while a `PluginContext` is installed for the dispatch — inside a
-plugin handler — and refuses otherwise with "no plugin context". The doors ride the
+plugin handler — and refuses otherwise with "no plugin context". The builtins ride the
 REPL surface the `repl` recipe boots, so the typechecker reads them off the
 session's own builtin table from the first rc check.
 
@@ -150,7 +150,7 @@ so plugin code never handles UTF-8.
 
 ## The enquiry vocabulary
 
-`enquiry.rs` types the REPL's three classes once, for door and host alike:
+`enquiry.rs` types the REPL's three classes once, for builtin and host alike:
 `` `repl-editor `` carries an `EditorOp` (`get`, `set`, `set-lbuffer`,
 `insert`, `push`, `accept`, `ghost`, `highlight`, `history`, `state-get`,
 `state-set`) and answers `EditorSnapshot` or data; `` `repl-plugin `` carries
@@ -163,13 +163,13 @@ unknown class or tag is refused by name.
 
 `plugin.rs::PluginRuntime` is the `Arc<Mutex<…>>` the `ReplHost` holds,
 threaded between the loop, rustyline's `Hinter`/`Highlighter` callbacks, and keybinding dispatch. It holds the
-host's plugin list (`LoadedPlugin`s, told by the load doors), the `KeyRouter`,
+host's plugin list (`LoadedPlugin`s, told by the load builtins), the `KeyRouter`,
 and the `keybindings_dirty` flag directly and partitions the rest into
 `EditorHooks`, `Keybindings`, and `DeferredDiagnostics` so each call site
-reaches only its slice. `PluginRuntime::note` takes what a load door says:
+reaches only its slice. `PluginRuntime::note` takes what a load builtin says:
 `admit` re-validates a manifest into a `LoadedPlugin` (chords parsed, guard
 regexes compiled) — the engine's own admission checks do not excuse it — and
-may refuse, which the door acts on.
+may refuse, which the builtin acts on.
 
 The frontend-neutral key vocabulary lives in `plugin/router.rs`:
 `parse_key_notation` yields a sequence of `KeyChord`s (a `KeyName` plus
@@ -221,20 +221,20 @@ earlier, or on a proper prefix wherever loaded.
   both; `hooks:`/`keybindings:`/`aliases:` stay on this file's own runtime
   parse for their *shape*, their handler values having no one fixed type to
   pin.
-- `plugin/load.rs` — the `load-plugin` and `unload-plugin` doors (`DOORS`),
+- `plugin/load.rs` — the `load-plugin` and `unload-plugin` builtins (`BUILTINS`),
   engine-side static builtins on the REPL surface. `load_plugin` resolves a
   plugin under `~/.config/ral/plugins/` or `RAL_PATH`, typechecks and
   evaluates it through `load::evaluate_source` in a fresh scope, under
   the return contract `contract::declared(Form::Manifest)`; `instantiate`
   applies a parameterised plugin's factory to its options map, nested under
-  the door's own mooring, to yield its manifest (the contract sees only a
+  the builtin's own mooring, to yield its manifest (the contract sees only a
   literal `return [...]`, so a factory's manifest stays on `manifest::parse`'s
   runtime check alone). Options arrive as a `Map`: the rc's own `plugins:`
   entry is where a non-map value is caught and named, and `load-plugin`,
-  which takes a name alone, passes the empty map. The door then commits the
+  which takes a name alone, passes the empty map. The builtin then commits the
   hooks and aliases and enquires `` `repl-plugin `loaded ``; any failure
   past the commit — the host's refusal included — rolls the plugin's whole
-  namespace back. The doors return their outcome: a failed `load-plugin` or `unload-plugin`
+  namespace back. The builtins return their outcome: a failed `load-plugin` or `unload-plugin`
   raises, its error contexted `plugin 'NAME'`, and an `exit` escape
   propagates. A relative path resolves through `shell.resolve` (live cwd,
   `~`). The plugin ledger `PluginEntry { name, aliases }` lives in the session's

@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods, reason = "test code")]
 
 //! A second `smoltcp` stack playing the guest, talking to `guest_net::run`'s
 //! host stack over a `UnixStream` pair — the same frame codec and
@@ -487,18 +487,14 @@ fn an_allowed_connect_tunnels_bytes_both_ways_and_either_eof_closes_both() {
 #[test]
 #[serial_test::serial]
 fn the_ledger_records_the_refusal_the_tunnel_and_its_byte_counts() {
-    let ledger = std::env::temp_dir().join(format!(
-        "guest-net-ledger-test-{}.jsonl",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&ledger);
+    let state = ral_core::own::OwnDir::for_test("guest-net-ledger").expect("a ledger directory");
     let egress = Egress {
         policy: Arc::new(exarch::net_policy::NetPolicy {
             hosts: std::iter::once(Host::parse("a.example").expect("a valid fixture host"))
                 .collect(),
             search: true,
         }),
-        audit: exarch::egress::AuditLog::for_test(&ledger),
+        audit: exarch::egress::AuditLog::for_test(&state),
     };
     let dialer = Arc::new(TestDialer {
         fixture: spawn_echo_fixture(),
@@ -534,7 +530,12 @@ fn the_ledger_records_the_refusal_the_tunnel_and_its_byte_counts() {
         .unwrap()
         .unwrap();
 
-    let text = std::fs::read_to_string(&ledger).expect("the ledger is written");
+    let text = String::from_utf8(
+        state
+            .read(exarch::egress::LEDGER)
+            .expect("the ledger is written"),
+    )
+    .expect("the ledger is text");
     let lines: Vec<serde_json::Value> = text
         .lines()
         .map(|line| serde_json::from_str(line).expect("each line is JSON on its own"))
@@ -559,7 +560,6 @@ fn the_ledger_records_the_refusal_the_tunnel_and_its_byte_counts() {
     assert_eq!(lines[2]["note"], "closed");
     assert_eq!(lines[2]["up"], 4);
     assert_eq!(lines[2]["down"], 4);
-    let _ = std::fs::remove_file(&ledger);
 }
 
 /// The fixed live-tunnel cap refuses the next connection at accept, before

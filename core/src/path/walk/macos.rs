@@ -8,6 +8,8 @@ use super::unix::{self, oflags};
 use super::{Access, Child, EntryName, Held, Kind, ObjectId, RootName, Seen, Sharing, Stat, Step};
 use crate::path::identity::collision_key;
 use crate::path::shown;
+use crate::path::site::{Silent, Surface};
+use crate::site::site;
 use rustix::fs::{FileType, Mode, OFlags};
 use rustix::io::Errno;
 use std::ffi::{CString, OsStr, OsString};
@@ -21,7 +23,7 @@ use std::time::SystemTime;
 
 pub(super) use super::unix::{
     DirInfo, Lister, copy_mode, create, create_sibling, discard, is_writable, list, mkdir,
-    open_discard, rename_over, sync_dir,
+    open_discard, remove, rename, rename_over, sync_dir,
 };
 
 /// The identity a by-name `stat` reports, for a caller comparing it with
@@ -63,15 +65,10 @@ fn moved(name: &EntryName) -> io::Error {
 }
 
 /// `/`, held as a search handle.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-root] Opens `/` as a search handle, the root every walk descends from: path resolution, not the model's data I/O."
-)]
 pub(super) fn open_root(_root: &RootName) -> io::Result<Held> {
-    let file = File::from(rustix::fs::open(
-        "/",
-        O_SEARCH | OFlags::CLOEXEC,
-        Mode::empty(),
+    let file = File::from(site!(
+        Silent::WalkRoot,
+        rustix::fs::open("/", O_SEARCH | OFlags::CLOEXEC, Mode::empty())
     )?);
     Ok(Held {
         file: Arc::new(file),
@@ -88,21 +85,20 @@ pub(super) fn open_root(_root: &RootName) -> io::Result<Held> {
 /// directory.  `O_SYMLINK` opens a link itself, and is not combined with
 /// `O_NOFOLLOW`, which XNU refuses on a link whatever else is set.  The
 /// handle's identity must be the lookup's, else the entry moved.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-step] Opens one component relative to a held directory and never follows it, to reach the object a grant will judge: path resolution, not the model's data I/O; the card belongs to the site that then opens the leaf."
-)]
 pub(super) fn step(parent: &Held, name: &EntryName, sharing: Sharing) -> io::Result<Child> {
     let dir = &*parent.file;
     let looked = lookup(dir, name.as_os_str())?;
     #[cfg(test)]
     super::tests::after_lookup();
     let open = |flags: OFlags| {
-        rustix::fs::openat(
-            dir,
-            name.as_os_str(),
-            flags | OFlags::CLOEXEC,
-            Mode::empty(),
+        site!(
+            Silent::WalkStep,
+            rustix::fs::openat(
+                dir,
+                name.as_os_str(),
+                flags | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
         )
         .map(File::from)
     };
@@ -314,10 +310,6 @@ const fn wanted(common: u32, file: u32) -> libc::attrlist {
 }
 
 /// The entry `name` of `dir`, stated by one lookup that follows nothing.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-stat] Looks up one entry of a held directory by name without following it: a metadata read, never turn-time data I/O.  It needs no permission on the object, which is how an object that cannot be held is still stated."
-)]
 fn lookup(dir: &File, name: &OsStr) -> io::Result<Looked> {
     let mut list = wanted(
         libc::ATTR_CMN_RETURNED_ATTRS
@@ -445,10 +437,6 @@ pub(super) fn seen_at(dir: &File, name: &OsStr) -> io::Result<Seen> {
 }
 
 /// A link's target, read through the descriptor that opened it.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:walk-link-read] Reads a link's target through the handle that opened it, to splice into the remaining name: path resolution, not data I/O."
-)]
 pub(super) fn read_link(link: &File) -> io::Result<PathBuf> {
     let mut buf = vec![0u8; usize::try_from(libc::PATH_MAX).unwrap_or(1024)];
     // SAFETY: `link` is a live descriptor and `buf` is writable for the
@@ -463,16 +451,15 @@ pub(super) fn read_link(link: &File) -> io::Result<PathBuf> {
 /// recorded of the object at the name: macOS cannot derive a data handle from
 /// a descriptor, and the check runs before any byte moves through the one it
 /// opens.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[surface:walk-reopen] The one open of a leaf the walk reached, by name under its held directory and verified against the identity the walk recorded, so a name that now leads elsewhere is refused.  Every caller surfaces it, each in its own way: a redirect's card is fused on by the frame that wrapped the locate, exarch's readers speak their own card, and a write's before- and after-images ride the card of the operation that asked for them."
-)]
 fn reopen(dir: &File, name: &EntryName, id: ObjectId, flags: OFlags) -> io::Result<File> {
-    let file = File::from(rustix::fs::openat(
-        dir,
-        name.as_os_str(),
-        flags | OFlags::NOFOLLOW | OFlags::NOCTTY | OFlags::CLOEXEC,
-        Mode::empty(),
+    let file = File::from(site!(
+        Surface::Reopen,
+        rustix::fs::openat(
+            dir,
+            name.as_os_str(),
+            flags | OFlags::NOFOLLOW | OFlags::NOCTTY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
     )?);
     if ObjectId::of(&file)? != id {
         return Err(moved(name));

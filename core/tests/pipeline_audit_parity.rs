@@ -1,18 +1,18 @@
 //! One external command is one fact, whether it ran alone or as a pipeline
-//! stage.  Both doors mint their `Observed::Command` through
+//! stage.  Both paths mint their `Observed::Command` through
 //! `evaluator::audit::command_fact` and both leave the emission to the one
-//! gated door, so the two must agree on the argv they spell *and* on whether
+//! gated recorder, so the two must agree on the argv they spell *and* on whether
 //! anything is emitted at all under a given sink/trail configuration.
 //!
 //! Every assertion here compares the staged run against the standalone one
 //! rather than against a literal: the test's job is to fail when a fourth
 //! construction site diverges, whatever it spells.
 //!
-//! Unix-only: both doors need a real external, and the paths named here are
+//! Unix-only: both paths need a real external, and the paths named here are
 //! `/bin`.
 
+#![allow(clippy::disallowed_methods, reason = "test code")]
 #![cfg(unix)]
-#![allow(clippy::disallowed_methods)]
 
 mod common;
 
@@ -145,7 +145,7 @@ fn a_pipeline_stage_and_a_standalone_run_agree_on_when_to_report() {
         assert_eq!(
             command_facts(&staged_events).is_empty(),
             command_facts(&alone_events).is_empty(),
-            "with sink={sink} the two doors must agree on whether anything surfaces"
+            "with sink={sink} the two paths must agree on whether anything surfaces"
         );
     }
 }

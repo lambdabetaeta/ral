@@ -14,9 +14,11 @@ mod browser;
 
 use crate::provider::error::body_detail;
 use crate::provider::identity::{self, Account, AccountId};
-use crate::provider::secret_file::write_private;
+use crate::site::{Silent, site};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use ral_core::own::{OwnDir, OwnError};
+use ral_core::path::{Visibility, XdgKind};
 use ral_core::sync::LockExt;
 use serde::Deserialize;
 use serde::Serialize;
@@ -39,6 +41,9 @@ const SCOPE: &str = "openid profile email offline_access resource.invoke chatgpt
 /// The one scope that authorises plan usage; a grant without it is refused.
 const PLAN_SCOPE: &str = "chatgpt.tokens.use.direct";
 const RESOURCE: &str = "https://api.openai.com/v1";
+
+/// The token store's file in exarch's state directory.
+const TOKEN_FILE: &str = "oauth.json";
 
 /// How long before expiry a token is renewed.
 const REFRESH_WINDOW_SECS: u64 = 5 * 60;
@@ -236,7 +241,7 @@ pub fn login(account: Option<String>) -> Result<(), String> {
 pub fn logout(account: Option<String>, all: bool) -> Result<(), String> {
     if all {
         revoke_all(&load_all());
-        clear_at(&token_path())?;
+        clear_at(&state()?)?;
         ral_core::errln!("Logged out of every ChatGPT account.");
         return Ok(());
     }
@@ -285,7 +290,7 @@ pub fn logout(account: Option<String>, all: bool) -> Result<(), String> {
 /// Returns `Err` when the handle names more than one account, or when the
 /// store cannot be rewritten.
 pub(crate) fn sign_out(account: &str) -> Result<Option<OAuthToken>, String> {
-    remove_at(&token_path(), account)
+    remove_at(&state()?, account)
 }
 
 /// Revoke `token` at the issuer, blocking on the network: never call it from
@@ -315,7 +320,9 @@ fn joined_labels(tokens: &[OAuthToken]) -> String {
 /// Every persisted login, in stored order. An absent or corrupt store reads
 /// as no accounts rather than an error.
 pub fn load_all() -> Vec<OAuthToken> {
-    load_all_at(&token_path())
+    // A query: a state directory, or a store, that cannot be read offers no
+    // accounts.
+    state().map_or_else(|_| Vec::new(), |state| load_all_at(&state))
 }
 
 /// Every persisted login, as the accounts the rest of exarch selects among.
@@ -325,16 +332,16 @@ pub fn accounts() -> Vec<Account> {
 
 /// Upsert `token` by issued id, reporting whether an existing login was
 /// replaced. `pub` so the `credential_env` integration test seeds logins
-/// through the same door the flows use.
+/// through the same function the flows use.
 ///
 /// # Errors
 /// Returns `Err` when the token store cannot be written.
 pub fn save_one(token: &OAuthToken) -> Result<bool, String> {
-    save_one_at(&token_path(), token)
+    save_one_at(&state()?, token)
 }
 
-// The `*_at` core takes the path as an argument so tests drive it against a
-// temp file without mutating the process environment.
+// The `*_at` core takes the state directory as an argument so tests drive it
+// against a temp directory without mutating the process environment.
 
 /// Serializes `save_one_at`, `remove_at` and `host_id_at`'s load-modify-write: two
 /// concurrent refreshes, one per stale account, would otherwise each write
@@ -395,18 +402,15 @@ impl From<StoredToken> for OAuthToken {
     }
 }
 
-/// The store's host id and its trustworthy accounts. An absent or unreadable
-/// store reads as empty.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:token-read] reads the persisted OAuth tokens; credential store infra, not turn-time data I/O"
-)]
-fn read_at(path: &std::path::Path) -> (Option<String>, Vec<OAuthToken>) {
-    let Some(store) = std::fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Store>(&bytes).ok())
-    else {
-        return (None, Vec::new());
+/// The store's host id and its trustworthy accounts; an absent store is empty.
+///
+/// # Errors
+/// A state directory or a store that cannot be read.  A caller that writes the
+/// store back stops here and writes nothing: a store that could not be read is
+/// never written over.
+fn read_at(state: &OwnDir) -> Result<(Option<String>, Vec<OAuthToken>), OwnError> {
+    let Some(store) = state.load::<Store>(TOKEN_FILE)? else {
+        return Ok((None, Vec::new()));
     };
     let chatgpt = identity::chatgpt_service().name;
     let tokens = store
@@ -420,21 +424,22 @@ fn read_at(path: &std::path::Path) -> (Option<String>, Vec<OAuthToken>) {
             ral_core::errln!(
                 "warning: {} names an entry as '{key}', but its own fields say '{expected}'; \
                  dropping it rather than trusting a key that disagrees with the record.",
-                ral_core::path::shown(path),
+                ral_core::path::shown(state.path().join(TOKEN_FILE)),
             );
             None
         })
         .collect();
-    (store.host, tokens)
+    Ok((store.host, tokens))
 }
 
-fn load_all_at(path: &std::path::Path) -> Vec<OAuthToken> {
-    read_at(path).1
+/// Every login in the store; one that cannot be read has none.
+fn load_all_at(state: &OwnDir) -> Vec<OAuthToken> {
+    read_at(state).map_or_else(|_| Vec::new(), |(_, tokens)| tokens)
 }
 
-fn save_one_at(path: &std::path::Path, token: &OAuthToken) -> Result<bool, String> {
+fn save_one_at(state: &OwnDir, token: &OAuthToken) -> Result<bool, String> {
     let _guard = STORE_LOCK.lock_ignore_poison();
-    let (host, mut all) = read_at(path);
+    let (host, mut all) = read_at(state)?;
     let replaced = if let Some(existing) = all.iter_mut().find(|t| t.issued == token.issued) {
         *existing = token.clone();
         true
@@ -442,28 +447,29 @@ fn save_one_at(path: &std::path::Path, token: &OAuthToken) -> Result<bool, Strin
         all.push(token.clone());
         false
     };
-    write_all_at(path, host.as_deref(), &all)?;
+    write_all_at(state, host.as_deref(), &all)?;
     Ok(replaced)
 }
 
 /// This host's id, minting and persisting one on first use.
-fn host_id_at(path: &std::path::Path) -> Result<String, String> {
+fn host_id_at(state: &OwnDir) -> Result<String, String> {
     let _guard = STORE_LOCK.lock_ignore_poison();
-    let (host, all) = read_at(path);
+    let (host, all) = read_at(state)?;
     if let Some(host) = host {
         return Ok(host);
     }
     let host = uuid::Uuid::new_v4().urn().to_string();
-    write_all_at(path, Some(&host), &all)?;
+    write_all_at(state, Some(&host), &all)?;
     Ok(host)
 }
 
 /// This host's id: opaque, minted on first use and kept in the token store.
 ///
 /// # Errors
-/// Returns `Err` when a freshly minted id cannot be persisted.
+/// Returns `Err` when the store cannot be read, or a freshly minted id cannot
+/// be persisted.
 pub fn host_id() -> Result<String, String> {
-    host_id_at(&token_path())
+    host_id_at(&state()?)
 }
 
 /// Whether `account` (handle, issued id, or account id) names `token`. The
@@ -473,9 +479,9 @@ fn names(token: &OAuthToken, account: &str) -> bool {
     token.issued == account || account_id(token).as_str() == account || token.handle() == account
 }
 
-fn remove_at(path: &std::path::Path, account: &str) -> Result<Option<OAuthToken>, String> {
+fn remove_at(state: &OwnDir, account: &str) -> Result<Option<OAuthToken>, String> {
     let _guard = STORE_LOCK.lock_ignore_poison();
-    let (host, mut all) = read_at(path);
+    let (host, mut all) = read_at(state)?;
     let matched: Vec<usize> = all
         .iter()
         .enumerate()
@@ -492,9 +498,9 @@ fn remove_at(path: &std::path::Path, account: &str) -> Result<Option<OAuthToken>
     let removed = all.remove(pos);
     // A fully logged-out machine carries no store at all, not an empty one.
     if all.is_empty() {
-        clear_at(path)?;
+        clear_at(state)?;
     } else {
-        write_all_at(path, host.as_deref(), &all)?;
+        write_all_at(state, host.as_deref(), &all)?;
     }
     Ok(Some(removed))
 }
@@ -516,19 +522,7 @@ fn account_id(token: &OAuthToken) -> AccountId {
     AccountId::of_login(&identity::chatgpt_service().name, &token.issued)
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:token-dir] creates the OAuth token store dir; credential store infra, not turn-time data I/O"
-)]
-fn write_all_at(
-    path: &std::path::Path,
-    host: Option<&str>,
-    all: &[OAuthToken],
-) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("could not create {}: {e}", ral_core::path::shown(parent)))?;
-    }
+fn write_all_at(state: &OwnDir, host: Option<&str>, all: &[OAuthToken]) -> Result<(), String> {
     let store = Store {
         host: host.map(str::to_string),
         accounts: all
@@ -541,26 +535,17 @@ fn write_all_at(
             })
             .collect(),
     };
-    let json = serde_json::to_string_pretty(&store)
-        .map_err(|e| format!("could not serialize tokens: {e}"))?;
-    write_private(path, json.as_bytes())
-        .map_err(|e| format!("could not write {}: {e}", ral_core::path::shown(path)))
+    Ok(state.store(TOKEN_FILE, &store, Visibility::Secret)?)
 }
 
 /// Delete the store; an absent one is not an error.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:token-remove] deletes the stored OAuth tokens; credential store infra, not turn-time data I/O"
-)]
-fn clear_at(path: &std::path::Path) -> Result<(), String> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!(
-            "could not remove {}: {e}",
-            ral_core::path::shown(path)
-        )),
-    }
+fn clear_at(state: &OwnDir) -> Result<(), String> {
+    Ok(state.remove(TOKEN_FILE)?)
+}
+
+/// Exarch's state directory, which holds the token store.
+fn state() -> Result<OwnDir, OwnError> {
+    crate::app::EXARCH.own(XdgKind::State)
 }
 
 /// The token-endpoint success body of a refresh.
@@ -723,12 +708,8 @@ pub(crate) async fn refresh_cell_if_stale(
     Ok(())
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[silent:oauth-client] the client every login flow and token refresh talks to the issuer's endpoints with. Sign-in machinery the user started, carrying credentials and no session data; raises no card for the same reason the loopback receiver does not."
-)]
 fn http_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+    site!(Silent::OauthClient, reqwest::Client::builder())
         .use_preconfigured_tls(crate::provider::tls::config())
         .timeout(Duration::from_secs(30))
         .build()
@@ -851,17 +832,26 @@ fn finalize(granted: Granted, sign_in: &SignIn) -> Result<OAuthToken, String> {
     })
 }
 
-/// `pub(crate)` for [`super::credential_files`]: a signed-in `ChatGPT`
-/// account's tokens live here, so every grant has to carve this path out.
-pub(crate) fn token_path() -> PathBuf {
+/// Where the token store is, as a spelling; `None` where the host names no
+/// state base.  `pub(crate)` for [`super::credential_files`]: a signed-in
+/// `ChatGPT` account's tokens live here, so every grant has to carve this path
+/// out.
+pub(crate) fn token_path() -> Option<PathBuf> {
     crate::app::EXARCH
-        .xdg_dir(ral_core::path::XdgKind::State)
-        .join("oauth.json")
+        .xdg_dir(XdgKind::State)
+        .map(|dir| dir.join(TOKEN_FILE))
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    use ral_core::own::TestDir;
+
+    /// A state directory of the test's own.
+    fn store() -> TestDir {
+        OwnDir::for_test("oauth").expect("a test state directory")
+    }
 
     fn token(issued: &str, email: Option<&str>) -> OAuthToken {
         OAuthToken {
@@ -901,37 +891,35 @@ mod tests {
 
     #[test]
     fn logout_by_a_shared_email_asks_for_an_account_id_instead() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("oauth.json");
+        let state = store();
         for issued in ["acc_personal", "acc_team"] {
-            save_one_at(&path, &token(issued, Some("alex@work"))).expect("seed");
+            save_one_at(&state, &token(issued, Some("alex@work"))).expect("seed");
         }
 
-        let error = remove_at(&path, "alex@work").expect_err("the email names two accounts");
+        let error = remove_at(&state, "alex@work").expect_err("the email names two accounts");
         assert!(
             error.contains("acc_personal") && error.contains("acc_team"),
             "{error}"
         );
-        assert_eq!(load_all_at(&path).len(), 2, "neither was taken");
+        assert_eq!(load_all_at(&state).len(), 2, "neither was taken");
 
-        let removed = remove_at(&path, "acc_team").expect("an account id is unambiguous");
+        let removed = remove_at(&state, "acc_team").expect("an account id is unambiguous");
         assert_eq!(removed.unwrap().issued, "acc_team");
-        assert_eq!(load_all_at(&path).len(), 1);
+        assert_eq!(load_all_at(&state).len(), 1);
     }
 
     /// The id-qualified label ends with the full `AccountId` rendering, so a
     /// name copied off `exarch accounts` must log out the account it names.
     #[test]
     fn logout_accepts_the_full_account_id_rendering() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("oauth.json");
+        let state = store();
         for issued in ["acc_personal", "acc_team"] {
-            save_one_at(&path, &token(issued, Some("alex@work"))).expect("seed");
+            save_one_at(&state, &token(issued, Some("alex@work"))).expect("seed");
         }
 
-        let removed = remove_at(&path, "chatgpt:acc_team").expect("a rendering is unambiguous");
+        let removed = remove_at(&state, "chatgpt:acc_team").expect("a rendering is unambiguous");
         assert_eq!(removed.unwrap().issued, "acc_team");
-        assert_eq!(load_all_at(&path).len(), 1);
+        assert_eq!(load_all_at(&state).len(), 1);
     }
 
     fn fake_id_token(payload: &serde_json::Value) -> String {
@@ -999,12 +987,11 @@ mod tests {
 
     #[test]
     fn two_logins_on_one_email_round_trip_through_the_keyed_store() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("oauth.json");
-        save_one_at(&path, &token("acc_personal", Some("alex@work"))).expect("seed 1");
-        save_one_at(&path, &token("acc_team", Some("alex@work"))).expect("seed 2");
+        let state = store();
+        save_one_at(&state, &token("acc_personal", Some("alex@work"))).expect("seed 1");
+        save_one_at(&state, &token("acc_team", Some("alex@work"))).expect("seed 2");
 
-        let loaded = load_all_at(&path);
+        let loaded = load_all_at(&state);
         assert_eq!(loaded.len(), 2, "both logins came back");
         assert!(loaded.iter().any(|t| t.issued == "acc_personal"));
         assert!(loaded.iter().any(|t| t.issued == "acc_team"));
@@ -1012,11 +999,10 @@ mod tests {
 
     #[test]
     fn signing_in_twice_to_the_same_account_stays_one_entry() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("oauth.json");
-        save_one_at(&path, &token("acc_1", Some("alex@work"))).expect("seed");
+        let state = store();
+        save_one_at(&state, &token("acc_1", Some("alex@work"))).expect("seed");
         save_one_at(
-            &path,
+            &state,
             &OAuthToken {
                 access_token: "fresh".into(),
                 ..token("acc_1", Some("alex@work"))
@@ -1024,7 +1010,7 @@ mod tests {
         )
         .expect("re-login");
 
-        let loaded = load_all_at(&path);
+        let loaded = load_all_at(&state);
         assert_eq!(loaded.len(), 1, "a re-login updates, it does not duplicate");
         assert_eq!(loaded[0].access_token, "fresh");
     }
@@ -1032,15 +1018,10 @@ mod tests {
     /// The key is an index into the map, not a fact to trust: an entry filed
     /// under a key its own fields disagree with is dropped, not adopted.
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[test] writes a mismatched token file directly"
-    )]
     fn an_entry_whose_key_disagrees_with_its_fields_is_dropped() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("oauth.json");
+        let state = store();
         std::fs::write(
-            &path,
+            state.path().join(TOKEN_FILE),
             r#"{"host":null,"accounts":{"chatgpt:wrong-key":{"service":"chatgpt",
                 "issued":"acc_1","email":null,"id_token":"id","client_id":"oaiapp_test",
                 "access_token":"at","refresh_token":"rt","expires_at":0}}}"#,
@@ -1048,22 +1029,44 @@ mod tests {
         .expect("write a mismatched entry directly");
 
         assert_eq!(
-            load_all_at(&path),
+            load_all_at(&state),
             Vec::new(),
             "a mismatched key is not trusted"
         );
     }
 
+    /// A modify never writes back what it could not read: doing so would
+    /// replace every other login in the store with the one at hand.
+    #[test]
+    fn a_store_that_cannot_be_read_is_never_written_over() {
+        let state = store();
+        let file = state.path().join(TOKEN_FILE);
+        std::fs::write(&file, "{ not json").expect("write a corrupt store");
+
+        save_one_at(&state, &token("acc_1", Some("alex@work"))).expect_err("an unreadable store");
+        remove_at(&state, "acc_1").expect_err("an unreadable store");
+        host_id_at(&state).expect_err("an unreadable store");
+
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("the store is still there"),
+            "{ not json"
+        );
+        assert_eq!(
+            load_all_at(&state),
+            Vec::new(),
+            "a query reads it as no accounts"
+        );
+    }
+
     #[test]
     fn the_host_id_is_minted_once() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("oauth.json");
-        let first = host_id_at(&path).expect("mint");
+        let state = store();
+        let first = host_id_at(&state).expect("mint");
         assert!(first.starts_with("urn:uuid:"), "{first}");
-        save_one_at(&path, &token("acc_1", Some("alex@work"))).expect("seed");
+        save_one_at(&state, &token("acc_1", Some("alex@work"))).expect("seed");
 
-        assert_eq!(host_id_at(&path).expect("read"), first);
-        assert_eq!(load_all_at(&path).len(), 1, "minting kept the accounts");
+        assert_eq!(host_id_at(&state).expect("read"), first);
+        assert_eq!(load_all_at(&state).len(), 1, "minting kept the accounts");
     }
 
     fn granted(scope: &str, claims: &serde_json::Value) -> Granted {

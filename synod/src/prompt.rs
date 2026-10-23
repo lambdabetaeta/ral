@@ -9,7 +9,9 @@
 //! situation report, whose every line is a host truth this agent, alone in
 //! its own machine, must never be told.
 
-use ral_core::path::shown;
+use crate::session::SYNOD;
+use ral_core::own::UserFile;
+use ral_core::path::{XdgKind, shown};
 use std::path::Path;
 
 /// The office house rules, if the operator deployed any: a plain-language
@@ -62,13 +64,15 @@ const HOUSE_RULES: &str = "house-rules.md";
 ///    stands, and the scratch space around the shared grant placeholder
 ///    ([`exarch::prompt::GRANT_PLACEHOLDER`]), which the trunk fills from
 ///    its own engine.
-/// 8. **House rules** (optional) — `<config_dir>/house-rules.md`.
+/// 8. **House rules** (optional) — `house-rules.md` in synod's config
+///    directory.
 /// 9. **Talking to the user** (`data/surface.md`) — the card grammar and
 ///    the register to write in.  Last, where its recency carries.
 ///
 /// # Errors
-/// Returns `Err` if `<config_dir>/house-rules.md` exists but cannot be read.
-pub fn assemble(workspace: &Path, folder_name: &str, config_dir: &Path) -> Result<String, String> {
+/// Returns `Err` if the house rules file exists but cannot be read, or if the
+/// host names no config directory to look for it in.
+pub fn assemble(workspace: &Path, folder_name: &str) -> Result<String, String> {
     let mut sections: Vec<(Option<&str>, String)> = Vec::new();
     sections.push((None, include_str!("../data/system.md").into()));
     sections.push((
@@ -94,16 +98,9 @@ pub fn assemble(workspace: &Path, folder_name: &str, config_dir: &Path) -> Resul
     ));
     sections.push((Some("Network"), include_str!("../data/network.md").into()));
     sections.push((Some("Host"), host_section(workspace)));
-    let rules = config_dir.join(HOUSE_RULES);
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[silent:house-rules] loading synod's own optional house-rules config file \
-                  while building the prompt; not the model's turn-time I/O"
-    )]
-    match std::fs::read_to_string(&rules) {
-        Ok(text) => sections.push((Some("House rules"), text)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("{}: {e}", ral_core::path::shown(rules))),
+    let rules = UserFile::xdg(SYNOD.name(), XdgKind::Config, HOUSE_RULES)?;
+    if let Some(text) = rules.read()? {
+        sections.push((Some("House rules"), text));
     }
     sections.push((
         Some("Talking to the user"),

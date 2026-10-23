@@ -3,12 +3,13 @@
 //! turns out to be one.
 
 mod batch;
-mod boot_door;
+mod boot_builtin;
 #[cfg(unix)]
 mod bridge;
 mod cli;
 mod platform;
 mod repl;
+mod site;
 mod startup;
 mod surface;
 

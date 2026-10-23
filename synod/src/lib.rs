@@ -30,6 +30,8 @@ pub mod grant;
 pub mod machine_factory;
 pub mod prompt;
 pub mod session;
+mod site;
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 pub(crate) mod test_fixture;
 pub mod workspace;
