@@ -1159,7 +1159,64 @@ fn a_file_the_user_may_not_write_is_not_staged_over() {
         .err()
         .unwrap();
     assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
+    assert!(
+        !directory_refused(&err),
+        "the file's refusal is the host's own: {err}"
+    );
     assert_eq!(std::fs::read(dir.join("f")).unwrap(), b"old");
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count(),
+        1,
+        "nothing staged"
+    );
+}
+
+/// A file the user may write, in a directory the user may not, is refused as
+/// the directory's: the file would take the write, and the refusal says it is
+/// not the file's.
+#[test]
+fn a_writable_file_in_an_unwritable_directory_is_refused_as_the_directorys() {
+    if root_user() {
+        eprintln!("skip: root writes every directory");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("d")).unwrap();
+    std::fs::write(dir.join("d/f"), b"old").unwrap();
+    std::fs::set_permissions(dir.join("d"), PermissionsExt::from_mode(0o555)).unwrap();
+    let staged = located(&dir.join("d/f")).unwrap().stage(Visibility::Public);
+    // Restored before any assertion, so a failure leaves the temp dir removable.
+    std::fs::set_permissions(dir.join("d"), PermissionsExt::from_mode(0o755)).unwrap();
+    let err = staged.err().unwrap();
+    assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
+    assert!(directory_refused(&err), "the directory's refusal: {err}");
+    assert_eq!(err.to_string(), "its directory is not writable");
+    assert_eq!(std::fs::read(dir.join("d/f")).unwrap(), b"old");
+    assert_eq!(
+        std::fs::read_dir(dir.join("d")).unwrap().count(),
+        1,
+        "nothing staged"
+    );
+}
+
+/// A FIFO is streamed, not replaced, whether the walk holds it (Linux) or
+/// states it (macOS): nothing is made beside it.
+#[test]
+fn a_held_fifo_is_not_staged_over() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    let made = std::process::Command::new("mkfifo")
+        .arg(dir.join("pipe"))
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let err = located(&dir.join("pipe"))
+        .unwrap()
+        .stage(Visibility::Public)
+        .err()
+        .unwrap();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
     assert_eq!(
         std::fs::read_dir(&dir).unwrap().count(),
         1,

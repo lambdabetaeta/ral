@@ -107,7 +107,7 @@ fn settle(
                 Ok(()) => (WriteOutcome::Committed, true),
                 Err(e) => {
                     if commit_err.is_ok() {
-                        commit_err = Err(crate::types::Error::io("atomic write", &e).into());
+                        commit_err = Err(crate::types::Error::io(&path, &e).into());
                     }
                     (WriteOutcome::Failed, false)
                 }

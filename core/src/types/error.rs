@@ -93,11 +93,18 @@ impl Error {
         }
     }
 
-    /// An I/O failure on `what`, in the one phrasing every door shares.
+    /// An I/O failure on `what`, in the one phrasing every door shares.  The
+    /// OS's errors and ral's own say the fixed string for `NotFound` and
+    /// `PermissionDenied`, the same on every host; the exception is the
+    /// directory's refusal of a staged write (`path::walk::directory_refused`),
+    /// whose words say whose refusal it is.
     pub fn io(what: impl fmt::Display, e: &std::io::Error) -> Self {
         use std::io::ErrorKind::{NotFound, PermissionDenied};
         match e.kind() {
             NotFound => Self::new(format!("{what}: no such file or directory")),
+            PermissionDenied if crate::path::walk::directory_refused(e) => {
+                Self::new(format!("{what}: {e}"))
+            }
             PermissionDenied => Self::new(format!("{what}: permission denied")),
             _ => Self::new(format!("{what}: {e}")),
         }
@@ -275,3 +282,47 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{self, ErrorKind};
+
+    fn said(e: &io::Error) -> String {
+        Error::io("f", e).message
+    }
+
+    /// `NotFound` and `PermissionDenied` say the fixed string, whoever made
+    /// them and whatever words they carry.
+    #[test]
+    fn io_says_the_fixed_string_for_not_found_and_permission_denied() {
+        let os_not_found = io::Error::from_raw_os_error(2);
+        assert_eq!(os_not_found.kind(), ErrorKind::NotFound);
+        assert_eq!(said(&os_not_found), "f: no such file or directory");
+        assert_eq!(
+            said(&ErrorKind::PermissionDenied.into()),
+            "f: permission denied"
+        );
+        assert_eq!(
+            said(&ErrorKind::NotFound.into()),
+            "f: no such file or directory"
+        );
+        assert_eq!(
+            said(&io::Error::new(ErrorKind::PermissionDenied, "other words")),
+            "f: permission denied"
+        );
+        assert_eq!(
+            said(&io::Error::new(ErrorKind::NotFound, "other words")),
+            "f: no such file or directory"
+        );
+    }
+
+    /// The directory's refusal of a staged write says whose refusal it is.
+    #[test]
+    fn io_says_the_directorys_refusal_in_its_own_words() {
+        assert_eq!(
+            said(&crate::path::walk::directory_refusal_for_test()),
+            "f: its directory is not writable"
+        );
+    }
+}

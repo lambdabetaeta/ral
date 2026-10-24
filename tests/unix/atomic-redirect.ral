@@ -25,4 +25,15 @@ to-string 'replaced' >~ "$d/ro" ? echo '>~ refused'
 to-string 'appended' >> "$d/ro" ? echo '>> refused'
 echo !{from-string < "$d/ro"}
 
+# A commit that fails names the file it was to land on: here the body puts a
+# directory where the file was, which no rename replaces.
+to-string 'old' > "$d/swapped"
+within [dir: $d] {
+    try {
+        /bin/sh -c 'rm swapped; mkdir swapped' > swapped
+    } { |e|
+        echo !{re-match '^swapped: ' $e[message]}
+    }
+}
+
 rm -rf $d

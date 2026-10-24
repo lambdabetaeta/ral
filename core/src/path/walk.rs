@@ -177,6 +177,35 @@ pub(crate) fn dangling(e: &io::Error) -> Option<&Path> {
         .map(|d| d.target.as_path())
 }
 
+/// A staged write's refusal where the sibling's create was refused: the
+/// directory's refusal, not the leaf's.  Shows as the words that say so.
+#[derive(Debug)]
+struct DirectoryRefused;
+
+impl fmt::Display for DirectoryRefused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("its directory is not writable")
+    }
+}
+
+impl std::error::Error for DirectoryRefused {}
+
+/// Whether `e` is a staged write's [`DirectoryRefused`]: read off its
+/// `PermissionDenied`, as [`is_loop`] reads `ELOOP`.  `false` for any other
+/// error, including the leaf's own refusal.
+pub(crate) fn directory_refused(e: &io::Error) -> bool {
+    e.get_ref()
+        .is_some_and(<dyn std::error::Error + Send + Sync>::is::<DirectoryRefused>)
+}
+
+/// The error [`Located::stage`] returns where the sibling's create is refused,
+/// built as it builds it, for the tests that render it where no directory can
+/// be made unwritable (root writes every directory).
+#[cfg(test)]
+pub(crate) fn directory_refusal_for_test() -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, DirectoryRefused)
+}
+
 /// What every name of an object shares and no other object has while the
 /// object exists.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
@@ -2042,20 +2071,22 @@ impl Located<Judged<Writing>> {
     /// sibling can land only over the leaf it was staged beside.
     ///
     /// # Errors
-    /// [`data`](Self::data)'s; `InvalidInput` for a stated special file
-    /// (macOS), which is streamed, not replaced;
-    /// [`may_write`](Self::may_write)'s for a present leaf; the create's,
-    /// other than `AlreadyExists`, which is retried under another name; the
-    /// mode's.
+    /// [`data`](Self::data)'s; `InvalidInput` for a special file, held or
+    /// stated, which is streamed, not replaced;
+    /// [`may_write`](Self::may_write)'s for a present leaf, which is the
+    /// leaf's refusal, the host's own; `PermissionDenied` carrying
+    /// [`DirectoryRefused`] where the sibling's create is refused, which is the
+    /// directory's; the create's otherwise, but for `AlreadyExists`, which is
+    /// retried under another name; the mode's.
     pub(crate) fn stage(self, visibility: Visibility) -> io::Result<StagedWrite> {
         match self.data()? {
-            Data::Special => {
+            Data::Held(_, stat) if stat.kind == Kind::File => self.may_write()?,
+            Data::Held(..) | Data::Special => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "a special file is streamed, not replaced",
                 ));
             }
-            Data::Held(..) => self.may_write()?,
             Data::Absent => {}
         }
         let (file, name) = loop {
@@ -2063,6 +2094,12 @@ impl Located<Judged<Writing>> {
             match host::create_sibling(self.dir(), &name, visibility) {
                 Ok(file) => break (file, name),
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        DirectoryRefused,
+                    ));
+                }
                 Err(e) => return Err(e),
             }
         };

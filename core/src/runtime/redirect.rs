@@ -161,9 +161,7 @@ impl Shell {
         file.write_all(bytes).map_err(|e| Error::io(path, &e))?;
         drop(file);
         if let Some(OpenedWrite::Atomic(staged)) = opened {
-            staged
-                .publish()
-                .map_err(|e| Error::io("atomic write", &e))?;
+            staged.publish().map_err(|e| Error::io(path, &e))?;
         }
         Ok(())
     }
