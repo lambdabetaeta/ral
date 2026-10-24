@@ -487,10 +487,21 @@ pub fn expand(toolchain: Toolchain, home: Option<&str>) -> Result<Vec<PathBuf>, 
         .collect())
 }
 
-/// The [`FLOOR`] rows' directories, walked, less any in the home, the user's
-/// to grant, or [`the_world`]: dropped, never refused, since an override is
-/// refused only where a grant names it.  A walk that fails refuses the floor,
-/// named: a host that cannot resolve its own floor cannot run anything.
+/// Whether `dir`, walked to where it lies, may stay in the read floor, whose
+/// `held` is where the process's home lies (`None` for a home that lies
+/// nowhere): the one rule for every directory the floor holds, listed or a
+/// [`FLOOR`] row's.  It keeps a directory that is neither [`the_world`] (a
+/// root, the home or an ancestor of it) nor inside the home, the user's to
+/// grant.  It drops one that is, never refuses it: a floor directory is no
+/// grant, so what names the world is no error but no floor.
+pub(crate) fn floor_keeps(dir: &RealPath, held: Option<&RealPath>) -> bool {
+    the_world(dir, held).is_none() && held.is_none_or(|h| !h.contains(dir))
+}
+
+/// The [`FLOOR`] rows' directories, walked, less any that [`floor_keeps`]
+/// drops, never refusing, since an override is refused only where a grant
+/// names it.  A walk that fails refuses the floor, named: a host that cannot
+/// resolve its own floor cannot run anything.
 ///
 /// # Errors
 /// A directory whose walk fails, or that no grant can hold.
@@ -499,26 +510,15 @@ pub(crate) fn floor_in(
     home: Option<&Home>,
 ) -> Result<Vec<GrantPath<Trace>>, PolicyError> {
     let held = home.and_then(|h| h.real.as_ref());
-    let floor =
-        |dir: &RealPath| the_world(dir, held).is_none() && held.is_none_or(|h| !h.contains(dir));
     let mut kept = Vec::new();
     for toolchain in FLOOR {
         for (dir, _) in walked::<Trace>(toolchain, &env, home.map(|h| h.spelled.as_str()))? {
-            if floor(dir.real.real()) {
+            if floor_keeps(dir.real.real(), held) {
                 kept.push(dir);
             }
         }
     }
     Ok(kept)
-}
-
-/// [`floor_in`] over the host environment and filesystem.
-///
-/// # Errors
-/// A home that cannot be walked; as [`floor_in`].
-pub(crate) fn floor(home: Option<&str>) -> Result<Vec<GrantPath<Trace>>, String> {
-    let home = home.map(Home::of).transpose().map_err(|e| e.message)?;
-    floor_in(crate::host::var, home.as_ref()).map_err(|e| e.message)
 }
 
 #[cfg(test)]
@@ -950,6 +950,31 @@ mod tests {
                     .all(|d| !held.contains(d.real.real()) && !d.real.real().contains(&held)),
                 "{prefix}: {floor:?}"
             );
+        }
+    }
+
+    /// The floor's one rule, on directories as walked.
+    #[test]
+    fn the_floor_keeps_neither_the_world_nor_the_home_nor_what_lies_in_it() {
+        let (tmp, _) = tree(&["h/in", "beside"]);
+        let at = |sub: &str| crate::test_helper::real(tmp.path().join(sub));
+        let (top, home, inside, beside) = (
+            crate::test_helper::real(tmp.path()),
+            at("h"),
+            at("h/in"),
+            at("beside"),
+        );
+        let host_root = crate::test_helper::real(if cfg!(windows) { r"C:\" } else { "/" });
+        for held in [None, Some(&home)] {
+            assert!(!floor_keeps(&host_root, held), "a root: {held:?}");
+            assert!(floor_keeps(&beside, held), "beside the home: {held:?}");
+        }
+        assert!(
+            floor_keeps(&home, None),
+            "no home to be the world or inside"
+        );
+        for dir in [&home, &inside, &top] {
+            assert!(!floor_keeps(dir, Some(&home)), "{dir:?}");
         }
     }
 

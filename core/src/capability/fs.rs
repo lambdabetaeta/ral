@@ -24,7 +24,7 @@ use super::exec::ExecRules;
 use super::lattice::{Extent, GrantPath, Polar};
 use super::table::{Allows, Denies, Table, Withheld};
 use super::{FsPolicy, GrantLayer, GrantStack, Join, Meet};
-use crate::guard::freeze::PolicyError;
+use crate::guard::freeze::{Home, PolicyError};
 use crate::guard::toolchains;
 use crate::path::{
     Depth, Dir, DirEntry, Excluded, FrozenPath, Judged, LeafMode, LexicalPath, Located, MatchedBy,
@@ -242,12 +242,24 @@ impl Denies<FsAllow> for FsDeny {
 #[cfg(target_os = "macos")]
 const ROSETTA: &str = "/Library/Apple/usr";
 
+/// The directories the read floor lists on Windows, as `env` names them:
+/// `%SystemRoot%`, `%ProgramFiles%` and `%ProgramFiles(x86)%`.  A variable
+/// that is unset is the empty spelling, which [`Floor::resolve`] drops as not
+/// absolute.  Taken on every host, so that a test can judge it on any.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_listed(env: impl Fn(&str) -> Option<String>) -> [String; 3] {
+    ["SystemRoot", "ProgramFiles", "ProgramFiles(x86)"].map(|k| env(k).unwrap_or_default())
+}
+
 /// The read-only system paths admitted under every restricted `read`.
 ///
 /// Each is resolved once, where the [`Runtime`](crate::types::Runtime) is
 /// built: the host's own, not the grant's, so no stack holds it and no wire
 /// carries it.  The system-wide prefixes of [`toolchains::FLOOR`] outside the
-/// process's home are among them; paths absent on this host are dropped.
+/// process's home are among them; paths absent on this host are dropped.  So
+/// is any directory, listed here or a toolchain row's, that
+/// [`toolchains::floor_keeps`] does not keep: a root, the home, an ancestor of
+/// it or inside it.
 #[derive(Clone, Debug, Default)]
 pub struct Floor(Vec<FsAllow>);
 
@@ -262,14 +274,28 @@ impl Floor {
         Self::of_home(home.as_deref())
     }
 
-    /// [`of_host`](Self::of_host) with the process's home given.
+    /// [`of_host`](Self::of_host) with the process's home given, by which
+    /// every directory of the floor, listed or a toolchain row's, is judged:
+    /// [`toolchains::floor_keeps`] drops a root, the home, an ancestor of it
+    /// and what lies inside it.
     ///
     /// # Errors
     /// As [`of_host`](Self::of_host); a `home` that cannot be walked, named.
     pub(crate) fn of_home(home: Option<&str>) -> Result<Self, String> {
+        Self::of_env(crate::host::var, home)
+    }
+
+    /// [`of_home`](Self::of_home) over an injected environment, which names
+    /// Windows' system directories and the toolchain rows' overrides.  The
+    /// home is walked once, and judges every directory the floor holds, the
+    /// listed and the toolchain rows': one rule, [`toolchains::floor_keeps`].
+    ///
+    /// # Errors
+    /// As [`of_home`](Self::of_home).
+    fn of_env(env: impl Fn(&str) -> Option<String>, home: Option<&str>) -> Result<Self, String> {
+        let home = home.map(Home::of).transpose().map_err(|e| e.message)?;
         #[cfg(windows)]
-        let listed = ["SystemRoot", "ProgramFiles", "ProgramFiles(x86)"]
-            .map(|k| crate::host::var(k).unwrap_or_default());
+        let listed = windows_listed(&env);
         #[cfg(target_os = "linux")]
         let listed = [
             "/bin",
@@ -323,8 +349,9 @@ impl Floor {
         ];
         #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         let listed: [&str; 0] = [];
-        let mut floor = Self::resolve(listed.map(std::path::PathBuf::from))?;
-        let prefixes = toolchains::floor(home)?;
+        let held = home.as_ref().and_then(|h| h.real.as_ref());
+        let mut floor = Self::resolve(listed.map(std::path::PathBuf::from), held)?;
+        let prefixes = toolchains::floor_in(&env, home.as_ref()).map_err(|e| e.message)?;
         floor.0.extend(
             prefixes
                 .into_iter()
@@ -335,8 +362,12 @@ impl Floor {
 
     /// The floor of `spellings`: each walked; one that is not absolute, or
     /// whose name is not Unicode (no grant can hold it), or that is absent
-    /// here, is dropped.
-    fn resolve(spellings: impl IntoIterator<Item = std::path::PathBuf>) -> Result<Self, String> {
+    /// here, or that [`toolchains::floor_keeps`] does not keep given the home
+    /// `held`, is dropped.
+    fn resolve(
+        spellings: impl IntoIterator<Item = std::path::PathBuf>,
+        held: Option<&RealPath>,
+    ) -> Result<Self, String> {
         let mut floor = Vec::new();
         for spelling in spellings {
             let Some(written) = crate::path::is_absolute(&spelling)
@@ -351,7 +382,7 @@ impl Floor {
                     written.shown()
                 )
             })?;
-            if trace.kind().is_some() {
+            if trace.kind().is_some() && toolchains::floor_keeps(trace.real(), held) {
                 floor.push(FsAllow::Prefix(
                     GrantPath {
                         written,
@@ -865,13 +896,98 @@ mod tests {
         std::fs::create_dir(&odd).unwrap();
         let fine = dir.path().join("fine");
         std::fs::create_dir(&fine).unwrap();
-        let floor = Floor::resolve([odd, fine.clone()]).unwrap();
+        let floor = Floor::resolve([odd, fine.clone()], None).unwrap();
         assert_eq!(
             floor.allows().collect::<Vec<_>>(),
             [&FsAllow::Prefix(
                 GrantPath::<Trace>::walk(spelled(&fine)).unwrap()
             )]
         );
+    }
+
+    /// `floor` holds exactly the prefixes at `dirs`, each an existing
+    /// directory, in order.
+    fn assert_holds(floor: &Floor, dirs: &[&Path]) {
+        let want: Vec<_> = (dirs.iter())
+            .map(|d| FsAllow::Prefix(GrantPath::<Trace>::walk(spelled(d)).unwrap()))
+            .collect();
+        assert_eq!(floor.allows().cloned().collect::<Vec<_>>(), want);
+    }
+
+    /// The root of this host's filesystem, as a floor spelling.
+    fn host_root() -> PathBuf {
+        PathBuf::from(if cfg!(windows) { r"C:\" } else { "/" })
+    }
+
+    /// A listed directory that is a filesystem root is no floor and no error,
+    /// as a toolchain row's is not: the root would hold the whole filesystem.
+    #[test]
+    fn a_listed_root_is_dropped_and_an_ordinary_directory_kept() {
+        let (_tmp, root) = tmp();
+        let ordinary = made(&root, "ordinary");
+        let floor = Floor::resolve([host_root(), ordinary.clone()], None).unwrap();
+        assert_holds(&floor, &[&ordinary]);
+    }
+
+    /// The home, what lies inside it and what it lies inside are the user's
+    /// to grant or the world: a listed directory so placed is dropped, and
+    /// one beside the home is kept.
+    #[test]
+    fn a_listed_directory_in_the_home_or_around_it_is_dropped() {
+        let (_tmp, root) = tmp();
+        let home = made(&root, "h");
+        let (inside, beside) = (made(&home, "inside"), made(&root, "beside"));
+        let held = Home::of(utf8(&home).unwrap()).unwrap().real;
+        assert!(held.is_some(), "an absolute home lies somewhere");
+        let listed = [root, home, inside, beside.clone()];
+        let floor = Floor::resolve(listed, held.as_ref()).unwrap();
+        assert_holds(&floor, &[&beside]);
+    }
+
+    /// An environment that names a root as one of Windows' system directories
+    /// puts no root on the floor; the variable that is unset lists nothing.
+    #[test]
+    fn a_windows_system_variable_naming_a_root_is_dropped() {
+        let (_tmp, root) = tmp();
+        let programs = made(&root, "programs");
+        let (drive, programs_at) = (
+            utf8(&host_root()).unwrap().to_owned(),
+            utf8(&programs).unwrap(),
+        );
+        let pairs = [
+            ("SystemRoot", drive.as_str()),
+            ("ProgramFiles", programs_at),
+        ];
+        let listed = windows_listed(vars(&pairs));
+        assert_eq!(listed, [drive.as_str(), programs_at, ""]);
+        let floor = Floor::resolve(listed.map(PathBuf::from), None).unwrap();
+        assert_holds(&floor, &[&programs]);
+    }
+
+    /// The same on Windows, through the floor of a whole environment: no
+    /// drive root named by a system variable stays, whatever the rows add.
+    #[cfg(windows)]
+    #[test]
+    fn a_drive_root_in_a_windows_system_variable_is_no_floor() {
+        let drive = r"C:\";
+        let pairs = [
+            ("SystemRoot", drive),
+            ("ProgramFiles", drive),
+            ("ProgramFiles(x86)", drive),
+        ];
+        let floor = Floor::of_env(vars(&pairs), None).unwrap();
+        for allow in floor.allows() {
+            let FsAllow::Prefix(dir) = allow else {
+                panic!("the floor holds prefixes: {allow:?}");
+            };
+            let below_a_root = dir.real.real().is_some_and(|p| !p.is_root());
+            assert!(below_a_root, "{dir:?}");
+        }
+    }
+
+    /// An environment as the fixtures give it.
+    fn vars<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k| (pairs.iter()).find_map(|&(var, v)| (var == k).then(|| v.to_owned()))
     }
 
     fn fs_layer(fs: FsPolicy) -> GrantLayer {
@@ -1012,7 +1128,7 @@ mod tests {
             made(&root, "system"),
             made(&root, "other"),
         );
-        let floor = Floor::resolve([system.clone()]).unwrap();
+        let floor = Floor::resolve([system.clone()], None).unwrap();
         let reads = stack([fs_layer(FsPolicy {
             read_prefixes: vec![spelled(&work)],
             ..FsPolicy::default()
@@ -1035,7 +1151,7 @@ mod tests {
         let (_tmp, root) = tmp();
         let system = made(&root, "system");
         std::fs::write(system.join("prog"), "").unwrap();
-        let floor = Floor::resolve([system.clone()]).unwrap();
+        let floor = Floor::resolve([system.clone()], None).unwrap();
         let program = Program::File {
             located: Box::new(located(system.join("prog"))),
             arg0: system.join("prog"),
