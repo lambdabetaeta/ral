@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 3bf43d16fc35212e3a3b354a91ffa2fcac136724
-verified_at_date: 2026-10-19
-anchors: [PipeNode, PipeNode::launch, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::ArmEdge, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Pumps::join_under, TerminalLoan, PipelineGroup::lend, PipelineGroup::end_anchor, TerminalLease, terminal_lease, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge]
+verified_at_commit: 30a5e059
+verified_at_date: 2026-10-24
+anchors: [PipeNode, PipeNode::launch, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Pumps::join_under, TerminalLoan, PipelineGroup::lend, PipelineGroup::end_anchor, TerminalLease, terminal_lease, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge]
 ---
 
 # Pipeline execution: byte edges, one process group, threads and processes

@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 677fc58d
-verified_at_date: 2026-10-17
-anchors: [lex, parse, Head, DelimKind, Operator, scan_token_group, scan_splice, end_unit, touches_after, eat_continuation, parse_control_op, collect_trailing_redirects, Ast::Redirected, LexErrorKind::Mismatched, WordLiteral::classify, is_bare_word, parse_entry_value]
+verified_at_commit: 30a5e059
+verified_at_date: 2026-10-24
+anchors: [lex, parse, Head, DelimKind, Operator, scan_token_group, scan_splice, end_unit, touches_after, eat_continuation, parse_control_op, collect_trailing_redirects, Ast::Redirected, LexErrorKind::Mismatched, WordLiteral::classify, is_bare_word, parse_entry_value, signed_numeral]
 ---
 
 # Surface syntax: lexing and parsing

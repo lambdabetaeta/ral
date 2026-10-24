@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 0055ee6f
-verified_at_date: 2026-10-01
-anchors: [Inferencer, Idx, settle_index, settle_pending_indexes, Unifier, Kind, Kinded, admit, unite_tys, settle_by_kind, Pairs, bind_ty, bind_comp_ty, unify_row, infer_assembly_record, CachedFreeVars, WeakVars, mark_weak, reseed_weak, settle_weak, infer_record_val, infer_map_val, infer_label_read, settle_label, settle_pending_labels, generalize, instantiate, annotate, SessionSchemes, extract_return, force_return_shape, stage_root_stdin_feed, InferCtx, head_class, stands_in, join_arms, adapt, coerce, unify_arm, stage_writes]
+verified_at_commit: 30a5e059
+verified_at_date: 2026-10-24
+anchors: [Inferencer, Idx, settle_index, settle_pending_indexes, Unifier, Kind, Kinded, admit, unite_tys, settle_by_kind, Pairs, bind_ty, bind_comp_ty, unify_row, infer_assembly_record, CachedFreeVars, WeakVars, mark_weak, reseed_weak, settle_weak, infer_record_val, infer_map_val, infer_label_read, settle_label, settle_pending_labels, generalize, instantiate, annotate, SessionSchemes, extract_return, force_return_shape, stage_root_stdin_feed, InferCtx, head_class, arm, join_arms, adapt, coerce, unify_arm, stage_writes]
 ---
 
 # Type inference: the algorithm

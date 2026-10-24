@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 1776d222
-verified_at_date: 2026-09-30
-anchors: [compile, compile_and_typecheck, CompileError, SessionSchemes, ReturnContract, contract::Table, bake_prelude, BakedPrelude, postcard, annotate, Capture, captured_string, eta_expand_arrow]
+verified_at_commit: 30a5e059
+verified_at_date: 2026-10-24
+anchors: [compile, compile_and_typecheck, CompileError, SessionSchemes, ReturnContract, contract::Table, bake_prelude, BakedPrelude, postcard, annotate, Capture, captured_string, thunked]
 ---
 
 # The compilation ladder: source to typed IR
