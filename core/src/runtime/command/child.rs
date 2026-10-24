@@ -340,9 +340,7 @@ impl RunningChild {
         // The leader is dead here, so finish the cgroup lest a straggler
         // outlive the command.  Windows releases its own group bookkeeping at
         // this same point.
-        if let Some(jail) = &self.jail {
-            jail.finish();
-        }
+        drop(self.jail.take());
         let _ = watch.reap();
         WaitedChild {
             outcome,
@@ -391,7 +389,7 @@ impl Drop for RunningChild {
     /// Abort path: SIGKILL the group, join the drainers, reap.  A no-op once
     /// `wait` has taken the watch — that is the success path's disarm.  The
     /// kill runs before the pump join it frees: killing first is what makes
-    /// the joins terminate.
+    /// the joins terminate.  The jail finishes after, as its field drops.
     fn drop(&mut self) {
         let Some(watch) = self.watch.take() else {
             return;
@@ -400,10 +398,6 @@ impl Drop for RunningChild {
         #[cfg(windows)]
         if let Some(Group::Owns(group)) = self.group {
             crate::process::release_win_group(group.as_raw());
-        }
-        #[cfg(target_os = "linux")]
-        if let Some(jail) = &self.jail {
-            crate::process::jail::linux::remove(jail);
         }
         // The abort path always joins, never detaches: nothing has decided
         // this child's remaining bytes are owed to nobody.

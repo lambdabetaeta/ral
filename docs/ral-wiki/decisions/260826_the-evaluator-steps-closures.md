@@ -39,6 +39,11 @@ a different prelude from its host and only the wire hid it.
   [handlers:]` are the scoped forms (S1, S10). Lambda-ness is read off the
   body's shape (`Comp::arrow`), guaranteed by the checker's η-expansion of
   every arrow-typed computation into a thunked λ (S3).
+  *Amended 2026-10-23*: the η-invariant is withdrawn. A `let` of function type
+  binds its right-hand side unrun, as its thunk, at any depth (Let-fun, SPEC
+  §17.5), so forcing it runs its effects up to the λ under the handlers in scope
+  at the force rather than at the application; nothing reads lambda-ness off a
+  body's shape but a description of a value (`Comp::lam`).
 - **Two terminal shapes are a type.** `Terminal::{Value, Lambda}`; a frame has
   a rule for each terminal its hole admits.
 - **Recursion is an n-ary `rec` with a projection**, not a record fixpoint —

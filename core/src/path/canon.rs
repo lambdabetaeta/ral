@@ -1,7 +1,6 @@
 //! The names one object answers to, for the kernel sandboxes: its firmlink
-//! twins ([`match_variants`]) and the names a lookup of it stats on the way
-//! ([`lookup_walk`]).  All lexical: what the object is, and where a surface
-//! reaches it, is the walk's to say.
+//! twins ([`match_variants`]).  All lexical: what the object is, and where a
+//! surface reaches it, is the walk's to say.
 
 #[cfg(unix)]
 use super::site::Silent;
@@ -43,20 +42,6 @@ pub(crate) fn with_firmlink_twins(mut names: Vec<PathBuf>) -> Vec<PathBuf> {
     let toggles: Vec<PathBuf> = names.iter().filter_map(|q| firmlink_toggle(q)).collect();
     names.extend(toggles);
     names
-}
-
-/// Each name a lookup of the object at `real`, granted by `surface`, stats on
-/// its way, the root apart: the ancestors of `surface`, itself included where it
-/// differs from `real` (an authored link is passed, never followed), and the
-/// proper ancestors of `real`.
-#[cfg(unix)]
-pub(crate) fn lookup_walk(surface: &Path, real: &Path) -> Vec<PathBuf> {
-    site!(Silent::LookupWalk, surface => ancestors())
-        .filter(|a| *a != real)
-        .chain(site!(Silent::LookupWalk, real => ancestors()).skip(1))
-        .filter(|a| a.file_name().is_some())
-        .map(Path::to_path_buf)
-        .collect()
 }
 
 /// [`spelled`] over [`match_variants`], for the tests below: dedup keys on

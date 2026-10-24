@@ -90,6 +90,26 @@ fn a_case_variant_is_recorded_at_the_spelling_the_directory_stores() {
     assert_eq!(step.name().as_os_str(), "Secret");
 }
 
+/// A link spelled in another case is passed at the name its directory
+/// stores, as its step would be.
+#[test]
+fn a_link_in_another_case_is_passed_at_its_stored_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("real")).unwrap();
+    symlink("real", dir.join("Link")).unwrap();
+    if !dir.join("LINK").exists() {
+        eprintln!("skip: this volume is case-sensitive, so no other spelling is an entry");
+        return;
+    }
+    let loc = located_with(&dir.join("LINK"), LeafMode::Follow).unwrap();
+    assert_eq!(loc.real().as_path(), dir.join("real"));
+    let passed: Vec<PathBuf> = (loc.trace().passed().iter())
+        .map(|p| p.as_path().to_path_buf())
+        .collect();
+    assert_eq!(passed, [dir.join("Link")]);
+}
+
 /// The rule over what a lookup answered, with two hard links `a` and `b` in
 /// one directory: an answer spelled as the name asked is taken without a
 /// listing; any other is decided by the entries whose lookup reaches the

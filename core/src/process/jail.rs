@@ -66,32 +66,49 @@ pub(crate) fn guest() -> Option<Arc<GuestJail>> {
     GUEST.get().cloned().flatten()
 }
 
-/// The transient cgroup a jailed exec was placed in.  Deliberately free of
-/// `cfg`, so `RunningChild` carries an `Option<JailCgroup>` on every platform
-/// — `None` anywhere but a real Linux guest.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The transient cgroup a jailed exec was placed in, owned: dropping it kills
+/// whatever is left inside and removes it.  Deliberately free of `cfg`, so
+/// `RunningChild` carries an `Option<JailCgroup>` on every platform — `None`
+/// anywhere but a real Linux guest.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) struct JailCgroup {
     path: PathBuf,
 }
 
 impl JailCgroup {
-    /// Kill everything left in this jail's cgroup, then remove it — the one
-    /// spelling of a jail's teardown, shared by `RunningChild::wait`'s tail
-    /// and a pipeline external stage's own end.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn finish(&self) {
+    /// A jail over `path`, for tests that stand a plain directory in for the
+    /// cgroup.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn at(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    /// Kill everything in this cgroup (`cgroup.kill`), leaving removal to [`Drop`].
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(clippy::unused_self, reason = "no cgroup exists off Linux")
+    )]
+    pub(crate) fn kill(&self) {
+        #[cfg(target_os = "linux")]
+        linux::kill(self);
+    }
+
+    /// Leave the cgroup to a detached survivor, unfinished: nobody left can
+    /// tell when it is empty, so it keeps the survivor's limits for good.
+    #[cfg(unix)]
+    pub(crate) fn surrender(self) {
+        // Skips the finish, not the path's memory.
+        let mut kept = std::mem::ManuallyDrop::new(self);
+        drop(std::mem::take(&mut kept.path));
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for JailCgroup {
+    fn drop(&mut self) {
         linux::kill(self);
         linux::remove(self);
     }
-
-    /// Nothing to finish: no cgroup was ever created off Linux, so callers
-    /// need no `cfg` of their own.
-    #[cfg(not(target_os = "linux"))]
-    #[allow(
-        clippy::unused_self,
-        reason = "shape, not use: the receiver is what makes this the same call as the Linux arm above, which is the whole point of the pair"
-    )]
-    pub(crate) fn finish(&self) {}
 }
 
 /// One exec's whole jail decision, reached without touching the kernel.
@@ -286,5 +303,48 @@ mod tests {
                 .starts_with(root.join(format!("engine-{}", std::process::id())))
         );
         assert_eq!(gone.cgroup.parent(), Some(root.join(DETACHED).as_path()));
+    }
+
+    /// A plain directory stands in for the cgroup: the finish's `cgroup.kill`
+    /// write lands in it as a file, which keeps it there to be seen.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_dropped_jail_is_finished_and_a_surrendered_one_is_not() {
+        let root = tempfile::tempdir().unwrap();
+        let leaf = |name: &str| {
+            let path = root.path().join(name);
+            std::fs::create_dir(&path).unwrap();
+            JailCgroup::at(path)
+        };
+        drop(leaf("dropped"));
+        leaf("surrendered").surrender();
+        let killed = |name: &str| root.path().join(name).join("cgroup.kill").exists();
+        assert!(killed("dropped"), "a dropped jail must be finished");
+        assert!(
+            !killed("surrendered"),
+            "a surrendered jail is its survivor's"
+        );
+    }
+
+    /// The cgroup is owned from its `mkdir`: a setup failing after it (here
+    /// at `cgroup.procs`, which a plain directory lacks) finishes it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_jail_whose_setup_fails_part_way_is_finished() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = JailPlan {
+            uid: 100_000,
+            gid: 100_000,
+            cgroup: root.path().join("exec-0"),
+            limits: JailLimits::default(),
+        };
+        assert!(
+            linux::prepare(&plan).is_err(),
+            "a plain directory has no cgroup.procs"
+        );
+        assert!(
+            plan.cgroup.join("cgroup.kill").exists(),
+            "the half-made jail must be finished"
+        );
     }
 }

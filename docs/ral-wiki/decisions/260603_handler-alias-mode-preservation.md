@@ -16,6 +16,11 @@ superseded_by: decisions/260606_alias-head-defines-its-modes
 > The mode-preservation analysis here is unaffected — read its examples
 > with the argument-binding form supplied.
 
+> **2026-10-23.** Arity is now the arm's type, not its spelling
+> ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]],
+> amended): `{ echo hi }` is still refused, taking no parameter, but a block
+> whose body is a function of the argv is an arm.
+
 # Handlers and aliases preserve a head's pipe signature
 
 A handler reinterprets an operation; it does not retype it. The

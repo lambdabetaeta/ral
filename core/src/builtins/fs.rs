@@ -315,13 +315,9 @@ pub(super) fn builtin_is_readable(args: &[Value], shell: &mut Shell) -> Settled<
 }
 
 pub(super) fn builtin_is_writable(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe(
-        "is-writable",
-        args,
-        shell,
-        LeafMode::Follow,
-        Located::is_writable,
-    )
+    fs_probe("is-writable", args, shell, LeafMode::Follow, |located| {
+        located.may_write().is_ok()
+    })
 }
 
 #[cfg(all(test, unix))]

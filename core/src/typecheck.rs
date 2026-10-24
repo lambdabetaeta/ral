@@ -29,7 +29,7 @@ use self::env::HandlerOrigin;
 pub(crate) use self::generalize::has_result_only_var;
 use self::generalize::{FreeVars, generalize, settle_weak};
 pub(crate) use self::generalize::{instantiate, reseed_weak};
-use crate::ir::{Comp, Phrase, Toplevel};
+use crate::ir::{Comp, Phrase, Toplevel, Val};
 use crate::source::Spanned;
 use crate::ty::{CompTy, Scheme, Ty};
 use std::sync::Arc;
@@ -181,9 +181,10 @@ fn close_thunk_scheme(
 /// A [`ReturnContract`] additionally ascribes the declared table to the
 /// phrases' own return value, once inference has finished (`contract::ascribe`).  The
 /// *inferred* type is what is checked, so a key misspelled inside a spread is
-/// caught with one written out.  A return typed at a variable, and a plugin
-/// factory's `return { |opts| … }`, stay on the caller's own runtime check,
-/// which dispatches off the same table.
+/// caught with one written out.  A return typed at a variable stays on the
+/// caller's own runtime check, which dispatches off the same table; a factory
+/// is held to a block of the options, and what it makes is ascribed as a
+/// direct return is.
 ///
 /// # Errors
 /// Every diagnostic inference collected, whenever that list is non-empty.
@@ -242,25 +243,20 @@ pub fn bake_prelude(phrases: &[Spanned<Phrase<()>>], manifest: &Manifest) -> Top
 }
 
 /// The scheme for a handler arm, computed by `HandlerEntry::vet` at install
-/// and persisted only on alias frames, which outlive their run.
-///
-/// The arm is inferred under the runtime handler calling convention — a
-/// lambda arm receives the argv list — and closed against its own unifier
-/// so a later run's check can be seeded with it.  The arm stands in for the
-/// head it names, so its result is that head's (`Inferencer::stands_in`).
+/// and persisted only on alias frames, which outlive their run: the arm rule
+/// ([`infer::Inferencer::arm`]) over the closure's comp, closed against its
+/// own unifier so a later run's check can be seeded with it.
 ///
 /// # Errors
-/// The arm's result is not what its head returns.
+/// The arm takes other than the argv, or produces other than its head.
 pub(crate) fn alias_arm_scheme(
     head: &str,
-    param: &crate::ir::Pattern,
-    body: &Comp,
+    arm: &Arc<Comp>,
     schemes: SessionSchemes,
 ) -> Result<Scheme, Box<TypeError>> {
     one_shot_inference(schemes, |inferencer| {
-        let cty = inferencer.infer_alias_arm(Some(param), body);
         let cty = inferencer
-            .stands_in(head, &cty)
+            .arm(&Val::thunk(Arc::clone(arm)), infer::Arm::Named(head))
             .map_err(|(_, error)| error)?;
         Ok(close_thunk_scheme(
             inferencer,
@@ -270,45 +266,48 @@ pub(crate) fn alias_arm_scheme(
     })
 }
 
-/// The computed catch-all's vet — `within [handler: $k]`, where the arm is a
-/// runtime value with no literal thunk for the checker to have already held
-/// to [`infer::Inferencer::infer_catch_all`]'s shape. Closed against its own
-/// unifier, the way [`alias_arm_scheme`] is; no scheme persists, a catch-all
-/// frame not outliving its run.
+/// The computed catch-all's vet — `within [handler: $k]` — by the arm rule,
+/// closed against its own unifier; no scheme persists, a catch-all frame not
+/// outliving its run.
 ///
 /// # Errors
-/// The catch-all, which stands in for every command, is no command.
+/// The catch-all takes other than the name and the argv, or is no command.
 pub(crate) fn catch_all_stands_in(
-    body: &Comp,
+    arm: &Arc<Comp>,
     schemes: SessionSchemes,
 ) -> Result<(), Box<TypeError>> {
     one_shot_inference(schemes, |inferencer| {
-        let cty = inferencer.infer_catch_all(body);
         inferencer
-            .catch_all_stands_in(&cty)
-            .map(|_| ())
+            .arm(&Val::thunk(Arc::clone(arm)), infer::Arm::CatchAll)
+            .map(drop)
             .map_err(|(_, error)| error)
     })
 }
 
-/// The scheme for a value binding (`Shell::bind_value`, `Shell::register_hook`),
-/// inferred under the ordinary value/function-application convention.
-///
-/// A lambda is a `Fun(param, body)` whose parameter binds an independent
-/// value type, not the argv list an alias arm is forced onto.  Closed
-/// against its own unifier; with no head to pin to, the scheme comes back
-/// directly.
-pub(crate) fn binding_value_scheme(
-    param: Option<&crate::ir::Pattern>,
-    body: &Comp,
-    schemes: SessionSchemes,
-) -> Scheme {
+/// The scheme for a value binding (`Shell::bind_value`, `Shell::register_hook`):
+/// the closure's comp inferred as written, closed against its own unifier.
+pub(crate) fn binding_value_scheme(body: &Comp, schemes: SessionSchemes) -> Scheme {
     one_shot_inference(schemes, |inferencer| {
-        let cty = inferencer.infer_binding_value(param, body);
+        let cty = inferencer.with_scope(|this| this.infer_comp(body));
         close_thunk_scheme(
             inferencer,
             cty,
             "binding-value scheme must leave no variable free",
         )
     })
+}
+
+/// Whether a block of `scheme` takes `n` arguments and then produces: its
+/// type is met, as an arm's is, so a type still a variable there fits.
+pub(crate) fn takes(scheme: &Scheme, n: usize) -> bool {
+    let mut u = Unifier::new();
+    let Ty::Thunk(body) = instantiate(&mut u, scheme) else {
+        return false;
+    };
+    let params: Vec<Ty> = (0..n).map(|_| u.fresh_ty()).collect();
+    let shape = CompTy::arrows(
+        params,
+        CompTy::Return(u.fresh_grade(), Box::new(u.fresh_ty())),
+    );
+    u.unify_comp_ty(&shape, &body).is_ok()
 }

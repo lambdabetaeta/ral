@@ -101,11 +101,6 @@ pub(in crate::path) enum Silent {
     /// A guest path read by the guest's own engine, whose OS spells it as the
     /// guest does: a lexical lift that opens no object.
     GuestNative,
-    /// The names a lookup stats on its way, rendered for a kernel sandbox: the
-    /// ancestors of a spelling and of a position, read lexically.  It opens no
-    /// object.
-    #[cfg(unix)]
-    LookupWalk,
     /// The UTF-8 check a name passes before it is rendered into a sandbox
     /// rule.  A name that is not UTF-8 is refused, never approximated.  A
     /// conversion, not an access.
@@ -220,8 +215,9 @@ pub(in crate::path) enum Silent {
     /// directory itself.
     #[cfg(unix)]
     WalkReopenDir,
-    /// The `is-writable` predicate: whether a write open would be granted, by
-    /// name under the held directory.  A permission predicate, not turn-time
+    /// Whether a write open would be granted, by name under the held
+    /// directory: the `is-writable` predicate, and a staged write's check of
+    /// the file it would replace.  A permission predicate, not turn-time
     /// model data I/O.
     WalkAccess,
     /// The discard device (`/dev/null`, `\\.\NUL`) opened by its fixed name: no

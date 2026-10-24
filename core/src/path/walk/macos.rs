@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 pub(super) use super::unix::{
-    DirInfo, Lister, copy_mode, create, create_sibling, discard, is_writable, list, mkdir,
+    DirInfo, Lister, copy_mode, create, create_sibling, discard, list, may_write, mkdir,
     open_discard, remove, rename, rename_over, sync_dir,
 };
 

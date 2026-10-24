@@ -132,10 +132,10 @@ Internals:
   fresh `ScopeOwner` (`Cradle::owning`), and on exit restores it and settles the
   scope by `concurrency::exit_brood` (`ScopeOwner::end`) on return, `ScopeOwner::stop` on a halt. The
   `within` form installs command handlers: a per-name handler and every alias
-  must be a unary lambda `{ |args| ... }`, the catch-all a binary lambda `{
-  |name args| ... }`; the calling convention is fixed by the surface form and
-  validated at the install boundary by `validate_handler_arity`, never sniffed
-  from the runtime value
+  takes one parameter, the argv, and the catch-all two, the name and the argv;
+  the calling convention is fixed by the surface position, and the arm's type
+  is checked against it at the install boundary (`HandlerEntry::vet`,
+  `parse_catch_all`), never sniffed from the runtime value's shape
   ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
   The handler-stack mechanics live in [[internals/handler-dispatch|handler-dispatch]].
   `WithinUndo` holds the whole cwd cell a `dir:` displaced, so a `cd` in the
@@ -181,15 +181,15 @@ Internals:
   is shared by record and map assembly (`MapParts`/`MapPart` read either
   entry enum uniformly) — explicit entries win over spreads, a computed key
   must close to a `String`, and a duplicate discovered only here is an error
-  ("key 'k' computed twice; which did you mean?", SPEC §4.5), as a *static*
+  ("key 'k' given twice; which did you mean?", SPEC §4.5), as a *static*
   duplicate is refused at check time.
 - The command/pipeline machinery — external-command dispatch,
   pipeline planning and execution, and the in-process-vs-sandboxed-child
   dispatch choice — lives in [[map/core/runtime|runtime]], which the machine
   reaches by dispatching an `Exec` node through `command_call::classify_command`
   → `run_base_frame` / `run_external`, and at
-  `PipeNode::launch`/`join`; runtime re-enters the machine only through
-  `machine::STAGE_EVAL` (`evaluate` and `close_args`, passed to `PipeNode::launch`; a stage's `(comp, env)`, run from `pipeline/thread.rs` —
+  `PipeNode::run`; runtime re-enters the machine only through
+  `machine::STAGE_EVAL` (`evaluate` and `close_args`, passed to `PipeNode::run`; a stage's `(comp, env)`, run from `pipeline/thread.rs` —
   a stage never rides a re-exec) — the boundary itself always evaluates its
   body in process, OS confinement being per-child in `build_launch`
   ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).

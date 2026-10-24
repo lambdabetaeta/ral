@@ -91,4 +91,12 @@ impl Scheme {
             || !self.comp_ty_bindings.is_empty()
             || !self.ty_bindings.is_empty()
     }
+
+    /// How many parameters a block of this scheme takes, read off its type.
+    pub(crate) fn arity(&self) -> usize {
+        match &self.ty {
+            Ty::Thunk(body) => body.arity(),
+            _ => 0,
+        }
+    }
 }

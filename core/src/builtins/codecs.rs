@@ -8,9 +8,10 @@
 //! [`crate::ir::CompKind::Decode`], syntax whose meaning no session can
 //! redefine.
 
+use crate::text::plural;
 use crate::ty::RefusedArg;
 use crate::types::{
-    Mooring, Settled, Shell, Value, decode_utf8_strict, pointer_token, sig, sig_hint,
+    Break, Mooring, Settled, Shell, Value, decode_utf8_strict, pointer_token, sig, sig_hint,
 };
 
 use crate::first_order::{FOValue, Finite, Opaque};
@@ -268,16 +269,14 @@ fn unpositioned(e: &serde_json::Error) -> String {
 
 /// Decode CSV into a list of maps keyed by the header row; fields stay
 /// `String`, since CSV is untyped.  A duplicate header is refused rather than
-/// resolved last-write-wins — a map cannot hold two columns of one name.
+/// resolved last-write-wins — a map cannot hold two columns of one name — and
+/// a row with more or fewer fields than the header rather than cut or padded.
 pub(super) fn builtin_from_csv(args: &[Value], shell: &Shell) -> Settled<Value> {
     let bytes = input_bytes(args, "from-csv", shell)?;
-    let mut rdr = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .flexible(true)
-        .from_reader(bytes.as_slice());
+    let mut rdr = csv::Reader::from_reader(bytes.as_slice());
     let headers: Vec<String> = rdr
         .headers()
-        .map_err(|e| sig(format!("from-csv: {e}")))?
+        .map_err(|e| csv_refusal(&e))?
         .iter()
         .map(str::to_owned)
         .collect();
@@ -289,39 +288,70 @@ pub(super) fn builtin_from_csv(args: &[Value], shell: &Shell) -> Settled<Value> 
     }
     let mut rows = Vec::new();
     for record in rdr.records() {
-        let record = record.map_err(|e| sig(format!("from-csv: {e}")))?;
+        let record = record.map_err(|e| csv_refusal(&e))?;
+        // The reader refuses a ragged record, so the zip drops nothing.
         let fields = headers
             .iter()
-            .enumerate()
-            .map(|(i, h)| (h.clone(), Value::string(record.get(i).unwrap_or(""))))
-            .collect::<Vec<_>>();
-        rows.push(Value::map(fields));
+            .cloned()
+            .zip(record.iter().map(Value::string));
+        rows.push(Value::map(fields.collect()));
     }
     Ok(Value::list(rows))
 }
 
-/// Encode a list of records as CSV.  Columns are the first record's keys in
-/// sorted order — `Map` is key-ordered, so no original column order survives
-/// into one to be recovered.
+/// `from-csv`'s refusal, a ragged row named by the line its read began on:
+/// the row's own, unless blank lines precede it.
+fn csv_refusal(e: &csv::Error) -> Break {
+    match e.kind() {
+        csv::ErrorKind::UnequalLengths {
+            pos: Some(pos),
+            expected_len,
+            len,
+        } => sig(format!(
+            "from-csv: line {} has {}, but the header has {}",
+            pos.line(),
+            plural(*len, "field"),
+            plural(*expected_len, "field")
+        )),
+        _ => sig(format!("from-csv: {e}")),
+    }
+}
+
+/// Encode a list of maps as CSV: the first map's keys, sorted (`Map` is
+/// key-ordered), as header, then each map's values.  A map with other keys
+/// is refused rather than cut or padded, so `from-csv` reads back exactly this.
 pub(super) fn builtin_to_csv(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let rows = args[0].as_list("to-csv")?;
-    let mut wtr = csv::WriterBuilder::new().from_writer(Vec::new());
+    let mut wtr = csv::Writer::from_writer(Vec::new());
     if let Some(first) = rows.iter().next() {
-        let headers: Vec<String> = first
-            .as_ref()
-            .as_map_ref("to-csv")?
-            .keys()
-            .map(str::to_string)
-            .collect();
-        wtr.write_record(&headers)
+        let header = first.as_ref().as_map_ref("to-csv")?;
+        if header.is_empty() {
+            return Err(sig(
+                "to-csv: the row at index 0 has no keys, and CSV cannot write a row of no columns",
+            ));
+        }
+        wtr.write_record(header.keys())
             .map_err(|e| sig(format!("to-csv: {e}")))?;
-        for row in &rows {
+        for (i, row) in rows.iter().enumerate() {
             let map = row.as_ref().as_map_ref("to-csv")?;
-            let fields: Vec<String> = headers
-                .iter()
-                .map(|h| map.get(h).map_or_else(String::new, |v| v.to_string()))
-                .collect();
-            wtr.write_record(&fields)
+            let stray = header
+                .keys()
+                .chain(map.keys())
+                .find(|k| header.contains_key(k) != map.contains_key(k));
+            if let Some(key) = stray {
+                let (has, lacks) = if map.contains_key(key) {
+                    (i, 0)
+                } else {
+                    (0, i)
+                };
+                return Err(sig_hint(
+                    format!(
+                        "to-csv: the row at index {has} has the key {key:?}, but the row at index {lacks} does not"
+                    ),
+                    "CSV cannot leave a field out: give every row every key, as `union $blank $row` does where `$blank` maps each column to ''",
+                ));
+            }
+            wtr.write_record(map.iter().map(|(_, v)| v.to_string()))
                 .map_err(|e| sig(format!("to-csv: {e}")))?;
         }
     }

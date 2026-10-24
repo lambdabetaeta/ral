@@ -1,40 +1,10 @@
-use super::{
-    FsAllow, FsRules, GrantKind, ProjectionKey, filter_out_granted, profile_name,
-    refuse_deny_meeting_grant,
-};
+use super::{FsAllow, FsRules, ProjectionKey, profile_name, refuse_deny_meeting_grant};
 use crate::capability::GrantPath;
 use crate::path::{Excluded, FrozenPath, RealPath, Trace};
 use crate::sandbox::Refusal;
 use crate::sandbox::carve::{Carving, carve};
 use crate::test_helper::{place, real as walked};
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-
-#[test]
-fn memo_drops_a_path_already_granted_at_the_same_kind() {
-    let mut granted = HashSet::new();
-    granted.insert((PathBuf::from(r"C:\work"), GrantKind::ReadWrite));
-    let kept = filter_out_granted(
-        &granted,
-        vec![PathBuf::from(r"C:\work"), PathBuf::from(r"C:\other")],
-        GrantKind::ReadWrite,
-    );
-    assert_eq!(kept, vec![PathBuf::from(r"C:\other")]);
-}
-
-#[test]
-fn memo_is_specific_to_access_kind() {
-    // Read-only coverage does not satisfy a read-write request: the two
-    // stamp different access masks.
-    let mut granted = HashSet::new();
-    granted.insert((PathBuf::from(r"C:\work"), GrantKind::ReadOnly));
-    let kept = filter_out_granted(
-        &granted,
-        vec![PathBuf::from(r"C:\work")],
-        GrantKind::ReadWrite,
-    );
-    assert_eq!(kept, vec![PathBuf::from(r"C:\work")]);
-}
 
 #[test]
 fn projection_key_identity_is_the_fs_triple() {
@@ -448,6 +418,16 @@ fn confined(
     cwd: &Path,
     line: &str,
 ) -> Result<crate::process::Launch, Refusal> {
+    confined_as(projection, cwd, line, &walked(cmd()))
+}
+
+/// [`confined`], with `image` handed to `confine` as the program's image.
+fn confined_as(
+    projection: &crate::sandbox::SandboxProjection,
+    cwd: &Path,
+    line: &str,
+    image: &RealPath,
+) -> Result<crate::process::Launch, Refusal> {
     use crate::process::cancel::DurableRoot;
     use crate::process::{Launch, StdioSpec};
     let mut launch = Launch::new(cmd());
@@ -456,11 +436,10 @@ fn confined(
     launch.stdin(StdioSpec::null());
     launch.stdout(StdioSpec::Piped);
     launch.stderr(StdioSpec::Piped);
-    let image = walked(cmd());
     super::confine(
         &mut launch,
         projection,
-        Some(&image),
+        Some(image),
         &DurableRoot::default().worker(),
     )?;
     Ok(launch)
@@ -638,6 +617,53 @@ fn a_deny_the_token_reaches_anyway_is_refused() {
             "type ok.txt",
         ));
         assert!(why.contains("linked.txt"), "{why}");
+    });
+}
+
+/// A program's image is granted to the launch that runs it alone: a later
+/// launch under the same projection does not read it.
+#[test]
+fn an_image_is_granted_to_its_own_launch_alone() {
+    with_scoped_state(|| {
+        let tree = Tree::new();
+        let image = walked(tree.write(r"B\key.txt"));
+        let _session = SessionGuard;
+        let (a, only_a) = (tree.at("A"), projection(&[&tree.real("A")], &[]));
+        let as_image = confined_as(&only_a, &a, r"type ..\B\key.txt", &image).unwrap();
+        assert_launch_reads(as_image, r"..\B\key.txt", true);
+        assert_reads(&only_a, &a, r"..\B\key.txt", false);
+    });
+}
+
+/// A read-write folder every sandbox may already write still takes the `Low`
+/// label its grant needs: without it the mandatory check refuses a create,
+/// whatever the DACL admits.
+#[test]
+fn a_read_write_folder_every_sandbox_may_write_admits_a_create() {
+    use crate::process::PgidPolicy;
+    use crate::sandbox::{ExecProjection, FsProjection, SandboxProjection};
+    with_scoped_state(|| {
+        let tree = Tree::new();
+        let w = tree.at("W");
+        std::fs::create_dir(&w).unwrap();
+        icacls(
+            &w,
+            &["/grant", &format!("*{ALL_APPLICATION_PACKAGES}:(OI)(CI)F")],
+        );
+        let _session = SessionGuard;
+        let allow = tree.real("W");
+        let writable = SandboxProjection {
+            fs: FsProjection::Restricted(rules(&[&allow], &[&allow], &[])),
+            net: false,
+            exec: ExecProjection::default(),
+        };
+        let mut launch = confined(&writable, &w, "echo ok>made.txt").unwrap();
+        let (mut child, _pgid, _) = launch.spawn(PgidPolicy::Inherit).unwrap();
+        let ended = child.reap().unwrap();
+        assert!(
+            w.join("made.txt").exists(),
+            "the create was refused; the child ended {ended:?}"
+        );
     });
 }
 

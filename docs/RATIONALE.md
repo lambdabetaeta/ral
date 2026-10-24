@@ -252,7 +252,8 @@ host's base interpretation of a command-shaped name, and the operating system
 share one convention, differing in what they do with it rather than in what
 they receive.
 
-Arity is checked when a handler is installed. Inferring it at dispatch would be
+Arity is checked where a handler is written and again when it is installed, and
+it is the handler's type, not its spelling. Inferring it at dispatch would be
 unsafe under currying: applying one argument to a binary lambda returns a
 closure, so a malformed handler could otherwise succeed with a plausible but
 nonsensical result.

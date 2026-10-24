@@ -9,6 +9,8 @@ use crate::path::site::Silent;
 use crate::path::{LexicalPath, shown};
 use crate::site::site;
 use globset::{GlobBuilder, GlobMatcher};
+use regex_syntax::ParserBuilder;
+use regex_syntax::hir::literal::Extractor;
 use std::ffi::{OsStr, OsString};
 use std::iter::successors;
 use std::path::{Component, PathBuf};
@@ -29,8 +31,8 @@ pub(crate) struct Glob {
 
 impl Glob {
     /// # Errors
-    /// A wildcard component beginning with `.`, one `globset` rejects, or
-    /// a `..` after a wildcard, which no walked entry carries.
+    /// A wildcard component that can match only names beginning with `.`, one
+    /// `globset` rejects, or a `..` after a wildcard, which no walked entry carries.
     pub(crate) fn parse(pattern: &LexicalPath) -> Result<Self, String> {
         let (mut root, mut steps) = (PathBuf::new(), Vec::new());
         for c in site!(Silent::GlobComponents, pattern.as_path() => components()) {
@@ -88,11 +90,11 @@ impl Glob {
     }
 
     fn advance(&self, i: usize, name: &OsStr) -> Option<usize> {
-        let hidden = name.as_encoded_bytes().starts_with(b".");
+        let visible = !hidden(name.as_encoded_bytes());
         match self.steps.get(i)? {
             Step::Name(n) => (n == name).then_some(i + 1),
-            Step::Wild(m) => (!hidden && m.is_match(name)).then_some(i + 1),
-            Step::Any => (!hidden).then_some(i),
+            Step::Wild(m) => (visible && m.is_match(name)).then_some(i + 1),
+            Step::Any => visible.then_some(i),
         }
     }
 
@@ -121,17 +123,34 @@ fn step(c: Component<'_>) -> Result<Step, String> {
     if s == "**" {
         return Ok(Step::Any);
     }
-    if s.starts_with('.') {
-        return Err(format!(
-            "'{s}': a wildcard never matches a name starting with '.'; name the file literally, or filter `list-dir`?"
-        ));
-    }
-    GlobBuilder::new(s)
+    let glob = GlobBuilder::new(s)
         .backslash_escape(false)
         .literal_separator(true)
         .build()
-        .map(|g| Step::Wild(g.compile_matcher()))
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    if hidden_only(&glob) {
+        return Err(format!(
+            "'{s}': a wildcard never matches a name starting with '.', and this one matches nothing else; name each file literally, or filter `list-dir`?"
+        ));
+    }
+    Ok(Step::Wild(glob.compile_matcher()))
+}
+
+/// Whether every match is hidden, judged by prefix literals; unbounded prefixes pass.
+fn hidden_only(glob: &globset::Glob) -> bool {
+    let hir = ParserBuilder::new()
+        .utf8(false)
+        .build()
+        .parse(glob.regex())
+        .expect("globset emits a valid regex");
+    Extractor::new()
+        .extract(&hir)
+        .literals()
+        .is_some_and(|prefixes| prefixes.iter().all(|p| hidden(p.as_bytes())))
+}
+
+fn hidden(name: &[u8]) -> bool {
+    name.starts_with(b".")
 }
 
 #[cfg(test)]
@@ -158,5 +177,15 @@ mod tests {
         assert!(parse("*/../x").is_err());
         assert!(parse("../x").is_ok());
         assert!(parse("a/../*").is_ok());
+    }
+
+    #[test]
+    fn a_wildcard_that_can_match_only_dotfiles_is_refused() {
+        for dotted in ["x/.h*", "x/[.]env", "x/{.env,.git}"] {
+            assert!(parse(dotted).is_err(), "{dotted}");
+        }
+        for open in ["x/*", "x/?env", "x/[.a]env", "x/{.env,a}", "x/*{.rs,.toml}"] {
+            assert!(parse(open).is_ok(), "{open}");
+        }
     }
 }

@@ -51,7 +51,8 @@ for a `Bytes` value (for example `$s[stdout]` from a `poll` result). The decoder
 - `from-csv` → a list of maps keyed by the header row, `[Map String]` and so not
   a boundary: its shape is decided; every field is a
   `String`, because CSV is untyped — coerce with `int` / `float`; the reader
-  handles quoted fields, embedded commas, and embedded newlines;
+  handles quoted fields, embedded commas, and embedded newlines, and refuses a
+  row with more or fewer fields than the header, naming its line;
 - `from-lines` → `[String]`, split by the line rule (below), lossy per line.
 
 **A decoder of undecided shape is checked.** `from-json`'s type is `∀α. Returns α`,
@@ -85,10 +86,13 @@ distinguishes the second writer, as in `bytes-to-string`. In a pipeline, the wri
 `let e = to-json $x` binds the encoded text as a `String`, and
 `let e = to-json $x > f` binds `()`, the redirect having discharged the output.
 
-`to-csv` takes a list of records and writes a header row plus one row for each
-record. The columns are the first record's keys in sorted order, because maps
-are key-ordered and hold no original column order. A record that misses a
-column contributes an empty field.
+`to-csv` takes a list of maps and writes a header row plus one row for each
+map. The columns are the keys in sorted order, because maps are key-ordered and
+hold no original column order. Every map must have the first one's keys, since
+CSV cannot leave a field out: a map with a key the first lacks, or lacking one
+it has, is refused by name, as is a map with no keys; as with `to-jsonl`,
+every row encodes before a byte is written. With `from-csv`'s refusal of a
+ragged line, `from-csv` reads back exactly the maps `to-csv` wrote.
 
 `to-json` maps a ral value to JSON structurally. A record or a `Map A`
 becomes an object; a list becomes an array; `Unit` becomes `null`. A

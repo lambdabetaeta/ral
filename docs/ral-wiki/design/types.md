@@ -140,7 +140,7 @@ value is its final stage's, always
 ## An arm stands in for what it is
 
 `standsFor(c)` is the scheme of the base frame or arm already in force under
-`c`, and `[String] → Command` for anything else (`Inferencer::stands_in`). An
+`c`, and `[String] → Command` for anything else (`Inferencer::arm`). An
 arm for `curl` therefore has a command's value, its output; an arm for `detach`
 returns what `detach` returns. A `()`-returning stub for an external is admitted
 by the upcast and captures `""`; the installed scheme has the head's producer
@@ -148,7 +148,8 @@ kind, so a call through the arm types as the head does. A mismatch is
 `Reason::StandsIn`, with a sentence naming what the arm stands in for and what
 to write. The catch-all `handler:` stands in for every command in its block. The
 checker at the literal arm and the run-time vet at install (`alias_arm_scheme`,
-`catch_all_stands_in`) apply the same check.
+`catch_all_stands_in`) apply the same rule (`Inferencer::arm`). Its parameters
+are its slot's, and are read off its type, never its spelling (SPEC §17.7).
 
 ## Branching is HM over thunks, joined by grade
 
@@ -200,7 +201,7 @@ legs:
 
 - **Recursion** is governed by the strongly-connected-component structure of
   binding groups: a non-recursive group generalises at its binding point, while a
-  mutually recursive group (`LetRec` / `Rec`) stays monomorphic within the group
+  mutually recursive group (`Rec`) stays monomorphic within the group
   and generalises only once its fixed point is reached.
 - **No value restriction is needed.** Bindings are immutable, so there are no
   polymorphic references; and CBPV's `Bind` sequences a computation's effect

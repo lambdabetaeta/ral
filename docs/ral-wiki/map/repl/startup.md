@@ -45,10 +45,10 @@ dispositions. Then, per role:
 
 - **Confined child** (`Warrant`) — served by `serve_warrant` alone, before any
   pin, so the child pins and opens nothing before it is confined.
-  `ral --warrant` is the whole argv of a confined re-exec: the child takes its
-  warrant off fd 99, enters the OS [[map/core/capabilities|sandbox]], and only
-  then `execve`s the host program or runs the bundled tool in-process. Windows
-  refuses it.
+  `ral --warrant <fd>` is the whole argv of a confined re-exec: the child
+  takes its warrant off that descriptor, enters the OS
+  [[map/core/capabilities|sandbox]], and only then `execve`s the host program
+  or runs the bundled tool in-process. Windows refuses it.
 - **Pipeline anchor** — `pipeline::anchor::serve` (`--ral-pipeline-anchor`, the
   one multicall re-exec a pipeline uses: a stage itself runs on a thread of the
   parent process, but a multi-stage pipeline needs one process to hold its pgid

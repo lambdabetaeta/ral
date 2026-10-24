@@ -5,7 +5,8 @@ use crate::process::{CancelCause, ScopeId};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// One interior edge's fate: dead once its reader stage has ended.
+/// One interior edge's fate: marked dead once its reader stage has ended
+/// outside a teardown, which cuts nothing at an edge.
 ///
 /// A stage is cut at its first write to a dead edge, and nowhere else — so
 /// whatever it does that the reader was never owed runs to completion.

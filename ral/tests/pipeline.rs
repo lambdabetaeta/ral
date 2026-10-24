@@ -680,6 +680,22 @@ fn grant_pipeline_abort_after_missing_later_stage_does_not_hang() {
     }
 }
 
+/// A confined stage rolled back as soon as it has spawned, here because the
+/// next stage cannot launch, ends with its launch.
+#[test]
+fn a_confined_stage_rolled_back_at_once_does_not_outlive_its_launch() {
+    if !sandbox_functional() {
+        return;
+    }
+    let o = run_with_timeout(
+        &[],
+        "grant [net: `offline] { /bin/sleep 30 | ral-no-such-command }",
+        Duration::from_secs(10),
+    )
+    .expect("the confined sleep outlived its pipeline's failed launch");
+    assert_eq!(o.status, 127, "stderr: {}", o.stderr);
+}
+
 #[test]
 fn grant_fs_pipeline_stdin_forwarded() {
     // An upstream stage pipes data into the grant body.
@@ -1035,9 +1051,9 @@ fn pipeline_three_stages_share_anchor_pgid() {
 #[test]
 fn pipeline_mid_stage_launch_failure_with_long_producer_kills_it() {
     // Stage 1 is a long-running producer (`yes`); stage 2 fails to launch.
-    // The producer must be killed (SIGKILL) by the half-built `PipeNode`'s
-    // drop; otherwise it would keep writing to its now-orphaned pipe forever
-    // and the test would time out.  This is the canonical Drop-chain regression.
+    // The failed launch's rollback must tear the producer down; otherwise it
+    // would keep writing to its orphaned pipe forever and the test would time
+    // out.
     let script = "/usr/bin/yes | /no/such/binary_xyzzy";
     let o = run_with_timeout(&[], script, Duration::from_secs(5))
         .expect("pipeline hung — long producer not killed on abort?");
@@ -1712,6 +1728,79 @@ fn a_reader_gone_stages_cleanup_write_is_stopped_and_its_tail_discarded() {
     assert!(
         !ran,
         "the cleanup continued past its write to the dead edge"
+    );
+}
+
+/// More than any pipe holds: `head` may grow its own to 1 MiB.
+const PAST_ANY_PIPE: &str = "/bin/sh -c 'head -c 8000000 /dev/zero'";
+
+/// `run_marked`, and how long the run took.
+fn run_marked_timed(tag: &str, script: impl FnOnce(&str) -> String) -> (Output, bool, Duration) {
+    let started = std::time::Instant::now();
+    let (o, touched) = run_marked(tag, script, Duration::from_secs(15));
+    (o, touched, started.elapsed())
+}
+
+#[test]
+fn a_reader_gone_stages_cleanup_command_runs_to_completion_and_its_halt_is_the_verdict() {
+    // The cut the shield masks once left it blocked until the 5 s grace.
+    let (o, ran, took) = run_marked_timed("ral_pipe_gone_cleanup_command", |f| {
+        format!(
+            "!{{ guard {{ /bin/sleep 0.2 }} {{ {PAST_ANY_PIPE}; touch {f}; fail [status: 7, message: x] }} }} | !{{ return () }}"
+        )
+    });
+    assert_eq!(o.status, 7, "stderr: {}", o.stderr);
+    assert!(ran, "the cleanup's command never finished");
+    assert!(
+        took < Duration::from_secs(3),
+        "it waited out the grace: {took:?}"
+    );
+}
+
+#[test]
+fn a_torn_down_stages_cleanup_does_not_block_on_its_escaped_reader() {
+    let (o, ran, took) = run_marked_timed("ral_pipe_teardown_cleanup_command", |f| {
+        format!(
+            "!{{ guard {{ /bin/sleep 5 }} {{ {PAST_ANY_PIPE}; touch {f} }} }} | !{{ /bin/sleep 0.3; exit 3 }}"
+        )
+    });
+    assert_eq!(o.status, 3, "stderr: {}", o.stderr);
+    assert!(ran, "the cleanup's command never finished");
+    assert!(
+        took < Duration::from_secs(3),
+        "it waited out the grace: {took:?}"
+    );
+}
+
+#[test]
+fn a_torn_down_stages_cleanup_write_is_not_cut_at_an_edge_the_teardown_left() {
+    // A ral write past what the pipe holds, to the edge of a `sleep` the
+    // teardown kills: read, not dead, so the cleanup goes on.
+    let (o, ran, took) = run_marked_timed("ral_pipe_teardown_cleanup_write", |f| {
+        format!(
+            "!{{ guard {{ /bin/sleep 5 }} {{ for !{{range 0 4000}} {{ |i| echo 0123456789012345678901234567890123456789 }}; touch {f} }} }} | /bin/sleep 5 | !{{ /bin/sleep 0.3; exit 3 }}"
+        )
+    });
+    assert_eq!(o.status, 3, "stderr: {}", o.stderr);
+    assert!(ran, "the cleanup was cut or blocked at its write");
+    assert!(
+        took < Duration::from_secs(3),
+        "it waited out the grace: {took:?}"
+    );
+}
+
+#[test]
+fn a_rolled_back_stages_cleanup_does_not_block_on_the_edge_its_reader_never_took() {
+    let (o, ran, took) = run_marked_timed("ral_pipe_rollback_cleanup_command", |f| {
+        format!(
+            "!{{ guard {{ /bin/sleep 5 }} {{ {PAST_ANY_PIPE}; touch {f} }} }} | ral-no-such-command"
+        )
+    });
+    assert_eq!(o.status, 127, "stderr: {}", o.stderr);
+    assert!(ran, "the cleanup's command never finished");
+    assert!(
+        took < Duration::from_secs(3),
+        "it waited out the grace: {took:?}"
     );
 }
 

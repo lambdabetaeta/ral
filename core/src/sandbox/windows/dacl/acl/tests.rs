@@ -7,10 +7,9 @@
 // crash recovery only reclaims profiles. Ported units keep upstream's names
 // so each diffs against the one it was taken from.
 
-use super::super::tests::{grant, pin, real, with_scoped_state_dir};
-use super::super::{GrantKind, RW_MASK, needing_grant, pin_all};
+use super::super::GrantKind;
+use super::super::tests::{pin, real, with_scoped_state_dir};
 use super::*;
-use crate::test_helper::place;
 #[test]
 fn sid_parse_valid_and_invalid() {
     let ok = OwnedSid::parse("S-1-1-0");
@@ -37,44 +36,6 @@ fn effective_access_is_zero_on_fresh_dir() {
         assert_eq!(
             compute_appcontainer_effective_access(pin.target()).unwrap(),
             0
-        );
-    });
-}
-
-#[test]
-fn needing_grant_drops_well_known_grant() {
-    with_scoped_state_dir(|| {
-        let td_grant = tempfile::tempdir().unwrap();
-        let td_no_grant = tempfile::tempdir().unwrap();
-
-        // Everyone is one of the well-known AC SIDs, so a grant for it is
-        // exactly what the filter must recognize as already covering.
-        let granted = real(td_grant.path());
-        grant(
-            &granted,
-            "S-1-1-0",
-            GrantKind::ReadWrite,
-            &crate::process::cancel::DurableRoot::default().worker(),
-        )
-        .unwrap();
-
-        let not_granted = real(td_no_grant.path());
-        let pins = pin_all(
-            &[place(&granted), place(&not_granted)],
-            GrantKind::ReadWrite,
-        )
-        .unwrap();
-        let kept: Vec<_> = needing_grant(pins, RW_MASK)
-            .iter()
-            .map(|p| p.path().to_path_buf())
-            .collect();
-        assert!(
-            !kept.contains(&granted),
-            "already-granted path should be filtered out: kept={kept:?}"
-        );
-        assert!(
-            kept.contains(&not_granted),
-            "non-granted path should survive the filter: kept={kept:?}"
         );
     });
 }

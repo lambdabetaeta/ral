@@ -51,7 +51,8 @@ pub enum Invocation<'a> {
     #[cfg(unix)]
     Engine,
     PipelineAnchor,
-    /// The arguments are those the warrant was wrongly given: it takes none.
+    /// The arguments, of which the trampoline takes one: the slot its warrant
+    /// arrives on.
     Warrant(&'a [OsString]),
     /// The tool's name, then its arguments.
     BundledTool(&'a [OsString]),
@@ -134,8 +135,8 @@ mod tests {
         );
     }
 
-    /// The warrant's arguments are carried, never read: a flag after it names
-    /// no role, and what it carries is what the trampoline refuses.
+    /// The warrant's arguments are carried, never read here: a flag after it
+    /// names no role, and the trampoline judges what it carries.
     #[test]
     fn a_warrant_reads_nothing_after_its_flag() {
         let warrant = Role::Warrant.flag();

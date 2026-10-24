@@ -65,7 +65,8 @@ sees raw bytes and bare words.
   is missing or extra; `stray_colon` catches a `key: value` written outside
   `[ ]`. The `$[…]`
   body is a Pratt parser whose operands are
-  `parse_atom`'s atoms, plus `(…)` grouping and the prefixes `-` and `not`;
+  `parse_atom`'s atoms, a sign touching a numeral included
+  (`signed_numeral`), plus `(…)` grouping and the prefixes `-` and `not`;
   an operator in operand position, or two operands with no operator between
   them, each earn an error naming the gap; a bare non-numeral word under
   `-`, arithmetic, or ordering (`numeric_operand`) is refused as the string
@@ -96,18 +97,21 @@ sees raw bytes and bare words.
   trip through printing, so `007` and `1.50` are numerals while `1e5`, which
   merely happens to f64-parse, is text
   ([[decisions/260824_a-numeral-denotes-its-number|a-numeral-denotes-its-number]]).
-- `numeral.rs` — the single home of the numeral grammar (`prefix`); the lexer's
-  numeral scanning and `WordLiteral::classify` both read it.
-- `group.rs` — pre-pass detecting mutually recursive binding groups, consumed by
-  the [[map/core/elaboration|elaborator]].
+  `Pattern`, `BinaryOp` and `Redirects` are not here: the [[map/core/ir|IR]]
+  owns them, and the parser builds them (`redirect_word`/`redirect_dup`
+  translate a redirect token).
+- `numeral.rs` — the single home of the numeral grammar (`prefix`, `shape`);
+  the lexer's numeral scanning, `WordLiteral::classify` and the parser's
+  `signed_numeral` read it.
+- `group.rs` — the scoping of a statement list: `parts` partitions it
+  into statements and stretches of block definitions (SPEC §5.7), and `sccs`
+  splits a stretch's dependency graph, which the
+  [[map/core/elaboration|elaborator]] draws, into its recursive groups.
 - `quote.rs` — bare-word classification (`is_bare_word`, `quote_word`,
   returning a `Cow`), shared with the [[map/repl|REPL]] and the
   `ral-quote` builtin. It is the dual of `WordLiteral::classify`: a string may
   go bare only where the numeral grammar declines it, since a bare `007` would
   read back as the number 7.
-- `free_refs.rs` — free-reference scans. `Pattern`, `BinaryOp` and `Redirects`
-  are not here: the [[map/core/ir|IR]] owns them, and the parser builds them
-  (`redirect_word`/`redirect_dup` translate a redirect token).
 - `highlight.rs` — `classify(src)`, token classes (`Class`) read off the lexer
   for the exarch and synod highlighters, so neither carries a second parser of
   its own.

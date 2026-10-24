@@ -20,6 +20,11 @@ use std::process::ExitCode;
 /// The prelude baked into this binary at build time by `build.rs`.
 pub(crate) static PRELUDE: ral_core::boot::BakedPrelude = ral_core::baked_prelude!();
 
+/// musl's allocator slows the bundled `rg`; ripgrep's own remedy (jemalloc lacks i686).
+#[cfg(all(feature = "ripgrep", target_env = "musl", target_pointer_width = "64"))]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 fn main() -> ExitCode {
     startup::refuse_setuid();
     #[cfg(unix)]

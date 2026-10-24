@@ -110,12 +110,16 @@ fn make_delegated(cgroup: &Path) -> io::Result<()> {
 
 /// Create the per-exec cgroup (and every level above it, lazily), write its
 /// limits, and hand back `cgroup.procs` still open: the pre-exec closure may
-/// not allocate, so it cannot build that path and open it itself.
+/// not allocate, so it cannot build that path and open it itself.  The cgroup
+/// is owned from its `mkdir`, so a failure after it finishes it.
 ///
 /// # Errors
 /// Returns the kernel's error for any mkdir/write/open along the way.
 pub(crate) fn prepare(plan: &JailPlan) -> io::Result<(JailCgroup, OwnedFd)> {
     make_delegated(&plan.cgroup)?;
+    let cgroup = JailCgroup {
+        path: plan.cgroup.clone(),
+    };
     write_control(
         &plan.cgroup,
         "memory.max",
@@ -127,12 +131,7 @@ pub(crate) fn prepare(plan: &JailPlan) -> io::Result<(JailCgroup, OwnedFd)> {
         Silent::JailCgroupProcs,
         std::fs::OpenOptions::new().write(true) => open(plan.cgroup.join("cgroup.procs"))
     )?;
-    Ok((
-        JailCgroup {
-            path: plan.cgroup.clone(),
-        },
-        OwnedFd::from(procs),
-    ))
+    Ok((cgroup, OwnedFd::from(procs)))
 }
 
 /// Format and write a pid without allocating: this runs in the pre-exec

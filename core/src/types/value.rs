@@ -26,10 +26,9 @@ pub(crate) use first_order::Leaf;
 /// The runtime representation of every ral value.
 ///
 /// There is one thunk value, `Thunk(Closure)`: a computation closed over the
-/// bindings it mentions. `{ |params| body }` and `{ body }` are told apart
-/// only by the closure's own comp shape —
-/// `Comp::arrow` answers `Some` for a `Lam`, so `apply` and the machine's
-/// `force` rule read the shape rather than a separate variant.
+/// bindings it mentions. `{ |params| body }` and `{ body }` are one
+/// variant: `apply` and the machine's `force` rule never ask which, and only a
+/// description of a value reads the shape (`Comp::lam`).
 ///
 /// Cloning copies no payload — `Str`, `Bytes`, `List`, `Map` and a closure's
 /// scope are all shared — and `Env` and variable lookup rely on it.
@@ -201,29 +200,11 @@ impl Value {
             Self::List(_) => "List",
             Self::Map(_) => "Map",
             Self::Variant { .. } => "Variant",
-            Self::Thunk(c) if c.comp().arrow().is_some() => "Lambda",
+            Self::Thunk(c) if c.comp().lam().is_some() => "Lambda",
             Self::Thunk(_) => "Block",
             Self::Native { .. } => "Native",
             Self::Handle(_) => "Handle",
         }
-    }
-
-    /// How many arguments `apply` consumes before reaching the body: the outer
-    /// `Lam` counts one, each nested `Lam` another. Being the operational
-    /// arity, it is what `validate_handler_arity` in `types/handler.rs` checks
-    /// a handler against at its install site. `None` for a `Thunk` whose
-    /// `comp.arrow()` is `None` — a block, not a lambda.
-    pub(crate) fn lambda_arity(&self) -> Option<usize> {
-        let Self::Thunk(c) = self else {
-            return None;
-        };
-        let (_, mut body) = c.comp().arrow()?;
-        let mut arity = 1;
-        while let crate::ir::CompKind::Lam { body: inner, .. } = &body.item {
-            arity += 1;
-            body = inner;
-        }
-        Some(arity)
     }
 
     /// A *shallow* size estimate in bytes, weighed against
@@ -328,7 +309,7 @@ impl fmt::Display for Value {
                 None => write!(f, "{TAG_PREFIX}{label}"),
                 Some(p) => write!(f, "{TAG_PREFIX}{label} {p}"),
             },
-            Self::Thunk(c) => match c.comp().arrow() {
+            Self::Thunk(c) => match c.comp().lam() {
                 Some((param, body)) => write!(f, "{}", fmt_lambda(param, body)),
                 None => write!(f, "<block>"),
             },

@@ -7,6 +7,13 @@ anchors: [Escape::Stopped, Break::stopped, Break::of_child, final_poll, ThreadEn
 
 # Delimiters are handlers for `poll`
 
+> Amended 2026-10-23: the sentinel drains a dead edge for as long as it is
+> held, so an external that a reader-gone stage's cleanup runs does not block
+> on the edge but runs to completion within the grace, its output discarded,
+> and a teardown reads, unmarked, every edge a reader has left (SPEC §7.6).
+> Law 6's parenthesis and the Consequences bullet "An external in a
+> reader-gone stage's cleanup …" no longer hold.
+
 > Amended 2026-10-20 by [[decisions/261020_gather|gather]]: in the construct
 > table, the `par` row is the `gather` row. `gather B` — and with it `par`,
 > `both` and `first-of`, prelude code over it — cancels and drains the

@@ -228,13 +228,12 @@ fn install_bindings(
     Ok(())
 }
 
-/// Apply the options map to a parameterised plugin block, nested under the
-/// load's own mooring, to yield its manifest.  If the plugin is already a
-/// manifest map, a non-empty options map is a load-time error; an empty one
-/// is fine.
+/// Apply the options map to a factory, nested under the load's own mooring,
+/// to yield its manifest.  If the plugin is already a manifest map, a
+/// non-empty options map is a load-time error; an empty one is fine.
 fn instantiate(val: Value, options: &Map, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     match val {
-        Value::Thunk(ref c) if c.comp().arrow().is_some() => {
+        Value::Thunk(_) => {
             ral_core::evaluator::apply(&val, vec![Value::Map(options.clone())], mooring, shell)
         }
         _ if !options.is_empty() => Err(Break::Error(load_err(
@@ -245,15 +244,10 @@ fn instantiate(val: Value, options: &Map, mooring: &Mooring, shell: &mut Shell) 
     }
 }
 
-/// Error if `val` is still a thunk after instantiation.  A `Lambda` means the
-/// plugin's one options parameter was not supplied; a `Block` means the plugin
-/// returned a block instead of a map.
+/// Error if `val` is still a block after instantiation: a factory that made
+/// one, which only a return of unknown type can slip past the checker with.
 fn check_is_manifest(val: &Value) -> Result<(), Error> {
     match val {
-        Value::Thunk(c) if c.comp().arrow().is_some() => Err(load_err(
-            "it expects its options map but none was applied; \
-             this is an internal error in load-plugin",
-        )),
         Value::Thunk(_) => Err(load_err(
             "it returned a Block as its manifest; \
              expected a Map (e.g. [name: '...', hooks: [...], keybindings: [...]])",

@@ -27,9 +27,9 @@ use crate::syntax::ast::{
     self, Ast, Head, IfBranch, ListElem, MapEntry, Options, RecordEntry, ScopeAst, Stmt, Word,
     WordLiteral,
 };
-use crate::syntax::group::{RecMember, StmtGroup, group_stmts};
+use crate::syntax::group::{self, Def};
 use crate::syntax::parser::ParseError;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
 
@@ -40,8 +40,11 @@ struct Elaborator {
     /// Prelude exports, in scope beneath every lexical frame.  Shared and never
     /// mutated, so an elaboration bumps a refcount rather than cloning the set.
     prelude: Arc<HashSet<String>>,
-    /// Bound names, innermost last; the base frame holds the caller's bindings.
+    /// Bound names, innermost last; the base frame holds the caller's bindings,
+    /// the one above it the top-level statements' own.
     lexical_scopes: Vec<HashSet<Name>>,
+    /// The stretches being elaborated, innermost last.
+    stretches: Vec<StretchGraph>,
     /// Attached to every emitted `Comp`; narrowed and restored by `with_span`,
     /// which every traversal that knows a tighter byte range wraps its body in.
     current_span: Option<Span>,
@@ -52,6 +55,22 @@ struct Elaborator {
     /// Elaboration's one failure path, checked by `elaborate` once the walk is
     /// done — a single slot beats threading `Result` through every traversal.
     error: Option<ParseError>,
+}
+
+/// A stretch under elaboration (SPEC §5.7): the references that resolve to
+/// its members are the edges of its dependency graph.
+struct StretchGraph {
+    /// The frame of `lexical_scopes` the stretch binds into.
+    frame: usize,
+    /// Each member's index, by name.
+    members: HashMap<Name, usize>,
+    /// The member being elaborated.
+    current: usize,
+    /// `edges[i]`: the members member `i` refers to.
+    edges: Vec<Vec<usize>>,
+    /// The names that block definitions further down the list, past the
+    /// stretch, define.
+    later: HashSet<Name>,
 }
 
 /// Wrap a `CompKind` using the elaborator's current span.
@@ -74,7 +93,8 @@ impl Elaborator {
         Self {
             counter: 0,
             prelude: prelude_scope(),
-            lexical_scopes: vec![bindings.into_iter().collect()],
+            lexical_scopes: vec![bindings.into_iter().collect(), HashSet::new()],
+            stretches: Vec::new(),
             current_span: None,
             script: script.map(crate::path::shown),
             error: None,
@@ -87,6 +107,7 @@ impl Elaborator {
     /// lexicality by construction.
     fn variable_val(&mut self, name: &str) -> Val {
         if name != "SCRIPT" {
+            self.refer(name);
             return Val::Variable(name.into());
         }
         if let Some(s) = &self.script {
@@ -164,6 +185,36 @@ impl Elaborator {
             || self.prelude.contains(name)
     }
 
+    /// Note a reference to `name`: refused if a block further down the list
+    /// defines it past the stretch and the body does not bind it above; an
+    /// edge if it resolves to a member of the stretch under elaboration.  Each
+    /// list has a frame of its own, so a frame below a stretch's is outside it.
+    fn refer(&mut self, name: &str) {
+        let frame = self.lexical_scopes.iter().rposition(|s| s.contains(name));
+        if self
+            .stretches
+            .iter()
+            .any(|s| s.later.contains(name) && frame.is_none_or(|f| f < s.frame))
+        {
+            self.refuse(
+                self.current_span,
+                &format!(
+                    "a block further down defines `{name}`, but a statement between them \
+                     hides it from this block; move that definition up, so that only block \
+                     definitions stand between them, or rename it"
+                ),
+            );
+        }
+        let Some(frame) = frame else {
+            return;
+        };
+        if let Some(stretch) = self.stretches.iter_mut().rev().find(|s| s.frame == frame)
+            && let Some(&member) = stretch.members.get(name)
+        {
+            stretch.edges[stretch.current].push(member);
+        }
+    }
+
     /// Every name-dispatched head (`bare`, `^name`, `./path`, `~/path`) funnels
     /// through here.
     fn exec(&self, head: CommandWord, args: Args, redirects: Redirects<Val>) -> Comp {
@@ -199,37 +250,79 @@ impl Elaborator {
         wrap_binds(self.current_span, binds, comp)
     }
 
-    /// Forward-declares a recursive knot's own names, then elaborates each
-    /// member's RHS to its thunk body, sharing one `group` `Arc` — Levy's
-    /// `rec x⃗. M⃗`.  Confining the forward declaration to the group, rather
-    /// than scanning ahead over earlier statements, keeps a preceding
-    /// command use of the same name lowering to `Exec` instead of a
-    /// dangling `Force(Variable)`.
-    fn build_rec_group(&mut self, members: &[RecMember<'_>]) -> Arc<GroupNode> {
-        for RecMember { name, .. } in members {
-            self.bind(name.span, [name.item.into()]);
+    /// A stretch (SPEC §5.7) as bindings: all its names are bound before any
+    /// member elaborates; components come dependencies first, a cyclic one
+    /// as one `Rec` group, Levy's `rec x⃗. M⃗`.
+    fn elab_stretch(
+        &mut self,
+        defs: &[Def<'_>],
+        after: &[group::Part<'_>],
+    ) -> Vec<(Option<Span>, Name, Comp)> {
+        for def in defs {
+            self.bind(def.name.span, [def.name.item.clone()]);
         }
-        let members: Vec<(Name, Arc<Comp>)> = members
-            .iter()
-            .map(|RecMember { name, value }| {
-                let mut empty = Vec::new();
-                let CompKind::Return(Val::Thunk(node)) = self
-                    .with_span(value.span, |this| this.elab_expr(&value.item, &mut empty))
-                    .item
-                else {
-                    unreachable!(
-                        "group.rs only emits lambda/block LetRec RHS, \
-                         which elaborate to Return(Thunk(_))"
-                    )
-                };
-                debug_assert!(
-                    empty.is_empty(),
-                    "lambda/block elaboration must not hoist into outer binds"
+        self.stretches.push(StretchGraph {
+            frame: self.lexical_scopes.len() - 1,
+            members: defs
+                .iter()
+                .enumerate()
+                .map(|(i, def)| (def.name.item.clone(), i))
+                .collect(),
+            current: 0,
+            edges: vec![Vec::new(); defs.len()],
+            later: after
+                .iter()
+                .flat_map(group::Part::defs)
+                .map(|def| def.name.item.clone())
+                .collect(),
+        });
+        let mut rhs: Vec<Option<Comp>> = Vec::with_capacity(defs.len());
+        for (i, def) in defs.iter().enumerate() {
+            self.stretches.last_mut().expect("pushed above").current = i;
+            rhs.push(Some(
+                self.with_span(def.span, |this| this.elab_let_rhs(def.value)),
+            ));
+        }
+        let mut edges = self.stretches.pop().expect("pushed above").edges;
+        for refs in &mut edges {
+            refs.sort_unstable();
+            refs.dedup();
+        }
+        let name = |i: usize| -> Name { defs[i].name.item.clone() };
+        let mut bindings = Vec::with_capacity(defs.len());
+        for component in group::sccs(&edges) {
+            let mut take = |i: usize| rhs[i].take().expect("each member is in one component");
+            if let [i] = component[..]
+                && !edges[i].contains(&i)
+            {
+                bindings.push((defs[i].span, name(i), take(i)));
+                continue;
+            }
+            let group = GroupNode::new(
+                component
+                    .iter()
+                    .map(|&i| {
+                        let CompKind::Return(Val::Thunk(node)) = take(i).item else {
+                            unreachable!("a block or lambda elaborates to Return(Thunk(_))")
+                        };
+                        (name(i), Arc::clone(node.shape()))
+                    })
+                    .collect(),
+            );
+            bindings.extend(component.iter().enumerate().map(|(index, &i)| {
+                let span = defs[i].value.span;
+                let rec = Spanned::with_span(
+                    span,
+                    CompKind::Rec {
+                        group: Arc::clone(&group),
+                        index,
+                    },
                 );
-                (name.item.into(), Arc::clone(node.shape()))
-            })
-            .collect();
-        GroupNode::new(members.into())
+                let comp = Spanned::with_span(span, CompKind::Return(Val::thunk(Arc::new(rec))));
+                (span, name(i), comp)
+            }));
+        }
+        bindings
     }
 
     /// One top-level phrase (depth 0): a `let` becomes a `Define`,
@@ -258,38 +351,6 @@ impl Elaborator {
         })
     }
 
-    /// A recursive knot at depth 0: *n* `Define`s, `xᵢ = Return(Thunk(Rec{group,
-    /// i}))`, sharing one `group` `Arc`.
-    fn toplevel_rec_group(&mut self, members: &[RecMember<'_>]) -> Unchecked {
-        let group = self.build_rec_group(members);
-        members
-            .iter()
-            .enumerate()
-            .map(|(index, RecMember { name, value })| {
-                let span = value.span;
-                let rec = Spanned::with_span(
-                    span,
-                    CompKind::Rec {
-                        group: Arc::clone(&group),
-                        index,
-                    },
-                );
-                let comp = Arc::new(Spanned::with_span(
-                    span,
-                    CompKind::Return(Val::thunk(Arc::new(rec))),
-                ));
-                Spanned::with_span(
-                    span,
-                    Phrase::Define {
-                        pattern: Arc::new(Pattern::Name(name.item.into())),
-                        comp,
-                        schemes: (),
-                    },
-                )
-            })
-            .collect()
-    }
-
     /// Elaborate `stmts` at depth > 0 — every block or lambda body — right-
     /// nesting each statement into a `Bind` chain over what follows it, so
     /// `{ a; b }` is `a to _. b`.  The tail of the block is its last
@@ -297,10 +358,17 @@ impl Elaborator {
     /// has tail `Return(Unit)`.
     fn stmts_nested(&mut self, stmts: &[Stmt]) -> Comp {
         let mut units: Vec<(Option<Span>, NestedUnit)> = Vec::new();
-        for group in group_stmts(stmts) {
-            match group {
-                StmtGroup::Single(stmt) => units.push(self.nested_single(stmt)),
-                StmtGroup::LetRec(bindings) => units.extend(self.nested_rec_group(&bindings)),
+        let parts = group::parts(stmts);
+        for (k, part) in parts.iter().enumerate() {
+            match part {
+                group::Part::Stmt(stmt) => units.push(self.nested_single(stmt)),
+                group::Part::Stretch(defs) => {
+                    let bindings = self.elab_stretch(defs, &parts[k + 1..]);
+                    units.extend(bindings.into_iter().map(|(span, name, rhs)| {
+                        let pattern = Pattern::Name(name);
+                        (span, NestedUnit::Bind { rhs, pattern })
+                    }));
+                }
             }
         }
         let mut rev = units.into_iter().rev();
@@ -340,34 +408,6 @@ impl Elaborator {
             let comp = this.stmt(kind);
             (span, NestedUnit::Other { comp })
         })
-    }
-
-    /// A recursive knot at depth > 0: *n* nested `Bind`s over `Return(Thunk(
-    /// Rec{group, i}))`, sharing one `group` `Arc`, in source order.
-    fn nested_rec_group(&mut self, members: &[RecMember<'_>]) -> Vec<(Option<Span>, NestedUnit)> {
-        let group = self.build_rec_group(members);
-        members
-            .iter()
-            .enumerate()
-            .map(|(index, RecMember { name, value })| {
-                let span = value.span;
-                let rec = Spanned::with_span(
-                    span,
-                    CompKind::Rec {
-                        group: Arc::clone(&group),
-                        index,
-                    },
-                );
-                let rhs = Spanned::with_span(span, CompKind::Return(Val::thunk(Arc::new(rec))));
-                (
-                    span,
-                    NestedUnit::Bind {
-                        rhs,
-                        pattern: Pattern::Name(name.item.into()),
-                    },
-                )
-            })
-            .collect()
     }
 
     /// A head applied to `args`, with the stage's trailing `redirects`.
@@ -415,15 +455,19 @@ impl Elaborator {
                 // bound block inside the redirect frame wrapped
                 // around it.
                 let head_comp = self.with_span(head.span, |this| {
+                    this.refer(s);
                     comp!(this, CompKind::Force(Val::Variable(s.clone().into())))
                 });
                 self.apply_head(head_comp, arg_vals, redirect_vals)
             }
-            Head::Bare(s) => self.exec(
-                CommandWord::Name(CommandName::Bare(s.clone().into())),
-                desugar_zero_arg_exit(s, arg_vals),
-                redirect_vals,
-            ),
+            Head::Bare(s) => {
+                self.with_span(head.span, |this| this.refer(s));
+                self.exec(
+                    CommandWord::Name(CommandName::Bare(s.clone().into())),
+                    desugar_zero_arg_exit(s, arg_vals),
+                    redirect_vals,
+                )
+            }
             Head::Path(path) => self.exec(
                 CommandWord::Name(CommandName::Path(path.clone())),
                 arg_vals,
@@ -1174,8 +1218,8 @@ pub(crate) fn word_val(s: &str) -> Val {
 
 /// Elaborate a top-level statement sequence into unchecked phrases.
 ///
-/// Each `let` becomes a `Define`, a `let`-knot becomes one `Define` per
-/// member sharing a `Rec` group, and everything else a `Run`.
+/// Each `let` becomes a `Define`, the members of a recursive group sharing
+/// one `Rec` group, and everything else a `Run`.
 ///
 /// `bindings` are the names already live in the calling environment (a REPL's
 /// accumulated definitions, say); the prelude is always in scope.  `script` is
@@ -1191,10 +1235,21 @@ pub fn elaborate(
 ) -> Result<Unchecked, ParseError> {
     let mut elaborator = Elaborator::new_with_bindings(bindings, script);
     let mut phrases = Vec::new();
-    for group in group_stmts(ast) {
-        match group {
-            StmtGroup::Single(stmt) => phrases.push(elaborator.toplevel_phrase(stmt)),
-            StmtGroup::LetRec(rec) => phrases.extend(elaborator.toplevel_rec_group(&rec)),
+    let parts = group::parts(ast);
+    for (k, part) in parts.iter().enumerate() {
+        match part {
+            group::Part::Stmt(stmt) => phrases.push(elaborator.toplevel_phrase(stmt)),
+            group::Part::Stretch(defs) => {
+                let bindings = elaborator.elab_stretch(defs, &parts[k + 1..]);
+                phrases.extend(bindings.into_iter().map(|(span, name, rhs)| {
+                    let define = Phrase::Define {
+                        pattern: Arc::new(Pattern::Name(name)),
+                        comp: Arc::new(rhs),
+                        schemes: (),
+                    };
+                    Spanned::with_span(span, define)
+                }));
+            }
         }
     }
     if let Some(e) = elaborator.error {

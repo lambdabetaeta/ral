@@ -34,7 +34,8 @@ Submodules:
   (`GrantLayer::from_capabilities`, or `guard::decode_capability_map`;
   [[design/capability-freeze|freeze boundary]]), holding its rules and nothing
   beside them; `GrantPath<R> { written, real }`, a spelling and what its walk
-  made of it, `R` an `Extent` (`Everywhere` or `Under(RealPath)`) for an allowance
+  made of it, `R` an `Extent` (`Everywhere`, or `Under { position, passed }`: a
+  position and what the walk passed on the way) for an allowance
   (`Everywhere` is the root spelling `/` on any host, or a Unix walk that reached `/`)
   and an `Excluded` for an exclusion; `Net` (`Offline`, the one opinion a layer
   holds on the network), the verb sets `BTreeSet<EditorVerb>` and
@@ -161,7 +162,9 @@ grant string becomes a frozen path.
   the `path` selector (`path_dirs`, over the pure `path_dirs_in`, which
   classifies each absolute `PATH` entry raw, as an `absolute` payload, before
   the freeze folds it), and
-  `refuse_the_world`, the guard both it and the toolchain overrides call;
+  `refuse_the_world`, the guard both it and the toolchain overrides call, over
+  `the_world`, the one predicate for a root, the home or an ancestor of it,
+  which the floor reads too;
   `FrozenPath::freeze` refuses a path that is not Unicode;
 - `toolchains.rs` — every other directory selector as one table: `enum
   Toolchain` (`system` and the package managers), each a few `Location`s of
@@ -170,8 +173,9 @@ grant string becomes a frozen path.
   `PathBuf`s (shown only in a refusal), its live wrapper `expand`
   (what `FreezeCtx::selector` calls), and
   `FLOOR`, the four system-wide prefixes (`homebrew`, `macports`, `nix`,
-  `pkgsrc`) that `fs::floor` reads through `floor` and keeps only outside the
-  process's home ([[design/grant|grant]] §Selectors states the rules);
+  `pkgsrc`) that `fs::floor` reads through `floor` and keeps only what is
+  neither in the process's home nor `the_world` ([[design/grant|grant]]
+  §Selectors states the rules);
 - `decode.rs` — `decode_capability_map`, which walks a `grant [...]` /
   `--capabilities` `Value` map into a resolved `GrantLayer`, one dimension
   decoder per `exec` / `fs` / `net` / `editor` / `shell` key, nested tables
@@ -222,15 +226,15 @@ Path resolution is `core/src/path/`: lexical stages, then one walk, plus
   digits of the SHA-256 of the cwd's exact OS bytes (UTF-16 units on Windows), so
   two cwds that differ at all key apart: `-Users-x-proj-25cf7293a3713b73`;
 - canon — `canon.rs`, the names one object answers to for the kernel
-  sandboxes: firmlink twins (`match_variants`) and the lexical `lookup_walk`
-  set, the ancestors of a spelling (itself included where it differs from its
-  real path) and the proper ancestors of the real path; what an object is, and
-  where a spelling reaches it, is the walk's to say;
+  sandboxes: firmlink twins (`match_variants`); what an object is, and where a
+  spelling reaches it, is the walk's to say;
 - locate — `walk.rs`, the one resolver: `walk` descends from the root through
   directory handles with no symlink followed by the kernel, splicing each link
   into the name itself (a link's target read through the handle held on it), and
   hands back a `Located` — the directory handle, the leaf, and the `Trace` whose
-  `RealPath` is symlink-free — whose every operation is handle-relative. Each
+  `RealPath` is symlink-free and whose `passed` names each link whose target it
+  read and each directory a `..` climbed out of — whose every operation is
+  handle-relative. Each
   step is one host primitive, `step`, reading the child's stored name and identity
   from the handle just opened (Linux the name `openat` resolved, macOS the
   parent's listing for that identity, Windows the normalized name checked against
@@ -469,8 +473,8 @@ VM boundary are the only confinement of grandchildren.
   asking to confine itself (`--warrant`) is refused with 126, and the pinned
   self serves to grant the container read on the bundled-tool re-exec image.
   `Pinned::verify`, the parent-side swap guard, is macOS's alone, which execs
-  the trampoline by name; Linux execs it from ral's pin lent at
-  `Slot::Trampoline`, so there is no name to verify.
+  the trampoline by name; Linux execs it from ral's pin, lent like every
+  descriptor, so there is no name to verify.
 - `projection.rs` — the sandbox's own view of authority:
   `SandboxProjection::of(&GrantStack, &Floor, Option<&Admitted>)`
   meet-folds the stack once, at spawn, into `FsProjection` (`read:
@@ -500,12 +504,12 @@ VM boundary are the only confinement of grandchildren.
   by the real path the guard judged, its spelling as `argv[0]`, or a
   `Program::Tool`. macOS
   and Linux share one trampoline: the pinned ral itself, whose whole argv is
-  `ral --warrant` (`Role::Warrant`). The confinement to enter and the program to
+  `ral --warrant <fd>` (`Role::Warrant`), the warrant's descriptor. The confinement to enter and the program to
   run cross in a `Warrant` (`sandbox/warrant.rs`, its fields private) compiled in
   the parent. The confinement is the `Confinement` trait — `spell`, `parse`,
   `enter` — implemented on macOS by `Seatbelt(String)`, the profile
   `macos::build_profile` compiled, and on Linux by `Option<Landlocked>`, spelled
-  `unconfined`, `landlock` or `landlock+refer`;
+  `unconfined`, `landlock@<fd>` or `landlock+refer@<fd>`, the ruleset's descriptor;
   the program is a `Run`, `File(path, args)` or `Tool(tool, args)`.
   `Warrant::confine` is the only way to the program: receive and verify the
   warrant, enter the confinement (`macos::apply_profile`, `Landlocked::enter`),
@@ -515,26 +519,30 @@ VM boundary are the only confinement of grandchildren.
   failure before the program starts exits 126, and an `execve` refusal takes its
   code from `SpawnFailure` (`From<&io::Error>`) — 126, or 127 for a missing
   program.
-  The encoding is NUL-terminated fields behind a `ral-warrant/2` magic — a
+  The encoding is NUL-terminated fields behind a `ral-warrant/3` magic — a
   `file` is its real path, then its `argv[0]` spelling, then the exclusion covering its script's interpreter (empty if none), then its argv; a `tool`
   its name, then its argv — canonical (decode re-encodes and compares) and at
-  most 8 MiB. It rides fd 99,
-  never argv: a sealed memfd on Linux, checked again after sealing, and on macOS
-  a prefilled socketpair whose writer closes before the child exists; the child
-  refuses an unsealed memfd or a non-socket. The fixed descriptor layout is
-  defined once as `Slot` in `warrant.rs`: 98 bwrap `--args`, 99 the warrant,
-  100 `--info-fd` (a socketpair, which unlike a pipe cannot be reopened through
-  `/proc`), 101 the Landlock ruleset, 102 ral's pin, the trampoline bwrap
-  execs, 103.. the seccomp programs (sealed
-  memfds), 107.. one mount handle per bind, open-ended and last. One `Handoff` lifts every source above every target and a
-  single `pre_exec` `dup2`s each home; the child sweeps everything from 98 up
-  with `close_range` once confined, and `Landlocked::enter` consumes the ruleset. `bwrap_command` refuses to launch if
-  bwrap's pin fd sits on one of these slots: the `dup2` would close it before
-  the exec of `/proc/self/fd/<N>`, which would then run whatever landed there.
+  most 8 MiB. It rides a descriptor, only its number in argv: a sealed
+  memfd on Linux, checked again after sealing, and on macOS a prefilled
+  socketpair whose writer closes before the child exists; the child
+  refuses an unsealed memfd or a non-socket. Every descriptor a launch
+  hands down crosses at the number a `Handoff` lifted it to, from 98 up
+  (`Slot`): bwrap's `--args`, the warrant, `--info-fd` (a socketpair,
+  which unlike a pipe cannot be reopened through `/proc`) and the
+  payload's copy of its writer, whose sweep ends the parent's read once
+  the payload's group exists, the Landlock ruleset, ral's pin, the
+  trampoline bwrap execs, the seccomp programs (sealed memfds) and one
+  mount handle per bind. The child's one `pre_exec` only clears
+  close-on-exec: nothing is `dup2`'d, so no descriptor it still uses
+  (`std`'s exec-error pipe, `detach`'s handshake) can be displaced. Each
+  number is named as data: to bwrap in its options, the ruleset's in the
+  warrant's confinement, the warrant's in the trampoline's argv. The
+  child sweeps everything from 98 up with `close_range` once confined,
+  and `Landlocked::enter` consumes the ruleset.
   macOS spawns the trampoline directly; Linux spawns it under `bwrap`
   (`bwrap_command`), giving the full shape **bwrap → ral trampoline
-  → Landlock → `execve`**. The real argv is `bwrap --args 98 --
-  /proc/self/fd/102 --warrant`: `bwrap_argv` is pure in descriptors and returns bwrap's options alone, which
+  → Landlock → `execve`**. The real argv is `bwrap --args <a> --
+  /proc/self/fd/<t> --warrant <w>`: `bwrap_argv` is pure in descriptor numbers and returns bwrap's options alone, which
   bwrap takes from `--args`. The order is forced rather than chosen: a Landlock
   domain handling any fs right forbids `mount(2)`, bwrap's first act, so the
   layer can only be entered *inside* the envelope bwrap has already built.
@@ -562,8 +570,8 @@ VM boundary are the only confinement of grandchildren.
   write prefixes, the image, each allowed file and live allowed directory of
   the `ExecRules` of the `ExecProjection`, and the cgroup tree in the `Over` layer, each object
   (`render_objects`: a path's canonical spelling, its other spellings mounted
-  too unless within another bind) opened once by `open_nofollow` and lent per
-  bind at `Slot::Mount(i)`. A read-only bind within another bind is dropped, a
+  too unless within another bind) opened once by `open_nofollow` and lent once per
+  bind. A read-only bind within another bind is dropped, a
   writable one only within a writable one; an absent object drops its binds,
   and so does a system default this user may not reach, while a name now
   reaching outside what was rendered refuses the launch. Every allowance is
@@ -572,7 +580,8 @@ VM boundary are the only confinement of grandchildren.
   (`Binds::names`): a mount laid inside one bind of an object does not show
   at another, so a prefix written through a symlink, two binds of one
   handle, is masked at both. A deny hiding `/proc` is refused,
-  the envelope starting its trampoline through it. The two pins join the `Over` layer by copies of their own
+  the envelope starting its trampoline through it, and so is one holding the
+  working directory, which no `--chdir` can enter. The two pins join the `Over` layer by copies of their own
   descriptors, read-only at the names their inodes hold now (`pinned`, over
   `Pinned::names`), an unlinked pin binding nothing. `bwrap_argv` emits
   `--ro-bind-fd`/`--bind-fd` from the same vector, `Shown`,
@@ -631,8 +640,9 @@ permanent mutations, and neither witnesses the other**: the mandatory-integrity
 check runs before the `AppContainer` pass, and an unlabeled object defaults to
 `Medium`, refusing every `Low`-IL child whatever the DACL says — so
 `ensure_low_integrity_label` also stamps a `Low` `SYSTEM_MANDATORY_LABEL_ACE`,
-asked *before* the ACE's witness is consulted and witnessed under its own stamp
-key and its own SACL probe. For each mutation two witnesses gate skipping it —
+asked *before* anything about the ACE, even where the well-known `AppContainer`
+SIDs make the ACE itself redundant, and witnessed under its own stamp key and
+its own SACL probe. For each mutation two witnesses gate skipping it —
 the completion store (`stamps.json` in that directory, replaced whole and atomically by `OwnDir::store`, per-path
 named-mutex merge) recording completed propagations, and a probe of the root's
 own DACL confirming its ACE remains. Before an ACE is reapplied, its old
@@ -640,15 +650,16 @@ completion witness is removed under the path mutex; recording follows
 the apply, so a crash mid-propagation leaves no witness and the next grant
 re-stamps idempotently while a child in the interim fails closed. A spawn's
 kernel-checked reach is then exactly the capability SIDs `session::confine`
-mints into its token, so attenuation shrinks-only: a narrowed grant or subagent
-gets a token lacking the wider paths' capabilities. An ACE lives on the NTFS
+mints into its token, those of its own launch's grants and no other's, so
+attenuation shrinks-only: a narrowed grant or subagent gets a token lacking the
+wider paths' capabilities. An ACE lives on the NTFS
 object and Windows does not re-inherit on a same-volume rename, so stamped
 authority is object-sticky where a grant rule is path-based — `dacl/mod.rs`'s module
 header records the resulting drift in both directions
 ([[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]]).
-Every frozen allowance is checked before any stamp filter and stamped through a held handle on the very object checked, no redirecting reparse point on its path (a redirected one refuses the launch; a name surrogate redirects, a cloud placeholder does not; [[internals/confined-launch|confined-launch]]), and a position that is not Unicode refused as `DaclError::NotUnicode`, since a Windows grant names its object by text; the projection key covers the whole `read` list, places and live support included; and a launch whose fs projection holds the universal prefix is refused before anything is stamped.
+Every frozen allowance is checked before the session's memo and stamped through a held handle on the very object checked, no redirecting reparse point on its path (a redirected one refuses the launch; a name surrogate redirects, a cloud placeholder does not; [[internals/confined-launch|confined-launch]]), and a position that is not Unicode refused as `DaclError::NotUnicode`, since a Windows grant names its object by text; and a launch whose fs projection holds the universal prefix is refused before anything is stamped.
 Within that shape: an AppContainer profile is still minted per *distinct fs
-projection* (`SessionSandbox` maps `bind_spec` identity to profile) for the
+projection* (`SessionSandbox` maps `ProjectionKey` to profile) for the
 deny-by-default token and named-object namespace separation, carrying no fs
 authority, and `DaclManager` is the profile ledger — teardown deletes profiles
 but restores no ACEs. **A deny stamps nothing**: the `AppContainer` pass of the
@@ -670,7 +681,7 @@ on every object beneath it, refusing the launch if any right is granted — an
 `ALL APPLICATION PACKAGES` ACE, or a hard link carrying a granted file's ACE.
 The walk checks reparse points as themselves without following them, polls
 cancel per entry, and refuses an exclusion it cannot read. The child's program image
-is granted read-only so a user-installed binary or the bundled-tool self image
+is granted read-only, to its own launch, so a user-installed binary or the bundled-tool self image
 can load at all, handed to `session::confine` as a `RealPath`, so the
 canonical form the pin and the stamp's local-prefix allow-list demand is the
 type's, not the caller's care; and `` net: `offline `` is enforced by withholding the network

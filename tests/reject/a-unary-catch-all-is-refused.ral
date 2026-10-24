@@ -1,0 +1,2 @@
+# contains: its two parameters are the name and the argv
+within [handler: { |args| echo hi }] { foo }

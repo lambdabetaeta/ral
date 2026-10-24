@@ -154,6 +154,31 @@ fn only_a_read_write_directory_grant_takes_the_label() {
     });
 }
 
+/// `ALL APPLICATION PACKAGES`, which every `AppContainer` token carries.
+const ALL_APPLICATION_PACKAGES: &str = "S-1-15-2-1";
+
+/// A read-write directory every sandbox may already write needs no capability
+/// ACE, and still takes the `Low` label: no ACE admits a create without it.
+#[test]
+fn a_read_write_directory_every_sandbox_may_write_takes_the_label_and_no_ace() {
+    with_scoped_state_dir(|| {
+        let td = tempfile::tempdir().unwrap();
+        let canonical = real(td.path());
+        let covering = pin(&canonical, GrantKind::ReadWrite).unwrap().unwrap();
+        apply_explicit_ace(covering.target(), ALL_APPLICATION_PACKAGES, RW_MASK, true).unwrap();
+        assert!(!labelled(&canonical));
+
+        grant(&canonical, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
+        assert!(labelled(&canonical));
+        assert!(!ace_present(
+            &canonical,
+            CAP_SID,
+            GrantKind::ReadWrite,
+            true
+        ));
+    });
+}
+
 /// A wall or an Esc must be able to end the stamp, and end it having
 /// touched nothing.
 #[test]

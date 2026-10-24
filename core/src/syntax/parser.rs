@@ -1467,6 +1467,22 @@ impl Parser {
             .is_some_and(|l| l.span.start == end)
     }
 
+    /// The numeral the sign at the cursor spells with the word it touches,
+    /// when the pair is one.  `$[…]` lexes every sign as an operator; where a
+    /// value is due, one is not.
+    fn signed_numeral(&self) -> Option<String> {
+        let Token::Op(Operator::Binary(BinaryOp::Arith(sign @ (ArithOp::Add | ArithOp::Sub)))) =
+            self.peek()
+        else {
+            return None;
+        };
+        let Token::Word(Word::Plain(word)) = self.peek_at(1) else {
+            return None;
+        };
+        let numeral = format!("{sign}{word}");
+        (self.touches_next() && numeral::shape(&numeral).is_some()).then_some(numeral)
+    }
+
     /// An atom begins where `unit` ends.
     fn touches_after(&self, unit: Span) -> bool {
         self.atom_starts_at(0, unit.end)
@@ -1687,9 +1703,14 @@ impl Parser {
         self.at_stmt_end() || self.peek() == &Token::Question || self.peek() == &Token::Pipe
     }
 
-    /// word = WORD | QUOTED | INTERP | deref | force | expr-block
+    /// word = WORD | sign WORD | QUOTED | INTERP | deref | force | expr-block
     fn parse_word(&mut self) -> Result<Ast, ParseError> {
         match self.peek().clone() {
+            _ if let Some(numeral) = self.signed_numeral() => {
+                self.advance();
+                self.advance();
+                Ok(Ast::Word(Word::Plain(numeral)))
+            }
             Token::Word(w) => {
                 self.advance();
                 Ok(Ast::Word(w))
@@ -1746,25 +1767,29 @@ impl Parser {
             .with_hint(hint)
     }
 
-    /// Separators and closers, at which a backtick tag stays nullary.  It is
-    /// otherwise greedy: anything value-shaped after it becomes the payload.
+    /// Separators, closers, and `$[…]`'s operators other than a numeral's
+    /// sign, at which a backtick tag stays nullary.  It is otherwise greedy:
+    /// anything value-shaped after it becomes the payload.
     fn at_tag_payload_end(&self) -> bool {
-        matches!(
-            self.peek(),
-            Token::Newline
-                | Token::Semi
-                | Token::Eof
-                | Token::RBrace
-                | Token::RBracket
-                | Token::RParen
-                | Token::Pipe
-                | Token::Question
-                | Token::Comma
-                | Token::Colon
-                | Token::Spread
-                | Token::Redirect { .. }
-                | Token::StderrToStdout
-        )
+        match self.peek() {
+            Token::Op(_) => self.signed_numeral().is_none(),
+            tok => matches!(
+                tok,
+                Token::Newline
+                    | Token::Semi
+                    | Token::Eof
+                    | Token::RBrace
+                    | Token::RBracket
+                    | Token::RParen
+                    | Token::Pipe
+                    | Token::Question
+                    | Token::Comma
+                    | Token::Colon
+                    | Token::Spread
+                    | Token::Redirect { .. }
+                    | Token::StderrToStdout
+            ),
+        }
     }
 
     /// force = '!' variable index* | '!' primary — both callers leave the `!`
@@ -2085,6 +2110,7 @@ impl Parser {
                 p.end_unit(span)?;
                 Ok(*expr.item)
             }
+            _ if p.signed_numeral().is_some() => p.parse_atom(),
             Token::Op(Operator::Binary(BinaryOp::Arith(ArithOp::Sub))) => {
                 let minus = p.span();
                 p.advance();

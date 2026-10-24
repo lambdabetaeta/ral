@@ -19,7 +19,7 @@ pub(crate) enum Leaf<'a> {
 impl Leaf<'_> {
     pub(crate) fn kind(&self) -> Opaque {
         match self {
-            Self::Thunk(c) if c.comp().arrow().is_none() => Opaque::Block,
+            Self::Thunk(c) if c.comp().lam().is_none() => Opaque::Block,
             Self::Thunk(_) | Self::Native(..) => Opaque::Function,
             Self::Handle => Opaque::Handle,
         }

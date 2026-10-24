@@ -13,6 +13,17 @@ not inferred from the value's runtime shape, and arity is validated at install
 time: a bare block `{ … }`, a non-lambda value, or a lambda of the wrong arity is
 rejected with a clear error.**
 
+> *Amended 2026-10-23*: arity is the arm's type, not its spelling. The hard
+> rule now reads: a per-name handler and every alias takes one parameter,
+> the argv; a catch-all takes two, the name and the argv; anything else — a
+> value that is no block, or a block whose type takes other parameters — is
+> refused where it is written and again where it is installed. A bare block
+> is refused when its type takes no parameter, as `{ echo hi }`'s does, not
+> because it is bare: `{ forward 'git' }`, whose body is a function of the
+> argv, is an arm. The convention stays positional; what changed is the
+> evidence (`Inferencer::arm`), since a block's shape cannot say what a
+> computed or polymorphic block takes (`let w = wrap $h`).
+
 ## Why arity cannot be inferred from the value
 
 A per-name handler is invoked with the command's argument list; a catch-all is

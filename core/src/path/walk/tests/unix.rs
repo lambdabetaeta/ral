@@ -375,8 +375,49 @@ fn a_dotdot_in_a_link_target_pops_one_step() {
     symlink("../f", dir.join("a/b/l")).unwrap();
     let located = located(&dir.join("a/b/l")).unwrap();
     let plain = walk(&spelled(&dir.join("a/f")), LeafMode::Follow).unwrap();
-    assert_eq!(located.trace(), plain.trace());
+    assert_eq!(located.trace().steps(), plain.trace().steps());
+    assert_eq!(located.trace().tail(), plain.trace().tail());
     assert_eq!(located.real().as_path(), dir.join("a/f"));
+}
+
+/// What a walk passes besides its steps is in its trace, by position: each
+/// link whose target it read, a chain's middle one too, and each directory
+/// a `..` climbed out of.
+#[test]
+fn a_trace_keeps_what_the_walk_passed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    for made in ["sub", "real", "d"] {
+        std::fs::create_dir(dir.join(made)).unwrap();
+    }
+    symlink("sub/../real", dir.join("middle")).unwrap();
+    symlink(dir.join("middle"), dir.join("link")).unwrap();
+    symlink("../real", dir.join("d/up")).unwrap();
+    let passed = |trace: &Trace| -> Vec<PathBuf> {
+        (trace.passed().iter())
+            .map(|p| p.as_path().to_path_buf())
+            .collect()
+    };
+
+    let chain = located(&dir.join("link")).unwrap();
+    assert_eq!(chain.real().as_path(), dir.join("real"));
+    assert_eq!(
+        passed(chain.trace()),
+        [dir.join("link"), dir.join("middle"), dir.join("sub")]
+    );
+    assert_eq!(
+        serde_json::from_value::<Trace>(json(chain.trace())).unwrap(),
+        *chain.trace()
+    );
+
+    assert_eq!(located(Path::new("/..")).unwrap().trace().passed(), []);
+
+    let beneath = entered(&dir.join("d"))
+        .unwrap()
+        .locate(&name("up"), LeafMode::Follow)
+        .unwrap();
+    assert_eq!(beneath.real().as_path(), dir.join("real"));
+    assert_eq!(passed(beneath.trace()), [dir.join("d/up"), dir.join("d")]);
 }
 
 /// A missing leaf has a one-name tail and a trace without a kind.
@@ -472,8 +513,8 @@ fn a_lenient_walk_folded_away_to_its_end_enters_the_directory() {
 
 /// A lenient walk whose tail folds away resumes from the directory it holds,
 /// so a `..` past it climbs that directory: `w/l`, a link to
-/// `missing/../../secret`, is fixed at `secret` beside `w`, the trace the
-/// walk makes once `missing` is there.
+/// `missing/../../secret`, is fixed at `secret` beside `w`, the steps and tail
+/// the walk makes once `missing` is there.
 #[test]
 fn a_lenient_dotdot_past_its_tail_climbs_the_held_directory() {
     let tmp = tempfile::tempdir().unwrap();
@@ -485,7 +526,10 @@ fn a_lenient_dotdot_past_its_tail_climbs_the_held_directory() {
     assert_eq!(trace.tail(), [name("secret")]);
     assert_eq!(trace.real().as_path(), dir.join("secret"));
     std::fs::create_dir(dir.join("w/missing")).unwrap();
-    assert_eq!(walked(), trace);
+    let there = walked();
+    assert_eq!(trace.steps(), there.steps());
+    assert_eq!(trace.tail(), there.tail());
+    assert_eq!(trace.real(), there.real());
 }
 
 /// A lenient walk ends its steps at a name it cannot enter and keeps the
@@ -560,6 +604,7 @@ fn a_trace_decodes_checked_and_recomputed() {
                 .cloned()
                 .collect(),
             tail.to_vec(),
+            Vec::new(),
         ))
     };
     assert!(decodes::<Trace>(made(&[dstep.clone(), fstep.clone()], &[])));
@@ -1093,6 +1138,32 @@ fn a_staged_write_carries_the_leafs_mode() {
     assert_eq!(
         std::fs::metadata(dir.join("f")).unwrap().mode() & 0o7777,
         0o640
+    );
+}
+
+/// A file the user may not write is not staged over, though its directory
+/// would let the rename replace it: nothing is made beside it.
+#[test]
+fn a_file_the_user_may_not_write_is_not_staged_over() {
+    if root_user() {
+        eprintln!("skip: root writes every file");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::write(dir.join("f"), b"old").unwrap();
+    std::fs::set_permissions(dir.join("f"), PermissionsExt::from_mode(0o444)).unwrap();
+    let err = located(&dir.join("f"))
+        .unwrap()
+        .stage(Visibility::Public)
+        .err()
+        .unwrap();
+    assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
+    assert_eq!(std::fs::read(dir.join("f")).unwrap(), b"old");
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count(),
+        1,
+        "nothing staged"
     );
 }
 

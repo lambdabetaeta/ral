@@ -1,0 +1,2 @@
+# contains: its one parameter is the argv
+alias greet { echo hi }

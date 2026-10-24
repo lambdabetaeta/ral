@@ -212,6 +212,9 @@ pub struct InferCtx {
     /// The computations a value demand captures, keyed by node address:
     /// `annotate` wraps each in `cap … to d. decode d`.
     pub(super) captured: HashSet<Node>,
+    /// The right-hand sides the bind rule found of function type, keyed by
+    /// node address: `annotate` binds each unrun, as `return (thunk M)`.
+    pub(super) thunked: HashSet<Node>,
     /// The values in hand a value demand captures — a command block passed
     /// where a value producer was wanted — keyed by address, with the arity
     /// `annotate` η-wraps them at.
@@ -236,10 +239,6 @@ pub struct InferCtx {
     /// `Rec` projection of one group shares the one node the elaborator
     /// built, rather than each rebuilding its own.
     pub(super) rec_group_rebuilds: HashMap<Node, Arc<GroupNode>>,
-    /// A `Bind`/`Define`/tail-`Run` RHS's curried arity, recorded whenever
-    /// its inferred type resolved to `Fun` — keyed by the RHS node's own
-    /// address, read back by `annotate`'s η-expansion.
-    pub(super) rhs_arrow_arity: HashMap<Node, usize>,
     /// The result type of each boundary call, keyed by the `Exec` node's
     /// address, and of each boundary builtin used as a value, keyed by its
     /// `Val`'s; frozen into a [`Site`] once the unit is solved.
@@ -278,6 +277,7 @@ impl InferCtx {
             errors: Vec::new(),
             pos: None,
             captured: HashSet::new(),
+            thunked: HashSet::new(),
             captured_vals: HashMap::new(),
             unit_reads: Vec::new(),
             pending_labels: Vec::new(),
@@ -286,7 +286,6 @@ impl InferCtx {
             holder: None,
             rec_groups: HashMap::new(),
             rec_group_rebuilds: HashMap::new(),
-            rhs_arrow_arity: HashMap::new(),
             boundary_results: HashMap::new(),
             boundary_values: HashMap::new(),
             boundary_missing: HashMap::new(),
@@ -425,6 +424,13 @@ impl InferCtx {
                 .or_else(|| self.unifier.weak_source_in_ty(b));
             self.report_weak(kind, why, weak);
         }
+    }
+
+    /// Unify two value types at the span in force, handing a mismatch back
+    /// rather than reporting it.
+    pub(crate) fn try_unify_ty(&mut self, a: &Ty, b: &Ty) -> Result<(), TypeErrorKind> {
+        self.unifier.at = self.pos;
+        self.unifier.unify_ty(a, b)
     }
 
     /// Unify two computation types at the span in force, handing a mismatch

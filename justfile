@@ -65,8 +65,7 @@ check-windows $RUSTFLAGS=deny:
 # Both arches because the seccomp filter is arch-conditional, and its x32 guard
 # is x86-64 only: one arch proves half of it. Both are rust-toolchain.toml's,
 # so no host needs a target it was not already going to install. Scoped to
-# ral-core: ral-ripgrep-core's tikv-jemallocator compiles jemalloc's C, which
-# needs a musl cross toolchain ("C compiler cannot create executables").
+# ral-core, where the sandbox lives.
 #
 # Even ral-core has C to assemble: psm, under serde_stacker, builds its
 # stack-switching routines in a build script that `cargo check` runs too, and

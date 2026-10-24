@@ -1244,6 +1244,33 @@ fn a_root_reached_through_a_symlink_denotes_top() {
     assert!(!writes_top("work"));
 }
 
+/// An allowance keeps what its walk passed: a chain's middle link lies on
+/// neither the spelling nor the position.
+#[cfg(unix)]
+#[test]
+fn an_allowance_keeps_each_link_its_spelling_passed() {
+    let (_tmp, root) = scratch();
+    std::fs::create_dir(root.join("target")).unwrap();
+    link(&root.join("target"), &root.join("l2"));
+    link(&root.join("l2"), &root.join("l1"));
+    let allowed = allowing(&spelled(&root.join("l1")));
+    let wire = serde_json::to_string(&allowed).unwrap();
+    assert_eq!(
+        serde_json::from_str::<GrantPath<Extent>>(&wire).unwrap(),
+        allowed
+    );
+    let GrantPath {
+        real: Extent::Under { position, passed },
+        ..
+    } = allowed
+    else {
+        panic!("a link to a directory is not the root");
+    };
+    assert_eq!(position.as_path(), root.join("target"));
+    let passed: Vec<PathBuf> = passed.iter().map(|p| p.as_path().to_path_buf()).collect();
+    assert_eq!(passed, [root.join("l1"), root.join("l2")]);
+}
+
 /// Activation reads denotations: an axis that denotes `t` activates nothing.
 #[test]
 fn activation_is_denotational() {

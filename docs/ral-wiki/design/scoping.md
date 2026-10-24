@@ -78,8 +78,8 @@ different one, and they should not be conflated.
 A same-thread β-step bridges the two: applying a thunk puts its closure's
 `Env` in focus directly — `force(thunk M) = M` pushes nothing — while the
 store (`Shell` minus its lexical scope) is shared by identity rather than
-forked. A block and a lambda are told apart only by the body's shape
-(`Comp::arrow`), never by how force treats them: an unbracketed store write in
+forked. A block and a lambda are one thunk value, and force treats them alike:
+an unbracketed store write in
 either body — `cd`, `alias`, a hook registration — persists past the force: a
 plain block is not a boundary for the store. `within [dir:]` / `within
 [handlers:]` are the scoped forms, and `within [dir:]` undoes a `cd` made

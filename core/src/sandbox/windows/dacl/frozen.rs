@@ -22,7 +22,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_READ_ATTRIBUTES, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
 };
 
-use super::acl::{Target, appcontainer_already_grants};
+use super::acl::Target;
 use super::{DaclError, GrantKind};
 use crate::path::{RealPath, is_loop, utf8};
 use crate::sandbox::TOKEN;
@@ -79,10 +79,6 @@ impl FrozenPin {
         }))
     }
 
-    pub(crate) fn path(&self) -> &Path {
-        self.real.as_path()
-    }
-
     /// The text of the path, which the capability name and the stamp keys are
     /// taken from.
     pub(crate) fn name(&self) -> &str {
@@ -122,33 +118,15 @@ fn unheld(at: &Path, e: &io::Error) -> DaclError {
     super::acl::win32_err_str(at, &format!("cannot hold it open to check it: {e}"))
 }
 
-/// Check every frozen allowance of one kind, before any filter sees it: the
-/// pins are what the filters and the stamp then work from, so a path granted
-/// at an earlier launch and since replaced by a junction is refused here,
-/// memo or no memo. Paths that are not on disk drop out.
+/// Check every frozen allowance of one kind, before the session's memo sees
+/// it: the pins are what the stamps then work from, so a path granted at an
+/// earlier launch and since replaced by a junction is refused here, memo or no
+/// memo. Paths that are not on disk drop out.
 pub(crate) fn pin_all(paths: &[RealPath], kind: GrantKind) -> Result<Vec<FrozenPin>, DaclError> {
     paths
         .iter()
         .filter_map(|p| FrozenPin::open(p, kind).transpose())
         .collect()
-}
-
-/// Drop the pins already covered by the well-known SIDs. Without this a
-/// non-admin session stamping a system root, `System32`, which
-/// `ALL APPLICATION PACKAGES` reads system-wide anyway, would fail closed on
-/// `WRITE_DAC` for a grant nobody needed.
-///
-/// after mxc `dispatcher.rs::filter_paths_needing_grant`
-pub(crate) fn needing_grant(pins: Vec<FrozenPin>, mask: u32) -> Vec<FrozenPin> {
-    pins.into_iter()
-        .filter(|p| !appcontainer_already_grants(p.target(), mask))
-        .collect()
-}
-
-impl AsRef<Path> for FrozenPin {
-    fn as_ref(&self) -> &Path {
-        self.real.as_path()
-    }
 }
 
 #[cfg(test)]

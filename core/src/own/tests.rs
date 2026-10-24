@@ -267,6 +267,36 @@ mod unix {
         assert_eq!(beside, ["rc"], "the staged sibling is gone");
     }
 
+    /// A file the link reaches that the user may not write is not replaced,
+    /// though its directory is writable, and the error says where to change it.
+    #[test]
+    fn replace_refuses_a_linked_file_the_user_may_not_write() {
+        if rustix::process::geteuid().is_root() {
+            eprintln!("skip: root writes every file");
+            return;
+        }
+        let home = scratch("replace-read-only");
+        let (config, store) = (home.path().join("config"), home.path().join("store"));
+        std::fs::create_dir_all(config.join("app")).unwrap();
+        std::fs::create_dir(&store).unwrap();
+        std::fs::write(store.join("rc"), "generated").unwrap();
+        std::fs::set_permissions(store.join("rc"), std::fs::Permissions::from_mode(0o444)).unwrap();
+        symlink(store.join("rc"), config.join("app").join("rc")).unwrap();
+
+        let refused = under_config(&config, || {
+            let rc = UserFile::xdg("app", XdgKind::Config, "rc").unwrap();
+            rc.replace("new").unwrap_err().to_string()
+        });
+        assert!(
+            refused.contains("change it where it is generated"),
+            "{refused}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(store.join("rc")).unwrap(),
+            "generated"
+        );
+    }
+
     #[test]
     fn replace_makes_the_directory_and_the_file_where_absent() {
         let home = scratch("replace-new");

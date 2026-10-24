@@ -744,11 +744,11 @@ mod tests {
     }
 
     /// A function under `aliases:` installs as an argv-handler alias (a
-    /// handler frame, not a scope binding).  An alias is a unary lambda whose
-    /// single parameter binds the argv, and an argv is a list of strings every
-    /// element crosses rendered — so where the `bindings:` function above has
-    /// two typed parameters, this one has no arity at all: the same
-    /// heterogeneous call lands, and so does a call with nothing to pass.
+    /// handler frame, not a scope binding).  An alias takes one parameter, the
+    /// argv, and an argv is a list of strings every element crosses rendered —
+    /// so where the `bindings:` function above has two typed parameters, this
+    /// one has no arity at all: the same heterogeneous call lands, and so does
+    /// a call with nothing to pass.
     #[test]
     fn rc_aliases_function_is_argv_alias() {
         let src = "return [\n    aliases: [\n        ws: { |args| echo $args },\n    ],\n]\n";

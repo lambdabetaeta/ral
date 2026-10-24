@@ -44,6 +44,22 @@ within [handlers: [mycmd: { |args| echo 'got' ...$args }]] {
     mycmd a b c
 }
 
+# An arm's arity is its type: a block whose body is a function of the argv
+let prefixed = { |prefix| return { |args| echo $prefix ...$args } }
+within [handlers: [mycmd: { prefixed 'made' }]] {
+    mycmd a b
+}
+let wrap = { |f| return { !$f } }
+let wrapped = wrap { |args| echo 'wrapped' ...$args }
+within [handlers: [mycmd: $wrapped]] {
+    mycmd c
+}
+# An arm escaped from its scope is vetted against what it captured
+let mkhi = { |p| let greet = { |w args| echo $w ...$args }; return { greet $p } }
+within [handlers: [hi: !{mkhi 'yo'}]] {
+    hi a
+}
+
 # Handler gone after block
 try { mycmd | from-string } { |_| echo 'mycmd gone'; return "" }
 

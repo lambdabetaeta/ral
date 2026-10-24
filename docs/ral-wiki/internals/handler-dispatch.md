@@ -44,16 +44,17 @@ Rust body never self-forwards (`run_base_frame`). A user frame therefore stacks
 *above* a base frame and forwards into it by the same wrap-and-forward idiom
 that reaches an outer handler.
 
-**The calling convention is fixed by surface form, not value shape.** A per-name
-entry (and every alias) is a unary lambda `{ |args| … }`, applied to the command's
-argument list; a catch-all is a binary lambda `{ |name args| … }`, applied to the
-name and the argument list. That list is a `List String` — `machine::render_handler_args` renders
+**The calling convention is fixed by surface position, not value shape.** A
+per-name entry (and every alias) takes one parameter, the command's argument
+list, as `{ |args| … }` does; a catch-all takes two, the name and the argument
+list, as `{ |name args| … }` does. That list is a `List String` — `machine::render_handler_args` renders
 every element through the total `to-string` as it packs the argv, so an arm
 consumes what an exec call would
 ([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
 Dispatch invokes the matched entry under the convention its install site demands
-rather than inspecting the stored value; a bare block, a non-lambda, or a
-wrong-arity lambda is rejected at install time (`docs/SPEC.md` §9.4), so no
+rather than inspecting the stored value; an arm whose type takes other
+parameters, or a value that is no block, is refused where it is written and
+again at install (`docs/SPEC.md` §9.4), so no
 malformed entry ever reaches lookup.
 
 **Self-masking is a strip-and-restore of one frame.** For the dynamic extent of

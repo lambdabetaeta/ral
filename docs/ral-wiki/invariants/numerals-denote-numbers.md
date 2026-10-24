@@ -7,8 +7,10 @@ canonical numeral crosses the shell unchanged and every other spelling
 normalises on the way out.**
 
 - **No positional asymmetry.** One question, asked the same way everywhere:
-  `f 007`, `let x = 007`, `[007]`, and `> 007` all see the number seven. A
-  position that read the digits instead would be an exception a user has to
+  `f 007`, `let x = 007`, `[007]`, `> 007` and `$[007]` all see the number
+  seven, and inside `$[…]`, where a value is expected, a sign touching a
+  numeral is still its sign: `$[-9223372036854775808]` is the smallest `Int`.
+  A position that read the digits instead would be an exception a user has to
   carry, and there is none.
 - **Lexical, never type-directed.** Classification reads the token and nothing
   else — not an expected type, not the enclosing scope, not the installed

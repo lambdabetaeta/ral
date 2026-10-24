@@ -52,6 +52,7 @@ either        = "1"
 imbl          = { version = "7", features = ["serde"] }
 rustc-hash    = { workspace = true }
 regex         = "1"
+regex-syntax  = "0.8"
 shlex         = { workspace = true }
 ignore        = "0.4"
 fastrand      = { workspace = true }

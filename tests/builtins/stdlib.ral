@@ -62,7 +62,7 @@ echo !{first-where { |x| $[$x > 2] } [1, 2, 3, 4]}
 echo !{flat-map { |x| return [$x, $x] } [1, 2]}
 # Expected: [1, 1, 2, 2]
 
-# extension — `.` and `..` have none; a dotfile has none, `foo.` an empty one
+# extension — what follows the last component's last dot, when a non-dot precedes it
 let show-ext = { |path|
     case !{extension $path} [
         `some: { |e| echo "$path: some [$e]" },
@@ -73,11 +73,17 @@ show-ext '..'
 show-ext '/a/..'
 show-ext '.'
 show-ext 'a/.'
+show-ext '...'
 show-ext '.bashrc'
+show-ext '..hidden'
+show-ext 'dir.d/file'
+show-ext 'dir.d/..f'
 show-ext 'foo.txt'
 show-ext 'a.tar.gz'
 show-ext 'foo.'
-show-ext '..hidden'
-# Expected: none for the first five, then some [txt], some [gz], some [], some [hidden]
+show-ext 'foo..'
+show-ext '.a.b'
+show-ext '..a.b'
+# Expected: none for the first nine, then some [txt], some [gz], some [], some [], some [b], some [b]
 
 echo 'stdlib tests done'

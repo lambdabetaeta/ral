@@ -135,10 +135,11 @@ pub(super) fn launch_thread_stage(
     let comp = Arc::clone(stage);
     let span = spec.span;
 
-    let settle = SettleOnDrop::new(slot);
     let join = cx
         .shell
         .spawn_thread(mooring, "ral pipeline stage", move |mooring, child| {
+            // Armed by the thread it guards: a spawn that fails posts nothing.
+            let settle = SettleOnDrop::new(slot);
             child.io = io;
             child.local.audit.install_active_policy(policy);
             let end = ThreadEnd::of(|| eval(comp, env, mooring, child));

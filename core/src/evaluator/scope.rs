@@ -3,8 +3,8 @@
 //! parsing and installing `within`'s options.
 
 use crate::types::{
-    Env, EnvVars, FrameHandle, HandlerEntry, HandlerRole, Map, Settled, Shell, Value, refused_arm,
-    sig, validate_handler_arity,
+    EnvVars, FrameHandle, HandlerArity, HandlerEntry, HandlerRole, Map, Settled, Shell, Value,
+    arm_closure, refused_arm, sig,
 };
 
 use crate::path::{CwdPath, Reading};
@@ -18,15 +18,13 @@ pub(crate) struct WithinScope {
 }
 
 impl WithinScope {
-    /// `shell` resolves and permission-checks `dir:`; handler validation
-    /// reads its schemes off `env`, the lexical environment the `within`
-    /// itself closes under, not the shell's mutable scope.  `arms` are the
-    /// `handlers:` list, which is syntax and so arrives beside `opts` rather
-    /// than in it.
+    /// `shell` resolves and permission-checks `dir:`; an arm is vetted against
+    /// what its own closure captured (`Shell::closure_schemes`).  `arms` are
+    /// the `handlers:` list, which is syntax and so arrives beside `opts`
+    /// rather than in it.
     pub(crate) fn parse(
         opts: &Map,
         arms: Option<Vec<(String, Value)>>,
-        env: &Env,
         shell: &mut Shell,
     ) -> Settled<Self> {
         let mut env_overrides = None;
@@ -35,14 +33,14 @@ impl WithinScope {
         // `handlers` and `handler` are independent: naming either installs a
         // frame, naming neither leaves the stack alone.
         let mut saw_handlers = arms.is_some();
-        let entries = parse_handlers(arms.unwrap_or_default(), env, shell)?;
+        let entries = parse_handlers(arms.unwrap_or_default(), shell)?;
 
         for (k, v) in opts {
             match k {
                 "env" => env_overrides = Some(parse_env(&v)?),
                 "dir" => cwd = Some(parse_dir(&v, shell)?),
                 "handler" => {
-                    catch_all = Some(parse_catch_all(&v, env, shell)?);
+                    catch_all = Some(parse_catch_all(&v, shell)?);
                     saw_handlers = true;
                 }
                 _ => unreachable!(
@@ -125,37 +123,19 @@ fn parse_dir(v: &Value, shell: &mut Shell) -> Settled<CwdPath> {
     CwdPath::new(dir.real().as_path().to_path_buf()).map_err(|e| sig(format!("within dir: {e}")))
 }
 
-/// What a handler body is typechecked against: the `within`'s own lexical
-/// environment, the aliases already in scope, and the session's builtins.
-fn handler_schemes(env: &Env, shell: &Shell) -> crate::typecheck::SessionSchemes {
-    crate::typecheck::SessionSchemes {
-        bindings: env.binding_schemes(&shell.sig),
-        aliases: shell.context.handlers.alias_schemes(),
-        builtins: shell.session.runtime.builtins.manifest().clone(),
-    }
-}
-
 /// `handlers:` — one named handler per entry, each vetted against its
 /// command's scheme.
-fn parse_handlers(
-    arms: Vec<(String, Value)>,
-    env: &Env,
-    shell: &Shell,
-) -> Settled<Vec<HandlerEntry>> {
-    let schemes = handler_schemes(env, shell);
+fn parse_handlers(arms: Vec<(String, Value)>, shell: &Shell) -> Settled<Vec<HandlerEntry>> {
     arms.into_iter()
-        .map(|(cmd, thunk)| HandlerEntry::vet(cmd, thunk, schemes.clone(), HandlerRole::Scoped))
+        .map(|(cmd, thunk)| HandlerEntry::vet(cmd, thunk, shell, HandlerRole::Scoped))
         .collect()
 }
 
 /// `handler:` — the catch-all, which stands in for *every* command, so its
 /// value is its output.
-fn parse_catch_all(v: &Value, env: &Env, shell: &Shell) -> Settled<Value> {
-    validate_handler_arity(v, 2, "within handler: catch-all")?;
-    let Value::Thunk(closure) = v else {
-        unreachable!("validate_handler_arity guarantees a lambda");
-    };
-    crate::typecheck::catch_all_stands_in(closure.comp(), handler_schemes(env, shell))
+fn parse_catch_all(v: &Value, shell: &Shell) -> Settled<Value> {
+    let closure = arm_closure(v, "within handler: catch-all", HandlerArity::CatchAll)?;
+    crate::typecheck::catch_all_stands_in(closure.comp(), shell.closure_schemes(closure))
         .map_err(|error| refused_arm("within handler", &error, closure.comp().span))?;
     Ok(v.clone())
 }
@@ -393,10 +373,9 @@ mod tests {
 
     /// A session function's scheme is what a `within` vets its arm
     /// against whether the `within` runs at top level or inside a block that
-    /// captured only that one function: `handler_schemes` reads
-    /// `env.binding_schemes(sig)` off the environment the `within` is
-    /// actually running under, so `h`'s scheme must show through `blk`'s own
-    /// (narrow) capture exactly as it would off the session `Env` directly.
+    /// captured only that one function: `Shell::closure_schemes` reads the
+    /// arm closure's own capture, so `h`'s scheme shows through it exactly as
+    /// it would off the session `Env`.
     #[test]
     fn within_vets_an_arm_against_a_captured_scheme() {
         let mut shell = crate::test_helper::core_shell();
@@ -417,7 +396,7 @@ mod tests {
         let mut shell = crate::test_helper::core_shell();
         for key in declared(Form::Within).keys {
             let opts = Map::from_iter([(key.label.to_string(), Value::Unit)]);
-            let _ = WithinScope::parse(&opts, None, &Env::default(), &mut shell);
+            let _ = WithinScope::parse(&opts, None, &mut shell);
         }
     }
 }

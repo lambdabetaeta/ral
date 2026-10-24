@@ -243,6 +243,34 @@ fn rc_plugin_installs_an_alias_and_unload_removes_it() {
     );
 }
 
+/// A factory made by application is a block of function type, not a written
+/// lambda, and its alias calls a helper the plugin's discarded scope held:
+/// both load, the alias vetted against what its own closure captured.
+#[test]
+fn a_plugin_made_by_application_loads() {
+    let plug = tempfile::tempdir().unwrap();
+    let manifest = plug.path().join("greeter.ral");
+    std::fs::write(
+        &manifest,
+        "let greet = { |word args| echo $word ...$args }\n\
+         let make = { |word options| return [name: 'greeter', aliases: [hail: { greet $word }]] }\n\
+         let factory = make hail-from-plugin\n\
+         return $factory\n",
+    )
+    .unwrap();
+    let (_dir, env) = rc_home(&format!(
+        "return [plugins: ['{}': [:]]]",
+        manifest.display()
+    ));
+    let out = repl(&["-i"], &env, "hail there\n");
+    assert!(
+        out.stdout.contains("hail-from-plugin there"),
+        "the made plugin loads and its alias runs: {}{}",
+        out.stdout,
+        out.stderr
+    );
+}
+
 /// Two plugins whose options have nothing in common: one type per key is
 /// what a record is for, so the rc's static contract must admit them.  The
 /// guard belongs on the boot path because that contract runs nowhere else.

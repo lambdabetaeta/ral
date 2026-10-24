@@ -79,7 +79,7 @@ fn eval_map<E: MapParts>(entries: &[E], env: &Env, sig: &Signature) -> Result<Va
         };
         if !seen.insert(key.clone()) {
             return Err(Error::new(format!(
-                "map literal: key '{key}' computed twice; which did you mean?"
+                "map literal: key '{key}' given twice; which did you mean?"
             )));
         }
         pairs.push((key, form(&value.item, env, sig)?));

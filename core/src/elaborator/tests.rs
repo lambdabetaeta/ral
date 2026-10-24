@@ -152,9 +152,9 @@ fn explicit_value_head_elaborates_to_app() {
     );
 }
 
-/// Only thunk-form bindings are forward-declared — the shapes
-/// `syntax::group` knots — so a command use preceding a non-thunk `let` on
-/// the same name stays an `Exec`, not a `Force` of an unbound variable.
+/// Only a stretch is bound ahead of its own statements, so a command use
+/// before a non-thunk `let` of the same name stays an `Exec`, not a `Force`
+/// of an unbound variable.
 #[test]
 fn command_use_before_non_thunk_let_is_exec() {
     let ast = parse("date\nlet date = 5").expect("parse");
@@ -167,8 +167,8 @@ fn command_use_before_non_thunk_let_is_exec() {
     assert_eq!(name, &CommandName::Bare("date".into()));
 }
 
-/// An acyclic singleton `let f = { return 1 }` emits as a `Single`, whose
-/// `Bind` runs after an earlier use of `f` — so that use must be an `Exec`.
+/// `let f = { return 1 }` after a use of `f` begins a stretch the use
+/// precedes, so that use must be an `Exec`.
 #[test]
 fn command_use_before_acyclic_thunk_let_is_exec() {
     let ast = parse("f\nlet f = { return 1 }").expect("parse");
@@ -323,16 +323,13 @@ fn script_cannot_be_bound_through_a_rest_pattern() {
 }
 
 #[test]
-fn script_cannot_be_bound_through_a_recursive_knot() {
+fn script_cannot_be_bound_by_a_block_definition() {
     for src in [
+        "let SCRIPT = { return 1 }",
         "let SCRIPT = { echo $SCRIPT }",
         "let f = { SCRIPT }\nlet SCRIPT = { f }",
     ] {
         let ast = parse(src).expect("parse");
-        assert!(
-            matches!(group_stmts(&ast)[..], [StmtGroup::LetRec(_)]),
-            "{src}"
-        );
         let err = elaborate(&ast, [], Some("main.ral".as_ref())).expect_err(src);
         let span = err.span.expect("the refusal carries the binder's span");
         let (start, end) = (span.start as usize, span.end as usize);
@@ -462,6 +459,184 @@ fn toplevel_mutual_recursion_shares_one_group_arc() {
     );
     assert_eq!(g1.shape()[0].0.as_ref(), "f");
     assert_eq!(g1.shape()[1].0.as_ref(), "g");
+}
+
+/// One descriptor per top-level phrase: `run`, `let NAME`, or
+/// `rec NAME of [..]` naming its `Rec` group's members.
+fn phrases_in(session: &[&str], src: &str) -> Vec<String> {
+    let ast = parse(src).expect("parse");
+    let session = session.iter().map(|&name| Name::from(name));
+    let top = elaborate(&ast, session, None).expect("elaborate");
+    top.iter()
+        .map(|phrase| match &phrase.item {
+            Phrase::Run(_) => "run".to_string(),
+            Phrase::Define { pattern, comp, .. } => {
+                let Pattern::Name(name) = pattern.as_ref() else {
+                    return "let <pattern>".to_string();
+                };
+                if let CompKind::Return(Val::Thunk(node)) = &comp.item
+                    && let CompKind::Rec { group, .. } = &node.shape().item
+                {
+                    let members: Vec<&str> =
+                        group.shape().iter().map(|(m, _)| m.as_ref()).collect();
+                    return format!("rec {name} of [{}]", members.join(", "));
+                }
+                format!("let {name}")
+            }
+        })
+        .collect()
+}
+
+fn phrases_of(src: &str) -> Vec<String> {
+    phrases_in(&[], src)
+}
+
+#[test]
+fn a_stretch_splits_into_its_recursive_groups() {
+    assert_eq!(
+        phrases_of("let f = { |x| g $x }\nlet g = { |y| f $y }\nlet h = { |z| h $z }\nreturn ()"),
+        ["rec f of [f, g]", "rec g of [f, g]", "rec h of [h]", "run"]
+    );
+}
+
+#[test]
+fn a_forward_reference_places_its_target_first() {
+    assert_eq!(
+        phrases_of("let g = { f }\nlet f = { |x| f $x }\nreturn ()"),
+        ["rec f of [f]", "let g", "run"]
+    );
+}
+
+#[test]
+fn independent_dependencies_keep_source_order() {
+    let src = "let a = { b; c; d; e }\nlet b = { return 1 }\nlet c = { return 2 }\n\
+               let d = { return 3 }\nlet e = { return 4 }\na";
+    assert_eq!(
+        phrases_of(src),
+        ["let b", "let c", "let d", "let e", "let a", "run"]
+    );
+}
+
+#[test]
+fn a_value_binding_never_joins_a_group() {
+    assert_eq!(
+        phrases_of("let f = { |x| f $x }\nlet n = f 5\nreturn $n"),
+        ["rec f of [f]", "let n", "run"]
+    );
+}
+
+/// No definition moves across `let x = f`; a block naming one past it is
+/// refused (see below).
+#[test]
+fn no_definition_moves_across_a_statement() {
+    assert_eq!(
+        phrases_of(
+            "let f = { return 0 }\nlet x = f\nlet f = { return 'hello' }\n\
+             let h = { f }\necho $x"
+        ),
+        ["let f", "let x", "let f", "let h", "run"]
+    );
+}
+
+/// The inner `g` is the inner block's own, so `idf` does not depend on the
+/// outer `g` and generalises before it.
+#[test]
+fn an_inner_definition_is_no_reference_to_the_stretch() {
+    assert_eq!(
+        phrases_of(
+            "let idf = { |x|\n  let a = { g }\n  let g = { return 1 }\n  return $x\n}\n\
+             let g = { idf 1 }"
+        ),
+        ["let idf", "let g"]
+    );
+}
+
+/// Edges are the elaborator's own resolution: a parameter hides a member,
+/// a use before an inner rebinding still reaches it, and so does a use
+/// under a branch.
+#[test]
+fn edges_follow_resolution() {
+    assert_eq!(
+        phrases_of("let a = { |b| b }\nlet b = { a 1 }"),
+        ["let a", "let b"]
+    );
+    assert_eq!(
+        phrases_of("let a = { let r = !{ b }; let b = 1; return $r }\nlet b = { return 2 }"),
+        ["let b", "let a"]
+    );
+    assert_eq!(
+        phrases_of("let a = { if $[1 == 1] { b } else { return 1 } }\nlet b = { return 2 }"),
+        ["let b", "let a"]
+    );
+}
+
+/// A stretch shadows the session's `f` across the whole stretch, so `g`'s
+/// `f` is the stretch's own.
+#[test]
+fn a_stretch_shadows_a_session_binding() {
+    assert_eq!(
+        phrases_in(&["f"], "let g = { f }\nlet f = { return 1 }"),
+        ["let f", "let g"]
+    );
+}
+
+/// A block that names a block defined past its stretch is refused at the
+/// reference: an otherwise unbound head or `$name`, a prelude name, and a
+/// name bound by an enclosing body alike.
+#[test]
+fn a_block_naming_a_block_past_its_stretch_is_refused() {
+    for (src, at) in [
+        (
+            "let main = { helper }\necho ready\nlet helper = { echo help }",
+            "helper }",
+        ),
+        (
+            "let main = { return $helper }\necho ready\nlet helper = { echo help }",
+            "$helper",
+        ),
+        (
+            "let main = { last [1] }\necho ready\nlet last = { |xs| return 0 }",
+            "last [",
+        ),
+        (
+            "let f = { return 1 }\nlet g = {\n  let a = { f }\n  echo x\n  let f = { return 2 }\n  a\n}",
+            "f }\n  echo",
+        ),
+    ] {
+        let ast = parse(src).expect("parse");
+        let err = elaborate(&ast, [], None).expect_err(src);
+        let span = err.span.expect("the refusal carries the reference's span");
+        assert!(src[span.start as usize..].starts_with(at), "{src}");
+    }
+}
+
+/// An earlier top-level run's binding is outside the list too.
+#[test]
+fn a_session_binding_does_not_lift_the_refusal() {
+    let src = "let main = { helper }\necho ready\nlet helper = { echo help }";
+    let ast = parse(src).expect("parse");
+    assert!(elaborate(&ast, [Name::from("helper")], None).is_err());
+}
+
+/// Bound above in the same body, the name is that binding: a `let` of the
+/// list, or the parameter of the block the list is the body of.  A plain
+/// statement's reference is no block's, so it stays what it was.
+#[test]
+fn a_name_bound_above_in_the_same_body_is_not_refused() {
+    assert_eq!(
+        phrases_of("let limit = 10\nlet check = { return $limit }\nlet limit = { return 20 }"),
+        ["let limit", "let check", "let limit"]
+    );
+    assert_eq!(
+        phrases_of(
+            "let f = { |helper| let main = { helper }; echo x; let helper = { return 1 }; main }"
+        ),
+        ["let f"]
+    );
+    assert_eq!(
+        phrases_of("echo $b\nlet b = { return 1 }"),
+        ["run", "let b"]
+    );
 }
 
 fn is_home_tilde(comp: &Comp) -> bool {

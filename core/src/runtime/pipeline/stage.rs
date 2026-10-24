@@ -8,12 +8,15 @@ use super::sentinel;
 use super::thread::ThreadStage;
 #[cfg(test)]
 use crate::process::Scope;
+use crate::process::jail::JailCgroup;
 use crate::process::{CancelCause, Pgid, WaitOutcome, Watch};
 use std::sync::Arc;
 
 pub(super) struct StageHandle {
-    kind: StageKind,
+    /// Before `kind`: a forced end drops the hold before it joins the writer,
+    /// which may be blocked on the edge.
     held: Option<HeldEdge>,
+    kind: StageKind,
     slot: Slot,
     /// What the collector sent this stage, joined by `max`.
     pub(super) sent: Option<CancelCause>,
@@ -91,13 +94,24 @@ impl StageHandle {
         }
     }
 
-    /// Mark the outbound edge dead and set the sentinel on its read end.
-    /// Marked before the sentinel snapshots what is pending, so a write
-    /// completing between the two is caught by the sink's own post-check.
-    pub(super) fn arm(&self) {
+    pub(super) fn jail(&self) -> Option<&JailCgroup> {
+        match &self.kind {
+            StageKind::External(e) => e.jail.as_ref(),
+            StageKind::Thread(_) => None,
+        }
+    }
+
+    /// Set the sentinel on the outbound edge, once.  With `cut`, mark the
+    /// edge dead first, so a write completing before the sentinel snapshots
+    /// what is pending is caught by the sink's own post-check.
+    pub(super) fn listen(&self, cut: bool) {
         if let Some(held) = &self.held {
-            held.edge.mark_dead();
-            sentinel::listen(Arc::clone(&held.reader), self.slot.clone());
+            if cut {
+                held.edge.mark_dead();
+            }
+            if !held.listening.replace(true) {
+                sentinel::listen(Arc::downgrade(&held.reader), self.slot.clone());
+            }
         }
     }
 

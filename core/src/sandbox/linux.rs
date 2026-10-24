@@ -1,9 +1,10 @@
 //! Linux sandbox: the bubblewrap (`bwrap`) options that confine one external
-//! child.  bwrap is never the payload: its monitor clones a namespace init
-//! which forks the payload, whose `setsid` (`--new-session`) makes its pid the
-//! group of everything inside — the group ral addresses, read over
-//! `--info-fd`; the monitor leads an inert group nobody signals.  The
-//! envelope is the child's whole world on every projection: own ipc and uts
+//! child.  bwrap is never the payload: its monitor clones a process that
+//! `setsid`s (`--new-session`) and then, as the pid namespace's init, forks
+//! the payload or, with no namespace, becomes it; that pid is the group of
+//! everything inside — the group ral addresses, read over `--info-fd` once
+//! it exists ([`InfoFd`]); the monitor leads an inert group nobody signals.
+//! The envelope is the child's whole world on every projection: own ipc and uts
 //! namespaces, a cgroup namespace with `/sys/fs/cgroup` re-rooted on it and a
 //! pid namespace with a fresh `/proc` where the host can build them
 //! ([`HostEnvelope`]), the [`seccomp`] deny-set on x86-64 and aarch64.
@@ -43,7 +44,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -122,21 +123,22 @@ impl<'a> Envelope<'a> {
 }
 
 /// The [`Command`] that runs `env`'s trampoline confined under `policy`:
-/// `bwrap --args 98 -- /proc/self/fd/102 --warrant`, the options in a sealed
-/// parcel at their slot beside the trampoline's pin, the seccomp programs,
-/// every bind's handle, the `--info-fd` peer and the caller's `handoff` (the
-/// warrant and Landlock ruleset), every descriptor through one [`Handoff`].
-/// bwrap takes options alone from `--args`, so the payload rides its argv,
-/// and runs the pinned inode whatever now holds its name.  `shown` is the
-/// bind plan the Landlock ruleset was built against.
+/// `bwrap --args <a> -- /proc/self/fd/<t> --warrant <w>`, every descriptor
+/// lent to `handoff` and named by its slot: the options in a sealed parcel,
+/// ral's pin, the seccomp programs, every bind's handle and the `--info-fd`
+/// peer, beside the caller's (the warrant, at `warrant`, and the Landlock
+/// ruleset).  bwrap takes options alone from `--args`, so the payload rides
+/// its argv, and runs the pinned inode whatever now holds its name.
+/// `shown` is the bind plan the Landlock ruleset was built against.
 ///
 /// The second element of the return is `Kept`'s `--info-fd` peer — see
 /// [`InfoFd`].  Refused under a bwrap that builds no envelope or cannot mount
-/// by descriptor, and where bwrap's pin sits on one of the slots.
+/// by descriptor.
 pub(crate) fn bwrap_command(
     env: &Envelope<'_>,
     shown: Shown,
-    handoff: Handoff<'_>,
+    mut handoff: Handoff,
+    warrant: Slot,
     policy: &RenderedProjection,
     chdir: Option<&Path>,
     ownership: Ownership,
@@ -157,60 +159,40 @@ pub(crate) fn bwrap_command(
             ));
         }
     }
-    let binds = Binds::open(env, shown)?;
-    let programs = seccomp_programs()?;
-    let options = bwrap_argv(policy, chdir, ownership, env.host, &binds, programs.len())?;
-    let parcel = |name: &str, bytes: &[u8]| {
-        parcel(name, bytes).map_err(|e| format!("sandbox: cannot parcel {name}: {e}"))
+    let binds = Binds::open(env, shown, &mut handoff)?;
+    let (info, address) = (ownership == Ownership::Kept)
+        .then(|| InfoFd::open(&mut handoff))
+        .transpose()?
+        .unzip();
+    let mut lend_parcel = |name: &str, bytes: &[u8]| {
+        let parcel =
+            parcel(name, bytes).map_err(|e| format!("sandbox: cannot parcel {name}: {e}"))?;
+        handoff.lend(parcel.as_fd())
     };
-    let args = parcel(
+    let seccomp = (seccomp_programs()?.into_iter())
+        .map(|program| lend_parcel("ral-seccomp", program))
+        .collect::<Result<Vec<_>, _>>()?;
+    let options = bwrap_argv(policy, chdir, address, env.host, &binds, &seccomp)?;
+    let args = lend_parcel(
         "ral-bwrap-args",
         &nul_terminated(options.iter().map(|arg| arg.as_bytes()))?,
     )?;
-    let seccomp = programs
-        .into_iter()
-        .map(|program| parcel("ral-seccomp", program))
-        .collect::<Result<Vec<_>, _>>()?;
-    // Rebound, so it may borrow this frame's parcels and handles.
-    let mut handoff = handoff;
-    handoff
-        .lend(Slot::Args, args.as_fd())
-        .lend(Slot::Trampoline, env.trampoline.fd());
-    for (i, program) in seccomp.iter().enumerate() {
-        handoff.lend(Slot::seccomp(i)?, program.as_fd());
-    }
-    binds.lend(&mut handoff);
-    let kept = ownership == Ownership::Kept;
-    // The trampoline's pin needs no such check: it is lent, so lifted before any `dup2`.
-    let pin = env.bwrap.fd().as_raw_fd();
-    let info = kept.then_some(Slot::Info.fd());
-    if handoff.targets().chain(info).any(|at| at == pin) {
-        return Err(Refusal::Launch(format!(
-            "sandbox: ral's pinned bwrap sits on descriptor {pin}, a slot the confined \
-             launch hands down; refusing rather than exec what lands there (was ral \
-             started with that many files open?)"
-        )));
-    }
+    let trampoline = handoff.lend(env.trampoline.fd())?;
     let mut c = env.bwrap.command();
-    let slot = Slot::Args.fd().to_string();
-    c.args(["--args", &slot, "--"])
-        .arg(crate::path::proc_fd_path(Slot::Trampoline.fd()))
-        .arg(Role::Warrant.flag());
-    if !kept {
-        handoff.install(&mut c)?;
-        return Ok((c, None));
-    }
-    let (reader, writer) = crate::process::cloexec_socketpair()
-        .map_err(|e| format!("sandbox: cannot open bwrap's --info-fd: {e}"))?;
-    let (reader, writer) = handoff.install_addressed(&mut c, (reader, writer.into()))?;
-    Ok((c, Some(InfoFd { reader, writer })))
+    c.args(["--args", &args.to_string(), "--"])
+        .arg(crate::path::proc_fd_path(trampoline.fd()))
+        .arg(Role::Warrant.flag())
+        .arg(warrant.to_string());
+    handoff.install(&mut c);
+    Ok((c, info))
 }
 
 /// The bwrap options that confine a payload under `policy`: `binds` by
 /// slot, layer by layer, `deny` masked last at every name a bind
 /// shows them; a deny hiding `/proc`, which bwrap execs the trampoline
-/// through, is refused.  Descriptors appear by slot number alone, one
-/// `--add-seccomp-fd` per program of `seccomp`; [`bwrap_command`] lends them.
+/// through, is refused, as is one holding `chdir`, which no mask lets bwrap
+/// enter.  Descriptors appear by slot number alone, one
+/// `--add-seccomp-fd` per slot of `seccomp`; [`bwrap_command`] lends them.
 ///
 /// Every name is taken from `policy`, rendered, so a rule lands on each
 /// spelling the kernel might present rather than on the one the grant author
@@ -223,22 +205,23 @@ pub(crate) fn bwrap_command(
 /// mount-namespace root — so a per-command launch passes the target's
 /// logical cwd; a launch with none to carry passes `None`.
 ///
-/// `ownership` decides two ties between the session and the envelope:
-/// death (`--die-with-parent`) and address (`--info-fd`).  A surrendered
-/// (detached) launch carries neither: the survivor must not be killed by our
-/// death, and there is no session left here to address once we stop watching
-/// it.  Confinement itself — the mounts, the seccomp filter — is otherwise
-/// identical.
+/// `address`, the `--info-fd` slot of a launch the session keeps, carries
+/// both ties between the session and the envelope: death
+/// (`--die-with-parent`) and address (`--info-fd`).  A surrendered
+/// (detached) launch has none, and carries neither: the survivor must not be
+/// killed by our death, and there is no session left here to address once
+/// we stop watching it.  Confinement itself — the mounts, the seccomp
+/// filter — is otherwise identical.
 ///
 /// The render is pure in `host` and in descriptors, so a test can assert
 /// options for a host it is not running on.
 pub(crate) fn bwrap_argv(
     policy: &RenderedProjection,
     chdir: Option<&Path>,
-    ownership: Ownership,
+    address: Option<Slot>,
     host: HostEnvelope,
     binds: &Binds,
-    seccomp: usize,
+    seccomp: &[Slot],
 ) -> Result<Vec<OsString>, String> {
     let mut c = Options::default();
     c.arg("--new-session");
@@ -249,9 +232,9 @@ pub(crate) fn bwrap_argv(
     if host.private_cgroup {
         c.arg("--unshare-cgroup");
     }
-    if ownership == Ownership::Kept {
+    if let Some(info) = address {
         c.arg("--die-with-parent");
-        c.args(["--info-fd", &Slot::Info.fd().to_string()]);
+        c.args(["--info-fd", &info.to_string()]);
     }
     if !policy.net {
         c.arg("--unshare-net");
@@ -263,10 +246,12 @@ pub(crate) fn bwrap_argv(
         FsProjection::Restricted(_) => {
             // Before the prefix binds: a write prefix under `/tmp` lands inside it.
             c.args(["--tmpfs", "/tmp"]);
-            // `--chdir` needs a directory to enter, and a cwd outside the
-            // grant has none: an empty unwritable stand-in, as macOS leaves it
-            // unreadable.  A bind over the name hides it.
-            if let Some(dir) = chdir.filter(|dir| dir.as_os_str() != "/") {
+            // `--chdir` needs a directory to enter: a cwd outside the grant gets
+            // an empty unwritable one, as macOS leaves it unreadable.  Before the
+            // binds, which may hide it; `/` and `/tmp` are the envelope's own.
+            if let Some(dir) =
+                chdir.filter(|dir| !matches!(dir.as_os_str().as_bytes(), b"/" | b"/tmp"))
+            {
                 c.args(["--perms", "0555", "--tmpfs"]).arg(dir);
             }
             binds.render(&mut c, Layer::Shown);
@@ -287,9 +272,24 @@ pub(crate) fn bwrap_argv(
     // unused because a mask is anchored to the inode, so a renamed ancestor
     // carries it — the pin macOS renders explicitly, Linux gets for free.
     if let Some(rules) = policy.fs.rules() {
+        // By stored name, where a mask lands, not folded as an exclusion is;
+        // a cwd that resolves nowhere is left to bwrap's `--chdir`.
+        let cwd =
+            chdir.and_then(|dir| Some((dir, RealPath::of(&LexicalPath::absolute(dir)?).ok()?)));
         let mut denied: Vec<_> = rules.deny.iter().collect();
         denied.sort();
         for path in denied {
+            if let Some((dir, at)) = &cwd
+                && path.holds_position(at)
+            {
+                return Err(format!(
+                    "sandbox: the working directory {} is excluded by {}, and no confined \
+                     command can start inside an exclusion; run it from another directory \
+                     (`cd` or `within [dir: …]`)",
+                    crate::path::shown(dir),
+                    path.as_str()
+                ));
+            }
             let mask = DenyMask::over(path);
             for name in binds.names(path) {
                 if name.holds("/proc") {
@@ -303,8 +303,8 @@ pub(crate) fn bwrap_argv(
             }
         }
     }
-    for i in 0..seccomp {
-        c.args(["--add-seccomp-fd", &Slot::seccomp(i)?.fd().to_string()]);
+    for program in seccomp {
+        c.args(["--add-seccomp-fd", &program.to_string()]);
     }
     Ok(c.0)
 }
@@ -373,19 +373,15 @@ impl Bind {
     }
 }
 
-/// The binds and their handles, in bwrap's order: `binds[i]` rides
-/// `Slot::Mount(i)`.
-pub(crate) struct Binds {
-    binds: Vec<Bind>,
-    handles: Vec<OwnedFd>,
-}
+/// The binds, each with the slot its handle was lent at.
+pub(crate) struct Binds(Vec<(Slot, Bind)>);
 
 impl Binds {
-    /// Plan and open: the one place a launch opens what it mounts, the two
+    /// Plan, open and lend: the one place a launch opens what it mounts, the two
     /// pins aside, which are open already.  Each object is opened once, and
     /// each bind lends its own copy, bwrap closing a descriptor after the
     /// one mount it serves.
-    fn open(env: &Envelope<'_>, shown: Shown) -> Result<Self, String> {
+    fn open(env: &Envelope<'_>, shown: Shown, handoff: &mut Handoff) -> Result<Self, String> {
         let Shown {
             binds: mut planned,
             tolerated,
@@ -403,48 +399,27 @@ impl Binds {
                 opened.insert(bind.position.clone(), held);
             }
         }
-        let (mut binds, mut handles) = (Vec::new(), Vec::new());
+        let mut binds = Vec::new();
         for bind in planned {
             // Absent: a name that shows nothing binds nothing.
             if let Some(Some(held)) = opened.get(&bind.position) {
-                let copy = |why: &dyn fmt::Display| {
+                let source = leaf_fd(held).map_err(|e| {
                     format!(
-                        "sandbox: cannot copy the handle on {}: {why}",
+                        "sandbox: cannot copy the handle on {}: {e}",
                         bind.object.as_str()
                     )
-                };
-                let source = leaf_fd(held).map_err(|e| copy(&e))?;
-                handles.push(source.try_clone_to_owned().map_err(|e| copy(&e))?);
-                binds.push(bind);
+                })?;
+                binds.push((handoff.lend(source)?, bind));
             }
         }
-        for (bind, handle) in pinned([env.bwrap, env.trampoline])? {
-            binds.push(bind);
-            handles.push(handle);
+        for (bind, pin) in pinned([env.bwrap, env.trampoline])? {
+            binds.push((handoff.lend(pin)?, bind));
         }
-        let slots = usize::from(u16::MAX) + 1;
-        if binds.len() > slots {
-            return Err(format!(
-                "sandbox: the grant asks for {} mounts, more than the {slots} a launch can lend",
-                binds.len()
-            ));
-        }
-        Ok(Self { binds, handles })
+        Ok(Self(binds))
     }
 
-    /// Each handle at its bind's slot.
-    fn lend<'a>(&'a self, handoff: &mut Handoff<'a>) {
-        for ((slot, _), handle) in self.slots().zip(&self.handles) {
-            handoff.lend(slot, handle.as_fd());
-        }
-    }
-
-    fn slots(&self) -> impl Iterator<Item = (Slot, &Bind)> {
-        (0..=u16::MAX).map(Slot::Mount).zip(&self.binds)
-    }
-
-    fn layer(&self, layer: Layer) -> impl Iterator<Item = (Slot, &Bind)> {
-        self.slots().filter(move |(_, bind)| bind.layer == layer)
+    fn layer(&self, layer: Layer) -> impl Iterator<Item = &(Slot, Bind)> {
+        self.0.iter().filter(move |(_, bind)| bind.layer == layer)
     }
 
     /// Every name the envelope shows `name` at: itself, and wherever a
@@ -657,8 +632,8 @@ pub(crate) fn seccomp_programs() -> Result<Vec<&'static [u8]>, String> {
 /// projection bound: no confined child rewrites a pinned inode in place, nor
 /// moves it, a mountpoint being unrenamable.  An unlinked pin has no name to
 /// lock, and runs by descriptor all the same.
-fn pinned(pins: [&Pinned; 2]) -> Result<Vec<(Bind, OwnedFd)>, String> {
-    let mut locked: Vec<(Bind, OwnedFd)> = Vec::new();
+fn pinned<'a>(pins: [&'a Pinned; 2]) -> Result<Vec<(Bind, BorrowedFd<'a>)>, String> {
+    let mut locked: Vec<(Bind, BorrowedFd<'a>)> = Vec::new();
     for pin in pins {
         let what = crate::path::shown(pin.arg0());
         let names = pin
@@ -669,11 +644,9 @@ fn pinned(pins: [&Pinned; 2]) -> Result<Vec<(Bind, OwnedFd)>, String> {
             continue;
         };
         if locked.iter().all(|(bind, _)| bind.dest != dest) {
-            let handle = (pin.fd().try_clone_to_owned())
-                .map_err(|e| format!("sandbox: cannot copy the pin on {what}: {e}"))?;
             locked.push((
                 Bind::read_only(Layer::Over, dest.clone(), (position, dest)),
-                handle,
+                pin.fd(),
             ));
         }
     }
@@ -757,26 +730,44 @@ fn own_cgroup() -> Option<String> {
 
 /// Both ends of a `Kept` launch's `--info-fd` socketpair — a socket, which
 /// unlike a pipe no same-uid process can reopen through `/proc/<pid>/fd` to
-/// forge a `child-pid`.  Our copy of bwrap's end, the lifted one, must
-/// outlive the fork that gives bwrap its own, then go: a read reaches EOF
-/// only once every copy of that end is closed.
+/// forge a `child-pid`.  The writer crosses twice, bwrap's copy and the
+/// payload's, both kept here, never lent: a lent copy lives as long as the
+/// [`Command`], and a read reaches EOF only once every copy is closed.
 pub(super) struct InfoFd {
     reader: UnixStream,
-    writer: OwnedFd,
+    writers: [OwnedFd; 2],
 }
 
 impl InfoFd {
-    /// The payload's process group — its pid, `--new-session` having made it
-    /// a leader — from bwrap's `child-pid`.  `None` if bwrap died before
-    /// writing it; never a block, since EOF follows bwrap's own close.
+    /// A socketpair whose writer crosses twice: bwrap's copy, at the slot
+    /// returned for its `--info-fd`, and the payload's, which bwrap leaves it
+    /// until its sweep.
+    fn open(handoff: &mut Handoff) -> Result<(Self, Slot), String> {
+        let (reader, writer) = crate::process::cloexec_socketpair()
+            .map_err(|e| format!("sandbox: cannot open bwrap's --info-fd: {e}"))?;
+        let (bwraps, at) = handoff.keep(writer.as_fd())?;
+        let (payloads, _) = handoff.keep(writer.as_fd())?;
+        Ok((
+            Self {
+                reader,
+                writers: [bwraps, payloads],
+            },
+            at,
+        ))
+    }
+
+    /// The payload's process group, bwrap's `child-pid`, read to EOF.  bwrap
+    /// writes it before that process's `setsid`, naming no group yet; EOF
+    /// waits for the payload's sweep of its copy of the writer, by which the
+    /// group exists, or for every holder's death.  `None` if bwrap died first.
     pub(super) fn payload_pgid(self) -> Option<crate::process::Pgid> {
         #[derive(serde::Deserialize)]
         struct Info {
             #[serde(rename = "child-pid")]
             child_pid: i32,
         }
-        let Self { reader, writer } = self;
-        drop(writer);
+        let Self { reader, writers } = self;
+        drop(writers);
         let info: Info = serde_json::from_reader(reader).ok()?;
         crate::process::Pgid::from_raw(info.child_pid)
     }
@@ -855,7 +846,7 @@ fn standing(name: &Rendered) -> Option<Trace> {
 mod tests {
     use super::{
         Access, Binds, Builds, CGROUP, Envelope, HostEnvelope, Layer, Pinned, Shown, bwrap_argv,
-        bwrap_command, seccomp_programs,
+        bwrap_command,
     };
     use crate::Role;
     use crate::capability::{Admitted, Capabilities, Floor, FsAllow, FsPolicy, Program};
@@ -967,9 +958,66 @@ mod tests {
         Shown::of(&rendered, &host_floor()).expect("the plan builds")
     }
 
-    /// `policy`'s binds, opened over this host's tree.
+    /// `policy`'s binds, opened over this host's tree, and the handoff
+    /// holding their handles.
+    fn lent(policy: &SandboxProjection, host: HostEnvelope) -> (Binds, Handoff) {
+        let mut handoff = Handoff::default();
+        let binds = Binds::open(&on(&stand_in(), host), plan(policy), &mut handoff)
+            .expect("the binds open");
+        (binds, handoff)
+    }
+
+    /// `policy`'s binds, for a render, which reads their slots alone.
     fn binds(policy: &SandboxProjection, host: HostEnvelope) -> Binds {
-        Binds::open(&on(&stand_in(), host), plan(policy)).expect("the binds open")
+        lent(policy, host).0
+    }
+
+    /// What the descriptor lent at `slot` holds, while its handoff lives.
+    fn stat_of(slot: Slot) -> rustix::fs::Stat {
+        rustix::fs::stat(crate::path::proc_fd_path(slot.fd())).expect("stat the lent handle")
+    }
+
+    /// What the handle lent for the bind at `dest` holds, while its
+    /// handoff lives.
+    fn held_at(binds: &Binds, dest: &std::path::Path) -> rustix::fs::Stat {
+        let dest = dest.to_string_lossy();
+        let (slot, _) = (binds.0.iter())
+            .find(|(_, bind)| bind.dest.as_str() == dest)
+            .expect("a bind there");
+        stat_of(*slot)
+    }
+
+    /// The `--info-fd` slot a kept render names: a number, nothing lent.
+    fn info_slot() -> Slot {
+        Slot::parse("98").expect("a slot")
+    }
+
+    /// A handoff lending `/dev/null` as the warrant: for a launch never
+    /// spawned, or refused before its trampoline would read one.
+    fn null_warrant() -> (Handoff, Slot) {
+        use std::os::fd::AsFd;
+        let null = std::fs::File::open("/dev/null").expect("open /dev/null");
+        let mut handoff = Handoff::default();
+        let at = handoff.lend(null.as_fd()).expect("lends");
+        (handoff, at)
+    }
+
+    /// `policy` rendered over `binds`, kept or surrendered.
+    fn render(
+        policy: &SandboxProjection,
+        binds: &Binds,
+        chdir: Option<&str>,
+        ownership: Ownership,
+        host: HostEnvelope,
+    ) -> Vec<String> {
+        let rendered = policy.rendered().expect("ASCII paths render");
+        let address = (ownership == Ownership::Kept).then(info_slot);
+        let chdir = chdir.map(std::path::Path::new);
+        bwrap_argv(&rendered, chdir, address, host, binds, &[])
+            .expect("ASCII paths render")
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
     }
 
     fn options(
@@ -978,15 +1026,7 @@ mod tests {
         ownership: Ownership,
         host: HostEnvelope,
     ) -> Vec<String> {
-        let seccomp = seccomp_programs().expect("seccomp programs compile");
-        let rendered = policy.rendered().expect("ASCII paths render");
-        let binds = binds(policy, host);
-        let chdir = chdir.map(std::path::Path::new);
-        bwrap_argv(&rendered, chdir, ownership, host, &binds, seccomp.len())
-            .expect("ASCII paths render")
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect()
+        render(policy, &binds(policy, host), chdir, ownership, host)
     }
 
     fn options_on(
@@ -1055,8 +1095,8 @@ mod tests {
 
     /// bwrap cannot `--chdir` into a name nothing mounted, so a cwd outside
     /// the grant gets an empty unwritable directory — before the binds, which
-    /// hide it where they cover the name — and the root and an unrestricted
-    /// envelope, which already have one, get none.
+    /// hide it where they cover the name — and the root, the scratch `/tmp`
+    /// and an unrestricted envelope, which already have one, get none.
     #[test]
     fn a_cwd_outside_the_grant_is_stood_up_empty_and_unwritable() {
         let dir = workdir("cwd-stand-in");
@@ -1065,6 +1105,7 @@ mod tests {
         for (label, policy, cwd, stood_up) in [
             ("ungranted", &granted, "/ral-ungranted/cwd", true),
             ("root", &granted, "/", false),
+            ("scratch", &granted, "/tmp", false),
             ("unrestricted", &unrestricted(), "/ral-ungranted/cwd", false),
         ] {
             let args = options(policy, Some(cwd), Ownership::Kept, WHOLE);
@@ -1078,6 +1119,44 @@ mod tests {
                 );
             }
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// bwrap can neither `--chdir` into a mask nor pass through one, so a cwd
+    /// at or beneath a deny, named directly or through a link, is refused
+    /// before bwrap runs, naming both; a deny inside the cwd is ordinary.
+    #[test]
+    fn a_cwd_within_a_deny_is_refused_naming_both() {
+        let dir = workdir("cwd-denied");
+        let dir = std::fs::canonicalize(&dir).expect("the work dir is real");
+        let denied = dir.join("secret");
+        let inner = denied.join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&denied, &link).unwrap();
+        let argv = |deny: &std::path::Path, cwd: &std::path::Path| {
+            let policy = deny_within(&dir, &[deny]);
+            let rendered = policy.rendered().expect("ASCII paths render");
+            let binds = binds(&policy, WHOLE);
+            bwrap_argv(&rendered, Some(cwd), None, WHOLE, &binds, &[])
+        };
+        for (deny, cwd) in [(&denied, &denied), (&denied, &inner), (&link, &inner)] {
+            let Err(why) = argv(deny, cwd) else {
+                panic!(
+                    "{} within {} must be refused",
+                    cwd.display(),
+                    deny.display()
+                );
+            };
+            assert!(
+                why.contains(&*denied.to_string_lossy()) && why.contains(&*cwd.to_string_lossy()),
+                "{why}"
+            );
+        }
+        assert!(
+            argv(&denied, &dir).is_ok(),
+            "a deny inside the cwd must not refuse"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1250,7 +1329,7 @@ mod tests {
                 [&tools, &w.join("bin")].map(|d| FsAllow::RunPlace(crate::test_helper::real(d))),
             );
         }
-        let binds = binds(&policy, WHOLE);
+        let (binds, _handoff) = lent(&policy, WHOLE);
         let name = |p: &std::path::Path| p.to_string_lossy().into_owned();
         assert_eq!(
             shown_within(&binds, &dir),
@@ -1261,11 +1340,7 @@ mod tests {
                 (name(&w), Access::Writable),
             ]
         );
-        let (_, handle) = (binds.slots().zip(&binds.handles))
-            .find(|((_, bind), _)| bind.dest.as_str() == name(&file))
-            .map(|((slot, _), handle)| (slot, handle))
-            .expect("the file's bind");
-        let opened = rustix::fs::fstat(handle).expect("fstat the handle");
+        let opened = held_at(&binds, &file);
         assert_eq!(opened.st_ino, std::fs::metadata(&file).unwrap().ino());
         assert!(rustix::fs::FileType::from_raw_mode(opened.st_mode).is_file());
         let _ = std::fs::remove_dir_all(&dir);
@@ -1384,7 +1459,7 @@ mod tests {
             };
             let rendered = policy.rendered().expect("renders");
             let binds = binds(&policy, WHOLE);
-            let argv = bwrap_argv(&rendered, None, Ownership::Kept, WHOLE, &binds, 0);
+            let argv = bwrap_argv(&rendered, None, None, WHOLE, &binds, &[]);
             assert_eq!(argv.is_err(), refused, "{denied}: {argv:?}");
         }
     }
@@ -1424,19 +1499,11 @@ mod tests {
         std::fs::rename(&parent, dir.join("moved")).unwrap();
         std::os::unix::fs::symlink(&elsewhere, &parent).unwrap();
         let shown = Shown::of(&rendered, &host_floor()).expect("the plan builds");
-        let Err(why) = Binds::open(&on(&stand_in(), WHOLE), shown) else {
+        let Err(why) = Binds::open(&on(&stand_in(), WHOLE), shown, &mut Handoff::default()) else {
             panic!("a symlinked component would show its target");
         };
         assert!(why.contains("symbolic link"), "{why}");
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The bind at `dest` and what its handle holds, as `Binds::open` made them.
-    fn handle_at<'a>(binds: &'a Binds, dest: &std::path::Path) -> &'a std::os::fd::OwnedFd {
-        let dest = dest.to_string_lossy();
-        let found =
-            (binds.slots().zip(&binds.handles)).find(|((_, bind), _)| bind.dest.as_str() == dest);
-        found.map(|(_, handle)| handle).expect("a bind there")
     }
 
     /// A directory removed and made again after the grant rendered it is what
@@ -1455,8 +1522,10 @@ mod tests {
         std::fs::create_dir(&data).unwrap();
         std::fs::write(data.join("fresh"), "x").unwrap();
         let shown = Shown::of(&rendered, &host_floor()).expect("the plan builds");
-        let binds = Binds::open(&on(&stand_in(), WHOLE), shown).expect("the binds open");
-        let held = rustix::fs::fstat(handle_at(&binds, &data)).expect("fstat the handle");
+        let mut handoff = Handoff::default();
+        let binds =
+            Binds::open(&on(&stand_in(), WHOLE), shown, &mut handoff).expect("the binds open");
+        let held = held_at(&binds, &data);
         assert_ne!(held.st_ino, before, "the directory the grant named is gone");
         assert_eq!(held.st_ino, std::fs::metadata(&data).unwrap().ino());
         let _ = std::fs::remove_dir_all(&dir);
@@ -1476,7 +1545,7 @@ mod tests {
         std::fs::rename(&data, dir.join("old")).unwrap();
         std::os::unix::fs::symlink(&elsewhere, &data).unwrap();
         let shown = Shown::of(&rendered, &host_floor()).expect("the plan builds");
-        let Err(why) = Binds::open(&on(&stand_in(), WHOLE), shown) else {
+        let Err(why) = Binds::open(&on(&stand_in(), WHOLE), shown, &mut Handoff::default()) else {
             panic!("a link at the position would show its target");
         };
         assert_eq!(
@@ -1505,9 +1574,9 @@ mod tests {
             let place = crate::test_helper::real(&tool);
             rules.read.push(FsAllow::RunPlace(place));
         }
-        let binds = binds(&policy, WHOLE);
+        let (binds, _handoff) = lent(&policy, WHOLE);
         for file in [&allowed, &tool] {
-            let held = rustix::fs::fstat(handle_at(&binds, file)).expect("fstat the handle");
+            let held = held_at(&binds, file);
             assert!(rustix::fs::FileType::from_raw_mode(held.st_mode).is_file());
             assert_eq!(held.st_ino, std::fs::metadata(file).unwrap().ino());
         }
@@ -1528,7 +1597,8 @@ mod tests {
         std::fs::create_dir_all(&w).unwrap();
         std::fs::write(&secret, "x").unwrap();
         let policy = restricted(&[&ro], &[&w], &[&secret]);
-        let args = options_for(&policy);
+        let binds = binds(&policy, WHOLE);
+        let args = render(&policy, &binds, None, Ownership::Kept, WHOLE);
         let at = |args: &[String], piece: &[&str]| {
             position_of(args, piece).unwrap_or_else(|| panic!("no {piece:?}: {args:?}"))
         };
@@ -1555,14 +1625,15 @@ mod tests {
             at(&over_root, &["--proc", "/proc"]),
         ];
         assert!(order.is_sorted(), "{order:?}: {over_root:?}");
-        let slots: Vec<_> = (args.windows(2))
+        let mounted: Vec<_> = (args.windows(3))
             .filter(|w| w[0] == "--ro-bind-fd" || w[0] == "--bind-fd")
-            .map(|w| w[1].clone())
+            .map(|w| (w[1].clone(), w[2].as_str()))
             .collect();
-        let expected: Vec<_> = (0..u16::try_from(slots.len()).unwrap())
-            .map(|i| Slot::Mount(i).fd().to_string())
+        let expected: Vec<_> = (binds.layer(Layer::Shown))
+            .chain(binds.layer(Layer::Over))
+            .map(|(slot, bind)| (slot.to_string(), bind.dest.as_str()))
             .collect();
-        assert_eq!(slots, expected, "one slot per bind, in order");
+        assert_eq!(mounted, expected, "one slot per bind, in layer order");
         for w in args.windows(2).filter(|w| w[0] == "--ro-bind") {
             assert_eq!(w[1], "/dev/null", "a source bwrap would resolve by name");
         }
@@ -1582,11 +1653,13 @@ mod tests {
         let pin = stand_in();
         let path = crate::path::shown(pin.arg0());
         let refusal = |builds| {
+            let (handoff, warrant) = null_warrant();
             let host = HostEnvelope { builds, ..WHOLE };
             let launch = bwrap_command(
                 &on(&pin, host),
                 plan(&unrestricted()),
-                Handoff::default(),
+                handoff,
+                warrant,
                 &rendered,
                 None,
                 Ownership::Kept,
@@ -1646,7 +1719,7 @@ mod tests {
         between();
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         let out = cmd.output().ok();
-        // Kept open across the fork inside `output()` for `pre_exec`'s `dup2`.
+        // Kept open across the fork inside `output()`, whose hook names its copies' numbers.
         drop(info_fd);
         out
     }
@@ -1676,6 +1749,40 @@ mod tests {
         );
         eprintln!("skipping: this host cannot build a bwrap envelope: {why}");
         None
+    }
+
+    /// `sh -c script` confined under `unrestricted()` through the path a
+    /// real command takes, `Launch::spawn` then `RunningChild`, and the
+    /// group the spawn named.  Callers skip first where no envelope builds.
+    fn spawn_confined(
+        script: &str,
+        scope: &crate::process::Scope,
+    ) -> (crate::runtime::command::RunningChild, crate::process::Pgid) {
+        use crate::process::{Group, PgidPolicy};
+        use crate::runtime::command::{Pumps, RunningChild};
+        let shell = crate::test_helper::core_shell();
+        let mut launch = crate::sandbox::sandboxed_command(
+            &unrestricted(),
+            &Floor::default(),
+            &sh_c(script),
+            Ownership::Kept,
+            &shell.cwd(),
+            scope,
+        )
+        .expect("build confined launch");
+        let (child, pgid, jail) = launch
+            .spawn(PgidPolicy::NewLeader)
+            .expect("spawn confined sh");
+        let pgid = pgid.expect("a kept launch names its payload's group");
+        let running = RunningChild::assemble_with_owner(
+            child,
+            "sh".to_string(),
+            Pumps::default(),
+            Some(Group::Owns(pgid)),
+            scope.clone(),
+            jail,
+        );
+        (running, pgid)
     }
 
     /// The whole regression: `xdg:config` readable, `xdg:config/gcloud`
@@ -2080,12 +2187,12 @@ mod tests {
         let own = format!("{CGROUP}{}", super::own_cgroup().expect("a cgroup2 host"));
         // The tree's handle, by the inode it opened.
         let tree = |host: HostEnvelope, policy: &SandboxProjection| {
-            let binds = binds(policy, host);
-            let ((_, bind), handle) = (binds.slots().zip(&binds.handles))
-                .find(|((_, bind), _)| bind.dest.as_str() == CGROUP)
+            let (binds, _handoff) = lent(policy, host);
+            let (slot, bind) = (binds.0.iter())
+                .find(|(_, bind)| bind.dest.as_str() == CGROUP)
                 .expect("a cgroup bind");
             assert_eq!(bind.layer, Layer::Over);
-            rustix::fs::fstat(handle).expect("fstat the tree").st_ino
+            stat_of(*slot).st_ino
         };
         let ino = |path: &str| std::fs::metadata(path).expect("the tree exists").ino();
         for (label, policy) in [
@@ -2249,15 +2356,17 @@ mod tests {
 
     /// The launcher is the file pinned at boot, named by descriptor: no
     /// `PATH` — the shell's override included — has any say in what runs.
-    /// Its own argv is the slot its options arrive on, then the trampoline,
-    /// named by descriptor too: the slot ral's pin is lent at.
+    /// Its own argv names, each by the slot it was lent at, the parcel its
+    /// options arrive in, the trampoline — ral's pin — and the warrant.
     #[test]
     fn the_launcher_is_the_pinned_envelope_and_never_a_name() {
         let pin = stand_in();
+        let (handoff, warrant) = null_warrant();
         let (cmd, _info_fd) = bwrap_command(
             &on(&pin, WHOLE),
             plan(&unrestricted()),
-            Handoff::default(),
+            handoff,
+            warrant,
             &unrestricted().rendered().expect("renders"),
             None,
             Ownership::Kept,
@@ -2271,40 +2380,28 @@ mod tests {
         let args: Vec<_> = (cmd.get_args())
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        let slot = Slot::Args.fd().to_string();
-        let flag = Role::Warrant.flag();
-        let trampoline = "/proc/self/fd/102";
-        assert_eq!(args, ["--args", &slot, "--", trampoline, flag], "{args:?}");
-    }
-
-    /// A pin on a handoff slot would be closed by the `dup2` before bwrap's
-    /// exec, which would then run whatever landed there.
-    #[test]
-    fn a_pin_on_a_handoff_slot_is_refused() {
-        use std::os::fd::{AsFd, AsRawFd};
-        let pin = stand_in().lifted(Slot::Warrant.fd());
-        let at = pin.fd().as_raw_fd();
-        if at > Slot::Info.fd() {
-            eprintln!(
-                "skipping: descriptors up to {} are all busy",
-                Slot::Info.fd()
-            );
-            return;
-        }
-        let lent = std::fs::File::open("/dev/null").expect("open /dev/null");
-        let mut handoff = Handoff::default();
-        handoff.lend(Slot::Warrant, lent.as_fd());
-        let Err(e) = bwrap_command(
-            &on(&pin, WHOLE),
-            plan(&unrestricted()),
-            handoff,
-            &unrestricted().rendered().expect("renders"),
-            None,
-            Ownership::Kept,
-        ) else {
-            panic!("a pin on a handoff slot must be refused");
+        let [opt, options, dashes, trampoline, flag, at] = &args[..] else {
+            panic!("not `bwrap --args <a> -- /proc/self/fd/<t> --warrant <w>`: {args:?}");
         };
-        assert!(e.to_string().contains(&format!("descriptor {at}")), "{e}");
+        assert_eq!(
+            [opt.as_str(), dashes, flag, at],
+            ["--args", "--", Role::Warrant.flag(), &warrant.to_string()],
+            "{args:?}"
+        );
+        let options = Slot::parse(options).expect("`--args` names a slot");
+        let parcel = std::fs::read(crate::path::proc_fd_path(options.fd()))
+            .expect("the options' parcel is open");
+        assert!(parcel.starts_with(b"--new-session\0"), "{parcel:?}");
+        let trampoline = (trampoline.strip_prefix("/proc/self/fd/"))
+            .and_then(|at| Slot::parse(at).ok())
+            .expect("the trampoline by its slot");
+        let lent = stat_of(trampoline);
+        let pinned = rustix::fs::fstat(pin.fd()).expect("fstat the pin");
+        assert_eq!(
+            (lent.st_dev, lent.st_ino),
+            (pinned.st_dev, pinned.st_ino),
+            "the trampoline must be ral's pin"
+        );
     }
 
     /// Whatever the projection bound, both files a launch execs go read-only
@@ -2354,14 +2451,15 @@ mod tests {
             net: false,
             exec: ExecProjection::default(),
         };
-        let kept = options_on(WHOLE, &policy, Ownership::Kept);
-        let surrendered = options_on(WHOLE, &policy, Ownership::Surrendered);
+        let binds = binds(&policy, WHOLE);
+        let kept = render(&policy, &binds, None, Ownership::Kept, WHOLE);
+        let surrendered = render(&policy, &binds, None, Ownership::Surrendered, WHOLE);
 
         assert!(
             kept.contains(&"--die-with-parent".to_string()),
             "a child we keep must not outlive us: {kept:?}"
         );
-        let info = Slot::Info.fd().to_string();
+        let info = info_slot().to_string();
         assert!(
             kept.windows(2).any(|w| w == ["--info-fd", info.as_str()]),
             "a kept launch must carry an `--info-fd` naming its payload's session: {kept:?}"
@@ -2374,12 +2472,12 @@ mod tests {
             !surrendered.contains(&"--info-fd".to_string()),
             "a surrendered launch has no session left here to address: {surrendered:?}"
         );
-        let ownership_ties = ["--die-with-parent", "--info-fd", info.as_str()];
+        let mut untied = kept;
+        let at = (untied.iter().position(|a| a == "--info-fd")).expect("an --info-fd");
+        untied.drain(at..at + 2);
+        untied.retain(|a| a != "--die-with-parent");
         assert_eq!(
-            kept.iter()
-                .filter(|a| !ownership_ties.contains(&a.as_str()))
-                .collect::<Vec<_>>(),
-            surrendered.iter().collect::<Vec<_>>(),
+            untied, surrendered,
             "the two launches must otherwise be confined identically"
         );
     }
@@ -2395,11 +2493,9 @@ mod tests {
     /// there being an envelope, not on which axis was attenuated.
     #[test]
     fn a_confined_payload_gets_its_grace_signal_not_the_monitors() {
-        use crate::process::{CancelCause, DurableRoot, Group, PgidPolicy, Scope};
-        use crate::runtime::command::{Pumps, RunningChild};
+        use crate::process::{CancelCause, DurableRoot};
 
-        let policy = unrestricted();
-        if envelope_launches(&policy).is_none() {
+        if envelope_launches(&unrestricted()).is_none() {
             return;
         }
 
@@ -2410,31 +2506,8 @@ mod tests {
             flag.display()
         );
 
-        let shell = crate::test_helper::core_shell();
         let scope = DurableRoot::default().worker();
-        let sh = Program::file("/bin/sh".into()).expect("/bin/sh exists");
-        let mut launch = crate::sandbox::sandboxed_command(
-            &policy,
-            &Floor::default(),
-            &admitted(sh, &["-c".to_string(), script]),
-            Ownership::Kept,
-            &shell.cwd(),
-            &scope,
-        )
-        .expect("build confined launch");
-
-        let (child, pgid, jail) = launch
-            .spawn(PgidPolicy::NewLeader)
-            .expect("spawn confined sh");
-
-        let running = RunningChild::assemble_with_owner(
-            child,
-            "sh".to_string(),
-            Pumps::default(),
-            pgid.map(Group::Owns),
-            Scope::clone(&scope),
-            jail,
-        );
+        let (running, _) = spawn_confined(&script, &scope);
 
         let striker = scope.clone();
         let canceller = std::thread::spawn(move || {
@@ -2471,6 +2544,41 @@ mod tests {
              itself, not just bwrap's monitor"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// bwrap writes `child-pid` before that process's `setsid`, and a kill
+    /// sent to a group not yet made is lost.  The spawn hands the group out
+    /// only once it exists, so an abort's one kill, struck before the wait,
+    /// ends a confined `sleep 30` at once.
+    #[test]
+    fn a_confined_payloads_group_exists_when_its_spawn_returns() {
+        use crate::process::{CancelCause, DurableRoot};
+
+        if envelope_launches(&unrestricted()).is_none() {
+            return;
+        }
+        let scope = DurableRoot::default().worker();
+        let (running, pgid) = spawn_confined("sleep 30", &scope);
+        assert!(
+            rustix::process::test_kill_process_group(pgid.as_pid()).is_ok(),
+            "the payload's group {pgid} must exist once its spawn returns"
+        );
+
+        scope.cancel(CancelCause::Aborted);
+        let t0 = std::time::Instant::now();
+        let waited = running.wait();
+        let elapsed = t0.elapsed();
+        let outcome = waited.outcome.enveloped(true);
+        waited.settle(&scope);
+        assert!(
+            elapsed.as_secs() < 5,
+            "an abort's one kill must end the payload, not wait out its sleep: took {elapsed:?}"
+        );
+        assert_eq!(
+            outcome,
+            crate::process::WaitOutcome::Enveloped(128 + libc::SIGKILL),
+            "the payload must die of the abort's kill"
+        );
     }
 
     fn field<'a>(stdout: &'a str, key: &str) -> Option<&'a str> {
@@ -3821,37 +3929,45 @@ mod tests {
     }
 
     /// A warrant promising a ruleset is the trampoline's whole word on it, so
-    /// one that never arrived is a launch it refuses, not one it runs open.
+    /// one that never arrived — at a slot the launch held but never handed
+    /// down — is a launch it refuses, not one it runs open.
     #[test]
     fn a_promised_ruleset_that_never_arrived_runs_nothing() {
         use crate::sandbox::warrant::Warrant;
         use std::os::fd::AsFd;
         let own = crate::sandbox::reexec::own().expect("ral pins itself");
         let sh = Program::file("/bin/sh".into()).expect("/bin/sh exists");
-        let promise = Some(super::landlock::Landlocked { refer_root: false });
-        let warrant = Warrant::new(
+        let null = std::fs::File::open("/dev/null").expect("open /dev/null");
+        let mut withheld = Handoff::default();
+        let at = withheld.lend(null.as_fd()).expect("lends");
+        let promise = Some(super::landlock::Landlocked {
+            refer_root: false,
+            at,
+        });
+        let parcel = Warrant::new(
             promise,
             &admitted(sh, &["-c".to_string(), "echo RAN".to_string()]),
             &unrestricted(),
         )
         .parcel()
         .expect("parcels");
+        let mut handoff = Handoff::default();
+        let warrant = handoff.lend(parcel.as_fd()).expect("lends");
         let mut cmd = own.command();
         cmd.arg(Role::Warrant.flag())
+            .arg(warrant.to_string())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut handoff = Handoff::default();
-        handoff.lend(Slot::Warrant, warrant.as_fd());
-        handoff.install(&mut cmd).expect("installs");
+        handoff.install(&mut cmd);
         let out = cmd.output().expect("spawn the trampoline");
+        drop(withheld);
         let (stdout, stderr) = (
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),
         );
         assert_eq!(out.status.code(), Some(126), "{stdout} {stderr}");
         assert!(!emitted(&stdout, "RAN"), "the program ran unconfined");
-        let at = format!("fd {}", Slot::Ruleset.fd());
-        assert!(stderr.contains(&at), "{stderr}");
+        assert!(stderr.contains(&format!("fd {at}")), "{stderr}");
     }
 
     // ── The trampoline by descriptor ──────────────────────────────────────
@@ -3863,7 +3979,8 @@ mod tests {
             trampoline: own,
             ..on(&bwrap, WHOLE)
         };
-        let binds = Binds::open(&env, plan(&unrestricted())).expect("the binds open");
+        let binds = Binds::open(&env, plan(&unrestricted()), &mut Handoff::default())
+            .expect("the binds open");
         (binds.layer(Layer::Over))
             .map(|(_, bind)| bind.dest.as_str().to_string())
             .collect()
@@ -3940,11 +4057,11 @@ mod tests {
     ) -> Option<std::process::Output> {
         use crate::sandbox::warrant::Warrant;
         use std::os::fd::AsFd;
-        let warrant = Warrant::new(None, admitted, policy)
+        let parcel = Warrant::new(None, admitted, policy)
             .parcel()
             .expect("parcels");
         let mut handoff = Handoff::default();
-        handoff.lend(Slot::Warrant, warrant.as_fd());
+        let warrant = handoff.lend(parcel.as_fd()).expect("lends");
         let rendered = policy.rendered().expect("renders");
         let env = Envelope {
             trampoline: own,
@@ -3954,6 +4071,7 @@ mod tests {
             &env,
             plan(policy),
             handoff,
+            warrant,
             &rendered,
             None,
             Ownership::Kept,

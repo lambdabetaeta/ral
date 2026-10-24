@@ -177,13 +177,13 @@ pub(super) fn reopen(dir: &File) -> io::Result<File> {
     ))
 }
 
-/// `access(2)` against the real uid and gid, as `test -w` asks; follows.
-pub(super) fn is_writable(dir: &File, name: &OsStr) -> bool {
-    site!(
+/// `access(2)` for writing against the real uid and gid, as `test -w` asks;
+/// follows.
+pub(super) fn may_write(dir: &File, name: &OsStr) -> io::Result<()> {
+    Ok(site!(
         Silent::WalkAccess,
         rustix::fs::accessat(dir, name, Amode::WRITE_OK, AtFlags::empty())
-    )
-    .is_ok()
+    )?)
 }
 
 /// `file` given the permission bits `stat` carries.

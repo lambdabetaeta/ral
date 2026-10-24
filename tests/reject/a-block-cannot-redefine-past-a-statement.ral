@@ -1,0 +1,5 @@
+# contains: a block further down defines `last`
+# contains: or rename it
+let main = { last [1, 2] }
+echo 'ready'
+let last = { |xs| return 0 }

@@ -20,13 +20,11 @@
 //! `within [dir: d] { hostname }` is, is a command.
 
 use super::builtins::audit_record;
-use super::contract::{
-    Form, Held, Holds, Key, NestedCheck, Table, catch_all_shape, declared, unify_held,
-};
+use super::contract::{Form, Held, Holds, Key, NestedCheck, Table, declared, unify_held};
 use super::env::HandlerOrigin;
 use super::error::{Reason, TypeErrorKind};
 use super::grade::JoinArm;
-use super::infer::Inferencer;
+use super::infer::{Arm, Inferencer};
 use crate::fact::ErrorRecord;
 use crate::ir::{HandlerArmV, OptionsV, Val};
 use crate::source::{Spanned, WithSpan};
@@ -35,10 +33,8 @@ use crate::ty::{CompTy, Producer, Scheme, Ty};
 
 impl Inferencer<'_> {
     /// Hold each written option to what `table` says of its label, each
-    /// caret on the option's own value.  A catch-all arm written out is
-    /// checked in context, its name and argv bound before its body, as a
-    /// named arm is; a bound one is unified against the shape the table
-    /// mints.
+    /// caret on the option's own value.  A catch-all is held to the arm rule
+    /// at its slot ([`Inferencer::arm`]).
     fn check_options(&mut self, opts: &OptionsV, table: &'static Table) {
         for (label, value) in opts {
             self.with_span(value.span, |this| {
@@ -92,29 +88,9 @@ impl Inferencer<'_> {
         }
     }
 
-    /// The catch-all `handler:`: a block written out is checked in context, its
-    /// name and argv bound before its body, as a named arm is; a value in hand
-    /// is pinned to the catch-all's parameters first, so its producer is what
-    /// stands in.
+    /// The catch-all `handler:`: the arm rule at the catch-all's slot.
     fn infer_catch_all_option(&mut self, value: &Val) -> Ty {
-        let cty = match value {
-            Val::Thunk(comp) => self.infer_catch_all(comp.shape()),
-            value => {
-                let ty = self.infer_val(value);
-                let shape = catch_all_shape(self.ctx.unifier.fresh_comp_ty());
-                self.ctx
-                    .unify_ty(&ty, &Ty::Thunk(Box::new(shape.clone())), Reason::HandlerArm);
-                shape
-            }
-        };
-        let cty = match self.catch_all_stands_in(&cty) {
-            Ok(cty) => cty,
-            Err((cty, error)) => {
-                self.ctx.raise(*error);
-                cty
-            }
-        };
-        Ty::Thunk(Box::new(cty))
+        Ty::Thunk(Box::new(self.checked_arm(value, Arm::CatchAll)))
     }
 
     /// Collect the schemes `handlers:` binds in the body.  A catch-all
@@ -124,7 +100,7 @@ impl Inferencer<'_> {
             .iter()
             .map(|arm| {
                 let scheme = self.with_span(arm.value.span, |this| {
-                    this.handler_arm_scheme(&arm.name, &arm.value.item)
+                    this.install_arm(&arm.value.item, &arm.name)
                 });
                 (arm.name.clone(), scheme)
             })

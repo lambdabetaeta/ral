@@ -12,6 +12,10 @@ Implementation update, 13 Oct: the 12 Oct image pin is removed by
 judge→open window on the image is a declared limit, not a residual; mount
 slots start at fd 107 again.
 
+> Corrected 2026-10-23: no handle is `dup2`'d onto a fixed slot any more.
+> Each crosses at the number it was lent at, from fd 98 up, and bwrap is
+> told that number ([[internals/confined-launch|confined-launch]]).
+
 **Every object the bwrap envelope shows is opened by ral, in the host, never
 through a symlink, and mounted by that descriptor (`--ro-bind-fd`,
 `--bind-fd`); bwrap is never handed a source name.** What the child sees at a

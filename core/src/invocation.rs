@@ -25,7 +25,7 @@ pub fn serve(
     installers: &'static [crate::engine::EngineInstaller],
 ) -> Option<u8> {
     match *role {
-        Invocation::Warrant(extra) => Some(sandbox::serve_warrant(extra)),
+        Invocation::Warrant(args) => Some(sandbox::serve_warrant(args)),
         Invocation::PipelineAnchor => Some(crate::runtime::pipeline::anchor::serve()),
         #[cfg(unix)]
         Invocation::Engine => {

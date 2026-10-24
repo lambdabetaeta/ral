@@ -270,13 +270,14 @@ impl SandboxProjection {
 #[cfg(unix)]
 fn objects(scopes: &[FsAllow]) -> Result<Vec<Object>, String> {
     let universal = RealPath::universal();
+    let none: &[RealPath] = &[];
     let named = scopes.iter().map(|scope| match scope {
         FsAllow::Prefix(GrantPath {
             written,
-            real: Extent::Under(real),
-        }) => (real, Some(written)),
-        FsAllow::Prefix(GrantPath { written, .. }) => (&universal, Some(written)),
-        FsAllow::RunPlace(place) => (place, None),
+            real: Extent::Under { position, passed },
+        }) => (position, Some(written), passed.as_slice()),
+        FsAllow::Prefix(GrantPath { written, .. }) => (&universal, Some(written), none),
+        FsAllow::RunPlace(place) => (place, None, none),
     });
     render_objects(named)
 }

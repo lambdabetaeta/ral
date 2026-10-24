@@ -79,7 +79,7 @@ alone.
 `render_handler_args` (`core/src/evaluator/machine.rs`) hands a handler its arguments
 as one list value — `[argv]` for a per-name entry, `[name, argv]` for a
 catch-all — every element rendered as it is packed, so a variadic operation is
-consumed by a fixed-arity lambda typed `Fun(List String, B)`
+consumed by a block typed `[String] → B`
 ([[internals/handler-dispatch|handler-dispatch]],
 [[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
 Variable arity is a surface phenomenon; at the value level it is always a list

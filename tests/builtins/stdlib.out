@@ -20,9 +20,15 @@ foo
 /a/..: none
 .: none
 a/.: none
+...: none
 .bashrc: none
+..hidden: none
+dir.d/file: none
+dir.d/..f: none
 foo.txt: some [txt]
 a.tar.gz: some [gz]
 foo.: some []
-..hidden: some [hidden]
+foo..: some []
+.a.b: some [b]
+..a.b: some [b]
 stdlib tests done

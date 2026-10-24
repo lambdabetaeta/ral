@@ -3,7 +3,7 @@
 //! into child stdio, spawn under the canonical pgid and sandbox, reap.
 //!
 //! Pipeline stages never reach [`run`] — they take
-//! [`super::pipeline::PipeNode::launch`] — but share `vet` and
+//! [`super::pipeline::PipeNode::run`] — but share `vet` and
 //! `build_launch` with it, so both paths resolve and confine a call the
 //! same way.
 

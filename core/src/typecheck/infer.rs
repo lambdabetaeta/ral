@@ -2,6 +2,7 @@
 //! `CompTy`, mutually recursive through thunks.
 
 use super::builtins::{BuiltinDiagnostic, Decl, LANGUAGE_CONSTANTS, fail_status_is_zero_literal};
+use super::contract::catch_all_shape;
 use super::env::{BoundaryValue, HandlerBinding, HandlerOrigin, InferCtx, Node, TyEnv};
 use super::error::{Reason, Standing, StdinFeed, TypeError, TypeErrorKind, UnitCall};
 use super::generalize::{FreeVars, generalize};
@@ -18,6 +19,19 @@ use crate::source::Spanned;
 use crate::source::WithSpan;
 use crate::ty::{CompTy, Grade, Kind, Label, Producer, RefusedArg, Row, Scheme, Ty};
 use std::sync::Arc;
+
+/// Which slot an arm fills.  The slot, never the arm's spelling, fixes its
+/// parameters (SPEC §17.7).
+#[derive(Clone, Copy)]
+pub(super) enum Arm<'a> {
+    /// `handlers: [name: …]` or `alias name …`: the argv.
+    Named(&'a str),
+    /// `handler: …`: the name, then the argv.
+    CatchAll,
+}
+
+/// An arm refused, ready to raise, beside the type it is installed at anyway.
+pub(super) type ArmVerdict = Result<CompTy, (CompTy, Box<TypeError>)>;
 
 /// What a bare command head resolves to, by the lookup order the checker and
 /// the runtime share: binding, value builtin, handler, external.
@@ -148,7 +162,7 @@ fn bare_call(comp: &Comp) -> Option<(&str, &Exec)> {
 /// The elaborator's IR shape for `alias name { body }` and `unalias name`,
 /// which bind and unbind a handler scheme for the statements after them.
 enum HandlerStatement<'a> {
-    Alias(&'a str, &'a Comp),
+    Alias(&'a str, &'a Val),
     Unalias(&'a str),
 }
 
@@ -173,8 +187,8 @@ impl<'a> HandlerStatement<'a> {
             return Err(malformed("spread arguments are not allowed here"));
         };
         match (head, &positional[..]) {
-            ("alias", [Val::String(name), Val::Thunk(thunk)]) => {
-                Ok(Some(Self::Alias(name.as_str(), thunk.shape())))
+            ("alias", [Val::String(name), thunk]) if matches!(thunk, Val::Thunk(_)) => {
+                Ok(Some(Self::Alias(name.as_str(), thunk)))
             }
             ("alias", _) => Err(malformed("expected `alias name { body }`")),
             (_, [Val::String(name)]) => Ok(Some(Self::Unalias(name.as_str()))),
@@ -284,15 +298,6 @@ impl Inferencer<'_> {
                     self.bind_pattern(&entry.pattern, field_ty, mode);
                 }
             }
-        }
-    }
-
-    /// Record `rhs`'s curried arity for `annotate`'s η-expansion, keyed
-    /// by `rhs`'s own address — absent means "not `Fun`-shaped".
-    fn record_arrow_arity(&mut self, rhs: &Comp, cty: &CompTy) {
-        let arity = self.spine(cty).arity();
-        if arity > 0 {
-            self.ctx.rhs_arrow_arity.insert(Node::comp(rhs), arity);
         }
     }
 
@@ -638,54 +643,80 @@ impl Inferencer<'_> {
         self.apply_args(head_cty, args)
     }
 
-    /// Infer the arm for head `name`, check that it stands in for what the head
-    /// is, and generalise.
-    fn handler_comp_scheme(&mut self, name: &str, comp: &Comp) -> Scheme {
-        let cty = self.infer_handler_comp(comp);
-        self.install_arm_scheme(name, &cty)
-    }
-
-    /// The scheme a `handlers:` arm is bound at.  An arm written out is
-    /// *inferred* under the argv convention, so its body is checked against
-    /// the parameters its call sites will hand it; an arm in hand as a value
-    /// was inferred under the ordinary one, whose parameter is a fresh
-    /// variable, and unification imposes the convention after the fact.  So
-    /// the two agree on the arm's type and the written one is stronger on its
-    /// body.
-    pub(super) fn handler_arm_scheme(&mut self, name: &str, arm: &Val) -> Scheme {
-        match arm {
-            Val::Thunk(comp) => self.handler_comp_scheme(name, comp.shape()),
-            value => {
-                let ty = self.infer_val(value);
-                let cty = self.ctx.unifier.fresh_comp_ty();
+    /// `(arm)`: `block`, written or in hand, takes the parameters its slot
+    /// hands it and produces what the head it stands in for produces.  Its
+    /// type is what is checked, never its spelling, so `{ forward 'git' }` is
+    /// as unary as `{ |args| … }`.  A refusal comes back ready to raise, with
+    /// the type the arm is installed at anyway: the run-time door renders it
+    /// in its own words.  A join's arm meets its join in place instead
+    /// (`check_arm`).
+    pub(super) fn arm(&mut self, block: &Val, arm: Arm<'_>) -> ArmVerdict {
+        let producer = CompTy::Return(
+            self.ctx.unifier.fresh_grade(),
+            Box::new(self.ctx.unifier.fresh_ty()),
+        );
+        let (wanted, why) = match arm {
+            Arm::Named(_) => (CompTy::arrows([Ty::argv()], producer), Reason::AliasParam),
+            Arm::CatchAll => (catch_all_shape(producer), Reason::CatchAllParams),
+        };
+        let met = match block {
+            Val::Thunk(comp) => {
+                let got = self.with_scope(|this| this.check_comp(comp.shape(), &wanted));
                 self.ctx
-                    .unify_ty(&ty, &Ty::Thunk(Box::new(cty.clone())), Reason::HandlerArm);
-                self.pin_arm_params_to_argv(&cty);
-                self.install_arm_scheme(name, &cty)
+                    .try_unify_comp_ty(&wanted, &got)
+                    .map_err(|kind| (kind, why))
+            }
+            // A value in hand is a block first, then one of the slot's type.
+            held => {
+                let ty = self.infer_val(held);
+                let got = self.ctx.unifier.fresh_comp_ty();
+                match self
+                    .ctx
+                    .try_unify_ty(&ty, &Ty::Thunk(Box::new(got.clone())))
+                {
+                    Ok(()) => self
+                        .ctx
+                        .try_unify_comp_ty(&wanted, &got)
+                        .map_err(|kind| (kind, why)),
+                    Err(kind) => Err((kind, Reason::HandlerArm)),
+                }
+            }
+        };
+        let (head, standing) = self.stands_for(arm);
+        let stands = self.arm_stands_in(&wanted, &head, standing);
+        match met {
+            Ok(()) => stands,
+            Err((kind, why)) => {
+                let installed = stands.unwrap_or_else(|(cty, _)| cty);
+                Err((installed, self.refusal(kind, why)))
             }
         }
     }
 
-    /// Pin `cty` to what head `name` stands for and generalise — the tail both
-    /// spellings of an arm share.  A failure is an ordinary positioned error.
-    fn install_arm_scheme(&mut self, name: &str, cty: &CompTy) -> Scheme {
-        let cty = match self.stands_in(name, cty) {
-            Ok(cty) => cty,
-            Err((cty, error)) => {
-                self.ctx.raise(*error);
-                cty
-            }
-        };
-        let thunk_ty = Ty::Thunk(Box::new(cty));
+    /// [`Self::arm`] at the checker, a refusal raised: the type the arm is
+    /// installed at.
+    pub(super) fn checked_arm(&mut self, block: &Val, arm: Arm<'_>) -> CompTy {
+        self.arm(block, arm).unwrap_or_else(|(cty, error)| {
+            self.ctx.raise(*error);
+            cty
+        })
+    }
+
+    /// The scheme a named arm is bound at for what follows it.
+    pub(super) fn install_arm(&mut self, block: &Val, name: &str) -> Scheme {
+        let thunk_ty = Ty::Thunk(Box::new(self.checked_arm(block, Arm::Named(name))));
         let tied = self.ctx.settle_pending_labels(Some(self.env));
         generalize(&self.ctx.unifier, self.env, &tied, &thunk_ty)
     }
 
-    /// What head `name` stands for, as `(arm)` compares an arm against it: the
-    /// type of the base frame or arm already in force under `name`, and a
-    /// command for anything else — an external, or a value row's name, whose
-    /// arm is dead because the table is searched first.
-    fn stands_for(&mut self, name: &str) -> (CompTy, Standing) {
+    /// What the head an arm stands in for is: under a name, the base frame or
+    /// arm already in force there, else a command — an external, or a value
+    /// row's name, whose arm is dead because the table is searched first.  The
+    /// catch-all stands in for every command.
+    fn stands_for(&mut self, arm: Arm<'_>) -> (CompTy, Standing) {
+        let Arm::Named(name) = arm else {
+            return (command_head(), Standing::EveryCommand);
+        };
         match self.env.lookup_handler(name).cloned() {
             Some(handler) => (
                 self.instantiate_comp(name, &handler.scheme),
@@ -695,36 +726,9 @@ impl Inferencer<'_> {
         }
     }
 
-    /// `(arm)`: an arm produces what the head it stands in for produces, and
-    /// is installed at the head's producer kind.  Refused as an error ready to
-    /// raise, with the arm as it was, since the run-time door that vets an
-    /// installed arm renders it in its own words.
-    pub(super) fn stands_in(
-        &mut self,
-        name: &str,
-        arm: &CompTy,
-    ) -> Result<CompTy, (CompTy, Box<TypeError>)> {
-        let (head, standing) = self.stands_for(name);
-        self.arm_stands_in(arm, &head, standing)
-    }
-
-    /// The catch-all stands in for every command.
-    pub(super) fn catch_all_stands_in(
-        &mut self,
-        arm: &CompTy,
-    ) -> Result<CompTy, (CompTy, Box<TypeError>)> {
-        self.arm_stands_in(arm, &command_head(), Standing::EveryCommand)
-    }
-
-    /// Unify what `arm` and `head` produce, each past its parameters: an arm
-    /// written without one discards its argv, as the runtime does.  A `()`
+    /// Unify what `arm` and `head` produce, each past its parameters.  A `()`
     /// producer stands in for a command: its output is whatever it wrote.
-    fn arm_stands_in(
-        &mut self,
-        arm: &CompTy,
-        head: &CompTy,
-        standing: Standing,
-    ) -> Result<CompTy, (CompTy, Box<TypeError>)> {
+    fn arm_stands_in(&mut self, arm: &CompTy, head: &CompTy, standing: Standing) -> ArmVerdict {
         let wanted = self.producer_of(head);
         let found = self.producer_of(arm);
         let upcast = matches!(
@@ -743,17 +747,19 @@ impl Inferencer<'_> {
         let installed = self.map_producer(arm, |_| wanted);
         match verdict {
             Ok(()) => Ok(installed),
-            Err(kind) => {
-                let error = TypeError {
-                    pos: self.ctx.pos,
-                    kind,
-                    reason: Some(Reason::StandsIn(standing)),
-                    weak: None,
-                    unit: None,
-                };
-                Err((installed, Box::new(error)))
-            }
+            Err(kind) => Err((installed, self.refusal(kind, Reason::StandsIn(standing)))),
         }
+    }
+
+    /// A refusal of `kind` under `why`, at the span in force, ready to raise.
+    fn refusal(&self, kind: TypeErrorKind, why: Reason) -> Box<TypeError> {
+        Box::new(TypeError {
+            pos: self.ctx.pos,
+            kind,
+            reason: Some(why),
+            weak: None,
+            unit: None,
+        })
     }
 
     /// What `cty` produces once every parameter is supplied, forced to
@@ -761,17 +767,6 @@ impl Inferencer<'_> {
     fn producer_of(&mut self, cty: &CompTy) -> CompTy {
         let tail = self.spine(cty).tail;
         self.force_return_shape(&tail, Reason::ReturnShape).into()
-    }
-
-    /// Force the argv convention on an arm's parameters.  A written arm is
-    /// *inferred* under it ([`Self::infer_alias_arm`]); an arm in hand as a
-    /// value has its own parameter type already, and only unification can
-    /// impose the convention on that.
-    fn pin_arm_params_to_argv(&mut self, cty: &CompTy) {
-        if let CompTy::Fun(param, body) = self.ctx.unifier.resolve_comp_ty(cty) {
-            self.ctx.unify_ty(&param, &Ty::argv(), Reason::AliasParam);
-            self.pin_arm_params_to_argv(&body);
-        }
     }
 
     /// Instantiate the scheme head `name` is bound at and strip the outer
@@ -804,55 +799,18 @@ impl Inferencer<'_> {
     }
 
     /// Apply an alias/handler arm — a user's or a base frame's — to a call
-    /// site's arguments.  A parameterised arm is `Fun(argv, body)`, and the
-    /// argv rule says what that parameter is; a nullary arm discards its
-    /// arguments, as the runtime does.
+    /// site's argv, which every arm takes as its one parameter
+    /// ([`Self::arm`]).  The argv rule's contribution is its walk and its
+    /// refusals: its type is always [`Ty::argv`].
     fn apply_alias_arm(&mut self, name: &str, scheme: &Scheme, args: &Args) -> CompTy {
         let cty = self.instantiate_comp(name, scheme);
-        let argv = self.argv_ty(args, ArgvBoundary::InShell(name));
-        let CompTy::Fun(param, body) = self.ctx.unifier.resolve_comp_ty(&cty) else {
-            return cty;
+        let _argv = self.argv_ty(args, ArgvBoundary::InShell(name));
+        let CompTy::Fun(_, body) = self.ctx.unifier.resolve_comp_ty(&cty) else {
+            unreachable!(
+                "every arm takes the argv: `Inferencer::arm` installs it so, as every base frame is"
+            )
         };
-        self.ctx.unify_ty(&param, &argv, Reason::AliasParam);
         *body
-    }
-
-    /// The runtime handler calling convention: an arm is forced on the argv, so
-    /// a parameter binds [`Ty::argv`] and the arm keeps its `Fun(argv, body)`
-    /// shape for [`Self::apply_alias_arm`] to meet a call site with.
-    ///
-    /// The parameter is `List String` at the arm, not a variable the call site
-    /// pins later, so an arm that reads an element as anything else is refused
-    /// where the mistake is written rather than where it is called.
-    pub(super) fn infer_alias_arm(&mut self, param: Option<&Pattern>, body: &Comp) -> CompTy {
-        match param {
-            Some(param) => {
-                let argv_ty = Ty::argv();
-                let body_cty = self.with_scope(|this| {
-                    this.bind_pattern(param, &argv_ty, BindMode::Param);
-                    this.infer_comp(body)
-                });
-                CompTy::Fun(Box::new(argv_ty), Box::new(body_cty))
-            }
-            None => self.with_scope(|this| this.infer_comp(body)),
-        }
-    }
-
-    /// The ordinary convention, for a value installed as a lexical binding: a
-    /// lambda is `Fun(param, body)` over a fresh value type, a block is its
-    /// bare body.  Contrast [`Self::infer_alias_arm`], which forces argv.
-    pub(super) fn infer_binding_value(&mut self, param: Option<&Pattern>, body: &Comp) -> CompTy {
-        match param {
-            Some(param) => {
-                let param_ty = self.ctx.unifier.fresh_ty();
-                let body_ty = self.with_scope(|this| {
-                    this.bind_pattern(param, &param_ty, BindMode::Param);
-                    this.infer_comp(body)
-                });
-                CompTy::Fun(Box::new(param_ty), Box::new(body_ty))
-            }
-            None => self.with_scope(|this| this.infer_comp(body)),
-        }
     }
 
     /// `comp` against a type already known: a block whose parameter the
@@ -870,32 +828,6 @@ impl Inferencer<'_> {
             }
             _ => self.infer_comp(comp),
         }
-    }
-
-    fn infer_handler_comp(&mut self, comp: &Comp) -> CompTy {
-        match &comp.item {
-            CompKind::Lam { param, body } => self.infer_alias_arm(Some(param), body),
-            _ => self.infer_alias_arm(None, comp),
-        }
-    }
-
-    /// The catch-all convention: `Fun(String, Fun(List String, body))`. The
-    /// name is bound `String`; the argv layer and body reuse
-    /// [`Self::infer_handler_comp`], so the shape is exactly a per-name arm
-    /// nested one level under the name.
-    pub(super) fn infer_catch_all(&mut self, comp: &Comp) -> CompTy {
-        let (name_param, rest) = match &comp.item {
-            CompKind::Lam { param, body } => (Some(param), body.as_ref()),
-            // arity is vetted elsewhere; infer the body for its errors
-            _ => (None, comp),
-        };
-        self.with_scope(|this| {
-            if let Some(name_param) = name_param {
-                this.bind_pattern(name_param, &Ty::String, BindMode::Param);
-            }
-            let body_cty = this.infer_handler_comp(rest);
-            CompTy::Fun(Box::new(Ty::String), Box::new(body_cty))
-        })
     }
 
     fn infer_not(&mut self, val: &Val) -> Ty {
@@ -1108,7 +1040,6 @@ impl Inferencer<'_> {
     /// reads, bound by the bind rule, and generalised.
     fn infer_let(&mut self, pattern: &Pattern, rhs: &Comp) {
         let cty = self.infer_held(pattern, rhs);
-        self.record_arrow_arity(rhs, &cty);
         let bound_ty = self.rhs_bound_ty(rhs, cty);
         let tied = self.ctx.settle_pending_labels(Some(self.env));
         let concrete = self.ctx.unifier.apply_ty_keeping_weak(&bound_ty);
@@ -1121,8 +1052,8 @@ impl Inferencer<'_> {
     /// held to the discarded shape.
     fn infer_statement(&mut self, comp: &Comp) -> CompTy {
         let handled = match HandlerStatement::of(comp) {
-            Ok(Some(HandlerStatement::Alias(name, body))) => {
-                let scheme = self.handler_comp_scheme(name, body);
+            Ok(Some(HandlerStatement::Alias(name, block))) => {
+                let scheme = self.install_arm(block, name);
                 self.env
                     .bind_handler(name.to_string(), scheme, HandlerOrigin::Alias);
                 true
@@ -1236,8 +1167,8 @@ impl Inferencer<'_> {
         Ty::Record(Self::fields_row(fields, tail))
     }
 
-    /// A plain map literal: `Map<elem>`, every key a static label — so the
-    /// checker refuses a static duplicate exactly as a record's (T0022).
+    /// A plain map literal: `Map<elem>`, every key written out — so the
+    /// checker refuses a duplicate exactly as a record's (T0022).
     fn infer_map_val(&mut self, entries: &[(Name, Spanned<Val>)]) -> Ty {
         let elem = self.ctx.unifier.fresh_ty();
         let mut seen: Vec<Name> = Vec::new();
@@ -1256,11 +1187,9 @@ impl Inferencer<'_> {
     }
 
     /// A map literal with a computed key or a spread ([`Assembly::Map`]):
-    /// `Map<elem>`, one `elem` shared by every value and spread. A static
-    /// label (`key:`, as opposed to `$k:`) is checked for a duplicate exactly
-    /// as [`Self::infer_map_val`]'s are — SPEC §4.5 makes any *static*
-    /// duplicate an error; only a computed key is left to the runtime
-    /// warning.
+    /// `Map<elem>`, one `elem` shared by every value and spread. A key written
+    /// out is checked for a duplicate as [`Self::infer_map_val`]'s are; a
+    /// computed duplicate is `eval_map`'s to refuse (SPEC §4.5).
     fn infer_assembly_map(&mut self, entries: &[ValMapEntry]) -> Ty {
         // Keys must be `String`: the runtime's status-1 refusal, lifted here.
         let elem = self.ctx.unifier.fresh_ty();
@@ -1840,7 +1769,14 @@ impl Inferencer<'_> {
         match &comp.item {
             CompKind::Return(value) => CompTy::pure(self.infer_val(value)),
             CompKind::Assemble(assembly) => CompTy::pure(self.infer_assembly(assembly)),
-            CompKind::Lam { param, body } => self.infer_binding_value(Some(param), body),
+            CompKind::Lam { param, body } => {
+                let param_ty = self.ctx.unifier.fresh_ty();
+                let body_ty = self.with_scope(|this| {
+                    this.bind_pattern(param, &param_ty, BindMode::Param);
+                    this.infer_comp(body)
+                });
+                CompTy::Fun(Box::new(param_ty), Box::new(body_ty))
+            }
             CompKind::Force(value) => {
                 let val_ty = self.infer_val(value);
                 if let Some(name) = written(value) {

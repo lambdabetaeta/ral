@@ -1,7 +1,8 @@
 //! Collect phase: every lifecycle edge arrives as one [`Event`] on one
 //! channel.  [`step`] is pure over them — effects are returned, not performed,
-//! bar the heard key's strike of the run's node — and however the stages
-//! ended, the verdict folds in launch order.
+//! bar the heard key's strike of the run's node — an abandoned edge is armed
+//! from state before each wait, and however the stages ended, the verdict
+//! folds in launch order.
 
 use super::super::command;
 use super::stage::StageHandle;
@@ -118,9 +119,8 @@ impl StageEnd {
                 pumps,
                 sent,
             } => {
-                if let Some(jail) = &jail {
-                    jail.finish();
-                }
+                // Before the join: the finish kills a straggler holding a pump's pipe.
+                drop(jail);
                 if sent != Some(CancelCause::ReaderGone) {
                     pumps.join_under(scope, || {
                         if let Group::Owns(g) = group {
@@ -178,7 +178,8 @@ pub(super) enum Event {
     Ended(usize, WaitOutcome),
     /// A thread stage's own report, or its [`SettleOnDrop`]'s.
     Returned(usize, StageObservation),
-    /// The sentinel heard a write to this stage's dead outbound edge.
+    /// The sentinel heard a write past what this stage's outbound edge owed
+    /// its departed reader.
     Wrote(usize),
     /// A cause on the current scope stronger than the teardown so far; minted
     /// by [`CollectState::recv`] alone.
@@ -249,8 +250,6 @@ impl Drop for SettleOnDrop {
 /// What [`step`] asks [`CollectState::run`] to perform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Effect {
-    /// Mark this stage's outbound edge dead and set the sentinel on it.
-    ArmEdge(usize),
     /// Cut this stage, whose write to a dead edge the sentinel heard.
     KillStage(usize),
     CancelAll {
@@ -292,7 +291,7 @@ impl StageObservation {
 
     /// The teardown an escape out of `stage` calls for: `Cancelled` for an
     /// `exit`; a stop's own cause unless it names `stage` (the collector's own
-    /// doing: a reader-gone stop, which arms, or a teardown already running).
+    /// doing: a reader-gone stop, or a teardown already running).
     fn tears_down_for(&self, stage: &ScopeId) -> Option<CancelCause> {
         match &self.end {
             ThreadEnd::Settled(Err(Break::Escape(Escape::Exit(_)))) => Some(CancelCause::Cancelled),
@@ -458,10 +457,11 @@ impl CollectState {
     }
 
     /// One event, or `None` at `deadline` or when every producer is gone.
-    /// The deadline and scope are read before each receive, which waits at
-    /// most a slice; this alone mints `Event::Cancelled`, for a cause above
-    /// `teardown`.
+    /// Every edge a reader has left is swept first.  The deadline and scope
+    /// are read before each receive, which waits at most a slice; this alone
+    /// mints `Event::Cancelled`, for a cause above `teardown`.
     fn recv(&self, deadline: Option<Instant>) -> Option<Event> {
+        self.sweep_edges();
         loop {
             if deadline.is_some_and(|d| Instant::now() >= d) {
                 return None;
@@ -488,19 +488,31 @@ impl CollectState {
         }
     }
 
-    /// File one stage's own terminal event, then arm the edge its reader has
-    /// just abandoned.  Only a live writer is armed against: one that already
-    /// finished keeps its outcome, so `!{ echo a; exit 3 } | head -1` stays
-    /// honest.
-    fn file(&mut self, ix: usize, end: impl FnOnce(StageHandle) -> StageEnd) -> Option<Effect> {
+    /// File one stage's own terminal event.
+    fn file(&mut self, ix: usize, end: impl FnOnce(StageHandle) -> StageEnd) {
         let handle = self.stages[ix]
             .take()
             .expect("a stage's own end arrives once, for a live stage");
         self.observed[ix] = Some(end(handle));
-        let writer = ix.checked_sub(1)?;
-        self.stages[writer]
-            .is_some()
-            .then_some(Effect::ArmEdge(writer))
+    }
+
+    /// Every live stage whose reader is gone: filed, or never pushed.  The
+    /// last stage pushed is always one: the final stage (no edge, so a no-op)
+    /// or, after a launch that failed part-way, a writer whose reader never
+    /// came.  A writer already filed keeps its outcome, so
+    /// `!{ echo a; exit 3 } | head -1` stays honest.
+    fn abandoned(&self) -> impl Iterator<Item = usize> {
+        let live = |ix: usize| matches!(self.stages.get(ix), Some(Some(_)));
+        (0..self.stages.len()).filter(move |&ix| live(ix) && !live(ix + 1))
+    }
+
+    /// Set the sentinel on every abandoned edge, marking it dead unless a
+    /// teardown, which cuts nothing at an edge, is under way.
+    fn sweep_edges(&self) {
+        let cut = self.teardown.is_none();
+        for writer in self.abandoned().filter_map(|ix| self.stages[ix].as_ref()) {
+            writer.listen(cut);
+        }
     }
 
     /// A stage already filed keeps its outcome, so the news is dropped.
@@ -510,11 +522,6 @@ impl CollectState {
 
     fn run(&mut self, effect: Effect) {
         match effect {
-            Effect::ArmEdge(ix) => {
-                if let Some(handle) = self.stages[ix].as_ref() {
-                    handle.arm();
-                }
-            }
             Effect::KillStage(ix) => {
                 if let Some(handle) = self.stages[ix].as_mut() {
                     handle.cut();
@@ -605,9 +612,14 @@ impl CollectState {
             .chain(envelopes)
     }
 
+    /// Every live address, plus each live stage's jail for a member that
+    /// `setsid()`'d out of the group.
     fn kill_live(&self) {
         for address in self.addresses(true) {
             address.kill();
+        }
+        for jail in self.stages.iter().flatten().filter_map(StageHandle::jail) {
+            jail.kill();
         }
     }
 
@@ -637,6 +649,14 @@ impl CollectState {
         }
         self.kill_live();
         self.drain();
+    }
+
+    /// End what a launch that failed part-way started: under the cause in
+    /// force, as `recv` would mint it, else as an `exit` in a stage would.
+    pub(super) fn roll_back(&mut self) {
+        if self.live() {
+            self.cancel_all(self.scope.cause().unwrap_or(CancelCause::Cancelled));
+        }
     }
 
     /// The audit and verdict fold, in launch order — the one place `&Shell`
@@ -701,9 +721,12 @@ impl CollectState {
 /// for.
 pub(super) fn step(state: &mut CollectState, ev: Event) -> Option<Effect> {
     match ev {
-        Event::Ended(ix, outcome) => state.file(ix, |h| h.file_external_end(outcome)),
+        Event::Ended(ix, outcome) => {
+            state.file(ix, |h| h.file_external_end(outcome));
+            None
+        }
         Event::Returned(ix, obs) => {
-            let arm = state.file(ix, |h| h.file_thread_end(obs));
+            state.file(ix, |h| h.file_thread_end(obs));
             let Some(StageEnd::Thread { obs, stage }) = &state.observed[ix] else {
                 unreachable!("a thread stage's end was just filed");
             };
@@ -711,10 +734,9 @@ pub(super) fn step(state: &mut CollectState, ev: Event) -> Option<Effect> {
                 Some(Effect::CancelAll {
                     cause: CancelCause::Aborted,
                 })
-            } else if let Some(cause) = obs.tears_down_for(stage) {
-                Some(Effect::CancelAll { cause })
             } else {
-                arm
+                obs.tears_down_for(stage)
+                    .map(|cause| Effect::CancelAll { cause })
             }
         }
         Event::Wrote(ix) => state.on_wrote(ix),

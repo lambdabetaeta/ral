@@ -45,6 +45,42 @@ let ta = { return $[!{tb} + 1] }
 let tb = { return 41 }
 echo !{ta}
 
+# A rebinding begins a new stretch: the block keeps the value bound above it
+let bf = 10
+let bg = { return $bf }
+let bf = { return 20 }
+echo !{bg}
+
+# No definition moves across a statement: `cx` reads the first `cf`
+let cf = { return 0 }
+let cx = cf
+let cf = { return 'hello' }
+let cg = { cf }
+echo $cx
+echo !{cg}
+
+# An inner block's own definition is no reference to the stretch around it
+let idf = { |x|
+  let ia = { ig }
+  let ig = { return 1 }
+  return $x
+}
+let ig = {
+  let p = idf 1
+  let q = idf 'a'
+  return $q
+}
+echo !{ig}
+
+# A stretch shadows an enclosing binding across the whole stretch
+let sf = 10
+let sh = {
+  let sg = { sf }
+  let sf = { return 20 }
+  sg
+}
+echo !{sh}
+
 # A let's extent is the rest of its own block
 echo !{ let extent_x = 41; return $[$extent_x + 1] }
 

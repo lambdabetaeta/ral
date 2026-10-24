@@ -8,6 +8,11 @@ generated_at_commit: 39934600
 > Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]: `service`
 > is deleted, so `spawn` and `detach` are the verbs for outliving a command.
 
+> Corrected 2026-10-23: `setsid` runs in the process bwrap clones, before it
+> forks the payload, so `child-pid` names a group that exists only once
+> that process has called `setsid`; the launch reads it no sooner
+> ([[internals/linux-envelope|linux-envelope]]).
+
 **A grant's envelope confines process identity and lifetime, not only the
 filesystem and network — on every projection, wherever the host can build the
 namespace, and it says when it cannot.** What `grant` means for `ps`, `kill`,

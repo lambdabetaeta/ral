@@ -5515,6 +5515,7 @@ dependencies = [
  "serde_json",
  "strum",
  "tempfile",
+ "tikv-jemallocator",
  "unicode-width 0.2.2",
  "windows-sys 0.61.2",
 ]
@@ -5550,6 +5551,7 @@ dependencies = [
  "ral-core",
  "ral-ripgrep-core",
  "regex",
+ "regex-syntax",
  "rustc-hash",
  "rustix",
  "ryu",
@@ -5648,7 +5650,6 @@ dependencies = [
  "serde_json",
  "termcolor",
  "textwrap",
- "tikv-jemallocator",
 ]
 
 [[package]]

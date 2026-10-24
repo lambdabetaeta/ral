@@ -272,7 +272,7 @@ pub struct HandlerArm {
 /// command name?", read by the parser to skip the [`Ast::Call`] wrapper and
 /// by elaboration through [`crate::elaborator::word_val`].
 ///
-/// Purely lexical: the grammar of [`numeral::prefix`] decides, never a round
+/// Purely lexical: the grammar of [`numeral::shape`] decides, never a round
 /// trip through printing.  A float wants a `.`, so `1e5`, which merely happens
 /// to f64-parse, stays a string; `007` and `1.50` are numerals all the same, and normalise
 /// to `7` and `1.5` wherever they are printed.
@@ -288,72 +288,12 @@ impl WordLiteral {
         match s {
             "true" => Some(Self::Bool(true)),
             "false" => Some(Self::Bool(false)),
-            _ => match numeral::prefix(s)? {
-                (n, _) if n != s.len() => None,
-                (_, Shape::Int) => s.parse().ok().map(Self::Int),
+            _ => match numeral::shape(s)? {
+                Shape::Int => s.parse().ok().map(Self::Int),
                 // A Float is finite by construction; an overflowing
                 // literal like 1.0e999 stays a plain word.
-                (_, Shape::Float) => s.parse().ok().and_then(Finite::new).map(Self::Float),
+                Shape::Float => s.parse().ok().and_then(Finite::new).map(Self::Float),
             },
-        }
-    }
-}
-
-impl Ast {
-    /// True for the forms that elaborate to a thunk: a `{…}` block or a
-    /// `{|p| …}` lambda. `syntax::group` admits only these into a `LetRec`,
-    /// since only a thunk can close over a forward reference without the
-    /// binding being settled first.
-    pub(crate) fn is_thunk_form(&self) -> bool {
-        matches!(self, Self::Lambda { .. } | Self::Block(_))
-    }
-
-    /// The name and right-hand side of a `let name = rhs`. `None` for anything
-    /// else, a destructuring `let [a, b] = …` included: it binds no single name
-    /// and so is no `LetRec` member. Both keep their spans: the elaborator
-    /// stamps a member with its RHS and refuses a bad binder at its name.
-    pub(crate) fn as_name_let(&self) -> Option<(Spanned<&str>, &Spanned<Box<Self>>)> {
-        match self {
-            Self::Let { pattern, value } => match &pattern.item {
-                Pattern::Name(name) => {
-                    Some((Spanned::with_span(pattern.span, name.as_ref()), value))
-                }
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-}
-
-impl ScopeAst {
-    /// Every sub-expression in source order: the operands, plus `within`'s
-    /// handler arms, which are syntax and so sit beside the operands rather
-    /// than inside one.  Free-variable collection walks them.
-    pub(crate) fn operands(&self) -> Vec<&Ast> {
-        match self {
-            Self::Try { body, handler } => vec![body, handler],
-            Self::Guard { body, cleanup } => vec![body, cleanup],
-            Self::Within {
-                opts,
-                handlers,
-                body,
-            } => {
-                let mut ops: Vec<&Ast> = opts.iter().map(|(_, v)| &v.item).collect();
-                ops.extend(handlers.iter().flatten().map(|arm| &arm.value.item));
-                ops.push(body);
-                ops
-            }
-            Self::Grant { caps, body } => {
-                let mut ops: Vec<&Ast> = caps.iter().map(|(_, v)| &v.item).collect();
-                ops.push(body);
-                ops
-            }
-            Self::Audit { body } | Self::Gather { body } => vec![body],
-            Self::Spawn { title, body } => {
-                let mut ops: Vec<&Ast> = title.iter().map(|t| &t.item).collect();
-                ops.push(body);
-                ops
-            }
         }
     }
 }

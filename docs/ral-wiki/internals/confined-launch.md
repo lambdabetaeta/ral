@@ -30,9 +30,9 @@ under a restrictive projection, it calls `sandboxed_command`
 
 ## The child is handed its confinement on a descriptor
 
-**Both Unix backends re-exec ral as `ral --warrant`, and that argv names
-nothing.** The confinement and the program arrive in a `Warrant` the parent
-compiled, on fd 99.
+**Both Unix backends re-exec ral as `ral --warrant <fd>`, and that argv
+names only a descriptor.** The confinement and the program arrive in a
+`Warrant` the parent compiled, on that descriptor.
 
 - **No other process can write the channel.**
   - On Linux it is a sealed memfd. A same-uid process may reopen any descriptor
@@ -42,14 +42,20 @@ compiled, on fd 99.
     writer closes before the child exists.
 - **The child refuses anything unexpected:** an unsealed memfd, a non-socket, or
   a warrant not in canonical form. Decoding re-encodes and compares.
-- **On Linux the real argv is `bwrap --args 98 -- /proc/self/fd/102 --warrant`.**
-  `bwrap_argv` is pure in descriptors and returns only bwrap's options, which
-  bwrap reads from `--args`. The trampoline is ral's own pin, lent at fd 102.
-- **Every descriptor a launch hands down has a slot defined once** (`Slot`):
-  bwrap's `--args`, the warrant, `--info-fd`, the Landlock ruleset, ral's pin,
-  the seccomp programs, and the mount handles, which come last because their
-  number is open-ended. One `Handoff` places them all. Once confined, the child
-  closes everything from the first slot up, so the program inherits none.
+- **On Linux the real argv is `bwrap --args <a> -- /proc/self/fd/<t> --warrant <w>`.**
+  `bwrap_argv` is pure in descriptor numbers and returns only bwrap's
+  options, which bwrap reads from `--args`. The trampoline is ral's own pin.
+- **Every descriptor a launch hands down crosses at the number it was lent
+  at** (`Slot`, from 98 up): bwrap's `--args`, the warrant, `--info-fd` and
+  the payload's copy of its writer, the Landlock ruleset, ral's pin, the
+  seccomp programs and the mount handles. A `Handoff` lifts each to a free
+  number in the parent, and the child's hook only clears close-on-exec:
+  nothing is `dup2`'d, so no descriptor the child still needs (`std`'s
+  exec-error pipe, `detach`'s handshake) can be displaced. Each number is
+  named as data: to bwrap in its options, the ruleset's in the warrant,
+  the warrant's in argv. Once confined, the child closes everything from 98
+  up, so the program inherits none, and a `Kept` launch's read of
+  `--info-fd` ends: the payload's group exists.
 - **`serve_warrant` runs before `sandbox::boot`.** The trampoline pins and
   opens nothing before it is confined.
 - **Exit codes are honest.** A failure before the program starts exits 126, a
@@ -61,7 +67,7 @@ compiled, on fd 99.
 **`Warrant::confine` is the only road to the program, and it runs only after the
 confinement is entered and the handoff closed.** The warrant's `Confinement` is
 the one thing the child enters: `Seatbelt(profile)` on macOS; on Linux
-`unconfined`, `landlock` or `landlock+refer`, a `Landlocked` promise or none.
+`unconfined`, `landlock@<fd>` or `landlock+refer@<fd>`, a `Landlocked` promise naming the ruleset's descriptor, or none.
 
 - **On Linux the parent decides everything.** It probes Landlock once, and
   `landlock::build`:
@@ -93,8 +99,7 @@ the one thing the child enters: `Seatbelt(profile)` on macOS; on Linux
 **Each `(canonical path, kind)` grant derives a fixed capability SID from a hash
 of the canonical path** (`dacl::fs_capability_name`). Its ACE is stamped once,
 ever, and never reverted (`dacl::ensure_frozen_grant`). `session::confine` mints
-into the child's token exactly the capability SIDs its projection names, from
-the session's `SessionSandbox`.
+into the child's token exactly the capability SIDs of this launch's grants.
 
 - **The kernel enforces the projection the guard judges.** A narrowed grant, or
   a subagent's narrowed permissions, hold at the OS layer, because the narrower
@@ -118,19 +123,22 @@ the session's `SessionSandbox`.
   (`dacl/frozen.rs`). A position that is not Unicode is refused there too, as
   `DaclError::NotUnicode`: the capability name is a hash of the position's text,
   and a grant that cannot be expressed faithfully is refused, not approximated.
-- **The check comes before every filter, on every launch.** Three filters drop
-  paths before anything is stamped: the projection's memo of what it granted,
-  existence, and the ambient-access probe. A path granted at an earlier launch and
-  since replaced by a junction would pass all three and skip a check placed in
-  the stamp alone, so every frozen allowance is checked first, warm cache or not.
-  A read-write grant also sets a mandatory integrity label; it goes through the
-  held handle too, so both operations reach the object checked.
-- **The projection key covers the whole `read` list**, run places and live
-  support included, not only its prefixes: capabilities accumulate per key and
-  reach every later token minted under it, so two launches with the same
-  prefixes and different places never share one. Every run place is stamped as a
-  read prefix is, frozen. The guest-jail launch branch still bypasses per-command
-  projection and installs no kernel exec policy.
+- **The check comes before every shortcut, on every launch.** Three things
+  spare a stamp: a path not on disk, the session's memo of the grants it has
+  ensured, and the ambient-access probe, which spares the capability ACE alone.
+  A path granted at an earlier launch and since replaced by a junction would
+  pass all three and skip a check placed in the stamp alone, so every frozen
+  allowance is checked first, warm cache or not. A read-write grant on a
+  directory also sets a mandatory integrity label, ambient access or not, since
+  the mandatory check runs before any ACE is read; it goes through the held
+  handle too, so both operations reach the object checked.
+- **A token names its own launch's grants and nothing else.** Its capabilities
+  are derived afresh at each launch, the program image and the carving of the
+  tree as it stands included, so nothing one launch was granted reaches another
+  launch under the same projection. The projection key, its whole fs lists,
+  picks only the profile: the package SID and its named-object namespace. Every
+  run place is stamped as a read prefix is, frozen. The guest-jail launch branch
+  still bypasses per-command projection and installs no kernel exec policy.
 - **An exclusion is never stamped.** The AppContainer pass ignores a deny ACE
   naming a capability, so nothing can take back what a grant's ACE admits.
   `session::confine` carves an exclusion out of the allowances around it,

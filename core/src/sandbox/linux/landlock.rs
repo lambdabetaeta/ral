@@ -3,8 +3,9 @@
 //! signal scope closing the same-uid `kill` hole where the host cannot build
 //! a pid namespace.  The parent builds the one ruleset ([`build`]), opening
 //! every admit in the host and never through a symlink; the payload inherits
-//! it at [`Slot::Ruleset`] and enters it ([`Landlocked::enter`]), never before
-//! bwrap: a domain handling any fs right forbids `mount(2)`, bwrap's first act.
+//! it at the slot its warrant names and enters it ([`Landlocked::enter`]),
+//! never before bwrap: a domain handling any fs right forbids `mount(2)`,
+//! bwrap's first act.
 //!
 //! Landlock is allow-list only, so an exclusion inside an allowed directory
 //! is rendered by subtraction ([`expand`]): the entries the table still
@@ -18,7 +19,7 @@
 //! admission is lowered against the envelope's bind roots ([`lowered`]).
 
 use super::super::Refusal;
-use super::super::warrant::Slot;
+use super::super::warrant::{Handoff, Slot};
 use super::{DenyMask, OpenError, leaf_fd, open_dir_nofollow, open_nofollow, standing};
 use crate::capability::{ExecDeny, ExecRules, Subject};
 use crate::path::{Dir, Installing, Kind, LeafMode, Located, Object, ObjectId, RealPath, Trace};
@@ -162,7 +163,7 @@ impl Scoped {
 }
 
 /// A ruleset not yet entered: built by the parent, entered by the payload.
-pub(crate) struct Ruleset(OwnedFd);
+struct Ruleset(OwnedFd);
 
 impl Ruleset {
     fn create(handled: Access, scoped: Scoped) -> io::Result<Self> {
@@ -236,12 +237,13 @@ impl AsFd for Ruleset {
     }
 }
 
-/// What a launch promised its payload: a ruleset at [`Slot::Ruleset`], and
-/// whether the payload must still grant `Refer` on its own root, which only
-/// exists in there.
+/// What a launch promised its payload: a ruleset at `at`, and whether the
+/// payload must still grant `Refer` on its own root, which only exists in
+/// there.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Landlocked {
     pub(crate) refer_root: bool,
+    pub(crate) at: Slot,
 }
 
 impl Landlocked {
@@ -249,7 +251,7 @@ impl Landlocked {
     /// to, and the kernel accepted the exact handled set when the parent
     /// created it.
     pub(crate) fn enter(&self) -> Result<(), String> {
-        let at = Slot::Ruleset;
+        let at = self.at;
         let ruleset = Ruleset(at.take().ok_or_else(|| Error::Missing(at.fd()))?);
         if self.refer_root {
             let root = open_dir_nofollow(&RealPath::universal())?
@@ -320,20 +322,22 @@ fn plan(exec: &ExecProjection, landlock: Landlock) -> Result<Option<Plan>, Refus
     Ok((handled != Access::NONE || scoped != Scoped::NONE).then_some(Plan { handled, scoped }))
 }
 
-/// The ruleset for `exec` on a kernel at `landlock`, and what the payload is
-/// promised; `None` where there is nothing to enter.  `roots` are the
-/// objects the envelope shows, which a directory admission is lowered onto;
-/// `fs` decides where a name veto is carried into one.
+/// The ruleset for `exec` on a kernel at `landlock`, lent to `handoff`, and
+/// what the payload is promised; `None` where there is nothing to enter.
+/// `roots` are the objects the envelope shows, which a directory admission is
+/// lowered onto; `fs` decides where a name veto is carried into one.
 ///
 /// # Errors
 /// As [`plan`]; a ruleset or rule the kernel refuses; an admit that cannot be
-/// opened, or that a symlink has replaced since the grant was rendered.
+/// opened, or that a symlink has replaced since the grant was rendered, or a
+/// lend the descriptor limit refuses.
 pub(crate) fn build(
     exec: &ExecProjection,
     fs: &RenderedFs,
     roots: &[RealPath],
     landlock: Landlock,
-) -> Result<Option<(Ruleset, Landlocked)>, Refusal> {
+    handoff: &mut Handoff,
+) -> Result<Option<Landlocked>, Refusal> {
     let Some(Plan { handled, scoped }) = plan(exec, landlock)? else {
         return Ok(None);
     };
@@ -342,8 +346,10 @@ pub(crate) fn build(
     if let Some(table) = kernel_table(exec) {
         admit_exec(&ruleset, table, fs, roots)?;
     }
-    let refer_root = handled.contains(Access::REFER);
-    Ok(Some((ruleset, Landlocked { refer_root })))
+    Ok(Some(Landlocked {
+        refer_root: handled.contains(Access::REFER),
+        at: handoff.lend(ruleset.as_fd())?,
+    }))
 }
 
 /// Every live file as itself, and every live directory lowered onto the
@@ -759,7 +765,10 @@ mod tests {
         match (dir, allow) {
             (true, true) => Rule::Allow(ExecAllow::Dir(GrantPath {
                 written,
-                real: Extent::Under(real),
+                real: Extent::Under {
+                    position: real,
+                    passed: Vec::new(),
+                },
             })),
             (true, false) => Rule::Deny(Box::new(ExecDeny::Dir(
                 GrantPath::<Excluded>::walk(written).expect("a directory walks"),
@@ -807,6 +816,7 @@ mod tests {
             &FsProjection::Unrestricted,
             &whole(),
             landlock,
+            &mut Handoff::default(),
         )
         .expect("builds");
         assert!(built.is_some(), "a restricted projection is entered");
@@ -829,6 +839,7 @@ mod tests {
             &FsProjection::Unrestricted,
             &whole(),
             landlock,
+            &mut Handoff::default(),
         ) else {
             panic!("a symlink would admit its target");
         };
@@ -1024,7 +1035,8 @@ mod tests {
     /// The write prefixes of an fs projection, each a rendered object.
     fn writing(prefixes: &[&str]) -> RenderedFs {
         let prefixes: Vec<_> = prefixes.iter().map(|p| nowhere(p)).collect();
-        let write = render_objects(prefixes.iter().map(|p| (p, None))).expect("renders");
+        let none: &[RealPath] = &[];
+        let write = render_objects(prefixes.iter().map(|p| (p, None, none))).expect("renders");
         FsProjection::Restricted(FsRules {
             write,
             ..FsRules::default()

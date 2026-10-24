@@ -325,7 +325,7 @@ impl Allows for ExecAllow {
         match self {
             Self::Any => Subject::Any,
             Self::Dir(GrantPath {
-                real: Extent::Under(position),
+                real: Extent::Under { position, .. },
                 ..
             }) => Subject::Dir(path::Subject::Position(position)),
             Self::Dir(GrantPath {
@@ -406,7 +406,7 @@ pub(crate) trait Keyed: Polar {
 impl Keyed for Trace {
     fn file(path: GrantPath<Extent>) -> Result<Rule, PolicyError> {
         match path.real {
-            Extent::Under(real) => Ok(Rule::Allow(ExecAllow::File {
+            Extent::Under { position: real, .. } => Ok(Rule::Allow(ExecAllow::File {
                 real,
                 written: path.written,
                 found_as: None,
@@ -526,7 +526,9 @@ impl ExecRules {
                 },
             ) => Some(FsAllow::Prefix(dir.clone())),
             ExecAllow::Dir(GrantPath {
-                real: Extent::Under(place),
+                real: Extent::Under {
+                    position: place, ..
+                },
                 ..
             })
             | ExecAllow::File { real: place, .. } => Some(FsAllow::RunPlace(place.clone())),

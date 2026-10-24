@@ -121,7 +121,7 @@ fn protocol_error_does_not_supersede_earlier_failure() {
 }
 
 /// An owning group and a collector wired onto the same channel, as
-/// `PipeNode::launch` builds them.
+/// `PipeNode::run` builds them.
 fn owning_pipeline(
     shell: &Shell,
     mooring: &Mooring,
@@ -276,6 +276,46 @@ fn a_collector_that_observed_every_stage_kills_nothing() {
     drop(group);
 }
 
+/// A collector dropped short of observation finishes each live external's
+/// jail.  A plain directory stands in for the cgroup, keeping the finish's
+/// `cgroup.kill`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_dropped_collector_finishes_its_live_stages_jail() {
+    use super::super::stage::{ExternalStage, StageKind};
+    let dir = tempfile::tempdir().unwrap();
+    let (mut state, tx) = CollectState::for_step_test();
+    let slot = Slot { ix: 0, tx };
+    let child = std::process::Command::new("/bin/sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn /bin/sleep");
+    state.push(StageHandle::new(
+        StageKind::External(ExternalStage {
+            watch: slot.watch(crate::process::ChildHandle::from_std(child)),
+            name: "sleep".to_string(),
+            args: Vec::new(),
+            jail: Some(crate::process::jail::JailCgroup::at(
+                dir.path().to_path_buf(),
+            )),
+            pumps: command::Pumps::default(),
+            envelope: None,
+        }),
+        None,
+        slot,
+    ));
+    state.kill_live();
+    assert!(
+        dir.path().join("cgroup.kill").exists(),
+        "kill_live must kill the live stage's jail before any wait"
+    );
+    drop(state);
+    assert!(
+        dir.path().join("cgroup.kill").exists(),
+        "the live stage's jail must be finished"
+    );
+}
+
 /// A joining collector has no pgid to kill, so `cancel_all` must reach its
 /// external's pid itself rather than hang in the final drain.
 #[cfg(unix)]
@@ -416,7 +456,10 @@ fn sent_to(state: &CollectState, ix: usize) -> Option<CancelCause> {
 /// `!{ echo a; exit 3 } | head -1` needs.
 #[test]
 fn settling_a_stage_arms_its_still_running_writers_edge_but_spares_a_finished_one() {
+    let abandoned = |s: &CollectState| s.abandoned().collect::<Vec<_>>();
     let mut state = state_with(4);
+    // Only the final stage, which writes to no edge, has no reader.
+    assert_eq!(abandoned(&state), [3]);
     // Stage 0 settles first — nothing upstream of it to arm.
     assert_eq!(
         step(&mut state, Event::Ended(0, WaitOutcome::Exited(0))),
@@ -428,15 +471,16 @@ fn settling_a_stage_arms_its_still_running_writers_edge_but_spares_a_finished_on
     );
     // Stage 1 settles: its writer (0) already settled, so it keeps its
     // outcome and nothing is armed against it.
-    let effect = step(&mut state, Event::Ended(1, WaitOutcome::Exited(0)));
+    let _ = step(&mut state, Event::Ended(1, WaitOutcome::Exited(0)));
     assert_eq!(
-        effect, None,
+        abandoned(&state),
+        [3],
         "a writer that already settled must keep its outcome, not be armed against"
     );
     // Stage 3 settles while its writer (2) is still running: that edge is
     // armed — and stage 2 has not settled, so the pipeline is not done.
-    let effect = step(&mut state, Event::Ended(3, WaitOutcome::Exited(0)));
-    assert_eq!(effect, Some(Effect::ArmEdge(2)));
+    let _ = step(&mut state, Event::Ended(3, WaitOutcome::Exited(0)));
+    assert_eq!(abandoned(&state), [2]);
     assert!(
         state.live(),
         "an unobserved writer means the pipeline is not done"
@@ -680,9 +724,10 @@ fn a_thread_writers_honest_exit_survives_its_readers_earlier_end() {
     let mooring = Mooring::adrift();
     let (mut state, _scopes, _tx) = threads_with(2);
 
+    let _ = step(&mut state, Event::Returned(1, StageObservation::ok()));
     assert_eq!(
-        step(&mut state, Event::Returned(1, StageObservation::ok())),
-        Some(Effect::ArmEdge(0)),
+        state.abandoned().collect::<Vec<_>>(),
+        [0],
         "the reader settling first must arm its writer's edge"
     );
 
@@ -817,14 +862,16 @@ fn a_closed_stdout_in_a_stage_tears_the_siblings_down() {
     }
 }
 
-/// A stage's own reader-gone stop arms its edge and tears nothing down.
+/// A stage's own reader-gone stop arms its writer's edge and tears nothing
+/// down.
 #[test]
 fn a_reader_gone_stop_naming_its_own_stage_tears_nothing_down() {
     let (mut state, scopes, _tx) = threads_with(2);
     assert_eq!(
         step(&mut state, returned(1, halted(cut(&scopes[1].id())))),
-        Some(Effect::ArmEdge(0))
+        None
     );
+    assert_eq!(state.abandoned().collect::<Vec<_>>(), [0]);
 }
 
 /// A stop naming the stage is the collector's whatever its cause, and the
@@ -908,6 +955,69 @@ fn a_cancel_all_waits_for_a_live_thread_stage_up_to_its_grace() {
         "{:?}",
         t0.elapsed()
     );
+}
+
+/// A fake thread stage whose outbound edge only its hold reads: the edge, and
+/// its write end.
+fn push_edged_thread(
+    state: &mut CollectState,
+    tx: &Sender<Event>,
+) -> (std::sync::Arc<crate::io::Edge>, os_pipe::PipeWriter) {
+    use super::super::route::HeldEdge;
+    use super::super::stage::StageKind;
+    use super::super::thread::ThreadStage;
+    use std::sync::Arc;
+    let (r, w) = crate::process::cloexec_pipe().expect("a pipe");
+    let edge = crate::io::Edge::new();
+    let held = HeldEdge {
+        edge: Arc::clone(&edge),
+        reader: Arc::new(r),
+        listening: std::cell::Cell::default(),
+    };
+    let slot = Slot {
+        ix: state.stages.len(),
+        tx: tx.clone(),
+    };
+    state.push(StageHandle::new(
+        StageKind::Thread(ThreadStage::fake().0),
+        Some(held),
+        slot,
+    ));
+    (edge, w)
+}
+
+/// The sweep's `cut`: outside a teardown an abandoned edge is marked dead.
+#[test]
+fn a_sweep_marks_an_abandoned_edge_dead() {
+    let (mut state, tx) = CollectState::for_step_test();
+    let (edge, _w) = push_edged_thread(&mut state, &tx);
+    state.sweep_edges();
+    assert!(edge.is_dead());
+}
+
+/// A teardown cuts nothing at an edge but reads every one a reader has left —
+/// here one never launched, as after a launch that failed part-way — so a
+/// writer more than a pipe's worth ahead is not blocked.
+#[test]
+fn a_teardown_reads_an_abandoned_edge_and_cuts_nothing() {
+    let (mut state, tx) = CollectState::for_step_test();
+    let (edge, w) = push_edged_thread(&mut state, &tx);
+    let (done, landed) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(std::io::Write::write_all(&mut &w, &vec![0u8; 1 << 20]).is_ok());
+    });
+    let helper = std::thread::spawn(move || {
+        let wrote = landed.recv_timeout(Duration::from_secs(2));
+        let _ = tx.send(returned(0, StageObservation::ok()));
+        wrote
+    });
+    state.cancel_all(CancelCause::Interrupted);
+    assert_eq!(
+        helper.join().expect("helper"),
+        Ok(true),
+        "the writer blocked on an edge nobody read"
+    );
+    assert!(!edge.is_dead(), "a teardown marked the edge dead");
 }
 
 /// A real external that ignores INT and TERM beside a fake thread stage, and

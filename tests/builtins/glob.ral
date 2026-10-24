@@ -56,11 +56,13 @@ within [env: [HOME: $dotdir]] {
 }
 rm -rf $dotdir
 
-# A wildcard component starting with `.` can match nothing: refused
+# A wildcard component that can match only dotfiles matches nothing: refused
 let refusal = { |body| try $body { |e| echo $e[message]; return () } }
 let gdir = temp-dir
 within [dir: $gdir] {
     refusal { glob '.h*'; return () }
+    refusal { glob '[.]env'; return () }
+    refusal { glob '{.env,.git}'; return () }
 
     # A literal dot name after a wildcard is matched; a wildcard never enters one
     mkdir -p a/.cfg .cfg/.cfg

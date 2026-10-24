@@ -14,12 +14,14 @@ entry matches. Handlers intercept **external commands only**, and only at the
 and cannot be overridden, and `^name`, like a path head, skips the handler
 stack too and reaches the external binary directly.
 
-A per-name handler (and every alias) must be a **unary lambda** `{ |args| … }`,
-applied to the intercepted command's argument list; the catch-all must be a
-**binary lambda** `{ |name args| … }`, applied to the command's name and its
-argument list. The calling convention is fixed by the surface position, not the
-value's runtime shape: a bare block `{ … }`, a non-lambda value, or a lambda of
-the wrong arity is rejected at install time.
+A per-name handler (and every alias) must be a **function of one parameter**,
+such as `{ |args| … }`, applied to the intercepted command's argument list;
+the catch-all must be a **function of two**, such as `{ |name args| … }`,
+applied to the command's name and its argument list. The calling convention
+is fixed by the surface position, and an arm's arity is its type, not its
+spelling: `{ forward 'git' }` is an arm when `forward 'git'` takes the argv;
+`{ echo hi }` is not, and is refused where it is written and again at
+install.
 
 **A handler reinterprets an operation; it cannot re-declare its type.** An arm
 stands in for the head it is installed under: its type is that of the base

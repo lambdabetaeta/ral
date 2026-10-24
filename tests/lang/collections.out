@@ -11,7 +11,9 @@ localhost
 3
 true
 false
-map literal: key 'a' computed twice; which did you mean?
+map literal: key 'a' given twice; which did you mean?
+map literal: key 'a' given twice; which did you mean?
+2
 6
 10
 upper hello

@@ -110,10 +110,13 @@ image is already mapped when the profile takes force.
 its resolved real position, with its firmlink twins, and as nothing else: a surface
 spelling is never a predicate of its own. Seatbelt checks the resolved path of
 each access against it, so a symlink put in an allowance's place reaches
-nothing. It does gate the `lstat` of each link a lookup passes, so the surface
-an allowance was granted by is stat-able and no more: `Object::walk` names each
-component of its lookup under its parent's real path, admitted as
-`file-read-metadata` literals. The spelling reaches the object while it leads
+nothing. It does gate the `lstat` of each link a lookup passes, so what the walk
+of an allowance's spelling passed is stat-able and no more: `Object::walk` is
+that walk's `Trace::passed` — each link it followed, a chain's middle ones
+included, and each directory a `..` in a target climbed out of — each named
+under its parent's real path and admitted as a `file-read-metadata` literal,
+with its proper ancestors, which is how the directories an absolute target
+abandons are covered. The spelling reaches the object while it leads
 there, and nothing beneath it once retargeted. Exclusions are rendered from the resolved real paths their walks held, never from the text as written; Seatbelt judges names, so the identity reading is ral's own readers'.
 
 **There is no write freeze.** An admitted directory a broad write covers stays

@@ -26,8 +26,9 @@ value, so a `Lam` in focus returns as `Lambda` and the frame above decides:
 `Apply` consumes it by β, a computation-holed frame (`Redirect`, `Unmask`,
 `Within`, `Grant`, `Try`) passes it through, a value-holed frame
 (`To`, `Capture`, `Guard`, `Cleanup`, `Audit`, `Gather`) halts with the
-bare-lambda error — unreachable for a checked program, since the checker
-η-expands every arrow-typed computation into a thunked λ (SPEC §17.8).
+bare-lambda error — unreachable for a checked program, since the one
+function-typed computation such a hole could receive, a `let`'s right-hand
+side, is bound unrun as its thunk (SPEC §17.5, §17.8).
 `Decode` has no frame: the kernel's `decode` takes a value, so it closes and
 reads it inline in `step_eval`, and the checker reaches it through a bind
 over `Capture` rather than nesting the two.
@@ -46,8 +47,9 @@ in focus under the current environment, closing nothing (`Machine::force_val`).
 Every form that suspends a command — `if`, `case`, `try`, `?`, `guard`,
 `within`, `grant` — holds its arms as thunks and forces the one it chooses the
 same way: `if true $aaah else $baaah` runs `$aaah`, and `case` pushes an
-`Apply` with the variant's payload before forcing the arm. Whether a thunk "is
-a lambda" is read off the body's shape by `Comp::arrow`, never stored.
+`Apply` with the variant's payload before forcing the arm. Whether a thunk
+takes parameters is its type's business: the machine never asks, and only a
+description of a value reads the body's shape (`Comp::lam`).
 
 **A list, record or map literal is a value closure too.** `form(val, env,
 sig)` (`core/src/evaluator/val.rs`) is CBPV's one-step rule for every value:

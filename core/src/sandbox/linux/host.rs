@@ -9,7 +9,7 @@ use super::landlock::Landlock;
 use crate::Role;
 use crate::path::RealPath;
 use crate::sandbox::reexec::Pinned;
-use crate::sandbox::warrant::{Handoff, Slot};
+use crate::sandbox::warrant::Handoff;
 use crate::site::{Silent, site};
 use std::os::fd::AsFd;
 use std::process::Stdio;
@@ -66,8 +66,8 @@ impl HostEnvelope {
 
 impl Builds {
     /// A bare envelope first, so a bwrap that builds none is never blamed
-    /// on its version; then `/` mounted from a descriptor lent at the first
-    /// mount slot, as every launch's binds are.
+    /// on its version; then `/` mounted from a lent descriptor, as every
+    /// launch's binds are.
     fn probe(bwrap: &Pinned, trampoline: &Pinned) -> Self {
         if let Err(why) = bwrap_builds(bwrap, trampoline, &[], Handoff::default()) {
             // Leaked once: the probe runs once a process, and keeps the fact `Copy`.
@@ -77,9 +77,17 @@ impl Builds {
             return Self::Nothing("ral cannot open / to lend bwrap a descriptor");
         };
         let mut handoff = Handoff::default();
-        handoff.lend(Slot::Mount(0), root.as_fd());
-        let at = Slot::Mount(0).fd().to_string();
-        match bwrap_builds(bwrap, trampoline, &["--ro-bind-fd", &at, "/"], handoff) {
+        let at = match handoff.lend(root.as_fd()) {
+            Ok(at) => at,
+            // Leaked once, as above: it carries `lift`'s `ulimit -n` hint.
+            Err(why) => return Self::Nothing(why.leak()),
+        };
+        match bwrap_builds(
+            bwrap,
+            trampoline,
+            &["--ro-bind-fd", &at.to_string(), "/"],
+            handoff,
+        ) {
             Ok(()) => Self::ByFd,
             Err(_) => Self::ByName,
         }
@@ -90,23 +98,23 @@ impl Builds {
 /// `handoff`, and execs `trampoline` in it by descriptor, as a launch does;
 /// as a pipeline anchor, it reads its empty stdin and exits.  bwrap's own
 /// words where not, for the one probe that reports them.
-fn bwrap_builds<'a>(
+fn bwrap_builds(
     bwrap: &Pinned,
-    trampoline: &'a Pinned,
+    trampoline: &Pinned,
     pieces: &[&str],
-    mut handoff: Handoff<'a>,
+    mut handoff: Handoff,
 ) -> Result<(), String> {
-    handoff.lend(Slot::Trampoline, trampoline.fd());
+    let at = handoff.lend(trampoline.fd())?;
     let mut cmd = bwrap.command();
     cmd.args(["--ro-bind", "/", "/"])
         .args(pieces)
         .arg("--")
-        .arg(crate::path::proc_fd_path(Slot::Trampoline.fd()))
+        .arg(crate::path::proc_fd_path(at.fd()))
         .arg(Role::Anchor.flag())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    handoff.install(&mut cmd)?;
+    handoff.install(&mut cmd);
     let out = site!(Silent::BwrapHostProbe, &mut cmd => output())
         .map_err(|e| format!("it did not start: {e}"))?;
     if out.status.success() {

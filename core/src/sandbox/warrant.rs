@@ -1,14 +1,15 @@
 //! The handoff from a launch to the confined re-exec of ral that becomes its
 //! program, and its only owner: the [`Warrant`] — the confinement to enter,
 //! the program to run — on a descriptor no other process can write, and the
-//! fixed descriptors every confined launch hands down.
+//! descriptors every confined launch hands down, each at the number it
+//! already holds ([`Handoff`]).
 //!
-//! The re-exec's whole argv is `ral --warrant`.  The warrant is NUL-terminated
-//! fields, with no length anywhere:
+//! The re-exec's whole argv is `ral --warrant <fd>`, the warrant's slot.  The
+//! warrant is NUL-terminated fields, with no length anywhere:
 //!
 //! ```text
-//! ral-warrant/2  <confinement>  file  <real>  <argv0>  <excluded>  <argc>  <arg>…
-//! ral-warrant/2  <confinement>  tool  <name>                       <argc>  <arg>…
+//! ral-warrant/3  <confinement>  file  <real>  <argv0>  <excluded>  <argc>  <arg>…
+//! ral-warrant/3  <confinement>  tool  <name>                       <argc>  <arg>…
 //! ```
 //!
 //! `<excluded>` names the exclusion covering the launched script's
@@ -30,64 +31,42 @@ use crate::syntax::quote::quote_word;
 use libc::c_int;
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
+use std::fmt;
 use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
-#[cfg(target_os = "linux")]
-use std::os::{fd::AsFd, unix::net::UnixStream};
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Every descriptor a confined launch hands its child, at its fixed slot.
+/// The number a handed-down descriptor holds, the same in parent and child:
+/// from [`Self::FIRST`] up, so the child's sweep reaches it.  Only a
+/// [`Handoff`] makes one, or a child parsing what its parent wrote.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Slot {
-    /// bwrap's `--args`.
-    #[cfg(target_os = "linux")]
-    Args,
-    Warrant,
-    /// bwrap's `--info-fd`, `Kept` launches only.
-    #[cfg(target_os = "linux")]
-    Info,
-    /// The Landlock ruleset, when the warrant promises one.
-    #[cfg(target_os = "linux")]
-    Ruleset,
-    /// ral's own pin, which bwrap execs as `/proc/self/fd/<this>`.
-    #[cfg(target_os = "linux")]
-    Trampoline,
-    /// bwrap's `--add-seccomp-fd`s, one per program.
-    #[cfg(target_os = "linux")]
-    Seccomp(u8),
-    /// One per bind, by `--ro-bind-fd` or `--bind-fd`; open-ended, so last.
-    #[cfg(target_os = "linux")]
-    Mount(u16),
-}
+pub(super) struct Slot(c_int);
 
 impl Slot {
     /// Everything from here up is the handoff's: ral hands a confined child
     /// nothing else above stderr.
     pub(super) const FIRST: c_int = 98;
-    #[cfg(target_os = "linux")]
-    const SECCOMP_SLOTS: u8 = 4;
 
-    /// 98, 99, 100, 101, 102, 103 + i, 107 + i.
     pub(super) const fn fd(self) -> c_int {
-        Self::FIRST
-            + match self {
-                #[cfg(target_os = "linux")]
-                Self::Args => 0,
-                Self::Warrant => 1,
-                #[cfg(target_os = "linux")]
-                Self::Info => 2,
-                #[cfg(target_os = "linux")]
-                Self::Ruleset => 3,
-                #[cfg(target_os = "linux")]
-                Self::Trampoline => 4,
-                #[cfg(target_os = "linux")]
-                Self::Seccomp(i) => 5 + i as c_int,
-                #[cfg(target_os = "linux")]
-                Self::Mount(i) => 9 + i as c_int,
-            }
+        self.0
+    }
+
+    /// The slot `field` spells as [`fmt::Display`] does: plain digits, from
+    /// [`Self::FIRST`] up.
+    pub(super) fn parse(field: &str) -> Result<Self, String> {
+        (field.parse::<c_int>().ok())
+            .filter(|&at| at >= Self::FIRST && at.to_string() == field)
+            .map(Self)
+            .ok_or_else(|| {
+                format!(
+                    "{field:?} names no handoff descriptor, which is a number from {} up \
+                     in plain digits",
+                    Self::FIRST
+                )
+            })
     }
 
     /// The descriptor the launch left here, now the caller's; `None` where
@@ -99,25 +78,15 @@ impl Slot {
             // SAFETY: open, and lent by the launch to this one taker.
             .then(|| unsafe { OwnedFd::from_raw_fd(at) })
     }
+}
 
-    /// The `i`th seccomp program's slot.
-    #[cfg(target_os = "linux")]
-    pub(super) fn seccomp(i: usize) -> Result<Self, String> {
-        u8::try_from(i)
-            .ok()
-            .filter(|&i| i < Self::SECCOMP_SLOTS)
-            .map(Self::Seccomp)
-            .ok_or_else(|| {
-                format!(
-                    "seccomp: program {i} overruns the {} slots reserved for the envelope's \
-                     programs",
-                    Self::SECCOMP_SLOTS
-                )
-            })
+impl fmt::Display for Slot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
-const MAGIC: &[u8] = b"ral-warrant/2";
+const MAGIC: &[u8] = b"ral-warrant/3";
 /// Under macOS's default socket-buffer ceiling, far above either OS's `ARG_MAX`.
 const CAP: usize = 8 << 20;
 
@@ -150,29 +119,39 @@ impl Confinement for Seatbelt {
     }
 }
 
-/// Linux: the Landlock ruleset the launch promised at [`Slot::Ruleset`], or
-/// none.
+/// Linux: the Landlock ruleset the launch promised, at the slot it names,
+/// or none.
 #[cfg(target_os = "linux")]
 impl Confinement for Option<Landlocked> {
     fn spell(&self) -> Cow<'_, str> {
         match self {
-            None => "unconfined",
-            Some(Landlocked { refer_root: false }) => "landlock",
-            Some(Landlocked { refer_root: true }) => "landlock+refer",
+            None => "unconfined".into(),
+            Some(Landlocked { refer_root, at }) => {
+                let refer = if *refer_root { "+refer" } else { "" };
+                format!("landlock{refer}@{at}").into()
+            }
         }
-        .into()
     }
 
     fn parse(field: &str) -> Result<Self, String> {
-        match field {
-            "unconfined" => Ok(None),
-            "landlock" => Ok(Some(Landlocked { refer_root: false })),
-            "landlock+refer" => Ok(Some(Landlocked { refer_root: true })),
-            _ => Err(format!(
-                "the warrant's confinement {field:?} is not unconfined, landlock or \
-                 landlock+refer"
-            )),
+        if field == "unconfined" {
+            return Ok(None);
         }
+        let (kind, at) = field.split_once('@').unwrap_or((field, ""));
+        let refer_root = match kind {
+            "landlock" => false,
+            "landlock+refer" => true,
+            _ => {
+                return Err(format!(
+                    "the warrant's confinement {field:?} is not unconfined, landlock@<fd> \
+                     or landlock+refer@<fd>"
+                ));
+            }
+        };
+        Ok(Some(Landlocked {
+            refer_root,
+            at: Slot::parse(at)?,
+        }))
     }
 
     fn enter(&self) -> Result<(), String> {
@@ -330,29 +309,27 @@ impl Warrant {
         }
     }
 
-    /// The warrant the launch left at [`Slot::Warrant`], its confinement
-    /// entered and the handoff closed: the program, and nothing before it.
-    pub(super) fn confine() -> Result<Confined, String> {
-        let Self { confinement, run } = Self::receive()?;
+    /// The warrant the launch left at `at`, its confinement entered and the
+    /// handoff closed: the program, and nothing before it.
+    pub(super) fn confine(at: Slot) -> Result<Confined, String> {
+        let Self { confinement, run } = Self::receive(at)?;
         confinement.enter()?;
         close_handoff()?;
         Ok(Confined(run))
     }
 
-    /// This warrant, parcelled for [`Slot::Warrant`].
+    /// This warrant, parcelled for a [`Handoff`].
     pub(super) fn parcel(&self) -> Result<OwnedFd, String> {
         parcel("ral-warrant", &self.encode()?)
             .map_err(|e| format!("sandbox: cannot parcel the warrant: {e}"))
     }
 
-    /// The warrant the launch left at [`Slot::Warrant`], which this takes and
-    /// closes.
-    fn receive() -> Result<Self, String> {
-        let fd = Slot::Warrant.take().ok_or_else(|| {
+    /// The warrant the launch left at `at`, which this takes and closes.
+    fn receive(at: Slot) -> Result<Self, String> {
+        let fd = at.take().ok_or_else(|| {
             format!(
-                "no warrant at fd {}: `{}` is how ral starts its own confined children, \
+                "no warrant at fd {at}: `{}` is how ral starts its own confined children, \
                  never a command to run by hand",
-                Slot::Warrant.fd(),
                 Role::Warrant.flag()
             )
         })?;
@@ -564,114 +541,81 @@ fn unwritable(fd: &OwnedFd) -> Result<(), String> {
     }
 }
 
-/// What a confined launch lends its child: each source borrowed, at its
-/// target.
+/// What a confined launch hands its child: copies lifted to free numbers
+/// from [`Slot::FIRST`] up, each crossing at the number it holds here.
+/// Nothing is `dup2`'d, so no descriptor the child still needs — `std`'s
+/// exec-error pipe, a later hook's — can be displaced.
 #[derive(Default)]
-pub(super) struct Handoff<'a>(Vec<(Slot, BorrowedFd<'a>)>);
+pub(super) struct Handoff {
+    lent: Vec<OwnedFd>,
+    kept: Vec<Slot>,
+}
 
-impl<'a> Handoff<'a> {
-    /// Asserts a slot is lent once; one source may be lent at two
-    /// slots, each lift being its own `dup`.
-    pub(super) fn lend(&mut self, slot: Slot, fd: BorrowedFd<'a>) -> &mut Self {
-        assert!(
-            self.0.iter().all(|&(lent, _)| lent != slot),
-            "{slot:?} lent twice"
-        );
-        self.0.push((slot, fd));
-        self
-    }
-
-    /// The target descriptors, for the one caller that must keep a non-lent
-    /// fd off them.
-    #[cfg(target_os = "linux")]
-    pub(super) fn targets(&self) -> impl Iterator<Item = c_int> + '_ {
-        self.0.iter().map(|&(slot, _)| slot.fd())
-    }
-
-    /// Hand `cmd`'s child each source at its target, through one `pre_exec`.
+impl Handoff {
+    /// Lend the child a copy of `fd`, owned here until the spawn.
     ///
     /// # Errors
     /// A lift the descriptor limit refuses.
-    pub(super) fn install(self, cmd: &mut Command) -> Result<(), String> {
-        let above = self.above();
-        self.place(cmd, above, None)
+    pub(super) fn lend(&mut self, fd: BorrowedFd<'_>) -> Result<Slot, String> {
+        let (copy, at) = lift(fd)?;
+        self.lent.push(copy);
+        Ok(at)
     }
 
-    /// [`Self::install`], with a `Kept` launch's `--info-fd` writer lent at
-    /// [`Slot::Info`].  Back come the reader and the lifted writer, a peer
-    /// whose last copy here closing is its reader's EOF, which only the
-    /// caller can time.
+    /// Hand the child a copy of `fd` that the caller owns, to close when its
+    /// closing is a signal; it must stay open past the spawn, whose hook
+    /// names its number.
     ///
     /// # Errors
-    /// As [`Self::install`].
+    /// As [`Self::lend`].
     #[cfg(target_os = "linux")]
-    pub(super) fn install_addressed(
-        self,
-        cmd: &mut Command,
-        (reader, writer): (UnixStream, OwnedFd),
-    ) -> Result<(UnixStream, OwnedFd), String> {
-        let at = Slot::Info.fd();
-        let above = self.above().max(at + 1);
-        let writer = lift(writer.as_fd(), above)?;
-        self.place(cmd, above, Some((writer.as_raw_fd(), at)))?;
-        Ok((reader, writer))
+    pub(super) fn keep(&mut self, fd: BorrowedFd<'_>) -> Result<(OwnedFd, Slot), String> {
+        let (copy, at) = lift(fd)?;
+        self.kept.push(at);
+        Ok((copy, at))
     }
 
-    fn above(&self) -> c_int {
-        self.0
-            .iter()
-            .map(|&(slot, _)| slot.fd() + 1)
-            .max()
-            .unwrap_or(0)
-    }
-
-    /// Every source lifted to `above` or higher, so no `dup2` can land on a
-    /// source not yet moved, in any order.  The hook owns the lifted copies;
-    /// `kept` is the caller's.
-    fn place(
-        self,
-        cmd: &mut Command,
-        above: c_int,
-        kept: Option<(RawFd, c_int)>,
-    ) -> Result<(), String> {
-        let lent = self
-            .0
-            .into_iter()
-            .map(|(slot, fd)| lift(fd, above).map(|copy| (copy, slot.fd())))
-            .collect::<Result<Vec<_>, _>>()?;
-        // SAFETY: post-fork, `dup2` alone, which is async-signal-safe.  It
-        // clears `CLOEXEC` on the copy it makes; each lifted source keeps its
-        // own.
+    /// Hand `cmd`'s child every slot, through one `pre_exec`.
+    pub(super) fn install(self, cmd: &mut Command) {
+        let Self { lent, kept } = self;
+        // SAFETY: post-fork, `fcntl` alone, which is async-signal-safe, on
+        // numbers open here at the fork: the lent copies, which the hook
+        // owns, and the kept ones, which their owners hold past the spawn.
         unsafe {
             cmd.pre_exec(move || {
-                let lent = lent.iter().map(|(fd, at)| (fd.as_raw_fd(), *at));
-                for (fd, at) in lent.chain(kept) {
-                    if libc::dup2(fd, at) < 0 {
+                let lent = lent.iter().map(AsRawFd::as_raw_fd);
+                for at in lent.chain(kept.iter().map(|at| at.0)) {
+                    if libc::fcntl(at, libc::F_SETFD, 0) < 0 {
                         return Err(io::Error::last_os_error());
                     }
                 }
                 Ok(())
             });
         }
-        Ok(())
     }
 }
 
-fn lift(fd: BorrowedFd<'_>, above: c_int) -> Result<OwnedFd, String> {
-    rustix::io::fcntl_dupfd_cloexec(fd, above).map_err(|e| {
+/// A close-on-exec copy of `fd` at the lowest free number from
+/// [`Slot::FIRST`] up, and that number.
+fn lift(fd: BorrowedFd<'_>) -> Result<(OwnedFd, Slot), String> {
+    let copy = rustix::io::fcntl_dupfd_cloexec(fd, Slot::FIRST).map_err(|e| {
         format!(
-            "sandbox: cannot move a descriptor above {above} for the confined child: {e}; is \
-             the open-file limit (`ulimit -n`) below that?"
+            "sandbox: cannot copy a descriptor to {} or above for the confined child: \
+             {e}; is the open-file limit (`ulimit -n`) below that?",
+            Slot::FIRST
         )
-    })
+    })?;
+    let at = Slot(copy.as_raw_fd());
+    Ok((copy, at))
 }
 
 /// Close every descriptor from [`Slot::FIRST`] up, so the program inherits
 /// none of the handoff.
 ///
 /// # Errors
-/// A kernel that cannot sweep: an unswept `--info-fd` writer would hold the
-/// parent's read of it open for the program's whole life.
+/// A kernel that cannot sweep: the program would hold the payload's copy
+/// of the `--info-fd` writer, and with it the parent's spawn, for its whole
+/// life.
 #[cfg(target_os = "linux")]
 pub(super) fn close_handoff() -> Result<(), String> {
     // SAFETY: nothing in this process owns a descriptor from the first slot up.
@@ -707,13 +651,14 @@ pub(super) fn close_handoff() -> Result<(), String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 
     #[cfg(target_os = "macos")]
     const CONFINEMENT: &str = "(version 1)\n(deny default)";
     #[cfg(target_os = "linux")]
-    const CONFINEMENT: &str = "landlock";
+    const CONFINEMENT: &str = "landlock@101";
 
     #[cfg(target_os = "macos")]
     const NO_CONFINEMENT: &str = "";
@@ -776,7 +721,7 @@ mod tests {
             ("empty", Vec::new()),
             (
                 "another version",
-                framed(&[b"ral-warrant/1", conf, b"file", b"/bin/sh", b"sh", b"0"]),
+                framed(&[b"ral-warrant/2", conf, b"file", b"/bin/sh", b"sh", b"0"]),
             ),
             ("cut short", control[..control.len() - 1].to_vec()),
             (
@@ -827,48 +772,23 @@ mod tests {
     fn a_linux_confinement_has_three_spellings() {
         for (field, ok) in [
             ("unconfined", true),
-            ("landlock", true),
-            ("landlock+refer", true),
-            ("landlock+refer+x", false),
-            ("Landlock", false),
-            ("3", false),
+            ("landlock@101", true),
+            ("landlock+refer@101", true),
+            ("landlock", false),
+            ("landlock@", false),
+            ("landlock@97", false),
+            ("landlock@+101", false),
+            ("landlock@0101", false),
+            ("landlock@101@102", false),
+            ("unconfined@101", false),
+            ("landlock+refer+x@101", false),
+            ("Landlock@101", false),
+            ("101", false),
             ("", false),
         ] {
             let bytes = framed(&[MAGIC, field.as_bytes(), b"tool", b"ls", b"0"]);
             assert_eq!(Warrant::decode(&bytes).is_ok(), ok, "{field:?}");
         }
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn the_slots_are_the_fd_table_in_order() {
-        let seccomp = (0..4).map(|i| Slot::seccomp(i).expect("a seccomp slot"));
-        let fixed = [
-            Slot::Args,
-            Slot::Warrant,
-            Slot::Info,
-            Slot::Ruleset,
-            Slot::Trampoline,
-        ];
-        let fds: Vec<_> = fixed
-            .into_iter()
-            .chain(seccomp)
-            .chain([Slot::Mount(0), Slot::Mount(1)])
-            .map(Slot::fd)
-            .collect();
-        assert_eq!(fds, [98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108]);
-        assert_eq!(fds[0], Slot::FIRST);
-        assert!(Slot::seccomp(4).is_err(), "a fifth program has no slot");
-    }
-
-    #[test]
-    #[should_panic(expected = "lent twice")]
-    fn a_slot_lent_twice_is_refused() {
-        use std::os::fd::AsFd;
-        let stderr = io::stderr();
-        Handoff::default()
-            .lend(Slot::Warrant, stderr.as_fd())
-            .lend(Slot::Warrant, stderr.as_fd());
     }
 
     #[test]
@@ -883,5 +803,70 @@ mod tests {
         let warrant = file(b"/bin/sh", b"sh", &[b"-c", b"true"]);
         let fd = warrant.parcel().expect("parcels");
         assert_eq!(Warrant::unparcel(fd).expect("reads back"), warrant);
+    }
+
+    /// Every free number below the first slot, held as a host with that
+    /// many descriptors open holds them: what opens next lands among the
+    /// slots.
+    fn below_first_held() -> Vec<std::fs::File> {
+        std::iter::repeat_with(|| {
+            std::fs::File::open("/dev/null").expect("open /dev/null (is `ulimit -n` below 98?)")
+        })
+        .take_while(|null| null.as_raw_fd() < Slot::FIRST)
+        .collect()
+    }
+
+    /// A descriptor opened after the handoff and written by a later hook,
+    /// as `detach`'s handshake is, crosses whole beside the lent one, with
+    /// every number below the slots busy.  A concurrent test freeing a low
+    /// number weakens this witness, never its verdict.
+    #[test]
+    fn a_later_hooks_descriptor_crosses_the_handoff_whole() {
+        use std::os::fd::AsFd;
+        let held = below_first_held();
+        let (lent, mut filler) = crate::process::cloexec_pipe().expect("a pipe");
+        filler.write_all(b"lent").expect("fill the pipe");
+        drop(filler);
+        let mut handoff = Handoff::default();
+        let at = handoff.lend(lent.as_fd()).expect("lends");
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", &format!("cat /dev/fd/{at}")]);
+        handoff.install(&mut cmd);
+        let (mut receipt, handshake) = crate::process::cloexec_pipe().expect("a pipe");
+        let fd = handshake.as_raw_fd();
+        // SAFETY: post-fork, `write` alone, as `detach`'s hook does.
+        unsafe {
+            cmd.pre_exec(move || {
+                let _ = libc::write(fd, b"!".as_ptr().cast(), 1);
+                Ok(())
+            });
+        }
+        let out = crate::process::output(&mut cmd).expect("spawn sh");
+        drop((handshake, held));
+        let mut byte = [0; 1];
+        receipt
+            .read_exact(&mut byte)
+            .expect("the later hook's write must arrive");
+        assert_eq!(&byte, b"!");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "lent", "{out:?}");
+    }
+
+    /// `std`'s exec-error pipe opens inside the spawn, after every hook, so
+    /// with every number below the slots busy it lands among them: the
+    /// handoff leaves it whole, and a program that cannot run is the
+    /// spawn's error, not a child that died of an abort.
+    #[test]
+    fn a_program_that_cannot_run_after_a_handoff_is_the_spawns_error() {
+        use std::os::fd::AsFd;
+        let held = below_first_held();
+        let stderr = io::stderr();
+        let mut handoff = Handoff::default();
+        handoff.lend(stderr.as_fd()).expect("lends");
+        let mut cmd = Command::new("/ral/no/such/program");
+        handoff.install(&mut cmd);
+        let spawned = crate::process::spawn(&mut cmd).map(|mut child| child.wait());
+        drop(held);
+        let err = spawned.expect_err("a program that cannot run must not spawn");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 }

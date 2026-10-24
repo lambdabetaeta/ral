@@ -404,6 +404,23 @@ fn a_dropped_or_failed_staged_write_leaves_no_sibling() {
     assert!(f.is_dir());
 }
 
+/// A read-only file is refused at the stage, before anything is made beside
+/// it, not at the commit, where the rename would refuse it.
+#[test]
+fn a_read_only_file_is_not_staged_over() {
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("f");
+    std::fs::write(&f, b"old").unwrap();
+    let mut permissions = std::fs::metadata(&f).unwrap().permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&f, permissions).unwrap();
+
+    let err = walked(&f).stage(Visibility::Public).err().unwrap();
+    assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
+    assert_eq!(read_all(&f), "old");
+    assert_eq!(names_in(tmp.path()), ["f"]);
+}
+
 /// A volume's refusal of an information class is the two codes FAT answers
 /// and no other: a denial is not one.
 #[test]

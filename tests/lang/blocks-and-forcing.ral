@@ -29,6 +29,11 @@ let add3 = { |x y z| return $[$x + $y + $z] }
 echo !{add3 1 2 3}
 let add12 = add3 1 2
 echo !{add12 3}
+echo $add12
+# A partial application bound inside a block or a lambda is a function too
+if true { let add6 = add3 1 5; echo !{add6 2} }
+let add-to = { |n| let inc = add3 1 2; inc $n }
+echo !{add-to 4}
 
 # `!{...}` atoms in one command evaluate left to right, before the command
 let three = { |a b c| return [$a, $b, $c] }

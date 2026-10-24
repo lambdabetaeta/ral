@@ -13,7 +13,7 @@
 //! a directory that is one, and [`expand`] is its live wrapper, which the
 //! freeze and the fs floor read.
 
-use super::freeze::{Home, PolicyError, Selector, refuse_the_world};
+use super::freeze::{Home, PolicyError, Selector, refuse_the_world, the_world};
 use crate::capability::GrantPath;
 use crate::capability::Polar;
 use crate::path::{
@@ -487,9 +487,10 @@ pub fn expand(toolchain: Toolchain, home: Option<&str>) -> Result<Vec<PathBuf>, 
         .collect())
 }
 
-/// The [`FLOOR`] rows' directories, walked: a walk that fails refuses the
-/// floor, named, since a host that cannot resolve its own floor cannot run
-/// anything (§4.3).
+/// The [`FLOOR`] rows' directories, walked, less any in the home, the user's
+/// to grant, or [`the_world`]: dropped, never refused, since an override is
+/// refused only where a grant names it.  A walk that fails refuses the floor,
+/// named: a host that cannot resolve its own floor cannot run anything.
 ///
 /// # Errors
 /// A directory whose walk fails, or that no grant can hold.
@@ -498,13 +499,8 @@ pub(crate) fn floor_in(
     home: Option<&Home>,
 ) -> Result<Vec<GrantPath<Trace>>, PolicyError> {
     let held = home.and_then(|h| h.real.as_ref());
-    // The floor is what lies outside the user's home and is not the world: a
-    // prefix an override puts in, at or above the home is the user's, read
-    // only where granted; one naming the root is no floor.  Dropped, never
-    // refused: a grant that names it is refused instead.
-    let floor = |dir: &RealPath| {
-        !dir.is_universal() && held.is_none_or(|h| !h.contains(dir) && !dir.contains(h))
-    };
+    let floor =
+        |dir: &RealPath| the_world(dir, held).is_none() && held.is_none_or(|h| !h.contains(dir));
     let mut kept = Vec::new();
     for toolchain in FLOOR {
         for (dir, _) in walked::<Trace>(toolchain, &env, home.map(|h| h.spelled.as_str()))? {
@@ -932,21 +928,20 @@ mod tests {
         assert!(err.message.contains(&looped), "{}", err.message);
     }
 
-    #[cfg(unix)]
     #[test]
     fn an_override_naming_the_world_or_the_home_is_no_floor_and_no_error() {
-        let (_tmp, root) = tree(&["h"]);
-        let home_dir = format!("{root}/h");
+        let (tmp, root) = tree(&["h"]);
+        let home_dir = spelled(&tmp.path().join("h")).to_owned();
         let home = Home::of(&home_dir).unwrap();
         let held = home.real.clone().unwrap();
         let kept = |prefix: &str, home: Option<&Home>| {
             floor_in(env(&[("HOMEBREW_PREFIX", prefix)]), home).unwrap()
         };
-        assert!(
-            kept("/", None)
-                .iter()
-                .all(|d| !d.real.real().is_universal())
-        );
+        let host_root = if cfg!(windows) { r"C:\" } else { "/" };
+        for home in [None, Some(&home)] {
+            let floor = kept(host_root, home);
+            assert!(floor.iter().all(|d| !d.real.real().is_root()), "{floor:?}");
+        }
         for prefix in [home_dir.as_str(), root.as_str()] {
             let floor = kept(prefix, Some(&home));
             assert!(

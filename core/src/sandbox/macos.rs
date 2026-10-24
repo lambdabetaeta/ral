@@ -174,9 +174,9 @@ fn emit_pins<'a>(pins: &mut Vec<String>, dirs: impl IntoIterator<Item = &'a Rend
 
 /// Emit a restricted fs projection: its allows, the lookups they need, and its
 /// denies.  Every allowance renders as its frozen real path and its firmlink
-/// twin; the surface it was granted by is only stat-able on the way.  The read
-/// region carries what exec runs and what a launch needs beyond it, so exec's
-/// own clauses read nothing.
+/// twin; the links and directories its surface's walk passed are only
+/// stat-able on the way.  The read region carries what exec runs and what a
+/// launch needs beyond it, so exec's own clauses read nothing.
 fn emit_fs_restricted(profile: &mut Profile, rules: &RenderedRules) {
     let objects = || rules.read.iter().chain(&rules.write);
     let readable: Vec<&Rendered> = objects().flat_map(Object::names).collect();
@@ -768,6 +768,36 @@ mod tests {
             [format!("(allow file-read-metadata (literal \"{link}\"))")],
             "{profile}"
         );
+    }
+
+    /// Every name a lookup of an allowance's spelling passes is stat-able: a
+    /// chain's middle link, which lies on neither the spelling nor the real
+    /// path, and a directory a `..` in a target climbs out of.
+    #[test]
+    fn mac_profile_lets_a_lookup_stat_every_name_a_chain_passes() {
+        let tmp = tempfile::tempdir().expect("a temp dir");
+        let root = crate::test_helper::real(tmp.path());
+        let under = |name: &str| root.as_path().join(name);
+        std::fs::create_dir(under("sub")).expect("a directory to climb out of");
+        std::fs::create_dir(under("real")).expect("the target");
+        std::os::unix::fs::symlink("sub/../real", under("middle")).expect("the middle link");
+        std::os::unix::fs::symlink(under("middle"), under("link")).expect("the first link");
+        let linked = prefix(crate::path::utf8(&under("link")).unwrap());
+        let profile = build_profile(&SandboxProjection {
+            fs: reading(vec![linked]),
+            ..SandboxProjection::default()
+        })
+        .unwrap();
+        let kernel = rules(&profile);
+        for name in ["link", "middle", "sub"] {
+            let name = crate::path::utf8(&under(name)).unwrap().to_owned();
+            let named: Vec<&str> = kernel.lines().filter(|l| l.contains(&name)).collect();
+            assert_eq!(
+                named,
+                [format!("(allow file-read-metadata (literal \"{name}\"))")],
+                "{profile}"
+            );
+        }
     }
 
     /// The kernel exec set is the rules: `/usr`, the toolchains and Homebrew

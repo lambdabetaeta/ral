@@ -9,8 +9,8 @@ covers_paths: [core/src/elaborator.rs, core/src/syntax/group.rs]
 `core/src/elaborator.rs` lowers the surface AST into CBPV [[map/core/ir|IR]]. Its
 sole public function is
 `elaborate(ast, bindings, name) -> Result<Toplevel, ParseError>`: each `let`
-becomes a `Phrase::Define`, a `let`-knot becomes one `Define` per member
-sharing a `Rec` group, and everything else a `Run`
+becomes a `Phrase::Define`, the members of a recursive group sharing one
+`Rec` group, and everything else a `Run`
 ([[map/core/ir|`Toplevel`/`Phrase`]]).
 
 This is the one phase that knows about surface sugar: it enforces the
@@ -49,22 +49,23 @@ reference there is a static error. That is the only way elaboration can fail: th
 `Option<ParseError>` slot and checked once at the end, rather than threading
 `Result` through every traversal.
 
-`group::group_stmts` (`core/src/syntax/group.rs`) runs first to find mutually
-recursive binding groups. Over a run of adjacent `let`s it builds a dependency
-graph — edge `i → j` when binding `i`'s value references name `j`, i.e. dependent
-→ dependency — and partitions it into strongly connected components with Tarjan's
-algorithm (`find_sccs` / `strongconnect`). A component emits a `LetRec` / `Rec`
-exactly when it is recursive (more than one member, or a singleton with a
-self-edge) *and* every member is a thunk form; everything else emits plain
-`let`s. The thunk-form gate is load-bearing: a non-lambda binding placed in a
-`LetRec` would have its body evaluated eagerly against placeholder thunks, turning
-a textual forward-reference into a genuine value cycle. Components are emitted in
-a topological order (`topo_dfs` post-order) so each dependency is in scope before
-the bindings that reference it. Shadowing needs no special split — `resolve_ref`
-points each use at the nearest preceding definition, so a rebound name simply
-falls into a later component. See [[map/core/typecheck|typecheck]] and
-[[internals/compilation-ladder|the compilation ladder]] for why recursive groups
-are kept monomorphic.
+`group::parts` (`core/src/syntax/group.rs`) partitions each statement list
+into statements and *stretches* of block definitions (SPEC §5.7): any
+other statement ends a stretch, and so does a definition of a name the
+list has already bound. `Elaborator::elab_stretch` binds all of a
+stretch's names, elaborates every member, and takes the references its own
+resolution sends to a member (`Elaborator::refer`) as the edges of the
+stretch's dependency graph, so the graph cannot disagree with the scoping
+it is read from. `group::sccs` (Tarjan) splits it into strongly connected
+components, dependencies first: a component of several members, or one
+member that refers to itself, becomes one `Rec` group, any other member an
+ordinary binding. Only a block or lambda joins a stretch, since binding a
+thunk runs nothing; no binding moves across a statement outside its
+stretch. A reference from inside a member to a name that a block defines
+further down the list, past the stretch, is refused unless the body binds
+it above (`Elaborator::refer`). See [[map/core/typecheck|typecheck]] and
+[[internals/compilation-ladder|the compilation ladder]] for why recursive
+groups are kept monomorphic.
 
 The bound/unbound head decision fixes the IR shape (App vs Exec): a bound head
 elaborates to `App`, which the [[map/core/typecheck|typechecker]] resolves

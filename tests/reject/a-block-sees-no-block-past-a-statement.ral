@@ -1,0 +1,6 @@
+# contains: a block further down defines `b`
+# contains: move that definition up
+let a = { return $b }
+let x = 1
+let b = { return $x }
+echo !{a}

@@ -220,7 +220,7 @@ impl Allows for FsAllow {
     fn own(&self) -> Subject<'_> {
         match self {
             Self::Prefix(GrantPath {
-                real: Extent::Under(position),
+                real: Extent::Under { position, .. },
                 ..
             })
             | Self::RunPlace(position) => Subject::Position(position),

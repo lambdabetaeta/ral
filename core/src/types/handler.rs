@@ -4,6 +4,7 @@
 
 use super::builtin::BuiltinEntry;
 use super::value::Value;
+use super::{Closure, Shell};
 use std::borrow::Cow;
 use std::fmt;
 use std::sync::Arc;
@@ -41,8 +42,8 @@ pub struct HandlerEntry {
 }
 
 impl HandlerEntry {
-    /// Build a per-name entry, unary by construction.  Vetting the thunk's
-    /// shape belongs to the caller, at the install boundary.
+    /// Build a per-name entry, unary by construction.  Vetting the thunk
+    /// belongs to the caller, at the install boundary.
     pub(crate) fn ral_per_name(name: String, thunk: Value) -> Self {
         Self {
             name: Cow::Owned(name),
@@ -52,7 +53,7 @@ impl HandlerEntry {
         }
     }
 
-    /// Vet `thunk` as the body for `name` and build the entry to install —
+    /// Vet `thunk` as the arm for `name` and build the entry to install —
     /// the one gate shared by `Shell::install_alias` and `within [handlers:
     /// …]`, so each check is written once.
     ///
@@ -61,24 +62,22 @@ impl HandlerEntry {
     /// order alone is what decides that.
     ///
     /// # Errors
-    /// `thunk` not a unary lambda, or its body returning something other than
-    /// what the head it stands in for returns (`Inferencer::stands_in`).
+    /// `thunk` not a block, or not an arm by its type: one parameter, the
+    /// argv, producing what its head produces (`Inferencer::arm`).
     pub(crate) fn vet(
         name: String,
         thunk: Value,
-        session_schemes: crate::typecheck::SessionSchemes,
+        shell: &Shell,
         role: HandlerRole,
     ) -> Settled<Self> {
         let label = <&str>::from(role);
-        validate_handler_arity(&thunk, 1, &format!("{label}: `{name}`"))?;
-        let Value::Thunk(closure) = &thunk else {
-            unreachable!("validate_handler_arity guarantees a unary lambda");
-        };
-        let Some((param, body)) = closure.comp().arrow() else {
-            unreachable!("validate_handler_arity guarantees a unary lambda");
-        };
-        let scheme = crate::typecheck::alias_arm_scheme(&name, param, body, session_schemes)
-            .map_err(|error| refused_arm(label, &error, body.span))?;
+        let closure = arm_closure(&thunk, &format!("{label}: `{name}`"), HandlerArity::Unary)?;
+        let scheme = crate::typecheck::alias_arm_scheme(
+            &name,
+            closure.comp(),
+            shell.closure_schemes(closure),
+        )
+        .map_err(|error| refused_arm(label, &error, closure.comp().span))?;
         let mut entry = Self::ral_per_name(name, thunk);
         if role.persists_scheme() {
             entry.scheme = Some(Arc::new(scheme));
@@ -119,29 +118,32 @@ pub(crate) fn refused_arm(
     error.into()
 }
 
-/// Check that `value` is a lambda of exactly `arity` arguments.
-///
-/// This is the gate at every install boundary (`alias`, `within [handlers:
-/// …]`, `within [handler: …]`), a handler's calling convention being fixed
-/// by its surface form. `context` names the offending install site in the
-/// message.
+impl HandlerArity {
+    /// The arm a slot of this convention is written as, for a refusal.
+    fn form(self) -> &'static str {
+        match self {
+            Self::CatchAll => "`{ |name args| … }`",
+            Self::Unary => "`{ |args| … }`",
+        }
+    }
+}
+
+/// The closure an arm installs: any block.  Its parameters are its type's
+/// business, which the caller checks.
 ///
 /// # Errors
-/// `value` is not a lambda, or its curry-chain arity is not `arity`.
-pub(crate) fn validate_handler_arity(value: &Value, arity: usize, context: &str) -> Settled<()> {
-    let form = match arity {
-        1 => "a unary lambda `{ |args| ... }`",
-        2 => "a binary lambda `{ |name args| ... }`",
-        n => unreachable!("handler arity must be 1 or 2, got {n}"),
-    };
-    match value.lambda_arity() {
-        Some(found) if found == arity => Ok(()),
-        Some(found) => Err(super::coerce::sig(format!(
-            "{context} must be {form}, got a lambda taking {found} argument(s)"
-        ))),
-        None => Err(super::coerce::sig(format!(
-            "{context} must be {form}, got a {}",
-            value.type_name()
+/// `value` is not a block.
+pub(crate) fn arm_closure<'a>(
+    value: &'a Value,
+    context: &str,
+    arity: HandlerArity,
+) -> Settled<&'a Closure> {
+    match value {
+        Value::Thunk(closure) => Ok(closure),
+        other => Err(super::coerce::sig(format!(
+            "{context} must be a block, such as {}, got a {}",
+            arity.form(),
+            other.type_name()
         ))),
     }
 }

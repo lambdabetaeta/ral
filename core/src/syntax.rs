@@ -2,7 +2,6 @@
 //! on raw source text.
 
 pub mod ast;
-mod free_refs;
 pub(crate) mod group;
 pub mod highlight;
 pub mod lexer;

@@ -5,7 +5,8 @@
 //! The walk is a plain structural rebuild: the commands inference recorded
 //! as captured are wrapped in [`captured_string`] where they stand, and a
 //! captured value in hand is η-wrapped into a block that captures its call.
-//! Its state is [`Annotate`]: the context, and whether η-expansion applies.
+//! A right-hand side of function type is bound unrun, as its thunk. Its state
+//! is [`Annotate`], the context.
 
 use super::env::{InferCtx, Node};
 use crate::ir::Redirects;
@@ -18,11 +19,9 @@ use crate::source::{Span, Spanned};
 use crate::ty::Site;
 use std::sync::Arc;
 
-/// The write-back walk.  `eta` says whether η-expansion applies: it does
-/// throughout a phrase, and not inside a thunk's body.
+/// The write-back walk.
 struct Annotate<'a> {
     ctx: &'a mut InferCtx,
-    eta: bool,
 }
 
 /// The whole of the capture coercion: `cap M to d. decode d`.
@@ -69,26 +68,6 @@ fn captured_block(value: Val, arity: usize, span: Option<Span>, ctx: &mut InferC
     };
     let body = captured_string(Spanned::with_span(span, call), ctx);
     lambda(span, params, body)
-}
-
-/// Rebuild an arrow-typed RHS of curried arity `arity` as
-/// `Return(Thunk(λx₁. … λxₙ. App { head, args }))`, flattening `rhs` into
-/// the `App`'s own head when it is itself an `App` — so every
-/// function-typed thunk's body is a syntactic `Lam` ([`Comp::arrow`]).
-fn eta_expand_arrow(rhs: Comp, ctx: &mut InferCtx, arity: usize) -> Comp {
-    let span = rhs.span;
-    let (params, applied) = eta(ctx, arity);
-    let call = match rhs.item {
-        CompKind::App { head, mut args } => {
-            args.extend(applied);
-            CompKind::App { head, args }
-        }
-        other => CompKind::App {
-            head: Arc::new(Spanned::with_span(span, other)),
-            args: applied,
-        },
-    };
-    Spanned::with_span(span, CompKind::Return(lambda(span, params, call)))
 }
 
 /// `{ |x₁| … |xₙ| body }`.
@@ -154,25 +133,17 @@ impl Annotate<'_> {
         rebuilt
     }
 
-    /// Rebuild the right-hand side of a `Bind` or `Define`, then η-expand it by
-    /// the arity recorded for the *original* `rhs`'s address in
-    /// `ctx.rhs_arrow_arity`.  `Bind` never generalises a scheme — that lives on
-    /// `Phrase::Define` alone, one per bound name.
+    /// Rebuild the right-hand side of a `Bind` or `Define`; one of function
+    /// type is bound unrun, as `return (thunk M)` (Let-fun).  `Bind` never
+    /// generalises a scheme — that lives on `Phrase::Define` alone, one per
+    /// bound name.
     fn rhs(&mut self, rhs: &Arc<Comp>) -> Arc<Comp> {
         let annotated = self.comp(rhs);
-        let arity = if self.eta {
-            self.ctx.rhs_arrow_arity.get(&Node::comp(rhs)).copied()
+        Arc::new(if self.ctx.thunked.contains(&Node::comp(rhs)) {
+            Spanned::with_span(rhs.span, CompKind::Return(Val::thunk(Arc::new(annotated))))
         } else {
-            None
-        };
-        debug_assert!(
-            arity.is_none() || !self.ctx.captured.contains(&Node::comp(rhs)),
-            "a function-typed RHS is never captured"
-        );
-        match arity {
-            Some(arity) => Arc::new(eta_expand_arrow(annotated, self.ctx, arity)),
-            None => Arc::new(annotated),
-        }
+            annotated
+        })
     }
 
     fn comp(&mut self, comp: &Comp) -> Comp {
@@ -329,17 +300,10 @@ impl Annotate<'_> {
         }
     }
 
-    /// The structural rebuild of a value.  A thunk's body is a fresh scope for
-    /// η-expansion: nothing inside it η-expands.
+    /// The structural rebuild of a value.
     fn rebuild_val(&mut self, val: &Val) -> Val {
         match val {
-            Val::Thunk(comp) => Val::thunk(Arc::new(
-                Annotate {
-                    ctx: self.ctx,
-                    eta: false,
-                }
-                .comp(comp.shape()),
-            )),
+            Val::Thunk(comp) => Val::thunk(Arc::new(self.comp(comp.shape()))),
             Val::List(elems) => Val::list(
                 elems
                     .shape()
@@ -432,9 +396,8 @@ impl Annotate<'_> {
     }
 }
 
-/// Rebuild a checked [`Toplevel`]: every phrase is walked at `eta = true`,
-/// so η-expansion applies throughout, and a `Define`'s RHS is read for its
-/// value.  A `Run` is a statement, held ready to run, so nothing η-expands
+/// Rebuild a checked [`Toplevel`]: a `Define`'s RHS is rebuilt as any `let`'s
+/// is.  A `Run` is a statement, held ready to run, so nothing thunks
 /// it and nothing captures it.  `schemes`, parallel to `phrases`, is
 /// [`infer::infer_toplevel`](super::infer::infer_toplevel)'s per-`Define`
 /// harvest, written straight onto the rebuilt `Phrase::Define` — `Bind`
@@ -444,7 +407,7 @@ pub(super) fn annotate_toplevel(
     ctx: &mut InferCtx,
     schemes: Vec<DefineSchemes>,
 ) -> Toplevel {
-    let mut walk = Annotate { ctx, eta: true };
+    let mut walk = Annotate { ctx };
     let phrases = phrases
         .iter()
         .zip(schemes)

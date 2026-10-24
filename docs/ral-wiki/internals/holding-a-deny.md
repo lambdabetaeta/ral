@@ -69,7 +69,8 @@ bwrap runs anything. That is a deny that denies nothing, because nothing runs.
   without `MS_DEV`, so it cannot be opened either way.
 - **A directory** takes `--perms 0000 --tmpfs`. The missing bits refuse the
   owner as much as anyone, so a tool that writes there is refused rather than
-  told it succeeded.
+  told it succeeded. Nothing can enter it, so a command whose working
+  directory lies at or beneath it is refused before bwrap runs.
 - **A symlink** gets no mount, since nothing mounts over a symlink. The deny is
   masked at the resolved target, which `SandboxProjection` carries beside the
   surface spelling.

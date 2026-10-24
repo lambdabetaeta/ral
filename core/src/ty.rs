@@ -234,6 +234,14 @@ impl CompTy {
             Self::Fun(Box::new(param), Box::new(body))
         })
     }
+
+    /// Its arrows before the first non-arrow; a variable counts as none.
+    pub(crate) fn arity(&self) -> usize {
+        match self {
+            Self::Fun(_, body) => 1 + body.arity(),
+            Self::Return(..) | Self::Var(_) => 0,
+        }
+    }
 }
 
 /// A node of the type language: the one enumeration every walk over types

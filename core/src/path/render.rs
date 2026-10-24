@@ -92,9 +92,9 @@ pub(crate) struct Object {
     pub(crate) position: super::RealPath,
     pub(crate) real: Rendered,
     pub(crate) spellings: Vec<Rendered>,
-    /// What a lookup of each surface it was granted by stats on the way, on
-    /// macOS, where Seatbelt gates the `lstat` of every link passed.  No name
-    /// of the object: nothing beneath one is reached through it.
+    /// What the walk of each surface it was granted by passed
+    /// ([`Trace::passed`](super::Trace::passed)), on macOS: Seatbelt lets a
+    /// lookup stat each, and reach nothing beneath one.
     pub(crate) walk: Vec<Rendered>,
 }
 
@@ -107,32 +107,40 @@ impl Object {
 
 /// Each frozen allowance as its object, one entry per object.  The object is
 /// the frozen real path through [`render_real`], never re-resolved; the
-/// surface a prefix was granted by is only where Linux shows it, and the walk
-/// macOS lets a lookup take.
+/// surface a prefix was granted by is only where Linux shows it, and what its
+/// walk passed is only what macOS lets a lookup stat.
 ///
 /// # Errors
 ///
 /// As [`render_real`].
 pub(crate) fn render_objects<'a>(
-    grants: impl IntoIterator<Item = (&'a super::RealPath, Option<&'a super::FrozenPath>)>,
+    grants: impl IntoIterator<
+        Item = (
+            &'a super::RealPath,
+            Option<&'a super::FrozenPath>,
+            &'a [super::RealPath],
+        ),
+    >,
 ) -> Result<Vec<Object>, String> {
     use std::collections::{BTreeMap, BTreeSet};
     let mut objects = BTreeMap::<Rendered, (super::RealPath, [BTreeSet<Rendered>; 2])>::new();
-    for (position, surface) in grants {
+    for (position, surface, passed) in grants {
         let mut names = render_real(position)?.into_iter();
         let Some(real) = names.next() else { continue };
         let shown = surface
             .filter(|_| cfg!(target_os = "linux"))
             .map(|surface| Rendered(surface.as_str().to_owned()))
             .filter(|surface| *surface != real);
-        let walk = surface
+        let walk = passed
+            .iter()
             .filter(|_| cfg!(target_os = "macos"))
-            .map(|surface| render_walk(surface, position));
+            .map(render_real)
+            .collect::<Result<Vec<_>, _>>()?;
         let (_, [spellings, walked]) = objects
             .entry(real)
             .or_insert_with(|| (position.clone(), Default::default()));
         spellings.extend(names.chain(shown));
-        walked.extend(walk.transpose()?.into_iter().flatten());
+        walked.extend(walk.into_iter().flatten());
     }
     Ok(objects
         .into_iter()
@@ -143,23 +151,6 @@ pub(crate) fn render_objects<'a>(
             walk: walk.into_iter().collect(),
         })
         .collect())
-}
-
-/// Every name a lookup of `real`, granted by `surface`, stats
-/// ([`lookup_walk`](super::canon::lookup_walk)), with firmlink twins.
-fn render_walk(
-    surface: &super::FrozenPath,
-    real: &super::RealPath,
-) -> Result<Vec<Rendered>, String> {
-    let names = super::canon::lookup_walk(surface.surface_path(), real.as_path());
-    Ok(
-        super::canon::spelled(names.iter().map(std::path::PathBuf::as_path), |p| {
-            super::canon::with_firmlink_twins(vec![p.to_path_buf()])
-        })?
-        .into_iter()
-        .map(Rendered)
-        .collect(),
-    )
 }
 
 /// `real` and its firmlink twin, never re-resolved: a frozen grant names
@@ -340,8 +331,13 @@ mod tests {
         let link = super::super::FrozenPath::from_surface(link.to_str().expect("UTF-8"));
         let real = crate::test_helper::real(&dir);
         let shown = |name: &std::path::Path| Rendered(name.to_str().expect("UTF-8").to_owned());
-        let objects = render_objects([(&real, Some(&link)), (&real, None), (&real, Some(&link))])
-            .expect("ASCII paths render");
+        let none: &[super::super::RealPath] = &[];
+        let objects = render_objects([
+            (&real, Some(&link), none),
+            (&real, None, none),
+            (&real, Some(&link), none),
+        ])
+        .expect("ASCII paths render");
         assert_eq!(
             objects,
             [Object {

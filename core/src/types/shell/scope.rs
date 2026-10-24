@@ -4,7 +4,7 @@
 //! inline save-modify-restore around the body rather than an RAII type.
 
 use super::Shell;
-use crate::types::{Binding, FrameHandle, HandlerEntry, HandlerRole, Settled, Value};
+use crate::types::{Binding, Closure, Env, FrameHandle, HandlerEntry, HandlerRole, Settled, Value};
 
 impl Shell {
     /// Install `thunk` as the alias for `name`, replacing any existing one.
@@ -15,8 +15,8 @@ impl Shell {
     /// seed the next run's check.
     ///
     /// # Errors
-    /// `thunk` not a unary lambda, or its body changing the head's pipeline
-    /// mode.
+    /// `thunk` not an arm: a block of one parameter, the argv, producing what
+    /// its head produces.
     pub fn install_alias(&mut self, name: String, thunk: Value) -> Settled<FrameHandle> {
         self.vet_alias(name, thunk)
             .map(|entry| self.commit_alias(entry))
@@ -27,7 +27,7 @@ impl Shell {
     /// # Errors
     /// As [`Self::install_alias`].
     pub fn vet_alias(&self, name: String, thunk: Value) -> Settled<HandlerEntry> {
-        HandlerEntry::vet(name, thunk, self.session_schemes(), HandlerRole::Alias)
+        HandlerEntry::vet(name, thunk, self, HandlerRole::Alias)
     }
 
     /// The committing half: install a vetted entry, replacing any alias of its name.
@@ -131,8 +131,18 @@ impl Shell {
     /// binding with its installed scheme, plus the alias arms' schemes off the
     /// persistent handler frames.
     pub fn session_schemes(&self) -> crate::typecheck::SessionSchemes {
+        self.schemes_over(&self.env)
+    }
+
+    /// What a closure's body is checked against at an install door: what it
+    /// captured, then Σ's prelude, beside the aliases in force.
+    pub(crate) fn closure_schemes(&self, closure: &Closure) -> crate::typecheck::SessionSchemes {
+        self.schemes_over(closure.env())
+    }
+
+    fn schemes_over(&self, env: &Env) -> crate::typecheck::SessionSchemes {
         crate::typecheck::SessionSchemes {
-            bindings: self.env.binding_schemes(&self.sig),
+            bindings: env.binding_schemes(&self.sig),
             aliases: self.context.handlers.alias_schemes(),
             builtins: self.session.runtime.builtins.manifest().clone(),
         }

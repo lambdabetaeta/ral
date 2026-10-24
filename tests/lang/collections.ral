@@ -44,10 +44,16 @@ echo !{length $trailing}
 echo !{has ["a": 1, "b": 2] a}
 echo !{has ["a": 1, "b": 2] c}
 
-# A computed duplicate key is an error, not a silent overwrite
+# A key given twice is an error, not a silent overwrite, whether both are
+# computed or one is written out
 let k = 'a'
 let j = 'a'
 try { let _ = [$k: 1, $j: 2]; return () } { |e| echo $e[message] }
+try { let _ = [a: 1, $k: 2]; return () } { |e| echo $e[message] }
+
+# An explicit entry replaces a spread's, so that is not a repeat
+let replaced = [...["a": 1], $k: 2]
+echo $replaced[a]
 
 # Functions are values in lists and maps
 let fns = [{ |x| return $[$x + 1] }, { |x| return $[$x * 2] }]

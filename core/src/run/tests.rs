@@ -1416,3 +1416,54 @@ fn a_stage_panic_stops_its_siblings_and_is_reraised() {
         _ => panic!("a stage panic must report Faulted"),
     }
 }
+
+/// A block's arity is its type, not its spelling: `{ on 'seen' }` takes the
+/// one parameter `on 'seen'` still waits for, a block whose type is still a
+/// variable fits, a binary lambda is no hook, and `{ add 1 }` is no prompt
+/// block.
+#[test]
+fn a_hooks_arity_is_its_type() {
+    let mut shell = crate::test_helper::core_shell();
+    shell.run(Run::captured(
+        "let on = { |tag event| return $tag }\n\
+         let made = { on 'seen' }\n\
+         let two = { |a b| return () }\n\
+         let add = { |a b| return $[$a + $b] }\n\
+         let inc = { add 1 }\n\
+         let wrap = { |f| return { !$f } }\n\
+         let held = wrap { |e| return () }",
+        test_origin(),
+    ));
+    let bound = |name: &str| shell.scope_lookup(name).cloned().expect("bound by the run");
+    let name = crate::types::HookName::session("t");
+    let chpwd = || crate::types::HookSig::Hook {
+        kind: "chpwd".into(),
+    };
+    let deny = crate::types::DefaultPolicy::denied;
+    assert!(
+        shell
+            .vet_hook(&name, bound("made"), chpwd(), deny())
+            .is_ok()
+    );
+    assert!(
+        shell
+            .vet_hook(&name, bound("held"), chpwd(), deny())
+            .is_ok()
+    );
+    assert!(matches!(
+        shell.vet_hook(&name, bound("two"), chpwd(), deny()),
+        Err(crate::types::RegisterError::ArityMismatch {
+            expected: 1,
+            actual: 2,
+            ..
+        })
+    ));
+    assert!(matches!(
+        shell.vet_hook(&name, bound("inc"), crate::types::HookSig::Block, deny()),
+        Err(crate::types::RegisterError::ArityMismatch {
+            expected: 0,
+            actual: 1,
+            ..
+        })
+    ));
+}

@@ -15,12 +15,13 @@ mod thread;
 use crate::ir::{Args, Comp};
 use crate::types::{Env, Error, Mooring, Settled, Shell, Signature, Value};
 use std::sync::Arc;
+use std::sync::mpsc::Sender;
 use std::time::Instant;
 
-use collect::{CollectState, Slot};
+use collect::{CollectState, Event, Slot};
 use group::PipelineGroup;
 use launch::{LaunchCx, spawn_stage};
-use resolve::{TerminalPlan, resolve_pipeline};
+use resolve::{StageSpec, TerminalPlan, resolve_pipeline};
 use route::open_stage_routes;
 
 /// What a stage needs of the machine, handed in by the evaluator so the
@@ -32,11 +33,11 @@ pub(crate) struct StageEval {
     pub(crate) close_args: fn(&Args, &Env, &Signature) -> Result<Vec<Value>, Error>,
 }
 
-/// A multi-stage pipeline between its launch and its join, its stages running
-/// in their own process group.
+/// A multi-stage pipeline from its launch to its join, its stages running in
+/// their own process group.
 ///
-/// Field order is teardown order: a collector dropped mid-flight kills the
-/// pgid, which must still be the anchor's — a reaped leader's pid may be
+/// Field order is teardown order: a collector an unwind drops mid-flight kills
+/// the pgid, which must still be the anchor's — a reaped leader's pid may be
 /// reused once its group is empty.
 pub(crate) struct PipeNode {
     collect: CollectState,
@@ -44,20 +45,21 @@ pub(crate) struct PipeNode {
 }
 
 impl PipeNode {
-    /// Resolve the plan and spawn every stage into one process group, none
-    /// observed yet.  No stage runs in the parent, so none is in tail
-    /// position.
+    /// Resolve the plan, spawn every stage into one process group, and fold
+    /// their observations into one value.  A launch that fails part-way is
+    /// rolled back and joined all the same, and its failure is the verdict.
+    /// No stage runs in the parent, so none is in tail position.
     ///
     /// `env` is the pipeline node's own lexical environment — the machine's
     /// `E` in focus, not necessarily `shell.env` — and is what each stage
     /// thread evaluates its stage under.
-    pub(crate) fn launch(
+    pub(crate) fn run(
         stages: &[Arc<Comp>],
         env: &Env,
         eval: StageEval,
         mooring: &Mooring,
         shell: &mut Shell,
-    ) -> Settled<Self> {
+    ) -> Settled<Value> {
         shell.poll()?;
         let plan = resolve_pipeline(stages, env, eval, mooring, shell)?;
 
@@ -82,10 +84,6 @@ impl PipeNode {
             started,
         );
         let mut node = Self { collect, group };
-        // Declared after `node` so unconsumed routes close before it tears
-        // down: a half-wired neighbour must see EOF.
-        let routes = open_stage_routes(stages.len())?;
-
         let mut cx = LaunchCx {
             mooring,
             shell,
@@ -94,18 +92,20 @@ impl PipeNode {
             group: &node.group,
             holds_terminal: node.collect.holds_terminal(),
         };
-        for (ix, ((stage, spec), route)) in stages.iter().zip(plan.specs).zip(routes).enumerate() {
-            cx.shell.poll()?;
-            let handle = spawn_stage(stage, spec, route, &mut cx, Slot { ix, tx: tx.clone() })?;
-            node.collect.push(handle);
+        let launched = launch(stages, plan.specs, &mut cx, &mut node.collect, &tx);
+        // The collector keeps no sender: `recv` sees the last producer go.
+        drop(tx);
+        if launched.is_err() {
+            node.collect.roll_back();
         }
-        Ok(node)
+        let value = node.join(mooring, shell);
+        launched.and(value)
     }
 
     /// Wait on every stage and fold their observations into one value.  The
     /// anchor ends before the fold, so every key it heard is on the channel;
     /// safe, `drive` returning only with no stage left to address the pgid.
-    pub(crate) fn join(self, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    fn join(self, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
         let Self {
             mut collect,
             mut group,
@@ -116,6 +116,23 @@ impl PipeNode {
         drop(group);
         value
     }
+}
+
+/// Spawn each stage in turn onto `collect`, stopping at the first that fails.
+fn launch(
+    stages: &[Arc<Comp>],
+    specs: Vec<StageSpec>,
+    cx: &mut LaunchCx<'_>,
+    collect: &mut CollectState,
+    tx: &Sender<Event>,
+) -> Settled<()> {
+    let routes = open_stage_routes(stages.len())?;
+    for (ix, ((stage, spec), route)) in stages.iter().zip(specs).zip(routes).enumerate() {
+        cx.shell.poll()?;
+        let handle = spawn_stage(stage, spec, route, cx, Slot { ix, tx: tx.clone() })?;
+        collect.push(handle);
+    }
+    Ok(())
 }
 
 #[cfg(all(test, unix))]
@@ -139,12 +156,17 @@ mod tests {
             self.0.path().join(name)
         }
 
-        fn command(&self) -> String {
+        /// The trapper's own `sh` script.
+        fn script(&self) -> String {
             format!(
-                "sh -c 'trap \"echo x >> {}\" INT TERM; echo $$ > {}; while :; do sleep 0.05; done'",
+                "trap \"echo x >> {}\" INT TERM; echo $$ > {}; while :; do sleep 0.05; done",
                 self.path("hits").display(),
                 self.path("ready").display(),
             )
+        }
+
+        fn command(&self) -> String {
+            format!("sh -c '{}'", self.script())
         }
 
         fn pid(&self) -> i32 {
@@ -231,5 +253,62 @@ mod tests {
             |scope, _| scope.cancel(CancelCause::TimedOut),
         );
         assert_eq!(trapper.hits(), 1);
+    }
+
+    /// The audit's P4: Ctrl-C lands while the pipeline launches, then a later
+    /// stage fails to.  The rollback and join strike the key on the run's node
+    /// and tear the started stage down.  The stage traps the key and the grace
+    /// signal, so the kill waits out the grace and cannot race the anchor's
+    /// report of the key.
+    #[test]
+    fn a_key_heard_while_a_launch_failed_is_struck() {
+        use super::stage::StageHandle;
+        use super::{CollectState, PipeNode, PipelineGroup, Slot};
+        use crate::types::Mooring;
+
+        let trapper = Trapper::new();
+        let mut shell = crate::test_helper::core_shell();
+        let mooring = Mooring::adrift();
+        let frame = crate::process::DurableRoot::default().worker();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let group = PipelineGroup::prepare(&shell, tx.clone()).expect("anchor spawns");
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.args(["-c", &trapper.script()]);
+        let (child, _) = crate::process::spawn_with_pgid(
+            &mut cmd,
+            crate::process::PgidPolicy::Join(group.leader_pgid()),
+        )
+        .expect("spawn the trapper into the group");
+        let mut collect = CollectState::new(
+            rx,
+            group.group(),
+            Some(crate::process::TerminalLoan::for_test(&frame)),
+            shell.scope.clone(),
+            mooring.cleanup_grace,
+            std::time::Instant::now(),
+        );
+        collect.push(StageHandle::for_test(
+            Slot { ix: 0, tx },
+            crate::process::ChildHandle::from_std(child),
+        ));
+        let pid = trapper.pid();
+        // As the tty delivers a key: to the whole group, the anchor included.
+        group
+            .leader_pgid()
+            .signal_group(crate::process::Signal::new(libc::SIGINT));
+
+        let mut node = PipeNode { collect, group };
+        node.collect.roll_back();
+        let _ = node.join(&mooring, &mut shell);
+        assert_eq!(
+            frame.cause(),
+            Some(CancelCause::Interrupted),
+            "a key heard during the launch must be struck on the run's node"
+        );
+        assert_ne!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "the started stage must be torn down"
+        );
     }
 }

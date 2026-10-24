@@ -410,10 +410,11 @@ Some characters depend on their position:
 - Inside `$[...]`, and only there, `<`, `>`, `<=`, `>=`, `!=`, `&&`, and `||`
   are operators rather than redirects and punctuation, and the word
   characters `+`, `-`, `*`, `/`, `%`, and `=` end a word, so `$[1+1]` is a
-  sum and needs no spaces (§17.1). A numeral is still read whole, exponent
-  sign included: `$[1.5e+3]` is a number. Outside `$[...]` all of these are
-  word characters or shell punctuation: `1+1` is a word and `a >= b` writes
-  to a file named `=`.
+  sum and needs no spaces (§17.1). A numeral is still read whole, its
+  exponent's sign included and, where a value is expected, its own sign:
+  `$[1.5e+3]` and `$[-9223372036854775808]` are numbers. Outside `$[...]`
+  all of these are word characters or shell punctuation: `1+1` is a word and
+  `a >= b` writes to a file named `=`.
 - `...` is the spread marker where a new word can start. It can occur inside
   a longer word.
 
@@ -543,8 +544,9 @@ returns the text `hello`.
 
 This reading does not depend on where the word stands. A numeral is its number
 as a command argument, as a bound value, as a redirect target — everywhere a
-word may appear. `007` is the number 7 and `1.50` is the number 1.5, wherever
-they are written.
+word may appear, `$[...]` included, in which a sign touching a numeral is its
+sign wherever a value is expected (§17.1). `007` is the number 7 and `1.50` is
+the number 1.5, wherever they are written.
 
 Each number in turn has exactly one printed spelling: the shortest decimal that
 reads back as the same number. A `Float` keeps its decimal point, so `3.0`
@@ -692,7 +694,10 @@ A key is a label or data, and its form says which. A label is a bare name or
 a `'single-quoted'` word. A data key is a string: `"double-quoted"`, whether
 or not it interpolates, or a value such as `$key`. Any computed key that is
 not a `String` is an error. Keys are unique in the resulting value and iterate
-in sorted order. A tag is not a key, in a literal or in a pattern (§4.6).
+in sorted order. A literal's explicit entries, as opposed to those a spread
+brings, never repeat a key: a repeat among labels and strings that do not
+interpolate is a type error, and any other is a runtime error. A tag is not a
+key, in a literal or in a pattern (§4.6).
 
 `[:]` is the empty map, and the only literal that opens with `:`. Otherwise a
 literal's keys decide. A literal every one of whose keys is a label is a
@@ -716,9 +721,6 @@ let computed = [$key: 5432]
 
 In a map literal every explicit entry wins over every spread entry, regardless
 of position, and if spread entries conflict with each other the first spread
-entry wins. Writing the same static key twice in one literal is an error, so
-within a literal the earlier entry always wins; a duplicate arising from
-computed keys, which the checker cannot see, produces a warning and the last
 entry wins.
 
 A record literal with a spread is an update of that one base: `[...$r, k: v]`.
@@ -1110,9 +1112,9 @@ let countdown = { |n|
 }
 ```
 
-Named blocks in the same statement list can also refer to each other in any
-source order. This supports mutual recursion and helper functions written
-after their callers.
+Consecutive named blocks in a statement list form a *stretch*, and the blocks
+of a stretch can refer to each other in any source order. This supports
+mutual recursion and helper functions written after their callers.
 
 ```ral
 let even = { |n|
@@ -1126,14 +1128,29 @@ let odd = { |n|
 }
 ```
 
-Forward references apply only to simple named bindings whose right-hand side
-is a plain or parameterised block. A value must still be bound before an
-earlier statement can read it.
+A stretch admits only simple named bindings whose right-hand side is a plain
+or parameterised block. Any other statement ends it, and so does a definition
+of a name that the same statement list has already bound, which begins the
+next stretch. Inside a stretch, every block sees every name the stretch
+defines, its own included, even where the name is already bound outside the
+list: by an enclosing block or parameter, by the prelude, or by an earlier
+top-level run. Every other reference sees only the bindings above it: no
+statement sees a binding below it, and a block sees one only within its own
+stretch. A block that names a block defined further down the same statement
+list, past its own stretch, is refused, unless a `let` above it in that list,
+or the parameter of the block whose body the list is, already binds the name.
+A binding from outside the body (the prelude's, an enclosing block's, or an
+earlier top-level run's) does not lift the refusal.
 
-When a name is defined more than once, a reference inside such a block uses
-the nearest preceding definition. If there is no preceding block definition,
-it can use the first later block definition in the same statement list. This
-keeps ordinary shadowing while allowing forward block references.
+```ral
+let limit = 10
+let check = { return $limit }   # 10: rebinding `limit` begins a new stretch
+let limit = { return 20 }
+
+let main = { helper }           # refused: `echo 'ready'` ends `main`'s stretch,
+echo 'ready'                    # so `main` cannot see `helper`
+let helper = { echo 'help' }
+```
 
 Tail-recursive calls reuse the current evaluator frame. Non-tail recursion is
 limited by the configured recursion limit and fails with a clear error if it
@@ -1290,7 +1307,8 @@ interchangeable with the command it replaces. So an arm cannot do arithmetic on
 `$args[0]`: it holds that argument's rendering, `'1'` rather than `1`. Use `int`
 or `float` when the arm wants a number.
 
-ral checks handler arity when the handler is installed. It also checks that the
+ral checks a handler's arity, which is its type and not its spelling, where
+the handler is written and again when it is installed. It also checks that the
 arm stands in for the head it names (§9.4). A handler for `echo`, for example,
 stands in for a command, so its value is its output.
 
@@ -1612,7 +1630,7 @@ Codecs make every conversion between values and bytes visible in the source. A d
 | `from-json` | a ral value, checked | Requires valid UTF-8 and JSON. JSON `null` becomes `Unit`, a whole number an `Int`, a number with a fraction a `Float`. |
 | `from-jsonl` | a list of ral values, checked | Splits by the line rule below and decodes each line as `from-json` does. A blank line, holding only spaces, tabs, and carriage returns, holds no value. An error names its line. |
 | `from-json-at tokens` | a ral value, checked | Decodes as `from-json` does, then reads the value at the RFC 6901 reference tokens `tokens`, a list of `String`: an object member by exact key, an array element by canonical decimal. A token that does not resolve is an error naming the pointer prefix and the object's keys or the array's length. |
-| `from-csv` | a list of maps from header to text | Uses the header row as map keys. Fields are strings; duplicate headers are rejected. |
+| `from-csv` | a list of maps from header to text | Uses the header row as map keys. Fields are strings. A duplicate header, or a row with more or fewer fields than the header, is an error naming it. |
 
 Decoders are command forms. They read the preceding byte pipe, or standard input when there is no preceding stage; only `from-json-at` takes an argument.
 
@@ -1653,9 +1671,9 @@ An encoder takes its value as an ordinary argument and writes bytes:
 | `to-lines` | a list of values | Each element's textual form followed by a newline. |
 | `to-json` | a JSON-representable value | UTF-8 JSON. `Bytes` become an array of integers; variants become tagged objects. |
 | `to-jsonl` | a list of JSON-representable values | Each element as `to-json` encodes it, followed by a newline. |
-| `to-csv` | a list of maps of text | UTF-8 CSV; columns are the first row's keys in sorted order. |
+| `to-csv` | a list of maps of text, all with the same keys | UTF-8 CSV: the keys in sorted order as the header row, then one row per map. |
 
-`to-json` rejects values with no faithful JSON representation, including blocks, lambdas, and handles. `to-jsonl` rejects a list holding one, names its index, and writes nothing. To decode a value already held in memory, encode it into a byte pipe first:
+`to-json` rejects values with no faithful JSON representation, including blocks, lambdas, and handles. `to-jsonl` rejects a list holding one, names its index, and writes nothing. `to-csv` rejects a map whose keys are not the first map's, naming a key one has and the other lacks, and a map with no keys, since CSV can neither leave a field out nor write a row of no columns; it too writes nothing, so `from-csv` reads back exactly the maps `to-csv` wrote. To decode a value already held in memory, encode it into a byte pipe first:
 
 ```ral
 to-string $json_text | from-json
@@ -1729,6 +1747,8 @@ For a regular file, `>` writes a temporary file beside the destination, flushes 
 
 This operation is failure-atomic, not a locking scheme: concurrent writers may still race. For non-regular destinations, `>` uses streaming behavior.
 
+A file's own write permission guards it from `>` as from `>~` and `>>`: an existing destination that `is-writable` reports unwritable, a read-only file among them, is refused before the command runs, although its directory would let the rename replace it. `>` also needs the directory, to make the temporary file and to rename it over the destination, which a sticky directory refuses over another user's file; a writable file whose directory refuses either takes `>~`.
+
 Use `>~` when readers should observe output as it is produced, or when writing a device, named pipe, or similar destination. `2>` is also streaming so diagnostics are not delayed until a command finishes. A streaming write is `committed` byte by byte as it lands, so it is observed `committed` even if the body later fails; only an atomic `>` can be `aborted`.
 
 ### 7.5. Here strings
@@ -1747,7 +1767,7 @@ Large here strings are written concurrently with the reader, so filling an opera
 
 ### 7.6. Process completion and the terminal
 
-ral runs a ral-written stage on its own thread and an external stage as a process; every external in the pipeline shares one process group the shell is not a member of. ral launches all stages and waits for all of them. A failure in any stage fails the whole pipeline. If several stages fail, the first failing stage in launch order supplies the reported failure. An escape outranks an ordinary stage failure, and a stop (§8.10) outranks an `exit`; two stops rank by cause; ties go to the earlier stage. A stage's own reader-gone stop, or an enclosing stage's, is no verdict at all: it ranks under everything. An `exit` in a stage, or a stop reaching a stage from outside the pipeline, ends the pipeline at once: the other stages are torn down, and what that teardown stops is the pipeline's own to forgive.
+ral runs a ral-written stage on its own thread and an external stage as a process; every external in the pipeline shares one process group the shell is not a member of. ral launches all stages and waits for all of them. A failure in any stage fails the whole pipeline. If several stages fail, the first failing stage in launch order supplies the reported failure. An escape outranks an ordinary stage failure, and a stop (§8.10) outranks an `exit`; two stops rank by cause; ties go to the earlier stage. A stage's own reader-gone stop, or an enclosing stage's, is no verdict at all: it ranks under everything. An `exit` in a stage, or a stop reaching a stage from outside the pipeline, ends the pipeline at once: the other stages are torn down, and what that teardown stops is the pipeline's own to forgive. A stage that cannot be launched ends the pipeline the same way, before any later stage starts, and the pipeline reports that failure, not what the stages already running did.
 
 A downstream command often stops reading before an upstream producer is done writing, as in:
 
@@ -1755,9 +1775,9 @@ A downstream command often stops reading before an upstream producer is done wri
 large-producer | head
 ```
 
-An interior edge is dead once its reader stage has ended. A stage feels that death at exactly one place — its next write to that edge — and nowhere else. A ral-written stage's own write to a dead edge raises the break at that write; an external's write ral cannot see, so ral hears it instead: once the reader is gone, ral reads the edge itself, on the read-end duplicate it already holds, discards whatever bytes are pending at that moment (they were owed to a reader that left), and treats the first byte written after them as the kill's cue — SIGKILL on Unix, a distinctive-code `TerminateProcess` on Windows. A write already blocked on a full pipe when the edge dies is completed into that same read and then judged dead: a write not complete when the edge dies does not complete.
+An interior edge is dead once its reader stage has ended. A stage feels that death at exactly one place — its next write to that edge — and nowhere else. A ral-written stage's own write to a dead edge raises the break at that write; an external's write ral cannot see, so ral hears it instead: once the reader is gone, ral reads the edge itself, on the read-end duplicate it already holds, discards whatever bytes are pending at that moment (they were owed to a reader that left), treats the first byte written after them as the kill's cue — SIGKILL on Unix, a distinctive-code `TerminateProcess` on Windows — and discards whatever follows until the writer is reaped or joined, so no writer ever blocks on a reader that is gone. A write already blocked on a full pipe when the edge dies is completed into that same read and then judged dead: a write not complete when the edge dies does not complete.
 
-That break — and only that break — is the pipeline's one forgiven death: a non-final stage ral cuts this way keeps no failure, because the rest of its output was owed to nobody. Everything a stage does before its first dead write is its own account and runs to completion: its stderr, its files, its children that never write the edge, its own exit status if it never writes again. Nothing after that write is promised. In the final stage the same condition is the closed-stdout stop: the pipeline's own output crosses the outer boundary, and a caller that stops reading it stops the run, status 141, an escape no `try` catches (§8.10). A reader-gone stage's `guard` cleanup runs, shielded (§8.7): a cleanup that halts on anything but its reader-gone stop is the pipeline's verdict; one that ends on it is forgiven; a cleanup's write to the dead edge is stopped, not masked.
+That break — and only that break — is the pipeline's one forgiven death: a non-final stage ral cuts this way keeps no failure, because the rest of its output was owed to nobody. Everything a stage does before its first dead write is its own account and runs to completion: its stderr, its files, its children that never write the edge, its own exit status if it never writes again. Nothing after that write is promised. In the final stage the same condition is the closed-stdout stop: the pipeline's own output crosses the outer boundary, and a caller that stops reading it stops the run, status 141, an escape no `try` catches (§8.10). A reader-gone stage's `guard` cleanup runs, shielded (§8.7): a cleanup that halts on anything but its reader-gone stop is the pipeline's verdict; one that ends on it is forgiven; a cleanup's own write to the dead edge is stopped, not masked, while a command the cleanup runs is shielded with it (§8.7) and what that command writes there is discarded. A teardown cuts no stage at an edge: an edge whose reader has gone is still read and discarded, but a write to it is no break, so a `guard` cleanup upstream runs to completion within its grace.
 
 A stage whose own redirect statically sends every byte of its stdout to a file, never to the interior edge, never performs the write the cut watches for: `cmd > file | next` therefore runs `cmd`'s redirect to completion regardless of when `next` settles, not because it is exempted but because it never reaches the operation the rule cuts.
 
@@ -2293,11 +2313,11 @@ within [handlers: [
 }
 ```
 
-Every value in `handlers` must be a unary lambda `{ |args| ... }`. It receives the command’s argument list: a `List String` holding every argument after the head, rendered as text.
+Every value in `handlers` must be a function of one parameter, such as `{ |args| ... }`. It receives the command’s argument list: a `List String` holding every argument after the head, rendered as text.
 
-The singular `handler` field is a catch-all and must be a binary lambda `{ |name args| ... }`. It receives the command name as a `String` and its argument list as a `List String`.
+The singular `handler` field is a catch-all and must be a function of two parameters, such as `{ |name args| ... }`. It receives the command name as a `String` and its argument list as a `List String`.
 
-A bare block, non-lambda value, or lambda with the wrong number of parameters is rejected when the frame is installed. A handler reinterprets a command, not a value binding: an arm **stands in** for the head it names (`standsFor`), and is checked against what that head is. An arm for an external, and any name that is neither a handler nor a base frame, stands in for a command, so its value is its output; `curl: { |args| echo '{"ok":1}' }` is an arm, and `curl: { |args| '{"ok":1}' }` is refused, since it returns a `String` where it should write — write it with `echo`. An arm that returns `()` is admitted and captures `""`. An arm for a base frame, such as `echo`, or for a head that is already a handler, returns what that frame or handler returns, so an alias over an alias keeps its own type. The catch-all stands in for every command in its block, so its value is its output. An arm written for a builtin that returns a value is never reached, because builtins are resolved first (§9.5). A handler may change what a command writes, but not what kind of thing it is; use an explicit codec when conversion is intended.
+The number of parameters is the arm's type, not its spelling: with `let forward = { |tool args| echo $tool ...$args }`, `{ forward 'git' }` is an arm, while `{ echo hi }` and `{ |a b| ... }` are not. A value that is not a block, or a block of the wrong number of parameters, is refused where it is written when its type shows it, and again when the frame is installed. A handler reinterprets a command, not a value binding: an arm **stands in** for the head it names (`standsFor`), and is checked against what that head is. An arm for an external, and any name that is neither a handler nor a base frame, stands in for a command, so its value is its output; `curl: { |args| echo '{"ok":1}' }` is an arm, and `curl: { |args| '{"ok":1}' }` is refused, since it returns a `String` where it should write — write it with `echo`. An arm that returns `()` is admitted and captures `""`. An arm for a base frame, such as `echo`, or for a head that is already a handler, returns what that frame or handler returns, so an alias over an alias keeps its own type. The catch-all stands in for every command in its block, so its value is its output. An arm written for a builtin that returns a value is never reached, because builtins are resolved first (§9.5). A handler may change what a command writes, but not what kind of thing it is; use an explicit codec when conversion is intended.
 
 `detach` refuses a handled head: a handler runs inside this session, so nothing can be detached. To stub `detach`, stand in for `detach` itself; to run the real program, write `^name`.
 
@@ -3250,7 +3270,7 @@ A *selector* names a set of directories that the environment chooses, not a path
 
 | Selector | Denotes |
 |---|---|
-| `` `path `` | every absolute directory in the host process's `$PATH` at decode time; an error if there are none, if an entry is the filesystem root, the home or an ancestor of the home, or if an entry is one `` `absolute `` would refuse under the host's rules (a malformed or mixed two-separator head) or is not valid Unicode |
+| `` `path `` | every absolute directory in the host process's `$PATH` at decode time; an error if there are none, if an entry is a filesystem root, the home or an ancestor of the home, or if an entry is one `` `absolute `` would refuse under the host's rules (a malformed or mixed two-separator head) or is not valid Unicode |
 | `` `system `` | ral's platform-defined system tool directories, without Homebrew |
 | a package manager, such as `` `rustup `` or `` `homebrew `` | the directories that manager runs programs from, where they exist; nothing if the manager is absent (§12.3) |
 
@@ -3319,7 +3339,7 @@ An omitted `exec` is every program, and a host that extends a base that omits it
 
 A selector may be the payload of `dir`:
 
-- `` `path `` — every absolute directory in the current `$PATH`; an entry that is the filesystem root, the home or an ancestor of the home is a freeze error, as for an override below, and so is one `` `absolute `` would refuse under the host's rules, or one that is not valid Unicode;
+- `` `path `` — every absolute directory in the current `$PATH`; an entry that is a filesystem root, the home or an ancestor of the home is a freeze error, as for an override below, and so is one `` `absolute `` would refuse under the host's rules, or one that is not valid Unicode;
 - `` `system `` — ral's platform-defined system tool directories, without Homebrew;
 - a package manager, such as `` `rustup ``, `` `cargo ``, `` `go ``, `` `pyenv ``, `` `homebrew `` or `` `scoop ``. The implementation holds them as one table, and the checker's refusal of an unknown selector lists every name.
 
@@ -3330,9 +3350,9 @@ A package manager's selector is a set of *locations*: the directories it install
 
 A selector is the union of its locations, and a manager that is absent expands to nothing, never to an error. Overrides are read from the host process environment, as `path` reads `$PATH`, and never from the variables of a running shell or from a tool's own configuration files; a user who relies on such a file names the directory with `` `dir `absolute ``. A home default with no bound home is absent, and a default rooted on the other platform is skipped. A location is read by running (see Running reads above), so it is the narrowest subtree that holds what runs, and holds no credential.
 
-An override whose chosen directory is the filesystem root, the home, or an ancestor of the home is a freeze error that names the variable and asks whether it is set correctly: running reads would make the selector a read of everything. The test is on the directory, not the variable, and follows symbolic links, so `GOPATH=~`, which chooses `~/bin`, is accepted.
+An override whose chosen directory is a filesystem root (a drive root on Windows), the home, or an ancestor of the home is a freeze error that names the variable and asks whether it is set correctly: running reads would make the selector a read of everything. The test is on the directory, not the variable, and follows symbolic links, so `GOPATH=~`, which chooses `~/bin`, is accepted.
 
-Four selectors, `` `homebrew ``, `` `macports ``, `` `nix `` and `` `pkgsrc ``, name system-wide package prefixes outside any home, and the read floor (§12.4) includes them wherever they exist, less any chosen directory inside the home: that is the user's, and is readable only where the grant says so.
+Four selectors, `` `homebrew ``, `` `macports ``, `` `nix `` and `` `pkgsrc ``, name system-wide package prefixes outside any home, and the read floor (§12.4) includes them wherever they exist, less any chosen directory inside the home: that is the user's, and is readable only where the grant says so. Nor does it include one that is a filesystem root or an ancestor of the home: the floor drops such a directory without error.
 
 ### 12.4. `fs`
 
@@ -3477,7 +3497,7 @@ Dynamic loader injection variables such as `LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY
 
 **macOS.** ral launches confined children under Seatbelt. Filesystem, offline-network, and executable-path restrictions are kernel-enforced. The executable allow-list also constrains programs launched internally by an admitted child. Since Seatbelt logs filesystem, executable, network, and Mach/IPC denials through one stream, a denial's diagnostic hint (§13.2) is classed by what was actually refused, never assumed to be a filesystem read merely because a hint has to say something. The read floor is `/bin`, `/usr`, `/lib`, `/System`, `/dev`, the Command Line Tools and Xcode developer directories, the system-wide package prefixes of §12.3 (`` `homebrew ``, `` `macports ``, `` `nix ``, `` `pkgsrc ``) that exist, the dyld cache directory, `/etc` wholesale, and the `xcode-select` and runtime-socket directories under `/var`; Rosetta's runtime is likewise runnable by every confined child.
 
-**Linux.** ral uses bubblewrap for filesystem restrictions and ``net: `offline``; on x86-64 and aarch64 every confined child also runs under a seccomp deny-set: kernel attack surface (ptrace, bpf, module loading, kexec/reboot/swap, keyrings, `userfaultfd`, `open_by_handle_at`, the mount family) is killed with SIGSYS, and user-namespace creation, `setns`, `clone3` and `ioctl(TIOCSTI)` are refused with an errno — no mounting and no containers inside a grant. ral opens each path the envelope shows itself, never through a symbolic link, and has bubblewrap mount that open file rather than a name, so a path replaced by a link after the grant was read shows nothing the grant did not name, and one whose components became a link refuses the launch; this needs bubblewrap 0.8.0 or later, and under an older one no confined command runs. A grant that limits which programs may run is refused on a kernel without Landlock, and every confined command is refused on a kernel older than 5.9, which cannot close the descriptors ral hands the child before its program starts. A directory the `exec` grant admits is readable inside, as on macOS. The read floor is `/bin`, `/usr`, `/lib`, `/lib64`, the files under `/etc` that dynamic linking, name resolution, user lookup and toolchain resolution need, the system-wide package prefixes of §12.3 (`` `homebrew ``, `` `macports ``, `` `nix ``, `` `pkgsrc ``) that exist, and of `/sys` only what sizes a program (`/sys/devices/system/cpu`, `/sys/kernel/mm/transparent_hugepage`); the envelope binds it read-only. The rest of `/sys` describes the host — its `class/net` lists the host's interfaces whatever `net` says — and a grant that wants it lists `/sys` under `read`. Every confined child runs in its own ipc and uts namespaces and, wherever the host can mount a fresh procfs, its own pid namespace with its own `/proc`: on every projection it sees and can signal no host process. Wherever the kernel builds a cgroup namespace the child has one, and on every projection `/sys/fs/cgroup` is the tree its own `/proc/self/cgroup` names — ral's cgroup, so a runtime reads its real limits; where the kernel cannot, the child sees the host's tree. A container runtime that masks `/proc` prevents the pid namespace; the launch still runs, and the table is the container's own. Each other invariant the host cannot build is likewise absent while the launch still runs. A confined command has no controlling terminal. Bubblewrap has no path-based executable filter, so the confined child enters a Landlock domain of its own inside the envelope: executable-path restrictions are kernel-enforced on kernels with Landlock (Linux 5.13 and later), constraining programs launched internally by an admitted child as on macOS, and on Landlock 6 kernels (Linux 6.12 and later) the child can signal no process outside the envelope even where no pid namespace could be built. What the kernel gates is the path passed to `execve`. Landlock is allow-list only, so a denied path *inside* an admitted directory is held by admitting that directory's other entries, as they stand when the command launches: a program added there afterwards is refused until the next launch, and a bare-name deny under an admitted directory that a `write` reaches is held by ral's own check alone, since a child could author a renamed copy there. An excluded path that is a hard link to an admitted file runs, since Landlock admits inodes. Under every program with exclusions, a program created during a launch on the spine of an excluded path waits for the next launch, and the sandbox's private `/tmp` runs nothing. An admitted dynamic loader or interpreter invoked explicitly on an unadmitted file is refused by ral's own check but not by the kernel. An attenuated `exec` alone is enough to build the envelope, so a grant that narrows only which programs run is still kernel-enforced.
+**Linux.** ral uses bubblewrap for filesystem restrictions and ``net: `offline``; on x86-64 and aarch64 every confined child also runs under a seccomp deny-set: kernel attack surface (ptrace, bpf, module loading, kexec/reboot/swap, keyrings, `userfaultfd`, `open_by_handle_at`, the mount family) is killed with SIGSYS, and user-namespace creation, `setns`, `clone3` and `ioctl(TIOCSTI)` are refused with an errno — no mounting and no containers inside a grant. ral opens each path the envelope shows itself, never through a symbolic link, and has bubblewrap mount that open file rather than a name, so a path replaced by a link after the grant was read shows nothing the grant did not name, and one whose components became a link refuses the launch; this needs bubblewrap 0.8.0 or later, and under an older one no confined command runs. A grant that limits which programs may run is refused on a kernel without Landlock, and every confined command is refused on a kernel older than 5.9, which cannot close the descriptors ral hands the child before its program starts. A directory the `exec` grant admits is readable inside, as on macOS. The read floor is `/bin`, `/usr`, `/lib`, `/lib64`, the files under `/etc` that dynamic linking, name resolution, user lookup and toolchain resolution need, the system-wide package prefixes of §12.3 (`` `homebrew ``, `` `macports ``, `` `nix ``, `` `pkgsrc ``) that exist, and of `/sys` only what sizes a program (`/sys/devices/system/cpu`, `/sys/kernel/mm/transparent_hugepage`); the envelope binds it read-only. The rest of `/sys` describes the host — its `class/net` lists the host's interfaces whatever `net` says — and a grant that wants it lists `/sys` under `read`. Every confined child runs in its own ipc and uts namespaces and, wherever the host can mount a fresh procfs, its own pid namespace with its own `/proc`: on every projection it sees and can signal no host process. Wherever the kernel builds a cgroup namespace the child has one, and on every projection `/sys/fs/cgroup` is the tree its own `/proc/self/cgroup` names — ral's cgroup, so a runtime reads its real limits; where the kernel cannot, the child sees the host's tree. A container runtime that masks `/proc` prevents the pid namespace; the launch still runs, and the table is the container's own. Each other invariant the host cannot build is likewise absent while the launch still runs. A confined command has no controlling terminal. A confined command whose working directory lies at or beneath a directory the grant denies is refused. Bubblewrap has no path-based executable filter, so the confined child enters a Landlock domain of its own inside the envelope: executable-path restrictions are kernel-enforced on kernels with Landlock (Linux 5.13 and later), constraining programs launched internally by an admitted child as on macOS, and on Landlock 6 kernels (Linux 6.12 and later) the child can signal no process outside the envelope even where no pid namespace could be built. What the kernel gates is the path passed to `execve`. Landlock is allow-list only, so a denied path *inside* an admitted directory is held by admitting that directory's other entries, as they stand when the command launches: a program added there afterwards is refused until the next launch, and a bare-name deny under an admitted directory that a `write` reaches is held by ral's own check alone, since a child could author a renamed copy there. An excluded path that is a hard link to an admitted file runs, since Landlock admits inodes. Under every program with exclusions, a program created during a launch on the spine of an excluded path waits for the next launch, and the sandbox's private `/tmp` runs nothing. An admitted dynamic loader or interpreter invoked explicitly on an unadmitted file is refused by ral's own check but not by the kernel. An attenuated `exec` alone is enough to build the envelope, so a grant that narrows only which programs run is still kernel-enforced.
 
 **Windows.** A launch whose filesystem region holds every path (exarch's `dangerous` with an exclusion from `--extend`, or a restrict file that only excludes) is refused before anything is stamped, since an AppContainer reaches only stamped folders and ral will not stamp every drive; the in-process guard still judges. A Windows sandbox cannot have access taken away beneath a folder it is granted, so an allowance holding an exclusion is carved at each launch: it is granted as its entries as they exist then, less the excluded ones, down to each exclusion, and each directory on the way is granted only the listing of its own names. An entry made in a carved directory during a run is unreadable to that run, the excluded name included; nothing can be created or renamed into a carved directory; a link among its entries is not granted or followed; and its entries' names and listed metadata are visible. A launch is refused whose exclusion lies on or around an allowance, the program it runs included, since nothing can be carved there. Every exclusion is then checked at each launch against the sandbox's own access, and the launch is refused, naming the object, if anything beneath the exclusion is open to it: an entry granted to every sandbox (`ALL APPLICATION PACKAGES`), or a hard link to a granted file. ral uses a projection-specific AppContainer token, filesystem capability SIDs, and a Job Object. AppContainer is deny-by-default: a child confined only to obtain ``net: `offline`` does not automatically retain ordinary access to the user’s working tree. Windows has no path-based executable filter, so an admitted program may execute another visible program internally. Network and UNC grant paths are unsupported. The read floor is `%SystemRoot%`, `%ProgramFiles%` and `%ProgramFiles(x86)%`, which AppContainer already reads. A host's ambient `ALL APPLICATION PACKAGES` grants may reach beyond the floor: the kernel is then wider than ral's own check, never narrower, and only a less-privileged AppContainer could close it. Filesystem capability entries are attached to NTFS objects; same-volume renames and hard links can therefore preserve or omit authority differently from a purely path-based rule.
 
@@ -4254,6 +4274,12 @@ readonly state, and symbolic-link target. `type` is a tag, `` `file ``,
 `` `dir ``, `` `symlink ``, or `` `other ``; `target` is `` `some `` the link's
 contents for a symlink and `` `none `` otherwise. An unavailable timestamp is 0.
 
+`glob` matches `?`, `*`, `[…]`, `[!…]` and `{a,b}` within one name and `**`
+across names. A wildcard never matches a name starting with `.`: a dotfile is
+matched only by a component that names it literally, and a wildcard component
+that could match only such names, such as `.h*`, `[.]env` or `{.env,.git}`, is
+refused.
+
 `exists`, `is-link`, and `file-info` judge a symbolic link at the link itself,
 never at the name it points to: a dangling link is judged and reported there,
 not as absent. `exists` and `is-link` both answer `true` for a dangling link,
@@ -4263,10 +4289,12 @@ as though nothing were there. `is-file`, `is-dir`, `is-readable`, and
 `false` to each of them.
 
 The prelude adds `file-empty`, `line-count`, and `extension`, the
-Option-valued extension of a path's last component: a dotfile such as
-`.bashrc` has none. `line-count` counts a file's lines by the line rule of
-§7.3, in bounded memory. `from-lines < $path` reads a file's lines as a list;
-for bounded-memory processing, redirect the file into `fold-lines`,
+Option-valued extension of a path's last `/`-separated component: what follows
+its last dot when a character other than a dot precedes that dot, so
+`a.tar.gz` has `gz`, `foo.` the empty extension, and `Makefile`, `.bashrc`,
+`..hidden` and `..` none. `line-count` counts a file's lines by the line rule
+of §7.3, in bounded memory. `from-lines < $path` reads a file's lines as a
+list; for bounded-memory processing, redirect the file into `fold-lines`,
 `map-lines`, `filter-lines`, or `each-line`.
 
 Filesystem mutations deliberately use command-shaped tools such as `cp`, `mv`,
@@ -4629,8 +4657,12 @@ naming the key and the list. A manifest the file returns is ascribed the
 table before the file runs, as at the rc file (§15.3): `return [nam: 'example']`
 is a record, so the misspelled `name` is caught statically and the plugin file
 never runs, and `return ["nam": 'example']` is a map, refused statically with
-the spelling to use. `return ()` lacks `name`, and is refused for that. One a
-factory returns is checked as it is parsed, against the same table. Each
+the spelling to use. `return ()` lacks `name`, and is refused for that. A factory is held to the
+same table before the file runs: it must be a block of one parameter, the
+options, and what it makes is ascribed as a returned manifest is, so
+`return { [name: 'example'] }` and `return { |a b| [name: 'example'] }` are
+refused statically. What a factory returns is checked again as it is parsed.
+Each
 declared field is checked exactly: ral does not stringify a value of the wrong
 type or silently drop a malformed handler. Hook and keybinding handlers each
 take exactly one argument. Unknown hook names, wrong handler arity, invalid
@@ -5077,7 +5109,7 @@ force         ::= "!" variable index* | "!" primary
 variable      ::= "$" identifier | "$(" identifier ")"
 expr-block    ::= "$[" expression "]"
 expression    ::= operand (infix-op operand)*    /* by the precedence below */
-operand       ::= "(" expression ")" | "-" operand | "not" operand | atom
+operand       ::= "(" expression ")" | "-" operand | "not" operand | atom    /* a sign touching a numeral is the numeral's, §4.1 */
 tag           ::= "`" identifier atom?
 
 block         ::= "{" program "}"
@@ -5154,7 +5186,15 @@ than once. A list rest pattern is terminal.
 
 `?` and `|` admit newlines on either side.
 
-An operator spelling inside `$[...]` is a token of its own, not a word.
+An operator spelling inside `$[...]` is a token of its own, not a word, with
+one exception: where a value is expected, as an operand or a tag's payload, a
+`+` or `-` touching a numeral is that numeral's sign (§4.1). So
+`$[-9223372036854775808]` is the smallest `Int`, `$[+5]` is 5, and `$[2*-3]` is
+-6. After a complete operand, `+` and `-` are binary however they are spaced:
+`$[5 -1]`, `$[5 - 1]` and `$[5-1]` are all 4. A tag is greedy, as everywhere:
+`` $[`a -1] `` is `` `a `` carrying -1, as `` `a -1 `` is outside `$[...]`,
+while `` $[`a - 1] `` subtracts from the nullary `` `a ``. A `-` that touches no
+numeral is unary minus, as in `$[- 5]` and `$[-$x]`; there is no unary `+`.
 
 Inside `$[...]`, expressions have the following precedence, from low to high:
 
@@ -5231,8 +5271,12 @@ payload. A literal `{ |p| M }` and a name holding one are the same value, so
 both spellings reach the same arm.
 
 Blocks elaborate to thunks. A parameterized block elaborates to a thunk whose
-computation is a function. Adjacent recursive name bindings whose right-hand
-sides are blocks or lambdas elaborate to one simultaneous `letrec` group.
+computation is a function. Within a stretch of block definitions (§5.7), each
+largest set of definitions that refer to one another, directly or through
+others, elaborates to one simultaneous `letrec` group, as does a single
+definition that refers to itself; every other definition is an ordinary
+binding. Each comes after the definitions it refers to, and none leaves its
+stretch.
 
 ### 17.3. Types and rows
 
@@ -5532,6 +5576,10 @@ The bind rule:
 --------------------------------------------- Let-cap
 Γ ⊢c let p = M ; N : C        elaborated  ⌈M⌉ to p . N
 
+Γ ⊢c M : A -> C    Γ, p : Gen_Γ(U (A -> C)) ⊢c N : C'
+------------------------------------------------------ Let-fun
+Γ ⊢c let p = M ; N : C'        elaborated  return (thunk M) to p . N
+
 Γ ⊢c M : F_ε̂ A      ε̂ := p, then Let
 ```
 
@@ -5551,8 +5599,12 @@ elaborator's hoists are ordinary binds, so `let x = cat f | grep "a$p"` captures
 the pipeline, and `"today: !{date +%F}"` interpolates the date. `let _ = cmd`
 captures and drops: a surface `_` is a fresh name, not a discard.
 
-A right-hand side of type `A -> C` is a function: evaluating it builds a
-closure, and the binder receives `U (A -> C)`.
+A right-hand side of type `A -> C` is a function, and the binder receives it
+unrun, as `thunk M` (Let-fun), at any depth: forcing it runs `M`'s effects up to
+the λ, under the handlers in scope at the force rather than at the application.
+With `let g = if true { fail [status: 1, message: boom]; add 1 } else { add 2 }`,
+a bare `g` in `let h = try { g } { |e| add 2 }` forces `g` inside the `try`, so
+the handler catches `boom` and `h 3` is `5`.
 
 A discarded statement is never captured on its own. The whole captured
 computation is one buffer, so `let x = !{ echo a; echo b }` prints nothing and
@@ -5703,7 +5755,9 @@ frame that writes, has `echo`'s own scheme. An arm for `detach`, a base frame
 that returns, has `detach`'s scheme and returns a receipt. A call through an arm
 types as its head does. The catch-all stands in for every command in its block,
 so `{ |name args| cd $name }` is valid. An arm installed at run time, by `alias` or from a bundle, is checked by
-the same rule when it is installed.
+the same rule when it is installed. The rule reads the arm's type, never its
+spelling: `{ forward 'git' }` is an arm when `forward 'git'` is a function of
+the argv, and `{ echo hi }`, whose type takes no parameter, is not.
 
 ### 17.8. Operational outcomes
 
@@ -5733,8 +5787,9 @@ X / κ, Σ                          (climbs to the first frame whose rule catche
 - `R` has two shapes, `value v` or `lambda ⟨M, Γ⟩` — a λ-closure standing for
   an unapplied function, since `lambda p.M` is never a value (§17.2). Only an
   `Apply` frame consumes a `lambda` by β; every other frame's hole wants a
-  value, and meeting a `lambda` there is a case the checker excludes by
-  η-expanding every arrow-typed computation into a thunked λ.
+  value, and meeting a `lambda` there is a case the checker excludes: the one
+  function-typed computation a value hole could otherwise receive is a `let`'s
+  right-hand side, which Let-fun binds unrun (§17.5).
 - `X` has two shapes, `error e` and `escape q` (`q ::= exit n`).
   A break climbs `κ` past every frame whose rule does not catch it, each
   frame's own rule running once on the way up to close what it opened — a

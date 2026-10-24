@@ -121,14 +121,17 @@ impl Inferencer<'_> {
     }
 
     /// The bind rule: what a binder's pattern reaches from its RHS's type.  A
-    /// `Fun` RHS is a lambda, so the whole arrow is thunked; a command is
+    /// `Fun` RHS is a function, bound unrun as its thunk (Let-fun); a command is
     /// captured, and the binder takes its output; a value producer's value is
     /// bound; a producer of unknown grade is made a value producer — a `let`
     /// is a demand for a value, the one defaulting in the system.  Shared by
     /// `Bind` and `Phrase::Define`.
     pub(super) fn rhs_bound_ty(&mut self, rhs: &Comp, cty: CompTy) -> Ty {
         match self.ctx.unifier.resolve_comp_ty(&cty) {
-            CompTy::Fun(..) => Ty::Thunk(Box::new(cty)),
+            CompTy::Fun(..) => {
+                self.ctx.thunked.insert(Node::comp(rhs));
+                Ty::Thunk(Box::new(cty))
+            }
             CompTy::Return(Grade::Output, unit) => {
                 debug_assert!(self.is_unit(&unit));
                 self.ctx.captured.insert(Node::comp(rhs));

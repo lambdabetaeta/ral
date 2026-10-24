@@ -15,7 +15,7 @@ path = "src/main.rs"
 [features]
 coreutils  = ["ral-core/coreutils"]
 diffutils  = ["ral-core/diffutils"]
-ripgrep    = ["ral-core/ripgrep"]
+ripgrep    = ["ral-core/ripgrep", "dep:tikv-jemallocator"]
 
 [dependencies]
 ral-core  = { path = "../core" }
@@ -38,6 +38,9 @@ windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_System_Console",
 ] }
+
+[target.'cfg(all(target_env = "musl", target_pointer_width = "64"))'.dependencies]
+tikv-jemallocator = { version = "0.7", optional = true }
 
 [package.metadata.deb]
 name = "ral"

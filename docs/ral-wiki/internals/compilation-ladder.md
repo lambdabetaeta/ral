@@ -22,8 +22,9 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
   surface sugar. It enforces the [[design/cbpv|value/command split]] by binding
   effectful sub-expressions to fresh temporaries (a *binds* accumulator folded
   into `Comp::Bind` chains), resolves command heads against lexical scope, and
-  runs `group_stmts` first to find mutually recursive binding groups, which
-  lower to an n-ary `Rec` with a projection per member. A statement sequence
+  splits each stretch of block definitions (SPEC §5.7) into its mutually
+  recursive groups along the references that resolution itself finds; each
+  lowers to an n-ary `Rec` with a projection per member. A statement sequence
   `a; b` is itself a binder — `a to _. b` — so a block is a right-nested chain
   of `Bind`s and the top level is a list of `Phrase`s (`Define` / `Run`). What
   it emits carries no parser syntax
@@ -50,9 +51,9 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
   binding point. A mutually recursive group stays monomorphic until its fixed
   point.
 
-  An arrow-typed right-hand side is η-expanded into a thunked λ
-  (`eta_expand_arrow`), so every function-typed thunk's body is a syntactic
-  `Lam`.
+  An arrow-typed right-hand side is bound unrun, as its thunk: the bind rule
+  records it (`InferCtx::thunked`) and `annotate` writes it `return (thunk M)`
+  (Let-fun, SPEC §17.5).
 
   Which computations are recorded is decided *during* inference, by the type:
   the bind rule (`rhs_bound_ty`) records a right-hand side of grade `Output`,

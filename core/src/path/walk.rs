@@ -4,10 +4,10 @@
 //! A name is never authority.  [`walk`] descends from the root one component
 //! at a time through directory handles, never letting the kernel follow a
 //! link, splicing each link it meets into the names still to take; every
-//! object it opened is a [`Step`] of the [`Trace`], and the position it lands
-//! on ([`Trace::real`]) is a memo of the steps.  Every operation a
-//! [`Located`] offers is relative to the handle of its directory, so the
-//! object judged is the object touched.
+//! object it opened is a [`Step`] of the [`Trace`], [passed](Trace::passed), or
+//! an ancestor of one passed, and the position it lands on ([`Trace::real`]) is
+//! a memo of the steps.  Every operation a [`Located`] offers is relative to
+//! the handle of its directory, so the object judged is the object touched.
 //!
 //! What the walk returns is [`Unjudged`]: it offers its trace and nothing more.
 //! Bytes, a stat, a listing come out of a handle only once someone vouched for
@@ -34,8 +34,9 @@
 //!   target through its handle, a data handle derived from a held leaf, and a
 //!   listing;
 //! - `create`, `create_sibling`, `mkdir`, `rename_over`, `discard`,
-//!   `remove`, `rename`, `is_writable` and `open_discard`, which write, and on
-//!   Unix `sync_dir` and `copy_mode`, which Windows has no use for;
+//!   `remove`, `rename` and `open_discard`, which write, `may_write`, which
+//!   asks whether the user may write, and on Unix `sync_dir` and
+//!   `copy_mode`, which Windows has no use for;
 //! - on Unix, `seen_at`, which stats a listed entry by name, and `impl
 //!   From<&rustix::fs::Stat> for ObjectId`, the identity a by-name `stat`
 //!   reports, which `carriers` compares with [`ObjectId::of`];
@@ -754,11 +755,13 @@ impl<'de> Deserialize<'de> for RealPath {
 /// it, as though the names folded away had never been spelled; so the tail
 /// is empty exactly where the walk reached an object.  `real` is `root`
 /// plus the steps' names plus `tail`, computed by the one constructor: a memo
-/// of the steps, never a separate observation.  `Deserialize` by hand: each
-/// field checks itself, the shape is checked — every step but the last has
-/// kind `Dir`, and a non-empty tail follows a `Dir` step or the root — and
-/// `real` is recomputed, so a trace read off the wire is one the walk could
-/// have made.
+/// of the steps, never a separate observation.  `passed` is, in order, the
+/// position of each link whose target the walk read and of each directory a
+/// `..` climbed out of: what else a lookup of the spelling looks up.
+/// `Deserialize` by hand: each field checks itself, the shape is checked —
+/// every step but the last has kind `Dir`, and a non-empty tail follows a
+/// `Dir` step or the root — and `real` is recomputed, so a trace read off the
+/// wire is one the walk could have made.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize)]
 pub struct Trace {
     root: RootName,
@@ -766,10 +769,17 @@ pub struct Trace {
     steps: Vec<Step>,
     tail: Vec<EntryName>,
     real: RealPath,
+    passed: Vec<RealPath>,
 }
 
 impl Trace {
-    fn new(root: RootName, root_id: ObjectId, steps: Vec<Step>, tail: Vec<EntryName>) -> Self {
+    fn new(
+        root: RootName,
+        root_id: ObjectId,
+        steps: Vec<Step>,
+        tail: Vec<EntryName>,
+        passed: Vec<RealPath>,
+    ) -> Self {
         let real = RealPath::assemble(&root, steps.iter().map(Step::name).chain(&tail));
         Self {
             root,
@@ -777,6 +787,7 @@ impl Trace {
             steps,
             tail,
             real,
+            passed,
         }
     }
 
@@ -790,13 +801,20 @@ impl Trace {
                 .split_last()
                 .map_or_else(Vec::new, |(_, above)| above.to_vec()),
             Vec::new(),
+            self.passed.clone(),
         )
     }
 
     /// This trace, a directory's, with `more` steps below it and `tail` past.
     fn extended(&self, more: impl IntoIterator<Item = Step>, tail: Vec<EntryName>) -> Self {
         let steps = self.steps.iter().cloned().chain(more).collect();
-        Self::new(self.root.clone(), self.root_id, steps, tail)
+        Self::new(
+            self.root.clone(),
+            self.root_id,
+            steps,
+            tail,
+            self.passed.clone(),
+        )
     }
 
     pub fn real(&self) -> &RealPath {
@@ -810,6 +828,11 @@ impl Trace {
 
     pub(super) fn tail(&self) -> &[EntryName] {
         &self.tail
+    }
+
+    /// What the walk passed besides its steps, by position.
+    pub(crate) fn passed(&self) -> &[RealPath] {
+        &self.passed
     }
 
     pub(super) fn root_id(&self) -> ObjectId {
@@ -846,6 +869,7 @@ struct WireTrace {
     steps: Vec<Step>,
     tail: Vec<EntryName>,
     real: RealPath,
+    passed: Vec<RealPath>,
 }
 
 impl<'de> Deserialize<'de> for Trace {
@@ -860,7 +884,7 @@ impl<'de> Deserialize<'de> for Trace {
                 "a trace descends through directories alone: a file or a link has nothing beneath it",
             ));
         }
-        let trace = Self::new(wire.root, wire.root_id, wire.steps, wire.tail);
+        let trace = Self::new(wire.root, wire.root_id, wire.steps, wire.tail, wire.passed);
         if trace.real != wire.real {
             return Err(D::Error::custom(format!(
                 "a trace of {} claims to be of {}",
@@ -1440,7 +1464,7 @@ impl<A: Lists> Dir<A> {
             Links::Splice,
             |_| true,
         );
-        walker.splice(&target)?;
+        walker.splice(&step.name, &target)?;
         let dir = walker
             .run()?
             .into_dir()
@@ -1828,11 +1852,14 @@ impl<A: Peeks> Located<A> {
         }
     }
 
-    /// `access(2)` against the real uid/gid — not `permissions().readonly()`,
-    /// which ignores ownership, so another user's 0644 file would read as
-    /// writable.  Follows, as `test -w` does.
-    pub(crate) fn is_writable(&self) -> bool {
-        host::is_writable(self.dir(), self.entry())
+    /// `access(2)` for writing against the real uid/gid (Windows: an open for
+    /// writing), never the stat's mode bits, which ignore ownership.  Follows,
+    /// as `test -w` does.
+    ///
+    /// # Errors
+    /// The host's refusal.
+    pub(crate) fn may_write(&self) -> io::Result<()> {
+        host::may_write(self.dir(), self.entry())
     }
 }
 
@@ -2007,22 +2034,29 @@ impl Located<Judged<Writing>> {
     }
 
     /// Stage an atomic write beside the leaf: a fresh exclusive sibling in
-    /// `dir`, read and write, made with `visibility`.  Only `Public` takes the
-    /// leaf's mode, copied from its stat taken at the walk; the others are
-    /// owner-only whatever the leaf was.  Takes `self`: the staged write owns
-    /// its target from here, so a sibling can land only over the leaf it was
-    /// staged beside.
+    /// `dir`, read and write, made with `visibility`.  A present leaf is
+    /// staged over only where the user may write it: the rename asks the
+    /// directory alone.  Only `Public` takes the leaf's mode, copied from its
+    /// stat taken at the walk; the others are owner-only whatever the leaf
+    /// was.  Takes `self`: the staged write owns its target from here, so a
+    /// sibling can land only over the leaf it was staged beside.
     ///
     /// # Errors
-    /// [`data`](Self::data)'s; `InvalidInput` for a special file, which is
-    /// streamed, not replaced; the create's, other than `AlreadyExists`,
-    /// which is retried under another name; the mode's.
+    /// [`data`](Self::data)'s; `InvalidInput` for a stated special file
+    /// (macOS), which is streamed, not replaced;
+    /// [`may_write`](Self::may_write)'s for a present leaf; the create's,
+    /// other than `AlreadyExists`, which is retried under another name; the
+    /// mode's.
     pub(crate) fn stage(self, visibility: Visibility) -> io::Result<StagedWrite> {
-        if matches!(self.data()?, Data::Special) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "a special file is streamed, not replaced",
-            ));
+        match self.data()? {
+            Data::Special => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "a special file is streamed, not replaced",
+                ));
+            }
+            Data::Held(..) => self.may_write()?,
+            Data::Absent => {}
         }
         let (file, name) = loop {
             let name = EntryName::fresh(".ral-write-")?;
@@ -2236,7 +2270,7 @@ impl Cursor {
         let id = ObjectId::of(&held.file)?;
         Ok(Self {
             base: Arc::new(Node { held, above: None }),
-            trace: Trace::new(root, id, Vec::new(), Vec::new()),
+            trace: Trace::new(root, id, Vec::new(), Vec::new(), Vec::new()),
             stack: Vec::new(),
         })
     }
@@ -2258,14 +2292,25 @@ impl Cursor {
         self.stack.push((handle, step));
     }
 
+    /// Where the cursor stands.
+    fn position(&self) -> RealPath {
+        (self.stack.iter()).fold(self.trace.real.clone(), |at, (_, step)| {
+            at.child(&step.name)
+        })
+    }
+
+    /// Climb out of the directory on top, which the walk has then passed;
+    /// at a root there is nothing above, and the walk stays.
     fn up(&mut self) {
-        // At a root there is nothing above: the walk stays.
-        if self.stack.pop().is_none()
-            && let Some(above) = self.base.above.clone()
-        {
+        let left = self.position();
+        if self.stack.pop().is_none() {
+            let Some(above) = self.base.above.clone() else {
+                return;
+            };
             self.base = above;
             self.trace = self.trace.above();
         }
+        self.trace.passed.push(left);
     }
 
     /// The trace of where the cursor stands, plus a step opened below it and
@@ -2373,12 +2418,15 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
         (self.vet)(&vetted).then_some(()).ok_or_else(Self::refused)
     }
 
-    /// Replace the link just met with its `target`: the names of a relative
-    /// one continue from the cursor, those of an absolute one from its root.
+    /// Replace `link`, the stored name of the link just met beneath the cursor,
+    /// now passed, with its `target`: the names of a relative one continue from
+    /// the cursor, those of an absolute one from its root.
     /// Whether the walk must end in a directory is re-asked of the whole
     /// spliced spelling, as the target's trailing separator and what is still
     /// to come say.
-    fn splice(&mut self, target: &Path) -> io::Result<()> {
+    fn splice(&mut self, link: &EntryName, target: &Path) -> io::Result<()> {
+        let passed = self.cursor.position().child(link);
+        self.cursor.trace.passed.push(passed);
         self.splices += 1;
         if self.splices > MAX_HOPS {
             return Err(loop_error());
@@ -2392,7 +2440,9 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
         let Spelling { root, names } = split(target)?;
         if let Some(root) = root {
             rooted(target)?;
-            self.cursor = Cursor::root(root)?;
+            let mut restarted = Cursor::root(root)?;
+            restarted.trace.passed = std::mem::take(&mut self.cursor.trace.passed);
+            self.cursor = restarted;
             self.vet_root()?;
         } else if is_absolute(target) {
             rooted(target)?;
@@ -2447,12 +2497,12 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
                 return Ok(ControlFlow::Break(Ended::Leaf(child)));
             }
             Kind::Symlink => {
-                let (link, ..) = child.held()?;
+                let (link, step, _) = child.held()?;
                 let spliced = host::read_link(&link.file).and_then(|target| {
                     if last && origin == Origin::Spelled {
                         self.linked = Some(target.clone());
                     }
-                    self.splice(&target)
+                    self.splice(&step.name, &target)
                 });
                 if let Err(e) = spliced {
                     return self.stopped(name, e);
@@ -2770,7 +2820,7 @@ pub(crate) fn walk_excluded(rp: &LexicalPath) -> io::Result<Excluded> {
             let read = host::read_link(&link.file);
             #[cfg(test)]
             tests::around_link_read(tests::Around::After);
-            let target = match read.and_then(|target| walker.splice(&target)) {
+            let target = match read.and_then(|target| walker.splice(&name, &target)) {
                 Ok(()) => walker.run()?,
                 Err(e) => match walker.stopped(name, e)? {
                     ControlFlow::Continue(()) => walker.run()?,

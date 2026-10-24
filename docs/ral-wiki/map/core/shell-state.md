@@ -27,11 +27,13 @@ everything `crate::types::*`.
   the worker's `CompletionPermit` and its `DeferredSurface`).
   Handlers are deep and self-masking, with no
   `resume` ([[design/effects-handlers|effects-handlers]], [[decisions/260530_handlers-deep-self-masking|handlers-deep-self-masking]]).
-  A *handler* or alias arm is always a lambda: `HandlerEntry` carries its
-  `HandlerArity` (`Unary` for a per-name arm or alias, `CatchAll` for `within
-  [handler: …]`) fixed by the surface form, and `validate_handler_arity` rejects
-  any non-lambda or wrong-arity value at every install boundary — the calling
-  convention is never inferred from the runtime shape
+  A *handler* or alias arm is a block whose type takes its slot's parameters:
+  `HandlerEntry` carries its `HandlerArity` (`Unary` for a per-name arm or
+  alias, `CatchAll` for `within [handler: …]`) fixed by the surface form, and
+  every install boundary refuses a value that is no block (`arm_closure`) or
+  whose type takes other parameters (`alias_arm_scheme`, `catch_all_stands_in`,
+  inferred over the closure's own capture by `Shell::closure_schemes`) — the
+  calling convention is never inferred from the runtime shape
   ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
 - `value.rs`'s `Value::heads` gives the heads a value may be admitted at; the
   shapes `execve(2)` has no argument for are `RefusedArg` (`ty/exec_arg.rs`),
@@ -215,7 +217,7 @@ checkpoint, since a run never writes it.
   ledger" can never be pulled apart: `Ran::define`'s single per-name
   loop over `pattern::destructure` calls it for every name a
   `Define` phrase installs under `Mode::Session` — a plain `let`, a
-  destructuring pattern's `Name`/`...rest` arms, or a `LetRec` group's
+  destructuring pattern's `Name`/`...rest` arms, or a `Rec` group's
   mutually-recursive members alike — and never under `Mode::Local`. Host verbs
   (`bind_value`, `set_var`) stay on the raw `Env` primitive, since every host
   call to them precedes arming. Idleness is *use-observation*, not

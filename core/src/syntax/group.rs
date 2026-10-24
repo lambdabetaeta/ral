@@ -1,316 +1,148 @@
-//! Pre-pass: partition a statement sequence into elaboration groups, telling
-//! the elaborator which `let` bindings form a recursive knot.
-//!
-//! Only a thunk-shaped RHS — lambda or block — may join a knot.  The
-//! machine's `Rec` rule binds every member as a thunk before any body runs,
-//! so members may name each other in any source order; a plain value binding
-//! like `let n = f 5` would have to call `f` at binding time, and stays out.
-//!
-//! Knots are *strongly* connected components, not merely connected ones: an
-//! SCC generalises as a unit and is monomorphic within, so a binding that only
-//! forward-references a helper is left a `Single` and gets the helper's scheme
-//! polymorphically.  A reference resolves to the nearest preceding definition
-//! of the name, or to the first if every definition follows it.  Groups are
-//! emitted dependencies-first, which can lift a `let` ahead of its source
-//! position; a group's independent dependencies keep their source order.
+//! The scoping of a statement list (SPEC §5.7): its stretches of block
+//! definitions, and the components that split a stretch into recursive groups.
 
-use crate::source::Spanned;
+use crate::ir::{Name, Pattern};
+use crate::source::{Span, Spanned};
 use crate::syntax::ast::{Ast, Stmt};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-/// A statement group produced by the pre-pass.
-pub(crate) enum StmtGroup<'a> {
-    /// Every non-recursive `let`, and every non-binding statement.
-    Single(&'a Stmt),
-    /// A recursive knot, emitted as `CompKind::Rec`.
-    LetRec(Vec<RecMember<'a>>),
-}
-
-/// One `let name = rhs` of a knot, both halves keeping their spans.
-pub(crate) struct RecMember<'a> {
-    pub name: Spanned<&'a str>,
+/// `let name = rhs`, `rhs` a block or a lambda: what a stretch admits.
+pub(crate) struct Def<'a> {
+    pub span: Option<Span>,
+    pub name: Spanned<&'a Name>,
     pub value: &'a Spanned<Box<Ast>>,
 }
 
-/// A thunk-shaped `let name = rhs` at statement index `.0`.
-type Def<'a> = (usize, Spanned<&'a str>, &'a Spanned<Box<Ast>>);
+impl<'a> Def<'a> {
+    fn of(stmt: &'a Stmt) -> Option<Self> {
+        let Ast::Let { pattern, value } = &stmt.item else {
+            return None;
+        };
+        let Pattern::Name(name) = &pattern.item else {
+            return None;
+        };
+        matches!(*value.item, Ast::Block(_) | Ast::Lambda { .. }).then(|| Self {
+            span: stmt.span,
+            name: Spanned::with_span(pattern.span, name),
+            value,
+        })
+    }
+}
 
-/// Partition `stmts` into [`StmtGroup`]s, dependencies before their dependents
-/// regardless of source order.
-pub(crate) fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup<'_>> {
-    // defs[name] = the def_list indices defining it, in stmt_idx order.
-    let mut def_list: Vec<Def<'_>> = Vec::new();
-    let mut defs: HashMap<&str, Vec<usize>> = HashMap::new();
+/// A part of a statement list: its bindings scope over the parts after it,
+/// and a stretch's also over the stretch itself.
+pub(crate) enum Part<'a> {
+    Stmt(&'a Stmt),
+    Stretch(Vec<Def<'a>>),
+}
 
-    for (stmt_idx, stmt) in stmts.iter().enumerate() {
-        if let Some((name, value)) = stmt.item.as_name_let()
-            && value.item.is_thunk_form()
-        {
-            let di = def_list.len();
-            defs.entry(name.item).or_default().push(di);
-            def_list.push((stmt_idx, name, value));
+impl<'a> Part<'a> {
+    /// A stretch's definitions; a statement has none.
+    pub(crate) fn defs(&self) -> &[Def<'a>] {
+        match self {
+            Self::Stmt(_) => &[],
+            Self::Stretch(defs) => defs,
         }
     }
+}
 
-    if def_list.is_empty() {
-        return stmts.iter().map(StmtGroup::Single).collect();
-    }
-
-    let candidate_names: HashSet<String> =
-        defs.keys().map(std::string::ToString::to_string).collect();
-
-    // Edge i→j: binding i's RHS freely references binding j's name.  Backward
-    // edges are kept, not filtered: a backward reference into a self-recursive
-    // binding still belongs in the same SCC.
-    let n = def_list.len();
-    let mut adj: Vec<Vec<usize>> = vec![vec![]; n];
-    for (i, &(stmt_i, _, value)) in def_list.iter().enumerate() {
-        for name_ref in value.item.free_refs(&candidate_names) {
-            if let Some(def_indices) = defs.get(name_ref.as_str()) {
-                let j = resolve_ref(stmt_i, def_indices, &def_list);
-                if !adj[i].contains(&j) {
-                    adj[i].push(j);
-                }
+/// `stmts` as parts, in source order.
+pub(crate) fn parts(stmts: &[Stmt]) -> Vec<Part<'_>> {
+    let mut bound: HashSet<&Name> = HashSet::new();
+    let mut out: Vec<Part<'_>> = Vec::new();
+    for stmt in stmts {
+        let Some(def) = Def::of(stmt) else {
+            if let Ast::Let { pattern, .. } = &stmt.item {
+                bound.extend(pattern.item.names());
             }
-        }
-    }
-
-    let scc_id = find_sccs(n, &adj);
-    let num_sccs = scc_id.iter().copied().max().map_or(0, |x| x + 1);
-
-    // Members are sorted by source order, so `members[0]` is the SCC's head.
-    let mut scc_members: Vec<Vec<usize>> = vec![Vec::new(); num_sccs];
-    for (di, &cid) in scc_id.iter().enumerate() {
-        scc_members[cid].push(di);
-    }
-    for members in &mut scc_members {
-        members.sort_by_key(|&di| def_list[di].0);
-    }
-
-    let scc_first_stmt: Vec<usize> = scc_members
-        .iter()
-        .map(|members| def_list[members[0]].0)
-        .collect();
-
-    // The condensation: edge A→B when some node of A references one of B,
-    // each SCC's edges in source order so the traversal is deterministic.
-    let mut scc_deps: Vec<Vec<usize>> = vec![Vec::new(); num_sccs];
-    for (di, edges) in adj.iter().enumerate() {
-        let from = scc_id[di];
-        for &dj in edges {
-            let to = scc_id[dj];
-            if from != to {
-                scc_deps[from].push(to);
-            }
-        }
-    }
-    for deps in &mut scc_deps {
-        deps.sort_unstable_by_key(|&cid| scc_first_stmt[cid]);
-        deps.dedup();
-    }
-
-    // Entering the DFS in source order keeps the topo order as close to the
-    // written order as the dependencies allow.
-    let mut topo: Vec<usize> = Vec::with_capacity(num_sccs);
-    let mut topo_visited: Vec<bool> = vec![false; num_sccs];
-    let mut entry_order: Vec<usize> = (0..num_sccs).collect();
-    entry_order.sort_by_key(|&cid| scc_first_stmt[cid]);
-    for cid in entry_order {
-        topo_dfs(cid, &scc_deps, &mut topo_visited, &mut topo);
-    }
-
-    // A non-head member never emits at its own source position; its SCC has
-    // already emitted it at the head's.
-    let mut consumed: HashSet<usize> = HashSet::new();
-    for members in &scc_members {
-        for &di in &members[1..] {
-            consumed.insert(def_list[di].0);
-        }
-    }
-
-    let mut head_at: HashMap<usize, usize> = HashMap::new();
-    for (cid, members) in scc_members.iter().enumerate() {
-        head_at.insert(def_list[members[0]].0, cid);
-    }
-
-    // At a head statement, flush the topo order up to and including its SCC,
-    // so every dependency lands before it.
-    let mut emitted: Vec<bool> = vec![false; num_sccs];
-    let mut out: Vec<StmtGroup<'_>> = Vec::new();
-    for (stmt_idx, stmt) in stmts.iter().enumerate() {
-        if consumed.contains(&stmt_idx) {
+            out.push(Part::Stmt(stmt));
             continue;
-        }
-        match head_at.get(&stmt_idx).copied() {
-            None => out.push(StmtGroup::Single(stmt)),
-            Some(this_scc) if emitted[this_scc] => {
-                // Already placed as a dependency of an earlier head.
-            }
-            Some(this_scc) => {
-                for &cid in &topo {
-                    if emitted[cid] {
-                        continue;
-                    }
-                    emit_scc(cid, &scc_members, &adj, &def_list, stmts, &mut out);
-                    emitted[cid] = true;
-                    if cid == this_scc {
-                        break;
-                    }
-                }
-            }
+        };
+        let fresh = bound.insert(def.name.item);
+        match out.last_mut() {
+            Some(Part::Stretch(defs)) if fresh => defs.push(def),
+            _ => out.push(Part::Stretch(vec![def])),
         }
     }
-
     out
 }
 
-// ── Internal helpers ─────────────────────────────────────────────────────
-
-/// Push `start`'s dependencies onto `topo` before `start` itself.  Iterative,
-/// because a dependency chain of tens of thousands of bindings would recurse
-/// as deep as the chain and overflow the host stack.
-fn topo_dfs(start: usize, scc_deps: &[Vec<usize>], visited: &mut [bool], topo: &mut Vec<usize>) {
-    if visited[start] {
-        return;
-    }
-    visited[start] = true;
-    let mut stack: Vec<(usize, std::slice::Iter<'_, usize>)> =
-        vec![(start, scc_deps[start].iter())];
-    while let Some((node, deps)) = stack.last_mut() {
-        match deps.next() {
-            Some(&dep) if !visited[dep] => {
-                visited[dep] = true;
-                stack.push((dep, scc_deps[dep].iter()));
-            }
-            Some(_) => {}
-            None => {
-                topo.push(*node);
-                stack.pop();
-            }
-        }
-    }
-}
-
-/// Emit one SCC: a `LetRec` if it has several members or a self-edge.
-fn emit_scc<'a>(
-    cid: usize,
-    scc_members: &[Vec<usize>],
-    adj: &[Vec<usize>],
-    def_list: &[Def<'a>],
-    stmts: &'a [Stmt],
-    out: &mut Vec<StmtGroup<'a>>,
-) {
-    let members = &scc_members[cid];
-    let is_recursive = members.len() > 1 || adj[members[0]].contains(&members[0]);
-    if is_recursive {
-        let bindings = members
-            .iter()
-            .map(|&di| {
-                let (_, name, value) = &def_list[di];
-                RecMember {
-                    name: name.clone(),
-                    value,
-                }
-            })
-            .collect();
-        out.push(StmtGroup::LetRec(bindings));
-    } else {
-        // The original stmt, unchanged, so it lowers to `CompKind::Bind` and
-        // generalises in the normal way.
-        let stmt_idx = def_list[members[0]].0;
-        out.push(StmtGroup::Single(&stmts[stmt_idx]));
-    }
-}
-
-/// Which of a name's definitions a use at `use_stmt_idx` sees: the nearest
-/// preceding one, or the first if every definition follows the use.
-fn resolve_ref(use_stmt_idx: usize, def_indices: &[usize], def_list: &[Def<'_>]) -> usize {
-    // `def_indices` ascends by stmt_idx, so the last match is the nearest.
-    let mut best = def_indices[0];
-    for &di in def_indices {
-        if def_list[di].0 <= use_stmt_idx {
-            best = di;
-        }
-    }
-    best
-}
-
-/// Tarjan's algorithm: `scc_id[i]` is node `i`'s component, dense in
-/// `0..num_sccs`.  The ids carry no order the caller relies on.
-fn find_sccs(n: usize, adj: &[Vec<usize>]) -> Vec<usize> {
-    let mut state = TarjanState {
-        idx_counter: 0,
-        indices: vec![None; n],
-        lowlinks: vec![0; n],
-        on_stack: vec![false; n],
+/// Tarjan's strongly connected components of `edges` (`edges[i]`: the nodes
+/// `i` refers to), dependencies first, each ascending.  Iterative: a long
+/// chain of definitions would overflow the host stack.
+pub(crate) fn sccs(edges: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let mut tarjan = Tarjan {
+        next: 0,
+        index: vec![None; edges.len()],
+        low: vec![0; edges.len()],
+        on_stack: vec![false; edges.len()],
         stack: Vec::new(),
-        scc_id: vec![None; n],
-        next_scc_id: 0,
+        out: Vec::new(),
     };
-    for v in 0..n {
-        if state.indices[v].is_none() {
-            strongconnect(v, adj, &mut state);
+    for v in 0..edges.len() {
+        if tarjan.index[v].is_none() {
+            tarjan.connect(v, edges);
         }
     }
-    state.scc_id.into_iter().map(|x| x.unwrap()).collect()
+    tarjan.out
 }
 
-struct TarjanState {
-    idx_counter: usize,
-    indices: Vec<Option<usize>>,
-    lowlinks: Vec<usize>,
+struct Tarjan {
+    next: usize,
+    index: Vec<Option<usize>>,
+    low: Vec<usize>,
     on_stack: Vec<bool>,
     stack: Vec<usize>,
-    scc_id: Vec<Option<usize>>,
-    next_scc_id: usize,
+    out: Vec<Vec<usize>>,
 }
 
-/// Iterative Tarjan rooted at `v`, so a chain of tens of thousands of bindings
-/// cannot overflow the host stack.  Popping a frame folds its lowlink into its
-/// parent's — the work the recursive form does on return.
-fn strongconnect(v: usize, adj: &[Vec<usize>], st: &mut TarjanState) {
-    // Frame: a node, and where in `adj[node]` to resume.
-    let mut work: Vec<(usize, usize)> = vec![(v, 0)];
-    st.indices[v] = Some(st.idx_counter);
-    st.lowlinks[v] = st.idx_counter;
-    st.idx_counter += 1;
-    st.stack.push(v);
-    st.on_stack[v] = true;
+impl Tarjan {
+    fn discover(&mut self, v: usize) {
+        self.index[v] = Some(self.next);
+        self.low[v] = self.next;
+        self.next += 1;
+        self.stack.push(v);
+        self.on_stack[v] = true;
+    }
 
-    while let Some(&(node, next)) = work.last() {
-        if next < adj[node].len() {
-            work.last_mut().unwrap().1 += 1;
-            let w = adj[node][next];
-            if st.indices[w].is_none() {
-                st.indices[w] = Some(st.idx_counter);
-                st.lowlinks[w] = st.idx_counter;
-                st.idx_counter += 1;
-                st.stack.push(w);
-                st.on_stack[w] = true;
-                work.push((w, 0));
-            } else if st.on_stack[w] {
-                st.lowlinks[node] = st.lowlinks[node].min(st.indices[w].unwrap());
-            }
-            continue;
-        }
-
-        // A node whose lowlink never fell below its own index is the root of
-        // its component: everything above it on the stack belongs to it.
-        if st.lowlinks[node] == st.indices[node].unwrap() {
-            let cid = st.next_scc_id;
-            st.next_scc_id += 1;
-            loop {
-                let w = st.stack.pop().unwrap();
-                st.on_stack[w] = false;
-                st.scc_id[w] = Some(cid);
-                if w == node {
-                    break;
+    /// Popping a frame folds its lowlink into its parent's: the work the
+    /// recursive form does on return.
+    fn connect(&mut self, v: usize, edges: &[Vec<usize>]) {
+        self.discover(v);
+        // Frame: a node, and where in its edges to resume.
+        let mut work: Vec<(usize, usize)> = vec![(v, 0)];
+        while let Some(&(node, at)) = work.last() {
+            if let Some(&w) = edges[node].get(at) {
+                work.last_mut().expect("non-empty").1 += 1;
+                match self.index[w] {
+                    None => {
+                        self.discover(w);
+                        work.push((w, 0));
+                    }
+                    Some(iw) if self.on_stack[w] => self.low[node] = self.low[node].min(iw),
+                    Some(_) => {}
                 }
+                continue;
             }
-        }
-        work.pop();
-        if let Some(&(parent, _)) = work.last() {
-            st.lowlinks[parent] = st.lowlinks[parent].min(st.lowlinks[node]);
+            // A node whose lowlink never fell below its own index roots a
+            // component: itself and everything above it on the stack.
+            if self.index[node] == Some(self.low[node]) {
+                let from = self
+                    .stack
+                    .iter()
+                    .rposition(|&w| w == node)
+                    .expect("on the stack");
+                let mut component = self.stack.split_off(from);
+                for &w in &component {
+                    self.on_stack[w] = false;
+                }
+                component.sort_unstable();
+                self.out.push(component);
+            }
+            work.pop();
+            if let Some(&(parent, _)) = work.last() {
+                self.low[parent] = self.low[parent].min(self.low[node]);
+            }
         }
     }
 }
@@ -318,99 +150,77 @@ fn strongconnect(v: usize, adj: &[Vec<usize>], st: &mut TarjanState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::Pattern;
     use crate::syntax::parser::parse;
-    use std::fmt::Write;
 
-    /// One descriptor per group, in emission order: `let NAME`, `stmt`, or
-    /// `rec [a, b]` with the knot's members sorted.
-    fn groups_of(src: &str) -> Vec<String> {
+    /// One descriptor per part: `stmt`, or `stretch [a, b]` naming its members.
+    fn parts_of(src: &str) -> Vec<String> {
         let stmts = parse(src).expect("parse");
-        group_stmts(&stmts)
-            .into_iter()
-            .map(|g| match g {
-                StmtGroup::Single(s) => match &s.item {
-                    Ast::Let { pattern, .. } => match &pattern.item {
-                        Pattern::Name(n) => format!("let {n}"),
-                        _ => "let <pat>".to_string(),
-                    },
-                    _ => "stmt".to_string(),
-                },
-                StmtGroup::LetRec(bindings) => {
-                    let mut names: Vec<&str> = bindings.iter().map(|m| m.name.item).collect();
-                    names.sort_unstable();
-                    format!("rec [{}]", names.join(", "))
+        parts(&stmts)
+            .iter()
+            .map(|part| match part {
+                Part::Stmt(_) => "stmt".to_string(),
+                Part::Stretch(defs) => {
+                    let names: Vec<&str> = defs.iter().map(|def| def.name.item.as_ref()).collect();
+                    format!("stretch [{}]", names.join(", "))
                 }
             })
             .collect()
     }
 
     #[test]
-    fn non_recursive_let_is_a_single() {
-        assert_eq!(groups_of("let x = 1\nreturn $x"), vec!["let x", "stmt"]);
+    fn consecutive_block_definitions_form_one_stretch() {
+        assert_eq!(
+            parts_of("let f = { |x| g $x }\nlet g = { |y| f $y }\nreturn ()"),
+            ["stretch [f, g]", "stmt"]
+        );
     }
 
+    /// `let x` ends the stretch, so `b` is not lifted past it.
     #[test]
-    fn self_recursive_lambda_is_a_singleton_letrec() {
+    fn any_other_statement_ends_a_stretch() {
         assert_eq!(
-            groups_of("let f = { |x| f $x }\nreturn ()"),
-            vec!["rec [f]", "stmt"]
+            parts_of("let a = { b }\nlet x = 1\nlet b = { return $x }\necho !{a}"),
+            ["stretch [a]", "stmt", "stretch [b]", "stmt"]
+        );
+    }
+
+    /// Rebinding `f` begins a new stretch, so `g` keeps the `f` above it.
+    #[test]
+    fn a_rebound_name_begins_the_next_stretch() {
+        assert_eq!(
+            parts_of("let f = 10\nlet g = { return $f }\nlet f = { return 20 }"),
+            ["stmt", "stretch [g]", "stretch [f]"]
+        );
+        assert_eq!(
+            parts_of("let f = { 1 }\nlet g = { f }\nlet f = { 2 }\nlet h = { f }"),
+            ["stretch [f, g]", "stretch [f, h]"]
         );
     }
 
     #[test]
-    fn mutually_recursive_lambdas_share_one_letrec() {
+    fn only_a_name_bound_to_a_block_or_lambda_joins_a_stretch() {
         assert_eq!(
-            groups_of("let f = { |x| g $x }\nlet g = { |y| f $y }\nreturn ()"),
-            vec!["rec [f, g]", "stmt"]
+            parts_of("let n = 5\nlet [a, b] = [1, 2]\nlet _ = { 1 }\nlet m = !{ 1 }"),
+            ["stmt", "stmt", "stmt", "stmt"]
         );
     }
 
+    /// 0 → 1 → 2 ⇄ 3, and 4 alone.
     #[test]
-    fn acyclic_forward_reference_splits_into_singles_in_dependency_order() {
-        let groups = groups_of("let g = { f }\nlet f = { |x| f $x }\nreturn ()");
-        assert_eq!(groups, vec!["rec [f]", "let g", "stmt"]);
+    fn components_come_dependencies_first() {
+        let edges = [vec![1], vec![2], vec![3], vec![2], vec![]];
+        assert_eq!(sccs(&edges), [vec![2, 3], vec![1], vec![0], vec![4]]);
     }
 
+    /// The host-stack regression that makes the walk iterative.
     #[test]
-    fn independent_dependencies_are_emitted_in_source_order() {
-        let src = "let a = { b; c; d; e }\nlet b = { return 1 }\nlet c = { return 2 }\n\
-                   let d = { return 3 }\nlet e = { return 4 }\na";
-        // Hash order varies per run; one pass would succeed by luck.
-        for _ in 0..16 {
-            assert_eq!(
-                groups_of(src),
-                vec!["let b", "let c", "let d", "let e", "let a", "stmt"]
-            );
-        }
-    }
-
-    #[test]
-    fn non_thunk_rhs_never_joins_a_letrec() {
-        let groups = groups_of("let f = { |x| f $x }\nlet n = f 5\nreturn $n");
-        assert_eq!(groups, vec!["rec [f]", "let n", "stmt"]);
-    }
-
-    /// `g` sees the second `f`, which is acyclic, so nothing knots.
-    #[test]
-    fn shadowed_definitions_stay_separate() {
-        let groups =
-            groups_of("let f = { return 1 }\nlet f = { return 2 }\nlet g = { f }\nreturn ()");
-        assert_eq!(groups, vec!["let f", "let f", "let g", "stmt"]);
-    }
-
-    /// The host-stack regression that makes both graph passes iterative.
-    #[test]
-    fn long_dependency_chain_does_not_overflow() {
+    fn a_long_chain_does_not_overflow() {
         const N: usize = 50_000;
-        let mut src = String::new();
-        for i in 0..N {
-            let _ = writeln!(src, "let f{i} = {{ f{} }}", i + 1);
-        }
-        let _ = write!(src, "let f{N} = {{ return 0 }}\nreturn 0\n");
-        let stmts = parse(&src).expect("parse");
-        let groups = group_stmts(&stmts);
-        // Every link is acyclic: N+1 singletons plus the trailing `return 0`.
-        assert_eq!(groups.len(), N + 2);
+        let edges: Vec<Vec<usize>> = (0..=N)
+            .map(|i| if i < N { vec![i + 1] } else { Vec::new() })
+            .collect();
+        let components = sccs(&edges);
+        assert_eq!(components.len(), N + 1);
+        assert_eq!(components[0], [N]);
     }
 }

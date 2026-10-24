@@ -96,14 +96,16 @@ launch hardening.
   installed and its runnable parts include a file; `reasonable` excludes that
   subtree. Caches and registries stay `fs` entries.
 - **No override names the world.** An override whose chosen directory, after its
-  subpath, is the filesystem root, the home or an ancestor of it is a freeze
-  error naming the variable and asking whether it is set correctly: running
-  reads would make the selector a read of everything, `~/.ssh` included. The
-  check is on the directory, not the variable (`GOPATH=~` chooses `~/bin` and is
-  fine), by containment of symlink-followed forms. Defaults are fixed and need no
-  check. `path` has the same hazard and the same guard, one function
-  (`refuse_the_world`, in `freeze.rs`): a `$PATH` entry naming the world is a
-  freeze error naming `PATH`, not a silent skip like a relative entry.
+  subpath, is a filesystem root (a drive's under Windows rules), the home or an
+  ancestor of it is a freeze error naming the variable and asking whether it is
+  set correctly: running reads would make the selector a read of everything,
+  `~/.ssh` included. The check is on the directory, not the variable (`GOPATH=~`
+  chooses `~/bin` and is fine), by containment of symlink-followed forms.
+  Defaults are fixed and need no check. `path` has the same hazard and the same
+  guard, one function (`refuse_the_world`, in `freeze.rs`): a `$PATH` entry
+  naming the world is a freeze error naming `PATH`, not a silent skip like a
+  relative entry. What counts as the world is one predicate, `the_world`, which
+  the floor reads too.
 - **`system` is a row, and `homebrew` is another.** `system` is the platform's
   own tool roots and no longer holds Homebrew. `` `dir `homebrew `` is
   `HOMEBREW_PREFIX` when usable, else `/opt/homebrew` or Linuxbrew's

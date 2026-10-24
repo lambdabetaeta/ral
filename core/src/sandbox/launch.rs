@@ -8,10 +8,10 @@
 //! child in its namespace root, so the logical cwd rides the argv as `--chdir`.
 //!
 //! macOS and Linux share one trampoline: the payload is *ral*, as `ral
-//! --warrant`, and the warrant it reads off a descriptor names both the
-//! confinement — macOS's Seatbelt profile, compiled here; Linux's promise of
-//! the Landlock ruleset built here in the host, which the payload inherits —
-//! and the program it becomes once inside ([`serve_warrant`]).  On Linux the
+//! --warrant <fd>`, and the warrant it reads off that descriptor names both
+//! the confinement — macOS's Seatbelt profile, compiled here; Linux's promise
+//! of the Landlock ruleset built here in the host, which the payload inherits
+//! — and the program it becomes once inside ([`serve_warrant`]).  On Linux the
 //! trampoline runs inside the bwrap envelope, which is what makes the Landlock
 //! layer possible at all: a domain handling any fs right forbids `mount(2)`,
 //! bwrap's first act.  Windows has no trampoline — its `LowBox` token is
@@ -29,7 +29,7 @@ use crate::capability::{Admitted, Floor};
 use std::ffi::OsString;
 use std::path::Path;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::{os::fd::AsFd, os::fd::OwnedFd, process::Command};
+use std::{os::fd::AsFd, process::Command};
 
 /// Whether the session keeps owning what it launches.  Read by the Linux
 /// backend, which decides two ties between the session and the envelope:
@@ -145,15 +145,17 @@ fn windows_sandboxed_command(
     Ok(launch)
 }
 
-/// Issue the warrant for `admitted` under `confinement`, parcelled for
-/// [`Slot::Warrant`]; `projection` is read for its exclusions, to diagnose.
+/// Issue the warrant for `admitted` under `confinement`, lent to `handoff`;
+/// `projection` is read for its exclusions, to diagnose.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn issue(
     confinement: Native,
     admitted: &Admitted,
     projection: &SandboxProjection,
-) -> Result<OwnedFd, Refusal> {
-    Ok(Warrant::new(confinement, admitted, projection).parcel()?)
+    handoff: &mut Handoff,
+) -> Result<Slot, Refusal> {
+    let parcel = Warrant::new(confinement, admitted, projection).parcel()?;
+    Ok(handoff.lend(parcel.as_fd())?)
 }
 
 /// Linux: the payload is always the trampoline, launched under this host's
@@ -186,20 +188,16 @@ pub(super) fn enveloped(
 ) -> Result<(Command, Option<super::linux::InfoFd>), Refusal> {
     let rendered = projection.rendered()?;
     let shown = super::linux::Shown::of(&rendered, floor)?;
-    let (ruleset, confinement) = super::linux::landlock::build(
+    let mut handoff = Handoff::default();
+    let confinement = super::linux::landlock::build(
         &rendered.exec,
         &rendered.fs,
         &shown.roots,
         env.host.landlock,
-    )?
-    .unzip();
-    let warrant = issue(confinement, admitted, projection)?;
-    let mut handoff = Handoff::default();
-    handoff.lend(Slot::Warrant, warrant.as_fd());
-    if let Some(ruleset) = &ruleset {
-        handoff.lend(Slot::Ruleset, ruleset.as_fd());
-    }
-    super::linux::bwrap_command(env, shown, handoff, &rendered, chdir, ownership)
+        &mut handoff,
+    )?;
+    let warrant = issue(confinement, admitted, projection, &mut handoff)?;
+    super::linux::bwrap_command(env, shown, handoff, warrant, &rendered, chdir, ownership)
 }
 
 /// macOS: re-exec the pinned ral, with the compiled profile in its warrant,
@@ -215,19 +213,17 @@ fn macos_sandboxed_command(
     let own = super::reexec::own()?;
     own.verify()?;
     let profile = super::macos::build_profile(projection)?;
-    let warrant = issue(Seatbelt(profile), admitted, projection)?;
-    let mut cmd = own.command();
-    cmd.arg(Role::Warrant.flag());
     let mut handoff = Handoff::default();
-    handoff.lend(Slot::Warrant, warrant.as_fd());
-    handoff.install(&mut cmd)?;
+    let warrant = issue(Seatbelt(profile), admitted, projection, &mut handoff)?;
+    let mut cmd = own.command();
+    cmd.arg(Role::Warrant.flag()).arg(warrant.to_string());
+    handoff.install(&mut cmd);
     Ok(cmd)
 }
 
-/// Serve `ral --warrant`, which takes no arguments: `extra` is what it was
-/// wrongly given.
+/// Serve `ral --warrant <fd>`: `args` must be that one slot.
 ///
-/// Take the warrant the launch left at [`Slot::Warrant`], enter its
+/// Take the warrant the launch left there, enter its
 /// confinement — Seatbelt on macOS, the Landlock layer inside the bwrap
 /// envelope on Linux — close the rest of the handoff, and only then become its
 /// program.
@@ -236,15 +232,14 @@ fn macos_sandboxed_command(
 /// so is a host program `execve` refuses for any reason but its absence, which
 /// is 127 — POSIX's two codes, as the in-process spawn assigns them.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub fn serve_warrant(extra: &[OsString]) -> u8 {
-    let confined = if extra.is_empty() {
-        Warrant::confine()
-    } else {
-        Err(format!(
-            "{} takes no arguments: its warrant arrives on fd {}",
-            Role::Warrant.flag(),
-            Slot::Warrant.fd()
-        ))
+pub fn serve_warrant(args: &[OsString]) -> u8 {
+    let confined = match args {
+        [at] => Slot::parse(&crate::path::shown(at)).and_then(Warrant::confine),
+        _ => Err(format!(
+            "{} takes one argument, the descriptor its warrant arrives on: it is how \
+             ral starts its own confined children, never a command to run by hand",
+            Role::Warrant.flag()
+        )),
     };
     match confined {
         Ok(confined) => confined.run(),
@@ -259,7 +254,7 @@ pub fn serve_warrant(extra: &[OsString]) -> u8 {
 /// itself is a regression to the Unix shape, or forged, and is refused
 /// rather than run unconfined.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub fn serve_warrant(_extra: &[OsString]) -> u8 {
+pub fn serve_warrant(_args: &[OsString]) -> u8 {
     crate::terminal::cmd_error(
         "ral",
         &format!(
@@ -339,21 +334,37 @@ mod tests {
     }
 
     /// Whatever the child is to run crosses in its warrant, so its argv names
-    /// only the trampoline asking for one.
+    /// only the trampoline asking for one and the slot it arrives at.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_macos_launch_is_the_warrant_trampoline_alone() {
         for program in [sh(), Program::Tool("ls".into())] {
             let cmd = macos_sandboxed_command(&restrictive(), &admitted(program, &["-l".into()]))
                 .expect("build macOS command");
-            assert_eq!(argv(&cmd), [Role::Warrant.flag()]);
+            let args = argv(&cmd);
+            let [flag, at] = &args[..] else {
+                panic!("not `--warrant <w>`: {args:?}");
+            };
+            assert_eq!(flag, Role::Warrant.flag());
+            Slot::parse(at).expect("the warrant's slot");
         }
     }
 
-    /// Refused before any descriptor is touched, so it is safe in-process.
+    /// Refused before any descriptor is touched, so it is safe in-process:
+    /// the trampoline takes one argument, a slot.
     #[test]
-    fn a_warrant_flag_with_arguments_runs_nothing() {
-        assert_eq!(serve_warrant(&["sh".into()]), 126);
+    fn a_warrant_flag_naming_no_slot_runs_nothing() {
+        for args in [
+            &[][..],
+            &["sh"],
+            &["97"],
+            &["+101"],
+            &["0101"],
+            &["101", "sh"],
+        ] {
+            let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+            assert_eq!(serve_warrant(&args), 126, "{args:?}");
+        }
     }
 
     /// Writable only under `write_dir`, with `net`/`exec` left wide so the one
@@ -924,7 +935,7 @@ mod tests {
     /// `ps` shows the envelope taking its options from a slot and running
     /// the trampoline from another, asking for its warrant, for a host
     /// program and a bundled tool alike: what either is to run crosses on
-    /// descriptors.
+    /// descriptors, each by the slot it was lent at.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_linux_launch_is_the_pinned_envelope_running_the_warrant_trampoline() {
@@ -933,7 +944,6 @@ mod tests {
             eprintln!("skipping: this host has no bwrap to pin");
             return;
         }
-        let slot = Slot::Args.fd().to_string();
         for program in [sh(), Program::Tool("ls".into())] {
             let (cmd, _info_fd) = linux_sandboxed_command(
                 &restrictive(),
@@ -950,15 +960,21 @@ mod tests {
                 "the launcher is the fd-pinned envelope, never a name PATH resolves: {:?}",
                 cmd.get_program()
             );
+            let args = argv(&cmd);
+            let [opt, options, dashes, trampoline, flag, warrant] = &args[..] else {
+                panic!("not `bwrap --args <a> -- /proc/self/fd/<t> --warrant <w>`: {args:?}");
+            };
             assert_eq!(
-                argv(&cmd),
-                [
-                    "--args",
-                    slot.as_str(),
-                    "--",
-                    "/proc/self/fd/102",
-                    Role::Warrant.flag()
-                ]
+                [opt.as_str(), dashes, flag],
+                ["--args", "--", Role::Warrant.flag()]
+            );
+            for at in [options, warrant] {
+                Slot::parse(at).expect("a slot");
+            }
+            assert!(
+                (trampoline.strip_prefix("/proc/self/fd/"))
+                    .is_some_and(|at| Slot::parse(at).is_ok()),
+                "{args:?}"
             );
         }
     }

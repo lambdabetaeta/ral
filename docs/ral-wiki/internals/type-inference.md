@@ -137,10 +137,11 @@ the annotate walk ([[decisions/260930_graded-f|graded-f]]).
   arity, as a value in hand.
 - `discharge` applies to the `Exec` and `Redirect` rules when stdout is
   redirected: `Return(_, a)` becomes `Return(Value, a)`, through `Fun` results.
-- `annotate` is a structural rebuild (the methods of `Annotate { ctx, eta }`) that
+- `annotate` is a structural rebuild (the methods of `Annotate { ctx }`) that
   wraps each recorded node in `cap M to d. decode d` (`CompKind::Capture` and
   `CompKind::Decode`, both checker-inserted); a value in hand becomes a lambda
-  whose body captures the forced call.
+  whose body captures the forced call; a right-hand side of function type is
+  written `return (thunk M)`, bound unrun (Let-fun).
 
 So `let x = f` with `f = { hostname }`, `let x = !$t`, `let x = g 5` and
 `let x = map { |f| echo $f } xs` all capture: β and η preserve meaning.
@@ -177,14 +178,16 @@ or `<< w` binding fd 0 there is `DeadPipeEdge` (T0070) — the feed answers the
 stage's reads for its whole run, so the wire's producer writes for nobody
 ([[design/pipelines|pipelines]]).
 
-**An arm stands in for the head it replaces.** `Inferencer::stands_in(name,
-arm)` checks a handler or alias arm against `standsFor(name)`: the scheme of the
+**An arm stands in for the head it replaces.** `Inferencer::arm(block, arm)`
+checks a handler or alias arm: it takes the parameters its slot hands it, read
+off its type, and produces what `standsFor(name)` produces — the scheme of the
 base frame or arm already in force under `name`, else `[String] → Command`. An
 arm for `curl` therefore has a command's value, its output (a `()`-returning stub
 is admitted by the upcast and captures `""`), and one for `detach` returns
 what `detach` returns; the installed scheme has the head's producer kind. A refusal is `Reason::StandsIn(Standing)`, with
 `Standing::{Command, Own, EveryCommand}` for a command, a head's own scheme and
-the catch-all handler. The run-time install doors apply the same check
+the catch-all handler. The run-time install doors apply the same rule, over
+what the arm's closure captured (`Shell::closure_schemes`)
 (`HandlerEntry::vet` through `alias_arm_scheme`, and the catch-all through
 `catch_all_stands_in`) and render the same sentence (`types::refused_arm`).
 

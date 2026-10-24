@@ -30,11 +30,17 @@ aliases, `eval`, subshells, and trap handlers: a block can be bound, passed,
 returned, or installed as an effect handler. Currying desugars to nested
 lambdas, so partial and under-application are uniform.
 
-`dev/agda/Ral/` mechanises the core: intrinsically typed syntax and a CEK machine per thread
-(`Machine.agda`, `step`), with preservation by indexing and progress and deadlock-freedom for a pool
-of such machines (`Progress.agda`, `progress`). `dev/agda/Core/Semantics/` gives finite behaviours with sequencing,
-capture and least fixed points of continuous process operators. Contextual equivalence and the βη
-laws are not mechanised. The map is `dev/agda/README.md`.
+`dev/agda/Ral/` mechanises the core: intrinsically typed syntax with grades (`p`/`w`, `Returns` and
+`Command`) and a CEK machine per thread (`Machine.agda`, `step`), with preservation by indexing and
+progress and deadlock-freedom for a pool of such machines (`Progress.agda`, `progress`), progress for
+every scheduler and bounded-waiting fairness for round-robin (`Scheduler.agda`); `echo`, `exec`/`grant`,
+`capture`/`decode`, worker output replay on `await`/join, cancellation unwinding through shielded
+cleanups, and a gather draining its brood are all in the machine, as in Rust, an external runs only when
+the grants in force permit it, by the evidence the step carries (`Ral/Authority.agda`, `Step.exec`,
+`Pool.trail`, `grant-attenuates`), and the machine is adequate for a big-step semantics of one thread
+(`BigStep.agda`, `Adequacy.agda`). `dev/agda/Core/Semantics/`
+gives finite behaviours with sequencing, capture and least fixed points of continuous process operators.
+Contextual equivalence and the βη laws are not mechanised. The map is `dev/agda/README.md`.
 
 Bindings are immutable. Re-`let` introduces a fresh binding that shadows the
 outer one within its lexical scope; closures capture at definition time. This

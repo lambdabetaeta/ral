@@ -20,6 +20,7 @@ pub(crate) use windows::RawChild;
 #[cfg(not(windows))]
 pub(crate) struct Launch {
     pub(super) cmd: std::process::Command,
+    /// Owned until a spawn hands it on.
     jail: Option<crate::process::jail::JailCgroup>,
     envelope: Option<Envelope>,
 }
@@ -32,8 +33,9 @@ pub(crate) struct Launch {
 #[cfg(not(windows))]
 pub(crate) struct Envelope {
     pub(crate) program: &'static str,
-    /// Asked once, after the fork, for the payload's own process group;
-    /// `None` when the envelope cannot say, leaving its own.
+    /// Asked once, after the fork, for the payload's own process group, and
+    /// answering only once the payload is in it or gone; `None` when the
+    /// envelope cannot say, leaving its own.
     pub(crate) payload_pgid: Option<Box<dyn FnOnce() -> Option<crate::process::Pgid> + Send>>,
 }
 
@@ -348,15 +350,19 @@ impl Launch {
     ///
     /// So point all three standard streams at something that outlives this
     /// process; an inherited one dies with us, taking the survivor's writes
-    /// with it.  And under a guest jail the survivor keeps its
-    /// `detached/exec-N` cgroup and its limits for good, since nobody left
-    /// can tell when that cgroup is empty.
+    /// with it.  And under a guest jail a birth surrenders the
+    /// `detached/exec-N` cgroup to the survivor, which keeps it and its
+    /// limits for good; a failed one leaves it to this launch to finish.
     ///
     /// # Errors
     /// A failed fork or `execve`; a survivor whose pid is lost is `Survivor::Unnamed`.
     #[cfg(unix)]
     pub(crate) fn spawn_detached(&mut self) -> std::io::Result<crate::process::group::Survivor> {
-        crate::process::group::spawn_detached(&mut self.cmd)
+        let survivor = crate::process::group::spawn_detached(&mut self.cmd)?;
+        if let Some(jail) = self.jail.take() {
+            jail.surrender();
+        }
+        Ok(survivor)
     }
 }
 

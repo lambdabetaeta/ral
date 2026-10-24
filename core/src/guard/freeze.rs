@@ -848,13 +848,21 @@ fn freeze(path: impl AsRef<Path>) -> Result<FrozenPath, PolicyError> {
     FrozenPath::freeze(path.as_ref()).map_err(PolicyError::new)
 }
 
-/// A directory chosen for `selector` that is a root, the home or an
-/// ancestor of it would make running reads a read of everything, `~/.ssh`
-/// included.  A root is any filesystem's, a drive's under Windows rules,
-/// home bound or not.  Judged on where the directory's walk landed, by
-/// containment of positions as [`FreezeCtx::xdg`] judges, so a home that is
-/// a symlink is still caught.  `subject` says what chose it; `var` is what
-/// to check.
+/// What `dir` is, if the world: a root (a drive's under Windows rules), the
+/// home or an ancestor of it, where running reads would read everything.  By
+/// containment of positions, as [`FreezeCtx::xdg`] judges, so a symlinked
+/// home is caught.
+pub(super) fn the_world(dir: &RealPath, home: Option<&RealPath>) -> Option<&'static str> {
+    match home {
+        _ if dir.is_root() => Some("the filesystem root"),
+        Some(home) if dir.contains(home) && home.contains(dir) => Some("the home directory itself"),
+        Some(home) if dir.contains(home) => Some("an ancestor of the home directory"),
+        _ => None,
+    }
+}
+
+/// A directory chosen for `selector` that is [`the_world`], judged where its
+/// walk landed.  `subject` says what chose it; `var` is what to check.
 ///
 /// # Errors
 /// `dir` is a filesystem root, the home or an ancestor of it.
@@ -865,13 +873,8 @@ pub(super) fn refuse_the_world(
     dir: &Trace,
     home: Option<&Home>,
 ) -> Result<(), PolicyError> {
-    let dir = dir.real();
-    let home = home.and_then(|h| h.real.as_ref());
-    let what = match home {
-        _ if dir.is_root() => "the filesystem root",
-        Some(home) if dir.contains(home) && home.contains(dir) => "the home directory itself",
-        Some(home) if dir.contains(home) => "an ancestor of the home directory",
-        _ => return Ok(()),
+    let Some(what) = the_world(dir.real(), home.and_then(|h| h.real.as_ref())) else {
+        return Ok(());
     };
     let selector = code(&format!("`dir `{}", selector.name()));
     Err(PolicyError::new(format!(
@@ -1019,6 +1022,17 @@ mod tests {
                 "{}",
                 err.message
             );
+        }
+    }
+
+    /// The audit's `D:\` with the home on `C:`, a drive no host need have.
+    #[cfg(windows)]
+    #[test]
+    fn a_drive_root_off_the_home_is_the_world() {
+        let home = RealPath::unwalked_for_test(r"C:\Users\h");
+        let drive = RealPath::unwalked_for_test(r"D:\");
+        for home in [None, Some(&home)] {
+            assert_eq!(the_world(&drive, home), Some("the filesystem root"));
         }
     }
 

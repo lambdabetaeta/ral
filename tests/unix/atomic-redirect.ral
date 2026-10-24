@@ -16,4 +16,13 @@ echo !{from-string < "$d/f.txt"}
 /bin/sh -c 'printf clobbered2; exit 1' >~ "$d/g.txt" ? echo 'stream arm failed'
 echo !{from-string < "$d/g.txt"}
 
+# A read-only file is refused by `>` as by `>~` and `>>`, though its
+# directory would let the rename replace it.
+to-string 'kept' > "$d/ro"
+chmod 444 "$d/ro"
+to-string 'replaced' > "$d/ro" ? echo '> refused'
+to-string 'replaced' >~ "$d/ro" ? echo '>~ refused'
+to-string 'appended' >> "$d/ro" ? echo '>> refused'
+echo !{from-string < "$d/ro"}
+
 rm -rf $d

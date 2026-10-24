@@ -69,19 +69,18 @@ jobs:
             bin: ral
             target: aarch64-unknown-linux-musl
           # The one entry that is not like the others.  `allutils` pulls in
-          # `tikv-jemalloc-sys` (via ripgrep's `vendor/ripgrep-core`, on
-          # `cfg(all(target_env = "musl", target_pointer_width = "64"))`), and
-          # on a plain arm runner with `musl-tools` jemalloc 5.3.0's C build
-          # fails on aarch64-musl with
+          # `tikv-jemalloc-sys` (`ral`'s allocator under `ripgrep` on 64-bit
+          # musl), and on a plain arm runner with `musl-tools` jemalloc's C
+          # build failed on aarch64-musl with
           #   include/jemalloc/internal/atomic.h:48:24: error:
           #     'atomic_memory_order_relaxed' undeclared
-          # because that toolchain trips a configure/atomics mismatch in
-          # jemalloc 5.3.0 (fixed upstream in 5.3.1, but tikv-jemalloc-sys is
-          # still pinned to 5.3.0).  The supported answer, and the one ripgrep
-          # and yazi use, is the official cross-rs container: it ships a
-          # known-good `aarch64-linux-musl-gcc` and points build scripts at it.
-          # No other entry needs it — without the `ripgrep` feature no
-          # jemalloc-sys is built at all.
+          # a configure/atomics mismatch in that toolchain, seen on jemalloc
+          # 5.3.0; the lock has since moved to 5.3.1 (upstream's fix), untried
+          # on a plain runner.  The supported answer, and the one ripgrep and
+          # yazi use, is the official cross-rs container: it ships a known-good
+          # `aarch64-linux-musl-gcc` and points build scripts at it.  No other
+          # entry needs it — without the `ripgrep` feature no jemalloc-sys is
+          # built at all.
           - out: ral-linux-arm64-allutils
             artifact: release-ral-linux-arm64-allutils
             os: ubuntu-latest

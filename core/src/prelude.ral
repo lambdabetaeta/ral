@@ -126,10 +126,11 @@ let pad-left = { |w c s| return "!{repeat $[$w - !{length $s}] $c}$s" }
 ## Pad `s` on the right with `c` to width `w`; never truncates.
 let pad-right = { |w c s| return "$s!{repeat $[$w - !{length $s}] $c}" }
 ## The extension of a path's last component, as an Option: `a.tar.gz` has
-## `` `some 'gz'``, while `Makefile`, the dotfile `.bashrc`, `.` and `..` have
-## `` `none``.
+## `` `some 'gz'``, while `Makefile`, `.bashrc`, `..hidden` and `..` have
+## `` `none``.  It is what follows the name's last dot when a character other
+## than a dot precedes that dot, so `foo.` has `` `some ''``.
 let extension = { |p|
-    if $[!{re-match '[^/]\.[^./]*$' $p} && not !{re-match '(^|/)\.\.$' $p}] {
+    if !{re-match '[^./][^/]*\.[^./]*$' $p} {
         return `some !{re-find-match '[^.]*$' $p}
     } else { return `none }
 }

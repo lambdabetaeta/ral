@@ -7,7 +7,9 @@ no match: 0
 [a.txt]
 [.hidden.txt]
 1
-glob: '.h*': a wildcard never matches a name starting with '.'; name the file literally, or filter `list-dir`?
+glob: '.h*': a wildcard never matches a name starting with '.', and this one matches nothing else; name each file literally, or filter `list-dir`?
+glob: '[.]env': a wildcard never matches a name starting with '.', and this one matches nothing else; name each file literally, or filter `list-dir`?
+glob: '{.env,.git}': a wildcard never matches a name starting with '.', and this one matches nothing else; name each file literally, or filter `list-dir`?
 [a/.cfg]
 [a.txt, b.txt]
 [src, src/x, src/x/f]

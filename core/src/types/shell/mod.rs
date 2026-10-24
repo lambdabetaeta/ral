@@ -341,23 +341,18 @@ impl Shell {
     }
 
     /// The closed session scheme for a value binding — `None` for anything
-    /// but a lambda- or block-shaped thunk. Shared by [`Self::bind_value`]
-    /// and [`Self::register_hook`], which differ only in what they do with it.
+    /// but a block. Shared by [`Self::bind_value`] and
+    /// [`Self::register_hook`], which differ only in what they do with it.
     pub(crate) fn value_scheme(
         &self,
         value: &crate::types::Value,
     ) -> Option<Arc<crate::ty::Scheme>> {
-        let (param, body) = match value {
-            crate::types::Value::Thunk(closure) => match closure.comp().arrow() {
-                Some((param, body)) => (Some(param), body),
-                None => (None, closure.comp()),
-            },
-            _ => return None,
+        let crate::types::Value::Thunk(closure) = value else {
+            return None;
         };
         Some(Arc::new(crate::typecheck::binding_value_scheme(
-            param,
-            body,
-            self.session_schemes(),
+            closure.comp(),
+            self.closure_schemes(closure),
         )))
     }
 }

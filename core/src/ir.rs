@@ -495,14 +495,13 @@ impl Toplevel {
 pub type Comp = Spanned<CompKind>;
 
 impl Comp {
-    /// `Some` for a `Lam`, and for a `Rec` projection whose member is a
-    /// `Lam`: the checker's η-expansion guarantees the body of every
-    /// function-typed thunk *is* a `Lam`, so reading the shape here is
-    /// reading the type.
-    pub fn arrow(&self) -> Option<(&Pattern, &Arc<Self>)> {
+    /// The λ this code opens with, through a `Rec` projection.  Syntax, not
+    /// type: a block of function type need not open with one, so only a
+    /// description of a value reads it.
+    pub(crate) fn lam(&self) -> Option<(&Pattern, &Arc<Self>)> {
         match &self.item {
             CompKind::Lam { param, body } => Some((param, body)),
-            CompKind::Rec { group, index } => group.shape()[*index].1.arrow(),
+            CompKind::Rec { group, index } => group.shape()[*index].1.lam(),
             _ => None,
         }
     }

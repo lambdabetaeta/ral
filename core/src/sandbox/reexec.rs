@@ -104,21 +104,6 @@ impl Pinned {
         fd.as_fd()
     }
 
-    /// This pin again, at the lowest free descriptor from `from`: how a test
-    /// puts one on a handoff slot.
-    #[cfg(all(test, target_os = "linux"))]
-    pub(super) fn lifted(&self, from: std::ffi::c_int) -> Self {
-        use std::os::fd::AsRawFd;
-        let Pin::Fd { id, .. } = self.pin;
-        let fd = rustix::io::fcntl_dupfd_cloexec(self.fd(), from).expect("a free descriptor");
-        Self {
-            exec_path: crate::path::proc_fd_path(fd.as_raw_fd()),
-            pin: Pin::Fd { fd, id },
-            arg0: self.arg0.clone(),
-            trace: self.trace.clone(),
-        }
-    }
-
     /// Whether `id` is the pinned object, under whatever name — a hard link
     /// names it too.  Never on Windows, where nothing is pinned.
     #[cfg_attr(windows, allow(unused_variables))]

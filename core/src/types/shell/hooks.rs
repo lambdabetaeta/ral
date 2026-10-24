@@ -161,7 +161,8 @@ pub struct Hook {
 }
 impl Hook {
     /// The single registration gate: the bound value must be a function — a
-    /// `Block`, a `Lambda`, or a builtin — of the arity `sig` expects.
+    /// `Block`, a `Lambda`, or a builtin — taking as many parameters as `sig`
+    /// expects, a block's read off its type (`typecheck::takes`).
     ///
     /// # Errors
     /// [`RegisterError::NotFunction`] if it is neither,
@@ -169,8 +170,17 @@ impl Hook {
     pub(crate) fn validate(&self, name: &HookName) -> Result<(), RegisterError> {
         let expected = self.sig.expected_arity();
         let actual = match &self.binding.value {
-            Value::Thunk(c) if c.comp().arrow().is_none() => 0,
-            Value::Thunk(_) => self.binding.value.lambda_arity().unwrap_or(0),
+            Value::Thunk(_) => {
+                let scheme = self
+                    .binding
+                    .scheme
+                    .as_ref()
+                    .expect("vet_hook infers every block's scheme");
+                if crate::typecheck::takes(scheme, expected) {
+                    return Ok(());
+                }
+                scheme.arity()
+            }
             Value::Native { entry, applied } => {
                 entry.decl.fixed_arity().saturating_sub(applied.len())
             }

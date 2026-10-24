@@ -15,7 +15,10 @@ echo '007' '+5' '1.50' '-0' '2.'
 echo 1e6 1_000 0x10 9223372036854775808 1.8e308 1.2.3 inf nan
 # Expected: unchanged
 
-# No position is exempt: bindings, interpolation, encoders
+# No position is exempt: `$[…]`, where a sign touching a numeral is its sign
+# rather than an operator; bindings, interpolation, encoders
+echo $[+5] $[+1.5] $[-007] $[-9223372036854775808]
+# Expected: 5 1.5 -7 -9223372036854775808
 let rate = 1.50
 echo $rate
 let ver = 3.0

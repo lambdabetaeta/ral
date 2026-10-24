@@ -25,7 +25,10 @@ between steps changes which child is obtained and the transcript says which.
   opened, each with the name as the filesystem stores it, the `ObjectId` and the
   kind, all read from the handle just opened; and the *missing tail*, empty for
   an object, one name for a create target. Its `RealPath` is computed from the
-  steps by the one constructor, so it cannot disagree with them.
+  steps by the one constructor, so it cannot disagree with them. It also names,
+  as `passed`, each link whose target the walk read and each directory a `..`
+  climbed out of, by position: what else a lookup of the spelling looks up,
+  which the Seatbelt profile lets it stat.
 - **A `RealPath` is a position**: no link, `.` or `..` in it. A `Trace` is a
   position and the proof of having walked to it. Both are plain values; a
   `Trace` is made by the walk, or read off the same-host wire by a
@@ -115,8 +118,9 @@ function of its layers.**
   keeps its rules and nothing beside them; each spelling is a `GrantPath`:
   as written, and what its walk made of it.
 - **An allowance is an `Extent`**: `Everywhere` where the spelling is, or walks
-  to, the root; otherwise a position. It holds nothing and resolves anywhere
-  — on every host; the Windows sandbox side refuses to project it at launch.
+  to, the root; otherwise a position, with what its walk passed on the way. It
+  holds nothing and resolves anywhere — on every host; the Windows sandbox side
+  refuses to project it at launch.
 - **An exclusion is an `Excluded`, made by `walk_excluded`**: the spelling walked
   without following its last component; where that is a link, its target read
   through the link's handle and walked on. Both are held: the link is an object
@@ -151,8 +155,10 @@ function of its layers.**
   absence; a file that has appeared since was not judged, so the write fails
   with `AlreadyExists` rather than truncating it.
 - **A write is staged beside the leaf and published under the held directory.**
-  The after-image is read from the staging handle: what ral wrote, never what
-  landed.
+  A present leaf is staged over only if `may_write` admits it: `>` writes the
+  file, staging only makes the write atomic, and the rename alone would ask the
+  directory. The after-image is read from the staging handle: what ral wrote,
+  never what landed.
 - **A name ral invents** (`temp-dir`, `temp-file`) is an absent child of a
   write-judged directory, judged as that leaf and created exclusively.
 - **ral enumerates.** `path/tree/walk.rs` lists with `Dir::read_dir`, judges every
@@ -255,8 +261,9 @@ position; the kernel judges current ancestry. The residuals:
   any reason but that it leads nowhere, to a non-directory or round a loop is
   reported as not entered, never shown as a plain link with its subtree
   dropped.
-- **Probes by name**: `is_writable`, the `+x` test of a `PATH` candidate, the
-  diagnostic probes after a failed exec, and git's session-start reading of
+- **Probes by name**: `may_write` (the `is-writable` builtin, and a staged
+  write's check of the file it replaces), the `+x` test of a `PATH` candidate,
+  the diagnostic probes after a failed exec, and git's session-start reading of
   `.git` answer by name and grant nothing. A casefolded Linux directory stores
   one spelling the walk cannot ask for.
 - **The sandbox side still does by name** what the sequel plan

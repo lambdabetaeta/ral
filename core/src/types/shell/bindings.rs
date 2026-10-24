@@ -500,8 +500,8 @@ mod chokepoint_tests {
         assert!(!is_baseline(&shell, "block_local"));
     }
 
-    /// Two mutually-recursive top-level `let`s form one `LetRec` group
-    /// (`syntax::group`'s SCC pre-pass), and both names must still be leased.
+    /// Two mutually recursive top-level `let`s form one `Rec` group, and both
+    /// names must still be leased.
     #[test]
     fn letrec_group_is_leased() {
         let mut shell = armed_shell(64);

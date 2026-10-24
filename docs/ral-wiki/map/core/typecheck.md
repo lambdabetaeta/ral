@@ -53,19 +53,15 @@ Entry points (`typecheck.rs`):
   annotated prelude `Toplevel` and nothing else. Every phrase already carries
   its schemes, and `SessionSchemes::from_prelude` reads them back through
   `Toplevel::exported_schemes`, so no second blob of schemes is baked.
-- `alias_arm_scheme(head, param, body, SessionSchemes) -> Result<Scheme, Box<TypeError>>`
-  — infers an alias arm under the runtime handler calling convention, holds it
-  to what `head` stands in for (`Inferencer::stands_in`), and closes it, for
-  `install_alias` and `WithinScope::parse` to store on a frame. A handler or
-  alias arm is a *fixed-arity lambda* — its calling convention is the surface form, not the
-  runtime value's shape, so `param` is non-optional and `infer_alias_arm` types
-  the arm `Fun(List(elem), body)`, forcing it on the argv list
-  ([[invariants/fixed-arity|fixed-arity]],
+- `alias_arm_scheme(head, arm, SessionSchemes) -> Result<Scheme, Box<TypeError>>`
+  — holds an installed arm's closure to the arm rule (`Inferencer::arm`,
+  `Arm::Named(head)`), seeded by `Shell::closure_schemes` from what the
+  closure captured, and closes it, for `HandlerEntry::vet` to store on an
+  alias frame; `catch_all_stands_in` is the same for `within [handler: $k]`.
+  An arm's parameters are its slot's — the argv, or the name and the argv —
+  and its arity is its type, never its spelling, so `{ forward 'git' }` is as
+  unary as `{ |args| … }` ([[invariants/fixed-arity|fixed-arity]],
   [[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
-  Statically `infer_handler_comp` still types a non-`Lam` thunk (e.g. a computed
-  `alias g $h`) by its bare body, binding it so `g x` is an arity mismatch
-  rather than a silently discarded argument; the runtime install boundary is the
-  sole complete gate on shape.
 
 The sorts split with CBPV:
 
@@ -74,7 +70,7 @@ The sorts split with CBPV:
 - records are open-row-polymorphic ([[design/row-types|row-types]]: `Row` /
   `RowVar`).
 
-Generalisation happens at `Bind`; recursive bindings (`LetRec` / `Rec`) stay
+Generalisation happens at `Bind`; recursive bindings (`Rec`) stay
 monomorphic to keep generalisation sound.
 
 Internals:
@@ -248,7 +244,7 @@ drop the lambda. `apply_args_capped` applies the two to a block argument, and
 `join_arms` to each arm against the join. `discharge` turns a redirected
 stdout's grade to `Value`.
 
-`annotate.rs` is a plain structural rebuild, the methods of `Annotate { ctx, eta }`.
+`annotate.rs` is a plain structural rebuild, the methods of `Annotate { ctx }`.
 It wraps each recorded node through the one constructor `captured_string`,
 which builds `Capture(body) to x. Decode(x)` — `x` a fresh name from
 `InferCtx::fresh_name` — with the captured node's span on both the bind and
@@ -257,9 +253,8 @@ forced call. `CompKind::Capture(body)` types as `F Bytes` with `body` unified
 to `F^w Unit`; `CompKind::Decode(val)` types as `F String` with `val` unified to
 `Bytes`. Both rules fire only when re-inferring a tree that already carries
 `annotate`-inserted nodes — a stored handler or thunk re-checked at a later
-install. Where a computation is held as a function of unknown arity,
-`eta_expand_arrow` η-expands it so every function-typed thunk's body is a
-syntactic `Lam`.
+install. A right-hand side the bind rule recorded in `InferCtx::thunked`, one
+of function type, is rebuilt as `return (thunk M)`: bound unrun (Let-fun).
 
 ## Arms and joins
 
@@ -279,12 +274,15 @@ and `?`, which elaborates to nested `try`) — carry no writer: `explain.rs`
 derives the hint from the two types, saying that one arm is a command, whose
 value is its output.
 
-`Inferencer::stands_in(name, arm)` holds an arm to the command it stands in
-for. `stands_for` is the scheme of the base frame or arm already in force
-under `name`, else `[String] → Command`; `Reason::StandsIn(Standing)` names
-which (`Standing::{Command, Own, EveryCommand}`). `catch_all_stands_in` is the
-same check for the catch-all `handler:`. `alias_arm_scheme`
-(`typecheck.rs`) and the free `catch_all_stands_in` apply them at the install
+`Inferencer::arm(block, Arm)` is the one arm rule: the block meets the
+parameters its slot hands it (`Arm::Named`, the argv, under
+`Reason::AliasParam`; `Arm::CatchAll`, the name and the argv, under
+`Reason::CatchAllParams`), and what it produces is held to what its head
+produces. `stands_for` is the scheme of the base frame or arm already in force
+under the name, else `[String] → Command`; `Reason::StandsIn(Standing)` names
+which (`Standing::{Command, Own, EveryCommand}`). The checker raises a refusal
+where the arm is written (`checked_arm`, `install_arm`); `alias_arm_scheme`
+and `catch_all_stands_in` (`typecheck.rs`) apply the same rule at the install
 site, and `HandlerEntry::vet` / `parse_catch_all` render the error through
 `types::refused_arm`.
 

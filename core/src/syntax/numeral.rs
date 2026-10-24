@@ -1,5 +1,6 @@
-//! The numeral grammar, in one place: the lexer scans by it and
-//! [`WordLiteral::classify`](super::ast::WordLiteral::classify) decides by it.
+//! The numeral grammar, in one place: the lexer scans by it,
+//! [`WordLiteral::classify`](super::ast::WordLiteral::classify) decides by it,
+//! and the parser's `signed_numeral` rejoins a sign by it.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Shape {
@@ -36,6 +37,11 @@ pub(crate) fn prefix(s: &str) -> Option<(usize, Shape)> {
         }
     }
     Some((end, Shape::Float))
+}
+
+/// The shape of `s` when the whole of it is a numeral, whatever its range.
+pub(crate) fn shape(s: &str) -> Option<Shape> {
+    prefix(s).and_then(|(n, shape)| (n == s.len()).then_some(shape))
 }
 
 #[cfg(test)]

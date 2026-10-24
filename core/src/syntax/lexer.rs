@@ -890,7 +890,7 @@ impl<'a> Lexer<'a> {
     }
 
     /// In `$[…]` `+` and `-` are operators, so the word is the numeral prefix
-    /// plus any bare text glued to it.
+    /// plus any bare text glued to it; the parser rejoins a numeral's sign.
     fn scan_numeral_word(&mut self, span: Span) -> Lexeme {
         let (len, _) = numeral::prefix(self.rest()).expect("caller saw a numeral");
         let mut word: String = (0..len)

@@ -1,0 +1,2 @@
+# contains: so it is a block the call runs
+let s = 'hi'; within [handlers: [greet: $s]] { greet }

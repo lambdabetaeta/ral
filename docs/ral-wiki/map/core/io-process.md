@@ -255,7 +255,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   the payload's own — never one it merely joined or inherited, and the
   `cfg(unix)` `spawn_detached`, a double-fork whose grandchild is reparented
   to init — its pid comes back but nothing else does, so there is no handle,
-  no wait, and (below) no `JailCgroup`. Unix
+  no wait, and no `JailCgroup` comes back — the launch surrenders it (below). Unix
   lowers to `std::process::Command` and keeps the `pre_exec` pgid/fd discipline;
   Windows owns the raw `CreateProcessW` boundary, including command-line/env
   rendering, explicit helper-handle allow lists, the `SECURITY_CAPABILITIES`
@@ -308,11 +308,15 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   down, one level ahead of each mkdir. A parent that will not delegate is
   refused outright rather than tolerated: a jail whose limits cannot be
   written must not run the command uncapped instead. `JailCgroup`
-  is plain data `RunningChild` carries uniformly (`None` off a real
-  guest); a detached birth is handed none at all, since a caller that
-  cannot name the process cannot know when its cgroup is empty — the
-  survivor keeps the transient cgroup's limits and leaves one inert
-  directory until the guest reboots. The jail itself is process-global (a `OnceLock` in `jail.rs`),
+  owns its cgroup from the `mkdir`: dropping it kills whatever
+  is left (`cgroup.kill`) and removes it, so every way out finishes it once —
+  a setup, wiring or spawn that fails, a pipeline rolled back part-way, a
+  settled child — and `Launch`, `RunningChild` and a pipeline stage carry it
+  uniformly (`None` off a real guest). A detached birth instead
+  `surrender`s it, since a caller that cannot name the process cannot know
+  when its cgroup is empty — the survivor keeps the transient cgroup's limits
+  and leaves one inert directory until the guest reboots; a birth that fails
+  finishes it like any launch. The jail itself is process-global (a `OnceLock` in `jail.rs`),
   so workers, pipeline stages, and forks share one counter; only a guest
   engine (`RAL_GUEST`) installs it, and there it replaces the per-command OS projection
   ([[map/core/runtime|runtime]], `docs/SPEC.md` §12.11).

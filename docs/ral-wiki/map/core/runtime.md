@@ -9,11 +9,11 @@ covers_paths: [core/src/runtime.rs, core/src/runtime/]
 `core/src/runtime/` is the OS plumbing the CBPV [[map/core/evaluator|machine]]
 dispatches into — command execution, pipeline orchestration, and the
 per-child confinement choice. It re-enters evaluation only through the
-`pipeline::StageEval` the machine passes to `PipeNode::launch` (a stage's
+`pipeline::StageEval` the machine passes to `PipeNode::run` (a stage's
 `(comp, env)`, run from `pipeline/thread.rs`) — stages carry computation
 closures, so the mutual recursion is irreducible, though runtime names no
 evaluator item; the evaluator reaches it at
-`PipeNode::launch`/`join` and, dispatching an `Exec` node, at
+`PipeNode::run` and, dispatching an `Exec` node, at
 `command_call::classify_command` → `run_base_frame` / `run_external`, and the redirect scope
 (`redirect::scope`), which the machine's `Frame::Redirect` enters
 ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
@@ -133,10 +133,9 @@ evaluator item; the evaluator reaches it at
     rendering live in [[map/exarch/io-surface|io-surface]]
     ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]).
 - `pipeline/` — pipeline planning and execution. A multi-stage `CompKind::Pipeline`
-  steps through a `PipeNode`: `PipeNode::launch` resolves the
-  plan and spawns every stage into one process group, and `join`
-  (`drive` then `fold`), called in the same rule, is what the arm
-  meets; no frame is pushed, so an unwinding panic tears the group down
+  steps through a `PipeNode`: `PipeNode::run` resolves the plan, spawns
+  every stage into one process group, and `join`s them (`drive` then `fold`),
+  a launch that failed part-way rolled back first; no frame is pushed, so an unwinding panic tears the group down
   through `PipelineGroup`'s `Drop` rather than through any undo of the
   machine's.  `group` (the pgid anchor and the foreground guard)
   stays alive across both `drive` and `fold` rather than dropped early
@@ -171,21 +170,21 @@ evaluator item; the evaluator reaches it at
     concern. The terminal-ownership decision (`resolve_terminal_plan`)
     likewise gates on a reachable terminal lease and a terminal-bound final
     sink, not on a `startup_foreground` predicate.
-  - `pipeline.rs` is the spine, and `PipeNode::launch` *is* the launch loop:
-    resolve, group, collector, node, then one `spawn_stage` per stage pushed
-    onto the collector. The routes are a local declared *after* the node, so an
-    error part-way through closes whatever the loop never consumed before the
-    node tears down and a half-wired neighbour sees EOF. `launch.rs` wires one
+  - `pipeline.rs` is the spine: `PipeNode::run` is resolve, group, collector,
+    node, then `launch`, one `spawn_stage` per stage pushed onto the collector,
+    then, after a `roll_back` if that failed, `join`. `launch.rs` wires one
     stage's byte endpoints (`stage_stdin`, then the shared `wire_stdio`)
     and dispatches it on its frozen `StageLaunch` (`spawn_stage`,
     `launch_external_stage_direct`); `stage.rs` holds
-    `StageHandle`, which dispatches `cancel`/`cut`/`watch`/`arm` over
+    `StageHandle`, which dispatches `cancel`/`cut`/`watch`/`listen` over
     its two kinds, `External`/`Thread` — `cancel` records the cause on its own
     `sent`, joined by `max`, and tells a thread's scope (a process hears a
     cancellation only as the signal the collector sends next); `cut` is that
     same cancel with `ReaderGone` plus the external's kill, `Effect::KillStage`'s
     action once the sentinel (`sentinel.rs`) has heard a dead write, never
-    reused for another kill; and `watch` hands the collector a live
+    reused for another kill; `listen` sets the sentinel on the outbound edge
+    once, marking the edge dead first outside a teardown, and `held` is
+    declared before `kind`, so a forced end drops the hold before it joins; and `watch` hands the collector a live
     external's wait handle for its own per-pid teardown — an `External` is a
     `crate::process::Watch` alone, the reaper's own subscription: no
     dedicated waiter thread, since `ChildHandle::into_watch`'s closure posts
@@ -261,13 +260,15 @@ evaluator item; the evaluator reaches it at
     stage handles from the first one launched, an `mpsc` channel every
     producer feeds — the reaper (through a stage's own `Watch`), a stage
     thread's own report, the sentinel, the anchor's witness and its watch —
-    received a slice at a time by `recv`, which reads the current scope
+    received a slice at a time by `recv`, which first sweeps the edges
+    (`sweep_edges`: every live writer whose reader is gone gets its sentinel,
+    the edge marked dead outside a teardown), then reads the current scope
     between slices and mints `Event::Cancelled` itself — carrying
     `Event::{Ended, Returned, Wrote, Cancelled, AnchorDied, Heard}`, with no
     `Stopped`/`Continued` variant at all, which the pure fold `step` folds
     over, returning at most one `Effect` (`Option<Effect>`) for a
     thin interpreter (`CollectState::run`) to perform:
-    `ArmEdge`, `KillStage`, `CancelAll { cause }`. Completion is not
+    `KillStage`, `CancelAll { cause }`. Completion is not
     among them — the pipeline is finished exactly when no stage handle is left
     (`live()`). A `Heard` key strikes the run's node and records `pressed` —
     the kernel gave the whole pgid that signal already, so teardown sends no
@@ -279,9 +280,9 @@ evaluator item; the evaluator reaches it at
     on the current scope, and the loan drops with the collector, returning
     the terminal and striking nothing; `holds_terminal`
     reports the loan actually made, which `LaunchCx.holds_terminal` freezes.
-    The `Slot` a stage hands its own producers is minted by `PipeNode::launch`,
-    which holds the sending half as a local and drops it on return — the
-    collector keeps none. Attribution rides the handle:
+    The `Slot` a stage hands its own producers is minted by `launch` from the
+    sending half `PipeNode::run` holds and drops once the stages are launched —
+    the collector keeps none. Attribution rides the handle:
     `StageHandle::sent` is the strongest cause
     this collector ever sent that stage, joined by `max` and carried onto its
     `StageEnd`, and `StageEnd::settle`, called by `CollectState::fold` — the one
@@ -296,8 +297,8 @@ evaluator item; the evaluator reaches it at
     `drive`/`cancel_all`/`step` take no `&Shell` at all. `drive` is
     `while live() { recv; step; run }`, no interval and
     no backoff, returning when every stage is observed;
-    `PipeNode::join` is `drive()`, then `fold(mooring, shell)`, the
-    group dropped after). `anchor.rs` is the hidden
+    `PipeNode::join` is `drive()`, `end_anchor()`, then `fold(mooring, shell)`,
+    the group dropped after). `anchor.rs` is the hidden
     `--ral-pipeline-anchor` child's entrypoint (`Role::Anchor`; a bundled tool's
     `Role::BundledTool` is launched beside it by `sandbox::reexec::launch`), a
     ral-written stage running on a thread of the parent process instead. On Windows every external a stage thread spawns still

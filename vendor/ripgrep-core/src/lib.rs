@@ -16,29 +16,6 @@ mod haystack;
 mod logger;
 mod search;
 
-// Since Rust no longer uses jemalloc by default, ripgrep will, by default,
-// use the system allocator. On Linux, this would normally be glibc's
-// allocator, which is pretty good. In particular, ripgrep does not have a
-// particularly allocation heavy workload, so there really isn't much
-// difference (for ripgrep's purposes) between glibc's allocator and jemalloc.
-//
-// However, when ripgrep is built with musl, this means ripgrep will use musl's
-// allocator, which appears to be substantially worse. (musl's goal is not to
-// have the fastest version of everything. Its goal is to be small and amenable
-// to static compilation.) Even though ripgrep isn't particularly allocation
-// heavy, musl's allocator appears to slow down ripgrep quite a bit. Therefore,
-// when building with musl, we use jemalloc.
-//
-// We don't unconditionally use jemalloc because it can be nice to use the
-// system's default allocator by default. Moreover, jemalloc seems to increase
-// compilation times by a bit.
-//
-// Moreover, we only do this on 64-bit systems since jemalloc doesn't support
-// i686.
-#[cfg(all(target_env = "musl", target_pointer_width = "64"))]
-#[global_allocator]
-static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
 /// Run the vendored ripgrep core with explicit argv entries.
 ///
 /// `rawargs` should not include `argv[0]`; pass only the user arguments.

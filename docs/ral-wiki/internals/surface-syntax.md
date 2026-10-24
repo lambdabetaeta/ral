@@ -18,7 +18,8 @@ Boolean spellings `<` `>` `<=` `>=` `!=` `&&` `||` and the arithmetic
 characters `+ - * / % =` are *operators*, a token of their own
 (`Token::Op(Operator)`, a closed enum over `ir::BinaryOp` plus `And`, `Or` and
 the lone `=`, which is an error wherever it stands), and end a word (a numeral
-is read whole, sign of exponent included, per `numeral.rs`); an operator is never a word, which is
+is read whole, sign of exponent included, per `numeral.rs`; the parser rejoins
+a leading sign where a value is due, below); an operator is never a word, which is
 what lets the [[design/words|words rule]] tell `1+1` from touching atoms. So `$[2>3]` is a comparison, `$[1+1]` a sum, and
 `$[!{wc -l < f} > 1]` reads a file inside its `!{…}` and compares outside it.
 Everywhere else those characters keep their shell meaning: `1+1` is a word,
@@ -109,7 +110,11 @@ admitted by the parser and judged by the checker. The one judgement the parser
 keeps is the one that needs no types: a bare non-numeral word is a string, so
 under `-`, arithmetic or ordering it can never typecheck, and `numeric_operand`
 refuses `$[x + 1]` asking whether `$x` was meant — the old sublanguage's best
-diagnostic, kept without its leaf grammar. The five operator forms —
+diagnostic, kept without its leaf grammar. A numeral keeps its sign there: the
+lexer emits every `+` and `-` as an operator, and where a value is expected
+`signed_numeral` reads one touching a numeral as that numeral's sign, so
+`$[-9223372036854775808]` is the smallest `Int` and the lexer's context stays
+its delimiter alone. The five operator forms —
 `Binary`, `Negate`, `Not`, `And`, `Or` — are `Ast` variants like any other;
 there is no `Expr` type, and `$[…]` leaves no node behind. `""` is a
 literal (the empty string), not an interpolation.
@@ -149,8 +154,9 @@ stand, so `let h = ~` binds the home directory and `42 foo` is the checker's
 T0011 rather than a missing command. The
 [[map/core/elaboration|elaborator]] resolves a `Bare` head against the lexical
 scope — a bound name lowers to CBPV application, an unbound one to `Exec`
-(forward declarations cover only the thunk-form bindings `group.rs` knots, so
-the shadow agrees with what evaluation will see). A name-dispatched `Exec`
+(a name is in scope from its own statement on, or across its whole stretch of
+block definitions (SPEC §5.7), exactly where evaluation binds it, so the shadow
+agrees with what evaluation will see). A name-dispatched `Exec`
 then resolves binding → handler → PATH at *evaluation* time
 (`ir.rs` `CommandWord`), so handler installation and PATH state are read when
 the command runs, not when it was parsed. The seven reserved
@@ -162,8 +168,9 @@ the first its title — optionality lives in syntax, as `if`'s `else` does,
 never in a value's arity
 ([[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]);
 `else` and `elsif` are refused as heads (they continue an `if`), and
-everything else is a library binding. `group.rs` is a pre-pass
-marking mutually recursive binding groups for the elaborator.
+everything else is a library binding. `group.rs` partitions a
+statement list into statements and stretches of block definitions for the
+elaborator.
 
 See also [[internals/compilation-ladder|compilation-ladder]]; map
 [[map/core/syntax|syntax]]. Grammar: `docs/SPEC.md` §3, §17.1; RATIONALE

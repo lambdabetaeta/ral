@@ -166,8 +166,8 @@ pub struct Key {
 pub struct Table {
     pub form: &'static str,
     pub keys: &'static [Key],
-    /// Whether a file may return a function of its options instead of the
-    /// settings, leaving the door to meet what the function returns.
+    /// Whether a file may return a block of its options making the settings,
+    /// instead of the settings themselves.
     pub factory: bool,
 }
 
@@ -444,8 +444,9 @@ pub(super) fn written_at(opts: &Val, label: &str) -> Option<Span> {
 /// key misspelled inside a spread is caught as one written out is.  Nothing
 /// constrains the program: the check runs in a scratch copy of the unifier, on
 /// a finished result that flows nowhere else, so the row's open tail is read
-/// as closed.  A return typed at a variable (`from-json`) and, where the table
-/// admits one, a factory stay on the runtime door.
+/// as closed.  A return typed at a variable (`from-json`) stays on the runtime
+/// door; where the table admits one, a factory is held to a block of the
+/// options, and what it makes is ascribed as a direct return is.
 pub(super) fn ascribe(
     ctx: &mut InferCtx,
     tail: Option<&Spanned<Phrase<()>>>,
@@ -467,18 +468,48 @@ pub(super) fn ascribe(
     };
     let saved = ctx.pos;
     ctx.pos = phrase.span;
-    match ctx.unifier.resolve_ty(&value) {
+    let resolved = ctx.unifier.resolve_ty(&value);
+    ascribe_value(ctx, resolved, table, written, table.factory);
+    ctx.pos = saved;
+}
+
+/// A finished value, resolved, against `table`: a record or `()` is its row,
+/// and where `factory` admits one, a block of the options making it.
+fn ascribe_value(
+    ctx: &mut InferCtx,
+    value: Ty,
+    table: &'static Table,
+    written: Option<&Val>,
+    factory: bool,
+) {
+    match value {
         Ty::Record(row) => ascribe_row(ctx, &row, table, written),
         Ty::Unit => ascribe_row(ctx, &Row::Empty, table, written),
         Ty::Var(_) => {}
-        Ty::Thunk(_) if table.factory => {}
+        Ty::Thunk(body) if factory => ascribe_factory(ctx, &body, table),
         found => ctx.diagnose(TypeErrorKind::ReturnNotRecord {
             form: table.form,
             found,
             offered: table.offered(),
         }),
     }
-    ctx.pos = saved;
+}
+
+/// A factory: one parameter, the options, and the table's row as the value
+/// it makes.  Unified on a scratch copy, as a row is ascribed, so nothing
+/// constrains the program; what it makes is then ascribed as a direct return.
+fn ascribe_factory(ctx: &mut InferCtx, body: &CompTy, table: &'static Table) {
+    let mut scratch = ctx.unifier.clone();
+    scratch.at = ctx.pos;
+    let made = scratch.fresh_ty();
+    let factory = CompTy::arrows(
+        [scratch.fresh_ty()],
+        CompTy::Return(scratch.fresh_grade(), Box::new(made.clone())),
+    );
+    match scratch.unify_comp_ty(&factory, body) {
+        Ok(()) => ascribe_value(ctx, scratch.resolve_ty(&made), table, None, false),
+        Err(kind) => ctx.report(kind, Reason::Factory),
+    }
 }
 
 /// Each field on `row`'s spine against `table`, then every required key

@@ -112,6 +112,18 @@ capability's allow admits. Hence:
   restricted one and still launch through `SECURITY_CAPABILITIES`, and how the
   restricted pass composes with the capability grants.
 
+**2026-10-23 amendment: a token names its own launch's grants.** A token's fs
+capabilities had been every capability its projection was ever granted, so a
+program image, which is not part of the projection, was readable by every later
+launch under it. `session::confine` now derives them afresh at each launch from
+that launch's grants, the image and the carving of the tree as it stands
+included. The memo of ensured grants is the session's, keyed by capability
+name, no longer one per projection. The projection key decides no capability
+and picks only the profile, so the deny paths stay in it as part of the
+projection's identity, not to keep two tokens apart. And a read-write directory takes its `Low` label even where the
+well-known `AppContainer` SIDs make its capability ACE redundant: the mandatory
+check runs first, whatever any ACE admits.
+
 ## Context
 
 Keying fs authority to the AppContainer SID makes the *stamp set* a function of

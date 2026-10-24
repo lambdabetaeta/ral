@@ -155,8 +155,8 @@ pub(super) fn stamp(b: Break, span: Option<Span>) -> Break {
     }
 }
 
-/// Unreachable for a checked program except where an `F`-holed frame meets a
-/// `Lambda` terminal.
+/// Unreachable for a checked program, Let-fun binding a function unrun
+/// (SPEC §17.8); kept a clean error, not a panic.
 fn bare_lambda_error() -> Error {
     Error::new(
         "tried to evaluate a bare lambda in computation position: a function value must be \
@@ -335,8 +335,8 @@ impl Machine {
         span: Option<Span>,
         shell: &Shell,
     ) -> Settled<Focus> {
-        let Some((param, body)) = comp.arrow() else {
-            unreachable!("a Terminal::Lambda's closure is always arrow-shaped (eta-expansion)")
+        let CompKind::Lam { param, body } = &comp.item else {
+            unreachable!("a Terminal::Lambda is built only from a Lam node")
         };
         let arg = args.remove(0);
         let env = pattern::bind(param, &arg, env)?;
@@ -600,8 +600,9 @@ impl Machine {
                         env,
                     });
                 }
-                let node = pipeline::PipeNode::launch(stages, &env, STAGE_EVAL, mooring, shell)?;
-                Focus::Return(Terminal::Value(node.join(mooring, shell)?))
+                Focus::Return(Terminal::Value(pipeline::PipeNode::run(
+                    stages, &env, STAGE_EVAL, mooring, shell,
+                )?))
             }
 
             CompKind::Capture(body) => {
@@ -670,7 +671,7 @@ impl Machine {
                             .collect::<Settled<Vec<_>>>()
                     })
                     .transpose()?;
-                let scope = WithinScope::parse(&opts.as_map("within")?, arms, &env, shell)?;
+                let scope = WithinScope::parse(&opts.as_map("within")?, arms, shell)?;
                 let body = form(body, &env, &shell.sig)?;
                 let slot = self.reserve(shell)?;
                 slot.push(Frame::Within(scope.enter(shell)));

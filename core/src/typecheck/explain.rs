@@ -1043,6 +1043,16 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
              `$args[0]`, or call the function directly, as in `!{$f 1}`"
                 .to_string(),
         ),
+        Reason::CatchAllParams => Some(
+            "the catch-all stands in for every command, so its two parameters are the \
+             name and the argv: write `{ |name args| … }`"
+                .to_string(),
+        ),
+        Reason::Factory => Some(
+            "a plugin returns its manifest, or a block of one parameter, the options, \
+             that makes it: `return { |options| [name: …] }`"
+                .to_string(),
+        ),
         // These constraints cannot fail on user input, already have a complete
         // diagnosis, or apply only to checker-inserted nodes.
         Reason::CaseScrutinee

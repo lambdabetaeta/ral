@@ -30,8 +30,10 @@ pub enum Reason {
     ListPattern,
     RecordPattern,
     Argument,
-    /// An arm's declared parameter against the argv a call site hands it.
+    /// A named arm against the one parameter its slot hands it, the argv.
     AliasParam,
+    /// The catch-all against its two parameters, the name and the argv.
+    CatchAllParams,
     /// A pipeline stage forced to `Return` shape: a stage still waiting for an
     /// argument is not a computation that can run.
     PipelineStageShape,
@@ -85,10 +87,13 @@ pub enum Reason {
         form: &'static str,
         key: String,
     },
+    /// A block a contract file returns where its table admits a factory,
+    /// against one parameter, the options, making the table's row.
+    Factory,
     /// A written option's value against the closed set of tags a vocabulary names;
     /// the innermost one the clash met.
     Vocabulary(&'static Vocab),
-    /// A `handlers:` arm that arrived as a value, against the block an arm is.
+    /// An arm that arrived as a value, against the block an arm is.
     HandlerArm,
     /// The `!` operator's operand against the block shape it forces.
     ForceOperand,

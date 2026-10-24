@@ -22,17 +22,17 @@
 //! intersects the normal pass, so an ACE no live token names is inert and can
 //! never widen any process's reach beyond the owning user's own.
 //!
-//! The capability ACE alone does not admit *creating* an entry: Windows runs
-//! the mandatory-integrity check before the `AppContainer` pass, and an
-//! unlabeled directory refuses every `Low`-IL `LowBox` child's create
-//! regardless of the DACL. A read-write grant on a directory therefore also
-//! stamps a `SYSTEM_MANDATORY_LABEL_ACE` at `Low` ([`ensure_low_integrity_label`])
-//! — its own permanent mutation, witnessed the same way under its own
-//! stamp-key namespace. The label is container-inherit only, never
-//! object-inherit: Windows caps a process at the label on its image file, so a
-//! `Low` label reaching files would run every host-built executable under the
-//! tree at `Low`. Files stay unlabeled, and the capability ACE alone admits
-//! writing an existing one.
+//! No ACE alone admits *creating* an entry: Windows runs the
+//! mandatory-integrity check before the `AppContainer` pass, and an unlabeled
+//! directory refuses every `Low`-IL `LowBox` child's create regardless of the
+//! DACL. A read-write grant on a directory therefore always stamps a
+//! `SYSTEM_MANDATORY_LABEL_ACE` at `Low` ([`ensure_low_integrity_label`]) — its
+//! own permanent mutation, witnessed the same way under its own stamp-key
+//! namespace — even where its capability ACE is not needed. The label is
+//! container-inherit only, never object-inherit: Windows caps a process at the
+//! label on its image file, so a `Low` label reaching files would run every
+//! host-built executable under the tree at `Low`. Files stay unlabeled, and the
+//! capability ACE alone admits writing an existing one.
 //!
 //! Two witnesses must agree before a stamp is skipped: the stamp store (a
 //! completion set beside the ledgers) says the propagation ran to completion,
@@ -89,11 +89,11 @@ mod stamp;
 mod tests;
 
 use acl::{
-    AceType, OICI_ACE_FLAGS, Target, apply_explicit_ace, apply_mandatory_label_ace,
-    low_integrity_label_present, scan_explicit_aces_for_sid,
+    AceType, OICI_ACE_FLAGS, Target, appcontainer_already_grants, apply_explicit_ace,
+    apply_mandatory_label_ace, low_integrity_label_present, scan_explicit_aces_for_sid,
 };
 pub(crate) use deny::{ContainerAccess, ensure_unreachable};
-pub(crate) use frozen::{FrozenPin, needing_grant, pin_all};
+pub(crate) use frozen::{FrozenPin, pin_all};
 pub(crate) use ledger::{DaclManager, recover_orphaned_state};
 use mutex::PathMutexGuard;
 use stamp::{label_stamp_key, record_stamp, stamp_key, stamp_recorded, update_stamp};
@@ -103,12 +103,11 @@ use stamp::{label_stamp_key, record_stamp, stamp_key, stamp_recorded, update_sta
 /// NTFS cannot grant the one without the other, so inheritance carries
 /// `FILE_EXECUTE` down to every file — accepted, since the `AppContainer`
 /// already sandboxes code execution.
-pub(crate) const RW_MASK: u32 =
-    FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
+const RW_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
 
 /// Rights stamped on a read-only prefix; execute is there for the same
 /// `FILE_TRAVERSE` reason as [`RW_MASK`].
-pub(crate) const RO_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
+const RO_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
 
 /// The three access shapes a grant stamps. Each keys its own capability name
 /// and its own stamp-store entry, so read-only coverage never satisfies a
@@ -345,17 +344,18 @@ pub(crate) fn fs_capability_name(name: &str, kind: GrantKind) -> String {
 /// a read-write grant, the mandatory label alongside it when the target is a
 /// directory (see [`ensure_low_integrity_label`]).
 ///
-/// A read-write grant is two mutations, so each answers for itself and
-/// neither may speak for the other: the label is asked *before* the ACE's
-/// witness is consulted, since a witness that only knows the DACL would
-/// otherwise wave through as complete a grant some earlier ral stamped when
-/// the label half did not yet exist — and, nothing here reverting, that path
-/// would stay unwritable for good with no witness able to say why. The ACE's
-/// own skip stands when both of its witnesses hold: the stamp store records a
-/// completed propagation, and the root's own DACL still carries it. A stamp
-/// already recorded needs no `WRITE_DAC`: only the write that would be new
-/// fails, as `WriteDacDenied`. `cancel` is polled before the apply; Win32's
-/// own propagation is not interruptible.
+/// A read-write grant is two mutations, so each answers for itself and neither
+/// may speak for the other: the label is asked *before* anything about the ACE,
+/// since a witness that only knows the DACL would otherwise wave through as
+/// complete a grant some earlier ral stamped when the label half did not yet
+/// exist — and, nothing here reverting, that path would stay unwritable for
+/// good with no witness able to say why. The ACE is skipped where the
+/// well-known `AppContainer` SIDs already admit `kind`, or where both of its
+/// witnesses hold: the stamp store records a completed propagation, and the
+/// root's own DACL still carries it. A stamp already recorded needs no
+/// `WRITE_DAC`: only the write that would be new fails, as `WriteDacDenied`.
+/// `cancel` is polled before the apply; Win32's own propagation is not
+/// interruptible.
 pub(crate) fn ensure_frozen_grant(
     pin: &FrozenPin,
     sid_str: &str,
@@ -370,13 +370,19 @@ pub(crate) fn ensure_frozen_grant(
             path: canonical.to_path_buf(),
             reason: format!("metadata: {e}"),
         })?;
-    // A capability ACE alone cannot admit a create: the mandatory-integrity
-    // check runs first, and a `Low`-IL child clears it only if the directory's
-    // own label is `Low` or below. A read-only grant needs no label —
-    // `Low` already reads `Medium` under the default no-write-up-only policy —
-    // and neither does a file, whose write the capability ACE alone admits.
+    // No ACE alone admits a create: the mandatory-integrity check runs first,
+    // and a `Low`-IL child clears it only if the directory's own label is
+    // `Low` or below. A read-only grant needs no label — `Low` already reads
+    // `Medium` under the default no-write-up-only policy — and neither does a
+    // file, whose write the capability ACE alone admits.
     if kind == GrantKind::ReadWrite && inheritable {
         ensure_low_integrity_label(target)?;
+    }
+    // The ACE, never the label, is skipped where every sandbox already has its
+    // rights: else `System32` fails a non-admin session on `WRITE_DAC` (after
+    // mxc `dispatcher.rs::filter_paths_needing_grant`).
+    if appcontainer_already_grants(target, kind.mask()) {
+        return Ok(());
     }
     let key = stamp_key(pin.name(), kind);
     // Serialize the witness with the mutation, including an interrupted retry.

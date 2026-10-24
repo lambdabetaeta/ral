@@ -10,7 +10,7 @@
 
 mod common;
 
-use ral_core::ir::{Comp, CompKind, Pattern, Phrase, Toplevel, Unchecked, Val};
+use ral_core::ir::{Comp, CompKind, Phrase, Toplevel, Unchecked, Val};
 use ral_core::ty::{CompTy, CompTyVar, Ty};
 use ral_core::typecheck::Form;
 use ral_core::typecheck::contract::declared;
@@ -331,42 +331,49 @@ fn independent_dependencies_are_checked_in_source_order() {
     }
 }
 
-/// A partial application's RHS resolves to `Fun`, so `annotate` η-expands it:
-/// `let g = f 1` becomes `Return(Thunk(Lam x. App { f, [1, x] }))`,
-/// whose body `Comp::arrow` reads as a `Lam`, and `g`'s scheme is
-/// generalised over the still-free second parameter.
+/// A right-hand side of function type is bound unrun, as its thunk (Let-fun),
+/// at any depth: `let g = f 1` is `Return(Thunk(App))`, generalised, and so is
+/// a `let` inside a lambda's body.
 #[test]
-fn toplevel_partial_application_eta_expands_to_thunked_lambda() {
+fn a_function_typed_rhs_is_bound_as_its_thunk_at_any_depth() {
     let top = toplevel_ok(
         "let f = { |a b| return $a }\n\
          let g = f 1\n\
+         let h = { |n| let k = f 2; k $n }\n\
          return ()",
     );
     let Phrase::Define { comp, schemes, .. } = &top.phrases[1].item else {
-        panic!("expected g's Define phrase, got {:?}", top.phrases[1].item);
+        panic!("expected g's Define, got {:?}", top.phrases[1].item);
     };
-    let CompKind::Return(Val::Thunk(body)) = &comp.item else {
+    let CompKind::Return(Val::Thunk(g)) = &comp.item else {
         panic!("expected Return(Thunk(..)), got {:?}", comp.item);
     };
-    let (param, lam_body) = body
-        .shape()
-        .arrow()
-        .expect("g's thunk body must be a syntactic Lam");
-    assert!(matches!(param, Pattern::Name(_)));
-    let CompKind::App { args, .. } = &lam_body.item else {
-        panic!("expected an App body, got {:?}", lam_body.item);
-    };
-    assert_eq!(
-        args.len(),
-        2,
-        "expected the original argument plus the eta parameter"
+    assert!(
+        matches!(g.shape().item, CompKind::App { .. }),
+        "g binds the call itself, unrun: {:?}",
+        g.shape().item
     );
-
-    assert_eq!(schemes.len(), 1);
     let rendered = schemes[0].1.to_string();
     assert!(
         rendered.starts_with('∀') && rendered.contains('→'),
         "expected g : U (B → C), got: {rendered}"
+    );
+    let Phrase::Define { comp, .. } = &top.phrases[2].item else {
+        panic!("expected h's Define, got {:?}", top.phrases[2].item);
+    };
+    let CompKind::Return(Val::Thunk(h)) = &comp.item else {
+        panic!("expected Return(Thunk(..)), got {:?}", comp.item);
+    };
+    let CompKind::Lam { body, .. } = &h.shape().item else {
+        panic!("expected h's Lam, got {:?}", h.shape().item);
+    };
+    let CompKind::Bind { comp: k, .. } = &body.item else {
+        panic!("expected k's Bind, got {:?}", body.item);
+    };
+    assert!(
+        matches!(k.item, CompKind::Return(Val::Thunk(_))),
+        "an inner let of function type is thunked too: {:?}",
+        k.item
     );
 }
 
@@ -682,6 +689,21 @@ fn return_schema_refuses_a_function_unless_the_table_admits_a_factory() {
         assert_eq!(codes_of(&errs), ["T0077"], "{form:?}: {errs:?}");
     }
     assert!(contract_errors(declared(Form::Manifest), factory).is_empty());
+}
+
+/// A factory is a block of one parameter, the options, making the manifest:
+/// held to that shape statically, and what it makes ascribed as a direct
+/// return is.
+#[test]
+fn a_returned_block_is_held_to_the_factory_shape() {
+    for src in ["return { [name: 'p'] }", "return { |a b| [name: 'p'] }"] {
+        let errs = contract_errors(declared(Form::Manifest), src);
+        assert_eq!(codes_of(&errs), ["T0011"], "{src}: {errs:?}");
+    }
+    let errs = contract_errors(declared(Form::Manifest), "return { |options| [nam: 'p'] }");
+    assert_eq!(codes_of(&errs), ["T0076", "T0021"], "{errs:?}");
+    let made = "let mk = { |n options| return [name: $n] }\nlet f = mk 'p'\nreturn $f";
+    assert!(contract_errors(declared(Form::Manifest), made).is_empty());
 }
 
 #[test]

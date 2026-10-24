@@ -4,6 +4,7 @@
 
 use crate::io::Edge;
 use crate::types::{Error, Settled};
+use std::cell::Cell;
 use std::sync::Arc;
 
 /// Stdin source for one stage.
@@ -23,10 +24,12 @@ pub(super) enum ByteOut {
 }
 
 /// The parent's hold on a non-final stage's outbound edge: its fate, and a
-/// duplicate of its read end, shared with the sentinel that reads it.
+/// duplicate of its read end, which the hold alone keeps open.
 pub(super) struct HeldEdge {
     pub(super) edge: Arc<Edge>,
     pub(super) reader: Arc<os_pipe::PipeReader>,
+    /// Set once a sentinel reads it: one per edge.
+    pub(super) listening: Cell<bool>,
 }
 
 /// One stage's fully-wired byte endpoints, consumed by value at spawn.
@@ -46,6 +49,7 @@ fn open_edge() -> Settled<((ByteOut, Option<HeldEdge>), ByteIn)> {
             Some(HeldEdge {
                 edge,
                 reader: Arc::new(r.try_clone().map_err(|e| Error::io("pipe", &e))?),
+                listening: Cell::default(),
             }),
         ),
         ByteIn::Upstream(r),

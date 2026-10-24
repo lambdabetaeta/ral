@@ -952,8 +952,8 @@ pub(super) fn discard(_dir: &File, sibling: &File, _name: &EntryName) -> io::Res
 }
 
 /// Whether the entry `name` of `dir` may be opened for writing, following a
-/// link.
-pub(super) fn is_writable(dir: &File, name: &OsStr) -> bool {
+/// link: `Err` is the open's refusal.
+pub(super) fn may_write(dir: &File, name: &OsStr) -> io::Result<()> {
     let name: &Path = name.as_ref();
     site!(
         Silent::WalkAccess,
@@ -968,7 +968,6 @@ pub(super) fn is_writable(dir: &File, name: &OsStr) -> bool {
             FollowSymlinks::Yes,
         )
     )
-    .is_ok()
 }
 
 /// The discard device, by its fixed name.

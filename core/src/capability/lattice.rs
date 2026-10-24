@@ -408,7 +408,11 @@ impl Flag {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Extent {
     Everywhere,
-    Under(RealPath),
+    Under {
+        position: RealPath,
+        /// What the walk to `position` passed ([`Trace::passed`]).
+        passed: Vec<RealPath>,
+    },
 }
 
 impl Extent {
@@ -417,7 +421,7 @@ impl Extent {
     pub(crate) fn contains(&self, subject: Subject<'_>) -> bool {
         match self {
             Self::Everywhere => true,
-            Self::Under(position) => subject.beneath(position),
+            Self::Under { position, .. } => subject.beneath(position),
         }
     }
 
@@ -426,7 +430,7 @@ impl Extent {
     pub(crate) fn real(&self) -> Option<&RealPath> {
         match self {
             Self::Everywhere => None,
-            Self::Under(position) => Some(position),
+            Self::Under { position, .. } => Some(position),
         }
     }
 
@@ -461,14 +465,18 @@ impl GrantPath<Extent> {
 
 impl GrantPath<Trace> {
     /// This walk read as an allowance's extent: everywhere if it reached the
-    /// root, as the root spelling does, else the position it reached.
+    /// root, as the root spelling does, else the position it reached and what
+    /// it passed on the way.
     pub(crate) fn extent(self) -> GrantPath<Extent> {
-        let real = self.real.real();
+        let trace = &self.real;
         GrantPath {
-            real: if real.is_universal() {
+            real: if trace.real().is_universal() {
                 Extent::Everywhere
             } else {
-                Extent::Under(real.clone())
+                Extent::Under {
+                    position: trace.real().clone(),
+                    passed: trace.passed().to_vec(),
+                }
             },
             written: self.written,
         }

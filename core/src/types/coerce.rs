@@ -51,14 +51,13 @@ impl Value {
         }
     }
 
-    /// A spawn body takes no parameters: `comp.arrow()` is `None` for a
-    /// block-shaped thunk.
+    /// A spawn or watch body: a block, which the checker holds to `U (F A)`.
     ///
     /// # Errors
     /// `self` is not a block.
     pub(crate) fn expect_thunk(&self, ctx: &str) -> Result<Closure, Error> {
         match self {
-            Self::Thunk(c) if c.comp().arrow().is_none() => Ok(c.clone()),
+            Self::Thunk(c) => Ok(c.clone()),
             _ => Err(self
                 .expected(ctx, "Block")
                 .with_hint(format!("{ctx} requires a block: {ctx} {{ ... }}"))),

@@ -569,6 +569,7 @@ fn touching_is_refused_naming_both_words_and_the_run() {
         ("[a'b']", "a", "'b'", "a'b'"),
         ("$[1'a']", "1", "'a'", "1'a'"),
         ("$[(1)'a']", "(1)", "'a'", "(1)'a'"),
+        ("$[-5'a']", "-5", "'a'", "-5'a'"),
         ("$(red)[x]", "$(red)", "[x]", "$(red)[x]"),
         ("cmd >$x'a'", "$x", "'a'", "$x'a'"),
         ("{a}'b'", "{a}", "'b'", "{a}'b'"),
@@ -892,6 +893,90 @@ fn parse_arithmetic_precedence() {
             binary(plain("3"), BinaryOp::Arith(ArithOp::Mul), plain("4")),
         )]
     );
+}
+
+/// Where a value is due inside `$[…]`, a `+` or `-` touching a numeral is
+/// its sign, so the word is the one it is outside: `i64::MIN` included.
+#[test]
+fn a_sign_touching_a_numeral_is_its_sign() {
+    let neg = |a: Ast| Ast::Negate(Spanned::synthetic_boxed(a));
+    let tag = |payload: Ast| Ast::Tag {
+        label: "a".into(),
+        payload: Some(Spanned::synthetic_boxed(payload)),
+    };
+    for (src, want) in [
+        ("$[-9223372036854775808]", plain("-9223372036854775808")),
+        ("$[-9223372036854775809]", plain("-9223372036854775809")),
+        ("$[+5]", plain("+5")),
+        ("$[+1.5]", plain("+1.5")),
+        ("$[-.5]", plain("-.5")),
+        ("$[-1.5e+3]", plain("-1.5e+3")),
+        ("$[(-1)]", plain("-1")),
+        (
+            "$[2*-3]",
+            binary(plain("2"), BinaryOp::Arith(ArithOp::Mul), plain("-3")),
+        ),
+        ("$[--5]", neg(plain("-5"))),
+        ("$[-+5]", neg(plain("+5"))),
+        ("$[- 5]", neg(plain("5"))),
+        ("$[`a -1]", tag(plain("-1"))),
+    ] {
+        assert_eq!(unwrap_stmts(parse(src).unwrap()), vec![want], "{src:?}");
+    }
+}
+
+/// After a complete operand `-` is binary, however it is spaced, whatever
+/// the operand.
+#[test]
+fn a_sign_after_a_value_is_binary() {
+    let nullary = |l: &str| Ast::Tag {
+        label: l.into(),
+        payload: None,
+    };
+    for (src, left, right) in [
+        ("$[5 -1]", plain("5"), plain("1")),
+        ("$[5 - 1]", plain("5"), plain("1")),
+        ("$[5-1]", plain("5"), plain("1")),
+        ("$[$x -1]", Ast::Variable("x".into()), plain("1")),
+        ("$[(1)-5]", plain("1"), plain("5")),
+        ("$['a' -1]", Ast::Literal("a".into()), plain("1")),
+        ("$[`a - 1]", nullary("a"), plain("1")),
+    ] {
+        assert_eq!(
+            unwrap_stmts(parse(src).unwrap()),
+            vec![binary(left, BinaryOp::Arith(ArithOp::Sub), right)],
+            "{src:?}"
+        );
+    }
+    assert_eq!(
+        unwrap_stmts(parse("$[`a == `b]").unwrap()),
+        vec![binary(nullary("a"), BinaryOp::Eq(EqOp::Eq), nullary("b"))]
+    );
+}
+
+/// A sign touching no numeral stays an operator.
+#[test]
+fn a_sign_touching_no_numeral_is_an_operator() {
+    refused_saying(&[
+        (
+            "$[+ 5]",
+            "`+` is an operator and needs an operand on each side",
+        ),
+        (
+            "$[+$x]",
+            "`+` is an operator and needs an operand on each side",
+        ),
+        (
+            "$[+-5]",
+            "`+` is an operator and needs an operand on each side",
+        ),
+        ("$[-1e6]", "a float needs a point: write `1.0e6`"),
+        ("$[-5abc]", "`5abc` is the string '5abc' here, not a number"),
+        (
+            "$[-9223372036854775809 + 1]",
+            "`-9223372036854775809` is the string",
+        ),
+    ]);
 }
 
 /// `$[…]` leaves no node of its own: a lone operand is that operand.

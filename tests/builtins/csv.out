@@ -4,6 +4,11 @@
 a,b
 1,2
 3,4
-true
+from-csv: line 2 has 1 field, but the header has 2 fields
+from-csv: line 2 has 3 fields, but the header has 2 fields
+1
 from-csv: duplicate header column "a"
+to-csv: the row at index 1 has the key "b", but the row at index 0 does not
+to-csv: the row at index 0 has the key "a", but the row at index 1 does not
+to-csv: the row at index 0 has no keys, and CSV cannot write a row of no columns
 csv tests done

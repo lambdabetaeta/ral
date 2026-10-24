@@ -18,8 +18,7 @@ use std::sync::Arc;
 /// What the re-exec'd child IPC adds to [`FOValue`]: closures over interned
 /// scopes.
 ///
-/// One wire shape for the one runtime thunk value: `Comp::arrow`
-/// on the decoded `comp` tells `Lambda` from `Block` back apart.
+/// One wire shape for the one runtime thunk value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) enum SerialClosure {
     Thunk(SerialThunk),

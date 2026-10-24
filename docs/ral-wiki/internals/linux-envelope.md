@@ -25,15 +25,23 @@ the filesystem**
   `/proc/self` is its own, and `ps` under any grant shows only the envelope.
 - **Working directory.** The logical cwd goes in as `--chdir`. A cwd the grant
   does not cover gets an empty `0555` tmpfs stand-in, laid before the binds,
-  which hide it wherever they do cover it. So a grant narrower than the cwd
-  still runs commands, as under Seatbelt, and a relative write there is
-  refused.
-- **The payload's pid.** bwrap never execs the payload in place: a monitor
-  clones a namespace init, which forks the payload. So a `Kept` launch reads the
-  payload's pid back over `--info-fd` (`InfoFd`, a socketpair). No same-uid
-  process can reopen a socketpair through `/proc` to forge a `child-pid`. That
-  pid is a session leader, by `--new-session`, and its group is the one every
-  signal ladder targets. Nothing addresses the monitor.
+  which may hide it; bwrap's `--chdir` then judges the name. `/` and the
+  scratch `/tmp` are the envelope's own writable memory and need none. So a
+  grant narrower than the cwd still runs commands, as under Seatbelt, and a
+  relative write in a stand-in is refused. A cwd at or beneath a deny is
+  refused before bwrap runs, since no mask can be entered.
+- **The payload's group.** bwrap never execs the payload in place: a monitor
+  clones a process that calls `setsid` (`--new-session`) and then, as the
+  pid namespace's init, forks the payload, or without one becomes it. So a
+  `Kept` launch reads that process's pid back over `--info-fd` (`InfoFd`, a
+  socketpair), and its group is the one every signal ladder targets. No
+  same-uid process can reopen a socketpair through `/proc` to forge a
+  `child-pid`. Nothing addresses the monitor.
+- **The group is named only once it exists.** bwrap writes `child-pid`
+  before that `setsid`, when a signal to the group would be lost. The
+  payload holds a second copy of the writer, which bwrap does not name, until its
+  handoff sweep, so the read ends only once the group exists or the
+  envelope has died, and `Launch::spawn` returns no sooner.
 - **Process groups.** `Launch::spawn` makes an enveloped launch `NewLeader`
   whatever was asked, and returns the payload's group. `ForegroundDecision`
   never hands an envelope the terminal. A pipeline collector addresses each
@@ -43,7 +51,7 @@ the filesystem**
 ## bwrap mounts what ral opened, never a name
 
 **`Binds::open` plans every bind a launch shows, opens each object once without
-following a symlink, and lends a copy at `Slot::Mount(i)`**
+following a symlink, and lends a copy per bind**
 ([[decisions/261006_the-envelope-mounts-by-handle|the-envelope-mounts-by-handle]]).
 `bwrap_argv` emits `--ro-bind-fd` or `--bind-fd` from the same vector. The binds
 are: the read-only defaults, the read region (`shown`: every read scope of the
