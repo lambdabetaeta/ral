@@ -139,7 +139,7 @@ fn a_redirected_allowance_refuses_the_launch_before_the_memo_is_consulted() {
     use crate::authority::sandbox::{ExecProjection, FsProjection, SandboxProjection};
     use crate::process::Launch;
     use crate::process::cancel::DurableRoot;
-    let _env = crate::test_env::env_guard();
+    let _env = crate::host::env::test_support::env_guard();
     let root = tempfile::tempdir().unwrap();
     let (granted, outside) = (root.path().join("granted"), root.path().join("outside"));
     std::fs::create_dir(&granted).unwrap();
@@ -223,7 +223,7 @@ fn carving_meets_a_junction_and_a_symlink_as_links() {
 /// stamp-store key naming a dead tempdir, inert.
 #[test]
 fn confined_child_writes_inside_the_grant_and_not_outside() {
-    let _env = crate::test_env::env_guard();
+    let _env = crate::host::env::test_support::env_guard();
     use crate::authority::sandbox::{ExecProjection, FsProjection, SandboxProjection};
     use crate::process::cancel::DurableRoot;
     use crate::process::{Launch, PgidPolicy, StdioSpec, WaitOutcome};
@@ -312,7 +312,11 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
 /// stamps never land in the user's state or in another test's.
 fn with_scoped_state(f: impl FnOnce()) {
     let state = tempfile::tempdir().unwrap();
-    crate::test_env::with_var("XDG_STATE_HOME", Some(state.path().to_str().unwrap()), f);
+    crate::host::env::test_support::with_var(
+        "XDG_STATE_HOME",
+        Some(state.path().to_str().unwrap()),
+        f,
+    );
 }
 
 /// The paths beneath `A` that a read grant on `A` reaches, each holding

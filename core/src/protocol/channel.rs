@@ -1,5 +1,5 @@
 //! Duplex framed channel: one connection is one session, carrying
-//! length-prefixed JSON frames ([`crate::frame`]) in either direction, and
+//! length-prefixed JSON frames ([`crate::io::frame`]) in either direction, and
 //! the one liveness law both ends of it keep.
 //!
 //! [`WireStream`] is `UnixStream` on Unix and `TcpStream` on Windows, yet
@@ -81,7 +81,7 @@ impl WireChannel {
     /// Returns the read or decode error.  `Ok(None)` is a clean EOF: the peer
     /// closed between frames.
     pub(crate) fn read_frame(&mut self) -> io::Result<Option<Frame>> {
-        crate::frame::read_frame(&mut self.stream)
+        crate::io::frame::read_frame(&mut self.stream)
     }
 
     /// Write one frame.
@@ -90,15 +90,15 @@ impl WireChannel {
     /// Returns the encode or write error.
     #[cfg(any(test, feature = "test-util"))]
     pub(crate) fn write_frame(&mut self, frame: &Frame) -> io::Result<()> {
-        self.put(&crate::frame::encode(frame)?)
+        self.put(&crate::io::frame::encode(frame)?)
     }
 
     /// Write one already-encoded frame.
     ///
     /// # Errors
     /// Returns the write error: only failed I/O.
-    pub(crate) fn put(&mut self, frame: &crate::frame::Encoded) -> io::Result<()> {
-        crate::frame::put(&mut self.stream, frame)
+    pub(crate) fn put(&mut self, frame: &crate::io::frame::Encoded) -> io::Result<()> {
+        crate::io::frame::put(&mut self.stream, frame)
     }
 
     /// Duplicate the socket so one channel reads while another writes the same
@@ -205,7 +205,7 @@ pub(crate) fn write_or_sever(
     frame: &Frame,
     record: impl FnOnce(&io::Error),
 ) -> Result<(), WriteError> {
-    let encoded = crate::frame::encode(frame).map_err(WriteError::Unencodable)?;
+    let encoded = crate::io::frame::encode(frame).map_err(WriteError::Unencodable)?;
     let mut guard = ch
         .lock_strict()
         .expect("a poisoned wire channel stays poisoned");

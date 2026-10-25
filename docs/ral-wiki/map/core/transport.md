@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_commit: a2aba680
 generated_at_date: 2026-10-25
-covers_paths: [core/src/data.rs, core/src/data/, core/src/shell/runtime/value/first_order.rs, core/src/seed.rs, core/src/seed/, core/src/frame.rs, core/src/shell/grant/spawn.rs]
+covers_paths: [core/src/data.rs, core/src/data/, core/src/shell/runtime/value/first_order.rs, core/src/seed.rs, core/src/seed/, core/src/io/frame.rs, core/src/shell/grant/spawn.rs]
 ---
 
 # Map: core / transport
@@ -67,6 +67,8 @@ typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
   declarations (`ErrorRecord::ty()`); `poll`'s polymorphic shape is
   `Io::ty().extend(..)` over them. The doors that mint them sit above
   (`shell::runtime::error`, `shell::runtime::audit`).
+- `data/string.rs` — `Str`, the shared immutable string, exported as
+  `data::Str` for IR and runtime values; `FOValue::String` owns a `String`.
 - `data/byte_encoding.rs` — byte strings serialize to base64 in JSON
   and native bytes in binary codecs. Binary decoding copies or takes the
   whole byte buffer. Each decoder requires its encoding.
@@ -176,7 +178,7 @@ each alias arm with its scheme
   `shell::grant::decode_capability_map`
   ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]).
 
-## Framing — `core/src/frame.rs`
+## Framing — `core/src/io/frame.rs`
 
 **`encode` + `put` / `read_frame` are length-prefixed JSON frames, carrying both
 the seal's one `EngineSeed` frame and the engine protocol's `WireChannel`

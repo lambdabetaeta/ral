@@ -5,7 +5,9 @@
 //! membership must be creation-time facts.
 
 #[cfg(not(windows))]
-use crate::site::{Surface, site};
+use crate::process::site::Surface;
+#[cfg(not(windows))]
+use crate::site::site;
 use std::ffi::OsStr;
 #[cfg(windows)]
 use std::ffi::OsString;

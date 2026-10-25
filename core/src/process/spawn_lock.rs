@@ -18,7 +18,8 @@
 //! The lock guards an `RwLock<()>`: poison carries no information, since there
 //! is no state to tear, so it goes through the workspace's poison policy.
 
-use crate::site::{Silent, site};
+use crate::process::site::Silent;
+use crate::site::site;
 #[cfg(target_vendor = "apple")]
 use crate::sync::RwLockExt as _;
 

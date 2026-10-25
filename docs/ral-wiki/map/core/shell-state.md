@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_commit: a2aba680
 generated_at_date: 2026-10-25
 covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs]
 ---
@@ -45,8 +45,9 @@ fact data are reached through their owning modules.
   wrapping `Arc<imbl::Vector<Value>>` / `Arc<imbl::OrdMap<String, Value>>`;
   `get`/`iter` lend a `Cow<'_, Value>` rather than `&Value`, so a caller
   never knows whether an element is shared or freshly formed; the
-  `pub(crate)` mutators go through `Arc::make_mut`. `string.rs` / `bytes.rs` — `Str` and
-  `Bytes`, newtypes over `Arc<String>` / `Arc<Vec<u8>>`, so an owned buffer
+  `pub(crate)` mutators go through `Arc::make_mut`. `data/string.rs` /
+  `data/bytes.rs` — `data::{Str, Bytes}`, newtypes over `Arc<String>` /
+  `Arc<Vec<u8>>`, so an owned buffer
   moves in without a copy. `Value::string` / `Value::bytes` are their one
   constructor, as `Value::list` is a list's. **Cloning a `Value` copies
   no payload**: a string, a byte string, a list or map spine and a closure's
@@ -61,6 +62,9 @@ fact data are reached through their owning modules.
 - `error.rs` — `Error` and `Status` (`Raised(i32) | WorkerStopped(WorkerStop) |
   Process(CommandFailure)`, one constructor per fact, whoever reports
   it; `Status::code` delegates to each failure's own `code`).
+  `Error::compile` converts a `CompileError` and its `Source` into a catchable
+  runtime error carrying its own rejection, without giving `compile` a runtime
+  dependency.
   `audit.rs` — the
   `Audit` collector, over `fact/observation.rs`'s `Observation` / `Observed`
   and `fact::AuditIo` (captured byte prefixes and totals) — data independent of

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_commit: a2aba680
 generated_at_date: 2026-10-25
 covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/compile.rs, core/src/syntax/report.rs, core/src/io/terminal.rs, core/src/io/terminal/stderr.rs, core/src/text.rs, core/src/io/ansi.rs, core/src/shell/runtime/exit_hints.rs]
 ---
@@ -78,10 +78,10 @@ project it — a trail entry, `try`'s error — carry an optional
 
 **A compile failure carries its own text**: `Rejection` (`diagnostic.rs`) pairs
 the failure's `Report`s with their `Source` and the status a run that failed so
-exits on (2 parse, 1 type), instead of registering into the session's
-`SourceDb`, since a failed compile leaves no live span to justify a permanent,
-unreclaimable registry slot. `compile::CompileError` (`Parse` or `Types`)
-becomes one with `reject`. A run that never reached evaluation carries one in
+exits on (2 parse, 1 type). A root run registers only after compilation
+succeeds; runtime loads register before compiling so every stamped span resolves
+in the session. `compile::CompileError` (`Parse` or `Types`) becomes a rejection
+with `reject`. A run that never reached evaluation carries one in
 its `StaticDiagnostics` (`shell/run.rs`) — `Compile(Rejection)`, beside `Host`, a
 spanless pre-run failure (an unknown hook, a non-ground argument) — whose
 `render` is what every host on the wire prints through `Report::Static`
@@ -89,11 +89,12 @@ spanless pre-run failure (an unknown hook, a non-ground argument) — whose
 `Error`: a loaded file's parse error would then raise status 2, not 1. A file
 loaded at runtime — a `use`d module, the rc, a plugin, a capability profile —
 carries its rejection on the runtime `Error` instead, as `Error::rejection`,
-from `CompileError::into_error` at the loaders' one compile door
-(`modules::check_source`). Its `message` stays the plain sentence a `try`
-handler reads (`use: parse error: …`), and its `span` is left to the break
-path's stamp, so `$err[site]` names the `use` that failed: the compile span
-cannot go there, its peeked `FileId` being the one the next registration mints.
+from `Error::compile` (`shell/runtime/error.rs`) at the loader's compile door
+(`shell::load::check_source`); `CompileError` itself knows no runtime error.
+Its `message` stays the plain sentence a `try` handler reads
+(`use: parse error: …`), and its `span` is left to the break path's stamp,
+so `$err[site]` names the `use` that failed, while the rejection draws the
+loaded source's compile failure.
 
 ## Rendering — `core/src/diagnostic.rs`
 

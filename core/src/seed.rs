@@ -110,9 +110,9 @@ pub struct Sealed(Bytes);
 pub fn seal(bequest: &Bequest) -> Result<Sealed, String> {
     let sealed = |e: &dyn std::fmt::Display| format!("seed: could not seal the bequest: {e}");
     let seed = EngineSeed::encode(bequest).map_err(|e| sealed(&e))?;
-    let frame = crate::frame::encode(&seed).map_err(|e| sealed(&e))?;
+    let frame = crate::io::frame::encode(&seed).map_err(|e| sealed(&e))?;
     let mut bytes = Vec::new();
-    crate::frame::put(&mut bytes, &frame).map_err(|e| sealed(&e))?;
+    crate::io::frame::put(&mut bytes, &frame).map_err(|e| sealed(&e))?;
     Ok(Sealed(bytes.into()))
 }
 
@@ -121,7 +121,7 @@ impl Sealed {
     /// one `EngineSeed` frame.
     pub(crate) fn unseal(&self) -> Result<EngineSeed, String> {
         let mut rest: &[u8] = &self.0;
-        match crate::frame::read_frame(&mut rest) {
+        match crate::io::frame::read_frame(&mut rest) {
             Err(e) => Err(format!("seed: the sealed bequest is not a seed frame: {e}")),
             Ok(Some(seed)) if rest.is_empty() => Ok(seed),
             Ok(_) => Err("seed: the sealed bequest is not one frame".into()),

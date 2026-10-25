@@ -18,8 +18,8 @@ fn value(pairs: &[(&str, u32)]) -> BTreeMap<String, u32> {
 #[cfg(unix)]
 mod unix {
     use super::*;
+    use crate::host::env::test_support::with_var;
     use crate::path;
-    use crate::test_env::with_var;
     use std::os::unix::fs::{PermissionsExt as _, symlink};
 
     /// `p` as the text an environment variable holds.

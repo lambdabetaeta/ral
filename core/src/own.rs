@@ -29,6 +29,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use strum::IntoStaticStr;
 
+use self::site::Silent;
 use crate::authority::policy::Ungoverned;
 use crate::host::{self, EnvVars};
 use crate::path::walk::{Access, dangling, walk_dir_made};
@@ -36,8 +37,10 @@ use crate::path::{
     Dir, EntryName, Judged, Kind, LeafMode, LexicalPath, Located, Reading, Resolver, Stat,
     Visibility, Writing, XdgKind, app_dir, shown, spelled_parent, walk, walk_dir,
 };
-use crate::site::{Silent, site};
+use crate::site::site;
 use crate::sync::LockExt as _;
+
+mod site;
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
@@ -54,17 +57,17 @@ static ROOTS: Mutex<BTreeMap<PathBuf, OwnDir>> = Mutex::new(BTreeMap::new());
 
 /// `l`, vouched for as the user's own, for reading.
 fn reading(l: Located) -> Located<Judged<Reading>> {
-    site!(Silent::OwnRead, Ungoverned::read(l))
+    site!(Silent::Read, Ungoverned::read(l))
 }
 
 /// `l`, vouched for as the user's own, for writing.
 fn writing(l: Located) -> Located<Judged<Writing>> {
-    site!(Silent::OwnWrite, Ungoverned::write(l))
+    site!(Silent::Write, Ungoverned::write(l))
 }
 
 /// `d`, vouched for as the user's own, for writing.
 fn writing_dir(d: Dir) -> Dir<Judged<Writing>> {
-    site!(Silent::OwnWriteDir, Ungoverned::write_dir(d))
+    site!(Silent::WriteDir, Ungoverned::write_dir(d))
 }
 
 // ── Errors ────────────────────────────────────────────────────────────

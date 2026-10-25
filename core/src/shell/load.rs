@@ -13,7 +13,7 @@ pub mod profile;
 
 use crate::ir::Toplevel;
 use crate::shell::evaluator::{Mode, Ran};
-use crate::shell::runtime::{Env, Mooring, Settled, Shell, Value, sig};
+use crate::shell::runtime::{Env, Error, Mooring, Settled, Shell, Value, sig};
 use crate::source::{Source, SourceOrigin};
 
 const MAX_SOURCE_DEPTH: usize = 100;
@@ -144,7 +144,7 @@ pub(crate) fn check_source(
         origin.file(),
         contract,
     )
-    .map_err(|error| error.into_error(text))?;
+    .map_err(|error| Error::compile(error, text))?;
     if shell.local.bindings.armed() {
         shell.local.bindings.renew(top.referenced_names());
     }

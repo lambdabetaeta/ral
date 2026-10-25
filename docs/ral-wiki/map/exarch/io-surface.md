@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 0d3760a97cb880b5c906cad45a403f6209e06d9a
+generated_at_commit: a2aba680
 generated_at_date: 2026-10-25
 covers_paths: [core/src/fact/observation.rs, exarch/src/tui/group.rs, core/src/shell/runtime/audit/fan_out.rs, core/src/shell/evaluator/call.rs, core/src/shell/exec/dispatch.rs, core/src/path/walk.rs, core/src/path/walk/, core/src/shell/runtime/state/checks.rs, core/src/shell/exec/redirect.rs, core/src/shell/exec/redirect/stage.rs, core/src/shell/exec/command/detach.rs, core/src/shell/exec/pipeline/collect.rs, core/src/shell/exec/redirect/scope.rs, core/src/shell/exec/command.rs, core/src/shell/exec/command/stdio.rs, core/src/shell/runtime/state/mod.rs, core/src/shell/runtime/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, core/src/path/tree/walk.rs, clippy.toml, lint/site.rs, core/tests/sites.rs]
 ---
@@ -372,7 +372,7 @@ for what clippy cannot state.**
 - **A program's own files need no syscall sites.** What a program keeps for itself
   and what the user writes at the places it chooses go through `ral_core::own`,
   whose every syscall is a walk primitive. `core/src/own.rs` holds only three
-  authority-mint sites, `Silent::{OwnRead, OwnWrite, OwnWriteDir}`; every
+  authority-mint sites, `own/site.rs`'s `Silent::{Read, Write, WriteDir}`; every
   `std::fs` ban points there, and the env bans point at
   `ral_core::host::{var, var_os, vars_os}`. What the user names to it
   (`read_named`, `open_named`, `kind_named`, `create_named`) takes any path, so it
@@ -385,8 +385,10 @@ for what clippy cannot state.**
   method, `site!(Silent::WhichStat, &candidate => is_file())`. The ban names
   the call; the site names the place.
   - *The first argument is a variant, and the enums are the manifest.* Each
-    crate that has sites defines the enums it uses, `Surface` and `Silent`, in
-    its `site.rs`, which `include!`s the one macro file. `Surface` lists the
+    crate that has sites includes the shared macro vocabulary in its `site.rs`.
+    Enums belong to their domains: core's `path`, `host`, `own`, `process` and
+    `sync` each declare their own in a local `site.rs`; cross-domain sites
+    remain in `core/src/site.rs`. `Surface` lists the
     sites that raise a card — the exec site that fuses an exec observation into
     the launch, and the open, staging and publish steps of the walk
     (`path/walk/`); `Silent` lists those that raise none — canonicalisation,
@@ -394,7 +396,7 @@ for what clippy cannot state.**
     (`grep-files` raises its one card above it), capability load, sandbox
     respawn/exec, prelude bake, exarch/ral infrastructure. A variant's doc says what the place is and why it is
     exempt, so silence is a written decision, not an omission. The enums are
-    crate-private, derive `Clone, Copy` alone and carry no list of themselves,
+    crate-private or domain-private, derive `Clone, Copy` alone and carry no list of themselves,
     so `dead_code` reports a variant no site uses.
   - *One exemption covers one call.* The receiver and every argument are
     evaluated outside it, so a banned call nested in an argument still fires,

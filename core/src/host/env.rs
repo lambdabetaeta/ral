@@ -2,6 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+pub(crate) mod test_support;
+
 /// Persistent string→string map of env-var overrides, cheap to clone.
 ///
 /// `Serialize` / `Deserialize` preserve the overlay across seed IPC boundaries.
@@ -103,7 +107,7 @@ where
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use crate::test_env::{with_var, with_vars_cleared};
+    use crate::host::env::test_support::{with_var, with_vars_cleared};
     use std::collections::BTreeMap;
 
     #[test]

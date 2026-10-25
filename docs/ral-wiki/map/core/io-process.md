@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_commit: a2aba680
 generated_at_date: 2026-10-25
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
@@ -18,6 +18,10 @@ Windows process creation immediately owns both returned handles as
 The child keeps the process handle, and the spawning thread releases the thread handle.
 
 ## IO — `core/src/io/`
+
+`io/frame.rs` owns length-prefixed JSON framing for seeds and protocol
+channels ([[map/core/transport|transport]]). Process syscall-site declarations
+live in `process/site.rs`, beside the launch, wait and jail operations they name.
 
 `io/state.rs` holds `Io`, the per-`Shell` bundle (stdin / stdout / stderr /
 interactive / terminal / stage), where `stdout` is wherever the running

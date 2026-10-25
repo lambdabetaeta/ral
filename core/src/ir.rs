@@ -16,9 +16,9 @@ pub use pattern::{MapPatternEntry, Pattern};
 pub use redirect::{Redirect, Redirects, StderrTarget, StdinSource, WriteMode};
 
 use crate::data::Finite;
+use crate::data::Str;
 use crate::path::tilde::TildePath;
 use crate::source::Spanned;
-use crate::text::Str;
 
 // ── Values ──────────────────────────────────────────────────────────────
 use serde::{Deserialize, Serialize};

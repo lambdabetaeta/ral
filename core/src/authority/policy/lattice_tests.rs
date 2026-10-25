@@ -123,7 +123,7 @@ fn runs(rules: &ExecRules, access: &Trace) -> Evidence {
 }
 
 #[cfg(unix)]
-use crate::test_env::{with_var, with_vars_cleared};
+use crate::host::env::test_support::{with_var, with_vars_cleared};
 
 /// Clears the `XDG_*_HOME` overrides so `xdg-*` places resolve to the
 /// home-joined defaults, under the synthetic home the escape guard admits.
@@ -610,7 +610,7 @@ fn decode_errors_when_there_is_no_home() {
         "fs",
         map(vec![("read", Value::list(vec![tagged("home", "x")]))]),
     )]);
-    crate::test_env::with_vars_cleared(&crate::host::HOME_VARS, || {
+    crate::host::env::test_support::with_vars_cleared(&crate::host::HOME_VARS, || {
         for ctx in [test_ctx(""), no_home_ctx()] {
             let err = break_msg(decode_capability_map(&v, "test", &ctx).unwrap_err());
             assert!(err.contains("HOME"), "got {err}");

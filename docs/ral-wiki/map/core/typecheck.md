@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_commit: a2aba680
 generated_at_date: 2026-10-25
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
@@ -38,7 +38,8 @@ Entry points (`typecheck.rs`):
   `Binding`, and back into the next run's `TyEnv`: neither seeding nor a
   lookup copies one. Builtins are shell-scoped, so the checker
   types against exactly the surface the booted shell dispatches
-  ([[map/core/builtins|builtins]]). `seed_env` is the one seeding routine, and
+  ([[map/core/builtins|builtins]]). Filesystem query types come from
+  `fact::{DirEntry, FileInfo}` (`fact/fs.rs`), not builtin bodies. `seed_env` is the one seeding routine, and
   the manifest reaches it as two: a table entry's rule, and a base-frame row's
   scheme, which lands in the env so that `lookup_handler` finds a base frame as
   it finds a handler

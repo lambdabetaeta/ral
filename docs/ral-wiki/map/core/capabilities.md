@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 0d3760a97cb880b5c906cad45a403f6209e06d9a
+generated_at_commit: a2aba680
 generated_at_date: 2026-10-25
-covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
+covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
 
 # Map: core / capabilities & sandbox
@@ -429,8 +429,8 @@ The files a program touches on its own account, outside any shell, are
   bans them, and each caller is a typed site that says why the name is the
   user's: a CLI argument, a TUI command, the install tree.
 
-`own.rs` holds three authority-mint sites, `Silent::{OwnRead, OwnWrite,
-OwnWriteDir}`, for clippy-banned `Ungoverned` methods, but no syscall sites:
+`own/site.rs` holds three authority-mint sites, `Silent::{Read, Write,
+WriteDir}`, for clippy-banned `Ungoverned` methods, but no syscall sites:
 each syscall it needs is a walk primitive
 (`walk_dir_made`, `Located::{remove, rename, open_data}`, and `Visibility`'s
 `Public`, `Private` and `Secret`). The config home holds only what the user
@@ -792,11 +792,13 @@ image that raises a card (`Launch::new`, `Surface::ProcessLaunch`) and a
 `Silent` one for infrastructure (the self re-exec, the
 pinned binaries' exec (`Pinned::command`), the `ps` denial sampler, the
 boot-time binary pin); test code
-carries one blanket per module. The enums are the list: `core/src/site.rs`, and
-`core/src/path/site.rs` for the path module's own, each variant documenting why
-its place is exempt. `Ungoverned::{read, read_dir, region, write, write_dir}`
+carries one blanket per module. The enums are the list: `core/src/site.rs`
+for cross-domain sites, and domain-local `site.rs` declarations in `path`,
+`host`, `own`, `process` and `sync`, each variant documenting why its place is
+exempt. `Ungoverned::{read, read_dir, region, write, write_dir}`
 are also clippy-banned, so each authority mint is a documented typed site.
-`core/src/own.rs` holds three (`OwnRead`, `OwnWrite`, `OwnWriteDir`)
+`core/src/own/site.rs` declares the three own-file authority mints
+(`Silent::{Read, Write, WriteDir}`), used in `own.rs`,
 but no syscall sites, since every syscall it needs is a walk primitive
 ([[decisions/261022_own-files|own-files]]). The site
 shapes and their rail rendering live in [[map/exarch/io-surface|io-surface]]; here

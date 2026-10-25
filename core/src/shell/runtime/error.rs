@@ -1,8 +1,9 @@
 //! The runtime error type.
 
+use crate::compile::CompileError;
 use crate::diagnostic::{Label, Rejection, Report, palette};
 use crate::process::{CancelCause, CommandFailure, SpawnFailure, WorkerStop};
-use crate::source::{CallSite, FileId, SourceDb, Span};
+use crate::source::{CallSite, FileId, Source, SourceDb, Span};
 use std::fmt::{self, Write as _};
 
 mod record;
@@ -74,6 +75,16 @@ impl Error {
     /// An error with status 1.
     pub fn new(message: impl Into<String>) -> Self {
         Self::raised(message, 1)
+    }
+
+    /// A loaded file's failure: the plain message for a handler to read, the
+    /// whole rejection for a renderer to draw.
+    pub(crate) fn compile(error: CompileError, source: Source) -> Self {
+        let message = error.to_string();
+        Self {
+            rejection: Some(Box::new(error.reject(source))),
+            ..Self::new(message)
+        }
     }
 
     pub fn raised(message: impl Into<String>, status: i32) -> Self {
@@ -286,7 +297,7 @@ impl std::error::Error for Error {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::source::{Source, SourceFile, SourceOrigin};
+    use crate::source::{SourceFile, SourceOrigin};
     use crate::syntax::parser::{ParseError, ParseErrorKind};
     use std::io::{self, ErrorKind};
 
@@ -308,12 +319,16 @@ mod tests {
             kind: ParseErrorKind::Plain { hint: None },
             incomplete: false,
         };
-        let err = crate::compile::CompileError::Parse(parse)
-            .into_error(Source::from_text(file_origin("plugin.ral"), "let [x"));
+        let err = Error::compile(
+            CompileError::Parse(parse),
+            Source::from_text(file_origin("plugin.ral"), "let [x"),
+        );
         let (db, root) = db_with("main.ral", "load-plugin plugin");
         let out = err.render(&db, Some(root));
         assert!(out.contains("P0001") && out.contains("plugin.ral"), "{out}");
         assert_eq!(err.message, "parse error: expected ]");
+        assert_eq!(err.code(), 1);
+        assert_eq!(err.rejection.as_ref().unwrap().status, 2);
     }
 
     fn runtime(

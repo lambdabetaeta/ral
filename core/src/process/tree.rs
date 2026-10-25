@@ -1,6 +1,7 @@
 //! A sample of the live process table.
 
-use crate::site::{Silent, site};
+use crate::process::site::Silent;
+use crate::site::site;
 use std::collections::{HashMap, HashSet};
 
 /// The live descendants of `root`, `root` itself excluded: one `/bin/ps` sample

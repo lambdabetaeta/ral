@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_commit: a2aba680
 generated_at_date: 2026-10-25
 covers_paths: [core/src/shell/builtins/, core/src/shell/builtins.rs, core/src/uutils.rs]
 ---
@@ -79,6 +79,11 @@ whether a given call may spend it is the live grant stack's question
 exarch declares its own entry over the same body under `exarch-surface`, with
 its own doc, so no host's name enters core's vocabulary. `builtin_surface` is
 `pub` for exactly this — the one core body two hosts each name their own way.
+
+Filesystem query schemas live below the shell: `fact/fs.rs` declares
+`DirEntry` (`list-dir`) and `FileInfo` (`file-info`) and constructs them purely
+from observed metadata. `shell/builtins/fs.rs` owns the queries; the checker
+reads the same records' `Typed` declarations.
 
 Bodies are grouped by concern, one submodule each:
 

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_commit: a2aba680
 generated_at_date: 2026-10-25
 covers_paths: [core/src/lib.rs, core/src/shell.rs, core/src/host.rs, core/src/host/, core/src/fact.rs, core/src/fact/]
 ---
@@ -66,7 +66,7 @@ reduction primitive behind it. A host states policy; core owns resources.
 - `shell::builtins`, `shell::run`, `shell::boot` and `shell::load` own primitives,
   the framed entry (including `shell/run/report.rs`), boot and loading;
   `shell/prelude.ral` is the embedded library.
-- `seed`, `frame`, `role`, `protocol`, `carrier` and `engine` stay at the crate root,
+- `seed`, `role`, `protocol`, `carrier` and `engine` stay at the crate root,
   alongside the other non-shell subjects.
 
 **`authority`, `fact`, `host`, `io`, `own`, `path` and `process` cannot reach
@@ -98,7 +98,10 @@ The crate splits driving a `Shell` from probing the machine it runs on.
   XDG bases (`xdg`, with the account's home as the program's own fallback).
   `host/env.rs` owns the persistent environment overlay, exported as
   `host::{EnvVars, EnvVarsIter}`, shared by shell state, paths and launches.
-  exarch's host snapshot is a formatter over it.
+  Its test-only `host/env/test_support.rs` serialises temporary host-environment
+  mutations. exarch's host snapshot is a formatter over it.
+- `fact/fs.rs` owns the typed `DirEntry` and `FileInfo` query records and their
+  pure construction from metadata; builtins and the checker share these schemas.
 - `fact/observation.rs` owns observation data, including `AuditIo`, the captured
   byte prefixes and totals a command fact consumes; collection belongs to runtime.
 - `own` is the files a program touches on its own account, outside any shell:
@@ -142,7 +145,7 @@ Source text flows down a fixed ladder; each rung is a subsystem page.
 - [[map/core/shell-state|shell-state]] — runtime values and the `Shell` interpreter state
   (`core/src/shell/runtime/`).
 - [[map/core/transport|transport]] — the serde mirror and wire envelope that carry a
-  shell across a re-exec (`core/src/seed.rs`, `seed/table.rs`, `frame.rs`).
+  shell across a process boundary (`core/src/seed.rs`, `seed/table.rs`, `io/frame.rs`).
 - [[map/core/diagnostics|diagnostics]] — source locations and error rendering
   (`core/src/source.rs`, `diagnostic.rs`, `compile.rs`, `io/terminal.rs`, `io/ansi.rs`).
 - [[map/core/prelude|prelude]] — the embedded `prelude.ral` standard library

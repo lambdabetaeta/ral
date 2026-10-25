@@ -1124,9 +1124,11 @@ mod tests {
         let link = home.path().join("link");
         std::os::unix::fs::symlink("/etc", &link).unwrap();
         let home_str = home.path().to_string_lossy().into_owned();
-        let err = crate::test_env::with_var("XDG_DATA_HOME", Some(&link.to_string_lossy()), || {
-            refusal(&xdg(XdgKind::Data, "."), &ctx(&home_str, "/cwd"))
-        });
+        let err = crate::host::env::test_support::with_var(
+            "XDG_DATA_HOME",
+            Some(&link.to_string_lossy()),
+            || refusal(&xdg(XdgKind::Data, "."), &ctx(&home_str, "/cwd")),
+        );
         assert!(err.contains("outside HOME"), "{err}");
         assert!(
             err.contains("/etc"),
@@ -1145,9 +1147,13 @@ mod tests {
         let data = home.path().join("data");
         std::fs::create_dir(&data).unwrap();
         let home_str = home.path().to_string_lossy().into_owned();
-        crate::test_env::with_var("XDG_DATA_HOME", Some(&data.to_string_lossy()), || {
-            frozen(&[xdg(XdgKind::Data, ".")], &ctx(&home_str, "/cwd")).unwrap();
-        });
+        crate::host::env::test_support::with_var(
+            "XDG_DATA_HOME",
+            Some(&data.to_string_lossy()),
+            || {
+                frozen(&[xdg(XdgKind::Data, ".")], &ctx(&home_str, "/cwd")).unwrap();
+            },
+        );
     }
 
     /// The overlay is the environment a freeze reads: its `XDG_CONFIG_HOME`
@@ -1173,7 +1179,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn freeze_accepts_xdg_under_a_drive_root_home() {
-        crate::test_env::with_var("XDG_DATA_HOME", None, || {
+        crate::host::env::test_support::with_var("XDG_DATA_HOME", None, || {
             frozen(&[xdg(XdgKind::Data, ".")], &ctx(r"C:\", r"C:\cwd")).unwrap();
         });
     }
@@ -1192,7 +1198,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn xdg_subpath_cannot_discard_its_base() {
-        crate::test_env::with_var("XDG_CONFIG_HOME", None, || {
+        crate::host::env::test_support::with_var("XDG_CONFIG_HOME", None, || {
             let ctx = ctx("/h", "/cwd");
             let err = refusal(&xdg(XdgKind::Config, "/etc"), &ctx);
             assert!(err.contains("absolute"), "{err}");
@@ -1551,7 +1557,7 @@ mod tests {
     /// fabricates `/.gitconfig`.
     #[test]
     fn freeze_rejects_home_relative_places_without_home() {
-        crate::test_env::with_vars_cleared(&crate::host::HOME_VARS, || {
+        crate::host::env::test_support::with_vars_cleared(&crate::host::HOME_VARS, || {
             for place in [
                 Place::Home(".gitconfig".into()),
                 xdg(XdgKind::Config, "git"),

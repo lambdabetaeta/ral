@@ -7,9 +7,11 @@
 //! them live above (`shell::runtime::error`, `shell::runtime::audit`, the builtins).
 
 mod error;
+mod fs;
 mod observation;
 
 pub use error::{ErrorRecord, Reason};
+pub(crate) use fs::{DirEntry, FileInfo};
 pub use observation::{
     Act, AuditIo, Check, Command, CommandOrigin, Decision, Grep, Observation, Observed, Read,
     Resource, Worker, Write, WriteOutcome,

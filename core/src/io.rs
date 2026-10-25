@@ -6,6 +6,7 @@
 
 pub mod ansi;
 mod edge;
+pub(crate) mod frame;
 mod poll;
 mod regime;
 mod sink;

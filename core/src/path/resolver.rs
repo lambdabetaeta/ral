@@ -263,7 +263,7 @@ mod tests {
     fn resolve_reads_xdg_with_unset_env() {
         // Held for the whole scope: the suite mutates process env in
         // parallel, and this test's answer depends on XDG_DATA_HOME.
-        let _guard = crate::test_env::env_guard();
+        let _guard = crate::host::env::test_support::env_guard();
         let prev = std::env::var_os("XDG_DATA_HOME");
         unsafe { std::env::remove_var("XDG_DATA_HOME") };
         let elsewhere = elsewhere();

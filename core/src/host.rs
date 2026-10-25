@@ -14,14 +14,16 @@
 //! Substituting one would spend the caller's only chance to say something
 //! true, and every caller has a different true thing to say.
 
-mod env;
+pub(crate) mod env;
+mod site;
 pub use env::{EnvVars, EnvVarsIter};
 
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use self::site::Silent;
 use crate::path::{CwdPath, XdgKind, is_absolute, resolve_xdg_in};
-use crate::site::{Silent, site};
+use crate::site::site;
 
 pub(crate) const HOME_VARS: [&str; 2] = ["HOME", "USERPROFILE"];
 pub(crate) const USER_VARS: [&str; 2] = ["USER", "USERNAME"];
@@ -125,7 +127,7 @@ pub fn home_dot(name: &str) -> Option<PathBuf> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use crate::test_env::{with_var, with_vars_cleared};
+    use crate::host::env::test_support::{with_var, with_vars_cleared};
 
     #[test]
     fn the_host_environment_is_read_here_as_text_and_as_the_os_holds_it() {

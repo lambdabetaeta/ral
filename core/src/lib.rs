@@ -22,7 +22,6 @@ pub mod diagnostic;
 pub mod elaborator;
 pub mod engine;
 pub mod fact;
-pub(crate) mod frame;
 pub mod host;
 pub mod invocation;
 pub mod io;
@@ -45,9 +44,6 @@ pub mod sync;
 pub mod syntax;
 #[cfg(feature = "test-util")]
 pub mod test_access;
-#[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "test code")]
-pub(crate) mod test_env;
 #[cfg(any(test, feature = "test-util"))]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 pub mod test_helper;

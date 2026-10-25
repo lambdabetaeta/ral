@@ -2,7 +2,8 @@
 //! `NO_NEW_PRIVS`.  [`super::JailPlan`] decides; this file only carries it out.
 
 use super::{JailCgroup, JailPlan};
-use crate::site::{Silent, site};
+use crate::process::site::Silent;
+use crate::site::site;
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::Path;

@@ -8,9 +8,11 @@ mod byte_encoding;
 mod bytes;
 pub mod datum;
 mod finite;
+mod string;
 
 pub use bytes::Bytes;
 pub use finite::Finite;
+pub use string::Str;
 
 use crate::text::plural;
 use serde::{Deserialize, Serialize};

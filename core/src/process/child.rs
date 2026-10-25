@@ -2,7 +2,8 @@
 
 use super::outcome::WaitOutcome;
 use super::reaper::{Watch, watch};
-use crate::site::{Silent, site};
+use crate::process::site::Silent;
+use crate::site::site;
 
 // ── Child handle ───────────────────────────────────────────────────────────
 //

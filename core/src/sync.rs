@@ -19,7 +19,10 @@
 use std::fmt;
 use std::io;
 
-use crate::site::{Silent, site};
+mod site;
+
+use self::site::Silent;
+use crate::site::site;
 
 /// Lock, recovering the guard if a prior holder panicked.
 ///

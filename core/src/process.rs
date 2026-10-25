@@ -17,6 +17,7 @@ pub(crate) mod limits;
 pub(crate) mod outcome;
 pub(crate) mod reaper;
 pub(crate) mod signal;
+mod site;
 #[cfg(unix)]
 pub(crate) mod slot;
 pub(crate) mod spawn_lock;

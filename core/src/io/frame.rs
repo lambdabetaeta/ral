@@ -244,7 +244,7 @@ mod tests {
 
         let state = OwnDir::for_test("frame-dump").unwrap();
         let base = crate::path::utf8(state.path()).unwrap();
-        let err = crate::test_env::with_var("XDG_STATE_HOME", Some(base), || {
+        let err = crate::host::env::test_support::with_var("XDG_STATE_HOME", Some(base), || {
             let mut framed = Vec::new();
             put(&mut framed, &encode(&"not a number").unwrap()).unwrap();
             let mut reader = std::io::Cursor::new(framed);

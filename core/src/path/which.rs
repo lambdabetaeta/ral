@@ -616,10 +616,10 @@ mod memo_tests {
         let path_value = as_path_value(tmp.path());
 
         // No `forget` between the two: `%PATHEXT%` is in the key itself.
-        let without = crate::test_env::with_var("PATHEXT", Some(".EXE"), || {
+        let without = crate::host::env::test_support::with_var("PATHEXT", Some(".EXE"), || {
             locate("runme", Some(&path_value), None)
         });
-        let with = crate::test_env::with_var("PATHEXT", Some(".BAT"), || {
+        let with = crate::host::env::test_support::with_var("PATHEXT", Some(".BAT"), || {
             locate("runme", Some(&path_value), None)
         });
         assert_eq!(without, None);
@@ -684,7 +684,7 @@ mod windows_tests {
         std::fs::write(tmp.path().join("build.exe"), b"MZ").unwrap();
         let path_value = tmp.path().to_str().unwrap().to_owned();
 
-        crate::test_env::with_var("PATHEXT", Some(".EXE"), || {
+        crate::host::env::test_support::with_var("PATHEXT", Some(".EXE"), || {
             assert_eq!(
                 locate("build.ps1", Some(&path_value), None),
                 None,

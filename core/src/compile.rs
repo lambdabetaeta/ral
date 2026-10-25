@@ -3,7 +3,6 @@
 use crate::diagnostic::Rejection;
 use crate::elaborator::elaborate;
 use crate::ir::{Name, Toplevel};
-use crate::shell::runtime::Error;
 use crate::source::{FileId, Source};
 use crate::syntax::parser::{ParseError, parse_with};
 use crate::typecheck::{ReturnContract, SessionSchemes, TypeError, typecheck};
@@ -42,16 +41,6 @@ impl CompileError {
             source,
             reports,
             status,
-        }
-    }
-
-    /// A loaded file's failure: the plain message for a handler to read, the
-    /// whole rejection for a renderer to draw.
-    pub fn into_error(self, source: Source) -> Error {
-        let message = self.to_string();
-        Error {
-            rejection: Some(Box::new(self.reject(source))),
-            ..Error::new(message)
         }
     }
 }

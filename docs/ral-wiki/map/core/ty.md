@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_commit: a2aba680
 generated_at_date: 2026-10-25
 covers_paths: [core/src/ty.rs, core/src/ty/]
 ---
@@ -38,4 +38,4 @@ sites name it, and nothing in it reads a unifier or a runtime value.
   unifier for delayed protection wrappers ([[map/core/evaluator|evaluator]]).
 
 `Str`, the shared immutable string a `Value::String` holds, lives in
-`core/src/text.rs`.
+`core/src/data/string.rs`, exported as `data::Str`.

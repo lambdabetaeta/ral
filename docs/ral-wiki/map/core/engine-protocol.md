@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_commit: a2aba680
 generated_at_date: 2026-10-25
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/shell/run/report.rs, core/src/seed.rs, core/src/shell/grant/spawn.rs]
 ---
@@ -159,7 +159,7 @@ The probe vocabulary, typed once for both ends.
   a *connected stream socket*, never a statement about address family
   (`vm-manager` hands back `AF_VSOCK`/`AF_HYPERV` sockets through the same
   type).
-- `WireChannel` — length-prefixed JSON framing (`frame.rs`) over one
+- `WireChannel` — length-prefixed JSON framing (`io/frame.rs`) over one
   `WireStream`; `pair()` (test-only: a socketpair on Unix, a loopback accept
   on Windows), `from_stream`, `try_clone`.
 - `poll_readable` (Unix) — wait for a frame or a timeout, by
@@ -344,7 +344,7 @@ The seal a child's `Attach` carries is an `EngineSeed` in bytes —
 
 [[design/engine-protocol|engine-protocol]] (the why — one engine and two
 carriers, the channel table, the laws of an enquiry, liveness and severance),
-[[map/core/transport|transport]] (`frame.rs`'s framing, `Datum`,
+[[map/core/transport|transport]] (`io/frame.rs`'s framing, `Datum`,
 `seal`/`Sealed`), [[map/exarch/agent|exarch / agent]] (the seat, the wire-seat
 spawn that dials the factory), [[map/repl/loop|repl / loop]] (the REPL as an
 identity front-end), [[map/synod|synod]] (`WireTransport::adopt` over a

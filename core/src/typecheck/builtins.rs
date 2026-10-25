@@ -11,9 +11,9 @@
 use super::env::TyEnv;
 use super::generalize::{FreeVars, generalize};
 use super::unify::Unifier;
+use crate::fact::{DirEntry, FileInfo};
 use crate::fact::{ErrorRecord, Io, Observation, Receipt};
 use crate::protocol::probe::WorkerRow;
-use crate::shell::builtins::fs::{DirEntry, FileInfo};
 use crate::ty::{
     CachedFreeVars, CompTy, Grade, GradeVar, Kind, Label, Row, RowVar, Scheme, Ty, TyVar, Typed,
     WeakVars, closed_record, closed_variant,
