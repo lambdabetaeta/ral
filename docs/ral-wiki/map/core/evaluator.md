@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 61c288f
-generated_at_date: 2026-10-21
+generated_at_commit: ce5a629202ebc86335ea55af1625b706d85e2774
+generated_at_date: 2026-10-25
 covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 ---
 
@@ -175,6 +175,19 @@ Internals:
   Σ-free inspection. `expr.rs` holds the primitive
   operators the elaborator's expression desugaring emits (`Negate` / `Not` /
   `Binary`) and value indexing (`Index`).
+- Imported weak occurrences whose contract reaches a thunk or handle carry
+  `Val::Protected`: `val::form` calls `Site::wrap` without admitting (a data
+  binding is admitted once per unit by `readmit`; `Site::protect`, admit then
+  wrap, runs at `Frame::Protect` returns and handle exposure), and
+  `types/protect.rs` recursively wraps thunks, containers and handles without
+  forcing delayed results. Thunk wrappers guard each argument and result;
+  `CompKind::Protect` pushes `Frame::Protect`, whose return checks and wraps the
+  value and whose halt propagates unchanged.
+  Handle views retain payload guards, applied by `builtins/concurrency/eliminate.rs`
+  at `await`, ready `poll`, and `race`, not by consuming a handle at import.
+  Wrapper captures carry schemes rebuilt from the site's authoritative contract,
+  preserving weak identities and the raw computation's grade on re-inference
+  ([[map/core/typecheck|typecheck]], [[map/core/ty|ty]]).
 - `assemble.rs` is the `CompKind::Assemble` rule: `eval_list` splices
   `...spread` elements (cons/snoc-shaped fast paths reuse the spread's
   persistent spine; explicit beats spread, first spread wins), `eval_map`

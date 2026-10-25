@@ -53,6 +53,10 @@ impl<'a> JoinArm<'a> {
     pub(super) fn result_span(&self) -> Option<Span> {
         match self.value {
             Val::Thunk(comp) => Inferencer::result_span(comp.shape()),
+            Val::Protected { value, .. } => match value.as_ref() {
+                Val::Thunk(comp) => Inferencer::result_span(comp.shape()),
+                _ => self.span,
+            },
             _ => self.span,
         }
     }
@@ -114,10 +118,14 @@ impl Inferencer<'_> {
         }
     }
 
-    /// A stdout redirect takes a command's output, so what is left is a value
-    /// producer: `M > f : F^p A`.
-    pub(super) fn discharge(&self, cty: &CompTy) -> CompTy {
-        self.map_producer(cty, |producer| CompTy::pure(producer.ty))
+    /// Redirects scope a ready computation, not a future application.
+    pub(super) fn redirected(&mut self, cty: &CompTy, stdout: bool) -> CompTy {
+        let producer = self.force_return_shape(cty, Reason::RedirectShape);
+        if stdout {
+            CompTy::pure(producer.ty)
+        } else {
+            producer.into()
+        }
     }
 
     /// The bind rule: what a binder's pattern reaches from its RHS's type.  A

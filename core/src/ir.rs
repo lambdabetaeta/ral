@@ -217,6 +217,11 @@ pub enum Val {
     Float(Finite),
     Bool(bool),
     Variable(Name),
+    /// Checker-inserted protection at an instantiation site.
+    Protected {
+        value: Box<Self>,
+        site: Arc<crate::ty::Site>,
+    },
     /// A suspended computation, eliminated by [`CompKind::Force`]: `⟨M,
     /// ρ|occ(M)⟩`.
     Thunk(Arc<ThunkNode>),
@@ -523,7 +528,9 @@ impl Comp {
 impl Mentions for Comp {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
         match &self.item {
-            CompKind::Lam { param: _, body } | CompKind::Capture(body) => body.mentions(out),
+            CompKind::Lam { param: _, body }
+            | CompKind::Capture(body)
+            | CompKind::Protect { body, .. } => body.mentions(out),
             CompKind::Bind {
                 comp,
                 pattern: _,
@@ -623,6 +630,7 @@ impl Mentions for Val {
         match self {
             Self::Unit | Self::String(_) | Self::Int(_) | Self::Float(_) | Self::Bool(_) => {}
             Self::Variable(name) => out.push(name),
+            Self::Protected { value, .. } => value.mentions(out),
             Self::Thunk(node) => out.extend(node.occ().names()),
             Self::List(node) => out.extend(node.occ().names()),
             Self::Record(node) | Self::Map(node) => out.extend(node.occ().names()),
@@ -696,6 +704,11 @@ impl Mentions for Redirects<Val> {
 /// matching on this.  Variant docs use Levy's CBPV notation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CompKind {
+    /// Checker-inserted protection at an instantiation site.
+    Protect {
+        body: Arc<Comp>,
+        site: Arc<crate::ty::Site>,
+    },
     /// force V — run a thunk.
     Force(Val),
     /// λ — evaluates to a closure.

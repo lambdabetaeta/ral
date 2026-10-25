@@ -709,12 +709,6 @@ impl Unifier {
         self.rows.is_weak(v)
     }
 
-    /// Whether a weak variable stands anywhere in `ty`, bound ones included:
-    /// a mismatch with the type a weak variable was fixed to is a mismatch on it.
-    pub(crate) fn reaches_weak(&self, ty: &Ty) -> bool {
-        self.weak_source_in_ty(ty).is_some()
-    }
-
     /// What made the first weak variable in `ty` weak, bound ones included.
     pub(crate) fn weak_source_in_ty(&self, ty: &Ty) -> Option<WeakSource> {
         self.weak_source_in(Term::Ty(ty))

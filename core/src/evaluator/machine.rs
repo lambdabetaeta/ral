@@ -19,6 +19,7 @@ use crate::runtime::command_call::{self, Resolution};
 use crate::runtime::pipeline;
 use crate::runtime::redirect::scope::{RedirectState, WriteFate};
 use crate::source::Span;
+use crate::ty::Site;
 use crate::types::{
     Binding, Break, BroodOwner, CapturePolicy, Closure, Cradle, Env, Error, Escape, FrameHandle,
     HandlerArity, HandlerFrame, Mooring, ScopeOwner, Settled, Shell, Signature, TrailScope, Value,
@@ -84,6 +85,8 @@ enum Frame {
     Guard {
         cleanup: Value,
     },
+    /// Checks and wraps the returned value against the site (`Site::protect`).
+    Protect(Arc<Site>),
     Cleanup {
         outcome: Settled<Value>,
         /// The current scope before the cleanup's shield, restored on pop
@@ -216,7 +219,7 @@ fn run_boundary(
     entry: &crate::types::BuiltinEntry,
     applied: Box<[Value]>,
     argv: Vec<Value>,
-    site: Option<&Arc<crate::ty::Site>>,
+    site: Option<&Arc<Site>>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
@@ -471,6 +474,13 @@ impl Machine {
         shell: &mut Shell,
     ) -> Settled<Focus> {
         Ok(match &comp.item {
+            CompKind::Protect { body, site } => {
+                self.reserve(shell)?.push(Frame::Protect(Arc::clone(site)));
+                Focus::Eval {
+                    comp: Arc::clone(body),
+                    env,
+                }
+            }
             CompKind::Return(val) => Focus::Return(Terminal::Value(form(val, &env, &shell.sig)?)),
 
             CompKind::Assemble(assembly) => {
@@ -831,6 +841,9 @@ impl Machine {
         shell: &mut Shell,
     ) -> Settled<Focus> {
         match frame {
+            Frame::Protect(site) => Ok(Focus::Return(Terminal::Value(
+                site.protect(as_value(t)?, shell)?,
+            ))),
             Frame::To { bind, env } => {
                 let v = as_value(t).map_err(|b| stamp(b, bind.span))?;
                 let CompKind::Bind { pattern, rest, .. } = &bind.item else {
@@ -937,7 +950,7 @@ impl Machine {
                 Err(flushed.err().unwrap_or(s))
             }
 
-            Frame::Apply { .. } => Err(s),
+            Frame::Apply { .. } | Frame::Protect(_) => Err(s),
 
             Frame::Cleanup { prev, .. } => {
                 shell.scope = prev;
@@ -1015,7 +1028,11 @@ impl Frame {
             Self::Grant(at) => shell.context.grants.remove(at, 1),
             Self::Cleanup { prev, .. } => shell.scope = prev,
             Self::Gather { prev, .. } => shell.local.cradle = prev,
-            Self::To { .. } | Self::Apply { .. } | Self::Try { .. } | Self::Guard { .. } => {}
+            Self::To { .. }
+            | Self::Apply { .. }
+            | Self::Try { .. }
+            | Self::Guard { .. }
+            | Self::Protect(_) => {}
         }
     }
 }

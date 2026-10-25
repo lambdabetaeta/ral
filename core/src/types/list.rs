@@ -175,6 +175,7 @@ impl From<Vec<Value>> for List {
 /// Infallible: `form` builds a `Literal` only when ρ binds its every name.
 pub(super) fn inspect<'a>(val: &'a Val, env: &'a Env) -> Cow<'a, Value> {
     match val {
+        Val::Protected { value, site } => Cow::Owned(site.wrap(inspect(value, env).into_owned())),
         Val::Unit => Cow::Owned(Value::Unit),
         Val::Int(n) => Cow::Owned(Value::Int(*n)),
         Val::Float(f) => Cow::Owned(Value::Float(*f)),

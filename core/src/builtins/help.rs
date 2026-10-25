@@ -123,6 +123,7 @@ static LANGUAGE_GUIDES: &[(&str, &str)] = &[(
     "Redirects bind a computation's byte streams.\n\n\
          `< file` reads stdin from a file; `<< text` feeds a string, dropping one newline at its very start. `> file` writes stdout atomically, `>> file` appends, and `>~ file` truncates and streams output directly. `2> file` and `2>~ file` truncate and stream stderr, while `2>> file` appends it. `2>&1` sends stderr wherever stdout goes, whichever side of `> file` it is written.\n\n\
          Each stream takes at most one redirect: `cmd > a > b` and `cmd 2> e 2>&1` are parse errors. There is no general fd plumbing: `1<`, `1>`, `0<`, `0>`, `1>&2`, and descriptors past 2 are refused. `echo 1>file` is refused rather than writing an empty file. Use `warn \"message\"` to write one line to stderr and return unit.\n\n\
+         A redirected stage must be ready to run, not a partial application waiting for arguments; this holds for every redirect, `2>&1` included. `to-json > f` is refused because `to-json` still awaits its argument, while `to-json $value > f` is ready. To redirect a function's eventual result, put the redirect inside a block: `{ |x| f $x > out }`.\n\n\
          Example:\n  sort in.txt > sorted.txt 2> errors.txt\n\n\
          See `explain from-string` and `explain to-string` for reading and writing text values.",
 )];

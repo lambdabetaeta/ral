@@ -171,6 +171,10 @@ impl Annotate<'_> {
                 head: Arc::new(self.comp(head)),
                 args: self.args(args),
             },
+            CompKind::Protect { body, site } => CompKind::Protect {
+                body: Arc::new(self.comp(body)),
+                site: Arc::clone(site),
+            },
             CompKind::Force(value) => CompKind::Force(self.val(value)),
             CompKind::Return(value) => CompKind::Return(self.val(value)),
             CompKind::Assemble(assembly) => CompKind::Assemble(self.assembly(assembly)),
@@ -261,6 +265,35 @@ impl Annotate<'_> {
     /// An `Exec`: its site from the checker, η-expanded when it is an
     /// under-applied boundary.
     fn exec(&mut self, comp: &Comp, e: &Exec) -> CompKind {
+        if let Some(site) = self.ctx.imported_sites.get(&Node::comp(comp)).cloned() {
+            let CommandWord::Name(CommandName::Bare(name)) = &e.head else {
+                unreachable!("a stored binding has a bare name")
+            };
+            let force = Spanned::with_span(
+                comp.span,
+                CompKind::Force(Val::Protected {
+                    value: Box::new(Val::Variable(name.clone())),
+                    site,
+                }),
+            );
+            let args = self.args(&e.args);
+            let call = if args.is_empty() {
+                force.item
+            } else {
+                CompKind::App {
+                    head: Arc::new(force),
+                    args,
+                }
+            };
+            return if e.redirects.is_empty() {
+                call
+            } else {
+                CompKind::Redirect {
+                    body: Arc::new(Spanned::with_span(comp.span, call)),
+                    redirects: e.redirects.map(|v| self.val(v)),
+                }
+            };
+        }
         let mut exec = Exec {
             head: e.head.clone(),
             args: self.args(&e.args),
@@ -294,6 +327,14 @@ impl Annotate<'_> {
             return boundary_block(&name, arity, site, span, self.ctx);
         }
         let rebuilt = self.rebuild_val(val);
+        // Pure data was admitted whole by `readmits`; only delayed parts need a membrane.
+        let rebuilt = match self.ctx.imported_sites.get(&Node::val(val)) {
+            Some(site) if site.has_delayed() => Val::Protected {
+                value: Box::new(rebuilt),
+                site: Arc::clone(site),
+            },
+            _ => rebuilt,
+        };
         match self.ctx.captured_vals.get(&Node::val(val)).copied() {
             Some(arity) => captured_block(rebuilt, arity, span, self.ctx),
             None => rebuilt,
@@ -303,6 +344,10 @@ impl Annotate<'_> {
     /// The structural rebuild of a value.
     fn rebuild_val(&mut self, val: &Val) -> Val {
         match val {
+            Val::Protected { value, site } => Val::Protected {
+                value: Box::new(self.val(value)),
+                site: Arc::clone(site),
+            },
             Val::Thunk(comp) => Val::thunk(Arc::new(self.comp(comp.shape()))),
             Val::List(elems) => Val::list(
                 elems

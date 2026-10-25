@@ -7,7 +7,7 @@ use crate::source::Span;
 use crate::sync::LockExt as _;
 use crate::ty::Kind;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -35,17 +35,17 @@ pub(crate) enum Shape {
     Record(Fields),
     Variant(Fields),
     Thunk(Id),
-    Free { var: u32, kind: Kind },
+    Free { var: u32, kind: Kind, weak: bool },
     Return(GradeShape, Id),
     Fun(Id, Id),
-    FreeComp,
+    FreeComp { weak: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum GradeShape {
     Value,
     Output,
-    Free,
+    Free(u32),
 }
 
 /// A row's labels in first-appearance order, and how it ends.
@@ -58,7 +58,7 @@ pub(crate) struct Fields {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Tail {
     Closed,
-    Open { deep: bool },
+    Open { var: u32, deep: bool, weak: bool },
 }
 
 /// What a `comparable` variable was fixed to: the one run-time operation that
@@ -144,7 +144,38 @@ impl<'de> Deserialize<'de> for Fixings {
 /// a value against it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Site {
-    pub(crate) nodes: Vec<Node>,
+    pub(crate) nodes: std::sync::Arc<[Node]>,
     pub(crate) root: Id,
     pub(crate) unit: UnitId,
+}
+
+impl Site {
+    /// Whether the contract reaches a thunk or a handle: the only places a
+    /// membrane has an obligation to install.
+    pub(crate) fn has_delayed(&self) -> bool {
+        let mut seen = HashSet::new();
+        let mut todo = vec![self.root];
+        while let Some(id) = todo.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            match &self.nodes[id].shape {
+                Shape::Thunk(_) | Shape::Handle(..) => return true,
+                Shape::List(a) | Shape::Map(a) | Shape::Return(_, a) => todo.push(*a),
+                Shape::Fun(a, b) => todo.extend([*a, *b]),
+                Shape::Record(fields) | Shape::Variant(fields) => {
+                    todo.extend(fields.labels.iter().map(|&(_, id)| id));
+                }
+                Shape::Unit
+                | Shape::Bytes
+                | Shape::Bool
+                | Shape::Int
+                | Shape::Float
+                | Shape::String
+                | Shape::Free { .. }
+                | Shape::FreeComp { .. } => {}
+            }
+        }
+        false
+    }
 }

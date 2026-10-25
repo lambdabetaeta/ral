@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-10-06
+generated_at_commit: ce5a629202ebc86335ea55af1625b706d85e2774
+generated_at_date: 2026-10-25
 covers_paths: [core/src/ty.rs, core/src/ty/]
 ---
 
@@ -22,14 +22,20 @@ sites name it, and nothing in it reads a unifier or a runtime value.
 - `ty/fmt.rs`: `Display` for `Ty` and `Scheme`; one `FmtCtx` names a shared
   variable the same in every type a diagnostic prints.
 - `ty/site.rs`: the data of a `Site`, a boundary's checked type frozen as a graph
-  of nodes (`Node`, `Shape`, `Fields`, `Tail`) naming its unit by a `UnitId`
+  of shared nodes (`Arc<[Node]>`, `Shape`, `Fields`, `Tail`) naming its unit by a `UnitId`
   — an OS nonce drawn once per process and a count, so unique in every process
-  that meets it, a baked prelude unit's included. `Fixings` is not in the
-  code: it is the session's table of what each unit's `comparable` variables
-  were fixed to, keyed by `(UnitId, var)`, which a session's threads share and
+  that meets it, a baked prelude unit's included. `Fixings` is the session's
+  table of what each unit's weak `comparable` variables were fixed to, keyed by
+  `(UnitId, var)`, which a session's threads share and
   a new session snapshots ([[map/core/shell-state|shell-state]]). The checker
   builds a `Site` (`typecheck/site.rs`), one fresh `UnitId` per unit, and the
   runtime walks it against the running session's table (`types/admit.rs`).
+  Free type/computation nodes and row tails retain weakness; open row tails and
+  free grades retain canonical ids. Projections share the graph and unit while
+  selecting another root. Reinstantiation freshens each identity once, preserving
+  sharing, cycles, kinds and grades; quantified `comparable` parameters do not
+  acquire session fixings. `Site::scheme` rebuilds a closed contract in a scratch
+  unifier for delayed protection wrappers ([[map/core/evaluator|evaluator]]).
 
 `Str`, the shared immutable string a `Value::String` holds, lives in
 `core/src/text.rs`.

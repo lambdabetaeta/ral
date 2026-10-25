@@ -42,6 +42,7 @@ pub(crate) use handle::{CompletionPermit, Snapshot, pins_live_work};
 
 // A boundary's checked type, and what a door admits against it.
 mod admit;
+mod protect;
 pub use admit::Mismatch;
 pub(crate) use admit::pointer_token;
 

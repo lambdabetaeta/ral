@@ -39,6 +39,7 @@ pub(crate) fn interpolate_piece(v: &Value) -> Result<String, Error> {
 /// ([`literal_names_bound`]), and is built eagerly otherwise.
 pub(crate) fn form(val: &Val, env: &Env, sig: &Signature) -> Result<Value, Error> {
     match val {
+        Val::Protected { value, site } => Ok(site.wrap(form(value, env, sig)?)),
         Val::Unit => Ok(Value::Unit),
         Val::Int(n) => Ok(Value::Int(*n)),
         Val::Float(f) => Ok(Value::Float(*f)),
@@ -126,6 +127,7 @@ pub(crate) fn form_options(opts: &OptionsV, env: &Env, sig: &Signature) -> Resul
 /// again, Σ included.
 fn literal_names_bound(val: &Val, env: &Env) -> bool {
     match val {
+        Val::Protected { value, .. } => literal_names_bound(value, env),
         Val::Unit | Val::Int(_) | Val::Float(_) | Val::Bool(_) | Val::String(_) | Val::Thunk(_) => {
             true
         }

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 6bfbb097
-generated_at_date: 2026-10-06
+generated_at_commit: ce5a629202ebc86335ea55af1625b706d85e2774
+generated_at_date: 2026-10-25
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
 
@@ -66,7 +66,7 @@ Entry points (`typecheck.rs`):
 The sorts split with CBPV:
 
 - value types `Ty` describe data;
-- computation types `CompTy` are `Return(Ty)`, `Fun(Ty, CompTy)`, and `Var`;
+- computation types `CompTy` are `Return(Grade, Ty)`, `Fun(Ty, CompTy)`, and `Var`;
 - records are open-row-polymorphic ([[design/row-types|row-types]]: `Row` /
   `RowVar`).
 
@@ -79,16 +79,19 @@ Internals:
 - `grade.rs` — the grade rules, as one `impl Inferencer`: the bind rule
   (`rhs_bound_ty`), a block meeting a demand of the other producer kind
   (`adapt` to an `Adaptation`, `coerce`), the join of a form's arms
-  (`join_arms`; `join_target` takes the greatest `Verdict`), and a stdout
-  redirect's `discharge`. `spine` reads a `CompTy` as a `Spine` (`ty.rs`, [[map/core/ty|ty]]:
+  (`join_arms`; `join_target` takes the greatest `Verdict`), and `redirected`,
+  which requires outer `Return` shape for every nonempty redirect list and
+  discharges stdout without constraining the input grade. `map_producer`
+  rebuilds a producer past its parameters for the handler-arm rule, not redirects. `spine` reads a `CompTy` as a `Spine` (`ty.rs`, [[map/core/ty|ty]]:
   parameters and tail; `producer()` the `Producer` past them, `over` the
   same parameters on another tail; `CompTy::arrows` is the constructor);
 - `index.rs` — the deferred reads `Lbl` (a bare label) and `Idx` (a computed key):
   owns `InferCtx::pending_labels` and `pending_indexes` and their settlement.
   A pending label is closed as a record at the boundary that owns it; an `Idx`'s
   variables are weak, nothing settles it at a generalisation, and
-  `settle_pending_indexes` drains both at the unit's end and refuses what is left
-  (`IndexContainerUnknown`, T0075);
+  `InferCtx::finish_indexes` propagates labels and indexes to a fixpoint,
+  defaults unresolved labels to records, then propagates again before refusing
+  remaining indexes (`IndexContainerUnknown`, T0075);
 - `unify.rs` — `Unifier`; binding refuses a cycle that crosses no data (`CyclicType`, T0073)
   and a head its variable's kind does not admit (`KindMismatch`, T0074);
   the weak set (`mark_weak`, inherited through `unite`), which `generalize.rs` subtracts,
@@ -116,13 +119,22 @@ Internals:
   reason prose or deliberately lists it as hintless: the constraint's other
   side is fresh, or the error kind is already its own diagnosis;
 - `annotate.rs` — the write-back pass (`annotate`) that rebuilds the checked
-  IR with schemes, boundary sites, stage types, and `Capture`/`Decode` nodes;
+  IR with schemes, boundary sites, stage types, `Capture`/`Decode` nodes,
+  and `Val::Protected` membranes for imported weak values, attached per
+  occurrence only where its contract reaches a thunk or handle;
   its side tables in `InferCtx` are keyed by `Node`, a node address tagged
   `Comp`, `Val` or `Group`;
-- `generalize.rs`;
+- `generalize.rs` — quantification, capture-avoiding instantiation and weak
+  reseeding over the whole scheme graph; settlement substitutes only live weak
+  residuals, leaving local ∀/μ names opaque. Closure is syntactic over the body
+  and equations. Cached residual ids are seeds resolved through the current
+  unifier, not assumed to remain unbound canonical roots
+  ([[invariants/schemes-leave-closed|schemes-leave-closed]]);
 - `env.rs` — `TyEnv`, `InferCtx`;
-- `site.rs` — `impl Site { snapshot, instantiate, exports }`: freezing the solved
-  type at a boundary, and the scratch unifier the module check uses for exports;
+- `site.rs` — `impl Site { snapshot, instantiate, scheme, exports }`: freezing
+  solved boundary and imported-weak occurrence types, preserving sharing and
+  weakness on reinstantiation, and rebuilding authoritative closed contracts
+  for protection-node re-inference and module exports;
   type display is `Display` for `Ty` and `Scheme` (`core/src/ty/fmt.rs`);
 - `builtins.rs` — Σ: `Decl`, a manifest row minus its body (name, `Convention`,
   doc, type rule, diagnostic, `boundary`, and one lazily computed `Spine` of arity
@@ -163,11 +175,12 @@ Internals:
   unifier ([[decisions/260930_a-table-never-enters-the-unifier|a-table-never-enters-the-unifier]]).
 
 `infer.rs`'s `infer_case` is left whole by decision
-([[decisions/260530_infer-case-stays-whole|infer-case-stays-whole]]). Its one
-companion, `infer_case_arm`, is a premise of the rule rather than a surface
-helper: an arm is syntax, so typing one — bind its pattern, infer its body,
-force its payload to agree with the scrutinee at that label — is a judgment
-that stands alone
+([[decisions/260530_infer-case-stays-whole|infer-case-stays-whole]]). It binds
+each arm's payload to the scrutinee's known payload at that label (a fresh type
+if unknown), so known payloads constrain arm parameters before bodies are
+inferred, including arms that forward a thunk payload. `join_arms` then infers
+the bodies and joins their grades, and the scrutinee row is unified with
+exactly the arms' label set. An arm is syntax, so that row is always closed
 ([[decisions/260811_case-is-syntax-try-is-not|case-is-syntax-try-is-not]]).
 
 ## The argv rule, and the exec gate
@@ -241,8 +254,12 @@ else — a value in hand, or a literal whose arrows are not all written, `map {
 !$f } $xs` — goes in `InferCtx::captured_vals` with its arity and is η-wrapped
 whole, since a `Capture` frame between a lambda and its pending argument would
 drop the lambda. `apply_args_capped` applies the two to a block argument, and
-`join_arms` to each arm against the join. `discharge` turns a redirected
-stdout's grade to `Value`.
+`join_arms` to each arm against the join. Both fused `Exec` redirects and
+`CompKind::Redirect` check their operands. For every nonempty list, `redirected`
+uses `force_return_shape` under `Reason::RedirectShape`: a partial application
+is refused with advice to supply its remaining arguments. An unresolved
+computation opens to a fresh input grade; stdout returns `Value` at the same
+payload type without binding that grade, while other redirects preserve it.
 
 `annotate.rs` is a plain structural rebuild, the methods of `Annotate { ctx }`.
 It wraps each recorded node through the one constructor `captured_string`,

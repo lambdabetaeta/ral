@@ -109,9 +109,9 @@ fn seed_env(
             Some(scheme) => reseed_weak(u, scheme),
             None => Arc::new(Scheme::mono(u.fresh_ty())),
         };
-        // A block's results are admitted by the sites in its own IR; a data
-        // binding's value is here, to be admitted against this unit's uses.
-        if !scheme.weak.is_empty() && !matches!(scheme.ty, Ty::Thunk(_)) {
+        // Any binding with weak residuals is re-admitted against its first use
+        // here; delayed parts are guarded per occurrence (`InferCtx::imported_sites`).
+        if !scheme.weak.is_empty() {
             residuals.push((name.clone(), Arc::clone(&scheme)));
         }
         env.bind(name, scheme);
@@ -156,8 +156,7 @@ fn close_thunk_scheme(
     invariant: &'static str,
 ) -> Scheme {
     let thunk_ty = Ty::Thunk(Box::new(cty));
-    inferencer.ctx.settle_pending_indexes();
-    inferencer.ctx.settle_pending_labels(None);
+    inferencer.ctx.finish_indexes();
     let scheme = generalize(
         &inferencer.ctx.unifier,
         &TyEnv::new(),
@@ -165,7 +164,7 @@ fn close_thunk_scheme(
         &thunk_ty,
     );
     let scheme = Arc::unwrap_or_clone(settle_weak(&inferencer.ctx.unifier, Arc::new(scheme)));
-    self::generalize::debug_assert_scheme_closed(&inferencer.ctx.unifier, &scheme, invariant);
+    self::generalize::debug_assert_scheme_closed(&scheme, invariant);
     scheme
 }
 
@@ -198,8 +197,7 @@ pub fn typecheck(
     let (mut ctx, mut env) = seeded_session(schemes);
 
     let (mut phrase_schemes, tail) = infer::infer_toplevel(&mut ctx, &mut env, phrases);
-    ctx.settle_pending_indexes();
-    ctx.settle_pending_labels(None);
+    ctx.finish_indexes();
     contract::drain_nested(&mut ctx);
     if ctx.errors.is_empty()
         && let Some(table) = contract

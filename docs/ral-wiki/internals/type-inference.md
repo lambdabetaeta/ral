@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 30a5e059
-verified_at_date: 2026-10-24
-anchors: [Inferencer, Idx, settle_index, settle_pending_indexes, Unifier, Kind, Kinded, admit, unite_tys, settle_by_kind, Pairs, bind_ty, bind_comp_ty, unify_row, infer_assembly_record, CachedFreeVars, WeakVars, mark_weak, reseed_weak, settle_weak, infer_record_val, infer_map_val, infer_label_read, settle_label, settle_pending_labels, generalize, instantiate, annotate, SessionSchemes, extract_return, force_return_shape, stage_root_stdin_feed, InferCtx, head_class, arm, join_arms, adapt, coerce, unify_arm, stage_writes]
+verified_at_commit: ce5a629202ebc86335ea55af1625b706d85e2774
+verified_at_date: 2026-10-25
+anchors: [Inferencer, Idx, settle_index, finish_indexes, Unifier, Kind, Kinded, admit, unite_tys, settle_by_kind, Pairs, bind_ty, bind_comp_ty, unify_row, infer_assembly_record, CachedFreeVars, WeakVars, mark_weak, reseed_weak, settle_weak, infer_record_val, infer_map_val, infer_label_read, settle_label, settle_pending_labels, generalize, instantiate, annotate, SessionSchemes, extract_return, force_return_shape, stage_root_stdin_feed, InferCtx, head_class, arm, join_arms, adapt, coerce, unify_arm, stage_writes]
 ---
 
 # Type inference: the algorithm
@@ -105,8 +105,10 @@ The three operands are made weak when the `Idx` is made, whether or not it
 settles, and settlement never lifts the mark, so which variables a `let`
 quantifies is a fact about the syntax of its body and no verdict depends on the
 order of independent statements. Nothing settles at a generalisation;
-`settle_pending_indexes` runs at the unit's end, drains labels and indexes
-together to a fixpoint, and refuses whatever index is still pending
+`InferCtx::finish_indexes` runs at the unit's end: it first propagates labels
+and indexes together to a fixpoint without defaulting, then defaults unresolved
+labels to records, then propagates both again. Only then does it refuse an
+index still pending
 (`IndexContainerUnknown`, T0075, with a second caret on the binding that holds
 it, `InferCtx.holder`).
 
@@ -135,8 +137,13 @@ the annotate walk ([[decisions/260930_graded-f|graded-f]]).
   block's body address in `captured` when the block writes every lambda of
   that arity, else the block itself in `InferCtx.captured_vals` with its
   arity, as a value in hand.
-- `discharge` applies to the `Exec` and `Redirect` rules when stdout is
-  redirected: `Return(_, a)` becomes `Return(Value, a)`, through `Fun` results.
+- Both `Exec` and `Redirect` check redirect operands. Every nonempty redirect
+  list calls `redirected`, which forces the **outer** computation to `Return`
+  under `Reason::RedirectShape`; a partial application is refused with advice
+  to supply the remaining arguments. An unresolved computation opens with a
+  fresh grade. Stdout returns `Return(Value, a)` without binding the original
+  grade; stdin, stderr and `2>&1` preserve it. `map_producer` still rebuilds
+  producers past parameters for handler arms, never for redirects.
 - `annotate` is a structural rebuild (the methods of `Annotate { ctx }`) that
   wraps each recorded node in `cap M to d. decode d` (`CompKind::Capture` and
   `CompKind::Decode`, both checker-inserted); a value in hand becomes a lambda
@@ -154,8 +161,10 @@ parameter types inward as before), resolves each `ρᵢ`, and decides the target
 `F^p τ` if some arm is `F^p A` with `A` not `Unit` or unresolved, capturing every
 `Output` arm; else `F^w Unit` if some arm is `Output`, upcasting the `F^p Unit`
 arms and binding grade variables to `w`; else unify. `infer_case` and
-`infer_try` route through it. A disagreement is `T0010` or `T0020` between two
-values, and `T0011` between shapes or grades; its hint is derived from the two
+`infer_try` route through it. A `case` supplies known scrutinee payload types
+before inferring its arms and joining their grades, so forwarding a command
+payload is already known to produce output when the join is chosen. A disagreement
+is `T0010` or `T0020` between two values, and `T0011` between shapes or grades; its hint is derived from the two
 types (one arm is a command, whose value is its output). An `else`-less `if`
 wraps its lone arm as `{ body; () }`. The join decides in program order with no
 pending constraint, so `{ |t| if c { echo hi } else { !$t }; let w = !$t; $w }`
@@ -285,10 +294,15 @@ There is no value restriction: a `let` of anything generalises
 A computed index marks its three operands, and so does a boundary call its result
 ([[decisions/260930_a-boundary-is-checked-against-its-type|a-boundary-is-checked-against-its-type]]);
 once the unit is solved, `annotate` freezes each recorded result as a `Site` on
-the call.
-`settle_weak` closes a scheme at its unit's end: each weak variable it mentions
-is resolved as far as the unit fixed it, and a cycle through one is snapshotted
-like any quantified cycle (`cyclic_bindings`), so `μα. Map α` survives the unit.
+the call. A site's graph preserves type and computation roots, and canonical
+free row-tail and grade ids. Reinstantiation freshens each identity once across
+the whole graph, so checking module exports in one scratch unifier keeps the
+same sharing constraints as direct unification.
+`settle_weak` closes a scheme at its unit's end: simultaneous substitution
+updates weak references throughout the body and all μ-equations. Only these
+substitution images belong to the live unifier; local ∀/μ names stay opaque.
+Cycles reached through the live images are snapshotted (`cyclic_bindings`), so
+`μα. Map α` survives the unit without resolving a local binder as a live slot.
 
 **A type variable carries a kind** (`kind.rs`): a set of admissible heads and a
 deep bit, and a row variable a deep bit alone. The unconstrained `any` has every
@@ -318,8 +332,9 @@ A bare-label read is settled by a head, or by a kind that admits `Map` and not
 read naming what else the variable was used as (`settle_by_kind`).
 
 **The quantifier is the prefix, not a binder.** A `Scheme` is the body's
-ordinary `Ty` under a ∀-prefix of three `Vec`s of variable ids — value
-(`ty_vars`), computation (`comp_ty_vars`) and row (`row_vars`) sorts, each a
+ordinary `Ty` under a ∀-prefix of four `Vec`s of variable ids — value
+(`ty_vars`), computation (`comp_ty_vars`), row (`row_vars`) and grade
+(`grade_vars`) sorts, each a
 `u32`-tagged unifier root (`scheme.rs`). There is
 no binder node and no de Bruijn index: a variable is
 **bound iff it is listed**.
@@ -334,11 +349,14 @@ no binder node and no de Bruijn index: a variable is
   so two uses of one recursive scheme never share a cycle root.
 - Because the prefix is nominal-by-listing, an open scheme leaving its minting
   unifier aliases another's variables: see [[invariants/schemes-leave-closed|schemes-leave-closed]].
-- *The residual cache is checked across every sort.* `CachedFreeVars` holds
-  the free variables a scheme did **not** quantify, and `env_free_vars` trusts
-  it rather than re-walking. That holds by construction: residuals come from
-  monomorphic environment bindings that outlive every scheme mentioning them, so
-  no later step moves or binds one, and a standing `debug_assert` checks it.
+- *The residual cache stores seeds, not stable roots.* `CachedFreeVars` holds
+  ids a scheme did **not** quantify. `env_free_vars` resolves each through the
+  current unifier, following unions and structural bindings across all four
+  sorts rather than assuming an id is still an unbound canonical root.
+- *Closure is syntactic over the whole graph.* Every variable in the body and
+  every μ-equation must be quantified, a μ-root or a listed weak residual;
+  resolving against a live unifier could hide an escaping id as ground.
+
 **The verdict survives into the next run.** The checker is a transformation:
 on success `annotate` writes each top-level name-bind's generalised `Scheme` onto
 its `Bind` node — and each `Pipeline`'s per-stage value
@@ -355,8 +373,28 @@ across units rather than quantified: the scheme records it (`Scheme.weak`), a
 unit settles its `Define` schemes before they are stored (`settle_weak`, so a
 residual the unit fixed is stored as what it was fixed to), and `seed_env`
 re-seeds each residual of a stored scheme as a fresh weak variable of the next
-unit's unifier (`reseed_weak`). The name is then used at one type in the next
+unit's unifier (`reseed_weak`). Reseeding simultaneously alpha-renames every
+local ∀/μ binder, including row and grade binders, to names disjoint from the
+fresh weak residuals; otherwise a new residual could be captured by an old
+binder with the same numeric id. The name is then used at one type in the next
 unit, as it was in the defining one, and no foreign id is ever read.
+
+An imported weak value's membrane is attached per occurrence as
+`Val::Protected`, using that occurrence's solved type, only when that type
+reaches a thunk or handle (`Site::has_delayed`). Its shared `Arc` site
+graph preserves canonical row/grade identities and freezes whether each
+remaining variable is weak or quantified. The membrane admits nothing: a stored
+data binding is admitted once per name, before the unit runs, against its first
+use's type (`readmits`), which covers every occurrence since weak variables are
+shared across the unit. Recursive wrapping carries delayed obligations through
+containers, thunk arguments/results (`CompKind::Protect`), and handle views at
+`await`, ready `poll`, and `race`, without forcing or consuming them at import.
+Only weak `comparable` identities acquire session fixings; a quantified
+parameter remains fresh on every call. Generated wrappers capture the raw value
+with a closed scheme rebuilt from the contract in a scratch unifier.
+Re-inference also checks protection nodes against their contracts,
+preserving weak results and the raw computation's grade when a host rebinds a
+returned wrapper.
 
 See also [[design/types|types]]; map [[map/core/typecheck|typecheck]]. Judgments:
 `docs/SPEC.md` §17.3.

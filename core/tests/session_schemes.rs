@@ -463,6 +463,160 @@ fn refusal(result: Settled<Value>) -> String {
     }
 }
 
+const WEAK_DECODER: &str = "let decode = { |s| to-string $s | from-json }";
+
+#[test]
+fn imported_weak_functions_protect_every_higher_order_route() {
+    let cases = [
+        ("", "let n = decode '\"bad\"'; let result = $[$n + 1]"),
+        (
+            "let apply = { |f x| f $x }",
+            "let n = apply $decode '\"bad\"'; let result = $[$n + 1]",
+        ),
+        (
+            "let get = { return $decode }",
+            "let f = get; let n = f '\"bad\"'; let result = $[$n + 1]",
+        ),
+        (
+            "let box = [f: $decode]",
+            "let n = !{$box[f] '\"bad\"'}; let result = $[$n + 1]",
+        ),
+        (
+            "let decode2 = { |ignored s| decode $s }",
+            "let partial = decode2 () ; let n = partial '\"bad\"'; let result = $[$n + 1]",
+        ),
+    ];
+    for (setup, later) in cases {
+        let mut sh = shell();
+        run(&mut sh, &format!("{WEAK_DECODER}\n{setup}")).unwrap();
+        assert!(check_errors(&sh, later).is_empty(), "{later}");
+        let message = refusal(run(&mut sh, later));
+        assert!(message.contains("imported value"), "{later}: {message}");
+        assert!(message.contains("text"), "{message}");
+    }
+}
+
+#[test]
+fn imported_weak_occurrences_keep_their_own_quantified_instances() {
+    let mut sh = shell();
+    run(
+        &mut sh,
+        "let f = { |x| let d = !{to-string '\"ok\"' | from-json}; return [item: $x, data: $d] }",
+    )
+    .unwrap();
+    run(
+        &mut sh,
+        "let a = f true; let b = f 1; let n = $[$b[item] + 1]",
+    )
+    .unwrap();
+}
+
+#[test]
+fn imported_comparable_parameters_stay_polymorphic_inside_closures() {
+    let mut sh = shell();
+    run(
+        &mut sh,
+        "let f = { |x| let d = !{to-string '0' | from-json}; return [less: $[$x < $x], data: $d] }",
+    )
+    .unwrap();
+    run(
+        &mut sh,
+        "let g = { |x| f $x }; let a = g 1; let b = g hello",
+    )
+    .unwrap();
+}
+
+#[test]
+fn returned_protected_decoders_retain_their_contract_when_host_bound() {
+    let mut sh = shell();
+    run(&mut sh, WEAK_DECODER).unwrap();
+    let decoder = run(&mut sh, "return $decode").unwrap();
+    sh.bind_value("host_decode".into(), decoder);
+    let scheme = scheme_of(&sh, "host_decode")
+        .expect("a re-inferred scheme")
+        .to_string();
+    assert!(scheme.contains("→ Returns _"), "{scheme}");
+    let later = "let n = host_decode '\"bad\"'; let result = $[$n + 1]";
+    assert!(check_errors(&sh, later).is_empty());
+    let message = refusal(run(&mut sh, later));
+    assert!(message.contains("imported value"), "{message}");
+}
+
+#[test]
+fn imported_weak_callbacks_are_protected_at_the_argument() {
+    let mut sh = shell();
+    run(
+        &mut sh,
+        "let invoke = { |f| let x = !{to-string '\"bad\"' | from-json}; f $x }",
+    )
+    .unwrap();
+    let later = "invoke { |x| return $[$x + 1] }";
+    assert!(check_errors(&sh, later).is_empty());
+    let message = refusal(run(&mut sh, later));
+    assert!(message.contains("imported value"), "{message}");
+}
+
+#[test]
+fn imported_weak_handles_protect_every_payload_observation() {
+    let cases = [
+        "let n = await $h; let result = $[$n + 1]",
+        "let n = race [$h]; let result = $[$n + 1]",
+        "let n = case !{poll $h} [\
+            `running: { |_| return 0 }, `stopping: { |_| return 0 },\
+            `consumed: { |_| return 0 },\
+            `ready: { |d| case $d[outcome] [\
+                `ok: { |n| return $[$n + 1] }, `err: { |_| return 0 }\
+            ] }\
+        ]",
+    ];
+    for later in cases {
+        let mut sh = shell();
+        run(
+            &mut sh,
+            "let h = spawn { to-string '\"bad\"' | from-json }; let _ = first-settled [$h]",
+        )
+        .unwrap();
+        assert!(check_errors(&sh, later).is_empty(), "{later}");
+        let message = refusal(run(&mut sh, later));
+        assert!(message.contains("imported value"), "{later}: {message}");
+    }
+}
+
+#[test]
+fn imported_handle_views_share_claims_without_claiming_at_wrap() {
+    let mut sh = shell();
+    run(
+        &mut sh,
+        "let h = spawn { to-string '1' | from-json }; let _ = first-settled [$h]",
+    )
+    .unwrap();
+    run(&mut sh, "let alias = $h").unwrap();
+    run(&mut sh, "let n = await $alias; let result = $[$n + 1]").unwrap();
+    let message = refusal(run(&mut sh, "await $h"));
+    assert!(message.contains("already claimed"), "{message}");
+}
+
+#[test]
+fn imported_weak_handle_payloads_keep_delayed_obligations() {
+    let mut sh = shell();
+    run(&mut sh, "let h = spawn { return [f: { |s| to-string $s | from-json }] }; let _ = first-settled [$h]").unwrap();
+    let later = "let box = await $h; let n = $box[f] '\"bad\"'; let result = $[$n + 1]";
+    assert!(check_errors(&sh, later).is_empty());
+    let message = refusal(run(&mut sh, later));
+    assert!(message.contains("imported value"), "{message}");
+}
+
+#[test]
+fn imported_weak_protection_survives_a_third_run() {
+    let mut sh = shell();
+    run(&mut sh, WEAK_DECODER).unwrap();
+    run(&mut sh, "let next = [f: $decode]").unwrap();
+    let later = "let n = !{$next[f] '\"bad\"'}; let result = $[$n + 1]";
+    assert!(check_errors(&sh, later).is_empty());
+    let message = refusal(run(&mut sh, later));
+    assert!(message.contains("imported value"), "{message}");
+}
+
 const DECODE_A: &str = r#"let m = !{to-string '{"a": "x"}' | from-json}"#;
 
 /// A later line's use of data decoded on an earlier one is admitted before the
@@ -561,4 +715,21 @@ fn a_residual_datum_is_admitted_again_by_each_unit_that_uses_it() {
     assert_eq!(admits("let k = length $m"), 1);
     assert_eq!(admits("let k = length $m\nlet j = length $m"), 1);
     assert_eq!(admits("let k = 1"), 0);
+}
+
+/// An imported weak value is given a membrane only where a thunk or handle
+/// hides in its contract: pure data was admitted whole, once, and costs
+/// nothing per occurrence.
+#[test]
+fn only_imported_values_with_delayed_parts_are_given_a_membrane() {
+    let mut sh = shell();
+    run(&mut sh, "let d = !{to-string '[1,2]' | from-json}").unwrap();
+    run(&mut sh, WEAK_DECODER).unwrap();
+    let membrane = |src: &str| {
+        let top = compile_and_typecheck(src, sh.session_schemes(), FileId::DUMMY, None, None)
+            .expect("the line checks");
+        format!("{:?}", top.phrases).contains("Protected {")
+    };
+    assert!(!membrane("let k = length $d"));
+    assert!(membrane("let box = [f: $decode]"));
 }

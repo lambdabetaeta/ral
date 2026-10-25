@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-10-06
+generated_at_commit: ce5a629202ebc86335ea55af1625b706d85e2774
+generated_at_date: 2026-10-25
 covers_paths: [core/src/ir.rs, core/src/ir/]
 ---
 
@@ -106,6 +106,15 @@ representable state.
   [[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]],
   [[design/types|types]]).
 
+- `Val::Protected { value, site }` marks an imported weak value occurrence whose
+  solved contract reaches a thunk or handle (`Site::has_delayed`). Forming it
+  wraps those delayed obligations recursively and admits nothing; it does not
+  run a thunk or consume a handle.
+  `CompKind::Protect { body, site }` checks and wraps the body's returned value,
+  so generated thunk wrappers can guard arguments and results at their actual
+  elimination points. Neither form has surface syntax; both retain their
+  contract when re-inferred ([[map/core/typecheck|typecheck]]).
+
 - `CompKind::Rec { group: Arc<GroupNode>, index }` is the `index`-th member of
   a recursive group — `x⃗ : U C⃗ ⊢ Mᵢ : Cᵢ`, typed `Cᵢₙdₑₓ` — an n-ary
   generalisation of Levy's `rec x. M`, which is a group of one. `group`'s occ
@@ -115,7 +124,7 @@ representable state.
   memoizing its rebuild per source `Arc`'s identity.
 
 Every verdict
-the evaluator needs from the checker is explicit syntax: a `Capture`/`Decode` pair, a site, a scheme.
+the evaluator needs from the checker is explicit syntax: a `Capture`/`Decode` pair, a protection node, a site, a scheme.
 
 `CommandName` is the structured head for external dispatch (`Bare` / `Path` /
 `TildePath`); `written()` gives it back as the source spelled it, `~`

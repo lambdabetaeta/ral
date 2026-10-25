@@ -44,13 +44,6 @@ impl FreeVars {
         };
     }
 
-    pub(crate) fn merge_cached(&mut self, cached: &crate::ty::CachedFreeVars) {
-        self.tys.extend(&cached.ty_fv);
-        self.comps.extend(&cached.comp_fv);
-        self.rows.extend(&cached.row_fv);
-        self.grades.extend(&cached.grade_fv);
-    }
-
     pub(crate) fn merge_into(self, target: &mut Self) {
         target.tys.extend(self.tys);
         target.comps.extend(self.comps);
@@ -131,7 +124,20 @@ pub(crate) fn env_free_vars(u: &Unifier, env: &TyEnv) -> FreeVars {
     let mut out = FreeVars::new();
     for s in env.all_schemes() {
         if let Some(cached) = &s.cached_fv {
-            out.merge_cached(cached);
+            for &v in &cached.ty_fv {
+                free_ty(u, &Ty::Var(v), &mut out);
+            }
+            for &v in &cached.comp_fv {
+                free_ty(u, &Ty::Thunk(Box::new(CompTy::Var(v))), &mut out);
+            }
+            for &v in &cached.row_fv {
+                free_ty(u, &Ty::Record(Row::Var(v)), &mut out);
+            }
+            for &v in &cached.grade_fv {
+                if let Grade::Var(root) = u.resolve_grade(Grade::Var(v)) {
+                    out.grades.insert(root);
+                }
+            }
         } else {
             let mut fvs = FreeVars::new();
             free_ty(u, &s.ty, &mut fvs);
@@ -161,17 +167,8 @@ pub(crate) fn generalize(u: &Unifier, env: &TyEnv, tied: &FreeVars, ty: &Ty) -> 
         .collect();
     let grade_vars: Vec<GradeVar> = fvs.grades.difference(&env_fvs.grades).copied().collect();
 
-    // Cached so later `env_free_vars` calls read the sets instead of re-walking
-    // this scheme's type tree.  Empty for top-level bindings.
-    let residuals = fvs.intersect_into_cached(&env_fvs);
-    // Holds by construction: residuals come from monomorphic env bindings that
-    // outlive every scheme mentioning them, so no later step moves or binds one.
-    debug_assert!(
-        residuals_are_live_roots(u, &residuals),
-        "a generalisation residual is not an unbound canonical root: the cache \
-         would go stale under a later unite/bind"
-    );
-    let cached_fv = Some(residuals);
+    // Cache residual seeds, not their evolving roots or the whole type tree.
+    let cached_fv = Some(fvs.intersect_into_cached(&env_fvs));
 
     // `apply_*` leaves each cycle as a `Var(root)` back-edge; snapshotting root
     // and binding lets `instantiate` rebuild the cycle in a fresh slot.  Roots
@@ -200,7 +197,7 @@ pub(crate) fn generalize(u: &Unifier, env: &TyEnv, tied: &FreeVars, ty: &Ty) -> 
         .map(|v| (v, u.kinded(v).kind))
         .collect();
 
-    Scheme {
+    let mut scheme = Scheme {
         ty_vars,
         comp_ty_vars,
         row_vars,
@@ -210,7 +207,10 @@ pub(crate) fn generalize(u: &Unifier, env: &TyEnv, tied: &FreeVars, ty: &Ty) -> 
         ty_bindings,
         cached_fv,
         weak,
-    }
+    };
+    // Kept weak anchors can already be bound; settlement still needs them.
+    scheme.weak = scheme_free_vars(&scheme).weak(u);
+    scheme
 }
 
 /// The computation and value cycles of a type, each a `(root, binding)`.
@@ -246,28 +246,14 @@ fn cyclic_bindings(
     (comps, tys)
 }
 
-fn residuals_are_live_roots(u: &Unifier, residuals: &crate::ty::CachedFreeVars) -> bool {
-    residuals
-        .ty_fv
-        .iter()
-        .all(|v| u.ty_root(*v) == *v && matches!(u.resolve_ty(&Ty::Var(*v)), Ty::Var(_)))
-        && residuals.comp_fv.iter().all(|v| {
-            u.comp_root(*v) == *v && matches!(u.resolve_comp_ty(&CompTy::Var(*v)), CompTy::Var(_))
-        })
-        && residuals
-            .row_fv
-            .iter()
-            .all(|v| matches!(u.resolve_row(&Row::Var(*v)), Row::Var(rv) if rv == *v))
-}
-
-/// A scheme is *closed* when every free variable in its body is quantified,
+/// A scheme is *closed* when every variable in its body and equations is quantified,
 /// captured as a cyclic-binding root, or a marked weak residual.  Any other
 /// unquantified residual is an id no live slot owns, which `Store` in
 /// `unify.rs` tolerates as free and a later `fresh()` can re-mint, aliasing
 /// two unrelated variables.
-pub(crate) fn scheme_is_closed(u: &Unifier, scheme: &Scheme) -> bool {
-    let mut fvs = FreeVars::new();
-    free_ty(u, &scheme.ty, &mut fvs);
+pub(crate) fn scheme_is_closed(scheme: &Scheme) -> bool {
+    // Stored binders are names, not slots in the caller's unifier.
+    let fvs = scheme_free_vars(scheme);
     let ty_roots: std::collections::HashSet<TyVar> =
         scheme.ty_bindings.iter().map(|(r, _)| *r).collect();
     let comp_roots: std::collections::HashSet<CompTyVar> =
@@ -283,6 +269,20 @@ pub(crate) fn scheme_is_closed(u: &Unifier, scheme: &Scheme) -> bool {
         .iter()
         .all(|v| scheme.row_vars.iter().any(|(q, _)| q == v) || scheme.weak.rows.contains_key(v))
         && fvs.grades.iter().all(|v| scheme.grade_vars.contains(v))
+}
+
+/// Syntactic variables in the entire scheme graph, including μ-equations.
+fn scheme_free_vars(scheme: &Scheme) -> FreeVars {
+    let u = Unifier::new();
+    let mut fvs = FreeVars::new();
+    free_ty(&u, &scheme.ty, &mut fvs);
+    for (_, binding) in &scheme.ty_bindings {
+        free_ty(&u, binding, &mut fvs);
+    }
+    for (_, binding) in &scheme.comp_ty_bindings {
+        free_ty(&u, &Ty::Thunk(Box::new(binding.clone())), &mut fvs);
+    }
+    fvs
 }
 
 /// Whether `scheme` quantifies a variable that its curried body's result
@@ -322,35 +322,71 @@ pub(crate) fn has_result_only_var(scheme: &Scheme) -> bool {
 /// Guards closure at the three empty-environment generalisation sites —
 /// `annotate`'s `Bind` rule, `alias_arm_scheme`, `binding_value_scheme` — so a
 /// violation trips there, not in a later run.  `msg` names the site.
-pub(crate) fn debug_assert_scheme_closed(u: &Unifier, scheme: &Scheme, msg: &str) {
-    debug_assert!(scheme_is_closed(u, scheme), "{msg}");
+pub(crate) fn debug_assert_scheme_closed(scheme: &Scheme, msg: &str) {
+    debug_assert!(scheme_is_closed(scheme), "{msg}");
 }
 
 /// `scheme` as its unit leaves it: each weak variable it mentions resolved as
 /// far as the unit fixed it, a cycle through one snapshotted like any other,
 /// and the still-free ones recorded.
 pub(crate) fn settle_weak(u: &Unifier, scheme: Arc<Scheme>) -> Arc<Scheme> {
-    if !u.reaches_weak(&scheme.ty) {
+    if scheme.weak.is_empty() {
         return scheme;
     }
-    let ty = u.apply_ty(&scheme.ty);
-    let (comps, tys) = cyclic_bindings(
-        u,
-        &ty,
-        |v| !scheme.comp_ty_bindings.iter().any(|(r, _)| *r == v),
-        |v| !scheme.ty_bindings.iter().any(|(r, _)| *r == v),
-    );
-    let mut fvs = FreeVars::new();
-    free_ty(u, &ty, &mut fvs);
-    fvs.tys.retain(|v| !tys.iter().any(|(r, _)| r == v));
-    fvs.comps.retain(|v| !comps.iter().any(|(r, _)| r == v));
-    Arc::new(Scheme {
-        ty,
-        weak: fvs.weak(u),
-        comp_ty_bindings: [scheme.comp_ty_bindings.clone(), comps].concat(),
-        ty_bindings: [scheme.ty_bindings.clone(), tys].concat(),
-        ..(*scheme).clone()
-    })
+    // Only residuals belong to `u`; local ∀/μ names stay opaque.
+    let sm = SubstMap {
+        tm: scheme
+            .weak
+            .tys
+            .keys()
+            .map(|&v| (v, u.apply_ty(&Ty::Var(v))))
+            .collect(),
+        rm: scheme
+            .weak
+            .rows
+            .keys()
+            .map(|&v| (v, u.apply_row(&Row::Var(v))))
+            .collect(),
+        cm: scheme
+            .weak
+            .comps
+            .iter()
+            .map(|&v| (v, u.apply_comp_ty(&CompTy::Var(v))))
+            .collect(),
+        gm: HashMap::new(),
+    };
+    let mut settled = (*scheme).clone();
+    sm.graph(&mut settled);
+    let mut comps: std::collections::BTreeMap<_, _> =
+        settled.comp_ty_bindings.iter().cloned().collect();
+    let mut tys: std::collections::BTreeMap<_, _> = settled.ty_bindings.iter().cloned().collect();
+    // Only substitution images are live graphs; scheme-local binders are opaque.
+    let bodies = sm
+        .tm
+        .values()
+        .cloned()
+        .chain(sm.rm.values().cloned().map(Ty::Record))
+        .chain(sm.cm.values().cloned().map(|b| Ty::Thunk(Box::new(b))));
+    for body in bodies {
+        let (new_comps, new_tys) = cyclic_bindings(
+            u,
+            &body,
+            |v| !comps.contains_key(&v),
+            |v| !tys.contains_key(&v),
+        );
+        comps.extend(new_comps);
+        tys.extend(new_tys);
+    }
+    settled.comp_ty_bindings = comps.into_iter().collect();
+    settled.ty_bindings = tys.into_iter().collect();
+    let mut fvs = scheme_free_vars(&settled);
+    fvs.remove_quantified(&settled);
+    fvs.tys
+        .retain(|v| !settled.ty_bindings.iter().any(|(r, _)| r == v));
+    fvs.comps
+        .retain(|v| !settled.comp_ty_bindings.iter().any(|(r, _)| r == v));
+    settled.weak = fvs.weak(u);
+    Arc::new(settled)
 }
 
 /// A stored scheme in a later unit: its weak residuals are ids of a unifier
@@ -393,98 +429,131 @@ pub(crate) fn reseed_weak(u: &mut Unifier, scheme: Arc<Scheme>) -> Arc<Scheme> {
             .collect(),
     };
     u.mark_weak_vars(&weak);
-    let sm = SubstMap {
-        tm,
-        rm,
-        cm,
-        tcm: HashMap::new(),
-        gm: HashMap::new(),
-    };
-    Arc::new(Scheme {
-        ty: sm.ty(&scheme.ty),
-        comp_ty_bindings: scheme
-            .comp_ty_bindings
-            .iter()
-            .map(|(root, binding)| (*root, sm.comp(binding)))
-            .collect(),
-        ty_bindings: scheme
-            .ty_bindings
-            .iter()
-            .map(|(root, binding)| (*root, sm.ty(binding)))
-            .collect(),
-        weak,
-        ..(*scheme).clone()
-    })
+    let mut sm = fresh_binders(u, &scheme);
+    sm.tm.extend(tm.into_iter().map(|(v, f)| (v, Ty::Var(f))));
+    sm.rm.extend(rm.into_iter().map(|(v, f)| (v, Row::Var(f))));
+    sm.cm
+        .extend(cm.into_iter().map(|(v, f)| (v, CompTy::Var(f))));
+    let mut seeded = (*scheme).clone();
+    sm.graph(&mut seeded);
+    for (v, _) in &mut seeded.ty_vars {
+        *v = sm.ty_var(*v);
+    }
+    for v in &mut seeded.comp_ty_vars {
+        *v = sm.comp_var(*v);
+    }
+    for (v, _) in &mut seeded.row_vars {
+        let Row::Var(fresh) = sm.rm[v] else {
+            unreachable!()
+        };
+        *v = fresh;
+    }
+    for v in &mut seeded.grade_vars {
+        let Grade::Var(fresh) = sm.gm[v] else {
+            unreachable!()
+        };
+        *v = fresh;
+    }
+    for (v, _) in &mut seeded.ty_bindings {
+        *v = sm.ty_var(*v);
+    }
+    for (v, _) in &mut seeded.comp_ty_bindings {
+        *v = sm.comp_var(*v);
+    }
+    seeded.weak = weak;
+    Arc::new(seeded)
 }
 
 pub(crate) fn instantiate(u: &mut Unifier, scheme: &Scheme) -> Ty {
     if !scheme.is_poly() {
         return scheme.ty.clone();
     }
-    // A fresh union-find root per old id: two instantiations never share state.
-    let mut cm: HashMap<CompTyVar, CompTyVar> = HashMap::new();
-    for v in &scheme.comp_ty_vars {
-        cm.insert(*v, u.fresh_comp_root());
-    }
-    for (old, _) in &scheme.comp_ty_bindings {
-        cm.insert(*old, u.fresh_comp_root());
-    }
-    let mut tcm: HashMap<TyVar, TyVar> = HashMap::new();
-    for (old, _) in &scheme.ty_bindings {
-        tcm.insert(*old, u.fresh_ty_root());
-    }
-    let sm = SubstMap {
-        tm: scheme
-            .ty_vars
-            .iter()
-            .map(|&(v, kind)| (v, u.fresh_kinded_var(kind)))
-            .collect(),
-        rm: scheme
-            .row_vars
-            .iter()
-            .map(|&(v, deep)| (v, u.fresh_deep_row_var(deep)))
-            .collect(),
-        cm: cm.clone(),
-        tcm: tcm.clone(),
-        gm: scheme
-            .grade_vars
-            .iter()
-            .map(|&v| (v, u.fresh_grade_var()))
-            .collect(),
-    };
+    let sm = fresh_binders(u, scheme);
     // Re-binding the fresh roots is what carries the cycle across instantiation.
     for (old, binding) in &scheme.comp_ty_bindings {
-        let fresh_root = cm[old];
+        let fresh_root = sm.comp_var(*old);
         let substituted = sm.comp(binding);
         u.bind_comp_root(fresh_root, substituted);
     }
     for (old, binding) in &scheme.ty_bindings {
-        let fresh_root = tcm[old];
+        let fresh_root = sm.ty_var(*old);
         let substituted = sm.ty(binding);
         u.bind_ty_root(fresh_root, substituted);
     }
     sm.ty(&scheme.ty)
 }
 
-/// Simultaneous substitution over all four variable kinds.  `cm` and `tcm`
-/// carry the cyclic back-edge roots — empty for non-recursive schemes.
+/// Reserve distinct live names for every local binder before substitution.
+fn fresh_binders(u: &mut Unifier, scheme: &Scheme) -> SubstMap {
+    let mut tm: HashMap<_, _> = scheme
+        .ty_vars
+        .iter()
+        .map(|&(v, k)| (v, Ty::Var(u.fresh_kinded_var(k))))
+        .collect();
+    tm.extend(
+        scheme
+            .ty_bindings
+            .iter()
+            .map(|(v, _)| (*v, Ty::Var(u.fresh_ty_root()))),
+    );
+    SubstMap {
+        tm,
+        cm: scheme
+            .comp_ty_vars
+            .iter()
+            .copied()
+            .chain(scheme.comp_ty_bindings.iter().map(|(v, _)| *v))
+            .map(|v| (v, CompTy::Var(u.fresh_comp_root())))
+            .collect(),
+        rm: scheme
+            .row_vars
+            .iter()
+            .map(|&(v, deep)| (v, Row::Var(u.fresh_deep_row_var(deep))))
+            .collect(),
+        gm: scheme
+            .grade_vars
+            .iter()
+            .map(|&v| (v, Grade::Var(u.fresh_grade_var())))
+            .collect(),
+    }
+}
+
+/// Simultaneous, non-recursive substitution over all four variable kinds.
 struct SubstMap {
-    tm: HashMap<TyVar, TyVar>,
-    rm: HashMap<RowVar, RowVar>,
-    cm: HashMap<CompTyVar, CompTyVar>,
-    tcm: HashMap<TyVar, TyVar>,
-    gm: HashMap<GradeVar, GradeVar>,
+    tm: HashMap<TyVar, Ty>,
+    rm: HashMap<RowVar, Row>,
+    cm: HashMap<CompTyVar, CompTy>,
+    gm: HashMap<GradeVar, Grade>,
 }
 
 impl SubstMap {
+    fn ty_var(&self, v: TyVar) -> TyVar {
+        let Ty::Var(fresh) = self.tm[&v] else {
+            unreachable!()
+        };
+        fresh
+    }
+
+    fn comp_var(&self, v: CompTyVar) -> CompTyVar {
+        let CompTy::Var(fresh) = self.cm[&v] else {
+            unreachable!()
+        };
+        fresh
+    }
+
+    fn graph(&self, scheme: &mut Scheme) {
+        scheme.ty = self.ty(&scheme.ty);
+        for (_, binding) in &mut scheme.ty_bindings {
+            *binding = self.ty(binding);
+        }
+        for (_, binding) in &mut scheme.comp_ty_bindings {
+            *binding = self.comp(binding);
+        }
+    }
+
     fn ty(&self, ty: &Ty) -> Ty {
         match ty {
-            Ty::Var(v) => {
-                if let Some(&fresh) = self.tcm.get(v) {
-                    return Ty::Var(fresh);
-                }
-                self.tm.get(v).map_or_else(|| ty.clone(), |&f| Ty::Var(f))
-            }
+            Ty::Var(v) => self.tm.get(v).unwrap_or(ty).clone(),
             Ty::List(a) => Ty::list(self.ty(a)),
             Ty::Map(a) => Ty::map(self.ty(a)),
             Ty::Handle(g, a) => Ty::Handle(self.grade(*g), Box::new(self.ty(a))),
@@ -500,7 +569,7 @@ impl SubstMap {
     fn row(&self, row: &Row) -> Row {
         match row {
             Row::Empty => Row::Empty,
-            Row::Var(v) => self.rm.get(v).map_or_else(|| row.clone(), |&f| Row::Var(f)),
+            Row::Var(v) => self.rm.get(v).unwrap_or(row).clone(),
             Row::Extend(l, ty, rest) => {
                 Row::Extend(l.clone(), Box::new(self.ty(ty)), Box::new(self.row(rest)))
             }
@@ -509,7 +578,7 @@ impl SubstMap {
 
     fn comp(&self, cty: &CompTy) -> CompTy {
         match cty {
-            CompTy::Var(v) => CompTy::Var(*self.cm.get(v).unwrap_or(v)),
+            CompTy::Var(v) => self.cm.get(v).unwrap_or(cty).clone(),
             CompTy::Return(grade, a) => CompTy::Return(self.grade(*grade), Box::new(self.ty(a))),
             CompTy::Fun(a, b) => CompTy::Fun(Box::new(self.ty(a)), Box::new(self.comp(b))),
         }
@@ -517,7 +586,7 @@ impl SubstMap {
 
     fn grade(&self, grade: Grade) -> Grade {
         match grade {
-            Grade::Var(v) => self.gm.get(&v).map_or(grade, |&f| Grade::Var(f)),
+            Grade::Var(v) => self.gm.get(&v).copied().unwrap_or(grade),
             _ => grade,
         }
     }
@@ -538,6 +607,38 @@ mod tests {
             Box::new(param),
             Box::new(CompTy::pure(result)),
         )))
+    }
+
+    #[test]
+    fn cached_residuals_follow_later_structure() {
+        for kind in 0..3 {
+            let mut u = Unifier::new();
+            let inner = u.fresh_tyvar();
+            let (seed, structure) = match kind {
+                0 => (Ty::Var(u.fresh_tyvar()), Ty::list(Ty::Var(inner))),
+                1 => (
+                    Ty::Thunk(Box::new(u.fresh_comp_ty())),
+                    Ty::Thunk(Box::new(CompTy::pure(Ty::Var(inner)))),
+                ),
+                _ => (
+                    Ty::Record(Row::Var(u.fresh_row_var())),
+                    Ty::Record(Row::Extend(
+                        Label::Field("a".into()),
+                        Box::new(Ty::Var(inner)),
+                        Box::new(Row::Empty),
+                    )),
+                ),
+            };
+            let mut enclosing = TyEnv::new();
+            enclosing.bind("param".into(), Scheme::mono(seed.clone()));
+            let local = generalize(&u, &enclosing, &FreeVars::new(), &seed);
+            let mut env = TyEnv::new();
+            env.bind("local".into(), local);
+            u.unify_ty(&seed, &structure).unwrap();
+            assert!(env_free_vars(&u, &env).tys.contains(&inner));
+            let next = generalize(&u, &env, &FreeVars::new(), &Ty::Var(inner));
+            assert!(next.ty_vars.is_empty(), "residual kind {kind}");
+        }
     }
 
     #[test]
@@ -598,7 +699,9 @@ mod tests {
         let scheme = generalized(&u, &arrow(Ty::Var(weak), Ty::Unit));
         assert_eq!(scheme.ty_vars, Vec::<(TyVar, Kind)>::new());
         assert!(u.is_weak_ty(inner));
-        assert!(scheme.weak.tys.contains_key(&inner));
+        assert!(scheme.weak.tys.contains_key(&weak));
+        let settled = settle_weak(&u, Arc::new(scheme));
+        assert!(settled.weak.tys.contains_key(&inner));
     }
 
     /// Weak rows and computations inherit too, and stay themselves in a scheme
@@ -659,7 +762,10 @@ mod tests {
         };
         assert_ne!(fresh, weak);
         assert!(next.is_weak_ty(fresh));
-        assert_eq!(seeded.ty_vars, vec![(bound, Kind::ANY)]);
+        let [(bound, Kind::ANY)] = seeded.ty_vars[..] else {
+            panic!("one quantified variable")
+        };
+        assert_ne!(bound, fresh);
         assert_eq!(seeded.ty, arrow(Ty::Var(bound), Ty::Var(fresh)));
     }
 
@@ -729,6 +835,174 @@ mod tests {
         assert_eq!(kind, Kind::COMPARABLE);
         assert_eq!(next.kinded(fresh).kind, Kind::COMPARABLE);
         assert!(next.is_weak_ty(fresh));
+    }
+
+    #[test]
+    fn reseeding_cannot_capture_a_quantifier_or_a_recursive_binder() {
+        for recursive in [false, true] {
+            let mut first = Unifier::new();
+            let (bound, weak) = (first.fresh_tyvar(), first.fresh_tyvar());
+            first.mark_weak(&Ty::Var(weak), &WeakSource::Index);
+            if recursive {
+                first.bind_ty_root(bound, Ty::list(Ty::Var(bound)));
+            }
+            let scheme = generalized(&first, &arrow(Ty::Var(bound), Ty::Var(weak)));
+            let mut next = Unifier::new();
+            let seeded = reseed_weak(&mut next, Arc::new(scheme));
+            let fresh_weak = *seeded.weak.tys.keys().next().unwrap();
+            assert_eq!(fresh_weak, bound, "force the old namespace collision");
+            let instance = instantiate(&mut next, &seeded);
+            let Ty::Thunk(body) = instance else {
+                panic!("a thunk")
+            };
+            let CompTy::Fun(param, rest) = *body else {
+                panic!("a function")
+            };
+            let CompTy::Return(_, result) = *rest else {
+                panic!("a result")
+            };
+            assert_eq!(*result, Ty::Var(fresh_weak));
+            assert_ne!(*param, *result);
+            next.unify_ty(&result, &Ty::Int)
+                .expect("the weak result fixes independently");
+            assert_ne!(next.apply_ty(&param), Ty::Int);
+        }
+    }
+
+    #[test]
+    fn reseeding_cannot_capture_row_or_computation_quantifiers() {
+        let mut first = Unifier::new();
+        let (bound_row, weak_row) = (first.fresh_row_var(), first.fresh_row_var());
+        let (bound_comp, weak_comp) = (first.fresh_comp_ty(), first.fresh_comp_ty());
+        let ty = arrow(
+            arrow(
+                Ty::Record(Row::Var(bound_row)),
+                Ty::Thunk(Box::new(bound_comp)),
+            ),
+            arrow(
+                Ty::Record(Row::Var(weak_row)),
+                Ty::Thunk(Box::new(weak_comp)),
+            ),
+        );
+        let Ty::Thunk(body) = &ty else { unreachable!() };
+        let CompTy::Fun(_, rest) = &**body else {
+            unreachable!()
+        };
+        let CompTy::Return(_, result) = &**rest else {
+            unreachable!()
+        };
+        first.mark_weak(result, &WeakSource::Index);
+        let scheme = generalized(&first, &ty);
+        let mut next = Unifier::new();
+        let seeded = reseed_weak(&mut next, Arc::new(scheme));
+        assert!(!seeded.weak.rows.contains_key(&seeded.row_vars[0].0));
+        assert!(!seeded.weak.comps.contains(&seeded.comp_ty_vars[0]));
+        let instance = instantiate(&mut next, &seeded);
+        let mut fvs = FreeVars::new();
+        free_ty(&next, &instance, &mut fvs);
+        assert_eq!(fvs.rows.len(), 2);
+        assert_eq!(fvs.comps.len(), 2);
+        assert!(scheme_is_closed(&seeded));
+    }
+
+    #[test]
+    fn settling_refreshes_weak_references_inside_recursive_snapshots() {
+        let mut u = Unifier::new();
+        let (root, weak) = (u.fresh_tyvar(), u.fresh_tyvar());
+        u.mark_weak(&Ty::Var(weak), &WeakSource::Index);
+        u.bind_ty_root(root, Ty::list(arrow(Ty::Var(weak), Ty::Var(root))));
+        let scheme = Arc::new(generalized(&u, &Ty::Var(root)));
+        u.unify_ty(&Ty::Var(weak), &Ty::Int).unwrap();
+        let settled = settle_weak(&u, scheme);
+        assert!(settled.weak.is_empty());
+        assert!(!scheme_free_vars(&settled).tys.contains(&weak));
+        assert!(scheme_is_closed(&settled));
+        let bytes = postcard::to_allocvec(&*settled).unwrap();
+        let stored: Scheme = postcard::from_bytes(&bytes).unwrap();
+        let mut next = Unifier::new();
+        let instance = instantiate(&mut next, &stored);
+        assert!(next.weak_source_in_ty(&instance).is_none());
+        assert_eq!(next.cyclic_roots_in_ty(&instance).1.len(), 1);
+    }
+
+    #[test]
+    fn settling_an_imported_computation_cycle_walks_its_equation() {
+        let mut first = Unifier::new();
+        let weak = first.fresh_tyvar();
+        let root = first.fresh_comp_root();
+        first.mark_weak(&Ty::Var(weak), &WeakSource::Index);
+        let body = CompTy::pure(Ty::list(arrow(
+            Ty::Var(weak),
+            Ty::Thunk(Box::new(CompTy::Var(root))),
+        )));
+        let mut scheme = Scheme::mono(Ty::Thunk(Box::new(CompTy::Var(root))));
+        scheme.comp_ty_bindings.push((root, body));
+        scheme.weak.tys.insert(weak, Kind::ANY);
+        let mut next = Unifier::new();
+        let seeded = reseed_weak(&mut next, Arc::new(scheme));
+        let weak = *seeded.weak.tys.keys().next().unwrap();
+        next.unify_ty(&Ty::Var(weak), &Ty::list(Ty::Var(weak)))
+            .unwrap();
+        assert!(
+            next.weak_source_in_ty(&seeded.ty).is_none(),
+            "the local μ-name is opaque"
+        );
+        let settled = settle_weak(&next, seeded);
+        assert!(settled.weak.is_empty());
+        assert_eq!(
+            settled.ty_bindings.len(),
+            1,
+            "capture the new weak cycle inside the equation"
+        );
+        assert!(scheme_is_closed(&settled));
+        let mut later = Unifier::new();
+        let instance = instantiate(&mut later, &settled);
+        let (comps, tys) = later.cyclic_roots_in_ty(&instance);
+        assert_eq!((comps.len(), tys.len()), (1, 1));
+    }
+
+    #[test]
+    fn closure_checks_snapshot_bodies_without_following_live_slots() {
+        let mut u = Unifier::new();
+        let root = u.fresh_tyvar();
+        let dangling = u.fresh_tyvar();
+        u.unify_ty(&Ty::Var(dangling), &Ty::Int).unwrap();
+        let mut scheme = Scheme::mono(Ty::Var(root));
+        scheme.ty_bindings.push((root, Ty::list(Ty::Var(dangling))));
+        assert!(!scheme_is_closed(&scheme));
+        scheme.ty_bindings[0].1 = Ty::list(Ty::Var(root));
+        assert!(scheme_is_closed(&scheme));
+        scheme
+            .comp_ty_bindings
+            .push((CompTyVar(0), CompTy::pure(Ty::Record(Row::Var(RowVar(0))))));
+        assert!(!scheme_is_closed(&scheme));
+    }
+
+    #[test]
+    fn settlement_does_not_resolve_local_binders_in_the_live_unifier() {
+        let mut u = Unifier::new();
+        let (local, weak) = (u.fresh_tyvar(), u.fresh_tyvar());
+        u.mark_weak(&Ty::Var(weak), &WeakSource::Index);
+        let scheme = Arc::new(generalized(&u, &arrow(Ty::Var(local), Ty::Var(weak))));
+        u.bind_ty_root(local, Ty::list(Ty::Var(local)));
+        u.unify_ty(&Ty::Var(weak), &Ty::Int).unwrap();
+        let settled = settle_weak(&u, scheme);
+        assert_eq!(settled.ty, arrow(Ty::Var(local), Ty::Int));
+        assert_eq!(settled.ty_bindings, []);
+        assert!(settled.weak.is_empty());
+    }
+
+    #[test]
+    fn already_fixed_weak_anchors_are_still_settled() {
+        let mut u = Unifier::new();
+        let weak = u.fresh_tyvar();
+        u.mark_weak(&Ty::Var(weak), &WeakSource::Index);
+        u.unify_ty(&Ty::Var(weak), &Ty::Int).unwrap();
+        let scheme = Arc::new(generalized(&u, &Ty::Var(weak)));
+        let settled = settle_weak(&u, scheme);
+        assert_eq!(settled.ty, Ty::Int);
+        assert!(settled.weak.is_empty());
+        assert!(scheme_is_closed(&settled));
     }
 
     #[test]

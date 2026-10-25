@@ -42,8 +42,12 @@ pub enum Reason {
     /// argument — [`PipelineStageShape`](Self::PipelineStageShape)'s sibling
     /// for a non-tail `Seq` part and the program's own value.
     DiscardedValueShape,
+    /// A redirect scopes a ready computation, not a future application.
+    RedirectShape,
     /// An unresolved computation forced to `Return` shape to read its value.
     ReturnShape,
+    /// A checker-inserted protection node re-inferred against its contract.
+    ProtectContract,
     /// An arm against what it stands in for: a command's value is its output,
     /// a base frame returns what it returns.
     StandsIn(Standing),
@@ -64,8 +68,6 @@ pub enum Reason {
     ScopeBody,
     /// A `spawn`'s title against `String`.
     SpawnTitle,
-    /// An arm's bound payload against the scrutinee's payload at that tag.
-    CaseArmPayload,
     /// The handler an arm names, against the function of the payload it must be.
     CaseArmHandler,
     /// The `case` arms against one another, where exactly one of them runs.

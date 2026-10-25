@@ -38,6 +38,14 @@ refuses in the next unit what it refused in its own — and a `Define` scheme is
 settled before it is stored, so no foreign id is ever read
 ([[decisions/260930_a-let-generalises-what-is-not-weak|a-let-generalises-what-is-not-weak]]).
 
+Closure is syntactic over the **whole scheme graph**: the body and every
+value/computation μ-equation. It must not follow the checking unifier's slots,
+which could hide a dangling id by resolving it to ground. Settlement likewise
+updates weak references in every equation, not only in the body; local ∀/μ
+names remain opaque. Reseeding alpha-renames all local binders as well as
+minting weak residuals, simultaneously, into disjoint fresh names. Otherwise a
+fresh weak id could equal an old binder and be captured on instantiation.
+
 One consequence: α-equivalence is **not** quotiented. `Scheme`'s `PartialEq` is
 derived, hence structural on the listed ids, so two schemes minted by different
 unifier runs compare unequal even when they denote the same ∀-type. Scheme

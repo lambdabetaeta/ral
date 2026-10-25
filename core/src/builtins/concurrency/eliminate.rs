@@ -62,9 +62,9 @@ fn conclude(end: ThreadEnd) -> Settled<Value> {
 }
 
 /// Exact await of a claimed result: replay, then conclude.
-fn exact(settle: CompletedHandle, shell: &mut Shell) -> Settled<Value> {
+fn exact(handle: &HandleInner, settle: CompletedHandle, shell: &mut Shell) -> Settled<Value> {
     replay(&settle.stdout, &settle.stderr, shell)?;
-    conclude(settle.end)
+    handle.protect_value(conclude(settle.end)?, shell)
 }
 
 /// One cancel-aware foreground wait, shared by `await`, `race`, a gather's
@@ -107,7 +107,7 @@ fn claim_first(
 /// join, which skips such a child.
 pub(crate) fn join(handle: &HandleInner, shell: &mut Shell) -> Settled<Option<Value>> {
     claim_first(std::slice::from_ref(handle), shell)?
-        .map(|(_, settle)| exact(settle, shell))
+        .map(|(_, settle)| exact(handle, settle, shell))
         .transpose()
 }
 
@@ -160,7 +160,7 @@ pub(crate) fn builtin_poll(args: &[Value], shell: &Shell) -> Settled<Value> {
         Sample::Ready(settle) => {
             let outcome = match settle.end {
                 ThreadEnd::Settled(Err(Break::Error(e))) => Err(e.record(shell)),
-                end => Ok(conclude(end)?),
+                end => Ok(handle.protect_value(conclude(end)?, shell)?),
             };
             let io = Io::of(settle.stdout, settle.stderr);
             let fields = [
@@ -183,8 +183,8 @@ pub(crate) fn builtin_race(args: &[Value], mooring: &Mooring, shell: &mut Shell)
     let first = claim_first(&handles, shell);
     // Whatever ends the wait, nothing given to `race` runs on past it.
     stop_and_drain(&handles, mooring.cleanup_grace);
-    let (_, settle) = first?.ok_or_else(|| already_claimed("race"))?;
-    exact(settle, shell)
+    let (index, settle) = first?.ok_or_else(|| already_claimed("race"))?;
+    exact(&handles[index], settle, shell)
 }
 
 /// `first-settled <handles>` -- the 0-based index of the first handle to

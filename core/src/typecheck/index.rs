@@ -311,11 +311,10 @@ impl InferCtx {
         progress
     }
 
-    /// The unit's end.  Labels and indexes settle together to a fixpoint,
-    /// since either can decide the other's target; an index still pending
-    /// is then refused.  Labels still pending are left to
-    /// [`Self::settle_pending_labels`], which reads them as records.
-    pub(super) fn settle_pending_indexes(&mut self) {
+    /// Finish the unit: propagate facts, default labels, then refuse undecided indexes.
+    pub(super) fn finish_indexes(&mut self) {
+        while self.retry_labels() | self.retry_indexes() {}
+        self.settle_pending_labels(None);
         while self.retry_labels() | self.retry_indexes() {}
         for idx in std::mem::take(&mut self.pending_indexes) {
             let saved = std::mem::replace(&mut self.pos, idx.span);

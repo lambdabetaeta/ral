@@ -402,6 +402,13 @@ fn a_computed_index_nothing_decides_is_refused_at_the_units_end() {
 }
 
 #[test]
+fn a_label_defaulted_to_a_record_is_what_refuses_a_computed_index() {
+    let src = "let f = { |m k| let a = $m[x]; return $m[$k] }\nreturn ()";
+    assert_eq!(codes(src), ["T0062"]);
+    has_error(src, "available: x");
+}
+
+#[test]
 fn a_computed_index_helper_is_accepted_at_the_one_container_type_its_unit_uses() {
     let top = toplevel_ok(
         "let pick = { |m k| $m[$k] }\n\
@@ -1080,6 +1087,71 @@ fn a_let_captures_the_command_that_produces_its_value() {
     assert_eq!(captures("let f = { echo hi }; let x = f"), 1);
     assert_eq!(captures("let t = { echo hi }; let x = !$t"), 1);
     assert_eq!(captures("let g = { |n| echo $n }; let x = g 5"), 1);
+}
+
+#[test]
+fn redirect_operands_are_inferred_without_a_string_requirement() {
+    for head in ["echo hi", "!{ return () }"] {
+        for redirect in ["<", "<<", ">", ">>", ">~", "2>", "2>>", "2>~"] {
+            has_error(&format!("{head} {redirect} $missing"), "missing");
+            for operand in ["42", "()", "[1, 2]", "{ return () }"] {
+                toplevel_ok(&format!(
+                    "let target = {operand}; {head} {redirect} $target"
+                ));
+            }
+        }
+        toplevel_ok(&format!("{head} 2>&1"));
+    }
+}
+
+#[test]
+fn case_joins_use_known_payloads_before_deciding_capture() {
+    for (payload, body, expected) in [
+        ("()", "return $p", "Command"),
+        ("hello", "return $p", "Returns String"),
+        ("{ echo hi }", "!$p", "Command"),
+    ] {
+        for arms in [
+            format!("`a: {{ |p| {body} }}, `b: {{ |_| echo bye }}"),
+            format!("`b: {{ |_| echo bye }}, `a: {{ |p| {body} }}"),
+        ] {
+            let top = toplevel_ok(&format!("let f = {{ case `a {payload} [{arms}] }}"));
+            assert_eq!(scheme_at(&top, 0), expected);
+        }
+    }
+}
+
+#[test]
+fn redirects_scope_ready_computations_not_partial_applications() {
+    for redirect in ["> out", "2> out", "< input", "<< 'text'", "2>&1"] {
+        let src = format!("let f = {{ |a b| echo \"$a $b\" }}; let g = f left {redirect}");
+        let errors = raw_errors(&src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.hint().is_some_and(|h| h.contains("redirect needs"))),
+            "{src}: {errors:?}"
+        );
+        toplevel_ok(&format!(
+            "let f = {{ |a b| echo \"$a $b\" }}; let g = {{ |b| f left $b {redirect} }}"
+        ));
+    }
+}
+
+#[test]
+fn abstract_stdout_discharge_preserves_the_input_grade() {
+    let top =
+        toplevel_ok("let f = { |t| !$t > out }; let x = f { echo hi }; let n = f { return 42 }");
+    assert_eq!(scheme_at(&top, 1), "Unit");
+    assert_eq!(scheme_at(&top, 2), "Integer");
+    assert_eq!(
+        captures("let f = { |t| !$t > out }; let x = f { echo hi }"),
+        0
+    );
+    has_error(
+        "let f = { |t| !$t > out }; let x = f { echo hi }; echo $x",
+        "nothing",
+    );
 }
 
 #[test]

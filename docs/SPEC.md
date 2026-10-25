@@ -1,4 +1,4 @@
-<!-- verified_at_commit: 002c654a -->
+<!-- verified_at_commit: ce5a629202ebc86335ea55af1625b706d85e2774 -->
 # ral(1) — language specification
 
 ## 1. About this specification
@@ -1473,7 +1473,7 @@ let saved = echo 'hello' > greeting.txt
 ```
 
 `branch` receives the captured branch name. The redirect sends `echo`'s bytes
-to `greeting.txt`, so `saved` is `""`.
+to `greeting.txt`, so `saved` is `()`.
 
 Captured text is data. ral does not re-lex it, split it, or expand wildcards in
 it. Use a decoder for structured bytes, and use `from-bytes` for data that is
@@ -1732,6 +1732,12 @@ Redirects attach input or output to one command or compound command:
 | `<< value` | Read standard input from a string value. |
 
 Any stage takes trailing redirects, `if` and `case` included: `if $ok { a } { b } > log`. A command's redirects may also stand between its arguments: `cmd a > f b`.
+
+A redirected stage must be ready to run, not a partial application waiting for
+arguments. This holds for every redirect, including stdin, stderr and `2>&1`:
+`to-json > f` is refused; `to-json $value > f` is ready. Redirect operands are
+checked whether the redirects are fused into a command call or scope another
+computation.
 
 These nine spellings are the whole redirect vocabulary: `< path`, `<< value`, `> path`, `>> path`, `>~ path`, `2> path`, `2>> path`, `2>~ path` and `2>&1`. The digit `2` names standard error and is the only fd prefix; `1>` is refused with advice to put a space before the `>` to pass `1` as an argument (`echo 1>file` would otherwise write an empty file). A redirect list binds streams: each of standard input, output, and error is bound at most once, and a second binding is a parse error with a caret on the second redirect. `cmd > a > b`, `cmd 2> e 2>&1`, `cmd 2>&1 2> e`, and `cmd < a << b` are all refused with "standard output is redirected twice; which one do you mean?" or its input and error counterpart. Position carries no meaning: `2>&1` sends standard error wherever standard output ends up, so `cmd 2>&1 > f` and `cmd > f 2>&1` are one command. Redirect targets are evaluated before their files are opened, and the files open in one fixed order: standard input, output, error. Relative paths use the scoped logical working directory.
 
@@ -5327,8 +5333,14 @@ variables of its result weak and records the result type on the call. Once the
 unit is solved that type is frozen as a *site* on the call, which the boundary
 admits the value against: each position's head, each free variable's kind, and
 for one `comparable` variable, number or text, agreed across the unit. A
-session data binding with weak residuals is admitted again, against this unit's
-uses, before the unit runs. Recursive groups are
+session data binding with weak residuals is admitted once per unit, before it
+runs, against the type of its first use there; every use shares that type. An
+occurrence whose type reaches a thunk or a handle also retains recursive
+protection: a thunk's arguments and results are checked when it runs, and a
+handle's payload when exposed by `await`, ready `poll`, or `race`. Importing a
+delayed value neither forces it nor consumes a handle. Only weak `comparable`
+identities acquire session-wide number-or-text fixings; universally quantified
+parameters remain fresh at each instantiation. Recursive groups are
 inferred against monomorphic self-bindings, then generalized after those
 self-bindings leave the environment. Runtime-created top-level bindings carry
 their closed schemes into later runs.
@@ -5362,7 +5374,18 @@ of `k`, or a kind that admits one disjunct and not the other, selects it, and an
 integer literal key is the list case outright. Its three variables are weak, so
 they are shared by every use in the unit, and one still undecided when the unit
 ends is a static error (`T0075`); a key that is neither `Int` nor `String` is
-refused by kind (`T0074`).
+refused by kind (`T0074`). At the unit boundary, label and computed-index
+constraints propagate together to a fixpoint before unresolved bare-label
+reads default to records. Both propagate again after that default; only then
+are undecided computed indexes refused.
+
+A stored scheme is closed over its whole graph: body and recursive equations.
+All variables are quantified, recursive roots, or listed weak residuals.
+Cross-unit reseeding alpha-renames local binders and weak residuals
+simultaneously, without capture; settlement substitutes live weak residuals
+through the whole graph without interpreting local binder names as unifier
+slots. Cached environment residual ids are resolved through the current
+unifier, since later constraints may unite them or bind them to structures.
 
 The principal judgments are:
 
@@ -5383,7 +5406,7 @@ itself. A cyclic type prints as `μβ. Map β`.
 A failed constraint records both the source span at which it was introduced
 and a provenance reason, such as argument application, pipeline stage shape,
 conditional branches, fallback branches, `try` arms, scope body, handler
-shape, a `case` arm's payload, or the handler a `case` arm names. Diagnostics
+shape, or the handler a `case` arm names. Diagnostics
 render the structural mismatch together with that provenance; provenance does
 not change the unification relation.
 
@@ -5449,10 +5472,14 @@ class(c) = row(σ)    σ ⊑ A1 -> ... -> An -> C    Γ ⊢v ai : Ai
 ```
 
 `Γ ⊢ ā : argv` says every element renders as text, and a spread spreads a list.
-A redirect of standard output discharges the grade: if `Γ ⊢c M : F_ε A` then
-`M > f` has type `F_p A`, because the bytes have gone to the file and the
-computation's value is what remains. Stdin and stderr redirects, and `2>&1`,
-leave the grade alone.
+Every nonempty redirect list requires `Γ ⊢c M : F_ε A` at the outermost
+computation: a function still awaiting arguments is refused, rather than
+redirecting its eventual result. Redirect operands are checked in both fused
+calls and redirect scopes. An unresolved computation opens with a fresh input
+grade. A redirect of standard output discharges the result grade: `M > f` has
+type `F_p A`, because the bytes have gone to the file and the computation's
+value is what remains. This does not constrain ε; other uses of `M` retain its
+original grade. Stdin and stderr redirects, and `2>&1`, leave the grade alone.
 
 ### 17.4. Pipe composition and sequences
 
@@ -5643,8 +5670,10 @@ atom is refused at elaboration (§17.1). The arms are joined by the rule below:
 ```
 
 Here `C` is the **join** of the arms' result types `R1 ... Rn`, each taken after
-the arm's own parameters. Every arm is inferred first, against a fresh result;
-then, in program order:
+the arm's own parameters. A `case` constrains each arm parameter with the
+scrutinee's known payload type before inferring the body and joining grades;
+a forwarded command payload therefore participates as a command. Every arm is
+inferred first, against a fresh result; then, in program order:
 
 - if some arm is `F_p A` with `A` not `Unit` (or not yet known), the join is
   `F_p A` and every `F_w Unit` arm is captured (§17.5), so

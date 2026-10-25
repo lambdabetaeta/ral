@@ -369,7 +369,7 @@ impl Walk<'_> {
             (Shape::Variant(fields), Value::Variant { label, payload }) => {
                 self.variant(fields, label, payload.as_deref(), at)
             }
-            (Shape::Free { var, kind }, _) => self.free(*var, *kind, value, at),
+            (Shape::Free { var, kind, weak }, _) => self.free(*var, *kind, *weak, value, at),
             (shape, _) => Err(self.uses(value, expected(shape), at, refusal_hint(shape, value))),
         }
     }
@@ -395,10 +395,10 @@ impl Walk<'_> {
                         },
                     ));
                 }
-                Tail::Open { deep: true } => {
+                Tail::Open { deep: true, .. } => {
                     self.below(Step::Key(key.to_string()), |w| w.data(&item, at))?;
                 }
-                Tail::Open { deep: false } => {}
+                Tail::Open { deep: false, .. } => {}
             }
         }
         Ok(())
@@ -416,8 +416,8 @@ impl Walk<'_> {
         match fields.labels.iter().find(|(name, _)| name == label) {
             Some((_, id)) => self.below(Step::Key("payload".into()), |w| w.run(*id, payload, at)),
             None => match fields.tail {
-                Tail::Open { deep: false } => Ok(()),
-                Tail::Open { deep: true } => {
+                Tail::Open { deep: false, .. } => Ok(()),
+                Tail::Open { deep: true, .. } => {
                     self.below(Step::Key("payload".into()), |w| w.data(payload, at))
                 }
                 Tail::Closed => Err(self.mismatch(
@@ -444,6 +444,7 @@ impl Walk<'_> {
         &mut self,
         var: u32,
         kind: Kind,
+        weak: bool,
         value: &Value,
         at: Option<Span>,
     ) -> Result<(), Mismatch> {
@@ -453,7 +454,8 @@ impl Walk<'_> {
         if kind.is_deep() {
             self.data(value, at)?;
         }
-        if kind == Kind::COMPARABLE
+        if weak
+            && kind == Kind::COMPARABLE
             && let Some(side) = side(value)
         {
             let pointer = pointer_of(&self.path);
@@ -522,7 +524,7 @@ fn expected(shape: &Shape) -> String {
         Shape::Thunk(_) => "a block".into(),
         Shape::Handle(..) => "a handle".into(),
         Shape::Free { kind, .. } => kind_phrase(*kind),
-        Shape::Return(..) | Shape::Fun(..) | Shape::FreeComp => {
+        Shape::Return(..) | Shape::Fun(..) | Shape::FreeComp { .. } => {
             unreachable!("a value position is never a computation")
         }
     }

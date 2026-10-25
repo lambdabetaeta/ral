@@ -17,7 +17,7 @@ use crate::ir::{ArithOp, BinaryOp, StdinSource};
 use crate::source::Span;
 use crate::source::Spanned;
 use crate::source::WithSpan;
-use crate::ty::{CompTy, Grade, Kind, Label, Producer, RefusedArg, Row, Scheme, Ty};
+use crate::ty::{CompTy, Grade, Kind, Label, Producer, RefusedArg, Row, Scheme, Site, Ty};
 use std::sync::Arc;
 
 /// Which slot an arm fills.  The slot, never the arm's spelling, fixes its
@@ -635,14 +635,6 @@ impl Inferencer<'_> {
         }
     }
 
-    /// Instantiate `scheme`, strip its outer `Thunk`, and apply the body to
-    /// `args`.  Instantiating here is what keeps quantified variables from
-    /// being shared between call sites, so callers hand in a `Scheme` as is.
-    pub(super) fn apply_scheme(&mut self, name: &str, scheme: &Scheme, args: &Args) -> CompTy {
-        let head_cty = self.instantiate_comp(name, scheme);
-        self.apply_args(head_cty, args)
-    }
-
     /// `(arm)`: `block`, written or in hand, takes the parameters its slot
     /// hands it and produces what the head it stands in for produces.  Its
     /// type is what is checked, never its spelling, so `{ forward 'git' }` is
@@ -869,7 +861,13 @@ impl Inferencer<'_> {
     /// two take an argv, and `...` is exactly its notation.
     fn exec_comp_ty(&mut self, comp: &Comp, name: &str, args: &Args) -> CompTy {
         match self.head_class(name) {
-            HeadClass::Binding(scheme) => self.apply_scheme(name, &scheme, args),
+            HeadClass::Binding(scheme) => {
+                let ty = self.ctx.instantiate(&scheme);
+                self.ctx
+                    .note_residual_use(Node::comp(comp), name, &scheme, &ty);
+                let body = self.thunk_body(name, &ty, Reason::AutoderefHead);
+                self.apply_args(body, args)
+            }
             HeadClass::Value(entry) => {
                 let cty = self.apply_builtin(&entry, name, args);
                 self.note_boundary_call(comp, &entry, args, &cty);
@@ -1314,8 +1312,17 @@ impl Inferencer<'_> {
         ty
     }
 
+    /// A value held to its contract: inferred, then unified with the site's type.
+    fn infer_protected_val(&mut self, value: &Val, site: &Site) -> Ty {
+        let have = self.infer_val(value);
+        let want = site.instantiate(&mut self.ctx.unifier);
+        self.ctx.unify_ty(&have, &want, Reason::ProtectContract);
+        want
+    }
+
     pub(super) fn infer_val(&mut self, val: &Val) -> Ty {
         match val {
+            Val::Protected { value, site } => self.infer_protected_val(value, site),
             Val::Unit => Ty::Unit,
             Val::String(_) => Ty::String,
             Val::Int(_) => Ty::Int,
@@ -1331,7 +1338,8 @@ impl Inferencer<'_> {
                     match self.env.lookup_binding(name).cloned() {
                         Some(scheme) => {
                             let ty = self.ctx.instantiate(&scheme);
-                            self.ctx.note_residual_use(name, &scheme, &ty);
+                            self.ctx
+                                .note_residual_use(Node::val(val), name, &scheme, &ty);
                             self.note_unit_read(name, &ty);
                             ty
                         }
@@ -1560,36 +1568,6 @@ impl Inferencer<'_> {
         elem
     }
 
-    /// A `case` arm's bound payload against what the scrutinee constructs at
-    /// its label, forced while pos is on the arm; the final row-unify would
-    /// report it with the caret on the whole `case` form.  Returns the
-    /// payload type the closed scrutinee row carries at `label`.
-    fn case_arm_payload(
-        &mut self,
-        arm: &JoinArm<'_>,
-        payload_ty: &Ty,
-        scrut_payload: Option<&Ty>,
-    ) -> Ty {
-        self.with_span(arm.result_span(), |this| {
-            let Some(scrut_payload) = scrut_payload else {
-                return payload_ty.clone();
-            };
-            if this.ctx.unifier.unify_ty(payload_ty, scrut_payload).is_ok() {
-                return payload_ty.clone();
-            }
-            let expected = this.ctx.unifier.apply_ty(scrut_payload);
-            let actual = this.ctx.unifier.apply_ty(payload_ty);
-            this.ctx.report(
-                TypeErrorKind::TyMismatch {
-                    expected: Box::new(expected),
-                    actual: Box::new(actual),
-                },
-                Reason::CaseArmPayload,
-            );
-            this.ctx.unifier.fresh_ty()
-        })
-    }
-
     fn infer_case(&mut self, scrutinee: &crate::source::Spanned<Val>, arms: &[CaseArm]) -> CompTy {
         let scrutinee_span = scrutinee.span;
         let scrut_ty = self.with_span(scrutinee_span, |this| this.infer_val(&scrutinee.item));
@@ -1612,8 +1590,9 @@ impl Inferencer<'_> {
             }
         });
 
-        // Pre-resolved so each arm can unify its payload under its own pos; a
-        // residual `Var` here waits for the final row-unify.
+        // Arm payloads come from the scrutinee's row where known, so a
+        // mismatch surfaces at the arm body's use; a residual `Var` here waits
+        // for the final row-unify.
         let scrut_resolved_row = self.ctx.unifier.apply_row(&Row::Var(scrut_row_var));
         let scrut_payloads: std::collections::HashMap<Label, Ty> = scrut_resolved_row
             .fields()
@@ -1621,10 +1600,19 @@ impl Inferencer<'_> {
             .collect();
 
         // Exactly one arm runs, so they share one type: a literal `{ |p| … }`
-        // binds its pattern to a fresh payload type, and a thunk in hand is
-        // unified.  Source order throughout, so a program's complaints arrive
+        // binds its pattern to the known payload or a fresh type, and a thunk
+        // in hand is unified. Payloads must be known before grades join.
+        // Source order throughout, so a program's complaints arrive
         // in the order it was written.
-        let payloads: Vec<Ty> = arms.iter().map(|_| self.ctx.unifier.fresh_ty()).collect();
+        let payloads: Vec<Ty> = arms
+            .iter()
+            .map(|arm| {
+                scrut_payloads
+                    .get(&Label::Case(arm.tag.item.clone()))
+                    .cloned()
+                    .unwrap_or_else(|| self.ctx.unifier.fresh_ty())
+            })
+            .collect();
         let join_arms: Vec<JoinArm<'_>> = arms
             .iter()
             .zip(&payloads)
@@ -1637,13 +1625,11 @@ impl Inferencer<'_> {
             })
             .collect();
         let joined = self.join_arms(&join_arms, &Reason::CaseArms);
-        let mut closed = Vec::with_capacity(arms.len());
-        for ((arm, join_arm), payload) in arms.iter().zip(&join_arms).zip(&payloads) {
-            let label = Label::Case(arm.tag.item.clone());
-            let closed_payload =
-                self.case_arm_payload(join_arm, payload, scrut_payloads.get(&label));
-            closed.push((label, closed_payload));
-        }
+        let closed: Vec<(Label, Ty)> = arms
+            .iter()
+            .zip(&payloads)
+            .map(|(arm, payload)| (Label::Case(arm.tag.item.clone()), payload.clone()))
+            .collect();
         let arm_labels: Vec<Label> = closed.iter().map(|(l, _)| l.clone()).collect();
         let closed_scrut = closed.into_iter().rev().fold(Row::Empty, |rest, (l, ty)| {
             Row::Extend(l, Box::new(ty), Box::new(rest))
@@ -1761,12 +1747,22 @@ impl Inferencer<'_> {
         cty
     }
 
+    /// A computation's result held to its contract, as [`Self::infer_protected_val`].
+    fn infer_protected_comp(&mut self, body: &Comp, site: &Site) -> CompTy {
+        let have = self.infer_comp(body);
+        let result = self.force_return_shape(&have, Reason::ProtectContract).ty;
+        let want = site.instantiate(&mut self.ctx.unifier);
+        self.ctx.unify_ty(&result, &want, Reason::ProtectContract);
+        have
+    }
+
     pub(super) fn infer_comp(&mut self, comp: &Comp) -> CompTy {
         if let Some(span) = comp.span {
             self.ctx.pos = Some(span);
         }
 
         match &comp.item {
+            CompKind::Protect { body, site } => self.infer_protected_comp(body, site),
             CompKind::Return(value) => CompTy::pure(self.infer_val(value)),
             CompKind::Assemble(assembly) => CompTy::pure(self.infer_assembly(assembly)),
             CompKind::Lam { param, body } => {
@@ -1837,6 +1833,10 @@ impl Inferencer<'_> {
                 self.apply_args(head_ty, args)
             }
             CompKind::Exec(e) => {
+                // Runtime renders any value; inference still checks embedded blocks.
+                for operand in e.redirects.operands() {
+                    self.infer_val(operand);
+                }
                 let cty = match &e.head {
                     CommandWord::Name(CommandName::Bare(name)) => {
                         self.exec_comp_ty(comp, name, &e.args)
@@ -1846,10 +1846,10 @@ impl Inferencer<'_> {
                         name @ (CommandName::Path(_) | CommandName::TildePath(_)),
                     ) => self.external_exec_comp_ty(&name.written(), &e.args),
                 };
-                if e.redirects.stdout.is_some() {
-                    self.discharge(&cty)
-                } else {
+                if e.redirects.is_empty() {
                     cty
+                } else {
+                    self.redirected(&cty, e.redirects.stdout.is_some())
                 }
             }
             CompKind::Pipeline { stages } => self.infer_pipeline(stages),
@@ -1898,12 +1898,11 @@ impl Inferencer<'_> {
             // forms above, so infer it directly.  A stdout redirect takes a
             // command's output, leaving a value producer.
             CompKind::Redirect { body, redirects } => {
-                let cty = self.infer_comp(body);
-                if redirects.stdout.is_some() {
-                    self.discharge(&cty)
-                } else {
-                    cty
+                for operand in redirects.operands() {
+                    self.infer_val(operand);
                 }
+                let cty = self.infer_comp(body);
+                self.redirected(&cty, redirects.stdout.is_some())
             }
             // Inserted by `annotate`'s write-back pass, so it is absent from a
             // freshly elaborated tree but present in every tree re-inferred

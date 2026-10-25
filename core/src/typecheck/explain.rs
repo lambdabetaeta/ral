@@ -650,7 +650,7 @@ impl TypeError {
         Report {
             code: Some(self.kind.code()),
             message: self.message(),
-            at: self.pos.map(|sp| at(sp, self.kind.render_label())),
+            at: self.pos.map(|sp| at(sp, self.label())),
             also: self
                 .pos
                 .zip(self.kind.witness(self.pos))
@@ -926,11 +926,6 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
             Some("indexing into a list takes an Integer (the position)".to_string())
         }
         Reason::MapIndexKey => Some("indexing into a map takes a String (the key)".to_string()),
-        Reason::CaseArmPayload => Some(
-            "the `case` arm binds the payload the scrutinee \
-             constructs at that tag, so the two must agree"
-                .to_string(),
-        ),
         Reason::CaseArmHandler => Some(
             "an arm that names its handler runs that handler on the payload, \
              so the name must stand for a function of one argument: to hand \
@@ -982,6 +977,12 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
              ready to run, not still waiting for an argument: apply it to \
              what's left, or write `$name` if you meant to keep the function \
              itself"
+                .to_string(),
+        ),
+        Reason::RedirectShape => Some(
+            "a redirect needs a computation ready to run, not a function still waiting for \
+             an argument: apply the missing arguments before redirecting (`f $x > out`), \
+             or put the redirect inside a block (`{ |x| f $x > out }`)"
                 .to_string(),
         ),
         Reason::OptionField { form, key } => Some(format!("{form} {key}: wrong value type")),
@@ -1062,6 +1063,7 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         | Reason::MapKeyRead
         | Reason::DynamicIndexTarget
         | Reason::AutoderefHead
+        | Reason::ProtectContract
         | Reason::Vocabulary(_)
         | Reason::Capture => None,
     }
@@ -1381,9 +1383,19 @@ pub(crate) fn unknown_tag_message(
 }
 
 impl TypeError {
+    fn is_redirect_shape(&self) -> bool {
+        matches!(
+            (&self.kind, &self.reason),
+            (TypeErrorKind::CompTyMismatch { .. }, Some(Reason::RedirectShape))
+        )
+    }
+
     /// The headline: the kind's own, or its vocabulary's when the failed
-    /// constraint was against one.
+    /// constraint was against one, or the redirect's when a function met one.
     pub fn message(&self) -> String {
+        if self.is_redirect_shape() {
+            return "a redirect was applied to a function that still waits for arguments".into();
+        }
         match (&self.kind, &self.reason) {
             (
                 TypeErrorKind::RowExtraField {
@@ -1404,6 +1416,14 @@ impl TypeError {
             _ => None,
         }
         .unwrap_or_else(|| self.kind.render_message())
+    }
+
+    /// The caret label: the kind's own, but for a redirect that met a function.
+    fn label(&self) -> String {
+        if self.is_redirect_shape() {
+            return "this still needs arguments".into();
+        }
+        self.kind.render_label()
     }
 }
 

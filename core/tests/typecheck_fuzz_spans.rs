@@ -104,11 +104,10 @@ fn span_cases() -> Vec<SpanCase> {
         c("let x = $try\nreturn $x", "$try", "ctrl-op-try"),
         // Case-arm payload mismatch: when the scrutinee has Integer
         // at `\`ok` but the handler body uses it as a String, the
-        // caret must land on the *offending arm's body*, not on the
-        // whole `let r = case … [` … `]` form.
+        // caret lands on the argument whose use contradicts that payload.
         c(
             "let r = `ok 5\nlet x = case $r [`ok: { |s| !{upper $s} }, `err: { |_| !{upper hello} }]\nreturn $x",
-            "!{upper $s}",
+            "$s",
             "case-arm-payload-mismatch",
         ),
         // Case-on-non-variant: with `scrutinee_span` on

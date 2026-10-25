@@ -7,10 +7,10 @@
 //! `comparable` type agree (a session's [`crate::ty::Fixings`], under the
 //! site's unit).  The runtime walks it in `types::admit`.
 
-use super::unify::Unifier;
+use super::unify::{Unifier, WeakSource};
 use crate::ty::{
-    CompTy, CompTyVar, Fields, Grade, GradeShape, Id, Label, Node, Row, Scheme, Shape, Site, Tail,
-    Ty, TyVar, UnitId,
+    CompTy, CompTyVar, Fields, Grade, GradeShape, Id, Label, Node, Row, RowVar, Scheme, Shape,
+    Site, Tail, Ty, TyVar, UnitId,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,15 +20,15 @@ impl GradeShape {
         match grade {
             Grade::Value => Self::Value,
             Grade::Output => Self::Output,
-            Grade::Var(_) => Self::Free,
+            Grade::Var(v) => Self::Free(v.0),
         }
     }
 
-    fn instantiate(self, u: &mut Unifier) -> Grade {
+    fn instantiate(self, u: &mut Unifier, grades: &mut HashMap<u32, Grade>) -> Grade {
         match self {
             Self::Value => Grade::Value,
             Self::Output => Grade::Output,
-            Self::Free => u.fresh_grade(),
+            Self::Free(var) => *grades.entry(var).or_insert_with(|| u.fresh_grade()),
         }
     }
 }
@@ -44,7 +44,7 @@ impl Site {
         };
         let root = build.ty(ty);
         Self {
-            nodes: build.nodes,
+            nodes: build.nodes.into(),
             root,
             unit,
         }
@@ -56,14 +56,15 @@ impl Site {
         self.unit == other.unit
     }
 
-    /// The root as a type over `u`'s fresh variables: one variable per node,
-    /// so sharing and cycles survive.
-    fn instantiate(&self, u: &mut Unifier) -> Ty {
+    /// Freshen each node, row tail and grade once, preserving sharing and cycles.
+    pub(super) fn instantiate(&self, u: &mut Unifier) -> Ty {
         let mut tys: HashMap<Id, TyVar> = HashMap::new();
         let mut comps: HashMap<Id, CompTyVar> = HashMap::new();
+        let mut rows = HashMap::new();
+        let mut grades = HashMap::new();
         for (id, node) in self.nodes.iter().enumerate() {
             match node.shape {
-                Shape::Return(..) | Shape::Fun(..) | Shape::FreeComp => {
+                Shape::Return(..) | Shape::Fun(..) | Shape::FreeComp { .. } => {
                     comps.insert(id, u.fresh_comp_root());
                 }
                 _ => {
@@ -75,16 +76,22 @@ impl Site {
         let comp = |id: Id| CompTy::Var(comps[&id]);
         for (id, node) in self.nodes.iter().enumerate() {
             match &node.shape {
-                Shape::Free { kind, .. } => {
-                    let free = u.fresh_kinded_var(*kind);
-                    u.bind_ty_root(tys[&id], Ty::Var(free));
+                Shape::Free { kind, weak, .. } => {
+                    let free = Ty::Var(u.fresh_kinded_var(*kind));
+                    if *weak {
+                        u.mark_weak(&free, &WeakSource::Residual);
+                    }
+                    u.bind_ty_root(tys[&id], free);
                 }
-                Shape::FreeComp => {
+                Shape::FreeComp { weak } => {
                     let free = u.fresh_comp_ty();
+                    if *weak {
+                        u.mark_weak(&Ty::Thunk(Box::new(free.clone())), &WeakSource::Residual);
+                    }
                     u.bind_comp_root(comps[&id], free);
                 }
                 Shape::Return(grade, inner) => {
-                    let grade = grade.instantiate(u);
+                    let grade = grade.instantiate(u, &mut grades);
                     u.bind_comp_root(comps[&id], CompTy::Return(grade, Box::new(ty(*inner))));
                 }
                 Shape::Fun(arg, body) => {
@@ -104,21 +111,41 @@ impl Site {
                         Shape::List(e) => Ty::list(ty(*e)),
                         Shape::Map(e) => Ty::map(ty(*e)),
                         Shape::Handle(grade, e) => {
-                            Ty::Handle(grade.instantiate(u), Box::new(ty(*e)))
+                            Ty::Handle(grade.instantiate(u, &mut grades), Box::new(ty(*e)))
                         }
                         Shape::Thunk(c) => Ty::Thunk(Box::new(comp(*c))),
-                        Shape::Record(fields) => Ty::Record(row_of(u, fields, &ty, Label::Field)),
-                        Shape::Variant(fields) => Ty::Variant(row_of(u, fields, &ty, Label::Case)),
+                        Shape::Record(fields) => {
+                            Ty::Record(row_of(u, fields, &ty, Label::Field, &mut rows))
+                        }
+                        Shape::Variant(fields) => {
+                            Ty::Variant(row_of(u, fields, &ty, Label::Case, &mut rows))
+                        }
                         Shape::Free { .. }
                         | Shape::Return(..)
                         | Shape::Fun(..)
-                        | Shape::FreeComp => unreachable!("bound above"),
+                        | Shape::FreeComp { .. } => unreachable!("bound above"),
                     };
                     u.bind_ty_root(tys[&id], built);
                 }
             }
         }
-        ty(self.root)
+        if let Some(root) = comps.get(&self.root) {
+            Ty::Thunk(Box::new(CompTy::Var(*root)))
+        } else {
+            ty(self.root)
+        }
+    }
+
+    /// Close a contract in its own namespace before it enters another checker.
+    pub(crate) fn scheme(&self) -> Arc<Scheme> {
+        let mut u = Unifier::new();
+        let ty = self.instantiate(&mut u);
+        Arc::new(super::generalize::generalize(
+            &u,
+            &super::env::TyEnv::new(),
+            &super::generalize::FreeVars::new(),
+            &ty,
+        ))
     }
 
     /// The module door's view of the exports the script uses.
@@ -182,10 +209,21 @@ fn row_of(
     fields: &Fields,
     ty: &impl Fn(Id) -> Ty,
     label: fn(String) -> Label,
+    rows: &mut HashMap<u32, RowVar>,
 ) -> Row {
     let tail = match fields.tail {
         Tail::Closed => Row::Empty,
-        Tail::Open { deep } => Row::Var(u.fresh_deep_row_var(deep)),
+        Tail::Open { var, deep, weak } => {
+            let row = Row::Var(
+                *rows
+                    .entry(var)
+                    .or_insert_with(|| u.fresh_deep_row_var(deep)),
+            );
+            if weak {
+                u.mark_weak(&Ty::Record(row.clone()), &WeakSource::Residual);
+            }
+            row
+        }
     };
     fields.labels.iter().rev().fold(tail, |rest, (name, id)| {
         Row::Extend(label(name.clone()), Box::new(ty(*id)), Box::new(rest))
@@ -230,6 +268,7 @@ impl Build<'_> {
                     Shape::Free {
                         var: v.0,
                         kind: kinded.kind,
+                        weak: u.is_weak_ty(*v),
                     },
                     kinded.witness,
                 )
@@ -269,7 +308,9 @@ impl Build<'_> {
             self.comps.insert(r, id);
         }
         let shape = match &*u.head_comp_ty(cty) {
-            CompTy::Var(_) => Shape::FreeComp,
+            CompTy::Var(v) => Shape::FreeComp {
+                weak: u.is_weak_comp(*v),
+            },
             CompTy::Return(grade, a) => {
                 Shape::Return(GradeShape::of(u.resolve_grade(*grade)), self.ty(a))
             }
@@ -294,12 +335,118 @@ impl Build<'_> {
                 }
                 Row::Var(v) => {
                     break Tail::Open {
+                        var: v.0,
                         deep: u.is_deep_row(v),
+                        weak: u.is_weak_row(v),
                     };
                 }
                 Row::Empty => break Tail::Closed,
             }
         };
         Fields { labels, tail }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ty::{closed_record, closed_variant, open_record, open_variant};
+
+    fn agrees_with_unification(mut u: Unifier, want: &[Ty; 2], have: &[Ty; 2], fits: bool) {
+        let snapshot = Site::snapshot(
+            &u,
+            &closed_record(&[("a", want[0].clone()), ("b", want[1].clone())]),
+            UnitId::fresh(),
+        );
+        let mut exports = snapshot.exports();
+        for (i, name) in ["a", "b"].into_iter().enumerate() {
+            let direct = u.unify_ty(&have[i], &want[i]).is_ok();
+            let exported = exports
+                .fits(name, &Arc::new(Scheme::mono(have[i].clone())))
+                .expect("named export")
+                .is_ok();
+            // The first pair always unifies (its open row absorbs the extra label); the
+            // second only when the tails are unshared or agree on `extra`.
+            assert_eq!(direct, i == 0 || fits, "direct: {name}");
+            assert_eq!(exported, direct, "snapshot: {name}");
+        }
+    }
+
+    #[test]
+    fn contract_schemes_preserve_weakness_in_every_sort() {
+        for weak in [false, true] {
+            let mut u = Unifier::new();
+            let item = Ty::Var(u.fresh_kinded_var(crate::ty::Kind::COMPARABLE));
+            let body = u.fresh_comp_ty();
+            let row = u.fresh_row_var();
+            let ty = closed_record(&[
+                ("item", item),
+                ("body", Ty::Thunk(Box::new(body))),
+                ("row", open_record(&[], row)),
+            ]);
+            if weak {
+                u.mark_weak(&ty, &WeakSource::Residual);
+            }
+            let scheme = Site::snapshot(&u, &ty, UnitId::fresh()).scheme();
+            assert_eq!(scheme.ty_vars.len(), usize::from(!weak));
+            assert_eq!(scheme.comp_ty_vars.len(), usize::from(!weak));
+            assert_eq!(scheme.row_vars.len(), usize::from(!weak));
+            assert_eq!(scheme.weak.tys.len(), usize::from(weak));
+            assert_eq!(scheme.weak.comps.len(), usize::from(weak));
+            assert_eq!(scheme.weak.rows.len(), usize::from(weak));
+        }
+    }
+
+    #[test]
+    fn exports_preserve_shared_row_tails() {
+        for variant in [false, true] {
+            for shared in [false, true] {
+                for same in [false, true] {
+                    let mut u = Unifier::new();
+                    let first = u.fresh_row_var();
+                    let second = u.fresh_row_var();
+                    let row = if variant { open_variant } else { open_record };
+                    let want = [row(&[("known", Ty::Unit)], first), row(&[], second)];
+                    if shared {
+                        // Distinct ids united before snapshotting must share too.
+                        u.unify_row(&Row::Var(first), &Row::Var(second)).unwrap();
+                    }
+                    let closed = if variant {
+                        closed_variant
+                    } else {
+                        closed_record
+                    };
+                    let have = [
+                        closed(&[("known", Ty::Unit), ("extra", Ty::Int)]),
+                        closed(&[("extra", if same { Ty::Int } else { Ty::String })]),
+                    ];
+                    agrees_with_unification(u, &want, &have, !shared || same);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exports_preserve_grades_shared_between_handles_and_returns() {
+        for shared in [false, true] {
+            for same in [false, true] {
+                let mut u = Unifier::new();
+                let first = u.fresh_grade_var();
+                let second = u.fresh_grade_var();
+                if shared {
+                    u.bind_grade(first, Grade::Var(second));
+                }
+                let thunk = |grade| Ty::Thunk(Box::new(CompTy::Return(grade, Box::new(Ty::Unit))));
+                let want = [
+                    Ty::Handle(Grade::Var(first), Box::new(Ty::Unit)),
+                    thunk(Grade::Var(second)),
+                ];
+                let have = [
+                    Ty::Handle(Grade::Output, Box::new(Ty::Unit)),
+                    thunk(if same { Grade::Output } else { Grade::Value }),
+                ];
+                agrees_with_unification(u, &want, &have, !shared || same);
+            }
+        }
     }
 }

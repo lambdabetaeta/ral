@@ -256,8 +256,11 @@ pub struct InferCtx {
     pub(super) residuals: Vec<(String, Arc<Scheme>)>,
     /// The type of the first use, in this unit, of each of [`Self::residuals`].
     residual_uses: Vec<(String, Ty)>,
-    /// The sites a data binding with residuals is re-admitted against before
-    /// the unit runs.
+    /// Quantified parts differ per occurrence even when residuals are shared.
+    imported_values: HashMap<Node, Ty>,
+    pub(super) imported_sites: HashMap<Node, Arc<Site>>,
+    /// The sites a binding with residuals is re-admitted against before the
+    /// unit runs.
     pub(crate) readmits: Vec<(String, Arc<Site>)>,
     /// Fresh-name counter for compiler-synthesized binders (η-expansion's
     /// parameters, the decode coercion's bind).
@@ -292,6 +295,8 @@ impl InferCtx {
             sites: HashMap::new(),
             residuals: Vec::new(),
             residual_uses: Vec::new(),
+            imported_values: HashMap::new(),
+            imported_sites: HashMap::new(),
             readmits: Vec::new(),
             synth_counter: 0,
         }
@@ -314,14 +319,24 @@ impl InferCtx {
     }
 
     /// Note that the stored binding `name`, read at `scheme`, is used here at
-    /// `ty`: the first such use is what the binding is re-admitted against.
-    pub(super) fn note_residual_use(&mut self, name: &str, scheme: &Arc<Scheme>, ty: &Ty) {
+    /// `ty`: every occurrence is recorded (a membrane, if its contract has
+    /// delayed parts), the first also gets readmission.
+    pub(super) fn note_residual_use(
+        &mut self,
+        key: Node,
+        name: &str,
+        scheme: &Arc<Scheme>,
+        ty: &Ty,
+    ) {
         let residual = self
             .residuals
             .iter()
             .any(|(n, stored)| n == name && Arc::ptr_eq(stored, scheme));
-        if residual && !self.residual_uses.iter().any(|(n, _)| n == name) {
-            self.residual_uses.push((name.to_owned(), ty.clone()));
+        if residual {
+            self.imported_values.insert(key, ty.clone());
+            if !self.residual_uses.iter().any(|(n, _)| n == name) {
+                self.residual_uses.push((name.to_owned(), ty.clone()));
+            }
         }
     }
 
@@ -332,6 +347,11 @@ impl InferCtx {
         let freeze = |ty: &Ty| Arc::new(Site::snapshot(&self.unifier, ty, unit));
         self.sites = self
             .boundary_results
+            .iter()
+            .map(|(&key, ty)| (key, freeze(ty)))
+            .collect();
+        self.imported_sites = self
+            .imported_values
             .iter()
             .map(|(&key, ty)| (key, freeze(ty)))
             .collect();

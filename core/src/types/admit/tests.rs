@@ -12,6 +12,16 @@ fn ground(ty: &Ty) -> Site {
     site(&Unifier::new(), ty)
 }
 
+fn weak_comparable(u: &mut Unifier) -> Ty {
+    let v = u.fresh_kinded(Kind::COMPARABLE);
+    let Ty::Var(root) = v else { unreachable!() };
+    u.mark_weak_vars(&crate::ty::WeakVars {
+        tys: [(root, Kind::COMPARABLE)].into(),
+        ..Default::default()
+    });
+    v
+}
+
 fn map(entries: &[(&str, Value)]) -> Value {
     Value::map(
         entries
@@ -116,7 +126,7 @@ fn a_free_variable_admits_anything_a_parametric_use_could_hold() {
 #[test]
 fn a_comparable_variable_is_fixed_to_numbers_or_to_text() {
     let mut u = Unifier::new();
-    let v = u.fresh_kinded(Kind::COMPARABLE);
+    let v = weak_comparable(&mut u);
     let ty = closed_record(&[("a", v.clone()), ("c", v)]);
     let s = site(&u, &ty);
     assert!(
@@ -142,7 +152,7 @@ fn a_comparable_variable_is_fixed_to_numbers_or_to_text() {
 #[test]
 fn fixings_are_shared_by_every_site_of_a_unit() {
     let mut u = Unifier::new();
-    let v = u.fresh_kinded(Kind::COMPARABLE);
+    let v = weak_comparable(&mut u);
     let (unit, fixings) = (UnitId::fresh(), Fixings::default());
     let first = Site::snapshot(&u, &v, unit);
     let second = Site::snapshot(&u, &v, unit);
@@ -156,7 +166,7 @@ fn fixings_are_shared_by_every_site_of_a_unit() {
 #[test]
 fn a_unit_fixes_independently_in_two_stores() {
     let mut u = Unifier::new();
-    let v = u.fresh_kinded(Kind::COMPARABLE);
+    let v = weak_comparable(&mut u);
     let s = site(&u, &v);
     let (one, other) = (Fixings::default(), Fixings::default());
     assert!(s.admit(&Value::Int(1), &one).is_ok());
@@ -234,7 +244,7 @@ fn the_witness_is_the_use_that_fixed_the_structure() {
 #[test]
 fn a_site_round_trips_with_its_unit() {
     let mut u = Unifier::new();
-    let v = u.fresh_kinded(Kind::COMPARABLE);
+    let v = weak_comparable(&mut u);
     let unit = UnitId::fresh();
     let (a, b) = (Site::snapshot(&u, &v, unit), Site::snapshot(&u, &v, unit));
     let wire = |site: &Site| postcard::to_allocvec(site).expect("a site serialises");
