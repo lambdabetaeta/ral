@@ -14,8 +14,8 @@
 //! Nothing here is made from an arbitrary path; the places are the program's
 //! layout, and the one write a user's name admits is a new file.
 //!
-//! This module contains no `site!`: every syscall it needs is a primitive of
-//! [`crate::path`]'s walk.
+//! Its typed sites mint the user's own authority; every syscall it needs is
+//! a primitive of [`crate::path`]'s walk.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -36,6 +36,7 @@ use crate::path::{
     Dir, EntryName, Judged, Kind, LeafMode, LexicalPath, Located, Reading, Resolver, Stat,
     Visibility, Writing, XdgKind, app_dir, shown, spelled_parent, walk, walk_dir,
 };
+use crate::site::{Silent, site};
 use crate::sync::LockExt as _;
 use crate::types::EnvVars;
 
@@ -54,17 +55,17 @@ static ROOTS: Mutex<BTreeMap<PathBuf, OwnDir>> = Mutex::new(BTreeMap::new());
 
 /// `l`, vouched for as the user's own, for reading.
 fn reading(l: Located) -> Located<Judged<Reading>> {
-    Ungoverned::read(l)
+    site!(Silent::OwnRead, Ungoverned::read(l))
 }
 
 /// `l`, vouched for as the user's own, for writing.
 fn writing(l: Located) -> Located<Judged<Writing>> {
-    Ungoverned::write(l)
+    site!(Silent::OwnWrite, Ungoverned::write(l))
 }
 
 /// `d`, vouched for as the user's own, for writing.
 fn writing_dir(d: Dir) -> Dir<Judged<Writing>> {
-    Ungoverned::write_dir(d)
+    site!(Silent::OwnWriteDir, Ungoverned::write_dir(d))
 }
 
 // ── Errors ────────────────────────────────────────────────────────────

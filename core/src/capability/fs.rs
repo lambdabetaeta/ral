@@ -468,9 +468,9 @@ struct Folded {
 
 /// The user's own authority: no grant governs these reads and writes.
 ///
-/// The second minting point beside [`GrantStack::judge`]; `core/tests/sites.rs`
-/// counts its callers.  Its read side is public; its write side is
-/// crate-private, and [`crate::own`] is its one caller.
+/// The second minting point beside [`GrantStack::judge`]; clippy bans its
+/// methods except at documented typed sites. Its read side is public; its
+/// write side is crate-private, and [`crate::own`] is its one caller.
 pub struct Ungoverned;
 
 impl Ungoverned {
@@ -488,8 +488,8 @@ impl Ungoverned {
 
     /// The write side of the user's own authority: the program's own
     /// directories, the files the user writes at its places, and the one new
-    /// file a user names.  [`crate::own`] is the one caller, and
-    /// `core/tests/sites.rs` counts it.
+    /// file a user names. [`crate::own`] is the one caller, with a typed site
+    /// documenting why no grant governs it.
     pub(crate) fn write(l: Located) -> Located<Judged<Writing>> {
         l.judged(Verdict(PhantomData))
     }

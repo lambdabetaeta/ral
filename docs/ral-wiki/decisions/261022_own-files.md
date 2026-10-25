@@ -11,7 +11,7 @@ anchors: [OwnDir, UserFile, OwnError, Ungoverned, read_named, create_named, walk
 **The files a program touches on its own account, outside any shell, are reached
 only through `ral_core::own`: three addresses (`OwnDir`, `UserFile` and the
 user-named functions), one authority (the crate-private write side of
-`Ungoverned`), no site of its own, and one layout rule: the config home holds
+`Ungoverned`), three authority-mint sites but no syscall sites, and one layout rule: the config home holds
 only what the user writes.** This completes
 [[decisions/261022_typed-sites|typed-sites]], which left 114 filesystem sites
 outside `path/`, 93 of them raw `std::fs` on files the program owns. Each of those
@@ -80,8 +80,11 @@ sites that the new bans of `create_dir` and `remove_dir` bring make 21.
   model's: a CLI argument, a TUI command, or the install tree.
 
 - **One authority.** `Ungoverned` gains `write` and `write_dir`, `pub(crate)`.
-  `core/src/own.rs` is their only caller, and `ungoverned_gains_no_new_caller`
-  pins the count. A fourth authority marker, an `Owned` that keeps itself on
+  `core/src/own.rs` is their only caller. Clippy's `disallowed_methods` bans
+  all five authority-minting methods (`read`, `read_dir`, `region`, `write`,
+  `write_dir`), requiring typed sites instead of a text-count allowlist.
+  This module has three: `Silent::{OwnRead, OwnWrite, OwnWriteDir}`.
+  A fourth authority marker, an `Owned` that keeps itself on
   descent, would restate in the type what the private fields of `OwnDir` and
   `UserFile` already guarantee.
 
@@ -95,7 +98,7 @@ sites that the new bans of `create_dir` and `remove_dir` bring make 21.
   string to `OwnDir::xdg("ral", Cache)?.make_dir(..)` would write into ral's cache
   with no grant, and only review stops that, as it stops any new site.
 
-- **No sites in `own.rs`.** Every syscall it needs is a primitive of
+- **No syscall sites in `own.rs`.** Every syscall it needs is a primitive of
   `crate::path`'s walk, which is already where every object is opened:
   - `walk_dir_made`, which makes each absent name of a spelling owner-only and
     steps onto it, and refuses a name that a link's target spliced in, as
@@ -308,8 +311,8 @@ too: exarch has four, ral one and synod two.
 fallback in `xdg`); `core/src/sync.rs` (`lock_strict`); `core/src/guard/freeze.rs`
 (`FreezeCtx`, the `scratch` place) and `core/src/guard/grant.rs`
 (`GrantNarrower`); `exarch/src/app.rs` (`App::own`, `Scratch`, `RunLock`);
-`clippy.toml` (the bans and their replacements); `core/tests/sites.rs`
-(`ungoverned_gains_no_new_caller`). The companion record is
+`clippy.toml` (the bans and their replacements); `core/src/site.rs`
+(the authority-mint variants); `core/tests/sites.rs` (typed-site enforcement). The companion record is
 [[decisions/261022_typed-sites|typed-sites]]; how the files are laid out is
 [[design/exarch-config-dir|exarch-config-dir]], and the session record's pointers
 are in [[internals/session-record|session-record]].

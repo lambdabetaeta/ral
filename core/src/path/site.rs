@@ -41,6 +41,10 @@ impl Site for Surface {}
 /// Sites that raise no card.
 #[derive(Clone, Copy)]
 pub(in crate::path) enum Silent {
+    /// The host-side size probe of its own scratch and log trees (`tree::bytes`).
+    /// It raises no card: no grant judges these resource-accounting reads;
+    /// model traversals use the grant's read region instead.
+    OwnTreeRegion,
     /// The by-spelling parent in `lex::spelled_parent`: a lexical read of a
     /// name that opens no object, so it raises no card.  It is exempt so that
     /// a program's own layout has one helper to ask, and `Path::parent` stays

@@ -11,6 +11,7 @@
 //! the folder is the user's own and the walk is judged by the root stack.
 
 use crate::grant::spelled;
+use crate::site::{Silent, site};
 use ral_core::capability::Ungoverned;
 use ral_core::path::tree::walk::{Found, Unentered, Walk, WalkEntry};
 use ral_core::path::{
@@ -127,7 +128,7 @@ impl Manifest {
         let mut manifest = Self::default();
         let mut files: u64 = 0;
         for entry in Walk::all(&named)
-            .readable_by(Ungoverned::region())
+            .readable_by(site!(Silent::WorkspaceManifest, Ungoverned::region()))
             .entries(stop.scope())
         {
             let entry = entry.map_err(|_| {
@@ -260,7 +261,11 @@ fn target_text(target: &Path, link: &WalkEntry) -> Result<String, String> {
 /// the folder is the user's own, and the manifest is synod's bookkeeping, not
 /// the model's I/O.
 fn link_target(at: &LexicalPath) -> io::Result<PathBuf> {
-    Ungoverned::read(walk(at, LeafMode::NoFollow)?).read_link()
+    site!(
+        Silent::WorkspaceManifest,
+        Ungoverned::read(walk(at, LeafMode::NoFollow)?)
+    )
+    .read_link()
 }
 
 /// A file's Unix permission bits; `0` on a host with no such notion.

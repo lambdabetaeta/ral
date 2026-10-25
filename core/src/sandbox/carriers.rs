@@ -77,7 +77,7 @@ pub(crate) fn linkers() -> Vec<RealPath> {
         .map(std::sync::Arc::new)
         .flat_map(|g| {
             g.walk()
-                .readable_by(Ungoverned::region())
+                .readable_by(site!(Silent::LinkerRegion, Ungoverned::region()))
                 .entries(scope.clone())
                 .filter_map(Result::ok)
                 .map(|entry| entry.shown)

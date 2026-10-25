@@ -46,8 +46,7 @@
 
 mod shell;
 // `lint/site.rs` is crate-local, so the library's `site` module cannot serve
-// the binary; this one is the binary's own, and only Windows has a site in it.
-#[cfg(windows)]
+// the binary; this one is the binary's own.
 #[path = "shell/site.rs"]
 mod site;
 

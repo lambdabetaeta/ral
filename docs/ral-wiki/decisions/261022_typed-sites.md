@@ -111,9 +111,11 @@ were wrong with that.
     `Cargo.toml`. A test reads the manifest of every workspace member but
     `vendor/`'s, which opts out by design, and fails one that lacks the table.
 
-  The two pinned caller sets stay: the production files that read through
-  `capability::Ungoverned` (`ungoverned_gains_no_new_caller`), and the files
-  outside `path/` that call the string containment helpers.
+  `capability::Ungoverned::{read, read_dir, region, write, write_dir}` are
+  banned by `clippy::disallowed_methods`: authority minting requires a typed
+  site, replacing the text-count allowlist and `ungoverned_gains_no_new_caller`
+  test. The pinned caller set for string containment helpers outside `path/`
+  stays.
 
 ## Consequences
 
@@ -144,11 +146,12 @@ were wrong with that.
   the scan permits as rule (d), by file and by the `generate_context!` it
   precedes; being an `#[expect]`, it is still reported if the expansion stops
   needing it.
-- **A program's own files take no site.** Of the filesystem sites outside `path/`,
+- **A program's own files take no syscall site.** Of the filesystem sites outside `path/`,
   93 were raw `std::fs` on files the program keeps, the user writes at its places,
   or the user names. They became operations of `ral_core::own`, whose every
-  syscall is a walk primitive, so the module holds no `site!`, and the filesystem
-  sites outside `path/` fell from 114 to 21. The four functions that take a name
+  syscall is a walk primitive, so the module holds no syscall site, and the
+  filesystem sites outside `path/` fell from 114 to 21. It has three authority-mint
+  sites instead: `Silent::{OwnRead, OwnWrite, OwnWriteDir}`. The four functions that take a name
   the user gave are banned, and each caller is a typed site that says why the name
   is the user's ([[decisions/261022_own-files|own-files]]).
 - **The classification is for the reader.** `Surface` and `Silent` change

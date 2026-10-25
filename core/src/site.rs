@@ -4,6 +4,36 @@ include!("../../lint/site.rs");
 /// Sites that raise no card.
 #[derive(Clone, Copy)]
 pub(crate) enum Silent {
+    // The user's own authority: mints of `capability::Ungoverned`.
+    /// The read mint of `own` (`reading`): a program-kept file, the user's
+    /// configuration or a name the user supplied, vouched for as the user's own
+    /// and handed on for reading.  It raises no card: no model names the
+    /// object, so no grant or read card applies.
+    OwnRead,
+    /// The leaf write mint of `own` (`writing`): a program-kept file or a new
+    /// file the user named, vouched for as the user's own and handed on for
+    /// writing.  It raises no card: no model names the object, so no grant or
+    /// write card applies.
+    OwnWrite,
+    /// The directory write mint of `own` (`writing_dir`): a directory of the
+    /// program's own layout or one the user named, vouched for as the user's own
+    /// and handed on for writing.  It raises no card: no model names the
+    /// directory, so no grant or write card applies.
+    OwnWriteDir,
+    /// The read of git discovery's `.git` pointer file and the reciprocal
+    /// `gitdir` file it names (`freeze::ungoverned`), made at session start to
+    /// freeze policy, before any grant exists to govern it.  It raises no card:
+    /// it reads the user's working tree to decide the grant, not on a model's
+    /// request.
+    GitDiscoveryRead,
+    /// The enumeration of the host's dynamic linkers: the files matching the
+    /// `ld*.so*` globs under the system library directories, walked so that
+    /// each can be admitted and bound read-only beside the grant, since
+    /// `execve` of a dynamic binary needs its `PT_INTERP` file.  It raises no
+    /// card: it is sandbox support naming the host's own files, not a read a
+    /// model asked for.
+    #[cfg(target_os = "linux")]
+    LinkerRegion,
     // The host process's environment, working directory and identity.
     /// A variable of the host process environment, as text: the one reader
     /// that [`crate::host::var`] publishes, which the host-only facts of

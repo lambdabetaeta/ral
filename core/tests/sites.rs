@@ -2,7 +2,7 @@
 
 //! What clippy cannot say about its own bans: which exemptions exist, whether a
 //! lint group silences them, and whether every member is bound by them.  And the
-//! two caller sets that stay pinned (ADR `261022_typed-sites`, ADR
+//! caller set that stays pinned (ADR `261022_typed-sites`, ADR
 //! `261021_one-path`, ADR `261022_own-files`).
 //!
 //! `clippy.toml` bans every filesystem, process, network and lock constructor,
@@ -63,7 +63,7 @@
 //!     [`every_member_inherits_the_workspace_lints`] reads the manifest of every
 //!     workspace member but `vendor/`'s, and fails the one that lacks it.
 //!
-//! Two counts stay pinned, since a ban cannot scope itself to a module or count
+//! One count stays pinned, since a ban cannot scope itself to a module or count
 //! anything:
 //!
 //!   - **The string containment helpers gain no caller.**
@@ -72,12 +72,10 @@
 //!     `Rendered::{holds, rebased}`, and how often.  They stay for the sandbox
 //!     renderers that call them today; the plan that moves those renderers onto
 //!     `RealPath` deletes the helpers, and finds no new caller.
-//!   - **The ungoverned authority gains no caller.**  [`UNGOVERNED_CALLERS`]
-//!     pins each production file that goes through `capability::Ungoverned`,
-//!     the user's own authority with no grant over it, and how often: a read
-//!     ral makes for itself (its own tree, a manifest, a review), never one a
-//!     grant judges, and the writes of `own.rs`, which alone calls its
-//!     crate-private write side.
+//!
+//! `capability::Ungoverned`'s authority-minting methods are banned by clippy,
+//! including aliases and function-item references. Legitimate reads and
+//! `own`'s crate-private writes require documented typed sites, not text counts.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -124,7 +122,7 @@ const SRC_ROOTS: &[&str] = &[
 
 /// The build scripts.  Each carries a blanket under rule (b), since
 /// `ral/build.rs` spawns `git`, so the bans do not govern them; they count as
-/// production only for the two pinned caller sets below.
+/// production only for the pinned caller set below.
 const BUILD_SCRIPTS: &[&str] = &["core/build.rs", "ral/build.rs", "exarch/build.rs"];
 
 /// The string containment helpers, which `path/` exports for the sandbox
@@ -146,18 +144,6 @@ const STRING_CONTAINMENT_HELPERS: &[&str] = &[
     "starts_with_identity",
     "path_within_str",
     "proper_ancestors",
-];
-
-/// Every production file that goes through `Ungoverned`, to read or (`own.rs`
-/// alone) to write, and how often.
-const UNGOVERNED_CALLERS: &[(&str, usize)] = &[
-    ("core/src/guard/freeze.rs", 1),
-    ("core/src/own.rs", 3),
-    ("core/src/path/tree.rs", 1),
-    ("core/src/sandbox/carriers.rs", 1),
-    ("synod/src/grant.rs", 1),
-    ("synod/src/shell/review.rs", 3),
-    ("synod/src/workspace/manifest.rs", 2),
 ];
 
 // ── The sources ───────────────────────────────────────────────────────
@@ -707,29 +693,6 @@ fn every_member_inherits_the_workspace_lints() {
          so the workspace's bans do not bind them:\n{}",
         unbound.len(),
         unbound.join("\n")
-    );
-}
-
-#[test]
-fn ungoverned_gains_no_new_caller() {
-    let counted: BTreeMap<String, usize> = production_sources()
-        .into_iter()
-        .filter(|source| source.rel != "core/src/capability/fs.rs")
-        .map(|source| {
-            let n = source.code.matches("Ungoverned::").count();
-            (source.rel, n)
-        })
-        .filter(|(_, n)| *n > 0)
-        .collect();
-    let pinned: BTreeMap<String, usize> = UNGOVERNED_CALLERS
-        .iter()
-        .map(|(f, n)| ((*f).to_owned(), *n))
-        .collect();
-    assert_eq!(
-        counted, pinned,
-        "a read or write through `Ungoverned` was added or removed: a read a grant should judge \
-         goes through `GrantStack::judge`; update UNGOVERNED_CALLERS only for ral's own reads and \
-         for `own.rs`'s writes."
     );
 }
 

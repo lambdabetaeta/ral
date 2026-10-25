@@ -53,6 +53,7 @@ use crate::path::{
     CwdPath, FrozenPath, GrantRefusal, LeafMode, LexicalPath, PathRules, RealPath, SubpathRefusal,
     Trace, XdgKind, classify_subpath, grant_eligibility, resolve_xdg_in, shown, walk, walk_lenient,
 };
+use crate::site::{Silent, site};
 use crate::syntax::quote::quote_word;
 use crate::text::code;
 use crate::types::{Break, EnvVars, Error, Shell};
@@ -295,7 +296,10 @@ impl From<BadPointer> for PolicyError {
 /// The file at `path`, read under no grant: what git discovery reads at
 /// session start, before any grant governs.
 fn ungoverned(path: &LexicalPath) -> std::io::Result<String> {
-    let file = Ungoverned::read(walk(path, LeafMode::Follow)?);
+    let file = site!(
+        Silent::GitDiscoveryRead,
+        Ungoverned::read(walk(path, LeafMode::Follow)?)
+    );
     std::io::read_to_string(file.read()?)
 }
 

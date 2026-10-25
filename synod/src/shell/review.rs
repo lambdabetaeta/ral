@@ -14,6 +14,7 @@
 //! is no status to distinguish, nothing to put back, and no conflict a
 //! put-back could discover.
 
+use crate::site::{Silent, site};
 use ral_core::path::{basename, extension, shown};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -218,11 +219,13 @@ pub(crate) fn file_to_open(review: &Review, index: usize, shown: &str) -> Result
     let held = walk_dir(&spelled(&folder)?).map_err(|e| missing(&e))?;
     let dir = above
         .iter()
-        .try_fold(held, |dir, name| Ungoverned::read_dir(dir).open_dir(name))
+        .try_fold(held, |dir, name| {
+            site!(Silent::ReviewTarget, Ungoverned::read_dir(dir)).open_dir(name)
+        })
         .map_err(|e| missing(&e))?;
-    let located = Ungoverned::read_dir(dir)
+    let located = site!(Silent::ReviewTarget, Ungoverned::read_dir(dir))
         .locate(last, LeafMode::NoFollow)
-        .map(Ungoverned::read)
+        .map(|entry| site!(Silent::ReviewTarget, Ungoverned::read(entry)))
         .map_err(|e| missing(&e))?;
     let stat = located
         .stat()

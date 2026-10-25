@@ -388,7 +388,9 @@ The files a program touches on its own account, outside any shell, are
   bans them, and each caller is a typed site that says why the name is the
   user's: a CLI argument, a TUI command, the install tree.
 
-`own.rs` holds no `site!`: each syscall it needs is a walk primitive
+`own.rs` holds three authority-mint sites, `Silent::{OwnRead, OwnWrite,
+OwnWriteDir}`, for clippy-banned `Ungoverned` methods, but no syscall sites:
+each syscall it needs is a walk primitive
 (`walk_dir_made`, `Located::{remove, rename, open_data}`, and `Visibility`'s
 `Public`, `Private` and `Secret`). The config home holds only what the user
 writes ([[decisions/261022_own-files|own-files]]).
@@ -751,8 +753,10 @@ pinned binaries' exec (`Pinned::command`), the `ps` denial sampler, the
 boot-time binary pin); test code
 carries one blanket per module. The enums are the list: `core/src/site.rs`, and
 `core/src/path/site.rs` for the path module's own, each variant documenting why
-its place is exempt. A program's own files carry none: `core/src/own.rs` holds no
-site, since every syscall it needs is a walk primitive
+its place is exempt. `Ungoverned::{read, read_dir, region, write, write_dir}`
+are also clippy-banned, so each authority mint is a documented typed site.
+`core/src/own.rs` holds three (`OwnRead`, `OwnWrite`, `OwnWriteDir`)
+but no syscall sites, since every syscall it needs is a walk primitive
 ([[decisions/261022_own-files|own-files]]). The site
 shapes and their rail rendering live in [[map/exarch/io-surface|io-surface]]; here
 the sites are only declared and accounted, with clippy failing CI on a

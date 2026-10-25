@@ -367,9 +367,10 @@ for what clippy cannot state.**
   clippy::disallowed_methods` is *not* used: a command-line `-D` escalates the
   lint onto the vendored `ral-ripgrep-core`, which deliberately opts out, and
   would break the build on vendored code.
-- **A program's own files are no site at all.** What a program keeps for itself
+- **A program's own files need no syscall sites.** What a program keeps for itself
   and what the user writes at the places it chooses go through `ral_core::own`,
-  whose every syscall is a walk primitive, so the module holds no `site!`; every
+  whose every syscall is a walk primitive. `core/src/own.rs` holds only three
+  authority-mint sites, `Silent::{OwnRead, OwnWrite, OwnWriteDir}`; every
   `std::fs` ban points there, and the env bans point at
   `ral_core::host::{var, var_os, vars_os}`. What the user names to it
   (`read_named`, `open_named`, `kind_named`, `create_named`) takes any path, so it
@@ -429,10 +430,9 @@ for what clippy cannot state.**
   without naming it. And a test reads the `Cargo.toml` of every workspace member
   but `vendor/`'s and fails one without `[lints]` with `workspace = true`, since
   a member outside the workspace's lints is outside the bans. The test file
-  also pins two caller sets that a ban cannot say, since clippy scopes a ban to
-  no module and counts nothing: the production files that read through
-  `capability::Ungoverned`, and the files outside `path/` that call the string
-  containment helpers.
+  also pins the files outside `path/` that call the string containment helpers.
+  `clippy::disallowed_methods` bans `Ungoverned::{read, read_dir, region,
+  write, write_dir}`, so each authority mint is a documented typed site.
 
 A constructor under no site fails clippy, and an allow in place of a site fails
 the scan, so outside the blankets and the one Tauri exception no exemption

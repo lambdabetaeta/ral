@@ -2,7 +2,9 @@
 
 use crate::capability::Ungoverned;
 use crate::path::LexicalPath;
+use crate::path::site::Silent;
 use crate::process::{DurableRoot, Scope};
+use crate::site::site;
 use std::path::Path;
 use walk::{Found, Walk};
 
@@ -22,7 +24,7 @@ pub fn bytes(root: &Path) -> u64 {
         return 0;
     };
     Walk::all(&root)
-        .readable_by(Ungoverned::region())
+        .readable_by(site!(Silent::OwnTreeRegion, Ungoverned::region()))
         .entries(Scope::clone(&DurableRoot::default()))
         .filter_map(Result::ok)
         .filter(|entry| entry.depth > 0)

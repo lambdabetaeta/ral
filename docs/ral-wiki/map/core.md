@@ -79,7 +79,7 @@ The crate splits driving a `Shell` from probing the machine it runs on.
   `OwnDir` (what it keeps), `UserFile` (what the user writes at its places) and the
   user-named `read_named`, `open_named`, `kind_named` and `create_named` (banned,
   so each caller is a typed site that says why the name is the user's), over the
-  walk and one authority, with no site of its own
+  walk and one authority, with three authority-mint sites but no syscall sites
   ([[map/core/capabilities|capabilities]],
   [[decisions/261022_own-files|own-files]]).
 

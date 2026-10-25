@@ -51,6 +51,14 @@
 # The vendored `ral-ripgrep-core` opts out with `[lints.clippy] all = "allow"`
 # to stay upstream-diffable.
 disallowed-methods = [
+    # Ungoverned authority is minted only at documented typed sites, never for
+    # model I/O that GrantStack::judge must authorize. Use the defining type so
+    # imports, aliases, reexports and function-item references are all covered.
+    { path = "ral_core::capability::Ungoverned::read", reason = "Use GrantStack::judge for model reads; the user's own authority requires a documented typed site." },
+    { path = "ral_core::capability::Ungoverned::read_dir", reason = "Use GrantStack::judge for model directory reads; the user's own authority requires a documented typed site." },
+    { path = "ral_core::capability::Ungoverned::region", reason = "Use the grant's read region for model traversal; an ungoverned traversal requires a documented typed site." },
+    { path = "ral_core::capability::Ungoverned::write", reason = "Only ral_core::own mints ungoverned write authority, at a documented typed site." },
+    { path = "ral_core::capability::Ungoverned::write_dir", reason = "Only ral_core::own mints ungoverned directory write authority, at a documented typed site." },
     { path = "std::fs::canonicalize", reason = "A name resolves in one place: crate::path::{walk, RealPath::of}, where the grant judges the object the walk opens; a program's own files are reached through ral_core::own." },
     { path = "std::env::current_dir", reason = "Use Shell::cwd(). Process CWD is OS-global and races every parallel ral thread; caching it in a shell-scoped store is how PWD went stale across thunks." },
     { path = "std::env::set_current_dir", reason = "ral's `cd` mutates Shell::logical_cwd, not the process cwd. A process-cwd write is subprocess setup only." },

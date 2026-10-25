@@ -213,7 +213,7 @@ impl Grant {
         // rather than let the first exchange fail halfway through the work.
         // No grant exists yet: the question is the user's own permission,
         // which the handle answers.
-        Ungoverned::read_dir(dir)
+        site!(Silent::GrantReadability, Ungoverned::read_dir(dir))
             .read_dir()
             .map_err(|e| {
                 format!(
