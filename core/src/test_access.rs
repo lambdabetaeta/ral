@@ -4,9 +4,9 @@
 //! external crate, so an internal they assert on would otherwise have to be
 //! public to every embedder
 //! (`docs/ral-wiki/decisions/260909_pub-crate-by-default.md`).
-//! Each door here goes through a `pub(crate)` item behaviourally, never by
-//! handing out core's representation, and the whole test-only reach is one
-//! auditable list.
+//! Representation-local tests belong beside their implementations. The doors
+//! here serve cross-component tests, and keep their test-only reach in one
+//! auditable list without widening the production API.
 //!
 //! Gated on `test-util`, which `core`'s own dev-dependency on itself turns on
 //! for every test, example and benchmark target of this package, and a
@@ -56,20 +56,10 @@ pub fn exec_has_redirects(exec: &Exec) -> bool {
     !exec.redirects.is_empty()
 }
 
-/// `Unifier::resolve_ty`: the type a variable stands for right now.
-pub fn resolve_ty(unifier: &mut Unifier, ty: &Ty) -> Ty {
-    unifier.resolve_ty(ty)
-}
-
 /// The scheme a builtin's type rule mints against `unifier` — the rule
 /// itself is core's, so a caller runs it rather than holding it.
 pub fn builtin_scheme(entry: &BuiltinEntry, unifier: &mut Unifier) -> Scheme {
     (entry.decl.type_rule)(unifier)
-}
-
-/// The type a scheme quantifies over.
-pub fn scheme_ty(scheme: &Scheme) -> &Ty {
-    &scheme.ty
 }
 
 /// The real paths the fs projection reads, baseline, run places and support
@@ -199,61 +189,10 @@ pub fn binding_scheme(shell: &Shell, name: &str) -> Option<std::sync::Arc<Scheme
         .and_then(|(_, scheme)| scheme)
 }
 
-/// `Shell::leased_binding_count`: how many bindings hold a terminal lease.
-pub fn leased_binding_count(shell: &Shell) -> usize {
-    shell.leased_binding_count()
-}
-
 /// `elaborator::word_val`: the value a bare word denotes — the numeral doctrine's
 /// single point of decision.
 pub fn val_from_word(word: &str) -> Val {
     crate::elaborator::word_val(word)
-}
-
-/// A scheme quantifying `comp_ty_vars` over `ty`.
-///
-/// `comp_ty_bindings` snapshots a cyclic root.  This is the one scheme shape
-/// the formatter's tests write by hand, so they need not know the rest of a
-/// scheme's fields.
-pub fn scheme_over_comp_vars(
-    comp_ty_vars: Vec<crate::ty::CompTyVar>,
-    ty: Ty,
-    comp_ty_bindings: Vec<(crate::ty::CompTyVar, crate::ty::CompTy)>,
-) -> Scheme {
-    Scheme {
-        comp_ty_vars,
-        ty,
-        comp_ty_bindings,
-        ..Scheme::mono(Ty::Unit)
-    }
-}
-
-/// A scheme over `ty` that leaves `weak` type variables unquantified, as a
-/// unit stores a binding that mentions a weak variable.
-pub fn scheme_with_weak_residuals(weak: Vec<crate::ty::TyVar>, ty: Ty) -> Scheme {
-    Scheme {
-        weak: crate::ty::WeakVars {
-            tys: weak
-                .into_iter()
-                .map(|v| (v, crate::ty::Kind::ANY))
-                .collect(),
-            ..Default::default()
-        },
-        ..Scheme::mono(ty)
-    }
-}
-
-/// `schemes` with `stored` added as bindings earlier units left behind.
-pub fn with_stored_schemes(
-    mut schemes: crate::typecheck::SessionSchemes,
-    stored: Vec<(String, Scheme)>,
-) -> crate::typecheck::SessionSchemes {
-    schemes.bindings.extend(
-        stored
-            .into_iter()
-            .map(|(name, scheme)| (name, Some(std::sync::Arc::new(scheme)))),
-    );
-    schemes
 }
 
 /// The peer end of a wire, driven directly: `core/tests/wire_write_stall.rs`

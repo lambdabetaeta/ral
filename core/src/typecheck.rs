@@ -14,6 +14,8 @@ mod grade;
 mod index;
 pub(crate) mod infer;
 mod scope;
+#[cfg(test)]
+mod session_tests;
 mod site;
 mod unify;
 

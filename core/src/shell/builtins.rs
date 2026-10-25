@@ -31,6 +31,9 @@ mod shell;
 pub mod strings;
 pub mod util;
 
+#[cfg(test)]
+mod tests;
+
 /// `CORE_BUILTINS_ARR`'s length, counted from the name literals.
 macro_rules! count_builtins {
     ($($name:literal),+ $(,)?) => {

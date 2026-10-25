@@ -452,6 +452,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fmt_scheme_shows_quantified_comp_vars() {
+        let beta = CompTyVar(17);
+        let scheme = Scheme {
+            comp_ty_vars: vec![beta],
+            ..Scheme::mono(Ty::Thunk(Box::new(CompTy::Var(beta))))
+        };
+        assert_eq!(scheme.to_string(), "∀ϕ. ϕ");
+    }
+
+    #[test]
+    fn fmt_scheme_binds_cyclic_comp_roots_by_mu() {
+        let root = CompTyVar(29);
+        let binding = CompTy::pure(Ty::list(Ty::Thunk(Box::new(CompTy::Var(root)))));
+        let scheme = Scheme {
+            comp_ty_bindings: vec![(root, binding.clone())],
+            ..Scheme::mono(Ty::Thunk(Box::new(binding)))
+        };
+        assert_eq!(scheme.to_string(), "μϕ. Returns [{ϕ}]");
+    }
+
+    #[test]
     fn fmt_scheme_binds_cyclic_ty_roots_by_mu() {
         let root = TyVar(17);
         let scheme = Scheme {

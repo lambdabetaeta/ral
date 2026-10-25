@@ -1,5 +1,5 @@
 ---
-generated_at_commit: a2aba680
+generated_at_commit: 34ae1424
 generated_at_date: 2026-10-25
 covers_paths: [core/src/ty.rs, core/src/ty/]
 ---
@@ -20,7 +20,8 @@ sites name it, and nothing in it reads a unifier or a runtime value.
 - `ty/exec_arg.rs`: `RefusedArg`, the shapes `execve(2)` has no argument for, one
   match on a `Head`.
 - `ty/fmt.rs`: `Display` for `Ty` and `Scheme`; one `FmtCtx` names a shared
-  variable the same in every type a diagnostic prints.
+  variable the same in every type a diagnostic prints. Local unit tests build
+  schemes directly to check quantified computation variables and cyclic roots.
 - `ty/site.rs`: the data of a `Site`, a boundary's checked type frozen as a graph
   of shared nodes (`Arc<[Node]>`, `Shape`, `Fields`, `Tail`) naming its unit by a `UnitId`
   — an OS nonce drawn once per process and a count, so unique in every process

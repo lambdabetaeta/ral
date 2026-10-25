@@ -162,6 +162,21 @@ pub fn core_shell() -> crate::Shell {
     crate::Shell::root(core_runtime().into(), process_cwd())
 }
 
+/// Core's surface booted with default env vars and the prelude at [`process_cwd`].
+///
+/// # Panics
+/// If the host's baseline does not resolve, which no test can run without.
+#[cfg(test)]
+pub(crate) fn fresh_shell() -> crate::Shell {
+    crate::shell::boot::boot_shell(
+        crate::io::terminal::TerminalState::default(),
+        crate::shell::boot::BakedPrelude::runtime(),
+        &crate::HostSurface::default(),
+        process_cwd(),
+    )
+    .expect("a test host resolves its baseline")
+}
+
 /// Core's own surface as a runtime: what [`core_shell`] is a root over.
 ///
 /// # Panics

@@ -21,17 +21,12 @@
 //! channel no pure call supplies, which is the same reason `RESOURCE_BACKED`
 //! exists — and is covered by `core/tests/argv_convention.rs`.
 
-#![allow(clippy::disallowed_methods, reason = "test code")]
-
-mod common;
-
-use common::fresh_shell;
-
-use ral_core::Break;
-use ral_core::shell::builtins::CORE_BUILTINS;
-use ral_core::shell::runtime::{Map, Mooring, Value};
-use ral_core::ty::{CompTy, Grade, Row, Ty};
-use ral_core::typecheck::Unifier;
+use super::{BOUNDARY_BUILTINS, CORE_BUILTINS};
+use crate::Break;
+use crate::shell::runtime::{Map, Mooring, Value};
+use crate::test_helper::fresh_shell;
+use crate::ty::{CompTy, Grade, Row, Ty};
+use crate::typecheck::Unifier;
 
 /// Builtins whose reducer reaches a resource a bare in-test call cannot
 /// satisfy, so the registry sweep cannot run them.  Each is exercised by
@@ -68,7 +63,7 @@ fn inhabitant(ty: &Ty) -> Option<Value> {
         Ty::Unit => Value::Unit,
         Ty::Bool => Value::Bool(true),
         Ty::Int | Ty::Var(_) => Value::Int(1),
-        Ty::Float => Value::Float(ral_core::data::Finite::new(1.5).expect("finite")),
+        Ty::Float => Value::Float(crate::data::Finite::new(1.5).expect("finite")),
         Ty::String => Value::string("ab"),
         Ty::Bytes => Value::bytes(vec![1, 2]),
         Ty::List(elem) => Value::list(vec![inhabitant(elem)?, inhabitant(elem)?]),
@@ -110,7 +105,7 @@ fn inhabits(value: &Value, ty: &Ty) -> bool {
 /// Walk `Thunk(Fun(A₁, … Fun(Aₙ, Return(_, R))))` into `(args, ret)`.
 /// Returns `None` for a scheme that is not a thunked function (e.g. a
 /// `pure` value scheme), which the sweep ignores.
-fn arg_and_return_types(u: &mut Unifier, ty: &Ty) -> Option<(Vec<Ty>, Ty)> {
+fn arg_and_return_types(u: &Unifier, ty: &Ty) -> Option<(Vec<Ty>, Ty)> {
     let Ty::Thunk(cty) = ty else {
         return None;
     };
@@ -119,11 +114,11 @@ fn arg_and_return_types(u: &mut Unifier, ty: &Ty) -> Option<(Vec<Ty>, Ty)> {
     loop {
         match cur {
             CompTy::Fun(param, body) => {
-                args.push(ral_core::test_access::resolve_ty(u, param));
+                args.push(u.resolve_ty(param));
                 cur = body;
             }
             CompTy::Return(_, ret) => {
-                return Some((args, ral_core::test_access::resolve_ty(u, ret)));
+                return Some((args, u.resolve_ty(ret)));
             }
             CompTy::Var(_) => return None,
         }
@@ -142,10 +137,8 @@ fn every_scheme_reducer_inhabits_its_return_type() {
         // unified, so a quantified `Ty::Var` stays unbound and is treated as
         // a polymorphic (any-value) position.
         let mut u = Unifier::new();
-        let scheme = ral_core::test_access::builtin_scheme(entry, &mut u);
-        let Some((arg_tys, ret_ty)) =
-            arg_and_return_types(&mut u, ral_core::test_access::scheme_ty(&scheme))
-        else {
+        let scheme = (entry.decl.type_rule)(&mut u);
+        let Some((arg_tys, ret_ty)) = arg_and_return_types(&u, &scheme.ty) else {
             continue;
         };
         let Some(args) = arg_tys.iter().map(inhabitant).collect::<Option<Vec<_>>>() else {
@@ -204,18 +197,18 @@ fn producers(ty: &Ty, out: &mut Vec<(Grade, Ty)>) {
 /// command grade with a value.
 #[test]
 fn every_scheme_pairs_a_grade_with_one_value_type() {
-    let table = ral_core::HostSurface::default().builtin_table();
+    let table = crate::HostSurface::default().builtin_table();
     let echo = table.get("echo").expect("the base frame `echo`");
     let rows = CORE_BUILTINS
         .iter()
-        .chain(ral_core::shell::builtins::BOUNDARY_BUILTINS)
+        .chain(BOUNDARY_BUILTINS)
         .chain(std::iter::once(&echo));
     for entry in rows {
         let name = entry.decl.name.as_ref();
         let mut u = Unifier::new();
-        let scheme = ral_core::test_access::builtin_scheme(entry, &mut u);
+        let scheme = (entry.decl.type_rule)(&mut u);
         let mut found = Vec::new();
-        producers(ral_core::test_access::scheme_ty(&scheme), &mut found);
+        producers(&scheme.ty, &mut found);
         let mut paired: std::collections::HashMap<Grade, Ty> = std::collections::HashMap::new();
         for (grade, value) in found {
             match grade {

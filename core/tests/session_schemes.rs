@@ -348,30 +348,7 @@ fn set_var_block_is_bound_and_usable_as_a_command_head() {
     );
 }
 
-// ─── (11) a stored weak residual is one type per unit, and never aliased ────
-
-/// What an earlier unit stores for a name of type `[_α]`, `α` being the
-/// number that unit's unifier gave it.
-fn stored_weak_list(alpha: u32) -> ral_core::ty::Scheme {
-    let elem = ral_core::ty::TyVar(alpha);
-    ral_core::test_access::scheme_with_weak_residuals(
-        vec![elem],
-        ral_core::ty::Ty::list(ral_core::ty::Ty::Var(elem)),
-    )
-}
-
-fn check_with_stored(names: &[&str], src: &str) -> Vec<TypeError> {
-    let stored = names
-        .iter()
-        .map(|name| ((*name).to_string(), stored_weak_list(0)))
-        .collect();
-    let schemes = ral_core::test_access::with_stored_schemes(shell().session_schemes(), stored);
-    match compile_and_typecheck(src, schemes, FileId::DUMMY, None, None) {
-        Ok(_) => Vec::new(),
-        Err(CompileError::Parse(e)) => panic!("parse: {src:?}: {e}"),
-        Err(CompileError::Types(errs)) => errs,
-    }
-}
+// ─── a generalised binding stays polymorphic across runs ───────────────────
 
 const ELEMENT_AS_INT_THEN_BOOL: &str = "
 let [a] = $xs
@@ -379,34 +356,7 @@ let n = $[$a + 1]
 let [b] = $ys
 let m = $[not $b]";
 
-/// Two names stored by different units carry the same residual number.  Each
-/// is re-seeded as its own fresh weak variable, so one is used as a number
-/// and the other as a Bool.
-#[test]
-fn stored_residuals_do_not_alias_across_names() {
-    let errs = check_with_stored(&["xs", "ys"], ELEMENT_AS_INT_THEN_BOOL);
-    assert!(
-        errs.is_empty(),
-        "residuals of two units must stay apart, got: {:?}",
-        errs.iter()
-            .map(|e| e.kind.render_message())
-            .collect::<Vec<_>>()
-    );
-}
-
-/// One name's residual is one type for the unit that reads it twice.
-#[test]
-fn a_stored_residual_has_one_type_per_unit() {
-    let errs = check_with_stored(&["xs"], &ELEMENT_AS_INT_THEN_BOOL.replace("$ys", "$xs"));
-    assert!(
-        errs.iter()
-            .any(|e| e.hint().is_some_and(|h| h.contains("another use fixed it"))),
-        "a weak residual must not be instantiated at a number and at a Bool, and the \
-         refusal says why: {errs:?}"
-    );
-}
-
-/// The contrast: a name the defining unit generalised is used at both.
+/// A name the defining unit generalised is used at both types.
 #[test]
 fn a_generalised_binding_is_used_at_two_types() {
     let mut sh = shell();

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: a2aba680
+generated_at_commit: 34ae1424
 generated_at_date: 2026-10-25
 covers_paths: [core/src/lib.rs, core/src/shell.rs, core/src/host.rs, core/src/host/, core/src/fact.rs, core/src/fact/]
 ---
@@ -28,9 +28,14 @@ outside the crate names it, `pub(crate)` otherwise, so `dead_code` can name an
 internal whose last caller went away
 ([[decisions/260909_pub-crate-by-default|pub-crate-by-default]]). Core's own
 integration tests link `ral-core` as an external crate and reach internals
-through one gated module, `core::test_access` — its engine reads go through
-`IdentityTransport::inspect`, the one `test-util`-only read of an identity
-engine's shell; core's unit tests boot engines through `engine::testkit`.
+through one gated module, `core::test_access`, for cross-component assertions.
+Representation-local tests live beside their implementations: builtin registry
+properties in `shell/builtins/tests.rs`, stored-scheme reseeding in
+`typecheck/session_tests.rs`, and scheme formatting in `ty/fmt.rs`.
+Integration tests' engine reads go through `IdentityTransport::inspect`, the
+one `test-util`-only read of an identity engine's shell; core's unit tests boot
+engines through `engine::testkit` and prelude shells through
+`test_helper::fresh_shell`.
 
 ## The evaluation seam
 

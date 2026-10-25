@@ -11,7 +11,7 @@
 mod common;
 
 use ral_core::ir::{Comp, CompKind, Phrase, Toplevel, Unchecked, Val};
-use ral_core::ty::{CompTy, CompTyVar, Ty};
+use ral_core::ty::Ty;
 use ral_core::typecheck::Form;
 use ral_core::typecheck::contract::declared;
 use ral_core::{TypeError, elaborator::elaborate, syntax::parser::parse, typecheck};
@@ -69,31 +69,6 @@ fn has_error(src: &str, fragment: &str) {
         errs.iter().any(|e| e.contains(fragment)),
         "expected an error containing {fragment:?} in {src:?}, got: {errs:?}"
     );
-}
-
-#[test]
-fn fmt_scheme_shows_quantified_comp_vars() {
-    let beta = CompTyVar(17);
-    let scheme = ral_core::test_access::scheme_over_comp_vars(
-        vec![beta],
-        Ty::Thunk(Box::new(CompTy::Var(beta))),
-        vec![],
-    );
-    let rendered = scheme.to_string();
-    assert_eq!(rendered, "∀ϕ. ϕ");
-}
-
-#[test]
-fn fmt_scheme_binds_cyclic_comp_roots_by_mu() {
-    let root = CompTyVar(29);
-    let binding = CompTy::pure(Ty::list(Ty::Thunk(Box::new(CompTy::Var(root)))));
-    let scheme = ral_core::test_access::scheme_over_comp_vars(
-        vec![],
-        Ty::Thunk(Box::new(binding.clone())),
-        vec![(root, binding)],
-    );
-    let rendered = scheme.to_string();
-    assert_eq!(rendered, "μϕ. Returns [{ϕ}]");
 }
 
 /// `workers` is data: a row's fields read at their documented types, including
