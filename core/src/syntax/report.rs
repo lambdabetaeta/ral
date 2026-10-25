@@ -201,3 +201,187 @@ fn lex_report(src: &Source, kind: &LexErrorKind, at: Option<Span>) -> Option<Rep
         LexErrorKind::Other(_) => return None,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::source::{FileId, SourceFile, SourceOrigin};
+    use crate::syntax::lexer::StringForm;
+
+    fn file_origin(path: &str) -> SourceOrigin {
+        SourceOrigin::File(SourceFile::new(path).expect("UTF-8"))
+    }
+
+    fn parse_error_with(message: &str, span: Option<Span>) -> ParseError {
+        ParseError {
+            message: message.into(),
+            span,
+            kind: ParseErrorKind::Plain { hint: None },
+            incomplete: false,
+        }
+    }
+
+    fn parse_error_from(kind: LexErrorKind) -> ParseError {
+        ParseError {
+            message: kind.message(),
+            span: None,
+            kind: ParseErrorKind::Lex(kind),
+            incomplete: false,
+        }
+    }
+
+    fn drawn(file: &str, text: &str, err: &ParseError) -> String {
+        let src = Source::from_text(file_origin(file), text);
+        err.report(&src).render(&src)
+    }
+
+    #[test]
+    fn parse_error_ariadne_points_at_source() {
+        let span = Span::new(FileId::DUMMY, 8, 9);
+        let err = parse_error_with("expected ',' or ']' in list", Some(span));
+        let output = drawn("test.al", "x = [a, b", &err);
+        assert!(output.contains("P0001"));
+        assert!(output.contains("expected ',' or ']' in list"));
+        assert!(output.contains("test.al"));
+    }
+
+    #[test]
+    fn lex_error_ariadne_renders_unterminated_string_with_open_anchor() {
+        let err = parse_error_from(LexErrorKind::UnterminatedString {
+            form: StringForm::DoubleQuoted,
+            opened: Span::new(FileId::DUMMY, 0, 1),
+            inner: None,
+        });
+        let output = drawn("test.al", "\"foo", &err);
+        assert!(output.contains("L0001"), "got:\n{output}");
+        assert!(output.contains("unterminated double-quoted string"));
+        assert!(output.contains("opened here"));
+    }
+
+    #[test]
+    fn lex_error_ariadne_names_the_bumped_closing_delimiter() {
+        let err = parse_error_from(LexErrorKind::UnterminatedString {
+            form: StringForm::BumpedSingle(2),
+            opened: Span::new(FileId::DUMMY, 0, 1),
+            inner: None,
+        });
+        let output = drawn("test.al", "##'foo", &err);
+        assert!(
+            output.matches("expected closing `'##`").count() == 2,
+            "got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn lex_error_ariadne_includes_inner_help_for_nested_unclosed() {
+        let inner = LexErrorKind::UnterminatedBalanced {
+            open: '{',
+            close: '}',
+            opened: Span::new(FileId::DUMMY, 6, 7),
+        };
+        let err = parse_error_from(LexErrorKind::UnterminatedString {
+            form: StringForm::DoubleQuoted,
+            opened: Span::new(FileId::DUMMY, 0, 1),
+            inner: Some(Box::new(inner)),
+        });
+        let output = drawn("test.al", "\"foo !{cmd", &err);
+        assert!(output.contains("L0001"));
+        assert!(output.contains("nested"));
+        assert!(output.contains("`{…}`"), "got:\n{output}");
+    }
+
+    #[test]
+    fn balanced_error_spells_its_delimiters_once() {
+        let kind = LexErrorKind::UnterminatedBalanced {
+            open: '[',
+            close: ']',
+            opened: Span::new(FileId::DUMMY, 0, 1),
+        };
+        let err = parse_error_from(kind.clone());
+        let src = Source::from_text(file_origin("t.ral"), "[a");
+        assert_eq!(err.report(&src).message, kind.message());
+        assert_eq!(kind.message(), "unterminated `[…]`");
+    }
+
+    fn touching_help(src: &str) -> String {
+        let err = crate::syntax::parser::parse(src).unwrap_err();
+        assert!(
+            matches!(err.kind, ParseErrorKind::Touching { .. }),
+            "{src}: {err}"
+        );
+        drawn("test.ral", src, &err)
+    }
+
+    #[test]
+    fn touching_words_render_both_readings() {
+        let cases = [
+            (
+                "echo --prefix=$d",
+                r#"two arguments: `--prefix= $d`; one argument: "--prefix=$d""#,
+            ),
+            ("echo 'a'\"b\"'c'", r#"one argument: "abc""#),
+            ("echo $h[k]'x'", r#"one argument: "$h[k]x""#),
+            (r"echo C:\tmp\$leaf", r#"one argument: "C:\\tmp\\$leaf""#),
+            ("echo a!{b c}", r#"one argument: "a!{b c}""#),
+            ("echo 'it''s'", r#"one argument: "its""#),
+            ("echo '~'/x", r#"one argument: "\~/x""#),
+        ];
+        for (src, help) in cases {
+            let output = touching_help(src);
+            assert!(output.contains("P0002"), "{src}:\n{output}");
+            assert!(output.contains(help), "{src}:\n{output}");
+        }
+    }
+
+    #[test]
+    fn an_entry_that_runs_renders_its_readings() {
+        for (src, help) in [
+            (
+                "[str $x[type], $x[size]]",
+                "Help: `str $x[type]` runs a command: write `!{str $x[type]}`, or, if these are \
+                 separate entries, put `,` between them",
+            ),
+            (
+                "[k: if $c { 1 } else { 2 }]",
+                "Help: `if` begins a statement: write `!{if …}`, or bind it first with `let`",
+            ),
+            (
+                "[1 2]",
+                "Help: if these are separate entries, put `,` between them",
+            ),
+            (
+                "[\n  str\n  $x\n]",
+                "Help: if these are separate entries, put `,` between them; or, to run",
+            ),
+        ] {
+            let err = crate::syntax::parser::parse(src).unwrap_err();
+            let output = drawn("test.ral", src, &err);
+            assert!(output.contains("P0003"), "{src}:\n{output}");
+            assert!(output.contains(help), "{src}:\n{output}");
+        }
+    }
+
+    #[test]
+    fn a_statement_entry_is_not_labelled_a_value() {
+        for src in ["[k: if $c { 1 } else { 2 }]", "[k: let x = 1]"] {
+            let err = crate::syntax::parser::parse(src).unwrap_err();
+            let output = drawn("test.ral", src, &err);
+            assert!(
+                output.contains("this entry is a statement, not a value"),
+                "{src}:\n{output}"
+            );
+            assert!(
+                !output.contains("its first value ends here"),
+                "{src}:\n{output}"
+            );
+        }
+    }
+
+    #[test]
+    fn touching_words_label_both_atoms() {
+        let output = touching_help("echo --prefix=$d");
+        assert!(output.contains("words touch: whitespace separates words, and nothing joins them"));
+        assert!(output.contains("this word starts with no space before it"));
+        assert!(output.contains("this word ends here"));
+    }
+}

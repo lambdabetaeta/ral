@@ -12,9 +12,6 @@ use ariadne::{Color, Config, IndexType, ReportKind};
 use std::fmt::Write;
 use std::ops::Range;
 
-#[cfg(test)]
-mod tests;
-
 /// A span and the phrase placed beside its underline; `None` is the end of
 /// the input.
 #[derive(Debug, Clone)]
@@ -132,5 +129,44 @@ fn caret(src: &Source, span: Option<Span>) -> Range<usize> {
         (true, _) => start..end,
         (false, true) => start..text.ceil_char_boundary(start + 1),
         (false, false) => text.floor_char_boundary(start.saturating_sub(1))..start,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::source::{FileId, SourceOrigin};
+
+    #[test]
+    fn caret_width_is_the_span_for_multibyte() {
+        let src = Source::from_text(SourceOrigin::Virtual("t".into()), "café bar");
+        assert_eq!(caret(&src, Some(Span::new(FileId::DUMMY, 0, 5))), 0..5);
+    }
+
+    #[test]
+    fn empty_and_eof_carets_widen_to_a_char() {
+        let src = Source::from_text(SourceOrigin::Virtual("t".into()), "aé");
+        assert_eq!(caret(&src, Some(Span::point(FileId::DUMMY, 0))), 0..1);
+        assert_eq!(caret(&src, Some(Span::point(FileId::DUMMY, 1))), 1..3);
+        assert_eq!(caret(&src, None), 1..3);
+        assert_eq!(
+            caret(&Source::from_text(src.origin().clone(), ""), None),
+            0..0
+        );
+    }
+
+    #[test]
+    fn plain_report_includes_code_message_and_hint() {
+        let out = Report {
+            code: Some("T9999"),
+            message: "message".into(),
+            at: None,
+            also: None,
+            hint: Some("hint".into()),
+        }
+        .plain();
+        assert!(out.contains("T9999"));
+        assert!(out.contains("message"));
+        assert!(out.contains("hint"));
     }
 }

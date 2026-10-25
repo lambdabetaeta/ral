@@ -1410,7 +1410,53 @@ impl TypeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::{FileId, Source, SourceFile, SourceOrigin};
     use crate::ty::CompTy;
+
+    #[test]
+    fn type_error_ariadne_with_span() {
+        let sp = Span::new(FileId::DUMMY, 21, 28);
+        let err = TypeError {
+            pos: Some(sp),
+            kind: TypeErrorKind::TyMismatch {
+                expected: Box::new(Ty::Int),
+                actual: Box::new(Ty::String),
+            },
+            reason: Some(Reason::IfCond),
+            weak: None,
+            unit: None,
+        };
+        let src = Source::from_text(
+            SourceOrigin::File(SourceFile::new("test.ral").expect("UTF-8")),
+            "if 1 { return 42 } else { return \"hello\" }",
+        );
+        let output = err.report().render(&src);
+        assert!(output.contains("T0010"));
+        assert!(output.contains("couldn't match"));
+        assert!(output.contains("Integer"));
+        assert!(output.contains("String"));
+        assert!(output.contains(
+            "the condition of an `if` must be a Bool: either `true`/`false` \
+             or an expression that produces one (e.g. `$[$x == 1]`)"
+        ));
+    }
+
+    #[test]
+    fn type_error_ariadne_without_span_is_spanless() {
+        let err = TypeError {
+            pos: None,
+            kind: TypeErrorKind::RecursiveRow,
+            reason: None,
+            weak: None,
+            unit: None,
+        };
+        let output = err.report().render(&Source::from_text(
+            SourceOrigin::File(SourceFile::new("test.ral").expect("UTF-8")),
+            "let x = 1",
+        ));
+        assert!(output.contains("infinite row"));
+        assert!(output.contains("T0002"));
+    }
 
     fn mismatch(expected: Ty, actual: Ty) -> TypeErrorKind {
         TypeErrorKind::TyMismatch {

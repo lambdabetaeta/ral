@@ -286,7 +286,121 @@ impl std::error::Error for Error {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::{Source, SourceFile, SourceOrigin};
+    use crate::syntax::parser::{ParseError, ParseErrorKind};
     use std::io::{self, ErrorKind};
+
+    fn file_origin(path: &str) -> SourceOrigin {
+        SourceOrigin::File(SourceFile::new(path).expect("UTF-8"))
+    }
+
+    fn db_with(name: &str, text: &str) -> (SourceDb, FileId) {
+        let mut db = SourceDb::default();
+        let id = db.register(Source::from_text(file_origin(name), text));
+        (db, id)
+    }
+
+    #[test]
+    fn rejected_error_renders_its_compile_report() {
+        let parse = ParseError {
+            message: "expected ]".into(),
+            span: Some(Span::new(FileId::DUMMY, 4, 5)),
+            kind: ParseErrorKind::Plain { hint: None },
+            incomplete: false,
+        };
+        let err = crate::compile::CompileError::Parse(parse)
+            .into_error(Source::from_text(file_origin("plugin.ral"), "let [x"));
+        let (db, root) = db_with("main.ral", "load-plugin plugin");
+        let out = err.render(&db, Some(root));
+        assert!(out.contains("P0001") && out.contains("plugin.ral"), "{out}");
+        assert_eq!(err.message, "parse error: expected ]");
+    }
+
+    fn runtime(
+        db: &SourceDb,
+        span: Option<Span>,
+        witness: Option<Span>,
+        hint: Option<&str>,
+    ) -> String {
+        let mut err = Error::new("boom").with_witness(witness);
+        err.span = span;
+        err.hint = hint.map(Into::into);
+        err.render(db, None)
+    }
+
+    #[test]
+    fn runtime_error_ariadne_points_at_source() {
+        let (db, file) = db_with("test.al", "x = 5\ny = 10\necho $undefined\n");
+        let output = runtime(&db, Some(Span::new(file, 18, 28)), None, None);
+        assert!(output.contains("R0001"));
+        assert!(output.contains("boom"));
+        assert!(output.contains("test.al"));
+    }
+
+    #[test]
+    fn runtime_error_ariadne_renders_hint() {
+        let (db, file) = db_with("test.al", "[a, b] = 5");
+        let output = runtime(
+            &db,
+            Some(Span::new(file, 0, 6)),
+            None,
+            Some("the right-hand side must evaluate to a list"),
+        );
+        assert!(output.contains("the right-hand side must evaluate to a list"));
+    }
+
+    #[test]
+    fn runtime_error_resolved_source_draws_caret() {
+        let (db, file) = db_with("main.ral", "echo x");
+        let out = runtime(&db, Some(Span::new(file, 5, 6)), None, None);
+        assert!(out.contains("R0001"));
+        assert!(
+            out.contains("here"),
+            "a resolved span should draw a caret:\n{out}"
+        );
+        assert!(out.contains("main.ral"));
+    }
+
+    #[test]
+    fn runtime_error_in_unregistered_source_is_spanless() {
+        let (db, _) = db_with("main.ral", "echo x");
+        let out = runtime(&db, Some(Span::new(FileId::DUMMY, 2, 6)), None, None);
+        assert!(out.contains("R0001"));
+        assert!(out.contains("boom"));
+        assert!(
+            !out.contains("here"),
+            "an unresolved span must not draw a caret in any source:\n{out}"
+        );
+    }
+
+    #[test]
+    fn runtime_error_in_module_draws_into_module_source() {
+        let mut db = SourceDb::default();
+        let _top = db.register(Source::from_text(
+            file_origin("main.ral"),
+            "use 'mod.ral'\n",
+        ));
+        let module = db.register(Source::from_text(
+            file_origin("mod.ral"),
+            "let a = 1\nfail [status: 1, message: 'kaboom']\n",
+        ));
+        // Strip ANSI: colours may split `fail` character by character.
+        let out =
+            crate::io::ansi::strip(&runtime(&db, Some(Span::new(module, 10, 14)), None, None));
+        assert!(out.contains("R0001"));
+        assert!(
+            out.contains("mod.ral"),
+            "the caret must be drawn against the module's source:\n{out}"
+        );
+        assert!(
+            !out.contains("main.ral"),
+            "the top-level source must not appear:\n{out}"
+        );
+        assert!(
+            out.contains("fail"),
+            "the underlined line must be the module's line 2:\n{out}"
+        );
+    }
 
     fn said(e: &io::Error) -> String {
         Error::io("f", e).message

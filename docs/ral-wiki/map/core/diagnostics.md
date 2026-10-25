@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 4e2ee042
-generated_at_date: 2026-10-10
+generated_at_commit: 27efdf28
+generated_at_date: 2026-10-25
 covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/compile.rs, core/src/syntax/report.rs, core/src/io/terminal.rs, core/src/io/terminal/stderr.rs, core/src/text.rs, core/src/io/ansi.rs, core/src/types/exit_hints.rs]
 ---
 
@@ -109,6 +109,9 @@ is the compact one-liner. The builders sit with their errors:
 message saying what is wrong and the help what to write), `TypeError::report` in
 `typecheck/explain.rs`, and `Error::render` / `Error::compact`
 (`types/error.rs`, resolving the error's `Span` against a `SourceDb`).
+Rendering tests live inline with each owner: generic renderer tests in
+`diagnostic.rs`, parse and lexer reports in `syntax/report.rs`, type reports in
+`typecheck/explain.rs`, and runtime source selection in `types/error.rs`.
 
 `Error::render` dispatches on where the error came from, not what the input
 looked like: a carried `rejection` draws its own report, so a broken plugin,
