@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 446e3123
-generated_at_date: 2026-10-06
-covers_paths: [core/src/elaborator.rs, core/src/syntax/group.rs]
+generated_at_commit: ec5a7b9d
+generated_at_date: 2026-10-14
+covers_paths: [core/src/elaborator.rs, core/src/elaborator/, core/src/syntax/group.rs]
 ---
 
 # Map: core / elaboration
@@ -12,6 +12,14 @@ sole public function is
 becomes a `Phrase::Define`, the members of a recursive group sharing one
 `Rec` group, and everything else a `Run`
 ([[map/core/ir|`Toplevel`/`Phrase`]]).
+
+One `Elaborator` shares state across implementation blocks:
+
+- `elaborator.rs`: entry point, scope and name resolution, hoisting.
+- `elaborator/statements.rs`: phrases, nested statements, recursive stretches.
+- `elaborator/calls.rs`: head dispatch, application, redirects.
+- `elaborator/branches.rs`: conditional arms, short-circuiting, isolated hoists.
+- `elaborator/expr.rs`: exhaustive AST traversal and literal lowering.
 
 This is the one phase that knows about surface sugar: it enforces the
 value/computation split by binding effectful sub-expressions to fresh temporaries
