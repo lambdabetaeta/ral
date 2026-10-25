@@ -4,7 +4,7 @@ use crate::agent::testkit::{TestAgentSpec, test_agent};
 use crate::card::Mark;
 use crate::tui::palette::READ_W;
 use crate::tui::row::Row;
-use ral_core::types::{Observation, Observed};
+use ral_core::shell::runtime::{Observation, Observed};
 
 /// The root is returned alongside its `App` because the frontend resolves
 /// it through the fleet only: dropping it here would settle the agent mid-test.

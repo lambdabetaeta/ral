@@ -6,7 +6,7 @@ use super::Engine;
 use crate::data::FOValue;
 use crate::data::datum::Datum;
 use crate::protocol::probe::{BindingRow, CompletionNames, HandleRow, Probe};
-use crate::types::{Shell, Value};
+use crate::shell::runtime::{Shell, Value};
 
 mod fs;
 

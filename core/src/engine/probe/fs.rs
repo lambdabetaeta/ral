@@ -7,7 +7,7 @@ use crate::authority::policy::ReadRegion;
 use crate::path::walk::Kind;
 use crate::path::{Dir, Judged, LeafMode, Reading, walk_dir};
 use crate::protocol::probe::PathEntry;
-use crate::types::Shell;
+use crate::shell::runtime::Shell;
 use std::path::Path;
 
 /// `dir` held and judged for reading, with the region that judges what is

@@ -129,7 +129,7 @@ impl Seat {
     }
 
     /// Install the session sink a settling worker's deferred batch reaches.
-    pub(crate) fn install_deferred(&self, sink: Arc<dyn ral_core::types::DeferredSink>) {
+    pub(crate) fn install_deferred(&self, sink: Arc<dyn ral_core::shell::runtime::DeferredSink>) {
         self.transport().set_deferred_sink(sink);
     }
 

@@ -20,8 +20,8 @@ use crate::process::{Ambient, interrupt_epoch};
 use crate::protocol::channel::{WireChannel, WriteError, write_or_sever};
 use crate::protocol::probe::{BindingRow, CompletionNames, PathEntry, Probe, WorkerRow};
 use crate::protocol::{Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Run};
+use crate::shell::runtime::DeferredSink;
 use crate::sync::LockExt as _;
-use crate::types::DeferredSink;
 
 mod identity;
 #[cfg(test)]

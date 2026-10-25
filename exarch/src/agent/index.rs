@@ -80,7 +80,7 @@ impl BuiltinIndex {
     /// `builtins` is the engine's own table, as `Transport::builtin_names`
     /// reads it.
     pub(crate) fn resolve(builtins: Vec<String>) -> std::sync::Arc<Self> {
-        let prelude = ral_core::builtins::help::prelude_names()
+        let prelude = ral_core::shell::builtins::help::prelude_names()
             .into_iter()
             .map(str::to_string);
         let library = crate::library::agent_library_docs()

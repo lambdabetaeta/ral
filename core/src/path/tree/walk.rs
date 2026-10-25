@@ -20,9 +20,8 @@ use crate::path::{
     CwdPath, Dir, EntryName, Judged, Kind, LeafMode, LexicalPath, Listing, Located, ObjectId,
     Reading, Stat, git, shown, walk, walk_dir,
 };
-use crate::process::Scope;
+use crate::process::{Cancellation, Scope};
 use crate::site::site;
-use crate::types::{Settled, Shell, sig};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read};
 use std::path::{Component, Path};
@@ -100,21 +99,6 @@ impl Walk {
     pub fn readable_by(self, region: ReadRegion) -> Granted {
         Granted { walk: self, region }
     }
-
-    /// The entries the live grant admits.  `named` is the root as the caller
-    /// wrote it: a cwd-relative name gives cwd-relative entries where it can,
-    /// any other absolute ones.  `who` heads a refused name.
-    pub fn admitted(self, shell: &Shell, who: &'static str, named: &str) -> Admitted {
-        let base = (shell.context.resolver().is_relative(named))
-            .then(|| shell.resolve(".").into_cwd().ok())
-            .flatten();
-        let region = shell.context.grants.read_region(shell.baseline());
-        Admitted {
-            entries: self.readable_by(region).entries(shell.scope.clone()),
-            base,
-            who,
-        }
-    }
 }
 
 /// A [`Walk`] and the region it may read.
@@ -183,11 +167,7 @@ impl WalkEntry {
     ///
     /// # Errors
     /// A name no ral string can hold.
-    pub fn name(&self, base: Option<&CwdPath>) -> Settled<String> {
-        self.named(base).map_err(sig)
-    }
-
-    fn named(&self, base: Option<&CwdPath>) -> Result<String, String> {
+    pub fn name(&self, base: Option<&CwdPath>) -> Result<String, String> {
         let path = self.shown.as_path();
         let rel = base
             .and_then(|base| site!(Silent::WalkedRelative, path => strip_prefix(base)).ok())
@@ -208,43 +188,6 @@ fn unnameable(shown: &Path) -> String {
         .unwrap_or("");
     let name = site!(Silent::Unnameable, shown => strip_prefix(dir)).unwrap_or(shown);
     format!("{dir}: {name:?} is not valid UTF-8, so no ral string can hold it; rename it?")
-}
-
-/// The entries of an [`Walk::admitted`] walk the walk saw, which the grant
-/// judged on the way.
-pub struct Admitted {
-    entries: Entries,
-    base: Option<CwdPath>,
-    who: &'static str,
-}
-
-impl Admitted {
-    /// The next entry seen.
-    ///
-    /// # Errors
-    /// The stop in force.
-    #[allow(
-        clippy::should_implement_trait,
-        reason = "a stop is an error that ends the walk, not an item"
-    )]
-    pub fn next(&mut self) -> Settled<Option<WalkEntry>> {
-        for entry in self.entries.by_ref() {
-            let entry = entry?;
-            if !matches!(entry.found, Found::Unseen(_)) {
-                return Ok(Some(entry));
-            }
-        }
-        Ok(None)
-    }
-
-    /// `entry`'s name as a reader takes it back, in the shape the root was
-    /// named.
-    ///
-    /// # Errors
-    /// A name no ral string can hold, headed by what the walk was for.
-    pub fn name(&self, entry: &WalkEntry) -> Settled<String> {
-        (entry.named(self.base.as_ref())).map_err(|e| sig(format!("{}: {e}", self.who)))
-    }
 }
 
 /// A directory entered, and what is left of it to yield.
@@ -282,7 +225,7 @@ pub struct Entries {
 }
 
 impl Iterator for Entries {
-    type Item = Settled<WalkEntry>;
+    type Item = Result<WalkEntry, Cancellation>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let next = if self.started {
@@ -300,7 +243,7 @@ impl Iterator for Entries {
 
 impl Entries {
     /// The next entry beneath the root.
-    fn advance(&mut self) -> Settled<Option<WalkEntry>> {
+    fn advance(&mut self) -> Result<Option<WalkEntry>, Cancellation> {
         while let Some(frame) = self.stack.last_mut() {
             let Some(item) = frame.items.next() else {
                 self.stack.pop();
@@ -318,7 +261,7 @@ impl Entries {
     }
 
     /// The root: filtered by nothing, entered through a link.
-    fn root(&mut self) -> Settled<WalkEntry> {
+    fn root(&mut self) -> Result<WalkEntry, Cancellation> {
         self.scope.poll()?;
         let root = self.walk.root.clone();
         let found = match walk_dir(&root) {
@@ -332,7 +275,7 @@ impl Entries {
         })
     }
 
-    fn enter_root(&mut self, dir: Dir) -> Settled<Found> {
+    fn enter_root(&mut self, dir: Dir) -> Result<Found, Cancellation> {
         let Ok(dir) = self.region.judge(dir) else {
             return Ok(Found::Unseen(denied()));
         };
@@ -379,7 +322,7 @@ impl Entries {
     }
 
     /// One entry of the directory on top, yielded unless something skips it.
-    fn step(&mut self, item: Item) -> Settled<Option<WalkEntry>> {
+    fn step(&mut self, item: Item) -> Result<Option<WalkEntry>, Cancellation> {
         let Item { name, seen } = item;
         let top = self.stack.last().expect("an entry belongs to a directory");
         let (shown, depth) = (child(&top.shown, &name), top.depth + 1);
@@ -434,7 +377,7 @@ impl Entries {
         linked: Option<io::Result<Dir>>,
         shown: &LexicalPath,
         depth: usize,
-    ) -> Settled<Found> {
+    ) -> Result<Found, Cancellation> {
         let beyond = |id: ObjectId| {
             let elsewhere = self.walk.same_file_system
                 && self.root_id.is_some_and(|root| !root.same_volume(id));
@@ -487,7 +430,7 @@ impl Entries {
         shown: LexicalPath,
         depth: usize,
         name: Option<&OsStr>,
-    ) -> Settled<io::Result<()>> {
+    ) -> Result<io::Result<()>, Cancellation> {
         let (items, marks) = match self.list(&dir)? {
             Ok(listed) => listed,
             Err(e) => return Ok(Err(e)),
@@ -510,14 +453,17 @@ impl Entries {
         Ok(Ok(()))
     }
 
-    fn list(&self, dir: &Dir<Judged<Reading>>) -> Settled<io::Result<(Vec<Item>, Marks)>> {
+    fn list(
+        &self,
+        dir: &Dir<Judged<Reading>>,
+    ) -> Result<io::Result<(Vec<Item>, Marks)>, Cancellation> {
         match dir.read_dir() {
             Ok(listing) => self.admit(listing).map(Ok),
             Err(e) => Ok(Err(e)),
         }
     }
 
-    fn admit(&self, listing: Listing<'_>) -> Settled<(Vec<Item>, Marks)> {
+    fn admit(&self, listing: Listing<'_>) -> Result<(Vec<Item>, Marks), Cancellation> {
         let (mut items, mut marks) = (Vec::new(), Marks::default());
         for entry in listing {
             self.scope.poll()?;

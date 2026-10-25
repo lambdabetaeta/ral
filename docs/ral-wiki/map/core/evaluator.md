@@ -1,12 +1,12 @@
 ---
-generated_at_commit: ce5a629202ebc86335ea55af1625b706d85e2774
+generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
 generated_at_date: 2026-10-25
-covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
+covers_paths: [core/src/shell/evaluator.rs, core/src/shell/evaluator/]
 ---
 
-# Map: core / evaluator
+# Map: core / shell / evaluator
 
-`core/src/evaluator/` runs the CBPV [[map/core/ir|IR]] as one CEK machine
+`core/src/shell/evaluator/` runs the CBPV [[map/core/ir|IR]] as one CEK machine
 (`machine.rs`) — the full narrative is
 [[internals/evaluator-machine|the evaluator machine]]. **Evaluation is
 entered only through the framed run (`Shell::run`); the machine's own verbs are
@@ -15,7 +15,7 @@ argument-free twin `force`:
 
 - `machine::evaluate(comp, env, mooring, shell)` (`pub(crate)`) — inject the
   computation closure ⟨M, ρ⟩ over the empty stack and step until it is empty.
-  `run_phrases` (`evaluator.rs`) is the phrase-level verb a tool call, a
+  `run_phrases` (`shell/evaluator.rs`) is the phrase-level verb a tool call, a
   REPL run, or a script line settles through: it threads a `Toplevel`'s
   `Phrase::{Define, Run}` sequence over a local `E` starting from
   `env`, running each phrase as its own closed machine, and — under
@@ -24,7 +24,7 @@ argument-free twin `force`:
   ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]],
   [[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]]).
   Hosts call none of the four directly: they enter through the framed
-  `Shell::run` and the run spine behind it, both in `core/src/run.rs`,
+  `Shell::run` and the run spine behind it, both in `core/src/shell/run.rs`,
   the sole way into evaluation — its `Run` (`core/src/protocol.rs`) carries
   a `Program` of source text or a registered hook. `Shell::run_under` checkpoints
   and rolls back `(env, context)` around every run, so a
@@ -120,7 +120,7 @@ Internals:
   key, dispatching to `assemble.rs`; a plain literal stays a `Return` and
   closes for free.
   `CompKind::Exec` classifies the head through the lexical environment and
-  dispatches into [[map/core/runtime|runtime]]'s `command_call`.
+  dispatches into [[map/core/runtime|shell/exec]]'s `dispatch`.
   `CompKind::Pipeline` launches and joins a `PipeNode` in one rule
   ([[map/core/runtime|runtime]]).
 - `scope.rs` — dynamic-frame installation implementing [[design/scoping|scoping]]
@@ -150,7 +150,7 @@ Internals:
   message and a shape hint, propagating like any other failure and so
   catchable by `try`. All-or-nothing: `destructure` collects every binding
   first, so a pattern that fails partway binds nothing. `Define` is the one
-  consumer that attaches schemes and observes: `Ran::define` in `evaluator.rs`
+  consumer that attaches schemes and observes: `Ran::define` in `shell/evaluator.rs`
   reaches [[map/core/shell-state|`Shell::note_define`]] beside each name's
   install, under `Mode::Session` alone, so only a session-scope write stamps
   the binding-lease ledger; a block, lambda, or `Rec` group's fixpoint
@@ -159,10 +159,10 @@ Internals:
 - Output capture (`with_capture`, the audit tee, one `SinkScope`) and the
   redirect-frame open/route/restore lifecycle (`RedirectState`, the one
   interpreter of a `Redirects` list) live in [[map/core/runtime|runtime]]
-  (`runtime/capture.rs`, `runtime/redirect/scope.rs`); the machine enters the
+  (`shell/exec/capture.rs`, `shell/exec/redirect/scope.rs`); the machine enters the
   latter from `Frame::Redirect`, and `with_redirects` serves a base-frame
   native's synchronous call and a fused external, whose child then reads the
-  installed sinks in `command/stdio.rs`. Targets open stdin, stdout, stderr;
+  installed sinks in `shell/exec/command/stdio.rs`. Targets open stdin, stdout, stderr;
   every write is observed at settle, carrying its target before and after.
 - `val.rs` holds the side-effect-free `Val` layer: `form(val, env, sig)` is
   CBPV's one-step rule — a constant is itself, a name is `lookup`, a variant
@@ -179,11 +179,11 @@ Internals:
   `Val::Protected`: `val::form` calls `Site::wrap` without admitting (a data
   binding is admitted once per unit by `readmit`; `Site::protect`, admit then
   wrap, runs at `Frame::Protect` returns and handle exposure), and
-  `types/protect.rs` recursively wraps thunks, containers and handles without
+  `shell/runtime/protect.rs` recursively wraps thunks, containers and handles without
   forcing delayed results. Thunk wrappers guard each argument and result;
   `CompKind::Protect` pushes `Frame::Protect`, whose return checks and wraps the
   value and whose halt propagates unchanged.
-  Handle views retain payload guards, applied by `builtins/concurrency/eliminate.rs`
+  Handle views retain payload guards, applied by `shell/builtins/concurrency/eliminate.rs`
   at `await`, ready `poll`, and `race`, not by consuming a handle at import.
   Wrapper captures carry schemes rebuilt from the site's authoritative contract,
   preserving weak identities and the raw computation's grade on re-inference
@@ -199,21 +199,21 @@ Internals:
 - The command/pipeline machinery — external-command dispatch,
   pipeline planning and execution, and the in-process-vs-sandboxed-child
   dispatch choice — lives in [[map/core/runtime|runtime]], which the machine
-  reaches by dispatching an `Exec` node through `command_call::classify_command`
+  reaches by dispatching an `Exec` node through `shell::exec::dispatch::classify_command`
   → `run_base_frame` / `run_external`, and at
   `PipeNode::run`; runtime re-enters the machine only through
-  `machine::STAGE_EVAL` (`evaluate` and `close_args`, passed to `PipeNode::run`; a stage's `(comp, env)`, run from `pipeline/thread.rs` —
+  `machine::STAGE_EVAL` (`evaluate` and `close_args`, passed to `PipeNode::run`; a stage's `(comp, env)`, run from `shell/exec/pipeline/thread.rs` —
   a stage never rides a re-exec) — the boundary itself always evaluates its
   body in process, OS confinement being per-child in `build_launch`
   ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
 - `call.rs` — `run_native`, the one call site for every native: it runs the
   body in `BuiltinEntry::framed`'s frame, the only minter of the `Frame` proof
   `call_body` demands. A builtin application is no observation; the fan-out
-  is `types::audit::fan_out`.
+  is `shell::runtime::audit::fan_out`.
 - A `~`-path (`CompKind::Tilde`, [[map/core/ir|ir]]) is read in `machine.rs`
   through `Context::require_home` and shown by `TildePath::shown`
   (the one spelling `~`, `home` and a `~/…` command head share). The six ambient reads (`cwd`, `env`,
-  `args`, `user`, `home`, `nproc`) are natives in `builtins/ambient.rs`
+  `args`, `user`, `home`, `nproc`) are natives in `shell/builtins/ambient.rs`
   ([[decisions/261005_ambient-reads-are-builtins|ambient-reads-are-builtins]]).
   `$SCRIPT` is neither — the elaborator bakes it to a literal.
 

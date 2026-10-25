@@ -5,7 +5,7 @@ use crate::record::model::ContextSurvey;
 use crate::record::{AgentLog, EditAuthority};
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
-use ral_core::types::Error;
+use ral_core::shell::runtime::Error;
 
 use super::{DeskAct, ExarchDesk};
 

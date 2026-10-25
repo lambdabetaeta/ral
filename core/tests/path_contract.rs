@@ -8,8 +8,8 @@ mod common;
 
 use ral_core::Value;
 use ral_core::protocol::Run;
+use ral_core::shell::runtime::Settled;
 use ral_core::source::SourceOrigin;
-use ral_core::types::Settled;
 use std::path::{Path, PathBuf};
 
 /// `body` run with `dir` for its working directory.

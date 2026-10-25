@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// Held on `SessionState`; lent as `&TerminalLease` to
 /// [`TerminalLoan::try_acquire`](crate::process::TerminalLoan::try_acquire)
 /// only when the run's access permits
-/// ([`Shell::terminal_lease`](crate::types::Shell::terminal_lease)).
+/// ([`Shell::terminal_lease`](crate::shell::runtime::Shell::terminal_lease)).
 #[derive(Debug, PartialEq, Eq)]
 pub struct TerminalLease {
     _seal: (),
@@ -38,7 +38,7 @@ impl TerminalLease {
 
 /// Whether a run may hand the controlling terminal to a child.
 ///
-/// The host states it, and [`Shell::terminal_lease`](crate::types::Shell::terminal_lease) decides whether the
+/// The host states it, and [`Shell::terminal_lease`](crate::shell::runtime::Shell::terminal_lease) decides whether the
 /// session's [`TerminalLease`] is reachable
 /// from it.  `ExplicitLoan` is absent because no host can seed it — only a
 /// within-run loan token raises it.

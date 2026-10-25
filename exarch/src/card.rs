@@ -14,12 +14,12 @@
 //! [`value`] are the substrates every decoder shares; [`done`]
 //! each decode one class of event core surfaces; [`observation`] composes
 //! cards from core's one observation vocabulary
-//! (`ral_core::types::Observed`), which core itself decodes; and [`change`]
+//! (`ral_core::shell::runtime::Observed`), which core itself decodes; and [`change`]
 //! is what a write or an edit did to a file.
 
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum as _;
-use ral_core::types::Observation;
+use ral_core::shell::runtime::Observation;
 use serde::{Deserialize, Serialize};
 
 mod change;

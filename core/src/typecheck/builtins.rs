@@ -1,7 +1,7 @@
 //! Type-checker side of the builtin registry.
 //!
 //! Here live the typing rule each `builtin_registry!` entry in
-//! `core/src/builtins.rs` selects through its `ty:` field, the scheme
+//! `core/src/shell/builtins.rs` selects through its `ty:` field, the scheme
 //! factories it picks from — base frames included, which name one directly —
 //! and the record shapes the record-valued builtins share.
 //!
@@ -11,9 +11,9 @@
 use super::env::TyEnv;
 use super::generalize::{FreeVars, generalize};
 use super::unify::Unifier;
-use crate::builtins::fs::{DirEntry, FileInfo};
 use crate::fact::{ErrorRecord, Io, Observation, Receipt};
 use crate::protocol::probe::WorkerRow;
+use crate::shell::builtins::fs::{DirEntry, FileInfo};
 use crate::ty::{
     CachedFreeVars, CompTy, Grade, GradeVar, Kind, Label, Row, RowVar, Scheme, Ty, TyVar, Typed,
     WeakVars, closed_record, closed_variant,
@@ -398,9 +398,9 @@ pub mod scheme {
     /// `surface :: ∀ρ. Variant ρ → F ()` — forward a tagged event to the host's
     /// event sink.  The row stays open: the host decides which tags it knows.
     ///
-    /// `pub`: a host declares its own [`BuiltinEntry`](crate::types::BuiltinEntry)
+    /// `pub`: a host declares its own [`BuiltinEntry`](crate::shell::runtime::BuiltinEntry)
     /// over this scheme under its own name; see
-    /// [`crate::builtins::SURFACE_BUILTIN`].
+    /// [`crate::shell::builtins::SURFACE_BUILTIN`].
     pub fn surface_op(u: &mut Unifier) -> Scheme {
         let row = u.fresh_row_var();
         mk_plain_scheme(

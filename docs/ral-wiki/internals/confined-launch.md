@@ -9,7 +9,7 @@ anchors: [sandboxed_command, build_launch, serve_warrant, Warrant, Slot, Handoff
 
 **ral confines one external command at a time, at the moment it spawns it, and
 nothing in that path can run a program unconfined.** When `build_launch`
-(`runtime/command/process.rs`) spawns an admitted external or bundled child
+(`shell/exec/command/process.rs`) spawns an admitted external or bundled child
 under a restrictive projection, it calls `sandboxed_command`
 (`authority/sandbox/launch.rs`), which confines that one child. Why it is per command is
 [[internals/capability-enforcement|capability-enforcement]].

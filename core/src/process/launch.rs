@@ -289,7 +289,7 @@ impl Launch {
 
     /// Prepare this exec's transient cgroup and register the pre-exec that
     /// puts the child in it at the plan's unprivileged uid/gid.  Called from
-    /// `build_launch` in `runtime/command/process.rs` when the shell carries
+    /// `build_launch` in `shell/exec/command/process.rs` when the shell carries
     /// a [`GuestJail`](crate::process::jail::GuestJail).
     ///
     /// # Errors

@@ -21,7 +21,7 @@ use ral_core::carrier::Host;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
 use ral_core::protocol::EnquiryError;
-use ral_core::types::Error;
+use ral_core::shell::runtime::Error;
 use std::sync::Arc;
 
 /// The acts a desk verb can commit. One vocabulary for two readers: the rail's

@@ -10,14 +10,14 @@ mod common;
 
 use common::prelude;
 
-use ral_core::boot::{HostSurface, boot_shell};
 use ral_core::data::FOValue;
 use ral_core::data::datum::untag;
 use ral_core::io::terminal::TerminalState;
 use ral_core::protocol::Run;
-use ral_core::run::RunRequest;
+use ral_core::shell::boot::{HostSurface, boot_shell};
+use ral_core::shell::run::RunRequest;
+use ral_core::shell::runtime::{Observation, Settled, Shell, Value};
 use ral_core::source::SourceOrigin;
-use ral_core::types::{Observation, Settled, Shell, Value};
 use ral_core::{EventSink, SurfaceSink};
 use std::sync::{Arc, Mutex};
 
@@ -28,7 +28,7 @@ fn host_shell() -> Shell {
         TerminalState::default(),
         prelude(),
         &HostSurface {
-            statics: vec![ral_core::builtins::SURFACE_BUILTIN],
+            statics: vec![ral_core::shell::builtins::SURFACE_BUILTIN],
             captured: Vec::new(),
         },
         ral_core::test_helper::process_cwd(),

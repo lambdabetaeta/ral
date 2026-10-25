@@ -1,8 +1,9 @@
 ---
 status: active
 generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-verified_at_commit: 002c654a
-anchors: [Place, Selector, FreezeCtx, Net, EditorVerb, ShellVerb, Holds, ExecGrant, Flag, drain_nested]
+verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+verified_at_date: 2026-10-25
+anchors: [Place, Selector, FreezeCtx, Shell::freeze_ctx, decode_capability_map, Net, EditorVerb, ShellVerb, Holds, ExecGrant, Flag, drain_nested]
 ---
 
 # The grant surface is typed data
@@ -466,6 +467,7 @@ Drafted against 0c52a8f4; revised at 6bfbb097 after three review rounds
 ## Where
 
 `authority::grant::freeze` (`Place`, `Selector`, `FreezeCtx::place`, `FreezeCtx::selector`),
+`shell::grant` (`decode_capability_map`, `Shell::freeze_ctx`),
 `authority::policy::lattice` (`Net`, `EditorVerb`, `ShellVerb`, `Flag`, `ExecGrant`),
 `typecheck::contract` (`Holds`, `drain_nested`). See [[design/grant|grant]],
 [[design/capability-freeze|capability-freeze]],

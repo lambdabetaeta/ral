@@ -8,7 +8,7 @@ use crate::record::Display;
 use crate::shell_eval::surface;
 use ral_core::carrier::Severed;
 use ral_core::protocol::probe::WorkerState;
-use ral_core::types::DoneEvent;
+use ral_core::shell::runtime::DoneEvent;
 
 impl Avatar {
     /// A direct child's result means it is no longer awaited, and

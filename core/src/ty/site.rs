@@ -1,7 +1,7 @@
 //! A checked boundary's type, frozen as data: the graph a [`Site`] is.
 //!
 //! The walk that builds it and the door that admits against it are in
-//! `types::site`; this is the vocabulary, with no `Value` or unifier in it.
+//! `shell::runtime::site`; this is the vocabulary, with no `Value` or unifier in it.
 
 use crate::source::Span;
 use crate::sync::LockExt as _;

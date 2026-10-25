@@ -218,7 +218,7 @@ impl TerminalLoan {
 /// kernel SIGINT whichever group owns the tty.  When an external child holds it
 /// this recreates that delivery, so the child dies and the evaluator's blocking
 /// `wait` returns; when the shell itself holds it there is nothing external to
-/// signal and the frontend's cooperative [`Shell::poll`](crate::types::Shell::poll) unwinds the
+/// signal and the frontend's cooperative [`Shell::poll`](crate::shell::runtime::Shell::poll) unwinds the
 /// in-process eval instead.  Signalling *another* group never ticks ral's
 /// escalation ladder, so no third-signal force-exit can follow from this.
 pub fn interrupt_foreground_child() {

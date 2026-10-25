@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 61c288f
-verified_at_date: 2026-10-21
-anchors: [Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, Break::code, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, CancelCause::code, Signal::status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, ScopeOwner, Frame::Gather, exit_brood]
+verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+verified_at_date: 2026-10-25
+anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, Break::code, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, CancelCause::code, Signal::status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, ScopeOwner, Frame::Gather, exit_brood]
 ---
 
 # Cancellation
@@ -108,8 +108,13 @@ A scope node is `{ flag, cancelled_at, parent, shield }` in a tree of
   | `Terminated` | 5 | the process was asked to shut down | SIGTERM / SIGHUP |
   | `Aborted` | 6 | the session root is being reaped | Ctrl-`\` |
 
-`poll` mints `Break::stopped(cause, owner)`, an escape; its message is
-`CancelCause::message`, the one vocabulary every poll point shares.
+**`Scope::poll` returns domain data: `Result<(), Cancellation>`, carrying the
+cause and its owner.** The process module knows no runtime control flow.
+`From<Cancellation> for Break` (`shell/runtime/flow.rs`) preserves both as
+`Break::stopped(cause, Some(owner))`; `Shell::poll` uses that conversion, so no
+`try` can catch the stop. Its message is `CancelCause::message`, the one
+vocabulary every poll point shares. Non-runtime readers may report the same
+cause without constructing a shell escape.
 
 ### Three types name the capabilities
 
@@ -243,16 +248,16 @@ delivered, so nothing can be lost.
 **Step boundaries.** `Shell::poll` reads the current scope and raises the stop
 in force, at:
 
-- the **machine's step arms** (`evaluator/machine.rs`) — the β-step, `Bind`,
+- the **machine's step arms** (`shell/evaluator/machine.rs`) — the β-step, `Bind`,
   `App`, `Rec`, `Source`, and the exec step each poll, so any loop of `ral`
   calls is preemptible (the original
   [[decisions/260504_hot-path-cancellation|hot-path-cancellation]] insight);
   a `?` chain's advance from one arm to the next is nested `try` applying a
   handler thunk, so it polls at the same β-step;
-- the **iterating builtins** (`builtins/collections.rs`, `builtins/concurrency.rs`)
+- the **iterating builtins** (`shell/builtins/collections.rs`, `shell/builtins/concurrency.rs`)
   — `map`/`filter`/`each`/`range` and the worker-join sweep poll between
   elements;
-- **pipeline launch** (`runtime/pipeline.rs`, `runtime/pipeline/launch.rs`) —
+- **pipeline launch** (`shell/exec/pipeline.rs`, `shell/exec/pipeline/launch.rs`) —
   before and between stage spawns;
 - a base's **closing poll** (`final_poll`), the first half of its return
   clause: the top of a run and a worker read their node once more after the
@@ -411,7 +416,7 @@ a signal handler's `_exit` reads `CancelCause::code` directly:
 | `stop ReaderGone` | 141 (`128 + SIGPIPE`) |
 
 Errors reach ral code as the error record's `reason`
-(`types/error/record.rs`, `Reason`), of which `status` is the projection;
+(`shell/runtime/error/record.rs`, `Reason`), of which `status` is the projection;
 `` `cancelled `` and `` `timed-out `` are the two `WorkerStopped` facts. A stop
 has no record: no `try` sees it.
 

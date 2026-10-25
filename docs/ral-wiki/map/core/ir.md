@@ -1,5 +1,5 @@
 ---
-generated_at_commit: ce5a629202ebc86335ea55af1625b706d85e2774
+generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
 generated_at_date: 2026-10-25
 covers_paths: [core/src/ir.rs, core/src/ir/]
 ---
@@ -158,4 +158,4 @@ already sitting on the node that owns its body
 
 This shape is what the prelude bake serialises with `postcard`; adding a field to
 `CompKind`, `Val`, or `Pattern` invalidates every emitted blob (see
-[[map/core|core]] and `core/src/boot.rs`). `docs/SPEC.md` gives the formal CBPV account.
+[[map/core|core]] and `core/src/shell/boot.rs`). `docs/SPEC.md` gives the formal CBPV account.

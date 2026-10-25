@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-generated_at_date: 2026-10-21
-covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/run/report.rs, core/src/seed.rs, core/src/authority/grant/spawn.rs]
+generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_date: 2026-10-25
+covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/shell/run/report.rs, core/src/seed.rs, core/src/shell/grant/spawn.rs]
 ---
 
 # Map: core / engine protocol
@@ -12,7 +12,7 @@ vocabulary, `protocol/channel.rs` the duplex byte channel and the one
 liveness law; `core/src/carrier.rs` and `carrier/` are the two carriers that
 interpret the algebra — the identity transport in process, the wire
 transport's front-end half — with `carrier/wire/serve.rs` the wire's engine
-half; `core/src/run/report.rs` projects a run onto the algebra; a wire-seat
+half; `core/src/shell/run/report.rs` projects a run onto the algebra; a wire-seat
 child is made by the host's factory and born from an `Attach` carrying its
 parent's seal, so core holds no spawn machinery for it.** The why is
 [[design/engine-protocol|engine-protocol]]; this page only points at symbols.
@@ -120,10 +120,10 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
   into `1..=255` on the way in and on the way back off the wire, so no ending
   that failed can be reported with the code that means success.
 
-## `core/src/run/report.rs`
+## `core/src/shell/run/report.rs`
 
 The projection is the run's. `RunReport::into_report` and `render_ending`
-project the engine's own `run::Ending`/`RunReport` onto the wire shapes above:
+project the engine's own `shell::run::Ending`/`RunReport` onto the wire shapes above:
 every diagnostic renders here, runtime errors against the `SourceDb` and static
 ones against the `Source` the diagnostic carries
 ([[decisions/260902_static-diagnostics-render-at-the-seam|static-diagnostics-render-at-the-seam]]).
@@ -318,18 +318,19 @@ The engine's answers: `Engine::probe` reads one `Probe` off the shell
 `probe/fs.rs` — `entries` (and `path::tree::bytes`, behind `Probe::PathBytes`): read-only
 metadata walks of the engine's own filesystem, under its cwd.
 
-## `core/src/authority/grant/spawn.rs`
+## `core/src/shell/grant/spawn.rs`
 
 - `SpawnGrant` — `Inherit`, `Base(name)`, or `Restrict(record)` carried
   unfrozen. `layer` resolves it against a `FreezeCtx`; `narrow_onto` pushes
-  that layer onto a shell as a session frame, frozen against the shell's own
-  cwd — the one layering step, which `Shell::child_of` takes for an adopted
-  identity fork (`IdentityTransport::adopt_parked`) and a sealed child alike, so neither seat holds a narrowing decision of its own
+  that layer onto a shell as a session frame, using `Shell::freeze_ctx` for
+  the child's env, logical cwd and scratch — the one layering step, which
+  `Shell::child_of` takes for an adopted identity fork
+  (`IdentityTransport::adopt_parked`) and a sealed child alike, so neither seat
+  holds a narrowing decision of its own
   ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]). A
   `` `restrict `` record crosses undecoded and is decoded there, which keeps
-  `Capabilities`' resolved-by-construction invariant true of every value that
-  ever exists.
-- `GrantNarrower` — `fn(&str, &Path) -> Result<Capabilities, String>`, a field
+  `GrantLayer`'s resolved-by-construction invariant true of every layer pushed.
+- `GrantNarrower` — `fn(&str, &FreezeCtx) -> Result<GrantLayer, String>`, a field
   of `EngineInstaller` rather than a registered hook: core has no base-tag
   lexicon of its own, so a `` `base `` arm is always resolved by the host
   that boots the engine (`exarch::policy::base_layer`), and the policy is

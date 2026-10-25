@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-generated_at_date: 2026-10-06
+generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_date: 2026-10-25
 covers_paths: [ral/src/main.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/boot_builtin.rs, ral/src/platform.rs, ral/build.rs]
 ---
 
@@ -49,7 +49,7 @@ dispositions. Then, per role:
   takes its warrant off that descriptor, enters the OS
   [[map/core/capabilities|sandbox]], and only then `execve`s the host program
   or runs the bundled tool in-process. Windows refuses it.
-- **Pipeline anchor** — `pipeline::anchor::serve` (`--ral-pipeline-anchor`, the
+- **Pipeline anchor** — `shell::exec::pipeline::anchor::serve` (`--ral-pipeline-anchor`, the
   one multicall re-exec a pipeline uses: a stage itself runs on a thread of the
   parent process, but a multi-stage pipeline needs one process to hold its pgid
   open for its whole life). It spawns nothing, so it is not pinned.
@@ -166,10 +166,10 @@ one ending law and one typecheck
 A run-evaluating host needs three things before rc files or capability
 frames: the prelude as a baked [[map/core|`Comp`]], its top-level scheme
 list, and its own builtin surface as a `ral_core::HostSurface`. Every mode
-reaches for them through `ral_core::boot` — the Shell-embedding seam — via the
-crate-root `PRELUDE: ral_core::boot::BakedPrelude` static built by the
+reaches for them through `ral_core::shell::boot` — the Shell-embedding seam — via the
+crate-root `PRELUDE: ral_core::shell::boot::BakedPrelude` static built by the
 `ral_core::baked_prelude!()` macro, and
-`ral_core::boot::boot_shell(terminal, &PRELUDE, surface)`, which constructs
+`ral_core::shell::boot::boot_shell(terminal, &PRELUDE, surface)`, which constructs
 the shell, installs the surface next to `CORE_BUILTINS`, seeds default env
 vars, and registers builtins against the prelude comp. `BakedPrelude` lazily
 `postcard`-decodes the IR blob on first access. Probing the
@@ -177,8 +177,8 @@ underlying machine is a separate concern, owned by `ral_core::host`.
 
 `build.rs` is the git-hash block — stamping `RAL_VERSION_SUFFIX` (`+<hash>`
 in a git checkout, empty in a release tarball) into the version string — plus
-one call to `ral_core::boot::bake_prelude`, which
-parses, elaborates, and `bake_prelude`s `prelude.ral` (annotating each top-level
+one call to `ral_core::shell::boot::bake_prelude`, which
+parses, elaborates, and `bake_prelude`s `core/src/shell/prelude.ral` (annotating each top-level
 bind with its inferred scheme in one checked pass) and returns the
 *annotated* `Comp` serialised, which the script writes into `OUT_DIR`. This is the consumer half of core's schema-less prelude discipline
 ([[map/core|core]]): a crate's build script cannot depend on the crate it builds,
@@ -196,7 +196,7 @@ home), `load_exit_hints` (user override in the data dir, else the embedded
 `data/exit-hints.txt`), and `exit_byte` (the one clamp-and-narrow every mode's
 final code funnels through).
 Default-env seeding is core's: `boot_shell` seeds the host's env and cwd
-(`boot::seed_env`, private) between building the shell and seating the
+(`shell::boot::seed_env`, private) between building the shell and seating the
 prelude.
 
 Builtins are shell-scoped: each mode declares its surface as one

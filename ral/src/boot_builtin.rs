@@ -7,16 +7,17 @@
 use ral_core::carrier::Severed;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum as _;
+use ral_core::host::EnvVars;
 use ral_core::path::{Resolver, is_absolute, shown, utf8};
 use ral_core::protocol::{Ending, Program, Report};
 use ral_core::record;
+use ral_core::shell::runtime::{
+    Break, BuiltinBody, BuiltinEntry, DefaultPolicy, HookName, HookSig, Mooring, Settled, Status,
+    sig,
+};
 use ral_core::ty::{Row, Scheme, Ty, Typed as _};
 use ral_core::typecheck::Unifier;
 use ral_core::typecheck::builtins::{fun, mk_scheme, pure, thunk};
-use ral_core::types::{
-    Break, BuiltinBody, BuiltinEntry, DefaultPolicy, EnvVars, HookName, HookSig, Mooring, Settled,
-    Status, sig,
-};
 use ral_core::{Shell, Value};
 use ral_core::{err, errln};
 use std::borrow::Cow;
@@ -162,7 +163,7 @@ fn boot(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> 
         shell.set_stack_limit(n);
     }
     let paths: Vec<PathBuf> = boot.capabilities.iter().map(Into::into).collect();
-    ral_core::load::profile::apply_session_profiles(mooring, shell, &paths).map_err(
+    ral_core::shell::load::profile::apply_session_profiles(mooring, shell, &paths).map_err(
         |e| match e {
             Break::Error(mut e) => {
                 e.status = Status::Raised(2);

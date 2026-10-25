@@ -13,14 +13,14 @@
 //! `Shell::bequeath`: no handle in the scope or the handler stack, and no
 //! terminal authority, inbox, cancel token or provider handle.
 
-use crate::authority::grant::SpawnGrant;
 use crate::data::datum::Datum;
 use crate::data::{Bytes, FOValue};
-use crate::source::SourceDb;
-use crate::ty::Fixings;
-use crate::types::{
+use crate::shell::grant::SpawnGrant;
+use crate::shell::runtime::{
     Bequest, Context, Error, FrameKind, HandlerEntry, HandlerFrame, Image, Runtime, Terms,
 };
+use crate::source::SourceDb;
+use crate::ty::Fixings;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use table::{InternCtx, ScopeTable, SerialEnvSnapshot, SerialValue, WireDecoder};
@@ -213,19 +213,19 @@ impl EngineSeed {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use crate::boot::BakedPrelude;
-    use crate::sync::LockExt as _;
-    use crate::types::{
+    use crate::shell::boot::BakedPrelude;
+    use crate::shell::runtime::{
         DefaultPolicy, Env, HookName, HookSig, Shell, Value, block_over, captured, idle_handle,
     };
+    use crate::sync::LockExt as _;
     use std::collections::BTreeSet;
 
     /// The runtime a parent and its children are built over.
     fn runtime() -> crate::Runtime {
-        crate::boot::boot_runtime(
+        crate::shell::boot::boot_runtime(
             crate::io::terminal::TerminalState::default(),
             BakedPrelude::runtime(),
-            &crate::boot::HostSurface::default(),
+            &crate::shell::boot::HostSurface::default(),
         )
         .expect("a test host resolves its baseline")
     }
@@ -233,15 +233,17 @@ mod tests {
     /// The recipe a parent is built by: core's own surface, the prelude
     /// seated, and a session's policy.
     fn booted() -> Shell {
-        let mut shell = crate::boot::boot_shell(
+        let mut shell = crate::shell::boot::boot_shell(
             crate::io::terminal::TerminalState::default(),
             BakedPrelude::runtime(),
-            &crate::boot::HostSurface::default(),
+            &crate::shell::boot::HostSurface::default(),
             crate::test_helper::process_cwd(),
         )
         .expect("a test host resolves its baseline");
-        shell.set_exit_hints(crate::types::ExitHints::from_text("false 1 hinted\n"));
-        shell.arm_binding_lease(crate::types::BindingLease {
+        shell.set_exit_hints(crate::shell::runtime::ExitHints::from_text(
+            "false 1 hinted\n",
+        ));
+        shell.arm_binding_lease(crate::shell::runtime::BindingLease {
             idle_calls: 3,
             large_binding_bytes: 1 << 20,
         });
@@ -636,7 +638,7 @@ mod tests {
     fn a_bequest_carries_a_binding_once_per_closure_that_mentions_it() {
         const MARKER: &str = "zqx-marker";
         let mut shell = booted();
-        crate::evaluator::run_source(
+        crate::shell::evaluator::run_source(
             &format!("let big = '{MARKER}'\nlet f = {{ 1 }}\nlet g = {{ 2 }}\nlet h = {{ $big }}"),
             &mut shell,
         )

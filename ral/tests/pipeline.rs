@@ -86,7 +86,7 @@ fn audit_cli_captures_command_stdout() {
 // ── Stage dispatch parity (handlers, ^name, redirects) ─────────────────────
 //
 // These regressions cover the rule that pipeline-stage dispatch must match
-// `command_call::run_call`: a `within [handlers: …]` interception of an external
+// `dispatch::run_call`: a `within [handlers: …]` interception of an external
 // name must fire even mid-pipeline, `^name` must skip binding lookup
 // (pipeline included), and stage-level redirects must be honored rather than
 // silently dropped.

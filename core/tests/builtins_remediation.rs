@@ -13,9 +13,9 @@ mod common;
 use common::fresh_shell;
 
 use ral_core::protocol::Run;
-use ral_core::run::{RunReport, StaticDiagnostics};
+use ral_core::shell::run::{RunReport, StaticDiagnostics};
+use ral_core::shell::runtime::{Break, Escape, Settled, Shell, Value};
 use ral_core::source::SourceOrigin;
-use ral_core::types::{Break, Escape, Settled, Shell, Value};
 
 /// Run one top-level run of `source` through the public `run` entry
 /// and return the body's `Settled<Value>`.  Every test below picks source

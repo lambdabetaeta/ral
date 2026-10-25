@@ -1,0 +1,173 @@
+//! The alias-frame lifecycle and the lexical scope doors.
+//!
+//! ral evaluation never unwinds for control flow, so each guard here is an
+//! inline save-modify-restore around the body rather than an RAII type.
+
+use super::Shell;
+use crate::shell::runtime::{
+    Binding, Closure, Env, FrameHandle, HandlerEntry, HandlerRole, Settled, Value,
+};
+
+impl Shell {
+    /// Install `thunk` as the alias for `name`, replacing any existing one.
+    /// Sibling of [`Self::with_handlers`]: same handler stack, but an alias
+    /// frame is never popped at scope exit, only by [`Self::remove_alias`].
+    /// Since it outlives its installing run, [`HandlerEntry::vet`] closes the
+    /// arm's scheme against the live session and stores it on the frame to
+    /// seed the next run's check.
+    ///
+    /// # Errors
+    /// `thunk` not an arm: a block of one parameter, the argv, producing what
+    /// its head produces.
+    pub fn install_alias(&mut self, name: String, thunk: Value) -> Settled<FrameHandle> {
+        self.vet_alias(name, thunk)
+            .map(|entry| self.commit_alias(entry))
+    }
+
+    /// The read-only half of [`Self::install_alias`]: the gate, nothing installed.
+    ///
+    /// # Errors
+    /// As [`Self::install_alias`].
+    pub fn vet_alias(&self, name: String, thunk: Value) -> Settled<HandlerEntry> {
+        HandlerEntry::vet(name, thunk, self, HandlerRole::Alias)
+    }
+
+    /// The committing half: install a vetted entry, replacing any alias of its name.
+    pub fn commit_alias(&mut self, entry: HandlerEntry) -> FrameHandle {
+        self.context.handlers.remove_alias(&entry.name);
+        self.context.handlers.push_alias(vec![entry])
+    }
+
+    /// Remove the alias frame [`Self::install_alias`] minted, reporting whether
+    /// it was still there: a frame the user replaced has a new handle.
+    pub fn remove_alias_frame(&mut self, handle: FrameHandle) -> bool {
+        self.context.handlers.remove_by_handle(handle).is_some()
+    }
+
+    /// Install `value` as a lexical scope binding for `name` — the rc
+    /// `bindings:` path.  Where [`Self::install_alias`] pushes a handler
+    /// frame, this writes a scope entry: a function value gets its closed
+    /// session scheme inferred and stored alongside, so the next run's check
+    /// sees a type and the name is applyable at the prompt.  Other values
+    /// carry no scheme.
+    pub fn bind_value(&mut self, name: String, value: Value) {
+        let scheme = self.value_scheme(&value);
+        self.env.bind(name.into(), Binding { value, scheme });
+    }
+
+    /// Bind `name` → `value` as a plain scope variable, inferring no scheme.
+    /// The scheme-less sibling of [`Self::bind_value`], for data that is
+    /// *resolved* but never applied — env mirrors like `USER` / `CWD`, the
+    /// `RAL_PROMPT` thunk the renderer reads, host seed vars.  The two verbs
+    /// stay distinct to hold the line an rc draws between its typed
+    /// `bindings:` and its untyped `env:` / `prompt:` keys.
+    pub fn set_var(&mut self, name: String, value: Value) {
+        self.env.bind(
+            name.into(),
+            Binding {
+                value,
+                scheme: None,
+            },
+        );
+    }
+
+    /// Record a `Phrase::Define`'s binding on the lease ledger: starts a
+    /// fresh non-baseline name's lease and renews an existing one — writing
+    /// a name is itself interest in it — and, when the lease is armed and
+    /// [`Value::shallow_size`] meets `large_binding_bytes`, queues a
+    /// residency notice.  Called from `run_phrases`'s `Define` arm alone,
+    /// under `Mode::Session`.
+    pub(crate) fn note_define(&mut self, name: &str, binding: &Binding) {
+        self.local.bindings.note_install(name);
+        if let Some(lease) = self.local.bindings.lease() {
+            let bytes = binding.value.shallow_size() as u64;
+            if bytes >= lease.large_binding_bytes {
+                self.local
+                    .bindings
+                    .queue_large_binding_notice(name.to_string(), bytes);
+            }
+        }
+    }
+
+    /// Look `name` up in the lexical scope chain, natives included.  The read
+    /// dual of [`Self::set_var`] / [`Self::bind_value`].
+    pub fn scope_lookup(&self, name: &str) -> Option<&Value> {
+        crate::shell::runtime::lookup(name, &self.env, &self.sig)
+    }
+
+    /// Every lexical binding across the whole scope chain, innermost
+    /// shadowing outermost.
+    pub fn bindings(&self) -> Vec<(String, Value)> {
+        self.env.all_bindings(&self.sig)
+    }
+
+    /// The largest single lexical binding's shallow byte estimate — the
+    /// `` `largest-binding-bytes `` probe's reading, taken by reference: a
+    /// probe that cloned the scope to size it would be its own cautionary
+    /// tale.
+    pub(crate) fn largest_binding_shallow_size(&self) -> usize {
+        self.env.largest_shallow_size(&self.sig)
+    }
+
+    /// The names of every installed handler entry — `within` arms and aliases
+    /// alike — for tab completion.  The handler-stack counterpart of
+    /// [`Self::builtin_names`].
+    pub fn handler_names(&self) -> impl Iterator<Item = &str> {
+        self.context.handlers.entries().map(|e| e.name.as_ref())
+    }
+
+    /// Run `f` under a fresh innermost lexical scope, popped on return — the
+    /// isolation `use` and the REPL plugin loader share, so a loaded file's
+    /// top-level helpers die with the frame instead of leaking into the
+    /// caller's scope.  [`crate::shell::load::evaluate_source`] owns the
+    /// cycle and depth guards and the source registration; this owns only the
+    /// scope frame.
+    pub fn in_fresh_scope<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved = self.env.clone();
+        let r = f(self);
+        self.env = saved;
+        r
+    }
+
+    /// The next run's check seed, read off the live session: every scope
+    /// binding with its installed scheme, plus the alias arms' schemes off the
+    /// persistent handler frames.
+    pub fn session_schemes(&self) -> crate::typecheck::SessionSchemes {
+        self.schemes_over(&self.env)
+    }
+
+    /// What a closure's body is checked against at an install door: what it
+    /// captured, then Σ's prelude, beside the aliases in force.
+    pub(crate) fn closure_schemes(&self, closure: &Closure) -> crate::typecheck::SessionSchemes {
+        self.schemes_over(closure.env())
+    }
+
+    fn schemes_over(&self, env: &Env) -> crate::typecheck::SessionSchemes {
+        crate::typecheck::SessionSchemes {
+            bindings: env.binding_schemes(&self.sig),
+            aliases: self.context.handlers.alias_schemes(),
+            builtins: self.session.runtime.builtins.manifest().clone(),
+        }
+    }
+
+    /// Remove the alias for `name`, returning whether anything was removed.
+    pub fn remove_alias(&mut self, name: &str) -> bool {
+        self.context.handlers.remove_alias(name).is_some()
+    }
+
+    /// True if an alias frame is installed for `name`.  A scoped `within`
+    /// frame is not an alias even when it has the same one-entry shape.
+    pub fn has_alias(&self, name: &str) -> bool {
+        self.context.handlers.iter().any(|f| f.is_alias_for(name))
+    }
+
+    /// The winning handler for `name` — a run frame (with its depth) or a
+    /// base frame.  A named run-frame entry at any depth outranks every
+    /// catch-all, and a base frame outranks a catch-all too.
+    pub(crate) fn lookup_handler(
+        &self,
+        name: &str,
+    ) -> Option<crate::shell::runtime::HandlerLookup> {
+        self.context.handlers.lookup(name)
+    }
+}

@@ -1,13 +1,13 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-generated_at_date: 2026-10-21
-covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
+generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_date: 2026-10-25
+covers_paths: [core/src/shell/builtins/, core/src/shell/builtins.rs, core/src/uutils.rs]
 ---
 
-# Map: core / builtins
+# Map: core / shell / builtins
 
-`core/src/builtins/` are the primitives implemented in Rust that run inside the
-shell process. `builtins.rs` holds the `builtin_registry!` macro: each entry
+`core/src/shell/builtins/` are the primitives implemented in Rust that run inside the
+shell process. `shell/builtins.rs` holds the `builtin_registry!` macro: each entry
 binds its facets at once — `names`, [[map/core/typecheck|type rule]] (`ty`),
 `doc` line, and runtime body (`call`) — into the `CORE_BUILTINS` static
 (`&[BuiltinEntry]`), so the facets cannot drift apart. A `BuiltinEntry` is a
@@ -29,7 +29,7 @@ can hand a value of another type to a name the checker believes is `Unit`.
 The manifest is *authored as two*, and
 that authoring — not the arity — is the classification: a table entry seeds a
 `Value::Native` in the base scope, a base-frame row seeds a base handler frame
-(`native_value`, `Runtime::install_set` in `types/shell/construct.rs`;
+(`native_value`, `Runtime::install_set` in `shell/runtime/state/construct.rs`;
 [[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]],
 [[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
 A body is a `BuiltinBody` — a `Static` `fn(&[Value], &Mooring, &mut Shell) ->
@@ -50,8 +50,8 @@ having declared its arguments ([[invariants/fixed-arity|fixed-arity]]).
 Builtins are *shell-scoped*: each shell's session carries a `BuiltinTable`
 ([[map/core/shell-state|shell-state]]) seeded from `CORE_SETS`
 (the core rows, the boundaries and the base frames, one list), and a host's
-extra sets ride a `HostSurface` into `HostSurface::shell` and `boot::boot_shell`
-(`core/src/boot.rs`), so the checker's rule table, the base
+extra sets ride a `HostSurface` into `HostSurface::shell` and `shell::boot::boot_shell`
+(`core/src/shell/boot.rs`), so the checker's rule table, the base
 scope, and the base frames all come from the manifest the shell was booted with
 — there is no process-global registry, and every path that builds or hydrates a
 shell must be built over a `Runtime` that carries them or re-link a native by name.
@@ -117,8 +117,8 @@ Bodies are grouped by concern, one submodule each:
   cancel-aware sweep (`first_ready`) under `await`, `race`, a gather's join and
   `first-settled` (`race` ends its losers and drains any already-`stopping`
   handles through `end_unclaimed`), and `concurrency/tests.rs` the tests; the
-  worker's deferred surface lives in `types/handle/surface.rs`, its
-  cradle, brood and `ScopeOwner` in `types/handle/brood.rs` (builtins under their bare
+  worker's deferred surface lives in `shell/runtime/handle/surface.rs`, its
+  cradle, brood and `ScopeOwner` in `shell/runtime/handle/brood.rs` (builtins under their bare
   names; `par`, `both` and `first-of` are prelude code over them,
   [[map/core/prelude|prelude]]). `spawn` and `gather` are control operators,
   not rows: the machine forms `spawn`'s operands and calls its door, and runs
@@ -129,7 +129,7 @@ Bodies are grouped by concern, one submodule each:
   the other two live here
   too but reach a session via `WATCH_BUILTIN` / `DETACH_BUILTIN`, not core. `builtin_detach` is the surface discipline
   alone — the birth itself is the ordinary external-command machinery down to
-  the double-fork in `runtime/command/detach.rs`
+  the double-fork in `shell/exec/command/detach.rs`
   ([[map/core/runtime|runtime]]), and it yields a `{pid, desc}` receipt, not a
   `Handle`, so none of the eliminators below apply to it. A handle is one
   private lock over a four-state `HandleState`: `Running`,
@@ -264,7 +264,7 @@ Bodies are grouped by concern, one submodule each:
   — a per-shell registry, host-independent and carrying no policy
   ([[map/core/shell-state|shell-state]]). **A listing is data.** `workers` maps
   every `Running`, `Stopping`, or `Ready` entry (`Consumed` entries are
-  omitted), ids ascending, through `worker_row` (`types/shell/host.rs`, shared
+  omitted), ids ascending, through `worker_row` (`shell/runtime/state/host.rs`, shared
   with the `` `workers `` probe) to a seven-field record — `id`, `title`,
   `owner` (`` `session ``, `` `worker id ``, `` `gather ``), `state`
   (`` `running ``, `` `stopping ``, or `` `ready `` with the `Done` ending),
@@ -275,12 +275,12 @@ Bodies are grouped by concern, one submodule each:
   the probe's eighth field, `retention-left`, is the host's alone). It holds
   no handle, so a top-level `workers` crosses the engine protocol. A `Handle`
   is process-local: `Shell::bequeath` scrubs it from every fork, and a run
-  whose result is or holds one ends `Unreturnable` (`core/src/run/report.rs`);
+  whose result is or holds one ends `Unreturnable` (`core/src/shell/run/report.rs`);
 - `modules.rs` — the cacheless `use` loader (a boundary: it builds the export
   record and admits it with `Site::admit_module`, holding each function to the
   scheme the module was checked at). It runs its phrases through
-  `load::module_phrases`, the cycle stack and depth bound it shares with the
-  host loading door `load::evaluate_source` (rank 10, `core/src/load.rs`,
+  `shell::load::module_phrases`, the cycle stack and depth bound it shares with the
+  host loading door `shell::load::evaluate_source` (rank 10, `core/src/shell/load.rs`,
   which also holds `check_source`, the compile door both share: it checks
   against the live session, registering the source first so the module's
   spans carry its real identity, and hands back a failure as an `Error`
@@ -336,10 +336,10 @@ Bodies are grouped by concern, one submodule each:
   `stdin_lines` runs it over `stdin_reader`, and `lossy_line_list` decodes
   its lines into the `[String]` that `from-lines` and `lines` return.
 
-The capability `Value`-map decoder is *not* a builtin: it lives beside the
-grant-construction layer in `authority/grant/decode.rs` (`decode_capability_map`), consumed by
-the `grant` control operator (`evaluator/scope.rs`) and the `--capabilities`
-ceiling (`load/profile.rs`) — see [[map/core/capabilities|capabilities]],
+The capability `Value`-map decoder is *not* a builtin: it lives at
+`shell/grant/decode.rs` (`decode_capability_map`), consumed by the `grant`
+control operator (`shell/evaluator/machine.rs`), the `--capabilities` ceiling
+(`shell/load/profile.rs`) and spawn grants (`shell/grant/spawn.rs`) — see [[map/core/capabilities|capabilities]],
 [[design/grant|grant]].
 
 Why a capability lands in one of these layers rather than another — builtin vs.

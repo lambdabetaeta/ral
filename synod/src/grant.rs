@@ -30,10 +30,10 @@
 
 use crate::site::{Silent, site};
 use ral_core::authority::policy::{Capabilities, Evidence, ExecKey, FsPolicy, Ungoverned};
+use ral_core::host::EnvVars;
 use ral_core::path::{
     FrozenPath, GuestPath, LeafMode, LexicalPath, RealPath, Resolver, shown, walk_dir, walk_lenient,
 };
-use ral_core::types::EnvVars;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 

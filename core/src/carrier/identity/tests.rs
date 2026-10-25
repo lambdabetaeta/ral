@@ -1,11 +1,11 @@
 //! The identity carrier's laws: cancel races, enquiry hosts, durability and
 //! probes, all through one in-process engine.
 use super::*;
-use crate::authority::grant::SpawnGrant;
 use crate::carrier::{Dispatching, dispatch_to_report};
 use crate::path::EnginePath;
 use crate::protocol::{Control, Ending, EnquiryError, Report, Root};
-use crate::types::Shell;
+use crate::shell::grant::SpawnGrant;
+use crate::shell::runtime::Shell;
 
 mod identity_cancel_tests {
     use super::*;
@@ -173,10 +173,10 @@ mod identity_cancel_tests {
 // that does — the shape a real enquiring host runs under.
 mod enquiry_tests {
     use super::*;
-    use crate::run::tests::install_act;
-    use crate::run::{RunReport, RunRequest};
+    use crate::shell::run::tests::install_act;
+    use crate::shell::run::{RunReport, RunRequest};
+    use crate::shell::runtime::{Break, Desk, Mooring};
     use crate::source::SourceOrigin;
-    use crate::types::{Break, Desk, Mooring};
     use std::sync::Mutex;
 
     /// No desk installed answers the honest absence error, verbatim.
@@ -189,7 +189,7 @@ mod enquiry_tests {
         else {
             panic!("an absent desk is an error, not a stop");
         };
-        assert_eq!(err.message, crate::types::NO_DESK);
+        assert_eq!(err.message, crate::shell::runtime::NO_DESK);
     }
 
     /// A no-op receiver, for a desk built without a real dispatch behind it.
@@ -308,10 +308,10 @@ mod durability_tests {
     use super::*;
 
     fn builtin_panic_now(
-        _args: &[crate::types::Value],
-        _mooring: &crate::types::Mooring,
+        _args: &[crate::shell::runtime::Value],
+        _mooring: &crate::shell::runtime::Mooring,
         _shell: &mut Shell,
-    ) -> crate::types::Settled<crate::types::Value> {
+    ) -> crate::shell::runtime::Settled<crate::shell::runtime::Value> {
         panic!("transport test: deliberate mid-eval panic");
     }
 
@@ -320,12 +320,13 @@ mod durability_tests {
         mk_scheme(&[], &[], thunk(pure(crate::ty::Ty::Unit)))
     }
 
-    static PANIC_BUILTINS_ARR: [crate::types::BuiltinEntry; 1] = [crate::types::BuiltinEntry::new(
-        std::borrow::Cow::Borrowed("protocol-panic-now"),
-        scheme_panic_now,
-        "test-only: panic the evaluator mid-run.",
-        crate::types::BuiltinBody::Static(builtin_panic_now),
-    )];
+    static PANIC_BUILTINS_ARR: [crate::shell::runtime::BuiltinEntry; 1] =
+        [crate::shell::runtime::BuiltinEntry::new(
+            std::borrow::Cow::Borrowed("protocol-panic-now"),
+            scheme_panic_now,
+            "test-only: panic the evaluator mid-run.",
+            crate::shell::runtime::BuiltinBody::Static(builtin_panic_now),
+        )];
 
     static PANICKY: [EngineInstaller; 1] = [crate::carrier::testkit::installer(
         "panicky",
@@ -545,7 +546,7 @@ mod probe_tests {
         let rows = transport.bindings().expect("a reading");
         let row = rows.iter().find(|r| r.name == "probe_h").expect("the row");
         let handle = row.handle.as_ref().expect("a handle row");
-        assert_eq!(handle.state, crate::types::Sample::Consumed);
+        assert_eq!(handle.state, crate::shell::runtime::Sample::Consumed);
     }
 
     #[test]

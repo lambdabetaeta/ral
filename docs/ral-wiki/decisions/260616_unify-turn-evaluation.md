@@ -59,7 +59,7 @@ diverges from the other.
 
 ## Problem: the swap of `local.cancel` collaterally kills background workers
 
-The divergence is not merely cosmetic. [`Shell::spawn_thread`](../../../core/src/types/shell/inherit.rs)
+The divergence is not merely cosmetic. [`Shell::spawn_thread`](../../../core/src/shell/runtime/state/inherit.rs)
 (`core/src/types/shell/inherit.rs`) parents **every** worker under
 `self.local.cancel.child()`. Detached workers (`spawn`, `watch`, and `par`,
 which the prelude defines over `spawn`) flow through `spawn_thread`, so the
@@ -102,7 +102,7 @@ eval_turn(shell: &mut Shell, src: &str, frame: TurnFrame) -> TurnOutcome
   - **Foreground scope** — a `CancelScope` under which the turn's foreground
     work runs (see the scope rule below).
   - **Capabilities** — a `Capabilities` to push for the turn's dynamic extent
-    via [`with_capabilities`](../../../core/src/types/shell/scope.rs). The
+    via [`with_capabilities`](../../../core/src/shell/runtime/state/scope.rs). The
     REPL supplies the ambient `Capabilities::root()`; exarch supplies its grant
     profile.
   - **Lifecycle callbacks** — optional pre/post hooks. The REPL supplies the
@@ -362,7 +362,7 @@ Today this ordering holds, but it is realised in two places rather than named
 once:
 
 - *Inside the evaluator,* per external child, it factors cleanly.
-  [`RunningChild::observe`](../../../core/src/runtime/command/child.rs)
+  [`RunningChild::observe`](../../../core/src/shell/exec/command/child.rs)
   (`core/src/runtime/command/child.rs`) is `wait()` → classify → `drain()`,
   and a typestate enforces the order: `drain` is only invocable on a
   `WaitedChild`, which only `wait` can construct, so "join the pump before the

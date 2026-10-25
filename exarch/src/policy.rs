@@ -20,9 +20,9 @@ use ral_core::authority::grant::freeze::{FreezeCtx, host_absolute};
 use ral_core::authority::policy::{
     Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy, GrantLayer, GrantStack,
 };
+use ral_core::host::EnvVars;
 use ral_core::io::terminal::TerminalState;
 use ral_core::path::FrozenPath;
-use ral_core::types::EnvVars;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -69,7 +69,7 @@ pub fn for_invocation(
     if let Some(path) = extension {
         let abs = absolute_in(&anchor, path);
         ceiling = ceiling.extend(load_fragment_ral(
-            &ral_core::types::Mooring::adrift(),
+            &ral_core::shell::runtime::Mooring::adrift(),
             &mut load_shell,
             &abs,
             "--extend",
@@ -86,7 +86,7 @@ pub fn for_invocation(
         .collect();
     for path in &restricts {
         stack.push(load_capabilities_ral(
-            &ral_core::types::Mooring::adrift(),
+            &ral_core::shell::runtime::Mooring::adrift(),
             &mut load_shell,
             path,
             "--restrict",

@@ -8,8 +8,8 @@ use ral_core::data::FOValue;
 use ral_core::data::datum::Datum as _;
 use ral_core::fact::Worker;
 use ral_core::protocol::EnquiryError;
+use ral_core::shell::runtime::{Notice, Observation, Observed};
 use ral_core::sync::LockExt;
-use ral_core::types::{Notice, Observation, Observed};
 use std::collections::HashSet;
 use std::sync::Mutex;
 

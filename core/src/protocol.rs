@@ -11,7 +11,7 @@ use crate::data::FOValue;
 use crate::io::{Captured, RunIo, RunStdin};
 use crate::path::EnginePath;
 use crate::process::{CancelCause, RequestedTerminalAccess};
-use crate::types::{CapturePolicy, Error};
+use crate::shell::runtime::{CapturePolicy, Error};
 use probe::Probe;
 
 pub mod channel;
@@ -283,7 +283,7 @@ pub struct Run {
     /// retention never block admission.
     pub worker_cap: Option<usize>,
     /// Whether a `spawn` must name its work, checked at the spawn step.
-    pub worker_title: crate::types::TitlePolicy,
+    pub worker_title: crate::shell::runtime::TitlePolicy,
     pub io: RunIo,
     pub terminal: RequestedTerminalAccess,
     pub stdin: RunStdin,
@@ -316,7 +316,7 @@ impl Run {
             wall: None,
             cleanup_grace: std::time::Duration::from_secs(5),
             worker_cap: None,
-            worker_title: crate::types::TitlePolicy::Optional,
+            worker_title: crate::shell::runtime::TitlePolicy::Optional,
             io: RunIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
             stdin: RunStdin::Inherit,
@@ -331,7 +331,7 @@ impl Run {
 pub enum Program {
     Source(String),
     Hook {
-        name: crate::types::HookName,
+        name: crate::shell::runtime::HookName,
         args: Vec<FOValue>,
     },
 }
@@ -384,7 +384,7 @@ pub enum SessionEvent {
 /// What crosses when an enquiry is refused or its handler fails: message *and*
 /// status, so a refusal raises the same error under both transports.
 ///
-/// Not `crate::types::Error`, whose `span` resolves against an engine-side
+/// Not `crate::shell::runtime::Error`, whose `span` resolves against an engine-side
 /// `SourceDb`; the location is stamped at the enquiring builtin instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnquiryError {
@@ -394,12 +394,12 @@ pub struct EnquiryError {
 
 impl EnquiryError {
     /// The refusal of a host that installed no desk, in the one wording
-    /// [`crate::types::NO_DESK`] fixes.
+    /// [`crate::shell::runtime::NO_DESK`] fixes.
     #[must_use]
     pub fn no_desk() -> Self {
         Self {
-            message: crate::types::NO_DESK.to_string(),
-            status: crate::types::NO_DESK_STATUS,
+            message: crate::shell::runtime::NO_DESK.to_string(),
+            status: crate::shell::runtime::NO_DESK_STATUS,
         }
     }
 }
@@ -441,8 +441,8 @@ impl Control {
 // ── The terminal frame ────────────────────────────────────────────────
 
 /// The run's terminal frame: the protocol projection of the engine's
-/// [`RunReport`](crate::run::RunReport), produced by
-/// [`RunReport::into_report`](crate::run::RunReport::into_report).
+/// [`RunReport`](crate::shell::run::RunReport), produced by
+/// [`RunReport::into_report`](crate::shell::run::RunReport::into_report).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Report {
     /// Parse/type/host refusal: the run never reached evaluation, so no
@@ -506,7 +506,7 @@ impl FailureStatus {
 
 /// How a run left evaluation, wire-shaped.
 ///
-/// The protocol projection of the engine's [`Ending`](crate::run::Ending),
+/// The protocol projection of the engine's [`Ending`](crate::shell::run::Ending),
 /// rendered against a [`SourceDb`](crate::source::SourceDb) — a live `Error`
 /// cannot cross the protocol, so [`Self::Raised`]/[`Self::Stopped`] carry the
 /// string it rendered to, and the record `try` would hand its handler.

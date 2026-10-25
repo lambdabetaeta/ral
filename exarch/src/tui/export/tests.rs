@@ -6,7 +6,7 @@ use crate::record::{
 use ral_core::data::datum::Datum as _;
 use ral_core::fact::Read;
 use ral_core::own::OwnDir;
-use ral_core::types::{Observation, Observed};
+use ral_core::shell::runtime::{Observation, Observed};
 
 fn prompt(turn: u64, text: &str) -> Protocol {
     Protocol::UserPrompt {

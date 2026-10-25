@@ -108,7 +108,7 @@ statement.
 `core/src/path/tilde.rs` (`TildePath::parse`, `TildePath::expand`,
 `abbreviate_home`), `core/src/syntax/lexer.rs` (`scan_bare_word`,
 `scan_double_quoted`), `core/src/syntax/parser.rs` (`parse_head`),
-`core/src/types/shell/cwd.rs`
+`core/src/shell/runtime/state/cwd.rs`
 (`apply_chdir`).
 
 > **Amended 2026-10-05.** `$HOME` is not a register: `home` is a nullary

@@ -5,8 +5,8 @@ use crate::engine::EngineInstaller;
 use crate::io::terminal::TerminalState;
 use crate::path::EnginePath;
 use crate::protocol::{Attach, EngineSpec, Report, Root, Run};
+use crate::shell::runtime::{Runtime, Shell};
 use crate::source::SourceOrigin;
-use crate::types::{Runtime, Shell};
 
 /// An installer that never makes children, so it states the one policy a host
 /// with no grant lexicon can: no seeded child.

@@ -1,5 +1,5 @@
 //! What the OS reported when a child ended, and the user-facing failure it
-//! becomes: a `CommandFailure` travels on as `Status::Process` in `types/error.rs`.
+//! becomes: a `CommandFailure` travels on as `Status::Process` in `shell/runtime/error.rs`.
 
 use super::cancel::CancelCause;
 use crate::path::shown;

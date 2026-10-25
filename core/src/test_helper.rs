@@ -30,7 +30,7 @@ pub fn core_schemes() -> crate::typecheck::SessionSchemes {
 /// # Panics
 /// If a spelling cannot be resolved.
 pub fn layer(caps: crate::authority::policy::Capabilities) -> crate::authority::policy::GrantLayer {
-    crate::authority::policy::GrantLayer::from_capabilities(caps, &crate::types::EnvVars::new())
+    crate::authority::policy::GrantLayer::from_capabilities(caps, &crate::host::EnvVars::new())
         .expect("a test grant resolves")
 }
 

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-generated_at_date: 2026-10-21
+generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_date: 2026-10-25
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/roles.md, exarch/data/ral.md, exarch/data/context.md]
 ---
 
@@ -154,7 +154,7 @@ the shell every seat starts from.
 
 - **`engine_runtime` and `engine_root`** (`boot.rs`) — the installer's two
   halves for both seats, run engine-side at Attach: `engine_runtime` is core's
-  [[map/repl/startup|`ral_core::boot::boot_runtime`]] with exarch's host surface
+  [[map/repl/startup|`ral_core::shell::boot::boot_runtime`]] with exarch's host surface
   (`builtins::host_surface()`) so the host builtins ride construction, and a
   child engine runs it too; `engine_root` is the root-only recipe over a root
   session: `library::install_agent_library` for the `agent.ral` helpers, ANSI colour

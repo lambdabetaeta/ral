@@ -6,7 +6,7 @@ anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, 
 
 # The evaluator: a CEK machine over computation closures
 
-The evaluator is one abstract machine, `core/src/evaluator/machine.rs`. Its
+The evaluator is one abstract machine, `core/src/shell/evaluator/machine.rs`. Its
 state is a **focus** and a **stack**: `Machine { focus: Focus, stack:
 Vec<Frame> }`, stepped against the store `&mut Shell` and the run's
 `&Mooring`. Nothing else in the crate constructs a state or sees the stack;
@@ -52,7 +52,7 @@ takes parameters is its type's business: the machine never asks, and only a
 description of a value reads the body's shape (`Comp::lam`).
 
 **A list, record or map literal is a value closure too.** `form(val, env,
-sig)` (`core/src/evaluator/val.rs`) is CBPV's one-step rule for every value:
+sig)` (`core/src/shell/evaluator/val.rs`) is CBPV's one-step rule for every value:
 a constant is itself, a name is `lookup(name, env, sig)`, a variant forms its
 payload, `thunk M` is `Closure::new`, and a plain literal is `List::literal`
 or `Map::literal` — `⟨V, ρ|occ(V)⟩` — unless one of the names it *directly*
@@ -73,7 +73,7 @@ environment, `Pipeline` launches and joins its node, the seven handler forms
 close their operands, install, push their frame and force the body …);
 `Assemble` is the one rule that does O(data) work over what looks like value
 syntax: a list, record, or map literal with a spread or a computed key
-elaborates to it rather than to `Return`, and `evaluator/assemble.rs` builds
+elaborates to it rather than to `Return`, and `shell/evaluator/assemble.rs` builds
 the collection ([[map/core/evaluator|evaluator]]) — a plain literal, with
 none of those, stays a `Return` and closes for free;
 `step_return` and `step_halt` have one arm per `Frame` — the two columns of
@@ -163,23 +163,23 @@ polled here and at `Bind`, `App`, `Exec` advance and β, so `let f = { !f };
 !f` is interruptible.
 
 **The environment is a map, and it is not the store.** `Env`
-(`core/src/types/env.rs`) is ρ alone: a sorted array of at most `SMALL` (8) bindings,
+(`core/src/shell/runtime/env.rs`) is ρ alone: a sorted array of at most `SMALL` (8) bindings,
 a persistent hash map past it, chosen by size and invisible to its readers.
 `bind`/`extend` produce a fresh environment that disturbs none a closure
 captured; `clone` is O(1); `restrict` narrows it to a closure's names,
 identity when nothing is dropped. Σ — the language natives and the frozen
-prelude — is `Signature` (`core/src/types/signature.rs`), one per shell,
-never part of any environment; `crate::types::lookup(name, env, sig)` reads
+prelude — is `Signature` (`core/src/shell/runtime/signature.rs`), one per shell,
+never part of any environment; `crate::shell::runtime::lookup(name, env, sig)` reads
 ρ, then Σ's prelude, then Σ's natives, and every rule that resolves a name
 (`Val::Variable` in `form`, `Exec`'s bare-head lookup in
-`command_call::resolve`) goes through it. The **store** is everything else
+`shell::exec::dispatch::resolve`) goes through it. The **store** is everything else
 on `Shell`: `sig`, sinks, the dynamic `Context` (grants, handlers, env
 overrides, cwd, args, modules, hooks), the trail, workers, leases. `Context`
 is read in O(1) by capability checks and command dispatch and changed only
 by frames holding their own undo; neither it nor Σ is ever part of a closure
 ([[map/core/shell-state|shell-state]]).
 
-**The top level is a sequence of phrases** (`core/src/evaluator.rs`,
+**The top level is a sequence of phrases** (`core/src/shell/evaluator.rs`,
 `run_phrases`). A `Toplevel` is `Phrase::{Define, Run}`; each phrase
 is a closed computation over the session environment `shell.env`, and a
 `Define` extends that environment *for every phrase after it, in this run
@@ -192,7 +192,7 @@ decides leases.
 
 **Boundaries.** Three things start a fresh machine over the empty stack: a
 run-door phrase, a worker thread (a `spawn` or `watch`), and a pipeline stage
-thread (`runtime/pipeline/thread.rs`). The `spawn` form pushes no frame: its
+thread (`shell/exec/pipeline/thread.rs`). The `spawn` form pushes no frame: its
 rule forms the operands and births the worker in one step (`spawn_form`). A
 `gather` is a frame like any handler's, not a boundary: its body runs on the
 same machine, and only the births inside it start machines of their own. A native that applies a user function — the

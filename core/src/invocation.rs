@@ -26,7 +26,7 @@ pub fn serve(
 ) -> Option<u8> {
     match *role {
         Invocation::Warrant(args) => Some(authority::sandbox::serve_warrant(args)),
-        Invocation::PipelineAnchor => Some(crate::runtime::pipeline::anchor::serve()),
+        Invocation::PipelineAnchor => Some(crate::shell::exec::pipeline::anchor::serve()),
         #[cfg(unix)]
         Invocation::Engine => {
             authority::sandbox::boot();

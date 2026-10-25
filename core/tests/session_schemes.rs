@@ -13,10 +13,10 @@ mod common;
 
 use ral_core::compile::{CompileError, compile_and_typecheck};
 use ral_core::protocol::Run;
+use ral_core::shell::runtime::Settled;
 use ral_core::source::FileId;
 use ral_core::source::SourceOrigin;
 use ral_core::test_access::binding_scheme as scheme_of;
-use ral_core::types::Settled;
 use ral_core::{Shell, TypeError, Value};
 
 fn shell() -> Shell {
@@ -458,7 +458,7 @@ fn a_label_read_is_settled_by_a_kind_in_either_order() {
 /// The refusal a run ended in, as text.
 fn refusal(result: Settled<Value>) -> String {
     match result {
-        Err(ral_core::types::Break::Error(e)) => e.message,
+        Err(ral_core::shell::runtime::Break::Error(e)) => e.message,
         other => panic!("the run must be refused, got {other:?}"),
     }
 }

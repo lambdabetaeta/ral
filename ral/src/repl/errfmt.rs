@@ -7,7 +7,7 @@
 
 use ral_core::err;
 use ral_core::io::ansi::{self, BOLD_YELLOW, RESET};
-use ral_core::types::Error;
+use ral_core::shell::runtime::Error;
 use ral_core::{Shell, io::terminal};
 
 /// Print a failed load's report, then `ral: {what}: …` saying how far it got:

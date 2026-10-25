@@ -1,6 +1,6 @@
 //! The six built-in capability bases, embedded from the `.ral` scripts in
 //! `exarch/data/` and loaded through
-//! [`load_capabilities_from_str`](ral_core::load::profile::load_capabilities_from_str),
+//! [`load_capabilities_from_str`](ral_core::shell::load::profile::load_capabilities_from_str),
 //! the same surface the ral CLI's `--capabilities` flag consumes.
 //!
 //! Loosest to tightest: `dangerous` (the lattice top), `reasonable`,
@@ -46,18 +46,18 @@ pub(super) fn resolve_base(name: &str, ctx: &FreezeCtx) -> Result<GrantLayer, St
         .shell(TerminalState::default(), ctx.cwd().clone())
         .map_err(|e| format!("built-in base '{name}' cannot load: {e}"))?;
     let origin = SourceOrigin::named(format!("<built-in:{name}>"));
-    ral_core::load::profile::load_capabilities_from_str(
-        &ral_core::types::Mooring::adrift(),
+    ral_core::shell::load::profile::load_capabilities_from_str(
+        &ral_core::shell::runtime::Mooring::adrift(),
         &mut shell,
         text,
         &origin,
         ctx,
     )
     .map_err(|e| match e {
-        ral_core::types::Break::Error(err) => {
+        ral_core::shell::runtime::Break::Error(err) => {
             format!("built-in base '{name}' failed to parse: {}", err.message)
         }
-        other @ ral_core::types::Break::Escape(_) => {
+        other @ ral_core::shell::runtime::Break::Escape(_) => {
             format!("built-in base '{name}' failed: {other:?}")
         }
     })
@@ -126,7 +126,7 @@ mod tests {
         let cwd = ral_core::path::CwdPath::new(cwd.as_ref().to_path_buf())
             .expect("a fixture cwd is absolute");
         FreezeCtx::at(
-            std::iter::once(("HOME", home)).collect::<ral_core::types::EnvVars>(),
+            std::iter::once(("HOME", home)).collect::<ral_core::host::EnvVars>(),
             cwd,
         )
         .with_scratch(Some(scratch().to_string_lossy()))
@@ -136,8 +136,8 @@ mod tests {
     /// here is malformed source, a refused payload, or an xdg escape.
     fn load(name: &str, text: &str, ctx: &FreezeCtx) -> GrantLayer {
         let mut shell = ral_core::test_helper::core_shell();
-        ral_core::load::profile::load_capabilities_from_str(
-            &ral_core::types::Mooring::adrift(),
+        ral_core::shell::load::profile::load_capabilities_from_str(
+            &ral_core::shell::runtime::Mooring::adrift(),
             &mut shell,
             text,
             &SourceOrigin::named(format!("<test-base:{name}>")),
@@ -150,8 +150,8 @@ mod tests {
     #[cfg(unix)]
     fn fragment(name: &str, text: &str, ctx: &FreezeCtx) -> Fragment {
         let mut shell = ral_core::test_helper::core_shell();
-        ral_core::load::profile::load_fragment_from_str(
-            &ral_core::types::Mooring::adrift(),
+        ral_core::shell::load::profile::load_fragment_from_str(
+            &ral_core::shell::runtime::Mooring::adrift(),
             &mut shell,
             text,
             &SourceOrigin::named(format!("<test-fragment:{name}>")),
@@ -445,10 +445,10 @@ mod tests {
     /// The selector names `text`'s `exec` allow list targets as `` `dir `NAME ``,
     /// read from the evaluated profile before it is decoded and frozen.
     fn dir_selectors(text: &str) -> std::collections::BTreeSet<String> {
-        use ral_core::types::Value;
+        use ral_core::shell::runtime::Value;
         let mut shell = ral_core::test_helper::core_shell();
-        let profile = ral_core::load::evaluate_source(
-            &ral_core::types::Mooring::adrift(),
+        let profile = ral_core::shell::load::evaluate_source(
+            &ral_core::shell::runtime::Mooring::adrift(),
             &mut shell,
             text,
             &SourceOrigin::named("<test-base:selectors>"),

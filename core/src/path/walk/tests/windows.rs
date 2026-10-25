@@ -28,7 +28,7 @@ use windows_sys::Win32::System::SystemServices::{
 
 fn spelled(path: &Path) -> LexicalPath {
     let cwd = crate::test_helper::process_cwd();
-    Resolver::at(&crate::types::EnvVars::new(), &cwd).anchor(path)
+    Resolver::at(&crate::host::EnvVars::new(), &cwd).anchor(path)
 }
 
 /// `path` walked, and the directory `path` entered, as these tests hold

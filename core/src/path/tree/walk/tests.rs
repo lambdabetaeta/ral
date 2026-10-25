@@ -670,7 +670,13 @@ fn a_cancelled_scope_stops_the_walk_at_the_next_entry() {
     let mut entries = (Walk::all(&lexical(&root)).readable_by(open())).entries(Scope::clone(&node));
     assert!(entries.next().expect("the root").is_ok());
     node.cancel(CancelCause::Interrupted);
-    assert!(entries.next().expect("the stop").is_err());
+    assert_eq!(
+        entries.next().expect("the stop").unwrap_err(),
+        Cancellation {
+            cause: CancelCause::Interrupted,
+            owner: node.id(),
+        }
+    );
     assert!(entries.next().is_none());
 }
 
@@ -684,17 +690,11 @@ fn a_cancelled_scope_stops_a_listing_between_its_entries() {
     let dir = dir.unwrap_or_else(|_| panic!("the root is readable"));
     let listing = dir.read_dir().unwrap();
     node.cancel(CancelCause::Interrupted);
-    assert!(entries.admit(listing).is_err());
-}
-
-#[test]
-fn an_admitted_walk_that_is_cancelled_aborts() {
-    let shell = crate::test_helper::core_shell();
-    shell.cancel_handle().cancel(CancelCause::Interrupted);
-    let root = shell.anchor(&shell.cwd());
-    let mut walk = Walk::respecting_ignores(&root).admitted(&shell, "walk", ".");
-    let stop = walk.next().expect_err("a cancelled scope aborts the walk");
-    assert_eq!(stop.code(), 130);
+    let Err(cancellation) = entries.admit(listing) else {
+        panic!("a cancelled listing must stop");
+    };
+    assert_eq!(cancellation.cause, CancelCause::Interrupted);
+    assert_eq!(cancellation.owner, node.id());
 }
 
 /// A link the walk fails to follow for a reason other than what it leads to

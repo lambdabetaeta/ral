@@ -2790,9 +2790,6 @@ pub fn exists(path: &str) -> bool {
 
 /// Whether the absolute spelling `path` reaches a directory, a link to one
 /// seen through.
-///
-/// Exec grants spell their two kinds of path key apart by a trailing slash,
-/// and `authority::grant::decode` checks that spelling against disk.
 pub fn is_dir(path: &str) -> bool {
     kind_of(path) == Some(Kind::Dir)
 }

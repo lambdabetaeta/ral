@@ -29,12 +29,12 @@ mod common;
 use ral_core::data::FOValue;
 use ral_core::protocol::Run;
 use ral_core::protocol::probe::Probe;
-use ral_core::run::RunReport;
+use ral_core::shell::run::RunReport;
+use ral_core::shell::runtime::Shell;
 use ral_core::source::SourceOrigin;
 use ral_core::sync::LockExt as _;
 use ral_core::test_helper::eventually;
-use ral_core::types::Shell;
-use ral_core::{RunIo, Value, builtins};
+use ral_core::{RunIo, Value, shell::builtins};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::sync::Mutex;
@@ -53,12 +53,12 @@ static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 /// installed and the budget armed in one act, so a shell that has the verb
 /// always has births to spend.
 fn armed() -> Shell {
-    let mut shell = ral_core::boot::boot_shell(
+    let mut shell = ral_core::shell::boot::boot_shell(
         ral_core::io::terminal::TerminalState::default(),
         common::prelude(),
-        &ral_core::boot::HostSurface {
+        &ral_core::shell::boot::HostSurface {
             statics: vec![builtins::DETACH_BUILTIN],
-            ..ral_core::boot::HostSurface::default()
+            ..ral_core::shell::boot::HostSurface::default()
         },
         ral_core::test_helper::process_cwd(),
     )
@@ -81,7 +81,7 @@ fn birth(shell: &mut Shell, call: &str) -> serde_json::Value {
     match report {
         RunReport::Ran {
             ending:
-                ral_core::run::Ending::Settled {
+                ral_core::shell::run::Ending::Settled {
                     value: Value::Unit, ..
                 },
             captured: Some(captured),
@@ -105,7 +105,7 @@ fn refusal(shell: &mut Shell, source: &str) -> String {
     });
     match report {
         RunReport::Ran {
-            ending: ral_core::run::Ending::Raised { error, .. },
+            ending: ral_core::shell::run::Ending::Raised { error, .. },
             ..
         } => error.to_string(),
         RunReport::Ran { ending, .. } => panic!("{source} must be refused, got {ending:?}"),

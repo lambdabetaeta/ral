@@ -21,11 +21,11 @@ use ral_core::errln;
 use ral_core::own::{OwnDir, UserFile};
 use ral_core::path::{XdgKind, shown};
 use ral_core::record;
-use ral_core::ty::{Ty, Typed};
-use ral_core::typecheck::Form;
-use ral_core::types::{
+use ral_core::shell::runtime::{
     Break, DefaultPolicy, Error, HandlerEntry, Hook, HookName, HookSig, Map, Mooring, Settled,
 };
+use ral_core::ty::{Ty, Typed};
+use ral_core::typecheck::Form;
 use ral_core::{Shell, Value, io::terminal};
 use std::path::PathBuf;
 
@@ -331,7 +331,7 @@ mod tests {
     use super::*;
 
     use crate::repl::host::ReplHost;
-    use ral_core::types::{BuiltinBody, BuiltinEntry};
+    use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry};
     use std::borrow::Cow;
     use std::sync::{Arc, Mutex};
 
@@ -494,7 +494,10 @@ mod tests {
             "recursion-limit".into(),
             Value::Int(0),
         )]));
-        assert_eq!(shell.stack_limit(), ral_core::types::DEFAULT_STACK_LIMIT);
+        assert_eq!(
+            shell.stack_limit(),
+            ral_core::shell::runtime::DEFAULT_STACK_LIMIT
+        );
         assert!(err.contains("recursion-limit") && err.contains("not applied"));
     }
 
@@ -506,7 +509,10 @@ mod tests {
             "recursion-limit".into(),
             Value::string("lots"),
         )]));
-        assert_eq!(shell.stack_limit(), ral_core::types::DEFAULT_STACK_LIMIT);
+        assert_eq!(
+            shell.stack_limit(),
+            ral_core::shell::runtime::DEFAULT_STACK_LIMIT
+        );
         assert!(err.contains("recursion-limit"));
     }
 
@@ -709,7 +715,10 @@ mod tests {
             ("edit-mode".into(), Value::Int(42)),
             ("recursion-limit".into(), Value::Int(256)),
         ]));
-        assert_eq!(shell.stack_limit(), ral_core::types::DEFAULT_STACK_LIMIT);
+        assert_eq!(
+            shell.stack_limit(),
+            ral_core::shell::runtime::DEFAULT_STACK_LIMIT
+        );
         assert!(err.contains("edit-mode") && err.contains("not applied"));
     }
 

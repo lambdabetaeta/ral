@@ -1,5 +1,5 @@
 ---
-generated_at_commit: ce5a629202ebc86335ea55af1625b706d85e2774
+generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
 generated_at_date: 2026-10-25
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
@@ -49,7 +49,7 @@ Entry points (`typecheck.rs`):
   `HeadBoundToValue` (T0072)
   ([[internals/type-inference|type-inference]]).
 - `bake_prelude(phrases, &Manifest) -> Toplevel` — called by
-  `boot::bake_prelude` from each host's build script: returns the
+  `shell::boot::bake_prelude` from each host's build script: returns the
   annotated prelude `Toplevel` and nothing else. Every phrase already carries
   its schemes, and `SessionSchemes::from_prelude` reads them back through
   `Toplevel::exported_schemes`, so no second blob of schemes is baked.
@@ -103,7 +103,7 @@ Internals:
   under a `ty::Term` (whose `children` is the one enumeration of sub-terms):
   free-variable collection and the weak-source search are both a fold over it;
 - `Site` (data in `core/src/ty/site.rs`, built by `typecheck/site.rs`, walked
-  and admitted by `core/src/types/admit.rs`) — the type solved at a boundary
+  and admitted by `core/src/shell/runtime/admit.rs`) — the type solved at a boundary
   call, frozen at the unit's end by `InferCtx::snapshot_sites` and written onto
   the `Exec` by `annotate`; `Site::exports` hands the module check one scratch
   unifier over a whole export record, so export types that share variables are
@@ -196,7 +196,7 @@ It carries *which* boundary it is at — `ArgvBoundary::InShell` or
 `Exec(shown)` — and that is the whole of the difference between them. `Exec`
 sends each written element through `gate_exec_arg`, which reads
 `RefusedArg::of_ty` (`core/src/ty/exec_arg.rs`) — the same declaration
-`runtime::command::vet` reads at the spawn — and raises
+`shell::exec::command::vet` reads at the spawn — and raises
 `TypeErrorKind::ExecArgNotText` (T0057) where the resolved shape is refused,
 saying nothing about a type variable or about a spread's elements.
 `explain.rs` composes the message and takes the guidance from
@@ -301,7 +301,7 @@ which (`Standing::{Command, Own, EveryCommand}`). The checker raises a refusal
 where the arm is written (`checked_arm`, `install_arm`); `alias_arm_scheme`
 and `catch_all_stands_in` (`typecheck.rs`) apply the same rule at the install
 site, and `HandlerEntry::vet` / `parse_catch_all` render the error through
-`types::refused_arm`.
+`shell::runtime::refused_arm`.
 
 ## Display and diagnostics
 

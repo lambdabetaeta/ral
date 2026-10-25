@@ -1,8 +1,9 @@
 ---
 status: active
 generated_at_commit: dad6a1b3
-verified_at_commit: dad6a1b3
-anchors: [Escape::Stopped, Break::stopped, Break::of_child, final_poll, ThreadEnd, Shell::poll, Shell::scope, Mooring::home, Scope::in_force, ScopeId, POLL_SLICE, WorkerStop, Status::WorkerStopped, convert_own_stop, StageObservation::names, CollectState::cancel_all, CollectState::recv, Ending::Stopped]
+verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+verified_at_date: 2026-10-25
+anchors: [Cancellation, Scope::poll, Escape::Stopped, Break::stopped, Break::of_child, final_poll, ThreadEnd, Shell::poll, Shell::scope, Mooring::home, Scope::in_force, ScopeId, POLL_SLICE, WorkerStop, Status::WorkerStopped, convert_own_stop, StageObservation::names, CollectState::cancel_all, CollectState::recv, Ending::Stopped]
 ---
 
 # Delimiters are handlers for `poll`
@@ -423,12 +424,14 @@ lands, when a mask ends, and for a process which write is first dead.
 ## Where
 
 `Escape`, `Break::stopped`, `Break::of_child`, `final_poll`, `ThreadEnd` in
-`core/src/types/flow.rs`; `Scope`, `ScopeNode`, `ScopeId`, `WorkerStop`, `POLL_SLICE`, `resolve` in
-`core/src/process/cancel.rs`; `Shell::scope`, `Shell::poll`,
-`Shell::write_sink` in `core/src/types/shell/mod.rs`; `Mooring::home` in
-`core/src/types/mooring.rs`; the collector's `rank`, `recv`, `escalate`,
-`cancel_all` and `StageObservation` in `core/src/runtime/pipeline/collect.rs`;
-`convert_own_stop` in `core/src/builtins/concurrency/birth.rs`; `Ending` in
-`core/src/run.rs`. See [[internals/cancellation|cancellation]] for the
+`core/src/shell/runtime/flow.rs` (`From<Cancellation> for Break` preserves cause
+and owner as a non-catchable stop); `Scope`, `ScopeNode`, `ScopeId`,
+`Cancellation`, `WorkerStop`, `POLL_SLICE`, `resolve` in
+`core/src/process/cancel.rs` (`Scope::poll` returns domain cancellation); `Shell::scope`, `Shell::poll`,
+`Shell::write_sink` in `core/src/shell/runtime/state/mod.rs`; `Mooring::home` in
+`core/src/shell/runtime/mooring.rs`; the collector's `rank`, `recv`, `escalate`,
+`cancel_all` and `StageObservation` in `core/src/shell/exec/pipeline/collect.rs`;
+`convert_own_stop` in `core/src/shell/builtins/concurrency/birth.rs`; `Ending` in
+`core/src/shell/run.rs`. See [[internals/cancellation|cancellation]] for the
 runtime narrative and [[design/effects-handlers|effects-handlers]] for the
 handler reading.

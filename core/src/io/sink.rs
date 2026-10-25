@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 /// marker, so a high-volume capture has to become an explicit redirect.  Two
 /// readings of the one event: a worker keeps the marked prefix, and a
 /// capture whose bytes are about to become a value refuses it
-/// (`runtime::capture::with_capture`, and `machine.rs`'s `Frame::Capture` arm).
+/// (`shell::exec::capture::with_capture`, and `machine.rs`'s `Frame::Capture` arm).
 pub(crate) const SINK_BUFFER_CAP: usize = 16 * 1024 * 1024;
 const SINK_BUFFER_TRUNC_MARKER: &[u8] =
     b"\n[ral: buffer exceeded 16 MiB; remaining output dropped]\n";
@@ -145,7 +145,7 @@ pub enum Sink {
     Terminal,
     /// The inherited fd 2, and the default `Io::stderr`.
     Stderr,
-    /// Redirect target, opened by `runtime::redirect`.  `Arc` so a nested frame
+    /// Redirect target, opened by `shell::exec::redirect`.  `Arc` so a nested frame
     /// under a redirect clones the sink rather than `dup`ing the fd — a `dup`
     /// shares the file offset anyway, so nothing about where bytes land changes.
     File(Arc<std::fs::File>),
@@ -450,7 +450,7 @@ impl Clone for Sink {
 }
 
 /// Wrap `base` in a `Sink::Tee` whose other branch is a fresh buffer, so bytes
-/// are recorded and still seen.  `with_audit_capture` in `runtime::capture` is
+/// are recorded and still seen.  `with_audit_capture` in `shell::exec::capture` is
 /// the caller; it drains the buffer once every writer has closed.
 pub(crate) fn tee_with_buffer(base: Sink, cap: usize) -> (Sink, ByteBuffer) {
     let buf = Arc::new(CapturedBytes::limited(cap, &[]));

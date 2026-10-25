@@ -2,8 +2,8 @@
 
 use super::super::*;
 use super::{writable, writing};
+use crate::host::EnvVars;
 use crate::path::{CwdPath, Resolver};
-use crate::types::EnvVars;
 use serde::de::DeserializeOwned;
 use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;

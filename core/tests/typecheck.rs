@@ -38,7 +38,7 @@ fn errors_against(src: &str, surface: &ral_core::HostSurface) -> Vec<TypeError> 
 #[cfg(unix)]
 fn detach_surface() -> ral_core::HostSurface {
     ral_core::HostSurface {
-        statics: vec![ral_core::builtins::DETACH_BUILTIN],
+        statics: vec![ral_core::shell::builtins::DETACH_BUILTIN],
         ..Default::default()
     }
 }

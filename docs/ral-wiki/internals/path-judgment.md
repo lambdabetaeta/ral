@@ -1,8 +1,7 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-verified_at_commit: c4ca94d2
-verified_at_date: 2026-10-22
-anchors: [walk, walk_excluded, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, GrantStack::judge, Refused, Extent, from_capabilities, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline]
+verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+verified_at_date: 2026-10-25
+anchors: [walk, walk_excluded, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, GrantStack::judge, Refused, Extent, from_capabilities, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline, Walk, Cancellation, AdmittedWalk, Shell::admitted_walk]
 ---
 
 # Path judgment: what ral checks when it touches a file
@@ -87,7 +86,9 @@ vouched for it.**
 
 The door is `Shell::locate` (and `locate_dir`, `locate_existing`,
 `locate_if_admitted`, `judge`): walk, then `GrantStack::judge` on the transcript,
-then the handle. `check_fs_write` does not exist; every write is a `locate`.
+then the handle. These shell adapters live in `shell/runtime/state/checks.rs`:
+`authority::guard` returns diagnostic data, and the adapter records a denial
+and raises its runtime error. Every write is a `locate`.
 
 ## Two readings
 
@@ -114,9 +115,9 @@ reused one over-denies and never admits.
 **A layer is resolved where it is decoded; the fold of a stack is a pure
 function of its layers.**
 
-- **`authority::grant::decode_capability_map` walks each spelling as it freezes it**, runs the
-  physical refusals (`xdg` within home, `refuse_the_world`, the toolchain floor)
-  on that trace, and keeps it. A `Capabilities` that arrives already decoded is
+- **`shell::grant::decode_capability_map` walks each spelling as it freezes it**
+  through `authority::grant`, runs the physical refusals (`xdg` within home,
+  `refuse_the_world`, the toolchain floor) on that trace, and keeps it. A `Capabilities` that arrives already decoded is
   resolved by `GrantLayer::from_capabilities`, the same walk. A `GrantLayer`
   keeps its rules and nothing beside them; each spelling is a `GrantPath`:
   as written, and what its walk made of it.
@@ -166,7 +167,12 @@ function of its layers.**
   write-judged directory, judged as that leaf and created exclusively.
 - **ral enumerates.** `path/tree/walk.rs` lists with `Dir::read_dir`, judges every
   directory it enters and every file it reads for its own guidance against a
-  `ReadRegion`, and uses `ignore` for its matcher alone.
+  `ReadRegion`, and uses `ignore` for its matcher alone. Its `Entries` yield
+  domain `Cancellation`s (cause and owner), and `WalkEntry::name` returns a
+  string refusal; neither depends on runtime. `Shell::admitted_walk`
+  (`shell/runtime/walk.rs`) supplies the live region, scope and naming base.
+  Its `AdmittedWalk` skips unseen entries, converts cancellation to a
+  non-catchable stop, and gives naming errors their caller's context.
 
 ## Exec
 

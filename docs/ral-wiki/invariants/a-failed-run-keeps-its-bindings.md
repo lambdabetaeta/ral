@@ -9,7 +9,7 @@ The law is normative in `docs/SPEC.md` §5.6, with its worked example: after a
 failed run of `let before = 1` / `failing-command` / `let after = 2`, `before`
 remains bound and `after` does not exist.
 
-**The mechanism.** `run_phrases` (`core/src/evaluator.rs`) runs each top-level
+**The mechanism.** `run_phrases` (`core/src/shell/evaluator.rs`) runs each top-level
 phrase in order in one loop. Under `Mode::Session`, `Ran::define` writes
 the landed binding through `shell.note_define` and back into `shell.env`
 *before* the next phrase runs; a failure breaks the loop and touches neither.
@@ -20,7 +20,7 @@ halt, never rolled back.
 classifications of the same `Err(Break::Error(_))` return: both leave `dispatch`
 inside `RunReport::Ran` and so return through `Shell::enter`'s `Ok` arm, which
 never touches the checkpoint. `mid_script_wall_keeps_the_bindings_that_landed`
-(`core/src/run.rs`) pins this for the wall specifically, with the cancel landing
+(`core/src/shell/run.rs`) pins this for the wall specifically, with the cancel landing
 *mid-script* rather than before evaluation. Exarch pins the raise from its own
 side in `tool_call_partial_effects_persist_on_error`
 (`exarch/src/shell_eval.rs`), and `core/tests/top_level_vs_block.rs` is the

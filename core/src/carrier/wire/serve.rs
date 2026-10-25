@@ -21,9 +21,9 @@ use crate::protocol::{
     Attach, Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Origin, Report, Root, Run,
     SessionEvent,
 };
+use crate::shell::runtime::{Break, DeferredSink, EnquiryDesk, Error, Fork, Settled};
 use crate::site::{Silent, site};
 use crate::sync::LockExt;
-use crate::types::{Break, DeferredSink, EnquiryDesk, Error, Fork, Settled};
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -171,7 +171,7 @@ impl EnquiryDesk for WireDesk {
         // Answer, then cancel, then park — in that order, so an answer already
         // in hand outranks a cancel pending beside it, and an enquiry raised
         // under an already-cancelled scope returns without parking at all. The
-        // park polls the scope, which mints the stop, as every poll point does.
+        // park converts the scope's cancellation to the evaluator's stop.
         let raised = |e| Break::from(Error::from(e));
         loop {
             match rx.try_recv() {
@@ -181,7 +181,7 @@ impl EnquiryDesk for WireDesk {
             }
             if let Err(stop) = scope.poll() {
                 self.parks.parked.lock_ignore_poison().remove(&eid);
-                return Err(stop);
+                return Err(stop.into());
             }
             match rx.recv_timeout(POLL_SLICE) {
                 Ok(answer) => return answer.map_err(raised),
@@ -660,17 +660,17 @@ mod wire_desk_tests {
             panic!("a refusal is an error, not a stop");
         };
         front_end.join().expect("front-end thread");
-        assert_eq!(err.message, crate::types::NO_DESK);
+        assert_eq!(err.message, crate::shell::runtime::NO_DESK);
         assert_eq!(
             err.status,
-            crate::types::Status::Raised(crate::types::NO_DESK_STATUS)
+            crate::shell::runtime::Status::Raised(crate::shell::runtime::NO_DESK_STATUS)
         );
     }
 
     fn is_cancelled_stop(br: &Break) -> bool {
         matches!(
             br,
-            Break::Escape(crate::types::Escape::Stopped {
+            Break::Escape(crate::shell::runtime::Escape::Stopped {
                 cause: CancelCause::Cancelled,
                 ..
             })
@@ -739,6 +739,34 @@ mod wire_desk_tests {
     }
 
     #[test]
+    fn an_answer_already_in_hand_outranks_cancellation() {
+        let parks = Arc::new(Parks::default());
+        let desk = WireDesk {
+            id: DispatchId(1),
+            parks: parks.clone(),
+            outlet: {
+                let parks = parks.clone();
+                Arc::new(move |_, event| {
+                    let Event::Enquiry(eid, _) = event else {
+                        panic!("a desk only emits enquiries");
+                    };
+                    parks.fill(eid, Ok(FOValue::Int { value: 42 }));
+                    Ok(())
+                })
+            },
+        };
+        let scope = DurableRoot::default().worker();
+        scope.cancel(CancelCause::Cancelled);
+
+        assert_eq!(
+            desk.enquire(FOValue::Unit, &scope)
+                .expect("already answered"),
+            FOValue::Int { value: 42 }
+        );
+        assert!(parks.parked.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn late_answer_for_a_dead_id_is_dropped() {
         let (desk, _peer) = lone_desk();
         desk.parks.fill(EnquiryId(99), Ok(FOValue::Unit));
@@ -768,10 +796,10 @@ mod engine_session_tests {
     static INSTALLERS: &[EngineInstaller] = &[crate::carrier::testkit::installer(
         "test",
         |_| {
-            crate::boot::boot_runtime(
+            crate::shell::boot::boot_runtime(
                 crate::io::terminal::TerminalState::default(),
-                crate::boot::BakedPrelude::runtime(),
-                &crate::boot::HostSurface::default(),
+                crate::shell::boot::BakedPrelude::runtime(),
+                &crate::shell::boot::HostSurface::default(),
             )
         },
         |_, _| Ok(()),

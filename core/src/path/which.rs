@@ -2,7 +2,7 @@
 //!
 //! Sibling to the grant pipeline, but `$PATH` is only a list of
 //! directories walked in turn, so the sigil/lex/canon stages do not apply.
-//! Dispatch arrives via `runtime::command::head`.
+//! Dispatch arrives via `shell::exec::command::head`.
 //!
 //! The walk costs one stat per `PATH` entry, and on Windows one per
 //! `%PATHEXT%` suffix per entry, so [`locate`] memoises it for the extent of a
@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use super::site::Silent;
 use super::{CwdPath, PathRules};
+use crate::host::EnvVars;
 use crate::site::site;
-use crate::types::EnvVars;
 
 /// Resolve a command head to its executable on disk: a separator-bearing
 /// name is a path anchored against `cwd`, a bare name is walked against
@@ -126,7 +126,7 @@ thread_local! {
     ///
     /// Thread-local and lock-free, because a run's evaluation is
     /// single-threaded on the calling thread.  It hangs off no `Shell` and no
-    /// `Context` on purpose: the hottest callers, `runtime::command::head`'s
+    /// `Context` on purpose: the hottest callers, `shell::exec::command::head`'s
     /// resolution and `authority::policy::exec`'s compile, hold no `Shell`.
     ///
     /// A newly installed or newly deleted executable is therefore invisible
@@ -269,7 +269,7 @@ pub(crate) fn is_executable_file(p: &Path) -> bool {
     }
 }
 
-/// What one walk of `PATH` found, in the three states `runtime::command::vet`
+/// What one walk of `PATH` found, in the three states `shell::exec::command::vet`
 /// must tell apart.
 ///
 /// Three, because the 126/127 split is a property *of the walk*: a verdict

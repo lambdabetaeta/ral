@@ -6,11 +6,11 @@
 mod common;
 
 use ral_core::Value;
-use ral_core::boot::{HostSurface, boot_shell};
 use ral_core::io::terminal::TerminalState;
 use ral_core::protocol::Run;
+use ral_core::shell::boot::{HostSurface, boot_shell};
+use ral_core::shell::runtime::{Break, Escape, Mooring, Settled, Shell};
 use ral_core::source::SourceOrigin;
-use ral_core::types::{Break, Escape, Mooring, Settled, Shell};
 
 const HOST: &str = "a test host resolves its baseline";
 
@@ -43,18 +43,18 @@ fn panic_builtin(
     _args: &[Value],
     _mooring: &Mooring,
     _shell: &mut Shell,
-) -> ral_core::types::Settled<Value> {
+) -> ral_core::shell::runtime::Settled<Value> {
     panic!("__test-panic builtin invoked");
 }
 
-static PANIC_BUILTIN_ARR: [ral_core::types::BuiltinEntry; 1] =
-    [ral_core::types::BuiltinEntry::new(
+static PANIC_BUILTIN_ARR: [ral_core::shell::runtime::BuiltinEntry; 1] =
+    [ral_core::shell::runtime::BuiltinEntry::new(
         std::borrow::Cow::Borrowed("__test-panic"),
         ral_core::typecheck::builtins::scheme::diverges,
         "__test-panic  — test-only: raise a Rust panic.",
-        ral_core::types::BuiltinBody::Static(panic_builtin),
+        ral_core::shell::runtime::BuiltinBody::Static(panic_builtin),
     )];
-static PANIC_BUILTIN: &[ral_core::types::BuiltinEntry] = &PANIC_BUILTIN_ARR;
+static PANIC_BUILTIN: &[ral_core::shell::runtime::BuiltinEntry] = &PANIC_BUILTIN_ARR;
 
 /// E5 — a Rust panic raised inside an alias body must leave the alias
 /// still installed.  The body invokes `__test-panic`, a host builtin the

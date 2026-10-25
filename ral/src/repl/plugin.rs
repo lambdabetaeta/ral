@@ -59,8 +59,8 @@ pub(super) fn lock(m: &Arc<Mutex<PluginRuntime>>) -> MutexGuard<'_, PluginRuntim
 /// A plugin load or unload failure.  The message carries no surface tag: the
 /// display site that reports it owns any prefix, so it appears at most once.
 /// Shared by the loader, the unloader, and the manifest parser.
-pub(super) fn load_err(msg: impl std::fmt::Display) -> ral_core::types::Error {
-    ral_core::types::Error::new(msg.to_string())
+pub(super) fn load_err(msg: impl std::fmt::Display) -> ral_core::shell::runtime::Error {
+    ral_core::shell::runtime::Error::new(msg.to_string())
 }
 
 /// Which keymap the editor is in — the frontend-neutral reduction of

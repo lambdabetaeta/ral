@@ -10,10 +10,10 @@ use crate::provider::scripted::{Reply, Script};
 use crate::record::Voice;
 use ral_core::Shell;
 use ral_core::Value;
+use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry, Mooring, Settled};
 use ral_core::ty::{Scheme, Ty};
 use ral_core::typecheck::Unifier;
 use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
-use ral_core::types::{BuiltinBody, BuiltinEntry, Mooring, Settled};
 use std::borrow::Cow;
 
 /// Stands in for any Rust panic the evaluator can raise mid-eval.
@@ -133,7 +133,7 @@ fn large_binding_install_warns_on_its_own_run_stderr() {
     let session = dressed_trunk_over(
         |_| {},
         |shell| {
-            shell.arm_binding_lease(ral_core::types::BindingLease {
+            shell.arm_binding_lease(ral_core::shell::runtime::BindingLease {
                 idle_calls: 1_000_000,
                 large_binding_bytes: 8,
             });
@@ -289,7 +289,7 @@ fn panic_after_prune_does_not_resurrect_binding() {
     let mut session = dressed_trunk_over(
         |runtime| runtime.install_builtins(PANIC_BUILTINS),
         |shell| {
-            shell.arm_binding_lease(ral_core::types::BindingLease {
+            shell.arm_binding_lease(ral_core::shell::runtime::BindingLease {
                 idle_calls: 2,
                 large_binding_bytes: u64::MAX,
             });

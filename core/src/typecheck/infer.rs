@@ -958,7 +958,7 @@ impl Inferencer<'_> {
     /// external's arguments too.
     ///
     /// A concrete type only.  Where the type is still a variable the shape is
-    /// genuinely unknown here, and `runtime::command::vet` keeps the question:
+    /// genuinely unknown here, and `shell::exec::command::vet` keeps the question:
     /// nothing that runs today stops running, and the two answers come from one
     /// declaration ([`RefusedArg`]) rather than from two matches that might
     /// drift.

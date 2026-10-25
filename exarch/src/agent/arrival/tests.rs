@@ -6,7 +6,9 @@ use crate::bus::{AgentOutcome, Emitter};
 use crate::card::testkit::card_value;
 use crate::record::{AgentId, Display, Record};
 use ral_core::carrier::Severed;
-use ral_core::types::{BuiltinBody, BuiltinEntry, Done, DoneEvent, Mooring, Settled, WorkerId};
+use ral_core::shell::runtime::{
+    BuiltinBody, BuiltinEntry, Done, DoneEvent, Mooring, Settled, WorkerId,
+};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};

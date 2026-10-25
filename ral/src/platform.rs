@@ -12,7 +12,7 @@ use ral_core::io::terminal::{InteractiveMode, TerminalState};
 use ral_core::own::UserFile;
 use ral_core::path::{EnginePath, XdgKind};
 use ral_core::protocol::{Attach, EngineSpec, Root};
-use ral_core::types::ExitHints;
+use ral_core::shell::runtime::ExitHints;
 
 use crate::site::{Silent, site};
 

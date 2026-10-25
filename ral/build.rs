@@ -31,7 +31,7 @@ fn main() {
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
     std::fs::write(
         out.join("prelude_baked.bin"),
-        ral_core::boot::bake_prelude(),
+        ral_core::shell::boot::bake_prelude(),
     )
     .expect("failed to write prelude_baked.bin");
 }

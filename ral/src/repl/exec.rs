@@ -11,7 +11,7 @@ use ral_core::data::FOValue;
 use ral_core::data::datum::Datum as _;
 use ral_core::protocol::{Ending, Report, Run};
 use ral_core::source::SourceOrigin;
-use ral_core::{HookName, Value, builtins};
+use ral_core::{HookName, Value, shell::builtins};
 use ral_core::{err, errln, outln};
 use std::sync::Arc;
 

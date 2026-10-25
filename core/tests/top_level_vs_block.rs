@@ -21,9 +21,9 @@ use ral_core::authority::policy::Capabilities;
 use ral_core::authority::policy::FsPolicy;
 use ral_core::path::shown;
 use ral_core::protocol::Run;
+use ral_core::shell::runtime::{Settled, Shell};
 use ral_core::source::SourceOrigin;
 use ral_core::test_helper::{layer, stack};
-use ral_core::types::{Settled, Shell};
 use ral_core::{Break, Value};
 use std::path::{Path, PathBuf};
 

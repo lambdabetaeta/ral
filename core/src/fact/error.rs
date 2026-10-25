@@ -1,6 +1,6 @@
 //! The record `try` hands its handler, `poll` its `` `err `` payload, and the
 //! report envelope its failed outcome.  Bytes are absent by design: `audit` is
-//! the forensic path.  Minted from an `Error` in `types::error`.
+//! the forensic path.  Minted from an `Error` in `shell::runtime::error`.
 
 use crate::source::CallSite;
 use crate::{record, variant};

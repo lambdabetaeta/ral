@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-generated_at_date: 2026-10-21
+generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_date: 2026-10-25
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
 
@@ -53,19 +53,19 @@ one `deputy` check per flagged prefix when a grant frame is entered
 
 Every profile is *resolved* as it loads — resolving each place (`` `home ``, `` `xdg-* ``, `` `cwd ``,
 `` `tempdir ``, `` `scratch ``, `` `gitdir ``) and the `dir` selectors against the session's home, working
-directory, scratch, and the host's live tool roots inside
-`ral_core::authority::grant`'s construction pass (`authority/grant/decode.rs`,
-`authority/grant/freeze.rs`) — authored resolution and host system-read discovery live
-here, while `authority::policy` owns the resolved model and judgments, so
-composition runs entirely on resolved `GrantLayer`s ([[design/capability-freeze|freeze boundary]]).
+directory, scratch, and the host's live tool roots through
+`ral_core::shell::grant::decode_capability_map` (`shell/grant/decode.rs`).
+Substantive freezing, authored resolution and host system-read discovery stay in
+`authority::grant` (`authority/grant/freeze.rs`); `authority::policy` owns the
+resolved model and judgments. Composition runs entirely on resolved `GrantLayer`s ([[design/capability-freeze|freeze boundary]]).
 An `` `xdg-* `` place escaping `HOME` is rejected at the profile that names it, before
 composition could discard it. Loading reuses
-`ral_core::load::profile::load_capabilities_from_*` — the same surface as ral's
+`ral_core::shell::load::profile::load_capabilities_from_*` — the same surface as ral's
 `--capabilities <path>.ral` (`policy/load.rs` wraps it with exarch's error
 format and the `absolute_in` cwd-join helper).
 
-`base_layer(base_name, cwd)` resolves a bake-in base, frozen against the
-child's working directory, as one way of naming the single layer a
+`base_layer(base_name, ctx)` resolves a bake-in base against the child's
+working directory and scratch from its `FreezeCtx`, as one way of naming the single layer a
 [[design/agents|sub-agent]] spawn pushes. It does not take the parent: the
 desk behind the [[map/exarch/builtins|`` exarch-agents `start `` tag]]
 (`agent/desk/agents.rs`'s `fork_seat`, through core's
@@ -82,12 +82,12 @@ stays offline even under `minimal`).
 `--base` and `--restrict` are the same act — the parent's stack is already
 underneath, so a base pushed here can only narrow, exactly as a restrict does
 ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]). The layer is
-resolved by `SpawnGrant::layer` (`core/src/authority/grant/spawn.rs`), which both seats
+resolved by `SpawnGrant::layer` (`core/src/shell/grant/spawn.rs`), which both seats
 call: `` `inherit `` is ⊤, a layer the fold leaves no trace of;
 `` `confined ``/`` `read-only ``/`` `edit-only ``/`` `reasonable `` reach
 `base_layer` through the `GrantNarrower` the resolution is handed; and
 `` `restrict R `` hands the record to
-`ral_core::authority::grant::decode_capability_map` — the same walker, off the same
+`ral_core::shell::grant::decode_capability_map` — the same walker, off the same
 `Form::Grant` declared table, that `grant [...] { body }` and each bake-in
 profile below already pass through, so one keyset earns one wording.
 `` `dangerous `` is a `--base` name only: at a spawn the lattice top is a layer
@@ -154,7 +154,7 @@ as it does `dangerous` ([[design/agents|agents]]).
 
 Each is a ral script whose terminal expression is a map shaped like the argument
 of `grant [...] { body }`, loaded through
-`ral_core::load::profile::load_capabilities_from_str` — the same surface
+`ral_core::shell::load::profile::load_capabilities_from_str` — the same surface
 `--capabilities <path>.ral` consumes at the ral CLI. Two surfaces, one model. The
 host reads the resulting authority only through core's accessors, never its
 representation ([[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]]).

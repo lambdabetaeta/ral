@@ -26,7 +26,7 @@ convention, the word "alias" is redundant and is retired everywhere.
   `Fun(String, Fun(List α, B))` — the shape that lets it monitor every call
   (`{ |name args| echo "$name called with ...$args" }`). That is the runtime
   calling convention (`run_handler`,
-  [`core/src/runtime/command_call.rs`](../../../core/src/runtime/command_call.rs));
+  [`core/src/runtime/command_call.rs`](../../../core/src/shell/exec/dispatch.rs));
   the typechecker does not yet pin it (see *Known weaknesses*).
 
 Variable arity is therefore a *surface* phenomenon — a handler invoked `g a b c`
@@ -75,7 +75,7 @@ and the codecs are `Sig` functions, exactly as before.
 ## `help` splits into two functions
 
 `help` only ever read `args[0]`
-([`builtin_help`, `core/src/builtins/misc.rs`](../../../core/src/builtins/misc.rs)):
+([`builtin_help`, `core/src/builtins/misc.rs`](../../../core/src/shell/builtins/misc.rs)):
 no argument listed everything, one argument looked a name up (exact, then a glob
 fallback), and any further arguments were silently dropped. It was never the
 variadic list its `Sig(HELP)` type advertised — only 0-or-1. But 0-or-1 under a
@@ -110,7 +110,7 @@ primitive of its own:
   type.
 - **`intercalate " "`** joins a `List String` into one `String`, and **`to-line`**
   writes that string to the byte output
-  ([`core/src/builtins/codecs.rs`](../../../core/src/builtins/codecs.rs)) — the
+  ([`core/src/builtins/codecs.rs`](../../../core/src/shell/builtins/codecs.rs)) — the
   value→bytes-on-stdout crossing the codecs own by design ([[design/codecs|codecs]]).
 
 So `echo` is neither a function nor a handler: it is **surface sugar**, lowered in
@@ -138,7 +138,7 @@ This *dissolves* the exception instead of quarantining it:
   is also *why* `echo` never fit as a handler: a handler receives the argv as one
   list, but `echo` must render before the list exists.
 - **A consistency win, not only a removal.** `echo` today pretty-prints maps via
-  its own `format_args` ([`core/src/builtins/misc.rs`](../../../core/src/builtins/misc.rs)),
+  its own `format_args` ([`core/src/builtins/misc.rs`](../../../core/src/shell/builtins/misc.rs)),
   diverging from the codec rendering; routed through `str`/`to-line` it renders
   identically to `to-string` and `"$x"`. One renderer, used everywhere.
 
@@ -151,7 +151,7 @@ split, nothing in `CORE_BUILTINS` is argv-as-list — the core ships only functi
 An alias was only ever the *persistent* install form of a ral handler — the same
 `HandlerEntry`, distinguished from a `within` frame by lifetime alone
 (`removable_by_unalias` on the frame; `install_alias`,
-[`core/src/types/shell/scope.rs`](../../../core/src/types/shell/scope.rs)). Once
+[`core/src/types/shell/scope.rs`](../../../core/src/shell/runtime/state/scope.rs)). Once
 "handler" is the single name for variable arity, "alias" carries no
 distinct meaning and is removed:
 
@@ -227,7 +227,7 @@ reader does not over-credit it.
   and `HELP` are the sole `ArgSig::Variadic` entries, and nothing in host crates or
   plugins uses the variant. The whole policy arm becomes dead and can go.
 - **`echo`'s `format_args`**
-  ([`core/src/builtins/misc.rs`](../../../core/src/builtins/misc.rs)) is private and
+  ([`core/src/builtins/misc.rs`](../../../core/src/shell/builtins/misc.rs)) is private and
   called only by `builtin_echo`, so it dies with `echo`.
 
 **The real gain is an invariant, not a deletion.** With no variadic builtin,

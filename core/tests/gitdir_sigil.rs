@@ -13,8 +13,8 @@
 //! rather than a wider grant.
 
 use ral_core::authority::grant::freeze::{FreezeCtx, Place, PolicyError};
+use ral_core::host::EnvVars;
 use ral_core::path::CwdPath;
-use ral_core::types::EnvVars;
 use std::path::{Path, PathBuf};
 
 fn root(tag: &str) -> PathBuf {

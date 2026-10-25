@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 3bf43d16fc35212e3a3b354a91ffa2fcac136724
-generated_at_date: 2026-10-19
+generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_date: 2026-10-25
 covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/protocol/channel.rs, core/src/carrier.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs]
 ---
 
@@ -75,7 +75,7 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   use. What `session::begin` hands
   `vm_manager::detect` is a `vm_manager::BootMedia` closure over `realise`,
   not the artifact itself.
-- `grant.rs` — the folder becomes a `ral_core::types::Capabilities`
+- `grant.rs` — the folder becomes a `ral_core::shell::runtime::Capabilities`
   ([[design/grant|grant]]), and a `vm_manager::MachineSpec` naming the same
   folder. One grant, read twice: once as authority, once as a workspace.
 - `prompt.rs` + `data/*.md` — the office persona and the office toolbox,

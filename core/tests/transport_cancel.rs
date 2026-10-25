@@ -18,8 +18,8 @@ use ral_core::engine::EngineInstaller;
 use ral_core::io::terminal::TerminalState;
 use ral_core::path::EnginePath;
 use ral_core::protocol::{Attach, Report, Run};
+use ral_core::shell::runtime::{CapturePolicy, Observed};
 use ral_core::source::SourceOrigin;
-use ral_core::types::{CapturePolicy, Observed};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -79,7 +79,7 @@ fn an_interrupt_through_the_control_sender_stops_an_in_flight_run() {
     // The struck `/bin/sleep` settles into an observation as the stop
     // unwinds, and `Audit::close` reads the trail however the run ended.
     let struck = trail.into_iter().find_map(|fo| {
-        let obs = ral_core::types::Observation::decode(&fo).ok()?;
+        let obs = ral_core::shell::runtime::Observation::decode(&fo).ok()?;
         match obs.what {
             Observed::Command(c) if c.argv.first().is_some_and(|a| a.contains("sleep")) => {
                 Some(c.argv)

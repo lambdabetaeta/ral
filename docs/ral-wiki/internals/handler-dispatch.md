@@ -8,8 +8,8 @@ anchors: [HandlerStack, lookup, HandlerLookup, install_base, strip_matched, rest
 
 [[design/effects-handlers|The effects design]] states the discipline — handlers
 are deep, self-masking, and there is no `resume`. This is the runtime mechanism
-that realises it, in `HandlerStack` (`types/handler.rs`) and the dispatch in
-`runtime/command_call.rs`.
+that realises it, in `HandlerStack` (`shell/runtime/handler.rs`) and the dispatch in
+`shell/exec/dispatch.rs`.
 
 **The stack is what a head reaches when the env does not hold the name.**
 Resolution is env → handlers → external, so a lexical binding — the prelude and
@@ -73,7 +73,7 @@ diverge.
 **Deep** means the frame persists across the body's whole extent, re-reached by
 each successive operation — a consequence of the stack living on the dynamic
 [[design/scoping|frame]] `Context` and not being consumed at first use. Frames
-are pushed by `WithinScope::enter` (`evaluator/scope.rs`), whose `WithinUndo`
+are pushed by `WithinScope::enter` (`shell/evaluator/scope.rs`), whose `WithinUndo`
 the machine carries in a `Frame::Within`; at an IPC boundary a
 deserialised stack is rebuilt with fresh handles, since the wire format does not
 carry them.

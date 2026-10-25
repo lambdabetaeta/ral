@@ -1,5 +1,5 @@
 //! Card composition over core's one observation vocabulary
-//! (`ral_core::types::Observed`): a command settled, a redirect read opened,
+//! (`ral_core::shell::runtime::Observed`): a command settled, a redirect read opened,
 //! a grep ran, a capability check was denied.  A write lands as a
 //! [`Change`](super::Change) instead.  Decoding
 //! the surfaced value back into an `Observation` is core's own
@@ -9,7 +9,7 @@
 use std::borrow::Cow;
 
 use ral_core::fact::{Check, Command, Grep, Read, Worker};
-use ral_core::types::{Decision, Observed, WorkerId};
+use ral_core::shell::runtime::{Decision, Observed, WorkerId};
 use std::collections::BTreeMap;
 
 use super::{Card, Mark, Role, Span};
@@ -144,7 +144,7 @@ pub(crate) fn greps_listing(greps: &[&Grep]) -> Listing {
 /// A capability check's heading, `check <resource> <decision> <fields…>`. The
 /// decision roles `Role::Bad` when denied — the only decision the rail ever
 /// surfaces, per [`Landed::of`]: core's fan-out (`Shell::observe_stamped` in
-/// `core/src/types/audit/fan_out.rs`) broadcasts every fact and leaves the rail's
+/// `core/src/shell/runtime/audit/fan_out.rs`) broadcasts every fact and leaves the rail's
 /// policy to the host. The
 /// trailing fields are core's own `fields` map (`name`/`resolved`/`args` for
 /// `exec`, `op`/`path` for `fs`, `prefix` for `deputy`) rendered as

@@ -1,14 +1,14 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-generated_at_date: 2026-10-21
-covers_paths: [core/src/types/, core/src/types.rs]
+generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_date: 2026-10-25
+covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs]
 ---
 
-# Map: core / runtime values & shell state
+# Map: core / shell / runtime — runtime values & shell state
 
-`core/src/types/` defines what the [[map/core/evaluator|evaluator]] manipulates
-at runtime. `types.rs` is a re-export façade so the rest of the tree spells
-everything `crate::types::*`.
+`core/src/shell/runtime/` defines what the [[map/core/evaluator|evaluator]] manipulates
+at runtime. `shell/runtime.rs` re-exports its runtime types; shared host and
+fact data are reached through their owning modules.
 
 ## Values
 
@@ -51,25 +51,25 @@ everything `crate::types::*`.
   constructor, as `Value::list` is a list's. **Cloning a `Value` copies
   no payload**: a string, a byte string, a list or map spine and a closure's
   scope are all shared, and `Env` and variable lookup rely on it.
-- `flow.rs` — the whole control-flow surface, four declarations:
-  `Settled<T> = Result<T, Break>`, `Break` (`Error` catchable, `Escape`
-  propagating), `Escape` (`Exit` alone — ral does not suspend, so there is no
-  stop variant to propagate), and `PolicyError`
+- `flow.rs` — `Settled<T> = Result<T, Break>`, `Break` (`Error` catchable,
+  `Escape` propagating), and `Escape` (`Exit`, `Stopped`).
+  `From<process::Cancellation> for Break` preserves cause and owner as a
+  non-catchable `Stopped`; the process domain knows no runtime control flow
   ([[decisions/260514_completion-escape-refactor|completion-escape-refactor]],
   [[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]). No `Option`/null appears;
   optionality is open variants ([[invariants/optionality-via-variants|optionality-via-variants]]).
-- `error.rs` — `Error` and `Status` (`Raised(i32) | Cancelled(CancelCause) |
+- `error.rs` — `Error` and `Status` (`Raised(i32) | WorkerStopped(WorkerStop) |
   Process(CommandFailure)`, one constructor per fact, whoever reports
   it; `Status::code` delegates to each failure's own `code`).
   `audit.rs` — the
-  `Audit` collector, over `observation.rs`'s `Observation` / `Observed` — the
-  one vocabulary shared by the trail, the surface rail, `--audit`'s JSON, and
-  the wire. `value.rs` — `Value` and, in `value/`, its two bridges: `data.rs` (the one walk each way to `FOValue`) and `compare.rs` (`Value::equals` and `Value::compare`, one equality and one order, exact across Int and Float). `closure.rs` — `Closure`, the thunk value `⟨M, ρ|occ(M)⟩`, its
+  `Audit` collector, over `fact/observation.rs`'s `Observation` / `Observed`
+  and `fact::AuditIo` (captured byte prefixes and totals) — data independent of
+  runtime, shared by the trail, the surface rail, `--audit`'s JSON, and the wire. `value.rs` — `Value` and, in `value/`, its two bridges: `data.rs` (the one walk each way to `FOValue`) and `compare.rs` (`Value::equals` and `Value::compare`, one equality and one order, exact across Int and Float). `closure.rs` — `Closure`, the thunk value `⟨M, ρ|occ(M)⟩`, its
   fields private and `Closure::new` its one constructor, which `restrict`s
   the environment to the names its body mentions
   ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
-  `env.rs` — lexical `Env`, ρ alone, and
-  `EnvVars` process-env overrides; a scope entry is
+  `env.rs` — lexical `Env`, ρ alone; process-env overrides are
+  `host::EnvVars` (`core/src/host/env.rs`), not runtime values. A scope entry is
   `Binding { value, scheme: Option<Arc<Scheme>> }`, so the checker's verdict
   rides next to the value
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
@@ -84,19 +84,27 @@ everything `crate::types::*`.
   `alias_schemes` hand the next run's check the very `Arc`s the scope holds;
   only the wire form keeps its own type and converts at its boundary.
   `signature.rs` — `Signature`, Σ: the natives and the frozen prelude, one
-  per `Shell`, `Arc`-shared into every fork. `crate::types::lookup(name, env,
+  per `Shell`, `Arc`-shared into every fork. `crate::shell::runtime::lookup(name, env,
   sig)` is the one resolution rule, ρ then Σ's prelude then Σ's natives; nothing
   else in core spells the shadowing order out again.
 - `coerce.rs` — the `sig` / `sig_hint` runtime-error constructors and the
   `Value::as_str` / `as_list` / `as_map` / `expect_handle` family of argument
-  decoders, which share one wording (`Value::expected`), sitting below both the
-  builtin and capability layers so each reaches them through `crate::types::*`.
+  decoders, which share one wording (`Value::expected`), read by builtins and
+  `shell::grant` through `crate::shell::runtime::*`.
+- `walk.rs` — `AdmittedWalk` and `Shell::admitted_walk`: the live stack's
+  `ReadRegion` and current cancel scope handed to `path::tree::Walk`; unseen
+  entries skipped, domain cancellation converted to `Break`, and unnameable
+  entries raised with the caller's name.
 
 ## Capabilities
 
 `authority/policy.rs` holds the resolved capability model and judgments;
 `authority/grant/` constructs it through authored resolution and host system-read
-discovery, while `authority/guard/` enforces it. The model includes: `Capabilities` (one layer), `ExecGrant` over
+discovery, while `authority/guard/` enforces it without runtime types.
+`shell/grant/` decodes `Value`s and adapts spawn grants;
+`Shell::freeze_ctx` builds a `FreezeCtx::at` from env and logical cwd, then
+adds scratch.
+The model includes: `Capabilities` (authored), `GrantLayer` (resolved), `ExecGrant` over
 `Evidence`, `FsPolicy`,
 `EditorPolicy`, `ShellPolicy`, `GrantStack` (`Vec<GrantLayer>`, a *stack* of
 layers rather than a folded aggregate — attenuation is the fold over the
@@ -112,7 +120,7 @@ intersection, not as a whole-layer operation.
 
 ## Shell
 
-`shell/` partitions the interpreter state into fields by lifetime — the
+`shell/runtime/state/` partitions the interpreter state into fields by lifetime — the
 field name *is* the invariant — joined by `Shell`
 ([[decisions/260617_turn-local-state|turn-local-state]],
 [[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]]):
@@ -130,7 +138,7 @@ checkpoint, since a run never writes it.
   `Shell` carries (as the field `io`): stdin / stdout / stderr, the terminal
   snapshot, the launch role ([[map/core/io-process|io-process]]). These
   genuinely change *within* a run — a redirect frame swaps the sinks — so
-  they are taken on **loan** and repaid: `run::IoLoan` swaps a fresh `Io` in
+  they are taken on **loan** and repaid: `shell::run::IoLoan` swaps a fresh `Io` in
   at install and restores the previous one on `Drop`, carrying the two `Copy`
   registers the run's frame also owns for its life (`session.root_file` and
   `local.audit.call_site`) with it, so an unwinding evaluation cannot leave a
@@ -163,7 +171,7 @@ checkpoint, since a run never writes it.
   trail, REPL scratch, the `workers` registry, the `bindings` ledger, the
   `detach` budget, the `cradle`); the
   residue once run and session state are named. The `cradle`
-  (`types/handle/brood.rs`) says where a loose birth hangs and who settles
+  (`shell/runtime/handle/brood.rs`) says where a loose birth hangs and who settles
   it: loose under the root, answering for nothing, for a run and an aside
   (`Shell::construct`, `Shell::join_session`); inside a gather, its entry
   scope and its `Brood`, paired with a unique `ScopeOwner` holding the handles
@@ -172,7 +180,7 @@ checkpoint, since a run never writes it.
   extent of a `gather { … }`; a stage shares its parent's, so a `spawn` in a
   stage inside a gather is that gather's
   ([[invariants/a-worker-ends-with-its-children|a-worker-ends-with-its-children]]). The worker registry
-  (`shell/workers.rs`) is a per-`Shell` directory of every `spawn`/`watch`ed
+  (`shell/runtime/state/workers.rs`) is a per-`Shell` directory of every `spawn`/`watch`ed
   worker, one per agent: a `WorkerEntry` is the `HandleInner` and its
   `Owner` (the session, the worker whose body it was born in, or a
   `gather`), the id, title and clock being the handle's own; `Shell::spawn_thread` shares it by `Arc` into
@@ -205,7 +213,7 @@ checkpoint, since a run never writes it.
   `spawn_thread` child holds a `Shared` roster over its *parent's* registry,
   so its own drop must not reap the parent's.
 
-  The binding-lease ledger (`shell/bindings.rs`,
+  The binding-lease ledger (`shell/runtime/state/bindings.rs`,
   [[decisions/260629_agent-binding-reaping|agent-binding-reaping]]) sits
   beside the worker registry but needs no lock: it has exactly one writer,
   the thread that owns `&mut Shell` for every run, install, and prune
@@ -225,7 +233,7 @@ checkpoint, since a run never writes it.
   re-installation: `Shell::dispatch`'s `Source` arm ticks the committed-run
   clock, and a lease is renewed by reference at both harvest seams — the
   run's own compiled program, and a runtime-compiled `use` load
-  (`check_source` in `core/src/load.rs`) —
+  (`check_source` in `core/src/shell/load.rs`) —
   each reading `ir::referenced_names` off what it just compiled
   ([[map/core/ir|ir]]). The same chokepoint runs a second, orthogonal
   check: `BindingLease` also carries `large_binding_bytes`, and an install
@@ -240,7 +248,7 @@ checkpoint, since a run never writes it.
   ready-boundary `` `notice `` push as the reap ledger's
   (`take_large_binding_notices` is crate-private).
 
-  The `detach` budget (`shell/detached.rs`) is the one member meant to
+  The `detach` budget (`shell/runtime/state/detached.rs`) is the one member meant to
   outlive the session: `None` until `Shell::arm_detach`, which a host calls
   in the same act that installs `detach`'s base frame
   ([[map/core/builtins|builtins]]), so the verb and the budget it spends
@@ -337,12 +345,12 @@ borrowed first-order `FOValue`
 method takes a borrowed `Value`, encodes it once, in that method, and forwards onto
 the installed sink — inert when none is present (a bare REPL).
 `Mooring::surface_data` is its `FOValue`-typed sibling, for a caller that
-already holds the wire form: `Shell::observe_stamped` (`types/audit/fan_out.rs`) reaches it
+already holds the wire form: `Shell::observe_stamped` (`shell/runtime/audit/fan_out.rs`) reaches it
 with `Observation::to_surface`, tagged `` `observed `` so a host dispatches on
 the tag alone without re-encoding a `Value` it never had. Run-scoped, not
 a persistent capability — a run installs it, so a clone of it has no
 liveness role and can never decide a run is over. A session worker does not receive the live sink: its surface is a
-`DeferredSurface` (`types/handle/surface.rs`) that buffers and, through the
+`DeferredSurface` (`shell/runtime/handle/surface.rs`) that buffers and, through the
 worker's `CompletionPermit` on every exit after the handle reaches its terminal
 state (`Ready` or `Consumed`), delivers the batch once to the session's
 `DeferredSink`; a mooring without that sink gives its workers no surface
@@ -375,7 +383,7 @@ a run that holds the terminal, never mints authority, and is never lent twice.
 
 Methods on `Shell` live by concern, one submodule each:
 
-- `construct.rs` — construction (`Shell::construct`, `Shell::root`, `Shell::child_of`). The startup seeding is not here but in `boot::seed_host_env`: the env-var pass into
+- `construct.rs` — construction (`Shell::construct`, `Shell::root`, `Shell::child_of`). The startup seeding is not here but in `shell::boot::seed_host_env`: the env-var pass into
   `context.env_overrides` ([[decisions/260531_env-is-dynamic-only|env-is-dynamic-only]];
   a default fills only an absent variable, and one the host binds in bytes
   that are not UTF-8 gets no entry, so children inherit it untouched),
@@ -392,9 +400,10 @@ Methods on `Shell` live by concern, one submodule each:
 - `host.rs` — the host-embedding accessor surface;
 - `context.rs` — the `Context` dynamic-context verbs;
 - `scope.rs` — `within` / `grant` guards realising [[design/scoping|scoping]];
-- `checks.rs` — forwarders to the
-  [[map/core/capabilities|`authority::guard::check_*(&Context, …)`]] decisions,
-  splitting the disjoint context/audit borrow for the audit-bearing checks;
+- `checks.rs` — the [[map/core/capabilities|authority adapter]]: hands the live
+  `GrantStack` to `authority::guard`, converts its `Refusal` to runtime `Error`,
+  and records a `Denial` through `Shell::refused`; also owns the judged path
+  doors, sandbox projection and grant-layer scope guards;
 - `cwd.rs` (the one working-directory cell, a `CwdPath` on `Context`: `cd` sets it,
   `enter_cwd`/`restore_cwd` save and restore it whole for `within [dir:]`, and
   `seed_cwd` lets an in-process front end whose working directory is not the
@@ -416,7 +425,7 @@ datum (the host builtin table among them) can be silently severed by a call site
 copying only the fields it happened to remember. There are two regimes.
 
 A **same-thread β-step** — forcing a block or applying a lambda — does not fork:
-`force`/`beta` in `evaluator::machine` put the body in focus *in* the
+`force`/`beta` in `shell::evaluator::machine` put the body in focus *in* the
 caller's `Shell`, no snapshot or restore around the call ([[map/core/evaluator|evaluator]]).
 The `io`, `session`, and `local` state are simply the one `Shell`'s, and the
 caller's `&Mooring` is passed along, so the body observes the caller's audit
@@ -442,7 +451,7 @@ registry, root file, call site and exit hints. The kinds differ only in their
 fixings:
 
 - `spawn_thread` — a spawned worker (`spawn`, `watch`) *and* a ral-written pipeline stage
-  ([[map/core/runtime|runtime]]'s `pipeline/thread.rs`) — a pipeline never
+  ([[map/core/runtime|shell/exec]]'s `shell/exec/pipeline/thread.rs`) — a pipeline never
   rides a re-exec'd child — on a fresh OS thread that owns its own IO, seeded
   from the spawning shell's session, built on the spawning thread; the body's
   capture rides in its closure, and nothing flows back. Both rebuild their

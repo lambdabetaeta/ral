@@ -38,11 +38,11 @@ The current split crosses lifetimes:
 - **`Local` mixes turn, session, and scratch.** `io`, `surface`, and `cancel` are
   swapped for a turn; `durable_root` and `exit_hints` live for the session;
   `audit` and `repl` each have their own inherit/return rules
-  ([`core/src/types/shell/mod.rs`](../../../core/src/types/shell/mod.rs)).
+  ([`core/src/types/shell/mod.rs`](../../../core/src/shell/runtime/state/mod.rs)).
 - **`Location` mixes cursor and registry.** `script`, `line`, `col`, `source`,
   `current`, and `call_site` are the active source cursor; `db: SourceDb` is the
   durable registry used at render time
-  ([`core/src/types/audit.rs`](../../../core/src/types/audit.rs)).
+  ([`core/src/types/audit.rs`](../../../core/src/shell/runtime/audit.rs)).
 - **`FrameGuard` knows the hidden membership.** `install` swaps IO only under
   `IoFrame::Capture`, always swaps the foreground cancel, saves four location
   fields, calls `install_root_context`, and restores the saved fields in `Drop`
@@ -187,7 +187,7 @@ old `TurnState` is restored so the signal slots never point at a scope whose
 owning frame has been removed.
 
 This must be a `Drop` guard, not the existing `run_with_mobile` shape:
-[`Shell::run_with_mobile`](../../../core/src/types/shell/inherit.rs) documents
+[`Shell::run_with_mobile`](../../../core/src/shell/runtime/state/inherit.rs) documents
 that it does **not** restore on unwind. A turn guard must restore on unwind
 because exarch catches worker panics and continues the session on the same
 `Shell` ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).

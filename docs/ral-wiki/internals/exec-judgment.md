@@ -14,7 +14,7 @@ of [[internals/capability-enforcement|capability-enforcement]].
 
 ## The head is judged by its program
 
-**`Head::resolve` (`runtime/command/head.rs`) finds the `Program` once**: a
+**`Head::resolve` (`shell/exec/command/head.rs`) finds the `Program` once**: a
 bundled `Tool`, or a host `File` with its spelling and its real path.
 `GrantStack::admit(program, args, resolver)` judges it in two parts: the exec
 table, then what running reads (below).

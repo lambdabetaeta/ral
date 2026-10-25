@@ -13,10 +13,10 @@ use gray_matter::engine::YAML;
 use ral_core::Shell;
 use ral_core::authority::policy::LocateError;
 use ral_core::authority::policy::{Baseline, GrantStack};
+use ral_core::host::EnvVars;
 use ral_core::path::{
     CwdPath, Dir, Judged, Kind, LeafMode, LexicalPath, Located, Reading, Resolver,
 };
-use ral_core::types::EnvVars;
 use std::collections::HashSet;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};

@@ -43,8 +43,7 @@ fn a_record_round_trips_through_the_entry_envelope() {
 #[test]
 fn a_large_observation_replays_exactly_from_compact_bytes() {
     use ral_core::data::datum::Datum as _;
-    use ral_core::fact::{Command, CommandOrigin, Observation, Observed};
-    use ral_core::types::AuditIo;
+    use ral_core::fact::{AuditIo, Command, CommandOrigin, Observation, Observed};
 
     let dir = temp_dir("compact-observation");
     let path = dir.path().join(RECORD);

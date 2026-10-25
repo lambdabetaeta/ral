@@ -195,7 +195,7 @@ fn a_failed_control_write_marks_the_transport_dead() {
 /// does not disturb `Frame::Event`.
 #[test]
 fn session_frame_with_no_dispatch_reaches_the_installed_sink() {
-    use crate::types::DeferredSink;
+    use crate::shell::runtime::DeferredSink;
 
     struct RecordingSink {
         batches: Mutex<Vec<Vec<FOValue>>>,

@@ -9,14 +9,14 @@
 mod common;
 
 use ral_core::protocol::Run;
-use ral_core::run::RunReport;
+use ral_core::shell::run::RunReport;
+use ral_core::shell::runtime::{Break, Shell, Value};
 use ral_core::source::SourceOrigin;
-use ral_core::types::{Break, Shell, Value};
 
 /// Evaluate `input` through the public run entry on an already-configured
 /// `shell` — parse, elaborate, typecheck against the prelude schemes, run
 /// the phrases.
-fn run_on(shell: &mut Shell, input: &str) -> ral_core::types::Settled<Value> {
+fn run_on(shell: &mut Shell, input: &str) -> ral_core::shell::runtime::Settled<Value> {
     match shell.run(Run::foreground(input, SourceOrigin::named("<test>"))) {
         RunReport::Ran { ending, .. } => ending.into_result(),
         // A parse or type failure is a static diagnostic, not a run
@@ -24,7 +24,7 @@ fn run_on(shell: &mut Shell, input: &str) -> ral_core::types::Settled<Value> {
         // both mean "this program never produced a value."
         RunReport::Static { diagnostics } => {
             let msg = diagnostics.render().0;
-            Err(ral_core::types::Error::raised(msg, 2).into())
+            Err(ral_core::shell::runtime::Error::raised(msg, 2).into())
         }
         // A panic is never a legitimate "no value": it fails the test.
         RunReport::Faulted { error } => panic!("the run faulted: {}", error.message),
@@ -32,7 +32,7 @@ fn run_on(shell: &mut Shell, input: &str) -> ral_core::types::Settled<Value> {
 }
 
 /// [`run_on`] against a fresh shell seeded with `path` on `PATH`.
-fn eval_on_path(input: &str, path: &str) -> ral_core::types::Settled<Value> {
+fn eval_on_path(input: &str, path: &str) -> ral_core::shell::runtime::Settled<Value> {
     let mut shell = common::prelude_shell();
     shell.set_env_var("PATH", path);
     run_on(&mut shell, input)
@@ -40,7 +40,7 @@ fn eval_on_path(input: &str, path: &str) -> ral_core::types::Settled<Value> {
 
 /// Evaluate independently of whichever tools happen to be installed on the
 /// test host. Individual process tests supply an explicit path when needed.
-fn eval(input: &str) -> ral_core::types::Settled<Value> {
+fn eval(input: &str) -> ral_core::shell::runtime::Settled<Value> {
     #[cfg(unix)]
     let path = "/bin:/usr/bin".to_string();
     #[cfg(windows)]
@@ -108,7 +108,7 @@ fn on_exit_runs() {
     // exit always returns Err(Break::Escape(Escape::Exit(_))) — callers decide whether to treat it as clean.
     let result = eval("exit 0");
     match result {
-        Err(Break::Escape(ral_core::types::Escape::Exit(0))) => {}
+        Err(Break::Escape(ral_core::shell::runtime::Escape::Exit(0))) => {}
         other => panic!("expected exit 0, got: {other:?}"),
     }
 }

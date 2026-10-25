@@ -1,16 +1,11 @@
----
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
----
-
 # The freeze boundary
 
 **A grant is resolved the moment it is decoded: `decode_capability_map` walks
 every spelling once and returns a `GrantLayer`, whose rules hold what the walks
 reached — positions for allowances, held objects for exclusions — and nothing
 beside them.** The boundary between *syntactic profile* and *resolved
-authority* is a type split with one crossing: nothing authored reaches the dynamic
-stack or the IPC wire, because a `GrantLayer` keeps no authored copy for
-anything to disagree with.
+authority* is a type split: nothing unresolved reaches the dynamic stack, and a
+`GrantLayer` keeps no authored copy for anything to disagree with.
 
 The types (`core/src/authority/policy/lattice.rs`):
 
@@ -28,9 +23,10 @@ The types (`core/src/authority/policy/lattice.rs`):
 
 ## `decode` is the one-way crossing
 
-The sole non-trivial constructor is `decode_capability_map`
-(`core/src/authority/grant/decode.rs`), the single `Value::Map → GrantLayer`
-function. `authority::grant` owns authored resolution and construction;
+Runtime records cross through `decode_capability_map`
+(`core/src/shell/grant/decode.rs`), the single `Value::Map → GrantLayer`
+function. `shell::grant` interprets runtime values; `authority::grant` owns
+substantive freezing and authored resolution without runtime types;
 `authority::policy` holds the resolved model and its judgments. The decoder
 walks a `.ral` profile's terminal record — or the inline
 `grant [...] { body }` record — into a layer, resolving each spelling by the
@@ -38,10 +34,11 @@ walk as it freezes it. In doing so it:
 
 - **resolves** every place (`` `cwd ``, `` `home ``, `` `tempdir ``, `` `scratch ``,
   `` `gitdir ``, `` `xdg-* ``, `` `absolute ``) and every selector (`` `path ``, `` `system ``, the package managers)
-  against a `FreezeCtx` (owned `home` and `cwd`, `FreezeCtx::of(&Shell)`;
-  `` `tempdir `` against the host's temp dir; `` `scratch `` against the spelling
-  of the session's scratch the context carries, which a host that made none
-  refuses). The freeze is `authority/grant/freeze.rs`:
+  against a `FreezeCtx`, built by `FreezeCtx::at` from owned `host::EnvVars`
+  and logical cwd. `Shell::freeze_ctx` supplies these and the session's scratch
+  at the shell boundary. `` `tempdir `` reads the host's temp dir;
+  `` `scratch `` reads the scratch spelling the context carries, and refuses
+  where the host made none. The freeze is `authority/grant/freeze.rs`:
   `FreezeCtx::place` is the one place a grant's place becomes a `FrozenPath`,
   `FreezeCtx::selector` the one place a selector becomes many, and
   `FrozenPath::from_surface` the one minting entry
@@ -74,11 +71,10 @@ A bare string or a relative path is no place at all: the checker refuses it
 before the program runs, and the decoder refuses it again for a value that
 arrived untyped. Authors write `` `cwd sub `` to pin "relative to here" once.
 
-Both callers — `eval_grant` (`core/src/evaluator/scope.rs`) and the profile
-loader (`core/src/load/profile.rs`) — are in-crate, and the path-free
-`root` / `deny_all` / `default` are the only other ways to obtain a
-`GrantLayer`, and a `Capabilities` that arrives already decoded passes through
-`GrantLayer::from_capabilities`, the same walk. So *resolved by construction* is
+The inline grant, profile loader (`core/src/shell/load/profile.rs`) and
+spawn grant (`core/src/shell/grant/spawn.rs`) share this decoder. Authored
+`Capabilities` pass through `GrantLayer::from_capabilities`, the same walk;
+`root` / `deny_all` / `default` construct path-free layers. So *resolved by construction* is
 a visibility fact, not a discipline: no surface admits an unresolved layer.
 
 ## What decode pins, and what the access resolves
@@ -193,9 +189,9 @@ and the lattice operations run on the resolved layers.
   (`/work/proj/src ⊂ /work/proj` is seen as such). Strictly more precise than
   comparing place spellings; no soundness change.
 - the `FreezeCtx` is built **once** per composition site, home and cwd in hand
-  — `eval_grant` and `apply_session_profiles` against the live shell's
-  effective home; exarch's `for_invocation` against `host::home()` and the
-  session cwd.
+  — inline grants and `apply_session_profiles` use `Shell::freeze_ctx` for
+  the live environment, cwd and scratch; exarch's `for_invocation` supplies
+  its launch anchor directly.
 
 The resolved layers and the runtime fold are then two fidelities of one
 algebra — over the positions and objects resolved at decode here, over the

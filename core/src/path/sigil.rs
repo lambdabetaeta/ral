@@ -7,11 +7,11 @@
 //! XDG uses the Linux defaults on every platform, macOS included
 //! ([`crate::host`]).
 
+use crate::host::EnvVars;
 use crate::path::basedir::resolve_xdg_in;
 use crate::path::lex::join_relative;
 use crate::path::tilde::TildePath;
 use crate::path::{PathRules, XdgKind};
-use crate::types::EnvVars;
 
 /// Parse `xdg:NAME[/sub]` under `rules`, the name ending at a separator as
 /// `~` does: `/`, or `\` under Windows.  The subpath is everything after

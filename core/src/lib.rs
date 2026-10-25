@@ -4,7 +4,7 @@
 //! signals, and platform shims.
 //!
 //! A host process (the `ral` REPL, `exarch`, a test binary) embeds the
-//! language through [`boot`], which decodes the prelude the host's build
+//! language through [`shell::boot`], which decodes the prelude the host's build
 //! script baked and loads it into a fresh [`Shell`].
 #![cfg_attr(
     test,
@@ -15,22 +15,18 @@
 )]
 
 pub mod authority;
-pub mod boot;
-pub mod builtins;
 pub mod carrier;
 pub mod compile;
 pub mod data;
 pub mod diagnostic;
 pub mod elaborator;
 pub mod engine;
-pub mod evaluator;
 pub mod fact;
 pub(crate) mod frame;
 pub mod host;
 pub mod invocation;
 pub mod io;
 pub mod ir;
-pub mod load;
 pub mod own;
 pub mod path;
 /// Names exported by `prelude.ral`, harvested from its top-level `let`
@@ -41,9 +37,8 @@ pub(crate) mod prelude_manifest {
 pub mod process;
 pub mod protocol;
 mod role;
-pub mod run;
-pub(crate) mod runtime;
 pub mod seed;
+pub mod shell;
 mod site;
 pub mod source;
 pub mod sync;
@@ -59,22 +54,21 @@ pub mod test_helper;
 pub mod text;
 pub mod ty;
 pub mod typecheck;
-pub mod types;
 pub mod uutils;
 
 // The host surface. A host imports a run from here; it does not reach the
 // evaluator or syntax layers through the crate root.
-pub use authority::grant::SpawnGrant;
-pub use boot::HostSurface;
 pub use io::{Captured, RunIo, RunStdin};
 pub use process::RequestedTerminalAccess;
 pub use role::{Invocation, Role, classify};
-pub use ty::Scheme;
-pub use typecheck::{SessionSchemes, TypeError, bake_prelude, typecheck};
-pub use types::{
+pub use shell::boot::HostSurface;
+pub use shell::grant::SpawnGrant;
+pub use shell::runtime::{
     Bequest, Break, DefaultPolicy, Error, Escape, EventSink, HookName, HookSig, Map, RegisterError,
     Runtime, Settled, Shell, SurfaceSink, Value,
 };
+pub use ty::Scheme;
+pub use typecheck::{SessionSchemes, TypeError, bake_prelude, typecheck};
 
 /// Pre-`main` dispatch for the lib's own unit-test binary, so a test that
 /// re-execs `current_exe()` (here, *this* binary) does not land a role's flag

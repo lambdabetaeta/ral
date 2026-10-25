@@ -130,4 +130,4 @@ root; deliberately out of scope here.
 - [[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]
   — the same discipline for the user-facing interrupt.
 - `core/src/process/signal.rs`, `core/src/process/signal/unix.rs`,
-  `core/src/runtime/command/child.rs`, `ral/src/repl/session.rs`.
+  `core/src/shell/exec/command/child.rs`, `ral/src/repl/session.rs`.

@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-generated_at_date: 2026-10-23
-covers_paths: [core/src/types/audit/observation.rs, exarch/src/tui/group.rs, core/src/types/audit/fan_out.rs, core/src/evaluator/call.rs, core/src/runtime/command_call.rs, core/src/path/walk.rs, core/src/authority/guard/shell.rs, core/src/runtime/redirect.rs, core/src/runtime/redirect/stage.rs, core/src/runtime/command/detach.rs, core/src/runtime/pipeline/collect.rs, core/src/runtime/redirect/scope.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, core/src/path/tree/walk.rs, clippy.toml, lint/site.rs, core/tests/sites.rs]
+generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_date: 2026-10-25
+covers_paths: [core/src/fact/observation.rs, exarch/src/tui/group.rs, core/src/shell/runtime/audit/fan_out.rs, core/src/shell/evaluator/call.rs, core/src/shell/exec/dispatch.rs, core/src/path/walk.rs, core/src/shell/runtime/state/checks.rs, core/src/shell/exec/redirect.rs, core/src/shell/exec/redirect/stage.rs, core/src/shell/exec/command/detach.rs, core/src/shell/exec/pipeline/collect.rs, core/src/shell/exec/redirect/scope.rs, core/src/shell/exec/command.rs, core/src/shell/exec/command/stdio.rs, core/src/shell/runtime/state/mod.rs, core/src/shell/runtime/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, core/src/path/tree/walk.rs, clippy.toml, lint/site.rs, core/tests/sites.rs]
 ---
 
 # Map: exarch / io surface
@@ -27,7 +27,7 @@ property of the **runtime**, not of kit discipline: the hooks sit at the
 syscall sites where the operation actually happens, so a read/write/exec
 surfaces no matter
 which helper — or no helper — issued it. Core emits a structural
-**`Observation`** (`core/src/types/audit/observation.rs`) — the one vocabulary
+**`Observation`** (`core/src/fact/observation.rs`) — the one vocabulary
 shared with the [[design/audit|audit trail]], `--audit`'s JSON, and the wire;
 exarch binds it to a card from the existing [[map/exarch/cards|mark grammar]],
 exactly as it already binds a kit `` `card ``
@@ -43,10 +43,10 @@ else**, held not by a flag but by *where code lives* (below). See the decision,
 ## The syscall sites — core emits its own activity
 
 Three operation classes, each hooked at the sites that realise it. Every site
-builds one `Observation` (`types/audit/observation.rs`) and hands it to
-`Shell::observe` (`types/audit/fan_out.rs`), the single fan-out point; `Shell::observation`
+builds one `Observation` (`fact/observation.rs`) and hands it to
+`Shell::observe` (`shell/runtime/audit/fan_out.rs`), the single fan-out point; `Shell::observation`
 stamps the call site and principal every site fetches. It judges nothing: the
-observation goes to the run's `Mooring::surface` (`types/mooring.rs`) and onto
+observation goes to the run's `Mooring::surface` (`shell/runtime/mooring.rs`) and onto
 the open [[design/audit|audit trail]], each already inert when its consumer is
 absent. **Which observations matter is the host's call**, made once in
 `Landed::of` (`card/observation.rs`), the one refinement of an observation to
@@ -58,10 +58,11 @@ The one filter core keeps is its own, and it is the decision rather than a flag:
 a capability *denial* joins the trail whenever one is open, an *allowed* check
 never does, and no `grant` has a dimension to change either — language
 semantics, not presentation ([[design/audit|audit]]). And only a head admission
-(`command_call.rs`) surfaces a *structured* denial — the `fs` and full-argv
+(`shell/exec/dispatch.rs`) surfaces a *structured* denial — the `fs` and full-argv
 checks in
-`authority/guard/enforce.rs` are entered from `authority/guard/shell.rs`, whose
-callers in `builtins/` and exarch's own sites carry no `Mooring`, so their
+`authority/guard/enforce.rs` return domain `Denial`s to
+`shell/runtime/state/checks.rs`, whose adapter records them and raises their
+runtime errors. Its callers in `shell/builtins/` and exarch's own sites carry no `Mooring`, so their
 denials reach the trail alone. A refused *external* command still surfaces
 either way, as a failed command observation carrying the denial message.
 
@@ -72,11 +73,11 @@ an external's dispatch, a redirect, a birth — and never per builtin
 application, which is no observation at all.
 
 - **Redirects** open through `open_file` and `install_stdin_redirect`
-  (`runtime/redirect.rs`). A **read** (`< file`, fd 0) emits eagerly
+  (`shell/exec/redirect.rs`). A **read** (`< file`, fd 0) emits eagerly
   when the file opens — `Observed::Read { path }`, no outcome — so it precedes
   the body it feeds. A **write** (`>`/`>>`/`>~`, fd 1/2) opens as an
   `OpenedWrite` — `Atomic`, staged beside a regular file, or `Stream` — that
-  `RedirectState` (`runtime/redirect/scope.rs`) holds as a `WriteIntent` and
+  `RedirectState` (`shell/exec/redirect/scope.rs`) holds as a `WriteIntent` and
   reports when the frame settles (`settle`), with the outcome the site alone
   can know: an atomic `>` is `committed` (body ok, commit succeeded),
   `aborted` (the body did not reach the commit) or `failed` (commit failed);
@@ -106,18 +107,18 @@ application, which is no observation at all.
   The external / bundled path — one site for both, since a bundled tool is a
   `ral --ral-bundled-tool` child like any host executable
   ([[decisions/260731_bundled-tools-always-reexec|bundled-tools-always-reexec]])
-  — emits from `call_external` (`runtime/command_call.rs`), which wraps the whole
+  — emits from `call_external` (`shell/exec/dispatch.rs`), which wraps the whole
   dispatch and so covers a spawn failure too, since that never reaches
   `wait()` (the card derives ok/bad from the status directly; a spawn failure
-  carries the synthesized 127/126/… code). `detach` (`runtime/command/detach.rs`)
+  carries the synthesized 127/126/… code). `detach` (`shell/exec/command/detach.rs`)
   is the second site, and the one that surfaces at the spawn rather than the
   wait: a surrendered process is never waited for, so its observation carries
   `` origin: `detached `` and status `0` meaning *exec'd*, not *succeeded*. A
   direct external *pipeline stage* is the third: the collector never enters
   `call_external`, so its settlement mints the fact itself
-  (`runtime/pipeline/collect.rs`). All three assemble their argv through the
-  one constructor, `Command::new` — the rule that index 0
-  is the shown name lives there and nowhere else. A **builtin** application
+  (`shell/exec/pipeline/collect.rs`). All three assemble their argv through the
+  one constructor, `Command::new`, consuming `fact::AuditIo`'s captured prefixes
+  and totals — the rule that index 0 is the shown name lives there and nowhere else. A **builtin** application
   is no command observation at all: its frame (`BuiltinEntry::framed`) stamps nothing
   and tees nothing, and whatever it did to the world arrives from the operation it
   did it through — `edit-hash` as the `` `write `` its `atomic_write`
@@ -303,8 +304,8 @@ judges the *object* it lands on. The `Located` it returns performs every open,
 stat, listing, staging, rename and unlink relative to that directory's handle
 with `FollowSymlinks::No`, so what was judged is what gets opened.
 
-That is why the site set is short enough to read: `redirect.rs` drives the
-recipe but contains no open, and `builtins/fs.rs`, `builtins/modules.rs` and
+That is why the site set is short enough to read: `shell/exec/redirect.rs` drives the
+recipe but contains no open, and `shell/builtins/fs.rs`, `shell/builtins/modules.rs` and
 exarch's readers, editors and grep all reach the filesystem through a
 `Located` rather than by re-walking a string the in-process guard already judged. The one
 exception is the discard device, which has no object to locate — on Windows

@@ -8,7 +8,7 @@ use ral_core::carrier::Transport;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum as _;
 use ral_core::errln;
-use ral_core::types::{Closure, DefaultPolicy, HookName, HookSig};
+use ral_core::shell::runtime::{Closure, DefaultPolicy, HookName, HookSig};
 use ral_core::{Captured, Shell, Value};
 use std::sync::Arc;
 

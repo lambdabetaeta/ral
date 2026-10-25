@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use super::{CwdPath, LexicalPath, NotACwd, lex, sigil};
-use crate::types::EnvVars;
+use crate::host::EnvVars;
 
 /// The environment and logical cwd one resolution runs against: `~` reads
 /// `env.home()`, `xdg:` the `XDG_*_HOME` of `env`, each overlay before the

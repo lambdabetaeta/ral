@@ -12,8 +12,8 @@ use common::fresh_shell;
 
 use ral_core::Value;
 use ral_core::protocol::Run;
+use ral_core::shell::runtime::{Settled, Shell};
 use ral_core::source::SourceOrigin;
-use ral_core::types::{Settled, Shell};
 
 /// Run one top-level run of `source` through the public `run` entry
 /// and return the body's `Settled<Value>`.  Every test below picks source

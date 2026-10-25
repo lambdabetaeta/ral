@@ -340,11 +340,10 @@ pub enum Net {
 /// The per-effect policies as authored: every place a spelling, nothing yet
 /// resolved.
 ///
-/// What a grant file decodes to and what [`GrantLayer::from_capabilities`]
-/// resolves into a layer.  The one non-trivial way to make a [`GrantLayer`]
-/// from a *value* is that; the other is `authority::grant::decode_capability_map`,
-/// which walks each spelling of a record as it freezes it.  Either way the
-/// layer holds what the walks found, and this is no part of it.
+/// [`GrantLayer::from_capabilities`] resolves this authored form into a layer.
+/// Runtime records instead cross `shell::grant::decode_capability_map`, which
+/// walks each spelling as it freezes it. Either way the layer keeps the
+/// resolution, not this authored form.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Capabilities {

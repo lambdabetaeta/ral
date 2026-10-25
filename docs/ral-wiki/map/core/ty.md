@@ -1,5 +1,5 @@
 ---
-generated_at_commit: ce5a629202ebc86335ea55af1625b706d85e2774
+generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
 generated_at_date: 2026-10-25
 covers_paths: [core/src/ty.rs, core/src/ty/]
 ---
@@ -29,7 +29,7 @@ sites name it, and nothing in it reads a unifier or a runtime value.
   `(UnitId, var)`, which a session's threads share and
   a new session snapshots ([[map/core/shell-state|shell-state]]). The checker
   builds a `Site` (`typecheck/site.rs`), one fresh `UnitId` per unit, and the
-  runtime walks it against the running session's table (`types/admit.rs`).
+  runtime walks it against the running session's table (`shell/runtime/admit.rs`).
   Free type/computation nodes and row tails retain weakness; open row tails and
   free grades retain canonical ids. Projections share the graph and unit while
   selecting another root. Reinstantiation freshens each identity once, preserving

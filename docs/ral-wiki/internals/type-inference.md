@@ -198,7 +198,7 @@ what `detach` returns; the installed scheme has the head's producer kind. A refu
 the catch-all handler. The run-time install doors apply the same rule, over
 what the arm's closure captured (`Shell::closure_schemes`)
 (`HandlerEntry::vet` through `alias_arm_scheme`, and the catch-all through
-`catch_all_stands_in`) and render the same sentence (`types::refused_arm`).
+`catch_all_stands_in`) and render the same sentence (`shell::runtime::refused_arm`).
 
 **The `()` note.** `TyEnv` records, for a name `let` bound to what a call
 returned (`note_called`, `called_head`), the callee; a read of that name at type

@@ -4,8 +4,8 @@
 
 use ral_core::authority::grant::freeze::FreezeCtx;
 use ral_core::authority::policy::{Fragment, GrantLayer};
-use ral_core::load::profile::NOT_FOUND;
-use ral_core::types::{Break, Escape, Mooring, Shell};
+use ral_core::shell::load::profile::NOT_FOUND;
+use ral_core::shell::runtime::{Break, Escape, Mooring, Shell};
 use std::path::{Path, PathBuf};
 
 use ral_core::path;
@@ -24,7 +24,7 @@ pub(super) fn load_capabilities_ral(
     ctx: &FreezeCtx,
 ) -> Result<GrantLayer, String> {
     load(path, flag, || {
-        ral_core::load::profile::load_capabilities_from_path(mooring, shell, path, ctx)
+        ral_core::shell::load::profile::load_capabilities_from_path(mooring, shell, path, ctx)
     })
 }
 
@@ -38,7 +38,7 @@ pub(super) fn load_fragment_ral(
     ctx: &FreezeCtx,
 ) -> Result<Fragment, String> {
     load(path, flag, || {
-        ral_core::load::profile::load_fragment_from_path(mooring, shell, path, ctx)
+        ral_core::shell::load::profile::load_fragment_from_path(mooring, shell, path, ctx)
     })
 }
 
@@ -61,7 +61,7 @@ fn load<T>(path: &Path, flag: &str, read: impl FnOnce() -> Result<T, Break>) -> 
 /// Anchor `p`, a path the host was handed on the command line, at `cwd`
 /// unless it is already absolute: see [`path::Resolver::anchor`].
 pub(super) fn absolute_in(cwd: &path::CwdPath, p: &Path) -> PathBuf {
-    path::Resolver::at(&ral_core::types::EnvVars::new(), cwd)
+    path::Resolver::at(&ral_core::host::EnvVars::new(), cwd)
         .anchor(p)
         .into_inner()
 }

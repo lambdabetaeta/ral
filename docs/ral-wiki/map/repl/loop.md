@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-generated_at_date: 2026-10-21
+generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_date: 2026-10-25
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/host.rs, ral/src/repl/enquiry.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/config/, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/boot_builtin.rs, ral/src/surface.rs]
 ---
 
@@ -106,7 +106,7 @@ The boot builtin (`_ral-boot`, one-shot: it unregisters its own hook) does the
 rest in a run, since startup files evaluate ral: `source_startup_files`
 (`config/source.rs` — login profiles, then the rc), the CLI's
 `--recursion-limit` after the rc, `--capabilities` through
-`load::profile::apply_session_profiles` (the user's ceiling is the last word,
+`shell::load::profile::apply_session_profiles` (the user's ceiling is the last word,
 and a session frame it pushes survives the builtin's run), and
 `install_default_prompt` (register the default `Session/"prompt"` hook,
 `{ return "❯ " }`, only when no rc `prompt:` key registered one). It answers
@@ -117,7 +117,7 @@ engine's shell.
 Each startup file has one contract on its return value: a profile is sourced
 for its effects and returns `()`; the rc returns a configuration record. An
 `exit` in either ends the session with its status; any other failure is
-reported and the boot goes on. The rc goes through `load::evaluate_source`,
+reported and the boot goes on. The rc goes through `shell::load::evaluate_source`,
 compiled against the live session and the `FileId` its text is registered
 with, so an alias or function it defines keeps naming the rc for the whole
 session. It compiles under a **return contract**

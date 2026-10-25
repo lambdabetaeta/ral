@@ -1,24 +1,24 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-generated_at_date: 2026-10-21
-covers_paths: [core/src/runtime.rs, core/src/runtime/]
+generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_date: 2026-10-25
+covers_paths: [core/src/shell/exec.rs, core/src/shell/exec/]
 ---
 
-# Map: core / runtime
+# Map: core / shell / exec
 
-`core/src/runtime/` is the OS plumbing the CBPV [[map/core/evaluator|machine]]
+`core/src/shell/exec/` is the OS plumbing the CBPV [[map/core/evaluator|machine]]
 dispatches into — command execution, pipeline orchestration, and the
 per-child confinement choice. It re-enters evaluation only through the
 `pipeline::StageEval` the machine passes to `PipeNode::run` (a stage's
 `(comp, env)`, run from `pipeline/thread.rs`) — stages carry computation
-closures, so the mutual recursion is irreducible, though runtime names no
-evaluator item; the evaluator reaches it at
+closures, so the mutual recursion is irreducible, though `shell::exec` names no
+`shell::evaluator` item; the evaluator reaches it at
 `PipeNode::run` and, dispatching an `Exec` node, at
-`command_call::classify_command` → `run_base_frame` / `run_external`, and the redirect scope
+`dispatch::classify_command` → `run_base_frame` / `run_external`, and the redirect scope
 (`redirect::scope`), which the machine's `Frame::Redirect` enters
 ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
 
-- `command_call.rs` — `classify_command`, the single site that resolves a head
+- `dispatch.rs` — `classify_command`, the single site that resolves a head
   (env → handlers → external) and admits it, and the runners
   (`run_base_frame`, `run_external`) the machine's `Exec` rule then calls for
   the chosen arm; the evaluator's down-seam for a bare command. There is no builtin arm: a native table entry is
@@ -45,7 +45,7 @@ evaluator item; the evaluator reaches it at
 - `capture.rs` — `with_capture` and the audit tee, both over one `SinkScope`
   that restores the replaced sinks on `Drop`. Audit retains 1 MiB per stream
   as a prefix and a byte total, independently of ordinary capture.
-- `command_call.rs` also holds `call_external`, the call of an external: stamp the
+- `dispatch.rs` also holds `call_external`, the call of an external: stamp the
   start, tee its streams, name a failure, settle the one `Observed::Command`.
 - `command.rs` — the External arm: vet the resolved head, launch its
   admitted program, wire stdio from the sinks the call's redirects installed, spawn, and reap. `stdio.rs`
@@ -112,7 +112,7 @@ evaluator item; the evaluator reaches it at
     `SIGCONT` inline, by whoever waits on it, the same rule everywhere
     ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
   - Redirects install on the handler arm
-    ([[decisions/260526_redirect-drop-on-handler-dispatch|redirect-drop-on-handler-dispatch]]). One interpreter, `runtime::redirect::scope::RedirectState`, installs them for an external and a block alike ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
+    ([[decisions/260526_redirect-drop-on-handler-dispatch|redirect-drop-on-handler-dispatch]]). One interpreter, `shell::exec::redirect::scope::RedirectState`, installs them for an external and a block alike ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
     Child stdio routing — the `(Stdio, pump)` plan for a spawned child's
     stdout/stderr — is one shape, `Sink::child_stdout` / `child_stderr` yielding
     the shared `ChildStdioPlan` ([[map/core/io-process|io-process]]), through
@@ -122,8 +122,8 @@ evaluator item; the evaluator reaches it at
   - The read redirect (`< file`), the write redirect (`> / >> / >|`, settled
     `committed`/`aborted`/`failed` at frame teardown), and the exec (Host
     and `BundledTool` completion) each build an `Observation`
-    (`core/src/types/audit/observation.rs`) and pass it to `Shell::observe`
-    (`core/src/types/audit/fan_out.rs`), the one fan-out: it reports to the
+    (`core/src/shell/runtime/audit/observation.rs`) and pass it to `Shell::observe`
+    (`core/src/shell/runtime/audit/fan_out.rs`), the one fan-out: it reports to the
     run's `Mooring` and to the open audit trail alike, judging neither's
     interest — the host filters the rail. It judges only whether anything
     happened: a write onto the discard device is dropped there
@@ -332,7 +332,7 @@ evaluator item; the evaluator reaches it at
   `setsid`'d grandchild cannot leave its cgroup) while the grace phase
   stays pgid-addressed (`docs/SPEC.md` §12.11).
 `core/src/seed.rs` (crate root, beside the wire layer it rides, *not*
-under `runtime/`) carries only `EngineSeed` and `seal`/`unseal`, the engine seat's
+under `shell/exec/`) carries only `EngineSeed` and `seal`/`unseal`, the engine seat's
 own seed wire for a sealed child engine; a pipeline stage never
 crosses a wire at all and this module carries no pipeline-stage type
 ([[decisions/260902_stages-are-threads|stages-are-threads]],

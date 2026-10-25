@@ -187,51 +187,14 @@ fn a_deny_holding_a_hard_link_cites_the_object_under_another_name() {
     );
 }
 
-/// The discard device is exempt by name alone: a spelling that folds to it
-/// lexically but walks elsewhere is judged where it walks.  `l` is a link
-/// deep enough that `..` back to `/` lexically lands inside the tree, where
-/// `dev/null` is a link to the secret.
-#[test]
-fn a_spelling_folding_to_the_discard_device_is_judged_where_it_walks() {
-    use crate::path::{LexicalPath, Reading};
-    let tmp = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(tmp.path()).unwrap();
-    let depth = root.components().count() - 1;
-    let deep: std::path::PathBuf = std::iter::repeat_n("a", depth + 1).collect();
-    std::fs::create_dir_all(root.join("work").join(&deep)).unwrap();
-    std::os::unix::fs::symlink(root.join("work").join(&deep), root.join("work/l")).unwrap();
-    std::fs::create_dir(root.join("dev")).unwrap();
-    std::fs::write(root.join("secret"), "key").unwrap();
-    std::os::unix::fs::symlink(root.join("secret"), root.join("dev/null")).unwrap();
-    let ups: std::path::PathBuf = std::iter::repeat_n("..", depth + 2).collect();
-    let spelling = root.join("work/l").join(ups).join("dev/null");
-    let rp = LexicalPath::absolute(&spelling).unwrap();
-    assert!(rp.is_discard(), "{}", spelling.display());
-    let frozen = |p: &std::path::Path| FrozenPath::from_surface(crate::path::utf8(p).unwrap());
-    let layer = layer(Capabilities {
-        fs: Some(FsPolicy {
-            read_prefixes: vec![frozen(&root)],
-            deny_paths: vec![frozen(&root.join("secret"))],
-            ..FsPolicy::default()
-        }),
-        ..Capabilities::default()
-    });
-    let mut shell = crate::test_helper::core_shell();
-    let refused = shell.with_layer(layer, |sh| sh.locate::<Reading>(&rp).err());
-    let refused = refused.expect("the walk lands on the denied secret");
-    assert!(refused.to_string().contains("denied"), "{refused}");
-}
-
 mod words {
     use super::*;
-    use crate::authority::guard::enforce::{check_exec, check_fs_exact};
+    use crate::authority::guard::enforce::{Refusal, check_exec, check_fs_exact, deny_head};
     use crate::authority::policy::{Evidence, ExecGrant, ExecKey, Program};
-    use crate::types::Context;
+    use crate::fact::Resource;
 
-    fn ctx(layers: impl IntoIterator<Item = Capabilities>) -> Context {
-        let mut ctx = Context::under_grants(GrantStack::root());
-        layers.into_iter().for_each(|l| ctx.grants.push(layer(l)));
-        ctx
+    fn grants(layers: impl IntoIterator<Item = Capabilities>) -> GrantStack {
+        crate::test_helper::stack(layers.into_iter().map(layer))
     }
 
     fn exec(entries: &[(ExecKey, Evidence)]) -> Capabilities {
@@ -252,8 +215,8 @@ mod words {
         ExecKey::Dir(FrozenPath::from_surface(path))
     }
 
-    fn refusal(ctx: &Context, real: &str) -> crate::types::Error {
-        match check_exec(ctx, &Baseline::default(), "t", file(real), vec![]) {
+    fn refusal(grants: &GrantStack, real: &str) -> Refusal {
+        match check_exec(grants, &Baseline::default(), "t", file(real), vec![]) {
             Ok(_) => panic!("{real} should be refused"),
             Err(denial) => denial.error,
         }
@@ -267,11 +230,11 @@ mod words {
         let tree = Tree::lay(tmp.path(), &["/x/t", "/other/"]);
         let t = tree.at("/x/t");
         let only = exec(&[(dir(&tree.at("/other")), Evidence::ALLOW)]);
-        let one = refusal(&ctx([only.clone()]), &t);
+        let one = refusal(&grants([only.clone()]), &t);
         assert!(one.message.contains("lets it run"), "{}", one.message);
         assert!(!one.hint.unwrap().contains("enclosing grant"));
         let outer = exec(&[(dir(&tree.at("/x")), Evidence::ALLOW)]);
-        let two = refusal(&ctx([outer, only]), &t);
+        let two = refusal(&grants([outer, only]), &t);
         assert!(
             two.message
                 .contains("some layer's exec `allow` list does not let it run"),
@@ -289,7 +252,7 @@ mod words {
         let tree = Tree::lay(tmp.path(), &["/x/t"]);
         let x = tree.at("/x");
         let both = exec(&[(dir(&x), Evidence::ALLOW), (dir(&x), Evidence::DENY)]);
-        let e = refusal(&ctx([both]), &tree.at("/x/t"));
+        let e = refusal(&grants([both]), &tree.at("/x/t"));
         let named = format!("`dir `absolute {}", crate::path::shown(&x));
         assert!(e.message.contains(&named), "{}", e.message);
         assert!(
@@ -298,6 +261,39 @@ mod words {
             e.message
         );
         assert!(!e.hint.unwrap().contains("--extend"));
+    }
+
+    #[test]
+    fn head_and_argv_refusals_keep_the_same_diagnostic_and_check() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = Tree::lay(tmp.path(), &["/x/t"]);
+        let x = dir(&tree.at("/x"));
+        let grants = grants([exec(&[(x.clone(), Evidence::ALLOW), (x, Evidence::DENY)])]);
+        let baseline = Baseline::default();
+        let program = file(&tree.at("/x/t"));
+        let why = grants.refusal(&baseline, &program).unwrap();
+        let head = deny_head(&grants, &baseline, "t", &program, &why);
+        let Err(mut argv) = check_exec(
+            &grants,
+            &baseline,
+            "t",
+            program,
+            vec!["one".into(), "two words".into()],
+        ) else {
+            panic!("an exclusion refuses the program with argv too");
+        };
+
+        assert_eq!(head.error, argv.error);
+        assert_eq!(head.check.resource, Resource::Exec);
+        assert_eq!(head.check.fields["name"], "t");
+        assert_eq!(head.check.fields["resolved"], tree.at("/x/t"));
+        assert!(head.check.fields.contains_key("deny"));
+        assert!(!head.check.fields.contains_key("args"));
+        assert_eq!(
+            argv.check.fields.remove("args").as_deref(),
+            Some("one two words")
+        );
+        assert_eq!(head.check, argv.check);
     }
 
     /// A name deny is cited as the author wrote it.  The program is a native
@@ -313,7 +309,7 @@ mod words {
             (ExecKey::Name("sh".into()), Evidence::ALLOW),
             (ExecKey::Name("sh".into()), Evidence::DENY),
         ]);
-        let e = refusal(&ctx([deny]), crate::path::utf8(&sh).unwrap());
+        let e = refusal(&grants([deny]), crate::path::utf8(&sh).unwrap());
         assert!(
             e.message.contains("excluded by `` `name sh ``"),
             "{}",
@@ -334,13 +330,13 @@ mod words {
             fs: Some(FsPolicy::default()),
             ..Capabilities::default()
         };
-        let e = refusal(&ctx([reads, runs.clone()]), &t);
+        let e = refusal(&grants([reads, runs.clone()]), &t);
         assert!(
             e.message.contains("may run, but it is not readable"),
             "{}",
             e.message
         );
-        let unrestricted = check_exec(&ctx([runs]), &Baseline::default(), "t", file(&t), vec![]);
+        let unrestricted = check_exec(&grants([runs]), &Baseline::default(), "t", file(&t), vec![]);
         assert!(unrestricted.is_ok());
     }
 
@@ -361,8 +357,8 @@ mod words {
             }),
             ..Capabilities::default()
         };
-        let ctx = ctx([excluding]);
-        let Err(denial) = check_exec(&ctx, &baseline, "ls", Program::Tool("ls".into()), vec![])
+        let grants = grants([excluding]);
+        let Err(denial) = check_exec(&grants, &baseline, "ls", Program::Tool("ls".into()), vec![])
         else {
             panic!("an fs exclusion over ral's binary refuses a bundled tool");
         };
@@ -381,14 +377,14 @@ mod words {
     /// An fs refusal names the missing permission.
     #[test]
     fn an_fs_refusal_names_reading_or_writing() {
-        let ctx = ctx([Capabilities {
+        let grants = grants([Capabilities {
             fs: Some(FsPolicy::default()),
             ..Capabilities::default()
         }]);
         let (baseline, nowhere) = (Baseline::default(), trace("/nowhere/x"));
-        let read = check_fs_exact(&ctx, &baseline, &nowhere, &FsOp::Read);
+        let read = check_fs_exact(&grants, &baseline, &nowhere, &FsOp::Read);
         assert!(read.err().unwrap().error.message.contains("reading"));
-        let write = check_fs_exact(&ctx, &baseline, &nowhere, &FsOp::Write);
+        let write = check_fs_exact(&grants, &baseline, &nowhere, &FsOp::Write);
         assert!(write.err().unwrap().error.message.contains("writing"));
     }
 }

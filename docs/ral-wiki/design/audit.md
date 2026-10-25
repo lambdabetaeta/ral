@@ -7,7 +7,7 @@ denials, worker births — so a run can be inspected after the fact. It is one o
 the seven [[design/control-operators|control operators]] for the same reason as
 the others: the trail it threads lives in `Shell` state, not in any value the
 body could construct. Every fact is one vocabulary, `Observation`
-(`core/src/types/audit/observation.rs`) — the same one the surface rail and
+(`core/src/shell/runtime/audit/observation.rs`) — the same one the surface rail and
 `--audit`'s JSON project, and the same one a host author speaks (exarch's
 desk records its committed acts as `Observed::Act`, host-side, into a
 per-call fragment of its own rather than the engine's trail) — so a command,
@@ -183,18 +183,18 @@ is stated once and no seam can forget it.
 See also [[design/syscalls-are-effects|syscalls-are-effects]] — an audit trail
 is a trace of the operations performed and the scopes that framed them.
 
-One module owns it all: `core/src/types/audit.rs` is the trail (`Audit`, with
-`TrailScope` carrying the capture policy it displaced), `types/audit/fan_out.rs` the
+One module owns it all: `core/src/shell/runtime/audit.rs` is the trail (`Audit`, with
+`TrailScope` carrying the capture policy it displaced), `shell/runtime/audit/fan_out.rs` the
 fan-out (`impl Shell { observe, observe_stamped, listening, audit_start,
 record_check }`, and `Shell::observation`, which stamps the call site and
-principal), `types/audit/observation.rs` its constructors; the records themselves are
+principal), `shell/runtime/audit/observation.rs` its constructors; the records themselves are
 `fact::observation`, each a `record!`/`variant!`/`label!` so one declaration
 yields the encoding, its decoder and its ral type. A `Check` is
 `{ resource, fields }` and takes its decision from the resource, so a denied
-deputy is not representable. `evaluator/call.rs` keeps only the call frame
+deputy is not representable. `shell/evaluator/call.rs` keeps only the call frame
 ([[map/core/evaluator|evaluator]]);
 the dispatch delimiter is the run's own scope, held in `Shell::run_under` in
-`core/src/run.rs`, outside the `catch_unwind` a panicking run rolls back
+`core/src/shell/run.rs`, outside the `catch_unwind` a panicking run rolls back
 through — a panic still drains and closes the scope, but reports `Static`
 rather than carrying a trail; `docs/SPEC.md` §13.3 gives the formal
 account.

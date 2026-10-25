@@ -1,7 +1,8 @@
 ---
 status: active
 generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-verified_at_commit: 002c654a
+verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+verified_at_date: 2026-10-25
 anchors: [Evidence, Meet, Join, Axis, Fragment, ExecGrant, Table, Withheld, ExecDenial, Refused, join_top, extend, places, GrantStack]
 ---
 
@@ -520,10 +521,11 @@ not cover Homebrew is corrected; profile comments that sent readers to
 
 ## Where
 
-`core/src/authority/policy/{evidence,table,exec,fs,lattice,deputy}.rs`,
-`core/src/authority/guard/enforce.rs`, `core/src/authority/grant/{freeze,decode}.rs`,
+`core/src/authority/policy/{table,exec,fs,lattice,deputy}.rs`,
+`core/src/authority/guard/enforce.rs`, `core/src/shell/runtime/state/checks.rs`,
+`core/src/authority/grant/freeze.rs`, `core/src/shell/grant/decode.rs`,
 `core/src/authority/sandbox/projection.rs`
-and the three backends, `core/src/load/profile.rs` (`Fragment`),
+and the three backends, `core/src/shell/load/profile.rs` (`Fragment`),
 `exarch/src/policy.rs` (`for_invocation`, the self layer).
 
 **Amended 2026-10-22 by [[decisions/261021_one-path|one-path]].** The denotation

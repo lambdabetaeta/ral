@@ -85,10 +85,10 @@ sentences in SPEC §13 and on `Context`.
 
 ## Where
 
-`core/src/builtins/ambient.rs`, `core/src/builtins.rs`,
+`core/src/shell/builtins/ambient.rs`, `core/src/shell/builtins.rs`,
 `core/src/typecheck/builtins.rs` (`pure_int`, `pure_strs`,
 `pure_string_map`), `core/src/ir.rs` (`CompKind::Tilde`),
-`core/src/elaborator.rs` (`variable_val`), `core/src/evaluator/machine.rs`,
+`core/src/elaborator.rs` (`variable_val`), `core/src/shell/evaluator/machine.rs`,
 `core/src/typecheck/infer.rs`, `docs/SPEC.md` §10.1–10.2.
 
 Amends [[decisions/260531_env-is-dynamic-only|env-is-dynamic-only]] (the

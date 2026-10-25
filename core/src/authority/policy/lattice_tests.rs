@@ -5,11 +5,11 @@
 
 use super::exec::{ExecRules, Subject};
 use super::*;
-use crate::authority::grant::decode_capability_map;
 use crate::authority::grant::freeze::{FreezeCtx, PolicyError};
 use crate::path::{self, Excluded, FrozenPath, Trace};
+use crate::shell::grant::decode_capability_map;
+use crate::shell::runtime::Value;
 use crate::test_helper::{self, Tree, layer, trace};
-use crate::types::Value;
 use std::collections::BTreeSet;
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
@@ -726,14 +726,14 @@ fn decode_accepts_verb_lists_and_offline() {
 
 fn test_ctx(home: &str) -> FreezeCtx {
     FreezeCtx::at(
-        std::iter::once(("HOME", home)).collect::<crate::types::EnvVars>(),
+        std::iter::once(("HOME", home)).collect::<crate::host::EnvVars>(),
         test_cwd_path(),
     )
 }
 
 /// No `HOME` in the overlay; tests using it clear the host's.
 fn no_home_ctx() -> FreezeCtx {
-    FreezeCtx::at(crate::types::EnvVars::new(), test_cwd_path())
+    FreezeCtx::at(crate::host::EnvVars::new(), test_cwd_path())
 }
 
 /// The root of the tree [`at`] names places in.

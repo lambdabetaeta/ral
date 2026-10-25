@@ -641,7 +641,7 @@ mod tests {
     use exarch::record::AgentState;
     use ral_core::data::datum::Datum as _;
     use ral_core::fact::Worker;
-    use ral_core::types::{Observation, Observed};
+    use ral_core::shell::runtime::{Observation, Observed};
 
     /// The wire form a `Display::Observation` carries.
     fn observation_wire(what: Observed) -> ral_core::data::FOValue {
@@ -721,7 +721,7 @@ mod tests {
         let context = Record::Display(Display::Context { rows: Vec::new() });
         let observation = Record::Display(Display::Observation {
             value: observation_wire(Observed::Worker(Worker {
-                id: ral_core::types::WorkerId(1),
+                id: ral_core::shell::runtime::WorkerId(1),
                 title: "watch build".to_string(),
             })),
         });

@@ -1372,9 +1372,9 @@ fn index_and_grep_answer_their_own_shapes() {
 #[test]
 fn a_run_with_no_fork_door_refuses_in_its_own_words() {
     use ral_core::protocol::Run;
-    use ral_core::run::{RunReport, RunRequest};
+    use ral_core::shell::run::{RunReport, RunRequest};
+    use ral_core::shell::runtime::Break;
     use ral_core::source::SourceOrigin;
-    use ral_core::types::Break;
 
     let mut shell = crate::boot::test_shell();
     let report = shell.run(RunRequest::from(Run::captured(

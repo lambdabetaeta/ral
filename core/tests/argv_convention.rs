@@ -28,9 +28,9 @@ use common::fresh_shell;
 
 use ral_core::Settled;
 use ral_core::protocol::Run;
-use ral_core::run::{RunReport, StaticDiagnostics};
+use ral_core::shell::run::{RunReport, StaticDiagnostics};
+use ral_core::shell::runtime::{Break, Value};
 use ral_core::source::SourceOrigin;
-use ral_core::types::{Break, Value};
 
 /// A session as every front end builds one: prelude registered, env seeded,
 /// capabilities at root.

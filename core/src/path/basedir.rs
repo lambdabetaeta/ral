@@ -4,7 +4,7 @@
 //! through [`resolve_xdg_in`], which is pure: it reads variables through a closure.
 //! [`crate::host::xdg`] closes it over the process environment (the host's own
 //! bases), and the `xdg:` sigil in [`crate::path::sigil`] and the freeze close it
-//! over an [`EnvVars`](crate::types::EnvVars).
+//! over an [`EnvVars`](crate::host::EnvVars).
 //!
 //! XDG everywhere: the Linux defaults (`.config`, `.local/share`, …) apply on
 //! every platform, macOS included.  An `XDG_*_HOME` override counts only when

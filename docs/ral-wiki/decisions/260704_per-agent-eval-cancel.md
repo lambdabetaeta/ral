@@ -71,7 +71,7 @@ detached worker; its turn-level cancel rides the published foreground slot.
 
 ## Where
 
-- **`core/src/types/shell/mod.rs` / `init.rs` / `inherit.rs`** —
+- **`core/src/shell/runtime/state/mod.rs` / `inherit.rs`** —
   `publishes_signal_slots` on `SessionState` no longer exists either; the
   one-publishing-session rule dissolved into how a session's scopes are minted
   (`Shell::face_signals`,
@@ -80,7 +80,7 @@ detached worker; its turn-level cancel rides the published foreground slot.
   bullet described (`TurnGuard`) no longer exists; it dissolved into the
   watermark this file now carries
   ([[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]).
-- **`core/src/types/shell/host.rs`** — `Shell::cancel_handle`, the host verb
+- **`core/src/shell/runtime/state/host.rs`** — `Shell::cancel_handle`, the host verb
   for a non-signal-facing session's stop lever.
 - **`exarch/src/fleet/registry.rs`** — `eval_root` on `EvalReach::Identity`;
   `terminate_entry` (the cascade) and `AgentRegistry::interrupt` (single

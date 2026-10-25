@@ -20,7 +20,7 @@ use crate::record::{self, Blocks, Delta, Record, Recorded, Settlement, Transient
 use crate::shell_eval::user_json;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum as _;
-use ral_core::types::{Observation, Observed};
+use ral_core::shell::runtime::{Observation, Observed};
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::time::Instant;

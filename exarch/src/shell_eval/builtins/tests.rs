@@ -266,7 +266,7 @@ fn help_lists_a_library_section_only_on_a_shell_that_sourced_it() {
     use ral_core::protocol::Run;
     use ral_core::source::SourceOrigin;
 
-    use ral_core::run::{RunReport, RunRequest};
+    use ral_core::shell::run::{RunReport, RunRequest};
 
     let run_help = |shell: &mut Shell| -> String {
         let req = RunRequest::from(Run::captured("help", SourceOrigin::named("<test>")));

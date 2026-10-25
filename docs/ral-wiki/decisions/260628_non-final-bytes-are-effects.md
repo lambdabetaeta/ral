@@ -86,7 +86,7 @@ clean value. The two facts are kept in separate maps on `InferCtx`: the existing
 - **`to-line` returns `Unit`.** It writes its argument plus a newline to stdout
   and yields `Unit` — the canonical byte-output-with-`Unit`-value shape, so a
   value boundary captures the line as a `String`
-  ([`builtin_to_line`, `core/src/builtins/codecs.rs`](../../../core/src/builtins/codecs.rs);
+  ([`builtin_to_line`, `core/src/builtins/codecs.rs`](../../../core/src/shell/builtins/codecs.rs);
   `sig::TO_LINE`, `core/src/typecheck/builtins.rs`). The other `to-*` codecs still
   return the `Bytes` they wrote; `to-line` is the line-writer `echo` desugars to.
 - **`echo` is sugar over `to-line`.** `expand_echo` lowers to a bare `to-line

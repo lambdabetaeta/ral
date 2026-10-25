@@ -1,7 +1,7 @@
 //! What a write or an edit did to one file: the one fact every file mutation
 //! lands as, whichever door it came through.
 
-use ral_core::types::{Observed, WriteOutcome};
+use ral_core::shell::runtime::{Observed, WriteOutcome};
 use serde::{Deserialize, Serialize};
 
 use super::diff::Diff;

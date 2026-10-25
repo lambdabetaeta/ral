@@ -9,8 +9,8 @@
 
 use ral_core::own::UserFile;
 use ral_core::path::shown;
+use ral_core::shell::runtime::{Break, Escape, Map, Mooring, Settled};
 use ral_core::source::{SourceFile, SourceOrigin};
-use ral_core::types::{Break, Escape, Map, Mooring, Settled};
 use ral_core::{Shell, Value, io::terminal};
 use std::path::Path;
 
@@ -135,7 +135,7 @@ fn evaluate(
     let file = SourceFile::new(path).map_err(|e| Stop::Failed(e.to_string()))?;
     let src = ral_core::source::normalize_source_text(text);
     let origin = SourceOrigin::File(file);
-    match ral_core::load::evaluate_source(mooring, shell, &src, &origin, contract) {
+    match ral_core::shell::load::evaluate_source(mooring, shell, &src, &origin, contract) {
         Ok(v) => Ok(v),
         Err(Break::Error(e)) => {
             let ran = "sourcing stopped at the error above";
@@ -164,7 +164,7 @@ mod tests {
     }
 
     fn booted_shell() -> Shell {
-        ral_core::boot::boot_shell(
+        ral_core::shell::boot::boot_shell(
             ral_core::io::terminal::TerminalState::default(),
             &crate::PRELUDE,
             &ral_core::HostSurface::default(),

@@ -6,12 +6,12 @@ use crate::app::{EXARCH, seed_var};
 use crate::shell_eval;
 use crate::shell_eval::builtins;
 use ral_core::authority::policy::{Capabilities, GrantLayer};
-use ral_core::boot::boot_runtime;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum as _;
+use ral_core::host::EnvVars;
 use ral_core::io::terminal::TerminalState;
 use ral_core::protocol::{EngineSpec, Root};
-use ral_core::types::EnvVars;
+use ral_core::shell::boot::boot_runtime;
 use ral_core::{Runtime, Shell};
 
 /// The process-level signal ceremony, once at each entry point that hosts an
@@ -35,7 +35,7 @@ pub fn engine_runtime(spec: &EngineSpec) -> Result<Runtime, String> {
         &builtins::host_surface(),
     )?;
     #[cfg(unix)]
-    runtime.install_builtins(ral_core::builtins::DETACH_BUILTIN);
+    runtime.install_builtins(ral_core::shell::builtins::DETACH_BUILTIN);
     runtime.install_library_docs(crate::library::agent_library_docs());
     Ok(runtime)
 }
@@ -77,12 +77,12 @@ pub fn engine_root(root: &Root, shell: &mut Shell) -> Result<(), String> {
         })?;
         shell.push_session_capabilities(layer);
     }
-    crate::library::install_agent_library(&ral_core::types::Mooring::adrift(), shell)
+    crate::library::install_agent_library(&ral_core::shell::runtime::Mooring::adrift(), shell)
         .unwrap_or_else(|e| panic!("exarch: embedded agent library failed to load: {e:?}"));
     seed_no_color(shell);
-    shell.set_exit_hints(ral_core::types::ExitHints::from_text(include_str!(
-        "../../data/exit-hints.txt"
-    )));
+    shell.set_exit_hints(ral_core::shell::runtime::ExitHints::from_text(
+        include_str!("../../data/exit-hints.txt"),
+    ));
     #[cfg(unix)]
     shell.arm_detach(shell_eval::DETACH_BIRTH_BUDGET);
     for (name, value) in &root.env {
@@ -140,7 +140,7 @@ mod testkit {
                 .into(),
             ral_core::test_helper::process_cwd(),
         );
-        ral_core::boot::seed_host_env(&mut shell);
+        ral_core::shell::boot::seed_host_env(&mut shell);
         engine_root(&root, &mut shell).expect("test_attach names the scratch");
         shell
     }
@@ -203,10 +203,14 @@ mod tests {
         assert_eq!(shell.scratch(), Some(named));
 
         shell.set_env_var(EXARCH.scratch_var(), "/elsewhere");
-        let frozen = FreezeCtx::of(&shell)
-            .place(&Place::Scratch("cache".into()))
-            .expect("the place freezes")
-            .expect("the place is live");
+        let frozen = FreezeCtx::at(
+            shell.env_overrides().clone(),
+            ral_core::path::CwdPath::new(shell.cwd()).expect("the shell's cwd is absolute"),
+        )
+        .with_scratch(shell.scratch())
+        .place(&Place::Scratch("cache".into()))
+        .expect("the place freezes")
+        .expect("the place is live");
         assert!(frozen.as_str().contains("a-session-scratch"), "{frozen:?}");
         assert!(!frozen.as_str().contains("elsewhere"), "{frozen:?}");
     }

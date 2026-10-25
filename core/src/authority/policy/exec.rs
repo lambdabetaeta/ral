@@ -475,10 +475,10 @@ pub(super) mod tests {
     use super::*;
     use crate::authority::grant::name_rules;
     use crate::authority::policy::{Evidence, ExecGrant, ExecKey};
+    use crate::host::EnvVars;
     use crate::path::Trace;
     use crate::path::utf8;
     use crate::test_helper::{Tree, real as walked, trace};
-    use crate::types::EnvVars;
     use std::path::Path;
     use std::sync::LazyLock;
 

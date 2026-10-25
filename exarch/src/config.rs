@@ -7,7 +7,7 @@
 //! which comes from the environment or the vault
 //! ([`crate::provider::credential`]). The file is source, not data: it runs
 //! through the same
-//! [`ral_core::load::evaluate_source`] core as any other `.ral` load,
+//! [`ral_core::shell::load::evaluate_source`] core as any other `.ral` load,
 //! and its terminal map decodes into [`Service`]s.
 //!
 //! A redirected `endpoint` aims the agent's own traffic at an arbitrary server, so
@@ -20,10 +20,11 @@ use crate::provider::identity::{adapter_for_protocol, key_var, protocol_for_adap
 use crate::provider::{Auth, Service, ServiceName, built_in};
 use ral_core::Shell;
 use ral_core::authority::policy::{Capabilities, GrantLayer};
+use ral_core::host::EnvVars;
 use ral_core::own::{OwnError, UserFile};
 use ral_core::path::XdgKind;
+use ral_core::shell::runtime::{Break, Escape, Mooring, Value};
 use ral_core::source::{SourceFile, SourceOrigin};
-use ral_core::types::{Break, EnvVars, Escape, Mooring, Value};
 
 const CONFIG_FILE: &str = "config.ral";
 
@@ -184,7 +185,7 @@ pub(crate) fn evaluate_no_authority(
         .map_err(|e| format!("{label} {origin}: {}", e.message))?;
     shell
         .with_layer(deny_all, |sh| {
-            ral_core::load::evaluate_source(&mooring, sh, source, origin, None)
+            ral_core::shell::load::evaluate_source(&mooring, sh, source, origin, None)
         })
         .map_err(|e| match e {
             Break::Error(err) => format!("{label} {origin}: {}", err.message),

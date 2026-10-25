@@ -35,8 +35,8 @@ use ral_core::carrier::{Transport, WireTransport, dispatch_to_report};
 use ral_core::path::{EnginePath, GuestPath, shown};
 use ral_core::protocol::channel::Liveness;
 use ral_core::protocol::{Attach, EngineSpec, Program, Report, Root, Run};
+use ral_core::shell::runtime::TitlePolicy;
 use ral_core::source::SourceOrigin;
-use ral_core::types::TitlePolicy;
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 use vm_manager::{BootArtifact, Hypervisor, Machine, MachineSpec};
 

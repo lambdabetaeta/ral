@@ -7,10 +7,10 @@ use ral_core::data::datum::Datum as _;
 use ral_core::elaborator::elaborate;
 use ral_core::own;
 use ral_core::protocol::{Ending, Program, Report, Run};
-use ral_core::run::StaticDiagnostics;
+use ral_core::shell::run::StaticDiagnostics;
+use ral_core::shell::runtime::{CapturePolicy, DeferredSink, Observation};
 use ral_core::source::{FileId, Source, SourceFile, SourceOrigin};
 use ral_core::syntax::parser::parse;
-use ral_core::types::{CapturePolicy, DeferredSink, Observation};
 use ral_core::{RequestedTerminalAccess, SessionSchemes, io::terminal};
 use ral_core::{err, errln, outln};
 use std::path::Path;
@@ -78,7 +78,7 @@ pub(crate) fn run_stdin(run: RunOpts) -> ExitCode {
 /// but the report reads `` `ok () ``; a stop reads `` `stopped cause ``.
 fn emit_audit_report(ending: &Ending, trail: &[ral_core::data::FOValue], pretty: bool) {
     use ral_core::data::datum::Datum as _;
-    use ral_core::types::{ErrorRecord, Status, Value, outcome_value, report_envelope};
+    use ral_core::shell::runtime::{ErrorRecord, Status, Value, outcome_value, report_envelope};
     let outcome = match ending {
         Ending::Settled { value, .. } => outcome_value(Ok(Value::from(value.clone()))),
         Ending::Raised { record, .. } | Ending::Unreturnable { record, .. } => {

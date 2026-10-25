@@ -45,7 +45,7 @@ pub use projection::{FsProjection, FsRules, SandboxProjection};
 pub(crate) use projection::{RenderedFs, RenderedProjection};
 pub use reexec::pinned_arg0;
 
-// `runtime::command::process::build_launch` routes an external/bundled child
+// `shell::exec::command::process::build_launch` routes an external/bundled child
 // through `sandboxed_command` when a projection is active and no guest jail
 // already confines it; `serve_warrant` is the trampoline's side, entering the
 // confinement before it becomes the program.
@@ -56,7 +56,7 @@ pub(crate) use launch::{Ownership, sandboxed_command};
 #[cfg(target_os = "macos")]
 pub use macos::ALREADY_PROFILED;
 
-// Read by `runtime::command::with_denials` on a failure that ran under an
+// Read by `shell::exec::command::with_denials` on a failure that ran under an
 // active OS sandbox, for a hint naming the denied path.
 pub(crate) use diag::denial_hint;
 

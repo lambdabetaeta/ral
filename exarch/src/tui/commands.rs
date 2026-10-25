@@ -287,7 +287,7 @@ pub(super) fn unrecognized_command(trimmed: &str) -> Option<&str> {
 /// Resolve a typed `/export` path: expand a `~`/`xdg:` head, then anchor a
 /// still-relative path at the launch `cwd` rather than the process's own.
 pub(super) fn resolve_export_path(arg: &str, cwd: &ral_core::path::CwdPath) -> PathBuf {
-    ral_core::path::Resolver::at(&ral_core::types::EnvVars::new(), cwd)
+    ral_core::path::Resolver::at(&ral_core::host::EnvVars::new(), cwd)
         .resolve(arg)
         .into_inner()
 }

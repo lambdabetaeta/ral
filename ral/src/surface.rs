@@ -3,7 +3,7 @@
 
 use ral_core::data::FOValue;
 use ral_core::data::datum::untag;
-use ral_core::types::{Observation, WatchEvent};
+use ral_core::shell::runtime::{Observation, WatchEvent};
 
 /// `'watch {label, line}`'s printed line, if `v` is one.
 pub(crate) fn watch_line(v: &FOValue) -> Option<String> {

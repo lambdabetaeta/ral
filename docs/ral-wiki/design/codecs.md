@@ -77,7 +77,7 @@ written by number), `to-string`, `to-lines` (each element followed by `\n`),
 `to-json`, `to-jsonl` (each element as `to-json` writes it, then `\n`),
 `to-csv`, and `to-line` (the line writer that `echo` uses) all
 write the encoded bytes (`write_encoded` in
-`core/src/builtins/codecs.rs`). Each encoder names one operand type, so
+`core/src/shell/builtins/codecs.rs`). Each encoder names one operand type, so
 `to-bytes 3` and `to-bytes hello` are ordinary unification failures rather than
 a union the checker has to resolve; the operand-prefixed name is what
 distinguishes the second writer, as in `bytes-to-string`. In a pipeline, the write feeds the wire:
@@ -135,7 +135,7 @@ caller share it:
 
 - *line readers* — `from-lines`, `from-jsonl`, `fold-lines` and the prelude
   filters over it, `line-count`, and `lines` — all split through one reader
-  generic over its byte source (`core/src/builtins/util.rs`): stdin for the
+  generic over its byte source (`core/src/shell/builtins/util.rs`): stdin for the
   decoders, the string's bytes for `lines`, which so agrees by construction
   rather than by test;
 - *one-terminator strippers* — capture, `from-line`, `ask` — remove at most one

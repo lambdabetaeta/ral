@@ -608,7 +608,8 @@ mod tests {
             bracketed_paste: true,
             mode: InteractiveMode::Full,
         };
-        let crate::types::Value::Map(m) = crate::types::Value::from(&state) else {
+        let crate::shell::runtime::Value::Map(m) = crate::shell::runtime::Value::from(&state)
+        else {
             panic!("expected map");
         };
         let get = |k: &str| {
@@ -617,7 +618,11 @@ mod tests {
                 .map(|(_, v)| v.into_owned())
         };
         let expect_bool = |k: &str, b: bool| {
-            assert_eq!(get(k), Some(crate::types::Value::Bool(b)), "key {k}");
+            assert_eq!(
+                get(k),
+                Some(crate::shell::runtime::Value::Bool(b)),
+                "key {k}"
+            );
         };
         expect_bool("stdin-tty", true);
         expect_bool("stdout-tty", false);
@@ -636,6 +641,9 @@ mod tests {
         expect_bool("ui-hyperlinks-ok", state.ui_hyperlinks_ok());
         expect_bool("ui-clipboard-write-ok", state.ui_clipboard_write_ok());
         expect_bool("ui-bracketed-paste-ok", state.ui_bracketed_paste_ok());
-        assert_eq!(get("mode"), Some(crate::types::Value::string("full")));
+        assert_eq!(
+            get("mode"),
+            Some(crate::shell::runtime::Value::string("full"))
+        );
     }
 }

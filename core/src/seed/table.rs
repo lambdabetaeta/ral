@@ -10,7 +10,7 @@
 
 use crate::data::FOValue;
 use crate::ir::{Comp, Name};
-use crate::types::{Binding, BuiltinTable, Closure, Env, Error, Leaf, Runtime, Value};
+use crate::shell::runtime::{Binding, BuiltinTable, Closure, Env, Error, Leaf, Runtime, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -539,7 +539,7 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(256 * 1024)
             .spawn(|| {
-                let chain = crate::types::deep_block_chain(50_000, Value::Unit);
+                let chain = crate::shell::runtime::deep_block_chain(50_000, Value::Unit);
                 let mut ctx = InternCtx::new();
                 SerialValue::from_runtime(&chain, &mut ctx).expect("encode");
                 let table = ctx.finish().expect("finish");
@@ -554,7 +554,7 @@ mod tests {
     /// dependencies and `into_runtime` rebuilds every link.
     #[test]
     fn deep_stream_chain_round_trips() {
-        let chain = crate::types::deep_block_chain(500, Value::Unit);
+        let chain = crate::shell::runtime::deep_block_chain(500, Value::Unit);
         let mut ctx = InternCtx::new();
         let ipc = SerialValue::from_runtime(&chain, &mut ctx).expect("encode");
         let table = ctx.finish().expect("finish");
@@ -590,10 +590,10 @@ mod tests {
     /// a row on the wire.
     #[test]
     fn pipeline_stage_request_carries_no_prelude_binding() {
-        let mut shell = crate::boot::boot_shell(
+        let mut shell = crate::shell::boot::boot_shell(
             crate::io::terminal::TerminalState::default(),
-            crate::boot::BakedPrelude::runtime(),
-            &crate::boot::HostSurface::default(),
+            crate::shell::boot::BakedPrelude::runtime(),
+            &crate::shell::boot::HostSurface::default(),
             crate::test_helper::process_cwd(),
         )
         .expect("a test host resolves its baseline");

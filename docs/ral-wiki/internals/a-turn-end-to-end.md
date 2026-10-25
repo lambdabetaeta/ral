@@ -10,7 +10,7 @@ anchors: [run, run_under, Program, register_hook, RunRequest, RunReport, Ending,
 host starts it through a synchronous, runtime-agnostic run door** —
 `Shell::run(RunRequest) -> RunReport` (or `Shell::run_under` when the host
 already holds a foreground scope) in
-[`core/src/run.rs`](../../../core/src/run.rs). The request's `Run`
+[`core/src/shell/run.rs`](../../../core/src/shell/run.rs). The request's `Run`
 carries a `Program` sum naming what runs: source text, or a *registered hook*
 applied to first-order arguments — a block, lambda, or builtin registered by
 name in the session-lived hook table (`Shell::register_hook`), so the host
@@ -117,7 +117,7 @@ module's framed scaffold:
   capability ceiling, pushed layer by layer and removed by position after, so
   a session frame the program pushes survives the run — `run_phrases(&top.phrases, shell.env.clone(),
   Mode::Session, mooring, shell)` for the source arm, the in-frame
-  `evaluator::apply` of the resolved hook for the hook arm
+  `shell::evaluator::apply` of the resolved hook for the hook arm
   ([[internals/evaluator-machine|the machine]];
   [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).
 - `run_phrases` writes each `let` straight into `shell.env` as its `Define`
@@ -134,7 +134,7 @@ module's framed scaffold:
   status and emits ready-boundary notices while the
   run frame and sinks are still installed. Only then does the IO guard drop.
 - Back in `run_built`, `classify_ending` folds the settled `Result`, the
-  transport status, `single_command` and `root` into one `run::Ending` —
+  transport status, `single_command` and `root` into one `shell::run::Ending` —
   `Settled`, `Raised`, `Stopped`, or `Exited` — a wall being simply a
   `TimedOut` stop, so no separate "timed out" flag exists to disagree with
   the result. `RunReport::Ran { ending, captured, trail }` carries it home; `trail`

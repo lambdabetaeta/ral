@@ -8,7 +8,7 @@
 use super::router::{CTRL_X, KeyChord, builtin_action, parse_key_notation, reserved_action};
 use super::{HookHealth, load_err};
 use ral_core::data::FOValue;
-use ral_core::types::{Error, settings_map};
+use ral_core::shell::runtime::{Error, settings_map};
 use ral_core::{Map, Value, label, record};
 use std::collections::HashMap;
 use strum::{IntoStaticStr, VariantArray};
@@ -326,7 +326,7 @@ fn parse_aliases(entries: &Map) -> Result<Vec<(String, Value)>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ral_core::types::Closure;
+    use ral_core::shell::runtime::Closure;
 
     /// A `capabilities:` key is rejected with an error that names the key and
     /// points at `grant` (the authority rationale lives on the struct doc).

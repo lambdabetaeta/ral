@@ -58,17 +58,17 @@ use ral_core::RunIo;
 use ral_core::authority::policy::{Capabilities, FsPolicy};
 use ral_core::path::FrozenPath;
 use ral_core::protocol::Run;
+use ral_core::shell::runtime::{Break, Settled, Shell, Value};
 use ral_core::source::SourceOrigin;
 use ral_core::test_helper::{layer, stack};
-use ral_core::types::{Break, Settled, Shell, Value};
 
 /// A `Shell` matching what every front end ends up with after bootstrap:
 /// prelude registered, default env, root capabilities.
 fn boot() -> Shell {
-    ral_core::boot::boot_shell(
+    ral_core::shell::boot::boot_shell(
         ral_core::io::terminal::TerminalState::default(),
         common::prelude(),
-        &ral_core::boot::HostSurface::default(),
+        &ral_core::shell::boot::HostSurface::default(),
         ral_core::test_helper::process_cwd(),
     )
     .expect("a test host resolves its baseline")
@@ -126,7 +126,7 @@ fn top_level_under(shell: &mut Shell, caps: Capabilities, src: &str) -> Settled<
 
 /// Assert that a confined child failed closed (the eval surfaced an
 /// error) rather than slipping through with `Ok`.
-fn assert_denied(result: &ral_core::types::Settled<Value>, what: &str) {
+fn assert_denied(result: &ral_core::shell::runtime::Settled<Value>, what: &str) {
     match result {
         Err(Break::Error(_)) => {}
         Err(other) => panic!("expected {what} to fail closed, got {other:?}"),

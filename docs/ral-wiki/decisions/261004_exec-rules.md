@@ -1,8 +1,9 @@
 ---
 status: active
 generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-verified_at_commit: 446e3123
-anchors: [ExecGrant, ExecKey, ExecRules, ExecAllow, ExecDeny, Table, Verdict, Rank, Program, Subject, Head, Missing, Admitted, admit, admits, check_exec, RealPath, holds, command_name_key, evicts]
+verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+verified_at_date: 2026-10-25
+anchors: [ExecGrant, ExecKey, ExecRules, ExecAllow, ExecDeny, Table, Withheld, Program, Subject, Head, Missing, Admitted, admit, admits, check_exec, decode_capability_map, RealPath, Excluded, command_name_key]
 ---
 
 > **Mechanics superseded 2026-10-06** by
@@ -258,14 +259,15 @@ program as stored.
 
 ## Where
 
-`core/src/authority/policy/lattice.rs` (`ExecGrant`, `ExecKey`, `Verdict`,
-`meet_insert`), `core/src/authority/grant/decode.rs` (keys to `ExecGrant`),
-`core/src/authority/policy/table.rs` (`Table`: `verdict`, `respelled`, the meet),
-`core/src/authority/policy/exec.rs` (`ExecRules`, `ExecScope`, `Rank`, `Program`,
-`Subject`, `holds`, `GrantStack::admit`/`admits`, `Admitted`),
-`core/src/authority/guard/enforce.rs` (`check_exec`),
-`core/src/runtime/command/head.rs` (`Head`, `Missing`),
-`core/src/path/forms.rs` (`RealPath`, `within::<P>`, `evicts`),
+`core/src/authority/policy/lattice.rs` (`ExecGrant`, `ExecKey`),
+`core/src/shell/grant/decode.rs` (`decode_capability_map`, keys to `ExecGrant`),
+`core/src/authority/policy/table.rs` (`Table`, `Withheld`, the meet),
+`core/src/authority/policy/exec.rs` (`ExecRules`, `ExecAllow`, `ExecDeny`,
+`Program`, `Subject`, `GrantStack::admit`/`admits`, `Admitted`),
+`core/src/authority/guard/enforce.rs` (`check_exec`) and
+`core/src/shell/runtime/state/checks.rs` (the shell adapter),
+`core/src/shell/exec/command/head.rs` (`Head`, `Missing`),
+`core/src/path/walk.rs` (`RealPath`, `Excluded`), `path/identity.rs` (the two readings),
 `core/src/path/which.rs` (`command_name_key`).
 
 **Amended 2026-10-22 by [[decisions/261021_one-path|one-path]].** `ExecScope` is `ExecAllow` and `ExecDeny`

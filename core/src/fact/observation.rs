@@ -14,7 +14,6 @@ use crate::data::{Bytes, FOValue};
 use crate::ir::WriteMode;
 use crate::source::CallSite;
 use crate::ty::{Ty, Typed, closed_record};
-use crate::types::AuditIo;
 use crate::{label, record, variant};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -69,6 +68,16 @@ variant!(typed Observed {
     Worker(Worker): "worker",
     Act(Act): "act",
 });
+
+/// Bytes captured for one command under `CapturePolicy::Bytes`, and the totals
+/// written; empty and zero otherwise.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AuditIo {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub stdout_total: u64,
+    pub stderr_total: u64,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Command {

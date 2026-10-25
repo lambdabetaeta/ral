@@ -13,8 +13,8 @@ use crate::engine::{Engine, EngineInstaller, Rails, Scopes};
 use crate::protocol::channel::WriteError;
 use crate::protocol::probe::Probe;
 use crate::protocol::{Attach, DispatchId, Event, Run};
+use crate::shell::runtime::{Fork, Nursery, NurseryId, Runtime, Shell};
 use crate::sync::LockExt as _;
-use crate::types::{Fork, Nursery, NurseryId, Runtime, Shell};
 
 /// A session lock that cannot poison-panic, named for the one state it
 /// guards: a run that unwinds drops its guard mid-mutation, and recovering
@@ -94,7 +94,7 @@ impl IdentityTransport {
 
     /// Read the engine's shell under the session lock.
     #[cfg(feature = "test-util")]
-    pub(crate) fn inspect<R>(&self, read: impl FnOnce(&crate::types::Shell) -> R) -> R {
+    pub(crate) fn inspect<R>(&self, read: impl FnOnce(&crate::shell::runtime::Shell) -> R) -> R {
         forbid_reentry(self);
         read(&self.engine.lock().shell)
     }
@@ -110,7 +110,7 @@ struct IdentityDesk {
     events: Arc<EventReceiver>,
 }
 
-impl crate::types::EnquiryDesk for IdentityDesk {
+impl crate::shell::runtime::EnquiryDesk for IdentityDesk {
     /// `_scope` goes unpolled: [`EnquiryDesk::enquire`] is contractually
     /// blocking and short, so a `Host` answers at once and leaves nothing
     /// here to park on.
@@ -118,7 +118,7 @@ impl crate::types::EnquiryDesk for IdentityDesk {
         &self,
         req: FOValue,
         _scope: &crate::process::Scope,
-    ) -> crate::types::Settled<FOValue> {
+    ) -> crate::shell::runtime::Settled<FOValue> {
         let mut carried = std::collections::VecDeque::new();
         while let Some((did, event)) = self.events.try_recv() {
             match event {
@@ -131,7 +131,7 @@ impl crate::types::EnquiryDesk for IdentityDesk {
         }
         self.host
             .enquire(req)
-            .map_err(|e| crate::types::Break::from(crate::types::Error::from(e)))
+            .map_err(|e| crate::shell::runtime::Break::from(crate::shell::runtime::Error::from(e)))
     }
 }
 

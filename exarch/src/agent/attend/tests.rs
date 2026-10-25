@@ -397,7 +397,7 @@ fn take_up_suppresses_already_awaited_done_event_without_resetting_exchange() {
     use crate::bus::Stamped;
     use crate::card::testkit::card_value;
     use crate::record::Display;
-    use ral_core::types::{Done, DoneEvent, WorkerId};
+    use ral_core::shell::runtime::{Done, DoneEvent, WorkerId};
 
     let mut session = Avatar::for_test("system").unwrap();
     let (tx, rx) = crate::bus::channel();
@@ -478,7 +478,7 @@ fn take_up_delivers_unclaimed_ready_and_non_done_surfaces_and_propagates_severed
     use crate::bus::Stamped;
     use crate::card::testkit::card_value;
     use ral_core::protocol::probe::WorkerState;
-    use ral_core::types::{Done, DoneEvent, WorkerId};
+    use ral_core::shell::runtime::{Done, DoneEvent, WorkerId};
 
     let mut session = Avatar::for_test("system").unwrap();
     let (tx, _rx) = crate::bus::channel();

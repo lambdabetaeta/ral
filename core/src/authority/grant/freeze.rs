@@ -46,6 +46,7 @@
 use super::Polar;
 use super::toolchains::{self, Toolchain};
 use crate::authority::policy::{GrantPath, Ungoverned};
+use crate::host::EnvVars;
 use crate::path::git::{BadPointer, Pointer, discover_git_dir};
 use crate::path::identity::windows_identity_components;
 use crate::path::lex::relative_suffix;
@@ -57,7 +58,6 @@ use crate::path::{
 use crate::site::{Silent, site};
 use crate::syntax::quote::quote_word;
 use crate::text::code;
-use crate::types::{Break, EnvVars, Error, Shell};
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::path::Path;
@@ -262,27 +262,6 @@ impl PolicyError {
     }
 }
 
-impl From<PolicyError> for Break {
-    fn from(e: PolicyError) -> Self {
-        let err = Error::new(e.message);
-        Self::Error(match e.hint {
-            Some(hint) => err.with_hint(hint),
-            None => err,
-        })
-    }
-}
-
-/// The `as_map`/`as_list` coercions raise a bare `Error`: a shape mismatch,
-/// never an exit, so the decoder absorbs one directly.
-impl From<Error> for PolicyError {
-    fn from(e: Error) -> Self {
-        match e.hint {
-            Some(hint) => Self::new(e.message).with_hint(hint),
-            None => Self::new(e.message),
-        }
-    }
-}
-
 /// The `gitdir` place's refusals, in the grant's terms.
 impl From<BadPointer> for PolicyError {
     fn from(BadPointer { dot_git, why }: BadPointer) -> Self {
@@ -399,17 +378,6 @@ pub struct FreezeCtx {
 }
 
 impl FreezeCtx {
-    /// The shell's own anchor: the environment its override chain binds, its
-    /// logical cwd and the scratch its front end made for it, so every freeze
-    /// of one session agrees.
-    pub fn of(shell: &Shell) -> Self {
-        Self::at(
-            shell.context.env_overrides().clone(),
-            shell.context.cwd().clone(),
-        )
-        .with_scratch(shell.scratch())
-    }
-
     /// An anchor at `env` and `cwd`, for a caller with no shell.
     pub fn at(env: EnvVars, cwd: CwdPath) -> Self {
         Self {
@@ -1119,18 +1087,6 @@ mod tests {
         let fold = |p: &Path| fold_dots(p).to_string_lossy().into_owned();
         assert_eq!(paths[0], fold(&scratch));
         assert_eq!(paths[1], fold(&scratch.join("cache")));
-    }
-
-    #[test]
-    fn a_shells_context_carries_the_scratch_its_front_end_set() {
-        let scratch = std::env::temp_dir().join("a-shells-scratch");
-        let mut shell = crate::test_helper::core_shell();
-        shell.set_scratch(scratch.to_str().unwrap());
-        let paths = frozen(&[Place::Scratch(".".into())], &FreezeCtx::of(&shell)).unwrap();
-        assert_eq!(paths[0], fold_dots(&scratch).to_string_lossy());
-        let bare = crate::test_helper::core_shell();
-        let err = refusal(&Place::Scratch(".".into()), &FreezeCtx::of(&bare));
-        assert!(err.contains("no scratch directory"), "{err}");
     }
 
     #[test]

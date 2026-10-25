@@ -18,8 +18,8 @@ use crate::protocol::probe::Probe;
 use crate::protocol::{
     Attach, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Run, SessionEvent,
 };
+use crate::shell::runtime::DeferredSink;
 use crate::sync::{CondvarExt as _, LockExt};
-use crate::types::DeferredSink;
 
 /// The out-of-process transport: the engine runs across a duplex stream, frames
 /// crossing on a `WireChannel` as length-prefixed JSON.

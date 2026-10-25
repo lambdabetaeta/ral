@@ -11,7 +11,7 @@ use super::palette::AgentSlot;
 use crate::card::{self, Card, Change, Landed, observation_card, observation_spans};
 use crate::record::{self, BlockId, Blocks, Delta, Record, Recorded, Seq};
 use ral_core::data::datum::Datum as _;
-use ral_core::types::{Observation, Observed};
+use ral_core::shell::runtime::{Observation, Observed};
 use std::time::Duration;
 
 pub(super) struct Mirror {

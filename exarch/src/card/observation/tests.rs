@@ -1,5 +1,6 @@
 use super::*;
-use ral_core::types::{AuditIo, CommandOrigin, Resource};
+use ral_core::fact::AuditIo;
+use ral_core::shell::runtime::{CommandOrigin, Resource};
 
 /// The card's first [`Mark::Text`] flattened — the on-screen line, roling
 /// dropped.

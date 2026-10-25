@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f56fff48
-generated_at_date: 2026-10-21
+generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_date: 2026-10-25
 covers_paths: [ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/keybinding.rs, ral/src/repl/enquiry.rs]
 ---
 
@@ -224,7 +224,7 @@ earlier, or on a proper prefix wherever loaded.
 - `plugin/load.rs` — the `load-plugin` and `unload-plugin` builtins (`BUILTINS`),
   engine-side static builtins on the REPL surface. `load_plugin` resolves a
   plugin under `~/.config/ral/plugins/` or `RAL_PATH`, typechecks and
-  evaluates it through `load::evaluate_source` in a fresh scope, under
+  evaluates it through `shell::load::evaluate_source` in a fresh scope, under
   the return contract `contract::declared(Form::Manifest)`; `instantiate`
   applies a parameterised plugin's factory to its options map, nested under
   the builtin's own mooring, to yield its manifest (the contract sees only a

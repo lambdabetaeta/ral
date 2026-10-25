@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-generated_at_date: 2026-10-23
-covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs]
+generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_date: 2026-10-25
+covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
 
 # Map: core / capabilities & sandbox
@@ -29,9 +29,9 @@ the live judgment, and `SandboxProjection` are distinct and not one is argued in
 Submodules:
 
 - `lattice.rs` — the types and their algebra: `Capabilities`, the authored
-  value (what a grant file decodes to; nothing judges it and no layer keeps it);
+  value (over spellings; nothing judges it and no layer keeps it);
   `GrantLayer`, one layer in force, resolved where it was decoded
-  (constructed in `authority::grant`, or by `grant::decode_capability_map`;
+  (constructed in `authority::grant`, or by `shell::grant::decode_capability_map`;
   [[design/capability-freeze|freeze boundary]]), holding its rules and nothing
   beside them; `GrantPath<R> { written, real }`, a spelling and what its walk
   made of it, `R` an `Extent` (`Everywhere`, or `Under { position, passed }`: a
@@ -103,7 +103,7 @@ Submodules:
   the shape into an escape — so it reports and never denies. Findings are recorded only into an open audit trail, as a layer is pushed
   (`ral --audit --capabilities <profile> -c true`; [[design/grant|grant]]).
 
-The `load` module (rank 10), not this one, holds `load/profile.rs` —
+The `shell::load` module holds `shell/load/profile.rs` —
 `load_capabilities_from_path` / `_from_str` for `.ral` capability profiles,
 compiled under `grant`'s own declared table (`typecheck::contract`,
 `Form::Grant`): a profile's dimensions *are* the form's options, so a returned
@@ -112,25 +112,28 @@ returning a map meets the same six keys.
 
 ## The guard — `core/src/authority/guard/`
 
-The model's in-process enforcer: every runtime yes/no over the dynamic
-capability stack is a free `guard::check_*(&Context, …)` function that folds
-the whole stack (`ctx.grants`) — a module boundary rather than a typestate
+The model's in-process enforcer: free `guard::check_*(&GrantStack, …)`
+functions fold the whole stack — a module boundary rather than a typestate
 ([[decisions/260605_witness-collapse|witness-collapse]]). It consumes resolved
-authority; grant decoding and freezing belong to `authority::grant`.
+authority and returns domain data, never runtime values or control flow.
 
 - `enforce.rs` — the guards over the model's judgments: `check_exec`
   (`GrantStack::admit` and the wording of its refusal), `check_fs_exact` (the
   access a walk found, for a probe's name), `fs_denial` (the wording of a
   `Refused`), `check_flag`, `check_device_name`, and `deny_head`, the refusal of
   a head before its argv is known. The exec and fs checks return
-  `Result<_, Denial>`, a `Denial { check, error }`, over
-  `Refused::{Guarded, Withheld}`: the fact the trail keeps and the error the
-  caller raises. The fs guard is split so the judgment is reusable without the
-  report: `fs_judge` is the decision — `Refused::Guarded` first, for a write onto
-  a boot-pinned sandbox binary (the supplied `Baseline`'s protected identities), before any
-  grant is folded. `GrantStack::admits_fs` is the quiet twin a write asks before
-  reading its before- and after-images;
-- `shell.rs` — the guard's `impl Shell`: `check(Flag, who)`, `check_exec`,
+  `Result<_, Box<Denial>>`, a `Denial { check, error: Refusal }`, over
+  `Refused::{Guarded, Withheld}`: a `fact::Check` and diagnostic data
+  (`Refusal { message, hint }`), given runtime status only by the shell.
+  Flag and device checks return `Result<(), Refusal>`. The judgment is reusable
+  without the report: `GrantStack::refusal_fs` decides — `Refused::Guarded`
+  first, for a write onto a boot-pinned sandbox binary (the supplied
+  `Baseline`'s protected identities), before any grant is folded. `GrantStack::admits_fs` is the quiet twin a write asks before
+  reading its before- and after-images.
+
+## The shell adapter — `core/src/shell/runtime/state/checks.rs`
+
+- `impl Shell`: `check(Flag, who)`, `check_exec`,
   `baseline`, `locate`, `locate_dir`, `locate_existing`, `locate_if_admitted`
   (each excusing the discard device `LexicalPath::is_discard` and refusing a
   reserved device name before either region is consulted), `judge` (an object a
@@ -140,14 +143,15 @@ authority; grant decoding and freezing belong to `authority::grant`.
   one path every read and open takes: the name refusal, `path::walk` to the object,
   then `GrantStack::judge` on its transcript, handing back the handle vouched
   for. `Shell::refused` mints a `Denial`'s `Break` and records its check
-  through `Shell::record_check` with no `Mooring`, so on the trail alone;
+  through `Shell::record_check` with no `Mooring`, so on the trail alone.
+  `From<Refusal> for Error` preserves the message and hint at this boundary.
 
 ## Construction — `core/src/authority/grant/`
 
-`authority::grant` owns decoding, freezing, directory selectors, spawn grants,
-authored resolution and host system-read discovery. It builds the resolved model
-that `policy` judges; `policy` neither resolves authored paths nor discovers
-the host's system reads.
+`authority::grant` owns freezing, directory selectors, authored resolution
+and host system-read discovery. It builds the resolved model that `policy`
+judges, without naming a shell or runtime value; the `Value` decoder and
+spawn adapter live in `shell::grant`.
 
 - `paths.rs` — `Polar` and grant-path walking: allowances keep positions,
   exclusions hold objects;
@@ -156,8 +160,9 @@ the host's system reads.
 - `host.rs` — platform system-read discovery and resolution; `authority.rs`
   attaches the sandbox's boot pins to form the runtime `Baseline`;
 - `freeze.rs` — the one place a grant's `Place` or `Selector` becomes a
-  `FrozenPath` (a folded spelling, which `decode` then walks), against one anchor: `FreezeCtx` (`FreezeCtx::of(&Shell)`, an owned
-  `EnvVars` and `CwdPath`: the `Resolver` pair, `FreezeCtx::at` for a caller with no shell) and its `place` (`None` is a dead grant, an `absolute`
+  `FrozenPath` (a folded spelling, which `decode` then walks), against one anchor:
+  `FreezeCtx::at` (an owned `host::EnvVars` and `CwdPath`: the `Resolver` pair,
+  with optional scratch) and its `place` (`None` is a dead grant, an `absolute`
   payload classified on the raw string by `live_absolute` through
   `lex::grant_eligibility` (`EligibleOn` / `GrantRefusal`) over `lex::parse_bytes`:
   a `HeadKind::Device` or `HeadKind::Malformed` head, a mixed-separator opening
@@ -190,20 +195,31 @@ the host's system reads.
   `SYSTEM_READS`, the four system-wide prefixes (`homebrew`, `macports`, `nix`,
   `pkgsrc`) used by grant's host system-read discovery, keeping only what is
   neither in the process's home nor `the_world` ([[design/grant|grant]]
-  §Selectors states the rules);
+  §Selectors states the rules).
+
+## Runtime decoding — `core/src/shell/grant/`
+
+`shell/grant.rs` supplies `Shell::freeze_ctx` (env, logical cwd and scratch)
+and the `PolicyError → Break` conversion; substantive freezing stays in
+`authority::grant::freeze`.
+
 - `decode.rs` — `decode_capability_map`, which walks a `grant [...]` /
   `--capabilities` `Value` map into a resolved `GrantLayer`, one dimension
   decoder per `exec` / `fs` / `net` / `editor` / `shell` key, nested tables
   and verb lists read as sets —
   every one of them authority, none of them a recording switch
-  ([[design/audit|audit]]); its exec targets freeze to `ExecKey::{Name, Path, Dir}` (a
-  `dir` selector expanding to one `Dir` per directory), collected through
-  `ExecGrant::from_iter` and resolved here into exec rules. A bare key reads
-  the decoding environment's `PATH`; a path allowance holds the position its
-  walk reached, an exclusion the objects held;
+  ([[design/audit|audit]]). Its exec targets freeze and walk through
+  `authority::grant` directly into exec rules: a `dir` selector expands once
+  per directory, a bare name reads the decoding environment's `PATH`, a path
+  allowance holds the position its walk reached, and an exclusion the objects
+  held;
 - `spawn.rs` — `SpawnGrant` (`Inherit`, `Base`, `Restrict`), a spawn's grant
   as it crosses to a child that has not yet resolved it, frozen against the
-  child's own `FreezeCtx`.
+  child's own `FreezeCtx` through `Shell::freeze_ctx`; `GrantNarrower` is the
+  host-supplied `fn(&str, &FreezeCtx) -> Result<GrantLayer, String>` that
+  resolves a named base.
+
+## Path resolution
 
 Path resolution is `core/src/path/`: lexical stages, then one walk, plus
 `which.rs` for PATH search.
@@ -296,7 +312,7 @@ cannot run before lexing: the ordering is in the types, not convention.
 the host already holds, a walked entry say, and expands nothing, so a file
 named `~` stays that file and a non-UTF-8 name is never renamed by a string
 round trip.
-A `Resolver` is an `EnvVars` and a `CwdPath`: `~` reads `env.home()`, `xdg:`
+A `Resolver` is a `host::EnvVars` and a `CwdPath`: `~` reads `env.home()`, `xdg:`
 the `XDG_*_HOME` of `env` through `get_or_host`, so a `within [env: …]` overlay
 reaches both. `Resolver::at` builds one for a caller with no shell to mint one; `resolve_in_script` is
 `resolve` for a path written in a ral script, which reads it beside itself:
@@ -323,13 +339,17 @@ predicate; link following) and which region it may read (`readable_by`), judges
 every directory it enters, every file it reads for its own guidance and every
 entry it yields against it, polls the cancel scope at each entry, and yields
 `WalkEntry { shown, depth, found }`, which tells a pruning from a refusal from an
-entry unseen. The root comes first and is filtered by nothing. A `WalkEntry`
-names its entry in the shape its root was written (`Resolver::is_relative`): a
-cwd-relative root gives cwd-relative names where it can, any other absolute
-ones. A name reads back as itself: one a sigil would claim is spelled `./~/x`
+entry unseen. The root comes first and is filtered by nothing. `Entries`
+yields `Result<WalkEntry, process::Cancellation>`; `WalkEntry::name` takes an
+optional cwd base and returns `Result<String, String>`, with no runtime types.
+A name reads back as itself: one a sigil would claim is spelled `./~/x`
 (`sigil::literal_relative`), and one no ral string can hold is refused when asked
-for. `glob` and exarch's `grep-files`, `grep-hidden`, `find-files` and
-`explore-dir` all walk through it.
+for. `Shell::admitted_walk` (`shell/runtime/walk.rs`) wraps this as `AdmittedWalk`:
+selects the live region, scope and name base (`Resolver::is_relative`: a
+cwd-relative root gives cwd-relative names where possible, any other absolute
+ones), skips unseen entries, and converts cancellation to a non-catchable stop
+and naming failures to contextual errors. `glob` and exarch's
+`grep-files`, `grep-hidden`, `find-files` and `explore-dir` use that adapter.
 
 `which.rs` is the one `PATH` walk. **Its anchor is an `Option<&CwdPath>`: the
 shell's cwd cell, or `None` for a shell-less caller — and `CwdPath` has one
@@ -350,7 +370,7 @@ constructor, so no call site can choose "here" for itself**
   re-joined into a string to be split again.
 - `search` returns `PathSearch::{Executable, FoundNotExecutable, Missing}` from
   one traversal — the executable half memoised, the presence half not — so
-  `runtime::command::vet` reads a verdict rather than taking a second walk.
+  `shell::exec::command::vet` reads a verdict rather than taking a second walk.
 - On Windows, `%PATHEXT%` suffixes **append**: `build.ps1` yields
   `build.ps1`, `build.ps1.EXE`, …, never `build.exe`.
 - Grant construction walks the `PATH` of the decoding environment with
@@ -447,7 +467,7 @@ unprivileged uid and a per-exec cgroup), the daemon disables the
 unprivileged user namespaces bwrap needs, and the guest has no network
 device for `net` to govern; the in-process guards apply unchanged
 (`docs/SPEC.md` §12.11). Unchanged means head-only: `build_launch`
-(`runtime/command/process.rs`) builds no projection under a jail, so a grant's
+(`shell/exec/command/process.rs`) builds no projection under a jail, so a grant's
 fs and exec tables bind the command head and nothing an admitted program then
 spawns (`rg --pre`, `env`, `find -exec`). The jail, the uid, the cgroup and the
 VM boundary are the only confinement of grandchildren.
@@ -506,7 +526,7 @@ VM boundary are the only confinement of grandchildren.
   `ExecRules::for_kernel` of the `Admitted`'s own table joined with the live
   support (`sandbox::carriers`), so the profile renders the table that judged
   the launch rather than a second compile. It takes no `Shell`;
-  `Shell::sandbox_projection` (`authority/guard/shell.rs`) is the entry.
+  `Shell::sandbox_projection` (`shell/runtime/state/checks.rs`) is the entry.
 - `projection_enforceable` (`sandbox.rs`) — rejects an offline (`` net: `offline ``)
   projection on a backend with no kernel network enforcement, so an unenforceable
   request fails closed rather than running ignored.
@@ -517,7 +537,7 @@ VM boundary are the only confinement of grandchildren.
 - `Launch::new` (`process/launch.rs`) builds the unsandboxed external exec
   image; `build_launch` reaches it directly when no projection is active.
 - `launch.rs` (`sandboxed_command`) — the per-command launcher. `build_launch`
-  (`runtime/command/process.rs`) routes an external or bundled child through here
+  (`shell/exec/command/process.rs`) routes an external or bundled child through here
   whenever a projection is active and the process is not already confined,
   confining that *one* child, the `Admitted`'s program: a `Program::File`
   by the real path the guard judged, its spelling as `argv[0]`, or a

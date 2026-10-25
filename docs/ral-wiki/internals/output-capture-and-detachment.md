@@ -26,7 +26,7 @@ computation in `cap M to d. decode d` (`let v = echo hi`; see
 [[decisions/260930_graded-f|graded-f]]). A command's value is its output, so the
 frame inspects no produced value: `capture : F^w Unit → F Bytes`.
 
-- `CompKind::Capture` pushes `Frame::Capture` (`core/src/evaluator/machine.rs`,
+- `CompKind::Capture` pushes `Frame::Capture` (`core/src/shell/evaluator/machine.rs`,
   [[internals/evaluator-machine|evaluator-machine]]) and swaps `shell.io.stdout`
   to a fresh `Sink::Buffer` for the run of its operand, the frame holding the
   sink it replaced.
@@ -62,7 +62,7 @@ A captured stream is a `Sink::Buffer` fed by a *pump* — see [[map/core/io-proc
   reaches end-of-file (`core/src/io/sink.rs`).
 - The pump is joined *after* the child is waited: `WaitedChild` joins the
   pump handles, and the typestate makes draining-before-waiting unwritable
-  (`core/src/runtime/command/child.rs`, [[map/core/runtime|runtime]]). A foreground
+  (`core/src/shell/exec/command/child.rs`, [[map/core/runtime|runtime]]). A foreground
   command returns only once every byte the child wrote has been copied and the
   pipe has closed.
 - The release condition is *EOF, not exit*. A pipe closes when its last writer's
@@ -77,7 +77,7 @@ A captured stream is a `Sink::Buffer` fed by a *pump* — see [[map/core/io-proc
   disarmable entry on the shared `process::deadline` scheduler (deadlines-as-data);
   on expiry the worker's child-wait loop fires `terminate_group`.
 - A non-interactive exarch external leads its own process group
-  (`PgidPolicy::NewLeader`, `core/src/runtime/command/foreground.rs`, gated by
+  (`PgidPolicy::NewLeader`, `core/src/shell/exec/command/foreground.rs`, gated by
   [[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]]),
   so the cancel SIGTERMs then unconditionally SIGKILLs the *whole group* —
   grandchildren included. Every copy of the write end closes, the pump sees EOF,
@@ -107,7 +107,7 @@ another worker hangs under that worker): the *handle* is its evidence
   milliseconds.
 - The worker's output goes to its *own* per-handle buffer — `spawn_child` wires the
   child's `stdout`/`stderr` to fresh `new_buffer()` sinks
-  (`core/src/builtins/concurrency/birth.rs`), drained into the handle's result only
+  (`core/src/shell/builtins/concurrency/birth.rs`), drained into the handle's result only
   when the worker settles it. There is no run-owned pipe for it to hold open, so the run cannot
   stall on it.
 
@@ -155,7 +155,7 @@ are `running`, `stopping`, or reserved at the spawn door, and teardown cancels
 the rest.
 
 - Every worker files a `WorkerEntry` in its shell's `WorkerRegistry` the
-  instant it starts (`core/src/types/shell/workers.rs`): the handle itself
+  instant it starts (`core/src/shell/runtime/state/workers.rs`): the handle itself
   and its `Owner` — the session, the worker whose body it was born in, or the
   `gather` that owns it. The handle carries the rest: its `WorkerId`,
   its title, and its clock — a birth `Stamp` (one instant on the monotonic
@@ -228,7 +228,7 @@ that up — the thing to escape is not the session but the parent's *observation
 of the child's pgid.
 
 - Everything up to the birth is the ordinary external-command machinery —
-  identity, `vet`, `build_launch` (`core/src/runtime/command/detach.rs`), so the
+  identity, `vet`, `build_launch` (`core/src/shell/exec/command/detach.rs`), so the
   grant judges the call exactly as it judges any exec and a head a handler in
   scope intercepts is refused, birthing nothing: a handler runs inside this
   session, so there is nothing to detach (to run the real program, `^name`). Only the last

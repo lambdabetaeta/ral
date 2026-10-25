@@ -1,8 +1,9 @@
 ---
 status: active
 generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-verified_at_commit: 446e3123
-anchors: [GrantStack, admit, Admitted, Flag, SandboxProjection, ExecProjection, for_kernel, FreezeCtx, PolicyError, Denial, refused, record_check]
+verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+verified_at_date: 2026-10-25
+anchors: [GrantStack, admit, Admitted, Flag, SandboxProjection, ExecProjection, for_kernel, FreezeCtx, PolicyError, Denial, Refusal, refused, record_check, Shell::freeze_ctx, decode_capability_map, SpawnGrant]
 ---
 
 # Capability is data; the guard and the sandbox are its two consumers
@@ -96,13 +97,14 @@ that took a `Context`.
 
 `core/src/authority/policy.rs` and `authority/policy/{lattice,exec,fs,table,deputy}.rs`
 (`GrantStack`, `Flag`, `admit`, `Admitted`, `Refused`, `ExecDenial`,
-`for_kernel`, `precedence`), `core/src/authority/sandbox/projection.rs`
-(`SandboxProjection::of`, `ExecProjection`, `FsRules`, `WriteReach`),
-`core/src/authority/guard.rs` and `authority/guard/{enforce,shell}.rs`
-(`check_exec`, `check_flag`, `Denial`, `Shell::refused`),
-`core/src/authority/grant/{freeze,decode,spawn}.rs` (`FreezeCtx`,
-`PolicyError`, `decode_capability_map`, `SpawnGrant`), and
-`core/src/types/audit/door.rs` (`Shell::record_check`).
+`for_kernel`); `core/src/authority/sandbox/projection.rs`
+(`SandboxProjection::of`, `ExecProjection`); `core/src/authority/guard/enforce.rs`
+(`check_exec`, `check_flag`, `Denial`, `Refusal`), over `GrantStack`;
+`core/src/shell/runtime/state/checks.rs` (`Shell::refused`, `Refusal → Error`);
+`core/src/authority/grant/freeze.rs` (`FreezeCtx`, `PolicyError`);
+`core/src/shell/grant.rs` (`Shell::freeze_ctx`, `PolicyError → Break`) and
+`shell/grant/{decode,spawn}.rs` (`decode_capability_map`, `SpawnGrant`);
+`core/src/shell/runtime/audit/fan_out.rs` (`Shell::record_check`).
 
 **Amended 2026-10-22 by [[decisions/261021_one-path|one-path]].** `respelled` is `MatchedBy` on
 `Withheld::Excluded`: `Name`, `FoldedName` or `Identity`.

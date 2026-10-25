@@ -613,7 +613,7 @@ fn stamp_from_secs(secs: u64) -> String {
 /// children inherit it, and a scope binding, so `$name` resolves in ral source.
 pub(crate) fn seed_var(shell: &mut Shell, name: &str, value: &str) {
     shell.set_env_var(name, value);
-    shell.set_var(name.into(), ral_core::types::Value::string(value));
+    shell.set_var(name.into(), ral_core::shell::runtime::Value::string(value));
 }
 
 #[cfg(test)]

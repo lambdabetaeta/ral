@@ -10,7 +10,7 @@ design is that duality and nothing more.
 ## One carrier
 
 At run time there is no record/map distinction at all. A `[…]` value is a single
-string-keyed ordered map — `Value::Map` (`core/src/types/value.rs`); there is no
+string-keyed ordered map — `Value::Map` (`core/src/shell/runtime/value.rs`); there is no
 `Value::Record`. Keys are always strings: numbers index *lists*, never maps.
 So the set of possible keys is identical for both; what differs is everything
 the checker is allowed to say about them.
@@ -102,7 +102,7 @@ builtin's scheme (`core/src/typecheck/builtins.rs`). `from-json` returns a
 result the script decides — a weak type variable, one per unit, checked at the
 decode ([[decisions/260930_a-boundary-is-checked-against-its-type|a-boundary-is-checked-against-its-type]])
 — and a JSON object decodes to the `Map` carrier
-at run time (`json_to_value`, `core/src/builtins/codecs.rs`). The decoded value's
+at run time (`json_to_value`, `core/src/shell/builtins/codecs.rs`). The decoded value's
 *type* is then fixed by how you use it: index it with a computed key and it
 pins to `Map<α>`; read a literal field off it and it pins toward `Record`.
 
@@ -174,7 +174,7 @@ literal as a map (`["k": …]`), which says it in the source rather than in the
 unifier.
 ## Order is not data
 
-One carrier, one order: `Map` is an `imbl::OrdMap` (`core/src/types/map.rs`), so
+One carrier, one order: `Map` is an `imbl::OrdMap` (`core/src/shell/runtime/map.rs`), so
 both views iterate **sorted by key** and the order a literal was written in is
 not observable. That is what lets `Value::equals` settle map equality with a
 pointwise zip and makes `Value::PartialEq` order-independent for free — and it
@@ -184,7 +184,7 @@ third carrier for it.
 
 The Agda core keeps a runtime map as an association list strictly sorted by key
 (`dev/agda/Ral/Map.agda`). Key checking is separate from insertion: the evaluator must reject a
-repeated computed key before evaluating its value (`eval_map`, `core/src/evaluator/assemble.rs`;
+repeated computed key before evaluating its value (`eval_map`, `core/src/shell/evaluator/assemble.rs`;
 `explicit` in `dev/agda/Ral/Data.agda`).
 
 ## Why both, not one

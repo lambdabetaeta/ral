@@ -93,8 +93,8 @@ one idea had three presentations and two merge rules:
 
 ## Where
 
-`core/src/runtime/command/redirect.rs` (`OpenedWrite`, `snapshot`),
-`core/src/evaluator/redirect.rs` (`settle`); `exarch/src/bus/card/change.rs`
+`core/src/shell/exec/redirect.rs` (`OpenedWrite`, `snapshot`),
+`core/src/shell/exec/redirect/scope.rs` (`settle`); `exarch/src/bus/card/change.rs`
 (`Change`, `change_card`), `exarch/src/bus/card/diff.rs` (`Diff::between`),
 `exarch/src/bus/card/encode.rs`/`decode.rs` (`encode_edit`/`value_to_edit`),
 `exarch/src/shell_eval.rs` (`decode_surface`), `exarch/src/tui/block.rs`

@@ -8,7 +8,7 @@ checker before the run, by the spawn at it.**
 Total inside, gated at the operating-system call. The asymmetry is not an
 oversight in either direction:
 
-- **Inside the shell**, `Value::render_argv` (`core/src/types/value.rs`) gives
+- **Inside the shell**, `Value::render_argv` (`core/src/shell/runtime/value.rs`) gives
   every value a text form, so a base frame, a handler arm and the audit trail
   take every shape. `echo [a: 1]` prints a map; `echo $f` prints a block.
 - **At the boundary**, an argument is one word, and a list (several arguments), a
@@ -18,7 +18,7 @@ oversight in either direction:
 
 **One declaration, two readings.** `RefusedArg`
 (`core/src/ty/exec_arg.rs`) names those shapes by a single wildcard-free match
-on a `Head`, `of_head`. The spawn (`runtime::command::vet`) reads it through
+on a `Head`, `of_head`. The spawn (`shell::exec::command::vet`) reads it through
 `Value::heads`, the checker's argv rule (`typecheck::infer`) through `of_ty`, and
 one `remedy` per shape means a user meeting either refusal meets one language. A
 new head has to be given a verdict before it compiles, for both sides at once. A second

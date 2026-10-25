@@ -13,7 +13,7 @@ use crate::record::AgentId;
 use crate::record::AgentLog;
 use crate::test_helper::spawn_engine_on;
 use ral_core::seed::{Sealed, seal};
-use ral_core::types::NurseryId;
+use ral_core::shell::runtime::NurseryId;
 use std::os::unix::net::UnixStream;
 use std::sync::Mutex as StdMutex;
 

@@ -5,7 +5,7 @@
 
 use jiff::fmt::friendly::{Designator, Spacing, SpanPrinter};
 use ral_core::data::FOValue;
-use ral_core::types::{Done, DoneEvent};
+use ral_core::shell::runtime::{Done, DoneEvent};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -125,11 +125,11 @@ pub fn settled_text(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ral_core::types::{ErrorRecord, Status};
+    use ral_core::shell::runtime::{ErrorRecord, Status};
 
     fn done(outcome: Done) -> FOValue {
         DoneEvent {
-            id: ral_core::types::WorkerId(7),
+            id: ral_core::shell::runtime::WorkerId(7),
             title: "building".into(),
             elapsed_ms: 192_000,
             outcome,

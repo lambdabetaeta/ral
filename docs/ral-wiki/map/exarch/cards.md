@@ -1,6 +1,6 @@
 ---
-generated_at_commit: dad6a1b3
-generated_at_date: 2026-10-17
+generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_date: 2026-10-25
 covers_paths: [exarch/src/record/fault.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/change.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/agent/desk.rs, exarch/src/bus/post.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/diff.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/commit.rs, exarch/src/record/view.rs, exarch/src/tui/scrollback.rs, exarch/data/agent.ral]
 ---
 
@@ -107,7 +107,7 @@ agent's answer arriving, whatever produced it — and synod's fold drops
 `Display::Done` unnarrated, a worker thread being exarch's own bookkeeping
 rather than anything the window's reader has business with.
 
-Core's ready-boundary housekeeping (`ral_core::types::Notice`, decoded by
+Core's ready-boundary housekeeping (`ral_core::shell::runtime::Notice`, decoded by
 `Notice::from_surface` in `decode_surface`) has no card. A reaped worker and a pruned binding are each something nobody observed
 for a long while — housekeeping, not news — so they are recorded as
 `Forensic::Reap` and `Forensic::Prune`, written by `shell_eval::surface`'s

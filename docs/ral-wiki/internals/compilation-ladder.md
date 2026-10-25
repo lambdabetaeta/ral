@@ -91,8 +91,8 @@ so the seed never drifts from the values it describes.
 The prelude is baked once at build time as a schema-less `postcard` blob of this
 same IR, so any field added to `Comp`, `Val`, or `Pattern` invalidates every
 emitted blob — a hazard closed by each host's build-dependency on `ral-core`,
-which reruns the host's build script, whose one call to `boot::bake_prelude`
-(`core/src/boot.rs`) is the only encode site; the only decode site
+which reruns the host's build script, whose one call to `shell::boot::bake_prelude`
+(`core/src/shell/boot.rs`) is the only encode site; the only decode site
 (`BakedPrelude`) lives there too, together as the host-embedding
 seam ([[decisions/260610_host-embedding-api|host-embedding-api]]). The bake runs
 the checker: it parses, elaborates, and hands the comp to `bake_prelude`

@@ -19,9 +19,9 @@ mod common;
 use common::fresh_shell;
 
 use ral_core::protocol::Run;
-use ral_core::run::RunRequest;
+use ral_core::shell::run::RunRequest;
+use ral_core::shell::runtime::{Map, Observation, Settled, Value};
 use ral_core::source::SourceOrigin;
-use ral_core::types::{Map, Observation, Settled, Value};
 use ral_core::{EventSink, SurfaceSink};
 use std::sync::{Arc, Mutex};
 

@@ -15,9 +15,9 @@ mod common;
 use common::fresh_shell;
 
 use ral_core::protocol::Run;
-use ral_core::run::RunRequest;
+use ral_core::shell::run::RunRequest;
+use ral_core::shell::runtime::{Observation, Settled, Shell, Value};
 use ral_core::source::SourceOrigin;
-use ral_core::types::{Observation, Settled, Shell, Value};
 use ral_core::{EventSink, SurfaceSink};
 use std::sync::{Arc, Mutex};
 
@@ -61,8 +61,8 @@ fn run(shell: &mut Shell, source: &str) -> (Settled<Value>, Vec<Value>) {
 /// events, asserting exactly one fired.  Core reports every dispatch it makes,
 /// so a test of one observation names the kind it is about rather than counting the whole
 /// stream.
-fn single_observation(events: &[Value], kind: &str) -> ral_core::types::Map {
-    let facts: Vec<ral_core::types::Map> = events
+fn single_observation(events: &[Value], kind: &str) -> ral_core::shell::runtime::Map {
+    let facts: Vec<ral_core::shell::runtime::Map> = events
         .iter()
         .filter_map(|v| match v {
             Value::Map(m) => match m.get("what").map(std::borrow::Cow::into_owned) {
@@ -130,7 +130,7 @@ fn some(bytes: &[u8]) -> Value {
 /// Run `script` against a fresh directory holding `f` as `old`, `{d}` in the
 /// script naming the directory, and return the directory with the one write
 /// observation.
-fn write_over(old: &[u8], script: &str) -> (tempfile::TempDir, ral_core::types::Map) {
+fn write_over(old: &[u8], script: &str) -> (tempfile::TempDir, ral_core::shell::runtime::Map) {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().canonicalize().unwrap();
     std::fs::write(dir.join("f"), old).unwrap();

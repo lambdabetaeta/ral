@@ -23,13 +23,13 @@ mod common;
 
 use common::fresh_shell;
 
-use ral_core::builtins::{REPL_PRINT_PARAMS, pretty_print};
 use ral_core::data::Finite;
 use ral_core::ir::Val;
 use ral_core::protocol::Run;
-use ral_core::run::RunReport;
+use ral_core::shell::builtins::{REPL_PRINT_PARAMS, pretty_print};
+use ral_core::shell::run::RunReport;
+use ral_core::shell::runtime::Value;
 use ral_core::source::SourceOrigin;
-use ral_core::types::Value;
 
 /// A session as every front end builds one: prelude registered, env seeded,
 /// capabilities at root.

@@ -82,11 +82,11 @@ fn text_args(argv: Vec<OsString>) -> Result<Vec<String>, String> {
 pub(crate) mod engine {
     use crate::boot_builtin;
     use ral_core::Runtime;
-    use ral_core::boot::boot_runtime;
     use ral_core::data::datum::Datum as _;
     use ral_core::engine::EngineInstaller;
     use ral_core::protocol::{EngineSpec, Root};
     use ral_core::record;
+    use ral_core::shell::boot::boot_runtime;
 
     pub(crate) static INSTALLERS: [EngineInstaller; 2] = [
         EngineInstaller {
@@ -122,8 +122,8 @@ pub(crate) mod engine {
     pub(crate) fn batch_surface() -> ral_core::HostSurface {
         ral_core::HostSurface {
             statics: vec![
-                ral_core::builtins::WATCH_BUILTIN,
-                ral_core::builtins::SURFACE_BUILTIN,
+                ral_core::shell::builtins::WATCH_BUILTIN,
+                ral_core::shell::builtins::SURFACE_BUILTIN,
                 boot_builtin::BUILTINS,
             ],
             captured: Vec::new(),

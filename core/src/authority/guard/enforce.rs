@@ -5,7 +5,7 @@
 //! [`GrantStack`], so a verdict is authority intersected across every layer,
 //! never one frame.  The judgments are the model's ([`GrantStack::admit`],
 //! [`GrantStack::read`]); this module words their refusals and, for the exec and fs
-//! guards, which reach a real OS resource, builds the [`Denial`] the Shell's
+//! guards, which reach a real OS resource, builds the [`Denial`] the shell
 //! records.  The sandbox projects the same authority off the same folds,
 //! so the two cannot drift.
 
@@ -13,25 +13,46 @@ use crate::authority::policy::{
     Admitted, Baseline, ExecDenial, ExecRefused, Flag, FsDeny, FsOp, GrantStack, LocateError,
     Program, Refused, ShellVerb, Withheld,
 };
+use crate::fact::{Check, Resource};
 use crate::path::shown;
 use crate::path::{LexicalPath, MatchedBy, RealPath, Trace};
 use crate::text::code;
-use crate::types::{Check, Context, Error, Resource, Settled, sig};
 use std::fmt::{self, Display};
 
-/// A refused exec or fs check: the fact the trail keeps, and the error the
+/// The guard's diagnostic; the shell gives it runtime status and control flow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Refusal {
+    pub message: String,
+    pub hint: Option<String>,
+}
+
+impl Refusal {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            hint: None,
+        }
+    }
+
+    fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
+    }
+}
+
+/// A refused exec or fs check: the fact the trail keeps, and the refusal the
 /// caller raises.  An admitted check is never recorded: a trail of every
 /// permitted read says nothing an auditor asked.
 pub(crate) struct Denial {
     pub check: Check,
-    pub error: Error,
+    pub error: Refusal,
 }
 
 impl Denial {
     fn new(
         resource: Resource,
         fields: impl IntoIterator<Item = (&'static str, String)>,
-        error: Error,
+        error: Refusal,
     ) -> Self {
         let fields = fields
             .into_iter()
@@ -100,19 +121,17 @@ const EXCLUSION_HINT: &str =
 
 /// Judge a program and its argv against the stack's exec rules.
 pub(crate) fn check_exec(
-    ctx: &Context,
+    grants: &GrantStack,
     baseline: &Baseline,
     shown: &str,
     program: Program,
     args: Vec<String>,
-) -> Result<Admitted, Box<Denial>> {
-    ctx.grants
-        .admit(baseline, program, args)
-        .map_err(|refused| {
-            let ExecRefused { program, args, why } = *refused;
-            let error = exec_error(&ctx.grants, baseline, shown, &program, &why);
-            Box::new(exec_denial(shown, &program, &why, Some(&args), error))
-        })
+) -> Result<Admitted, Denial> {
+    grants.admit(baseline, program, args).map_err(|refused| {
+        let ExecRefused { program, args, why } = *refused;
+        let error = exec_error(grants, baseline, shown, &program, &why);
+        exec_denial(shown, &program, &why, Some(&args), error)
+    })
 }
 
 /// The words of an exec refusal.
@@ -122,15 +141,15 @@ fn exec_error(
     shown: &str,
     program: &Program,
     why: &ExecDenial,
-) -> Error {
+) -> Refusal {
     let layers = grants.exec().count();
     let head = format!("command '{shown}' denied by active grant");
     match why {
-        ExecDenial::Run(Withheld::MissingAllowance) if layers > 1 => Error::new(format!(
+        ExecDenial::Run(Withheld::MissingAllowance) if layers > 1 => Refusal::new(format!(
             "{head}: some layer's exec `allow` list does not let it run"
         ))
         .with_hint(NESTED),
-        ExecDenial::Run(Withheld::MissingAllowance) => Error::new(format!(
+        ExecDenial::Run(Withheld::MissingAllowance) => Refusal::new(format!(
             "{head}: nothing in the grant's exec `allow` list lets it run"
         ))
         .with_hint(format!(
@@ -140,7 +159,7 @@ fn exec_error(
             code("`absolute /path/to/it"),
             code("`dir `absolute /path"),
         )),
-        ExecDenial::Run(Withheld::Excluded { scope, matched_by }) => Error::new(format!(
+        ExecDenial::Run(Withheld::Excluded { scope, matched_by }) => Refusal::new(format!(
             "{head}: {}",
             excluded(
                 format_args!("'{program}'"),
@@ -149,7 +168,7 @@ fn exec_error(
             )
         ))
         .with_hint(EXCLUSION_HINT),
-        ExecDenial::Read(why) => Error::new(format!(
+        ExecDenial::Read(why) => Refusal::new(format!(
             "{head}: {}",
             read_cause(baseline, shown, program, why)
         ))
@@ -201,7 +220,7 @@ fn exec_denial(
     program: &Program,
     why: &ExecDenial,
     args: Option<&[String]>,
-    error: Error,
+    error: Refusal,
 ) -> Denial {
     let deny = match why {
         ExecDenial::Run(Withheld::Excluded { scope, .. }) => Some(scope.to_string()),
@@ -233,40 +252,41 @@ pub(crate) fn deny_head(
 
 /// Refuse a name the host would read as a DOS device (Windows only).  No grant
 /// can admit it: it names no object to judge.
-pub(crate) fn check_device_name(path: &LexicalPath) -> Settled<()> {
+pub(crate) fn check_device_name(path: &LexicalPath) -> Result<(), Refusal> {
     path.reserved_device_refusal()
-        .map_or(Ok(()), |m| Err(sig(m)))
+        .map_or(Ok(()), |m| Err(Refusal::new(m)))
 }
 
 /// Decide an `op` on the access a walk found: [`GrantStack::refusal_fs`] is
 /// the decision, [`fs_denial`] the wording and the fact around it.
 pub(crate) fn check_fs_exact(
-    ctx: &Context,
+    grants: &GrantStack,
     baseline: &Baseline,
     trace: &Trace,
     op: &FsOp,
-) -> Result<(), Box<Denial>> {
-    (ctx.grants.refusal_fs(baseline, op, trace))
-        .map_err(|refused| fs_denial(ctx, refused, op, trace.real()))
+) -> Result<(), Denial> {
+    grants
+        .refusal_fs(baseline, op, trace)
+        .map_err(|refused| fs_denial(grants, refused, op, trace.real()))
 }
 
 /// The denial of `refused`, an `op` on the object at `real`.
 pub(crate) fn fs_denial(
-    ctx: &Context,
+    grants: &GrantStack,
     refused: Refused,
     op: &FsOp,
     real: &RealPath,
-) -> Box<Denial> {
+) -> Denial {
     let name = <&str>::from(op);
     let path = shown(real.as_path());
-    let layers = ctx.grants.fs().count();
+    let layers = grants.fs().count();
     let (detail, error) = match refused {
         Refused::Withheld(Withheld::MissingAllowance) => {
             let permission = match op {
                 FsOp::Read => "reading",
                 FsOp::Write => "writing",
             };
-            let error = Error::new(format!(
+            let error = Refusal::new(format!(
                 "fs {name} denied by grant: no allowance for {permission} {path}"
             ));
             let hint = if layers > 1 {
@@ -284,7 +304,7 @@ pub(crate) fn fs_denial(
         }
         Refused::Withheld(Withheld::Excluded { scope, matched_by }) => (
             Some(("deny", scope.to_string())),
-            Error::new(format!(
+            Refusal::new(format!(
                 "fs {name} denied by grant: {}",
                 excluded(&path, &scope, matched_by)
             ))
@@ -292,7 +312,7 @@ pub(crate) fn fs_denial(
         ),
         Refused::Guarded(pinned) => (
             Some(("pinned", pinned.to_string())),
-            Error::new(format!(
+            Refusal::new(format!(
                 "fs write refused: {path} is the {pinned} binary ral pinned at startup, which \
                  confines every command run under a grant"
             ))
@@ -306,16 +326,16 @@ pub(crate) fn fs_denial(
     let fields = [("op", name.to_string()), ("path", path)]
         .into_iter()
         .chain(detail);
-    Box::new(Denial::new(Resource::Fs, fields, error))
+    Denial::new(Resource::Fs, fields, error)
 }
 
 /// Refuse a verb or builtin some layer of the stack withholds; `who` names it
 /// in the refusal.  Silence permits.
-pub(crate) fn check_flag(ctx: &Context, flag: Flag, who: &str) -> Settled<()> {
-    if ctx.grants.permits(flag) {
+pub(crate) fn check_flag(grants: &GrantStack, flag: Flag, who: &str) -> Result<(), Refusal> {
+    if grants.permits(flag) {
         return Ok(());
     }
-    Err(sig(match flag {
+    Err(Refusal::new(match flag {
         Flag::Shell(ShellVerb::Detach) => format!(
             "{who}: an active grant withholds it, so nothing here may outlive this session. \
              Would `spawn` do, since it ends when the session does?"

@@ -1,0 +1,448 @@
+# ral prelude — standard library
+
+# Comparison and size — the `$[…]` operators and `length` under names.
+## Whether `a` < `b`: numbers numerically, strings lexicographically.
+let lt = { |a b| return $[$a < $b] }
+## Whether `a` > `b`: numbers numerically, strings lexicographically.
+let gt = { |a b| return $[$a > $b] }
+## Whether a list, map, bytes or string is empty.
+let is-empty = { |x| return $[!{length $x} == 0] }
+## The identity function: returns its argument unchanged.  Useful as the
+## key for `-by` combinators when the element is already the magnitude.
+let identity = { |x| return $x }
+## Sort a list ascending: numbers numerically (Int and Float exactly), strings lexicographically.
+let sort-list = { |xs| sort-list-by $identity $xs }
+
+# Strings — direct builtins: upper, lower, re-split, re-match,
+# re-replace, re-replace-all, string-replace, intercalate, slice,
+# re-find-match, re-find-matches, dedent, ral-quote, posix-quote, posix-split, lines.
+# Regex builtins carry the `re-` prefix because the first argument is
+# a regex, not a literal substring; `string-replace` is the
+# literal-string counterpart that demands an exactly-once match.
+# (`join` itself is the coreutils command for joining lines from two
+# files; ral's list-of-strings join is `intercalate` — interpose a
+# separator between every pair.)  Use `$name` to obtain a first-class
+# value (a synthesised thunk pinned to the primitive).
+## Split a string into its Unicode-whitespace-delimited words.
+let words = { |s| re-find-matches '\S+' $s }
+## Decode stdin as a list of words.
+let from-words = {
+    let s = !{from-string}
+    words $s
+}
+
+# Paths and value coercions — each is a directly registered builtin
+# (resolve-path, absolute-path, abbreviate-home, file-info, list-dir,
+# temp-dir, temp-file, int, float, str).  Filesystem predicates and
+# size/line-count wrappers live below under "Filesystem queries".
+
+# Control flow
+# `each`, `map`, `filter`, `sort-list-by`, `fold`
+# are builtins under their bare names, all data-last.
+# `for` is the traditional loop form: for <list> <fn>.
+## Loop over a list for side effects.
+let for = { |list fn| each $fn $list }
+## Reduce without an initial value; list must be non-empty.
+let reduce = { |f items|
+    if !{is-empty $items} { fail [status: 1, message: "reduce: the list is empty; use fold if you have an initial value"] } else {
+        let [head, ...tail] = $items
+        fold $f $head $tail
+    }
+}
+
+## Reverse a list.  Uses `fold` so the iteration is one Rust loop with
+## one closure invocation per element, avoiding the O(n) per-call
+## evaluator overhead that explicit ral-level recursion incurs.  Cons
+## (`[$x, ...$acc]`) is O(1) amortised on the persistent list rep.
+let reverse = { |items|
+    fold { |acc x| return [$x, ...$acc] } [] $items
+}
+
+## Last element of a non-empty list; fails on empty.
+let last = { |items|
+    if !{is-empty $items} {
+        fail [status: 1, message: "last: empty list has no last element"]
+    } else {
+        let [head, ...rest] = $items
+        if !{is-empty $rest} { return $head } else { last $rest }
+    }
+}
+
+## Get a map value, returning default if key is absent.
+let get = { |m key default|
+    if !{has $m $key} { return $m[$key] } else { return $default }
+}
+
+# List combinators
+## Take elements from the front while predicate holds.
+let take-while = { |pred items|
+    let _go = { |xs acc|
+        if !{is-empty $xs} {
+            let reversed = !{reverse $acc}
+            return $reversed
+        } else {
+            let [head, ...rest] = $xs
+            if !{$pred $head} { _go $rest [$head, ...$acc] } else {
+                let reversed = !{reverse $acc}
+                return $reversed
+            }
+        }
+    }
+    _go $items []
+}
+## Drop elements from the front while predicate holds.
+let drop-while = { |pred items|
+    if !{is-empty $items} { return [] } else {
+        let [head, ...rest] = $items
+        if !{$pred $head} {
+            drop-while $pred $rest
+        } else { return $items }
+    }
+}
+## Take the first n elements.
+let take = { |n items|
+    let _go = { |k xs acc|
+        if $[$k <= 0 || !{is-empty $xs}] {
+            let reversed = !{reverse $acc}
+            return $reversed
+        } else {
+            let [head, ...rest] = $xs
+            _go $[$k - 1] $rest [$head, ...$acc]
+        }
+    }
+    _go $n $items []
+}
+## Drop the first n elements.
+let drop = { |n items|
+    if $[$n <= 0 || !{is-empty $items}] { return $items } else {
+        let [_, ...rest] = $items
+        drop $[$n - 1] $rest
+    }
+}
+## `s` repeated `n` times; empty when `n <= 0`.
+let repeat = { |n s| intercalate '' !{map { |_| return $s } !{range 0 $n}} }
+## Pad `s` on the left with `c` to width `w`; never truncates.
+let pad-left = { |w c s| return "!{repeat $[$w - !{length $s}] $c}$s" }
+## Pad `s` on the right with `c` to width `w`; never truncates.
+let pad-right = { |w c s| return "$s!{repeat $[$w - !{length $s}] $c}" }
+## The extension of a path's last component, as an Option: `a.tar.gz` has
+## `` `some 'gz'``, while `Makefile`, `.bashrc`, `..hidden` and `..` have
+## `` `none``.  It is what follows the name's last dot when a character other
+## than a dot precedes that dot, so `foo.` has `` `some ''``.
+let extension = { |p|
+    if !{re-match '[^./][^/]*\.[^./]*$' $p} {
+        return `some !{re-find-match '[^.]*$' $p}
+    } else { return `none }
+}
+## Prepend n spaces to every non-empty line.
+let indent = { |n s|
+    let spaces = repeat $n ' '
+    let lns = lines $s
+    let indented = map { |l| if $[$l != ''] { "$spaces$l" } else { $l } } $lns
+    intercalate "\n" $indented
+}
+
+# Error handling — `try` itself is a control-operator keyword, not a builtin.
+## Retry body up to n times on failure.
+let retry = { |n body|
+    try $body { |err|
+        if $[$n > 1] { retry $[$n - 1] $body } else { fail $err }
+    }
+}
+
+# Concurrency, cleanup, observability — `spawn`, `gather` and `watch` are
+# control forms; `await`, `is-done`, `poll`, `race`, `first-settled`, `cancel`
+# and `workers` are builtins (see `core/src/shell/builtins.rs`).  `par`, `both` and
+# `first-of` are library code over `gather`.
+
+## par <f> <items> <jobs>  — parallel map: run `f` over `items` on at most
+## `jobs` workers at once (`jobs <= 0`: one per item), owned by this call.
+## Values and output keep input order, whatever order the items finish in.
+## A new worker starts as soon as any running one settles.  The first failure
+## in time is raised at once, and the rest are cancelled and drained.  Nothing
+## started by `par` outlives the call.
+let par = { |f items jobs|
+    let limit = if $[$jobs <= 0] { length $items } else { return $jobs }
+    gather {
+        ## A ready child that failed is awaited now: its bytes replay and its
+        ## failure is raised here, and the gather ends the rest.  A success
+        ## keeps its result for the ordered pass below; an already-claimed
+        ## child fails honestly.
+        let _claimed = { |_| fail [status: 1, message: "par: this worker's result was already claimed"] }
+        let _raise-if-failed = { |h|
+            case !{poll $h} [
+                `ready: { |s| case $s[outcome] [`err: { |_| await $h; return () }, `ok: { |_| return () }] },
+                `running: { |_| return () },
+                `stopping: $_claimed,
+                `consumed: $_claimed
+            ]
+        }
+        ## `running`: the children holding a slot; `pending`: the unstarted
+        ## items; `i`: the count started, for the title; `born`: every child so
+        ## far, in input order.  Destructuring, not `$xs[$k]`: an index by a
+        ## computed key would make `par` monomorphic (`typecheck/index.rs`).
+        let _schedule = { |running pending i born|
+            if $[!{length $running} < $limit && !{length $pending} > 0] {
+                let [x, ...later] = $pending
+                let h = spawn "par #$i" { $f $x }
+                _schedule [...$running, $h] $later $[$i + 1] [...$born, $h]
+            } elsif !{is-empty $running} { return $born } else {
+                let k = first-settled $running
+                let [settled, ...younger] = !{drop $k $running}
+                _raise-if-failed $settled
+                _schedule [...!{take $k $running}, ...$younger] $pending $i $born
+            }
+        }
+        map { |h| await $h } !{_schedule [] $items 0 []}
+    }
+}
+
+## both <a> <b>  — run two blocks at once, owned by this call, and return
+## `[fst: …, snd: …]`: the fixed-arity form of fan-out into a record.  `fst`
+## is awaited, then `snd`, so it does not fail fast: a failure in either is the
+## call's, and the other is cancelled and drained at the gather's exit.
+let both = { |a b|
+    gather {
+        let ha = spawn "both.fst" { !$a }
+        let hb = spawn "both.snd" { !$b }
+        return [fst: !{await $ha}, snd: !{await $hb}]
+    }
+}
+
+## first-of <blocks>  — run several blocks at once and behave as the first to
+## finish: its output and value, or its failure.  `race` over fresh blocks:
+## `race` claims the winner and cancels and drains the losers, and the gather's
+## exit waits for them all.
+let first-of = { |blocks| gather { race !{map { |b| spawn "first-of" { !$b } } $blocks} } }
+
+## Run body; suppress failure and return unit.  For fire-and-forget commands
+## where the outcome is irrelevant.
+let attempt = { |body| try { !$body; return () } { |_| return () } }
+
+## Run body; return true on POSIX exit 0, false on any error or non-zero status.
+let succeeds = { |body| try { !$body; return true } { |_| return false } }
+
+# Filesystem queries — `exists`, `is-file`, `is-dir`, `is-link`,
+# `is-readable`, `is-writable` are native builtins (see
+# `core/src/shell/builtins/predicates.rs`); they resolve their path
+# argument against the within-scoped cwd, which the bundled `test`
+# wrappers they replaced did not.
+## Count a file's lines by `from-lines`' rule, in bounded memory.
+let line-count  = { |p| fold-lines { |n _| return $[$n + 1] } 0 < $p }
+## true if a file has zero bytes or a directory has no entries.
+let file-empty  = { |p|
+    if !{is-dir $p} {
+        is-empty !{list-dir $p}
+    } else {
+        $[!{file-info $p}[size] == 0]
+    }
+}
+
+# Map utilities
+## Map keys to [key, value] pairs.
+let entries = { |m| map { |k| return [$k, $m[$k]] } !{keys $m} }
+## Map keys to their values as a list.
+let values = { |m| map { |k| return $m[$k] } !{keys $m} }
+## Merge two maps; b's entries win on conflict.
+let union = { |a b| fold { |m k| return [...$m, $k: $b[$k]] } $a !{keys $b} }
+## Keys present in both maps, with a's values.
+let intersection = { |a b| fold { |m k| return [...$m, $k: $a[$k]] } [:] !{filter { |k| has $b $k } !{keys $a}} }
+## Keys in a but not in b, with a's values.
+let difference = { |a b| fold { |m k| if !{has $b $k} { return $m } else { return [...$m, $k: $a[$k]] } } [:] !{keys $a} }
+
+# Standard library
+## Sum a list of numbers.
+let sum = { |items| fold { |acc x| return $[$acc + $x] } 0 $items }
+
+## The larger of two numbers.
+let max = { |a b| if $[$a >= $b] { return $a } else { return $b } }
+## The smaller of two numbers.
+let min = { |a b| if $[$a <= $b] { return $a } else { return $b } }
+## The largest element of a non-empty list.
+let maximum = { |xs|
+    if !{is-empty $xs} { fail [status: 1, message: "maximum: the list is empty"] } else { reduce $max $xs }
+}
+## The smallest element of a non-empty list.
+let minimum = { |xs|
+    if !{is-empty $xs} { fail [status: 1, message: "minimum: the list is empty"] } else { reduce $min $xs }
+}
+
+## Cartesian product of two lists, each pair combined by `f`.  Build a
+## record in `f` to mix element types — lists are homogeneous — and to chain
+## into higher dimensions; this is the meshgrid of a benchmark matrix:
+##   let grid = cross $progs $strats { |p s| [prog: $p, strat: $s] }
+##   cross $grid !{range 1 4} { |row r| [row: $row, rep: $r] }
+let cross = { |a b f| flat-map { |x| map { |y| $f $x $y } $b } $a }
+
+## Partition `xs` into a map from string key to the list of elements that
+## share it, computed by `key-fn`; first-seen order is preserved within
+## each group.  Keys are strings (map keys always are) — build a composite
+## key with interpolation, e.g. `{ |r| "$r[prog]/$r[strat]" }`.
+let group-by = { |key-fn xs|
+    fold { |acc x|
+        let k = !{key-fn $x}
+        if !{has $acc $k} { [...$acc, $k: [...$acc[$k], $x]] } else { [...$acc, $k: [$x]] }
+    } [:] $xs
+}
+
+## The element of `xs` whose key is the median, ordered by `key-fn`.
+## Lower-middle on even length; fails on the empty list.
+let median-by = { |key-fn xs|
+    if !{is-empty $xs} {
+        fail [status: 1, message: "median-by: empty list has no median"]
+    } else {
+        let sorted = sort-list-by $key-fn $xs
+        return $sorted[$[(!{length $sorted} - 1) / 2]]
+    }
+}
+
+## The median element of `xs` ordered by its own value.
+let median = { |xs| median-by $identity $xs }
+
+## Zip two lists into a list of pairs (tail-recursive).
+let zip = { |a b|
+    let _go = { |xs ys acc|
+        if $[!{is-empty $xs} || !{is-empty $ys}] {
+            let reversed = !{reverse $acc}
+            return $reversed
+        } else {
+            let [xh, ...xt] = $xs
+            let [yh, ...yt] = $ys
+            _go $xt $yt [[$xh, $yh], ...$acc]
+        }
+    }
+    _go $a $b []
+}
+
+## Map f over items, then flatten one level.
+let flat-map = { |f items|
+    let mapped = !{map $f $items}
+    concat $mapped
+}
+
+## Find the first element matching pred, as an Option: `` `some`` the
+## matching element, or `` `none`` when nothing matches.
+let first-where = { |pred items|
+    if !{is-empty $items} { return `none } else {
+        let [head, ...rest] = $items
+        if !{$pred $head} { return `some $head } else { first-where $pred $rest }
+    }
+}
+
+## Eliminate an Option: the payload of `` `some``, or `default` for `` `none``.
+let option-or = { |default opt|
+    case $opt [
+        `none: { |_| return $default },
+        `some: { |x| return $x }
+    ]
+}
+
+## Zip items with their indices: enumerate $xs → [[index: 0, item: x0], ...].
+let enumerate = { |items|
+    let count = !{length $items}
+    map { |i| return [index: $i, item: $items[$i]] } !{range 0 $count}
+}
+
+## Flatten a list of lists one level (tail-recursive).
+let concat = { |xss|
+    let _go = { |remaining acc|
+        if !{is-empty $remaining} {
+            return $acc
+        } else {
+            let [head, ...rest] = $remaining
+            _go $rest [...$acc, ...$head]
+        }
+    }
+    _go $xss []
+}
+
+# Streaming (stdin, line by line).  `fold-lines` is a builtin; `map-lines`
+# and `filter-lines` are ergonomic wrappers around it, whose callbacks `echo`
+# because a stage feeds the next by writing.
+## Map a function over stdin lines, echoing results.
+let map-lines = { |f|
+    fold-lines { |_ line| echo !{$f $line} } ()
+}
+## Filter stdin lines by a predicate.
+let filter-lines = { |pred|
+    fold-lines { |_ line| if !{$pred $line} { echo $line } else {} } ()
+}
+## Apply a function to each stdin line.
+let each-line = { |f|
+    fold-lines { |_ line| !{$f $line}; return () } ()
+}
+
+# ANSI styling — `styled` looks up its code and asks `_ansi-ok` when it
+# writes, so the wrap is a no-op wherever colour is unsupported; no prelude
+# constant closes over that fact, since a prelude binding can only be a
+# value or a thunk and "is stdout a colour terminal" is neither.
+## Wrap `text` in an ANSI style code, resetting after: `style` is `reset`,
+## `bold`, `dim`, or one of `red green yellow blue magenta cyan`. Plain text
+## when colour is unsupported.
+let styled = { |style text|
+    if !{_ansi-ok} {
+        let code =
+            if    $[$style == 'reset']   { '\e[0m'    }
+            elsif $[$style == 'bold']    { '\e[1m'    }
+            elsif $[$style == 'dim']     { '\e[2m'    }
+            elsif $[$style == 'red']     { '\e[0;31m' }
+            elsif $[$style == 'green']   { '\e[0;32m' }
+            elsif $[$style == 'yellow']  { '\e[0;33m' }
+            elsif $[$style == 'blue']    { '\e[0;34m' }
+            elsif $[$style == 'magenta'] { '\e[0;35m' }
+            elsif $[$style == 'cyan']    { '\e[0;36m' }
+            else { fail [status: 2, message: "styled: unknown style '$style'"] }
+        return "$code$text\e[0m"
+    } else {
+        return $text
+    }
+}
+
+# Editor state — all _ed-* operations are host builtins registered by
+# the ral crate (see ral/src/repl/plugin/ed_builtins.rs).  The underscore
+# prefix hides them from `help`; plugin handlers call them directly
+# without going through any prelude wrapper layer.
+
+## Test if x is an element of items.
+let elem = { |x items|
+    if !{is-empty $items} { return false } else {
+        let [head, ...rest] = $items
+        if $[$head == $x] { return true } else { elem $x $rest }
+    }
+}
+
+## Test if items contains x (collection-first; delegates to `elem`).
+let contains = { |items x| elem $x $items }
+
+## De-duplicate a list, keeping the first occurrence of each element
+## (compared with `==`); the result preserves first-seen order.
+let nub = { |xs| fold { |acc x| if !{elem $x $acc} { $acc } else { [...$acc, $x] } } [] $xs }
+
+## The `` `command`` facts of an audit report's trail, in trail order;
+## every other kind of fact is passed over.  Usage:
+## `each { |c| echo $c[argv][0] } !{commands $r}`.
+let commands = { |report|
+    fold { |acc o|
+        case $o[what] [
+            `command: { |c| return [...$acc, $c] },
+            `write:   { |_| return $acc },
+            `read:    { |_| return $acc },
+            `grep:    { |_| return $acc },
+            `check:   { |_| return $acc },
+            `worker:  { |_| return $acc },
+            `act:     { |_| return $acc }
+        ]
+    } [] $report[trail]
+}
+
+## True when the audited body returned, false when it failed.
+let succeeded = { |report|
+    case $report[outcome] [
+        `ok:  { |_| return true },
+        `err: { |_| return false }
+    ]
+}
+
+## Decode `Bytes`, such as a `poll` result's `stdout`, into a String.
+## Usage: `bytes-to-string $s[stdout]`.
+let bytes-to-string = { |bytes| to-bytes $bytes | from-string }

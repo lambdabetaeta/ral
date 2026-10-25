@@ -19,7 +19,7 @@ pub(crate) struct Io {
     /// their own; `None` at the top level.  It decides pgid placement (a
     /// top-level standalone external may lead its own group, so a watchdog
     /// cancel can `kill(-pgid, …)` the whole subtree), and top level is one
-    /// conjunct of the foreground gate in `runtime/command/foreground.rs`;
+    /// conjunct of the foreground gate in `shell/exec/command/foreground.rs`;
     /// holding the session's [`TerminalLease`](crate::process::TerminalLease)
     /// is another.
     pub(crate) stage: Option<crate::process::Membership>,

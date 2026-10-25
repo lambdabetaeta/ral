@@ -85,9 +85,9 @@ impl Drop for ResourcesReleaseGuard {
 
 fn builtin_resources_hold_until_released(
     _args: &[ral_core::Value],
-    _mooring: &ral_core::types::Mooring,
+    _mooring: &ral_core::shell::runtime::Mooring,
     shell: &mut ral_core::Shell,
-) -> ral_core::types::Settled<ral_core::Value> {
+) -> ral_core::shell::runtime::Settled<ral_core::Value> {
     RESOURCES_STOP_ENTERED.store(true, std::sync::atomic::Ordering::Release);
     while !RESOURCES_STOP_RELEASE.load(std::sync::atomic::Ordering::Acquire) {
         std::thread::sleep(std::time::Duration::from_millis(2));
@@ -96,12 +96,12 @@ fn builtin_resources_hold_until_released(
     Ok(ral_core::Value::Unit)
 }
 
-static RESOURCES_TEST_BUILTINS: [ral_core::types::BuiltinEntry; 1] =
-    [ral_core::types::BuiltinEntry::new(
+static RESOURCES_TEST_BUILTINS: [ral_core::shell::runtime::BuiltinEntry; 1] =
+    [ral_core::shell::runtime::BuiltinEntry::new(
         std::borrow::Cow::Borrowed("test-resources-hold"),
         scheme_test_clear_block_forever,
         "test-only: hold until RESOURCES_STOP_RELEASE, then poll.",
-        ral_core::types::BuiltinBody::Static(builtin_resources_hold_until_released),
+        ral_core::shell::runtime::BuiltinBody::Static(builtin_resources_hold_until_released),
     )];
 
 /// The agent half surveys what this thread owns: the worker registry's

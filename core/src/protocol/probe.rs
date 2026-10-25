@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use crate::authority::policy::{Capabilities, GrantStack, GrantSummary};
 use crate::data::datum::{Datum, tag, untag};
 use crate::data::{Bytes, FOValue, Finite};
+use crate::shell::runtime::{Done, Owner, Sample, Value};
 use crate::ty::{Ty, Typed, closed_record};
-use crate::types::{Done, Owner, Sample, Value};
 use crate::{record, variant};
 
 /// One read of session state: the payload of `Frame::Probe`.

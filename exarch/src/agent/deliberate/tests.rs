@@ -8,10 +8,10 @@ use crate::record::AgentId;
 use genai::chat::ChatRole;
 use ral_core::Shell;
 use ral_core::Value;
+use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry, Mooring, Settled};
 use ral_core::ty::{Scheme, Ty};
 use ral_core::typecheck::Unifier;
 use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
-use ral_core::types::{BuiltinBody, BuiltinEntry, Mooring, Settled};
 use std::borrow::Cow;
 
 /// A sub-agent returns through `reply`: the payload is deposited raw, it
@@ -922,7 +922,7 @@ fn answer_suppresses_awaited_and_stopping_done_events_while_replaying_cards() {
     use crate::card::testkit::card_value;
     use crate::record::{Display, Record};
     use ral_core::protocol::probe::WorkerState;
-    use ral_core::types::{Done, DoneEvent, WorkerId};
+    use ral_core::shell::runtime::{Done, DoneEvent, WorkerId};
 
     DELIBERATE_STOP_ENTERED.store(false, std::sync::atomic::Ordering::Release);
     DELIBERATE_STOP_RELEASE.store(false, std::sync::atomic::Ordering::Release);
@@ -1089,7 +1089,7 @@ fn answer_propagates_severed_from_arrival_worker_probe() {
     use crate::card::testkit::card_value;
     use crate::record::{Display, Publish, Record, Recorded, Transient};
     use ral_core::carrier::Severed;
-    use ral_core::types::{Done, DoneEvent, WorkerId};
+    use ral_core::shell::runtime::{Done, DoneEvent, WorkerId};
 
     struct SeverOnCard {
         transport: Arc<ral_core::carrier::IdentityTransport>,

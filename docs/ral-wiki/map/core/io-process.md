@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-generated_at_date: 2026-10-17
+generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_date: 2026-10-25
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
 
@@ -31,7 +31,7 @@ cause that scope does not hold.
 It decides pgid *placement* (a top-level standalone external may lead its own
 group so a watchdog cancel can `kill(-pgid, …)` the whole subtree; anything
 inside a stage joins that stage's pgid) and says whether a child's reader is
-the caller or the next stage — never who may foreground. `pipeline/launch.rs`'s
+the caller or the next stage — never who may foreground. `shell/exec/pipeline/launch.rs`'s
 `stage_stdin` resolves a stage thread's stdin against its route — the upstream
 edge, or (`ByteIn::Parent`) a duplicate of the parent's own `shell.io.stdin`
 — never taking or moving it, since `Source::reader` only ever hands out a
@@ -181,7 +181,10 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   ([[decisions/260504_hot-path-cancellation|hot-path-cancellation]]). A scope's
   cancellation is a *join*: one private `resolve` over its chain's flags,
   naming the outermost node that attains it (`ScopeId`) and masking at a
-  shielded node (`shielded`) within the grace from the chain's first strike;
+  shielded node (`shielded`) within the grace from the chain's first strike.
+  `Scope::poll` returns `Result<(), Cancellation>` — cause and owner, no
+  runtime error or escape. `shell/runtime/flow.rs` converts it to a
+  non-catchable `Break::stopped`, preserving both; `Shell::poll` is that adapter.
   `POLL_SLICE` is every sliced wait's period. A
   signal handler raises an ambient cause instead — `REQUESTED_ROOT`, an
   absolute `AtomicU8`, or an interrupt on the `INTERRUPTS` count — which no
@@ -246,7 +249,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   status 128 when no kernel denial was attributed.
   `Launch::limit_resources` arms the pre-exec half and
   `ChildHandle::limit_processes` the post-spawn one; a brake that cannot be
-  armed is an `Err`, never a warning. `runtime::command::brake` caps the job
+  armed is an `Err`, never a warning. `shell::exec::command::brake` caps the job
   the child already sits in; when it cannot, the child is killed, any group it
   leads released, and the launch refused as sandbox-unavailable
   ([[design/two-enforcers|two-enforcers]]).

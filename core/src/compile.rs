@@ -3,10 +3,10 @@
 use crate::diagnostic::Rejection;
 use crate::elaborator::elaborate;
 use crate::ir::{Name, Toplevel};
+use crate::shell::runtime::Error;
 use crate::source::{FileId, Source};
 use crate::syntax::parser::{ParseError, parse_with};
 use crate::typecheck::{ReturnContract, SessionSchemes, TypeError, typecheck};
-use crate::types::Error;
 use std::path::Path;
 
 /// Why [`compile_and_typecheck`] produced no toplevel, kept structured until

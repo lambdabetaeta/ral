@@ -9,7 +9,6 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::authority::grant::GrantNarrower;
 use crate::data::FOValue;
 use crate::path::CwdPath;
 use crate::process::{CancelCause, DurableRoot, Scope, ScopeNode};
@@ -17,8 +16,9 @@ use crate::protocol::channel::WriteError;
 use crate::protocol::{
     Attach, Control, DispatchId, EngineSpec, Event, Origin, PROTOCOL_VERSION, Report, Root, Run,
 };
+use crate::shell::grant::GrantNarrower;
+use crate::shell::runtime::{DeferredSink, Desk, Fork, Runtime, Shell};
 use crate::sync::LockExt as _;
-use crate::types::{DeferredSink, Desk, Fork, Runtime, Shell};
 
 pub(crate) mod probe;
 
@@ -72,7 +72,7 @@ struct Surface {
     outlet: Outlet,
 }
 
-impl crate::types::EventSink for Surface {
+impl crate::shell::runtime::EventSink for Surface {
     fn emit(&self, ev: &FOValue) {
         if let Err(WriteError::Unencodable(e)) = (self.outlet)(self.id, Event::Surface(ev.clone()))
         {
@@ -119,7 +119,7 @@ impl Engine {
                 let cwd =
                     CwdPath::new(root.cwd.native().to_path_buf()).map_err(|e| e.to_string())?;
                 let mut shell = Shell::root(Arc::clone(&runtime), cwd);
-                crate::boot::seed_host_env(&mut shell);
+                crate::shell::boot::seed_host_env(&mut shell);
                 (installer.root)(root, &mut shell)?;
                 for (name, value) in &root.env {
                     shell.set_env_var(name, value);
@@ -164,7 +164,7 @@ impl Engine {
 
     /// Run dispatch `id` under the scope [`Scopes::open`] minted for it.
     pub(crate) fn run(&mut self, id: DispatchId, run: Run, rails: Rails, scope: &Scope) -> Report {
-        let req = crate::run::RunRequest {
+        let req = crate::shell::run::RunRequest {
             surface: Some(Arc::new(Surface {
                 id,
                 outlet: rails.outlet,
@@ -172,7 +172,7 @@ impl Engine {
             deferred: rails.deferred,
             desk: Some(rails.desk),
             fork: Some(rails.fork),
-            ..crate::run::RunRequest::from(run)
+            ..crate::shell::run::RunRequest::from(run)
         };
         self.shell.run_under(scope, req).into_report(&self.shell)
     }

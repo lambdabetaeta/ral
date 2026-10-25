@@ -18,7 +18,7 @@ use base64::Engine;
 use ral_core::Shell;
 use ral_core::Value as RalValue;
 use ral_core::data::FOValue;
-use ral_core::types::{DeferredSink, TitlePolicy};
+use ral_core::shell::runtime::{DeferredSink, TitlePolicy};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -52,7 +52,7 @@ pub(crate) const BINDING_IDLE_CALLS: u64 = 256;
 pub(crate) const LARGE_BINDING_BYTES: u64 = 1024 * 1024;
 
 pub(crate) fn arm_session_ledgers(shell: &mut Shell) {
-    shell.arm_binding_lease(ral_core::types::BindingLease {
+    shell.arm_binding_lease(ral_core::shell::runtime::BindingLease {
         idle_calls: BINDING_IDLE_CALLS,
         large_binding_bytes: LARGE_BINDING_BYTES,
     });
@@ -60,7 +60,7 @@ pub(crate) fn arm_session_ledgers(shell: &mut Shell) {
 }
 
 /// The prelude baked into this binary at build time by `build.rs`.
-pub static PRELUDE: ral_core::boot::BakedPrelude = ral_core::baked_prelude!();
+pub static PRELUDE: ral_core::shell::boot::BakedPrelude = ral_core::baked_prelude!();
 
 /// A successful tool run, kept in named pieces so `agent::digest::render` can
 /// clip each section against its own cap and one oversized stream cannot crowd
@@ -182,14 +182,15 @@ pub(crate) fn run_shell(
 /// `edit-replace` both match verbatim, so a line rendered in part is a line that
 /// cannot be edited. Spending the byte budget instead costs whole rows, and each
 /// container says how many it dropped.
-const VALUE_PRINT_PARAMS: ral_core::builtins::PrintParams = ral_core::builtins::PrintParams {
-    max_width: 120,
-    max_string: 0,
-    max_depth: 3,
-    min_quote_hashes: 1,
-    quote_bytes: true,
-    max_bytes: 16 * 1024,
-};
+const VALUE_PRINT_PARAMS: ral_core::shell::builtins::PrintParams =
+    ral_core::shell::builtins::PrintParams {
+        max_width: 120,
+        max_string: 0,
+        max_depth: 3,
+        min_quote_hashes: 1,
+        quote_bytes: true,
+        max_bytes: 16 * 1024,
+    };
 
 /// Render a first-order value as the text the `VALUE` section carries.  A top-level
 /// string or byte string is a payload and passes through raw, so file windows,
@@ -199,7 +200,7 @@ pub(crate) fn ral_value_to_text(value: &FOValue) -> Option<String> {
         FOValue::Unit => None,
         FOValue::String { value } => Some(value.clone()),
         FOValue::Bytes { value } => Some(String::from_utf8_lossy(value).into_owned()),
-        other => Some(ral_core::builtins::pretty_print(
+        other => Some(ral_core::shell::builtins::pretty_print(
             &RalValue::from(other.clone()),
             0,
             &VALUE_PRINT_PARAMS,

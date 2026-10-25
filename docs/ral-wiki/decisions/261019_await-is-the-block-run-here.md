@@ -439,13 +439,13 @@ code renders anything.
 ## Where
 
 `await_handle`, `join`, `claim_first`, `builtin_poll`, `builtin_is_done` in
-`core/src/builtins/concurrency/eliminate.rs`; `HandleState`, `Sample`,
-`CompletionPermit`, `Stamp` in `core/src/types/handle.rs`; `Birth`,
-`convert_own_stop`, `exit_brood` in `core/src/builtins/concurrency/birth.rs`;
-`spawn_form` in `core/src/builtins/concurrency.rs`; `Cradle`, `Brood`,
-`ScopeOwner` in `core/src/types/handle/brood.rs`; `Owner` in
-`core/src/types/shell/workers.rs`; `TitlePolicy` in
-`core/src/types/mooring.rs`; `WorkerRow` in `core/src/protocol/probe.rs`. The
+`core/src/shell/builtins/concurrency/eliminate.rs`; `HandleState`, `Sample`,
+`CompletionPermit`, `Stamp` in `core/src/shell/runtime/handle.rs`; `Birth`,
+`convert_own_stop`, `exit_brood` in `core/src/shell/builtins/concurrency/birth.rs`;
+`spawn_form` in `core/src/shell/builtins/concurrency.rs`; `Cradle`, `Brood`,
+`ScopeOwner` in `core/src/shell/runtime/handle/brood.rs`; `Owner` in
+`core/src/shell/runtime/state/workers.rs`; `TitlePolicy` in
+`core/src/shell/runtime/mooring.rs`; `WorkerRow` in `core/src/protocol/probe.rs`. The
 runtime narrative is [[internals/cancellation|cancellation]] and
 [[internals/output-capture-and-detachment|output-capture-and-detachment]];
 the normative text is `docs/SPEC.md` §11.

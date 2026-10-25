@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
+generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
 generated_at_date: 2026-10-25
-covers_paths: [core/src/data.rs, core/src/data/, core/src/types/value/first_order.rs, core/src/seed.rs, core/src/seed/, core/src/frame.rs, core/src/authority/grant/spawn.rs]
+covers_paths: [core/src/data.rs, core/src/data/, core/src/shell/runtime/value/first_order.rs, core/src/seed.rs, core/src/seed/, core/src/frame.rs, core/src/shell/grant/spawn.rs]
 ---
 
 # Map: core / transport
@@ -26,7 +26,7 @@ indistinguishable from an in-process fork exactly when no hop drops a field or
 collapses a variant. The discipline is mechanical — an exhaustive match makes a
 new variant fail the build, a field-complete struct literal a new field:
 
-- *value walks* (`types/value/first_order.rs`) match `Value` / `FOValue` exhaustively, once forward and once back;
+- *value walks* (`shell/runtime/value/first_order.rs`) match `Value` / `FOValue` exhaustively, once forward and once back;
 - *hydration* installs a complete `HandlerFrame` through
   `HandlerStack::push_frame` rather than re-deriving fields like
   its `FrameKind`, so a hydrated alias stays removable by `unalias`; a
@@ -66,13 +66,13 @@ typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
   `Receipt`, ...), below the checker, which reads their types off the
   declarations (`ErrorRecord::ty()`); `poll`'s polymorphic shape is
   `Io::ty().extend(..)` over them. The doors that mint them sit above
-  (`types::error`, `types::audit`).
+  (`shell::runtime::error`, `shell::runtime::audit`).
 - `data/byte_encoding.rs` — byte strings serialize to base64 in JSON
   and native bytes in binary codecs. Binary decoding copies or takes the
   whole byte buffer. Each decoder requires its encoding.
 
 **One walk each way joins `Value` and `FOValue`
-(`types/value/first_order.rs`).** `FOValue::walk` folds a `Value`, handing each
+(`shell/runtime/value/first_order.rs`).** `FOValue::walk` folds a `Value`, handing each
 leaf that is not data to the caller as a borrowed `Leaf`; `unwalk` and
 `for_each_ext` are its converses. `from_runtime`, `try_from` and `scrubbed`
 differ only in that leaf function, and so do `into_runtime` and `From<FOValue>`.
@@ -85,7 +85,7 @@ classifies it — a block, a function, a handle:
 - `FOValue::scrubbed` makes the conversion total by writing every such leaf as
   its `` `opaque [type: …] `` placeholder — the flat wire's treatment, taken by
   `Mooring::surface`;
-- the fork's scrub (`core/src/types/shell/scrub.rs`,
+- the fork's scrub (`core/src/shell/runtime/state/scrub.rs`,
   [[map/core/shell-state|shell-state]]) replaces only `Handle`s, with the same
   placeholder, and keeps closures live, since this wire interns them. It
   reaches every handle the fork holds — in a binding's data, in every scope a
@@ -102,7 +102,7 @@ a `Rec` group's siblings share one, and the linear root scan makes interning
 O(roots²). A value two closures mention is written in both rows
 ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
 Σ never crosses: a row is ρ alone, and the receiving shell's own natives and
-prelude answer for a decoded closure exactly as `crate::types::lookup` reads
+prelude answer for a decoded closure exactly as `crate::shell::runtime::lookup` reads
 them for any other, through the receiver's `Signature`.
 
 - `InternCtx::intern_env` only *reserves* a row and queues the environment;
@@ -121,7 +121,7 @@ them for any other, through the receiver's `Signature`.
 - `SerialEnvSnapshot::into_runtime`, given a `WireDecoder`, is the sole
   wire→runtime conversion of an environment.
 
-## The seed — `core/src/seed.rs`, `core/src/authority/grant/spawn.rs`
+## The seed — `core/src/seed.rs`, `core/src/shell/grant/spawn.rs`
 
 **`EngineSeed` is a `Bequest` in wire form, and a codec and nothing else:
 `scope_table`, `env`, `context`, the parent's `sources`, `terms`, `fixings` and
@@ -167,12 +167,13 @@ each alias arm with its scheme
 - `SpawnGrant` — `Inherit` (⊤), `Base(name)`, or `Restrict(record)` — crosses
   **unfrozen**: a `` `cwd `` place in a grant names the cwd of the shell it
   governs, so the freeze happens on the child's side. `SpawnGrant::narrow_onto`
-  resolves it against that shell's cwd and home and pushes one session layer —
+  uses `Shell::freeze_ctx` to resolve it against the child's environment, cwd
+  and scratch and pushes one session layer —
   the step `Shell::child_of` takes for an adopted identity fork
   (`IdentityTransport::adopt_parked`) and a sealed child alike.
   `Base` reaches the host's `GrantNarrower`, since core has
   no base-tag lexicon; `Restrict` goes through
-  `authority::grant::decode_capability_map`
+  `shell::grant::decode_capability_map`
   ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]).
 
 ## Framing — `core/src/frame.rs`

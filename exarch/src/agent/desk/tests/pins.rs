@@ -136,10 +136,10 @@ fn live_surfaces_record_their_seam_twins() {
         }));
     let applier = SurfaceApplier::new(d.services.log.borrow().record_emitter());
 
-    let read = ral_core::types::Observation::instant(
+    let read = ral_core::shell::runtime::Observation::instant(
         None,
         None,
-        ral_core::types::Observed::Read(ral_core::fact::Read {
+        ral_core::shell::runtime::Observed::Read(ral_core::fact::Read {
             path: "a.rs".into(),
         }),
     );
@@ -149,19 +149,19 @@ fn live_surfaces_record_their_seam_twins() {
         payload: Some(Box::new(FOValue::List { items: vec![] })),
     });
     applier.surface(
-        &ral_core::types::DoneEvent {
-            id: ral_core::types::WorkerId(7),
+        &ral_core::shell::runtime::DoneEvent {
+            id: ral_core::shell::runtime::WorkerId(7),
             title: "<block>".into(),
             elapsed_ms: 0,
-            outcome: ral_core::types::Done::Ok,
+            outcome: ral_core::shell::runtime::Done::Ok,
         }
         .to_surface(),
     );
     applier.surface(
-        &ral_core::types::Notice::Reap(ral_core::types::ReapNotice {
-            id: ral_core::types::WorkerId(1),
+        &ral_core::shell::runtime::Notice::Reap(ral_core::shell::runtime::ReapNotice {
+            id: ral_core::shell::runtime::WorkerId(1),
             title: "sleep 10".into(),
-            cause: ral_core::types::ReapCause::Retention,
+            cause: ral_core::shell::runtime::ReapCause::Retention,
         })
         .to_surface(),
     );

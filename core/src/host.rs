@@ -1,10 +1,10 @@
 //! The host process's facts: its environment, working directory, user and
 //! home, temp directory, XDG bases and ral's dot-files.
 //!
-//! [`crate::boot`] boots a `Shell` *in* a host process; this only reports on
-//! one.  Nothing here reads language state: a `within [env: …]` overlay never
-//! applies, and code holding a shell threads its overlay through
-//! [`EnvVars::home`](crate::types::EnvVars::home) instead.  This module takes
+//! [`crate::shell::boot`] boots a `Shell` *in* a host process; this only reports on
+//! one.  The free functions read no language state: a `within [env: …]` overlay
+//! never applies, and code holding a shell threads its overlay through
+//! [`EnvVars::home`] instead.  This module takes
 //! from the crate only the pure rules of [`crate::path`] and the site
 //! vocabulary, so the host's facts are read here and only here: [`var`],
 //! [`var_os`], [`vars_os`] and [`temp_dir`] are the one reader of the host
@@ -13,6 +13,9 @@
 //! A fact that is absent stays absent: no `.`, no `/`, no placeholder.
 //! Substituting one would spend the caller's only chance to say something
 //! true, and every caller has a different true thing to say.
+
+mod env;
+pub use env::{EnvVars, EnvVarsIter};
 
 use std::ffi::OsString;
 use std::path::PathBuf;

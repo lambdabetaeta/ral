@@ -1,7 +1,7 @@
 //! The embedded agent library, `data/agent.ral`, and the docs it carries.
 
+use ral_core::shell::runtime::{Break, Mooring, Settled, sig};
 use ral_core::source::SourceOrigin;
-use ral_core::types::{Break, Mooring, Settled, sig};
 use ral_core::{Shell, Value};
 
 const AGENT_SOURCE: &str = include_str!("../data/agent.ral");
@@ -14,7 +14,7 @@ const AGENT_SOURCE: &str = include_str!("../data/agent.ral");
 /// If sourcing raises a ral error (re-surfaced as a signal) or escapes.
 pub fn install_agent_library(mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let origin = SourceOrigin::named("<exarch:agent>");
-    ral_core::load::evaluate_source(mooring, shell, AGENT_SOURCE, &origin, None).map_err(
+    ral_core::shell::load::evaluate_source(mooring, shell, AGENT_SOURCE, &origin, None).map_err(
         |e| match e {
             Break::Error(err) => sig(format!("exarch agent library: {}", err.message)),
             other @ Break::Escape(_) => other,

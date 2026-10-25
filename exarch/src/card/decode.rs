@@ -5,7 +5,7 @@
 //! user-facing act.  `shell_eval::surface::decode_surface` calls in here.
 
 use ral_core::data::FOValue;
-use ral_core::types::WriteOutcome;
+use ral_core::shell::runtime::WriteOutcome;
 
 use super::change::Change;
 use super::diff::{Diff, Hunk, Row, Seg};

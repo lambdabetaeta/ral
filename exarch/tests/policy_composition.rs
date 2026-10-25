@@ -14,8 +14,8 @@ use exarch::policy::{Invocation, for_invocation};
 use ral_core::authority::policy::{GrantLayer, GrantStack};
 use ral_core::path::XdgKind;
 use ral_core::path::{LeafMode, Reading, Resolver, Writing, locate};
+use ral_core::shell::runtime::{Break, Settled, Shell};
 use ral_core::test_access::check_file;
-use ral_core::types::{Break, Settled, Shell};
 use std::path::PathBuf;
 
 exarch::pre_main_ctor!();
@@ -64,7 +64,7 @@ fn on_path(name: &str) -> String {
     });
     let cwd = ral_core::test_helper::process_cwd();
     let object = ral_core::path::RealPath::of(
-        &Resolver::at(&ral_core::types::EnvVars::new(), &cwd).anchor(&hit),
+        &Resolver::at(&ral_core::host::EnvVars::new(), &cwd).anchor(&hit),
     );
     ral_core::path::shown(object.expect("a PATH hit exists").as_path())
 }

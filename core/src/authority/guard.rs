@@ -1,7 +1,9 @@
-//! In-process enforcement: judge actions against the live grant stack,
-//! explain refusals, and record denials at the shell boundary.
+//! In-process enforcement: judge actions against a grant stack and explain
+//! refusals. The shell records denials at its boundary.
 
 mod enforce;
-mod shell;
 
-pub(crate) use enforce::{Denial, deny_head};
+pub(crate) use enforce::{
+    Denial, Refusal, check_device_name, check_exec, check_flag, check_fs_exact, deny_head,
+    fs_denial,
+};

@@ -9,10 +9,10 @@ use ral_core::data::datum::{Datum as _, untag};
 use ral_core::process::CancelCause;
 use ral_core::protocol::probe::{WorkerRow, WorkerState};
 use ral_core::protocol::{Ending, EnquiryError, Program, Report, Run};
+use ral_core::shell::runtime::{DeferredSink, HookName};
 use ral_core::source::SourceOrigin;
 use ral_core::sync::LockExt as _;
 use ral_core::text::plural;
-use ral_core::types::{DeferredSink, HookName};
 use ral_core::{Captured, RequestedTerminalAccess, Value};
 use ral_core::{errln, outln};
 use std::sync::{Arc, Mutex};
@@ -244,7 +244,7 @@ mod tests {
         WorkerRow {
             id,
             title: title.to_string(),
-            owner: ral_core::types::Owner::Session,
+            owner: ral_core::shell::runtime::Owner::Session,
             state,
             started: 0,
             elapsed: ral_core::data::Finite::from(0),
@@ -260,7 +260,7 @@ mod tests {
             if running {
                 WorkerState::Running
             } else {
-                WorkerState::Ready(ral_core::types::Done::Ok)
+                WorkerState::Ready(ral_core::shell::runtime::Done::Ok)
             },
         )
     }

@@ -30,7 +30,7 @@ use serde::de::DeserializeOwned;
 use strum::IntoStaticStr;
 
 use crate::authority::policy::Ungoverned;
-use crate::host;
+use crate::host::{self, EnvVars};
 use crate::path::walk::{Access, dangling, walk_dir_made};
 use crate::path::{
     Dir, EntryName, Judged, Kind, LeafMode, LexicalPath, Located, Reading, Resolver, Stat,
@@ -38,7 +38,6 @@ use crate::path::{
 };
 use crate::site::{Silent, site};
 use crate::sync::LockExt as _;
-use crate::types::EnvVars;
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]

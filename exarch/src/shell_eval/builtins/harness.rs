@@ -24,11 +24,11 @@ use crate::enquiry::{
 use crate::schedule::ScheduleInfo;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
+use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry, Fork, Mooring, Settled, sig};
 use ral_core::ty::Site;
 use ral_core::ty::{Kind, Row, RowVar, Scheme, Ty, TyVar, Typed as _, closed_record, open_variant};
 use ral_core::typecheck::Unifier;
 use ral_core::typecheck::builtins::{fun, mk_scheme as scheme, pure, thunk};
-use ral_core::types::{BuiltinBody, BuiltinEntry, Fork, Mooring, Settled, sig};
 use ral_core::{Shell, SpawnGrant, Value};
 use std::borrow::Cow;
 use std::sync::Arc;

@@ -106,9 +106,9 @@ whose precedence rule stands unchanged.
 
 ## Where
 
-`Frame::Guard` and `Frame::Cleanup` in `core/src/evaluator/machine.rs`;
-`Shell::shield` in `core/src/types/shell/mod.rs`; `Scope::shielded` and
+`Frame::Guard` and `Frame::Cleanup` in `core/src/shell/evaluator/machine.rs`;
+`Shell::shield` in `core/src/shell/runtime/state/mod.rs`; `Scope::shielded` and
 `resolve` in `core/src/process/cancel.rs`; `Mooring::cleanup_grace`;
 `Run::cleanup_grace` in `core/src/protocol.rs`; `CollectState::cancel_all` in
-`core/src/runtime/pipeline/collect.rs`. See
+`core/src/shell/exec/pipeline/collect.rs`. See
 [[internals/cancellation|cancellation]].

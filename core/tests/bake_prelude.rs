@@ -14,7 +14,7 @@ use ral_core::ir::{CompKind, Phrase, Toplevel};
 
 /// Re-bake the prelude from source so the test owns the annotated toplevel.
 fn rebake() -> Toplevel {
-    let src = include_str!("../src/prelude.ral");
+    let src = include_str!("../src/shell/prelude.ral");
     let ast = ral_core::syntax::parser::parse(src).expect("prelude parse");
     let top = ral_core::elaborator::elaborate(&ast, [], None).expect("elaborate");
     ral_core::bake_prelude(&top, &common::manifest(&ral_core::HostSurface::default()))

@@ -1,7 +1,3 @@
----
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
----
-
 # Authority's three carriers, and why they don't collapse
 
 **Authority changes its form as it travels — from a rule you write, to the act of
@@ -41,9 +37,8 @@ allowed, right now?* — turns on details a written rule does not contain:
   the live environment before "inside my project" means anything.
 
 So the combined form is not a tidier rule — it is *the act of judging*, and an act
-is a verb, not a noun. It is realised as a function over the live `Context`: each
-`authority::guard::check_*(&Context, …)` folds the whole stack of rules and answers one
-specific request as it arrives. The fold is the guarantee that a verdict was
+is a verb, not a noun. Each `authority::guard::check_*(&GrantStack, …)` folds
+the whole stack of rules and answers one specific request as it arrives. The fold is the guarantee that a verdict was
 weighed against *all* the rules at once, never one rule in isolation — held by
 the function bodies, not by a witness type
 ([[decisions/260605_witness-collapse|witness-collapse]]).
@@ -55,7 +50,8 @@ understand different languages ([[design/two-enforcers|two-enforcers]]):
 
 - **ral itself** is the sharp judge — it sees the exact command and arguments,
   knows where it is running, and rules on each action as it happens. So it never
-  pre-decides; it judges live. That is the function over `Context`.
+  pre-decides; it judges live. The guard returns domain refusals; the shell
+  supplies the stack and interprets those refusals as runtime errors.
 - **the operating system's sandbox** is the blunt but powerful sentry — it can
   physically stop a runaway child program, but it is dim: you must hand it a flat
   list of "these locations yes, these no" *up front*, and it cannot ask

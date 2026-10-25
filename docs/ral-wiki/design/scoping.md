@@ -51,10 +51,10 @@ The lexical scoping above is one mechanism; *crossing a shell boundary* is a
 different one, and they should not be conflated.
 
 - **Lexical scope within a shell** splits ρ from Σ. `Env`
-  (`core/src/types/env.rs`) is ρ alone: a finite map from names to bindings,
-  read with no fallback. `Signature` (`core/src/types/signature.rs`) is Σ —
+  (`core/src/shell/runtime/env.rs`) is ρ alone: a finite map from names to bindings,
+  read with no fallback. `Signature` (`core/src/shell/runtime/signature.rs`) is Σ —
   the natives and the frozen prelude, constants of the running shell, one per
-  shell, `Arc`-shared into every fork. `crate::types::lookup(name, env, sig)`
+  shell, `Arc`-shared into every fork. `crate::shell::runtime::lookup(name, env, sig)`
   is the one resolution rule: ρ, then Σ's prelude, then Σ's natives. A
   binding that shadows a Σ name is an entry of ρ and wins; a name only Σ
   answers is never an entry, so `Env::restrict` never copies it.

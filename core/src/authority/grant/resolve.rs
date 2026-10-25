@@ -6,8 +6,8 @@ use crate::authority::policy::{
     Capabilities, ExecAllow, ExecDeny, ExecGrant, ExecKey, ExecRules, Extent, FsLayer, FsPolicy,
     GrantLayer, GrantPath, Rule,
 };
+use crate::host::EnvVars;
 use crate::path::{self, Excluded, FrozenPath, Trace, command_name_key};
-use crate::types::EnvVars;
 
 /// How a walked key becomes a rule, by the polarity that walked it: an
 /// allowance keeps the position, an exclusion the holds.

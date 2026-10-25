@@ -1,8 +1,8 @@
 ---
 status: active
 generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-verified_at_commit: da9576de
-verified_at_date: 2026-10-23
+verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+verified_at_date: 2026-10-25
 anchors: [OwnDir, UserFile, OwnError, Ungoverned, read_named, create_named, walk_dir_made, lock_strict, AccountHome, GrantNarrower, FreezeCtx, Pointer]
 ---
 
@@ -309,7 +309,7 @@ too: exarch has four, ral one and synod two.
 `Visibility`, `remove`, `rename`); `core/src/authority/policy/fs.rs` (`Ungoverned`);
 `core/src/host.rs` (`var`, `var_os`, `vars_os`, `temp_dir`, and the account-home
 fallback in `xdg`); `core/src/sync.rs` (`lock_strict`); `core/src/authority/grant/freeze.rs`
-(`FreezeCtx`, the `scratch` place) and `core/src/authority/grant/spawn.rs`
+(`FreezeCtx`, the `scratch` place) and `core/src/shell/grant/spawn.rs`
 (`GrantNarrower`); `exarch/src/app.rs` (`App::own`, `Scratch`, `RunLock`);
 `clippy.toml` (the bans and their replacements); `core/src/site.rs`
 (the authority-mint variants); `core/tests/sites.rs` (typed-site enforcement). The companion record is

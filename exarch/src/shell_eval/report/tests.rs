@@ -3,7 +3,7 @@ use ral_core::data::FOValue;
 use ral_core::data::Finite;
 use ral_core::process::CancelCause;
 use ral_core::protocol::probe::WorkerState;
-use ral_core::types::{Done, Owner};
+use ral_core::shell::runtime::{Done, Owner};
 
 fn born(ids: &[u64]) -> HashSet<u64> {
     ids.iter().copied().collect()

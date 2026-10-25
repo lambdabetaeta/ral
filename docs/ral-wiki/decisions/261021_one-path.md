@@ -1,6 +1,9 @@
 ---
 status: active
 generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
+verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+verified_at_date: 2026-10-25
+anchors: [Trace, RealPath, Hold, Excluded, Dir, Located, walk, walk_excluded, GrantLayer, GrantPath, Extent, GrantStack::judge, rehold, Walk, AdmittedWalk, Shell::admitted_walk]
 ---
 
 # One path
@@ -110,7 +113,9 @@ its authored form beside its resolution, and the two could disagree.
 - **`core/src/path/identity.rs`** — the two readings.
 - **`core/src/authority/policy/{lattice,fs,exec}.rs`** — `GrantLayer`, `GrantPath`,
   `Extent`, `GrantStack::{judge, rehold}`.
-- **`core/src/path/tree/walk.rs`** — ral's own enumeration.
+- **`core/src/path/tree/walk.rs`** — domain enumeration (`Walk`), with
+  **`core/src/shell/runtime/walk.rs`** the live-shell adapter (`AdmittedWalk`,
+  `Shell::admitted_walk`).
 
 ## Verification
 

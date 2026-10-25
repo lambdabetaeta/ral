@@ -1,12 +1,12 @@
 ---
-generated_at_commit: 61c288f
-generated_at_date: 2026-10-21
-covers_paths: [core/src/prelude.ral]
+generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_date: 2026-10-25
+covers_paths: [core/src/shell/prelude.ral]
 ---
 
-# Map: core / prelude
+# Map: core / shell / prelude
 
-`core/src/prelude.ral` is the standard library, written in ral and baked into the
+`core/src/shell/prelude.ral` is the standard library, written in ral and baked into the
 binary at build time. `build.rs` reads it once, scanning its top-level `let`
 bindings into `PRELUDE_EXPORTS` and the `##` summary above each into
 `PRELUDE_DOCS` — the table `help` and `explain` print from

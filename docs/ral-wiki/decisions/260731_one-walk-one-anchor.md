@@ -118,7 +118,7 @@ what `.` means.
 
 Cite: `core/src/path/which.rs` (`path_dirs`, `search`,
 `PathSearch`, `locate_in`, `windows_command_candidates`),
-`core/src/types/shell/context.rs`
+`core/src/shell/runtime/state/context.rs`
 (`Context::search_cwd`), `core/src/runtime/command/identity.rs` (`walk_path`,
-`policy_names`, `absolutize`), `core/src/runtime/command/vet.rs`
+`policy_names`, `absolutize`), `core/src/shell/exec/command/vet.rs`
 (`check_existence`).

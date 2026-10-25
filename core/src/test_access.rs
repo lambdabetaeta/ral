@@ -30,9 +30,9 @@ use crate::path::Walked;
 use crate::protocol::Frame;
 use crate::protocol::channel::{WireChannel, WireStream};
 use crate::protocol::probe::Probe;
+use crate::shell::runtime::{BuiltinEntry, Settled, Shell};
 use crate::ty::{Scheme, Ty};
 use crate::typecheck::Unifier;
-use crate::types::{BuiltinEntry, Settled, Shell};
 
 /// The thunk a case arm forces: its literal block, or a thunk in hand.
 pub fn case_arm_val(arm: &CaseArm) -> &Val {
@@ -309,7 +309,7 @@ pub fn grant_depth(transport: &dyn Transport) -> Result<u64, ProbeError> {
 
 /// `Shell::workers` on the engine behind `transport`, each entry's handle
 /// included, for a test watching a worker outlive its engine.
-pub fn workers(transport: &IdentityTransport) -> Vec<crate::types::WorkerEntry> {
+pub fn workers(transport: &IdentityTransport) -> Vec<crate::shell::runtime::WorkerEntry> {
     transport.inspect(Shell::workers)
 }
 

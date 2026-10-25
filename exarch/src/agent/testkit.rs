@@ -19,10 +19,10 @@ use ral_core::Value;
 use ral_core::engine::EngineInstaller;
 use ral_core::io::terminal::TerminalState;
 use ral_core::own::{OwnDir, TestDir};
+use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry, Mooring, Settled};
 use ral_core::ty::{Scheme, Ty};
 use ral_core::typecheck::Unifier;
 use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
-use ral_core::types::{BuiltinBody, BuiltinEntry, Mooring, Settled};
 use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -120,7 +120,7 @@ pub(crate) fn bare_transport() -> ral_core::carrier::IdentityTransport {
 
 /// Every worker `session`'s engine holds, handles included, so a test can
 /// watch one outlive the engine.
-pub(crate) fn workers(session: &Avatar) -> Vec<ral_core::types::WorkerEntry> {
+pub(crate) fn workers(session: &Avatar) -> Vec<ral_core::shell::runtime::WorkerEntry> {
     let crate::agent::seat::SeatKind::Identity(transport) = session.seat.kind() else {
         panic!("a test trunk sits on an identity seat");
     };

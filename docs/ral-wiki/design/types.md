@@ -105,7 +105,7 @@ local: a `let` demands a value. `annotate` wraps the recorded nodes.
 `M` with its stdout captured and returns precisely the bytes `M` wrote —
 nothing stripped, nothing decoded
 (`CompKind::Capture` in `core/src/ir.rs`, stepped by the `Frame::Capture` rules
-in `core/src/evaluator/machine.rs`). Its one further clause is handler
+in `core/src/shell/evaluator/machine.rs`). Its one further clause is handler
 semantics rather than decoding: bytes `M` wrote before failing are flushed to
 the sink the capture replaced rather than lost.
 

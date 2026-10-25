@@ -6,11 +6,11 @@ anchors: [builtin_registry, CORE_BUILTINS, WATCH_BUILTIN, BuiltinEntry, fixed_ar
 
 # Builtins: structure and registration
 
-A builtin is a Rust atom the shell keeps in-process. `core/src/builtins/` defines
+A builtin is a Rust atom the shell keeps in-process. `core/src/shell/builtins/` defines
 them; the question this page answers is how one declaration stays coherent
 across the typechecker and the evaluator.
 
-**One macro binds the facets.** `builtin_registry!` (in `builtins.rs`) declares
+**One macro binds the facets.** `builtin_registry!` (in `shell/builtins.rs`) declares
 each builtin as one row, collapsed into the `CORE_BUILTINS` static
 (`&[BuiltinEntry]`):
 

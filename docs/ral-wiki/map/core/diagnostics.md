@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 27efdf28
+generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
 generated_at_date: 2026-10-25
-covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/compile.rs, core/src/syntax/report.rs, core/src/io/terminal.rs, core/src/io/terminal/stderr.rs, core/src/text.rs, core/src/io/ansi.rs, core/src/types/exit_hints.rs]
+covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/compile.rs, core/src/syntax/report.rs, core/src/io/terminal.rs, core/src/io/terminal/stderr.rs, core/src/text.rs, core/src/io/ansi.rs, core/src/shell/runtime/exit_hints.rs]
 ---
 
 # Map: core / diagnostics
@@ -23,7 +23,7 @@ the IR free of presentation state.
 ## Runtime source identity — `SourceDb`
 
 **A runtime error carries the span of the node it broke on, not a cursor the
-evaluator wrote down.** `Error` (`types/error.rs`) holds
+evaluator wrote down.** `Error` (`shell/runtime/error.rs`) holds
 `span: Option<Span>` — `None` at mint, stamped by the break path with the
 innermost enclosing node's span as it unwinds (`Error::at_span`). Since a
 `Span` is already tagged with its `FileId`, the source identity is the
@@ -82,7 +82,7 @@ exits on (2 parse, 1 type), instead of registering into the session's
 `SourceDb`, since a failed compile leaves no live span to justify a permanent,
 unreclaimable registry slot. `compile::CompileError` (`Parse` or `Types`)
 becomes one with `reject`. A run that never reached evaluation carries one in
-its `StaticDiagnostics` (`run.rs`) — `Compile(Rejection)`, beside `Host`, a
+its `StaticDiagnostics` (`shell/run.rs`) — `Compile(Rejection)`, beside `Host`, a
 spanless pre-run failure (an unknown hook, a non-ground argument) — whose
 `render` is what every host on the wire prints through `Report::Static`
 ([[map/core/engine-protocol|engine-protocol]]). `Compile` is not folded into
@@ -108,10 +108,10 @@ is the compact one-liner. The builders sit with their errors:
 `LexErrorKind::headline` alone; a plain `P0001` carries its own help, the
 message saying what is wrong and the help what to write), `TypeError::report` in
 `typecheck/explain.rs`, and `Error::render` / `Error::compact`
-(`types/error.rs`, resolving the error's `Span` against a `SourceDb`).
+(`shell/runtime/error.rs`, resolving the error's `Span` against a `SourceDb`).
 Rendering tests live inline with each owner: generic renderer tests in
 `diagnostic.rs`, parse and lexer reports in `syntax/report.rs`, type reports in
-`typecheck/explain.rs`, and runtime source selection in `types/error.rs`.
+`typecheck/explain.rs`, and runtime source selection in `shell/runtime/error.rs`.
 
 `Error::render` dispatches on where the error came from, not what the input
 looked like: a carried `rejection` draws its own report, so a broken plugin,
@@ -154,11 +154,11 @@ in `typecheck/explain.rs` ([[map/core/typecheck|typecheck]]).
 the front end's, never a probe of its own null stdio. Before any seat,
 `stderr_color` answers from one memoised `Auto` probe, so early-startup errors
 still colour, and `ui_color` is false: only a front end has a UI. The
-`$TERMINAL` map is `impl From<&TerminalState> for Value` (`types/value.rs`).
+`$TERMINAL` map is `impl From<&TerminalState> for Value` (`shell/runtime/value.rs`).
 Value-output styling (the REPL's `=> ` prefix) lives instead in the `ral`
 crate's [[map/repl/loop|repl::theme]].
 
-## Exit-code hints — `core/src/types/exit_hints.rs`
+## Exit-code hints — `core/src/shell/runtime/exit_hints.rs`
 
 `ExitHints` is a pure `(command basename, exit-status) → explanation` lookup table
 (two maps, `*` the wildcard),

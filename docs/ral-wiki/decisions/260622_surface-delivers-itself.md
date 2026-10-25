@@ -109,10 +109,10 @@ a new scope makes a new channel ([[design/engine-protocol|engine-protocol]],
 
 ## Where
 
-- `core/src/types/mooring.rs` — `DeferredSink`, `Mooring::for_thread`.
-- `core/src/types/handle.rs` — `CompletionPermit`; `core/src/types/handle/surface.rs` — `DeferredSurface`.
-- `core/src/types/shell/workers.rs` — `DoneEvent`.
-- `core/src/builtins/concurrency/birth.rs` — `spawn_child`, `CompletionPermit::finish` publishing terminal state before `DeferredSurface::flush`.
+- `core/src/shell/runtime/mooring.rs` — `DeferredSink`, `Mooring::for_thread`.
+- `core/src/shell/runtime/handle.rs` — `CompletionPermit`; `core/src/shell/runtime/handle/surface.rs` — `DeferredSurface`.
+- `core/src/shell/runtime/state/workers.rs` — `DoneEvent`.
+- `core/src/shell/builtins/concurrency/birth.rs` — `spawn_child`, `CompletionPermit::finish` publishing terminal state before `DeferredSurface::flush`.
 - `core/src/protocol.rs` — `SessionEvent::DeferredSurface`; carried by
   `core/src/carrier/wire/{serve,front}.rs`.
 - `exarch/src/shell_eval.rs` — `InboxDeferred`; `exarch/src/agent/arrival.rs`

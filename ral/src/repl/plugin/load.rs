@@ -11,12 +11,12 @@
 
 use ral_core::data::datum::Datum as _;
 use ral_core::path::{Judged, Located, Reading};
-use ral_core::source::{SourceFile, SourceOrigin};
-use ral_core::typecheck::builtins::scheme;
-use ral_core::types::{
+use ral_core::shell::runtime::{
     Break, BuiltinBody, BuiltinEntry, DefaultPolicy, Error, FrameHandle, HookName, HookSig, Map,
     Mooring, PluginEntry, Settled,
 };
+use ral_core::source::{SourceFile, SourceOrigin};
+use ral_core::typecheck::builtins::scheme;
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 
@@ -88,7 +88,7 @@ pub(crate) fn load_plugin(
     // file's *return value*, not its bindings.
     let origin = SourceOrigin::File(file);
     let value = shell.in_fresh_scope(|shell| {
-        ral_core::load::evaluate_source(
+        ral_core::shell::load::evaluate_source(
             mooring,
             shell,
             &source,
@@ -233,9 +233,12 @@ fn install_bindings(
 /// non-empty options map is a load-time error; an empty one is fine.
 fn instantiate(val: Value, options: &Map, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     match val {
-        Value::Thunk(_) => {
-            ral_core::evaluator::apply(&val, vec![Value::Map(options.clone())], mooring, shell)
-        }
+        Value::Thunk(_) => ral_core::shell::evaluator::apply(
+            &val,
+            vec![Value::Map(options.clone())],
+            mooring,
+            shell,
+        ),
         _ if !options.is_empty() => Err(Break::Error(load_err(
             "it takes no configuration; \
              its entry in the rc's plugins map wants the empty options map `[:]`",

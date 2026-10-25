@@ -28,10 +28,10 @@ mod common;
 use common::fresh_shell;
 
 use ral_core::Break;
-use ral_core::builtins::CORE_BUILTINS;
+use ral_core::shell::builtins::CORE_BUILTINS;
+use ral_core::shell::runtime::{Map, Mooring, Value};
 use ral_core::ty::{CompTy, Grade, Row, Ty};
 use ral_core::typecheck::Unifier;
-use ral_core::types::{Map, Mooring, Value};
 
 /// Builtins whose reducer reaches a resource a bare in-test call cannot
 /// satisfy, so the registry sweep cannot run them.  Each is exercised by
@@ -208,7 +208,7 @@ fn every_scheme_pairs_a_grade_with_one_value_type() {
     let echo = table.get("echo").expect("the base frame `echo`");
     let rows = CORE_BUILTINS
         .iter()
-        .chain(ral_core::builtins::BOUNDARY_BUILTINS)
+        .chain(ral_core::shell::builtins::BOUNDARY_BUILTINS)
         .chain(std::iter::once(&echo));
     for entry in rows {
         let name = entry.decl.name.as_ref();

@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-generated_at_date: 2026-10-13
-covers_paths: [core/src/lib.rs]
+generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_date: 2026-10-25
+covers_paths: [core/src/lib.rs, core/src/shell.rs, core/src/host.rs, core/src/host/, core/src/fact.rs, core/src/fact/]
 ---
 
 # Map: core (ral-core)
@@ -17,7 +17,7 @@ flat AST → CBPV IR → typed IR*, bundled as `compile::compile_and_typecheck` 
 elaborate → typecheck, failing with a `CompileError` of `Parse` or `Types`)
 and, crate-privately, `compile`
 (the same ladder without the checker), both returning a `Toplevel` — a sequence of phrases
-(`Define`/`Run`) run by `evaluator::run_phrases`, which replaced the
+(`Define`/`Run`) run by `shell::evaluator::run_phrases`, which replaced the
 flat `Comp`-rooted top level. Evaluation is not on the crate root — `parse`,
 `elaborate`, and `Toplevel` are crate-private, reached by the owning module path
 when a host deliberately steps past the seam
@@ -52,11 +52,33 @@ reduction primitive behind it. A host states policy; core owns resources.
 - The reduction host behind the entry is crate-private, so a host cannot start an
   unframed evaluation that would foreground or capture against a stale frame.
 
+## The shell subjects
+
+**`core/src/shell.rs` groups shell code by subject, not by dependency layer.**
+
+- `shell::runtime` owns runtime values and interpreter state; static types stay in
+  `ty` and inference in `typecheck`.
+- `shell::evaluator` is the CBPV machine; `shell::exec` owns command dispatch,
+  pipelines and sink scopes. The evaluator passes `pipeline::StageEval` callbacks
+  into `exec`, so stage threads re-enter evaluation without importing the machine.
+- `shell::grant` decodes runtime grant values and adapts spawn grants;
+  substantive freezing and authored resolution stay in `authority::grant`.
+- `shell::builtins`, `shell::run`, `shell::boot` and `shell::load` own primitives,
+  the framed entry (including `shell/run/report.rs`), boot and loading;
+  `shell/prelude.ral` is the embedded library.
+- `seed`, `frame`, `role`, `protocol`, `carrier` and `engine` stay at the crate root,
+  alongside the other non-shell subjects.
+
+**`authority`, `fact`, `host`, `io`, `own`, `path` and `process` cannot reach
+`shell`, directly or transitively, in production.** Their intentional lower
+cycles are permitted: this is a
+[[invariants/core-below-shell|boundary, not a DAG]].
+
 ## host and boot
 
 The crate splits driving a `Shell` from probing the machine it runs on.
 
-- `boot` embeds a `Shell` in a host process. `Shell::root(runtime)` constructs over a `Runtime`, the surface a
+- `shell::boot` embeds a `Shell` in a host process. `Shell::root(runtime)` constructs over a `Runtime`, the surface a
   host chooses through `HostSurface::runtime` or `boot_runtime`, so every
   shell chooses its surface through one of two constructors:
   `HostSurface::shell` (core's `CORE_SETS`, then the host's sets, no env, no
@@ -65,8 +87,8 @@ The crate splits driving a `Shell` from probing the machine it runs on.
   production shell is unrepresentable, and `HostSurface::manifest` hands the
   checker the same list. The prelude is baked ahead of time
   into a schema-less `postcard` blob whose single encode site
-  (`boot::bake_prelude`, returning the blob for a host's build script to write) and single decode site
-  (`boot::BakedPrelude`) sit together, and the build-dependency edge from each
+  (`shell::boot::bake_prelude`, returning the blob for a host's build script to write) and single decode site
+  (`shell::boot::BakedPrelude`) sit together, and the build-dependency edge from each
   host to `ral-core` reruns the bake, so the schema-evolution hazard has one guard rather than three that must
   agree ([[decisions/260610_host-embedding-api|host-embedding-api]],
   [[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
@@ -74,7 +96,11 @@ The crate splits driving a `Shell` from probing the machine it runs on.
   wall-clock `now()`, and re-exports of cwd/user/home. It is also the one reader
   of the host's environment (`var`, `var_os`, `vars_os`, `temp_dir`), and of the
   XDG bases (`xdg`, with the account's home as the program's own fallback).
+  `host/env.rs` owns the persistent environment overlay, exported as
+  `host::{EnvVars, EnvVarsIter}`, shared by shell state, paths and launches.
   exarch's host snapshot is a formatter over it.
+- `fact/observation.rs` owns observation data, including `AuditIo`, the captured
+  byte prefixes and totals a command fact consumes; collection belongs to runtime.
 - `own` is the files a program touches on its own account, outside any shell:
   `OwnDir` (what it keeps), `UserFile` (what the user writes at its places) and the
   user-named `read_named`, `open_named`, `kind_named` and `create_named` (banned,
@@ -99,29 +125,28 @@ Source text flows down a fixed ladder; each rung is a subsystem page.
   (`core/src/typecheck/`), the sole inference engine, including the grade that places capture
   (`CompTy::Return(Grade, _)`).
 - [[map/core/evaluator|evaluator]] — the CEK machine over computation closures:
-  focus, frame stack, matching, audit (`core/src/evaluator/`).
-- [[map/core/runtime|runtime]] — the command/pipeline/transport machinery the
-  machine dispatches into, and the shared re-exec'd-child eval runner
-  (`core/src/runtime/`, `core/src/seed.rs`).
+  focus, frame stack, matching, audit (`core/src/shell/evaluator/`).
+- [[map/core/runtime|exec]] — command dispatch, pipelines and sink scopes the
+  machine dispatches into (`core/src/shell/exec/`).
 
 ## Authority, plumbing, surface
 
 - [[map/core/capabilities|capabilities]] — the dynamic capability stack and the OS process
   sandbox (`core/src/authority/`: resolved policy and judgments in `policy/`,
   authored resolution and host system-read discovery in `grant/`, enforcement in `guard/`
-  and `sandbox/`).
+  and `sandbox/`; runtime decoding and spawn adaptation in `shell/grant/`).
 - [[map/core/io-process|io-process]] — byte streams, terminal, signals, process
   groups (`core/src/io/`, `core/src/process/`).
 - [[map/core/builtins|builtins]] — Rust-implemented commands and bundled coreutils/grep
-  (`core/src/builtins/`).
+  (`core/src/shell/builtins/`).
 - [[map/core/shell-state|shell-state]] — runtime values and the `Shell` interpreter state
-  (`core/src/types/`).
+  (`core/src/shell/runtime/`).
 - [[map/core/transport|transport]] — the serde mirror and wire envelope that carry a
   shell across a re-exec (`core/src/seed.rs`, `seed/table.rs`, `frame.rs`).
 - [[map/core/diagnostics|diagnostics]] — source locations and error rendering
   (`core/src/source.rs`, `diagnostic.rs`, `compile.rs`, `io/terminal.rs`, `io/ansi.rs`).
 - [[map/core/prelude|prelude]] — the embedded `prelude.ral` standard library
-  (`core/src/prelude.ral`).
+  (`core/src/shell/prelude.ral`).
 
 ## Siblings
 

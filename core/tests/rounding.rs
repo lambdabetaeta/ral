@@ -15,7 +15,7 @@ mod common;
 use common::fresh_shell;
 
 use ral_core::protocol::Run;
-use ral_core::run::RunReport;
+use ral_core::shell::run::RunReport;
 use ral_core::source::SourceOrigin;
 
 /// Run `source`, expecting it to be rejected by the type checker before it

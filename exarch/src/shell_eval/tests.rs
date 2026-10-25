@@ -17,8 +17,8 @@ use ral_core::carrier::IdentityTransport;
 use ral_core::data::datum::Datum as _;
 use ral_core::fact::Read;
 use ral_core::path::shown;
-use ral_core::types::WriteOutcome;
-use ral_core::types::{
+use ral_core::shell::runtime::WriteOutcome;
+use ral_core::shell::runtime::{
     CallSite, Done, DoneEvent, Notice, Observation, Observed, Pruned, ReapCause, ReapNotice,
     WorkerId,
 };
@@ -666,7 +666,7 @@ fn decode_surface_round_trips_each_class() {
         Decoded::Surface(Surface::Card(_))
     ));
     let done = DoneEvent {
-        id: ral_core::types::WorkerId(7),
+        id: ral_core::shell::runtime::WorkerId(7),
         title: "building".into(),
         elapsed_ms: 1_500,
         outcome: Done::Ok,
@@ -1691,8 +1691,8 @@ fn a_write_over_a_file_too_large_to_read_shows_no_diff() {
 #[test]
 fn bare_external_surfaces_one_exec_card() {
     use ral_core::{
-        fact::Command,
-        types::{AuditIo, CommandOrigin},
+        fact::{AuditIo, Command},
+        shell::runtime::CommandOrigin,
     };
     let engine = fresh();
 
@@ -1764,8 +1764,8 @@ fn view_is_a_helper_not_an_exec_image() {
 #[test]
 fn cat_redirect_surfaces_read_then_exec_in_order() {
     use ral_core::{
-        fact::Command,
-        types::{AuditIo, CommandOrigin},
+        fact::{AuditIo, Command},
+        shell::runtime::CommandOrigin,
     };
     let engine = fresh();
     let (_dir, path) = scratch_file("cov-cat", "a", "one\ntwo\n");
@@ -2035,7 +2035,7 @@ mod self_layer {
         )
         .expect("reasonable composes");
         let ctx = ral_core::authority::grant::freeze::FreezeCtx::at(
-            ral_core::types::EnvVars::new(),
+            ral_core::host::EnvVars::new(),
             ral_core::path::CwdPath::new(f.cwd.clone()).expect("the fixture cwd is absolute"),
         );
         let place = |label: &str, path: &str| FOValue::Variant {

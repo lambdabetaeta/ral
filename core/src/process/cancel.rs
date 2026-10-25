@@ -2,9 +2,8 @@
 //!
 //! A scope's cancellation is the join of its own flag with every ancestor's —
 //! walked, not flattened, so a subscope carries its own flag while still
-//! observing its parents.  Computations read it with
-//! [`Shell::poll`](crate::types::Shell::poll) at every step boundary, and every
-//! blocked wait re-reads it each [`POLL_SLICE`].
+//! observing its parents.  Computations read it with [`Scope::poll`] at every
+//! step boundary, and every blocked wait re-reads it each [`POLL_SLICE`].
 //!
 //! A signal handler holds no scope, so it raises one of two ambient causes
 //! instead, and no scope folds either: a host hears them through
@@ -19,7 +18,6 @@ use std::time::{Duration, Instant};
 use strum::{IntoStaticStr, VariantArray};
 
 use crate::sync::LockExt as _;
-use crate::types::{Break, Settled};
 
 /// Why a [`Scope`] was cancelled.
 ///
@@ -85,10 +83,6 @@ impl CancelCause {
 
     /// The word every poll point and every host's parked wait reports this
     /// cause with, so the phrasing cannot drift between them.
-    ///
-    /// For rendering a cancellation that already exists — the `Display`
-    /// impl, the process exit byte — never for minting one; minting is
-    /// `Break::stopped`'s alone.
     pub fn message(self) -> &'static str {
         match self {
             Self::ReaderGone => "its reader ended",
@@ -276,6 +270,13 @@ impl std::fmt::Debug for ScopeId {
     }
 }
 
+/// Cancellation in force on a scope, named for the node that owns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cancellation {
+    pub cause: CancelCause,
+    pub(crate) owner: ScopeId,
+}
+
 /// Every sliced wait's period: a blocked wait re-reads its scope this often.
 pub(crate) const POLL_SLICE: Duration = Duration::from_millis(10);
 
@@ -387,16 +388,13 @@ impl Scope {
         self.in_force().map(|(cause, _)| cause)
     }
 
-    /// `poll`: the stop in force on this scope, named for its owner, or
-    /// nothing.  `pub`: a desk outside core parks on it, and only this
-    /// mints the named stop (`in_force` and `id` stay crate-private).
+    /// Observe the cancellation in force, named for its owner.
     ///
     /// # Errors
-    /// The stop in force, as the escape it is.
-    pub fn poll(&self) -> Settled<()> {
-        self.in_force().map_or(Ok(()), |(cause, owner)| {
-            Err(Break::stopped(cause, Some(owner)))
-        })
+    /// The strongest cause and the outermost node attaining it.
+    pub fn poll(&self) -> Result<(), Cancellation> {
+        self.in_force()
+            .map_or(Ok(()), |(cause, owner)| Err(Cancellation { cause, owner }))
     }
 
     /// The strongest cause in force and the node that attained it.
@@ -446,7 +444,7 @@ impl ScopeNode {
 pub struct DurableRoot(ScopeNode);
 
 impl DurableRoot {
-    /// Mint a fresh session root.  One per [`Shell`](crate::types::Shell).
+    /// Mint a fresh session root.
     pub(crate) fn new() -> Self {
         Self(ScopeNode(Scope(mint(None, None))))
     }
@@ -625,27 +623,44 @@ mod tests {
     }
 
     #[test]
-    fn a_join_names_the_outermost_node_attaining_it() {
+    fn a_fresh_scope_polls_clear() {
+        assert_eq!(DurableRoot::default().poll(), Ok(()));
+    }
+
+    #[test]
+    fn a_poll_names_the_outermost_node_attaining_the_join() {
         let (parent, child) = pair();
         parent.cancel(CancelCause::Interrupted);
         child.cancel(CancelCause::Interrupted);
         assert_eq!(
-            child.in_force(),
-            Some((CancelCause::Interrupted, parent.id()))
+            child.poll(),
+            Err(Cancellation {
+                cause: CancelCause::Interrupted,
+                owner: parent.id(),
+            })
         );
 
         let (parent, child) = pair();
         parent.cancel(CancelCause::Cancelled);
         child.cancel(CancelCause::Interrupted);
         assert_eq!(
-            child.in_force(),
-            Some((CancelCause::Cancelled, parent.id()))
+            child.poll(),
+            Err(Cancellation {
+                cause: CancelCause::Cancelled,
+                owner: parent.id(),
+            })
         );
 
         let (parent, child) = pair();
         parent.cancel(CancelCause::Interrupted);
         child.cancel(CancelCause::Cancelled);
-        assert_eq!(child.in_force(), Some((CancelCause::Cancelled, child.id())));
+        assert_eq!(
+            child.poll(),
+            Err(Cancellation {
+                cause: CancelCause::Cancelled,
+                owner: child.id(),
+            })
+        );
     }
 
     #[test]

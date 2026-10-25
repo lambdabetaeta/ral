@@ -7,15 +7,15 @@ use crate::skill::{self, Judge as _};
 use grep::matcher::LineTerminator;
 use grep::regex::RegexMatcherBuilder;
 use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
-use ral_core::builtins::util::regex_err;
 use ral_core::fact::{Grep, Read};
 use ral_core::path::tree::walk::Walk;
 use ral_core::path::{LeafMode, LexicalPath, Reading};
+use ral_core::shell::builtins::util::regex_err;
+use ral_core::shell::runtime::{Break, BuiltinBody, BuiltinEntry, Mooring, Observed, Settled, sig};
 use ral_core::text::rank;
 use ral_core::ty::{Scheme, Ty, closed_record};
 use ral_core::typecheck::Unifier;
 use ral_core::typecheck::builtins::{fun, mk_scheme as scheme, pure, thunk};
-use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Mooring, Observed, Settled, sig};
 use ral_core::{HostSurface, Shell, Value};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -442,7 +442,7 @@ fn search_tree(
         .build();
 
     let mut results = Vec::new();
-    let mut walk = tree.same_file_system().admitted(shell, name, path);
+    let mut walk = shell.admitted_walk(tree.same_file_system(), name, path);
     while let Some(entry) = walk.next()? {
         if !entry.is_file() {
             continue;
@@ -721,7 +721,7 @@ fn builtin_edit_replace(args: &[Value], mooring: &Mooring, shell: &mut Shell) ->
         return Err(sig("edit-replace: FROM must be non-empty."));
     }
     let (eol, body) = read_text_file(shell, path, "edit-replace")?;
-    let starts = ral_core::builtins::strings::occurrence_starts(&body, from);
+    let starts = ral_core::shell::builtins::strings::occurrence_starts(&body, from);
     let &[start] = starts.as_slice() else {
         return Err(no_unique_match(&body, from, path, &starts));
     };
@@ -831,9 +831,8 @@ fn builtin_explore_dir(args: &[Value], _mooring: &Mooring, shell: &mut Shell) ->
     };
     let path = args[1].as_str("explore-dir")?;
     let root = walk_root(shell, "explore-dir", path)?;
-    let mut walk = Walk::respecting_ignores(&root)
-        .max_depth(Some(depth))
-        .admitted(shell, "explore-dir", path);
+    let tree = Walk::respecting_ignores(&root).max_depth(Some(depth));
+    let mut walk = shell.admitted_walk(tree, "explore-dir", path);
     let mut entries = Vec::new();
     while let Some(entry) = walk.next()? {
         if entry.depth > 0 {
@@ -858,7 +857,7 @@ fn builtin_find_files(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> 
     let query = args[0].as_str("find-files")?;
     let path = args[1].as_str("find-files")?;
     let root = walk_root(shell, "find-files", path)?;
-    let mut walk = Walk::respecting_ignores(&root).admitted(shell, "find-files", path);
+    let mut walk = shell.admitted_walk(Walk::respecting_ignores(&root), "find-files", path);
     let mut files = Vec::new();
     while let Some(entry) = walk.next()? {
         if entry.is_file() {
@@ -1063,7 +1062,7 @@ static EXARCH_BUILTINS_ARR: [BuiltinEntry; 11] = [
         Cow::Borrowed("exarch-surface"),
         ral_core::typecheck::builtins::scheme::surface_op,
         "exarch-surface <event>  — forward a tagged variant onto the rail: `card renders a card there, `pin`/`unpin` write straight to your register (exarch-pins is the tag-based way to reach those same slots), and any other tag is dropped, unrendered.",
-        BuiltinBody::Static(ral_core::builtins::builtin_surface),
+        BuiltinBody::Static(ral_core::shell::builtins::builtin_surface),
     ),
     BuiltinEntry::new(
         Cow::Borrowed("view-text"),

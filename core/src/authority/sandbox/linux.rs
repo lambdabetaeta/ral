@@ -1763,9 +1763,12 @@ mod tests {
     fn spawn_confined(
         script: &str,
         scope: &crate::process::Scope,
-    ) -> (crate::runtime::command::RunningChild, crate::process::Pgid) {
+    ) -> (
+        crate::shell::exec::command::RunningChild,
+        crate::process::Pgid,
+    ) {
         use crate::process::{Group, PgidPolicy};
-        use crate::runtime::command::{Pumps, RunningChild};
+        use crate::shell::exec::command::{Pumps, RunningChild};
         let shell = crate::test_helper::core_shell();
         let mut launch = crate::authority::sandbox::sandboxed_command(
             &unrestricted(),

@@ -10,7 +10,7 @@ anchors: [BindingLedger, arm_binding_lease, note_define, referenced_names, Menti
 them; nothing else about binding does.** The model treats top-level `let` as
 scratch paper and never erases, so a long session accumulates dead strings,
 forgotten closures, and settled handles still holding captured output. The
-binding-lease ledger (`core/src/types/shell/bindings.rs`, armed only by
+binding-lease ledger (`core/src/shell/runtime/state/bindings.rs`, armed only by
 exarch) removes a name once it has gone 256 ral calls without use — and does
 nothing else: ral's semantics are untouched, the REPL never expires anything,
 and a pruned name afterwards reads exactly like a name that was never bound.

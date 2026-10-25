@@ -16,7 +16,7 @@ the command, the exact data/command collision the language exists to remove.
 `eval_bind` and the `slot = None` arm of `eval_letrec`
 ([`core/src/evaluator/comp.rs`](../../../core/src/evaluator/comp.rs)) call
 `check_pattern_shadow` / `check_path_shadow`
-([`core/src/evaluator/pattern.rs`](../../../core/src/evaluator/pattern.rs)): if
+([`core/src/evaluator/pattern.rs`](../../../core/src/shell/evaluator/pattern.rs)): if
 the bound name resolves through `Shell::locate_command` (the effective `PATH`,
 honouring `within [env: PATH]`), the bind is refused before its RHS runs.
 Reachability is the pure filesystem question, independent of whether the active

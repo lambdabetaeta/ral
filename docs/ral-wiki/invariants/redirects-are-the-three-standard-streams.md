@@ -39,9 +39,9 @@ interpreter opens the targets in one fixed order, stdin, stdout, stderr
 (`Redirects<Ast>`), the elaborated value (`Redirects<Val>`, inside the IR), the
 evaluated string (`Redirects<String>`, at the runtime). `map` and `try_map` carry
 one tier to the next, so no tier re-widens the type and every consumer — the
-in-process redirect frame (`core/src/runtime/redirect/scope.rs`), the external
-command's stdio plan (`core/src/runtime/command/stdio.rs`), the write
-observation (`core/src/types/audit/observation.rs`) — is an exhaustive case with no
+in-process redirect frame (`core/src/shell/exec/redirect/scope.rs`), the external
+command's stdio plan (`core/src/shell/exec/command/stdio.rs`), the write
+observation (`core/src/shell/runtime/audit/observation.rs`) — is an exhaustive case with no
 unreachable arm. `WriteMode` is a write mode and nothing else, so a write
 observation cannot carry a read mode.
 

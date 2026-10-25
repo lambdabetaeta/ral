@@ -157,7 +157,7 @@ impl TypeErrorKind {
                      which only a command, an external, or a handler has"
                 )
             }
-            // The wording `runtime::command::vet` uses at the spawn, the
+            // The wording `shell::exec::command::vet` uses at the spawn, the
             // refusal being the same refusal one step earlier.
             Self::ExecArgNotText {
                 command,
@@ -1386,7 +1386,10 @@ impl TypeError {
     fn is_redirect_shape(&self) -> bool {
         matches!(
             (&self.kind, &self.reason),
-            (TypeErrorKind::CompTyMismatch { .. }, Some(Reason::RedirectShape))
+            (
+                TypeErrorKind::CompTyMismatch { .. },
+                Some(Reason::RedirectShape)
+            )
         )
     }
 

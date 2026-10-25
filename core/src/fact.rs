@@ -4,15 +4,15 @@
 //! Each is declared once, as the `record!`, `variant!` or `label!` that yields
 //! both its encoding and its ral type, and knows no `Value` or `Shell`: the
 //! checker reads its types off these declarations, and the doors that mint
-//! them live above (`types::error`, `types::audit`, the builtins).
+//! them live above (`shell::runtime::error`, `shell::runtime::audit`, the builtins).
 
 mod error;
 mod observation;
 
 pub use error::{ErrorRecord, Reason};
 pub use observation::{
-    Act, Check, Command, CommandOrigin, Decision, Grep, Observation, Observed, Read, Resource,
-    Worker, Write, WriteOutcome,
+    Act, AuditIo, Check, Command, CommandOrigin, Decision, Grep, Observation, Observed, Read,
+    Resource, Worker, Write, WriteOutcome,
 };
 
 use crate::data::Bytes;

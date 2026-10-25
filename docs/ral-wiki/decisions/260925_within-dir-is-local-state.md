@@ -61,8 +61,8 @@ leaks.
 ## In the code
 
 `Cwd` and `Shell::{cwd, apply_chdir, enter_cwd, restore_cwd}` in
-`core/src/types/shell/cwd.rs`; `Context::cwd` in `context.rs`;
-`WithinScope::enter` and `WithinUndo::apply` in `core/src/evaluator/scope.rs`;
+`core/src/shell/runtime/state/cwd.rs`; `Context::cwd` in `context.rs`;
+`WithinScope::enter` and `WithinUndo::apply` in `core/src/shell/evaluator/scope.rs`;
 the probes as tests in `core/tests/top_level_vs_block.rs` §(6c); the
 `chpwd` boundary in `ral/src/repl/exec.rs::step`. Refines
 [[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]]

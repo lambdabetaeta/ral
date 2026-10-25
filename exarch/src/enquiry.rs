@@ -12,9 +12,9 @@ use crate::schedule::{CronSchedule, ScheduleInfo, Trigger, fmt_duration, parse_d
 use ral_core::SpawnGrant;
 use ral_core::data::FOValue;
 use ral_core::data::datum::{Datum, exact_keys, field, tag, untag};
+use ral_core::shell::runtime::NurseryId;
 use ral_core::text::code;
 use ral_core::ty::{Ty, Typed, closed_record};
-use ral_core::types::NurseryId;
 use ral_core::{record, variant};
 use regex::Regex;
 use std::path::PathBuf;
@@ -1522,7 +1522,7 @@ mod tests {
     fn every_grant_base_resolves_to_a_bake_in_base() {
         let cwd = ral_core::path::CwdPath::new(std::env::current_dir().unwrap()).unwrap();
         let ctx =
-            ral_core::authority::grant::freeze::FreezeCtx::at(ral_core::types::EnvVars::new(), cwd)
+            ral_core::authority::grant::freeze::FreezeCtx::at(ral_core::host::EnvVars::new(), cwd)
                 .with_scratch(Some(std::env::temp_dir().to_string_lossy()));
         for label in crate::policy::SPAWN_BASES {
             crate::policy::base_layer(label, &ctx)

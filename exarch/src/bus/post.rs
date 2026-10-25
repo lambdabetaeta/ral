@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn a_completion_notice_names_the_worker_to_await() {
-        use ral_core::types::{Done, DoneEvent, ErrorRecord, Status, WorkerId};
+        use ral_core::shell::runtime::{Done, DoneEvent, ErrorRecord, Status, WorkerId};
         let done = DoneEvent {
             id: WorkerId(7),
             title: "building".into(),

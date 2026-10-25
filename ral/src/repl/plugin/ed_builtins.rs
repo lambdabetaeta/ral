@@ -10,13 +10,13 @@
 use ral_core::authority::policy::{EditorVerb, Flag};
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
+use ral_core::shell::runtime::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled, sig};
 use ral_core::ty::Site;
 use ral_core::ty::{
     CompTy, Grade, Kind, Scheme, Ty, Typed, closed_record, closed_variant, open_record,
 };
 use ral_core::typecheck::Unifier;
 use ral_core::typecheck::builtins::{fun, graded, mk_scheme as scheme, pure, thunk};
-use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled, sig};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -171,8 +171,8 @@ pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
     };
     // A TUI plugin's own screen output, not a value the program binds: the
     // truncation marker is the whole report a 16 MiB draw deserves.
-    let (result, bytes, _overflowed) = ral_core::evaluator::with_capture(shell, |shell| {
-        ral_core::evaluator::apply(&args[0], Vec::new(), &loaned, shell)
+    let (result, bytes, _overflowed) = ral_core::shell::evaluator::with_capture(shell, |shell| {
+        ral_core::shell::evaluator::apply(&args[0], Vec::new(), &loaned, shell)
     });
     match result {
         Ok(_) => Ok(tui_result(Value::string(decode_captured(&bytes)), 0)),
@@ -345,7 +345,7 @@ pub fn builtin_ed_state(
         }
         None => args[0].clone(),
     };
-    let new_val = ral_core::evaluator::apply(&args[1], vec![current], mooring, shell)?;
+    let new_val = ral_core::shell::evaluator::apply(&args[1], vec![current], mooring, shell)?;
     let data = FOValue::try_from(&new_val).map_err(|e| {
         sig(format!(
             "_ed-state: the updater returned {}, but the state cell holds only data",
@@ -358,7 +358,7 @@ pub fn builtin_ed_state(
 
 // ─── Host registration ───────────────────────────────────────────────────────
 //
-// Every facet that `ral_core::builtins` exposes is carried by the entry
+// Every facet that `ral_core::shell::builtins` exposes is carried by the entry
 // that owns the call function.  This is a static host extension: plugins
 // remain dynamic source/alias/hook loaders above this surface.
 
@@ -553,7 +553,7 @@ mod tests {
             assert!(!entry.decl.name.is_empty());
             assert_eq!(
                 entry.decl.convention,
-                ral_core::types::Convention::Value,
+                ral_core::shell::runtime::Convention::Value,
                 "the editor surface is applied, not an argv: {:?}",
                 entry.decl.name
             );
@@ -592,12 +592,12 @@ mod tests {
         asked: std::sync::atomic::AtomicUsize,
     }
 
-    impl ral_core::types::EnquiryDesk for Cell {
+    impl ral_core::shell::runtime::EnquiryDesk for Cell {
         fn enquire(
             &self,
             req: FOValue,
             _scope: &ral_core::process::Scope,
-        ) -> ral_core::types::Settled<FOValue> {
+        ) -> ral_core::shell::runtime::Settled<FOValue> {
             use super::super::super::enquiry::Enquiry;
             self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             match Enquiry::decode(&req) {
@@ -623,11 +623,11 @@ mod tests {
         runtime.install_builtins(ED_BUILTINS);
         let mut shell = ral_core::Shell::root(runtime.into(), ral_core::test_helper::process_cwd());
         shell.set_interactive(true);
-        let report = shell.run(ral_core::run::RunRequest {
+        let report = shell.run(ral_core::shell::run::RunRequest {
             desk: Some(cell.clone()),
-            ..ral_core::run::RunRequest::from(run)
+            ..ral_core::shell::run::RunRequest::from(run)
         });
-        let ral_core::run::RunReport::Ran { ending, .. } = report else {
+        let ral_core::shell::run::RunReport::Ran { ending, .. } = report else {
             panic!("the line must check and run");
         };
         (

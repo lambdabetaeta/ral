@@ -1,0 +1,504 @@
+//! Builtins: the commands implemented in Rust that run inside the shell process.
+//!
+//! `builtin_registry!` binds each builtin's names, type rule, doc and
+//! runtime body in one entry — so those facets cannot drift apart — and expands
+//! them into the [`CORE_BUILTINS`] static, one of the [`CORE_SETS`] every host
+//! surface lists first.  Arity is structural, read off the type rule by
+//! [`crate::shell::runtime::BuiltinEntry::fixed_arity`].
+//!
+//! Those are the *value* half of the manifest.  The argv half — a name that
+//! takes an argv rather than arguments, and installs as a base handler frame —
+//! is authored beside it in [`CORE_BASE_FRAMES`], because the two conventions
+//! share nothing but a body signature.
+
+use crate::shell::runtime::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled, Shell, Value};
+use crate::typecheck::builtins::{BuiltinDiagnostic, scheme};
+use std::borrow::Cow;
+
+pub(crate) mod ambient;
+mod codecs;
+mod collections;
+pub(crate) mod concurrency;
+pub(crate) mod fs;
+pub mod help;
+mod math;
+mod misc;
+pub use misc::builtin_surface;
+pub mod modules;
+mod predicates;
+mod print;
+mod shell;
+pub mod strings;
+pub mod util;
+
+/// `CORE_BUILTINS_ARR`'s length, counted from the name literals.
+macro_rules! count_builtins {
+    ($($name:literal),+ $(,)?) => {
+        [$($name),+].len()
+    };
+}
+
+/// `entry.with_diagnostic(diag)` when a `diag` is given, `entry` unchanged
+/// otherwise — the registry macro's optional `diagnostic:` field.
+macro_rules! with_diagnostic_if_any {
+    ($entry:expr) => {
+        $entry
+    };
+    ($entry:expr, $diag:expr) => {
+        $entry.with_diagnostic($diag)
+    };
+}
+
+/// One entry per builtin, expanded into [`CORE_BUILTINS`].  Arity is never
+/// declared — [`BuiltinEntry::fixed_arity`] reads it off the type rule.
+///
+/// `call` must be a non-capturing closure — it is coerced to a fn pointer.
+/// `names` splits its first literal out from the rest so an optional
+/// `diagnostic:` — one row's own never varies with how many names
+/// alias it — can sit beside it without zipping against a repetition of
+/// mismatched length; such a row is always written with one name, which
+/// is every row this macro carries one for today.
+macro_rules! builtin_registry {
+    (
+        $(
+            $(#[$meta:meta])*
+            $variant:ident {
+                names: [$name0:literal $(, $namerest:literal)* $(,)?],
+                ty: $ty:expr,
+                doc: $doc:literal,
+                $(diagnostic: $diag:expr,)?
+                call: $call:expr,
+            }
+        ),+ $(,)?
+    ) => {
+        // A module, so a variant name like `Map` cannot collide with a type in scope.
+        mod __core_thunks {
+            #[allow(unused_imports)]
+            use super::*;
+            $(
+                $(#[$meta])*
+                #[allow(non_snake_case)]
+                pub(super) fn $variant(
+                    args: &[Value],
+                    mooring: &Mooring,
+                    shell: &mut Shell,
+                ) -> Settled<Value> {
+                    let inner: fn(&[Value], &Mooring, &mut Shell) -> Settled<Value> = $call;
+                    inner(args, mooring, shell)
+                }
+            )+
+        }
+
+        // A named array, not a promoted temporary: rustc refuses promotion
+        // once an element carries `arity_cache`'s interior mutability.
+        static CORE_BUILTINS_ARR: [BuiltinEntry; count_builtins!($($name0 $(, $namerest)*),+)] = [
+            $(
+                $(#[$meta])*
+                with_diagnostic_if_any!(
+                    BuiltinEntry::new(
+                        Cow::Borrowed($name0),
+                        $ty,
+                        $doc,
+                        BuiltinBody::Static(__core_thunks::$variant),
+                    )
+                    $(, $diag)?
+                ),
+                $(
+                    BuiltinEntry::new(
+                        Cow::Borrowed($namerest),
+                        $ty,
+                        $doc,
+                        BuiltinBody::Static(__core_thunks::$variant),
+                    ),
+                )*
+            )+
+        ];
+
+        /// Every host-implemented name the language ships with.
+        ///
+        /// Part of [`CORE_SETS`], which runtime and checker both read.
+        pub static CORE_BUILTINS: &[BuiltinEntry] = &CORE_BUILTINS_ARR;
+    };
+}
+
+builtin_registry! {
+    Clear { names: ["clear"], ty: scheme::terminal_control,
+        doc: "clear  — clear screen and scrollback (ESC[H ESC[2J ESC[3J). Shadows external `clear`; use `^clear` for the ncurses binary.",
+        call: |args, _mooring, shell| misc::builtin_clear(args, shell), },
+    Reset { names: ["reset"], ty: scheme::terminal_control,
+        doc: "reset  — emit ESC c (RIS) to reset the terminal. Does not touch stty modes; use `^reset` for the full ncurses terminfo reset.",
+        call: |args, _mooring, shell| misc::builtin_reset(args, shell), },
+    Each { names: ["each"], ty: scheme::each_op,
+        doc: "each <fn> <list>  — call fn on each element for side effects.",
+        call: |args, mooring, shell| collections::builtin_each(args, mooring, shell), },
+    Map { names: ["map"], ty: scheme::map_op,
+        doc: "map <fn> <list>  — apply fn to each element, return new list.",
+        call: |args, mooring, shell| collections::builtin_map(args, mooring, shell), },
+    Filter { names: ["filter"], ty: scheme::filter_op,
+        doc: "filter <fn> <list>  — keep elements where fn returns true.",
+        call: |args, mooring, shell| collections::builtin_filter(args, mooring, shell), },
+    SortListBy { names: ["sort-list-by"], ty: scheme::sort_list_by,
+        doc: "sort-list-by <fn> <list>  — sort by a key function.",
+        call: |args, mooring, shell| collections::builtin_sort_by(args, mooring, shell), },
+    Fold { names: ["fold"], ty: scheme::fold_op,
+        doc: "fold <fn> <init> <list>  — reduce list left-to-right with fn and accumulator.",
+        call: |args, mooring, shell| collections::builtin_fold(args, mooring, shell), },
+    Range { names: ["range"], ty: scheme::range,
+        doc: "range <start> <end>  — generate a list of integers from start (inclusive) to end (exclusive).",
+        call: |args, _, shell| collections::builtin_range(args, shell), },
+    Fail { names: ["fail"], ty: scheme::fail,
+        doc: "fail [status: Int, message: String]  — raise an error. status must be nonzero, and the message is the text the failure carries. `fail $err` on a caught error re-raises it.",
+        diagnostic: BuiltinDiagnostic::FailStatusNonzero,
+        call: |args, _mooring, _shell| Err(misc::builtin_fail(args)), },
+    Len { names: ["length"], ty: scheme::length,
+        doc: "length <val>  — number of elements in a string, bytes, list, or map.",
+        call: |args, _mooring, _shell| strings::builtin_len(args), },
+    Upper { names: ["upper"], ty: scheme::str_to_str,
+        doc: "upper <s>  — convert a string to uppercase.",
+        call: |args, _mooring, _shell| strings::builtin_upper(args), },
+    Lower { names: ["lower"], ty: scheme::str_to_str,
+        doc: "lower <s>  — convert a string to lowercase.",
+        call: |args, _mooring, _shell| strings::builtin_lower(args), },
+    Dedent { names: ["dedent"], ty: scheme::str_to_str,
+        doc: "dedent <s>  — strip common leading whitespace from every non-empty line.",
+        call: |args, _mooring, _shell| strings::builtin_dedent(args), },
+    Intercalate { names: ["intercalate"], ty: scheme::intercalate,
+        doc: "intercalate <sep> <items>  — interpose sep between every pair of items, concatenated as one string.",
+        call: |args, _mooring, _shell| strings::builtin_join(args), },
+    Slice { names: ["slice"], ty: scheme::slice,
+        doc: "slice <s> <start> <count>  — extract a substring by character offset.",
+        call: |args, _mooring, _shell| strings::builtin_slice(args), },
+    Split { names: ["re-split"], ty: scheme::re_split,
+        doc: "re-split <pattern> <s>  — split a string by a regex pattern.",
+        call: |args, _mooring, _shell| strings::builtin_split(args), },
+    Match { names: ["re-match"], ty: scheme::re_match,
+        doc: "re-match <pattern> <s>  — true if regex pattern matches anywhere in s.",
+        call: |args, _mooring, _shell| strings::builtin_match(args), },
+    FindMatch { names: ["re-find-match"], ty: scheme::re_find_match,
+        doc: "re-find-match <pattern> <s>  — first regex match, or fail if none.",
+        call: |args, _mooring, _shell| strings::builtin_find_match(args), },
+    FindMatches { names: ["re-find-matches"], ty: scheme::re_split,
+        doc: "re-find-matches <pattern> <s>  — all non-overlapping regex matches as a list.",
+        call: |args, _mooring, _shell| strings::builtin_find_matches(args), },
+    Replace { names: ["re-replace"], ty: scheme::replace_3,
+        doc: "re-replace <pattern> <repl> <s>  — replace the unique regex match of <pattern> in <s>; error on 0 or >1 matches. $1 etc. backreferences. `re-replace-all` is the one that replaces every match.",
+        call: |args, _mooring, _shell| strings::builtin_replace(args), },
+    ReplaceAll { names: ["re-replace-all"], ty: scheme::replace_3,
+        doc: "re-replace-all <pattern> <repl> <s>  — replace every regex match.",
+        call: |args, _mooring, _shell| strings::builtin_replace_all(args), },
+    StrReplace { names: ["string-replace"], ty: scheme::replace_3,
+        doc: "string-replace <from> <to> <s>  — replace the unique literal occurrence of <from> in <s> with <to>; error on 0 or >1 matches. No regex.",
+        call: |args, _mooring, _shell| strings::builtin_string_replace(args), },
+    RalQuote { names: ["ral-quote"], ty: scheme::str_to_str,
+        doc: "ral-quote <s>  — ral source that reads back as <s>, one word: bare where it can be, else '…', else #'…'#. A numeral-shaped string is quoted, so '007' stays text.",
+        call: |args, _mooring, _shell| strings::builtin_ral_quote(args), },
+    PosixQuote { names: ["posix-quote"], ty: scheme::str_to_str,
+        doc: "posix-quote <s>  — quote a string as one POSIX shell word, which posix-split reads back. For sh, not for ral: ral source is ral-quote's.",
+        call: |args, _mooring, _shell| strings::builtin_posix_quote(args), },
+    Lines { names: ["lines"], ty: scheme::str_to_strs,
+        doc: "lines <s>  — split a string into lines as from-lines splits the channel: a line ends at `\\n` or `\\r\\n`, the last need not end, and a lone `\\r` is text.",
+        call: |args, _mooring, _shell| strings::builtin_lines(args), },
+    PosixSplit { names: ["posix-split"], ty: scheme::str_to_strs,
+        doc: "posix-split <s>  — split a string into words by POSIX shell quoting, as sh would; the inverse of posix-quote.",
+        call: |args, _mooring, _shell| strings::builtin_posix_split(args), },
+    Keys { names: ["keys"], ty: scheme::keys,
+        doc: "keys <map>  — list of map keys.",
+        call: |args, _mooring, _shell| predicates::builtin_keys(args), },
+    Has { names: ["has"], ty: scheme::has,
+        doc: "has <map> <key>  — true if map contains key.",
+        call: |args, _mooring, _shell| predicates::builtin_has(args), },
+    ResolvePath { names: ["resolve-path"], ty: scheme::str_to_str,
+        doc: "resolve-path <path>  — resolve to an absolute path.",
+        call: |args, _mooring, shell| fs::builtin_resolve_path(args, shell), },
+    AbsolutePath { names: ["absolute-path"], ty: scheme::str_to_str,
+        doc: "absolute-path <path>  — absolute form of a path, computed lexically: anchors to the current working directory (honouring `within [dir: …]`), expands `~`/`xdg:`, folds `.`/`..`. Never touches the filesystem: symlinks stay as written and the path need not exist. Lexical counterpart of resolve-path.",
+        call: |args, _mooring, shell| fs::builtin_absolute_path(args, shell), },
+    AbbreviateHome { names: ["abbreviate-home"], ty: scheme::str_to_str,
+        doc: "abbreviate-home <path>  — fold a leading home directory to ~, for display.",
+        call: |args, _mooring, shell| fs::builtin_abbreviate_home(args, shell), },
+    Glob { names: ["glob"], ty: scheme::glob,
+        doc: "glob <pattern>  — list paths matching a glob: `?`, `*`, `[…]`, `[!…]`, `{a,b}` match within one name, `**` matches zero or more names. Patterns relative to the current working directory return matches relative to the current working directory; sigil-rooted (`~`, `xdg:`) and absolute patterns return absolute matches. A wildcard never matches a name starting with `.`: name a dotfile literally, or filter `list-dir`. A matching name that is not valid UTF-8 is an error.",
+        call: |args, _mooring, shell| fs::builtin_glob(args, shell), },
+    Exit { names: ["exit", "quit"], ty: scheme::exit,
+        doc: "exit [status]  — exit the shell.",
+        call: |args, _mooring, shell| misc::builtin_exit(args, shell), },
+    Warn { names: ["warn"], ty: scheme::string_to_unit,
+        doc: "warn <message>  — write one diagnostic line to standard error: the message, then a newline. This is how a script says something to the human without putting it on the byte channel a caller might be binding; `2> f` files it, and a capture keeps it apart from the value. ral has no `1>&2`; diagnostics are this builtin, not fd plumbing.",
+        call: |args, _mooring, shell| misc::builtin_warn(args, shell), },
+    FoldLines { names: ["fold-lines"], ty: scheme::fold_lines,
+        doc: "fold-lines <fn> <init>  — fold over stdin lines, split as from-lines splits them, in bounded memory.",
+        call: |args, mooring, shell| collections::builtin_fold_lines(args, mooring, shell), },
+    FromBytes { names: ["from-bytes"], ty: scheme::from_bytes,
+        doc: "from-bytes  — read raw bytes from the channel (stdin / `< file` / pipe) as Bytes.",
+        diagnostic: BuiltinDiagnostic::Decoder,
+        call: |args, _mooring, shell| codecs::builtin_from_bytes(args, shell), },
+    FromString { names: ["from-string"], ty: scheme::from_string,
+        doc: "from-string  — decode UTF-8 bytes from the channel to a String.",
+        diagnostic: BuiltinDiagnostic::Decoder,
+        call: |args, _mooring, shell| codecs::builtin_from_string(args, shell), },
+    FromLine { names: ["from-line"], ty: scheme::from_string,
+        doc: "from-line  — decode UTF-8 bytes from the channel, stripping one trailing `\\n` or `\\r\\n` (inverse of to-line).",
+        diagnostic: BuiltinDiagnostic::Decoder,
+        call: |args, _mooring, shell| codecs::builtin_from_line(args, shell), },
+    FromLines { names: ["from-lines"], ty: scheme::from_lines,
+        doc: "from-lines  — decode the channel to a list of lines, lossy on invalid UTF-8: a line ends at `\\n` or `\\r\\n`, the last need not end, and a lone `\\r` is text.",
+        diagnostic: BuiltinDiagnostic::Decoder,
+        call: |args, _mooring, shell| codecs::builtin_from_lines(args, shell), },
+    FromCsv { names: ["from-csv"], ty: scheme::from_csv,
+        doc: "from-csv  — decode CSV bytes from the channel to a list of maps keyed by the header row (every field a String); a row with more or fewer fields than the header is refused.",
+        diagnostic: BuiltinDiagnostic::Decoder,
+        call: |args, _mooring, shell| codecs::builtin_from_csv(args, shell), },
+    ToBytes { names: ["to-bytes"], ty: scheme::to_bytes,
+        doc: "to-bytes <bytes>  — pass a Bytes value through to the byte channel; the inverse of from-bytes.",
+        call: |args, _mooring, shell| codecs::builtin_to_bytes(args, shell), },
+    IntsToBytes { names: ["ints-to-bytes"], ty: scheme::ints_to_bytes,
+        doc: "ints-to-bytes <ints>  — write a list of Ints, each 0 through 255, to the byte channel as those bytes. ral has no byte literal, so this is how bytes are written by number: `ints-to-bytes [104, 105] | from-bytes` is the Bytes value \"hi\".",
+        call: |args, _mooring, shell| codecs::builtin_ints_to_bytes(args, shell), },
+    ToString { names: ["to-string"], ty: scheme::to_any_bytes,
+        doc: "to-string <value>  — encode a value's String form to the byte channel.",
+        call: |args, _mooring, shell| codecs::builtin_to_string(args, shell), },
+    ToLine { names: ["to-line"], ty: scheme::to_line,
+        doc: "to-line <value>  — encode value with a trailing newline (inverse of from-line).",
+        call: |args, _mooring, shell| codecs::builtin_to_line(args, shell), },
+    ToLines { names: ["to-lines"], ty: scheme::to_lines,
+        doc: "to-lines <list>  — write each element followed by `\\n` to the byte channel; from-lines reads back any list whose elements hold no `\\n` and do not end in `\\r`.",
+        call: |args, _mooring, shell| codecs::builtin_to_lines(args, shell), },
+    ToJson { names: ["to-json"], ty: scheme::to_any_bytes,
+        doc: "to-json <value>  — encode a value as JSON to the byte channel.",
+        call: |args, _mooring, shell| codecs::builtin_to_json(args, shell), },
+    ToJsonl { names: ["to-jsonl"], ty: scheme::to_lines,
+        doc: "to-jsonl <list>  — write each element to the byte channel as to-json encodes it, one per line.",
+        call: |args, _mooring, shell| codecs::builtin_to_jsonl(args, shell), },
+    ToCsv { names: ["to-csv"], ty: scheme::to_csv,
+        doc: "to-csv <rows>  — encode a list of maps of text, all with the same keys, as CSV to the byte channel; the columns are those keys in sorted order.",
+        call: |args, _mooring, shell| codecs::builtin_to_csv(args, shell), },
+    Ask { names: ["ask"], ty: scheme::ask,
+        doc: "ask <prompt>  — prompt for interactive input, return string.",
+        call: |args, _mooring, _shell| misc::builtin_ask(args).map_err(Break::from), },
+    Cwd { names: ["cwd"], ty: scheme::pure_string,
+        doc: "cwd  — the shell's working directory, absolute.",
+        call: |_args, _mooring, shell| Ok(ambient::cwd(shell)), },
+    Env { names: ["env"], ty: scheme::pure_string_map,
+        doc: "env  — the environment as a Map of String to String: the host process environment under any `within [env: …]` overlay. PWD and OLDPWD are absent; the working directory is `cwd`.",
+        call: |_args, _mooring, shell| Ok(ambient::env(shell)), },
+    Args { names: ["args"], ty: scheme::pure_strs,
+        doc: "args  — the program's arguments as [String]: those after the script path or the -c source. Empty in the REPL.",
+        call: |_args, _mooring, shell| Ok(ambient::args(shell)), },
+    User { names: ["user"], ty: scheme::pure_string,
+        doc: "user  — the current user: USER, or USERNAME where appropriate, from the effective environment.",
+        call: |_args, _mooring, shell| ambient::user(shell).map_err(Break::from), },
+    Home { names: ["home"], ty: scheme::pure_string,
+        doc: "home  — the current user's home directory, the one `~` abbreviates: HOME, or USERPROFILE where appropriate, from the effective environment.",
+        call: |_args, _mooring, shell| ambient::home(shell).map_err(Break::from), },
+    Nproc { names: ["nproc"], ty: scheme::pure_int,
+        doc: "nproc  — available processor parallelism as an Int, never less than 1.",
+        call: |_args, _mooring, _shell| Ok(ambient::nproc()), },
+    Chdir { names: ["cd"], ty: scheme::chdir,
+        doc: "cd <path>  — change the shell working directory; gated by shell.chdir capability. `cd ~` goes home.",
+        call: |args, _mooring, shell| shell::builtin_chdir(args, shell), },
+    Alias { names: ["alias"], ty: scheme::alias,
+        doc: "alias NAME { |args| BODY }  — install BODY as a handler-frame alias for NAME; replaces any prior alias for the same name. Persists past `within` blocks; remove with `unalias`.",
+        call: |args, _mooring, shell| shell::builtin_alias(args, shell), },
+    Unalias { names: ["unalias"], ty: scheme::unalias,
+        doc: "unalias NAME  — remove the alias for NAME. Errors if none is installed.",
+        call: |args, _mooring, shell| shell::builtin_unalias(args, shell), },
+    Exists { names: ["exists"], ty: scheme::path_bool,
+        doc: "exists <path>  — true if path exists (any type); resolves against the within-scoped cwd.",
+        call: |args, _mooring, shell| fs::builtin_exists(args, shell), },
+    IsFile { names: ["is-file"], ty: scheme::path_bool,
+        doc: "is-file <path>  — true if path is a regular file (follows symlinks).",
+        call: |args, _mooring, shell| fs::builtin_is_file(args, shell), },
+    IsDir { names: ["is-dir"], ty: scheme::path_bool,
+        doc: "is-dir <path>  — true if path is a directory (follows symlinks).",
+        call: |args, _mooring, shell| fs::builtin_is_dir(args, shell), },
+    IsLink { names: ["is-link"], ty: scheme::path_bool,
+        doc: "is-link <path>  — true if path is a symbolic link.",
+        call: |args, _mooring, shell| fs::builtin_is_link(args, shell), },
+    IsReadable { names: ["is-readable"], ty: scheme::path_bool,
+        doc: "is-readable <path>  — true if path is readable by the caller.",
+        call: |args, _mooring, shell| fs::builtin_is_readable(args, shell), },
+    IsWritable { names: ["is-writable"], ty: scheme::path_bool,
+        doc: "is-writable <path>  — true if path is writable by the caller.",
+        call: |args, _mooring, shell| fs::builtin_is_writable(args, shell), },
+    ListDir { names: ["list-dir"], ty: scheme::list_dir,
+        doc: "list-dir <path>  — list directory contents as [{name, type, size, mtime}].",
+        call: |args, _mooring, shell| fs::builtin_list_dir(args, shell), },
+    FileInfo { names: ["file-info"], ty: scheme::file_info,
+        doc: "file-info <path>  — {name, type, size, mtime, atime, btime, readonly, target}; uses lstat (no symlink follow); 0 when a timestamp is unavailable.",
+        call: |args, _mooring, shell| fs::builtin_file_info(args, shell), },
+    TempDir { names: ["temp-dir"], ty: scheme::temp_path,
+        doc: "temp-dir  — create a temporary directory.",
+        call: |args, _mooring, shell| fs::builtin_temp_dir(args, shell), },
+    TempFile { names: ["temp-file"], ty: scheme::temp_path,
+        doc: "temp-file  — create a temporary file.",
+        call: |args, _mooring, shell| fs::builtin_temp_file(args, shell), },
+    ToInt { names: ["int"], ty: scheme::int_parse,
+        doc: "int <val>  — parse a value as an integer.",
+        call: |args, _mooring, _shell| strings::builtin_to_int(args), },
+    ToFloat { names: ["float"], ty: scheme::float_parse,
+        doc: "float <val>  — parse a value as a float.",
+        call: |args, _mooring, _shell| strings::builtin_to_float(args), },
+    Round { names: ["round"], ty: scheme::round,
+        doc: "round <x> <places>  — round a Float to <places> decimal places, halves away from zero; always returns a Float (round 3.7 0 is 4.0). Use int for a whole number.",
+        call: |args, _mooring, _shell| math::builtin_round(args), },
+    Floor { names: ["floor"], ty: scheme::float_to_int,
+        doc: "floor <x>  — the greatest Int not exceeding a Float.",
+        call: |args, _mooring, _shell| math::builtin_floor(args), },
+    Ceil { names: ["ceil"], ty: scheme::float_to_int,
+        doc: "ceil <x>  — the least Int not below a Float.",
+        call: |args, _mooring, _shell| math::builtin_ceil(args), },
+    Trunc { names: ["trunc"], ty: scheme::float_to_int,
+        doc: "trunc <x>  — drop a Float's fractional part toward zero, yielding an Int.",
+        call: |args, _mooring, _shell| math::builtin_trunc(args), },
+    Str { names: ["str"], ty: scheme::str_parse,
+        doc: "str <val>  — convert a value to its string representation.",
+        call: |args, _mooring, _shell| Ok(strings::builtin_to_string(args)), },
+    Await { names: ["await"], ty: scheme::await_op,
+        doc: "await <handle>  — wait for a concurrent block, claim its result, and behave as if it had run here: its stdout and stderr are written to yours, its value is returned, and a failure, an exit or a stop is raised as it was. A result is claimed once: a handle already awaited, raced or cancelled fails.",
+        call: |args, _mooring, shell| concurrency::builtin_await(args, shell), },
+    IsDone { names: ["is-done"], ty: scheme::is_done,
+        doc: "is-done <handle>  — true once a worker's execution has ended (`ready or `consumed), false while it is `running or `stopping. Claims nothing and copies no buffers.",
+        call: |args, _mooring, _shell| concurrency::builtin_is_done(args), },
+    Poll { names: ["poll"], ty: scheme::poll,
+        doc: "poll <handle>  — sample a concurrent block without waiting or writing: `running [stdout, stderr, elapsed], `stopping [elapsed], `ready [stdout, stderr, elapsed, outcome: `ok value | `err error], or `consumed [elapsed]. Claims nothing: a failed block, or one stopped by its scope, settles as `err data in `ready; an exit, a foreign stop and a panic are re-raised when sampling `ready; `stopping and `consumed return data without failing.",
+        call: |args, _mooring, shell| concurrency::builtin_poll(args, shell), },
+    Race { names: ["race"], ty: scheme::race,
+        doc: "race <handles>  — wait for the first of several concurrent blocks to finish, then claim it and behave as `await` on it; the rest are claimed, cancelled and drained before `race` returns. A handle another caller claimed is skipped; if every handle is claimed, `race` fails.",
+        call: |args, mooring, shell| concurrency::builtin_race(args, mooring, shell), },
+    FirstSettled { names: ["first-settled"], ty: scheme::first_settled,
+        doc: "first-settled <handles>  — the index of the first of several concurrent blocks to reach `ready, without claiming it: a pure observation like `poll`, so `await` of the one it names still works. Cancel-aware. A `stopping or `consumed handle is skipped; if no handle is `running or `ready, or the list is empty, it fails.",
+        call: |args, _mooring, shell| concurrency::builtin_first_settled(args, shell), },
+    Cancel { names: ["cancel"], ty: scheme::cancel_op,
+        doc: "cancel <handle>  — claim a concurrent block and cancel it; nothing if its result was already claimed.",
+        call: |args, _mooring, _shell| concurrency::builtin_cancel(args), },
+    Workers { names: ["workers"], ty: scheme::workers_op,
+        doc: "workers  — every non-consumed worker this session registered, as one record each: `id`, `title`, `owner` (`session, `worker id, or `gather for one a `gather` owns), `state` (`running, `stopping, or `ready with how it ended), `started` (unix seconds), `elapsed` (seconds, so far or in total), `settled` (`some unix seconds, or `none). Pure observation.",
+        call: |_args, _mooring, shell| Ok(concurrency::builtin_workers(shell)), },
+    // The bundled uutils tools (cat, yes, head, wc, …) are deliberately absent:
+    // `shell::exec::command` runs each as a `ral --ral-bundled-tool <tool>` child, so
+    // they cross the same wait / signal / exit-code boundary as a system binary.
+    // See `crate::uutils::is_uutils_tool`.
+
+    Help { names: ["help"], ty: scheme::help,
+        doc: "help  — print an overview of language syntax, builtins, prelude, and library; see also `explain`.",
+        call: |args, _mooring, shell| help::builtin_help(args, shell), },
+    Explain { names: ["explain"], ty: scheme::explain,
+        doc: "explain <name>  — print the full guide for one language form or command, followed by its type when applicable, its source, and what it shadows. Unlike `which`, which only searches PATH and so cannot see anything ral provides, this describes the entry that actually applies.",
+        call: |args, _mooring, shell| help::builtin_explain(args, shell), },
+    // The `_ed-*` family rides the REPL's boot surface instead; see
+    // `ral::repl::plugin::ed_builtins::ED_BUILTINS`.
+    AnsiOk { names: ["_ansi-ok"], ty: scheme::pure_bool,
+        doc: "_ansi-ok  — true if stdout supports ANSI colour (respects NO_COLOR / non-tty).",
+        call: |_args, _mooring, _shell| Ok(Value::Bool(crate::io::terminal::ui_color())), },
+}
+
+/// The argv half of core's manifest: names that take an argv rather than
+/// arguments, and so install as base handler frames instead of natives.
+///
+/// `echo` is core's only one.  [`DETACH_BUILTIN`] is the other frame core
+/// publishes, withheld from here for a host that also arms a birth budget.
+static CORE_BASE_FRAMES_ARR: [BuiltinEntry; 1] = [BuiltinEntry::base_frame(
+    Cow::Borrowed("echo"),
+    scheme::echo,
+    "echo <args...>  — write one line: every argument in its text form (what `str` gives, so a list or a map prints as it looks), joined by single spaces, with a trailing newline. It takes an argv rather than arguments, so there is no `$echo` to hold: a handler stacked on `echo` intercepts it, but `^echo` skips this frame; it is the operating system's `echo`, not ral's.",
+    BuiltinBody::Static(codecs::builtin_echo),
+)];
+pub(crate) static CORE_BASE_FRAMES: &[BuiltinEntry] = &CORE_BASE_FRAMES_ARR;
+
+/// Core's boundaries: the doors through which a value of a shape the program
+/// did not decide enters typed code.  Each is handed the [`Site`] the checker
+/// solved at its call and admits what it lets in against it; they sit apart
+/// from [`CORE_BUILTINS`] because their bodies take that site.
+static BOUNDARY_BUILTINS_ARR: [BuiltinEntry; 4] = [
+    BuiltinEntry::boundary(
+        Cow::Borrowed("from-json"),
+        scheme::from_json,
+        "from-json  — decode JSON bytes from the channel to a value, checked against how the script uses it.",
+        codecs::builtin_from_json,
+    )
+    .with_diagnostic(BuiltinDiagnostic::Decoder),
+    BuiltinEntry::boundary(
+        Cow::Borrowed("from-jsonl"),
+        scheme::from_jsonl,
+        "from-jsonl  — decode JSON Lines from the channel to a list of values, one per line split as from-lines splits them; a blank line holds none. Checked against how the script uses the values.",
+        codecs::builtin_from_jsonl,
+    )
+    .with_diagnostic(BuiltinDiagnostic::Decoder),
+    BuiltinEntry::boundary(
+        Cow::Borrowed("from-json-at"),
+        scheme::from_json_at,
+        "from-json-at <tokens>  — decode JSON bytes from the channel and read the value at a path, given as a list of RFC 6901 reference tokens: an object member by exact key, an array element by decimal index. `from-json-at ['items', '3', 'size']` reads `/items/3/size`. Checked against how the script uses the value.",
+        codecs::builtin_from_json_at,
+    )
+    .with_diagnostic(BuiltinDiagnostic::Decoder),
+    BuiltinEntry::boundary(
+        Cow::Borrowed("use"),
+        scheme::use_op,
+        "use <file>  — load a .ral module, returning its bindings as a record; its functions are checked against the types the script uses them at.",
+        modules::builtin_use,
+    ),
+];
+pub static BOUNDARY_BUILTINS: &[BuiltinEntry] = &BOUNDARY_BUILTINS_ARR;
+
+/// Core's manifest, every half: the one list the runtime installs and the
+/// checker's Σ is read from.  A [`HostSurface`](crate::HostSurface) lists these
+/// first, then its own.
+pub(crate) static CORE_SETS: [&[BuiltinEntry]; 3] =
+    [CORE_BUILTINS, BOUNDARY_BUILTINS, CORE_BASE_FRAMES];
+
+/// `watch` — a spawn whose output lines surface live to the host as
+/// `` `watch [label, line] ``, kept out of [`CORE_BUILTINS`] for a host's boot
+/// surface to carry.
+///
+/// The lines ride the session's deferred sink, which outlives the run, so only
+/// a host that installs a deferred sink installs this; elsewhere naming `watch`
+/// is an unknown-name diagnostic at compile time rather than a builtin that
+/// resolves and then refuses.
+static WATCH_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
+    Cow::Borrowed("watch"),
+    scheme::watch,
+    "watch <label> <thunk>  — spawn a concurrent block whose output lines surface live to the host, each labelled with the given label.",
+    BuiltinBody::Static(concurrency::builtin_watch),
+)];
+pub static WATCH_BUILTIN: &[BuiltinEntry] = &WATCH_BUILTIN_ARR;
+
+/// `surface` — forward a tagged variant event to the host's structured-event
+/// sink; the identity when no host is installed. Kept out of [`CORE_BUILTINS`]
+/// so the rail is named by its host, not by core.
+///
+/// The ral hosts install this static under `surface`; exarch declares its own
+/// entry over the same body (`scheme::surface_op`, `builtin_surface`,
+/// both `pub` for exactly this) as `exarch-surface`, with exarch's own doc —
+/// the rail, cards, the pin marks. No host's name enters core's vocabulary.
+static SURFACE_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
+    Cow::Borrowed("surface"),
+    scheme::surface_op,
+    "surface <event>  — forward a tagged variant event to the host's structured-event sink; the identity when no host is installed.",
+    BuiltinBody::Static(misc::builtin_surface),
+)];
+pub static SURFACE_BUILTIN: &[BuiltinEntry] = &SURFACE_BUILTIN_ARR;
+
+/// `detach` — a birth this session renounces: the process reparents to init.
+///
+/// Carried only by a host that also arms a detach policy
+/// ([`crate::shell::runtime::Shell::arm_detach`]) — one act, so absence is an unknown-name
+/// diagnostic and never a veto.  Whether
+/// a call that does resolve may *spend* the verb is the separate capability
+/// question, asked of the live grant stack
+/// ([`crate::authority::policy::GrantStack::permits`]) and answered as a refusal.
+///
+/// The other three verbs vary policy over one type; this one changes it — it
+/// takes an argv, hence a base frame and no `$detach`, returning a plain record
+/// rather than a [`Value::Handle`] because no eliminator here can reach what it
+/// births.  The birth is a double-fork, which Windows has no analogue of.
+#[cfg(unix)]
+static DETACH_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::base_frame(
+    Cow::Borrowed("detach"),
+    scheme::detach,
+    "detach <desc> <cmd> <args...>  — run a program that keeps running after this session is over. Returns a receipt {pid, desc}: data, not a handle: await, poll, race and cancel do not apply, and nothing in ral can stop it once it is born. It is also mute. Its stdin, stdout and stderr are all /dev/null, and its exit status is unrecoverable, since init reaps it and nothing here can ever wait for it: if it dies at startup (port already in use, bad flag, a missing import) nothing observes that, and a returned pid says only that the program was exec'd, never that it is alive or that it worked. The one way to learn whether it is running is to probe whatever it serves: connect to the port, fetch the URL, read the file it writes. Give it its own logging if you want a record of what it did. <pid> is the name it had at birth, not a capability over it; pids are recycled, so that number may later name something else entirely. Only cwd and env cross into it, from the enclosing `within`; bindings and the audit tree do not, and a head that a handler in scope intercepts is refused, since a handler runs inside this session and nothing could be detached; to stub `detach`, stand in for `detach` itself. A grant you birth it inside confines it for the rest of its life: it keeps the fs, net and exec limits in force at that moment, and nothing later can widen them, since nothing later can name it. Each grant's children live in their own process namespace, so a later grant cannot `ps` or `kill` a survivor an earlier one detached; control from inside a later grant must use whatever the survivor serves. A grant may also withhold the verb outright by leaving `detach` out of its `shell` list, in which case the call is refused and no process is born. <desc> is required, single-line and non-empty: once this session is gone it is all that says what the pid was for.",
+    BuiltinBody::Static(concurrency::builtin_detach),
+)];
+#[cfg(unix)]
+pub static DETACH_BUILTIN: &[BuiltinEntry] = &DETACH_BUILTIN_ARR;
+
+pub use print::{PrintParams, REPL_PRINT_PARAMS, pretty_print};
