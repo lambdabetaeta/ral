@@ -9,6 +9,7 @@ members = [
     "guest-net",
     "ral-daemon",
     "ral-initramfs",
+    "vm-image/build-tools",
     "prompt-editor",
     "clipboard",
     "vendor/ripgrep-core",

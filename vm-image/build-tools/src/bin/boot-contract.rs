@@ -5,8 +5,8 @@
 //! number copied by hand, or grepped out of a source line whose spelling has
 //! since moved, would record precisely the drift it exists to catch.  So the
 //! script does not read the constant: it *compiles* it, from the same checkout
-//! and in the same cargo invocation that produces the `ral-daemon` going into
-//! the initramfs, and asks the result.  A number that disagreed with the
+//! as the `ral-daemon` going into the initramfs, and asks the result.
+//! A number that disagreed with the
 //! shipped daemon could then only come from a compiler that disagreed with
 //! itself.
 //!
@@ -15,7 +15,7 @@
 
 #![allow(
     clippy::disallowed_macros,
-    reason = "[silent:example] an example prints its result"
+    reason = "[silent:build-tool] the packaging script reads this result"
 )]
 fn main() {
     println!("{}", ral_daemon::boot::CONTRACT);

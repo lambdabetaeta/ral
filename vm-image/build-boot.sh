@@ -346,20 +346,20 @@ done
 #
 # Compiled, not read.  A grep of the source, or a number kept by hand, could
 # record exactly the drift the number exists to catch; the tiny
-# `boot-contract` example links the very library that is about to become
+# `boot-contract` build tool links the very library that is about to become
 # /ral-daemon in the initramfs and prints the constant, so the recording
 # cannot be stale unless the compiler is. It runs here for the same reason
 # verify.txt's probes do: the container is $ARCH, asserted above, so a musl
 # guest binary executes natively.
 echo ">> [container] reading the boot contract out of the daemon it just built"
 ( cd /ral && cargo build --release --locked --target "$RUST_TARGET" \
-    -p ral-daemon --example boot-contract )
-BOOT_CONTRACT=$("$BIN/examples/boot-contract")
+    -p ral-vm-image-build-tools --bins )
+BOOT_CONTRACT=$("$BIN/boot-contract")
 case "$BOOT_CONTRACT" in
   '' | *[!0-9]*)
     printf 'error: ral-daemon reported `%s` as its boot contract, which is not a version.\n' \
       "$BOOT_CONTRACT" >&2
-    echo "ral-daemon/examples/boot-contract.rs prints boot::CONTRACT and nothing else." >&2
+    echo "vm-image/build-tools/src/bin/boot-contract.rs prints boot::CONTRACT and nothing else." >&2
     exit 1 ;;
 esac
 echo ">> [container] boot contract $BOOT_CONTRACT"
@@ -370,14 +370,12 @@ echo ">> [container] boot contract $BOOT_CONTRACT"
 # package this media rather than ship an engine that will refuse its Attach
 # and leave the front-end holding a closed socket.
 echo ">> [container] reading the protocol version out of the engine it just built"
-( cd /ral && cargo build --release --locked --target "$RUST_TARGET" \
-    -p ral-core --example proto-version )
-PROTO_VERSION=$("$BIN/examples/proto-version")
+PROTO_VERSION=$("$BIN/proto-version")
 case "$PROTO_VERSION" in
   '' | *[!0-9]*)
     printf 'error: ral-core reported `%s` as its protocol version, which is not a version.\n' \
       "$PROTO_VERSION" >&2
-    echo "core/examples/proto-version.rs prints protocol::PROTOCOL_VERSION and nothing else." >&2
+    echo "vm-image/build-tools/src/bin/proto-version.rs prints protocol::PROTOCOL_VERSION and nothing else." >&2
     exit 1 ;;
 esac
 echo ">> [container] protocol version $PROTO_VERSION"

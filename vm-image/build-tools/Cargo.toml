@@ -1,0 +1,13 @@
+[package]
+name = "ral-vm-image-build-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+ral-core = { path = "../../core" }
+ral-daemon = { path = "../../ral-daemon" }
