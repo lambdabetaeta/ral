@@ -411,7 +411,7 @@ impl Headless<'_> {
                 Remedy::RaiseMaxTokens => {
                     "rerun with --max-tokens N, or split the turn into smaller writes"
                 }
-                Remedy::SignIn => "run `exarch login`",
+                Remedy::SignIn => "run `exarch login <service>`",
             };
             let _ = writeln!(self.err, "  hint: {hint}");
         }

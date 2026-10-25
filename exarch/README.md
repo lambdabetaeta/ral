@@ -48,7 +48,7 @@ from the one saved with `/providers` in this computer's credential manager;
 the environment's wins. Variables are read into memory and scrubbed from the
 environment at startup so no spawned child inherits them.
 
-| provider       | key env var          |
+| provider       | key env var or sign-in method |
 |----------------|----------------------|
 | `anthropic`    | `ANTHROPIC_API_KEY`  |
 | `openai`       | `OPENAI_API_KEY`     |
@@ -59,6 +59,9 @@ environment at startup so no spawned child inherits them.
 | `opencode-go`  | `OPENCODE_API_KEY`   |
 | `xai`          | `XAI_API_KEY`        |
 | `qwen`         | `DASHSCOPE_API_KEY`  |
+| `openai-chatgpt` | OAuth browser sign-in |
+| `openai-codex` | OAuth browser or device sign-in |
+| `xai-grok` | OAuth device sign-in |
 
 `opencode-zen` and `opencode-go` share one `OPENCODE_API_KEY` — one account
 key, two endpoints — so setting it makes both available. A key value with a
@@ -71,25 +74,48 @@ protocol, and `` key: `none `` if it checks no key. The file never holds a
 key: an endpoint named `groq` reads `GROQ_API_KEY`, else its saved key. See
 [`examples/config.ral`](examples/config.ral) for the format.
 
-A **signed-in ChatGPT account** is the one credential not read from the
-environment: it signs in through OpenAI's "Sign in with ChatGPT" for
-open-source apps, an OAuth redirect to a browser on this machine. `chatgpt`
-is a service like any other above, but unlike them it can own **several
-accounts** — a login email carries a personal account and one per workspace,
-and OpenAI issues each its own id.
-Sign in as many as you like with `exarch login`; `exarch login <account>`
-renews an existing sign-in. Each is separately selectable in the `/model`
-picker, listed by `exarch accounts`, and named by its email, qualified by its
-account id when two would otherwise read alike. A plan's usage is shown in
-ChatGPT Settings → Usage, not by `/limits`. Every other
-service owns exactly one account and goes by its own name, which is why
-`--provider deepseek` names a credential unambiguously and `--provider
-alex@example.com` may not: if two accounts answer to a name, exarch refuses it
-and prints both rather than choosing for you.
+**Three login services** keep credentials outside the environment, with
+multiple independently selectable accounts on each:
+
+```sh
+exarch login openai-chatgpt
+exarch login openai-codex
+exarch login openai-codex --device-auth
+exarch login xai-grok
+exarch accounts
+```
+
+`exarch login openai-chatgpt <account>` renews an existing Chatgpt account;
+Codex/Grok use the same service-first grammar.
+
+Chatgpt uses OpenAI's dynamic-client token-sharing browser route; Codex reuses
+the Codex CLI public client; Grok reuses pi's xAI public client. Public-client
+reuse does **not** establish issuer approval. No live authentication or
+inference is claimed: Grok's initial ID token with subject, Xai inference and
+`/v1/models` compatibility remain unverified. Missing identity fails without
+saving. See the [sign-in decision](../docs/ral-wiki/decisions/261008_sign-in-with-chatgpt-token-sharing.md)
+for policy caveats and deferred live acceptance.
+
+Chatgpt/Grok accounts key by returned subject, not email; Chatgpt workspaces
+are independently selectable only if their returned subjects differ. Codex
+distinguishes both human subject and backend account/workspace id. Each account
+has its own refresh, renewal, model catalog and selection; wrong-account renewal
+is refused. `/model` shows labels qualified with ids when needed; `--provider`
+pins the exact account id. Old `chatgpt:*` entries are rejected with warnings,
+not migrated; sign in again. Stale saved selections take the normal picker path.
+
+Codex `/limits` reads server-defined usage windows; Chatgpt/Grok publish no
+meter. ChatGPT token-sharing usage is in Settings → Usage. Only that route
+restricts tuning to reasoning effort; Codex/Grok retain sampling and output caps.
+Codex logout is local-only and its refresh credential may remain usable at the
+issuer. Chatgpt/Grok attempt issuer revocation; even acceptance need not invalidate
+existing access tokens immediately. Issuer-side app/session revocation is separate.
 
 Type `/providers` to save or clear an API key, add or remove a custom endpoint,
-or sign in to ChatGPT; changes are saved and take effect at once, except that a
-key set in the environment stays in force over a saved one.
+or choose a login service; `/login` also manages sign-ins. Changes take effect
+at once, except that an environment key stays in force over a saved one.
+Synod's window still offers only ChatGPT sign-in; its roster can contain other
+accounts added through exarch.
 
 Type `/model` in the REPL for a searchable picker over every available
 provider's live model list (fetched from the provider and cached); the

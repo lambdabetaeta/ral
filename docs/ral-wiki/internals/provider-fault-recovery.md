@@ -1,6 +1,6 @@
 ---
-verified_at_commit: d13f07b0
-verified_at_date: 2026-10-17
+verified_at_commit: dd8a5443b8f87dc40de66bcf5c5a72df05a723d8
+verified_at_date: 2026-10-25
 anchors: [from_genai, refused, error_object, Fault, of_webc, of_boxed, of_reqwest, ProviderError, Refused, Refusal, Limit, Recovery, recovery, Transient, Api, Truncated, retry_with_backoff, Attempt, backoff_sleep, parse_retry_after, unwaitable, BODY_KEYS, epoch_or_delta, Wait::patient, RATE_LIMIT_MAX_DELAY_MS, json_status_code, CutShort, stall_cause, root_cause, body_detail, Readout, stalled_step_out, STREAM_HEADER_TIMEOUT, STREAM_READ_TIMEOUT, budget, retryable, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS, manufacture, Sealed]
 ---
 
@@ -123,10 +123,12 @@ by status when present:
 A 429 is read by `refused`. A body whose error `type` or `code` names a quota
 or credit spent (`insufficient_quota`, `usage_not_included`, the spend- and
 usage-limit codes, and `subscription_sharing_usage_limit_exceeded`, a
-sign-in plan's cap, whose reset the route does not name) is `Api`: waiting
-does not refill a purse. Every other 429 is stated whole as a
-`Refusal`: what ran out (`Limit`: `Allowance` when the body's `type` or `code`
-is `usage_limit_reached`, else `Rate`), when it was `received`, and the reset,
+Chatgpt token-sharing cap whose reset the route does not name) is `Api`:
+waiting does not refill a purse. Login kind does not decide retryability.
+In particular Codex's `usage_limit_reached` stays in the allowance set, not
+the unwaitable set. Every other 429 is stated whole as a `Refusal`: what ran
+out (`Limit`: `Allowance` for `usage_limit_reached`, else `Rate`), when it was
+`received`, and the reset,
 which `provider/reset.rs`'s `at` reads from every convention one is named by,
 taking the **latest** instant any names — asking before the last named clock
 runs out is only refused again:
@@ -186,6 +188,11 @@ a model listing — it passes through `body_detail`, which prefers the body's ow
 JSON message, names an HTML error page rather than spilling it, and caps every
 shape alike: a proxy's page can reflect request context, and the string reaches
 both the screen and the log.
+
+Authentication recovery is service-neutral: `Remedy::SignIn` means renew the
+affected account through its own login service, not switch to OpenAI or replace
+another account's credentials. Refresh failures and UI hints name that service;
+an issuer rejection is distinct from an allowance reset or local-only logout.
 
 Two more `ProviderError` variants never come from `from_genai`:
 

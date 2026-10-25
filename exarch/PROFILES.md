@@ -72,7 +72,7 @@ whole home directory. It deliberately reads broad XDG config, data, and state
 surfaces. Known credential directories for `gh`, 1Password, and Google Cloud
 are denied, but if other home data must remain private, start from `minimal` or
 add a restriction. exarch's and synod's own credential files — the keychain
-fallback and the ChatGPT OAuth tokens under the XDG config and state homes —
+fallback and all three services' OAuth tokens under the XDG config and state homes —
 are denied too, by every profile that restricts the filesystem, so an agent
 cannot read the key that pays for its own session.
 

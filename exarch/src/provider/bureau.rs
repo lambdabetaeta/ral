@@ -236,8 +236,8 @@ impl Bureau {
         )))
     }
 
-    /// Admit a freshly signed-in `ChatGPT` token, returning who it now is and
-    /// what it is now called.
+    /// Admit a freshly signed-in token, returning who it now is and what it
+    /// is now called.
     ///
     /// # Errors
     /// If the bureau is scripted, which has no store to admit into.
@@ -248,7 +248,7 @@ impl Bureau {
         Ok(super::admit_login(holdings, token))
     }
 
-    /// Sign out of the `ChatGPT` login named `id`: delete its stored token and
+    /// Sign out of the login named `id`: delete its stored token and
     /// retire the account, returning the token for the caller to revoke.
     ///
     /// # Errors
@@ -262,7 +262,7 @@ impl Bureau {
             let account = super::accounts::find(store, id)?;
             let label = super::identity::label(&account, &store.available());
             let token = oauth::sign_out(account.id.as_str())?
-                .ok_or_else(|| format!("{label} is not signed in to ChatGPT"))?;
+                .ok_or_else(|| format!("{label} is not signed in"))?;
             store.retire(&account.id);
             Ok(token)
         })
@@ -389,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn a_plan_selection_carries_effort_alone() {
+    fn only_chatgpt_selection_carries_effort_alone() {
         let tuning = Tuning {
             effort: Some(ReasoningEffort::Medium),
             temperature: Some(0.5),
@@ -397,15 +397,25 @@ mod tests {
         };
         let pick = |account: &Account| selection(account, "m".into(), &tuning, None, Some(10));
 
-        let plan = pick(&Account::chatgpt("a", "a@x"));
+        let plan = pick(&Account::login(super::super::Login::Chatgpt, "a", "a@x"));
         assert!(matches!(plan.tuning.effort, Some(ReasoningEffort::Medium)));
         assert_eq!((plan.tuning.temperature, plan.tuning.top_p), (None, None));
         assert_eq!(plan.max_tokens_override, None);
 
-        let keyed = pick(&Account::built_in("openai"));
-        assert_eq!(keyed.tuning.temperature, Some(0.5));
-        assert_eq!(keyed.tuning.top_p, Some(0.9));
-        assert_eq!(keyed.max_tokens_override, Some(10));
+        for account in [
+            Account::built_in("openai"),
+            Account::login(super::super::Login::Codex, "a", "a@x"),
+            Account::login(super::super::Login::Grok, "a", "a@x"),
+        ] {
+            let selection = pick(&account);
+            assert!(matches!(
+                selection.tuning.effort,
+                Some(ReasoningEffort::Medium)
+            ));
+            assert_eq!(selection.tuning.temperature, Some(0.5));
+            assert_eq!(selection.tuning.top_p, Some(0.9));
+            assert_eq!(selection.max_tokens_override, Some(10));
+        }
     }
 
     #[test]

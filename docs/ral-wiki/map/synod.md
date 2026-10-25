@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_commit: dd8a5443b8f87dc40de66bcf5c5a72df05a723d8
 generated_at_date: 2026-10-25
 covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/protocol/channel.rs, core/src/carrier.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs]
 ---
@@ -166,11 +166,13 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   display — the opening's and a finished sign-in's account name — is spelled
   `label` on the wire, so an id and a display string cannot be mistaken for
   one another in either direction.
-- `session/signin.rs` — `sign_in` drives exarch's browser login flow
-  (`exarch::provider::oauth::login_flow`, always `SignIn::Register`) and admits the fresh account to the
-  live store and catalog through `exarch::provider::admit_login` — the same
-  call exarch's own front end uses — so a ChatGPT plan signed in from the
-  window is usable without a restart. The credential store is behind a
+- `session/signin.rs` — the window retains its **ChatGPT-only** sign-in button.
+  `sign_in` drives `exarch::provider::oauth::login_flow` with
+  `SignIn::New(Login::Chatgpt, Method::Browser)` and admits the fresh account
+  through `exarch::provider::admit_login`. The shared roster can also contain
+  Codex/Grok accounts added through exarch; the window does not offer their
+  sign-in methods. Its phase conversion handles device phases exhaustively.
+  A new Chatgpt account is usable without a restart. The credential store is behind a
   `Mutex` for exactly that reason, taken only for an account list or an
   admission, never across a fetch or a boot. `admit_login` and
   `pricing::ensure_loaded_blocking` (`session.rs`'s `resolve_tuning` calls

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_commit: dd8a5443b8f87dc40de66bcf5c5a72df05a723d8
 generated_at_date: 2026-10-25
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/roles.md, exarch/data/ral.md, exarch/data/context.md]
 ---
@@ -9,7 +9,7 @@ covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/
 exarch is a small LLM coding agent — a separate workspace binary that
 **embeds** [[map/core|ral-core]] (`ral-core = { path = "../core" }`). A model
 (Anthropic / OpenAI / Gemini / xAI / Qwen / OpenRouter / DeepSeek / OpenCode, a
-`custom` provider, or a signed-in ChatGPT account) is
+`custom` provider, or an `openai-chatgpt`, `openai-codex` or `xai-grok` account) is
 given one `ral` tool, and each call is evaluated as a *ral top-level run*
 against a persistent in-process `Shell`, under capabilities the user chose. It
 ships as one executable ([[invariants/single-binary|single-binary]]); the same
@@ -51,7 +51,7 @@ exit code.
   dispatch and the confined transport stays unpinned, so that binary's
   confined-path tests cannot run.
 - **Subcommands** (`cli.rs`) run an out-of-band action and exit before any session
-  setup: `login` / `logout` / `accounts` manage signed-in ChatGPT accounts (see
+  setup: `login` / `logout` / `accounts` manage signed-in accounts (see
   below), `--model` and the session flags are ignored on this path. `export
   <session> [--out FILE]` renders a session's `record.jsonl` (given as its
   directory or the file) as the plain-text transcript the scrollback showed, to
@@ -86,33 +86,34 @@ exit code.
 
 ## Accounts
 
-**One service may own many accounts.** `chatgpt` is a single service, and a
-login email can carry several accounts under it — a personal one and one per
-workspace, each with its own issued id. Each account is separately selectable
-in the `/model` picker, exactly like any API-keyed one, so there is no second
-account dimension; a key-bearing service is simply the case where the service
-owns exactly one account and lends it its name. The shape is
-[[map/exarch/provider#Services and accounts|`Service` × `Account`]].
+**Each login service may own many accounts.** `openai-chatgpt` and `xai-grok`
+key by returned subject, not email; independently selectable Chatgpt workspaces
+are not promised unless returned subjects distinguish them. `openai-codex`
+keys by subject and backend account/workspace id together. Every account is
+independently selectable in `/model`, with its own credential cell and catalog.
+The shape is [[map/exarch/provider#Services and accounts|`Service` × `Account`]].
 
-- `login` signs in through OpenAI's "Sign in with ChatGPT" for open-source
-  apps (a browser redirect to a loopback listener): bare, it registers a new
-  account; `login <account>` renews an existing one under its own issued
-  client. There is no device-code flow.
-- `/login` performs the same sign-in inside a running TUI session, then admits
-  the returned shared OAuth credential to both the live store and model
-  catalog; a refresh of the selected account is visible to its next request.
-- `logout` removes one account by email or id, or `--all`. An email two
-  accounts answer to names neither, so it is refused with both account ids
-  rather than taking whichever came first.
-- `accounts` lists the signed-in set, each named by
-  `identity::label` against the others present.
+- `exarch login openai-chatgpt` adds a browser token-sharing account.
+  `exarch login openai-codex` adds a Codex browser account;
+  `exarch login openai-codex --device-auth` uses its device method.
+  `exarch login xai-grok` uses Grok device authorization. No aliases exist.
+- `exarch login openai-chatgpt <account>` renews an existing Chatgpt account;
+  the same service-first grammar applies to Codex/Grok. A service mismatch
+  or different returned identity is refused rather than replacing credentials.
+- `/login` offers accounts and the three services, then only supported methods;
+  successful admission updates the live credential store and catalog.
+- `logout` removes one account by handle or id, or `--all`. Ambiguous handles
+  are refused with candidate ids. Codex removal is local-only; Chatgpt/Grok
+  attempt issuer revocation, without promising immediate token invalidation.
+- `accounts` labels the signed-in set with `identity::label` against its peers.
 
-The token store is an object keyed by the rendering of an `AccountId`, one
-entry per account, and so is every map above it. `run` resolves each login into
-its own account, ordered after the key-bearing ones. Because a key-bearing
-account's id *is* its service name, an existing `state.json`, model cache
-entry, or `--provider deepseek` keeps working untouched; only a ChatGPT
-selection changes key.
+The store and all caches key on full service-qualified `AccountId`. Login
+accounts follow key-bearing accounts, ordered by login declaration order,
+handle and id. No signed-out login gets a synthetic account. Old `chatgpt:*`
+entries are rejected with warnings, never migrated; stale cache keys do not
+alias new accounts and stale selection follows the normal unavailable/picker
+path. See [[decisions/261008_sign-in-with-chatgpt-token-sharing|sign-in-with-chatgpt-token-sharing]]
+for public-client policy caveats and deferred live acceptance.
 
 ## Credentials and the env scrub
 
@@ -134,10 +135,10 @@ can inherit a live key.**
   re-read, so a key absent at startup stays absent for the run. Read and removal
   happen while the process is still single-threaded — before any session worker —
   so the env mutation cannot race.
-- A signed-in **ChatGPT account** never touches the environment: its login is
-  loaded from the OAuth token store into its own `OAuth` credential cell
-  ([[#Accounts]]). `chatgpt` is a different service from `openai`, so a login
-  and an `OPENAI_API_KEY` coexist, and two logins never share a cell.
+- A **signed-in account** never touches the environment: each login is loaded
+  from the OAuth token store into its own credential cell ([[#Accounts]]).
+  The three login services are distinct from `openai` and `xai`, so API keys
+  and logins coexist without sharing credentials.
 - This is the subtractive half of exarch's env shaping; the additive half —
   `NO_COLOR`, `$EXARCH_SCRATCH`, and the redirected tool homes — is seeded onto the
   session shell ([[#Bootstrap]]). Per-spawn loader-variable hardening (stripping

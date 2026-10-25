@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 11950445365e2a5381b0bc988f6b6142ae16bb52
-generated_at_date: 2026-10-19
-covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
+generated_at_commit: dd8a5443b8f87dc40de66bcf5c5a72df05a723d8
+generated_at_date: 2026-10-25
+covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs, exarch/src/tui/login.rs, exarch/src/tui/providers.rs, exarch/src/tui/commands.rs]
 ---
 
 # Map: exarch / provider
@@ -28,11 +28,11 @@ methods on `Engine` and `Transport`, not visible fields.
 Selectable identity is a **product of two things**, not a sum over provenance.
 A *`Service`* is where bytes go — endpoint, wire adapter, billing, model list.
 An *`Account`* is who is asking — an id, a credential, and a name for itself.
-One service may own many accounts: a ChatGPT login email carries a personal
-account and one per workspace, and OpenAI issues each its own id against the
-same `email` claim. A key-bearing service is the degenerate case — one service
-with exactly one account, which borrows the service's name — and that is why
-the flattened design never went wrong there.
+One service may own many accounts. Chatgpt and Grok distinguish returned
+subjects, not emails or assumed workspaces. Codex distinguishes subject and
+backend account/workspace id together; two people in one workspace cannot
+overwrite one another. A key-bearing service owns exactly one account and
+borrows the service's name.
 
 `provider/identity.rs` owns both, and the two newtypes that keep them apart:
 
@@ -52,14 +52,14 @@ the flattened design never went wrong there.
 
 `built_in_services()` is the table — nine key-bearing services (Anthropic,
 OpenAI, OpenRouter, DeepSeek, Gemini, opencode Zen, opencode Go, xAI, Qwen)
-plus chatgpt — as struct literals rather than a value enum. A declared
+plus `Login::ALL`'s `openai-chatgpt`, `openai-codex` and `xai-grok` — as struct literals rather than a value enum. A declared
 endpoint is the *same struct* parsed from a hand-written `config.ral`, with
 the protocol mapped onto genai's `AdapterKind` at decode time; provenance is
 not a type. See [[decisions/260613_provider-config-ral-script|provider-config-ral-script]].
 `Service::routes` is true for OpenRouter alone, and is what admits a `Via`, so
 no code compares a service name against the string `"openrouter"`.
-`Service::auth` says how a service authenticates — `Key(var)`, `OAuth`, or
-`Keyless` — and never the secret itself. A declared endpoint's `var` is
+`Service::auth` says how a service authenticates — `Key(var)`, `OAuth(Login)`,
+or `Keyless` — and never the secret itself. A declared endpoint's `var` is
 `identity::key_var`'s `{NAME}_API_KEY`, never written in the declaration;
 `Keyless` is the declaration's `` key: `none ``, a fact about the server.
 
@@ -76,12 +76,12 @@ stale.
 ### A handle is local; a label is set-relative
 
 An `Account::handle` is derived from that account's own credential alone: the
-`id_token`'s email claim, else the issued account id. For a key-bearing
-service it is simply the service's name. Being local is the point — admitting
-one account is complete and correct on its own, so `add_oauth` needs no set,
-and a refresh that rewrites claims into the token cell leaves nothing stale.
-`exarch logout` revokes the refresh token at the issuer, best-effort, before
-removing the local record.
+email, else the issued identity; Codex qualifies it with workspace or plan.
+For a key-bearing service it is simply the service's name. Admission needs
+no set; refresh updates only that credential cell. `exarch logout` removes
+the local record and attempts issuer revocation for Chatgpt/Grok. Codex
+returns `Revocation::LocalOnly`; its refresh credential may remain usable.
+Issuer acceptance does not promise immediate access-token invalidation.
 
 `identity::label(account, among)` computes the **set-relative** name, and is
 the one place in either product that names an account. It takes the set
@@ -98,8 +98,8 @@ label.
 ```
 anthropic
 opencode-go
-chatgpt · alex@bristol.ac.uk
-chatgpt · alex@bristol.ac.uk · <issued id>
+openai-chatgpt · alex@bristol.ac.uk
+openai-codex · alex@bristol.ac.uk (workspace) · <issued id>
 ```
 
 The honest limit: a live session's status line keeps the handle it started
@@ -114,7 +114,7 @@ what a log is for.
 
 `Service::billing` is the sole authority on whether a turn costs money, and
 `Transport::metered` is `billing == Billing::Metered` — the whole derivation.
-chatgpt and opencode Go are both `FlatRate`; a subscription turn reports
+The three login services and opencode Go are `FlatRate`; a subscription turn reports
 tokens and never a cost. There is no second derivation to disagree with it;
 one keyed on the login kind would report a future *metered* OAuth service as
 free.
@@ -123,14 +123,12 @@ free.
 from `billing`. `Billing` says *does this turn cost money*; `Meter` says *does
 this account publish what is left*. The two are orthogonal and the table says
 both: OpenRouter is `Metered` and publishes a credit balance, a declared local
-endpoint is `Metered` and publishes nothing, chatgpt is `FlatRate` and
-publishes nothing: OpenAI's token-sharing route has no usage readout, and the
-plan's usage is shown only in ChatGPT Settings → Usage. A derivation either way would have to guess at
-one of those rows. `Meter` has two readouts, one for OpenRouter's credit balance, and publishing
-nothing is itself a variant, `Meter::Unpublished`, which chatgpt and
-`opencode-go` carry. The field is no `Option`: the `keyed` builder takes the meter as an
-argument, so every row states one and no row can default it — which is how
-a subscription is visibly unpublished rather than forgotten.
+endpoint is `Metered` and publishes nothing. `openai-chatgpt` and `xai-grok`
+are `FlatRate` with `Meter::Unpublished`; ChatGPT token-sharing usage is in
+Settings → Usage. `openai-codex` is `FlatRate` with `Meter::Codex`, reading
+`wham/usage` windows and durations from the server (five hours and one week
+are common, not fixed semantics). OpenRouter publishes a credit balance.
+Every service states its meter explicitly; billing never implies a readout.
 
 What a meter reports is one value type, `provider/allowance.rs`'s `Allowance`:
 a quantity of entitlement, consumed against a bound, renewing over a span. Its
@@ -186,27 +184,38 @@ atomically, and *born* owner-private whatever was there before. The Unix arm
 creates it mode `0600`; the Windows arm gives it an owner-only,
 inheritance-protected DACL at creation, so at no instant does the token file wear
 the parent directory's inherited ACL. A store that cannot be read is never
-written over: a failed read aborts the write and returns its error. The document holds the host id and an object keyed by the rendering of an
-`AccountId`, one entry per account; an entry whose key disagrees with its own
-fields is dropped with a warning rather than trusted, the key being an index
-and the fields the truth.
+written over: a failed read aborts the write and returns its error. The document
+holds the host id and service-qualified `AccountId` entries. `StoredToken`
+stays flat; conversion checks grant-specific required fields and key agreement.
+Unknown services (including old `chatgpt`), invalid semantic fields and key
+mismatches drop only that entry with a non-secret warning. Invalid JSON or
+structurally undecodable required fields make the whole store unreadable.
+Queries do not rewrite it; successful writes omit rejected entries. Upserts
+compare the full account id, never bare issued identity across services.
 
 ### The sign-in
 
-`provider/oauth/` is OpenAI's "Sign in with ChatGPT" token-sharing route for
-open-source apps: a browser redirect to a loopback listener (`127.0.0.1:1455`,
-else any free port; only the port may vary), an authorization-code exchange
-with PKCE, and no device-code flow. The store carries one **host id**
-(`urn:uuid:<v4>`, minted once, never user-identifying) and, per account, the
-**issued client id** (`oaiapp_…`) and the retained ID token. A first sign-in
-presents the dynamic client and learns the issued id from the callback;
-`SignIn::Register` or `SignIn::Reauthorize(token)` says which, so signing an
-account in again presents its own client and `id_token_hint` and never
-registers exarch twice. The ID token's payload is decoded, not
-signature-verified (it comes straight from the issuer's token endpoint over
-TLS and names the account): its `nonce` must match the attempt, its `sub` be
-present, and `chatgpt.tokens.use.direct` be among the granted scopes. See
-[[decisions/261008_sign-in-with-chatgpt-token-sharing|sign-in-with-chatgpt-token-sharing]].
+`Login::{Chatgpt, Codex, Grok}` determines service and supported `Method`:
+Chatgpt browser, Codex browser/device, Grok device. `SignIn::New(login, method)`
+adds an account; `SignIn::Renew(token, method)` refuses a different identity.
+`OAuthToken` has common credentials and `Grant`-specific data. Chatgpt/Grok
+use nonempty subject as issued identity; Codex uses the injective
+`base64url(sub):base64url(chatgpt_account_id)` composite, retaining the raw
+backend id separately for headers. Naming metadata does not participate in keys.
+
+Chatgpt preserves dynamic registration, host id, issued client, nonce, scope
+and ID-token-hint behavior. Codex reuses the Codex CLI public client and
+Grok pi's xAI client; reuse is not issuer approval. Grok's initial ID-token
+subject and bearer compatibility with Xai inference **and** `/v1/models` remain
+live-unverified. See [[decisions/261008_sign-in-with-chatgpt-token-sharing|sign-in-with-chatgpt-token-sharing]]
+for policy and deferred acceptance, including no migration of `chatgpt:*`.
+
+The `/login` overlay chooses accounts or one new-account row per login, then
+only supported methods. `LoginPhase` distinguishes browser URL, device
+code/URL/expiry and code exchange. Choosing bounds its account viewport;
+running/failed phases collapse the roster so instructions remain visible.
+Esc closes immediately and signals cancellation; sliced waits observe it
+within a tick, while in-flight HTTP remains bounded by its timeout.
 
 ## Two layers for a key, the environment's on top
 
@@ -236,7 +245,7 @@ Each launch reads the vault once per key-bearing account:
   products' keys are two entries exactly as their config directories are two
   directories. Only key-bearing accounts reach the vault, and their ids *are*
   their service names, so an entry name stays short printable ASCII and no
-  `chatgpt:<issued>` ever becomes a Credential Manager target.
+  login account id ever becomes a Credential Manager target.
   `Entry::store_status()` is asked first; a computer with no
   credential manager falls back to an owner-only file beside the app's
   configuration, and `vault()` answers where secrets actually land in a
@@ -250,7 +259,7 @@ Each launch reads the vault once per key-bearing account:
   base profiles read the `` `xdg-config ``/`` `xdg-state `` places wholesale and would otherwise
   hand the agent the key that pays for its own turn — see
   [[invariants/a-grant-never-reaches-its-own-key|a-grant-never-reaches-its-own-key]].
-- the `ChatGPT` token store and that fallback file are both written through
+- the OAuth token store and that fallback file are both written through
   `ral_core::own`'s `OwnDir::store` with `Visibility::Secret`: one implementation
   of the owner-only promise, in the walk, instead of two copies.
 
@@ -279,10 +288,10 @@ everything before writing anything, touching the vault with the store
 unlocked, and applying the change live through `Holdings::change`.
 `Wallet::exarch()` is `Keychain::for_app(EXARCH)` over `config::path()`, read
 at startup as well as written by `/providers`; synod's `accounts::wallet()` is
-its own. A ChatGPT login is no wallet's: the token store is exarch's whichever
-product signed in, so `Bureau::sign_out`, `admit`'s mirror, removes the token
-and retires the account locally and hands the token back, and the caller
-revokes it at the issuer off its UI thread (`oauth::revoke_blocking`).
+its own. An OAuth login is no wallet's: the token store is exarch's whichever
+product signed in. `Bureau::sign_out` removes the token and retires the local
+account; the caller runs `oauth::revoke_blocking` off its UI thread and reports
+issuer acceptance, local-only removal or revocation failure without conflating them.
 
 `config.rs` is likewise generalised: `load_declared(path, label)` reads either
 product's file, and `save_declared` writes the same `.ral` source back — a
@@ -306,16 +315,15 @@ genai `Client`:
   unknown-name fallback to local Ollama is overridden — the provider is the
   authority, so a misspelled model fails at its provider rather than silently
   hitting `localhost`.
-- An **OAuth** login branches to `build_oauth_client`: the Responses adapter
-  renders the body, and an `AuthResolver` hands every request the login's
-  access token as the bearer, read live from the shared cell so a mid-session
-  refresh is picked up without rebuilding. There is no endpoint override and
-  no extra header: requests go to genai's default, `api.openai.com/v1/responses`.
-  `refresh_cell_if_stale` is the common renewal path for inference and catalog
-  requests, upserting just that account's entry. A refresh may rename the
-  account — fresh claims update the handle's ingredients — but never re-keys
-  it: the issued id is pinned to the current token's, since every map keys on
-  it.
+- An **OAuth** login branches to `build_oauth_client`, using its service's
+  adapter (`OpenAIResp` for Chatgpt/Codex, `Xai` for Grok). The resolver reads
+  `OAuthToken::auth_data` live from the shared cell. Chatgpt/Grok supply the
+  bearer; Codex supplies a backend Responses URL override and
+  `request_headers`, including the raw backend account id, beta, originator
+  and user-agent headers. Other grants never receive Codex headers.
+  `refresh_cell_if_stale` is shared by inference and catalogs, dispatching
+  refresh by grant and upserting just that full account id. Issued identity,
+  Chatgpt client id and Codex raw backend id stay pinned; naming metadata may change.
 
 ## One owner for construction
 
@@ -384,10 +392,12 @@ disk-caches both paths:
   parser — and `Native::of` is the only place an adapter picks one. Every
   listing is `Vec<Listed { id, context_window }>`, and the picker sees only
   the names.
-- ChatGPT accounts list through `https://api.openai.com/v1/models`,
-  authenticated by their live OAuth cell after the common stale-token check;
-  only entries whose `visibility` is `"list"` are kept, in server order, with
-  each entry's `context_window`.
+- `models::list_login` dispatches after the shared stale-token check.
+  `plan_models` preserves server order, `visibility == "list"` and context
+  windows for Chatgpt's `https://api.openai.com/v1/models` and Codex's backend
+  catalog. Codex sends its raw-account headers and `client_version`, pinned to
+  `0.164.0` unless `EXARCH_CODEX_CLIENT_VERSION` overrides it. Grok lists through
+  genai's Xai adapter. Its OAuth `/v1/models` acceptance remains live-unverified.
 - `Bureau::build` is the one place a selection passes, and takes a `Choice`:
   an account, one of its models, and the `Via` it is served through, if any.
   It refuses a via on a service that does not route, or one naming an upstream
@@ -607,7 +617,9 @@ the ChatGPT plan route rejects outright (rust-genai #273),
 so every other adapter carries its system prompt in the request's own
 `system` field — where the Responses adapter's `instructions` string wants it
 anyway — and leans on the per-process `prompt_cache_key` alone, which genai
-reads as intent for the free implicit cache. `tool_defs(adapter, request)`, also in `wire.rs`, builds the request's tool array: the agent's
-[[map/exarch/tools|`Toolset`]] (`provider/tools.rs`) on the wire, plus the provider's own hosted web-search tool
-under `search` — carried only on the three adapters genai maps it for
-(`OpenAIResp`, `Anthropic`, `Gemini`), bare on each; the bit is [[map/exarch/agent|agent]]'s `search`.
+reads as intent for the free implicit cache. `tool_defs` also receives the
+selected `Service`, so hosted search can distinguish the two Responses routes.
+Alongside the agent's [[map/exarch/tools|`Toolset`]], search is carried on
+`OpenAIResp`, `Anthropic` and `Gemini`; only Codex receives the legacy
+`external_web_access: true` configuration. Chatgpt retains its default search
+form. The bit is [[map/exarch/agent|agent]]'s `search`.

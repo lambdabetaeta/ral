@@ -2,7 +2,7 @@
 //!
 //! An account's model list is that account's to know: Anthropic, `DeepSeek` and
 //! Gemini list through their own endpoints ([`native`]), other API-key services
-//! through genai, `ChatGPT` accounts through `OpenAI`'s public model list. A listing
+//! through genai. Signed-in accounts use their service's own catalog. A listing
 //! carries each model's context window where the wire reports one. The
 //! listing is the authority on which models an account serves: a model it
 //! does not name is never run on that account.
@@ -14,7 +14,7 @@
 
 use crate::provider::credential::{Credential, CredentialStore, Roster};
 use crate::provider::error::body_detail;
-use crate::provider::identity::{self, Account, AccountId};
+use crate::provider::identity::{self, Account, AccountId, Login};
 use crate::provider::oauth;
 use genai::Client;
 use genai::resolver::{AuthData, Endpoint, ProviderConfig};
@@ -158,7 +158,7 @@ impl ModelSource for LiveSource {
             .ok_or(ListFailure::NoCredential)?;
         match credential {
             Credential::ApiKey(key) => self.list_api_key(account, key),
-            Credential::OAuth(cell) => Self::list_chatgpt(cell),
+            Credential::OAuth(cell) => self.list_login(account, cell),
         }
     }
 
@@ -227,10 +227,12 @@ impl LiveSource {
             .map_err(|e| ListFailure::Request(e.to_string()))
     }
 
-    /// The plan's own catalog, as `OpenAI` lists it for this account;
-    /// authenticated from the live cell, so a token refreshed here needs no
-    /// new source.
-    fn list_chatgpt(
+    /// The login's own catalog, authenticated from the live cell so a token
+    /// refreshed here needs no new source. Refresh and listing share one
+    /// runtime; no mutex guard survives into a network request.
+    fn list_login(
+        &self,
+        account: &Account,
         cell: &std::sync::Arc<std::sync::Mutex<oauth::OAuthToken>>,
     ) -> Result<Vec<Listed>, ListFailure> {
         let runtime = blocking_runtime("subscription model-list").map_err(ListFailure::Runtime)?;
@@ -239,27 +241,46 @@ impl LiveSource {
                 .await
                 .map_err(ListFailure::Refresh)?;
             let token = cell.lock_ignore_poison().clone();
-            let response = crate::provider::tls::client()
-                .get(PLAN_MODELS_URL)
-                .bearer_auth(token.access_token)
-                .send()
-                .await
-                .map_err(|e| ListFailure::Request(e.to_string()))?;
-            let status = response.status();
-            if !status.is_success() {
-                let body = response.text().await.unwrap_or_default();
-                return Err(ListFailure::Http {
-                    status,
-                    detail: body_detail(&body),
-                });
+            match token.login() {
+                Login::Chatgpt => {
+                    plan_models(
+                        crate::provider::tls::client()
+                            .get(PLAN_MODELS_URL)
+                            .bearer_auth(&token.access_token),
+                    )
+                    .await
+                }
+                Login::Codex => {
+                    let request = token.request_headers("application/json").into_iter().fold(
+                        crate::provider::tls::client().get(oauth::codex::models_url()),
+                        |request, (key, value)| request.header(key, value),
+                    );
+                    plan_models(request).await
+                }
+                Login::Grok => self.list_genai(account, &token.access_token).await,
             }
-            let body: PlanModels = response
-                .json()
-                .await
-                .map_err(|e| ListFailure::Parse(e.to_string()))?;
-            Ok(body.listed())
         })
     }
+}
+
+async fn plan_models(request: reqwest::RequestBuilder) -> Result<Vec<Listed>, ListFailure> {
+    let response = request
+        .send()
+        .await
+        .map_err(|e| ListFailure::Request(e.to_string()))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(ListFailure::Http {
+            status,
+            detail: body_detail(&body),
+        });
+    }
+    let body: PlanModels = response
+        .json()
+        .await
+        .map_err(|e| ListFailure::Parse(e.to_string()))?;
+    Ok(body.listed())
 }
 
 #[derive(Deserialize)]
@@ -626,6 +647,7 @@ pub fn resolve_pinned_provider(name: &str, available: &[Account]) -> Result<Acco
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use std::cell::Cell;
@@ -785,8 +807,8 @@ mod tests {
 
     #[test]
     fn resolve_two_accounts_listing_one_model_is_refused_naming_both() {
-        let personal = Account::chatgpt("acc-1", "alex@bristol.ac.uk");
-        let work = Account::chatgpt("acc-2", "alex@work (Acme Ltd)");
+        let personal = Account::login(Login::Chatgpt, "acc-1", "alex@bristol.ac.uk");
+        let work = Account::login(Login::Chatgpt, "acc-2", "alex@work (Acme Ltd)");
         let lists = Lists::from([
             (personal.id.clone(), Ok(bare(&["model-a"]))),
             (work.id.clone(), Ok(bare(&["model-a"]))),
@@ -886,27 +908,30 @@ mod tests {
         assert!(err.contains("no provider available"), "got: {err}");
     }
 
-    /// A bare service name naming two `ChatGPT` accounts is refused, naming
-    /// both, rather than picking whichever the store happened to list first.
+    /// A bare login service naming two accounts is refused, naming both,
+    /// rather than picking whichever the store happened to list first.
     #[test]
     fn pin_a_service_name_naming_two_accounts_is_refused() {
-        let personal = Account::chatgpt("acc-1", "alex@bristol.ac.uk");
-        let work = Account::chatgpt("acc-2", "alex@work");
-        let available = [personal, work];
-        let err = resolve_pinned_provider("chatgpt", &available).unwrap_err();
-        assert!(err.contains("account id"), "{err}");
-        assert!(
-            err.contains("alex@bristol.ac.uk") && err.contains("alex@work"),
-            "{err}"
-        );
+        for login in Login::ALL {
+            let personal = Account::login(login, "acc-1", "alex@bristol.ac.uk");
+            let work = Account::login(login, "acc-2", "alex@work");
+            let available = [personal, work];
+            let err =
+                resolve_pinned_provider(login.service().name.as_str(), &available).unwrap_err();
+            assert!(err.contains("account id"), "{err}");
+            assert!(
+                err.contains("alex@bristol.ac.uk") && err.contains("alex@work"),
+                "{err}"
+            );
+        }
     }
 
     /// Two accounts sharing an email: the label `exarch accounts` prints picks
     /// one; the bare handle stays ambiguous.
     #[test]
     fn pin_a_full_label_resolves_exactly() {
-        let a = Account::chatgpt("acc-1", "alex@bristol.ac.uk");
-        let b = Account::chatgpt("acc-2", "alex@bristol.ac.uk");
+        let a = Account::login(Login::Chatgpt, "acc-1", "alex@bristol.ac.uk");
+        let b = Account::login(Login::Chatgpt, "acc-2", "alex@bristol.ac.uk");
         let available = [a, b];
         let label = identity::label(&available[1], &available);
         let got = resolve_pinned_provider(&label, &available).unwrap();
@@ -920,8 +945,9 @@ mod tests {
         let body: PlanModels = serde_json::from_value(serde_json::json!({
             "models": [
                 {"slug": "model-a", "visibility": "list", "context_window": 272_000},
-                {"slug": "model-b", "visibility": "list"},
+                {"slug": "model-b"},
                 {"slug": "model-c", "visibility": "hidden", "context_window": 8_000},
+                {"slug": "model-zero", "context_window": 0},
             ],
         }))
         .unwrap();
@@ -934,8 +960,199 @@ mod tests {
             ids_and_windows,
             [
                 ("model-a".to_string(), Some(272_000)),
-                ("model-b".to_string(), None)
+                ("model-b".to_string(), None),
+                ("model-zero".to_string(), None),
             ]
         );
+    }
+
+    #[test]
+    fn login_catalogs_are_cached_by_full_account_identity() {
+        let mut lists = Lists::new();
+        let mut expected = Vec::new();
+        for login in Login::ALL {
+            for issued in ["a", "b"] {
+                let account = Account::login(login, issued, "same@work");
+                let window = u64::try_from(expected.len()).unwrap() + 1;
+                let models = vec![Listed {
+                    id: "shared-model".into(),
+                    context_window: Some(window),
+                }];
+                lists.insert(account.id.clone(), Ok(models.clone()));
+                expected.push((account.id, models));
+            }
+        }
+        let source = FakeSource::new(lists);
+        let calls = Rc::clone(&source.calls);
+        let catalog = Mutex::new(ModelCatalog::memo_only(source));
+        for _ in 0..2 {
+            for (id, models) in &expected {
+                assert_eq!(listing_of(&catalog, id), Ok(models.clone()));
+            }
+        }
+        assert_eq!(calls.get(), 6, "each account keeps its own cached catalog");
+    }
+
+    fn catalog_token(login: Login) -> oauth::OAuthToken {
+        oauth::OAuthToken {
+            access_token: "catalog-access".into(),
+            refresh_token: "catalog-refresh".into(),
+            issued: "catalog-subject".into(),
+            email: Some("same@work".into()),
+            expires_at: u64::MAX,
+            grant: match login {
+                Login::Chatgpt => oauth::Grant::Chatgpt {
+                    id_token: "id".into(),
+                    client_id: "client".into(),
+                },
+                Login::Codex => oauth::Grant::Codex {
+                    account_id: "raw-backend-id".into(),
+                    workspace: None,
+                    plan: None,
+                },
+                Login::Grok => oauth::Grant::Grok,
+            },
+        }
+    }
+
+    fn local_model_server(status: u16, body: &str) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/v1/", listener.local_addr().unwrap());
+        let body = body.to_owned();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 4096];
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).unwrap();
+                assert!(read > 0, "request ended before its headers");
+                request.extend_from_slice(&buffer[..read]);
+            }
+            write!(stream, "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        (endpoint, server)
+    }
+
+    fn local_model_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn both_openai_catalogs_use_the_same_visibility_and_window_parser() {
+        for (login, body) in [
+            (
+                Login::Chatgpt,
+                serde_json::json!({"models": [
+                    {"slug":"shown", "visibility":"list", "context_window":128_000},
+                    {"slug":"default"},
+                    {"slug":"zero", "context_window":0},
+                    {"slug":"hidden", "visibility":"hidden"},
+                ]}),
+            ),
+            (
+                Login::Codex,
+                serde_json::json!({"models": [
+                    {"slug":"shown", "visibility":"list", "context_window":128_000, "display_name":"Shown"},
+                    {"slug":"default", "supported_reasoning_levels":[]},
+                    {"slug":"zero", "context_window":0},
+                    {"slug":"hidden", "visibility":"hide", "context_window":400_000},
+                ]}),
+            ),
+        ] {
+            let (endpoint, server) = local_model_server(200, &body.to_string());
+            let token = catalog_token(login);
+            let request = token.request_headers("application/json").into_iter().fold(
+                local_model_client().get(format!("{endpoint}models")),
+                |request, (key, value)| request.header(key, value),
+            );
+            assert_eq!(
+                plan_models(request).await.unwrap(),
+                vec![
+                    Listed {
+                        id: "shown".into(),
+                        context_window: Some(128_000)
+                    },
+                    Listed::bare("default"),
+                    Listed::bare("zero"),
+                ]
+            );
+            let request = server.join().unwrap().to_ascii_lowercase();
+            assert!(request.starts_with("get /v1/models http/1.1\r\n"));
+            assert!(request.contains("authorization: bearer catalog-access\r\n"));
+            assert!(request.contains("accept: application/json\r\n"));
+            assert_eq!(
+                request.contains("chatgpt-account-id: raw-backend-id\r\n"),
+                login == Login::Codex
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_catalog_http_and_parse_failures_keep_their_classification() {
+        let (endpoint, server) =
+            local_model_server(403, r#"{"error":{"message":"catalog refused"}}"#);
+        let failure = plan_models(local_model_client().get(endpoint))
+            .await
+            .unwrap_err();
+        server.join().unwrap();
+        assert!(matches!(failure, ListFailure::Http { status, detail }
+            if status == reqwest::StatusCode::FORBIDDEN && detail.contains("catalog refused")));
+
+        let (endpoint, server) = local_model_server(200, "not-json");
+        let failure = plan_models(local_model_client().get(endpoint))
+            .await
+            .unwrap_err();
+        server.join().unwrap();
+        assert!(matches!(failure, ListFailure::Parse(_)));
+    }
+
+    #[test]
+    fn grok_catalog_uses_xai_in_the_same_listing_runtime() {
+        for status in [200, 401] {
+            let body = if status == 200 {
+                r#"{"data":[{"id":"grok-model"}]}"#
+            } else {
+                r#"{"error":{"message":"refused"}}"#
+            };
+            let (endpoint, server) = local_model_server(status, body);
+            let token = catalog_token(Login::Grok);
+            let cell = std::sync::Arc::new(Mutex::new(token.clone()));
+            let mut account = oauth::to_account(&token);
+            account.service.endpoint = Some(endpoint);
+            let source = LiveSource {
+                roster: Roster::default(),
+                client: Client::builder()
+                    .with_reqwest(local_model_client())
+                    .build()
+                    .unwrap(),
+            };
+            let listing = source.list_login(&account, &cell);
+            if status == 200 {
+                assert_eq!(listing.unwrap(), vec![Listed::bare("grok-model")]);
+            } else {
+                assert!(matches!(listing, Err(ListFailure::Request(_))));
+            }
+            let request = server.join().unwrap().to_ascii_lowercase();
+            assert!(request.starts_with("get /v1/models http/1.1\r\n"));
+            assert!(request.contains("authorization: bearer catalog-access\r\n"));
+            assert!(!request.contains("chatgpt-account-id"));
+        }
+    }
+
+    #[test]
+    fn old_chatgpt_account_ids_do_not_pin_a_renamed_login() {
+        let account = Account::login(Login::Chatgpt, "same-id", "same@work");
+        let failure = resolve_pinned_provider("chatgpt:same-id", &[account]).unwrap_err();
+        assert!(failure.contains("not available"), "{failure}");
     }
 }

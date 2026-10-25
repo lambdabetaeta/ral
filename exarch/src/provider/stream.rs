@@ -93,7 +93,7 @@ impl Engine {
         self.refresh_if_stale(transport);
         let model = selection.model.as_str();
         let adapter = transport.adapter();
-        let tools = tool_defs(adapter, request);
+        let tools = tool_defs(adapter, transport.live_search(), request);
         let options = complete_options(
             self.cache_key(),
             selection.max_tokens_override,

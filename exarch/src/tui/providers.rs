@@ -506,7 +506,7 @@ impl ProvidersOverlay {
                     w.seeing(&cells[c])
                 })
         });
-        rows.extend(["+ add endpoint…", "+ sign in with ChatGPT"].map(|label| {
+        rows.extend(["+ add endpoint…", "+ sign in…"].map(|label| {
             (
                 "○",
                 SLATE,
@@ -600,12 +600,7 @@ pub(super) fn input(
                         if app.overlay_gen == opened
                             && let Some(Overlay::Providers(p)) = &mut app.overlay
                         {
-                            p.status = Some(match revoked {
-                                Ok(()) => Ok(format!("signed out of {label}; OpenAI revoked the token")),
-                                Err(e) => Err(format!(
-                                    "signed out of {label} here, but OpenAI did not revoke the token: {e}"
-                                )),
-                            });
+                            p.status = Some(revocation_status(&label, revoked));
                         }
                     })));
                 });
@@ -640,4 +635,50 @@ pub(super) fn input(
             .emit_or_report(crate::record::Forensic::SystemNote { text });
     }
     true
+}
+
+fn revocation_status(
+    label: &str,
+    revoked: Result<oauth::Revocation, String>,
+) -> Result<String, String> {
+    match revoked {
+        Ok(oauth::Revocation::AtIssuer) => Ok(format!(
+            "signed out of {label}; the issuer accepted token revocation"
+        )),
+        Ok(oauth::Revocation::LocalOnly) => Ok(format!(
+            "signed out of {label} here only; exarch does not revoke this login remotely, so its credentials may still be usable"
+        )),
+        Err(error) => Err(format!(
+            "signed out of {label} here, but revocation at the issuer failed: {error}"
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{oauth::Revocation, revocation_status};
+
+    #[test]
+    fn revocation_status_distinguishes_remote_local_and_failure() {
+        let label = "xai-grok personal";
+        assert_eq!(
+            revocation_status(label, Ok(Revocation::AtIssuer)),
+            Ok(format!(
+                "signed out of {label}; the issuer accepted token revocation"
+            )),
+        );
+        let local = revocation_status(label, Ok(Revocation::LocalOnly)).expect("local removal");
+        assert!(local.contains("here only"));
+        assert!(local.contains("credentials may still be usable"));
+        let failure =
+            revocation_status(label, Err("unreachable".into())).expect_err("remote failure");
+        assert_eq!(
+            failure,
+            format!("signed out of {label} here, but revocation at the issuer failed: unreachable")
+        );
+        for status in [local, failure] {
+            assert!(!status.contains("OpenAI"));
+            assert!(!status.contains("access token expires"));
+        }
+    }
 }

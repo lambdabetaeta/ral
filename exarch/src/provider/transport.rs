@@ -1,7 +1,7 @@
 //! Credential binding and the per-process transport cache.
 
 use super::credential::Credential;
-use super::identity::{Account, AccountId, Billing, Service, adapter_for_model};
+use super::identity::{Account, AccountId, Auth, Billing, Login, Service, adapter_for_model};
 use super::oauth;
 use genai::adapter::AdapterKind;
 use genai::resolver::{AuthData, AuthResolver, Endpoint, ServiceTargetResolver};
@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 /// One [`Transport`] per account, credential, and wire adapter, not per
 /// model — only API-key `OpenAI` splits, where the model picks the adapter.
-/// Two `ChatGPT` accounts share a service, hence an endpoint and an adapter,
+/// Two signed-in accounts share a service, hence an endpoint and an adapter,
 /// but never a token cell, so the key must name the account and not just the
 /// service.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -62,6 +62,7 @@ pub(super) struct Transport {
     adapter: AdapterKind,
     token_cell: Option<Arc<Mutex<oauth::OAuthToken>>>,
     billing: Billing,
+    live_search: bool,
 }
 
 impl Transport {
@@ -76,6 +77,7 @@ impl Transport {
             adapter,
             token_cell,
             billing: service.billing,
+            live_search: matches!(service.auth, Auth::OAuth(Login::Codex)),
         })
     }
 
@@ -85,6 +87,10 @@ impl Transport {
 
     pub(super) fn adapter(&self) -> AdapterKind {
         self.adapter
+    }
+
+    pub(super) fn live_search(&self) -> bool {
+        self.live_search
     }
 
     /// The sole authority on whether this transport's turns cost money —
@@ -136,7 +142,7 @@ impl Engine {
             return;
         };
         if let Err(error) = self.runtime.block_on(oauth::refresh_cell_if_stale(cell)) {
-            ral_core::errln!("exarch: ChatGPT token refresh failed: {error}");
+            ral_core::errln!("exarch: {error}");
         }
     }
 
@@ -164,7 +170,10 @@ fn build_client(service: &Service, model: &str, credential: &Credential) -> (Cli
     let key = match credential {
         Credential::ApiKey(key) => key.clone(),
         Credential::OAuth(cell) => {
-            return (build_oauth_client(cell.clone()), AdapterKind::OpenAIResp);
+            return (
+                build_oauth_client(service.adapter, cell.clone()),
+                service.adapter,
+            );
         }
     };
     let adapter = adapter_for_model(service, model);
@@ -204,22 +213,24 @@ fn build_client(service: &Service, model: &str, credential: &Credential) -> (Cli
 
 /// The auth resolver reads the cell on every request, so a refresh by
 /// [`Engine::refresh_if_stale`] reaches the next call without rebuilding the
-/// client; the endpoint is genai's default, `api.openai.com`.
-fn build_oauth_client(cell: Arc<Mutex<oauth::OAuthToken>>) -> Client {
-    let auth = AuthResolver::from_resolver_fn(move |identity: ModelIden| {
-        if identity.adapter_kind == AdapterKind::OpenAIResp {
-            let access_token = cell.lock_ignore_poison().access_token.clone();
-            Ok(Some(AuthData::from_single(access_token)))
+/// client. Only the account's adapter may receive this credential.
+fn build_oauth_client(adapter: AdapterKind, cell: Arc<Mutex<oauth::OAuthToken>>) -> Client {
+    Client::builder()
+        .with_reqwest(super::tls::client())
+        .with_adapter_kind(adapter)
+        .with_auth_resolver(oauth_auth_resolver(adapter, cell))
+        .build()
+        .expect("with_reqwest supplies the client, so build() cannot fail")
+}
+
+fn oauth_auth_resolver(adapter: AdapterKind, cell: Arc<Mutex<oauth::OAuthToken>>) -> AuthResolver {
+    AuthResolver::from_resolver_fn(move |identity: ModelIden| {
+        if identity.adapter_kind == adapter {
+            Ok(Some(cell.lock_ignore_poison().auth_data()))
         } else {
             Ok(None)
         }
-    });
-    Client::builder()
-        .with_reqwest(super::tls::client())
-        .with_adapter_kind(AdapterKind::OpenAIResp)
-        .with_auth_resolver(auth)
-        .build()
-        .expect("with_reqwest supplies the client, so build() cannot fail")
+    })
 }
 
 /// Fill the pricing cache up front so the first usage lookup never pays the fetch.
@@ -229,18 +240,28 @@ fn prime_pricing(runtime: &tokio::runtime::Runtime) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::identity::chatgpt_service;
     use super::*;
 
-    fn token(access_token: &str) -> oauth::OAuthToken {
+    fn token(login: Login, access_token: &str) -> oauth::OAuthToken {
+        let grant = match login {
+            Login::Chatgpt => oauth::Grant::Chatgpt {
+                id_token: "id".into(),
+                client_id: "oaiapp_test".into(),
+            },
+            Login::Codex => oauth::Grant::Codex {
+                account_id: "raw-backend-id".into(),
+                workspace: None,
+                plan: None,
+            },
+            Login::Grok => oauth::Grant::Grok,
+        };
         oauth::OAuthToken {
             access_token: access_token.into(),
             refresh_token: format!("refresh-{access_token}"),
-            id_token: "id".into(),
-            client_id: "oaiapp_test".into(),
-            issued: "account".into(),
+            issued: "local-composite-id".into(),
             email: Some("me@example.com".into()),
             expires_at: u64::MAX,
+            grant,
         }
     }
 
@@ -259,13 +280,99 @@ mod tests {
     }
 
     #[test]
-    fn oauth_keys_ignore_rotated_secret() {
-        let chat = Account::chatgpt("account", "me@example.com");
-        let credential = |secret: &str| Credential::OAuth(Arc::new(Mutex::new(token(secret))));
-        assert_eq!(
-            TransportKey::for_selection(&chat, "gpt-5.5", &credential("first")),
-            TransportKey::for_selection(&chat, "gpt-5.5", &credential("second")),
+    fn oauth_keys_ignore_rotated_secret_but_not_account_or_service() {
+        let mut keys = Vec::new();
+        for login in Login::ALL {
+            let account = Account::login(login, "account", "me@example.com");
+            let credential =
+                |secret: &str| Credential::OAuth(Arc::new(Mutex::new(token(login, secret))));
+            let first = TransportKey::for_selection(&account, "m", &credential("first"));
+            assert_eq!(
+                first,
+                TransportKey::for_selection(&account, "m", &credential("second"))
+            );
+            let sibling = Account::login(login, "other-account", "me@example.com");
+            assert_ne!(
+                first,
+                TransportKey::for_selection(&sibling, "m", &credential("first"))
+            );
+            keys.push(first);
+        }
+        assert_ne!(keys[0], keys[1]);
+        assert_ne!(keys[0], keys[2]);
+        assert_ne!(keys[1], keys[2]);
+    }
+
+    #[test]
+    fn oauth_resolver_reads_the_current_cell_and_refuses_other_adapters() {
+        for login in Login::ALL {
+            let adapter = login.service().adapter;
+            let cell = Arc::new(Mutex::new(token(login, "old")));
+            let AuthResolver::ResolverFn(resolver) = oauth_auth_resolver(adapter, cell.clone())
+            else {
+                panic!("OAuth uses a synchronous cell resolver");
+            };
+            let resolve = |kind| resolver.exec_fn(ModelIden::new(kind, "m")).unwrap();
+            for secret in ["old", "new"] {
+                *cell.lock_ignore_poison() = token(login, secret);
+                match (login, resolve(adapter).unwrap()) {
+                    (Login::Chatgpt | Login::Grok, AuthData::Key(key)) => assert_eq!(key, secret),
+                    (Login::Codex, AuthData::RequestOverride { url, headers }) => {
+                        assert_eq!(url, oauth::codex::RESPONSES_URL);
+                        let headers: std::collections::BTreeMap<_, _> =
+                            headers.into_iter().collect();
+                        assert_eq!(
+                            headers,
+                            std::collections::BTreeMap::from([
+                                ("authorization".into(), format!("Bearer {secret}")),
+                                ("chatgpt-account-id".into(), "raw-backend-id".into()),
+                                ("openai-beta".into(), "responses=experimental".into()),
+                                ("originator".into(), "codex_cli_rs".into()),
+                                (
+                                    "user-agent".into(),
+                                    format!(
+                                        "codex_cli_rs/{}",
+                                        oauth::codex::codex_client_version()
+                                    )
+                                ),
+                                ("accept".into(), "text/event-stream".into()),
+                            ]),
+                        );
+                    }
+                    _ => panic!("the login's grant must choose its authentication shape"),
+                }
+                for other in [
+                    AdapterKind::OpenAIResp,
+                    AdapterKind::Xai,
+                    AdapterKind::Anthropic,
+                ] {
+                    if other != adapter {
+                        assert!(resolve(other).is_none());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn login_transports_keep_the_service_adapter_and_only_codex_has_live_search() {
+        for login in Login::ALL {
+            let service = login.service();
+            let transport = Transport::build(
+                &service,
+                "m",
+                &Credential::OAuth(Arc::new(Mutex::new(token(login, "live")))),
+            );
+            assert_eq!(transport.adapter(), service.adapter);
+            assert_eq!(transport.live_search(), login == Login::Codex);
+            assert!(!transport.metered());
+        }
+        let keyed = Transport::build(
+            &Account::built_in("openai").service,
+            "gpt-5.5",
+            &Credential::ApiKey("k".into()),
         );
+        assert!(!keyed.live_search());
     }
 
     /// `metered` decides whether a turn is priced at all, so the flavours are
@@ -282,14 +389,15 @@ mod tests {
             "claude-opus-4",
             &Credential::ApiKey("k".into()),
         );
-        let chatgpt = Transport::build(
-            &chatgpt_service(),
-            "gpt-5.5",
-            &Credential::OAuth(Arc::new(Mutex::new(token("live")))),
-        );
+        let logins = Login::ALL.map(|login| {
+            Transport::build(
+                &login.service(),
+                "m",
+                &Credential::OAuth(Arc::new(Mutex::new(token(login, "live")))),
+            )
+        });
         assert!(!flat_rate.metered());
         assert!(keyed.metered());
-        assert!(!chatgpt.metered());
 
         let raw = genai::chat::Usage {
             prompt_tokens: Some(1_000),
@@ -299,7 +407,8 @@ mod tests {
         let usage = |transport: &Transport, model: &str| {
             super::super::usage::usage_from(model, &raw, transport.metered(), transport.adapter())
         };
-        for (transport, model) in [(&flat_rate, "glm-5.2"), (&chatgpt, "gpt-5.5")] {
+        for transport in std::iter::once(&flat_rate).chain(logins.iter()) {
+            let model = "gpt-5.5";
             let usage = usage(transport, model);
             assert!(usage.unmetered);
             assert_eq!(usage.parts().cost, "subscription");

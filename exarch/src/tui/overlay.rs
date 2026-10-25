@@ -34,6 +34,11 @@ pub(super) fn body_width(want: u16, frame: Rect) -> u16 {
     want.min(frame.width.saturating_sub(CHROME_W + SHADOW.horizontal))
 }
 
+/// The row budget left inside the shared chrome, even on tiny terminals.
+pub(super) fn body_height(frame: Rect) -> usize {
+    usize::from(frame.height.saturating_sub(CHROME_H + SHADOW.vertical))
+}
+
 /// Draw the chrome around a `w × h` body at `anchor` in `frame`, clamped to
 /// fit with room for the shadow, and return the body's rect.
 pub(super) fn draw(

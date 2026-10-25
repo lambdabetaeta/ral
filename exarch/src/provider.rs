@@ -35,8 +35,8 @@ mod wire;
 pub use bureau::{Bureau, Choice, Holdings};
 pub use error::{CancelSite, CutShort, Limit, ProviderError, Refusal};
 pub(crate) use error::{error_object, extract_url};
-pub use identity::{Account, AccountId, Auth, Billing, Meter, Service, ServiceName};
-pub use identity::{built_in, built_in_services, chatgpt_service, scripted_service};
+pub use identity::{Account, AccountId, Auth, Billing, Login, Meter, Service, ServiceName};
+pub use identity::{built_in, built_in_services, scripted_service};
 pub use rations::Rations;
 pub(crate) use request::Request;
 pub use request::{EFFORT_LADDER, Tuning, default_effort_label, effort_by_label, effort_label};
@@ -57,7 +57,7 @@ use transport::Transport;
 
 /// Every file on this computer holding one of our own credentials, as
 /// spellings: each product's keychain fallback ([`keychain`]) and the
-/// `ChatGPT` tokens ([`oauth`]), all in a state directory; none where the
+/// sign-in tokens ([`oauth`]), all in a state directory; none where the
 /// host names no state base.
 ///
 /// [`crate::policy::for_invocation`] denies these to every session whose grant

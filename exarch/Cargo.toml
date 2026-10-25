@@ -98,6 +98,7 @@ ral-core = { path = "../core" }
 
 [dev-dependencies]
 ral-core = { path = "../core", features = ["test-util"] }
+tokio = { version = "1", features = ["test-util", "net", "io-util", "sync"] }
 ctor = "1"
 tempfile = "3.27"
 # cargo's idiom for "this feature is on whenever my own tests build": the test

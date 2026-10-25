@@ -117,7 +117,7 @@ fn declarations_source(services: &[Service], label: &str) -> Result<String, Stri
             let endpoint = quoted(endpoint, "address", label)?;
             let key = match service.auth {
                 Auth::Keyless => ", key: `none",
-                Auth::Key(_) | Auth::OAuth => "",
+                Auth::Key(_) | Auth::OAuth(_) => "",
             };
             let protocol = protocol_for_adapter(service.adapter).ok_or_else(|| {
                 format!(
@@ -405,11 +405,14 @@ mod tests {
     /// service name, a shadow would be an identity collision.
     #[test]
     fn a_declared_name_colliding_with_a_built_in_is_refused() {
-        let err =
-            parse("return [anthropic: [endpoint: 'https://x.example/', protocol: 'anthropic']]")
-                .unwrap_err();
-        assert!(err.contains("anthropic"), "{err}");
-        assert!(err.contains("built-in"), "{err}");
+        for name in ["anthropic", "openai-chatgpt", "openai-codex", "xai-grok"] {
+            let err = parse(&format!(
+                "return ['{name}': [endpoint: 'https://x.example/', protocol: 'anthropic']]"
+            ))
+            .unwrap_err();
+            assert!(err.contains(name), "{err}");
+            assert!(err.contains("built-in"), "{err}");
+        }
     }
 
     /// Rejected, rather than silently dropped.

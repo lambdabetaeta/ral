@@ -4,6 +4,7 @@
 
 use crate::headless::OutputFormat;
 use crate::prompt::EditScheme;
+use crate::provider::identity::Login;
 use crate::site::{Silent, site};
 use clap::{ArgGroup, Parser, Subcommand};
 
@@ -230,18 +231,22 @@ impl Cli {
 /// An out-of-band action that runs and exits instead of starting a session.
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Sign in to `ChatGPT` and add the account as a model provider.
+    /// Sign in to a plan: openai-chatgpt, openai-codex or xai-grok.
     ///
-    /// You can sign in to several accounts and choose between them with
-    /// `/model`. Name an account that is already signed in to renew its
-    /// sign-in; otherwise a new account is registered. Use this command on a
-    /// machine where you cannot first open an Exarch session; `/login`
-    /// provides the same sign-in flow inside a live session.
+    /// Add a new account, or name an account of this service to renew its
+    /// sign-in. Choose between signed-in accounts with `/model`. `/login`
+    /// offers the same flows inside a live session.
     Login {
+        /// The sign-in service: openai-chatgpt, openai-codex or xai-grok.
+        #[arg(value_parser = Login::named)]
+        service: Login,
         /// An account to sign in again, by its email address or account ID.
         account: Option<String>,
+        /// Use a device code instead of a browser (Codex and Grok only).
+        #[arg(long)]
+        device_auth: bool,
     },
-    /// Remove a stored `ChatGPT` login.
+    /// Remove a stored plan login.
     ///
     /// Name an account, use `--all`, or leave both out. With neither, Exarch
     /// removes the account if exactly one is signed in; otherwise it asks you
@@ -249,13 +254,13 @@ pub enum Command {
     Logout {
         /// Choose the account to sign out by its email address or account ID.
         account: Option<String>,
-        /// Sign out of every stored `ChatGPT` account.
+        /// Sign out of every stored account, across all sign-in services.
         ///
         /// You cannot use this option while also naming one account.
         #[arg(long, conflicts_with = "account")]
         all: bool,
     },
-    /// List the `ChatGPT` accounts that are signed in to Exarch.
+    /// List the accounts signed in to Exarch, across all sign-in services.
     Accounts,
     /// Render a session's transcript as text.
     ///
@@ -296,7 +301,8 @@ pub fn load_seed(
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::{Cli, Command};
+    use crate::provider::identity::Login;
     use clap::Parser;
 
     #[test]
@@ -317,5 +323,75 @@ mod tests {
             Cli::try_parse_from(["exarch", "--prompt", "do it", "--output-format", "json",])
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn login_requires_an_explicit_service_without_aliases() {
+        assert!(Cli::try_parse_from(["exarch", "login"]).is_err());
+        for name in ["chatgpt", "codex", "grok", "openai-chatgp", "openai"] {
+            assert!(
+                Cli::try_parse_from(["exarch", "login", name]).is_err(),
+                "{name}"
+            );
+        }
+        for login in Login::ALL {
+            let service = login.service();
+            let cli = Cli::try_parse_from(["exarch", "login", service.name.as_str()])
+                .expect("known service");
+            assert!(matches!(cli.command, Some(Command::Login {
+                service, account: None, device_auth: false,
+            }) if service == login));
+        }
+    }
+
+    #[test]
+    fn login_device_flag_can_surround_the_positionals() {
+        for args in [
+            vec![
+                "exarch",
+                "login",
+                "--device-auth",
+                "openai-codex",
+                "work@example.test",
+            ],
+            vec![
+                "exarch",
+                "login",
+                "openai-codex",
+                "--device-auth",
+                "work@example.test",
+            ],
+            vec![
+                "exarch",
+                "login",
+                "openai-codex",
+                "work@example.test",
+                "--device-auth",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(args).expect("device renewal grammar");
+            assert!(matches!(cli.command, Some(Command::Login {
+                service: Login::Codex, account: Some(account), device_auth: true,
+            }) if account == "work@example.test"));
+        }
+        // Method support is checked before network work in login_flow, not clap.
+        for service in ["openai-chatgpt", "xai-grok"] {
+            assert!(Cli::try_parse_from(["exarch", "login", service, "--device-auth"]).is_ok());
+        }
+    }
+
+    #[test]
+    fn logout_exclusivity_and_accounts_grammar_are_unchanged() {
+        assert!(Cli::try_parse_from(["exarch", "logout"]).is_ok());
+        assert!(Cli::try_parse_from(["exarch", "logout", "person@example.test"]).is_ok());
+        assert!(Cli::try_parse_from(["exarch", "logout", "--all"]).is_ok());
+        assert!(Cli::try_parse_from(["exarch", "logout", "person@example.test", "--all"]).is_err());
+        assert!(matches!(
+            Cli::try_parse_from(["exarch", "accounts"])
+                .expect("account listing")
+                .command,
+            Some(Command::Accounts)
+        ));
+        assert!(Cli::try_parse_from(["exarch", "accounts", "openai-codex"]).is_err());
     }
 }

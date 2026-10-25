@@ -2,10 +2,8 @@
 //!
 //! A service is an endpoint, a wire adapter, a billing flavour and a model
 //! list. An account is an identity, a credential, and a name for itself. One
-//! service may own many accounts — a `ChatGPT` login email carries a personal
-//! account and one per workspace, each with its own issued id — so the two are
-//! kept apart rather than flattened into a single provider identity whose only
-//! distinguishing field would be its name.
+//! service may own many accounts, each keyed by the identity its sign-in
+//! returns rather than by its human-readable handle.
 
 use genai::adapter::AdapterKind;
 
@@ -127,9 +125,9 @@ pub struct Service {
 pub enum Meter {
     /// `GET /api/v1/key`: credits spent against the key's cap, in dollars.
     OpenRouterCredits,
-    /// Every key-bearing vendor that simply bills what you use, and a
-    /// subscription with no readout: `opencode-go`, and a `ChatGPT` plan,
-    /// whose usage is shown only in `ChatGPT`'s own settings.
+    /// Codex's server-defined usage windows and reset times.
+    Codex,
+    /// A service that publishes no allowance readout.
     Unpublished,
 }
 
@@ -138,10 +136,56 @@ pub enum Meter {
 pub enum Auth {
     /// A key: this environment variable's at launch, else the vault's.
     Key(String),
-    /// A signed-in login. `ChatGPT`'s flow, named for its shape.
-    OAuth,
+    /// An account authenticated through this sign-in route.
+    OAuth(Login),
     /// A server that checks no key, sent the inert `NO_AUTH_PLACEHOLDER`.
     Keyless,
+}
+
+/// Explicit sign-in routes, in display order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Login {
+    Chatgpt,
+    Codex,
+    Grok,
+}
+
+impl Login {
+    pub const ALL: [Self; 3] = [Self::Chatgpt, Self::Codex, Self::Grok];
+
+    pub fn service(self) -> Service {
+        let (name, adapter, meter) = match self {
+            Self::Chatgpt => (
+                "openai-chatgpt",
+                AdapterKind::OpenAIResp,
+                Meter::Unpublished,
+            ),
+            Self::Codex => ("openai-codex", AdapterKind::OpenAIResp, Meter::Codex),
+            Self::Grok => ("xai-grok", AdapterKind::Xai, Meter::Unpublished),
+        };
+        Service {
+            name: ServiceName::built_in(name),
+            endpoint: None,
+            adapter,
+            auth: Auth::OAuth(self),
+            billing: Billing::FlatRate,
+            routes: false,
+            meter,
+        }
+    }
+
+    /// # Errors
+    /// Unknown names are refused without aliases.
+    pub fn named(name: &str) -> Result<Self, String> {
+        match name {
+            "openai-chatgpt" => Ok(Self::Chatgpt),
+            "openai-codex" => Ok(Self::Codex),
+            "xai-grok" => Ok(Self::Grok),
+            _ => Err(format!(
+                "unknown service '{name}'; sign in to one of: openai-chatgpt, openai-codex, xai-grok"
+            )),
+        }
+    }
 }
 
 /// The variable a declared service's key is read from: `{NAME}_API_KEY`, as a
@@ -164,8 +208,7 @@ pub fn key_var(name: &ServiceName) -> String {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Billing {
     Metered,
-    /// A subscription: turns report tokens but never a cost. chatgpt and
-    /// opencode-go.
+    /// A subscription: turns report tokens but never a cost.
     FlatRate,
 }
 
@@ -173,7 +216,7 @@ impl Service {
     /// Whether requests ride a `ChatGPT` plan over `OpenAI`'s token-sharing
     /// route, which refuses sampling controls and an output cap.
     pub fn shares_a_plan(&self) -> bool {
-        matches!(self.auth, Auth::OAuth)
+        matches!(self.auth, Auth::OAuth(Login::Chatgpt))
     }
 
     /// An endpoint the user declared: metered, unrouted, and unmetered by any
@@ -214,9 +257,9 @@ impl Account {
         }
     }
 
-    /// A `ChatGPT` login, identified by its token's `issued` stamp.
-    pub fn chatgpt(issued: &str, handle: impl Into<String>) -> Self {
-        let service = chatgpt_service();
+    /// A login, keyed by its route and opaque issuer-local identity.
+    pub fn login(login: Login, issued: &str, handle: impl Into<String>) -> Self {
+        let service = login.service();
         Self {
             id: AccountId::of_login(&service.name, issued),
             handle: handle.into(),
@@ -250,9 +293,8 @@ const HANDLE_SEPARATOR: &str = " · ";
 /// Name one account among the accounts present.
 ///
 /// The service alone when its handle is the service's name — every key-bearing
-/// service. Otherwise the service and the handle both, so a `ChatGPT` login
-/// never reads as bare "chatgpt" with another beside it, and a lone `ChatGPT`
-/// login never loses its email. Two accounts left indistinguishable by their
+/// service. Otherwise the service and handle both, so a lone login keeps its
+/// handle and never reads as a bare service name beside another login. Equal
 /// handles are separated by their ids, which are unique by construction — and
 /// an account whose handle merely *reads* as another's id-qualified form is
 /// qualified too, so a handle cannot impersonate a sibling's label. Nothing is
@@ -265,8 +307,8 @@ const HANDLE_SEPARATOR: &str = " · ";
 /// ```text
 /// anthropic
 /// opencode-go
-/// chatgpt · alex@bristol.ac.uk
-/// chatgpt · alex@work · chatgpt:acct-2
+/// openai-chatgpt · alex@bristol.ac.uk
+/// openai-codex · alex@work · openai-codex:acct-2
 /// ```
 pub fn label(account: &Account, among: &[Account]) -> String {
     let named = unqualified(account);
@@ -302,7 +344,7 @@ fn unqualified(account: &Account) -> String {
     named
 }
 
-/// The built-in table: nine key-bearing services plus chatgpt.
+/// The built-in table: nine key-bearing services followed by sign-in routes.
 pub fn built_in_services() -> Vec<Service> {
     let keyed = |name, endpoint: Option<&str>, adapter, env, billing, meter| Service {
         name: ServiceName::built_in(name),
@@ -313,7 +355,7 @@ pub fn built_in_services() -> Vec<Service> {
         routes: false,
         meter,
     };
-    vec![
+    let mut services = vec![
         keyed(
             "anthropic",
             None,
@@ -390,28 +432,13 @@ pub fn built_in_services() -> Vec<Service> {
             Billing::Metered,
             Meter::Unpublished,
         ),
-        chatgpt_service(),
-    ]
+    ];
+    services.extend(Login::ALL.map(Login::service));
+    services
 }
 
 pub fn built_in(name: &ServiceName) -> Option<Service> {
     built_in_services().into_iter().find(|s| &s.name == name)
-}
-
-/// The chatgpt row by name, since `oauth` mints accounts against it.
-///
-/// It names no endpoint: a login speaks the public Responses API at genai's
-/// default for `OpenAIResp`, with its access token as the bearer.
-pub fn chatgpt_service() -> Service {
-    Service {
-        name: ServiceName::built_in("chatgpt"),
-        endpoint: None,
-        adapter: AdapterKind::OpenAIResp,
-        auth: Auth::OAuth,
-        billing: Billing::FlatRate,
-        routes: false,
-        meter: Meter::Unpublished,
-    }
 }
 
 /// The service a scripted test backend answers to. Not a row of the table: it
@@ -503,13 +530,62 @@ pub fn protocols() -> Vec<&'static str> {
 mod tests {
     use super::*;
 
-    /// Asserts the whole table; `opencode-go` documents that a subscription
-    /// with no readout is a choice the row states.
     #[test]
-    fn only_openrouter_meters_anything() {
+    fn login_routes_have_distinct_identities_and_capabilities() {
+        use crate::provider::oauth::{Method, methods};
+        let expected = [
+            (
+                Login::Chatgpt,
+                "openai-chatgpt",
+                AdapterKind::OpenAIResp,
+                Meter::Unpublished,
+                &[Method::Browser][..],
+            ),
+            (
+                Login::Codex,
+                "openai-codex",
+                AdapterKind::OpenAIResp,
+                Meter::Codex,
+                &[Method::Browser, Method::Device][..],
+            ),
+            (
+                Login::Grok,
+                "xai-grok",
+                AdapterKind::Xai,
+                Meter::Unpublished,
+                &[Method::Device][..],
+            ),
+        ];
+        for (login, (route, name, adapter, meter, supported)) in
+            Login::ALL.into_iter().zip(expected)
+        {
+            assert_eq!(login, route);
+            let service = login.service();
+            assert_eq!(Login::named(name), Ok(login));
+            assert_eq!(service.name.as_str(), name);
+            assert_eq!(service.adapter, adapter);
+            assert_eq!(service.meter, meter);
+            assert_eq!(service.auth, Auth::OAuth(login));
+            assert_eq!(service.billing, Billing::FlatRate);
+            assert_eq!(service.endpoint, None);
+            assert!(!service.routes);
+            assert_eq!(methods(login), supported);
+            assert_eq!(service.shares_a_plan(), login == Login::Chatgpt);
+        }
+        for refused in ["chatgpt", "codex", "grok", "openai-chatgtp"] {
+            let error = Login::named(refused).unwrap_err();
+            for (_, name, ..) in expected {
+                assert!(error.contains(name), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn only_openrouter_and_codex_meter_anything() {
         for service in built_in_services() {
             let expected = match service.name.as_str() {
                 "openrouter" => Meter::OpenRouterCredits,
+                "openai-codex" => Meter::Codex,
                 _ => Meter::Unpublished,
             };
             assert_eq!(service.meter, expected, "{}", service.name);
@@ -554,26 +630,26 @@ mod tests {
 
     #[test]
     fn a_lone_chatgpt_account_keeps_its_handle() {
-        let one = Account::chatgpt("acct-1", "alex@bristol.ac.uk");
+        let one = Account::login(Login::Chatgpt, "acct-1", "alex@bristol.ac.uk");
         assert_eq!(
             label(&one, std::slice::from_ref(&one)),
-            "chatgpt · alex@bristol.ac.uk"
+            "openai-chatgpt · alex@bristol.ac.uk"
         );
     }
 
     #[test]
     fn two_accounts_on_one_email_draw_two_distinguishable_labels() {
-        let personal = Account::chatgpt("acct-1", "alex@bristol.ac.uk");
-        let work = Account::chatgpt("acct-2", "alex@bristol.ac.uk (Acme Ltd)");
+        let personal = Account::login(Login::Chatgpt, "acct-1", "alex@bristol.ac.uk");
+        let work = Account::login(Login::Chatgpt, "acct-2", "alex@bristol.ac.uk (Acme Ltd)");
         let among = [personal.clone(), work.clone()];
         assert_ne!(label(&personal, &among), label(&work, &among));
 
         // Handles that stayed identical fall back to the ids, which cannot collide.
-        let twin = Account::chatgpt("acct-2", "alex@bristol.ac.uk");
+        let twin = Account::login(Login::Chatgpt, "acct-2", "alex@bristol.ac.uk");
         let among = [personal.clone(), twin.clone()];
         assert_ne!(label(&personal, &among), label(&twin, &among));
         assert!(
-            label(&twin, &among).ends_with("chatgpt:acct-2"),
+            label(&twin, &among).ends_with("openai-chatgpt:acct-2"),
             "{}",
             label(&twin, &among)
         );
@@ -584,11 +660,15 @@ mod tests {
     /// rendering; the labels must still read apart.
     #[test]
     fn a_handle_embedding_anothers_qualified_rendering_still_reads_apart() {
-        let plain = Account::chatgpt("acct-1", "alex@work");
+        let plain = Account::login(Login::Chatgpt, "acct-1", "alex@work");
         // The twin forces `plain` onto its id-qualified form...
-        let twin = Account::chatgpt("acct-2", "alex@work");
+        let twin = Account::login(Login::Chatgpt, "acct-2", "alex@work");
         // ...which is exactly what this handle spells out.
-        let imposter = Account::chatgpt("acct-3", "alex@work · chatgpt:acct-1");
+        let imposter = Account::login(
+            Login::Chatgpt,
+            "acct-3",
+            "alex@work · openai-chatgpt:acct-1",
+        );
         let among = [plain.clone(), twin.clone(), imposter.clone()];
         let labels = [
             label(&plain, &among),
@@ -607,11 +687,12 @@ mod tests {
 
     #[test]
     fn an_account_id_renders_injectively() {
-        let chatgpt = chatgpt_service().name;
-        assert_eq!(AccountId::of_service(&chatgpt).as_str(), "chatgpt");
-        assert_eq!(AccountId::of_login(&chatgpt, "abc").as_str(), "chatgpt:abc");
-        // No declared service can render as `chatgpt:abc`, because no service
-        // name may carry the colon that separates the halves.
-        assert!(ServiceName::declared("chatgpt:abc").is_err());
+        let chatgpt = Login::Chatgpt.service().name;
+        assert_eq!(AccountId::of_service(&chatgpt).as_str(), "openai-chatgpt");
+        assert_eq!(
+            AccountId::of_login(&chatgpt, "abc").as_str(),
+            "openai-chatgpt:abc"
+        );
+        assert!(ServiceName::declared("openai-chatgpt:abc").is_err());
     }
 }

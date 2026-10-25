@@ -345,7 +345,11 @@ mod tests {
 
     #[test]
     fn refresh_menu_folds_fetched_lists_in_and_serves_them() {
-        let account = Account::chatgpt("work-account", "work-account");
+        let account = Account::login(
+            exarch::provider::identity::Login::Chatgpt,
+            "work-account",
+            "work-account",
+        );
         let source = FakeSource::new(one(account.id.clone(), &["model-a"]));
         let catalog = Mutex::new(ModelCatalog::memo_only(source));
 

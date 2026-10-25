@@ -92,12 +92,16 @@ fn a_two_word_query_narrows_by_both_words() {
 /// its email rather than falling back to the id.
 #[test]
 fn a_lone_chatgpt_account_row_keeps_its_email() {
-    let alex = Account::chatgpt("acct-1", "alex@bristol.ac.uk");
+    let alex = Account::login(
+        crate::provider::Login::Chatgpt,
+        "acct-1",
+        "alex@bristol.ac.uk",
+    );
     let mut p = Picker::new(vec![alex.clone()], &Tuning::default(), caps_unknown);
     p.set_models(&alex.id, ModelsState::Loaded(vec!["model-a".into()]));
     assert_eq!(
         row_labels(&p),
-        vec!["model-a · chatgpt · alex@bristol.ac.uk"]
+        vec!["model-a · openai-chatgpt · alex@bristol.ac.uk"]
     );
     // The bare service name still matches search.
     for c in "chatgpt".chars() {
@@ -120,8 +124,16 @@ fn flat_rate_provider_rows_are_named_by_their_service_alone() {
 /// one collapsed into the other — the bug this plan exists to kill.
 #[test]
 fn two_accounts_on_one_email_draw_two_distinguishable_rows() {
-    let personal = Account::chatgpt("acct-1", "alex@bristol.ac.uk");
-    let work = Account::chatgpt("acct-2", "alex@bristol.ac.uk (Acme Ltd)");
+    let personal = Account::login(
+        crate::provider::Login::Chatgpt,
+        "acct-1",
+        "alex@bristol.ac.uk",
+    );
+    let work = Account::login(
+        crate::provider::Login::Chatgpt,
+        "acct-2",
+        "alex@bristol.ac.uk (Acme Ltd)",
+    );
     let mut p = Picker::new(
         vec![personal.clone(), work.clone()],
         &Tuning::default(),

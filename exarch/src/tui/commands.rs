@@ -94,14 +94,14 @@ const COMMANDS: &[Spec] = &[
         name: "/login",
         aliases: &[],
         arg: Arg::No,
-        help: "Sign in with ChatGPT: adds a plan-backed provider.",
+        help: "Sign in to a plan: ChatGPT, Codex or Grok.",
         command: |_| Command::Login,
     },
     Spec {
         name: "/providers",
         aliases: &[],
         arg: Arg::No,
-        help: "Manage providers: API keys, custom endpoints, ChatGPT sign-in.",
+        help: "Manage providers: API keys, custom endpoints, plan sign-ins.",
         command: |_| Command::Providers,
     },
     Spec {

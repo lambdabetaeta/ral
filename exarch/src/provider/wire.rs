@@ -17,7 +17,7 @@
 
 use super::request::Request;
 use genai::adapter::AdapterKind;
-use genai::chat::{CacheControl, ChatMessage, ChatRequest, MessageOptions, Tool};
+use genai::chat::{CacheControl, ChatMessage, ChatRequest, MessageOptions, Tool, ToolConfig};
 
 /// A wire request: one manufacture, one send.
 pub(super) struct Sealed(ChatRequest); // deliberately not Clone
@@ -71,7 +71,11 @@ pub(super) fn manufacture(
 /// Search rides only the adapters genai maps `Tool::new_web_search()` to a
 /// native tool for; the rest, plain `OpenAI` included, would serialise
 /// `ToolName::WebSearch` into the function-name slot as junk on the wire.
-pub(super) fn tool_defs(adapter: AdapterKind, request: Request<'_>) -> Vec<Tool> {
+pub(super) fn tool_defs(
+    adapter: AdapterKind,
+    live_search: bool,
+    request: Request<'_>,
+) -> Vec<Tool> {
     let Request {
         tools: offered,
         search,
@@ -84,7 +88,14 @@ pub(super) fn tool_defs(adapter: AdapterKind, request: Request<'_>) -> Vec<Tool>
             AdapterKind::OpenAIResp | AdapterKind::Anthropic | AdapterKind::Gemini
         )
     {
-        tools.push(Tool::new_web_search());
+        let search = Tool::new_web_search();
+        tools.push(if live_search && adapter == AdapterKind::OpenAIResp {
+            search.with_config(ToolConfig::Custom(
+                serde_json::json!({"external_web_access": true}),
+            ))
+        } else {
+            search
+        });
     }
     tools
 }
@@ -173,7 +184,7 @@ mod tests {
             AdapterKind::Anthropic,
             AdapterKind::Gemini,
         ] {
-            let tools = tool_defs(adapter, searching(true));
+            let tools = tool_defs(adapter, false, searching(true));
             assert_eq!(tools.len(), 1);
             assert_eq!(tools[0].name, ToolName::WebSearch);
             assert_eq!(tools[0].config, None);
@@ -181,9 +192,31 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_adapter_gets_no_search_tool() {
-        let tools = tool_defs(AdapterKind::OpenAI, searching(true));
-        assert!(tools.is_empty());
+    fn live_search_enables_external_access_only_on_responses() {
+        let tools = tool_defs(AdapterKind::OpenAIResp, true, searching(true));
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, ToolName::WebSearch);
+        assert_eq!(
+            tools[0].config,
+            Some(ToolConfig::Custom(
+                serde_json::json!({"external_web_access": true})
+            )),
+        );
+        for adapter in [AdapterKind::Anthropic, AdapterKind::Gemini] {
+            let tools = tool_defs(adapter, true, searching(true));
+            assert_eq!(tools.len(), 1);
+            assert_eq!(tools[0].name, ToolName::WebSearch);
+            assert_eq!(tools[0].config, None);
+        }
+    }
+
+    #[test]
+    fn unsupported_adapters_get_no_search_tool() {
+        for adapter in [AdapterKind::OpenAI, AdapterKind::Xai] {
+            for live_search in [false, true] {
+                assert!(tool_defs(adapter, live_search, searching(true)).is_empty());
+            }
+        }
     }
 
     #[test]
@@ -192,8 +225,12 @@ mod tests {
             AdapterKind::OpenAIResp,
             AdapterKind::Anthropic,
             AdapterKind::Gemini,
+            AdapterKind::OpenAI,
+            AdapterKind::Xai,
         ] {
-            assert!(tool_defs(adapter, searching(false)).is_empty());
+            for live_search in [false, true] {
+                assert!(tool_defs(adapter, live_search, searching(false)).is_empty());
+            }
         }
     }
 }

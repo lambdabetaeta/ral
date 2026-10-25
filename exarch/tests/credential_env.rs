@@ -14,9 +14,9 @@
 
 use exarch::provider::credential::{Credential, CredentialStore, NO_AUTH_PLACEHOLDER};
 use exarch::provider::identity::{
-    Account, AccountId, Auth, Service, ServiceName, built_in_services, chatgpt_service,
+    Account, AccountId, Auth, Login, Service, ServiceName, built_in_services,
 };
-use exarch::provider::oauth::{self, OAuthToken};
+use exarch::provider::oauth::{self, Grant, OAuthToken};
 use ral_core::sync::LockExt as _;
 
 // Mirror the binary's pre-`main` re-exec dispatch — helper re-exec dispatch,
@@ -31,15 +31,17 @@ fn fam(name: &str) -> AccountId {
 
 /// A `ChatGPT` login's account id, by its issued id.
 fn login(issued: &str) -> AccountId {
-    AccountId::of_login(&chatgpt_service().name, issued)
+    AccountId::of_login(&Login::Chatgpt.service().name, issued)
 }
 
 fn oauth_token(issued: &str, email: Option<&str>) -> OAuthToken {
     OAuthToken {
         access_token: "at".into(),
         refresh_token: "rt".into(),
-        id_token: "id".into(),
-        client_id: "oaiapp_test".into(),
+        grant: Grant::Chatgpt {
+            id_token: "id".into(),
+            client_id: "oaiapp_test".into(),
+        },
         issued: issued.into(),
         email: email.map(str::to_string),
         expires_at: u64::MAX,
@@ -79,7 +81,7 @@ fn with_env(values: &[(&str, Option<&str>)], body: impl FnOnce()) {
         .into_iter()
         .filter_map(|service| match service.auth {
             Auth::Key(var) => Some(var),
-            Auth::OAuth | Auth::Keyless => None,
+            Auth::OAuth(_) | Auth::Keyless => None,
         })
         .collect();
     names.push("XDG_STATE_HOME".to_string());
@@ -250,37 +252,86 @@ fn oauth_login_is_a_distinct_account_coexisting_with_openai_key() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Several signed-in `ChatGPT` accounts are each available as their own
-/// account, distinct by id and never shadowing one another however they
-/// were saved.
 #[test]
-fn multiple_chatgpt_accounts_stay_distinct_and_available() {
-    let dir = std::env::temp_dir().join(format!("exarch-cred-multi-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+fn all_login_routes_load_independent_cells_in_stable_order() {
+    with_env(&[("ANTHROPIC_API_KEY", Some("a"))], || {
+        let mut expected = Vec::new();
+        for login in Login::ALL {
+            for issued in ["second", "first"] {
+                let mut token = oauth_token(issued, Some("same@example.com"));
+                token.grant = match login {
+                    Login::Chatgpt => token.grant,
+                    Login::Codex => Grant::Codex {
+                        account_id: "workspace".into(),
+                        workspace: None,
+                        plan: None,
+                    },
+                    Login::Grok => Grant::Grok,
+                };
+                token.access_token = format!("{login:?}-{issued}");
+                assert!(!oauth::save_one(&token).unwrap());
+                expected.push((Account::login(login, issued, token.handle()).id, token));
+            }
+        }
+        expected.sort_by_key(|(id, token)| (token.login(), token.handle(), id.clone()));
+        let mut store = CredentialStore::resolve_and_scrub(Vec::new());
+        let ids: Vec<_> = store
+            .available()
+            .iter()
+            .map(|account| account.id.clone())
+            .collect();
+        let wanted: Vec<_> = std::iter::once(fam("anthropic"))
+            .chain(expected.iter().map(|(id, _)| id.clone()))
+            .collect();
+        assert_eq!(ids, wanted);
+        let cells: Vec<_> = expected
+            .iter()
+            .map(|(id, token)| {
+                let Some(Credential::OAuth(cell)) = store.get(id) else {
+                    panic!("missing {id}")
+                };
+                assert_eq!(*cell.lock_ignore_poison(), *token);
+                cell
+            })
+            .collect();
+        for (index, cell) in cells.iter().enumerate() {
+            for other in &cells[index + 1..] {
+                assert!(!std::sync::Arc::ptr_eq(cell, other));
+            }
+        }
+        let mut renewed = expected[2].1.clone();
+        renewed.access_token = "renewed".into();
+        assert!(oauth::save_one(&renewed).unwrap());
+        store.add_oauth(&renewed);
+        let Some(Credential::OAuth(current)) = store.get(&expected[2].0) else {
+            panic!("lost renewed account")
+        };
+        assert!(std::sync::Arc::ptr_eq(&current, &cells[2]));
+        assert_eq!(*cells[2].lock_ignore_poison(), renewed);
+        for (index, (_, token)) in expected.iter().enumerate() {
+            if index != 2 {
+                assert_eq!(*cells[index].lock_ignore_poison(), *token);
+            }
+        }
+    });
+}
+
+#[test]
+fn login_services_never_resolve_synthetic_api_key_variables() {
     with_env(
         &[
-            ("XDG_STATE_HOME", Some(dir.to_str().unwrap())),
-            ("ANTHROPIC_API_KEY", Some("a")),
-            ("OPENAI_API_KEY", None),
-            ("OPENROUTER_API_KEY", None),
-            ("DEEPSEEK_API_KEY", None),
+            ("OPENAI_CHATGPT_API_KEY", Some("not-a-login")),
+            ("OPENAI_CODEX_API_KEY", Some("not-a-login")),
+            ("XAI_GROK_API_KEY", Some("not-a-login")),
         ],
         || {
-            oauth::save_one(&oauth_token("acc_w", Some("alex@work"))).expect("save token");
-            oauth::save_one(&oauth_token("acc_p", Some("alex@home"))).expect("save token");
             let store = CredentialStore::resolve_and_scrub(Vec::new());
-            let available = store.available();
-            let ids: Vec<AccountId> = available.iter().map(|a| a.id.clone()).collect();
-            assert!(ids.contains(&fam("anthropic")));
-            assert!(ids.contains(&login("acc_w")));
-            assert!(ids.contains(&login("acc_p")));
-            assert_eq!(ids.len(), 3, "neither login shadows the other");
-            for account in [login("acc_p"), login("acc_w")] {
-                assert!(matches!(store.get(&account), Some(Credential::OAuth(_))));
+            for login in Login::ALL {
+                assert!(!store.is_available(&AccountId::of_service(&login.service().name)));
             }
+            assert_eq!(store.available(), Vec::<Account>::new());
         },
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A declared service from `config.ral` is swept exactly like a built-in

@@ -13,7 +13,7 @@ use super::identity::{self, Account, Auth, Service, ServiceName};
 pub enum Source {
     /// No key yet.
     None,
-    /// A `ChatGPT` login: the one case a key is never typed.
+    /// A plan sign-in: the credential is never a key typed by the user.
     SignedIn,
     /// A server that checks no key: a state, not a key anyone typed, so it
     /// has no tail to show.
@@ -48,7 +48,7 @@ pub struct Entry {
 }
 
 /// Every account, in the store's own order: built-in services first, then
-/// signed-in `ChatGPT` accounts, then declared endpoints.
+/// signed-in accounts, then declared endpoints.
 pub fn entries(store: &CredentialStore) -> Vec<Entry> {
     let available = store.available();
     store
@@ -64,7 +64,7 @@ fn entry(store: &CredentialStore, account: &Account, available: &[Account]) -> E
         store.from_vault(&account.id),
     );
     let (source, env_var) = match &account.service.auth {
-        Auth::OAuth => (Source::SignedIn, None),
+        Auth::OAuth(_) => (Source::SignedIn, None),
         Auth::Keyless => (Source::Keyless, None),
         Auth::Key(var) => (
             match (env, saved) {
@@ -251,6 +251,39 @@ mod tests {
     fn a_built_in_name_is_already_taken() {
         let anthropic = ServiceName::declared("anthropic").unwrap();
         assert!(taken(&[], &anthropic));
+    }
+
+    #[test]
+    fn every_signed_out_login_name_is_reserved() {
+        let store = CredentialStore::default();
+        for login in identity::Login::ALL {
+            let service = login.service();
+            assert!(taken(&[], &service.name));
+            let error = declare_endpoint(
+                &store,
+                service.name.as_str(),
+                "https://example.invalid/v1/",
+                "openai",
+                true,
+                "settings",
+            )
+            .unwrap_err();
+            assert!(error.contains("already a service"), "{error}");
+        }
+    }
+
+    #[test]
+    fn every_login_has_a_signed_in_source_without_key_metadata() {
+        let store = CredentialStore::default();
+        for login in identity::Login::ALL {
+            let account = Account::login(login, "same-id", "same@work");
+            let row = entry(&store, &account, std::slice::from_ref(&account));
+            assert_eq!(row.source, Source::SignedIn);
+            assert_eq!(row.env_var, None);
+            assert_eq!(row.hint, None);
+            assert_eq!(row.shadowed, None);
+            assert!(!row.withdrawable);
+        }
     }
 
     #[test]

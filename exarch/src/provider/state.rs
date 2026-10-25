@@ -354,6 +354,36 @@ mod tests {
     }
 
     #[test]
+    fn legacy_chatgpt_selection_does_not_alias_a_renamed_account() {
+        let state = State {
+            provider: "chatgpt:subject".into(),
+            provider_name: "chatgpt · same@example.com".into(),
+            model: "model-a".into(),
+            via: None,
+        };
+        let available = [Account::login(
+            crate::provider::Login::Chatgpt,
+            "subject",
+            "same@example.com",
+        )];
+        assert!(state.account(&available).is_none());
+        match opening(
+            None,
+            None,
+            None,
+            Some(&state),
+            &available,
+            lists(&["model-a"]),
+        ) {
+            Ok(Opening::Choose(among, Some(why))) => {
+                assert_eq!(among, available);
+                assert!(why.contains("chatgpt"), "{why}");
+            }
+            _ => panic!("a stale sign-in selection must ask, never silently pick"),
+        }
+    }
+
+    #[test]
     fn nothing_saved_and_no_flags_asks_among_every_account() {
         let available = [
             Account::built_in("anthropic"),

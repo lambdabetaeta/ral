@@ -135,13 +135,17 @@ pub fn run() -> Result<(), String> {
     // since `login` is how the OpenAI provider becomes available.
     if let Some(command) = c.command {
         return match command {
-            cli::Command::Login { account } => provider::oauth::login(account),
+            cli::Command::Login {
+                service,
+                account,
+                device_auth,
+            } => provider::oauth::login(service, account, device_auth),
             cli::Command::Logout { account, all } => provider::oauth::logout(account, all),
             cli::Command::Accounts => {
                 let accounts = provider::oauth::accounts();
                 if accounts.is_empty() {
                     ral_core::errln!(
-                        "No ChatGPT accounts signed in. Run `exarch login` to add one."
+                        "No accounts signed in. Run exarch login <service> to add one (openai-chatgpt, openai-codex, xai-grok)."
                     );
                 } else {
                     for account in &accounts {

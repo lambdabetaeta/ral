@@ -197,6 +197,7 @@ impl MeterSource for LiveMeters {
     fn read(&self, account: &Account) -> Result<Vec<Allowance>, String> {
         let read = match account.service.meter {
             Meter::Unpublished => return Ok(Vec::new()),
+            Meter::Codex => meters::codex::read,
             Meter::OpenRouterCredits => meters::openrouter::read,
         };
         let credential = self
@@ -280,6 +281,18 @@ mod tests {
             window: Some(Duration::from_hours(5)),
             used: Consumption::Counted { used, limit, unit },
             resets_at: None,
+        }
+    }
+
+    #[test]
+    fn only_openrouter_and_codex_meter_anything() {
+        for service in crate::provider::identity::built_in_services() {
+            let expected = match service.name.as_str() {
+                "openrouter" => Meter::OpenRouterCredits,
+                "openai-codex" => Meter::Codex,
+                _ => Meter::Unpublished,
+            };
+            assert_eq!(service.meter, expected, "{}", service.name);
         }
     }
 

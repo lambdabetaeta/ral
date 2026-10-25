@@ -1,9 +1,5 @@
-//! Browser login: the authorize page opens in the user's browser and redirects
-//! to a loopback listener here, whose captured code is exchanged for tokens.
+//! Shared loopback callback listener and platform browser launchers.
 
-use super::{
-    AGENT_NAME, AUTHORIZE_URL, DYNAMIC_CLIENT, Granted, LoginPhase, RESOURCE, SCOPE, SignIn,
-};
 use crate::site::{Silent, site};
 use std::io::BufRead;
 use std::io::Write;
@@ -16,114 +12,23 @@ use std::time::{Duration, Instant};
 /// Bounds an abandoned sign-in's wait.
 const MAX_WAIT: Duration = Duration::from_mins(15);
 
-/// Drive the browser flow to completion and return the granted tokens.
-pub(super) async fn run(
-    client: &reqwest::Client,
-    host_id: &str,
-    sign_in: &SignIn,
-    on_phase: impl Fn(LoginPhase),
-    cancel: &Arc<AtomicBool>,
-) -> Result<Granted, String> {
-    let (verifier, challenge) = super::pkce();
-    let state = super::random_b64url(32);
-    let nonce = super::random_b64url(32);
-
-    let listener = bind_listener()?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| format!("could not read listener address: {e}"))?
-        .port();
-    let redirect_uri = format!("http://127.0.0.1:{port}/auth/callback");
-
-    let url = authorize_url(&redirect_uri, &challenge, &state, &nonce, host_id, sign_in)?;
-    // Best effort, and its outcome is not worth reporting: a launcher that
-    // reports success has still shown the user nothing when it started a text
-    // browser on a box they reached over ssh. The phase carries the URL.
-    let _ = launch_browser(&url);
-    on_phase(LoginPhase::AwaitingBrowser { url });
-
-    // Cloned because `spawn_blocking` needs `'static`; the caller keeps the flag it trips.
-    let expected_state = state.clone();
-    let cancel = Arc::clone(cancel);
-    let (code, issued) =
-        tokio::task::spawn_blocking(move || accept_callback(&listener, &expected_state, &cancel))
-            .await
-            .map_err(|e| format!("callback listener panicked: {e}"))??;
-
-    let client_id = match (sign_in, issued) {
-        (SignIn::Register, Some(issued)) => issued,
-        (SignIn::Register, None) => {
-            return Err("the sign-in callback carried no issued client id; OpenAI's registration did not complete".to_string());
+/// Try the registered callback addresses in order.
+pub(super) fn bind(addrs: &[&str]) -> Result<TcpListener, String> {
+    let mut last = None;
+    for addr in addrs {
+        match site!(Silent::CallbackListener, TcpListener::bind(addr)) {
+            Ok(listener) => return Ok(listener),
+            Err(error) => last = Some(error),
         }
-        (SignIn::Reauthorize(token), Some(issued)) if issued != token.client_id => {
-            return Err("the sign-in callback names a different client than this account's; nothing was changed".to_string());
-        }
-        (SignIn::Reauthorize(token), _) => token.client_id.clone(),
-    };
-
-    on_phase(LoginPhase::ExchangingCode);
-    let raw = super::exchange_code(client, &client_id, &redirect_uri, &code, &verifier).await?;
-    Ok(Granted {
-        raw,
-        client_id,
-        nonce,
+    }
+    Err(match last {
+        Some(error) => format!("could not bind a callback listener: {error}"),
+        None => "no callback listener addresses were supplied".to_string(),
     })
 }
 
-fn bind_listener() -> Result<TcpListener, String> {
-    site!(
-        Silent::CallbackListener,
-        TcpListener::bind("127.0.0.1:1455")
-    )
-    .or_else(|_| site!(Silent::CallbackListener, TcpListener::bind("127.0.0.1:0")))
-    .map_err(|e| format!("could not bind a callback listener on 127.0.0.1: {e}"))
-}
-
-fn authorize_url(
-    redirect_uri: &str,
-    challenge: &str,
-    state: &str,
-    nonce: &str,
-    host_id: &str,
-    sign_in: &SignIn,
-) -> Result<String, String> {
-    let client_id = match sign_in {
-        SignIn::Register => DYNAMIC_CLIENT,
-        SignIn::Reauthorize(token) => &token.client_id,
-    };
-    let mut url = reqwest::Url::parse(AUTHORIZE_URL)
-        .map_err(|e| format!("could not build authorize URL: {e}"))?;
-    {
-        let mut pairs = url.query_pairs_mut();
-        pairs.extend_pairs([
-            ("response_type", "code"),
-            ("client_id", client_id),
-            ("redirect_uri", redirect_uri),
-            ("scope", SCOPE),
-            ("resource", RESOURCE),
-            ("state", state),
-            ("nonce", nonce),
-            ("code_challenge", challenge),
-            ("code_challenge_method", "S256"),
-            ("ext_agent_host_id", host_id),
-        ]);
-        match sign_in {
-            SignIn::Register => {
-                pairs.append_pair("agent_name_hint", AGENT_NAME);
-            }
-            SignIn::Reauthorize(token) => {
-                pairs.append_pair("id_token_hint", &token.id_token);
-                if let Some(email) = &token.email {
-                    pairs.append_pair("login_hint", email);
-                }
-            }
-        }
-    }
-    Ok(url.into())
-}
-
 #[cfg(target_os = "macos")]
-fn launch_browser(url: &str) -> Result<(), String> {
+pub(super) fn launch_browser(url: &str) -> Result<(), String> {
     let mut cmd = site!(Silent::BrowserLaunch, std::process::Command::new("open"));
     cmd.arg(url);
     ral_core::process::spawn(&mut cmd)
@@ -132,7 +37,7 @@ fn launch_browser(url: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
-fn launch_browser(url: &str) -> Result<(), String> {
+pub(super) fn launch_browser(url: &str) -> Result<(), String> {
     let mut cmd = site!(
         Silent::BrowserLaunchLinux,
         std::process::Command::new("xdg-open")
@@ -144,7 +49,7 @@ fn launch_browser(url: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-fn launch_browser(url: &str) -> Result<(), String> {
+pub(super) fn launch_browser(url: &str) -> Result<(), String> {
     use std::ptr;
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -181,15 +86,20 @@ fn windows_shell_target(url: &str) -> Vec<u16> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-fn launch_browser(_url: &str) -> Result<(), String> {
+pub(super) fn launch_browser(_url: &str) -> Result<(), String> {
     Err("opening a browser is not supported on this platform".to_string())
 }
 
-fn accept_callback(
+pub(super) struct Callback {
+    pub code: String,
+    pub client_id: Option<String>,
+}
+
+pub(super) fn accept_callback(
     listener: &TcpListener,
     expected_state: &str,
     cancel: &Arc<AtomicBool>,
-) -> Result<(String, Option<String>), String> {
+) -> Result<Callback, String> {
     let mut stream = accept_within(listener, MAX_WAIT, cancel)?;
     let request_line = read_request_line(&mut stream)?;
 
@@ -232,7 +142,7 @@ fn accept_callback(
     let code = code.ok_or_else(|| "callback did not carry an authorization code".to_string())?;
 
     write_page(&mut stream, "Signed in to exarch. You can close this tab.");
-    Ok((code, client_id))
+    Ok(Callback { code, client_id })
 }
 
 /// Accept one connection, giving up on `timeout` or `cancel`; a blocking
@@ -289,4 +199,77 @@ fn write_page(stream: &mut TcpStream, message: &str) {
         body.len()
     );
     let _ = stream.write_all(response.as_bytes());
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod tests {
+    use super::*;
+
+    fn callback(query: &str) -> Result<Callback, String> {
+        let listener = bind(&["127.0.0.1:0"]).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let receiver = std::thread::spawn(move || {
+            accept_callback(&listener, "expected", &Arc::new(AtomicBool::new(false)))
+        });
+        let mut stream = TcpStream::connect(addr).unwrap();
+        write!(
+            stream,
+            "GET /auth/callback?{query} HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        )
+        .unwrap();
+        receiver.join().unwrap()
+    }
+
+    #[test]
+    fn callback_retains_code_and_optional_issued_client() {
+        let received = callback("state=expected&code=auth-code&client_id=oaiapp_issued").unwrap();
+        assert_eq!(received.code, "auth-code");
+        assert_eq!(received.client_id.as_deref(), Some("oaiapp_issued"));
+        assert!(
+            callback("state=expected&code=auth-code")
+                .unwrap()
+                .client_id
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn callback_checks_state_before_issuer_errors() {
+        assert_eq!(
+            callback("state=wrong&error=denied").err().unwrap(),
+            "state mismatch"
+        );
+        assert_eq!(
+            callback("state=expected&error=denied&error_description=No+thanks")
+                .err()
+                .unwrap(),
+            "sign-in failed: denied: No thanks"
+        );
+        assert!(
+            callback("state=expected")
+                .err()
+                .unwrap()
+                .contains("authorization code")
+        );
+    }
+
+    #[test]
+    fn binding_tries_addresses_in_order_and_cancellation_precedes_accept() {
+        let listener = bind(&["not-an-address", "127.0.0.1:0"]).unwrap();
+        let error = accept_callback(&listener, "state", &Arc::new(AtomicBool::new(true)))
+            .err()
+            .unwrap();
+        assert_eq!(error, "sign-in cancelled");
+        assert!(bind(&[]).is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_launch_target_preserves_the_entire_url() {
+        let url = "https://example.test/auth?state=a&code=b";
+        let wide = windows_shell_target(url);
+        assert_eq!(wide.last(), Some(&0));
+        assert_eq!(String::from_utf16(&wide[..wide.len() - 1]).unwrap(), url);
+    }
 }

@@ -9,10 +9,9 @@
 //! an accounts screen saves and forgets keys. A keyless declared endpoint
 //! authenticates with [`NO_AUTH_PLACEHOLDER`].
 //!
-//! Signed-in `ChatGPT` accounts ([`crate::provider::oauth`]) come from the
-//! token store, one account per login, and are identities distinct from an
-//! API-key `openai` account: a login and an `OPENAI_API_KEY` are two
-//! selectable accounts, not one.
+//! Signed-in accounts ([`crate::provider::oauth`]) come from the token store,
+//! one account per issuer identity. They are distinct from API-key accounts:
+//! a login and an `OPENAI_API_KEY` are separately selectable accounts.
 
 use crate::provider::identity::{self, Account, AccountId, Auth, Service};
 use crate::provider::oauth::{self, OAuthToken};
@@ -29,7 +28,7 @@ pub const NO_AUTH_PLACEHOLDER: &str = "no-auth";
 
 /// A resolved credential — what an account's requests authenticate with.
 ///
-/// An OAuth credential holds its `ChatGPT` token behind a shared cell that
+/// An OAuth credential holds its token behind a shared cell that
 /// `Engine::refresh_if_stale` mutates in place, so a session outliving an
 /// access token keeps authenticating with no provider rebuild. Accounts own
 /// distinct cells; their writes meet only at the on-disk token store, where
@@ -67,7 +66,7 @@ impl CredentialStore {
     /// every one that was *present* — the malformed one too, since a value
     /// with a pasted newline is still a live secret for a child to inherit.
     /// The process is sealed first (`seal`), and each variable erased (`erase`).
-    /// `ChatGPT` logins are folded in from the token store.
+    /// Signed-in accounts are folded in from the token store.
     ///
     /// SAFETY: call this while the process is still single-threaded (before any
     /// session worker thread exists), so the env scrub races nothing.
@@ -75,7 +74,7 @@ impl CredentialStore {
         seal();
         let all: Vec<Account> = identity::built_in_services()
             .into_iter()
-            .filter(|service| service.auth != Auth::OAuth)
+            .filter(|service| !matches!(service.auth, Auth::OAuth(_)))
             .chain(declared)
             .map(Account::of_service)
             .collect();
@@ -117,7 +116,7 @@ impl CredentialStore {
                 .or_else(|| self.vault.get(id))
                 .cloned()
                 .map(Credential::ApiKey),
-            Auth::OAuth => self.logins.get(id).cloned().map(Credential::OAuth),
+            Auth::OAuth(_) => self.logins.get(id).cloned().map(Credential::OAuth),
             Auth::Keyless => Some(Credential::ApiKey(NO_AUTH_PLACEHOLDER.into())),
         }
     }
@@ -216,14 +215,19 @@ impl CredentialStore {
     }
 
     /// Where a login belongs among the accounts already known: after every
-    /// built-in service, among the other logins in handle order, before the
+    /// built-in key-bearing service, in login/handle/id order, before the
     /// first declared service.
     fn insert_login(&mut self, account: Account) {
+        let Auth::OAuth(login) = account.service.auth else {
+            unreachable!("only signed-in accounts are inserted as logins");
+        };
         let pos = self
             .all
             .iter()
             .position(|other| match &other.service.auth {
-                Auth::OAuth => other.handle > account.handle,
+                Auth::OAuth(other_login) => {
+                    (*other_login, &other.handle, &other.id) > (login, &account.handle, &account.id)
+                }
                 _ => identity::built_in(&other.service.name).is_none(),
             })
             .unwrap_or(self.all.len());
@@ -336,7 +340,7 @@ unsafe fn erase(var: &str) {
 mod tests {
     use super::*;
     use genai::adapter::AdapterKind;
-    use identity::ServiceName;
+    use identity::{Login, ServiceName};
 
     // The `resolve_and_scrub` scenarios live in `tests/credential_env.rs`: they
     // mutate the process-global environment, which no library test may share.
@@ -351,14 +355,29 @@ mod tests {
     }
 
     fn oauth_token(issued: &str, email: Option<&str>) -> OAuthToken {
+        login_token(Login::Chatgpt, issued, email)
+    }
+
+    fn login_token(login: Login, issued: &str, email: Option<&str>) -> OAuthToken {
+        let grant = match login {
+            Login::Chatgpt => oauth::Grant::Chatgpt {
+                id_token: "id".into(),
+                client_id: "oaiapp_test".into(),
+            },
+            Login::Codex => oauth::Grant::Codex {
+                account_id: "raw-workspace".into(),
+                workspace: None,
+                plan: None,
+            },
+            Login::Grok => oauth::Grant::Grok,
+        };
         OAuthToken {
             access_token: "at".into(),
             refresh_token: "rt".into(),
-            id_token: "id".into(),
-            client_id: "oaiapp_test".into(),
             issued: issued.into(),
             email: email.map(str::to_string),
             expires_at: 0,
+            grant,
         }
     }
 
@@ -449,9 +468,12 @@ mod tests {
     #[test]
     fn read_vault_never_touches_a_signed_in_login() {
         let mut store = CredentialStore::default();
-        let login = store.add_oauth(&oauth_token("acc_1", Some("alex@work")));
-        store.read_vault(&StickyVault);
-        assert!(matches!(store.get(&login.id), Some(Credential::OAuth(_))));
+        for login in Login::ALL {
+            let account = store.add_oauth(&login_token(login, "same-id", Some("alex@work")));
+            store.read_vault(&StickyVault);
+            assert!(matches!(store.get(&account.id), Some(Credential::OAuth(_))));
+            assert_eq!(store.from_vault(&account.id), None);
+        }
     }
 
     #[test]
@@ -474,7 +496,7 @@ mod tests {
                 .map(|a| a.id)
                 .collect::<Vec<_>>(),
             vec![anthropic.id, alpha.id, bravo.id, llama.id],
-            "built-in, then chatgpt logins by handle, then declared"
+            "built-in, then logins by handle, then declared"
         );
     }
 
@@ -559,5 +581,83 @@ mod tests {
             "at",
             "the sibling's token is untouched by the other's refresh"
         );
+    }
+
+    #[test]
+    fn six_accounts_sort_by_login_handle_and_id_and_keep_independent_cells() {
+        let keyed = Account::built_in("anthropic");
+        let declared = keyless("local-llama");
+        let mut store = CredentialStore {
+            all: vec![keyed.clone(), declared.clone()],
+            environment: BTreeMap::from([(keyed.id.clone(), "key".into())]),
+            ..CredentialStore::default()
+        };
+        let mut expected = vec![keyed.id];
+        for login in Login::ALL.into_iter().rev() {
+            for issued in ["b", "a"] {
+                store.add_oauth(&login_token(login, issued, Some("same@work")));
+            }
+        }
+        for login in Login::ALL {
+            for issued in ["a", "b"] {
+                expected.push(Account::login(login, issued, "same@work").id);
+            }
+        }
+        expected.push(declared.id);
+        let ids = || {
+            store
+                .available()
+                .into_iter()
+                .map(|account| account.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(), expected);
+
+        let cells: Vec<_> = expected[1..7]
+            .iter()
+            .map(|id| match store.get(id) {
+                Some(Credential::OAuth(cell)) => cell,
+                _ => panic!("expected an independent login cell"),
+            })
+            .collect();
+        for (index, cell) in cells.iter().enumerate() {
+            for other in &cells[index + 1..] {
+                assert!(!Arc::ptr_eq(cell, other));
+            }
+        }
+        let roster = store.roster();
+        let mut replacement = login_token(Login::Codex, "a", Some("same@work"));
+        replacement.access_token = "codex-refreshed".into();
+        store.add_oauth(&replacement);
+        assert_eq!(
+            store
+                .available()
+                .into_iter()
+                .map(|a| a.id)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        for (index, cell) in cells.iter().enumerate() {
+            assert_eq!(
+                cell.lock_ignore_poison().access_token,
+                if index == 2 { "codex-refreshed" } else { "at" },
+            );
+            let Some(Credential::OAuth(snapshot)) = roster.credential(&expected[index + 1]) else {
+                panic!("the earlier roster retains its cell");
+            };
+            assert!(Arc::ptr_eq(cell, snapshot));
+        }
+
+        replacement.email = Some("aaa@work".into());
+        store.add_oauth(&replacement);
+        assert_eq!(store.known()[3].id, expected[3]);
+        replacement.email = Some("zzz@work".into());
+        store.add_oauth(&replacement);
+        assert_eq!(store.known()[4].id, expected[3]);
+        store.retire(&expected[3]);
+        assert_eq!(store.logins.len(), 5);
+        for id in expected[1..7].iter().filter(|id| **id != expected[3]) {
+            assert!(matches!(store.get(id), Some(Credential::OAuth(_))));
+        }
     }
 }
