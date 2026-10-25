@@ -6,7 +6,7 @@
 //! other's module.  Both Unix and Windows env-var fallbacks are encoded
 //! explicitly.
 
-use ral_core::first_order::FOValue;
+use ral_core::data::FOValue;
 use ral_core::io::terminal;
 use ral_core::io::terminal::{InteractiveMode, TerminalState};
 use ral_core::own::UserFile;

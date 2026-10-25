@@ -14,7 +14,7 @@ use super::{
 };
 use crate::card::{Card, Change, DoneOutcome, Field, FieldVal, Mark, Role as Ink, Span};
 use crate::provider::{ProviderError, Usage};
-use ral_core::first_order::FOValue;
+use ral_core::data::FOValue;
 use serde::{Deserialize, Serialize};
 
 /// What a [`Block`] carries: the [`Display`] commits verbatim, plus the

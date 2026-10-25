@@ -1,7 +1,7 @@
 //! Test-only builders mirroring the values the kit and core put on the
 //! `surface` sink; shared by every surface decoder test.
 
-use ral_core::first_order::FOValue;
+use ral_core::data::FOValue;
 
 pub(crate) fn s(text: &str) -> FOValue {
     FOValue::String { value: text.into() }

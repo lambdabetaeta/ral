@@ -107,7 +107,7 @@ step fmt-check
 # stray fs/process constructor a build break.
 step lint
 
-# `test` depends on `_build`, which is load-bearing: ral/tests/ invokes the
+# `test` depends on `build`, which is load-bearing: ral/tests/ invokes the
 # `ral` binary as a subprocess, and `cargo test` alone won't refresh it.
 step test
 

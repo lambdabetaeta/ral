@@ -10,7 +10,7 @@
 
 use super::Shell;
 use super::construct::{Bequest, Image, Terms};
-use crate::first_order::Opaque;
+use crate::data::Opaque;
 use crate::guard::SpawnGrant;
 use crate::types::handler::HandlerFrame;
 use crate::types::{Binding, Closure, Env, List, Map, Value};
@@ -249,7 +249,7 @@ mod tests {
     use crate::types::{block_over, captured, idle_handle};
 
     fn is_placeholder(v: Option<&Value>) -> bool {
-        matches!(v, Some(Value::Variant { label, .. }) if label.as_ref() == crate::first_order::OPAQUE_TAG)
+        matches!(v, Some(Value::Variant { label, .. }) if label.as_ref() == crate::data::OPAQUE_TAG)
     }
 
     #[test]

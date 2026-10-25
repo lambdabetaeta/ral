@@ -3,8 +3,8 @@ use crate::record::RECORD;
 use crate::record::{
     BlockId, Display, EditAuthority, Emitter as Recorder, Protocol, Residue, Span, Verdict, Voice,
 };
+use ral_core::data::datum::Datum as _;
 use ral_core::fact::Read;
-use ral_core::first_order::datum::Datum as _;
 use ral_core::own::OwnDir;
 use ral_core::types::{Observation, Observed};
 

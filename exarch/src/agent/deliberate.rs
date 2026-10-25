@@ -15,7 +15,7 @@ use crate::provider::{Delta, Provider, ProviderError, StepOut, StopReason, ToolC
 use crate::record::ToolResult as SessionToolResult;
 use crate::record::commit::Stream;
 use crate::record::{AgentState, EditAuthority, Forensic, QuiesceReason, Transient, Voice};
-use ral_core::first_order::FOValue;
+use ral_core::data::FOValue;
 use ral_core::process::CancelCause;
 use std::ops::ControlFlow;
 use std::sync::Arc;

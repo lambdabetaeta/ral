@@ -15,7 +15,7 @@ pub use op::{ArithOp, BinaryOp, CompareOp, EqOp};
 pub use pattern::{MapPatternEntry, Pattern};
 pub use redirect::{Redirect, Redirects, StderrTarget, StdinSource, WriteMode};
 
-use crate::first_order::Finite;
+use crate::data::Finite;
 use crate::path::tilde::TildePath;
 use crate::source::Spanned;
 use crate::text::Str;

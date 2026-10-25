@@ -46,7 +46,7 @@ use crate::cancel::{self, InterruptTarget};
 use crate::provider::Provider;
 use crate::record::AgentId;
 use crate::shell_eval;
-use ral_core::first_order::FOValue;
+use ral_core::data::FOValue;
 use ral_core::own::OwnDir;
 use ral_core::process::CancelCause;
 use ral_core::sync::LockExt;

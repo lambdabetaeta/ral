@@ -13,7 +13,7 @@ use crate::record::{AgentLog, EditAuthority, Span};
 use crate::record::{AgentState, Forensic};
 use crate::shell_eval;
 use atomic_refcell::{AtomicRef, AtomicRefCell, AtomicRefMut};
-use ral_core::first_order::FOValue;
+use ral_core::data::FOValue;
 use ral_core::protocol::Report;
 use std::fmt::Write;
 use std::io;

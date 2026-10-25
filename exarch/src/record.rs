@@ -41,7 +41,7 @@ pub use crate::app::RECORD;
 use crate::card::{Card, Change, DoneOutcome};
 use crate::provider::{Provider, ProviderError, Tuning, Usage, Via};
 use genai::chat::ChatMessage;
-use ral_core::first_order::FOValue;
+use ral_core::data::FOValue;
 use ral_core::own::OwnDir;
 use serde::{Deserialize, Serialize};
 use std::fmt;

@@ -4,8 +4,8 @@
 
 use clipboard::{Clipboard, Copied};
 use ral_core::carrier::{Host, Severed, Transport, dispatch_to_report};
-use ral_core::first_order::FOValue;
-use ral_core::first_order::datum::{Datum as _, untag};
+use ral_core::data::FOValue;
+use ral_core::data::datum::{Datum as _, untag};
 use ral_core::process::CancelCause;
 use ral_core::protocol::probe::{WorkerRow, WorkerState};
 use ral_core::protocol::{Ending, EnquiryError, Program, Report, Run};
@@ -247,7 +247,7 @@ mod tests {
             owner: ral_core::types::Owner::Session,
             state,
             started: 0,
-            elapsed: ral_core::first_order::Finite::from(0),
+            elapsed: ral_core::data::Finite::from(0),
             settled,
             retention_left: None,
         }

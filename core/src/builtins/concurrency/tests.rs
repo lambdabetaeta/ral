@@ -1,6 +1,6 @@
 use super::eliminate::await_handle;
 use super::*;
-use crate::first_order::FOValue;
+use crate::data::FOValue;
 use crate::io::new_buffer;
 use crate::process::{CancelCause, DurableRoot, Scope, ScopeNode, WorkerStop};
 use crate::types::{
@@ -349,9 +349,9 @@ struct EchoDesk;
 impl crate::types::EnquiryDesk for EchoDesk {
     fn enquire(
         &self,
-        req: crate::first_order::FOValue,
+        req: crate::data::FOValue,
         _scope: &crate::process::Scope,
-    ) -> Settled<crate::first_order::FOValue> {
+    ) -> Settled<crate::data::FOValue> {
         Ok(req)
     }
 }
@@ -363,9 +363,9 @@ fn spawned_worker_never_receives_the_enquiry_desk() {
     let mut shell = crate::test_helper::core_shell();
     let mut m = Mooring::adrift();
     m.desk = Some(Arc::new(EchoDesk) as crate::types::Desk);
-    let (tx, rx) = mpsc::channel::<Settled<crate::first_order::FOValue>>();
+    let (tx, rx) = mpsc::channel::<Settled<crate::data::FOValue>>();
     let handle = spawn_child(&m, &mut shell, spawned("<test>"), move |mooring, child| {
-        let outcome = child.enquire(mooring, crate::first_order::FOValue::Unit);
+        let outcome = child.enquire(mooring, crate::data::FOValue::Unit);
         let _ = tx.send(outcome);
         Ok(Value::Unit)
     })

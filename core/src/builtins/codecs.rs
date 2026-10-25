@@ -14,7 +14,7 @@ use crate::types::{
     Break, Mooring, Settled, Shell, Value, decode_utf8_strict, pointer_token, sig, sig_hint,
 };
 
-use crate::first_order::{FOValue, Finite, Opaque};
+use crate::data::{FOValue, Finite, Opaque};
 use crate::ty::Site;
 use std::sync::Arc;
 

@@ -11,8 +11,8 @@
 
 use ral_core::HookName;
 use ral_core::carrier::Transport;
-use ral_core::first_order::FOValue;
-use ral_core::first_order::datum::Datum as _;
+use ral_core::data::FOValue;
+use ral_core::data::datum::Datum as _;
 use std::sync::Arc;
 
 use super::frontend::EditBuffer;

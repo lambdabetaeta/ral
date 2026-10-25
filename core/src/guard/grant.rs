@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use super::decode::decode_capability_map;
 use super::freeze::FreezeCtx;
 use crate::capability::GrantLayer;
-use crate::first_order::FOValue;
+use crate::data::FOValue;
 use crate::types::{Shell, Value};
 
 /// A base tag and the anchor to freeze it against (the child's cwd and

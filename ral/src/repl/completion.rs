@@ -21,8 +21,8 @@
 //! names extending the typed text, alphabetically, else fuzzy matches.
 
 use ral_core::carrier::Transport;
-use ral_core::first_order::FOValue;
-use ral_core::first_order::datum::{Datum, exact_keys, field};
+use ral_core::data::FOValue;
+use ral_core::data::datum::{Datum, exact_keys, field};
 use ral_core::path::CwdPath;
 use ral_core::path::complete::{PartialPath, Tilde, spell_entry};
 use ral_core::protocol::probe::PathEntry;

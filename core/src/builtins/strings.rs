@@ -1,6 +1,6 @@
 //! String, regex, shell-word, and value-coercion builtins.
 
-use crate::first_order::Finite;
+use crate::data::Finite;
 use crate::types::{Settled, Value, sig, sig_hint};
 use std::borrow::Cow;
 

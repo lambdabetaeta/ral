@@ -8,8 +8,8 @@
 //! editor context is installed for the dispatch — inside a plugin handler.
 
 use ral_core::capability::{EditorVerb, Flag};
-use ral_core::first_order::FOValue;
-use ral_core::first_order::datum::Datum;
+use ral_core::data::FOValue;
+use ral_core::data::datum::Datum;
 use ral_core::ty::Site;
 use ral_core::ty::{
     CompTy, Grade, Kind, Scheme, Ty, Typed, closed_record, closed_variant, open_record,

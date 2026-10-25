@@ -8,8 +8,8 @@ use super::{
     ControlRoute, ControlSender, Ends, EventReceiver, Host, ProbeError, Severed, Transport,
     forbid_reentry,
 };
+use crate::data::FOValue;
 use crate::engine::{Engine, EngineInstaller, Rails, Scopes};
-use crate::first_order::FOValue;
 use crate::protocol::channel::WriteError;
 use crate::protocol::probe::Probe;
 use crate::protocol::{Attach, DispatchId, Event, Run};

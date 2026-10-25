@@ -462,10 +462,7 @@ fn surface(epoch: u64) -> Post {
         "done",
         map_value(vec![
             ("cmd", s("<block>")),
-            (
-                "outcome",
-                variant("ok", ral_core::first_order::FOValue::Unit),
-            ),
+            ("outcome", variant("ok", ral_core::data::FOValue::Unit)),
         ]),
     );
     Post::Stamped {

@@ -8,8 +8,8 @@
 //! - `` `repl-clipboard `` — `_ed-clipboard`'s copy, which the host performs.
 
 use ral_core::capability::{EditorVerb, Flag};
-use ral_core::first_order::FOValue;
-use ral_core::first_order::datum::{Datum, tag, untag};
+use ral_core::data::FOValue;
+use ral_core::data::datum::{Datum, tag, untag};
 use ral_core::record;
 
 use super::plugin::Keymap;
@@ -173,7 +173,7 @@ impl Datum for EditorOp {
     }
 
     fn decode(v: &FOValue) -> Result<Self, String> {
-        use ral_core::first_order::datum::{exact_keys, field};
+        use ral_core::data::datum::{exact_keys, field};
         Ok(match untag(v) {
             Some(("get", None)) => Self::Get,
             Some(("set", Some(p))) => {

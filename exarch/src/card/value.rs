@@ -2,7 +2,7 @@
 //! surfaced record, answering `None` on absence or wrong shape, so a malformed
 //! record costs a field rather than the decode.
 
-use ral_core::first_order::FOValue;
+use ral_core::data::FOValue;
 
 /// `v` when it is a record, so a field lookup can follow.
 pub(super) fn record(v: &FOValue) -> Option<&FOValue> {

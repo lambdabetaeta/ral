@@ -3,8 +3,8 @@
 //! Every answer is data, rendered here and never a live handle.
 
 use super::Engine;
-use crate::first_order::FOValue;
-use crate::first_order::datum::Datum;
+use crate::data::FOValue;
+use crate::data::datum::Datum;
 use crate::protocol::probe::{BindingRow, CompletionNames, HandleRow, Probe};
 use crate::types::{Shell, Value};
 

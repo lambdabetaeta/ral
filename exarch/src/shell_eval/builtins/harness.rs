@@ -22,8 +22,8 @@ use crate::enquiry::{
     Survey, Transcript, Turns, Word, family,
 };
 use crate::schedule::ScheduleInfo;
-use ral_core::first_order::FOValue;
-use ral_core::first_order::datum::Datum;
+use ral_core::data::FOValue;
+use ral_core::data::datum::Datum;
 use ral_core::ty::Site;
 use ral_core::ty::{Kind, Row, RowVar, Scheme, Ty, TyVar, Typed as _, closed_record, open_variant};
 use ral_core::typecheck::Unifier;

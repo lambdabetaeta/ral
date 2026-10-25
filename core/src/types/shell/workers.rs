@@ -18,9 +18,9 @@
 //! [`Shell::child`](super::Shell::child) do not, and a sub-agent fork starts
 //! empty.
 
+use crate::data::FOValue;
+use crate::data::datum::{Datum, tag, untag};
 use crate::fact::WorkerId;
-use crate::first_order::FOValue;
-use crate::first_order::datum::{Datum, tag, untag};
 use crate::process::CancelCause;
 use crate::sync::LockExt as _;
 use crate::types::handle::compacting::Compacting;

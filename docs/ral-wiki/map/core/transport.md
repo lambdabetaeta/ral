@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 8aa9355b
-generated_at_date: 2026-10-14
-covers_paths: [core/src/first_order.rs, core/src/first_order/, core/src/types/value/first_order.rs, core/src/seed.rs, core/src/seed/, core/src/frame.rs, core/src/guard/grant.rs]
+generated_at_commit: 632ac5c2064a48094cf11805454866a685db09e6
+generated_at_date: 2026-10-25
+covers_paths: [core/src/data.rs, core/src/data/, core/src/types/value/first_order.rs, core/src/seed.rs, core/src/seed/, core/src/frame.rs, core/src/guard/grant.rs]
 ---
 
 # Map: core / transport
@@ -37,10 +37,11 @@ new variant fail the build, a field-complete struct literal a new field:
   their IEEE-754 bits, total and exact where JSON's number turns NaN and ±∞
   into `null`.
 
-## Values — `core/src/first_order.rs`, `core/src/seed/table.rs`
+## Values — `core/src/data.rs`, `core/src/seed/table.rs`
 
-**`FOValue<X>` (`first_order.rs`, which knows no `Value`) is the one value
-vocabulary every seam speaks: first-order by construction, over an extension
+**`FOValue<X>` (`data.rs`, which knows no `Value`) is the one value
+vocabulary every seam speaks. The top-level `data` module is independent of
+runtime values and shared by protocols and snapshots: first-order by construction, over an extension
 slot `X` uninhabited by default (`NoExt`).** Externally tagged on the wire, with
 typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
 
@@ -52,7 +53,7 @@ typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
 - `SerialBinding` mirrors a scope entry, value *and* scheme, so a sealed child
   keeps each binding's type
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
-- `first_order/datum.rs` — `Datum`, the one strict first-order codec every typed
+- `data/datum.rs` — `Datum`, the one strict first-order codec every typed
   protocol payload goes through (`encode`; a `decode` naming what arrived
   ill-shaped), with `tag` / `untag` / `field` / `exact_keys` and the `record!`
   macro, which derives a strict record: exact keys, each once, an unknown one
@@ -66,7 +67,7 @@ typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
   declarations (`ErrorRecord::ty()`); `poll`'s polymorphic shape is
   `Io::ty().extend(..)` over them. The doors that mint them sit above
   (`types::error`, `types::audit`).
-- `first_order/byte_encoding.rs` — byte strings serialize to base64 in JSON
+- `data/byte_encoding.rs` — byte strings serialize to base64 in JSON
   and native bytes in binary codecs. Binary decoding copies or takes the
   whole byte buffer. Each decoder requires its encoding.
 
@@ -161,7 +162,7 @@ each alias arm with its scheme
   is a `Datum` over `Bytes`, which is how a seal rides the enquiry as
   `FOValue::Bytes`, and is `Origin::Child`'s payload. `Engine::boot` unseals it
   against the runtime it has just derived. `Bytes` serialises as base64 under a
-  human-readable serializer (`first_order/byte_encoding.rs`), so a seal also
+  human-readable serializer (`data/byte_encoding.rs`), so a seal also
   crosses JSON.
 - `SpawnGrant` — `Inherit` (⊤), `Base(name)`, or `Restrict(record)` — crosses
   **unfrozen**: a `` `cwd `` place in a grant names the cwd of the shell it

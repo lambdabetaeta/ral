@@ -2,8 +2,8 @@
 
 use crate::card::{Card, encode_card};
 use crate::shell_eval::{self, surface, surface::Surface};
-use ral_core::first_order::FOValue;
-use ral_core::first_order::datum::Datum;
+use ral_core::data::FOValue;
+use ral_core::data::datum::Datum;
 use ral_core::sync::LockExt;
 
 use super::ExarchDesk;

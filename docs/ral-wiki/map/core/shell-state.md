@@ -64,7 +64,7 @@ everything `crate::types::*`.
   `audit.rs` — the
   `Audit` collector, over `observation.rs`'s `Observation` / `Observed` — the
   one vocabulary shared by the trail, the surface rail, `--audit`'s JSON, and
-  the wire. `value.rs` — `Value` and, in `value/`, its two bridges: `first_order.rs` (the one walk each way to `FOValue`) and `compare.rs` (`Value::equals` and `Value::compare`, one equality and one order, exact across Int and Float). `closure.rs` — `Closure`, the thunk value `⟨M, ρ|occ(M)⟩`, its
+  the wire. `value.rs` — `Value` and, in `value/`, its two bridges: `data.rs` (the one walk each way to `FOValue`) and `compare.rs` (`Value::equals` and `Value::compare`, one equality and one order, exact across Int and Float). `closure.rs` — `Closure`, the thunk value `⟨M, ρ|occ(M)⟩`, its
   fields private and `Closure::new` its one constructor, which `restrict`s
   the environment to the names its body mentions
   ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).

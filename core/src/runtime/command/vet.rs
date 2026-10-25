@@ -292,7 +292,7 @@ mod tests {
             (Value::Bool(true), Ty::Bool),
             (Value::Int(1), Ty::Int),
             (
-                Value::Float(crate::first_order::Finite::new(1.0).expect("finite")),
+                Value::Float(crate::data::Finite::new(1.0).expect("finite")),
                 Ty::Float,
             ),
             (Value::string("x"), Ty::String),

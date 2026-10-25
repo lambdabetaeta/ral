@@ -2,9 +2,9 @@
 
 use ral_core::carrier::{IdentityTransport, Transport as _, dispatch_to_report};
 use ral_core::compile::{CompileError, compile_and_typecheck, on_compile_stack};
+use ral_core::data::FOValue;
+use ral_core::data::datum::Datum as _;
 use ral_core::elaborator::elaborate;
-use ral_core::first_order::FOValue;
-use ral_core::first_order::datum::Datum as _;
 use ral_core::own;
 use ral_core::protocol::{Ending, Program, Report, Run};
 use ral_core::run::StaticDiagnostics;
@@ -76,8 +76,8 @@ pub(crate) fn run_stdin(run: RunOpts) -> ExitCode {
 /// same envelope `audit { … }` returns, with the whole run as its body.  An
 /// escape (`exit`) is not a failure: the process still exits with its code,
 /// but the report reads `` `ok () ``; a stop reads `` `stopped cause ``.
-fn emit_audit_report(ending: &Ending, trail: &[ral_core::first_order::FOValue], pretty: bool) {
-    use ral_core::first_order::datum::Datum as _;
+fn emit_audit_report(ending: &Ending, trail: &[ral_core::data::FOValue], pretty: bool) {
+    use ral_core::data::datum::Datum as _;
     use ral_core::types::{ErrorRecord, Status, Value, outcome_value, report_envelope};
     let outcome = match ending {
         Ending::Settled { value, .. } => outcome_value(Ok(Value::from(value.clone()))),

@@ -8,7 +8,7 @@
 //! captured environment carries only ρ.  `into_runtime`, given a
 //! [`WireDecoder`], is the sole wire→runtime conversion.
 
-use crate::first_order::FOValue;
+use crate::data::FOValue;
 use crate::ir::{Comp, Name};
 use crate::types::{Binding, BuiltinTable, Closure, Env, Error, Leaf, Runtime, Value};
 use serde::{Deserialize, Serialize};

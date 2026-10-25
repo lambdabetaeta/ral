@@ -62,16 +62,16 @@ fn wire_host_services(emit: &Emitter, parent: &Arc<crate::agent::Agent>) -> Host
 
 /// A `Host` that only records the values it is surfaced, for the
 /// round-trip below — this run raises no enquiry and forks nothing.
-struct SurfaceCollector(std::sync::Mutex<Vec<ral_core::first_order::FOValue>>);
+struct SurfaceCollector(std::sync::Mutex<Vec<ral_core::data::FOValue>>);
 
 impl Host for SurfaceCollector {
-    fn surface(&self, val: &ral_core::first_order::FOValue) {
+    fn surface(&self, val: &ral_core::data::FOValue) {
         self.0.lock().unwrap().push(val.clone());
     }
     fn enquire(
         &self,
-        _req: ral_core::first_order::FOValue,
-    ) -> Result<ral_core::first_order::FOValue, EnquiryError> {
+        _req: ral_core::data::FOValue,
+    ) -> Result<ral_core::data::FOValue, EnquiryError> {
         unreachable!("this run raises no enquiry")
     }
 }
@@ -105,7 +105,7 @@ fn wire_seat_run_round_trips_and_surfaces_a_value() {
     // kit's own value is the variant among them.
     let surfaced = host.0.lock().unwrap().clone();
     assert!(
-        surfaced.contains(&ral_core::first_order::FOValue::Variant {
+        surfaced.contains(&ral_core::data::FOValue::Variant {
             label: "ping".into(),
             payload: None
         }),
@@ -219,7 +219,7 @@ fn wire_seat_install_deferred_installs_the_sink_for_a_settled_spawn_worker() {
             // this asserts on content rather than length.
             assert!(
                 values.iter().any(
-                    |v| matches!(v, ral_core::first_order::FOValue::Variant { label, .. } if label == "done")
+                    |v| matches!(v, ral_core::data::FOValue::Variant { label, .. } if label == "done")
                 ),
                 "the batch must carry the worker's completion marker, got {values:?}"
             );

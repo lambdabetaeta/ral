@@ -7,7 +7,7 @@
 
 use super::router::{CTRL_X, KeyChord, builtin_action, parse_key_notation, reserved_action};
 use super::{HookHealth, load_err};
-use ral_core::first_order::FOValue;
+use ral_core::data::FOValue;
 use ral_core::types::{Error, settings_map};
 use ral_core::{Map, Value, label, record};
 use std::collections::HashMap;

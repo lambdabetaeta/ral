@@ -12,7 +12,7 @@ use crate::carrier::{
     Ends, Host, ProbeError, READER_SEVERS_FIRST, Severed, Transport, mint_dispatch_id, sever,
     write_through,
 };
-use crate::first_order::FOValue;
+use crate::data::FOValue;
 use crate::protocol::channel::{Liveness, WireChannel, WireStream, WriteError, ticks};
 use crate::protocol::probe::Probe;
 use crate::protocol::{

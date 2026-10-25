@@ -2,7 +2,7 @@
 //! `lt`, `gt`, `sort-list` and the rest.
 
 use super::Value;
-use crate::first_order::Finite;
+use crate::data::Finite;
 use crate::types::{Settled, sig_hint};
 use std::cmp::Ordering;
 

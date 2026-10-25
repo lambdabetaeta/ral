@@ -314,7 +314,7 @@ mod tests {
     /// on normal return and when `f` unwinds (such as a completion-delivery panic).
     #[test]
     fn live_ticket_outlives_child_and_mooring_teardown_on_return_and_unwind() {
-        use crate::first_order::FOValue;
+        use crate::data::FOValue;
         use crate::io::Sink;
         use crate::sync::LockExt as _;
         use crate::types::EventSink;

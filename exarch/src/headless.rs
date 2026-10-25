@@ -18,8 +18,8 @@ use crate::record::AgentId;
 use crate::record::fault::Remedy;
 use crate::record::{self, Blocks, Delta, Record, Recorded, Settlement, Transient};
 use crate::shell_eval::user_json;
-use ral_core::first_order::FOValue;
-use ral_core::first_order::datum::Datum as _;
+use ral_core::data::FOValue;
+use ral_core::data::datum::Datum as _;
 use ral_core::types::{Observation, Observed};
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -62,7 +62,7 @@ pub struct Headless<'a> {
     last_stop: Option<String>,
     /// The root's deliberate `reply`, kept as a value until the consuming
     /// projection chooses ral text or [`user_json`].
-    reply: Option<ral_core::first_order::FOValue>,
+    reply: Option<ral_core::data::FOValue>,
     /// `pump` recovers from a worker unwind and returns the worker value as
     /// normal, so without latching the panic here a crashed exchange would
     /// report as a clean, empty success.

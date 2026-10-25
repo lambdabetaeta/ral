@@ -62,7 +62,7 @@ fn display_facts(rx: &crate::bus::BusReceiver) -> Vec<Display> {
         .collect()
 }
 
-fn done_surface(id: u64, title: &str) -> ral_core::first_order::FOValue {
+fn done_surface(id: u64, title: &str) -> ral_core::data::FOValue {
     DoneEvent {
         id: WorkerId(id),
         title: title.into(),

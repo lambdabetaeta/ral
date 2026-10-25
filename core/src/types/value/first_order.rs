@@ -4,8 +4,8 @@
 //! data, so a leaf is a borrowed view handed to the caller, never a `&Value`.
 
 use super::Value;
-use crate::first_order::datum::Datum;
-use crate::first_order::{FOValue, NoExt, NotData, Opaque};
+use crate::data::datum::Datum;
+use crate::data::{FOValue, NoExt, NotData, Opaque};
 use crate::types::{BuiltinEntry, Closure};
 use std::convert::Infallible;
 

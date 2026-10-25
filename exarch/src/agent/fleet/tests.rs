@@ -57,8 +57,8 @@ fn a_lease_is_armed_only_after_a_child_replies() {
         "working children have no reply lease"
     );
     assert!(fleet.nearest_reap().is_none());
-    worker.deposit_reply(&fleet, ral_core::first_order::FOValue::Int { value: 1 });
-    branch.deposit_reply(&fleet, ral_core::first_order::FOValue::Int { value: 1 });
+    worker.deposit_reply(&fleet, ral_core::data::FOValue::Int { value: 1 });
+    branch.deposit_reply(&fleet, ral_core::data::FOValue::Int { value: 1 });
     assert!(fleet.nearest_reap().is_some());
 
     assert!(
@@ -424,7 +424,7 @@ fn the_summary_counts_company_and_what_is_owed() {
     assert_eq!(alone.live, 3, "trunk, sibling and child are all out there");
     assert_eq!(alone.replied, 0, "none of them holds a value yet");
 
-    child.deposit_reply(&fleet, ral_core::first_order::FOValue::Int { value: 1 });
+    child.deposit_reply(&fleet, ral_core::data::FOValue::Int { value: 1 });
     let owed = roster::summary(&mid);
     assert_eq!(
         owed.live, 3,
@@ -524,7 +524,7 @@ fn followups_disarm_the_old_reply_and_the_next_reply_gets_a_new_lease() {
         let fleet = Fleet::leased_for_test(Duration::from_secs(60));
         let trunk = agent(&fleet, "trunk", None);
         let child = agent(&fleet, "child", Some(&trunk));
-        child.deposit_reply(&fleet, ral_core::first_order::FOValue::Int { value: 1 });
+        child.deposit_reply(&fleet, ral_core::data::FOValue::Int { value: 1 });
         let first = child.reply_since().expect("reply armed the lease");
         if peer_message {
             trunk.message(&child, "follow up".into());
@@ -540,7 +540,7 @@ fn followups_disarm_the_old_reply_and_the_next_reply_gets_a_new_lease() {
 
         child.disarm_reply_lease();
         assert!(child.reply_since().is_none(), "working has no deadline");
-        child.deposit_reply(&fleet, ral_core::first_order::FOValue::Int { value: 2 });
+        child.deposit_reply(&fleet, ral_core::data::FOValue::Int { value: 2 });
         let second = child.reply_since().expect("second reply armed a new lease");
         assert!(second > first);
         lease_fire(&Arc::downgrade(&child), first);
@@ -561,7 +561,7 @@ fn resumed_work_disarms_the_reply_even_without_a_message() {
     let fleet = Fleet::for_test();
     let trunk = agent(&fleet, "trunk", None);
     let child = agent(&fleet, "child", Some(&trunk));
-    child.deposit_reply(&fleet, ral_core::first_order::FOValue::Int { value: 1 });
+    child.deposit_reply(&fleet, ral_core::data::FOValue::Int { value: 1 });
     let since = child.reply_since().expect("reply armed the lease");
     child.disarm_reply_lease();
     lease_fire(&Arc::downgrade(&child), since);
@@ -574,7 +574,7 @@ fn observing_status_does_not_disarm_the_reply_lease() {
     let fleet = Fleet::for_test();
     let trunk = agent(&fleet, "trunk", None);
     let child = agent(&fleet, "child", Some(&trunk));
-    child.deposit_reply(&fleet, ral_core::first_order::FOValue::Int { value: 1 });
+    child.deposit_reply(&fleet, ral_core::data::FOValue::Int { value: 1 });
     let since = child.reply_since().expect("reply armed the lease");
     child.set_resting(false);
     child.set_resting(true);
@@ -591,7 +591,7 @@ fn settling_before_the_fire_ends_the_chain_silently() {
     let trunk = agent(&fleet, "trunk", None);
     let child = born(&fleet, spec("child", Some(&trunk))).expect("a fresh child of a live trunk");
     let token = child.token.clone();
-    child.deposit_reply(&fleet, ral_core::first_order::FOValue::Int { value: 1 });
+    child.deposit_reply(&fleet, ral_core::data::FOValue::Int { value: 1 });
 
     drop(child);
 
@@ -612,7 +612,7 @@ fn a_clear_outranks_the_lease() {
     child.reach = reach;
     let child = born(&fleet, child).expect("a fresh child of a live trunk");
 
-    child.deposit_reply(&fleet, ral_core::first_order::FOValue::Int { value: 1 });
+    child.deposit_reply(&fleet, ral_core::data::FOValue::Int { value: 1 });
     trunk.forget();
     assert_eq!(
         ended(&engine),

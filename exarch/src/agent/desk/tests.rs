@@ -19,7 +19,7 @@ use crate::record::EditAuthority;
 use crate::record::{AgentId, Memory, Voice};
 use crate::record::{Display, Record, Transient};
 use crate::schedule::{Trigger, parse_duration};
-use ral_core::first_order::datum::tag;
+use ral_core::data::datum::tag;
 use ral_core::types::NurseryId;
 use regex::Regex;
 use std::sync::Mutex;

@@ -1,7 +1,7 @@
 //! A worker's surface: the events it emits while no run listens, buffered
 //! until the worker settles and then handed once to the session's deferred sink.
 
-use crate::first_order::FOValue;
+use crate::data::FOValue;
 use crate::sync::LockExt as _;
 use crate::types::{DeferredSink, DoneEvent, EventSink};
 use std::sync::{Arc, Mutex};

@@ -346,8 +346,8 @@ pub(crate) fn started_child(parent: &Avatar, name: &str) -> Avatar {
     use crate::agent::seat::{Seat, SeatKind};
     use crate::enquiry::{Agents, ForkClaim, Request, Start};
     use ral_core::carrier::Host;
-    use ral_core::first_order::FOValue;
-    use ral_core::first_order::datum::Datum as _;
+    use ral_core::data::FOValue;
+    use ral_core::data::datum::Datum as _;
     use ral_core::protocol::{EnquiryError, Run};
     use ral_core::source::SourceOrigin;
 

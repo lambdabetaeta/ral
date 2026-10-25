@@ -1,6 +1,6 @@
 use super::*;
-use ral_core::first_order::FOValue;
-use ral_core::first_order::Finite;
+use ral_core::data::FOValue;
+use ral_core::data::Finite;
 use ral_core::process::CancelCause;
 use ral_core::protocol::probe::WorkerState;
 use ral_core::types::{Done, Owner};

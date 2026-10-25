@@ -2,8 +2,8 @@
 //! the [`Typed`] types that derive theirs from their own fields.
 
 use super::{Label, Row, RowVar, Ty};
-use crate::first_order::datum::Datum;
-use crate::first_order::{Bytes, Finite};
+use crate::data::datum::Datum;
+use crate::data::{Bytes, Finite};
 use crate::record;
 use crate::source::CallSite;
 use std::collections::BTreeMap;

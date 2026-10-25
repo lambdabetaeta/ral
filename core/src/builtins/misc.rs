@@ -1,8 +1,8 @@
 //! Small builtins with no cluster of their own: `clear`, `reset`, `fail`,
 //! `exit`, `surface`, `warn`, and `ask`.
 
+use crate::data::{FOValue, datum::Datum};
 use crate::fact::Reason;
-use crate::first_order::{FOValue, datum::Datum};
 use crate::process::{CommandFailure, Signal, SpawnFailure, WorkerStop};
 use crate::site::{Silent, site};
 use crate::types::{

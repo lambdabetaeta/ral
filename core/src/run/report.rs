@@ -5,8 +5,8 @@
 //! engine's shell is in hand; the host receives the full string (prefix,
 //! status, hint, caret) and only has to print it.
 
-use crate::first_order::datum::Datum;
-use crate::first_order::{FOValue, NotData, Opaque};
+use crate::data::datum::Datum;
+use crate::data::{FOValue, NotData, Opaque};
 use crate::process::CancelCause;
 use crate::protocol::{Ending, FailureStatus, Report};
 use crate::run::RunReport;

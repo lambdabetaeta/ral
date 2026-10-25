@@ -14,8 +14,8 @@ use crate::card::Change;
 use crate::card::Row;
 use ral_core::capability::Capabilities;
 use ral_core::carrier::IdentityTransport;
+use ral_core::data::datum::Datum as _;
 use ral_core::fact::Read;
-use ral_core::first_order::datum::Datum as _;
 use ral_core::path::shown;
 use ral_core::types::WriteOutcome;
 use ral_core::types::{
@@ -700,7 +700,7 @@ fn inbox_deferred_always_pushes_stamped_with_its_birth_epoch() {
     let emit = Emitter::with_mailbox(tx, agent.id, inbox.mailbox());
     let deferred = deferred_sink(&emit);
 
-    deferred.deliver(vec![ral_core::first_order::FOValue::Unit]);
+    deferred.deliver(vec![ral_core::data::FOValue::Unit]);
     match inbox.next_item() {
         Some(crate::bus::Next::Item(crate::bus::Item::Surface { id, .. })) => {
             assert_eq!(
@@ -713,7 +713,7 @@ fn inbox_deferred_always_pushes_stamped_with_its_birth_epoch() {
 
     // A `/clear` bumps this inbox past the sink's captured epoch.
     inbox.clear();
-    deferred.deliver(vec![ral_core::first_order::FOValue::Unit]);
+    deferred.deliver(vec![ral_core::data::FOValue::Unit]);
     assert!(
         !inbox.is_empty(),
         "the post-clear flush still posts: the sink neither checks nor withholds"
@@ -1855,7 +1855,7 @@ fn user_json_bool_and_int_are_scalars() {
 fn user_json_finite_float_is_a_json_number() {
     assert_eq!(
         super::user_json(&FOValue::Float {
-            value: ral_core::first_order::Finite::new(1.5).expect("finite")
+            value: ral_core::data::Finite::new(1.5).expect("finite")
         }),
         serde_json::json!(1.5)
     );
@@ -1922,7 +1922,7 @@ fn user_json_payload_less_variant_becomes_the_bare_label_string() {
 mod self_layer {
     use super::*;
     use ral_core::capability::GrantStack;
-    use ral_core::first_order::FOValue;
+    use ral_core::data::FOValue;
 
     struct Fixture {
         dir: tempfile::TempDir,

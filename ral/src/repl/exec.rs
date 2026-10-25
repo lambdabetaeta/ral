@@ -7,8 +7,8 @@
 //! session's directory, then `post-exec`, which sees the line that ran.
 
 use ral_core::carrier::Transport;
-use ral_core::first_order::FOValue;
-use ral_core::first_order::datum::Datum as _;
+use ral_core::data::FOValue;
+use ral_core::data::datum::Datum as _;
 use ral_core::protocol::{Ending, Report, Run};
 use ral_core::source::SourceOrigin;
 use ral_core::{HookName, Value, builtins};

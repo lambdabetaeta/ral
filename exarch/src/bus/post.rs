@@ -2,7 +2,7 @@
 //! boundary yields a [`Next`] — an [`Item`] for the model, or a command for
 //! the attend loop.  The queue itself is `bus::inbox`.
 
-use ral_core::first_order::FOValue;
+use ral_core::data::FOValue;
 use std::fmt;
 use std::time::Duration;
 

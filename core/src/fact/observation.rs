@@ -9,8 +9,8 @@
 //! reads its type off the declaration (`Observation::ty`).
 
 use super::WorkerId;
-use crate::first_order::datum::{Datum, field, tag, untag};
-use crate::first_order::{Bytes, FOValue};
+use crate::data::datum::{Datum, field, tag, untag};
+use crate::data::{Bytes, FOValue};
 use crate::ir::WriteMode;
 use crate::source::CallSite;
 use crate::ty::{Ty, Typed, closed_record};
@@ -199,7 +199,7 @@ impl Datum for Check {
     }
 
     fn decode(v: &FOValue) -> Result<Self, String> {
-        crate::first_order::datum::exact_keys(v, &["resource", "decision", "fields"])?;
+        crate::data::datum::exact_keys(v, &["resource", "decision", "fields"])?;
         let resource: Resource = field(v, "resource")?;
         let decision: Decision = field(v, "decision")?;
         if decision != resource.decision() {

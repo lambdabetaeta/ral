@@ -4,8 +4,8 @@
 
 use super::bindings::Pruned;
 use super::workers::ReapNotice;
-use crate::first_order::FOValue;
-use crate::first_order::datum::{Datum, tag, untag};
+use crate::data::FOValue;
+use crate::data::datum::{Datum, tag, untag};
 use crate::variant;
 
 /// A `` `notice `` event's body: `` `reap [id, title, cause] `` or

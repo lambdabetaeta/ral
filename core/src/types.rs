@@ -60,7 +60,7 @@ pub use map::Map;
 
 // The inner of `Value::Bytes`.
 // Here because `Value::Bytes` holds one.
-pub use crate::first_order::Bytes;
+pub use crate::data::Bytes;
 
 mod error;
 pub use error::{Error, Status, outcome_value};

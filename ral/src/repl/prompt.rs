@@ -5,9 +5,9 @@
 //! Plugins may transform the result via the `prompt` hook.
 
 use ral_core::carrier::Transport;
+use ral_core::data::FOValue;
+use ral_core::data::datum::Datum as _;
 use ral_core::errln;
-use ral_core::first_order::FOValue;
-use ral_core::first_order::datum::Datum as _;
 use ral_core::types::{Closure, DefaultPolicy, HookName, HookSig};
 use ral_core::{Captured, Shell, Value};
 use std::sync::Arc;

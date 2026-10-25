@@ -3,7 +3,7 @@
 //! A [`Datum`] encodes to an [`FOValue`] and decodes back strictly, naming
 //! whatever arrived ill-shaped; every protocol payload is typed through it.
 
-use crate::first_order::{FOValue, Finite};
+use crate::data::{FOValue, Finite};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -96,19 +96,19 @@ macro_rules! record {
         }
     };
     ($ty:ty { $($field:ident: $key:literal),* $(,)? }) => {
-        impl $crate::first_order::datum::Datum for $ty {
-            fn encode(self) -> $crate::first_order::FOValue {
+        impl $crate::data::datum::Datum for $ty {
+            fn encode(self) -> $crate::data::FOValue {
                 let mut entries = vec![$((
                     $key.to_string(),
-                    $crate::first_order::datum::Datum::encode(self.$field),
+                    $crate::data::datum::Datum::encode(self.$field),
                 )),*];
                 entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-                $crate::first_order::FOValue::Map { entries }
+                $crate::data::FOValue::Map { entries }
             }
 
-            fn decode(v: &$crate::first_order::FOValue) -> Result<Self, String> {
-                use $crate::first_order::datum::field;
-                $crate::first_order::datum::exact_keys(v, &[$($key),*])?;
+            fn decode(v: &$crate::data::FOValue) -> Result<Self, String> {
+                use $crate::data::datum::field;
+                $crate::data::datum::exact_keys(v, &[$($key),*])?;
                 Ok(Self { $($field: field(v, $key)?),* })
             }
         }
@@ -128,7 +128,7 @@ macro_rules! label {
         impl $crate::ty::Typed for $ty {
             fn ty() -> $crate::ty::Ty {
                 $crate::ty::closed_variant(
-                    &<$ty as $crate::first_order::datum::strum::VariantArray>::VARIANTS
+                    &<$ty as $crate::data::datum::strum::VariantArray>::VARIANTS
                         .iter()
                         .map(|v| (<&str>::from(*v), $crate::ty::Ty::Unit))
                         .collect::<Vec<_>>(),
@@ -137,14 +137,14 @@ macro_rules! label {
         }
     };
     ($ty:ty) => {
-        impl $crate::first_order::datum::Datum for $ty {
-            fn encode(self) -> $crate::first_order::FOValue {
-                $crate::first_order::datum::tag(<&str>::from(self), None)
+        impl $crate::data::datum::Datum for $ty {
+            fn encode(self) -> $crate::data::FOValue {
+                $crate::data::datum::tag(<&str>::from(self), None)
             }
 
-            fn decode(v: &$crate::first_order::FOValue) -> Result<Self, String> {
-                let all = <$ty as $crate::first_order::datum::strum::VariantArray>::VARIANTS;
-                $crate::first_order::datum::labelled(v, all, |x| <&str>::from(*x))
+            fn decode(v: &$crate::data::FOValue) -> Result<Self, String> {
+                let all = <$ty as $crate::data::datum::strum::VariantArray>::VARIANTS;
+                $crate::data::datum::labelled(v, all, |x| <&str>::from(*x))
             }
         }
     };
@@ -158,7 +158,7 @@ macro_rules! variant {
     (@ty) => { $crate::ty::Ty::Unit };
     (@ty $t:ty) => { <$t as $crate::ty::Typed>::ty() };
     (@enc) => { None };
-    (@enc $x:ident $t:ty) => { Some($crate::first_order::datum::Datum::encode($x)) };
+    (@enc $x:ident $t:ty) => { Some($crate::data::datum::Datum::encode($x)) };
     (@dec $label:literal, $arm:path, $p:ident) => {
         match $p {
             None => Ok($arm),
@@ -167,7 +167,7 @@ macro_rules! variant {
     };
     (@dec $label:literal, $arm:path, $p:ident, $t:ty) => {
         match $p {
-            Some(x) => <$t as $crate::first_order::datum::Datum>::decode(x)
+            Some(x) => <$t as $crate::data::datum::Datum>::decode(x)
                 .map($arm)
                 .map_err(|why| format!("`{}: {why}", $label)),
             None => Err(format!("`{} needs a payload", $label)),
@@ -185,11 +185,11 @@ macro_rules! variant {
         }
     };
     ($ty:ty { $($arm:ident $(($payload:ty))?: $label:literal),* $(,)? }) => {
-        impl $crate::first_order::datum::Datum for $ty {
-            fn encode(self) -> $crate::first_order::FOValue {
+        impl $crate::data::datum::Datum for $ty {
+            fn encode(self) -> $crate::data::FOValue {
                 match self {
                     $(Self::$arm $(($crate::variant!(@bind $payload, payload)))? => {
-                        $crate::first_order::datum::tag(
+                        $crate::data::datum::tag(
                             $label,
                             $crate::variant!(@enc $(payload $payload)?),
                         )
@@ -197,8 +197,8 @@ macro_rules! variant {
                 }
             }
 
-            fn decode(v: &$crate::first_order::FOValue) -> Result<Self, String> {
-                match $crate::first_order::datum::untag(v) {
+            fn decode(v: &$crate::data::FOValue) -> Result<Self, String> {
+                match $crate::data::datum::untag(v) {
                     $(Some(($label, payload)) => {
                         $crate::variant!(@dec $label, Self::$arm, payload $(, $payload)?)
                     })*

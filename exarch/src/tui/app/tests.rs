@@ -139,8 +139,8 @@ fn matrix_mode_swallows_prompt_editing() {
 #[test]
 fn a_pin_never_splits_a_coalesced_observation_run() {
     use crate::record::{Display, Locus, Record, Recorded, Seq};
+    use ral_core::data::datum::Datum as _;
     use ral_core::fact::Read;
-    use ral_core::first_order::datum::Datum as _;
 
     let (mut app, rx, root) = app();
     let opening = app

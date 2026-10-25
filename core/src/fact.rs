@@ -15,8 +15,8 @@ pub use observation::{
     Worker, Write, WriteOutcome,
 };
 
-use crate::first_order::Bytes;
-use crate::first_order::datum::Datum;
+use crate::data::Bytes;
+use crate::data::datum::Datum;
 use crate::record;
 use crate::ty::{Ty, Typed};
 use std::time::SystemTime;
@@ -30,11 +30,11 @@ use std::time::SystemTime;
 pub struct WorkerId(pub u64);
 
 impl Datum for WorkerId {
-    fn encode(self) -> crate::first_order::FOValue {
+    fn encode(self) -> crate::data::FOValue {
         self.0.encode()
     }
 
-    fn decode(v: &crate::first_order::FOValue) -> Result<Self, String> {
+    fn decode(v: &crate::data::FOValue) -> Result<Self, String> {
         u64::decode(v).map(Self)
     }
 }

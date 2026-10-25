@@ -67,8 +67,8 @@ impl Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::first_order::FOValue;
-    use crate::first_order::datum::{Datum, tag};
+    use crate::data::FOValue;
+    use crate::data::datum::{Datum, tag};
 
     #[test]
     fn status_is_the_reasons_own_projection() {

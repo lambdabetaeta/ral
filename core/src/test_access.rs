@@ -20,7 +20,7 @@ use crate::capability::Program;
 #[cfg(unix)]
 use crate::capability::{ExecAllow, ExecDeny};
 use crate::carrier::{IdentityTransport, ProbeError, Transport};
-use crate::first_order::FOValue;
+use crate::data::FOValue;
 use crate::ir::{CaseArm, Comp, CompKind, Exec, Val, ValListElem};
 #[cfg(unix)]
 use crate::path::Walked;

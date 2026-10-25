@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use crate::capability::{Capabilities, GrantStack, GrantSummary};
-use crate::first_order::datum::{Datum, tag, untag};
-use crate::first_order::{Bytes, FOValue, Finite};
+use crate::data::datum::{Datum, tag, untag};
+use crate::data::{Bytes, FOValue, Finite};
 use crate::ty::{Ty, Typed, closed_record};
 use crate::types::{Done, Owner, Sample, Value};
 use crate::{record, variant};

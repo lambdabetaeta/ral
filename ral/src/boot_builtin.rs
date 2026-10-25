@@ -5,8 +5,8 @@
 //! answers what the rc settled for the host.
 
 use ral_core::carrier::Severed;
-use ral_core::first_order::FOValue;
-use ral_core::first_order::datum::Datum as _;
+use ral_core::data::FOValue;
+use ral_core::data::datum::Datum as _;
 use ral_core::path::{Resolver, is_absolute, shown, utf8};
 use ral_core::protocol::{Ending, Program, Report};
 use ral_core::record;

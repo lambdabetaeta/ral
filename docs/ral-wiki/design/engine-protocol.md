@@ -169,7 +169,7 @@ silently. Every surface class is a label, an audit observation included
 value's shape.
 
 **A payload is typed once, for both ends.** It is an `FOValue` on the wire
-and a Rust type on either side of it: `Datum` (`ral_core::first_order::datum`) is
+and a Rust type on either side of it: `Datum` (`ral_core::data::datum`) is
 the one first-order codec — `encode`, and a strict `decode` naming whatever
 arrived ill-shaped — and `record!` derives it for a record whose keys must be
 exactly its own, answering an unknown key with the one it most likely meant

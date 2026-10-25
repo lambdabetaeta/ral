@@ -11,8 +11,8 @@
 //! think about UTF-8.  Use [`ral_core::text::char_to_byte`] and
 //! [`ral_core::text::byte_to_char`] for the conversion.
 
-use ral_core::first_order::FOValue;
-use ral_core::first_order::datum::Datum as _;
+use ral_core::data::FOValue;
+use ral_core::data::datum::Datum as _;
 use std::sync::Arc;
 
 use super::super::enquiry::{Data, EditorOp, EditorSnapshot};

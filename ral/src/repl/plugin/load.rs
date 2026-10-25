@@ -9,7 +9,7 @@
 //! plugin's whole namespace back, so a rejected load leaves the session
 //! untouched.  Unloading is the exact inverse.
 
-use ral_core::first_order::datum::Datum as _;
+use ral_core::data::datum::Datum as _;
 use ral_core::path::{Judged, Located, Reading};
 use ral_core::source::{SourceFile, SourceOrigin};
 use ral_core::typecheck::builtins::scheme;

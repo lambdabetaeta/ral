@@ -4,7 +4,7 @@
 //! deferred buffer; [`value_to_done`] decodes it, [`settled_spans`] words it.
 
 use jiff::fmt::friendly::{Designator, Spacing, SpanPrinter};
-use ral_core::first_order::FOValue;
+use ral_core::data::FOValue;
 use ral_core::types::{Done, DoneEvent};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;

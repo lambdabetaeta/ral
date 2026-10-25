@@ -9,7 +9,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::first_order::FOValue;
+use crate::data::FOValue;
 use crate::guard::GrantNarrower;
 use crate::path::CwdPath;
 use crate::process::{CancelCause, DurableRoot, Scope, ScopeNode};
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn a_seal_that_will_not_unseal_refuses_the_attach() {
-        use crate::first_order::{Bytes, datum::Datum as _};
+        use crate::data::{Bytes, datum::Datum as _};
         let garbage = Bytes::from(&b"not a frame"[..]).encode();
         let mut attach = crate::carrier::testkit::attach(&crate::carrier::testkit::BARE);
         attach.origin =

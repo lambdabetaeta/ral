@@ -3,7 +3,7 @@
 //! All four take a Float only, since an integer is already rounded.  `round`
 //! stays in Float even at zero places: `round 3.7 0` is `4.0`.
 
-use crate::first_order::Finite;
+use crate::data::Finite;
 use crate::types::{Settled, Value, sig, sig_hint};
 
 /// The largest `places` for which `10^places` is still finite in `f64`.

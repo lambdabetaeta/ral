@@ -6,8 +6,8 @@ use crate::agent::seat::{Seat, SeatKind};
 use crate::enquiry::{Deposit, ForkClaim, Message, Name, Selection, Start};
 use crate::provider::Provider;
 use crate::shell_eval;
-use ral_core::first_order::FOValue;
-use ral_core::first_order::datum::Datum;
+use ral_core::data::FOValue;
+use ral_core::data::datum::Datum;
 use ral_core::types::Error;
 use std::sync::Arc;
 

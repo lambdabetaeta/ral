@@ -4,7 +4,7 @@ use crate::agent::testkit::*;
 use crate::provider::Refusal;
 use crate::provider::scripted::{Reply, Script};
 use crate::record::{Forensic, Memory, Record};
-use ral_core::first_order::FOValue;
+use ral_core::data::FOValue;
 use std::time::Duration;
 
 /// The park verdict reads engagement off the agent's own exchange clock,

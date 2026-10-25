@@ -363,13 +363,13 @@ fn ready_boundary_notice_surfaces_an_idle_prune() {
 
 /// Run `src` under a capturing surface sink, answering the notices it pushed.
 fn surfaced_notices(shell: &mut Shell, src: &str) -> Vec<crate::types::Notice> {
-    struct CapturingSink(Arc<Mutex<Vec<crate::first_order::FOValue>>>);
+    struct CapturingSink(Arc<Mutex<Vec<crate::data::FOValue>>>);
     impl crate::types::EventSink for CapturingSink {
-        fn emit(&self, ev: &crate::first_order::FOValue) {
+        fn emit(&self, ev: &crate::data::FOValue) {
             self.0.lock().unwrap().push(ev.clone());
         }
     }
-    let captured: Arc<Mutex<Vec<crate::first_order::FOValue>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured: Arc<Mutex<Vec<crate::data::FOValue>>> = Arc::new(Mutex::new(Vec::new()));
     let _ = shell.run(RunRequest {
         surface: Some(Arc::new(CapturingSink(captured.clone()))),
         ..RunRequest::from(Run::captured(src, test_origin()))
@@ -766,9 +766,9 @@ struct PanickingDesk;
 impl crate::types::EnquiryDesk for PanickingDesk {
     fn enquire(
         &self,
-        _req: crate::first_order::FOValue,
+        _req: crate::data::FOValue,
         _cancel: &crate::process::Scope,
-    ) -> Settled<crate::first_order::FOValue> {
+    ) -> Settled<crate::data::FOValue> {
         panic!("run-door test: desk handler panic");
     }
 }
@@ -777,7 +777,7 @@ impl crate::types::EnquiryDesk for PanickingDesk {
 fn desk_handler_panic_is_caught_at_the_door() {
     let mut runtime = crate::test_helper::core_runtime();
     install_act(&mut runtime, "enquire", |mooring, shell| {
-        let _ = shell.enquire(mooring, crate::first_order::FOValue::Unit);
+        let _ = shell.enquire(mooring, crate::data::FOValue::Unit);
     });
     let mut shell = Shell::root(runtime.into(), crate::test_helper::process_cwd());
 
@@ -1048,7 +1048,7 @@ fn a_dispatch_trail_projects_and_round_trips_through_the_wire() {
         "the dispatch's own trail must carry its one command"
     );
     let round_tripped = trail.iter().any(|fo| {
-        let obs = crate::first_order::datum::Datum::decode(fo);
+        let obs = crate::data::datum::Datum::decode(fo);
         matches!(
             obs,
             Ok(crate::types::Observation {

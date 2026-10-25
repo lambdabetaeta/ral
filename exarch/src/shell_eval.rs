@@ -17,7 +17,7 @@ use crate::record::AgentId;
 use base64::Engine;
 use ral_core::Shell;
 use ral_core::Value as RalValue;
-use ral_core::first_order::FOValue;
+use ral_core::data::FOValue;
 use ral_core::types::{DeferredSink, TitlePolicy};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

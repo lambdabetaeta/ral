@@ -4,9 +4,9 @@
 use crate::card::{Change, Landed, value_to_card, value_to_done, value_to_edit};
 use crate::record::{Display, Emitter, Forensic, Transient};
 use ral_core::carrier::Host;
+use ral_core::data::FOValue;
+use ral_core::data::datum::Datum as _;
 use ral_core::fact::Worker;
-use ral_core::first_order::FOValue;
-use ral_core::first_order::datum::Datum as _;
 use ral_core::protocol::EnquiryError;
 use ral_core::sync::LockExt;
 use ral_core::types::{Notice, Observation, Observed};

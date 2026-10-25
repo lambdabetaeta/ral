@@ -18,13 +18,13 @@ use std::time::Duration;
 /// the child subtree; a deferred worker never gets the live sink, only a
 /// bounded buffering one that delivers at completion.
 pub trait EventSink: Send + Sync {
-    fn emit(&self, ev: &crate::first_order::FOValue);
+    fn emit(&self, ev: &crate::data::FOValue);
 }
 
 /// The no-op surface, for a caller with no rail to speak into; an absent
 /// sink (`None`) behaves identically.
 impl EventSink for () {
-    fn emit(&self, _ev: &crate::first_order::FOValue) {}
+    fn emit(&self, _ev: &crate::data::FOValue) {}
 }
 
 /// Shared handle to the run-local structured-event sink.
@@ -64,9 +64,9 @@ pub trait EnquiryDesk: Send + Sync {
     /// carries.
     fn enquire(
         &self,
-        req: crate::first_order::FOValue,
+        req: crate::data::FOValue,
         scope: &crate::process::Scope,
-    ) -> Settled<crate::first_order::FOValue>;
+    ) -> Settled<crate::data::FOValue>;
 }
 
 /// Shared handle to the run-local enquiry desk.  Run-scoped like
@@ -140,7 +140,7 @@ pub enum Fork {
 /// a time; where absent, a worker's surface is dropped.
 pub trait DeferredSink: Send + Sync {
     /// Deliver surfaced values: a settled worker's whole batch, or one watched line.
-    fn deliver(&self, batch: Vec<crate::first_order::FOValue>);
+    fn deliver(&self, batch: Vec<crate::data::FOValue>);
 }
 
 /// This run's authority to hand the controlling terminal to a child: the
@@ -262,19 +262,19 @@ impl Mooring {
 
     /// The sink entry for a runtime [`Value`], such as a host builtin with no
     /// vocabulary of its own hands in.  Encoded here into the first-order
-    /// [`FOValue`](crate::first_order::FOValue) the sink carries; inert with no
+    /// [`FOValue`](crate::data::FOValue) the sink carries; inert with no
     /// sink installed.  Total: a `Handle` or a closure reachable through `ev`
     /// crosses as its `opaque` placeholder rather than being dropped.
     pub fn surface(&self, ev: &Value) {
         if let Some(sink) = self.surface.as_ref() {
-            sink.emit(&crate::first_order::FOValue::scrubbed(ev));
+            sink.emit(&crate::data::FOValue::scrubbed(ev));
         }
     }
 
     /// [`Self::surface`] for a host that already holds data.  Every entry core
     /// owns reaches it through `Shell::observe_stamped` with
     /// [`crate::types::Observation::to_surface`].
-    pub fn surface_data(&self, ev: &crate::first_order::FOValue) {
+    pub fn surface_data(&self, ev: &crate::data::FOValue) {
         if let Some(sink) = self.surface.as_ref() {
             sink.emit(ev);
         }
@@ -319,7 +319,7 @@ impl Drop for NurseryGuard {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use crate::first_order::{FOValue, OPAQUE_TAG};
+    use crate::data::{FOValue, OPAQUE_TAG};
     use crate::types::idle_handle;
     use std::sync::Mutex;
 

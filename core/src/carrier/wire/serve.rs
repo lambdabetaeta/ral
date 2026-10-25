@@ -12,8 +12,8 @@ use std::os::unix::io::FromRawFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
+use crate::data::FOValue;
 use crate::engine::{Engine, EngineInstaller, Outlet, Rails};
-use crate::first_order::FOValue;
 use crate::process::{CancelCause, POLL_SLICE, Scope};
 use crate::protocol::channel::{HOST_SILENCE_DEADLINE, WireChannel, WriteError, write_or_sever};
 use crate::protocol::probe::Probe;

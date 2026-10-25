@@ -10,7 +10,7 @@ use super::group;
 use super::palette::AgentSlot;
 use crate::card::{self, Card, Change, Landed, observation_card, observation_spans};
 use crate::record::{self, BlockId, Blocks, Delta, Record, Recorded, Seq};
-use ral_core::first_order::datum::Datum as _;
+use ral_core::data::datum::Datum as _;
 use ral_core::types::{Observation, Observed};
 use std::time::Duration;
 
@@ -408,7 +408,7 @@ fn surfaced(card: Card) -> Item {
 /// Decode one [`Display::Observation`](crate::record::Display::Observation),
 /// through the same [`Landed::of`] the live rail draws from — a rendering, never
 /// recorded, built as the fact arrives.
-fn observation_items(value: &ral_core::first_order::FOValue) -> Vec<Item> {
+fn observation_items(value: &ral_core::data::FOValue) -> Vec<Item> {
     let Ok(obs) = Observation::decode(value) else {
         return Vec::new();
     };

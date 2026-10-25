@@ -7,7 +7,7 @@
 //! that interpret the algebra are [`crate::carrier`]'s.
 use serde::{Deserialize, Serialize};
 
-use crate::first_order::FOValue;
+use crate::data::FOValue;
 use crate::io::{Captured, RunIo, RunStdin};
 use crate::path::EnginePath;
 use crate::process::{CancelCause, RequestedTerminalAccess};

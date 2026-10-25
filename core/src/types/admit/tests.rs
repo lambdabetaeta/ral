@@ -87,7 +87,7 @@ fn a_kinded_variable_admits_only_its_heads() {
         s.admit(
             &Value::list(vec![
                 Value::Int(1),
-                Value::Float(crate::first_order::Finite::new(2.5).expect("finite"))
+                Value::Float(crate::data::Finite::new(2.5).expect("finite"))
             ]),
             &Fixings::default()
         )
@@ -125,7 +125,7 @@ fn a_comparable_variable_is_fixed_to_numbers_or_to_text() {
                 ("a", Value::Int(1)),
                 (
                     "c",
-                    Value::Float(crate::first_order::Finite::new(2.5).expect("finite"))
+                    Value::Float(crate::data::Finite::new(2.5).expect("finite"))
                 )
             ]),
             &Fixings::default()
@@ -185,7 +185,7 @@ fn a_json_number_keeps_its_kind_at_a_ground_site() {
     assert!(float.contains("a whole number (`3`)") && float.contains("as a Float"));
     let int = ground(&Ty::Int)
         .admit(
-            &Value::Float(crate::first_order::Finite::new(2.5).expect("finite")),
+            &Value::Float(crate::data::Finite::new(2.5).expect("finite")),
             &Fixings::default(),
         )
         .expect_err("a fraction is not an Int");

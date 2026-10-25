@@ -68,7 +68,7 @@ fn inhabitant(ty: &Ty) -> Option<Value> {
         Ty::Unit => Value::Unit,
         Ty::Bool => Value::Bool(true),
         Ty::Int | Ty::Var(_) => Value::Int(1),
-        Ty::Float => Value::Float(ral_core::first_order::Finite::new(1.5).expect("finite")),
+        Ty::Float => Value::Float(ral_core::data::Finite::new(1.5).expect("finite")),
         Ty::String => Value::string("ab"),
         Ty::Bytes => Value::bytes(vec![1, 2]),
         Ty::List(elem) => Value::list(vec![inhabitant(elem)?, inhabitant(elem)?]),

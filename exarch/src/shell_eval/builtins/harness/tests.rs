@@ -715,7 +715,7 @@ fn double_reply_in_one_exchange_is_last_wins() {
             let v = session.agent.reply().expect("the reply is deposited");
             assert_eq!(
                 v,
-                ral_core::first_order::FOValue::String {
+                ral_core::data::FOValue::String {
                     value: "second".into()
                 },
                 "the last reply in the exchange must win"

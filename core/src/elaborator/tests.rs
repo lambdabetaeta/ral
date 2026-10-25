@@ -1,5 +1,5 @@
 use super::*;
-use crate::first_order::Finite;
+use crate::data::Finite;
 use crate::path::tilde::TildePath;
 use crate::syntax::parser::parse;
 

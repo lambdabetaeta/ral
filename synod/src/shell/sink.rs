@@ -639,12 +639,12 @@ mod tests {
     use exarch::card::DoneOutcome;
     use exarch::card::{Row, Seg};
     use exarch::record::AgentState;
+    use ral_core::data::datum::Datum as _;
     use ral_core::fact::Worker;
-    use ral_core::first_order::datum::Datum as _;
     use ral_core::types::{Observation, Observed};
 
     /// The wire form a `Display::Observation` carries.
-    fn observation_wire(what: Observed) -> ral_core::first_order::FOValue {
+    fn observation_wire(what: Observed) -> ral_core::data::FOValue {
         Observation::instant(None, None, what).encode()
     }
 

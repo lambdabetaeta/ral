@@ -7,7 +7,7 @@
 //! its current position before lowering, so a form with no span of its own
 //! inherits the enclosing statement's.
 
-use crate::first_order::Finite;
+use crate::data::Finite;
 use crate::ir::{BinaryOp, Pattern, Redirects};
 use crate::path::tilde::TildePath;
 use crate::source::Spanned;

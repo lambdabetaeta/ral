@@ -30,9 +30,9 @@ pub(super) use self::router::{KeyChord, KeyName, KeyRouter, Resolution};
 
 use ral_core::HookName;
 use ral_core::carrier::Transport;
+use ral_core::data::FOValue;
+use ral_core::data::datum::Datum;
 use ral_core::errln;
-use ral_core::first_order::FOValue;
-use ral_core::first_order::datum::Datum;
 use ral_core::sync::LockExt as _;
 use ral_core::ty::{Ty, Typed};
 use std::time::Duration;

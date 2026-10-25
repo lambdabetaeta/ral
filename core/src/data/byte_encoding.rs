@@ -47,7 +47,7 @@ impl Visitor<'_> for ByteVisitor {
 
 #[cfg(test)]
 mod tests {
-    use crate::first_order::FOValue;
+    use crate::data::FOValue;
 
     #[test]
     fn json_bytes_are_lossless_and_compact() {
@@ -78,7 +78,7 @@ mod tests {
     #[test]
     fn binary_encoding_uses_native_bytes() {
         let bytes: Vec<u8> = (0..=255).collect();
-        let encoded = postcard::to_allocvec(&FOValue::<crate::first_order::NoExt>::Bytes {
+        let encoded = postcard::to_allocvec(&FOValue::<crate::data::NoExt>::Bytes {
             value: bytes.clone(),
         })
         .unwrap();

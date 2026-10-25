@@ -13,8 +13,8 @@
 //! `Shell::bequeath`: no handle in the scope or the handler stack, and no
 //! terminal authority, inbox, cancel token or provider handle.
 
-use crate::first_order::datum::Datum;
-use crate::first_order::{Bytes, FOValue};
+use crate::data::datum::Datum;
+use crate::data::{Bytes, FOValue};
 use crate::guard::SpawnGrant;
 use crate::source::SourceDb;
 use crate::ty::Fixings;
@@ -324,7 +324,7 @@ mod tests {
     }
 
     fn opaque(v: Option<&Value>) -> bool {
-        matches!(v, Some(Value::Variant { label, .. }) if label.as_ref() == crate::first_order::OPAQUE_TAG)
+        matches!(v, Some(Value::Variant { label, .. }) if label.as_ref() == crate::data::OPAQUE_TAG)
     }
 
     fn names(env: &Env) -> BTreeSet<String> {

@@ -35,10 +35,10 @@ impl Observation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::datum::{Datum, tag, untag};
+    use crate::data::{Bytes, FOValue};
     use crate::fact::{Act, Check, Decision, Grep, Read, Resource, Worker, Write, WriteOutcome};
     use crate::fact::{Command, CommandOrigin};
-    use crate::first_order::datum::{Datum, tag, untag};
-    use crate::first_order::{Bytes, FOValue};
     use crate::ir::WriteMode;
     use crate::types::AuditIo;
     use crate::types::{Map, Value, WorkerId};

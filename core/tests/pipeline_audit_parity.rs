@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 struct Recorder(Arc<Mutex<Vec<Value>>>);
 
 impl EventSink for Recorder {
-    fn emit(&self, ev: &ral_core::first_order::FOValue) {
+    fn emit(&self, ev: &ral_core::data::FOValue) {
         if let Some(obs) = Observation::from_surface(ev) {
             self.0.lock().unwrap().push(Value::from_datum(obs));
         }
@@ -162,9 +162,9 @@ fn nested_pipelines_publish_each_fact_once_and_keep_the_whole_trail() {
 
 #[test]
 fn audit_retention_preserves_pipeline_traffic_and_reports_the_cut() {
+    use ral_core::data::FOValue;
+    use ral_core::data::datum::Datum as _;
     use ral_core::fact::Observed;
-    use ral_core::first_order::FOValue;
-    use ral_core::first_order::datum::Datum as _;
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("large.bin");

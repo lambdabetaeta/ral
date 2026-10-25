@@ -15,9 +15,9 @@
 
 pub(crate) mod source;
 
+use ral_core::data::FOValue;
+use ral_core::data::datum::Datum;
 use ral_core::errln;
-use ral_core::first_order::FOValue;
-use ral_core::first_order::datum::Datum;
 use ral_core::own::{OwnDir, UserFile};
 use ral_core::path::{XdgKind, shown};
 use ral_core::record;

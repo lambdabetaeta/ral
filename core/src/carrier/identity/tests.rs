@@ -424,7 +424,7 @@ mod probe_tests {
     fn the_grant_depth_probe_counts_the_root_layer_and_every_frame() {
         use crate::capability::GrantLayer;
         use crate::carrier::read;
-        use crate::first_order::datum::Datum;
+        use crate::data::datum::Datum;
         use crate::test_access::answer_probe;
         assert_eq!(read::<u64>(&fresh(), &Probe::GrantDepth), Ok(1));
         let mut shell = crate::test_helper::core_shell();

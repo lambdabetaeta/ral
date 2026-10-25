@@ -3,7 +3,7 @@
 //! `CompKind::Not`, and `CompKind::Index` to.
 
 use super::val::form;
-use crate::first_order::Finite;
+use crate::data::Finite;
 use crate::ir::Val;
 use crate::ir::{ArithOp, BinaryOp, CompareOp, EqOp};
 use crate::types::{Break, Env, Error, Settled, Signature, Value};

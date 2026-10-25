@@ -269,8 +269,8 @@ impl Shell {
     pub fn enquire(
         &self,
         mooring: &Mooring,
-        req: crate::first_order::FOValue,
-    ) -> Settled<crate::first_order::FOValue> {
+        req: crate::data::FOValue,
+    ) -> Settled<crate::data::FOValue> {
         match mooring.desk.as_ref() {
             Some(desk) => desk.enquire(req, &self.scope),
             None => Err(Break::Error(

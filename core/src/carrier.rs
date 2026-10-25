@@ -13,9 +13,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::capability::GrantSummary;
+use crate::data::FOValue;
+use crate::data::datum::Datum;
 use crate::engine::Scopes;
-use crate::first_order::FOValue;
-use crate::first_order::datum::Datum;
 use crate::process::{Ambient, interrupt_epoch};
 use crate::protocol::channel::{WireChannel, WriteError, write_or_sever};
 use crate::protocol::probe::{BindingRow, CompletionNames, PathEntry, Probe, WorkerRow};

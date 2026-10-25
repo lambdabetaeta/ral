@@ -11,8 +11,8 @@ mod common;
 use common::prelude;
 
 use ral_core::boot::{HostSurface, boot_shell};
-use ral_core::first_order::FOValue;
-use ral_core::first_order::datum::untag;
+use ral_core::data::FOValue;
+use ral_core::data::datum::untag;
 use ral_core::io::terminal::TerminalState;
 use ral_core::protocol::Run;
 use ral_core::run::RunRequest;

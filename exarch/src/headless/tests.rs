@@ -194,15 +194,15 @@ fn structured_result_is_faithful_not_stringified() {
     let mut sink_out = Vec::new();
     let mut sink_err = Vec::new();
     let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
-    h.reply = Some(ral_core::first_order::FOValue::Map {
+    h.reply = Some(ral_core::data::FOValue::Map {
         entries: vec![(
             "files".into(),
-            ral_core::first_order::FOValue::List {
+            ral_core::data::FOValue::List {
                 items: vec![
-                    ral_core::first_order::FOValue::String {
+                    ral_core::data::FOValue::String {
                         value: "a.rs".into(),
                     },
-                    ral_core::first_order::FOValue::String {
+                    ral_core::data::FOValue::String {
                         value: "b.rs".into(),
                     },
                 ],
@@ -247,7 +247,7 @@ fn user_json_projected_result_keeps_a_string_reply_raw() {
     let mut sink_out = Vec::new();
     let mut sink_err = Vec::new();
     let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
-    let payload = ral_core::first_order::FOValue::String {
+    let payload = ral_core::data::FOValue::String {
         value: "plain text reply".into(),
     };
     h.reply = Some(payload);
@@ -264,15 +264,15 @@ fn user_json_projected_result_keeps_structure_ordinary_json() {
     let mut sink_out = Vec::new();
     let mut sink_err = Vec::new();
     let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
-    let payload = ral_core::first_order::FOValue::Map {
+    let payload = ral_core::data::FOValue::Map {
         entries: vec![(
             "files".to_string(),
-            ral_core::first_order::FOValue::List {
+            ral_core::data::FOValue::List {
                 items: vec![
-                    ral_core::first_order::FOValue::String {
+                    ral_core::data::FOValue::String {
                         value: "a.rs".into(),
                     },
-                    ral_core::first_order::FOValue::String {
+                    ral_core::data::FOValue::String {
                         value: "b.rs".into(),
                     },
                 ],

@@ -212,7 +212,7 @@ mod tests {
     }
 
     fn deep_result_crosses() {
-        use crate::first_order::FOValue;
+        use crate::data::FOValue;
         use crate::protocol::{DispatchId, Ending, Event, Frame, Report};
 
         let lists = (0..5000).fold(FOValue::Unit, |inner, _| FOValue::List {

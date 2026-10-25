@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 struct Recorder(Arc<Mutex<Vec<Value>>>);
 
 impl EventSink for Recorder {
-    fn emit(&self, ev: &ral_core::first_order::FOValue) {
+    fn emit(&self, ev: &ral_core::data::FOValue) {
         if let Some(obs) = Observation::from_surface(ev) {
             self.0.lock().unwrap().push(Value::from_datum(obs));
         }

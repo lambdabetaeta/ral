@@ -3,8 +3,8 @@
 use crate::enquiry::{Evict, Note, Survey};
 use crate::record::model::ContextSurvey;
 use crate::record::{AgentLog, EditAuthority};
-use ral_core::first_order::FOValue;
-use ral_core::first_order::datum::Datum;
+use ral_core::data::FOValue;
+use ral_core::data::datum::Datum;
 use ral_core::types::Error;
 
 use super::{DeskAct, ExarchDesk};

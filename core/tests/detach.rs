@@ -26,7 +26,7 @@
 
 mod common;
 
-use ral_core::first_order::FOValue;
+use ral_core::data::FOValue;
 use ral_core::protocol::Run;
 use ral_core::protocol::probe::Probe;
 use ral_core::run::RunReport;

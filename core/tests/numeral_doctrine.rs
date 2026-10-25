@@ -24,7 +24,7 @@ mod common;
 use common::fresh_shell;
 
 use ral_core::builtins::{REPL_PRINT_PARAMS, pretty_print};
-use ral_core::first_order::Finite;
+use ral_core::data::Finite;
 use ral_core::ir::Val;
 use ral_core::protocol::Run;
 use ral_core::run::RunReport;

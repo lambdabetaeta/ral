@@ -22,13 +22,13 @@ deny := '-D warnings'
 # stopping at the first crate turns one pass into one fix-and-rebuild cycle per
 # failure. Exit status is unchanged; only how much of the pile one run reports.
 
-# Private, and a dependency of `test`: `cargo test` alone does not reliably
-# refresh the `ral` binary that ral/tests/ shells out to.
-_build $RUSTFLAGS=deny:
+# Build all workspace targets; `test` depends on this to refresh the `ral`
+# binary that ral/tests/ shells out to.
+build $RUSTFLAGS=deny:
     cargo build --workspace {{gui}} --all-targets --keep-going
 
 # Run the workspace test suite.
-test $RUSTFLAGS=deny: _build
+test $RUSTFLAGS=deny: build
     cargo test --workspace {{gui}} --features ral-core/test-util,exarch/test-util --no-fail-fast
 
 # Compiles nothing, so it is the cheapest step CI has and the one worth failing
