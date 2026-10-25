@@ -17,7 +17,9 @@
 //! `argv[0]`; bwrap execs the trampoline as `/proc/self/fd/<slot>`.
 
 use crate::Role;
-use crate::path::{LeafMode, LexicalPath, Located, ObjectId, Trace, walk};
+#[cfg(unix)]
+use crate::path::ObjectId;
+use crate::path::{LeafMode, LexicalPath, Located, Trace, walk};
 #[cfg(unix)]
 use crate::site::{Silent, site};
 use std::io;

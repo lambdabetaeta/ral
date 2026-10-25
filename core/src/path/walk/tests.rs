@@ -59,11 +59,16 @@ pub(super) fn writable(d: Dir) -> Dir<Judged<Writing>> {
 }
 
 #[cfg(unix)]
+#[path = "tests/holds.rs"]
 mod holds;
 #[cfg(target_os = "macos")]
+#[path = "tests/macos.rs"]
 mod macos;
+#[path = "tests/markers.rs"]
 mod markers;
 #[cfg(unix)]
+#[path = "tests/unix.rs"]
 mod unix;
 #[cfg(windows)]
+#[path = "tests/windows.rs"]
 mod windows;

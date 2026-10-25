@@ -1,12 +1,18 @@
 //! The walk on a Windows volume.
 
-use super::super::*;
+use super::super::super::names::{EntryName, rooted};
+use super::super::super::trace::{Kind, ObjectId};
+use super::super::resolve::{LeafMode, walk, walk_dir, walk_dir_made, walk_excluded, walk_lenient};
+use super::super::{Access, Dir, Judged, Located, Sharing, Visibility, Writing, host};
 use super::{writable, writing};
-use crate::path::Resolver;
-use std::io::{Read, Write};
+use crate::path::{LexicalPath, Resolver};
+use std::ffi::OsStr;
+use std::fs::File;
+use std::io::{self, Read, Write};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
+use std::path::{Path, PathBuf};
 use windows_sys::Wdk::Storage::FileSystem::SYMLINK_FLAG_RELATIVE;
 use windows_sys::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, ERROR_SHARING_VIOLATION,

@@ -6,8 +6,8 @@
 //! in this crate and in another.  A case is a file under `tests/markers/`
 //! with the compiler's complaint beside it; `pass/` holds what must keep
 //! compiling.  These are the `pub` surface.  What needs a `pub(crate)` door
-//! is pinned from inside the crate, by `path::walk::tests::markers`, and the
-//! two tokens' construction sites by its source scan.  `installing/` holds the
+//! is pinned from inside the crate, by `path::walk::held::tests::markers`, and
+//! the two tokens' construction sites by its source scan.  `installing/` holds the
 //! doors of the OS sandbox side, which exist where a renderer holds a
 //! position: not on macOS.
 //!

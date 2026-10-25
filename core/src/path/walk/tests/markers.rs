@@ -7,8 +7,17 @@
 //! inherent methods win wherever their impl applies, so a call typed `Absent`
 //! found none, and a call that finds the method stops this module compiling.
 
-use super::super::*;
-use crate::path::LexicalPath;
+use super::super::super::names::EntryName;
+use super::super::super::trace::{RealPath, Stat, Trace};
+#[cfg(target_os = "linux")]
+use super::super::Writing;
+use super::super::resolve::{LeafMode, walk, walk_dir};
+use super::super::{Dir, Installing, Judged, Listing, Located, Reading, Unjudged};
+use crate::path::{LexicalPath, shown};
+use std::ffi::OsStr;
+use std::fs::File;
+use std::io;
+use std::path::{Path, PathBuf};
 
 /// What a call answers when no method of that name was there.
 struct Absent;

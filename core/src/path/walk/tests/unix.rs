@@ -1,13 +1,24 @@
 //! The walk on a real filesystem with real links.
 
-use super::super::*;
+use super::super::super::error::{LOOP_MESSAGE, dangling, directory_refused, loop_error};
+use super::super::super::names::{EntryName, RootName, rooted};
+use super::super::super::trace::{Kind, ObjectId, RealPath, Step, Trace};
+use super::super::resolve::{
+    LeafMode, Links, MAX_HOPS, Mode, OnMissing, Vetted, exists, finish, is_dir, kind_of, walk,
+    walk_dir, walk_dir_made, walk_lenient, walk_with,
+};
+use super::super::{Access, Dir, Judged, Leaf, Located, Streaming, Visibility, Writing, host};
 use super::{writable, writing};
 use crate::host::EnvVars;
-use crate::path::{CwdPath, Resolver};
+use crate::path::{CwdPath, LexicalPath, Resolver, shown};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use std::io::{Read, Write};
+use std::ffi::{OsStr, OsString};
+use std::fs::File;
+use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+use std::path::{Path, PathBuf};
 
 pub(super) fn spelled(path: &Path) -> LexicalPath {
     let cwd = CwdPath::new(PathBuf::from("/")).expect("/ is a working directory");
@@ -348,7 +359,7 @@ fn a_trace_has_the_roots_identity_and_one_step_per_component() {
     std::fs::write(dir.join("a/b/f"), b"").unwrap();
     let located = located(&dir.join("a/b/f")).unwrap();
     let trace = located.trace();
-    assert_eq!(trace.root_id, id(Path::new("/")));
+    assert_eq!(trace.root_id(), id(Path::new("/")));
     let depth = dir.components().count() - 1;
     let steps = trace.steps();
     assert_eq!(steps.len(), depth + 3);
@@ -593,10 +604,11 @@ fn a_trace_decodes_checked_and_recomputed() {
     let [.., dstep, fstep] = trace.steps() else {
         panic!("a walk of d/f has steps");
     };
-    let root_id = trace.root_id;
+    let root: RootName = serde_json::from_value(wire["root"].clone()).unwrap();
+    let root_id = trace.root_id();
     let made = |steps: &[Step], tail: &[EntryName]| {
         json(&Trace::new(
-            trace.root.clone(),
+            root.clone(),
             root_id,
             trace.steps()[..trace.steps().len() - 2]
                 .iter()

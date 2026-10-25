@@ -4,7 +4,7 @@ error[E0599]: the method `read_dir` exists for reference `&ral_core::path::Dir`,
 6 |     let _ = dir.read_dir();
   |                 ^^^^^^^^ method cannot be called on `&ral_core::path::Dir` due to unsatisfied trait bounds
   |
- ::: src/path/walk.rs
+ ::: src/path/walk/held.rs
   |
   | pub enum Unjudged {}
   | ----------------- doesn't satisfy `Unjudged: Lists`

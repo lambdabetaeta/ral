@@ -2,11 +2,14 @@
 //! name the object takes, by the walk's own descriptor against the
 //! identity's reuse, and by position where the object is gone.
 
-use super::super::*;
+use super::super::super::exclusion::{Excluded, Hold};
+use super::super::super::trace::{ObjectId, Trace};
+use super::super::resolve::{LeafMode, walk_excluded, walk_lenient};
 use super::unix::{entered, root, spelled};
 use super::{Around, LINK_READ};
 use crate::path::{Depth, MatchedBy, Subject};
 use std::os::unix::fs::{MetadataExt, symlink};
+use std::path::{Path, PathBuf};
 
 fn deny(path: &Path) -> Excluded {
     walk_excluded(&spelled(path)).unwrap()
@@ -340,9 +343,14 @@ fn a_link_swapped_out_and_back_around_the_read_holds_the_held_links_target() {
 #[test]
 fn the_held_identity_is_not_reused_while_the_deny_stands() {
     let (_tmp, dir, excluded) = secret();
-    let old = excluded.named.trace.last_id();
+    let old = excluded.named().last_id();
     std::fs::remove_file(dir.join("d/secret")).unwrap();
-    let held = excluded.named.handle.as_ref().expect("the leaf is held");
+    let held = excluded
+        .holds()
+        .next()
+        .unwrap()
+        .handle_for_test()
+        .expect("the leaf is held");
     assert_eq!(held.metadata().unwrap().nlink(), 0, "the inode is kept");
     std::fs::write(dir.join("d/secret"), "new").unwrap();
 
@@ -362,24 +370,31 @@ fn the_held_identity_is_not_reused_while_the_deny_stands() {
 #[test]
 fn rehold_keeps_the_object_found_and_lets_go_of_another() {
     let (_tmp, dir, mut excluded) = secret();
-    let recorded = excluded.named.trace.clone();
+    let recorded = excluded.named().clone();
     excluded.rehold();
     let held = excluded
-        .named
-        .handle
-        .as_ref()
+        .holds()
+        .next()
+        .unwrap()
+        .handle_for_test()
         .expect("still there, so held");
     assert_eq!(ObjectId::of(held).unwrap(), recorded.last_id());
 
     std::fs::hard_link(dir.join("d/secret"), dir.join("elsewhere/h")).unwrap();
     std::fs::remove_file(dir.join("d/secret")).unwrap();
     excluded.rehold();
-    assert!(excluded.named.handle.is_none(), "gone");
+    assert!(
+        excluded.holds().next().unwrap().handle_for_test().is_none(),
+        "gone"
+    );
     std::fs::write(dir.join("d/secret"), "new").unwrap();
     excluded.rehold();
-    assert!(excluded.named.handle.is_none(), "replaced");
+    assert!(
+        excluded.holds().next().unwrap().handle_for_test().is_none(),
+        "replaced"
+    );
 
-    assert_eq!(excluded.named.trace, recorded);
+    assert_eq!(excluded.named(), &recorded);
     assert_eq!(by(&excluded, &dir.join("d/secret")), Some(MatchedBy::Name));
     assert_eq!(
         by(&excluded, &dir.join("elsewhere/h")),
@@ -395,12 +410,12 @@ fn rehold_of_an_absent_name_holds_its_directory_until_the_name_is_made() {
     let dir = root(&tmp);
     mkdirs(&dir, &["d"]);
     let mut excluded = deny(&dir.join("d/.env"));
-    assert!(excluded.named.handle.is_some());
+    assert!(excluded.holds().next().unwrap().handle_for_test().is_some());
     excluded.rehold();
-    assert!(excluded.named.handle.is_some());
+    assert!(excluded.holds().next().unwrap().handle_for_test().is_some());
     std::fs::write(dir.join("d/.env"), "").unwrap();
     excluded.rehold();
-    assert!(excluded.named.handle.is_none());
+    assert!(excluded.holds().next().unwrap().handle_for_test().is_none());
     assert_eq!(by(&excluded, &dir.join("d/.env")), Some(MatchedBy::Name));
 }
 
@@ -408,10 +423,11 @@ fn rehold_of_an_absent_name_holds_its_directory_until_the_name_is_made() {
 #[test]
 fn a_hold_round_trips_as_its_trace_and_arrives_unheld() {
     let (_tmp, _dir, excluded) = secret();
-    let wire = serde_json::to_value(&excluded.named).unwrap();
-    assert_eq!(wire, serde_json::to_value(&excluded.named.trace).unwrap());
+    let named = excluded.holds().next().unwrap();
+    let wire = serde_json::to_value(named).unwrap();
+    assert_eq!(wire, serde_json::to_value(named.trace()).unwrap());
     let back: Hold = serde_json::from_value(wire).unwrap();
-    assert!(back.handle.is_none());
-    assert_eq!(back, excluded.named);
-    assert!(excluded.named.handle.is_some());
+    assert!(back.handle_for_test().is_none());
+    assert_eq!(&back, named);
+    assert!(named.handle_for_test().is_some());
 }

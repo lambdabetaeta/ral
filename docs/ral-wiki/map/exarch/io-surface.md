@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_commit: 0d3760a97cb880b5c906cad45a403f6209e06d9a
 generated_at_date: 2026-10-25
-covers_paths: [core/src/fact/observation.rs, exarch/src/tui/group.rs, core/src/shell/runtime/audit/fan_out.rs, core/src/shell/evaluator/call.rs, core/src/shell/exec/dispatch.rs, core/src/path/walk.rs, core/src/shell/runtime/state/checks.rs, core/src/shell/exec/redirect.rs, core/src/shell/exec/redirect/stage.rs, core/src/shell/exec/command/detach.rs, core/src/shell/exec/pipeline/collect.rs, core/src/shell/exec/redirect/scope.rs, core/src/shell/exec/command.rs, core/src/shell/exec/command/stdio.rs, core/src/shell/runtime/state/mod.rs, core/src/shell/runtime/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, core/src/path/tree/walk.rs, clippy.toml, lint/site.rs, core/tests/sites.rs]
+covers_paths: [core/src/fact/observation.rs, exarch/src/tui/group.rs, core/src/shell/runtime/audit/fan_out.rs, core/src/shell/evaluator/call.rs, core/src/shell/exec/dispatch.rs, core/src/path/walk.rs, core/src/path/walk/, core/src/shell/runtime/state/checks.rs, core/src/shell/exec/redirect.rs, core/src/shell/exec/redirect/stage.rs, core/src/shell/exec/command/detach.rs, core/src/shell/exec/pipeline/collect.rs, core/src/shell/exec/redirect/scope.rs, core/src/shell/exec/command.rs, core/src/shell/exec/command/stdio.rs, core/src/shell/runtime/state/mod.rs, core/src/shell/runtime/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, core/src/path/tree/walk.rs, clippy.toml, lint/site.rs, core/tests/sites.rs]
 ---
 
 # Map: exarch / io surface
@@ -294,11 +294,12 @@ There is no independent operational trace: the record log
 as a display commit so a resumed scrollback can rebuild its card, but never
 the rendered mark tree itself — a rendering is not a fact.
 
-## One file opens everything
+## One resolver opens everything
 
-Every filesystem operation on a model-named path happens in
-`core/src/path/walk.rs`. `Shell::locate` walks the name from the root, one
-component at a time through directory handles, never letting the kernel follow
+Every filesystem operation on a model-named path happens in the
+`core/src/path/walk/` module family, exported by `core/src/path/walk.rs`.
+`Shell::locate` walks the name from the root, one component at a time through
+directory handles, never letting the kernel follow
 a symlink — each link is spliced into the name and re-walked — and the grant
 judges the *object* it lands on. The `Located` it returns performs every open,
 stat, listing, staging, rename and unlink relative to that directory's handle
@@ -349,7 +350,7 @@ for what clippy cannot state.**
   `ignore::WalkBuilder::build` (every directory walk roots at the one
   cancellable site, core's `path/tree/walk.rs`, beneath `glob` and exarch's
   `grep-files`, `explore-dir` and `find-files`). The whole `cap_primitives::fs`
-  surface is banned alongside it, not just the entries `path/walk.rs` uses
+  surface is banned alongside it, not just the entries `path/walk/` uses
   today: a ban naming only the current callers is exactly what lets the fs site
   move out from under the list. Enforcement rides the pre-existing
   `[workspace.lints.clippy] disallowed_methods = "deny"` table, which all ten

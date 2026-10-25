@@ -1,12 +1,18 @@
 //! The walk on macOS: the stored-name rule, a leaf the user cannot hold or a
 //! special file, and links read through the descriptor that opened them.
 
-use super::super::*;
+use super::super::super::trace::{Kind, ObjectId, RealPath};
+use super::super::resolve::{LeafMode, walk_excluded, walk_lenient};
+use super::super::{Held, Judged, Leaf, Located, Sharing, Streaming, Visibility, Writing, host};
 use super::LOOKED;
 use super::unix::{id, located_with, name, root, root_user, spelled};
-use std::io::{Read, Write};
+use std::ffi::OsStr;
+use std::fs::File;
+use std::io::{self, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// A directory held as the walk holds one.
@@ -508,8 +514,13 @@ fn an_exclusion_holds_its_leaf_by_the_walks_own_o_evtonly_descriptor() {
     let dir = root(&tmp);
     std::fs::write(dir.join("secret"), b"s").unwrap();
     let excluded = walk_excluded(&spelled(&dir.join("secret"))).unwrap();
-    let held = excluded.named.handle.as_ref().expect("the leaf is held");
-    assert_eq!(ObjectId::of(held).unwrap(), excluded.named.trace.last_id());
+    let held = excluded
+        .holds()
+        .next()
+        .unwrap()
+        .handle_for_test()
+        .expect("the leaf is held");
+    assert_eq!(ObjectId::of(held).unwrap(), excluded.named().last_id());
     std::fs::remove_file(dir.join("secret")).unwrap();
     assert_eq!(held.metadata().unwrap().nlink(), 0, "the vnode is kept");
 }
@@ -524,11 +535,11 @@ fn an_unmounted_volume_leaves_an_exclusion_unheld_by_position() {
     let mount = volume.path().to_path_buf();
     std::fs::write(mount.join("secret"), b"s").unwrap();
     let mut excluded = walk_excluded(&spelled(&mount.join("secret"))).unwrap();
-    assert!(excluded.named.handle.is_some());
+    assert!(excluded.holds().next().unwrap().handle_for_test().is_some());
 
     drop(volume);
     excluded.rehold();
-    assert!(excluded.named.handle.is_none());
+    assert!(excluded.holds().next().unwrap().handle_for_test().is_none());
     let access = walk_lenient(&spelled(&mount.join("secret")), LeafMode::Follow).unwrap();
     assert_eq!(
         excluded.matches(Subject::Access(&access), Depth::Within),
@@ -565,7 +576,7 @@ fn a_special_file_is_stated_and_never_held() {
         "no reader of ours"
     );
     let excluded = walk_excluded(&spelled(&dir.join("pipe"))).unwrap();
-    assert!(excluded.named.handle.is_none());
+    assert!(excluded.holds().next().unwrap().handle_for_test().is_none());
 
     let _listener = UnixListener::bind(dir.join("sock")).unwrap();
     let loc = located_with(&dir.join("sock"), LeafMode::Follow).unwrap();

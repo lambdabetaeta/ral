@@ -328,7 +328,7 @@ mod tests {
         }
 
         /// The file is held as an `Installing` object of kind `File` that lends
-        /// its descriptor; that it reads nothing is `path::walk::tests::markers`'.
+        /// its descriptor; that it reads nothing is `path::walk::held::tests::markers`'.
         #[cfg(target_os = "linux")]
         #[test]
         fn a_file_is_held_as_an_installing_object_lending_its_leaf_fd() {

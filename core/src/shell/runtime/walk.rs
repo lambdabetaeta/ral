@@ -16,6 +16,7 @@ impl Shell {
     /// cwd-relative entry names where possible; other roots give absolute
     /// ones.  `who` heads a name that no ral string can hold.
     pub fn admitted_walk(&self, walk: Walk, who: &'static str, named: &str) -> AdmittedWalk {
+        // If the cwd cannot be resolved, names stay absolute.
         let base = (self.context.resolver().is_relative(named))
             .then(|| self.resolve(".").into_cwd().ok())
             .flatten();

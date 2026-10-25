@@ -4,7 +4,7 @@ error[E0624]: method `open_nofollow` is private
 7 |       let _ = position.open_nofollow();
   |                        ^^^^^^^^^^^^^ private method
   |
- ::: src/path/walk.rs
+ ::: src/path/walk/resolve.rs
   |
   | /     pub(crate) fn open_nofollow(
   | |         &self,

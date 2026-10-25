@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_commit: 0d3760a97cb880b5c906cad45a403f6209e06d9a
 generated_at_date: 2026-10-25
 covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
@@ -261,8 +261,12 @@ Path resolution is `core/src/path/`: lexical stages, then one walk, plus
 - canon — `canon.rs`, the names one object answers to for the kernel
   sandboxes: firmlink twins (`match_variants`); what an object is, and where a
   spelling reaches it, is the walk's to say;
-- locate — `walk.rs`, the one resolver: `walk` descends from the root through
-  directory handles with no symlink followed by the kernel, splicing each link
+- locate — `walk.rs` exports one resolver from `walk/`: `names.rs` validates
+  spellings, `trace.rs` holds evidence, and `exclusion.rs` keeps deny anchors.
+  `held.rs` owns private handles and authority conversions; operations in
+  `held/`, traversal in `resolve.rs`, and host adapters are its child modules.
+  `walk` descends from the root through directory handles with no symlink
+  followed by the kernel, splicing each link
   into the name itself (a link's target read through the handle held on it), and
   hands back a `Located` — the directory handle, the leaf, and the `Trace` whose
   `RealPath` is symlink-free and whose `passed` names each link whose target it
@@ -393,7 +397,7 @@ contained.
 
 The set-level algebra over prefixes is not in `path/`: it is
 `authority::policy::table`, which names polarities and never identities, so every
-spelling question stays here. `RealPath` (`walk.rs`) is the position a walk
+spelling question stays here. `RealPath` (`walk/trace.rs`) is the position a walk
 ends at and the identity of a run place, ordered as the host identifies files.
 
 XDG base directories resolve through one resolver, `path/basedir.rs`
