@@ -20,7 +20,7 @@
 mod common;
 
 use ral_core::RunIo;
-use ral_core::capability::{Capabilities, FsPolicy};
+use ral_core::authority::policy::{Capabilities, FsPolicy};
 use ral_core::path::FrozenPath;
 use ral_core::protocol::Run;
 use ral_core::source::SourceOrigin;
@@ -36,7 +36,7 @@ fn boot() -> Shell {
         &ral_core::boot::HostSurface::default(),
         ral_core::test_helper::process_cwd(),
     )
-    .expect("a test host resolves its floor")
+    .expect("a test host resolves its baseline")
 }
 
 /// A process-unique work directory under the system temp root, created on

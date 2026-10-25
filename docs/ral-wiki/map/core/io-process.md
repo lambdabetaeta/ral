@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e4025de9
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 generated_at_date: 2026-10-17
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
@@ -290,7 +290,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   exec-<seq>`, so a child engine's teardown stays scoped to its own
   engine's tree (the daemon kills a dead engine's commands through `engine-<pid>/cgroup.kill`, since they leave its process group) and pid recycling can at worst hand a later engine a dead
   engine's stale directory name, which its own teardown tolerates.
-  `plan` takes the launch's `sandbox::Ownership`: a `Surrendered` (detached)
+  `plan` takes the launch's `authority::sandbox::Ownership`: a `Surrendered` (detached)
   exec goes to `ral-exec/detached/exec-<seq>` instead, out of every engine's
   tree, so an engine's end spares its survivors as it does on the host, and
   only the daemon's halt reaches them. Off a

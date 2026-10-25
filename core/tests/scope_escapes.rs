@@ -12,7 +12,7 @@ use ral_core::protocol::Run;
 use ral_core::source::SourceOrigin;
 use ral_core::types::{Break, Escape, Mooring, Settled, Shell};
 
-const HOST: &str = "a test host resolves its floor";
+const HOST: &str = "a test host resolves its baseline";
 
 /// Run one top-level run of `source` through the public `run` entry
 /// and return the body's `Settled<Value>`.  Every test below picks source

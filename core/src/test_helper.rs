@@ -29,16 +29,16 @@ pub fn core_schemes() -> crate::typecheck::SessionSchemes {
 ///
 /// # Panics
 /// If a spelling cannot be resolved.
-pub fn layer(caps: crate::capability::Capabilities) -> crate::capability::GrantLayer {
-    crate::capability::GrantLayer::from_capabilities(caps, &crate::types::EnvVars::new())
+pub fn layer(caps: crate::authority::policy::Capabilities) -> crate::authority::policy::GrantLayer {
+    crate::authority::policy::GrantLayer::from_capabilities(caps, &crate::types::EnvVars::new())
         .expect("a test grant resolves")
 }
 
 /// The stack of `layers` over the ambient root.
 pub fn stack(
-    layers: impl IntoIterator<Item = crate::capability::GrantLayer>,
-) -> crate::capability::GrantStack {
-    let mut stack = crate::capability::GrantStack::root();
+    layers: impl IntoIterator<Item = crate::authority::policy::GrantLayer>,
+) -> crate::authority::policy::GrantStack {
+    let mut stack = crate::authority::policy::GrantStack::root();
     layers.into_iter().for_each(|layer| stack.push(layer));
     stack
 }
@@ -165,9 +165,9 @@ pub fn core_shell() -> crate::Shell {
 /// Core's own surface as a runtime: what [`core_shell`] is a root over.
 ///
 /// # Panics
-/// If the host's floor does not resolve, which no test can run without.
+/// If the host's baseline does not resolve, which no test can run without.
 pub fn core_runtime() -> crate::Runtime {
     crate::HostSurface::default()
         .runtime(crate::io::terminal::TerminalState::default())
-        .expect("a test host resolves its floor")
+        .expect("a test host resolves its baseline")
 }

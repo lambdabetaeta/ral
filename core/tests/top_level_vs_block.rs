@@ -16,9 +16,9 @@ mod common;
 
 use common::fresh_shell;
 
-use ral_core::capability::Capabilities;
+use ral_core::authority::policy::Capabilities;
 #[cfg(unix)]
-use ral_core::capability::FsPolicy;
+use ral_core::authority::policy::FsPolicy;
 use ral_core::path::shown;
 use ral_core::protocol::Run;
 use ral_core::source::SourceOrigin;

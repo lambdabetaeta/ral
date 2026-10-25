@@ -7,7 +7,7 @@
 //! as a `` `repl-editor `` enquiry, which the host answers only while an
 //! editor context is installed for the dispatch — inside a plugin handler.
 
-use ral_core::capability::{EditorVerb, Flag};
+use ral_core::authority::policy::{EditorVerb, Flag};
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
 use ral_core::ty::Site;

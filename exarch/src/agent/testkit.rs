@@ -144,7 +144,7 @@ pub(crate) struct TestAgentSpec {
     /// backdated by it, so a test can stand past an idle threshold without
     /// waiting the threshold out.
     pub(crate) idle: Duration,
-    pub(crate) caps: ral_core::capability::GrantStack,
+    pub(crate) caps: ral_core::authority::policy::GrantStack,
     pub(crate) fuel: u32,
     pub(crate) search: bool,
 }
@@ -160,7 +160,7 @@ impl TestAgentSpec {
             mailbox: crate::bus::Inbox::new().mailbox(),
             role: Role::Converses,
             idle: Duration::ZERO,
-            caps: ral_core::capability::GrantStack::root(),
+            caps: ral_core::authority::policy::GrantStack::root(),
             fuel: 0,
             search: false,
         }
@@ -315,7 +315,7 @@ fn root(trunk: Trunk, tools: Toolset) -> Avatar {
     Avatar::root(
         RootConfig {
             system: "system".into(),
-            caps: ral_core::capability::GrantStack::root(),
+            caps: ral_core::authority::policy::GrantStack::root(),
             run_dir,
             trunk,
             tools,

@@ -14,7 +14,7 @@ return [
   # The working tree, plus scratch directories.  Nothing else readable;
   # nothing else writable.  System paths needed by the platform runtime
   # (libc, dyld, /private/etc, …) come automatically from the read
-  # floor — see `core/src/capability/fs.rs::floor`.
+  # floor — see `core/src/authority/policy/fs.rs::floor`.
   fs: [
     read: [
       `cwd .,          # working tree
@@ -33,7 +33,7 @@ return [
   # Host binaries are admitted by subpath, never enumerated: the build
   # sandbox trusts whatever lives in the platform's tool roots
   # (`dir `system`, and `dir `homebrew` for a Homebrew tree when the host
-  # has one; both are rows of `core/src/guard/toolchains.rs`) — a build
+  # has one; both are rows of `core/src/authority/grant/toolchains.rs`) — a build
   # jail plausibly needs a Homebrew-installed compiler.  Apple's
   # toolchain (CommandLineTools, Xcode) is among the `system` roots, so
   # `gcc → cc1 → as → ld` resolves without listing each tool here.

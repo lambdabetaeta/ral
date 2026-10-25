@@ -1,4 +1,5 @@
 ---
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 verified_at_commit: 646bff0a
 verified_at_date: 2026-10-13
 anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, cgroup_tree, floor, Pinned, pin_envelope, InfoFd]
@@ -85,7 +86,7 @@ spelling is only the destination at which the opened object is bound.
   envelope refuses every confined launch, and one without `--ro-bind-fd` is
   named with its version.
 
-Pinned by `sandbox::linux::tests::a_bind_is_opened_for_each_name_no_other_bind_shows`,
+Pinned by `authority::sandbox::linux::tests::a_bind_is_opened_for_each_name_no_other_bind_shows`,
 `::a_prefix_whose_component_became_a_symlink_since_render_is_refused`,
 `::every_bind_is_a_handle_by_slot_in_layer_order`,
 `::a_write_through_a_link_is_masked_at_both_its_names` and, spawning,
@@ -138,7 +139,7 @@ result by hand, or states what it cannot build.**
   refuses the procfs a pid namespace needs. `--unshare-pid` is emitted only
   where the table can be hidden.
 - **`HostEnvelope` learns both** with one probe spawn each
-  (`sandbox/linux/host.rs`).
+  (`authority/sandbox/linux/host.rs`).
 - **What cannot be rebuilt is stated, not refused.** Neither is a restriction a
   grant names, so the launch runs, and the child sees what it would see
   unconfined: the container's own process table, the host's `/dev/pts`
@@ -154,7 +155,7 @@ result by hand, or states what it cannot build.**
 - **Open:** such hosts still refuse the read-only rebind of their own locked
   `/etc/hosts` and `/etc/resolv.conf`, by descriptor as by name.
 
-Pinned by `sandbox::linux::tests::a_host_that_refuses_dev_gets_the_same_shape_by_hand`
+Pinned by `authority::sandbox::linux::tests::a_host_that_refuses_dev_gets_the_same_shape_by_hand`
 and `::the_by_hand_dev_serves_a_confined_body`.
 
 ## Kernel pseudo-filesystems describe the envelope
@@ -178,7 +179,7 @@ cannot is a host bind like any other, present only where something needs it.**
   (`HostEnvelope::private_cgroup`), the host's tree is the true one and is bound
   as it is.
 
-Pinned by `sandbox::linux::tests::sys_is_narrowed_to_what_sizes_a_program_and_the_cgroup_tree_is_the_payloads`
+Pinned by `authority::sandbox::linux::tests::sys_is_narrowed_to_what_sizes_a_program_and_the_cgroup_tree_is_the_payloads`
 and `::a_confined_program_reads_its_own_cgroup_and_none_of_the_hosts_interfaces`.
 
 ## The envelope binary is fixed at boot
@@ -189,7 +190,7 @@ payload's, including any `PATH` override. `Command::new("bwrap")` would let a
 `within [env: [PATH: …]]`, or a planted binary earlier on `PATH`, run code before
 any confinement.
 
-- **`sandbox::boot` pins bwrap before any shell exists** (`linux::pin_envelope`).
+- **`authority::sandbox::boot` pins bwrap before any shell exists** (`authority::sandbox::linux::pin_envelope`).
   It searches the absolute entries of the `PATH` ral started with, as directories
   rather than a re-joined string (`path::locate_in`), and keeps the
   result as a `reexec::Pinned`, the same fd pin ral uses to re-exec itself.
@@ -216,7 +217,7 @@ any confinement.
   that needs one, through `Refusal::Unavailable`. `Launch::envelope` names the
   binary only for the wording of a spawn failure.
 
-Pinned by `sandbox::linux::tests::the_launcher_is_the_pinned_envelope_and_never_a_name`,
+Pinned by `authority::sandbox::linux::tests::the_launcher_is_the_pinned_envelope_and_never_a_name`,
 `::the_envelope_binary_is_read_only_inside_every_envelope`,
 `::a_pinned_binary_inside_a_writable_prefix_is_locked` and
-`guard::enforce::tests::a_write_onto_a_pinned_binary_is_guarded_before_any_grant_is_consulted`.
+`authority::guard::enforce::tests::a_write_onto_a_pinned_binary_is_guarded_before_any_grant_is_consulted`.

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f56fff48
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 generated_at_date: 2026-10-21
 covers_paths: [core/src/runtime.rs, core/src/runtime/]
 ---
@@ -29,7 +29,7 @@ evaluator item; the evaluator reaches it at
   `^name` and a path-bearing head are the external directly, consulting
   neither the env nor the handler stack. **Grant admission is an
   external-command property**: only the `External` arm consults
-  `capability::admits_head` before any argument evaluates, refusing the head
+  `authority::guard::admits_head` before any argument evaluates, refusing the head
   outright; the env, base, and handler arms pass through. Handler and alias
   thunks are lambdas — a unary `{ |args| … }` or a catch-all `{ |name args| … }`
   — with the calling convention fixed by surface position, not inferred from a
@@ -86,7 +86,7 @@ evaluator item; the evaluator reaches it at
     pgid is never observed here and nothing can signal, await, or reap it.
     What replaces the handle is a first-order `{pid, desc}` receipt. The
     birthing frame's projection is rendered into the launch exactly as for a
-    child we keep, only with `sandbox::Ownership::Surrendered` dropping the
+    child we keep, only with `authority::sandbox::Ownership::Surrendered` dropping the
     parent-death tie, so the survivor's authority is frozen as that frame
     left it and no later frame can widen it — it cannot name the process at
     all ([[map/core/capabilities|capabilities]]). All three of its standard
@@ -300,7 +300,7 @@ evaluator item; the evaluator reaches it at
     `PipeNode::join` is `drive()`, `end_anchor()`, then `fold(mooring, shell)`,
     the group dropped after). `anchor.rs` is the hidden
     `--ral-pipeline-anchor` child's entrypoint (`Role::Anchor`; a bundled tool's
-    `Role::BundledTool` is launched beside it by `sandbox::reexec::launch`), a
+    `Role::BundledTool` is launched beside it by `authority::sandbox::reexec::launch`), a
     ral-written stage running on a thread of the parent process instead. On Windows every external a stage thread spawns still
     resolves `PgidPolicy::Join` against the anchor's registered Job Object,
     assigned at creation under the suspended create → assign → resume path
@@ -310,7 +310,7 @@ evaluator item; the evaluator reaches it at
   no router in between:
   nested grants compose by intersection over authority, an algebra of the
   evaluator's dynamic context. Confinement happens elsewhere — the
-  RAL-owned effects are decided in process by `capability::check_*`
+  RAL-owned effects are decided in process by `authority::guard::check_*`
   ([[map/core/capabilities|capabilities]]), and child-owned effects are
   kernel-backed at *external dispatch*: when a projection is active,
   `command::build_launch` obtains a confined `process::Launch` via

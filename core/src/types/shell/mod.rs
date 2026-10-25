@@ -42,7 +42,7 @@ use super::flow::{Break, Settled};
 use super::handler::HandlerStack;
 use super::mooring::{Mooring, TerminalAccess};
 use super::sig;
-use crate::capability::GrantStack;
+use crate::authority::policy::GrantStack;
 use crate::io::{Io, WriteStopped};
 use crate::path::CwdPath;
 use crate::process::{CancelCause, DurableRoot, Scope};
@@ -88,7 +88,7 @@ pub(crate) struct Context<H = HandlerStack> {
     pub(crate) modules: Modules,
 }
 
-// The `capability::check_*(&Context, …)` decisions fold the whole stack from
+// The `authority::guard::check_*(&Context, …)` decisions fold the whole stack from
 // this one borrow, so the type system bars policy code from ever reading
 // lexical scope, REPL scratch, control state, or exit hints.
 

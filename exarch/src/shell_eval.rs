@@ -136,7 +136,7 @@ pub(crate) fn deferred_sink(emit: &Emitter) -> Arc<dyn DeferredSink> {
 /// caller a [`crate::agent::desk::RunHost`].
 pub(crate) fn run_shell(
     transport: &dyn ral_core::carrier::Transport,
-    caps: &ral_core::capability::GrantStack,
+    caps: &ral_core::authority::policy::GrantStack,
     source: &str,
     cmd: &str,
     timeout_secs: u64,

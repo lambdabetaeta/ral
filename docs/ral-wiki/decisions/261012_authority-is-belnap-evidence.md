@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: 002c654a
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 verified_at_commit: 002c654a
 anchors: [Evidence, Meet, Join, Axis, Fragment, ExecGrant, Table, Withheld, ExecDenial, Refused, join_top, extend, places, GrantStack]
 ---
@@ -520,8 +520,9 @@ not cover Homebrew is corrected; profile comments that sent readers to
 
 ## Where
 
-`core/src/capability/{evidence,table,exec,fs,lattice,deputy}.rs`,
-`core/src/guard/{enforce,freeze,decode}.rs`, `core/src/sandbox/projection.rs`
+`core/src/authority/policy/{evidence,table,exec,fs,lattice,deputy}.rs`,
+`core/src/authority/guard/enforce.rs`, `core/src/authority/grant/{freeze,decode}.rs`,
+`core/src/authority/sandbox/projection.rs`
 and the three backends, `core/src/load/profile.rs` (`Fragment`),
 `exarch/src/policy.rs` (`for_invocation`, the self layer).
 

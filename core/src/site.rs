@@ -4,7 +4,7 @@ include!("../../lint/site.rs");
 /// Sites that raise no card.
 #[derive(Clone, Copy)]
 pub(crate) enum Silent {
-    // The user's own authority: mints of `capability::Ungoverned`.
+    // The user's own authority: mints of `authority::policy::Ungoverned`.
     /// The read mint of `own` (`reading`): a program-kept file, the user's
     /// configuration or a name the user supplied, vouched for as the user's own
     /// and handed on for reading.  It raises no card: no model names the
@@ -70,11 +70,9 @@ pub(crate) enum Silent {
     /// fresh shell at boot: the host environment is the source the overlay
     /// later shadows.  It raises no card: it reads variables, not objects.
     HostEnvSeed,
-    /// The process's home, which the fs floor lists among its defaults: the
-    /// floor has no `FreezeCtx`, so its home is the process's, as the places
-    /// `home` defaults to are.  It raises no card: it reads a variable, not
-    /// an object.
-    FloorHome,
+    /// The process's home, used to exclude user paths from system reads.
+    /// It raises no card: it reads a variable, not an object.
+    SystemReadsHome,
 
     // Process spawn, wait and the jail.
     /// The one pipe constructor: `os_pipe::pipe` under the spawn lock's shared

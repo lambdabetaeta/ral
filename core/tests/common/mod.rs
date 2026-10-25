@@ -17,7 +17,7 @@ use ral_core::types::Shell;
 use ral_core::{Scheme, ir::Comp};
 use std::sync::Arc;
 
-const HOST: &str = "a test host resolves its floor";
+const HOST: &str = "a test host resolves its baseline";
 
 #[ctor::ctor(unsafe)]
 fn init_test_binary() {

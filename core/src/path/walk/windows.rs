@@ -1236,7 +1236,7 @@ pub(super) mod owner_only {
             TrusteeType: TRUSTEE_IS_UNKNOWN,
             // The trustee-by-SID form reinterprets this field as the PSID;
             // both are raw `*mut _` here, so the cast preserves bits.
-            // `trustee_for` in ral-core's `sandbox::windows::dacl` does the same.
+            // `trustee_for` in ral-core's `authority::sandbox::windows::dacl` does the same.
             ptstrName: owner_sid.cast::<u16>(),
         };
         let ea = EXPLICIT_ACCESS_W {

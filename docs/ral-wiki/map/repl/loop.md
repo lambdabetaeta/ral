@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 61c288f
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 generated_at_date: 2026-10-21
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/host.rs, ral/src/repl/enquiry.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/config/, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/boot_builtin.rs, ral/src/surface.rs]
 ---
@@ -65,7 +65,7 @@ no job table: ral does not suspend
 - Teardown — the `workers` reading, transport detach, history flush, a
   one-time notice naming any worker still `running` or `stopping`
   (`host::teardown_notice`, over `WorkerRow`s), and
-  `ral_core::sandbox::teardown_session` (deletes the session's
+  `ral_core::authority::sandbox::teardown_session` (deletes the session's
   per-projection AppContainer profiles on Windows; a no-op elsewhere) — lives
   in `Drop for Session`, so it covers a panic unwinding through the owned
   `Session` as well as the orderly exit.

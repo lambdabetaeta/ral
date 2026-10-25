@@ -2,8 +2,8 @@
 //! canonical pgid + sandbox funnel, and render spawn failures as [`Break`]s.
 //! Stdio routing lives in `stdio` and `redirect`, layered on before spawn.
 
-use crate::capability::{Admitted, Program};
-use crate::sandbox::Refusal;
+use crate::authority::policy::{Admitted, Program};
+use crate::authority::sandbox::Refusal;
 use crate::types::{Break, Error, Settled, Shell, sig};
 
 impl From<Refusal> for Break {
@@ -23,7 +23,7 @@ impl From<Refusal> for Break {
 /// jail, which seats a surrendered child outside this engine's cgroup tree.
 pub(crate) fn build_launch(
     admitted: Admitted,
-    ownership: crate::sandbox::Ownership,
+    ownership: crate::authority::sandbox::Ownership,
     shell: &Shell,
     cancel: &crate::process::cancel::Scope,
 ) -> Settled<crate::process::Launch> {
@@ -32,17 +32,17 @@ pub(crate) fn build_launch(
     // The in-process guard in `vet` runs either way.
     let jail = crate::process::jail::guest();
     let mut cmd = if jail.is_none()
-        && let Some(projection) = crate::sandbox::SandboxProjection::of(
+        && let Some(projection) = crate::authority::sandbox::SandboxProjection::of(
             &shell.context.grants,
-            shell.floor(),
+            shell.baseline(),
             Some(&admitted),
         ) {
         // A `grant` body evaluates in this process unconfined; spawned children
         // are the only thing an OS sandbox reaches, and this is where it does.
-        crate::sandbox::projection_enforceable(&projection)?;
-        crate::sandbox::sandboxed_command(
+        crate::authority::sandbox::projection_enforceable(&projection)?;
+        crate::authority::sandbox::sandboxed_command(
             &projection,
-            shell.floor(),
+            shell.baseline(),
             &admitted,
             ownership,
             &shell.cwd(),
@@ -62,7 +62,7 @@ pub(crate) fn build_launch(
                 cmd
             }
             Program::Tool(tool) => {
-                let mut cmd = crate::sandbox::reexec::launch(crate::Role::BundledTool)
+                let mut cmd = crate::authority::sandbox::reexec::launch(crate::Role::BundledTool)
                     .map_err(|e| sig(format!("bundled tool '{tool}': {e}")))?;
                 cmd.arg(tool);
                 cmd.args(admitted.args());
@@ -123,7 +123,7 @@ pub(crate) fn with_denials(
     if shell.sandbox_projection().is_none() {
         return err;
     }
-    if let Some(hint) = crate::sandbox::denial_hint(&pids(), since, err.code()) {
+    if let Some(hint) = crate::authority::sandbox::denial_hint(&pids(), since, err.code()) {
         return err.append_hint(hint);
     }
     #[cfg(target_os = "macos")]
@@ -317,7 +317,7 @@ mod judged_program {
     fn stdout_of(plan: SpawnPlan, shell: &Shell) -> String {
         let mut cmd = build_launch(
             plan.admitted,
-            crate::sandbox::Ownership::Kept,
+            crate::authority::sandbox::Ownership::Kept,
             shell,
             &DurableRoot::default().worker(),
         )

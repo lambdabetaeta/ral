@@ -8,7 +8,7 @@
 
 pub(crate) mod scope;
 
-use crate::capability::FsOp;
+use crate::authority::policy::FsOp;
 use crate::fact::Read;
 use crate::ir::{StdinSource, WriteMode};
 use crate::path::walk::Kind;

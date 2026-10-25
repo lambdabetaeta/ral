@@ -1,3 +1,7 @@
+---
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
+---
+
 # Authority's three carriers, and why they don't collapse
 
 **Authority changes its form as it travels — from a rule you write, to the act of
@@ -38,7 +42,7 @@ allowed, right now?* — turns on details a written rule does not contain:
 
 So the combined form is not a tidier rule — it is *the act of judging*, and an act
 is a verb, not a noun. It is realised as a function over the live `Context`: each
-`capability::check_*(&Context, …)` folds the whole stack of rules and answers one
+`authority::guard::check_*(&Context, …)` folds the whole stack of rules and answers one
 specific request as it arrives. The fold is the guarantee that a verdict was
 weighed against *all* the rules at once, never one rule in isolation — held by
 the function bodies, not by a witness type

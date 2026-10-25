@@ -1,3 +1,7 @@
+---
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
+---
+
 # Capabilities and `grant`
 
 **`grant` is a dynamic-context operator that attenuates authority for its body by
@@ -60,11 +64,11 @@ launch hardening.
 
 - **A selector is a set of locations, and the table is one file.** The names are
   `path`, which reads `$PATH`, and `enum Toolchain` in
-  `core/src/guard/toolchains.rs`: `system` and every package manager, each a
+  `core/src/authority/grant/toolchains.rs`: `system` and every package manager, each a
   few rows of data (`Location { overrides, defaults }`), checked complete by one
   exhaustive `match`. The rules below are stated here once; the table is the
   data, and no page copies it. `FreezeCtx::selector` dispatches to it, and
-  `fs::floor` calls the same live expansion over the same rows.
+  System-read discovery in `authority::grant` calls the same live expansion over the same rows.
 - **Choose, then keep what exists.** A location's *overrides* are host
   environment variables with an optional subpath (`$CARGO_HOME/bin`), tried in
   order. The first usable one (non-empty and absolute under the host's rules;
@@ -105,7 +109,7 @@ launch hardening.
   guard, one function (`refuse_the_world`, in `freeze.rs`): a `$PATH` entry
   naming the world is a freeze error naming `PATH`, not a silent skip like a
   relative entry. What counts as the world is one predicate, `the_world`, which
-  the floor reads too.
+  system-read discovery uses too.
 - **`system` is a row, and `homebrew` is another.** `system` is the platform's
   own tool roots and no longer holds Homebrew. `` `dir `homebrew `` is
   `HOMEBREW_PREFIX` when usable, else `/opt/homebrew` or Linuxbrew's
@@ -113,18 +117,18 @@ launch hardening.
   reached only through `HOMEBREW_PREFIX`, since that prefix is shared with
   everything else. The root is the whole prefix, so a formula's `bin` link and
   the `Cellar` file it resolves to are both admitted, and readable by running.
-- **Four rows are on the read floor.** `homebrew`, `macports`, `nix` and
+- **Four rows supply system reads.** `homebrew`, `macports`, `nix` and
   `pkgsrc` are system-wide prefixes outside any home, world-readable trees of
   the standing of `/usr`, and a program from one maps its libraries from its
-  prefix wherever its admission came from. They join `fs::floor`. No home-based
+  prefix wherever its admission came from. They join the system reads constructed by `authority::grant`. No home-based
   row does: a home tree is the user's, and reading it must be granted. An
   override can still choose one (`HOMEBREW_PREFIX` on a home Linuxbrew), so the
-  floor keeps only chosen directories outside the process's home, the floor
-  having no `FreezeCtx`; such a prefix is run, and read by running, wherever
-  `homebrew` is granted, and is not floored. A floor directory whose walk
-  fails refuses the floor, so boot fails and names it; an override naming the
-  world or the home is no floor and no error. The floor is an allowance like
-  any other, so it renders frozen and a redirected root shows nothing.
+  baseline includes only chosen directories outside the process's home, using
+  the host environment rather than a `FreezeCtx`. A home prefix is readable
+  only where granted, including by running. A system-read directory whose walk
+  fails prevents boot and is named in the error; an override naming the world
+  or the home is dropped without error. System reads are ordinary allowances,
+  rendered frozen, so a redirected root shows nothing.
   An exclusion means "not allowed", never "not included": a profile that merely
   leaves something unlisted does not exclude it.
 - **A refusal says why, in one of a few shapes.** *Missing allowance* names the
@@ -386,7 +390,7 @@ run evaluates under a profile's capabilities pushed onto this same stack.
   `~/.local/bin`) lets a child author programs there, and a bare-name veto
   beneath a writable directory or `every` is advisory to descendants. That is a
   declared limit, not a defence ([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]
-  records what it costs). `capability::deputy_prefixes` reports the folders that
+  records what it costs). `authority::policy::deputy_prefixes` reports the folders that
   stay both writable and runnable, into an `audit` trail only (read them with
   `ral --audit --capabilities <profile> -c true`), and never denies; *no prefix is both* is not an invariant this design wants.
 

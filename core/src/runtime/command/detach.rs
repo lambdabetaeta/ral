@@ -5,13 +5,13 @@
 //!
 //! A survivor born inside a `grant` keeps that confinement for life: the
 //! projection is rendered into the launch as for a child we keep, minus the
-//! parent-death tie ([`Ownership::Surrendered`](crate::sandbox::Ownership)),
+//! parent-death tie ([`Ownership::Surrendered`](crate::authority::sandbox::Ownership)),
 //! and nothing later can widen it because nothing later can name the process.
 //!
 //! Its standard descriptors are `/dev/null`: our end of an inherited pipe
 //! closes when we exit, and the survivor's next write would take a `SIGPIPE`.
 
-use crate::capability::{Flag, ShellVerb};
+use crate::authority::policy::{Flag, ShellVerb};
 use crate::fact::{Command, Receipt};
 use crate::ir::CommandName;
 use crate::process::StdioSpec;
@@ -93,7 +93,7 @@ pub(crate) fn detach(
     // only a born survivor, named or not, spends one.
     let mut launch = build_launch(
         admitted,
-        crate::sandbox::Ownership::Surrendered,
+        crate::authority::sandbox::Ownership::Surrendered,
         shell,
         &shell.scope,
     )?;

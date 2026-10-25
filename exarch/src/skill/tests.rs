@@ -4,18 +4,18 @@ use super::*;
 /// fixture is judged by the real checks and refused by none.
 fn boot<'a>(
     grants: &'a GrantStack,
-    floor: &'a Floor,
+    baseline: &'a Baseline,
     env: &'a EnvVars,
     cwd: &'a CwdPath,
 ) -> Boot<'a> {
-    Boot::new(grants, floor, env, cwd)
+    Boot::new(grants, baseline, env, cwd)
 }
 
 /// The skill whose directory is `dir`, found as the boot finds one.
 fn found(dir: &Path) -> Found {
-    let (grants, floor, env) = (GrantStack::root(), Floor::default(), EnvVars::new());
+    let (grants, baseline, env) = (GrantStack::root(), Baseline::default(), EnvVars::new());
     let cwd = CwdPath::new(dir.to_path_buf()).unwrap();
-    let mut reader = boot(&grants, &floor, &env, &cwd);
+    let mut reader = boot(&grants, &baseline, &env, &cwd);
     let file = reader.file(&reader.anchor(&dir.join("SKILL.md"))).unwrap();
     let name = dir.file_name().unwrap().to_str().unwrap().to_owned();
     Found {
@@ -104,12 +104,12 @@ fn local_overrides_global() {
     std::fs::write(local.join("SKILL.md"), "---\nname: dup\n---\n").unwrap();
     std::fs::write(global.join("SKILL.md"), "---\nname: dup\n---\n").unwrap();
 
-    let (grants, floor, env) = (GrantStack::root(), Floor::default(), EnvVars::new());
+    let (grants, baseline, env) = (GrantStack::root(), Baseline::default(), EnvVars::new());
     let at = CwdPath::new(cwd.path().to_path_buf()).unwrap();
     let all = discover_all(
         cwd.path(),
         Some(config.path()),
-        &mut boot(&grants, &floor, &env, &at),
+        &mut boot(&grants, &baseline, &env, &at),
     );
     let dup: Vec<_> = all.iter().filter(|found| found.name == "dup").collect();
     assert_eq!(dup.len(), 1, "duplicate name should collapse to one entry");
@@ -123,7 +123,7 @@ fn local_overrides_global() {
 /// it refuses, and a root it does not read, are not found.
 #[test]
 fn discovery_under_a_restricted_stack_finds_only_what_it_may_read() {
-    use ral_core::capability::{Capabilities, FsPolicy};
+    use ral_core::authority::policy::{Capabilities, FsPolicy};
     use ral_core::path::{FrozenPath, utf8};
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
@@ -145,9 +145,13 @@ fn discovery_under_a_restricted_stack_finds_only_what_it_may_read() {
         }),
         ..Capabilities::default()
     })]);
-    let (floor, env) = (Floor::default(), EnvVars::new());
+    let (baseline, env) = (Baseline::default(), EnvVars::new());
     let at = CwdPath::new(work.clone()).unwrap();
-    let all = discover_all(&work, Some(&config), &mut boot(&grants, &floor, &env, &at));
+    let all = discover_all(
+        &work,
+        Some(&config),
+        &mut boot(&grants, &baseline, &env, &at),
+    );
     let names: Vec<_> = all.iter().map(|found| found.name.as_str()).collect();
     assert_eq!(names, ["alpha"]);
 }

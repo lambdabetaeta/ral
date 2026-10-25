@@ -1,4 +1,5 @@
 ---
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 verified_at_commit: f0b81686
 verified_at_date: 2026-10-17
 anchors: [Head, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, check_exec, Admitted, for_kernel, places, deputy_prefixes]
@@ -74,7 +75,7 @@ cannot run another program.
 
 ## The kernel holds the same evidence
 
-**`check_exec` judges the program and argv before the spawn. The kernel then
+**`authority::guard::check_exec` judges the program and argv before the spawn. The kernel then
 holds the same table against programs the child starts itself.**
 
 - **The kernel's rules are `ExecRules::for_kernel` of the table inside the
@@ -130,7 +131,7 @@ interpreter, is the same.
   launched from `~` is the shipped case (`~/.local/bin`). Name vetoes beneath
   writable directories are advisory to descendants
   ([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]).
-- **`capability/deputy.rs` reports the overlap** (`deputy_prefixes`): the live
+- **`authority/policy/deputy.rs` reports the overlap** (`deputy_prefixes`): the live
   part of the meet of the exec region and the write region, so each writable
   island under a runnable directory is named and a directory wholly excluded on
   either side is not. It reports only where exec does not denote `t` and fs
@@ -147,9 +148,9 @@ folded as the guard folds it, so neither side's exclusions are lost.
   a layer with `every`. Treating an `every` layer as an empty region instead
   would let the meet erase every other layer's finding. Where exec denotes `t`
   there is no finding: unrestricted running is not a deputy.
-- **`W`** is `fs::region(FsOp::Write)` itself, deny paths included, not a second
+- **`W`** is `authority::policy::fs::region(FsOp::Write)` itself, deny paths included, not a second
   reading of `write_prefixes`; where fs writes nothing restricted it is `None`
-  and there is no finding. `deputy_prefixes` takes the resolver `fs::region` takes.
+  and there is no finding. `deputy_prefixes` takes the resolver `authority::policy::fs::region` takes.
 - **The meet** keeps both sides' exclusions, so a directory wholly excluded on
   either side holds Both and is dropped (running `/work` less `/work/private`
   while writing only `/work/private` reports nothing), and keeps every positive

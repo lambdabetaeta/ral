@@ -251,6 +251,6 @@ impl Drop for Session {
         }
         // Windows-only, no-op elsewhere: reverts this session's AppContainer
         // grant ACEs and deletes its profile.
-        ral_core::sandbox::teardown_session();
+        ral_core::authority::sandbox::teardown_session();
     }
 }

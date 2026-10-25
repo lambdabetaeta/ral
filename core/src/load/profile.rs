@@ -9,9 +9,9 @@
 
 use std::path::Path;
 
-use crate::capability::{Fragment, GrantLayer, LocateError};
-use crate::guard::decode_capability_map;
-use crate::guard::freeze::FreezeCtx;
+use crate::authority::grant::decode_capability_map;
+use crate::authority::grant::freeze::FreezeCtx;
+use crate::authority::policy::{Fragment, GrantLayer, LocateError};
 use crate::path::Reading;
 use crate::source::{SourceFile, SourceOrigin};
 use crate::types::{Break, Mooring, Settled, Shell, sig};
@@ -67,7 +67,7 @@ pub fn load_capabilities_from_path(
         _ => failed(e),
     };
     let located = (shell.context.grants)
-        .locate::<Reading>(shell.floor(), &shell.anchor(path))
+        .locate::<Reading>(shell.baseline(), &shell.anchor(path))
         .map_err(|e| match &e {
             LocateError::Io(io) => unread(io),
             LocateError::Refused(refused) => failed(refused),
@@ -154,7 +154,7 @@ fn wrap(origin: &SourceOrigin, e: Break) -> Break {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use crate::capability::{ExecAllow, ExecDeny, FsAllow, FsOp};
+    use crate::authority::policy::{ExecAllow, ExecDeny, FsAllow, FsOp};
 
     fn shell() -> Shell {
         crate::test_helper::core_shell()

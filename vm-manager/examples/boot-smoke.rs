@@ -30,7 +30,7 @@ use std::io::{Read as _, Write as _};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ral_core::capability::GrantStack;
+use ral_core::authority::policy::GrantStack;
 use ral_core::carrier::{Transport, WireTransport, dispatch_to_report};
 use ral_core::path::{EnginePath, GuestPath, shown};
 use ral_core::protocol::channel::Liveness;

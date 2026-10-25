@@ -594,7 +594,7 @@ mod tests {
         );
         let runtime = ral_core::HostSurface::default()
             .runtime(ral_core::io::terminal::TerminalState::default())
-            .expect("a test host resolves its floor");
+            .expect("a test host resolves its baseline");
         crate::repl::engine_at(&attach, runtime, |_| {})
     }
 

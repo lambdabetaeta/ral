@@ -335,7 +335,7 @@ impl FrozenPath {
         self.surface
     }
 
-    /// True iff this prefix is absolute; `guard::freeze` rejects a
+    /// True iff this prefix is absolute; `authority::grant::freeze` rejects a
     /// frozen entry that is not.
     pub fn is_absolute(&self) -> bool {
         is_absolute(self.surface_path())
@@ -371,7 +371,7 @@ impl PartialEq<String> for FrozenPath {
 mod tests {
     use super::{FrozenPath, GuestPath};
     #[cfg(unix)]
-    use crate::capability::GrantPath;
+    use crate::authority::policy::GrantPath;
     #[cfg(unix)]
     use crate::path::{Depth, Excluded, Subject, Walked as _, utf8};
 

@@ -1,7 +1,7 @@
 # `minimal` bake-in.  The smallest base that's actually useful as a
 # starting point for additive `--extend` composition: the
 # platform's tool roots (`dir `system`, a row of the table in
-# `core/src/guard/toolchains.rs`) + cwd + scratch, network on, chdir
+# `core/src/authority/grant/toolchains.rs`) + cwd + scratch, network on, chdir
 # allowed.  Nothing from the
 # user's home except scratch: `xdg-bin` is not admitted (so a fresh
 # tool dropped in `~/.local/bin` is a deliberate choice via
@@ -54,7 +54,7 @@ return [
   # matches what users actually want from "tight but functional."
   #
   # `system` is the platform's own tool roots (see
-  # `core/src/guard/toolchains.rs`) and carries no Homebrew tree.
+  # `core/src/authority/grant/toolchains.rs`) and carries no Homebrew tree.
   # Apple's toolchain (CommandLineTools, Xcode) is folded in by
   # `system`, so building from source works without listing each tool
   # here.

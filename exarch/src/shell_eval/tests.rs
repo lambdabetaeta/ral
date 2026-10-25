@@ -12,7 +12,7 @@ use super::*;
 use crate::bus::{Emitter, Inbox, channel};
 use crate::card::Change;
 use crate::card::Row;
-use ral_core::capability::Capabilities;
+use ral_core::authority::policy::Capabilities;
 use ral_core::carrier::IdentityTransport;
 use ral_core::data::datum::Datum as _;
 use ral_core::fact::Read;
@@ -51,7 +51,7 @@ fn run_shell_direct(
 /// [`run_shell_direct`] under a whole stack.
 fn run_shell_under(
     transport: &IdentityTransport,
-    stack: &ral_core::capability::GrantStack,
+    stack: &ral_core::authority::policy::GrantStack,
     cmd: &str,
     timeout_secs: u64,
     recorder: &crate::record::Emitter,
@@ -105,7 +105,7 @@ fn run_once(engine: &IdentityTransport, cmd: &str) -> ToolResult {
 #[cfg(unix)]
 fn projecting_caps() -> Capabilities {
     Capabilities {
-        fs: Some(ral_core::capability::FsPolicy {
+        fs: Some(ral_core::authority::policy::FsPolicy {
             read_prefixes: vec![ral_core::path::FrozenPath::root()],
             write_prefixes: vec![ral_core::path::FrozenPath::root()],
             deny_paths: Vec::new(),
@@ -118,7 +118,7 @@ fn projecting_caps() -> Capabilities {
 /// one alike: only a guest is refused the latter.
 #[test]
 fn a_local_transport_takes_root_and_a_restrictive_stack() {
-    use ral_core::capability::{GrantStack, Net};
+    use ral_core::authority::policy::{GrantStack, Net};
     use ral_core::carrier::Transport as _;
     let engine = fresh();
     assert!(engine.is_local());
@@ -928,7 +928,7 @@ fn raised_error_status_is_the_tool_exit() {
 #[test]
 fn timeout_kills_sandboxed_subprocess_tree() {
     #[cfg(all(target_os = "linux", feature = "test-util"))]
-    if !ral_core::sandbox::restricted_envelope_launches() {
+    if !ral_core::authority::sandbox::restricted_envelope_launches() {
         eprintln!(
             "skip: this host cannot build a Restricted envelope; its /etc/hosts \
              and /etc/resolv.conf are locked mounts bwrap cannot rebind read-only"
@@ -959,7 +959,7 @@ fn timeout_kills_sandboxed_subprocess_tree() {
         {
             assert_eq!(
                 reason,
-                ral_core::sandbox::ALREADY_PROFILED,
+                ral_core::authority::sandbox::ALREADY_PROFILED,
                 "the refusal is not attributed"
             );
             assert_eq!(r.exit, 126, "a refused launch exits 126");
@@ -1497,7 +1497,7 @@ fn an_absent_walk_root_is_not_found_unless_its_name_is_denied() {
         "an absent root is not-found, got: {err}"
     );
 
-    let denying = ral_core::capability::FsPolicy {
+    let denying = ral_core::authority::policy::FsPolicy {
         read_prefixes: vec![ral_core::path::FrozenPath::root()],
         write_prefixes: Vec::new(),
         deny_paths: vec![ral_core::path::FrozenPath::from_surface(&missing)],
@@ -1921,7 +1921,7 @@ fn user_json_payload_less_variant_becomes_the_bare_label_string() {
 #[cfg(target_os = "linux")]
 mod self_layer {
     use super::*;
-    use ral_core::capability::GrantStack;
+    use ral_core::authority::policy::GrantStack;
     use ral_core::data::FOValue;
 
     struct Fixture {
@@ -1933,7 +1933,7 @@ mod self_layer {
     }
 
     fn fixture() -> Option<Fixture> {
-        if !ral_core::sandbox::restricted_envelope_launches() {
+        if !ral_core::authority::sandbox::restricted_envelope_launches() {
             eprintln!("skip: this host cannot build a Restricted envelope");
             return None;
         }
@@ -2034,7 +2034,7 @@ mod self_layer {
             &[],
         )
         .expect("reasonable composes");
-        let ctx = ral_core::guard::freeze::FreezeCtx::at(
+        let ctx = ral_core::authority::grant::freeze::FreezeCtx::at(
             ral_core::types::EnvVars::new(),
             ral_core::path::CwdPath::new(f.cwd.clone()).expect("the fixture cwd is absolute"),
         );

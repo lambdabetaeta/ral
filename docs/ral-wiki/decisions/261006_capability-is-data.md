@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: 446e3123
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 verified_at_commit: 446e3123
 anchors: [GrantStack, admit, Admitted, Flag, SandboxProjection, ExecProjection, for_kernel, FreezeCtx, PolicyError, Denial, refused, record_check]
 ---
@@ -94,12 +94,13 @@ that took a `Context`.
 
 ## Where
 
-`core/src/capability.rs` and `capability/{lattice,exec,fs,table,deputy}.rs`
+`core/src/authority/policy.rs` and `authority/policy/{lattice,exec,fs,table,deputy}.rs`
 (`GrantStack`, `Flag`, `admit`, `Admitted`, `Refused`, `ExecDenial`,
-`for_kernel`, `precedence`), `core/src/sandbox/projection.rs`
+`for_kernel`, `precedence`), `core/src/authority/sandbox/projection.rs`
 (`SandboxProjection::of`, `ExecProjection`, `FsRules`, `WriteReach`),
-`core/src/guard.rs` and `guard/{enforce,shell,freeze,decode,grant}.rs`
-(`check_exec`, `check_flag`, `Denial`, `Shell::refused`, `FreezeCtx`,
+`core/src/authority/guard.rs` and `authority/guard/{enforce,shell}.rs`
+(`check_exec`, `check_flag`, `Denial`, `Shell::refused`),
+`core/src/authority/grant/{freeze,decode,spawn}.rs` (`FreezeCtx`,
 `PolicyError`, `decode_capability_map`, `SpawnGrant`), and
 `core/src/types/audit/door.rs` (`Shell::record_check`).
 

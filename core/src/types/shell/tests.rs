@@ -1,13 +1,13 @@
 use super::super::value::Value;
 use super::*;
-use crate::guard::SpawnGrant;
+use crate::authority::grant::SpawnGrant;
 use crate::types::Nursery;
 
 /// A narrower no test here may reach: only a Base grant consults one.
 fn no_base(
     _: &str,
-    _: &crate::guard::freeze::FreezeCtx,
-) -> Result<crate::capability::GrantLayer, String> {
+    _: &crate::authority::grant::freeze::FreezeCtx,
+) -> Result<crate::authority::policy::GrantLayer, String> {
     panic!("only a Base grant consults the narrower")
 }
 

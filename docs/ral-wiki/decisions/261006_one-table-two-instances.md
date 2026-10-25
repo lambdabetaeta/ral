@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: 90479dea
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 verified_at_commit: 446e3123
 anchors: [Table, Scope, Subject, Region, ExecKey, ExecRules, ExecAllow, ExecDeny, live, for_kernel, region, rules, contains, own]
 ---
@@ -135,15 +135,15 @@ synod's base to nothing. The fix that had mattered was the fold:
 
 ## Where
 
-`core/src/capability/table.rs` (`Table`, `Scope`, `verdict`, `live`,
-`denies`, `respelled`, `Meet for Table`), `core/src/capability/fs.rs`
+`core/src/authority/policy/table.rs` (`Table`, `Scope`, `verdict`, `live`,
+`denies`, `respelled`, `Meet for Table`), `core/src/authority/policy/fs.rs`
 (`Region`, `region`, `impl Scope for FrozenPath`),
-`core/src/capability/exec.rs` (`ExecScope`, `Subject`, `Rank`, `ExecRules`,
+`core/src/authority/policy/exec.rs` (`ExecScope`, `Subject`, `Rank`, `ExecRules`,
 `compile`, `for_kernel`, `precedence`, `allowed_files`, `rules`),
-`core/src/sandbox/projection.rs` (`surface`), `core/src/capability/deputy.rs`
+`core/src/authority/sandbox/projection.rs` (`surface`), `core/src/authority/policy/deputy.rs`
 (`deputy_prefixes`), `core/src/path/forms.rs` (`contains`, `refreeze`,
 `from_guest`), `core/src/path/lex.rs` (`Polarity`, `Allow`, `Deny`),
-`core/src/capability/lattice.rs` (`ExecKey`, `ExecGrant`, `meet_insert`).
+`core/src/authority/policy/lattice.rs` (`ExecKey`, `ExecGrant`, `meet_insert`).
 
 **Amended 2026-10-22 by [[decisions/261021_one-path|one-path]] and
 [[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]].**

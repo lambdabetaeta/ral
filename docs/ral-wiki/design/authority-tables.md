@@ -1,3 +1,7 @@
+---
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
+---
+
 # Authority is a table of scoped rules
 
 **Each dimension of a grant that ranges over places, fs and exec, denotes a
@@ -6,7 +10,7 @@ structure: a finite table of scoped rules, read as "an exclusion beats every
 allowance; silence permits nothing".** A layer is a table, a stack is the meet
 of its layers' tables, and the meet is *defined* by the pointwise law
 `ev(a ∧ b, s) = ev(a, s) ∧ ev(b, s)`. The fs region and the exec rules are two
-instances of it (`core/src/capability/table.rs`); everything that differs
+instances of it (`core/src/authority/policy/table.rs`); everything that differs
 between them is a choice of scope and subject. Authority is a policy in the
 sense of Bruns and Huth's PBel, in a small fragment of it
 ([[related/access-control-algebra|access-control-algebra]]). Why the meet is a
@@ -150,7 +154,7 @@ laws *structurally*, including `a ∧ a = a`; this stronger claim is checked by
 property tests over a universe of directories, files,
 tools, vetoes and `Any`, built over a tempdir tree of real links and renames and
 holding case pairs and an NFC/NFD pair, so a name one filesystem keeps apart and
-another merges (`laws` in `capability/table.rs`).
+another merges (`laws` in `authority/policy/table.rs`).
 
 ## Laws
 
@@ -397,7 +401,7 @@ clauses after the positive ones.
   `every` is not a key: only `join_top` sets it, so no surface spelling widens,
   and a flag has no negative form, so "every program" can never be excluded.
 - `ExecAllow` and `ExecDeny`: the grant *resolved where it is decoded*
-  (`ExecRules::of_grant`): a bare name becomes the bundled tool of that name,
+  (in `authority::grant`): a bare name becomes the bundled tool of that name,
   the file the decoding environment's `PATH` finds and, for negative evidence
   alone, a `Name` veto; a path key a `File`, a dir key a `Dir`; `every` the
   allowance `Any`. A key walks as its polarity walks: the positive bit to the

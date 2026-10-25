@@ -1,4 +1,4 @@
-//! Git directory discovery, for the `gitdir:` sigil that `guard::freeze`
+//! Git directory discovery, for the `gitdir:` sigil that `authority::grant::freeze`
 //! expands at policy freeze, and the working tree's directory chain, for the
 //! files a tool reads at every level of it.
 //!

@@ -9,8 +9,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::authority::grant::GrantNarrower;
 use crate::data::FOValue;
-use crate::guard::GrantNarrower;
 use crate::path::CwdPath;
 use crate::process::{CancelCause, DurableRoot, Scope, ScopeNode};
 use crate::protocol::channel::WriteError;
@@ -29,7 +29,7 @@ pub(crate) mod probe;
 /// the function.
 pub struct EngineInstaller {
     pub tag: &'static str,
-    /// The process half: Σ, builtins, docs, and the read floor this host
+    /// The process half: Σ, builtins, docs, and the system reads this host
     /// resolves. Derived from the binary and the spec's terminal, once per
     /// engine: a root and a child engine each derive their own, an in-process
     /// child shares its parent's. An `Err` refuses the attach, in the

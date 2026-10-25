@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::capability::{Capabilities, GrantStack, GrantSummary};
+use crate::authority::policy::{Capabilities, GrantStack, GrantSummary};
 use crate::data::datum::{Datum, tag, untag};
 use crate::data::{Bytes, FOValue, Finite};
 use crate::ty::{Ty, Typed, closed_record};
@@ -273,7 +273,7 @@ mod tests {
     /// A grant stack crosses a probe layer for layer, exec rules and all.
     #[test]
     fn a_grant_stack_round_trips() {
-        use crate::capability::{Capabilities, Evidence, ExecGrant, ExecKey, Net};
+        use crate::authority::policy::{Capabilities, Evidence, ExecGrant, ExecKey, Net};
         use crate::path::FrozenPath;
         let dir =
             FrozenPath::from_surface(&crate::test_helper::Tree::nowhere().at("/ral-probe/bin"));
@@ -289,7 +289,7 @@ mod tests {
     /// A stack of real directories, exclusions and all: restrictive on every
     /// axis a summary shows.
     fn stack_over(root: &std::path::Path) -> GrantStack {
-        use crate::capability::{Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy, Net};
+        use crate::authority::policy::{Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy, Net};
         use crate::path::FrozenPath;
         let spell = |dir: &str| {
             std::fs::create_dir_all(root.join(dir)).unwrap();

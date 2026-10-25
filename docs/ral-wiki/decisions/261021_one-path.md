@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: ed814376
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 ---
 
 # One path
@@ -108,7 +108,7 @@ its authored form beside its resolution, and the two could disagree.
 - **`core/src/path/walk.rs`** and its host modules: `Trace`, `RealPath`, `Hold`,
   `Excluded`, `Dir`, `Located`, `walk`, `walk_excluded`.
 - **`core/src/path/identity.rs`** — the two readings.
-- **`core/src/capability/{lattice,fs,exec}.rs`** — `GrantLayer`, `GrantPath`,
+- **`core/src/authority/policy/{lattice,fs,exec}.rs`** — `GrantLayer`, `GrantPath`,
   `Extent`, `GrantStack::{judge, rehold}`.
 - **`core/src/path/tree/walk.rs`** — ral's own enumeration.
 

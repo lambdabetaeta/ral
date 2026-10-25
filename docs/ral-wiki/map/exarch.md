@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 61c288f
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 generated_at_date: 2026-10-21
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/roles.md, exarch/data/ral.md, exarch/data/context.md]
 ---
@@ -24,7 +24,7 @@ system prompt is assembled.
 
 `run` (in `lib.rs`, lifted out of `main` so integration tests link the whole
 crate) is the session path; `main.rs` is the thin shell over it. On the way out,
-`main` runs `ral_core::sandbox::teardown_session` — deleting the session's
+`main` runs `ral_core::authority::sandbox::teardown_session` — deleting the session's
 AppContainer profiles on Windows, a no-op elsewhere — before surrendering the
 exit code.
 
@@ -36,7 +36,7 @@ exit code.
   carries no base-tag lexicon of its own and a wire-seeded child resolves its own
   layer while booting). A confined child is served before any pin, the anchor
   unpinned; every other role — the `--engine` seat child
-  included — is pinned by [[map/core/capabilities|`sandbox::boot`]] before it runs.
+  included — is pinned by [[map/core/capabilities|`authority::sandbox::boot`]] before it runs.
   `main` and **every test `#[ctor]` (`pre_main_ctor!`) share this dispatch and
   its exit** — they differ only in where argv comes from: a constructor calls
   `serve_process_before_main`, because on musl std has no argv before `main`

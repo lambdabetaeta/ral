@@ -28,7 +28,7 @@
 mod common;
 
 use ral_core::RunIo;
-use ral_core::capability::{Capabilities, EditorVerb, FsPolicy, ShellVerb};
+use ral_core::authority::policy::{Capabilities, EditorVerb, FsPolicy, ShellVerb};
 use ral_core::path::FrozenPath;
 use ral_core::protocol::Run;
 use ral_core::run::RunReport;
@@ -45,7 +45,7 @@ fn boot() -> Shell {
         &ral_core::boot::HostSurface::default(),
         ral_core::test_helper::process_cwd(),
     )
-    .expect("a test host resolves its floor")
+    .expect("a test host resolves its baseline")
 }
 
 /// A capability frame whose fs policy confines reads and writes to a scratch

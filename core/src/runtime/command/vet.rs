@@ -9,7 +9,7 @@
 //! single-command exec and pipeline stages consume the plan, so the rules
 //! live in exactly one place.
 
-use crate::capability::{Admitted, Program};
+use crate::authority::policy::{Admitted, Program};
 use crate::ty::RefusedArg;
 use crate::types::{Break, Error, Settled, Shell, Value};
 
@@ -72,7 +72,7 @@ fn reject_exec_arg(cmd: &str, arg: &Value) -> Option<Break> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use crate::capability::Program;
+    use crate::authority::policy::Program;
     use crate::ir::CommandName;
     use std::path::Path;
 
@@ -229,7 +229,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_denied_non_executable_is_refused_as_denied_not_as_non_executable() {
-        use crate::capability::{Capabilities, ExecGrant};
+        use crate::authority::policy::{Capabilities, ExecGrant};
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("plain");

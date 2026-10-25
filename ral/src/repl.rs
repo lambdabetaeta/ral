@@ -74,7 +74,7 @@ pub(crate) fn prelude_runtime() -> ral_core::Runtime {
         &crate::PRELUDE,
         &ral_core::HostSurface::default(),
     )
-    .expect("a test host resolves its floor")
+    .expect("a test host resolves its baseline")
 }
 
 /// Boot an identity engine at `attach`, over a root on `runtime` that `dress`

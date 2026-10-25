@@ -65,7 +65,7 @@ pub struct Agent {
     /// The run's directory, which this agent's `log_dir` hangs under.
     run_dir: OwnDir,
     started: Instant,
-    pub(crate) caps: ral_core::capability::GrantStack,
+    pub(crate) caps: ral_core::authority::policy::GrantStack,
     pub(crate) role: Role,
     /// Weak: a child that fails to upgrade has settled, and is pruned.
     children: Mutex<Vec<Weak<Self>>>,
@@ -152,7 +152,7 @@ pub(crate) struct Birth {
     pub log_dir: OwnDir,
     pub run_dir: OwnDir,
     pub started: Instant,
-    pub caps: ral_core::capability::GrantStack,
+    pub caps: ral_core::authority::policy::GrantStack,
     pub role: Role,
     pub fuel: u32,
     pub provider: ProviderHandle,

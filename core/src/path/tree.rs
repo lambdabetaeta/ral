@@ -1,6 +1,6 @@
 //! Directory trees: the one walk over them, glob patterns enumerated by it, and their size.
 
-use crate::capability::Ungoverned;
+use crate::authority::policy::Ungoverned;
 use crate::path::LexicalPath;
 use crate::path::site::Silent;
 use crate::process::{DurableRoot, Scope};

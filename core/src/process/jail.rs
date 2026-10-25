@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use crate::sandbox::Ownership;
+use crate::authority::sandbox::Ownership;
 
 #[cfg(target_os = "linux")]
 pub(crate) mod linux;

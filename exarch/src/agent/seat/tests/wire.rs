@@ -277,7 +277,7 @@ fn wire_reach_interrupt_settles_an_in_flight_run_promptly() {
 /// host that resolved it and nothing on another.
 #[test]
 fn a_guest_transport_takes_root_and_is_refused_a_resolved_stack() {
-    use ral_core::capability::{Capabilities, GrantStack, Net};
+    use ral_core::authority::policy::{Capabilities, GrantStack, Net};
     use ral_core::carrier::Severed;
     let (seat, mut child) = wire_seat(Liveness::default());
     assert!(!seat.transport().is_local());

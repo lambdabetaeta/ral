@@ -1,3 +1,7 @@
+---
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
+---
+
 # The freeze boundary
 
 **A grant is resolved the moment it is decoded: `decode_capability_map` walks
@@ -8,7 +12,7 @@ authority* is a type split with one crossing: nothing authored reaches the dynam
 stack or the IPC wire, because a `GrantLayer` keeps no authored copy for
 anything to disagree with.
 
-The types (`core/src/capability/lattice.rs`):
+The types (`core/src/authority/policy/lattice.rs`):
 
 - *`Capabilities`* — the authored value: per-effect policies (`exec`, `fs`,
   `net`, and the `editor` and `shell` verb sets) over spellings. Nothing
@@ -25,8 +29,10 @@ The types (`core/src/capability/lattice.rs`):
 ## `decode` is the one-way crossing
 
 The sole non-trivial constructor is `decode_capability_map`
-(`core/src/guard/decode.rs`), the single `Value::Map → GrantLayer`
-function. It walks a `.ral` profile's terminal record — or the inline
+(`core/src/authority/grant/decode.rs`), the single `Value::Map → GrantLayer`
+function. `authority::grant` owns authored resolution and construction;
+`authority::policy` holds the resolved model and its judgments. The decoder
+walks a `.ral` profile's terminal record — or the inline
 `grant [...] { body }` record — into a layer, resolving each spelling by the
 walk as it freezes it. In doing so it:
 
@@ -35,7 +41,7 @@ walk as it freezes it. In doing so it:
   against a `FreezeCtx` (owned `home` and `cwd`, `FreezeCtx::of(&Shell)`;
   `` `tempdir `` against the host's temp dir; `` `scratch `` against the spelling
   of the session's scratch the context carries, which a host that made none
-  refuses). The freeze is `guard/freeze.rs`:
+  refuses). The freeze is `authority/grant/freeze.rs`:
   `FreezeCtx::place` is the one place a grant's place becomes a `FrozenPath`,
   `FreezeCtx::selector` the one place a selector becomes many, and
   `FrozenPath::from_surface` the one minting entry
@@ -172,7 +178,7 @@ legitimately lies outside the tree, so no region bounds it. What bounds it is
   config of a repository split off with `--separate-git-dir`, the two records git
   itself keeps. Both ends must agree, and only one end is writable from inside
   the tree.
-- A pointer nothing claims is a `PolicyError` at the boundary (`guard::freeze`, which holds the three `gitdir` refusals), like an escaping
+- A pointer nothing claims is a `PolicyError` at the boundary (`authority::grant::freeze`, which holds the three `gitdir` refusals), like an escaping
   `xdg-*` place. Silently narrowing to the cwd would be safe and unreadable — the same
   fail-closed-and-say-so reading the XDG guard takes.
 

@@ -12,7 +12,7 @@
 //! this working tree back, and a pointer nothing claims is a policy error
 //! rather than a wider grant.
 
-use ral_core::guard::freeze::{FreezeCtx, Place, PolicyError};
+use ral_core::authority::grant::freeze::{FreezeCtx, Place, PolicyError};
 use ral_core::path::CwdPath;
 use ral_core::types::EnvVars;
 use std::path::{Path, PathBuf};

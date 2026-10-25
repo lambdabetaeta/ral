@@ -9,8 +9,8 @@
 //! session start — so the per-invocation working directory is baked into the
 //! policy and exarch never injects it dynamically.
 
-use ral_core::capability::GrantLayer;
-use ral_core::guard::freeze::FreezeCtx;
+use ral_core::authority::grant::freeze::FreezeCtx;
+use ral_core::authority::policy::GrantLayer;
 use ral_core::io::terminal::TerminalState;
 use ral_core::source::SourceOrigin;
 
@@ -67,12 +67,12 @@ pub(super) fn resolve_base(name: &str, ctx: &FreezeCtx) -> Result<GrantLayer, St
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    use ral_core::authority::grant::freeze::FreezeCtx;
     #[cfg(unix)]
-    use ral_core::capability::{Capabilities, Fragment, Net};
-    use ral_core::capability::{ExecSummary, FsSummary, GrantLayer};
-    use ral_core::guard::freeze::FreezeCtx;
+    use ral_core::authority::grant::freeze::Place;
     #[cfg(unix)]
-    use ral_core::guard::freeze::Place;
+    use ral_core::authority::policy::{Capabilities, Fragment, Net};
+    use ral_core::authority::policy::{ExecSummary, FsSummary, GrantLayer};
     #[cfg(unix)]
     use ral_core::path::XdgKind;
     use std::path::PathBuf;
@@ -488,7 +488,7 @@ mod tests {
     /// host, and a manager absent here would pass vacuously.
     #[test]
     fn reasonable_lists_every_selector() {
-        use ral_core::guard::freeze::Selector;
+        use ral_core::authority::grant::freeze::Selector;
         let want = Selector::names().map(String::from).collect();
         assert_eq!(dir_selectors(REASONABLE_RAL), want);
     }
@@ -669,7 +669,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn verbs_join_by_union() {
-        use ral_core::capability::{Flag, ShellVerb};
+        use ral_core::authority::policy::{Flag, ShellVerb};
         use ral_core::test_helper::{layer, stack};
         let ctx = ctx_at(&host_home(), "/work");
         let base = layer(Capabilities {
@@ -684,13 +684,13 @@ mod tests {
 
     /// A base that omits exec but restricts fs, extended with a run allowance
     /// beside `every`: the ceiling keeps the allowance and reads what it
-    /// names.  The program sits in a scratch dir, outside the read floor.
+    /// names.  The program sits in a scratch dir, outside the system reads.
     #[cfg(unix)]
     #[test]
     fn a_run_allowance_beside_every_is_readable_under_an_fs_only_base() {
         let ctx = ctx_at(&host_home(), "/work");
         let base = ral_core::test_helper::layer(Capabilities {
-            fs: Some(ral_core::capability::FsPolicy {
+            fs: Some(ral_core::authority::policy::FsPolicy {
                 read_prefixes: vec![frozen(&Place::Absolute("/work".into()), &ctx)],
                 ..Default::default()
             }),
@@ -720,8 +720,8 @@ mod tests {
         // `cfg(unix)`-gated tests use — Windows reads that as rootless.
         let cwd = std::env::temp_dir();
         let ctx = ctx_at(&home, cwd);
-        let roots = ral_core::guard::toolchains::expand(
-            ral_core::guard::toolchains::Toolchain::System,
+        let roots = ral_core::authority::grant::toolchains::expand(
+            ral_core::authority::grant::toolchains::Toolchain::System,
             Some(&home),
         )
         .expect("the system roots expand");

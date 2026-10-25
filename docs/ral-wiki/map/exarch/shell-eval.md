@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 61c288f
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 generated_at_date: 2026-10-21
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/surface.rs, exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/clip.rs, exarch/src/shell_eval/report.rs, exarch/data/agent.ral]
 ---
@@ -277,6 +277,6 @@ remote shell is dressed with the same atoms.
 A tool command that fails under an active OS sandbox carries a kernel-denial
 diagnostic — the blocked syscall, the exact path to grant, the symlink caveat —
 appended to the error's `hint`. That harvesting lives in core
-(`core::sandbox::diag`), driven by the command and pipeline runners over the
+(`ral_core::authority::sandbox::diag`), driven by the command and pipeline runners over the
 failing call's wall window and rendered identically by both the `ral` REPL and
 exarch ([[map/core/capabilities|capabilities]]).

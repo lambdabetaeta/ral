@@ -143,7 +143,7 @@ fn launch_external_stage_direct(
     let args = admitted.args().to_vec();
     let mut cmd = command::build_launch(
         admitted,
-        crate::sandbox::Ownership::Kept,
+        crate::authority::sandbox::Ownership::Kept,
         cx.shell,
         &cx.shell.scope,
     )?;

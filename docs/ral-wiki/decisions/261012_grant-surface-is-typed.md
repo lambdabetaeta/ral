@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: 002c654a
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 verified_at_commit: 002c654a
 anchors: [Place, Selector, FreezeCtx, Net, EditorVerb, ShellVerb, Holds, ExecGrant, Flag, drain_nested]
 ---
@@ -465,8 +465,8 @@ Drafted against 0c52a8f4; revised at 6bfbb097 after three review rounds
 
 ## Where
 
-`guard::freeze` (`Place`, `Selector`, `FreezeCtx::place`, `FreezeCtx::selector`),
-`capability::lattice` (`Net`, `EditorVerb`, `ShellVerb`, `Flag`, `ExecGrant`),
+`authority::grant::freeze` (`Place`, `Selector`, `FreezeCtx::place`, `FreezeCtx::selector`),
+`authority::policy::lattice` (`Net`, `EditorVerb`, `ShellVerb`, `Flag`, `ExecGrant`),
 `typecheck::contract` (`Holds`, `drain_nested`). See [[design/grant|grant]],
 [[design/capability-freeze|capability-freeze]],
 [[design/two-enforcers|two-enforcers]] and `docs/SPEC.md` §12.

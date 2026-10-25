@@ -73,7 +73,7 @@
 //!     renderers that call them today; the plan that moves those renderers onto
 //!     `RealPath` deletes the helpers, and finds no new caller.
 //!
-//! `capability::Ungoverned`'s authority-minting methods are banned by clippy,
+//! `authority::policy::Ungoverned`'s authority-minting methods are banned by clippy,
 //! including aliases and function-item references. Legitimate reads and
 //! `own`'s crate-private writes require documented typed sites, not text counts.
 
@@ -131,9 +131,9 @@ const BUILD_SCRIPTS: &[&str] = &["core/build.rs", "ral/build.rs", "exarch/build.
 /// are counted as `.holds(` and `.rebased(` in a file that names `Rendered`.
 /// Nothing new may join this list.
 const STRING_CONTAINMENT_CALLERS: &[(&str, &str, usize)] = &[
-    ("core/src/sandbox/linux.rs", ".holds(", 2),
-    ("core/src/sandbox/linux.rs", ".rebased(", 1),
-    ("core/src/sandbox/macos.rs", "proper_ancestors", 2),
+    ("core/src/authority/sandbox/linux.rs", ".holds(", 2),
+    ("core/src/authority/sandbox/linux.rs", ".rebased(", 1),
+    ("core/src/authority/sandbox/macos.rs", "proper_ancestors", 2),
 ];
 
 /// What `Rendered` lends a renderer, counted in a file that names it.

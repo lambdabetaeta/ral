@@ -307,7 +307,7 @@ pub fn assert_admitted(out: &Output, what: &str) {
 /// to enter still fails.
 #[cfg(target_os = "macos")]
 pub fn refused_by_a_confined_runner(out: &Output) -> bool {
-    use ral_core::sandbox::ALREADY_PROFILED;
+    use ral_core::authority::sandbox::ALREADY_PROFILED;
     const ENTRY_REFUSED: &str = "ral: cannot enter the Seatbelt sandbox: ";
     let Some(reason) = out
         .stderr

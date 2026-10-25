@@ -1,4 +1,5 @@
 ---
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 verified_at_commit: 002c654a
 verified_at_date: 2026-10-13
 anchors: [check_exec, Admitted, admit, Flag, ExecDenial, Refused, Withheld, refused, region, Table, Evidence, GrantStack, SandboxProjection, Fragment, sandboxed_command, build_launch, projection_enforceable]
@@ -11,7 +12,7 @@ does itself, and an OS sandbox for what a spawned program does on its own.**
 Each is the authority exactly where the other is blind
 ([[design/two-enforcers|two enforcers]]). [[design/grant|The grant design]]
 states the lattice; this page says how a check runs. The code lives in
-`core/src/capability/`, `core/src/guard/` and `core/src/sandbox/`.
+`core/src/authority/`, split into `authority::{policy, grant, guard, sandbox}`.
 
 The detail is split by mechanism:
 
@@ -30,19 +31,27 @@ The detail is split by mechanism:
 
 ## One model, read in two places
 
-**The `capability` module decides authority; `guard` and `sandbox` only read
-it** ([[decisions/261006_capability-is-data|capability-is-data]]). The
-dependency order is `capability < sandbox < guard`. This is a module boundary,
-not a typestate ([[decisions/260605_witness-collapse|witness-collapse]]).
+**`authority::policy` owns the resolved model and its judgments;
+`authority::grant` constructs it; `authority::guard` and `authority::sandbox`
+enforce it** ([[decisions/261006_capability-is-data|capability-is-data]]).
+`authority::grant` owns decoding, freezing, selectors, authored resolution,
+host system-read discovery and spawn-grant construction (`authority/grant/spawn.rs`).
+`authority::policy` performs no authored resolution or host discovery. These
+are module boundaries, not a typestate
+([[decisions/260605_witness-collapse|witness-collapse]]).
+The runtime supplies a `Baseline`: resolved system read paths, ral's image for
+bundled-tool reads, and boot-pinned identities protected from writes.
+`authority.rs` assembles it; policy judgments never query the sandbox for
+those facts.
 
-**Every in-process yes or no is a `guard::check_*(&Context, …)`.** Each check
-in `guard/enforce.rs` is a free function over a borrowed `Context`. It folds
+**Every in-process yes or no is an `authority::guard::check_*(&Context, …)`.** Each check
+in `authority/guard/enforce.rs` is a free function over a borrowed `Context`. It folds
 the whole dynamic `GrantStack` (`ctx.grants`) before it answers, so an answer
 reflects every frame on the stack, not just the top one. The exec and fs checks
-return a typed refusal (`ExecDenial`, `Refused`), and `Shell::refused` (`guard/shell.rs`) records it on
+return a typed refusal (`ExecDenial`, `Refused`), and `Shell::refused` (`authority/guard/shell.rs`) records it on
 the trail. The doors are:
 
-- `check_exec`, which returns the `Admitted` token every launch needs. Only
+- `authority::guard::check_exec`, which returns the `Admitted` token every launch needs. Only
   `GrantStack::admit` mints one.
 - `Shell::locate` and its siblings (`locate_dir`, `locate_existing`,
   `locate_if_admitted`), the doors every read and open goes through. Each walks
@@ -71,7 +80,7 @@ under intersection: a bare key means whatever file the decoding env's `PATH` fin
 ([[decisions/260906_object-not-name|object-not-name]]). So a layer is resolved
 where it is decoded, and the fold meets what it holds. A `GrantLayer` keeps its
 rules and nothing beside them: every spelling was walked as the layer was made
-(`GrantLayer::from_capabilities`, or `decode_capability_map`), an allowance
+(`GrantLayer::from_capabilities`, or `authority::grant::decode_capability_map`), an allowance
 holding the position its walk reached (`Extent`: everywhere, or under a
 position), an exclusion the objects its walk held (`Excluded`: the name and,
 where it was a link, its target), a bare name the file the decoding env's `PATH`
@@ -82,7 +91,7 @@ found and the tool this platform bundles. Nothing judges a spelling again:
 - `region` folds every layer's tables for one operation into a
   `Table<FsAllow, FsDeny>` and meets those. A read takes each layer's read and
   write allowances (writing reads) and, through `GrantStack::read`, its run
-  places, then joins the `Floor`.
+  places, then joins the system reads supplied by `Baseline`.
 
 Both are a `Table`, whose meet is the pointwise law `⟦a ∧ b⟧ = ⟦a⟧ ∧ ⟦b⟧`
 ([[design/authority-tables|authority-tables]]).
@@ -117,26 +126,27 @@ stay a [[invariants/single-binary|single binary]].
 **The guard covers what ral dispatches. The OS sandbox covers what a spawned
 process does on its own.**
 
-- **Exec.** The guard checks every platform. `check_exec` judges the program
+- **Exec.** The guard checks every platform. `authority::guard::check_exec` judges the program
   and its argv *before* the spawn and returns `Admitted`, which `build_launch`
   launches from. The kernel then holds the same rules against programs the
   child starts itself (`sh -c`, `find -exec`): Seatbelt on macOS, Landlock on
   Linux. Windows has no kernel exec filter
   ([[internals/exec-judgment|exec-judgment]]).
 - **Filesystem.** The guard checks ral's own reads and writes
-  (`check_fs_exact`). An OS sandbox confines the child's: Seatbelt on macOS,
+  (`authority::guard::check_fs_exact`). An OS sandbox confines the child's: Seatbelt on macOS,
   bwrap on Linux, an AppContainer LowBox token on Windows.
 - **Network.** There is no guard, because ral performs no network operation
   itself. The OS sandbox is the only enforcer. On Windows it is the withheld
   network capability SIDs: a LowBox token without them cannot open a socket.
 
 **For the filesystem, guard and sandbox read one fold and judge it on different
-evidence.** Both read one fold (`capability/fs.rs`). `region` meets each layer's table
+evidence.** Both read one fold (`authority/policy/fs.rs`). `region` meets each layer's table
 for the operation: the allows meet and the exclusions join. A read then joins
-the `Floor`, the platform's system paths, after the meet, so no `read` narrows
-the floor and only a `deny` removes part of it. The floor is host state, resolved
-once where the `Runtime` is built (a host that cannot resolve it refuses to
-boot) and passed to every reader; no stack holds it and no wire carries it. No backend carries a system set of
+the system reads in `Baseline`, the platform's system paths, after the meet:
+only a `deny` removes them. They are host state, resolved once by
+`authority::grant` where the `Runtime` is built (a host that cannot resolve
+them refuses to boot) and passed to every reader; no stack holds them and no
+wire carries them. No backend carries a system set of
 its own. They differ in *when* the fold runs, and in what an exclusion is
 matched against: ral's own readers match it by position or by the object it was
 fixed to; the kernel renderers by position alone

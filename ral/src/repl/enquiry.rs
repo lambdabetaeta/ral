@@ -7,7 +7,7 @@
 //!   first-order manifest, which the host may refuse;
 //! - `` `repl-clipboard `` — `_ed-clipboard`'s copy, which the host performs.
 
-use ral_core::capability::{EditorVerb, Flag};
+use ral_core::authority::policy::{EditorVerb, Flag};
 use ral_core::data::FOValue;
 use ral_core::data::datum::{Datum, tag, untag};
 use ral_core::record;

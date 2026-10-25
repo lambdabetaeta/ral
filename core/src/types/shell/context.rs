@@ -83,7 +83,7 @@ impl Context {
 impl Context {
     /// A context under `grants` and nothing else, at the test process's cwd:
     /// a fixture for the decisions that read a context alone.
-    pub(crate) fn under_grants(grants: crate::capability::GrantStack) -> Self {
+    pub(crate) fn under_grants(grants: crate::authority::policy::GrantStack) -> Self {
         Self {
             env_overrides: EnvVars::default(),
             cwd: crate::test_helper::process_cwd(),

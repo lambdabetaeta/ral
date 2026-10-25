@@ -5,7 +5,7 @@ pub mod host;
 
 use crate::policy::Invocation;
 use crate::skill::{self, Boot};
-use ral_core::capability::{ExecSummary, Floor, GrantSummary, LayerSummary, LocateError};
+use ral_core::authority::policy::{Baseline, ExecSummary, GrantSummary, LayerSummary, LocateError};
 use ral_core::path::CwdPath;
 use ral_core::types::EnvVars;
 use std::collections::BTreeSet;
@@ -47,7 +47,7 @@ pub enum EditScheme {
 pub fn assemble(
     files: &[PathBuf],
     invocation: &Invocation,
-    floor: &Floor,
+    baseline: &Baseline,
     app: crate::app::App,
     cwd: &CwdPath,
     config_dir: Option<&Path>,
@@ -55,7 +55,7 @@ pub fn assemble(
     edit: EditScheme,
 ) -> Result<String, String> {
     let env = EnvVars::new();
-    let mut reader = Boot::new(&invocation.stack, floor, &env, cwd);
+    let mut reader = Boot::new(&invocation.stack, baseline, &env, cwd);
     let mut sections: Vec<(Option<&str>, String)> = Vec::new();
     // Persona is the only section `--system` replaces; the rest stand.
     sections.push((
@@ -356,7 +356,7 @@ fn skills_section(skills: &[skill::Skill]) -> String {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use ral_core::capability::{EditorVerb, FsSummary, Net};
+    use ral_core::authority::policy::{EditorVerb, FsSummary, Net};
 
     /// A Linux guest's summary as a macOS or Windows host receives it: built
     /// of spellings and axes, a newtype of its layers on the wire.
@@ -403,7 +403,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_agents_link_to_a_denied_file_is_skipped_and_one_under_an_allowance_is_read() {
-        use ral_core::capability::{Capabilities, FsPolicy, GrantStack};
+        use ral_core::authority::policy::{Capabilities, FsPolicy, GrantStack};
         use ral_core::path::{FrozenPath, utf8};
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
@@ -411,7 +411,7 @@ mod tests {
         std::fs::create_dir(&work).unwrap();
         std::fs::write(root.join("notes.md"), "linked text").unwrap();
         std::os::unix::fs::symlink(root.join("notes.md"), work.join("AGENTS.md")).unwrap();
-        let (floor, env) = (Floor::default(), EnvVars::new());
+        let (baseline, env) = (Baseline::default(), EnvVars::new());
         let cwd = CwdPath::new(work.clone()).unwrap();
         let frozen = |path: &Path| FrozenPath::from_surface(utf8(path).unwrap());
         let reading = |deny: Vec<FrozenPath>| {
@@ -425,7 +425,7 @@ mod tests {
             })])
         };
         let agents = |stack: &GrantStack| {
-            let reader = Boot::new(stack, &floor, &env, &cwd);
+            let reader = Boot::new(stack, &baseline, &env, &cwd);
             read_agents(&work, Some(&root.join("config")), &reader)
         };
         assert_eq!(agents(&reading(Vec::new())), Ok("linked text".to_owned()));

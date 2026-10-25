@@ -13,7 +13,7 @@
 //! and is judged again on the walk that makes.
 
 use super::ignore::{self, Files, Layer, Rules};
-use crate::capability::ReadRegion;
+use crate::authority::policy::ReadRegion;
 use crate::path::sigil::literal_relative;
 use crate::path::site::Silent;
 use crate::path::{
@@ -108,7 +108,7 @@ impl Walk {
         let base = (shell.context.resolver().is_relative(named))
             .then(|| shell.resolve(".").into_cwd().ok())
             .flatten();
-        let region = shell.context.grants.read_region(shell.floor());
+        let region = shell.context.grants.read_region(shell.baseline());
         Admitted {
             entries: self.readable_by(region).entries(shell.scope.clone()),
             base,

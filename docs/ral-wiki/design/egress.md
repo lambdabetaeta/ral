@@ -1,3 +1,7 @@
+---
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
+---
+
 # Egress: a destination gate
 
 **The guest may open TCP connections to port 443 of the public addresses
@@ -90,7 +94,7 @@ an OS-sandbox one, and inside a guest not even that: `docs/SPEC.md` §12.5,
 grant vocabulary names an endpoint. The real narrowing this page describes
 happens one layer outside the grant entirely, in the host policy `NetPolicy`
 enforces: `synod::grant`'s `net: Some(true)` is a correctness bit that keeps
-`core/src/sandbox/linux.rs` from stripping the network `bwrap
+`core/src/authority/sandbox/linux.rs` from stripping the network `bwrap
 --unshare-net`-style, not a promise about what the network admits. `grant`
 says *whether* a guest may reach the wire at all; egress says *which
 destinations* it may reach once it does.

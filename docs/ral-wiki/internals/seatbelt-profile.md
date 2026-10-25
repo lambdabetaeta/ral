@@ -1,4 +1,5 @@
 ---
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 verified_at_commit: f0b81686
 verified_at_date: 2026-10-17
 anchors: [apply_profile, build_profile, Profile, emit_fs_restricted, emit_exec_rules, Clause, Filter, emit_ancestor_metadata, withheld_services, rendered_ancestors, pinned_dirs, step]
@@ -8,7 +9,7 @@ anchors: [apply_profile, build_profile, Profile, emit_fs_restricted, emit_exec_r
 
 Seatbelt judges **names**. ral judges **objects**
 ([[decisions/260906_object-not-name|object-not-name]]). Every line of
-`core/src/sandbox/macos.rs` that is not a straight rendering of a grant is the
+`core/src/authority/sandbox/macos.rs` that is not a straight rendering of a grant is the
 cost of saying the second in the first:
 
 - **Two spellings per path.** `/tmp` is a firmlink to `/private/tmp`, and the
@@ -121,7 +122,7 @@ there, and nothing beneath it once retargeted. Exclusions are rendered from the 
 
 **There is no write freeze.** An admitted directory a broad write covers stays
 writable, with or without a veto, under any fs; a name veto there is advisory to
-descendants, and `capability::deputy` names such folders
+descendants, and `authority::policy::deputy` names such folders
 ([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]).
 
 **net.** Enforced by absence. The base admits `network-outbound` for nothing;
@@ -154,7 +155,7 @@ admits being variable-length.
   `notify_register_*`), opendirectoryd's libinfo and membership (`getpwuid`,
   `~`, `whoami`, `id`), and the loggers (`os_log`; a denial is survivable, but
   every libSystem process hits it and would drown the denial log
-  `sandbox::diag` reads). Withheld, each with its reason as *data* in
+  `authority::sandbox::diag` reads). Withheld, each with its reason as *data* in
   `withheld_services` so the denial hint can quote it — a comment cannot reach the
   agent holding the EPERM, and a deliberate `no` read as an accident is chased
   instead of worked around: `launchservicesd` (and `lsd.*`) would spawn
@@ -210,7 +211,7 @@ admits being variable-length.
 
 ## Diagnosis
 
-`sandbox::diag` turns a kernel denial into a hint per operand class — a path
+`authority::sandbox::diag` turns a kernel denial into a hint per operand class — a path
 to `read`, `write` or `exec`, a network operand to the `net:` bit, a Mach or IPC
 operand to nothing, since a service is the base's to decide and no grant widens one
 ([[map/core/capabilities|capabilities]]).

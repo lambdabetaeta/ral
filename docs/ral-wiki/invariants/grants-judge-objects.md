@@ -1,3 +1,7 @@
+---
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
+---
+
 # Grants judge objects
 
 **A grant path carries `written`, the author's spelling, and `real`, what its
@@ -7,7 +11,8 @@ objects the kernel touches; `exec` authorises the file a head will execute
 judges too. The spelling is kept for rendering and display, never a route to
 authority.
 
-A `GrantPath<R>` (`core/src/capability/lattice.rs`) is made once, where a layer
+A `GrantPath<R>` (`core/src/authority/policy/lattice.rs`) is resolved policy data,
+made once by grant construction (`core/src/authority/grant/`) where a layer
 is decoded, by the walk ([[internals/path-judgment|path-judgment]]):
 
 - **An allowance** is `GrantPath<Extent>`: the `RealPath` its walk reached, or

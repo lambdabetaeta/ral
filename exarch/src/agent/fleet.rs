@@ -33,7 +33,7 @@ use crate::enquiry::check_name;
 use crate::provider::Bureau;
 use crate::provider::Toolset;
 use crate::provider::roles::Roles;
-use ral_core::capability::GrantStack;
+use ral_core::authority::policy::GrantStack;
 use ral_core::carrier::Severed;
 use ral_core::engine::EngineInstaller;
 use ral_core::io::terminal::TerminalState;

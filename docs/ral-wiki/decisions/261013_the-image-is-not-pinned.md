@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: 646bff0a
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 verified_at_commit: 646bff0a
 anchors: [Program, Head, build_launch, Warrant, Confined, Slot, build, admit_exec, Binds]
 ---
@@ -175,11 +175,11 @@ What the kernel now reports:
 
 ## Where
 
-`core/src/capability/exec.rs` (`Program`), `core/src/path/forms.rs`,
+`core/src/authority/policy/exec.rs` (`Program`), `core/src/path/forms.rs`,
 `core/src/runtime/command/{head,process}.rs` (`Program::file`, `build_launch`),
-`core/src/process/launch.rs` (`Launch::new`), `core/src/sandbox/launch.rs`,
-`core/src/sandbox/warrant.rs` (`Slot`, `Confined`, `Warrant::confine`),
-`core/src/sandbox/carriers.rs`, `core/src/sandbox/linux.rs`,
-`core/src/sandbox/linux/landlock.rs` (`build`, `admit_exec`); tests in
+`core/src/process/launch.rs` (`Launch::new`), `core/src/authority/sandbox/launch.rs`,
+`core/src/authority/sandbox/warrant.rs` (`Slot`, `Confined`, `Warrant::confine`),
+`core/src/authority/sandbox/carriers.rs`, `core/src/authority/sandbox/linux.rs`,
+`core/src/authority/sandbox/linux/landlock.rs` (`build`, `admit_exec`); tests in
 `core/src/runtime/command/process.rs` (`judged_program`),
-`core/src/sandbox/linux.rs` and `ral/tests/script_name.rs`.
+`core/src/authority/sandbox/linux.rs` and `ral/tests/script_name.rs`.

@@ -94,7 +94,7 @@ return [
   exec: [
     allow: [
       `dir `xdg-bin .,
-      `dir `system,    # the platform's tool roots (table: core/src/guard/toolchains.rs)
+      `dir `system,    # the platform's tool roots (table: core/src/authority/grant/toolchains.rs)
       `dir `homebrew,  # the Homebrew prefixes present (same table)
       `dir `absolute /usr/local/bin,
       `dir `absolute /usr/local/sbin,

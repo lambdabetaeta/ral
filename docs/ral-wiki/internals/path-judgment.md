@@ -1,7 +1,8 @@
 ---
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 verified_at_commit: c4ca94d2
 verified_at_date: 2026-10-22
-anchors: [walk, walk_excluded, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, GrantStack::judge, Refused, Extent, from_capabilities, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, pinned_binary]
+anchors: [walk, walk_excluded, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, GrantStack::judge, Refused, Extent, from_capabilities, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline]
 ---
 
 # Path judgment: what ral checks when it touches a file
@@ -13,7 +14,9 @@ handles.** Policy is resolved to objects once, when a layer is decoded, and
 never again ([[decisions/261021_one-path|one-path]], which argues why).
 This page is the in-process half of
 [[internals/capability-enforcement|capability-enforcement]] for the filesystem.
-The code is `core/src/path/` and `core/src/guard/`.
+The code is `core/src/path/` and `core/src/authority/`: `authority::grant`
+resolves authored layers, `authority::policy` judges the resolved model, and
+`authority::guard` enforces each in-process check.
 
 ## The transcript
 
@@ -75,7 +78,7 @@ vouched for it.**
 - **The marker is the voucher.** `Unjudged` is what the walk returns and offers
   its trace and nothing more. `Judged<Reading>` and `Judged<Writing>` are minted
   by `GrantStack::judge` and nothing else. `Installing` is minted by the two
-  `RealPath::open_*_nofollow` against an `InstallToken` only `sandbox/` can
+  `RealPath::open_*_nofollow` against an `InstallToken` only `authority::sandbox` can
   make. Bytes come out of a judged handle only, and go in through a write-judged
   one only; a stat or a link's target needs a judged or installing one. A
   descent keeps its authority (`Installing` to `Installing`; `Judged` to
@@ -111,7 +114,7 @@ reused one over-denies and never admits.
 **A layer is resolved where it is decoded; the fold of a stack is a pure
 function of its layers.**
 
-- **`decode_capability_map` walks each spelling as it freezes it**, runs the
+- **`authority::grant::decode_capability_map` walks each spelling as it freezes it**, runs the
   physical refusals (`xdg` within home, `refuse_the_world`, the toolchain floor)
   on that trace, and keeps it. A `Capabilities` that arrives already decoded is
   resolved by `GrantLayer::from_capabilities`, the same walk. A `GrantLayer`
@@ -208,7 +211,7 @@ holds as stored**
   `/dev/null`, `\\.\NUL`); the same predicate decides whether the act counts as a
   fact ([[design/audit|audit]]). `GrantStack::admits_fs` does not share the
   exemption: it decides membership of a region.
-- **A DOS device name is refused, not excused** (`check_device_name`), before any
+- **A DOS device name is refused, not excused** (`authority::guard::check_device_name`), before any
   region is consulted.
 - **A write onto a pinned binary is refused**: `Refused::Guarded`, for the binary
   the sandbox pinned at boot, judged by inode and *before* the stack is folded,

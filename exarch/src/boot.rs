@@ -5,8 +5,8 @@
 use crate::app::{EXARCH, seed_var};
 use crate::shell_eval;
 use crate::shell_eval::builtins;
+use ral_core::authority::policy::{Capabilities, GrantLayer};
 use ral_core::boot::boot_runtime;
-use ral_core::capability::{Capabilities, GrantLayer};
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum as _;
 use ral_core::io::terminal::TerminalState;
@@ -27,7 +27,7 @@ pub fn face_process_signals(terminal: &TerminalState) {
 /// prelude, `detach` where the double fork exists, the agent library's docs.
 ///
 /// # Errors
-/// A host whose read floor cannot be resolved, which can run nothing.
+/// A host whose system reads cannot be resolved, which can run nothing.
 pub fn engine_runtime(spec: &EngineSpec) -> Result<Runtime, String> {
     let mut runtime = boot_runtime(
         spec.terminal,
@@ -136,7 +136,7 @@ mod testkit {
         let (spec, root) = test_attach();
         let mut shell = Shell::root(
             engine_runtime(&spec)
-                .expect("a test host resolves its floor")
+                .expect("a test host resolves its baseline")
                 .into(),
             ral_core::test_helper::process_cwd(),
         );
@@ -184,7 +184,7 @@ mod tests {
     /// root's attach alone, so a `within [env: …]` cannot redirect it.
     #[test]
     fn a_shell_carries_the_scratch_its_root_names_whatever_the_overlay_says() {
-        use ral_core::guard::freeze::{FreezeCtx, Place};
+        use ral_core::authority::grant::freeze::{FreezeCtx, Place};
         let scratch = std::env::temp_dir().join("a-session-scratch");
         let named = ral_core::path::utf8(&scratch).expect("a test path is Unicode");
         let spec = EngineSpec::new(
@@ -193,7 +193,7 @@ mod tests {
         );
         let mut shell = Shell::root(
             engine_runtime(&spec)
-                .expect("a test host resolves its floor")
+                .expect("a test host resolves its baseline")
                 .into(),
             ral_core::test_helper::process_cwd(),
         );
@@ -220,7 +220,7 @@ mod tests {
         );
         let mut shell = Shell::root(
             engine_runtime(&spec)
-                .expect("a test host resolves its floor")
+                .expect("a test host resolves its baseline")
                 .into(),
             ral_core::test_helper::process_cwd(),
         );

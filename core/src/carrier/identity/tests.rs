@@ -1,8 +1,8 @@
 //! The identity carrier's laws: cancel races, enquiry hosts, durability and
 //! probes, all through one in-process engine.
 use super::*;
+use crate::authority::grant::SpawnGrant;
 use crate::carrier::{Dispatching, dispatch_to_report};
-use crate::guard::SpawnGrant;
 use crate::path::EnginePath;
 use crate::protocol::{Control, Ending, EnquiryError, Report, Root};
 use crate::types::Shell;
@@ -412,7 +412,7 @@ mod probe_tests {
         assert_eq!(read::<u64>(&transport, &Probe::WorkerCount), Ok(0));
         assert_eq!(
             transport.grants(),
-            Ok(crate::capability::GrantStack::root().summary()),
+            Ok(crate::authority::policy::GrantStack::root().summary()),
             "a fresh shell shows the ambient root as nothing"
         );
     }
@@ -422,7 +422,7 @@ mod probe_tests {
     #[cfg(feature = "test-util")]
     #[test]
     fn the_grant_depth_probe_counts_the_root_layer_and_every_frame() {
-        use crate::capability::GrantLayer;
+        use crate::authority::policy::GrantLayer;
         use crate::carrier::read;
         use crate::data::datum::Datum;
         use crate::test_access::answer_probe;
@@ -441,7 +441,7 @@ mod probe_tests {
         "granted",
         |_| crate::HostSurface::default().runtime(crate::io::terminal::TerminalState::default()),
         |_, shell| {
-            use crate::capability::{Capabilities, FsPolicy, Net};
+            use crate::authority::policy::{Capabilities, FsPolicy, Net};
             use crate::path::FrozenPath;
             use crate::test_helper::Tree;
             shell
@@ -464,7 +464,7 @@ mod probe_tests {
     /// `Probe::Grants` answers what the session's stack shows, not the stack.
     #[test]
     fn grants_answer_a_summary_of_the_sessions_stack() {
-        use crate::capability::Net;
+        use crate::authority::policy::Net;
         let transport = boot(&GRANTED);
         let shown = transport.grants().expect("the probe answers");
         let [layer] = shown.layers() else {

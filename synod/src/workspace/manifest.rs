@@ -12,7 +12,7 @@
 
 use crate::grant::spelled;
 use crate::site::{Silent, site};
-use ral_core::capability::Ungoverned;
+use ral_core::authority::policy::Ungoverned;
 use ral_core::path::tree::walk::{Found, Unentered, Walk, WalkEntry};
 use ral_core::path::{
     Kind, LeafMode, LexicalPath, Stat, relative_key, shown, spelled_parent, utf8, walk,

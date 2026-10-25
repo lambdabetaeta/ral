@@ -350,7 +350,7 @@ mod tests {
     /// refused the plugin is not found.
     #[test]
     fn the_candidate_search_passes_over_what_the_grant_refuses() {
-        use ral_core::capability::{Capabilities, FsPolicy};
+        use ral_core::authority::policy::{Capabilities, FsPolicy};
         use ral_core::path::{FrozenPath, utf8};
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();

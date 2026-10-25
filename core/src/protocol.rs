@@ -271,7 +271,7 @@ pub struct Run {
     /// layer of it: the stack is the meet, and folding it into one frame
     /// would lose what a layer says only about a resolved name.
     /// `GrantStack::root()` is ⊤, the identity on authority.
-    pub caps: crate::capability::GrantStack,
+    pub caps: crate::authority::policy::GrantStack,
     /// `Some(d)` arms a deadline cancel on the run's foreground scope `d`
     /// after it starts; `None` leaves the run uncapped.
     pub wall: Option<std::time::Duration>,
@@ -312,7 +312,7 @@ impl Run {
         Self {
             program: program.into(),
             origin,
-            caps: crate::capability::GrantStack::root(),
+            caps: crate::authority::policy::GrantStack::root(),
             wall: None,
             cleanup_grace: std::time::Duration::from_secs(5),
             worker_cap: None,

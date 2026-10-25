@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e028f5a3
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 generated_at_date: 2026-10-13
 covers_paths: [core/src/lib.rs]
 ---
@@ -107,7 +107,9 @@ Source text flows down a fixed ladder; each rung is a subsystem page.
 ## Authority, plumbing, surface
 
 - [[map/core/capabilities|capabilities]] — the dynamic capability stack and the OS process
-  sandbox (`core/src/capability/`, `core/src/sandbox/`).
+  sandbox (`core/src/authority/`: resolved policy and judgments in `policy/`,
+  authored resolution and host system-read discovery in `grant/`, enforcement in `guard/`
+  and `sandbox/`).
 - [[map/core/io-process|io-process]] — byte streams, terminal, signals, process
   groups (`core/src/io/`, `core/src/process/`).
 - [[map/core/builtins|builtins]] — Rust-implemented commands and bundled coreutils/grep

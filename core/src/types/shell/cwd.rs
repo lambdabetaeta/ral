@@ -76,7 +76,7 @@ impl Shell {
     /// Absolute path of the executable the shell would run for `name`, via the
     /// effective `PATH` and cwd; `None` if there is none.
     ///
-    /// A filesystem question only — admission is [`GrantStack::admits`](crate::capability::GrantStack::admits)
+    /// A filesystem question only — admission is [`GrantStack::admits`](crate::authority::policy::GrantStack::admits)
     /// (head alone) and [`Self::check_exec`] (full call).  `which` pairs
     /// the two to tell denied-but-installed from absent.
     pub(crate) fn locate_command(&self, name: &str) -> Option<PathBuf> {

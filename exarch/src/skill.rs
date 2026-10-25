@@ -11,8 +11,8 @@
 use gray_matter::Matter;
 use gray_matter::engine::YAML;
 use ral_core::Shell;
-use ral_core::capability::LocateError;
-use ral_core::capability::{Floor, GrantStack};
+use ral_core::authority::policy::LocateError;
+use ral_core::authority::policy::{Baseline, GrantStack};
 use ral_core::path::{
     CwdPath, Dir, Judged, Kind, LeafMode, LexicalPath, Located, Reading, Resolver,
 };
@@ -38,7 +38,7 @@ pub(crate) fn skill_roots(cwd: &Path, config_dir: Option<&Path>) -> Vec<PathBuf>
 }
 
 /// Who judges a skill read: a shell at call time, where a refusal is the
-/// trail's, and at boot a stack and the floor of the runtime the boot built.
+/// trail's, and at boot a stack and the baseline of the runtime the boot built.
 pub(crate) trait Judge {
     /// `path` as the spelling the judge walks.
     fn anchor(&self, path: &Path) -> LexicalPath;
@@ -71,11 +71,11 @@ impl Judge for Shell {
 }
 
 /// The boot's reader: no shell exists yet, so the stack this agent will run
-/// under judges every read of the boot, with the floor of the runtime the
+/// under judges every read of the boot, with the baseline of the runtime the
 /// boot built, and the two judges agree by construction.
 pub(crate) struct Boot<'a> {
     grants: &'a GrantStack,
-    floor: &'a Floor,
+    baseline: &'a Baseline,
     resolver: Resolver<'a>,
 }
 
@@ -85,13 +85,13 @@ impl<'a> Boot<'a> {
     /// resolver's home is never consulted.
     pub(crate) fn new(
         grants: &'a GrantStack,
-        floor: &'a Floor,
+        baseline: &'a Baseline,
         env: &'a EnvVars,
         cwd: &'a CwdPath,
     ) -> Self {
         Self {
             grants,
-            floor,
+            baseline,
             resolver: Resolver::at(env, cwd),
         }
     }
@@ -103,7 +103,7 @@ impl<'a> Boot<'a> {
     pub(crate) fn read(&self, path: &Path) -> Result<String, LocateError> {
         let held = self
             .grants
-            .locate::<Reading>(self.floor, &self.resolver.anchor(path))?;
+            .locate::<Reading>(self.baseline, &self.resolver.anchor(path))?;
         let mut text = String::new();
         (held.read().map_err(LocateError::Io)?)
             .read_to_string(&mut text)
@@ -118,12 +118,12 @@ impl Judge for Boot<'_> {
     }
 
     fn file(&mut self, rp: &LexicalPath) -> Option<Located<Judged<Reading>>> {
-        let held = self.grants.locate::<Reading>(self.floor, rp);
+        let held = self.grants.locate::<Reading>(self.baseline, rp);
         held.ok().filter(is_file)
     }
 
     fn dir(&mut self, rp: &LexicalPath) -> Option<Dir<Judged<Reading>>> {
-        self.grants.locate_dir::<Reading>(self.floor, rp).ok()
+        self.grants.locate_dir::<Reading>(self.baseline, rp).ok()
     }
 }
 

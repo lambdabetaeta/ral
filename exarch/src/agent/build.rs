@@ -55,7 +55,7 @@ pub(crate) struct Build {
     /// The tab-bar identity, held before construction; the agent's name is
     /// the claim's.
     pub(crate) claim: Claim,
-    pub(crate) caps: ral_core::capability::GrantStack,
+    pub(crate) caps: ral_core::authority::policy::GrantStack,
     /// Already through its identity ceremony: `assemble` seats no engine of
     /// its own, so every construction site states which seat kind it builds.
     pub(crate) seat: Seat,
@@ -98,7 +98,7 @@ impl Trunk {
 /// Everything a run's roots need beyond the seat choice and the provider.
 pub struct RootConfig {
     pub system: String,
-    pub caps: ral_core::capability::GrantStack,
+    pub caps: ral_core::authority::policy::GrantStack,
     /// The run's directory — the one its `sessions/` hangs under, and the
     /// one [`Avatar::resume`] reads back.
     pub run_dir: OwnDir,
@@ -634,7 +634,7 @@ impl Avatar {
         let run_dir = scratch.test_sibling("run")?;
         let config = RootConfig {
             system,
-            caps: ral_core::capability::GrantStack::root(),
+            caps: ral_core::authority::policy::GrantStack::root(),
             run_dir,
             trunk: Trunk::Headless,
             tools: Toolset::offered(false),

@@ -1344,7 +1344,7 @@ mod tests {
                                 ral_core::io::terminal::TerminalState::default(),
                                 ral_core::test_helper::process_cwd(),
                             )
-                            .expect("a test host resolves its floor")
+                            .expect("a test host resolves its baseline")
                             .bequeath(SpawnGrant::Inherit),
                     )
                     .expect("a bequest seals"),
@@ -1521,8 +1521,9 @@ mod tests {
     #[test]
     fn every_grant_base_resolves_to_a_bake_in_base() {
         let cwd = ral_core::path::CwdPath::new(std::env::current_dir().unwrap()).unwrap();
-        let ctx = ral_core::guard::freeze::FreezeCtx::at(ral_core::types::EnvVars::new(), cwd)
-            .with_scratch(Some(std::env::temp_dir().to_string_lossy()));
+        let ctx =
+            ral_core::authority::grant::freeze::FreezeCtx::at(ral_core::types::EnvVars::new(), cwd)
+                .with_scratch(Some(std::env::temp_dir().to_string_lossy()));
         for label in crate::policy::SPAWN_BASES {
             crate::policy::base_layer(label, &ctx)
                 .unwrap_or_else(|e| panic!("grant `{label} must name a bake-in base: {e}"));

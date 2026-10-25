@@ -1,3 +1,7 @@
+---
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
+---
+
 # Single binary
 
 **The ral language runtime ships as a single executable.** The lexer,
@@ -8,7 +12,7 @@ behind a hidden sentinel flag, never a sibling helper — the flag is the first
 argument, `ral_core::Role` spells each flag once, `ral_core::classify` is the
 one place that reads it, and `ral_core::invocation::serve` the one place that
 serves it; a re-exec is launched from a `Role`, never a string
-(`sandbox::reexec::launch`). Every role ships; none exists for tests:
+(`authority::sandbox::reexec::launch`). Every role ships; none exists for tests:
 
 - a multi-stage pipeline pins its process group's pgid open for the
   pipeline's whole life with a lone anchor, `--ral-pipeline-anchor`

@@ -10,8 +10,8 @@
 
 use super::Shell;
 use super::construct::{Bequest, Image, Terms};
+use crate::authority::grant::SpawnGrant;
 use crate::data::Opaque;
-use crate::guard::SpawnGrant;
 use crate::types::handler::HandlerFrame;
 use crate::types::{Binding, Closure, Env, List, Map, Value};
 use std::convert::Infallible;

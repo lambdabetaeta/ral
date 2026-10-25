@@ -8,7 +8,7 @@
 //! names nothing runnable has no program: its [`Missing`] is the 127 or 126
 //! `super::vet` reports, read off this walk rather than re-probed.
 
-use crate::capability::Program;
+use crate::authority::policy::Program;
 use crate::ir::CommandName;
 use crate::path::{LeafMode, LexicalPath, PathSearch, is_executable_file, walk};
 use crate::process::{SpawnFailure, Unrunnable};
@@ -176,14 +176,16 @@ fn launch_path(target: &Path, ctx: &Context) -> PathBuf {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use crate::capability::{Capabilities, Evidence, ExecGrant, ExecKey, Floor, GrantStack};
+    use crate::authority::policy::{
+        Baseline, Capabilities, Evidence, ExecGrant, ExecKey, GrantStack,
+    };
     use crate::path::FrozenPath;
     use std::path::Path;
 
     /// Head admission as dispatch asks it: a head with no program passes.
     fn admits_head(ctx: &Context, head: &Head) -> bool {
         (head.program.as_ref().ok())
-            .is_none_or(|program| ctx.grants.admits(&Floor::default(), program))
+            .is_none_or(|program| ctx.grants.admits(&Baseline::default(), program))
     }
 
     #[test]

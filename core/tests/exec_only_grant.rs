@@ -9,7 +9,7 @@
 //! the shape that needs it most.  It was also the shape that skipped it: the
 //! trigger named macOS alone and stayed that way when Linux's Landlock ruleset
 //! landed, so adding an unrelated `fs:` key to the same grant turned kernel
-//! enforcement back on.  The trigger now reads `sandbox::EXEC_ENFORCED`, one
+//! enforcement back on.  The trigger now reads `authority::sandbox::EXEC_ENFORCED`, one
 //! fact stated beside the backends, so this test is the law and not a platform
 //! list: both Unix backends render exec, so both must project.
 //!
@@ -21,7 +21,7 @@
 
 mod common;
 
-use ral_core::capability::{Capabilities, Evidence, ExecKey};
+use ral_core::authority::policy::{Capabilities, Evidence, ExecKey};
 use ral_core::path::FrozenPath;
 use ral_core::test_access::exec_projection_restricts;
 use ral_core::test_helper::layer;

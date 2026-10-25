@@ -1,6 +1,6 @@
 # The Linux box `just linux-ci` runs in — the only place a macOS host can
 # compile or run `#[cfg(target_os = "linux")]` code at all, since
-# core/src/sandbox.rs gates `mod linux` out of a native build.
+# core/src/authority/sandbox.rs gates `mod linux` out of a native build.
 #
 # Deliberately lean: the cargo toolchain, bubblewrap, and `just` — which is
 # here because scripts/ci.sh runs its steps as justfile recipes, so the image

@@ -10,7 +10,7 @@
 //! build script cannot depend on the crate it is building — so a test
 //! binary takes [`BakedPrelude::runtime`] instead.
 
-use crate::capability::Floor;
+use crate::authority::policy::Baseline;
 use crate::evaluator::{Mode, run_phrases};
 use crate::io::terminal::TerminalState;
 use crate::ir::{CompKind, Phrase, Toplevel};
@@ -68,17 +68,17 @@ impl BakedPrelude {
     /// ([`crate::host::cwd`]), which a front end refuses to boot without
     /// before it seats a prelude.
     pub fn seat(&self, runtime: &mut Runtime) {
-        let map = self.map.get_or_init(|| self.evaluate(runtime.floor()));
+        let map = self.map.get_or_init(|| self.evaluate(runtime.baseline()));
         Arc::make_mut(&mut runtime.sig).install_prelude(Arc::clone(map));
     }
 
-    /// Run the prelude on a core-only shell over `floor`, the floor of the
+    /// Run the prelude on a core-only shell over `baseline`, the baseline of the
     /// runtime it is being seated in, which exists before the prelude runs.
-    fn evaluate(&self, floor: &Floor) -> Arc<PreludeMap> {
+    fn evaluate(&self, baseline: &Baseline) -> Arc<PreludeMap> {
         let cwd =
             crate::host::cwd().expect("the prelude runs in a process with a working directory");
         let runtime = HostSurface::default()
-            .install(Runtime::bare_on(floor.clone(), TerminalState::default()));
+            .install(Runtime::bare_on(baseline.clone(), TerminalState::default()));
         let mut shell = Shell::root(runtime.into(), cwd);
         let ran = run_phrases(
             &self.comp().phrases,
@@ -248,7 +248,7 @@ impl HostSurface {
     /// Core plus this surface, no prelude: the process half of a session.
     ///
     /// # Errors
-    /// [`Runtime::bare`]'s: the host's floor cannot be resolved.
+    /// [`Runtime::bare`]'s: the host's baseline cannot be resolved.
     ///
     /// # Panics
     /// Panics if a name here collides with a core builtin or repeats.
@@ -443,7 +443,7 @@ mod tests {
     #[test]
     fn two_bakes_seat_two_preludes() {
         let (first, second) = (baked("let only_first = 1"), baked("let only_second = 2"));
-        let bare = || Runtime::bare(TerminalState::default()).expect("a host floor");
+        let bare = || Runtime::bare(TerminalState::default()).expect("a host baseline");
         let (mut a, mut b) = (bare(), bare());
         first.seat(&mut a);
         second.seat(&mut b);
@@ -458,7 +458,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "the prelude failed to run: exit 3")]
     fn a_prelude_that_fails_to_run_panics() {
-        let mut bare = Runtime::bare(TerminalState::default()).expect("a host floor");
+        let mut bare = Runtime::bare(TerminalState::default()).expect("a host baseline");
         baked("exit 3").seat(&mut bare);
     }
 

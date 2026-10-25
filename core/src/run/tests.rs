@@ -1,5 +1,5 @@
 use super::*;
-use crate::capability::GrantStack;
+use crate::authority::policy::GrantStack;
 use crate::source::SourceOrigin;
 use std::sync::{Arc, Mutex};
 
@@ -709,7 +709,7 @@ fn panicking_shell() -> Shell {
         crate::io::terminal::TerminalState::default(),
         crate::test_helper::process_cwd(),
     )
-    .expect("a test host resolves its floor")
+    .expect("a test host resolves its baseline")
 }
 
 /// Rollback is to the run's entry, not to session birth: the panicking run's
@@ -845,7 +845,7 @@ fn a_result_that_is_not_data_says_what_it_holds() {
 /// A shell whose `_narrow` pushes an offline session ceiling and whose
 /// `_narrowed` reports whether any ceiling holds.
 fn narrowing_shell() -> Shell {
-    use crate::capability::Capabilities;
+    use crate::authority::policy::Capabilities;
     use crate::types::{BuiltinBody, BuiltinEntry};
     let entries: Arc<[BuiltinEntry]> = vec![
         BuiltinEntry::new(
@@ -854,7 +854,7 @@ fn narrowing_shell() -> Shell {
             "",
             BuiltinBody::Captured(Arc::new(|_, _, s: &mut Shell| {
                 s.push_session_capabilities(crate::test_helper::layer(Capabilities {
-                    net: Some(crate::capability::Net::Offline),
+                    net: Some(crate::authority::policy::Net::Offline),
                     ..Capabilities::default()
                 }));
                 Ok(Value::Bool(true))
@@ -878,7 +878,7 @@ fn narrowing_shell() -> Shell {
         crate::io::terminal::TerminalState::default(),
         crate::test_helper::process_cwd(),
     )
-    .expect("a test host resolves its floor")
+    .expect("a test host resolves its baseline")
 }
 
 /// Run `narrow`, then assert its session ceiling alone outlived it and
@@ -893,7 +893,7 @@ fn assert_ceiling_survives(mut shell: Shell, narrow: Run) {
     );
     assert_eq!(
         shell.context.grants.net().collect::<Vec<_>>(),
-        [crate::capability::Net::Offline]
+        [crate::authority::policy::Net::Offline]
     );
     let RunReport::Ran {
         ending: Ending::Settled { value, .. },
@@ -913,10 +913,12 @@ fn assert_ceiling_survives(mut shell: Shell, narrow: Run) {
 #[test]
 fn a_session_ceiling_pushed_in_a_run_outlives_it() {
     let mut caps = GrantStack::root();
-    caps.push(crate::test_helper::layer(crate::capability::Capabilities {
-        shell: Some([crate::capability::ShellVerb::Chdir].into()),
-        ..crate::capability::Capabilities::default()
-    }));
+    caps.push(crate::test_helper::layer(
+        crate::authority::policy::Capabilities {
+            shell: Some([crate::authority::policy::ShellVerb::Chdir].into()),
+            ..crate::authority::policy::Capabilities::default()
+        },
+    ));
     let mut narrow = Run::captured("_narrow", test_origin());
     narrow.caps = caps;
     assert_ceiling_survives(narrowing_shell(), narrow);
@@ -927,7 +929,7 @@ fn a_session_ceiling_pushed_in_a_run_outlives_it() {
 #[cfg(unix)]
 #[test]
 fn a_framed_run_holds_its_exclusions_again_before_the_body_runs() {
-    use crate::capability::{Capabilities, FsPolicy};
+    use crate::authority::policy::{Capabilities, FsPolicy};
     let tmp = tempfile::tempdir().unwrap();
     let secret = crate::test_helper::real(tmp.path())
         .as_path()

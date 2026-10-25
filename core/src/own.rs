@@ -29,7 +29,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use strum::IntoStaticStr;
 
-use crate::capability::Ungoverned;
+use crate::authority::policy::Ungoverned;
 use crate::host;
 use crate::path::walk::{Access, dangling, walk_dir_made};
 use crate::path::{

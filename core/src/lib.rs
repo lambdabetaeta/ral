@@ -14,9 +14,9 @@
     )
 )]
 
+pub mod authority;
 pub mod boot;
 pub mod builtins;
-pub mod capability;
 pub mod carrier;
 pub mod compile;
 pub mod data;
@@ -26,7 +26,6 @@ pub mod engine;
 pub mod evaluator;
 pub mod fact;
 pub(crate) mod frame;
-pub mod guard;
 pub mod host;
 pub mod invocation;
 pub mod io;
@@ -44,7 +43,6 @@ pub mod protocol;
 mod role;
 pub mod run;
 pub(crate) mod runtime;
-pub mod sandbox;
 pub mod seed;
 mod site;
 pub mod source;
@@ -66,8 +64,8 @@ pub mod uutils;
 
 // The host surface. A host imports a run from here; it does not reach the
 // evaluator or syntax layers through the crate root.
+pub use authority::grant::SpawnGrant;
 pub use boot::HostSurface;
-pub use guard::SpawnGrant;
 pub use io::{Captured, RunIo, RunStdin};
 pub use process::RequestedTerminalAccess;
 pub use role::{Invocation, Role, classify};

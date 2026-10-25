@@ -65,10 +65,10 @@ use super::{LexicalPath, PathRules, shown};
 use crate::label;
 use crate::site::site;
 // Inverted edge, deliberate: `Verdict`'s field is private to its module, which `pub(in ..)` cannot name from a sibling.
-use crate::capability::{FsOp, Verdict};
+use crate::authority::policy::{FsOp, Verdict};
 // Inverted edge, deliberate: the twin of `Verdict`, its field private to `sandbox.rs`.
 #[cfg(any(target_os = "linux", windows))]
-use crate::sandbox::InstallToken;
+use crate::authority::sandbox::InstallToken;
 
 #[cfg(unix)]
 mod unix;
@@ -2792,7 +2792,7 @@ pub fn exists(path: &str) -> bool {
 /// seen through.
 ///
 /// Exec grants spell their two kinds of path key apart by a trailing slash,
-/// and `guard::decode` checks that spelling against disk.
+/// and `authority::grant::decode` checks that spelling against disk.
 pub fn is_dir(path: &str) -> bool {
     kind_of(path) == Some(Kind::Dir)
 }

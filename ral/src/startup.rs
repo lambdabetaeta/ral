@@ -172,8 +172,8 @@ pub(crate) mod engine {
     /// rather than silently admitted.
     fn no_seeded_children(
         _grant: &str,
-        _ctx: &ral_core::guard::freeze::FreezeCtx,
-    ) -> Result<ral_core::capability::GrantLayer, String> {
+        _ctx: &ral_core::authority::grant::freeze::FreezeCtx,
+    ) -> Result<ral_core::authority::policy::GrantLayer, String> {
         Err(
             "the ral shell's engine spawns no child engines, so it has no grant policy to hold \
              one to: was this meant to run under exarch?"

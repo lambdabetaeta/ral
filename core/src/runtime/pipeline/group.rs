@@ -134,7 +134,7 @@ impl AnchorProcess {
         let _ = tx;
         let (reader, release) =
             crate::process::cloexec_pipe().map_err(|e| Error::io("pipeline anchor", &e))?;
-        let mut cmd = crate::sandbox::reexec::launch(crate::Role::Anchor)
+        let mut cmd = crate::authority::sandbox::reexec::launch(crate::Role::Anchor)
             .map_err(|e| Error::io("pipeline anchor", &e))?;
         cmd.stdin(crate::process::StdioSpec::from_pipe_reader(reader));
         cmd.stderr(crate::process::StdioSpec::null());

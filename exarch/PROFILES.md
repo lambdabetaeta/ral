@@ -286,7 +286,7 @@ reports only grants the current platform can back.
 Besides `` `dir `system ``, `` `dir `NAME `` names where a package manager runs
 programs from: `rustup`, `cargo`, `go`, `pyenv`, `nvm`, `uv`, `poetry`, `conda`,
 `sdkman`, `homebrew`, `scoop` and many more. A refusal of an unknown name lists
-them all, and the table behind them is `core/src/guard/toolchains.rs`. Each
+them all, and the table behind them is `core/src/authority/grant/toolchains.rs`. Each
 manager is a few locations, each with environment-variable overrides and
 defaults:
 

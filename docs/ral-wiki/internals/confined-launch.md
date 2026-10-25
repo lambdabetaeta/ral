@@ -1,4 +1,5 @@
 ---
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 verified_at_commit: 646bff0a
 verified_at_date: 2026-10-13
 anchors: [sandboxed_command, build_launch, serve_warrant, Warrant, Slot, Handoff, Landlocked, Envelope, Refusal, spawn_error, projection_enforceable, SessionSandbox, ensure_frozen_grant, ensure_unreachable, fs_capability_name]
@@ -10,7 +11,7 @@ anchors: [sandboxed_command, build_launch, serve_warrant, Warrant, Slot, Handoff
 nothing in that path can run a program unconfined.** When `build_launch`
 (`runtime/command/process.rs`) spawns an admitted external or bundled child
 under a restrictive projection, it calls `sandboxed_command`
-(`sandbox/launch.rs`), which confines that one child. Why it is per command is
+(`authority/sandbox/launch.rs`), which confines that one child. Why it is per command is
 [[internals/capability-enforcement|capability-enforcement]].
 
 ## One confinement point per platform
@@ -25,7 +26,7 @@ under a restrictive projection, it calls `sandboxed_command`
   alone, then `execve`s exactly that file.
 - **Windows** attaches the projection's AppContainer LowBox
   `SECURITY_CAPABILITIES` to the child's own `CreateProcessW`
-  (`windows::session::confine`). The parent's spawn is the confinement point;
+  (`authority::sandbox::windows::session::confine`). The parent's spawn is the confinement point;
   there is no re-exec.
 
 ## The child is handed its confinement on a descriptor
@@ -56,7 +57,7 @@ names only a descriptor.** The confinement and the program arrive in a
   the warrant's in argv. Once confined, the child closes everything from 98
   up, so the program inherits none, and a `Kept` launch's read of
   `--info-fd` ends: the payload's group exists.
-- **`serve_warrant` runs before `sandbox::boot`.** The trampoline pins and
+- **`serve_warrant` runs before `authority::sandbox::boot`.** The trampoline pins and
   opens nothing before it is confined.
 - **Exit codes are honest.** A failure before the program starts exits 126, a
   missing program 127. An `execve` refusal takes its code from the same
@@ -82,7 +83,7 @@ the one thing the child enters: `Seatbelt(profile)` on macOS; on Linux
   enters it. A promised ruleset that never arrived, or a descriptor that is not
   one, refuses the launch.
 - **A sandboxed launch needs ral's own pin** (`reexec::own`, fixed at
-  `sandbox::boot`, so a swap on disk cannot subvert it). Without the pin, the
+  `authority::sandbox::boot`, so a swap on disk cannot subvert it). Without the pin, the
   launch is refused.
   - On Linux bwrap execs that pin by descriptor. The trampoline is the boot
     inode whatever holds its name now, and nothing re-stats the name. A build
@@ -143,7 +144,7 @@ into the child's token exactly the capability SIDs of this launch's grants.
   naming a capability, so nothing can take back what a grant's ACE admits.
   `session::confine` carves an exclusion out of the allowances around it,
   granting their existing entries less the excluded ones and each directory on
-  the way only its own listing by an ACE nothing inherits (`sandbox::carve`),
+  the way only its own listing by an ACE nothing inherits (`authority::sandbox::carve`),
   and refuses one on or around an allowance, the program image among them,
   before anything is stamped; for every exclusion it then asks `AuthzAccessCheck`, with the child's own package and capability SIDs,
   whether the token could open anything beneath it, a file or a directory held
@@ -166,7 +167,7 @@ into the child's token exactly the capability SIDs of this launch's grants.
 ## When confinement is unavailable
 
 **A launch that cannot be confined is refused, and the refusal says the sandbox
-is why** (`sandbox::Refusal::Unavailable`).
+is why** (`authority::sandbox::Refusal::Unavailable`).
 
 - **Some causes show only at spawn.** On Linux the envelope is bwrap, a host
   package, and a host without it fails at the spawn with `ENOENT`.

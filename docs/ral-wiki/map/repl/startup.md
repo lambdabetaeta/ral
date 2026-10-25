@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 958d7af7
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 generated_at_date: 2026-10-06
 covers_paths: [ral/src/main.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/boot_builtin.rs, ral/src/platform.rs, ral/build.rs]
 ---
@@ -53,9 +53,9 @@ dispositions. Then, per role:
   one multicall re-exec a pipeline uses: a stage itself runs on a thread of the
   parent process, but a multi-stage pipeline needs one process to hold its pgid
   open for its whole life). It spawns nothing, so it is not pinned.
-- **Every other role** runs `sandbox::boot` first, which pins the binary (and, on
+- **Every other role** runs `authority::sandbox::boot` first, which pins the binary (and, on
   Linux, bwrap) and, on Windows, sweeps what a crashed prior session left
-  registered; the bundled tool only `sandbox::pin`s, as a re-exec child that
+  registered; the bundled tool only `authority::sandbox::pin`s, as a re-exec child that
   reaches no ledger.
   - **Engine** (Unix) — then hands the process to
     `ral_core::engine::run_engine(installers)`, pinned exactly as the shell

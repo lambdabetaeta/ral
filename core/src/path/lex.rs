@@ -24,7 +24,7 @@ use super::{CwdPath, EntryName, LexicalPath, NotAnEntryName, PathRules};
 /// [`HeadKind::Malformed`]); every path opening with two separators, of
 /// either spelling, is UNC or device to Windows, so device and malformed
 /// heads count as absolute there too.  Whether such a head is eligible as a
-/// grant is a separate question, which `guard::freeze` asks first.
+/// grant is a separate question, which `authority::grant::freeze` asks first.
 ///
 /// [`anchor`], through [`is_absolute`], and [`join_under`], rely on a
 /// [`HeadKind::Device`] or [`HeadKind::Malformed`] path counting as absolute
@@ -473,7 +473,7 @@ pub(crate) enum GrantRefusal {
     NtObject,
     Driveless,
     DriveRelative,
-    /// Relative under both platforms' rules, or (in `guard::freeze::host_absolute`) a held
+    /// Relative under both platforms' rules, or (in `authority::grant::freeze::host_absolute`) a held
     /// path whose head is live only on the other platform.
     ForeignOrRelative,
 }

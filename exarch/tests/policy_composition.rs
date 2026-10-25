@@ -11,7 +11,7 @@
 
 use exarch::app::{EXARCH, SYNOD, Scratch};
 use exarch::policy::{Invocation, for_invocation};
-use ral_core::capability::{GrantLayer, GrantStack};
+use ral_core::authority::policy::{GrantLayer, GrantStack};
 use ral_core::path::XdgKind;
 use ral_core::path::{LeafMode, Reading, Resolver, Writing, locate};
 use ral_core::test_access::check_file;

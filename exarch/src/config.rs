@@ -19,7 +19,7 @@
 use crate::provider::identity::{adapter_for_protocol, key_var, protocol_for_adapter, protocols};
 use crate::provider::{Auth, Service, ServiceName, built_in};
 use ral_core::Shell;
-use ral_core::capability::{Capabilities, GrantLayer};
+use ral_core::authority::policy::{Capabilities, GrantLayer};
 use ral_core::own::{OwnError, UserFile};
 use ral_core::path::XdgKind;
 use ral_core::source::{SourceFile, SourceOrigin};

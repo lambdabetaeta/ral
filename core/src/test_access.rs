@@ -15,10 +15,13 @@
 //! `pub(crate)` and `dead_code` still names one whose last in-crate caller
 //! went away.
 
-use crate::capability::FsAllow;
-use crate::capability::Program;
+use crate::authority::policy::FsAllow;
+use crate::authority::policy::Program;
 #[cfg(unix)]
-use crate::capability::{ExecAllow, ExecDeny};
+use crate::authority::policy::{ExecAllow, ExecDeny};
+use crate::authority::sandbox::FsProjection;
+#[cfg(unix)]
+use crate::authority::sandbox::{ExecProjection, SandboxProjection};
 use crate::carrier::{IdentityTransport, ProbeError, Transport};
 use crate::data::FOValue;
 use crate::ir::{CaseArm, Comp, CompKind, Exec, Val, ValListElem};
@@ -27,9 +30,6 @@ use crate::path::Walked;
 use crate::protocol::Frame;
 use crate::protocol::channel::{WireChannel, WireStream};
 use crate::protocol::probe::Probe;
-use crate::sandbox::FsProjection;
-#[cfg(unix)]
-use crate::sandbox::{ExecProjection, SandboxProjection};
 use crate::ty::{Scheme, Ty};
 use crate::typecheck::Unifier;
 use crate::types::{BuiltinEntry, Settled, Shell};
@@ -72,7 +72,7 @@ pub fn scheme_ty(scheme: &Scheme) -> &Ty {
     &scheme.ty
 }
 
-/// The real paths the fs projection reads, floor, run places and support
+/// The real paths the fs projection reads, baseline, run places and support
 /// among them; `None` at the unrestricted top.
 pub fn fs_read_paths<A, X>(projection: &FsProjection<A, X>) -> Option<Vec<String>>
 where
@@ -177,7 +177,7 @@ fn file(real: &str) -> Program {
 
 /// Whether the live stack admits running the file whose real path is `real`.
 pub fn admits_file(shell: &Shell, real: &str) -> bool {
-    shell.context.grants.admits(shell.floor(), &file(real))
+    shell.context.grants.admits(shell.baseline(), &file(real))
 }
 
 /// `Shell::check_exec` on the file whose real path is `real`, with `args`.

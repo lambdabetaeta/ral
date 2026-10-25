@@ -4,14 +4,14 @@
 //! left, pinned, to its caller; each role's body stays with the code it serves.
 //!
 //! The order is the sandbox's.  A confined re-exec is served by
-//! [`sandbox::serve_warrant`] alone, pinning and opening nothing before it is
+//! [`authority::sandbox::serve_warrant`] alone, pinning and opening nothing before it is
 //! confined; the anchor spawns nothing, so pins nothing.  A
 //! bundled tool pins, as a re-exec child that reaches no session ledger.  Every
 //! other role boots first, the engine included: its grant-confined launches
 //! need the pinned envelope as much as the shell's.
 
 use crate::site::{Silent, site};
-use crate::{Invocation, Role, classify, io::terminal, sandbox, uutils};
+use crate::{Invocation, Role, authority, classify, io::terminal, uutils};
 use std::ffi::OsString;
 
 /// Serve `role`.  `Some(code)` is a served role's exit; `None` leaves the
@@ -25,19 +25,19 @@ pub fn serve(
     installers: &'static [crate::engine::EngineInstaller],
 ) -> Option<u8> {
     match *role {
-        Invocation::Warrant(args) => Some(sandbox::serve_warrant(args)),
+        Invocation::Warrant(args) => Some(authority::sandbox::serve_warrant(args)),
         Invocation::PipelineAnchor => Some(crate::runtime::pipeline::anchor::serve()),
         #[cfg(unix)]
         Invocation::Engine => {
-            sandbox::boot();
+            authority::sandbox::boot();
             crate::carrier::run_engine(installers)
         }
         Invocation::BundledTool(args) => {
-            sandbox::pin();
+            authority::sandbox::pin();
             Some(serve_bundled_tool(args))
         }
         Invocation::Shell => {
-            sandbox::boot();
+            authority::sandbox::boot();
             None
         }
     }

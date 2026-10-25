@@ -2,8 +2,8 @@
 //! loader dressed in exarch's error format, and the cwd-relative path helper
 //! `super::for_invocation` calls around it.
 
-use ral_core::capability::{Fragment, GrantLayer};
-use ral_core::guard::freeze::FreezeCtx;
+use ral_core::authority::grant::freeze::FreezeCtx;
+use ral_core::authority::policy::{Fragment, GrantLayer};
 use ral_core::load::profile::NOT_FOUND;
 use ral_core::types::{Break, Escape, Mooring, Shell};
 use std::path::{Path, PathBuf};

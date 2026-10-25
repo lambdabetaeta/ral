@@ -127,7 +127,7 @@ thread_local! {
     /// Thread-local and lock-free, because a run's evaluation is
     /// single-threaded on the calling thread.  It hangs off no `Shell` and no
     /// `Context` on purpose: the hottest callers, `runtime::command::head`'s
-    /// resolution and `capability::exec`'s compile, hold no `Shell`.
+    /// resolution and `authority::policy::exec`'s compile, hold no `Shell`.
     ///
     /// A newly installed or newly deleted executable is therefore invisible
     /// for at most the remainder of the current top-level run — one submitted
@@ -208,7 +208,7 @@ pub(crate) fn names_a_path_for(name: &str, rules: PathRules) -> bool {
 /// Anchor a relative entry to `cwd`, folding `.` and `..` out of the join.
 ///
 /// The fold is not cosmetic: a resolved path travels on to the OS sandbox
-/// profile via [`SandboxProjection::of`](crate::sandbox::SandboxProjection::of), which
+/// profile via [`SandboxProjection::of`](crate::authority::sandbox::SandboxProjection::of), which
 /// matches literally, and the `/work/./bin/git` an unfolded `./bin` yields
 /// is covered by no `/work/bin/` the profile names.  With no cwd a relative
 /// entry names nothing: there is no "here" to read it against.
@@ -400,7 +400,7 @@ fn windows_pathext_suffixes() -> Vec<String> {
 }
 
 /// Mirror the Windows resolver's `%PATHEXT%` fallback, so
-/// `locate("python")` finds `python.exe`.  `capability::exec` keeps its
+/// `locate("python")` finds `python.exe`.  `authority::policy::exec` keeps its
 /// own copy of the default list to strip suffixes off command names.
 ///
 /// The resolver *appends* each suffix; it never substitutes one.  Building the

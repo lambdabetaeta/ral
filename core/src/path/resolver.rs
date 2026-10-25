@@ -13,7 +13,7 @@ use crate::types::EnvVars;
 /// `env.home()`, `xdg:` the `XDG_*_HOME` of `env`, each overlay before the
 /// host, and a `~` with no home resolves to itself.
 ///
-/// The pair a [`FreezeCtx`](crate::guard::freeze::FreezeCtx) owns: a freeze
+/// The pair a [`FreezeCtx`](crate::authority::grant::freeze::FreezeCtx) owns: a freeze
 /// resolves `cwd:` against its cwd once and for good, a runtime resolution
 /// against this one each time it is asked.  The cwd is a [`CwdPath`], checked
 /// where it was minted, so every path read against it has an absolute answer.

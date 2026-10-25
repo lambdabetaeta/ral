@@ -55,7 +55,7 @@ pub(crate) struct Launch {
 }
 
 /// `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` payload, borrowing raw SID
-/// values from the types in `sandbox::windows::appcontainer` that own them.
+/// values from the types in `authority::sandbox::windows::appcontainer` that own them.
 #[cfg(windows)]
 struct SecurityCapabilitiesAttr {
     app_container_sid: PSID,
@@ -389,7 +389,7 @@ impl Launch {
     /// re-set here, exactly as on the non-Windows arm.
     #[allow(
         dead_code,
-        reason = "shape, not use: every caller of the pair (`sandbox::reexec::launch`, `sandbox::launch`) is `cfg(unix)` or Linux/macOS-only today, and both arms present one signature for the day one is not"
+        reason = "shape, not use: every caller of the pair (`authority::sandbox::reexec::launch`, `authority::sandbox::launch`) is `cfg(unix)` or Linux/macOS-only today, and both arms present one signature for the day one is not"
     )]
     #[allow(
         clippy::needless_pass_by_value,
@@ -470,7 +470,7 @@ impl Launch {
 
     /// Stage `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` for the spawn.
     /// Only the raw SID values are borrowed, so they must stay valid until
-    /// [`Self::spawn`] returns; `sandbox::windows::session::confine` passes
+    /// [`Self::spawn`] returns; `authority::sandbox::windows::session::confine` passes
     /// SIDs the session owns for the whole process lifetime.
     pub(crate) fn security_capabilities(
         &mut self,

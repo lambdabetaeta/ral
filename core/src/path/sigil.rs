@@ -3,7 +3,7 @@
 //!
 //! They expand only here, at run time (stage 1 of
 //! [`crate::path::Resolver`]): a grant names its places with tags, which
-//! `guard::freeze` owns, and refuses these prefixes.
+//! `authority::grant::freeze` owns, and refuses these prefixes.
 //! XDG uses the Linux defaults on every platform, macOS included
 //! ([`crate::host`]).
 
@@ -93,7 +93,7 @@ pub(crate) fn literal_relative(name: &str) -> String {
 /// opening the sub-path (`xdg:config/\\?\UNC\srv\sh`, `xdg:config///x`).
 /// The unexpanded literal is then anchored against `cwd` (`<cwd>/~/x`) rather
 /// than fabricating a root-anchored `/.gitconfig`.  A grant refuses the gap
-/// instead, in `guard::freeze::FreezeCtx::place`.
+/// instead, in `authority::grant::freeze::FreezeCtx::place`.
 pub fn expand_path_prefix(input: &str, env: &EnvVars) -> String {
     let expanded = match SigilHead::of(input) {
         Some(SigilHead::Xdg(kind, sub)) => {

@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 61c288f
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 generated_at_date: 2026-10-21
-covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/run/report.rs, core/src/seed.rs, core/src/guard/grant.rs]
+covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/run/report.rs, core/src/seed.rs, core/src/authority/grant/spawn.rs]
 ---
 
 # Map: core / engine protocol
@@ -318,7 +318,7 @@ The engine's answers: `Engine::probe` reads one `Probe` off the shell
 `probe/fs.rs` — `entries` (and `path::tree::bytes`, behind `Probe::PathBytes`): read-only
 metadata walks of the engine's own filesystem, under its cwd.
 
-## `core/src/guard/grant.rs`
+## `core/src/authority/grant/spawn.rs`
 
 - `SpawnGrant` — `Inherit`, `Base(name)`, or `Restrict(record)` carried
   unfrozen. `layer` resolves it against a `FreezeCtx`; `narrow_onto` pushes

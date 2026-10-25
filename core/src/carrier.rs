@@ -12,7 +12,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use crate::capability::GrantSummary;
+use crate::authority::policy::GrantSummary;
 use crate::data::FOValue;
 use crate::data::datum::Datum;
 use crate::engine::Scopes;

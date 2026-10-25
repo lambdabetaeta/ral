@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 61c288f
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 generated_at_date: 2026-10-21
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
@@ -94,8 +94,9 @@ everything `crate::types::*`.
 
 ## Capabilities
 
-`capability.rs` holds the capability *types* the [[map/core/capabilities|grant]]
-decision layer interprets: `Capabilities` (one layer), `ExecGrant` over
+`authority/policy.rs` holds the resolved capability model and judgments;
+`authority/grant/` constructs it through authored resolution and host system-read
+discovery, while `authority/guard/` enforces it. The model includes: `Capabilities` (one layer), `ExecGrant` over
 `Evidence`, `FsPolicy`,
 `EditorPolicy`, `ShellPolicy`, `GrantStack` (`Vec<GrantLayer>`, a *stack* of
 layers rather than a folded aggregate — attenuation is the fold over the
@@ -106,7 +107,7 @@ position (`GrantStack::remove`) rather than popping the top, so a session
 frame `push_session_capabilities` lays inside it, as the boot builtin's
 `--capabilities` (`apply_session_profiles`) does inside its run, survives it), `SandboxProjection`,
 and `GrantLayer::extend`, which adds an `--extend` `Fragment` to a base once (tested in
-`capability/lattice_tests.rs`). `Meet` survives only where evidence genuinely narrows by
+`authority/policy/lattice_tests.rs`). `Meet` survives only where evidence genuinely narrows by
 intersection, not as a whole-layer operation.
 
 ## Shell
@@ -392,7 +393,7 @@ Methods on `Shell` live by concern, one submodule each:
 - `context.rs` — the `Context` dynamic-context verbs;
 - `scope.rs` — `within` / `grant` guards realising [[design/scoping|scoping]];
 - `checks.rs` — forwarders to the
-  [[map/core/capabilities|`capability::check_*(&Context, …)`]] decisions,
+  [[map/core/capabilities|`authority::guard::check_*(&Context, …)`]] decisions,
   splitting the disjoint context/audit borrow for the audit-bearing checks;
 - `cwd.rs` (the one working-directory cell, a `CwdPath` on `Context`: `cd` sets it,
   `enter_cwd`/`restore_cwd` save and restore it whole for `within [dir:]`, and

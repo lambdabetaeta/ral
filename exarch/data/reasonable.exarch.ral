@@ -2,7 +2,7 @@
 # (shells, version control, net fetch, search/inspect, scripting,
 # archives), plus directory-based allowance (`dir` targets in
 # `exec`) for the system and package-manager tool roots (the selectors
-# of `core/src/guard/toolchains.rs`), plus
+# of `core/src/authority/grant/toolchains.rs`), plus
 # everything already on `$PATH` via the `path` selector, so
 # build drivers (cargo, make, cc, npm, …) work out of the box and
 # user-installed tooling is automatically visible.
@@ -19,7 +19,7 @@ return [
   # project tree itself.  The OS sandbox layer's readable system
   # paths (CommandLineTools, Homebrew, /etc/alternatives, …)
   # are added separately, and the tool roots that may run come from the
-  # `dir` selectors below (the table in `core/src/guard/toolchains.rs`),
+  # `dir` selectors below (the table in `core/src/authority/grant/toolchains.rs`),
   # which running reads make readable too; this section covers what
   # neither can bake in.
   #
@@ -153,7 +153,7 @@ return [
       `dir `path,
 
       `dir `xdg-bin .,  # ${XDG_BIN_HOME:-~/.local/bin}
-      `dir `system,     # the platform's tool roots (table: core/src/guard/toolchains.rs)
+      `dir `system,     # the platform's tool roots (table: core/src/authority/grant/toolchains.rs)
       `dir `homebrew,   # the Homebrew prefixes present (same table)
       `dir `absolute /usr/local/bin,
       `dir `absolute /usr/local/sbin,
@@ -170,7 +170,7 @@ return [
       `dir `tempdir .,                # `$TMPDIR` on macOS — distinct from /tmp
       `dir `scratch .,                # the session's own scratch (`$EXARCH_SCRATCH`)
 
-      # Every other selector of the table in core/src/guard/toolchains.rs,
+      # Every other selector of the table in core/src/authority/grant/toolchains.rs,
       # by ecosystem: what a manager installs and its shims dispatch into.
       `dir `macports, `dir `nix, `dir `pkgsrc,
       `dir `rustup, `dir `cargo,  # cargo's shims dispatch into rustup's root

@@ -8,9 +8,9 @@
 
 use std::sync::Arc;
 
+use crate::authority::grant::decode_capability_map;
+use crate::authority::grant::freeze::FreezeCtx;
 use crate::builtins::concurrency::{self, legible_title};
-use crate::guard::decode_capability_map;
-use crate::guard::freeze::FreezeCtx;
 use crate::io::{self, Sink};
 use crate::ir::Redirects;
 use crate::ir::{Args, CaseArm, Comp, CompKind, GroupNode, Val, ValListElem};

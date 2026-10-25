@@ -2,6 +2,6 @@
 //! module is private: no other crate can reach it, so none can judge a
 //! handle itself.
 
-use ral_core::capability::fs::Verdict;
+use ral_core::authority::policy::fs::Verdict;
 
 fn main() {}

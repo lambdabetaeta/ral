@@ -52,7 +52,7 @@ pub(crate) fn run(
     // must not be discovered only once the child is already running.
     let mut command = build_launch(
         admitted,
-        crate::sandbox::Ownership::Kept,
+        crate::authority::sandbox::Ownership::Kept,
         shell,
         &shell.scope,
     )?;
@@ -76,7 +76,7 @@ pub(crate) fn run(
     announce_command_title(&cmd_name, shell);
 
     // Anchor the denial-log window before the spawn, so a kernel deny the
-    // child logs falls inside what `sandbox::denial_hint` reads back.
+    // child logs falls inside what `authority::sandbox::denial_hint` reads back.
     let started = std::time::Instant::now();
     // `finish_command` builds the `Command{External}` observation from
     // whatever error reaches it, so a spawn failure needs no emission of

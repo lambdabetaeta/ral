@@ -1,6 +1,6 @@
 //! The shell-state builtins: `alias`, `unalias`, and `cd`.
 
-use crate::capability::{Flag, ShellVerb};
+use crate::authority::policy::{Flag, ShellVerb};
 use crate::types::{Settled, Shell, Value, sig};
 
 /// `alias NAME BODY` — the interactive door to [`Shell::install_alias`],

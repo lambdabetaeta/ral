@@ -7,7 +7,7 @@
 //! judge a file a test lays on disk in a tempdir.  The policies and their
 //! meet/extension semantics are the contract.
 
-use ral_core::capability::{Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy};
+use ral_core::authority::policy::{Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy};
 use ral_core::path::FrozenPath;
 use ral_core::test_access::check_file;
 #[cfg(unix)]

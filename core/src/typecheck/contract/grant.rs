@@ -6,8 +6,8 @@
 //! variant.  A `Ty::List` cannot sit in a `static`, hence `Shaped`.
 
 use super::{Holds, Key, Table, Vocab};
-use crate::capability::{EditorVerb, Net, ShellVerb};
-use crate::guard::freeze::{Anchor, Selector};
+use crate::authority::grant::freeze::{Anchor, Selector};
+use crate::authority::policy::{EditorVerb, Net, ShellVerb};
 use crate::ty::Ty;
 use crate::typecheck::error::Reason;
 use crate::typecheck::unify::Unifier;

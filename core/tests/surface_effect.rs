@@ -33,7 +33,7 @@ fn host_shell() -> Shell {
         },
         ral_core::test_helper::process_cwd(),
     )
-    .expect("a test host resolves its floor")
+    .expect("a test host resolves its baseline")
 }
 
 /// A sink that records every surfaced value.

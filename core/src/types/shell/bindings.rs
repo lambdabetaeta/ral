@@ -392,7 +392,7 @@ mod chokepoint_tests {
             &crate::boot::HostSurface::default(),
             crate::test_helper::process_cwd(),
         )
-        .expect("a test host resolves its floor");
+        .expect("a test host resolves its baseline");
         shell.arm_binding_lease(BindingLease {
             idle_calls,
             large_binding_bytes,
@@ -543,7 +543,7 @@ mod chokepoint_tests {
             &crate::boot::HostSurface::default(),
             crate::test_helper::process_cwd(),
         )
-        .expect("a test host resolves its floor");
+        .expect("a test host resolves its baseline");
         let (prelude_name, _) = shell
             .bindings()
             .into_iter()

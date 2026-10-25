@@ -29,7 +29,7 @@
 //! the construction lives here and is not scattered across the session.
 
 use crate::site::{Silent, site};
-use ral_core::capability::{Capabilities, Evidence, ExecKey, FsPolicy, Ungoverned};
+use ral_core::authority::policy::{Capabilities, Evidence, ExecKey, FsPolicy, Ungoverned};
 use ral_core::path::{
     FrozenPath, GuestPath, LeafMode, LexicalPath, RealPath, Resolver, shown, walk_dir, walk_lenient,
 };
@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 /// The image's office toolbox, as an allowlist of *bare command names*:
 /// no path or dir key.
 ///
-/// [`ExecGrant`](ral_core::capability::ExecGrant) admits by bare name, by path or by directory prefix,
+/// [`ExecGrant`](ral_core::authority::policy::ExecGrant) admits by bare name, by path or by directory prefix,
 /// and exarch's profiles lean hard on the directory half because a
 /// developer's tool roots are open-ended: Homebrew, rustup toolchains,
 /// nvm and pyenv install binaries nobody can enumerate in advance, so
@@ -375,7 +375,7 @@ impl Grant {
     ///   real narrowing is stated one layer out, in that host policy —
     ///   `design/two-enforcers` applied outward, not reproduced here.
     ///   `Some(false)` would strip the network from every command this grant
-    ///   spawns (`core/src/sandbox/linux.rs`'s `bwrap --unshare-net`),
+    ///   spawns (`core/src/authority/sandbox/linux.rs`'s `bwrap --unshare-net`),
     ///   silently deleting that wire — this is a correctness bit, not prose.
     /// - **exec** — the image's toolbox and nothing else.  See [`TOOLBOX`]
     ///   for why it is a list of names rather than of directories.
@@ -541,7 +541,7 @@ mod tests {
     use super::*;
     use crate::test_fixture::workshop;
     #[cfg(unix)]
-    use ral_core::capability::FsOp;
+    use ral_core::authority::policy::FsOp;
     #[cfg(unix)]
     use ral_core::path::Reading;
 
@@ -999,7 +999,7 @@ mod tests {
         assert_eq!(
             grant.capabilities().net,
             None,
-            "the guest has a wire; `core/src/sandbox/linux.rs` turns \
+            "the guest has a wire; `core/src/authority/sandbox/linux.rs` turns \
              `Offline` into `bwrap --unshare-net`, which would strip it back off"
         );
     }

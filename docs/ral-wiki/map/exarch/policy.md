@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f56fff48
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 generated_at_date: 2026-10-21
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
@@ -54,8 +54,10 @@ one `deputy` check per flagged prefix when a grant frame is entered
 Every profile is *resolved* as it loads — resolving each place (`` `home ``, `` `xdg-* ``, `` `cwd ``,
 `` `tempdir ``, `` `scratch ``, `` `gitdir ``) and the `dir` selectors against the session's home, working
 directory, scratch, and the host's live tool roots inside
-`ral_core::guard`'s decode pass (`guard/decode.rs`, `guard/freeze.rs`) — so composition runs entirely on
-resolved `GrantLayer`s ([[design/capability-freeze|freeze boundary]]).
+`ral_core::authority::grant`'s construction pass (`authority/grant/decode.rs`,
+`authority/grant/freeze.rs`) — authored resolution and host system-read discovery live
+here, while `authority::policy` owns the resolved model and judgments, so
+composition runs entirely on resolved `GrantLayer`s ([[design/capability-freeze|freeze boundary]]).
 An `` `xdg-* `` place escaping `HOME` is rejected at the profile that names it, before
 composition could discard it. Loading reuses
 `ral_core::load::profile::load_capabilities_from_*` — the same surface as ral's
@@ -80,12 +82,12 @@ stays offline even under `minimal`).
 `--base` and `--restrict` are the same act — the parent's stack is already
 underneath, so a base pushed here can only narrow, exactly as a restrict does
 ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]). The layer is
-resolved by `SpawnGrant::layer` (`core/src/guard/grant.rs`), which both seats
+resolved by `SpawnGrant::layer` (`core/src/authority/grant/spawn.rs`), which both seats
 call: `` `inherit `` is ⊤, a layer the fold leaves no trace of;
 `` `confined ``/`` `read-only ``/`` `edit-only ``/`` `reasonable `` reach
 `base_layer` through the `GrantNarrower` the resolution is handed; and
 `` `restrict R `` hands the record to
-`ral_core::guard::decode_capability_map` — the same walker, off the same
+`ral_core::authority::grant::decode_capability_map` — the same walker, off the same
 `Form::Grant` declared table, that `grant [...] { body }` and each bake-in
 profile below already pass through, so one keyset earns one wording.
 `` `dangerous `` is a `--base` name only: at a spawn the lattice top is a layer
@@ -159,7 +161,7 @@ representation ([[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-le
 
 **The bake-ins name exec authority portably through the `dir` selectors** —
 [[map/core/capabilities|core]]'s spelling of live tool roots, each a row of one
-table (`ral_core::guard::toolchains`, rules in [[design/grant|grant]]
+table (`ral_core::authority::grant::toolchains`, rules in [[design/grant|grant]]
 §Selectors). `` `dir `system `` is the standard binary dirs on Unix (Homebrew is
 its own selector, `` `dir `homebrew ``, expanding to the prefixes that exist,
 `HOMEBREW_PREFIX` first); `%SystemRoot%\System32`, the PowerShell home, and

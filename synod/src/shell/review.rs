@@ -19,7 +19,7 @@ use ral_core::path::{basename, extension, shown};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use ral_core::capability::Ungoverned;
+use ral_core::authority::policy::Ungoverned;
 use ral_core::path::{EntryName, Kind, LeafMode, Stat, descendant, walk_dir};
 use ral_core::sync::LockExt;
 use serde::Serialize;

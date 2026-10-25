@@ -8,8 +8,8 @@ use super::hooks::HookTable;
 use super::modules::Modules;
 use super::workers::Roster;
 use super::{Context, DEFAULT_STACK_LIMIT, LocalState, SessionState, Shell};
-use crate::capability::{Floor, GrantStack};
-use crate::guard::{GrantNarrower, SpawnGrant};
+use crate::authority::grant::{GrantNarrower, SpawnGrant};
+use crate::authority::policy::{Baseline, GrantStack};
 use crate::io::terminal::TerminalState;
 use crate::io::{Io, Source};
 use crate::path::CwdPath;
@@ -36,36 +36,35 @@ pub struct Runtime {
     pub(crate) base: Vec<BuiltinEntry>,
     pub(crate) library_docs: HashMap<String, String>,
     pub(crate) terminal: TerminalState,
-    /// The read-only system paths this host lets every program start from,
-    /// resolved once here: host state, so no stack holds it.
-    floor: Floor,
+    /// Host system reads and boot-image protection, outside the grant stack.
+    baseline: Baseline,
 }
 
 impl Runtime {
-    /// No builtins, no prelude, no docs, over the floor of this host.
+    /// No builtins, no prelude, no docs, over the baseline of this host.
     ///
     /// # Errors
-    /// A floor path whose walk fails, named: a host that cannot resolve its
-    /// own floor cannot run anything.
+    /// A baseline path whose walk fails, named: a host that cannot resolve its
+    /// own baseline cannot run anything.
     pub fn bare(terminal: TerminalState) -> Result<Self, String> {
-        Ok(Self::bare_on(Floor::of_host()?, terminal))
+        Ok(Self::bare_on(Baseline::of_host()?, terminal))
     }
 
-    /// [`bare`](Self::bare) over a floor already resolved.
-    pub(crate) fn bare_on(floor: Floor, terminal: TerminalState) -> Self {
+    /// [`bare`](Self::bare) over a baseline already resolved.
+    pub(crate) fn bare_on(baseline: Baseline, terminal: TerminalState) -> Self {
         Self {
             sig: Arc::default(),
             builtins: BuiltinTable::default(),
             base: Vec::new(),
             library_docs: HashMap::new(),
             terminal,
-            floor,
+            baseline,
         }
     }
 
-    /// The floor every fs judgment under this runtime reads.
-    pub fn floor(&self) -> &Floor {
-        &self.floor
+    /// Host facts supplied to every authority judgment.
+    pub fn baseline(&self) -> &Baseline {
+        &self.baseline
     }
 
     pub fn install_builtins(&mut self, entries: &'static [BuiltinEntry]) {
@@ -331,7 +330,7 @@ mod tests {
         let shell = Shell::root(
             HostSurface::default()
                 .runtime(terminal)
-                .expect("a test host resolves its floor")
+                .expect("a test host resolves its baseline")
                 .into(),
             crate::test_helper::process_cwd(),
         );

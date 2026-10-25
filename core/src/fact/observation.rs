@@ -248,7 +248,7 @@ impl Resource {
 #[strum(serialize_all = "kebab-case")]
 pub enum Decision {
     Denied,
-    /// Reported, not enforced: `capability::deputy_prefixes` names a confused
+    /// Reported, not enforced: `authority::policy::deputy_prefixes` names a confused
     /// deputy without refusing it, so the run continues either way.
     Flagged,
 }

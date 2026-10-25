@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 632ac5c2064a48094cf11805454866a685db09e6
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 generated_at_date: 2026-10-25
-covers_paths: [core/src/data.rs, core/src/data/, core/src/types/value/first_order.rs, core/src/seed.rs, core/src/seed/, core/src/frame.rs, core/src/guard/grant.rs]
+covers_paths: [core/src/data.rs, core/src/data/, core/src/types/value/first_order.rs, core/src/seed.rs, core/src/seed/, core/src/frame.rs, core/src/authority/grant/spawn.rs]
 ---
 
 # Map: core / transport
@@ -121,7 +121,7 @@ them for any other, through the receiver's `Signature`.
 - `SerialEnvSnapshot::into_runtime`, given a `WireDecoder`, is the sole
   wire→runtime conversion of an environment.
 
-## The seed — `core/src/seed.rs`, `core/src/guard/grant.rs`
+## The seed — `core/src/seed.rs`, `core/src/authority/grant/spawn.rs`
 
 **`EngineSeed` is a `Bequest` in wire form, and a codec and nothing else:
 `scope_table`, `env`, `context`, the parent's `sources`, `terms`, `fixings` and
@@ -172,7 +172,7 @@ each alias arm with its scheme
   (`IdentityTransport::adopt_parked`) and a sealed child alike.
   `Base` reaches the host's `GrantNarrower`, since core has
   no base-tag lexicon; `Restrict` goes through
-  `guard::decode_capability_map`
+  `authority::grant::decode_capability_map`
   ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]).
 
 ## Framing — `core/src/frame.rs`

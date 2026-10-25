@@ -101,7 +101,7 @@ impl FileInfo {
 pub(super) fn builtin_list_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let rp = shell.resolve(args[0].as_str("list-dir")?);
     let dir = shell.locate_dir::<Reading>(&rp)?;
-    let region = shell.context.grants.read_region(shell.floor());
+    let region = shell.context.grants.read_region(shell.baseline());
     let mut entries: Vec<DirEntry> = Vec::new();
     for entry in dir
         .read_dir()

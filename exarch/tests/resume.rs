@@ -64,7 +64,7 @@ fn drive(session: &mut Avatar, provider: &Arc<Provider>, prompt: &str) {
 fn root_config(run_dir: &OwnDir) -> RootConfig {
     RootConfig {
         system: "system".into(),
-        caps: ral_core::capability::GrantStack::root(),
+        caps: ral_core::authority::policy::GrantStack::root(),
         run_dir: OwnDir::clone(run_dir),
         trunk: Trunk::Attended,
         tools: Toolset::offered(false),

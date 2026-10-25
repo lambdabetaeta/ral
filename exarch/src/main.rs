@@ -13,7 +13,7 @@ fn main() -> std::process::ExitCode {
         }
     };
     // A no-op off Windows, where it reverts this session's grant ACEs.
-    ral_core::sandbox::teardown_session();
+    ral_core::authority::sandbox::teardown_session();
     code
 }
 

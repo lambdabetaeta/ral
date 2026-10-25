@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 61c288f
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 generated_at_date: 2026-10-21
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
@@ -337,7 +337,7 @@ Bodies are grouped by concern, one submodule each:
   its lines into the `[String]` that `from-lines` and `lines` return.
 
 The capability `Value`-map decoder is *not* a builtin: it lives beside the
-authority layer in `guard/decode.rs` (`decode_capability_map`), consumed by
+grant-construction layer in `authority/grant/decode.rs` (`decode_capability_map`), consumed by
 the `grant` control operator (`evaluator/scope.rs`) and the `--capabilities`
 ceiling (`load/profile.rs`) — see [[map/core/capabilities|capabilities]],
 [[design/grant|grant]].

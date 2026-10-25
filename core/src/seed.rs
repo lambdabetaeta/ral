@@ -13,9 +13,9 @@
 //! `Shell::bequeath`: no handle in the scope or the handler stack, and no
 //! terminal authority, inbox, cancel token or provider handle.
 
+use crate::authority::grant::SpawnGrant;
 use crate::data::datum::Datum;
 use crate::data::{Bytes, FOValue};
-use crate::guard::SpawnGrant;
 use crate::source::SourceDb;
 use crate::ty::Fixings;
 use crate::types::{
@@ -227,7 +227,7 @@ mod tests {
             BakedPrelude::runtime(),
             &crate::boot::HostSurface::default(),
         )
-        .expect("a test host resolves its floor")
+        .expect("a test host resolves its baseline")
     }
 
     /// The recipe a parent is built by: core's own surface, the prelude
@@ -239,7 +239,7 @@ mod tests {
             &crate::boot::HostSurface::default(),
             crate::test_helper::process_cwd(),
         )
-        .expect("a test host resolves its floor");
+        .expect("a test host resolves its baseline");
         shell.set_exit_hints(crate::types::ExitHints::from_text("false 1 hinted\n"));
         shell.arm_binding_lease(crate::types::BindingLease {
             idle_calls: 3,
@@ -253,8 +253,8 @@ mod tests {
     /// A narrower no test here may reach: only a Base grant consults one.
     fn no_base(
         _: &str,
-        _: &crate::guard::freeze::FreezeCtx,
-    ) -> Result<crate::capability::GrantLayer, String> {
+        _: &crate::authority::grant::freeze::FreezeCtx,
+    ) -> Result<crate::authority::policy::GrantLayer, String> {
         panic!("only a Base grant consults the narrower")
     }
 
@@ -510,8 +510,8 @@ mod tests {
 
     /// A layer reading everything and denying `deny`.
     #[cfg(unix)]
-    fn denying(deny: &std::path::Path) -> crate::capability::GrantLayer {
-        use crate::capability::{Capabilities, FsPolicy};
+    fn denying(deny: &std::path::Path) -> crate::authority::policy::GrantLayer {
+        use crate::authority::policy::{Capabilities, FsPolicy};
         crate::test_helper::layer(Capabilities {
             fs: Some(FsPolicy {
                 read_prefixes: vec![crate::path::FrozenPath::root()],
@@ -552,7 +552,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_exclusion_replaced_before_the_decode_keeps_its_position_and_old_identity() {
-        use crate::capability::{Floor, FsOp};
+        use crate::authority::policy::{Baseline, FsOp};
         let tmp = tempfile::tempdir().unwrap();
         let dir = crate::test_helper::real(tmp.path()).as_path().to_path_buf();
         let (secret, kept, other) = (dir.join("secret"), dir.join("kept"), dir.join("other"));
@@ -573,7 +573,7 @@ mod tests {
         assert_eq!(grants.held_ids(), [None]);
         let reads = |path: &std::path::Path| {
             grants.admits_fs(
-                &Floor::default(),
+                &Baseline::default(),
                 &FsOp::Read,
                 &crate::test_helper::trace(path),
             )
@@ -588,7 +588,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_child_bequeathed_a_retargeted_allowance_link_admits_the_old_target_only() {
-        use crate::capability::{Capabilities, Floor, FsOp, FsPolicy};
+        use crate::authority::policy::{Baseline, Capabilities, FsOp, FsPolicy};
         let tmp = tempfile::tempdir().unwrap();
         let dir = crate::test_helper::real(tmp.path()).as_path().to_path_buf();
         for target in ["old", "new"] {
@@ -624,7 +624,7 @@ mod tests {
             child
                 .context
                 .grants
-                .admits_fs(&Floor::default(), &FsOp::Read, &access)
+                .admits_fs(&Baseline::default(), &FsOp::Read, &access)
         };
         assert!(reads(dir.join("old/f")));
         assert!(!reads(dir.join("new/f")));

@@ -12,7 +12,7 @@
 //! verb is ordinary capability behaviour, checked here through the same
 //! public entry as everything else.  What the survivor is confined *to* is
 //! not: it is one flag in a bwrap argv, so it is checked where that argv is
-//! built (`core/src/sandbox/linux.rs`) rather than by birthing a process
+//! built (`core/src/authority/sandbox/linux.rs`) rather than by birthing a process
 //! and interrogating a namespace this test cannot enter.
 //!
 //! Three properties the ADR argues about are deliberately *not* tested
@@ -62,7 +62,7 @@ fn armed() -> Shell {
         },
         ral_core::test_helper::process_cwd(),
     )
-    .expect("a test host resolves its floor");
+    .expect("a test host resolves its baseline");
     shell.arm_detach(16);
     shell
 }

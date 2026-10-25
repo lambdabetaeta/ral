@@ -54,7 +54,7 @@ use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Bureau, Provider, ToolCall};
 use exarch::record::AgentId;
 use exarch::record::{Display, Record, Recorded, Settlement, Transient};
-use ral_core::capability::{Capabilities, GrantStack};
+use ral_core::authority::policy::{Capabilities, GrantStack};
 use ral_core::own::OwnDir;
 use std::path::PathBuf;
 use std::sync::Arc;

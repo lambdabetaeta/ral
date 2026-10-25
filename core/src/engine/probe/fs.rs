@@ -3,7 +3,7 @@
 //! model I/O.  A listing shown to the user is a read, so each directory is
 //! judged for reading under the live grant.
 
-use crate::capability::ReadRegion;
+use crate::authority::policy::ReadRegion;
 use crate::path::walk::Kind;
 use crate::path::{Dir, Judged, LeafMode, Reading, walk_dir};
 use crate::protocol::probe::PathEntry;
@@ -15,9 +15,9 @@ use std::path::Path;
 fn open(shell: &Shell, dir: &Path) -> Option<(ReadRegion, Dir<Judged<Reading>>)> {
     let entered = walk_dir(&shell.anchor(dir)).ok()?;
     let judged = (shell.context.grants)
-        .judge_dir::<Reading>(shell.floor(), entered)
+        .judge_dir::<Reading>(shell.baseline(), entered)
         .ok()?;
-    Some((shell.context.grants.read_region(shell.floor()), judged))
+    Some((shell.context.grants.read_region(shell.baseline()), judged))
 }
 
 /// `dir`'s entries with a UTF-8 name; none, if it cannot be read. `exec`
@@ -76,7 +76,7 @@ pub(super) fn bytes(shell: &Shell, root: &Path) -> u64 {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use crate::capability::{Capabilities, FsPolicy};
+    use crate::authority::policy::{Capabilities, FsPolicy};
     use crate::path::FrozenPath;
     use crate::test_helper::{core_shell, layer};
 

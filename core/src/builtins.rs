@@ -485,7 +485,7 @@ pub static SURFACE_BUILTIN: &[BuiltinEntry] = &SURFACE_BUILTIN_ARR;
 /// diagnostic and never a veto.  Whether
 /// a call that does resolve may *spend* the verb is the separate capability
 /// question, asked of the live grant stack
-/// ([`crate::capability::GrantStack::permits`]) and answered as a refusal.
+/// ([`crate::authority::policy::GrantStack::permits`]) and answered as a refusal.
 ///
 /// The other three verbs vary policy over one type; this one changes it — it
 /// takes an argv, hence a base frame and no `$detach`, returning a plain record

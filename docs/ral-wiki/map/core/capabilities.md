@@ -1,7 +1,7 @@
 ---
-generated_at_commit: ba7dd300
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 generated_at_date: 2026-10-23
-covers_paths: [core/src/capability/, core/src/capability.rs, core/src/guard/, core/src/guard.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs, core/src/own.rs]
+covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs]
 ---
 
 # Map: core / capabilities & sandbox
@@ -12,14 +12,14 @@ authoritative exactly where the other is blind ([[design/two-enforcers|two
 enforcers]]). Authority is attenuated by intersection — a `grant` block can only
 narrow.
 
-## The model — `core/src/capability/`
+## The model — `core/src/authority/policy/`
 
-Authority as data, at rank 3: `Capabilities` (the authored value), `GrantLayer`
+`authority::policy` owns the resolved model and its judgments: `GrantLayer`
 (one layer, resolved), `GrantStack` (their dynamic composition) and the folds
-over it, with no reader of its own. The
-in-process guard (`core/src/guard/`) and the OS sandbox
-(`core/src/sandbox/projection.rs`) are its two consumers, in the order
-`capability < sandbox < guard`
+over it. `Capabilities` is the authored value; `authority::grant` owns its
+resolution and all construction that reads the host, including the system reads.
+The in-process guard (`core/src/authority/guard/`) and the OS sandbox
+(`core/src/authority/sandbox/projection.rs`) enforce the resolved model
 ([[decisions/261006_capability-is-data|capability-is-data]]). Every judgment
 combines the layers' *evidence* ([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]); there is no `Capabilities::meet`
 ([[decisions/260906_object-not-name|object-not-name]]). Why `Capabilities`,
@@ -31,7 +31,7 @@ Submodules:
 - `lattice.rs` — the types and their algebra: `Capabilities`, the authored
   value (what a grant file decodes to; nothing judges it and no layer keeps it);
   `GrantLayer`, one layer in force, resolved where it was decoded
-  (`GrantLayer::from_capabilities`, or `guard::decode_capability_map`;
+  (constructed in `authority::grant`, or by `grant::decode_capability_map`;
   [[design/capability-freeze|freeze boundary]]), holding its rules and nothing
   beside them; `GrantPath<R> { written, real }`, a spelling and what its walk
   made of it, `R` an `Extent` (`Everywhere`, or `Under { position, passed }`: a
@@ -66,8 +66,11 @@ Submodules:
 - `fs.rs` — the fs instance: `FsOp`, `FsAllow { Prefix(GrantPath<Extent>),
   RunPlace(RealPath) }`, `FsDeny(GrantPath<Excluded>)`, `FsRules = Table<FsAllow,
   FsDeny>`, and `FsLayer { read, write }`, the two tables a layer holds, each
-  with every exclusion; `region(stack, op, floor)`, each supplying layer's
-  tables met (writing reads) and the `Floor` joined; `ReadRegion`, the read and
+  with every exclusion; `region(stack, op, baseline)`, each supplying layer's
+  tables met (writing reads) and the system reads from `Baseline` joined;
+  `Baseline` also supplies the bundled-tool image and protected boot identities,
+  assembled in `authority.rs`, without a policy-to-sandbox dependency;
+  `ReadRegion`, the read and
   the running regions (run places `P≤L`) folded once for a walk that judges many
   objects. `GrantStack::judge`, `judge_dir` and `locate` are the one place
   evidence becomes authority: the pinned-binary veto (`Refused::Guarded`) first, then
@@ -78,11 +81,9 @@ Submodules:
   (`Tool` or `File { arg0, located }`, one owned `Located`) and the `Subject` it
   is judged as (`Program`, `Dir`, `Tool`, `Any`); `ExecAllow` (`Any`, `Dir`,
   `File`, `Tool`) and `ExecDeny` (`Name`, `Dir`, `File`); `ExecRules =
-  Table<ExecAllow, ExecDeny>`; `ExecRules::of_grant`, one authored `ExecGrant`
-  resolved where its layer is decoded, a bare key on the decoding environment's
-  `PATH`, a path key's allowance to the position it reached and its exclusion to
-  the objects held; `rules`, the stack's table; `places`, the run places.
-  `GrantStack::admit(floor, program, args)` is the one exec judgment, the table
+  Table<ExecAllow, ExecDeny>`; `rules`, the stack's table; `places`, the run
+  places. Authored exec targets are resolved by `authority::grant`, not here;
+  `GrantStack::admit(baseline, program, args)` is the one exec judgment, the table
   then the read judgment and the only mint of `Admitted` (the program as
   `Program<Judged<Reading>>`, its argv and the table that judged them, private
   fields, all a launch reads); a refusal is data, `Refused { program, args, why:
@@ -109,13 +110,13 @@ compiled under `grant`'s own declared table (`typecheck::contract`,
 row is held to them statically and the decoder below is where a profile
 returning a map meets the same six keys.
 
-## The guard — `core/src/guard/`
+## The guard — `core/src/authority/guard/`
 
-The model's in-process reader, at rank 7: every runtime yes/no over the dynamic
+The model's in-process enforcer: every runtime yes/no over the dynamic
 capability stack is a free `guard::check_*(&Context, …)` function that folds
 the whole stack (`ctx.grants`) — a module boundary rather than a typestate
-([[decisions/260605_witness-collapse|witness-collapse]]) — and the one place a
-grant string becomes a frozen path.
+([[decisions/260605_witness-collapse|witness-collapse]]). It consumes resolved
+authority; grant decoding and freezing belong to `authority::grant`.
 
 - `enforce.rs` — the guards over the model's judgments: `check_exec`
   (`GrantStack::admit` and the wording of its refusal), `check_fs_exact` (the
@@ -126,11 +127,11 @@ grant string becomes a frozen path.
   `Refused::{Guarded, Withheld}`: the fact the trail keeps and the error the
   caller raises. The fs guard is split so the judgment is reusable without the
   report: `fs_judge` is the decision — `Refused::Guarded` first, for a write onto
-  a boot-pinned sandbox binary (`sandbox::pinned_binary`, by inode), before any
+  a boot-pinned sandbox binary (the supplied `Baseline`'s protected identities), before any
   grant is folded. `GrantStack::admits_fs` is the quiet twin a write asks before
   reading its before- and after-images;
 - `shell.rs` — the guard's `impl Shell`: `check(Flag, who)`, `check_exec`,
-  `floor`, `locate`, `locate_dir`, `locate_existing`, `locate_if_admitted`
+  `baseline`, `locate`, `locate_dir`, `locate_existing`, `locate_if_admitted`
   (each excusing the discard device `LexicalPath::is_discard` and refusing a
   reserved device name before either region is consulted), `judge` (an object a
   caller already holds), `admits_fs`, `sandbox_projection`, and the grant scope
@@ -140,6 +141,20 @@ grant string becomes a frozen path.
   then `GrantStack::judge` on its transcript, handing back the handle vouched
   for. `Shell::refused` mints a `Denial`'s `Break` and records its check
   through `Shell::record_check` with no `Mooring`, so on the trail alone;
+
+## Construction — `core/src/authority/grant/`
+
+`authority::grant` owns decoding, freezing, directory selectors, spawn grants,
+authored resolution and host system-read discovery. It builds the resolved model
+that `policy` judges; `policy` neither resolves authored paths nor discovers
+the host's system reads.
+
+- `paths.rs` — `Polar` and grant-path walking: allowances keep positions,
+  exclusions hold objects;
+- `resolve.rs` — authored `Capabilities`, filesystem policies and exec keys
+  resolved into layers and tables, including PATH lookup;
+- `host.rs` — platform system-read discovery and resolution; `authority.rs`
+  attaches the sandbox's boot pins to form the runtime `Baseline`;
 - `freeze.rs` — the one place a grant's `Place` or `Selector` becomes a
   `FrozenPath` (a folded spelling, which `decode` then walks), against one anchor: `FreezeCtx` (`FreezeCtx::of(&Shell)`, an owned
   `EnvVars` and `CwdPath`: the `Resolver` pair, `FreezeCtx::at` for a caller with no shell) and its `place` (`None` is a dead grant, an `absolute`
@@ -164,7 +179,7 @@ grant string becomes a frozen path.
   the freeze folds it), and
   `refuse_the_world`, the guard both it and the toolchain overrides call, over
   `the_world`, the one predicate for a root, the home or an ancestor of it,
-  which the floor reads too;
+  which system-read discovery uses too;
   `FrozenPath::freeze` refuses a path that is not Unicode;
 - `toolchains.rs` — every other directory selector as one table: `enum
   Toolchain` (`system` and the package managers), each a few `Location`s of
@@ -172,8 +187,8 @@ grant string becomes a frozen path.
   over an injected environment, home and `exists`, answering native
   `PathBuf`s (shown only in a refusal), its live wrapper `expand`
   (what `FreezeCtx::selector` calls), and
-  `FLOOR`, the four system-wide prefixes (`homebrew`, `macports`, `nix`,
-  `pkgsrc`) that `fs::floor` reads through `floor` and keeps only what is
+  `SYSTEM_READS`, the four system-wide prefixes (`homebrew`, `macports`, `nix`,
+  `pkgsrc`) used by grant's host system-read discovery, keeping only what is
   neither in the process's home nor `the_world` ([[design/grant|grant]]
   §Selectors states the rules);
 - `decode.rs` — `decode_capability_map`, which walks a `grant [...]` /
@@ -183,8 +198,10 @@ grant string becomes a frozen path.
   every one of them authority, none of them a recording switch
   ([[design/audit|audit]]); its exec targets freeze to `ExecKey::{Name, Path, Dir}` (a
   `dir` selector expanding to one `Dir` per directory), collected through
-  `ExecGrant::from_iter` and resolved by `ExecRules::of_grant`;
-- `grant.rs` — `SpawnGrant` (`Inherit`, `Base`, `Restrict`), a spawn's grant
+  `ExecGrant::from_iter` and resolved here into exec rules. A bare key reads
+  the decoding environment's `PATH`; a path allowance holds the position its
+  walk reached, an exclusion the objects held;
+- `spawn.rs` — `SpawnGrant` (`Inherit`, `Base`, `Restrict`), a spawn's grant
   as it crosses to a child that has not yet resolved it, frozen against the
   child's own `FreezeCtx`.
 
@@ -193,7 +210,7 @@ Path resolution is `core/src/path/`: lexical stages, then one walk, plus
 
 - expand — `sigil.rs` (run-time `~` and `xdg:` expansion of ordinary paths,
   never in a grant; the places `cwd`, `tempdir`, `scratch`, `gitdir` are policy-only,
-  expanded at freeze by `guard::freeze` (`scratch` against the spelling of the
+  expanded at freeze by `grant::freeze` (`scratch` against the spelling of the
   session's scratch that the `FreezeCtx` carries, which plain ral has none of); `git.rs` backs `gitdir` discovery, following a `.git` pointer file only to a
   git directory whose `gitdir` back-pointer or `core.worktree` names the working
   tree back, judged by the positions the two walks reach, never by identity; a bad pointer is a path-level `BadPointer`, phrased as a grant error by the caller), `tilde.rs` (`~` and `~/sub` only; an unset `HOME` is `None`,
@@ -207,8 +224,8 @@ Path resolution is `core/src/path/`: lexical stages, then one walk, plus
   `xdg:` sub-path naming a volume of its own under Windows rules — a drive
   component, or a share or namespace head opening it — would re-root the join, so `expand_path_prefix` leaves the whole path as written: it fails
   closed, a prefix matching nothing rather than a fabricated path, while a
-  grant refuses the gap outright in `guard::freeze`;
-- lex — `lex.rs`: one structural parser, `parse_bytes`, reading a byte slice under `PathRules` into `Parsed { raw, rules, kind: HeadKind, spelling: HeadSpelling, head_len }`, from which resolution, `.`/`..` folding and every head judgment project. `HeadKind` names the structural head (`Posix`, `Drive { letter, volume }`, `Unc { volume }`, `Driveless`, `DriveRelative { letter }`, `Relative`, `Device` for `\\.\`, and `Malformed` for a two-separator or `\\?\` head that is no well-formed drive, share or device); `HeadSpelling` records the opening separator and namespace facts once (`namespace: Option<Namespace>` — `Verbatim { exact }` for `\\?\`, `Device { exact }` for `\\.\`, `Object` for `\??\`, with `exact` / `Namespace::is_exact` true when all three separator bytes of that 4-byte prefix are `\` — `mixed_opening` for `/\` or `\/`, and `opens_with_slash`). `fold_dots_under` (over `fold_bytes`) is one kernel under either rules from any host, `fold_dots` its host instance on a held path: `head_len` marks where the head ends and only the names past it fold, joined with the rules' separator, so a fold preserves `HeadKind`, `volume` and (save when `..` climbs into the `??` component of a `\??\` driveless path) `HeadSpelling::namespace`; under Windows rules a non-namespace `Drive`, `Unc`, `Driveless`, `DriveRelative` or `Relative` head (`Parsed::respell_head`) is respelled with `\` too (`C:/a/b` folds to `C:\a\b`, `//srv/sh` to `\\srv\sh`), so such a path has one separator throughout, while every head whose kind or meaning turns on its spelling is kept as written: a `Posix` `/` (as `\` it would be `Driveless`), a slash-spelled verbatim head (`//?/C:/x` is a device path Win32 normalises, so its tail past `head_len` folds), and a `Device` or `Malformed` path, or an exact `\\?\` verbatim path (`Namespace::is_exact`, `head_len == raw.len()`: Win32 hands its rest to the kernel uninterpreted, `/` a name byte and `.`/`..` names), all head and kept whole, `..` included; a relative path's drive-shaped first name keeps a `.\` before it; `is_unparsed_head`, a Windows path absolute to the kernel in which `std::path` finds no prefix and so would descend or climb from the current drive, which the walk refuses. Every head predicate projects from `parse_bytes`: whether a path is absolute under either rules set (`absolute_under` / `Parsed::is_absolute`: POSIX, `HeadKind::Posix`; Windows, `Drive`, `Unc`, `Device` or `Malformed`) and on this host (`is_absolute`, `absolute_under` the host's rules, the one absoluteness ral asks, `anchor` included; `Path::is_absolute` is banned in clippy.toml in its favour); `is_working_directory` (`Posix`, or `Drive` / `Unc` under Windows); `is_bare_root` (one separator alone under the given `PathRules`); `has_drive` (non-namespace `Drive` or `DriveRelative`); `Parsed::is_mixed_head` and `Parsed::is_nt_object`, shared by `grant_eligibility` and `classify_subpath` (`SubpathRefusal`), which `guard::freeze` maps to its messages; `is_network` (`HeadKind::Unc`), `is_verbatim_drive` (`Namespace::Verbatim` + `HeadKind::Drive`) and `is_volume_guid` (`has_os_namespace_head` with a `Volume{` `namespace_tail`), which the Windows DACL backend asks rather than parsing prefixes itself; `Parsed::has_os_namespace_head` (`Namespace::is_exact`), what `show` leaves unfolded; `Parsed::without_verbatim_prefix`, what the Windows identity fold slices; and `Parsed::namespace_tail`, what the discard device check reads under `HeadKind::Device`; `utf8`, a path's native spelling as text or `NotUtf8` naming it, the one strict conversion for a path that must travel as a string (`--capabilities` profiles, `SourceFile`), as `shown` is the one lossy conversion, for display only; `spelled_parent`, a path with its last name dropped by spelling alone, for a program's own layout (the folder a file it writes sits in, its install tree, a run folder it made) and never for a name a grant judges, which asks `RealPath::parent`; a final component's `extension`, and whether a component is a Windows drive or stream (`is_stream_or_drive`); `relative_suffix` strips a sub-path's leading separators under the rules, and `join_under` joins a sub-path onto a base string one component at a time
+  grant refuses the gap outright in `grant::freeze`;
+- lex — `lex.rs`: one structural parser, `parse_bytes`, reading a byte slice under `PathRules` into `Parsed { raw, rules, kind: HeadKind, spelling: HeadSpelling, head_len }`, from which resolution, `.`/`..` folding and every head judgment project. `HeadKind` names the structural head (`Posix`, `Drive { letter, volume }`, `Unc { volume }`, `Driveless`, `DriveRelative { letter }`, `Relative`, `Device` for `\\.\`, and `Malformed` for a two-separator or `\\?\` head that is no well-formed drive, share or device); `HeadSpelling` records the opening separator and namespace facts once (`namespace: Option<Namespace>` — `Verbatim { exact }` for `\\?\`, `Device { exact }` for `\\.\`, `Object` for `\??\`, with `exact` / `Namespace::is_exact` true when all three separator bytes of that 4-byte prefix are `\` — `mixed_opening` for `/\` or `\/`, and `opens_with_slash`). `fold_dots_under` (over `fold_bytes`) is one kernel under either rules from any host, `fold_dots` its host instance on a held path: `head_len` marks where the head ends and only the names past it fold, joined with the rules' separator, so a fold preserves `HeadKind`, `volume` and (save when `..` climbs into the `??` component of a `\??\` driveless path) `HeadSpelling::namespace`; under Windows rules a non-namespace `Drive`, `Unc`, `Driveless`, `DriveRelative` or `Relative` head (`Parsed::respell_head`) is respelled with `\` too (`C:/a/b` folds to `C:\a\b`, `//srv/sh` to `\\srv\sh`), so such a path has one separator throughout, while every head whose kind or meaning turns on its spelling is kept as written: a `Posix` `/` (as `\` it would be `Driveless`), a slash-spelled verbatim head (`//?/C:/x` is a device path Win32 normalises, so its tail past `head_len` folds), and a `Device` or `Malformed` path, or an exact `\\?\` verbatim path (`Namespace::is_exact`, `head_len == raw.len()`: Win32 hands its rest to the kernel uninterpreted, `/` a name byte and `.`/`..` names), all head and kept whole, `..` included; a relative path's drive-shaped first name keeps a `.\` before it; `is_unparsed_head`, a Windows path absolute to the kernel in which `std::path` finds no prefix and so would descend or climb from the current drive, which the walk refuses. Every head predicate projects from `parse_bytes`: whether a path is absolute under either rules set (`absolute_under` / `Parsed::is_absolute`: POSIX, `HeadKind::Posix`; Windows, `Drive`, `Unc`, `Device` or `Malformed`) and on this host (`is_absolute`, `absolute_under` the host's rules, the one absoluteness ral asks, `anchor` included; `Path::is_absolute` is banned in clippy.toml in its favour); `is_working_directory` (`Posix`, or `Drive` / `Unc` under Windows); `is_bare_root` (one separator alone under the given `PathRules`); `has_drive` (non-namespace `Drive` or `DriveRelative`); `Parsed::is_mixed_head` and `Parsed::is_nt_object`, shared by `grant_eligibility` and `classify_subpath` (`SubpathRefusal`), which `grant::freeze` maps to its messages; `is_network` (`HeadKind::Unc`), `is_verbatim_drive` (`Namespace::Verbatim` + `HeadKind::Drive`) and `is_volume_guid` (`has_os_namespace_head` with a `Volume{` `namespace_tail`), which the Windows DACL backend asks rather than parsing prefixes itself; `Parsed::has_os_namespace_head` (`Namespace::is_exact`), what `show` leaves unfolded; `Parsed::without_verbatim_prefix`, what the Windows identity fold slices; and `Parsed::namespace_tail`, what the discard device check reads under `HeadKind::Device`; `utf8`, a path's native spelling as text or `NotUtf8` naming it, the one strict conversion for a path that must travel as a string (`--capabilities` profiles, `SourceFile`), as `shown` is the one lossy conversion, for display only; `spelled_parent`, a path with its last name dropped by spelling alone, for a program's own layout (the folder a file it writes sits in, its install tree, a run folder it made) and never for a name a grant judges, which asks `RealPath::parent`; a final component's `extension`, and whether a component is a Windows drive or stream (`is_stream_or_drive`); `relative_suffix` strips a sub-path's leading separators under the rules, and `join_under` joins a sub-path onto a base string one component at a time
   with the separator of the given rules, on every host alike (`GuestPath::join`
   is it under Posix rules), and refuses (`Rerooting`) a sub-path naming a volume
   of its own under Windows rules — absolute there, or a drive at any component;
@@ -336,7 +353,7 @@ constructor, so no call site can choose "here" for itself**
   `runtime::command::vet` reads a verdict rather than taking a second walk.
 - On Windows, `%PATHEXT%` suffixes **append**: `build.ps1` yields
   `build.ps1`, `build.ps1.EXE`, …, never `build.exe`.
-- `ExecRules::of_grant` walks the `PATH` of the decoding environment with
+- Grant construction walks the `PATH` of the decoding environment with
   no anchor, so neither a scoped `PATH` nor a relative entry can
   redirect a bare key.
 
@@ -355,7 +372,7 @@ the check it guarded matched the real form — and read a symlink out of `HOME` 
 contained.
 
 The set-level algebra over prefixes is not in `path/`: it is
-`capability::table`, which names polarities and never identities, so every
+`authority::policy::table`, which names polarities and never identities, so every
 spelling question stays here. `RealPath` (`walk.rs`) is the position a walk
 ends at and the identity of a run place, ordered as the host identifies files.
 
@@ -369,13 +386,13 @@ the account's own from the user database (the `AccountHome` site), so `app_dir`,
 `OwnDir`, `UserFile` and the credential denies all see the same base; a `~` in a
 script (`host::home`) is unchanged. Where even that fails, `own` refuses with an
 error naming what to set, and no temp dir stands in. Both the `xdg-*` grant places
-(`sigil.rs`, `guard::freeze`) and the host's own config/data loaders (`host::xdg`) defer to
+(`sigil.rs`, `grant::freeze`) and the host's own config/data loaders (`host::xdg`) defer to
 it, so a grant and the rc/history/plugin paths can never name different
 directories — [[decisions/260601_xdg-resolver-consolidation|xdg-resolver-consolidation]].
 
 The files a program touches on its own account, outside any shell, are
 `core/src/own.rs`'s, under one authority, the crate-private write side of
-`capability::Ungoverned`:
+`authority::policy::Ungoverned`:
 
 - `OwnDir` — what the program keeps for itself (state, tokens, logs, caches,
   records, scratches): a held directory reached from an XDG root, one entry name
@@ -395,7 +412,7 @@ each syscall it needs is a walk primitive
 `Public`, `Private` and `Secret`). The config home holds only what the user
 writes ([[decisions/261022_own-files|own-files]]).
 
-## OS sandbox — `core/src/sandbox/`
+## OS sandbox — `core/src/authority/sandbox/`
 
 External commands inside a `grant` block run under an OS sandbox enforcing the
 declared **filesystem and network** capabilities — and **exec**, wherever a
@@ -478,10 +495,10 @@ VM boundary are the only confinement of grandchildren.
   the trampoline by name; Linux execs it from ral's pin, lent like every
   descriptor, so there is no name to verify.
 - `projection.rs` — the sandbox's own view of authority:
-  `SandboxProjection::of(&GrantStack, &Floor, Option<&Admitted>)`
+  `SandboxProjection::of(&GrantStack, &Baseline, Option<&Admitted>)`
   meet-folds the stack once, at spawn, into `FsProjection` (`read:
   Vec<FsAllow>`, the live positives of the read region with run places and live
-  support among them, beside the write prefixes, the floor and the exclusions;
+  support among them, beside the write prefixes, the system reads and the exclusions;
   allowances keep their resolved positions up to rendering, exclusions render
   from the resolved real paths their walks held; `FsRules`, whose `rendered()`
   derives `pinned_dirs`; no write
@@ -489,7 +506,7 @@ VM boundary are the only confinement of grandchildren.
   `ExecRules::for_kernel` of the `Admitted`'s own table joined with the live
   support (`sandbox::carriers`), so the profile renders the table that judged
   the launch rather than a second compile. It takes no `Shell`;
-  `Shell::sandbox_projection` (`guard/shell.rs`) is the entry.
+  `Shell::sandbox_projection` (`authority/guard/shell.rs`) is the entry.
 - `projection_enforceable` (`sandbox.rs`) — rejects an offline (`` net: `offline ``)
   projection on a backend with no kernel network enforcement, so an unenforceable
   request fails closed rather than running ignored.

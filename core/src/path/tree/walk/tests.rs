@@ -2,7 +2,7 @@
 //! what a grant takes from it.
 
 use super::*;
-use crate::capability::{Capabilities, Floor, FsPolicy, GrantStack};
+use crate::authority::policy::{Baseline, Capabilities, FsPolicy, GrantStack};
 use crate::path::{FrozenPath, relative_key, utf8};
 use crate::process::{CancelCause, DurableRoot};
 use crate::test_helper::{layer, stack};
@@ -43,7 +43,7 @@ pub(super) fn lexical(path: &Path) -> LexicalPath {
 
 /// No grant: the root stack's region, which withholds nothing.
 pub(super) fn open() -> ReadRegion {
-    GrantStack::root().read_region(&Floor::default())
+    GrantStack::root().read_region(&Baseline::default())
 }
 
 /// A grant that reads under `allow` but for `deny`.
@@ -58,7 +58,7 @@ fn reading(allow: &Path, deny: &[&Path]) -> ReadRegion {
         fs: Some(policy),
         ..Capabilities::default()
     };
-    stack([layer(caps)]).read_region(&Floor::default())
+    stack([layer(caps)]).read_region(&Baseline::default())
 }
 
 pub(super) fn scope() -> Scope {

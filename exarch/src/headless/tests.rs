@@ -17,7 +17,7 @@ fn converse_trunk(tag: &str, script: Script) -> Avatar {
     Avatar::root(
         RootConfig {
             system: "system".into(),
-            caps: ral_core::capability::GrantStack::root(),
+            caps: ral_core::authority::policy::GrantStack::root(),
             run_dir: dir,
             trunk: Trunk::Embedded,
             tools: Toolset::offered(false),
@@ -357,7 +357,7 @@ fn settled_trunk(tag: &str, script: Script, allow_schedule: bool, resume_on_rese
     Avatar::root(
         RootConfig {
             system: "system".into(),
-            caps: ral_core::capability::GrantStack::root(),
+            caps: ral_core::authority::policy::GrantStack::root(),
             run_dir: dir,
             trunk: Trunk::Embedded,
             tools: Toolset::offered(false),

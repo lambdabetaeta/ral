@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: 7f61632a
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 verified_at_commit: 446e3123
 anchors: [ExecGrant, ExecKey, ExecRules, ExecAllow, ExecDeny, Table, Verdict, Rank, Program, Subject, Head, Missing, Admitted, admit, admits, check_exec, RealPath, holds, command_name_key, evicts]
 ---
@@ -258,12 +258,12 @@ program as stored.
 
 ## Where
 
-`core/src/capability/lattice.rs` (`ExecGrant`, `ExecKey`, `Verdict`,
-`meet_insert`), `core/src/guard/decode.rs` (keys to `ExecGrant`),
-`core/src/capability/table.rs` (`Table`: `verdict`, `respelled`, the meet),
-`core/src/capability/exec.rs` (`ExecRules`, `ExecScope`, `Rank`, `Program`,
+`core/src/authority/policy/lattice.rs` (`ExecGrant`, `ExecKey`, `Verdict`,
+`meet_insert`), `core/src/authority/grant/decode.rs` (keys to `ExecGrant`),
+`core/src/authority/policy/table.rs` (`Table`: `verdict`, `respelled`, the meet),
+`core/src/authority/policy/exec.rs` (`ExecRules`, `ExecScope`, `Rank`, `Program`,
 `Subject`, `holds`, `GrantStack::admit`/`admits`, `Admitted`),
-`core/src/guard/enforce.rs` (`check_exec`),
+`core/src/authority/guard/enforce.rs` (`check_exec`),
 `core/src/runtime/command/head.rs` (`Head`, `Missing`),
 `core/src/path/forms.rs` (`RealPath`, `within::<P>`, `evicts`),
 `core/src/path/which.rs` (`command_name_key`).

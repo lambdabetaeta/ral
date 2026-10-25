@@ -1,4 +1,5 @@
 ---
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 verified_at_commit: 002c654a
 verified_at_date: 2026-10-13
 anchors: [GrantStack, Capabilities::extend, Fragment, Axis, join_top, Evidence, Table::meet, Table::withheld, region, rules, for_invocation]
@@ -247,8 +248,8 @@ layers. Credential, profile-file and self exclusions never move into the
 extension, where they could be forgotten. The `deny_layer` is `t ⊕ (f if X)`,
 built by `join_top` over a fragment of exclusions.
 
-- **restrict**: each file is a layer; `capability::fs::region` and
-  `capability::exec::rules` meet the layers' tables with `Table::meet`, so a
+- **restrict**: each file is a layer; `authority::policy::fs::region` and
+  `authority::policy::exec::rules` meet the layers' tables with `Table::meet`, so a
   conjunct per layer and `↓(S ∧ R)` permits nothing `↓S` did not (restriction attenuates).
   Pairing of run places looks *down* the stack, so a pushed layer changes no
   layer beneath it.

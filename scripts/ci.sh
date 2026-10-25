@@ -16,7 +16,7 @@
 #              Seatbelt, or to compile synod, at all.
 #   linux-box  inside scripts/linux-box.Dockerfile's image — the only way a
 #              macOS host compiles the cfg(target_os = "linux") sandbox,
-#              which core/src/sandbox.rs gates out of a native build.
+#              which core/src/authority/sandbox.rs gates out of a native build.
 set -eu
 
 MODE=${1:-}

@@ -1,4 +1,5 @@
 ---
+generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
 verified_at_commit: 002c654a
 verified_at_date: 2026-10-13
 anchors: [pinned_dirs, build_profile, DenyMask, Binds]
@@ -23,7 +24,7 @@ covers.
 
 ## macOS pins the ancestors
 
-**`FsRules::pinned_dirs` (`core/src/sandbox/projection.rs`) collects every
+**`FsRules::pinned_dirs` (`core/src/authority/sandbox/projection.rs`) collects every
 proper ancestor of a deny that lies within a write prefix**, the write prefix's
 root included.
 
@@ -32,7 +33,7 @@ root included.
   spelling and its symlink-resolved target. So an alias's chain is pinned
   beside its target's, and a symlink swapped in after the sandbox starts is
   covered too.
-- **`build_profile` (`core/src/sandbox/macos.rs`) emits
+- **`build_profile` (`core/src/authority/sandbox/macos.rs`) emits
   `(deny file-write-unlink (literal "<dir>"))` for each pinned directory**,
   after the write prefix's own allow, since Seatbelt's last match wins.
 - **`literal`, never `subpath`.** That keeps a pinned directory's *entries*
@@ -46,7 +47,7 @@ See [[internals/seatbelt-profile|seatbelt-profile]] for the full rendering.
 ## Linux needs no pin
 
 **On Linux a deny is a mount, and a mount is anchored to the inode it covers,
-not to the path that named it** (`DenyMask`, `core/src/sandbox/linux.rs`).
+not to the path that named it** (`DenyMask`, `core/src/authority/sandbox/linux.rs`).
 
 - **Renaming an ancestor carries the mask along.** It keeps covering the real
   file at its new place.
@@ -194,8 +195,8 @@ fails for a stated reason:
 Neither shows up in an argv assertion, so each rule is pinned by a test that
 spawns the envelope for real:**
 
-- `sandbox::linux::tests::a_denied_path_refuses_every_access_while_the_body_still_runs`
-- `sandbox::linux::tests::building_an_envelope_never_creates_a_denied_name_on_the_host`
+- `authority::sandbox::linux::tests::a_denied_path_refuses_every_access_while_the_body_still_runs`
+- `authority::sandbox::linux::tests::building_an_envelope_never_creates_a_denied_name_on_the_host`
 - `capabilities::seatbelt_holds_an_absent_deny_inside_a_write_prefix` (macOS)
 
 **No Linux test pins the absent-name gap itself.** `tests/unix/grant-fs-deny.ral`
@@ -211,7 +212,7 @@ holds.
 
 The Unix renderers place an exclusion at both positions it holds, its name's
 and its link's target's. The Windows DACL side places it at one, the target
-where the name is a link (`session.rs::excluded_real`): it judged the followed
+where the name is a link (`authority/sandbox/windows/session.rs::excluded_real`): it judged the followed
 path alone before, carving never grants a link entry anyway, and
 `ensure_unreachable` holds a position with every link refused, which the
 link's own position would fail.

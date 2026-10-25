@@ -596,7 +596,7 @@ mod tests {
             &crate::boot::HostSurface::default(),
             crate::test_helper::process_cwd(),
         )
-        .expect("a test host resolves its floor");
+        .expect("a test host resolves its baseline");
         shell.env.bind(
             "only_mine".into(),
             Binding {

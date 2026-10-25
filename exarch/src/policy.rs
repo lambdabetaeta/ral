@@ -16,10 +16,10 @@ mod load;
 
 use base::resolve_base;
 use load::{absolute_in, load_capabilities_ral, load_fragment_ral};
-use ral_core::capability::{
+use ral_core::authority::grant::freeze::{FreezeCtx, host_absolute};
+use ral_core::authority::policy::{
     Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy, GrantLayer, GrantStack,
 };
-use ral_core::guard::freeze::{FreezeCtx, host_absolute};
 use ral_core::io::terminal::TerminalState;
 use ral_core::path::FrozenPath;
 use ral_core::types::EnvVars;
@@ -192,7 +192,7 @@ fn deny_layer(paths: &[PathBuf]) -> Result<GrantLayer, String> {
 /// held, under every program less it.  Exec only: an fs exclusion would
 /// refuse every bundled tool.  Unpinned, it names nothing rather than guess.
 fn self_layer() -> Result<GrantLayer, String> {
-    let exe = ral_core::sandbox::pinned_arg0().ok_or(
+    let exe = ral_core::authority::sandbox::pinned_arg0().ok_or(
         "exarch could not pin its own binary at startup (is it missing or unreadable?), \
          so cannot exclude it from exec",
     )?;
@@ -211,7 +211,7 @@ fn self_layer() -> Result<GrantLayer, String> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use ral_core::capability::Net;
+    use ral_core::authority::policy::Net;
 
     /// The scratch spelling every test here freezes `scratch` places against:
     /// no test makes anything in it.
@@ -251,8 +251,8 @@ mod tests {
         let runtime = ral_core::test_helper::core_runtime();
         assert!(
             !stack.admits_fs(
-                runtime.floor(),
-                &ral_core::capability::FsOp::Write,
+                runtime.baseline(),
+                &ral_core::authority::policy::FsOp::Write,
                 &ral_core::test_helper::trace(&path)
             ),
             "restrict file path should be write-denied"

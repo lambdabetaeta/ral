@@ -33,7 +33,7 @@
 //! covers host-external *write* denial outside an fs grant at the top
 //! level, in a `grant { … }` block body, in a `spawn` body, and in a
 //! `par` task. The lib-level seam tests
-//! `sandbox::launch::tests::{external_denied_write_outside_fs_grant,
+//! `authority::sandbox::launch::tests::{external_denied_write_outside_fs_grant,
 //! bundled_tool_denied_outside_fs_grant}` cover the `sandboxed_command`
 //! seam directly; this file proves the same enforcement *through eval*.
 //!
@@ -55,7 +55,7 @@
 mod common;
 
 use ral_core::RunIo;
-use ral_core::capability::{Capabilities, FsPolicy};
+use ral_core::authority::policy::{Capabilities, FsPolicy};
 use ral_core::path::FrozenPath;
 use ral_core::protocol::Run;
 use ral_core::source::SourceOrigin;
@@ -71,7 +71,7 @@ fn boot() -> Shell {
         &ral_core::boot::HostSurface::default(),
         ral_core::test_helper::process_cwd(),
     )
-    .expect("a test host resolves its floor")
+    .expect("a test host resolves its baseline")
 }
 
 /// A process-unique work directory under the system temp root, created on
@@ -198,15 +198,15 @@ fn external_read_outside_grant_denied() {
     let _ = std::fs::remove_file(&secret);
 }
 
-/// The floor is one fold: under a read grant that never names `/etc/hosts`,
+/// The baseline is one fold: under a read grant that never names `/etc/hosts`,
 /// the in-process guard and a confined child both read it.
 #[test]
-fn a_floor_file_reads_alike_in_process_and_in_a_child() {
-    let (work, work_s) = unique_workdir("floor");
+fn a_system_reads_file_reads_alike_in_process_and_in_a_child() {
+    let (work, work_s) = unique_workdir("baseline");
     let mut shell = boot();
     let read = |shell: &mut Shell, src: &str| {
         top_level_under(shell, restrict_to(&work_s), src)
-            .expect("a floor file is readable under any restricted read")
+            .expect("a baseline file is readable under any restricted read")
     };
     let guard = read(&mut shell, "from-lines < /etc/hosts");
     let child = read(&mut shell, "!{/bin/cat /etc/hosts | from-string}");

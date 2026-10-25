@@ -265,19 +265,20 @@ fn made_outside(home: &str, token: &str) -> Vec<String> {
 fn the_two_tokens_are_made_in_their_own_modules_alone() {
     let read = |file: &str| std::fs::read_to_string(source().join(file)).unwrap();
     assert!(
-        read("capability/fs.rs").contains("pub(crate) struct Verdict<O: Op>(PhantomData<O>);"),
-        "`Verdict`'s field must stay private to `capability/fs.rs`"
+        read("authority/policy/fs.rs")
+            .contains("pub(crate) struct Verdict<O: Op>(PhantomData<O>);"),
+        "`Verdict`'s field must stay private to `authority/policy/fs.rs`"
     );
     assert!(
-        read("sandbox.rs").contains("pub(crate) struct InstallToken(());"),
-        "`InstallToken`'s field must stay private to `sandbox.rs`"
+        read("authority/sandbox.rs").contains("pub(crate) struct InstallToken(());"),
+        "`InstallToken`'s field must stay private to `authority/sandbox.rs`"
     );
     assert_eq!(
-        made_outside("capability/fs.rs", "Verdict"),
+        made_outside("authority/policy/fs.rs", "Verdict"),
         Vec::<String>::new()
     );
     assert_eq!(
-        made_outside("sandbox.rs", "InstallToken"),
+        made_outside("authority/sandbox.rs", "InstallToken"),
         Vec::<String>::new()
     );
 }
