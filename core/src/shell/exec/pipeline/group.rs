@@ -1,7 +1,7 @@
 //! Process-group lifecycle for a multi-stage pipeline, on every platform.
 //!
-//! An owning group spawns the anchor — [`Role::Anchor`](crate::Role::Anchor), the one
-//! member outliving every stage, so the pgid stays joinable; a group joining
+//! An owning group spawns [`Role::PipelineAnchor`](crate::Role::PipelineAnchor),
+//! outliving every stage so the pgid stays joinable; a group joining
 //! an enclosing stage's pgid has no anchor.  The shell is not a member, so a
 //! signal the tty delivers to the group reaches it only as the anchor's
 //! [`Event::Heard`] — the kernel having already given that signal to every
@@ -134,7 +134,7 @@ impl AnchorProcess {
         let _ = tx;
         let (reader, release) =
             crate::process::cloexec_pipe().map_err(|e| Error::io("pipeline anchor", &e))?;
-        let mut cmd = crate::authority::sandbox::reexec::launch(crate::Role::Anchor)
+        let mut cmd = crate::authority::sandbox::reexec::launch(crate::Role::PipelineAnchor)
             .map_err(|e| Error::io("pipeline anchor", &e))?;
         cmd.stdin(crate::process::StdioSpec::from_pipe_reader(reader));
         cmd.stderr(crate::process::StdioSpec::null());

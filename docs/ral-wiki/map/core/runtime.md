@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_commit: 19f4267e14b59dd8c37436c1ceae26f03a416714
 generated_at_date: 2026-10-25
 covers_paths: [core/src/shell/exec.rs, core/src/shell/exec/]
 ---
@@ -299,7 +299,7 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     no backoff, returning when every stage is observed;
     `PipeNode::join` is `drive()`, `end_anchor()`, then `fold(mooring, shell)`,
     the group dropped after). `anchor.rs` is the hidden
-    `--ral-pipeline-anchor` child's entrypoint (`Role::Anchor`; a bundled tool's
+    `--ral-pipeline-anchor` child's entrypoint (`Role::PipelineAnchor`; a bundled tool's
     `Role::BundledTool` is launched beside it by `authority::sandbox::reexec::launch`), a
     ral-written stage running on a thread of the parent process instead. On Windows every external a stage thread spawns still
     resolves `PgidPolicy::Join` against the anchor's registered Job Object,

@@ -110,7 +110,7 @@ fn bwrap_builds(
         .args(pieces)
         .arg("--")
         .arg(crate::path::proc_fd_path(at.fd()))
-        .arg(Role::Anchor.flag())
+        .arg(Role::PipelineAnchor.flag())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());

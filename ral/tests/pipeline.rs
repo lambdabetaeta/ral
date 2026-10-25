@@ -1161,8 +1161,8 @@ const CTRL_BACKSLASH: u8 = 0x1c;
 
 /// Type `line` at a pty REPL, press `key` once the terminal is lent, and wait
 /// for the prompt to come back.  The line's marker is `$[1234*2]`, computed
-/// because the tty echoes what was typed: `2468` in the output means the line
-/// ran on past the key.
+/// because the tty echoes what was typed: a standalone `2468` output line
+/// means execution ran on past the key.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn press_on_the_lent_terminal(line: &str, key: u8) -> (bool, PtySession) {
     let mut session = PtySession::spawn().unwrap_or_else(|e| panic!("{e}"));
@@ -1183,7 +1183,7 @@ fn assert_the_key_stops_the_line(line: &str) {
     let out = session.finish();
     assert!(ended, "the prompt never came back; stderr: {}", out.stderr);
     assert!(
-        !out.stderr.contains("2468"),
+        !out.stderr.lines().any(|line| line.trim() == "2468"),
         "attempt swallowed the Ctrl-C and the line ran on; stderr: {}",
         out.stderr
     );
@@ -1224,7 +1224,7 @@ fn ctrl_c_stops_the_line_though_every_stage_traps_it() {
 fn ctrl_backslash_on_a_lent_command_ends_the_job_not_the_shell() {
     let (ended, mut session) =
         press_on_the_lent_terminal("attempt { sleep 30 }; echo $[1234*2]", CTRL_BACKSLASH);
-    let stopped = !session.text().contains("2468");
+    let stopped = !session.text().lines().any(|line| line.trim() == "2468");
     session.send_line("echo $[2*3]").expect("send failed");
     let lives = session.wait_until(Duration::from_secs(8), |t| {
         t.lines().any(|line| line.trim() == "6")
@@ -1253,7 +1253,9 @@ fn a_key_the_lent_command_handles_does_not_stop_the_line() {
         CTRL_C,
     );
     let ran_on = session.wait_until(Duration::from_secs(8), |t| {
-        t.contains("caught42") && t.contains("alive42") && t.contains("2468")
+        t.contains("caught42")
+            && t.contains("alive42")
+            && t.lines().any(|line| line.trim() == "2468")
     });
     let out = session.finish();
     assert!(

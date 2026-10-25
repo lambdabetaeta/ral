@@ -1,21 +1,14 @@
-//! The one pre-`main` dispatch, for `ral`, `exarch` and every test constructor.
+//! Shared process-role dispatch for `ral`, `exarch` and test constructors.
 //!
-//! Each process serves the role [`classify`](crate::classify) names, or is
-//! left, pinned, to its caller; each role's body stays with the code it serves.
-//!
-//! The order is the sandbox's.  A confined re-exec is served by
-//! [`authority::sandbox::serve_warrant`] alone, pinning and opening nothing before it is
-//! confined; the anchor spawns nothing, so pins nothing.  A
-//! bundled tool pins, as a re-exec child that reaches no session ledger.  Every
-//! other role boots first, the engine included: its grant-confined launches
-//! need the pinned envelope as much as the shell's.
+//! A warrant must enter confinement before opening or pinning anything.
+//! The anchor spawns nothing, so needs no pin; a bundled tool pins but reaches
+//! no session ledger. Engines and shells boot the sandbox support for launches.
 
 use crate::site::{Silent, site};
 use crate::{Invocation, Role, authority, classify, io::terminal, uutils};
 use std::ffi::OsString;
 
-/// Serve `role`.  `Some(code)` is a served role's exit; `None` leaves the
-/// process to its caller: the shell, whose argv it reads.
+/// Serve `role`, returning its exit code or leaving normal startup to the caller.
 #[cfg_attr(
     not(unix),
     allow(unused_variables, reason = "only a Unix engine reads its installers")
@@ -43,58 +36,34 @@ pub fn serve(
     }
 }
 
-/// Exit with `code` where a served re-exec role has run: nothing is booted in
-/// a process that served one, so no lease, watched child or staged write is
-/// left behind.  Returns where none was.
-///
-/// `code` is what [`serve`] answered, and it is the one place a caller
-/// exits on it, so every `main` and every `#[ctor]` over a host cannot drift
-/// on what makes exiting there safe.
+/// Exit after [`serve`] finishes a role; continue normal startup otherwise.
+/// Role handlers must finish cleanup before returning an exit code.
 pub fn exit_if_served(code: Option<u8>) {
     if let Some(code) = code {
         site!(Silent::ServedRoleExit, std::process::exit(i32::from(code)));
     }
 }
 
-/// [`serve`] the role this process's own argv names: the `main`s' form.
-///
-/// A `main` reads argv from std, as any program does, and never from `/proc`:
-/// the guest and a sandboxed payload may have none.  A `#[ctor]` runs before
-/// `main` and calls [`serve_process_before_main`] instead, so that a test
-/// binary's re-exec of `current_exe()` is served before libtest sees flags it
-/// would reject.
+/// Serve this process's role from `main`, using std's argv without requiring `/proc`.
 pub fn serve_process(installers: &'static [crate::engine::EngineInstaller]) -> Option<u8> {
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
     serve(&classify(&argv), installers)
 }
 
-/// [`serve_process`], for a `#[ctor]`: the same role, read from the argv
-/// [`argv_before_main`] can find before `main` has run.
+/// Serve a test re-exec before libtest can reject its role flag.
 ///
-/// It exists because a constructor cannot read argv the way a `main` does: on
-/// Linux without glibc std has not captured it yet, and a constructor that saw
-/// no argv would see no role, leaving libtest to reject the role's flag.
-///
-/// The role then runs with std's argv still empty there, so a bundled tool,
-/// whose uucore reads it, cannot be served this way: tests that need one are
-/// ignored under `cfg(ctor_without_argv)`.
+/// Without glibc on Linux, std's argv is still empty here. [`argv_before_main`]
+/// supplies the role, but cannot initialise std's argv for uucore; bundled-tool
+/// tests are therefore ignored under `cfg(ctor_without_argv)`.
 pub fn serve_process_before_main(
     installers: &'static [crate::engine::EngineInstaller],
 ) -> Option<u8> {
     serve(&classify(&argv_before_main()), installers)
 }
 
-/// This process's argv without `argv[0]`, as a `#[ctor]` can read it.
-///
-/// std captures argv before `main` only where the platform hands it over:
-/// glibc passes `argc` and `argv` to `.init_array` functions, and std
-/// registers one on `all(target_os = "linux", target_env = "gnu")`; macOS has
-/// `_NSGetArgv` and Windows `GetCommandLineW`.  musl calls its `.init_array`
-/// functions with no arguments, so there `std::env::args_os` is empty until
-/// `main`.  The kernel's copy of the exec'd argv, `/proc/self/cmdline`, is the
-/// one source left, so that is read, and a failure to read it is a panic: a
-/// constructor that silently saw no role would fail much later, and far from
-/// its cause.
+/// Read argv without `argv[0]` before std captures it on non-glibc Linux.
+/// Unlike glibc, musl passes no argv to `.init_array` constructors.
+/// Failure is fatal: missing the role would leave libtest to reject its flag.
 #[cfg(ctor_without_argv)]
 fn argv_before_main() -> Vec<OsString> {
     use std::os::unix::ffi::OsStringExt;
@@ -113,8 +82,7 @@ fn argv_before_main() -> Vec<OsString> {
         .collect()
 }
 
-/// This process's argv without `argv[0]`: std has captured it before `main`
-/// here (see the Linux-without-glibc form for where it has not).
+/// Read argv without `argv[0]` where std makes it available before `main`.
 #[cfg(not(ctor_without_argv))]
 fn argv_before_main() -> Vec<OsString> {
     std::env::args_os().skip(1).collect()

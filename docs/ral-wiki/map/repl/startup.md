@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_commit: 19f4267e14b59dd8c37436c1ceae26f03a416714
 generated_at_date: 2026-10-25
 covers_paths: [ral/src/main.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/boot_builtin.rs, ral/src/platform.rs, ral/build.rs]
 ---
@@ -21,11 +21,13 @@ runs the session named. `identify` answers with a two-armed `Invocation`:
 its work — or for an argv that is not text: ral's arguments become strings,
 so one that is not UTF-8 is refused with status 2, never mangled.
 
-## Pre-`main` dispatch
+## Process-role dispatch
 
 **One pure classifier names the hidden role a process was started for, and
 one dispatch serves it.** `ral_core::classify(argv)`
-(`core/src/role.rs`) reads the first argument alone over `Role::ALL` and
+(`core/src/role.rs`) keeps the launch vocabulary and classification independent
+of execution; `core/src/invocation.rs` owns dispatch. The classifier reads the
+first argument alone over `Role::ALL` and
 returns an `Invocation`: `Engine`, `PipelineAnchor`, `Warrant`,
 `BundledTool`, or `Shell`. Each flag is spelled once,
 by `Role::flag`, and disjointness lives there and nowhere else — a flag a

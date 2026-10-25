@@ -1,10 +1,7 @@
-//! The hidden roles a ral-family process is re-exec'd to play, read off argv
-//! alone.
+//! Process-role vocabulary and argv classification, independent of dispatch.
 //!
-//! Every entry point (`ral`, `exarch`, a test binary's constructor) matches
-//! on [`classify`], so each flag is spelled once here, and a launch is given a
-//! [`Role`], never a string.  The role is named by the first argument; what
-//! follows it is the role's own to read.
+//! Launches name a [`Role`]; [`classify`] reads only the first argument.
+//! [`crate::invocation`] serves the result.
 
 use std::ffi::{OsStr, OsString};
 
@@ -15,7 +12,7 @@ pub enum Role {
     #[cfg(unix)]
     Engine,
     /// The process that holds a pipeline's pgid open.
-    Anchor,
+    PipelineAnchor,
     /// A confined re-exec, whose warrant arrives on a descriptor.
     Warrant,
     /// The bundled-tool multicall.
@@ -26,7 +23,7 @@ impl Role {
     pub(crate) const ALL: &[Self] = &[
         #[cfg(unix)]
         Self::Engine,
-        Self::Anchor,
+        Self::PipelineAnchor,
         Self::Warrant,
         Self::BundledTool,
     ];
@@ -38,7 +35,7 @@ impl Role {
         match self {
             #[cfg(unix)]
             Self::Engine => "--engine",
-            Self::Anchor => "--ral-pipeline-anchor",
+            Self::PipelineAnchor => "--ral-pipeline-anchor",
             Self::Warrant => "--warrant",
             Self::BundledTool => "--ral-bundled-tool",
         }
@@ -51,8 +48,7 @@ pub enum Invocation<'a> {
     #[cfg(unix)]
     Engine,
     PipelineAnchor,
-    /// The arguments, of which the trampoline takes one: the slot its warrant
-    /// arrives on.
+    /// The warrant descriptor's argument, validated by the trampoline.
     Warrant(&'a [OsString]),
     /// The tool's name, then its arguments.
     BundledTool(&'a [OsString]),
@@ -72,7 +68,7 @@ pub fn classify(argv: &[OsString]) -> Invocation<'_> {
     match role {
         #[cfg(unix)]
         Role::Engine => Invocation::Engine,
-        Role::Anchor => Invocation::PipelineAnchor,
+        Role::PipelineAnchor => Invocation::PipelineAnchor,
         Role::Warrant => Invocation::Warrant(rest),
         Role::BundledTool => Invocation::BundledTool(rest),
     }
@@ -88,7 +84,7 @@ mod tests {
 
     #[test]
     fn each_role_is_named_by_its_first_argument() {
-        let anchor = Role::Anchor.flag();
+        let anchor = Role::PipelineAnchor.flag();
         let bundled = Role::BundledTool.flag();
         assert_eq!(classify(&[]), Invocation::Shell);
         assert_eq!(
@@ -144,7 +140,7 @@ mod tests {
             &[][..],
             &["sh"],
             &["--engine"],
-            &[Role::Anchor.flag()],
+            &[Role::PipelineAnchor.flag()],
             &[Role::BundledTool.flag(), "ls"],
         ] {
             let argv = argv(&[&[warrant], rest].concat());

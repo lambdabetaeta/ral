@@ -1,4 +1,4 @@
-//! The pipeline anchor, a re-exec of ral in `Role::Anchor`: it holds the
+//! The pipeline anchor, a re-exec of ral in `Role::PipelineAnchor`: it holds the
 //! pipeline pgid open so a fast-exiting first stage cannot strand its
 //! successors.  Its byte protocol is read by `AnchorProcess` in `group.rs`.
 
