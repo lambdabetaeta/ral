@@ -5,10 +5,10 @@
 //! REPL-styled notices — disable and warning — and the line that says what
 //! a failed load left out.
 
-use ral_core::ansi::{self, BOLD_YELLOW, RESET};
 use ral_core::err;
+use ral_core::io::ansi::{self, BOLD_YELLOW, RESET};
 use ral_core::types::Error;
-use ral_core::{Shell, terminal};
+use ral_core::{Shell, io::terminal};
 
 /// Print a failed load's report, then `ral: {what}: …` saying how far it got:
 /// skipped whole if it never compiled, which a compile report cannot say, or

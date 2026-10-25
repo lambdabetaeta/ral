@@ -593,7 +593,7 @@ mod tests {
                 .with_env(vec![("PATH".into(), path.into())]),
         );
         let runtime = ral_core::HostSurface::default()
-            .runtime(ral_core::terminal::TerminalState::default())
+            .runtime(ral_core::io::terminal::TerminalState::default())
             .expect("a test host resolves its floor");
         crate::repl::engine_at(&attach, runtime, |_| {})
     }

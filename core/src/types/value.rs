@@ -12,7 +12,7 @@ use super::list::List;
 use super::map::Map;
 use crate::first_order::Bytes;
 use crate::first_order::Finite;
-use crate::terminal::{InteractiveMode, TerminalState};
+use crate::io::terminal::{InteractiveMode, TerminalState};
 use crate::text::Str;
 use crate::ty::{Head, TAG_PREFIX};
 use std::fmt;

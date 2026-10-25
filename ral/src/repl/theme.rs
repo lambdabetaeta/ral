@@ -5,10 +5,10 @@
 //! `value-color` (an ANSI SGR escape).  Both fields are configurable from
 //! the RC file's `theme` key.
 //!
-//! Color is suppressed automatically when [`ral_core::terminal::ui_color`]
+//! Color is suppressed automatically when [`ral_core::io::terminal::ui_color`]
 //! returns false, so the theme can store an unconditional `Some(color)`.
 
-use ral_core::ansi::{YELLOW, named_color};
+use ral_core::io::ansi::{YELLOW, named_color};
 use ral_core::{Map, Value};
 
 /// Styling applied to ral-computed values printed at the REPL prompt.

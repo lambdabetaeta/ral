@@ -9,8 +9,8 @@ use ral_core::boot::boot_runtime;
 use ral_core::capability::{Capabilities, GrantLayer};
 use ral_core::first_order::FOValue;
 use ral_core::first_order::datum::Datum as _;
+use ral_core::io::terminal::TerminalState;
 use ral_core::protocol::{EngineSpec, Root};
-use ral_core::terminal::TerminalState;
 use ral_core::types::EnvVars;
 use ral_core::{Runtime, Shell};
 

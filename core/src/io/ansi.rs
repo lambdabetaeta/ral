@@ -1,7 +1,7 @@
 //! ANSI escape constants, OSC sequence builders, and escape scanning.
 //!
 //! Vocabulary only: whether a sequence may be emitted is decided by
-//! [`TerminalState`](crate::terminal::TerminalState).
+//! [`TerminalState`](crate::io::terminal::TerminalState).
 
 // ── Constants ─────────────────────────────────────────────────────────────
 

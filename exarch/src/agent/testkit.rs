@@ -17,8 +17,8 @@ use ral_core::Runtime;
 use ral_core::Shell;
 use ral_core::Value;
 use ral_core::engine::EngineInstaller;
+use ral_core::io::terminal::TerminalState;
 use ral_core::own::{OwnDir, TestDir};
-use ral_core::terminal::TerminalState;
 use ral_core::ty::{Scheme, Ty};
 use ral_core::typecheck::Unifier;
 use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
@@ -331,7 +331,7 @@ fn root(trunk: Trunk, tools: Toolset) -> Avatar {
         RootSeat::Identity {
             scratch: Arc::new(scratch),
             cwd: std::env::current_dir().expect("test process has a cwd"),
-            terminal: ral_core::terminal::TerminalState::default(),
+            terminal: ral_core::io::terminal::TerminalState::default(),
         },
         scripted("test-model", Script::new()),
     )

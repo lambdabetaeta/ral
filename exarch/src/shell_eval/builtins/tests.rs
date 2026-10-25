@@ -244,7 +244,7 @@ fn clear_reboots_a_shell_that_still_carries_detach() {
     let mut seat = crate::agent::seat::Seat::root(
         &crate::INSTALLERS,
         cwd,
-        ral_core::terminal::TerminalState::default(),
+        ral_core::io::terminal::TerminalState::default(),
         scratch,
     )
     .expect("the recipe boots");

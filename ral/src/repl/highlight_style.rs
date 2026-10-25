@@ -4,7 +4,7 @@
 //! row names a style and gives its ANSI escape.  `_ed-highlight` validates
 //! against the same table via [`style_ansi`].
 
-use ral_core::ansi;
+use ral_core::io::ansi;
 
 use super::plugin::editor::HighlightSpan;
 

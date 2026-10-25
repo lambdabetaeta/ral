@@ -229,7 +229,7 @@ pub fn run() -> Result<(), String> {
         c.extend.as_deref(),
         &c.restrict,
     )?;
-    let (_mode, terminal, _warn) = ral_core::terminal::TerminalState::probe_from_env();
+    let (_mode, terminal, _warn) = ral_core::io::terminal::TerminalState::probe_from_env();
     boot::face_process_signals(&terminal);
     // Held for the whole run: the lock is the launcher's, not the node's.
     let (run, _run_lock, resumes) = resolve_run(launch_cwd.as_path(), c.resume)?;

@@ -12,7 +12,7 @@
 #![allow(dead_code)] // not every test file uses every helper
 
 use ral_core::boot::{BakedPrelude, HostSurface, boot_runtime, boot_shell};
-use ral_core::terminal::TerminalState;
+use ral_core::io::terminal::TerminalState;
 use ral_core::types::Shell;
 use ral_core::{Scheme, ir::Comp};
 use std::sync::Arc;

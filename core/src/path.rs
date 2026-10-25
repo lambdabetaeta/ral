@@ -24,9 +24,12 @@ pub mod git;
 pub(crate) mod identity;
 pub mod lex;
 mod namespace;
+#[cfg(target_os = "linux")]
+mod procfs;
 #[cfg(unix)]
 pub(crate) mod render;
 pub(crate) mod resolver;
+mod rules;
 mod show;
 pub mod sigil;
 mod site;
@@ -78,34 +81,6 @@ pub(crate) use which::{PathSearch, search};
 pub(crate) use which::{WINDOWS_EXEC_EXTENSIONS, command_name_key, names_a_path, names_a_path_for};
 pub use which::{forget_located_commands, locate, path_dirs, path_entries, ral_path_entries};
 
-/// Which platform's path rules a question is asked under.
-///
-/// A parameter rather than a `cfg!` read, so both tables are pinned by tests
-/// on every host; the gate is [`Self::HOST`], read by the public entry points.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PathRules {
-    Posix,
-    Windows,
-}
-
-impl PathRules {
-    pub(crate) const HOST: Self = if cfg!(windows) {
-        Self::Windows
-    } else {
-        Self::Posix
-    };
-
-    /// Whether `c` separates path components: `/` under both rules, `\`
-    /// under Windows alone; under Posix a backslash is a filename byte.
-    pub(crate) fn is_separator(self, c: char) -> bool {
-        c == '/' || (self == Self::Windows && c == '\\')
-    }
-}
-
-/// `/proc/self/fd/<raw>` as a `PathBuf`: how a binary `sandbox::reexec`
-/// pinned by fd (ral, bwrap) is exec'd, by the parent from the pin and by
-/// bwrap from the slot the pin was lent at.
 #[cfg(target_os = "linux")]
-pub(crate) fn proc_fd_path(raw: std::os::fd::RawFd) -> std::path::PathBuf {
-    std::path::PathBuf::from(format!("/proc/self/fd/{raw}"))
-}
+pub(crate) use procfs::proc_fd_path;
+pub(crate) use rules::PathRules;

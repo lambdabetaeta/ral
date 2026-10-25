@@ -143,7 +143,7 @@ pub enum RootSeat {
     Identity {
         scratch: Arc<Scratch>,
         cwd: std::path::PathBuf,
-        terminal: ral_core::terminal::TerminalState,
+        terminal: ral_core::io::terminal::TerminalState,
     },
     /// Out-of-process: an already-built `transport` onto an engine elsewhere,
     /// a spawned `--engine` child or synod's adopted control-plane stream into
@@ -653,7 +653,7 @@ impl Avatar {
                 .expect("test process has a cwd")
                 .as_path()
                 .to_path_buf(),
-            terminal: ral_core::terminal::TerminalState::default(),
+            terminal: ral_core::io::terminal::TerminalState::default(),
         };
         let provider = Arc::new(Provider::scripted(
             "test-model",

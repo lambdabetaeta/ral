@@ -47,7 +47,7 @@ pub(super) struct PromptText {
 
 impl PromptText {
     fn from_styled(styled: String) -> Self {
-        let raw = ral_core::ansi::strip(&styled);
+        let raw = ral_core::io::ansi::strip(&styled);
         Self { raw, styled }
     }
 
@@ -81,14 +81,14 @@ fn prompt_text(value: FOValue, captured: Option<Captured>) -> String {
 /// Presentation-layer side effect, separate from the semantic prompt
 /// computation in [`render`], so the title updates whether or not the user
 /// changes the prompt.  No-op on terminals that can't render OSC titles.
-pub(super) fn write_terminal_title(terminal: &ral_core::terminal::TerminalState, cwd: &str) {
+pub(super) fn write_terminal_title(terminal: &ral_core::io::terminal::TerminalState, cwd: &str) {
     if !terminal.ui_title_ok() {
         return;
     }
     use std::io::Write;
     let cwd = if cwd.is_empty() { "?" } else { cwd };
     let _ = std::io::stdout()
-        .write_all(ral_core::ansi::osc_set_title(&format!("ral: {cwd}")).as_bytes());
+        .write_all(ral_core::io::ansi::osc_set_title(&format!("ral: {cwd}")).as_bytes());
     let _ = std::io::stdout().flush();
 }
 

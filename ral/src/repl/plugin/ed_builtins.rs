@@ -246,7 +246,7 @@ pub fn builtin_ed_hyperlink(
     let uri = args[0].as_str("_ed-hyperlink")?;
     let text = args[1].as_str("_ed-hyperlink")?;
     let rendered = if shell.terminal().ui_hyperlinks_ok() {
-        ral_core::ansi::osc8_link(uri, text)
+        ral_core::io::ansi::osc8_link(uri, text)
     } else {
         text.to_owned()
     };

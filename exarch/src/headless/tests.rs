@@ -33,7 +33,7 @@ fn converse_trunk(tag: &str, script: Script) -> Avatar {
         RootSeat::Identity {
             scratch,
             cwd: std::env::current_dir().expect("test process has a cwd"),
-            terminal: ral_core::terminal::TerminalState::default(),
+            terminal: ral_core::io::terminal::TerminalState::default(),
         },
         Arc::new(Provider::scripted("test-model", script)),
     )
@@ -373,7 +373,7 @@ fn settled_trunk(tag: &str, script: Script, allow_schedule: bool, resume_on_rese
         RootSeat::Identity {
             scratch,
             cwd: std::env::current_dir().expect("test process has a cwd"),
-            terminal: ral_core::terminal::TerminalState::default(),
+            terminal: ral_core::io::terminal::TerminalState::default(),
         },
         Arc::new(Provider::scripted("test-model", script)),
     )

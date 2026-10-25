@@ -244,7 +244,7 @@ pub fn serve_warrant(args: &[OsString]) -> u8 {
     match confined {
         Ok(confined) => confined.run(),
         Err(e) => {
-            crate::terminal::cmd_error("ral", &e);
+            crate::io::terminal::cmd_error("ral", &e);
             126
         }
     }
@@ -255,7 +255,7 @@ pub fn serve_warrant(args: &[OsString]) -> u8 {
 /// rather than run unconfined.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn serve_warrant(_args: &[OsString]) -> u8 {
-    crate::terminal::cmd_error(
+    crate::io::terminal::cmd_error(
         "ral",
         &format!(
             "{} is not served on {}: confinement is applied to a child from outside, \

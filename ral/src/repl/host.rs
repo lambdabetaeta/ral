@@ -163,9 +163,9 @@ impl ReplHost {
         match untag(v) {
             Some(("notice", Some(payload))) => self.line(&format!(
                 "{}note: {}{}",
-                ral_core::ansi::DIM,
+                ral_core::io::ansi::DIM,
                 Value::from(payload.clone()),
-                ral_core::ansi::RESET
+                ral_core::io::ansi::RESET
             )),
             _ => {
                 if let Some(note) = crate::surface::dropped(v) {

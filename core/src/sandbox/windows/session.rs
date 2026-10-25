@@ -454,14 +454,14 @@ pub(crate) fn teardown() {
         match profile.delete() {
             Ok(()) => {
                 if let Err(e) = dacl.forget_profile(&name) {
-                    crate::terminal::shell_warning(&format!(
+                    crate::io::terminal::shell_warning(&format!(
                         "sandbox session teardown: ledger update for profile {name} failed: {e}"
                     ));
                 }
             }
             Err(e) => {
                 // The name stays ledgered; the next boot's sweep retries.
-                crate::terminal::shell_warning(&format!(
+                crate::io::terminal::shell_warning(&format!(
                     "sandbox session teardown: delete AppContainer profile {name} failed: {e}"
                 ));
             }

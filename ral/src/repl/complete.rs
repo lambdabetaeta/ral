@@ -17,8 +17,8 @@
 //! highlight rule wanting a command list must not reach for `sources()`, or it
 //! puts a disk walk between a keypress and the character appearing.
 
-use ral_core::ansi;
 use ral_core::carrier::Transport;
+use ral_core::io::ansi;
 use ral_core::syntax::parser::needs_continuation;
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::{CmdKind, Highlighter};
@@ -43,7 +43,7 @@ pub(super) struct RalHelper {
     sources: SourceCache,
     engine: Arc<dyn Transport>,
     host: Arc<ReplHost>,
-    terminal: ral_core::terminal::TerminalState,
+    terminal: ral_core::io::terminal::TerminalState,
 }
 
 impl RalHelper {
@@ -52,7 +52,7 @@ impl RalHelper {
     pub(super) fn new(
         engine: Arc<dyn Transport>,
         host: Arc<ReplHost>,
-        terminal: ral_core::terminal::TerminalState,
+        terminal: ral_core::io::terminal::TerminalState,
     ) -> Self {
         Self {
             sources: SourceCache::new(),

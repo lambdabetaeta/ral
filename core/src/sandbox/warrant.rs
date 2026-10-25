@@ -252,7 +252,7 @@ impl Confined {
                 args,
             } => exec(&real, &arg0, excluded.as_deref(), args),
             Run::Tool(tool, args) => crate::uutils::run(tool.as_ref(), args).unwrap_or_else(|e| {
-                crate::terminal::cmd_error("ral", &e.to_string());
+                crate::io::terminal::cmd_error("ral", &e.to_string());
                 127
             }),
         }
@@ -290,7 +290,7 @@ fn exec(
                 ),
             }
         });
-    crate::terminal::cmd_error(
+    crate::io::terminal::cmd_error(
         "ral",
         &format!("{}: {err}{}", shown(real), hint.unwrap_or_default()),
     );

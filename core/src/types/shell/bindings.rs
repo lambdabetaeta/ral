@@ -387,7 +387,7 @@ mod chokepoint_tests {
     /// order exarch's `Agent::assemble` follows.
     fn armed_shell_with(idle_calls: u64, large_binding_bytes: u64) -> Shell {
         let mut shell = crate::boot::boot_shell(
-            crate::terminal::TerminalState::default(),
+            crate::io::terminal::TerminalState::default(),
             BakedPrelude::runtime(),
             &crate::boot::HostSurface::default(),
             crate::test_helper::process_cwd(),
@@ -538,7 +538,7 @@ mod chokepoint_tests {
     #[test]
     fn prelude_and_host_seeds_are_baseline() {
         let mut shell = crate::boot::boot_shell(
-            crate::terminal::TerminalState::default(),
+            crate::io::terminal::TerminalState::default(),
             BakedPrelude::runtime(),
             &crate::boot::HostSurface::default(),
             crate::test_helper::process_cwd(),

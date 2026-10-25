@@ -12,10 +12,10 @@
 
 use crate::capability::Floor;
 use crate::evaluator::{Mode, run_phrases};
+use crate::io::terminal::TerminalState;
 use crate::ir::{CompKind, Phrase, Toplevel};
 use crate::path::CwdPath;
 use crate::site::{Silent, site};
-use crate::terminal::TerminalState;
 use crate::typecheck::Manifest;
 use crate::types::{
     Break, BuiltinEntry, BuiltinTable, Env, Escape, Mooring, PreludeMap, Runtime, Set, Shell,
@@ -423,7 +423,7 @@ pub fn bake_prelude() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{BakedPrelude, HostSurface, validate_prelude_shape};
-    use crate::terminal::TerminalState;
+    use crate::io::terminal::TerminalState;
     use crate::types::Runtime;
     use std::sync::Arc;
 

@@ -40,10 +40,14 @@ fn print_result(val: &Value, theme: &OutputTheme) {
                 }
                 _ => val.to_string(),
             };
-            if ral_core::terminal::ui_color()
+            if ral_core::io::terminal::ui_color()
                 && let Some(color) = &theme.value_color
             {
-                outln!("{color}{}{s}{}", theme.value_prefix, ral_core::ansi::RESET);
+                outln!(
+                    "{color}{}{s}{}",
+                    theme.value_prefix,
+                    ral_core::io::ansi::RESET
+                );
             } else {
                 outln!("{}{s}", theme.value_prefix);
             }

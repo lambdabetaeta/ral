@@ -11,8 +11,8 @@
 
 use ral_core::capability::GrantLayer;
 use ral_core::guard::freeze::FreezeCtx;
+use ral_core::io::terminal::TerminalState;
 use ral_core::source::SourceOrigin;
-use ral_core::terminal::TerminalState;
 
 const MINIMAL_RAL: &str = include_str!("../../data/minimal.exarch.ral");
 const REASONABLE_RAL: &str = include_str!("../../data/reasonable.exarch.ral");

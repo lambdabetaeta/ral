@@ -1047,7 +1047,7 @@ silently severed at this call site.
 `shell_eval/clip.rs`; the separate cap for opaque error blobs (`OPAQUE_CAP`)
 lives with `shell_eval/report.rs`, whose rejection/fault composition uses it.
 `clip` measures what a terminal would
-show (`ral_core::ansi::visible`, replaying `\r` and backspace beside the
+show (`ral_core::io::ansi::visible`, replaying `\r` and backspace beside the
 escape strip). The whole-history gauges — the `EVICT_THRESHOLD` byte
 fallback, `forced_eviction_due`/`eviction_trigger` (the reserve line and the token
 count that names it, for `/resources`), `pressure_due` and its

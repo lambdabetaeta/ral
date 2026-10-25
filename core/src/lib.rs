@@ -14,7 +14,6 @@
     )
 )]
 
-pub mod ansi;
 pub mod boot;
 pub mod builtins;
 pub mod capability;
@@ -51,7 +50,6 @@ mod site;
 pub mod source;
 pub mod sync;
 pub mod syntax;
-pub mod terminal;
 #[cfg(feature = "test-util")]
 pub mod test_access;
 #[cfg(test)]

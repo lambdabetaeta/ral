@@ -7,9 +7,9 @@ mod common;
 
 use ral_core::Value;
 use ral_core::boot::{HostSurface, boot_shell};
+use ral_core::io::terminal::TerminalState;
 use ral_core::protocol::Run;
 use ral_core::source::SourceOrigin;
-use ral_core::terminal::TerminalState;
 use ral_core::types::{Break, Escape, Mooring, Settled, Shell};
 
 const HOST: &str = "a test host resolves its floor";

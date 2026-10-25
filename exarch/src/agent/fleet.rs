@@ -36,12 +36,12 @@ use crate::provider::roles::Roles;
 use ral_core::capability::GrantStack;
 use ral_core::carrier::Severed;
 use ral_core::engine::EngineInstaller;
+use ral_core::io::terminal::TerminalState;
 use ral_core::own::OwnDir;
 #[cfg(test)]
 use ral_core::own::TestDir;
 use ral_core::process::{self, CancelCause};
 use ral_core::sync::{CondvarExt, LockExt};
-use ral_core::terminal::TerminalState;
 use std::collections::HashMap;
 use std::fmt;
 use std::io;

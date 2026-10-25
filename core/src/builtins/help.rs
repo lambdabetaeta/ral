@@ -4,12 +4,12 @@
 //! prelude function, or host-installed library entry to its documentation and
 //! place in the shell.
 
-use crate::ansi::{BOLD, CYAN, DIM, RESET};
+use crate::io::ansi::{BOLD, CYAN, DIM, RESET};
+use crate::io::terminal;
 use crate::ir::CommandName;
 use crate::path::shown;
 use crate::prelude_manifest::PRELUDE_DOCS;
 use crate::runtime::command::Head;
-use crate::terminal;
 use crate::typecheck::builtin_type_hint;
 use crate::types::{Binding, HandlerLookup, Settled, Shell, Value};
 use std::fmt::{self, Write};

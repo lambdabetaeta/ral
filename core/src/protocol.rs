@@ -165,7 +165,7 @@ pub struct EngineSpec {
     /// `EngineInstaller` table, so only the tag crosses, never the functions
     /// it names.
     pub installer: String,
-    pub terminal: crate::terminal::TerminalState,
+    pub terminal: crate::io::terminal::TerminalState,
     /// The engine's `HOME`, on the machine it runs on.
     pub home: EnginePath,
 }
@@ -197,7 +197,7 @@ impl EngineSpec {
         Self {
             proto_version: PROTOCOL_VERSION,
             installer: installer.into(),
-            terminal: crate::terminal::TerminalState::default(),
+            terminal: crate::io::terminal::TerminalState::default(),
             home,
         }
     }
@@ -254,7 +254,7 @@ impl Attach {
     }
 
     #[must_use]
-    pub fn with_terminal(mut self, terminal: crate::terminal::TerminalState) -> Self {
+    pub fn with_terminal(mut self, terminal: crate::io::terminal::TerminalState) -> Self {
         self.engine.terminal = terminal;
         self
     }

@@ -66,7 +66,7 @@ use ral_core::types::{Break, Settled, Shell, Value};
 /// prelude registered, default env, root capabilities.
 fn boot() -> Shell {
     ral_core::boot::boot_shell(
-        ral_core::terminal::TerminalState::default(),
+        ral_core::io::terminal::TerminalState::default(),
         common::prelude(),
         &ral_core::boot::HostSurface::default(),
         ral_core::test_helper::process_cwd(),

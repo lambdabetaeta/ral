@@ -330,8 +330,8 @@ mod durability_tests {
     static PANICKY: [EngineInstaller; 1] = [crate::carrier::testkit::installer(
         "panicky",
         |_| {
-            let mut runtime =
-                crate::HostSurface::default().runtime(crate::terminal::TerminalState::default())?;
+            let mut runtime = crate::HostSurface::default()
+                .runtime(crate::io::terminal::TerminalState::default())?;
             runtime.install_builtins(&PANIC_BUILTINS_ARR);
             Ok(runtime)
         },
@@ -439,7 +439,7 @@ mod probe_tests {
     /// folder.
     static GRANTED: [crate::engine::EngineInstaller; 1] = [crate::carrier::testkit::installer(
         "granted",
-        |_| crate::HostSurface::default().runtime(crate::terminal::TerminalState::default()),
+        |_| crate::HostSurface::default().runtime(crate::io::terminal::TerminalState::default()),
         |_, shell| {
             use crate::capability::{Capabilities, FsPolicy, Net};
             use crate::path::FrozenPath;

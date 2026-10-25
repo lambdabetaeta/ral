@@ -7,9 +7,9 @@
 //! unavailable here.
 
 use ral_core::carrier::Transport;
+use ral_core::io::terminal;
 use ral_core::process::interrupt_epoch;
 use ral_core::syntax::parser::needs_continuation;
-use ral_core::terminal;
 use rustyline::history::{FileHistory, History};
 use std::io::Write;
 use std::path::PathBuf;

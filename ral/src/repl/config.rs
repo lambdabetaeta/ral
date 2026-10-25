@@ -26,7 +26,7 @@ use ral_core::typecheck::Form;
 use ral_core::types::{
     Break, DefaultPolicy, Error, HandlerEntry, Hook, HookName, HookSig, Map, Mooring, Settled,
 };
-use ral_core::{Shell, Value, terminal};
+use ral_core::{Shell, Value, io::terminal};
 use std::path::PathBuf;
 
 use super::errfmt::report_failed_load;

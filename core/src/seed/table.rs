@@ -591,7 +591,7 @@ mod tests {
     #[test]
     fn pipeline_stage_request_carries_no_prelude_binding() {
         let mut shell = crate::boot::boot_shell(
-            crate::terminal::TerminalState::default(),
+            crate::io::terminal::TerminalState::default(),
             crate::boot::BakedPrelude::runtime(),
             &crate::boot::HostSurface::default(),
             crate::test_helper::process_cwd(),

@@ -20,8 +20,8 @@ use ral_core::capability::{
     Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy, GrantLayer, GrantStack,
 };
 use ral_core::guard::freeze::{FreezeCtx, host_absolute};
+use ral_core::io::terminal::TerminalState;
 use ral_core::path::FrozenPath;
-use ral_core::terminal::TerminalState;
 use ral_core::types::EnvVars;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

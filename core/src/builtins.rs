@@ -389,7 +389,7 @@ builtin_registry! {
     // `ral::repl::plugin::ed_builtins::ED_BUILTINS`.
     AnsiOk { names: ["_ansi-ok"], ty: scheme::pure_bool,
         doc: "_ansi-ok  — true if stdout supports ANSI colour (respects NO_COLOR / non-tty).",
-        call: |_args, _mooring, _shell| Ok(Value::Bool(crate::terminal::ui_color())), },
+        call: |_args, _mooring, _shell| Ok(Value::Bool(crate::io::terminal::ui_color())), },
 }
 
 /// The argv half of core's manifest: names that take an argv rather than

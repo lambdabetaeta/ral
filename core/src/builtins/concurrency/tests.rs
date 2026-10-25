@@ -999,7 +999,7 @@ fn detach_test_shell(budget: u64) -> Shell {
         ..crate::HostSurface::default()
     }
     .shell(
-        crate::terminal::TerminalState::default(),
+        crate::io::terminal::TerminalState::default(),
         crate::test_helper::process_cwd(),
     )
     .expect("a test host resolves its floor");
@@ -2534,7 +2534,7 @@ fn a_brood_prunes_only_a_claimed_and_ended_child() {
 fn first_of_takes_the_winner_and_drains_losers() {
     let mut shell = crate::Shell::root(
         crate::boot::boot_runtime(
-            crate::terminal::TerminalState::default(),
+            crate::io::terminal::TerminalState::default(),
             crate::boot::BakedPrelude::runtime(),
             &crate::HostSurface::default(),
         )
@@ -3345,7 +3345,7 @@ fn par_surfaces_outside_claim_with_par_prefix() {
 
     let mut shell = crate::Shell::root(
         crate::boot::boot_runtime(
-            crate::terminal::TerminalState::default(),
+            crate::io::terminal::TerminalState::default(),
             crate::boot::BakedPrelude::runtime(),
             &crate::HostSurface::default(),
         )

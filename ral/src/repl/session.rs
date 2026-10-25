@@ -13,7 +13,7 @@ mod boot;
 
 use ral_core::carrier::{IdentityTransport, Transport};
 use ral_core::errln;
-use ral_core::terminal::TerminalState;
+use ral_core::io::terminal::TerminalState;
 use std::process::ExitCode;
 use std::sync::Arc;
 

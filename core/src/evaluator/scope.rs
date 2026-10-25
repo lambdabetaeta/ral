@@ -255,7 +255,7 @@ mod tests {
             ..crate::HostSurface::default()
         }
         .shell(
-            crate::terminal::TerminalState::default(),
+            crate::io::terminal::TerminalState::default(),
             crate::test_helper::process_cwd(),
         )
         .expect("a test host resolves its floor");
@@ -287,7 +287,7 @@ mod tests {
             ..crate::HostSurface::default()
         }
         .shell(
-            crate::terminal::TerminalState::default(),
+            crate::io::terminal::TerminalState::default(),
             crate::test_helper::process_cwd(),
         )
         .expect("a test host resolves its floor");

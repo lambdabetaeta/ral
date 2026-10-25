@@ -70,7 +70,7 @@ pub(crate) fn eval(shell: &mut ral_core::Shell, src: &str) -> ral_core::Value {
 #[cfg(test)]
 pub(crate) fn prelude_runtime() -> ral_core::Runtime {
     ral_core::boot::boot_runtime(
-        ral_core::terminal::TerminalState::default(),
+        ral_core::io::terminal::TerminalState::default(),
         &crate::PRELUDE,
         &ral_core::HostSurface::default(),
     )

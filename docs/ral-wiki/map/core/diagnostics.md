@@ -1,7 +1,7 @@
 ---
 generated_at_commit: 4e2ee042
 generated_at_date: 2026-10-10
-covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/compile.rs, core/src/syntax/report.rs, core/src/terminal.rs, core/src/terminal/stderr.rs, core/src/text.rs, core/src/ansi.rs, core/src/types/exit_hints.rs]
+covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/compile.rs, core/src/syntax/report.rs, core/src/io/terminal.rs, core/src/io/terminal/stderr.rs, core/src/text.rs, core/src/io/ansi.rs, core/src/types/exit_hints.rs]
 ---
 
 # Map: core / diagnostics
@@ -141,7 +141,7 @@ lives beside the checker: provenance is data on the error (`Reason`,
 `typecheck/error.rs`) and every user-facing sentence is a pure function of it
 in `typecheck/explain.rs` ([[map/core/typecheck|typecheck]]).
 
-## Styling and the colour gate — `core/src/ansi.rs`, `core/src/terminal.rs`
+## Styling and the colour gate — `core/src/io/ansi.rs`, `core/src/io/terminal.rs`
 
 `ansi` is vocabulary only: escape constants, the OSC helpers (`osc_set_title`,
 `osc8_link`), `escape_seq_len`, `strip`, `visible`, `when`.

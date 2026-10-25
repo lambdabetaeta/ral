@@ -221,7 +221,7 @@ disallowed-methods = [
     { path = "std::sync::RwLock::into_inner", reason = "No helper yet: no site needs one. Add into_inner_ignore_poison to RwLockExt rather than reaching past the policy." },
 ]
 
-# The shell's own output goes through `outln!` / `errln!` (crate::terminal),
+# The shell's own output goes through `outln!` / `errln!` (crate::io::terminal),
 # which drop a failed write: once the terminal hangs up, `println!` and
 # `eprintln!` panic on EIO or EPIPE.  A print that is not the shell's own
 # output (a tool's `--help`, a test) is allowed with a reason, in prose, saying

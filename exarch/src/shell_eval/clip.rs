@@ -6,10 +6,10 @@
 const ELISION_NUDGE: &str = "; narrow the output by using within/filter/take/view-text/tail";
 
 /// Cap `text` at `cap` bytes, measured on what a terminal would show of it
-/// ([`ral_core::ansi::visible`]) rather than the raw bytes, eliding the
+/// ([`ral_core::io::ansi::visible`]) rather than the raw bytes, eliding the
 /// middle when it does not fit.
 pub(crate) fn clip(text: &str, cap: usize) -> String {
-    let plain = ral_core::ansi::visible(text);
+    let plain = ral_core::io::ansi::visible(text);
     head_tail(&plain, cap, ELISION_NUDGE).unwrap_or(plain)
 }
 

@@ -108,8 +108,8 @@ Source text flows down a fixed ladder; each rung is a subsystem page.
 
 - [[map/core/capabilities|capabilities]] — the dynamic capability stack and the OS process
   sandbox (`core/src/capability/`, `core/src/sandbox/`).
-- [[map/core/io-process|io-process]] — byte streams, signals, process groups
-  (`core/src/io/`, `core/src/process/`).
+- [[map/core/io-process|io-process]] — byte streams, terminal, signals, process
+  groups (`core/src/io/`, `core/src/process/`).
 - [[map/core/builtins|builtins]] — Rust-implemented commands and bundled coreutils/grep
   (`core/src/builtins/`).
 - [[map/core/shell-state|shell-state]] — runtime values and the `Shell` interpreter state
@@ -117,7 +117,7 @@ Source text flows down a fixed ladder; each rung is a subsystem page.
 - [[map/core/transport|transport]] — the serde mirror and wire envelope that carry a
   shell across a re-exec (`core/src/seed.rs`, `seed/table.rs`, `frame.rs`).
 - [[map/core/diagnostics|diagnostics]] — source locations and error rendering
-  (`core/src/source.rs`, `diagnostic.rs`, `compile.rs`, `terminal.rs`, `ansi.rs`).
+  (`core/src/source.rs`, `diagnostic.rs`, `compile.rs`, `io/terminal.rs`, `io/ansi.rs`).
 - [[map/core/prelude|prelude]] — the embedded `prelude.ral` standard library
   (`core/src/prelude.ral`).
 

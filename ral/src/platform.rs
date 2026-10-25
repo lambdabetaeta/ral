@@ -7,11 +7,11 @@
 //! explicitly.
 
 use ral_core::first_order::FOValue;
+use ral_core::io::terminal;
+use ral_core::io::terminal::{InteractiveMode, TerminalState};
 use ral_core::own::UserFile;
 use ral_core::path::{EnginePath, XdgKind};
 use ral_core::protocol::{Attach, EngineSpec, Root};
-use ral_core::terminal;
-use ral_core::terminal::{InteractiveMode, TerminalState};
 use ral_core::types::ExitHints;
 
 use crate::site::{Silent, site};

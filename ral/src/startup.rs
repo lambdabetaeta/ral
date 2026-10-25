@@ -37,7 +37,7 @@ pub(crate) fn refuse_setuid() {
 /// the shell, and a re-exec'd tool resets it for itself.
 pub(crate) fn adopt_process_dispositions() {
     #[cfg(windows)]
-    ral_core::terminal::enable_virtual_terminal_processing();
+    ral_core::io::terminal::enable_virtual_terminal_processing();
 }
 
 /// Serve whichever re-exec child this process is, or read argv as a shell

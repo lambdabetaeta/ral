@@ -76,7 +76,7 @@ pub fn load_declared(file: &UserFile, label: &str) -> Result<Vec<Service>, Strin
     let cwd = ral_core::host::cwd()
         .ok_or_else(|| format!("{label} cannot load: the working directory is unavailable"))?;
     let mut shell = ral_core::HostSurface::default()
-        .shell(ral_core::terminal::TerminalState::default(), cwd)
+        .shell(ral_core::io::terminal::TerminalState::default(), cwd)
         .map_err(|e| format!("{label} cannot load: {e}"))?;
     decode(
         evaluate_no_authority(&mut shell, &source, &origin, label)?,

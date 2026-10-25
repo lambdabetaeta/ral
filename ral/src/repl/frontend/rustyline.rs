@@ -3,8 +3,8 @@
 //! on TTYs that support raw mode and ANSI.
 
 use ral_core::carrier::Transport;
-use ral_core::terminal;
-use ral_core::terminal::TerminalState;
+use ral_core::io::terminal;
+use ral_core::io::terminal::TerminalState;
 use rustyline::config::{BellStyle, Builder, CompletionType};
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;

@@ -148,7 +148,7 @@ fn landed_in(
 fn announce_command_title(cmd: &str, shell: &Shell) {
     if shell.io.interactive && shell.io.terminal.ui_title_ok() {
         use std::io::Write;
-        let _ = std::io::stdout().write_all(crate::ansi::osc_set_title(cmd).as_bytes());
+        let _ = std::io::stdout().write_all(crate::io::ansi::osc_set_title(cmd).as_bytes());
         let _ = std::io::stdout().flush();
     }
 }

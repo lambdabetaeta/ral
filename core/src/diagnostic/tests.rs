@@ -337,7 +337,7 @@ fn runtime_error_in_module_draws_into_module_source() {
     // Bytes 10..14 of the module are `fail`, past the top-level's end.  Strip
     // ANSI: on a tty ariadne colours the span character by character, which
     // splits `fail` with escapes.
-    let out = crate::ansi::strip(&runtime(&db, Some(Span::new(module, 10, 14)), None, None));
+    let out = crate::io::ansi::strip(&runtime(&db, Some(Span::new(module, 10, 14)), None, None));
     assert!(out.contains("R0001"));
     assert!(
         out.contains("mod.ral"),

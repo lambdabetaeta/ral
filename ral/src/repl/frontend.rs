@@ -36,11 +36,11 @@ use super::prompt::PromptText;
 /// Which interactive surface the REPL presents, chosen by the `--surface`
 /// flag or the rc `surface:` key (flag wins).
 ///
-/// Distinct from [`InteractiveMode`](ral_core::terminal::InteractiveMode): that
+/// Distinct from [`InteractiveMode`](ral_core::io::terminal::InteractiveMode): that
 /// records what the terminal *can* do (ANSI, round-trips) and is the escape
 /// hatch for hostile setups; this records which frontend the user *wants*.
 /// The capability gate overrides this — a terminal resolved to
-/// [`Minimal`](ral_core::terminal::InteractiveMode::Minimal) gets the canonical
+/// [`Minimal`](ral_core::io::terminal::InteractiveMode::Minimal) gets the canonical
 /// editor whatever surface was asked for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum Surface {

@@ -5,9 +5,9 @@
 //! one-liner when it does not.  Each error type builds its own report; none
 //! draws.
 
-use crate::ansi::{BOLD_CYAN, BOLD_RED, RESET};
+use crate::io::ansi::{BOLD_CYAN, BOLD_RED, RESET};
+use crate::io::terminal::stderr_color;
 use crate::source::{Source, Span};
-use crate::terminal::stderr_color;
 use ariadne::{Color, Config, IndexType, ReportKind};
 use std::fmt::Write;
 use std::ops::Range;

@@ -3,9 +3,9 @@
 //! claim, panic hook — and the frontend the rc settles on after it.
 
 use ral_core::carrier::Transport;
+use ral_core::io::terminal::{self, InteractiveMode, TerminalState};
 use ral_core::own::OwnDir;
 use ral_core::path::{Visibility, XdgKind};
-use ral_core::terminal::{self, InteractiveMode, TerminalState};
 use rustyline::config::BellStyle;
 use std::sync::Arc;
 
@@ -160,7 +160,7 @@ fn claim_terminal() -> Result<TerminalClaim, String> {
 ///
 /// Unix snapshots termios and restores it with `tcsetattr`; Windows
 /// snapshots the console mode and restores it with `SetConsoleMode`
-/// (`ral_core::terminal::console_mode_snapshot`/`restore_console_mode`) — the
+/// (`ral_core::io::terminal::console_mode_snapshot`/`restore_console_mode`) — the
 /// two platforms' analogues of "undo whatever raw mode left dirty" before
 /// [`write_crash_log`] runs.  Either arm is a no-op when stdin isn't a
 /// real terminal (no termios / console mode to snapshot).
@@ -182,11 +182,11 @@ pub(super) fn setup_panic_hook() {
     }
     #[cfg(windows)]
     {
-        let saved = ral_core::terminal::console_mode_snapshot();
+        let saved = ral_core::io::terminal::console_mode_snapshot();
         if let Some(mode) = saved {
             let crash_dir = crash_log_dir();
             std::panic::set_hook(Box::new(move |info| {
-                ral_core::terminal::restore_console_mode(mode);
+                ral_core::io::terminal::restore_console_mode(mode);
                 write_crash_log(crash_dir.as_ref(), info);
             }));
         }
@@ -234,7 +234,7 @@ fn write_crash_log(dir: Option<&OwnDir>, info: &std::panic::PanicHookInfo<'_>) {
 /// flag, if given.
 ///
 /// The capability gate comes first: a terminal resolved to
-/// [`InteractiveMode::Minimal`](ral_core::terminal::InteractiveMode::Minimal) — a
+/// [`InteractiveMode::Minimal`](ral_core::io::terminal::InteractiveMode::Minimal) — a
 /// dumb terminal or `RAL_INTERACTIVE_MODE=minimal` — can only do the
 /// canonical-stdin editor, whatever surface was asked for.  Otherwise the
 /// surface preference decides.

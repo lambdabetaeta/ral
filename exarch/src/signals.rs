@@ -163,7 +163,7 @@ mod tests {
         // A raw ral install models any clobber before the exarch session
         // constructor runs.
         ral_core::process::install_handlers();
-        crate::boot::face_process_signals(&ral_core::terminal::TerminalState::default());
+        crate::boot::face_process_signals(&ral_core::io::terminal::TerminalState::default());
         let fleet = crate::agent::fleet::Fleet::for_test();
         let trunk = test_agent(&fleet, TestAgentSpec::new("trunk")).expect("a fresh trunk");
         let _signals = face(&fleet);

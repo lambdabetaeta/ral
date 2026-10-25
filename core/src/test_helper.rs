@@ -168,6 +168,6 @@ pub fn core_shell() -> crate::Shell {
 /// If the host's floor does not resolve, which no test can run without.
 pub fn core_runtime() -> crate::Runtime {
     crate::HostSurface::default()
-        .runtime(crate::terminal::TerminalState::default())
+        .runtime(crate::io::terminal::TerminalState::default())
         .expect("a test host resolves its floor")
 }

@@ -4,7 +4,7 @@
 //! layer may print.
 
 use super::stderr_color;
-use crate::ansi::{BOLD_RED, BOLD_YELLOW, RESET};
+use crate::io::ansi::{BOLD_RED, BOLD_YELLOW, RESET};
 
 /// Print `{cmd}: {msg}` to stderr.
 pub fn cmd_error(cmd: &str, msg: &str) {
@@ -63,7 +63,7 @@ macro_rules! errln {
 #[macro_export]
 macro_rules! dbg_trace {
     ($tag:expr, $($arg:tt)*) => {
-        if $crate::terminal::stderr_color() {
+        if $crate::io::terminal::stderr_color() {
             $crate::errln!("\x1b[1;91m[[DEBUG] {}]\x1b[0m {}", $tag, format!($($arg)*))
         } else {
             $crate::errln!("[[DEBUG] {}] {}", $tag, format!($($arg)*))

@@ -223,7 +223,7 @@ mod tests {
     /// The runtime a parent and its children are built over.
     fn runtime() -> crate::Runtime {
         crate::boot::boot_runtime(
-            crate::terminal::TerminalState::default(),
+            crate::io::terminal::TerminalState::default(),
             BakedPrelude::runtime(),
             &crate::boot::HostSurface::default(),
         )
@@ -234,7 +234,7 @@ mod tests {
     /// seated, and a session's policy.
     fn booted() -> Shell {
         let mut shell = crate::boot::boot_shell(
-            crate::terminal::TerminalState::default(),
+            crate::io::terminal::TerminalState::default(),
             BakedPrelude::runtime(),
             &crate::boot::HostSurface::default(),
             crate::test_helper::process_cwd(),

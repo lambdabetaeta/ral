@@ -11,7 +11,7 @@
 //! need the pinned envelope as much as the shell's.
 
 use crate::site::{Silent, site};
-use crate::{Invocation, Role, classify, sandbox, terminal, uutils};
+use crate::{Invocation, Role, classify, io::terminal, sandbox, uutils};
 use std::ffi::OsString;
 
 /// Serve `role`.  `Some(code)` is a served role's exit; `None` leaves the

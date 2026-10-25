@@ -299,7 +299,9 @@ mod tests {
     fn a_sealed_attach_runs_no_root_recipe() {
         static PANICKY: [EngineInstaller; 1] = [crate::carrier::testkit::installer(
             "panicky-root",
-            |_| crate::HostSurface::default().runtime(crate::terminal::TerminalState::default()),
+            |_| {
+                crate::HostSurface::default().runtime(crate::io::terminal::TerminalState::default())
+            },
             |_, _| panic!("a sealed child runs no root recipe"),
         )];
         let sealed = crate::seed::seal(

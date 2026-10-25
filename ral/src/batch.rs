@@ -11,7 +11,7 @@ use ral_core::run::StaticDiagnostics;
 use ral_core::source::{FileId, Source, SourceFile, SourceOrigin};
 use ral_core::syntax::parser::parse;
 use ral_core::types::{CapturePolicy, DeferredSink, Observation};
-use ral_core::{RequestedTerminalAccess, SessionSchemes, terminal};
+use ral_core::{RequestedTerminalAccess, SessionSchemes, io::terminal};
 use ral_core::{err, errln, outln};
 use std::path::Path;
 use std::process::ExitCode;

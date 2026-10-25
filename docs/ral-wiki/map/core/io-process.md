@@ -19,7 +19,7 @@ The child keeps the process handle, and the spawning thread releases the thread 
 
 ## IO — `core/src/io/`
 
-`io.rs` holds `Io`, the per-`Shell` bundle (stdin / stdout / stderr /
+`io/state.rs` holds `Io`, the per-`Shell` bundle (stdin / stdout / stderr /
 interactive / terminal / stage), where `stdout` is wherever the running
 computation writes — a capture buffer, inside a capture — and
 *`stage: Option<Membership>`* — `None` at the top level, the orchestrator;
@@ -82,6 +82,9 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
   re-reads its scope and, under a shield, retries; writes go a 4 KiB chunk
   at a time, so the sentinel's one read lands one
   ([[internals/cancellation|cancellation]]).
+- `ansi.rs` — terminal escape vocabulary only: SGR constants, OSC builders,
+  and escape-sequence scanning. Whether a sequence may be emitted is
+  `terminal`'s decision.
 - `terminal.rs` — `TerminalState`: cached startup isatty / ANSI / NO_COLOR /
   mode bits. `startup_foreground` records whether ral's group owned the
   controlling terminal's foreground at entry; it is not a per-handoff

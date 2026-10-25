@@ -11,7 +11,7 @@ use ral_core::own::UserFile;
 use ral_core::path::shown;
 use ral_core::source::{SourceFile, SourceOrigin};
 use ral_core::types::{Break, Escape, Map, Mooring, Settled};
-use ral_core::{Shell, Value, terminal};
+use ral_core::{Shell, Value, io::terminal};
 use std::path::Path;
 
 use super::super::errfmt::report_failed_load;
@@ -165,7 +165,7 @@ mod tests {
 
     fn booted_shell() -> Shell {
         ral_core::boot::boot_shell(
-            ral_core::terminal::TerminalState::default(),
+            ral_core::io::terminal::TerminalState::default(),
             &crate::PRELUDE,
             &ral_core::HostSurface::default(),
             ral_core::test_helper::process_cwd(),

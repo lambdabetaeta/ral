@@ -54,7 +54,7 @@ static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 /// always has births to spend.
 fn armed() -> Shell {
     let mut shell = ral_core::boot::boot_shell(
-        ral_core::terminal::TerminalState::default(),
+        ral_core::io::terminal::TerminalState::default(),
         common::prelude(),
         &ral_core::boot::HostSurface {
             statics: vec![builtins::DETACH_BUILTIN],

@@ -61,7 +61,7 @@ impl Seat {
     pub(crate) fn root(
         installers: &'static [EngineInstaller],
         cwd: std::path::PathBuf,
-        terminal: ral_core::terminal::TerminalState,
+        terminal: ral_core::io::terminal::TerminalState,
         scratch: Arc<Scratch>,
     ) -> Result<Self, Severed> {
         let home = site!(Silent::EngineHome, ral_core::host::home()).unwrap_or_default();

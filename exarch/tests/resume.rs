@@ -83,7 +83,7 @@ fn identity_seat(tag: &str) -> RootSeat {
     RootSeat::Identity {
         scratch: Arc::new(Scratch::for_test(EXARCH, tag).expect("scratch dir")),
         cwd: std::env::current_dir().expect("test process has a cwd"),
-        terminal: ral_core::terminal::TerminalState::default(),
+        terminal: ral_core::io::terminal::TerminalState::default(),
     }
 }
 

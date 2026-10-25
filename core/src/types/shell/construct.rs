@@ -10,11 +10,11 @@ use super::workers::Roster;
 use super::{Context, DEFAULT_STACK_LIMIT, LocalState, SessionState, Shell};
 use crate::capability::{Floor, GrantStack};
 use crate::guard::{GrantNarrower, SpawnGrant};
+use crate::io::terminal::TerminalState;
 use crate::io::{Io, Source};
 use crate::path::CwdPath;
 use crate::process::{DurableRoot, Scope, TerminalLease};
 use crate::source::SourceDb;
-use crate::terminal::TerminalState;
 use crate::ty::Fixings;
 use crate::types::handler::{HandlerFrame, HandlerStack};
 use crate::types::{

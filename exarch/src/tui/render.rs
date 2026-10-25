@@ -368,7 +368,7 @@ pub(super) fn emit_tab_title(app: &mut App) {
     if app.last_title == title {
         return;
     }
-    let seq = ral_core::ansi::osc_set_title(&title);
+    let seq = ral_core::io::ansi::osc_set_title(&title);
     let _ = std::io::stdout().write_all(seq.as_bytes());
     let _ = std::io::stdout().flush();
     app.last_title = title;

@@ -4,7 +4,7 @@
 //! abandoned edit.  Neither platform reads stdin, so type-ahead reaches the
 //! editor.
 
-use ral_core::ansi::{RESET, REVERSE};
+use ral_core::io::ansi::{RESET, REVERSE};
 use std::io::Write;
 use unicode_width::UnicodeWidthStr;
 

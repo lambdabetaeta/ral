@@ -4,9 +4,9 @@
 //
 // Covers the non-REPL path that produces visible output via
 // `terminal::stderr_color`.  The env gates (NO_COLOR, TERM) are pinned
-// by `stderr_ansi_ok_gates` in core/src/terminal.rs.  The REPL-side
+// by `stderr_ansi_ok_gates` in core/src/io/terminal.rs.  The REPL-side
 // gating of the highlighter / hinter / CPR is covered by unit tests in
-// core/src/terminal.rs on `TerminalState`; driving a full PTY from a cargo
+// core/src/io/terminal.rs on `TerminalState`; driving a full PTY from a cargo
 // test is possible but fragile, so those paths are exercised manually.
 // See TODO(interactive) below.
 

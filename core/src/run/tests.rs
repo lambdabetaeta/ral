@@ -706,7 +706,7 @@ fn panicking_shell() -> Shell {
         ..crate::HostSurface::default()
     }
     .shell(
-        crate::terminal::TerminalState::default(),
+        crate::io::terminal::TerminalState::default(),
         crate::test_helper::process_cwd(),
     )
     .expect("a test host resolves its floor")
@@ -875,7 +875,7 @@ fn narrowing_shell() -> Shell {
         ..crate::HostSurface::default()
     }
     .shell(
-        crate::terminal::TerminalState::default(),
+        crate::io::terminal::TerminalState::default(),
         crate::test_helper::process_cwd(),
     )
     .expect("a test host resolves its floor")
@@ -987,7 +987,7 @@ fn a_lambda_faults_against_the_run_that_compiled_it() {
             ..
         }
     ));
-    let rendered = crate::ansi::strip(&rendered_fault(&mut shell, "boom 1"));
+    let rendered = crate::io::ansi::strip(&rendered_fault(&mut shell, "boom 1"));
     assert!(
         rendered.contains("message: nope] }"),
         "the caret must be drawn into the defining run's text:\n{rendered}"
@@ -998,7 +998,7 @@ fn a_lambda_faults_against_the_run_that_compiled_it() {
 #[test]
 fn a_single_command_faulting_in_its_own_text_renders_compact() {
     let mut shell = crate::test_helper::core_shell();
-    let rendered = crate::ansi::strip(&rendered_fault(&mut shell, "no-such-command-xyz"));
+    let rendered = crate::io::ansi::strip(&rendered_fault(&mut shell, "no-such-command-xyz"));
     assert!(
         !rendered.contains('╭'),
         "a fault in the text on screen needs no caret:\n{rendered}"

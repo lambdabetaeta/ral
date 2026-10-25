@@ -769,7 +769,7 @@ mod engine_session_tests {
         "test",
         |_| {
             crate::boot::boot_runtime(
-                crate::terminal::TerminalState::default(),
+                crate::io::terminal::TerminalState::default(),
                 crate::boot::BakedPrelude::runtime(),
                 &crate::boot::HostSurface::default(),
             )
