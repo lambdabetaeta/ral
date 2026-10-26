@@ -206,14 +206,80 @@ fn ctrl_c_still_leaves_the_session_usable() {
         let mut session = PtySession::spawn_command(command(&dir, surface)).unwrap();
         prompt(&mut session, 1);
         session.send_ctrl_c().unwrap();
+        prompt(&mut session, 2);
         if surface == "readline" {
-            prompt(&mut session, 2);
             paste_line(&mut session, "exit 7");
         } else {
             session.send_line("exit 7").unwrap();
         }
         assert_eq!(exit_pty(&mut session).code(), Some(7));
     }
+}
+
+#[test]
+fn minimal_ctrl_c_abandons_primary_and_continuation_without_enter() {
+    for first in [
+        "",
+        "echo abandoned-primary",
+        "echo abandoned-block; {\necho abandoned-body",
+    ] {
+        let dir = TempDir::new().unwrap();
+        let mut session = PtySession::spawn_command(command(&dir, "minimal")).unwrap();
+        prompt(&mut session, 1);
+        for byte in first.bytes() {
+            session.send_byte(byte).unwrap();
+        }
+        if first.contains('\n') {
+            assert!(
+                session.wait_until(WAIT, |text| text.contains("> ")),
+                "{}",
+                session.text()
+            );
+        }
+        session.send_ctrl_c().unwrap();
+        // No Enter: this also races the prompt's flush against read entry.
+        prompt(&mut session, 2);
+        session.send_line("echo fresh-command").unwrap();
+        prompt(&mut session, 3);
+        let text = session.text();
+        assert_eq!(
+            text.lines().filter(|line| *line == "fresh-command").count(),
+            1,
+            "{text}"
+        );
+        assert!(
+            !text.lines().any(|line| line.starts_with("abandoned-")),
+            "{text}"
+        );
+        session.send_byte(4).unwrap();
+        assert_eq!(exit_pty(&mut session).code(), Some(0));
+    }
+}
+
+#[test]
+fn minimal_eof_executes_a_final_unterminated_line_once() {
+    let dir = TempDir::new().unwrap();
+    let mut child = command(&dir, "minimal")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"echo final-line")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .matches("final-line")
+            .count(),
+        1
+    );
 }
 
 #[test]

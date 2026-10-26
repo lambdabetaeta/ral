@@ -1,0 +1,386 @@
+[
+  {
+    "name": "unit is punctuation, not a reserved word",
+    "source": "return (); unit unitish\n",
+    "scopes": {
+      "constant.language.unit.ral": ["()"],
+      "constant.numeric.ral": []
+    }
+  },
+  {
+    "name": "empty and adjacent single quotes close at the first quote",
+    "source": "'' 'a''b' '''' tail\n",
+    "scopes": {
+      "punctuation.definition.string.begin.ral": ["'", "'", "'", "'", "'"],
+      "punctuation.definition.string.end.ral": ["'", "'", "'", "'", "'"],
+      "constant.character.escape.ral": []
+    }
+  },
+  {
+    "name": "bumped single string is verbatim and multiline",
+    "source": "#'a'b\n$no !{splice} \\n '# tail\n",
+    "scopes": {
+      "string.quoted.single.ral": ["#'a'b\n$no !{splice} \\n '#"],
+      "punctuation.definition.string.begin.ral": ["#'"],
+      "punctuation.definition.string.end.ral": ["'#"],
+      "comment.line.number-sign.ral": [],
+      "constant.character.escape.ral": [],
+      "variable.other.ral": []
+    }
+  },
+  {
+    "name": "arbitrary fences retain lower fences across lines",
+    "source": "############'a '# b '### c\n'########### d'############ tail\n",
+    "scopes": {
+      "string.quoted.single.ral": ["############'a '# b '### c\n'########### d'############"],
+      "punctuation.definition.string.begin.ral": ["############'"],
+      "punctuation.definition.string.end.ral": ["'############"],
+      "comment.line.number-sign.ral": []
+    }
+  },
+  {
+    "name": "a longer closing run consumes only the opening fence length",
+    "source": "##'a'### comment\n",
+    "scopes": {
+      "string.quoted.single.ral": ["##'a'##"],
+      "punctuation.definition.string.end.ral": ["'##"],
+      "comment.line.number-sign.ral": ["# comment"]
+    }
+  },
+  {
+    "name": "hash double quote is a comment, including in a block",
+    "source": "#\"x\"#\n{ #\"also\"#\n # ordinary\n}\n",
+    "scopes": {
+      "comment.line.number-sign.ral": ["#\"x\"#", "#\"also\"#", "# ordinary"],
+      "string.quoted.double.ral": [],
+      "string.quoted.single.ral": []
+    }
+  },
+  {
+    "name": "hashes inside bare words do not open comments or bumped strings",
+    "source": "foo#bar foo##bar foo?#bar foo&#bar 1#bar if#word true#word return#word ^foo#word foo#'quote' foo###'more' # real\n",
+    "scopes": {
+      "comment.line.number-sign.ral": ["# real"],
+      "punctuation.definition.string.begin.ral": ["'", "'"],
+      "punctuation.definition.string.end.ral": ["'", "'"]
+    }
+  },
+  {
+    "name": "unterminated fences retain the body scope to EOF",
+    "source": "#####'body\n'#### still body",
+    "scopes": {
+      "string.quoted.single.ral": ["#####'body\n'#### still body"],
+      "punctuation.definition.string.end.ral": [],
+      "comment.line.number-sign.ral": []
+    }
+  },
+  {
+    "name": "nested scopes include bumped strings before comments",
+    "source": "!{ ##'a '# b'## }; \"!{ #'x'y'# }\"\n",
+    "scopes": {
+      "string.quoted.single.ral": ["##'a '# b'##", "#'x'y'#"],
+      "comment.line.number-sign.ral": []
+    }
+  },
+  {
+    "name": "current whole-token numerals",
+    "source": "0 007 +2 -2 .5 +.5 -.5 2. +2. -2. 2.0e2 .5E-2 -2.e+3 999999999999999999999999999999 1.0e999\n",
+    "scopes": {
+      "constant.numeric.ral": ["0", "007", "+2", "-2", ".5", "+.5", "-.5", "2.", "+2.", "-2.", "2.0e2", ".5E-2", "-2.e+3", "999999999999999999999999999999", "1.0e999"]
+    }
+  },
+  {
+    "name": "no numeric prefixes or suffixes of words",
+    "source": "1e6 0x10 1_000 3.10.1 1abc 1.0e 1.0e+ 1.0e-2foo 1-2 1+2 v1 .5abc --2 ++2 path/2 x:2 2:x 2#word 2?word\n",
+    "scopes": {
+      "constant.numeric.ral": [],
+      "comment.line.number-sign.ral": []
+    }
+  },
+  {
+    "name": "numerals next to real delimiters",
+    "source": "[1,-2,.5,2.] {return +3}; 4|cat; 5: x\n",
+    "scopes": {
+      "constant.numeric.ral": ["1", "-2", ".5", "2.", "+3", "4", "5"]
+    }
+  },
+  {
+    "name": "arithmetic separates operators and retains point-bearing exponents",
+    "source": "$[1-2 + -.5 * 2.e-3 / (+2.)]\n\"$[3.0e+2-.5]\"\n",
+    "scopes": {
+      "constant.numeric.ral": ["1", "2", "-.5", "2.e-3", "+2.", "3.0e+2", ".5"],
+      "keyword.operator.arithmetic.ral": ["-", "+", "*", "/", "-"]
+    }
+  },
+  {
+    "name": "arithmetic also requires whole numeral tokens",
+    "source": "$[1e6 + 0x10 + 1_000 + 3.10.1 + 1abc + .5abc + 2#word + 1.0e+2foo + 1.0e+2.0]\n",
+    "scopes": {
+      "constant.numeric.ral": [],
+      "keyword.operator.arithmetic.ral": ["+", "+", "+", "+", "+", "+", "+", "+"],
+      "comment.line.number-sign.ral": []
+    }
+  },
+  {
+    "name": "interior colons are word text, trailing entry colons split",
+    "source": "foo::bar host:5432 [key: value, foo::bar: value]\n",
+    "scopes": {
+      "punctuation.separator.colon.ral": [":", ":"],
+      "constant.numeric.ral": []
+    }
+  },
+  {
+    "name": "Unicode words do not acquire numeral suffix scopes",
+    "source": "α1 é#word 😀.5",
+    "scopes": {
+      "constant.numeric.ral": [],
+      "comment.line.number-sign.ral": []
+    }
+  },
+  {
+    "name": "literal keyword boundaries do not consume word prefixes",
+    "source": "true false true#word false.x if if#word return return#word",
+    "scopes": {
+      "constant.language.boolean.ral": ["true", "false"],
+      "keyword.control.ral": ["if"],
+      "keyword.control.return.ral": ["return"],
+      "comment.line.number-sign.ral": []
+    }
+  },
+  {
+    "name": "double quote escapes remain supported",
+    "source": "\"a\\n\\\"\\$\" tail\n",
+    "scopes": {
+      "constant.character.escape.ral": ["\\n\\\"\\$"],
+      "punctuation.definition.string.end.ral": ["\""]
+    }
+  },
+  {
+    "name": "all simple double quote escapes",
+    "source": "\"\\n \\r \\t \\e \\\\ \\0 \\\" \\$ \\! \\~\"\n",
+    "scopes": {
+      "constant.character.escape.ral": ["\\n", "\\r", "\\t", "\\e", "\\\\", "\\0", "\\\"", "\\$", "\\!", "\\~"],
+      "punctuation.definition.string.end.ral": ["\""]
+    }
+  },
+  {
+    "name": "hex and one to six digit Unicode escapes",
+    "source": "\"\\x00 \\x4A \\x7f \\u{0} \\u{e9} \\u{263} \\u{1F60} \\u{1f600} \\u{10FFFF}\"\n",
+    "scopes": {
+      "constant.character.escape.ral": ["\\x00", "\\x4A", "\\x7f", "\\u{0}", "\\u{e9}", "\\u{263}", "\\u{1F60}", "\\u{1f600}", "\\u{10FFFF}"]
+    }
+  },
+  {
+    "name": "malformed escapes do not acquire valid escape scopes",
+    "source": "\"\\q \\x4 \\xGG \\u{} \\u{1234567} \\u{gg} \\u1234 \\'\"\n",
+    "scopes": {
+      "constant.character.escape.ral": [],
+      "punctuation.definition.string.end.ral": ["\""]
+    }
+  },
+  {
+    "name": "escaped LF CRLF and CR preserve double quote state",
+    "source": "\"a\\\nb\\\r\nc\\\rd\" 42\n",
+    "scopes": {
+      "constant.character.escape.ral": ["\\\n", "\\\r\n", "\\\r"],
+      "string.quoted.double.ral": ["\"a\\\nb\\\r\nc\\\rd\""],
+      "punctuation.definition.string.end.ral": ["\""],
+      "constant.numeric.ral": ["42"]
+    }
+  },
+  {
+    "name": "spread scopes only the sigil and delegates any touching atom",
+    "source": "...42 ...'x' ...\"$name\" ...$xs ...$(items-) ...[1] ...{return 2} ...!$xs ...foo ...true ...() tail...42 foo...$xs\n",
+    "scopes": {
+      "keyword.operator.spread.ral": ["...", "...", "...", "...", "...", "...", "...", "...", "...", "...", "..."],
+      "constant.numeric.ral": ["42", "1", "2"],
+      "variable.other.ral": ["name", "xs", "items-", "xs", "xs"],
+      "constant.language.boolean.ral": ["true"],
+      "constant.language.unit.ral": ["()"],
+      "keyword.operator.force.ral": ["!"],
+      "punctuation.definition.string.begin.ral": ["'", "\""]
+    }
+  },
+  {
+    "name": "string force scopes only bang and reuses interpolation operands",
+    "source": "\"!$name !$(name-) !$[1+2] !$xs[0] !name ! name !$ !\"\n",
+    "scopes": {
+      "keyword.operator.force.ral": ["!", "!", "!", "!"],
+      "variable.other.ral": ["name", "name-", "xs"],
+      "punctuation.definition.variable.ral": ["$", "$"],
+      "punctuation.definition.variable.begin.ral": ["$("],
+      "punctuation.section.interpolation.begin.ral": ["$["],
+      "punctuation.section.index.ral": ["[0]"],
+      "constant.numeric.ral": ["1", "2"],
+      "keyword.operator.arithmetic.ral": ["+"]
+    }
+  },
+  {
+    "name": "escaped string sigils do not open force or dereference",
+    "source": "\"\\!name \\!\\$name \\$name\"\n",
+    "scopes": {
+      "constant.character.escape.ral": ["\\!", "\\!\\$", "\\$"],
+      "keyword.operator.force.ral": [],
+      "variable.other.ral": []
+    }
+  },
+  {
+    "name": "bare dereferences trim trailing hyphens but delimited names retain them",
+    "source": "$name- $name-- $foo-bar- $_- $a- $(name-) $[ $name-2 + $foo-bar[0] ]\n\"$name- $foo-bar-- $xs-[0] $xs[0] $(name-) !$name- !$(name-)\"\n",
+    "scopes": {
+      "variable.other.ral": ["name", "name", "foo-bar", "_", "a", "name-", "name-2", "foo-bar", "name", "foo-bar", "xs", "xs", "name-", "name", "name-"],
+      "punctuation.section.index.ral": ["[0]"],
+      "punctuation.section.index.begin.ral": ["["],
+      "keyword.operator.force.ral": ["!", "!"],
+      "keyword.operator.arithmetic.ral": ["+"]
+    }
+  },
+  {
+    "name": "arithmetic trims only bare trailing hyphens and keeps index operands",
+    "source": "$[ $name- + $name-- + $(name-) + $foo-bar[0] ]\n",
+    "scopes": {
+      "variable.other.ral": ["name", "name", "name-", "foo-bar"],
+      "keyword.operator.arithmetic.ral": ["-", "+", "--", "+", "+"],
+      "punctuation.section.index.begin.ral": ["["],
+      "punctuation.section.index.end.ral": ["]"]
+    }
+  },
+  {
+    "name": "arithmetic touching operand signs belong to whole numerals",
+    "source": "$[-9223372036854775808]; $[+5]; $[2*-3]; $[-.5 + +2.e-3]\n",
+    "scopes": {
+      "constant.numeric.ral": ["-9223372036854775808", "+5", "2", "-3", "-.5", "+2.e-3"],
+      "keyword.operator.arithmetic.ral": ["*", "+"]
+    }
+  },
+  {
+    "name": "arithmetic complete operands require binary signs regardless of spacing",
+    "source": "$[5 -1]; $[5 - 1]; $[5-1]; $[5 +1]; $[5+ 1]; $[5+-1]; $[5--1]\n",
+    "scopes": {
+      "constant.numeric.ral": ["5", "1", "5", "1", "5", "1", "5", "1", "5", "1", "5", "-1", "5", "-1"],
+      "keyword.operator.arithmetic.ral": ["-", "-", "-", "+", "+", "+", "-"]
+    }
+  },
+  {
+    "name": "arithmetic unary minus stays separate unless it touches a whole numeral",
+    "source": "$[- 5]; $[-$x]; $[--2]; $[-(-3)]; $[not -4]; $[1 * - 5]\n",
+    "scopes": {
+      "constant.numeric.ral": ["5", "-2", "-3", "-4", "1", "5"],
+      "keyword.operator.arithmetic.ral": ["-", "-", "-", "-", "*", "-"],
+      "variable.other.ral": ["x"]
+    }
+  },
+  {
+    "name": "arithmetic operand expectation survives newlines and comments",
+    "source": "$[\n# initial -9\n-1\n# after operand +9\n+2 *\n# after operator -9\n-3\n-\n# after binary sign +9\n+4]\n",
+    "scopes": {
+      "constant.numeric.ral": ["-1", "2", "-3", "+4"],
+      "keyword.operator.arithmetic.ral": ["+", "*", "-"],
+      "comment.line.number-sign.ral": ["# initial -9", "# after operand +9", "# after operator -9", "# after binary sign +9"]
+    }
+  },
+  {
+    "name": "arithmetic unary minus retains operand expectation through trivia",
+    "source": "$[-\n# unary -9\n-2 + not\n# prefix +9\n-3]\n",
+    "scopes": {
+      "constant.numeric.ral": ["-2", "-3"],
+      "keyword.operator.arithmetic.ral": ["-", "+"],
+      "comment.line.number-sign.ral": ["# unary -9", "# prefix +9"]
+    }
+  },
+  {
+    "name": "arithmetic group state is nested and restored after closing",
+    "source": "$[(-1\n# group tail\n+2)\n# outer tail\n-3 * (\n# new group\n+4 - (-5)) + ()\n-6]\n",
+    "scopes": {
+      "constant.numeric.ral": ["-1", "2", "3", "+4", "-5", "6"],
+      "keyword.operator.arithmetic.ral": ["+", "-", "*", "-", "+", "-"],
+      "comment.line.number-sign.ral": ["# group tail", "# outer tail", "# new group"]
+    }
+  },
+  {
+    "name": "quoted arithmetic operands hide operators and complete the operand",
+    "source": "$['-9'\n# single tail\n-1 + \"+8 $[-2]\"\n# double tail\n+3 + ##'a -7\nb +6'##\n-4]\n",
+    "scopes": {
+      "constant.numeric.ral": ["1", "-2", "3", "4"],
+      "keyword.operator.arithmetic.ral": ["-", "+", "+", "+", "-"],
+      "string.quoted.single.ral": ["'-9'", "##'a -7\nb +6'##"],
+      "comment.line.number-sign.ral": ["# single tail", "# double tail"]
+    }
+  },
+  {
+    "name": "interpolated arithmetic retains operand expectation across trivia",
+    "source": "\"$[\n# operand\n-1\n# binary\n+2 *\n# operand again\n+3]\" 4\n",
+    "scopes": {
+      "constant.numeric.ral": ["-1", "2", "+3", "4"],
+      "keyword.operator.arithmetic.ral": ["+", "*"],
+      "punctuation.section.interpolation.end.ral": ["]"],
+      "punctuation.definition.string.end.ral": ["\""]
+    }
+  },
+  {
+    "name": "arithmetic dereferences and indices complete operands before trivia",
+    "source": "$[$x\n# bare\n-1 + $(x-)\n# delimited\n+2 + $xs[0]\n# indexed\n-3]\n",
+    "scopes": {
+      "constant.numeric.ral": ["1", "2", "3"],
+      "keyword.operator.arithmetic.ral": ["-", "+", "+", "+", "-"],
+      "variable.other.ral": ["x", "x-", "xs"],
+      "variable.other.index-key.ral": ["0"]
+    }
+  },
+  {
+    "name": "arithmetic forced blocks and collections restore binary expectation",
+    "source": "$[!{ return -1 }\n# forced\n-2 + [-3]\n# list\n+4 + { return +5 }\n-6 + !$x\n+7 + $[-8]\n-9]\n",
+    "scopes": {
+      "constant.numeric.ral": ["-1", "2", "-3", "4", "+5", "6", "7", "-8", "9"],
+      "keyword.operator.arithmetic.ral": ["-", "+", "+", "+", "-", "+", "+", "+", "-"],
+      "keyword.operator.force.begin.ral": ["!{"],
+      "keyword.operator.force.end.ral": ["}"],
+      "keyword.operator.force.ral": ["!"],
+      "variable.other.ral": ["x"]
+    }
+  },
+  {
+    "name": "arithmetic tag payloads greedily retain operand expectation",
+    "source": "$[`a -1]; $[`a - 1]; $[`outer `inner\n# payload\n+2\n# binary\n-3]; $[not\n-4]\n",
+    "scopes": {
+      "constant.numeric.ral": ["-1", "1", "+2", "3", "-4"],
+      "keyword.operator.arithmetic.ral": ["-", "-"]
+    }
+  },
+  {
+    "name": "arithmetic signed malformed numeral words retain whole boundaries",
+    "source": "$[-1e6 + +0x10 + -1_000 + +3.10.1 + -1abc + +.5abc + -2#word + +1.0e+2foo + -1.0e-2.0]\n",
+    "scopes": {
+      "constant.numeric.ral": [],
+      "keyword.operator.arithmetic.ral": ["-", "+", "+", "+", "-", "+", "+", "+", "-", "+", "+", "+", "-", "+", "+", "+", "-"],
+      "comment.line.number-sign.ral": []
+    }
+  },
+  {
+    "name": "arithmetic comparison and logical operators expect signed operands",
+    "source": "$[-1==-2 && +3!=+4 || -5<=-6]; $[+7>=+8]; $[-9<-10]; $[+11>+12]; $[-13/+14%-15]\n",
+    "scopes": {
+      "constant.numeric.ral": ["-1", "-2", "+3", "+4", "-5", "-6", "+7", "+8", "-9", "-10", "+11", "+12", "-13", "+14", "-15"],
+      "keyword.operator.arithmetic.ral": ["==", "&&", "!=", "||", "<=", ">=", "<", ">", "/", "%"]
+    }
+  },
+  {
+    "name": "quoted index closers do not swallow the arithmetic tail",
+    "source": "$[$xs['a]b'] + 2]\n",
+    "scopes": {
+      "string.quoted.single.ral": ["'a]b'"],
+      "punctuation.section.index.begin.ral": ["["],
+      "punctuation.section.index.end.ral": ["]"],
+      "constant.numeric.ral": ["2"],
+      "keyword.operator.arithmetic.ral": ["+"]
+    }
+  },
+  {
+    "name": "arithmetic EOF and CRLF retain sign state without leaking outside",
+    "source": "$[\r\n# initial\r\n-1\r\n# tail\r\n+2] -3\r\n$[+4\n-5",
+    "scopes": {
+      "constant.numeric.ral": ["-1", "2", "-3", "+4", "5"],
+      "keyword.operator.arithmetic.ral": ["+", "-"]
+    }
+  }
+]

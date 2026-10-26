@@ -1,0 +1,18 @@
+generate
+# a comment before the pipe
+# <- comment
+| consume
+# <- operator
+# a comment before the chain
+# <- comment
+? fallback
+# <- operator
+
+return $[
+1
+# a comment before an arithmetic operator
+# <- comment
++
+# <- operator
+2
+]

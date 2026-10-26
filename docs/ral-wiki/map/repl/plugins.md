@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
-generated_at_date: 2026-10-25
+generated_at_commit: 67715a25
+generated_at_date: 2026-10-26
 covers_paths: [ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/keybinding.rs, ral/src/repl/enquiry.rs]
 ---
 
@@ -127,7 +127,10 @@ grant a request needs (`flag`) and turns into an `Enquiry`, implemented by
 first, before its updater runs. `_ed-tui` needs `editor.tui` and the terminal, not the
 editor: `Mooring::lend_terminal` is `Some` only from `Leased` (a keybinding
 handler's run), so anywhere else, or nested, it answers status 1 with a
-sentence saying this run holds no terminal to lend. The host answers an editor
+sentence saying this run holds no terminal to lend. Its captured stdout is
+decoded lossily after removing one LF or CRLF with `io::terminator_len`;
+a lone CR, embedded NULs, and preceding terminators remain. Captured prompt
+text follows the same rule; returned prompt Strings do not. The host answers an editor
 op only while a `PluginContext` is installed for the dispatch — inside a
 plugin handler — and refuses otherwise with "no plugin context". The builtins ride the
 REPL surface the `repl` recipe boots, so the typechecker reads them off the

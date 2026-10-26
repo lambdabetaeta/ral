@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 24aab6a4
+generated_at_commit: 67715a25
 generated_at_date: 2026-10-26
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/record/session.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/boot.rs, exarch/src/agent/seat.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
 ---
@@ -503,7 +503,7 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
 - The command token completes **as it is typed**, not on request: while the
   first row is a bare `/` and command characters, `commands::command_candidates`
   fuzzy-ranks every name and alias (`ral_core::text::rank`) and `PromptState`
-  holds the result in a `prompt_editor::completion::Menu`, floated out of the
+  holds the result in a private `tui::prompt::editor::completion::Menu`, floated out of the
   top of the prompt box over the transcript — a transient overlay that reserves
   no row, so the frame never shifts under the reader. A live popup owns ↓/Tab,
   ↑/⇧Tab, Enter and Esc: Enter takes the highlighted command *into the line* and
@@ -518,7 +518,16 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
   its own. Each row also carries the registry's own `Spec::help` line —
   the same sentence `/help` lists — in a dimmer second column, so the popup
   never says less than the listing does; `Menu` drops that column first when
-  the terminal is too narrow to hold it.
+  the terminal is too narrow to hold it. Names and details are measured and padded
+  in display columns, with clipping at grapheme boundaries.
+  **Completion is one undoable edit; adopting a draft starts a new buffer.**
+  The private edtui wrapper (`tui/prompt/editor.rs`) replaces the command token
+  by a selection-paste action, preserving Vi mode and every other row. Escape
+  then `u` restores the partial command; Ctrl-R restores the accepted spelling.
+  Submit clearing, history recall/restoration, queued-prompt recall and external
+  editor adoption instead install a fresh Insert-mode state and undo baseline:
+  undo never crosses into another draft or a submitted prompt. History browsing
+  keeps its stashed draft; external editor adoption ends the browse.
 - `/model`'s model list ranks through `ral_core::text::rank_by` — the same
   `nucleo` matcher the command popup uses, given the `label / model` line each
   row matches by rather than the row itself, so a row and its haystack travel
@@ -588,7 +597,9 @@ OS signal reaches every root.
 The TUI key table keeps UI control separate from cancellation: a modal
 overlay's (`/model`, `/login`, `/providers`, `/rewind`) Ctrl-C/Ctrl-D/Esc close it (`input_of`), only
 `/quit`/`/exit` end the session, and Ctrl-C/Esc otherwise always drive the
-focused tab's non-escalating cancel (`key_action`). A single press stops the exchange /
+focused tab's non-escalating cancel (`key_action`). Escape also reaches the
+editable prompt's Vi mode transition, without reopening the command popup;
+Ctrl-C does not edit the draft. A single press stops the exchange /
 in-flight HTTP future and unwinds the in-flight eval at its next poll point;
 because the path never escalates the signal count, repeated presses cannot
 reach ral's third-signal `_exit`
@@ -621,7 +632,7 @@ user, home, git state, exarch's log directory) once at startup for the [[map/exa
         - `tui/tabs.rs` — session/view lifecycle: `Tab` (birth facts, `Status`, `Life`), `Tabs` as one id-ordered `Vec` with no root, `TabRow` (the matrix's per-frame projection, demotion included), titles, attachment management, the parent climb, `tick`'s retirement to `Life::Gone` past `LINGER`
         - `tui/scrollback.rs` — per-session scrollback as a mirror of the view fold: `Scrollback`, `Scrollback::fact` acting on a `Delta` (`opened`/`grew`/`patched`), the record vocabulary decoded once into `Item`s, `absorb`'s tail rules (an effect walks back to its call, a change joins the run of changes at the tail, everything else grows the tail), `trim`'s head retirement against the fold's own window, `live_tail`, `screen`'s one seam rule, the `Log` transcript writer
         - `record/commit.rs` — the model's stream, cut into records worker-side: `Stream`/`Chopper` into `Display::Answer`/`Thinking` commits
-        - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input, the live slash-command popup (`refresh_menu`, `menu_key`)
+        - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input, the live slash-command popup (`refresh_menu`, `menu_key`); `prompt/editor.rs` owns edtui, fresh-draft `adopt` and undoable `replace_row_bytes`; `prompt/editor/completion.rs` owns the popup and its column geometry
         - `tui/gesture.rs` — the mouse as a transition system: `Cell`, `FrameGeom` (the one place pointer → buffer cell, stamped with the tab it drew, so a gesture never outlives its frame's tab), `Phase` (Idle/Pressed/Dragging/Selected), copy `Toast`, hover. Reads come in as `&Scrollback`; writes go out as an `Effect` (`Scroll`, `CycleBlock`, `Copy`) that `App::apply` runs — the module never mutates a scrollback or touches the terminal
         - `tui/render.rs` — `strips` lays the frame out as a value, `draw` paints it; `paint_selection`, `paint_hover`, `footer_hint`, `emit_tab_title`; the screen-side `Row::into_line` flatten; `draw` records the frame's geometry before painting selection or hover
         - `tui/row.rs` — the transcript row: `Row { gutter, content }`, `rail`/`wash`/`hover`/`plain`/`into_line`, the `RAIL_W` gutter-width invariant

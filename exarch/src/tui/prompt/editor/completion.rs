@@ -1,24 +1,18 @@
-//! The completion popup: a ranked candidate list dropping down under the token
-//! being completed.
-//!
-//! [`Menu`] owns a selection and the buffer span the chosen [`Candidate`]
-//! replaces, and nothing else — it neither gathers candidates nor ranks them
-//! (that is the host's job).  The
-//! host owns the keys, driving [`Menu::select_next`] / [`Menu::select_prev`]
-//! (cycle), [`Menu::accept`] (splice) and dismissal (drop the menu) from its own
-//! event loop, and calls [`Menu::render`] with the area the popup may occupy.
+//! The slash-command popup; the registry supplies ranked candidates.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
-use crate::{PromptEditor, char_to_byte};
+use super::PromptEditor;
+use ral_core::text::char_to_byte;
+use unicode_width::UnicodeWidthStr;
 
 /// The most candidate rows a [`Menu`] shows at once, scrolling within them.  A
 /// host that reserves room for a menu before opening one reserves this many
 /// rows plus two, the borders.
-pub const MENU_MAX_ROWS: u16 = 6;
+const MENU_MAX_ROWS: u16 = 6;
 
 /// The popup is never narrower than this, so a one-character candidate still
 /// reads as a list rather than a sliver — unless the area itself is narrower.
@@ -32,25 +26,16 @@ const DETAIL_GAP: u16 = 3;
 /// and an ellipsis are noise, not a gloss.
 const MIN_DETAIL_WIDTH: u16 = 12;
 
-/// One row of a [`Menu`]: the text it shows (`display`), an optional one-line
-/// gloss (`detail`) shown in a dimmer second column, and the text it splices
-/// into the buffer when chosen (`replacement`).
-///
-/// `display` and `replacement` differ wherever a host shows a name but splices
-/// something else — a path candidate whose replacement is source-quoted, say.
-/// `detail` is `None` where a name is its own whole story, as a filename or a
-/// binding is; the column then does not exist.  A host with its own richer
-/// notion of a candidate converts into this shape at the call to
-/// [`Menu::open`]; the widget wants nothing more than these three fields.
+/// The display may carry an argument hint; only `replacement` enters the draft.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Candidate {
-    pub display: String,
-    pub detail: Option<String>,
-    pub replacement: String,
+pub(in crate::tui) struct Candidate {
+    pub(in crate::tui) display: String,
+    pub(in crate::tui) detail: Option<String>,
+    pub(in crate::tui) replacement: String,
 }
 
 /// An open completion menu: ranked candidates and the buffer span they replace.
-pub struct Menu {
+pub(in crate::tui) struct Menu {
     /// Non-empty: [`Menu::open`] refuses an empty list, so a selection always
     /// names a candidate.
     candidates: Vec<Candidate>,
@@ -60,14 +45,6 @@ pub struct Menu {
     name_w: u16,
     detail_w: u16,
     selected: usize,
-    /// Byte offset into the trigger row where the chosen replacement starts.
-    replace_from: usize,
-    /// The editor row the menu was opened on; accept aborts if the cursor has
-    /// since left it.
-    row: usize,
-    /// Screen column the popup drops down under: the prompt prefix width plus
-    /// the token's start column, so the list aligns under what is being typed.
-    anchor_col: u16,
     item_style: Style,
     border_style: Style,
     detail_style: Style,
@@ -76,24 +53,19 @@ pub struct Menu {
 impl Menu {
     /// Open a menu over `candidates`, selecting the first.  An empty list has
     /// nothing to offer and yields no menu.
-    pub fn open(
-        candidates: Vec<Candidate>,
-        replace_from: usize,
-        row: usize,
-        anchor_col: u16,
-    ) -> Option<Self> {
+    pub(in crate::tui) fn open(candidates: Vec<Candidate>) -> Option<Self> {
         if candidates.is_empty() {
             return None;
         }
         let name_w = candidates
             .iter()
-            .map(|c| u16::try_from(c.display.chars().count()).unwrap_or(u16::MAX))
+            .map(|c| u16::try_from(c.display.width()).unwrap_or(u16::MAX))
             .max()
             .unwrap_or(0);
         let detail_w = candidates
             .iter()
             .filter_map(|c| c.detail.as_deref())
-            .map(|d| u16::try_from(d.chars().count()).unwrap_or(u16::MAX))
+            .map(|d| u16::try_from(d.width()).unwrap_or(u16::MAX))
             .max()
             .unwrap_or(0);
         Some(Self {
@@ -101,9 +73,6 @@ impl Menu {
             name_w,
             detail_w,
             selected: 0,
-            replace_from,
-            row,
-            anchor_col,
             item_style: Style::default(),
             border_style: Style::default(),
             detail_style: Style::default().add_modifier(Modifier::DIM),
@@ -113,7 +82,7 @@ impl Menu {
     /// Paint the candidate rows and the border in the host's own palette.  The
     /// selection is reversed on top of `item`, so it reads against any colour.
     #[must_use]
-    pub fn style(mut self, item: Style, border: Style) -> Self {
+    pub(in crate::tui) fn style(mut self, item: Style, border: Style) -> Self {
         self.item_style = item;
         self.border_style = border;
         self
@@ -123,25 +92,15 @@ impl Menu {
     /// to the default `DIM`: the selection reverses this style too, and a
     /// dimmed reverse is unreliable across terminals.
     #[must_use]
-    pub fn detail_style(mut self, detail: Style) -> Self {
+    pub(in crate::tui) fn detail_style(mut self, detail: Style) -> Self {
         self.detail_style = detail;
         self
-    }
-
-    /// The editor row the menu was opened on.
-    pub fn row(&self) -> usize {
-        self.row
-    }
-
-    /// The byte offset in that row where the chosen replacement starts.
-    pub fn replace_from(&self) -> usize {
-        self.replace_from
     }
 
     /// The popup's wanted height, borders included: the rows it would show,
     /// capped at [`MENU_MAX_ROWS`], plus two.  A render clamps this to the
     /// height it is actually given.
-    pub fn height(&self) -> u16 {
+    pub(in crate::tui) fn height(&self) -> u16 {
         let rows = u16::try_from(self.candidates.len())
             .unwrap_or(u16::MAX)
             .min(MENU_MAX_ROWS);
@@ -149,44 +108,36 @@ impl Menu {
     }
 
     /// Advance the selection to the next candidate, wrapping.
-    pub fn select_next(&mut self) {
+    pub(in crate::tui) fn select_next(&mut self) {
         self.selected = (self.selected + 1) % self.candidates.len();
     }
 
     /// Retreat the selection to the previous candidate, wrapping.
-    pub fn select_prev(&mut self) {
+    pub(in crate::tui) fn select_prev(&mut self) {
         let n = self.candidates.len();
         self.selected = (self.selected + n - 1) % n;
     }
 
-    /// Apply the selected candidate: replace the token from `replace_from` to
-    /// the current cursor (which has not moved while the menu owned the keys)
-    /// with the chosen replacement.  Reports whether the buffer *changed* — it
-    /// does not if the cursor has left the trigger row, if the recorded span no
-    /// longer fits that row, or if the span already holds the chosen text.  A
-    /// host reads that last case as a menu with nothing left to offer, and
-    /// gives the key to whoever wants it next.
-    pub fn accept(&self, prompt: &mut PromptEditor) -> bool {
+    /// Replace the slash command up to the cursor on the first row.
+    /// An unchanged draft leaves the key available to the host.
+    pub(in crate::tui::prompt) fn accept(&self, prompt: &mut PromptEditor) -> bool {
         let row = prompt.row();
-        if row != self.row {
+        if row != 0 {
             return false;
         }
         let Some(line) = prompt.line(row) else {
             return false;
         };
-        let end = char_to_byte(&line, prompt.col());
+        let end_col = prompt.col() + usize::from(prompt.state.mode == edtui::EditorMode::Normal);
+        let end = char_to_byte(&line, end_col);
         let replacement = &self.candidates[self.selected].replacement;
-        if line.get(self.replace_from..end) == Some(replacement.as_str()) {
-            return false;
-        }
-        prompt.replace_row_bytes(row, self.replace_from, end, replacement)
+        prompt.replace_row_bytes(row, 0, end, replacement)
     }
 
-    /// Draw the menu as a bordered popup at the top of `area`, dropping down,
-    /// its left edge anchored under the token being completed (clamped to stay
-    /// within the area).  The selected row is reversed; the list scrolls within
+    /// Draw the menu at the top left of `area`.
+    /// The selected row is reversed; the list scrolls within
     /// [`MENU_MAX_ROWS`] so a long candidate set stays navigable.
-    pub fn render(&self, frame: &mut ratatui::Frame, area: Rect) {
+    pub(in crate::tui) fn render(&self, frame: &mut ratatui::Frame, area: Rect) {
         if area.height < 3 {
             return;
         }
@@ -211,7 +162,7 @@ impl Menu {
             .clamp(MIN_WIDTH.min(area.width), area.width);
         let pop_h = self.height().min(area.height);
         let rect = Rect {
-            x: area.x + self.anchor_col.min(area.width.saturating_sub(pop_w)),
+            x: area.x,
             y: area.y,
             width: pop_w,
             height: pop_h,
@@ -232,19 +183,19 @@ impl Menu {
                     item = item.add_modifier(Modifier::REVERSED);
                     detail = detail.add_modifier(Modifier::REVERSED);
                 }
-                match (detail_col, c.detail.as_deref()) {
-                    (Some(w), Some(d)) => {
-                        // Both columns are padded to a fixed width, so the
-                        // reversed selection is a clean rectangle rather than
-                        // a ragged one.
-                        let pad = usize::from(self.name_w + DETAIL_GAP);
-                        let w = usize::from(w);
-                        Line::from(vec![
-                            Span::styled(format!("{:pad$}", c.display), item),
-                            Span::styled(format!("{:w$}", clip(d, w)), detail),
-                        ])
-                    }
-                    _ => Line::from(Span::styled(c.display.clone(), item)),
+                match detail_col {
+                    Some(w) => Line::from(vec![
+                        Span::styled(padded(&c.display, usize::from(self.name_w)), item),
+                        Span::styled(" ".repeat(usize::from(DETAIL_GAP)), item),
+                        Span::styled(
+                            padded(c.detail.as_deref().unwrap_or(""), usize::from(w)),
+                            detail,
+                        ),
+                    ]),
+                    None => Line::from(Span::styled(
+                        clip(&c.display, usize::from(rect.width.saturating_sub(2))),
+                        item,
+                    )),
                 }
             })
             .collect();
@@ -259,8 +210,30 @@ impl Menu {
 
 /// `s` cut to `max` columns, the last spent on an `…` when anything is dropped.
 fn clip(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
+    if s.width() <= max {
+        return s.to_owned();
     }
-    s.chars().take(max.saturating_sub(1)).chain(['…']).collect()
+    let ellipsis = "…";
+    if max < ellipsis.width() {
+        return String::new();
+    }
+    let budget = max - ellipsis.width();
+    let mut used = 0;
+    let mut out = String::new();
+    for g in Span::raw(s).styled_graphemes(Style::default()) {
+        let width = g.symbol.width();
+        if used + width > budget {
+            break;
+        }
+        out.push_str(g.symbol);
+        used += width;
+    }
+    out.push_str(ellipsis);
+    out
+}
+
+fn padded(s: &str, width: usize) -> String {
+    let mut out = clip(s, width);
+    out.push_str(&" ".repeat(width.saturating_sub(out.width())));
+    out
 }

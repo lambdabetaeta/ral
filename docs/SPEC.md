@@ -4502,8 +4502,9 @@ none. Consecutive duplicate entries are omitted. Saving
 appends the current session's new entries instead of replacing the file, so
 concurrent sessions do not erase each other's history.
 
-In a full frontend, Ctrl-C at the prompt abandons the current input and redraws;
-Ctrl-D on an empty prompt exits cleanly. Ctrl-D within non-empty input performs
+Ctrl-C at the prompt abandons the whole current input, including continuation
+lines, and presents a fresh prompt without waiting for Enter (also on the Unix
+minimal surface). In a full frontend, Ctrl-D on an empty prompt exits cleanly. Ctrl-D within non-empty input performs
 the editor's ordinary delete operation. Ctrl-C while a command is running
 interrupts that foreground run. Unix Ctrl-Z is specified with concurrency
 (§11.6): a stopped process is resumed at once, so Ctrl-Z has no visible
@@ -4600,8 +4601,10 @@ a whole check. A build whose tables break that is refused, naming both tables
 and the label.
 
 The prompt body may return a value, whose display form becomes the prompt. If
-it returns `Unit`, its captured standard output becomes the prompt, with one
-trailing newline removed. Prompt failures are reported and fall back to `❯ `.
+it returns `Unit`, its captured standard output is decoded lossily after
+removing exactly one trailing LF or CRLF; a lone CR and any preceding
+terminator remain. A returned String is unchanged. Prompt failures are
+reported and fall back to `❯ `.
 Plugin prompt hooks then transform the base prompt in plugin load order.
 
 Parse, type, read, and runtime failures in a startup file are reported without
@@ -4853,7 +4856,8 @@ do not become part of the input buffer.
 `_ed-tui : ∀ν α. {ν α} -> Returns [output: String, status: Int]` runs the body with its
 standard output captured while allowing an interactive child to use the
 terminal. The body's value is ignored; the captured bytes are decoded as text,
-lossily, with one trailing newline removed, and supply `output`. A body failure
+lossily after removing exactly one trailing LF or CRLF, and supply `output`.
+A lone CR and any preceding terminator remain. A body failure
 is returned as data in `output` and `status` rather than raised. `_ed-tui`
 opens only from a keybinding handler, the run that holds the terminal; from any
 other hook, and nested inside another `_ed-tui`, it is reported as status 1.

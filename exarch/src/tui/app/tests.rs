@@ -67,6 +67,26 @@ pub(in crate::tui) fn text(app: &mut App, id: AgentId) -> String {
 }
 
 #[test]
+fn live_vi_completion_escape_undo_and_redo_restore_the_partial_command() {
+    let (mut app, _, _root) = app();
+    app.prompt_state = PromptState::new(true);
+    app.prompt_state.set_prompt("/th");
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    app.key(key(KeyCode::Char('i')), &ctx());
+    app.key(key(KeyCode::Enter), &ctx());
+    assert_eq!(app.prompt_state.prompt_text(), "/thinking");
+    app.key(key(KeyCode::Esc), &ctx());
+    assert!(app.prompt_state.menu().is_none());
+    app.key(key(KeyCode::Char('u')), &ctx());
+    assert_eq!(app.prompt_state.prompt_text(), "/thi");
+    app.key(
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        &ctx(),
+    );
+    assert_eq!(app.prompt_state.prompt_text(), "/thinking");
+}
+
+#[test]
 fn matrix_cursor_does_not_change_focus_until_enter() {
     let (mut app, _, root) = app();
     let child = AgentId::new(root.id.get() + 1);

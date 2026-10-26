@@ -1,10 +1,13 @@
+pub(super) mod editor;
+
 use super::commands;
 use super::palette::SLATE;
 use crate::bus::Mailbox;
-use prompt_editor::completion::Menu;
-use prompt_editor::{EditMode, PromptEditor};
+use editor::completion::Menu;
+use editor::{EditMode, PromptEditor};
 use ratatui::crossterm::event::KeyCode;
 use ratatui::style::{Color, Modifier, Style};
+
 /// The prompt line: editor, history, and the draft stashed while browsing it.
 pub(super) struct PromptState {
     editor: PromptEditor,
@@ -39,7 +42,7 @@ impl PromptState {
         }
         self.history.push(prompt.clone());
         self.hist_pos = None;
-        self.editor.clear();
+        self.editor.adopt("");
         self.refresh_menu();
         Some(prompt)
     }
@@ -103,10 +106,9 @@ impl PromptState {
         self.editor.set_base_style(style);
     }
 
-    /// Replace the prompt's contents, leaving the cursor at the end.
+    /// Install a fresh draft with its own undo history, cursor at the end.
     pub(super) fn set_prompt(&mut self, s: &str) {
-        self.editor.clear();
-        self.editor.insert_str(s);
+        self.editor.adopt(s);
         self.refresh_menu();
     }
 
@@ -126,7 +128,7 @@ impl PromptState {
             Some(line) if self.editor.row() == 0 => commands::command_candidates(&line),
             _ => Vec::new(),
         };
-        self.menu = Menu::open(candidates, 0, 0, 0).map(|m| {
+        self.menu = Menu::open(candidates).map(|m| {
             m.style(Style::default().fg(Color::Cyan), Style::default().fg(SLATE))
                 .detail_style(Style::default().fg(SLATE))
         });
@@ -194,7 +196,11 @@ impl PromptState {
     /// and the shell line-edit chords itself.
     pub(super) fn edit_input(&mut self, k: ratatui::crossterm::event::KeyEvent) {
         self.editor.handle_key(k);
-        self.refresh_menu();
+        if k.code == KeyCode::Esc {
+            self.menu = None;
+        } else {
+            self.refresh_menu();
+        }
     }
     pub(super) fn height_hint(&self, text_width: u16, area_height: u16) -> u16 {
         self.editor.height_hint(text_width, area_height)
@@ -216,3 +222,6 @@ impl PromptState {
         self.editor.cursor_screen_position().map(|p| (p.x, p.y))
     }
 }
+
+#[cfg(test)]
+mod tests;

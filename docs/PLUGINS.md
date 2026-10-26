@@ -112,8 +112,8 @@ if the user had pressed Enter. The pair implements zsh-style
 **`_ed-tui`.** The body runs with the line editor suspended and
 stdout captured. It opens only from a keybinding handler, the one run
 that holds the terminal. On success the return record's `status` is 0 and
-`output` is the captured stdout, decoded lossily, one trailing newline
-stripped.  The body is a command, its value is its output, and the call
+`output` is the captured stdout, decoded lossily after stripping exactly
+one trailing LF or CRLF. A lone CR and any preceding terminator remain.  The body is a command, its value is its output, and the call
 displays a terminal selection rather than computing with it. When the body fails, `status` carries the exit code and
 `output` carries the error message; the call never raises, so plugins
 can discriminate cancellation (fzf 1 = no match, 130 = Esc) from real
@@ -283,7 +283,8 @@ restores the directory on exit, fires nothing.
 **`prompt`** is a transformer, not an event record. Each handler
 receives the current prompt string (starting from the shell's base)
 and returns a new one, or prints it: like the session prompt, a
-handler returning `()` has its captured stdout taken as the prompt.
+handler returning `()` has its captured stdout decoded lossily after removing
+one trailing LF or CRLF. A directly returned String is unchanged.
 Handlers compose: the output of handler `n` is the input to handler
 `n+1`. A failing handler leaves the prompt as it was; the faults of
 one render print together, once while they repeat.

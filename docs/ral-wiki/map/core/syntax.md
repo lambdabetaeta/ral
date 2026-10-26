@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 677fc58d
-generated_at_date: 2026-10-17
-covers_paths: [core/src/syntax/]
+generated_at_commit: 67715a25
+generated_at_date: 2026-10-26
+covers_paths: [core/src/syntax/, editors/]
 ---
 
 # Map: core / syntax
@@ -115,6 +115,30 @@ sees raw bytes and bare words.
 - `highlight.rs` — `classify(src)`, token classes (`Class`) read off the lexer
   for the exarch and synod highlighters, so neither carries a second parser of
   its own.
+
+## Editor projections
+
+**Editor grammars approximate this surface; they do not define it.**
+
+- `editors/tree-sitter-ral/grammar.js` and `queries/highlights.scm` preserve
+  bracket-local whitespace, statement newlines in nested braces, touching
+  spread/force operands, and adjacent nonempty word indices. Forced variable
+  keys remain inside the force operand; delimited names take none.
+- Tree-sitter bounds hash-bumped single-string fences at depths 1–3 and
+  approximates positional colon splitting with colon-joined nonempty stems.
+  Its `map_literal` covers both records and maps without enforcing the
+  classification-dependent one-first-spread restriction on records.
+- `editors/ral-syntax/ral.tmLanguage.json` and its hand-translated Sublime YAML
+  use backreferences for arbitrary matching single-string fences. They scope
+  whole numeral words, not numeric prefixes; numeric ranges remain runtime
+  checks in every editor grammar. Regex bundles treat commas as punctuation
+  even outside brackets, and arithmetic unary signs as operators.
+- `test/corpus/` under the tree-sitter grammar tests parse behavior;
+  `editors/ral-syntax/tests/` tests actual TextMate and syntect scope spans.
+  Generated tree-sitter sources, headers and libraries are ignored outputs.
+  Each grammar's README records regeneration and consumer coverage.
+
+## Runtime nesting
 
 **Recursion is bounded by a single shared depth cap, so adversarial nesting
 rejects cleanly instead of overflowing the stack.** One `NESTING_DEPTH_LIMIT`

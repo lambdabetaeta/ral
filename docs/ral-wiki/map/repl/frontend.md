@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 4e2ee042
-generated_at_date: 2026-10-12
-covers_paths: [ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/completion.rs, ral/src/repl/complete.rs, ral/src/repl/highlight_style.rs, prompt-editor/src/completion.rs, core/src/text.rs]
+generated_at_commit: 67715a25
+generated_at_date: 2026-10-26
+covers_paths: [ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/cursor.rs, ral/src/repl/completion.rs, ral/src/repl/complete.rs, ral/src/repl/highlight_style.rs, core/src/text.rs]
 ---
 
 # Map: repl / frontend
@@ -22,11 +22,15 @@ transport `read` is handed** — probes, and hook dispatches through the
 `Validator` (`needs_continuation`), so Enter on an incomplete buffer inserts a
 newline in place; a plugin key's `AcceptLine` submits unconditionally, so a
 pending key always sees the full buffer and a full-buffer byte cursor. After an
-`Edit` outcome `cursor::erase_drawn` erases exactly the rows drawn (per-line
-`ceil(width / cols)`, prompt included, by `unicode-width`). `End(0)` is EOF, a
-read error prints then `End(1)`. The minimal frontend alone folds continuation
-lines (`join_continuation`); Ctrl-C there arrives as a signal, so a line read
-after the `interrupt_epoch` moved restarts the buffer. Both frontends hold a
+`Edit` outcome `cursor::erase_drawn` walks the prompt then buffer with
+rustyline's configured grapheme-width mode and tab stops, preserving the
+column between them, resetting on LF, and advancing exact-width endings.
+The accepted-line newline determines the erase distance; earlier output is
+untouched. Unknown or zero width conservatively counts explicit lines, and
+terminal controls remain capability-gated. `End(0)` is EOF, a read error
+prints then `End(1)`. The minimal frontend alone folds continuation lines
+(`join_continuation`); on Unix, Ctrl-C immediately returns `Read::Interrupt`
+and abandons the whole logical buffer, without waiting for another line. Both frontends hold a
 rustyline `FileHistory` (one `#V2` format); saves *append* the session's own
 entries so concurrent sessions do not clobber each other, and a failed save is
 reported once, from `Drop for Session`.
@@ -51,20 +55,32 @@ dumb terminals whatever was asked):
 cleanup.** `input.rs::Input` is the unique reader; its shared `Shutdown`
 handle is held by the ambient forwarder.
 
-- Minimal input reads through `Reading` itself, checking shutdown before
-  each read and after interruption. The interactive SIGINT handler omits
-  `SA_RESTART`, so a blocked read returns `EINTR`. Inherited descriptor flags
-  are untouched: `O_NONBLOCK` belongs to the shared open file description,
-  including the parent's aliases. Already-nonblocking input waits in `poll`
-  after `EAGAIN`. One-byte buffering leaves the next command's stdin untouched.
+- Minimal input reads through `PromptReader` with one interrupt epoch for
+  the whole logical prompt. Shutdown takes priority; otherwise a changed epoch
+  returns `Interrupted` before reading or retrying, including after EINTR or
+  a readiness wake. One-byte line assembly propagates interruption without
+  `BufRead::read_line`'s retry and discards partial bytes. The frontend checks
+  the epoch before accepting primary and continuation lines too. The prompt
+  reader blocks SIGINT before checking the epoch, then `pselect` atomically
+  unmasks it while waiting for stdin readiness. An ambient-forwarder wake pipe
+  also covers interrupts handled on another pthread: the process does not
+  globally mask SIGINT. Registration precedes the epoch check, so neither
+  delivery route can lose an interrupt between checking and waiting. Shutdown
+  and epoch are checked again before the unique reader takes one ready byte.
+  Inherited descriptor flags are untouched: `O_NONBLOCK` belongs to the shared
+  open file description, including the parent's aliases. Already-nonblocking
+  input returns to the same wait after `EAGAIN`. One-byte reads leave the next
+  command's stdin untouched.
+  UTF-8 validation and final unterminated lines follow ordinary `read_line`
+  semantics. Windows retains its console host handling and `stdin.read_line`.
 - Rustyline construction requires its external printer on Unix: that
   establishes a supported input/output TTY and its SIGINT-aware reader.
   Construction failures retain their diagnostic and fall back to minimal.
 - Both frontends hold a `Reading` guard, exclusively registering the reading
   pthread and temporarily unblocking SIGINT. Shutdown sends it SIGINT every
   20 ms until the guard drops:
-  the retry covers entry before rustyline installs its handler or between
-  the minimal reader's shutdown check and its blocking syscall. The guard
+  the retry covers entry before rustyline installs its handler. Minimal input
+  instead closes the check-to-wait gap atomically as described above. The guard
   cannot cross threads; unregistration precedes restoring the signal mask.
 - Rustyline restores raw mode and bracketed paste before returning. The
   session observes the durable root before interpreting the returned input,

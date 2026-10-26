@@ -4,6 +4,7 @@
   "scopeName": "source.ral",
   "fileTypes": ["ral"],
   "patterns": [
+    { "include": "#string-bumped" },
     { "include": "#comment" },
     { "include": "#string-double" },
     { "include": "#string-single" },
@@ -26,6 +27,8 @@
     { "include": "#unit" },
     { "include": "#control-name" },
     { "include": "#block" },
+    { "include": "#collection" },
+    { "include": "#word" },
     { "include": "#punctuation" }
   ],
   "repository": {
@@ -34,18 +37,20 @@
       "match": "#.*$"
     },
 
+    "string-bumped": {
+      "name": "string.quoted.single.ral",
+      "begin": "(#+)'",
+      "end": "'\\1",
+      "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.ral" } },
+      "endCaptures":   { "0": { "name": "punctuation.definition.string.end.ral" } }
+    },
+
     "string-single": {
       "name": "string.quoted.single.ral",
       "begin": "'",
-      "end": "'(?!')",
+      "end": "'",
       "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.ral" } },
-      "endCaptures":   { "0": { "name": "punctuation.definition.string.end.ral" } },
-      "patterns": [
-        {
-          "name": "constant.character.escape.ral",
-          "match": "''"
-        }
-      ]
+      "endCaptures":   { "0": { "name": "punctuation.definition.string.end.ral" } }
     },
 
     "string-double": {
@@ -66,7 +71,7 @@
 
     "string-escape": {
       "name": "constant.character.escape.ral",
-      "match": "\\\\[nte\\\\0\"$!]"
+      "match": "\\\\(?:[nrte\\\\0\"$!~]|x[0-9a-fA-F]{2}|u\\{[0-9a-fA-F]{1,6}\\}|\\r\\n?|\\n)"
     },
 
     "interp-arith": {
@@ -101,7 +106,7 @@
     },
 
     "interp-deref-index": {
-      "match": "(\\$)([a-zA-Z_][a-zA-Z0-9_-]*)(\\[[^\\]]*\\])*",
+      "match": "(\\$)([a-zA-Z_](?:[a-zA-Z0-9_-]*[a-zA-Z0-9_])?)(\\[[^\\]]*\\])*",
       "captures": {
         "1": { "name": "punctuation.definition.variable.ral" },
         "2": { "name": "variable.other.ral" },
@@ -110,11 +115,8 @@
     },
 
     "interp-force-plain": {
-      "match": "(!)([a-zA-Z_][a-zA-Z0-9_-]*)",
-      "captures": {
-        "1": { "name": "keyword.operator.force.ral" },
-        "2": { "name": "variable.other.ral" }
-      }
+      "name": "keyword.operator.force.ral",
+      "match": "!(?=\\$(?:[a-zA-Z_]|\\(|\\[))"
     },
 
     "arithmetic": {
@@ -130,38 +132,128 @@
 
     "arith-inner": {
       "patterns": [
+        { "match": "not(?=$|[\\s|{}\\[\\]$^!<>\"'`();,+*/%=&\\-]|:(?=[\\s,\\]})]|$))" },
+        { "include": "#arith-atom-expected" }
+      ]
+    },
+
+    "arith-atom-expected": {
+      "patterns": [
+        { "include": "#arith-tag" },
+        { "include": "#arith-force" },
+        { "include": "#arith-operand-and-tail" },
+        { "include": "#comment" },
+        { "include": "#arith-binary" }
+      ]
+    },
+
+    "arith-tag": {
+      "begin": "`[a-zA-Z_][a-zA-Z0-9_-]*",
+      "end": "(?=[\\])])",
+      "patterns": [
+        { "include": "#arith-atom-expected" }
+      ]
+    },
+
+    "arith-force": {
+      "begin": "!(?![={])",
+      "beginCaptures": { "0": { "name": "keyword.operator.force.ral" } },
+      "end": "(?=[\\])])",
+      "patterns": [
+        { "include": "#arith-atom-expected" }
+      ]
+    },
+
+    "arith-binary": {
+      "begin": "[+\\-*/%]|==|!=|<=|>=|<|>|&&|\\|\\|",
+      "beginCaptures": { "0": { "name": "keyword.operator.arithmetic.ral" } },
+      "end": "(?=[\\])])",
+      "patterns": [
+        { "include": "#arith-inner" }
+      ]
+    },
+
+    "arith-operand-and-tail": {
+      "comment": "After an atom, retain binary-operator expectation through whitespace and comments.",
+      "begin": "([+-])(?=(?:(?:[0-9]+\\.[0-9]*|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?|[0-9]+)(?=$|[\\s|{}\\[\\]$^!<>\"'`();,+*/%=&\\-]|:(?=[\\s,\\]})]|$)))|(?=(?:#+)'|!\\{|[^\\s#!\\])},;`+*/%=&|<>\\-])",
+      "beginCaptures": { "1": { "name": "constant.numeric.ral" } },
+      "end": "(?=[\\])])",
+      "patterns": [
+        { "include": "#arith-binary" },
+        { "include": "#arith-atoms" }
+      ]
+    },
+
+    "arith-atoms": {
+      "patterns": [
+        { "include": "#string-bumped" },
+        { "include": "#comment" },
+        { "include": "#string-single" },
+        { "include": "#string-double" },
+        { "include": "#arithmetic" },
         { "include": "#deref-paren" },
         { "include": "#arith-deref-index" },
         { "include": "#deref-plain" },
         { "include": "#force-brace" },
-        { "include": "#force-sigil" },
         {
           "name": "constant.numeric.ral",
-          "match": "[0-9]+(\\.[0-9]+)?"
+          "match": "(?:(?:[0-9]+\\.[0-9]*|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?|[0-9]+)(?=$|[\\s|{}\\[\\]$^!<>\"'`();,+*/%=&\\-]|:(?=[\\s,\\]})]|$))"
         },
-        {
-          "name": "keyword.operator.arithmetic.ral",
-          "match": "[+\\-*/%]|==|!=|<=|>=|<|>"
-        },
+        { "include": "#block" },
+        { "include": "#collection" },
         {
           "begin": "\\(",
           "end": "\\)",
           "patterns": [
             { "include": "#arith-inner" }
           ]
+        },
+        {
+          "comment": "Keep exponent signs inside malformed numeral words.",
+          "match": "(?:(?:[0-9]+\\.[0-9]*|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?|[0-9]+|[^\\s|{}\\[\\]$^!<>\"'`();,:#?&+*/%=\\-]|:(?![\\s,\\]})]|$))(?:[^\\s|{}\\[\\]$^!<>\"'`();,:+*/%=&\\-]|:(?![\\s,\\]})]|$))*"
         }
       ]
     },
 
     "arith-deref-index": {
-      "match": "(\\$)([a-zA-Z_][a-zA-Z0-9_-]*)(\\[)([^\\]]*)(\\])",
-      "captures": {
+      "begin": "(\\$)([a-zA-Z_](?:[a-zA-Z0-9_-]*[a-zA-Z0-9_])?)(\\[)",
+      "end": "\\]",
+      "contentName": "variable.other.index-key.ral",
+      "beginCaptures": {
         "1": { "name": "punctuation.definition.variable.ral" },
         "2": { "name": "variable.other.ral" },
-        "3": { "name": "punctuation.section.index.begin.ral" },
-        "4": { "name": "variable.other.index-key.ral" },
-        "5": { "name": "punctuation.section.index.end.ral" }
-      }
+        "3": { "name": "punctuation.section.index.begin.ral" }
+      },
+      "endCaptures": { "0": { "name": "punctuation.section.index.end.ral" } },
+      "patterns": [
+        { "include": "#arith-index-key" }
+      ]
+    },
+
+    "arith-index-key": {
+      "patterns": [
+        { "include": "#string-bumped" },
+        { "include": "#comment" },
+        { "include": "#string-single" },
+        { "include": "#string-double" },
+        {
+          "begin": "\\[",
+          "end": "\\]",
+          "patterns": [
+            { "include": "#arith-index-key" }
+          ]
+        }
+      ]
+    },
+
+    "collection": {
+      "begin": "\\[",
+      "end": "\\]",
+      "beginCaptures": { "0": { "name": "punctuation.section.bracket.ral" } },
+      "endCaptures": { "0": { "name": "punctuation.section.bracket.ral" } },
+      "patterns": [
+        { "include": "$self" }
+      ]
     },
 
     "let-binding": {
@@ -174,7 +266,7 @@
     },
 
     "return-keyword": {
-      "match": "\\breturn\\b",
+      "match": "\\breturn(?=$|[\\s|{}\\[\\]$^!<>\"'`();,]|:(?=[\\s,\\]})]|$))",
       "name": "keyword.control.return.ral"
     },
 
@@ -206,7 +298,7 @@
     },
 
     "deref-plain": {
-      "match": "(\\$)([a-zA-Z_][a-zA-Z0-9_-]*)",
+      "match": "(\\$)([a-zA-Z_](?:[a-zA-Z0-9_-]*[a-zA-Z0-9_])?)",
       "captures": {
         "1": { "name": "punctuation.definition.variable.ral" },
         "2": { "name": "variable.other.ral" }
@@ -214,12 +306,8 @@
     },
 
     "spread": {
-      "match": "(\\.\\.\\.)(\\$)([a-zA-Z_][a-zA-Z0-9_-]*)",
-      "captures": {
-        "1": { "name": "keyword.operator.spread.ral" },
-        "2": { "name": "punctuation.definition.variable.ral" },
-        "3": { "name": "variable.other.ral" }
-      }
+      "name": "keyword.operator.spread.ral",
+      "match": "\\.\\.\\."
     },
 
     "force-brace": {
@@ -239,7 +327,7 @@
     },
 
     "bypass": {
-      "match": "(\\^)([^ \\t\\n|{}\\[\\]$<>\"'#,();]+)",
+      "match": "(\\^)([^ \\t\\n|{}\\[\\]$<>\"',();]+)",
       "captures": {
         "1": { "name": "keyword.operator.bypass.ral" },
         "2": { "name": "entity.name.command.bypass.ral" }
@@ -271,22 +359,22 @@
 
     "number": {
       "name": "constant.numeric.ral",
-      "match": "(?<![a-zA-Z_\\-])[0-9]+(\\.[0-9]+)?"
+      "match": "[+-]?(?:(?:[0-9]+\\.[0-9]*|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?|[0-9]+)(?=$|[\\s|{}\\[\\]$^!<>\"'`();,]|:(?=[\\s,\\]})]|$))"
     },
 
     "boolean": {
       "name": "constant.language.boolean.ral",
-      "match": "\\b(true|false)\\b"
+      "match": "\\b(true|false)(?=$|[\\s|{}\\[\\]$^!<>\"'`();,]|:(?=[\\s,\\]})]|$))"
     },
 
     "unit": {
       "name": "constant.language.unit.ral",
-      "match": "\\bunit\\b"
+      "match": "\\(\\)"
     },
 
     "control-name": {
       "name": "keyword.control.ral",
-      "match": "\\b(if|for|try|case|while|spawn|gather|await|race|use|source|grant|within|map|filter|fold|reduce)\\b"
+      "match": "\\b(if|for|try|case|while|spawn|gather|await|race|use|source|grant|within|map|filter|fold|reduce)(?=$|[\\s|{}\\[\\]$^!<>\"'`();,]|:(?=[\\s,\\]})]|$))"
     },
 
     "block": {
@@ -299,12 +387,17 @@
       ]
     },
 
+    "word": {
+      "comment": "Consume whole words before scanning interior hashes or numeral suffixes.",
+      "match": "(?:[^\\s|{}\\[\\]$^!<>\"'`();,:#?&]|:(?![\\s,\\]})]|$))(?:[^\\s|{}\\[\\]$^!<>\"'`();,:]|:(?![\\s,\\]})]|$))*"
+    },
+
     "punctuation": {
       "patterns": [
         { "match": "[\\[\\]]", "name": "punctuation.section.bracket.ral" },
         { "match": ",",      "name": "punctuation.separator.comma.ral" },
         { "match": ";",      "name": "punctuation.terminator.statement.ral" },
-        { "match": ":",      "name": "punctuation.separator.colon.ral" }
+        { "match": ":(?=[\\s,\\]})]|$)", "name": "punctuation.separator.colon.ral" }
       ]
     }
   }

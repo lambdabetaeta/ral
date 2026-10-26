@@ -27,7 +27,7 @@
 
 "^"    @operator  ; bypass sigil
 
-; force sigils: !{...} opening, !name, !$name
+; Forced variable indices belong to the operand, not the force result.
 (force_brace) @operator
 (force_bang)  @operator
 
@@ -41,7 +41,6 @@
 ; $name — highlight the whole token
 (deref)       @variable
 (deref_paren) @variable
-(deref_index) @variable
 
 ; Interpolation inside strings
 (interp_deref)       @variable
@@ -57,7 +56,6 @@
 (bumped_string_3) @string
 
 (escape_sequence) @string.escape
-(escape_single)   @string.escape
 
 ; Interpolated segments inside double-quoted strings
 (interp_arith)       @embedded
@@ -118,9 +116,6 @@
 
 (map_entry
   key: (string_single) @property)
-
-(map_entry
-  key: (tag) @property)
 
 ; ── Function calls ───────────────────────────────────────────────────────────
 

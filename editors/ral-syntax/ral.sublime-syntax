@@ -11,6 +11,7 @@ first_line_match: '^#!.*\bral\b'
 
 contexts:
   main:
+    - include: string-bumped
     - include: comment
     - include: string-double
     - include: string-single
@@ -33,6 +34,7 @@ contexts:
     - include: unit
     - include: control-name
     - include: block
+    - include: word
     - include: punctuation
 
   comment:
@@ -41,6 +43,15 @@ contexts:
 
   # --- strings ---
 
+  string-bumped:
+    - match: '(#+)'''
+      scope: punctuation.definition.string.begin.ral
+      push:
+        - meta_scope: string.quoted.single.ral
+        - match: '''\1'
+          scope: punctuation.definition.string.end.ral
+          pop: true
+
   string-single:
     - match: "'"
       scope: punctuation.definition.string.begin.ral
@@ -48,8 +59,6 @@ contexts:
 
   string-single-body:
     - meta_scope: string.quoted.single.ral
-    - match: "''"
-      scope: constant.character.escape.ral
     - match: "'"
       scope: punctuation.definition.string.end.ral
       pop: true
@@ -61,7 +70,7 @@ contexts:
 
   string-double-body:
     - meta_scope: string.quoted.double.ral
-    - match: '\\[nte\\0"$!]'
+    - match: '\\(?:[nrte\\0"$!~]|x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]{1,6}\}|\r\n?|\n)'
       scope: constant.character.escape.ral
     - include: interp-arith
     - include: interp-force-brace
@@ -104,17 +113,15 @@ contexts:
         3: punctuation.definition.variable.end.ral
 
   interp-deref-index:
-    - match: '(\$)([a-zA-Z_][a-zA-Z0-9_-]*)(\[[^\]]*\])*'
+    - match: '(\$)([a-zA-Z_](?:[a-zA-Z0-9_-]*[a-zA-Z0-9_])?)(\[[^\]]*\])*'
       captures:
         1: punctuation.definition.variable.ral
         2: variable.other.ral
         3: punctuation.section.index.ral
 
   interp-force-plain:
-    - match: '(!)([a-zA-Z_][a-zA-Z0-9_-]*)'
-      captures:
-        1: keyword.operator.force.ral
-        2: variable.other.ral
+    - match: '!(?=\$(?:[a-zA-Z_]|\(|\[))'
+      scope: keyword.operator.force.ral
 
   # --- arithmetic ---
 
@@ -131,31 +138,92 @@ contexts:
       pop: true
 
   arith-inner:
+    - include: arith-prefix
+    - include: arith-operand-and-tail
+    - include: comment
+    - match: '[+\-*/%]|==|!=|<=|>=|<|>|&&|\|\|'
+      scope: keyword.operator.arithmetic.ral
+
+  arith-prefix:
+    - match: 'not(?=$|[\s|{}\[\]$^!<>"''`();,+*/%=&\-]|:(?=[\s,\]})]|$))'
+    - match: '`[a-zA-Z_][a-zA-Z0-9_-]*'
+    - match: '!(?=[a-zA-Z_$\(\[])'
+      scope: keyword.operator.force.ral
+
+  # After an atom, retain binary-operator expectation through whitespace and comments.
+  arith-operand-and-tail:
+    - match: '([+-])(?=(?:(?:[0-9]+\.[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?|[0-9]+)(?=$|[\s|{}\[\]$^!<>"''`();,+*/%=&\-]|:(?=[\s,\]})]|$)))|(?=(?:#+)''|!\{|[^\s#\])},;`+*/%=&|<>\-])'
+      captures:
+        1: constant.numeric.ral
+      push: arith-operand-and-tail-body
+
+  arith-operand-and-tail-body:
+    - match: '([+\-*/%]|==|!=|<=|>=|<|>|&&|\|\|)|(?=[\])])'
+      captures:
+        1: keyword.operator.arithmetic.ral
+      pop: true
+    - include: arith-atoms
+
+  arith-atoms:
+    - include: string-bumped
+    - include: comment
+    - include: string-single
+    - include: string-double
+    - include: arithmetic
     - include: deref-paren
     - include: arith-deref-index
     - include: deref-plain
     - include: force-brace
     - include: force-sigil
-    - match: '[0-9]+(\.[0-9]+)?'
+    - match: '(?:(?:[0-9]+\.[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?|[0-9]+)(?=$|[\s|{}\[\]$^!<>"''`();,+*/%=&\-]|:(?=[\s,\]})]|$))'
       scope: constant.numeric.ral
-    - match: '[+\-*/%]|==|!=|<=|>=|<|>'
-      scope: keyword.operator.arithmetic.ral
+    - include: block
+    - match: '\['
+      scope: punctuation.section.bracket.ral
+      push: arith-collection
     - match: '\('
       push: arith-paren
+    # Keep exponent signs inside malformed numeral words.
+    - match: '(?:(?:[0-9]+\.[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?|[0-9]+|[^\s|{}\[\]$^!<>"''`();,:#?&+*/%=\-]|:(?![\s,\]})]|$))(?:[^\s|{}\[\]$^!<>"''`();,:+*/%=&\-]|:(?![\s,\]})]|$))*'
 
   arith-paren:
     - include: arith-inner
     - match: '\)'
       pop: true
 
+  arith-collection:
+    - match: '\]'
+      scope: punctuation.section.bracket.ral
+      pop: true
+    - include: main
+
   arith-deref-index:
-    - match: '(\$)([a-zA-Z_][a-zA-Z0-9_-]*)(\[)([^\]]*)(\])'
+    - match: '(\$)([a-zA-Z_](?:[a-zA-Z0-9_-]*[a-zA-Z0-9_])?)(\[)'
       captures:
         1: punctuation.definition.variable.ral
         2: variable.other.ral
         3: punctuation.section.index.begin.ral
-        4: variable.other.index-key.ral
-        5: punctuation.section.index.end.ral
+      push: arith-index-body
+
+  arith-index-body:
+    - meta_content_scope: variable.other.index-key.ral
+    - match: '\]'
+      scope: punctuation.section.index.end.ral
+      pop: true
+    - include: arith-index-key
+
+  arith-index-key:
+    - include: string-bumped
+    - include: comment
+    - include: string-single
+    - include: string-double
+    - match: '\['
+      push: arith-nested-index
+
+  arith-nested-index:
+    - match: '\]'
+      pop: true
+    - include: arith-index-key
 
   # --- bindings and keywords ---
 
@@ -167,7 +235,7 @@ contexts:
         3: keyword.operator.assignment.ral
 
   return-keyword:
-    - match: '\breturn\b'
+    - match: '\breturn(?=$|[\s|{}\[\]$^!<>"''`();,]|:(?=[\s,\]})]|$))'
       scope: keyword.control.return.ral
 
   lambda-params:
@@ -195,17 +263,14 @@ contexts:
         3: punctuation.definition.variable.end.ral
 
   deref-plain:
-    - match: '(\$)([a-zA-Z_][a-zA-Z0-9_-]*)'
+    - match: '(\$)([a-zA-Z_](?:[a-zA-Z0-9_-]*[a-zA-Z0-9_])?)'
       captures:
         1: punctuation.definition.variable.ral
         2: variable.other.ral
 
   spread:
-    - match: '(\.\.\.)(\$)([a-zA-Z_][a-zA-Z0-9_-]*)'
-      captures:
-        1: keyword.operator.spread.ral
-        2: punctuation.definition.variable.ral
-        3: variable.other.ral
+    - match: '\.\.\.'
+      scope: keyword.operator.spread.ral
 
   force-brace:
     - match: '!\{'
@@ -224,7 +289,7 @@ contexts:
       scope: keyword.operator.force.ral
 
   bypass:
-    - match: '(\^)([^ \t\n|{}\[\]$<>"''#,();]+)'
+    - match: '(\^)([^ \t\n|{}\[\]$<>"'',();]+)'
       captures:
         1: keyword.operator.bypass.ral
         2: entity.name.command.bypass.ral
@@ -250,19 +315,19 @@ contexts:
   # --- literals ---
 
   number:
-    - match: '(?<![a-zA-Z_\-])[0-9]+(\.[0-9]+)?'
+    - match: '[+-]?(?:(?:[0-9]+\.[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?|[0-9]+)(?=$|[\s|{}\[\]$^!<>"''`();,]|:(?=[\s,\]})]|$))'
       scope: constant.numeric.ral
 
   boolean:
-    - match: '\b(true|false)\b'
+    - match: '\b(true|false)(?=$|[\s|{}\[\]$^!<>"''`();,]|:(?=[\s,\]})]|$))'
       scope: constant.language.boolean.ral
 
   unit:
-    - match: '\bunit\b'
+    - match: '\(\)'
       scope: constant.language.unit.ral
 
   control-name:
-    - match: '\b(if|for|try|case|while|spawn|gather|await|race|use|source|grant|within|map|filter|fold|reduce)\b'
+    - match: '\b(if|for|try|case|while|spawn|gather|await|race|use|source|grant|within|map|filter|fold|reduce)(?=$|[\s|{}\[\]$^!<>"''`();,]|:(?=[\s,\]})]|$))'
       scope: keyword.control.ral
 
   block:
@@ -276,6 +341,10 @@ contexts:
       scope: punctuation.section.block.end.ral
       pop: true
 
+  # Consume whole words before scanning interior hashes or numeral suffixes.
+  word:
+    - match: '(?:[^\s|{}\[\]$^!<>"''`();,:#?&]|:(?![\s,\]})]|$))(?:[^\s|{}\[\]$^!<>"''`();,:]|:(?![\s,\]})]|$))*'
+
   punctuation:
     - match: '[\[\]]'
       scope: punctuation.section.bracket.ral
@@ -283,5 +352,5 @@ contexts:
       scope: punctuation.separator.comma.ral
     - match: ';'
       scope: punctuation.terminator.statement.ral
-    - match: ':'
+    - match: ':(?=[\s,\]})]|$)'
       scope: punctuation.separator.colon.ral

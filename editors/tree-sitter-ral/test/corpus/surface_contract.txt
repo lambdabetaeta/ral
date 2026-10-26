@@ -1,0 +1,1345 @@
+================================================================================
+unit is punctuation and unit is an ordinary word
+================================================================================
+return ()
+return unit
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (unit_literal))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (identifier)))))))
+
+================================================================================
+backslash does not continue a statement
+================================================================================
+echo \
+next
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (identifier)
+            (word))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (identifier)))))))
+
+================================================================================
+literal strings have no escape but bumped strings contain apostrophes
+================================================================================
+return ''
+return #'a'b'#
+return ##'lower '# and '' fences'##
+return ###'lower '## and ''' fences'###
+return #'ends with quote''#
+return #'a'b
+multiline'#
+#"not a bumped string"#
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (string_single))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (string_single
+              (bumped_string_1)))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (string_single
+              (bumped_string_2)))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (string_single
+              (bumped_string_3)))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (string_single
+              (bumped_string_1)))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (string_single
+              (bumped_string_1)))))))
+  (comment))
+
+================================================================================
+double quoted escapes and escaped newline remain supported
+================================================================================
+return "a\n\r\t\e\0\"\$\!\~\x41\u{1f600}\
+next"
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (string_double
+              (escape_sequence)
+              (escape_sequence)
+              (escape_sequence)
+              (escape_sequence)
+              (escape_sequence)
+              (escape_sequence)
+              (escape_sequence)
+              (escape_sequence)
+              (escape_sequence)
+              (escape_sequence)
+              (escape_sequence)
+              (escape_sequence))))))))
+
+================================================================================
+complete numeral shapes and nonnumeral whole words
+================================================================================
+f -2 +5 .5 2. -.25 +.5e-2 2.E+3 007 -9223372036854775808
+f 1e6 0x10 1_000 3.10.1 1abc 1-2 foo::bar host:8080/a#part
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (identifier)
+            (integer)
+            (integer)
+            (float)
+            (float)
+            (float)
+            (float)
+            (float)
+            (integer)
+            (integer))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (identifier)
+            (word)
+            (word)
+            (word)
+            (word)
+            (word)
+            (word)
+            (word)
+            (word)))))))
+
+================================================================================
+pipe and chain look through comment and blank lines on both sides
+================================================================================
+generate # trailing
+# before
+
+| # after
+# another
+
+transform
+
+# fallback
+? # after chain
+# another
+fallback
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (identifier)))
+        (comment)
+        (comment)
+        (comment)
+        (comment)
+        (cmd
+          (application
+            (identifier))))
+      (comment)
+      (comment)
+      (comment)
+      (pipeline
+        (cmd
+          (application
+            (identifier)))))))
+
+================================================================================
+bumped strings are statements rather than continuation comments
+================================================================================
+echo a
+#'b'#
+| cat
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (identifier)
+            (identifier))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (string_single
+              (bumped_string_1))))
+        (cmd
+          (application
+            (identifier)))))))
+
+================================================================================
+newlines surround collection keys colons values and commas
+================================================================================
+return [
+a
+:
+1
+,
+'b'
+:
+`tag
+'payload'
+,
+$(key)
+:
+$v
+,
+]
+return [
+:
+]
+return [
+a
+,
+b
+,
+]
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (map_literal
+              (map_entry
+                (identifier)
+                (integer))
+              (map_entry
+                (string_single)
+                (tag
+                  (tag_label)
+                  (string_single)))
+              (map_entry
+                (deref_paren)
+                (deref))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (map_literal))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (list_literal
+              (identifier)
+              (identifier))))))))
+
+================================================================================
+pattern bracket whitespace and terminal rest
+================================================================================
+let [a
+:
+[x
+,
+...rest
+]
+,
+'b'
+:
+y
+,
+] = source
+let [
+...all
+,
+] = source
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (let_stmt
+            (map_pattern
+              (map_pattern_entry
+                (identifier)
+                (list_pattern
+                  (identifier)
+                  (rest_pattern
+                    (identifier))))
+              (map_pattern_entry
+                (string_single)
+                (identifier)))
+            (chain
+              (pipeline
+                (cmd
+                  (application
+                    (identifier))))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (let_stmt
+            (list_pattern
+              (rest_pattern
+                (identifier)))
+            (chain
+              (pipeline
+                (cmd
+                  (application
+                    (identifier)))))))))))
+
+================================================================================
+case colons and tag payloads use bracket whitespace
+================================================================================
+case $x [`ok
+:
+{ |p| use $p }, `err:
+$handler]
+return [`outer
+`inner
+42, `none
+]
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (case_stmt
+            (deref)
+            (case_arm
+              (tag_label)
+              (case_arm_lambda
+                (lambda_params
+                  (identifier))
+                (statement
+                  (chain
+                    (pipeline
+                      (cmd
+                        (application
+                          (identifier)
+                          (deref))))))))
+            (case_arm
+              (tag_label)
+              (deref)))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (list_literal
+              (tag
+                (tag_label)
+                (tag
+                  (tag_label)
+                  (integer)))
+              (tag
+                (tag_label)))))))))
+
+================================================================================
+expression whitespace preserves precedence and whole signed operands
+================================================================================
+return $[
+(
+1
+# between operands
++
+2
+)
+*
+-3.0e-2
+]
+return $[1-2]
+return $[1+2*3]
+return $[-2 + +3]
+return $[1.5e+3-.5]
+return $[1.5e+3foo == 'x']
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (arith_expr
+              (arith_binary
+                (arith_group
+                  (arith_binary
+                    (integer)
+                    (comment)
+                    (integer)))
+                (float))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (arith_expr
+              (arith_binary
+                (integer)
+                (integer))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (arith_expr
+              (arith_binary
+                (integer)
+                (arith_binary
+                  (integer)
+                  (integer)))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (arith_expr
+              (arith_binary
+                (integer)
+                (integer))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (arith_expr
+              (arith_binary
+                (float)
+                (float))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (arith_expr
+              (arith_binary
+                (word)
+                (string_single)))))))))
+
+================================================================================
+braces restore statement newlines even inside brackets
+================================================================================
+return [a: {return
+42}, b: {f
+  argument}]
+return
+42
+f
+  argument
+return [(
+)]
+return [{
+}, !{
+}]
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (map_literal
+              (map_entry
+                (identifier)
+                (block
+                  (statement
+                    (chain
+                      (pipeline
+                        (cmd
+                          (return_stmt)))))
+                  (statement
+                    (chain
+                      (pipeline
+                        (cmd
+                          (application
+                            (integer))))))))
+              (map_entry
+                (identifier)
+                (block
+                  (statement
+                    (chain
+                      (pipeline
+                        (cmd
+                          (application
+                            (identifier))))))
+                  (statement
+                    (chain
+                      (pipeline
+                        (cmd
+                          (application
+                            (identifier))))))))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt)))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (integer))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (identifier))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (identifier))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (list_literal
+              (unit_literal)))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (list_literal
+              (block)
+              (force_brace))))))))
+
+================================================================================
+force reaches over variable keys but other primaries are forced first
+================================================================================
+return !$x[0][
+'a'
+]
+return !$(x)
+return !{f}[a]
+return !!$x[0]
+return !'text'[0]
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (force_bang
+              (indexed
+                (deref)
+                (index
+                  (integer))
+                (index
+                  (string_single)))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (force_bang
+              (deref_paren)))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (indexed
+              (force_brace
+                (statement
+                  (chain
+                    (pipeline
+                      (cmd
+                        (application
+                          (identifier)))))))
+              (index
+                (identifier))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (force_bang
+              (force_bang
+                (indexed
+                  (deref)
+                  (index
+                    (integer))))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (indexed
+              (force_bang
+                (string_single))
+              (index
+                (integer)))))))))
+
+================================================================================
+all ordinary primaries take adjacent nonempty word keys
+================================================================================
+return 'abc'[0]
+return [a,b][0]
+return $[1+1][0]
+return [a: 1][a]
+return foo[bar]
+return $x[!{return 0}][!foo]
+return $x[if][true]
+f $x [$k]
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (indexed
+              (string_single)
+              (index
+                (integer))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (indexed
+              (list_literal
+                (identifier)
+                (identifier))
+              (index
+                (integer))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (indexed
+              (arith_expr
+                (arith_binary
+                  (integer)
+                  (integer)))
+              (index
+                (integer))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (indexed
+              (map_literal
+                (map_entry
+                  (identifier)
+                  (integer)))
+              (index
+                (identifier))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (indexed
+              (identifier)
+              (index
+                (identifier))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (indexed
+              (deref)
+              (index
+                (force_brace
+                  (statement
+                    (chain
+                      (pipeline
+                        (cmd
+                          (return_stmt
+                            (integer))))))))
+              (index
+                (force_bang
+                  (identifier)))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (indexed
+              (deref)
+              (index
+                (identifier))
+              (index
+                (boolean))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (identifier)
+            (deref)
+            (list_literal
+              (deref))))))))
+
+================================================================================
+spread accepts any touching atom without consulting types
+================================================================================
+f ...42 ...'abc' ...() ...$[1+1] ...!$x[0] ...!!$x
+return [...42, ...'abc', ...(), ...$[1+1]]
+return [...$a, ...$b]
+return ["a": 1, ...$a, ...$b]
+return [...$base, a: 1]
+case $x [`ok: !handler]
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (identifier)
+            (spread
+              (integer))
+            (spread
+              (string_single))
+            (spread
+              (unit_literal))
+            (spread
+              (arith_expr
+                (arith_binary
+                  (integer)
+                  (integer))))
+            (spread
+              (force_bang
+                (indexed
+                  (deref)
+                  (index
+                    (integer)))))
+            (spread
+              (force_bang
+                (force_bang
+                  (deref)))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (list_literal
+              (spread
+                (integer))
+              (spread
+                (string_single))
+              (spread
+                (unit_literal))
+              (spread
+                (arith_expr
+                  (arith_binary
+                    (integer)
+                    (integer))))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (list_literal
+              (spread
+                (deref))
+              (spread
+                (deref))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (map_literal
+              (map_entry
+                (string_double)
+                (integer))
+              (spread
+                (deref))
+              (spread
+                (deref))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (map_literal
+              (spread
+                (deref))
+              (map_entry
+                (identifier)
+                (integer))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (case_stmt
+            (deref)
+            (case_arm
+              (tag_label)
+              (force_bang
+                (identifier)))))))))
+
+================================================================================
+interpolation keys and delimited names have the same boundary as outside
+================================================================================
+return "$x[0] !$x[0] !$(x)[text] $(x)[text] !{f}[a] $[1+2][0] !$[1][0]"
+return "$os-$arch $(name-) $ ! text"
+return "$[
+1
++
+2
+]"
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (string_double
+              (interp_deref_index
+                (deref)
+                (index
+                  (integer)))
+              (interp_force_plain
+                (indexed
+                  (deref)
+                  (index
+                    (integer))))
+              (interp_force_plain
+                (deref_paren))
+              (interp_deref_paren
+                (deref_paren))
+              (interp_force
+                (statement
+                  (chain
+                    (pipeline
+                      (cmd
+                        (application
+                          (identifier))))))
+                (index
+                  (identifier)))
+              (interp_arith
+                (arith_binary
+                  (integer)
+                  (integer))
+                (index
+                  (integer)))
+              (interp_force_plain
+                (arith_expr
+                  (integer))
+                (index
+                  (integer)))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (string_double
+              (interp_deref)
+              (interp_deref)
+              (interp_deref_paren
+                (deref_paren))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (string_double
+              (interp_arith
+                (arith_binary
+                  (integer)
+                  (integer))))))))))
+
+================================================================================
+redirects remain interleaved with arguments even without a preceding gap
+================================================================================
+echo>out hi
+echo a>out b
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (identifier)
+            (redirect
+              (redir_write)
+              (identifier))
+            (identifier))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (identifier)
+            (identifier)
+            (redirect
+              (redir_write)
+              (identifier))
+            (identifier)))))))
+
+================================================================================
+tags greedily take a following atom even when it touches
+================================================================================
+return `ok'x'
+return `ok[1]
+f ...`ok[1][0]
+return `tag
+payload
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (tag
+              (tag_label)
+              (string_single)))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (tag
+              (tag_label)
+              (list_literal
+                (integer))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (identifier)
+            (spread
+              (tag
+                (tag_label)
+                (indexed
+                  (list_literal
+                    (integer))
+                  (index
+                    (integer))))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (tag
+              (tag_label)))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (identifier)))))))
+
+================================================================================
+arithmetic newline whitespace preserves mixed operator precedence
+================================================================================
+return $[1
++
+2
+*
+3]
+return $[1
+*
+2
++
+3]
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (arith_expr
+              (arith_binary
+                (integer)
+                (arith_binary
+                  (integer)
+                  (integer)))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (arith_expr
+              (arith_binary
+                (arith_binary
+                  (integer)
+                  (integer))
+                (integer)))))))))
+
+================================================================================
+flow keywords are ordinary value words outside command heads
+================================================================================
+f if elsif else let return case
+return if
+f ...if ...return ...case
+return if[0]
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (identifier)
+            (identifier)
+            (identifier)
+            (identifier)
+            (identifier)
+            (identifier)
+            (identifier))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (identifier))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (identifier)
+            (spread
+              (identifier))
+            (spread
+              (identifier))
+            (spread
+              (identifier)))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (indexed
+              (identifier)
+              (index
+                (integer)))))))))
+
+================================================================================
+keyword-shaped labels remain static keys rather than constructors
+================================================================================
+return [if: 1, true: 2, else: 3]
+let [if: x, true: y] = source
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (map_literal
+              (map_entry
+                (identifier)
+                (integer))
+              (map_entry
+                (identifier)
+                (integer))
+              (map_entry
+                (identifier)
+                (integer))))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (let_stmt
+            (map_pattern
+              (map_pattern_entry
+                (identifier)
+                (identifier))
+              (map_pattern_entry
+                (identifier)
+                (identifier)))
+            (chain
+              (pipeline
+                (cmd
+                  (application
+                    (identifier)))))))))))
+
+================================================================================
+adjacent quoted atoms do not become an escaped apostrophe
+:error
+================================================================================
+return 'a''b'
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+semicolon is not a pipe continuation
+:error
+================================================================================
+generate;
+| consume
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+semicolon is not a chain continuation
+:error
+================================================================================
+generate;
+? fallback
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+old parenthesized tags do not return
+:error
+================================================================================
+return (`tag payload)
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+parentheses alone do not suppress newlines
+:error
+================================================================================
+return (
+)
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+list newlines do not replace commas
+:error
+================================================================================
+return [a
+b]
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+literal keys cannot be bare numerals
+:error
+================================================================================
+return [42: a]
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+literal keys cannot be tags
+:error
+================================================================================
+return [`tag: a]
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+pattern keys cannot be tags
+:error
+================================================================================
+let [`tag: x] = source
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+pattern keys cannot be data
+:error
+================================================================================
+let ["a": x] = source
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+patterns require a value after a colon
+:error
+================================================================================
+let [a:] = source
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+a delimited variable takes no postfix
+:error
+================================================================================
+return $(x)[0]
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+a forced delimited variable takes no postfix
+:error
+================================================================================
+return !$(x)[0]
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+an index requires a key
+:error
+================================================================================
+return $x[]
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+an index does not contain a command application
+:error
+================================================================================
+return $x[foo bar]
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+an index does not contain a collection primary
+:error
+================================================================================
+return $x[[a]]
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+an index does not contain a block primary
+:error
+================================================================================
+return $x[{f}]
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+an index does not contain a spread
+:error
+================================================================================
+return $x[...foo]
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+a spread must touch its operand
+:error
+================================================================================
+f ... $x
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+a force must touch its operand
+:error
+================================================================================
+return ! $x
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+a rest pattern must touch its binder
+:error
+================================================================================
+let [... rest] = source
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+a rest pattern is terminal
+:error
+================================================================================
+let [a, ...rest, b] = source
+--------------------------------------------------------------------------------
+
+
+
+================================================================================
+a fixed form does not permit touching atoms
+:error
+================================================================================
+if true{}
+--------------------------------------------------------------------------------

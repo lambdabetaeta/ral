@@ -10,6 +10,7 @@ use super::export::{Format, export_to};
 use super::gesture::Toast;
 use super::login;
 use super::model_picker::pick_model;
+use super::prompt::editor::completion::Candidate;
 use super::providers;
 use super::rewind;
 use crate::SessionInfo;
@@ -20,7 +21,6 @@ use crate::card::{Card, Field, FieldVal, Mark, Readout, Span};
 use crate::provider::allowance::{Allowance, Consumption, Reading, Scope};
 use crate::record::{Memory, RECORD};
 use jiff::Timestamp;
-use prompt_editor::completion::Candidate;
 use ral_core::process::CancelCause;
 
 /// A command's trailing argument.

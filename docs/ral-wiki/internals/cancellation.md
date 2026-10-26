@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
-verified_at_date: 2026-10-25
+verified_at_commit: 67715a25
+verified_at_date: 2026-10-26
 anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, Break::code, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, CancelCause::code, Signal::status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, ScopeOwner, Frame::Gather, exit_brood]
 ---
 
@@ -210,7 +210,10 @@ signal context. The two are different kinds of proposition.
   forwarder calls `hear` before `Shutdown::end`: both readers are interrupted
   with thread-directed SIGINT until their exclusive registration ends. The
   minimal reader leaves stdin's shared flags untouched and checks shutdown
-  after `EINTR`; the interactive handler omits `SA_RESTART`. Repeated delivery
+  after `EINTR`; the interactive handler omits `SA_RESTART`. A user interrupt
+  instead changes the logical prompt's epoch: the reader returns `Interrupted`
+  and the frontend discards primary or continuation input immediately. This
+  admits a fresh prompt without ending the session or consuming its root. Repeated delivery
   covers cancellation just before a blocking syscall or before rustyline
   installs its handler. A new read refuses a standing shutdown. The loop checks the root
   again after input returns, preserving its cause's status and the ordinary
@@ -508,7 +511,7 @@ The same two mechanisms are driven by different keys on different surfaces.
 |---|---|---|---|
 | **Ctrl-C** | ral REPL, mid-eval | SIGINT → `interrupt_handler` | `request_interrupt()`, forwarded as `Control::Interrupt` — a pipeline's externals hear it through the collector; **counter untouched** |
 | **Ctrl-C** | ral REPL, idle prompt | line editor reads it as a byte | abandons the partial buffer; nothing is in flight, so nothing is sent; no signal |
-| **Ctrl-C** | ral REPL, idle minimal prompt | canonical tty → SIGINT → `interrupt_handler` | the tty drops the partial line; `request_interrupt()` is forwarded, but every later dispatch is born after it, so it strikes none |
+| **Ctrl-C** | ral REPL, idle minimal prompt | canonical tty → SIGINT → `interrupt_handler` | the tty drops the partial line; the changed prompt epoch wakes a fresh prompt immediately and discards continuation input too; `request_interrupt()` is forwarded, but every later dispatch is born after it, so it strikes none |
 | **Ctrl-`\`** | ral REPL, terminal not lent | SIGQUIT → `sigquit_handler` | `request_root_cancel(Aborted)`, forwarded as `Control::Abort` — reaps foreground *and* every worker, latching if idle; the REPL loop observes the sticky root and exits |
 | **Ctrl-C / Ctrl-`\` / hangup** | any ral host, terminal lent to a command or pipeline | tty → the tenant's group (a hangup also reaches ral, as session leader) | the `TerminalLoan` hears it from the tenant — its death, or the anchor's `Heard` — and strikes `Interrupted` / `Aborted` / `Terminated` on the run's node as it hears: the job is stopped, `try` never sees it, the session lives |
 | **Ctrl-C** | ral batch / `-c` | SIGINT → `handler` | `request_interrupt()`, forwarded as `Control::Interrupt`, + ladder `+1`; third press `_exit`s |

@@ -36,9 +36,8 @@ impl MinimalFrontend {
 enum Continuation {
     /// Another line to fold into the buffer.
     Line(String),
-    /// A line read after Ctrl-C: the partial buffer is abandoned and this
-    /// line starts afresh.
-    Restart(String),
+    /// Ctrl-C abandons the entire logical input.
+    Interrupt,
     /// EOF / read error: abandon the partial buffer, yielding an empty input
     /// for the session to skip.
     Discard,
@@ -46,7 +45,7 @@ enum Continuation {
 
 /// Fold continuation lines into `first` until the buffer is a complete
 /// input, joining with newlines.  The backend owns the actual read via `next`.
-fn join_continuation(first: String, mut next: impl FnMut() -> Continuation) -> String {
+fn join_continuation(first: String, mut next: impl FnMut() -> Continuation) -> Option<String> {
     let mut buf = first;
     while needs_continuation(&buf) {
         match next() {
@@ -54,11 +53,11 @@ fn join_continuation(first: String, mut next: impl FnMut() -> Continuation) -> S
                 buf.push('\n');
                 buf.push_str(&line);
             }
-            Continuation::Restart(line) => buf = line,
-            Continuation::Discard => return String::new(),
+            Continuation::Interrupt => return None,
+            Continuation::Discard => return Some(String::new()),
         }
     }
-    buf
+    Some(buf)
 }
 
 impl Frontend for MinimalFrontend {
@@ -71,11 +70,12 @@ impl Frontend for MinimalFrontend {
     ) -> Read {
         #[cfg(windows)]
         let stdin = std::io::stdin();
+        let epoch = interrupt_epoch();
         #[cfg_attr(windows, allow(unused_mut))]
         let mut read_line = |line: &mut String| {
             #[cfg(unix)]
             {
-                input.read_line(line)
+                input.read_line(line, epoch)
             }
             #[cfg(windows)]
             {
@@ -87,41 +87,38 @@ impl Frontend for MinimalFrontend {
             let _ = out.write_all(s.as_bytes());
             let _ = out.flush();
         };
-        let mut epoch = interrupt_epoch();
-        let trim = |s: &str| s.trim_end_matches(['\n', '\r']).to_string();
+        let trim = |s: &str| s[..s.len() - ral_core::io::terminator_len(s.as_bytes())].to_owned();
 
         write_prompt(prompt.styled());
         let mut line = String::new();
         match read_line(&mut line) {
             Ok(0) => return Read::End(0),
             Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return Read::Interrupt,
             Err(e) => {
                 terminal::cmd_error("ral", &e.to_string());
                 return Read::End(1);
             }
         }
+        if interrupt_epoch() != epoch {
+            return Read::Interrupt;
+        }
 
-        // Canonical mode delivers Ctrl-C as a signal, not a byte: a line read
-        // after the interrupt epoch moved restarts the buffer.
-        Read::Line(join_continuation(trim(&line), || {
+        join_continuation(trim(&line), || {
             write_prompt("> ");
             let mut cont = String::new();
             match read_line(&mut cont) {
                 Ok(0) => Continuation::Discard,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => Continuation::Interrupt,
                 Err(e) => {
                     terminal::cmd_error("ral", &e.to_string());
                     Continuation::Discard
                 }
-                Ok(_) => {
-                    let now = interrupt_epoch();
-                    if std::mem::replace(&mut epoch, now) == now {
-                        Continuation::Line(trim(&cont))
-                    } else {
-                        Continuation::Restart(trim(&cont))
-                    }
-                }
+                Ok(_) if interrupt_epoch() != epoch => Continuation::Interrupt,
+                Ok(_) => Continuation::Line(trim(&cont)),
             }
-        }))
+        })
+        .map_or(Read::Interrupt, Read::Line)
     }
 
     fn add_history(&mut self, entry: &str) {
@@ -153,7 +150,7 @@ mod tests {
             calls += 1;
             Continuation::Discard
         });
-        assert_eq!(out, "echo hi");
+        assert_eq!(out.as_deref(), Some("echo hi"));
         assert_eq!(calls, 0, "a complete line must not prompt for more");
     }
 
@@ -166,7 +163,7 @@ mod tests {
         let out = join_continuation("echo hi |".into(), || {
             Continuation::Line(rest.next().unwrap().to_string())
         });
-        assert_eq!(out, "echo hi |\nworld");
+        assert_eq!(out.as_deref(), Some("echo hi |\nworld"));
     }
 
     /// A trailing `?` is a continuation exactly as a trailing `|` is, and
@@ -177,21 +174,25 @@ mod tests {
         let out = join_continuation("echo a ?".into(), || {
             Continuation::Line(rest.next().unwrap().to_string())
         });
-        assert_eq!(out, "echo a ?\necho b");
-        assert!(ral_core::syntax::parser::parse(&out).is_ok(), "{out:?}");
+        assert_eq!(out.as_deref(), Some("echo a ?\necho b"));
+        assert!(ral_core::syntax::parser::parse(&out.unwrap()).is_ok());
     }
 
     /// Discard (EOF / read error) abandons the partial buffer.
     #[test]
     fn discard_yields_empty() {
         let out = join_continuation("echo hi |".into(), || Continuation::Discard);
-        assert_eq!(out, "");
+        assert_eq!(out.as_deref(), Some(""));
     }
 
-    /// A restart replaces the partial buffer with the new line.
     #[test]
-    fn restart_replaces_the_buffer() {
-        let out = join_continuation("echo hi |".into(), || Continuation::Restart("ls".into()));
-        assert_eq!(out, "ls");
+    fn interrupt_abandons_the_entire_buffer_without_another_read() {
+        let mut calls = 0;
+        let out = join_continuation("echo hi |".into(), || {
+            calls += 1;
+            Continuation::Interrupt
+        });
+        assert_eq!(out, None);
+        assert_eq!(calls, 1);
     }
 }

@@ -138,8 +138,10 @@ caller share it:
   generic over its byte source (`core/src/shell/builtins/util.rs`): stdin for the
   decoders, the string's bytes for `lines`, which so agrees by construction
   rather than by test;
-- *one-terminator strippers* — capture, `from-line`, `ask` — remove at most one
-  terminator from the end: `a\r\n\r\n` becomes `a\r\n`;
+- *one-terminator strippers* — capture, `from-line`, `ask`, and captured REPL
+  display text (`_ed-tui` and Unit-returning prompts) — remove at most one
+  terminator from the end: `a\r\n\r\n` becomes `a\r\n`. The host shares
+  `ral_core::io::terminator_len`; direct prompt Strings are untouched;
 - *writers* — `to-line`, `to-lines`, `to-jsonl`, `echo` — emit `\n` only.
   Reading accepts both endings the world writes; ral's own output has one
   spelling.

@@ -487,6 +487,10 @@ impl App {
                 if let Some(agent) = self.tabs.focused_agent() {
                     agent.interrupt();
                 }
+                // Escape also leaves Vi Insert; Ctrl-C never edits the draft.
+                if action == KeyAction::Cancel && self.is_steerable() {
+                    self.prompt_state.edit_input(k);
+                }
             }
             KeyAction::Submit => {
                 if let Some(text) = self.prompt_state.submit() {

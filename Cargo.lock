@@ -1903,6 +1903,8 @@ dependencies = [
  "clipboard",
  "crossterm",
  "ctor",
+ "edtui",
+ "edtui-jagged",
  "exarch",
  "futures-util",
  "genai",
@@ -1913,7 +1915,6 @@ dependencies = [
  "keyring",
  "libc",
  "os_info",
- "prompt-editor",
  "pulldown-cmark",
  "ral-core",
  "ratatui",
@@ -1928,6 +1929,7 @@ dependencies = [
  "similar",
  "syntect",
  "tempfile",
+ "textwrap",
  "tokio",
  "tui-math",
  "two-face",
@@ -5373,17 +5375,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "prompt-editor"
-version = "0.9.0"
-dependencies = [
- "crossterm",
- "edtui",
- "edtui-jagged",
- "ratatui",
- "textwrap",
-]
-
-[[package]]
 name = "psm"
 version = "0.1.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5516,6 +5507,7 @@ dependencies = [
  "strum",
  "tempfile",
  "tikv-jemallocator",
+ "unicode-segmentation",
  "unicode-width 0.2.2",
  "windows-sys 0.61.2",
 ]

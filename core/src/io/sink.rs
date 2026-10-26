@@ -467,12 +467,9 @@ pub(crate) fn new_buffer() -> (Sink, ByteBuffer) {
     (Sink::Buffer(buf.clone()), buf)
 }
 
-/// Length of the line terminator ending `bytes`: 2 for `\r\n`, 1 for `\n`,
-/// else 0.  The one line rule, cut by every line reader and by capture,
-/// `from-line` and `ask`: CRLF is one terminator, since a surviving `\r` would
-/// send the cursor to column 0 wherever the text is interpolated, and a lone
-/// `\r` is text.  Safe on undecoded bytes — neither appears mid-codepoint.
-pub(crate) fn terminator_len(bytes: &[u8]) -> usize {
+/// Length of one trailing CRLF (2 bytes) or LF (1 byte), otherwise zero.
+/// A lone CR is text. Safe before UTF-8 decoding.
+pub fn terminator_len(bytes: &[u8]) -> usize {
     match bytes {
         [.., b'\r', b'\n'] => 2,
         [.., b'\n'] => 1,

@@ -72,7 +72,7 @@ pub(super) struct EditBuffer {
 /// has already handled any plugin keybinding that accepted.  `Edit` is
 /// a buffer the session should re-feed to the next `read` call (a plugin
 /// keybinding handler asked to re-edit, or `_ed-push` queued a buffer).
-/// `Interrupt` is Ctrl-C at an empty prompt; `End` ends the session with
+/// `Interrupt` discards the whole pending input on Ctrl-C; `End` ends the session with
 /// that exit status (0 on Ctrl-D at an empty prompt, 1 on a read error).
 pub(super) enum Read {
     Line(String),

@@ -12,7 +12,10 @@ $x[0]
       (pipeline
         (cmd
           (application
-            (deref_index)))))))
+            (indexed
+              (deref)
+              (index
+                (integer)))))))))
 
 ================================================================================
 $x [0] with a gap is a bare dereference followed by a list literal
@@ -28,17 +31,12 @@ $x [0]
       (pipeline
         (cmd
           (application
-            (deref))))))
-  (statement
-    (chain
-      (pipeline
-        (cmd
-          (application
+            (deref)
             (list_literal
               (integer))))))))
 
 ================================================================================
-chained indices stay one deref_index only when every bracket abuts
+chained indices stay one indexed value only when every bracket abuts
 ================================================================================
 
 $x[0][1]
@@ -51,4 +49,9 @@ $x[0][1]
       (pipeline
         (cmd
           (application
-            (deref_index)))))))
+            (indexed
+              (deref)
+              (index
+                (integer))
+              (index
+                (integer)))))))))

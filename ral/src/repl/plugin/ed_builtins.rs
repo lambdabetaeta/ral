@@ -130,13 +130,10 @@ fn tui_result(output: Value, status: i64) -> Value {
     ])
 }
 
-/// Decode captured stdout as lossy UTF-8, stripping a single trailing newline.
+/// Decode captured stdout lossily, stripping one trailing LF or CRLF.
 fn decode_captured(bytes: &[u8]) -> String {
-    let mut s = String::from_utf8_lossy(bytes).into_owned();
-    if s.ends_with('\n') {
-        s.pop();
-    }
-    s
+    String::from_utf8_lossy(&bytes[..bytes.len() - ral_core::io::terminator_len(bytes)])
+        .into_owned()
 }
 
 /// `_ed-tui {body}` — suspend editor, run body, return `[output: Str, status: Int]`.
@@ -149,7 +146,7 @@ fn decode_captured(bytes: &[u8]) -> String {
 /// the plugin as a String.  The TUI itself draws on /dev/tty via stderr, so
 /// capturing stdout does not disrupt the interface.  The body is a command, and
 /// the captured bytes are decoded, lossily,
-/// trailing newline stripped — the call displays a terminal selection rather
+/// one trailing LF or CRLF stripped — the call displays a terminal selection rather
 /// than computing with it.
 ///
 /// The pipeline foreground signal is a derived [`Mooring`]:
@@ -545,6 +542,22 @@ mod tests {
     use super::*;
     use crate::repl::exec::line_run;
     use ral_core::{RequestedTerminalAccess, protocol::Run};
+
+    #[test]
+    fn captured_selection_removes_only_one_line_terminator() {
+        for (bytes, expected) in [
+            (b"x\r\n".as_slice(), "x"),
+            (b"x\n", "x"),
+            (b"x\r", "x\r"),
+            (b"x\n\r\n", "x\n"),
+            (b"x\r\ny\r\n", "x\r\ny"),
+            (b"", ""),
+            (b"\0\n", "\0"),
+            (b"\xff\r\n", "\u{fffd}"),
+        ] {
+            assert_eq!(decode_captured(bytes), expected);
+        }
+    }
 
     /// Every `_ed-*` entry must carry all static facets directly.
     #[test]

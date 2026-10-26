@@ -28,5 +28,41 @@ grammar.js with the CLI's own JS engine instead:
 
     tree-sitter generate --js-runtime native
 
-Test the grammar against the corpus in test/corpus with
-`tree-sitter test` (npm test).
+Test the grammar against the behavioral corpus in test/corpus with
+`tree-sitter test` (npm test). Check query compilation and captures with:
+
+    tree-sitter query queries/highlights.scm path/to/sample.ral
+
+Syntax contract and limits
+--------------------------
+
+The grammar follows docs/SPEC.md and core/src/syntax/{lexer,parser,numeral}.rs.
+Bracket-context variants allow newlines without making them whitespace in
+nested brace blocks. Immediate-start variants enforce ! and ... attachments;
+postfix indices are adjacent, nonempty word keys. An indexed force operand
+(!$x[k]) is distinct from indexing a forced result (!{f}[k]). Delimited names
+($(name), !$(name)) take no postfix keys. The visible nodes retain ordinary
+names through aliases; indexing uses indexed/deref/index nodes, with force
+operands under the operand field.
+
+This is an editor parser, not the runtime validator:
+
+- Hash-bumped single strings support fence depths 1-3, not arbitrary depths.
+  Use the regex bundles for highlighting arbitrary fences; runtime syntax
+  itself has no fence-depth bound. Single-quoted strings have no escapes.
+- Bare colon words use nonempty stems joined by colon runs (foo::bar).
+  This is a deliberate approximation of the lexer's positional colon rule,
+  not a second context-sensitive scanner.
+- Numeral nodes recognize complete lexical shapes, including signs, partial
+  decimal points and point-bearing exponents, not runtime numeric ranges.
+- Brackets with spreads alone are lists. A keyed entry selects map_literal,
+  which covers both records and maps. Classification-dependent record rules
+  (one spread, first), duplicate keys/binders/arms, and types are not checked.
+- Reserved control-operator heads other than let/return/if/case use application
+  nodes. Highlight queries classify those names; this grammar does not check
+  their form-specific option sets or arities.
+
+() is unit; unit is text. Backslash is ordinary outside double quotes.
+Pipelines and failure chains continue across blank/comment lines on either
+side of | and ?, never across semicolons. Parentheses group only inside
+$[...], apart from unit and delimited names.

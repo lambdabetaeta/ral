@@ -24,6 +24,7 @@ use ral_core::text::char_to_byte;
 
 pub(in crate::repl) struct RustylineFrontend {
     rl: Editor<RalHelper, DefaultHistory>,
+    config: rustyline::Config,
     host: Arc<ReplHost>,
     keymap: Keymap,
     terminal: TerminalState,
@@ -50,7 +51,7 @@ impl RustylineFrontend {
             .completion_prompt_limit(30)
             .build();
 
-        let mut rl: Editor<RalHelper, DefaultHistory> = Editor::with_config(config)?;
+        let mut rl: Editor<RalHelper, DefaultHistory> = Editor::with_config(config.clone())?;
         // Unix's printer requires the TTY path whose reader handles SIGINT.
         #[cfg(unix)]
         let printer = Some(Box::new(rl.create_external_printer()?) as Printer);
@@ -70,6 +71,7 @@ impl RustylineFrontend {
 
         Ok(Self {
             rl,
+            config,
             host,
             keymap,
             terminal,
@@ -155,7 +157,7 @@ impl Frontend for RustylineFrontend {
             KeybindingOutcome::Accept(line) => Read::Line(line),
             KeybindingOutcome::Edit(text, cursor) => {
                 if self.terminal.ui_controls_ok() {
-                    erase_drawn(prompt.raw(), &raw);
+                    erase_drawn(prompt.raw(), &raw, &self.config);
                 }
                 Read::Edit(EditBuffer { text, cursor })
             }

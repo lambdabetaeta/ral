@@ -61,15 +61,13 @@ impl PromptText {
 }
 
 /// A prompt run's text: a returned value is the prompt; a returned unit falls
-/// back to its captured stdout, a trailing newline trimmed.
+/// back to its captured stdout, one trailing LF or CRLF trimmed.
 fn prompt_text(value: FOValue, captured: Option<Captured>) -> String {
     match (value, captured) {
         (FOValue::Unit, Some(cap)) => {
-            let mut text = String::from_utf8_lossy(&cap.stdout).into_owned();
-            if text.ends_with('\n') {
-                text.pop();
-            }
-            text
+            let bytes = &cap.stdout;
+            String::from_utf8_lossy(&bytes[..bytes.len() - ral_core::io::terminator_len(bytes)])
+                .into_owned()
         }
         (FOValue::Unit, None) => DEFAULT_PROMPT.to_string(),
         (value, _) => Value::from(value).to_string(),
@@ -134,6 +132,35 @@ pub(super) fn render(t: &dyn Transport, host: &Arc<ReplHost>) -> PromptText {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captured_prompt_removes_only_one_line_terminator() {
+        for (bytes, expected) in [
+            (b"x\r\n".as_slice(), "x"),
+            (b"x\n", "x"),
+            (b"x\r", "x\r"),
+            (b"x\n\r\n", "x\n"),
+            (b"x\r\ny\r\n", "x\r\ny"),
+            (b"", ""),
+            (b"\0\n", "\0"),
+            (b"\xff\r\n", "\u{fffd}"),
+        ] {
+            let captured = Captured {
+                stdout: bytes.to_vec(),
+                stderr: Vec::new(),
+            };
+            assert_eq!(prompt_text(FOValue::Unit, Some(captured)), expected);
+        }
+    }
+
+    #[test]
+    fn returned_prompt_string_is_not_trimmed() {
+        let text = "x\n\r\n";
+        assert_eq!(
+            prompt_text(FOValue::String { value: text.into() }, None),
+            text
+        );
+    }
 
     #[test]
     fn strips_sgr_sequences_from_prompt_width() {

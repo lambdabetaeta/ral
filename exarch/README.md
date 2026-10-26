@@ -142,6 +142,17 @@ not an oversight: it keeps one config/state layout across every platform
 rather than a Windows-specific Known Folders migration with no functional
 payoff. Set `XDG_CONFIG_HOME`/`XDG_STATE_HOME` to relocate either.
 
+## Prompt editing
+
+With `--vi`, drafts start in Insert mode. Slash-command completion
+preserves the current mode and is one undoable edit: Escape then `u` restores
+the partial command; Ctrl-R redoes the completion. Enter accepts a highlighted
+command, then a second Enter submits it. Argument hints and help are not inserted.
+
+Submitting, recalling history or queued prompts, and returning from the external
+editor each start a fresh undo history. Undo stays within that draft and cannot
+restore an earlier submitted prompt.
+
 ## Sandbox
 
 The boundary is the active profile's `Capabilities`, pushed onto the
