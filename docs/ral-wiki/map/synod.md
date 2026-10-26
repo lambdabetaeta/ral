@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 250814a2988f485051430ff7230ccddfa29ad624
+generated_at_commit: e0ce0bd48669fc3fef1d3e8bc36a3e2cd9aa2d46
 generated_at_date: 2026-10-26
 covers_paths: [guest-net/, synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/protocol/channel.rs, core/src/carrier.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs]
 ---
@@ -353,7 +353,9 @@ the picker already renders through; with no account set up the sign-in is the
 screen's primary button and the folder picker waits for it; `review.rs`
 translates the workspace vocabulary into cards, and carries
 `WindowReport::unreadable` beside them — what the walk could not read, so
-the panel can say what it is not answering for. The surface is read-only:
+the panel can say what it is not answering for. Deleted entries and created
+directories remain visible without an Open/Reveal action; `file_to_open` admits
+only plain files. The surface is read-only:
 there is no status to distinguish, nothing to put back, and no conflict a
 caller could be asked to resolve. That holding type, `Held`, carries the
 report's own folder and refuses a later call whose `folder` argument does

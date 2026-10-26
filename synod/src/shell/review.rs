@@ -68,7 +68,7 @@ pub struct ChangeFile {
     pub rename_from: Option<String>,
     pub kind: ChangeKind,
     /// What the card's button does with the file as it is now.  Absent for
-    /// a deletion, which leaves nothing to open.  The window names the file
+    /// a deletion or a created directory.  The window names the file
     /// back by its place in [`WindowReport::files`], never by a path of its
     /// own, so the shell alone decides which file on disk a button reaches.
     pub open: Option<OpenAs>,
@@ -120,7 +120,11 @@ pub(crate) fn hold(review: &Review, folder: &Path, report: &JobReport) {
                 }
             };
             ChangeFile {
-                open: (!matches!(change, Change::Deleted { .. })).then(|| open_as(&shown)),
+                open: (!matches!(
+                    change,
+                    Change::Deleted { .. } | Change::Created { folder: true, .. }
+                ))
+                .then(|| open_as(&shown)),
                 rename_from: from,
                 path: shown,
                 kind,
@@ -207,7 +211,7 @@ pub(crate) fn file_to_open(review: &Review, index: usize, shown: &str) -> Result
         ));
     };
     let Some(how) = open else {
-        return Err(format!("{rel} was deleted, so there is nothing to open."));
+        return Err(format!("{rel} has no open action in this report."));
     };
     let names = inside(&rel)?;
     let (last, above) = names.split_last().expect("a descendant has a name");
