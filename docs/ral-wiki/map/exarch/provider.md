@@ -1,5 +1,5 @@
 ---
-generated_at_commit: c2e8e68c0fa65efcf8e4e3c9f20584bffb7b6a2f
+generated_at_commit: 52452c4185168dff9be4a03cc1d61d445c622342
 generated_at_date: 2026-10-26
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs, exarch/src/tui/login.rs, exarch/src/tui/providers.rs, exarch/src/tui/commands.rs]
 ---
@@ -230,6 +230,17 @@ code/URL/expiry and code exchange. Choosing bounds its account viewport;
 running/failed phases collapse the roster so instructions remain visible.
 Esc closes immediately and signals cancellation; sliced waits observe it
 within a tick, while in-flight HTTP remains bounded by its timeout.
+
+Browser callbacks share `oauth/loopback.rs`'s nonblocking worker and callback
+path constant. **Only a matching-state callback settles a flow**; stray,
+malformed and duplicate-field requests close or reject that connection only.
+The worker holds at most eight connections, each with a 16 KiB request-line
+limit and an absolute two-second read deadline, beneath one fifteen-minute
+flow deadline. Accept/read work is bounded per iteration; cancellation is
+polled at most every 50 ms. Responses have a 100 ms deadline clipped to the
+flow's; failed delivery cannot undo a validated callback. Cancellation and
+flow expiry close pending sockets without flushing. The browser acknowledges
+callback receipt, not the subsequent token exchange or durable sign-in.
 
 ## Two layers for a key, the environment's on top
 

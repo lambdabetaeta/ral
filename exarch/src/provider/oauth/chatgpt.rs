@@ -51,7 +51,7 @@ pub(super) async fn sign_in(
         .local_addr()
         .map_err(|e| format!("could not read listener address: {e}"))?
         .port();
-    let redirect_uri = format!("http://127.0.0.1:{port}/auth/callback");
+    let redirect_uri = format!("http://127.0.0.1:{port}{}", loopback::CALLBACK_PATH);
     let url = authorize_url(&redirect_uri, &challenge, &state, &nonce, host_id, sign_in)?;
     // Launch success does not establish that a remote user's browser is visible.
     let _ = loopback::launch_browser(&url);

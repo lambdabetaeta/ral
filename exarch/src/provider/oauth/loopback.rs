@@ -1,16 +1,33 @@
 //! Shared loopback callback listener and platform browser launchers.
 
 use crate::site::{Silent, site};
-use std::io::BufRead;
-use std::io::Write;
+use std::io::{ErrorKind, Read, Write};
 use std::net::TcpListener;
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-/// Bounds an abandoned sign-in's wait.
-const MAX_WAIT: Duration = Duration::from_mins(15);
+pub(super) const CALLBACK_PATH: &str = "/auth/callback";
+
+#[derive(Clone, Copy)]
+struct Policy {
+    flow: Duration,
+    request: Duration,
+    response: Duration,
+    poll: Duration,
+    connections: usize,
+    line_bytes: usize,
+}
+
+const POLICY: Policy = Policy {
+    flow: Duration::from_mins(15),
+    request: Duration::from_secs(2),
+    response: Duration::from_millis(100),
+    poll: Duration::from_millis(50),
+    connections: 8,
+    line_bytes: 16 * 1024,
+};
 
 /// Try the registered callback addresses in order.
 pub(super) fn bind(addrs: &[&str]) -> Result<TcpListener, String> {
@@ -100,176 +117,223 @@ pub(super) fn accept_callback(
     expected_state: &str,
     cancel: &Arc<AtomicBool>,
 ) -> Result<Callback, String> {
-    let mut stream = accept_within(listener, MAX_WAIT, cancel)?;
-    let request_line = read_request_line(&mut stream)?;
-
-    let path_and_query = request_line
-        .split_whitespace()
-        .nth(1)
-        .ok_or_else(|| "malformed callback request".to_string())?;
-    let url = reqwest::Url::parse(&format!("http://localhost{path_and_query}"))
-        .map_err(|e| format!("could not parse callback URL: {e}"))?;
-
-    let mut code = None;
-    let mut client_id = None;
-    let mut state = None;
-    let mut error = None;
-    let mut description = None;
-    for (key, value) in url.query_pairs() {
-        match key.as_ref() {
-            "code" => code = Some(value.into_owned()),
-            "client_id" => client_id = Some(value.into_owned()),
-            "state" => state = Some(value.into_owned()),
-            "error" => error = Some(value.into_owned()),
-            "error_description" => description = Some(value.into_owned()),
-            _ => {}
-        }
-    }
-
-    // `state` guards an open loopback port: only this flow's minted value passes,
-    // and it is checked first so a stray request cannot abort the sign-in.
-    if state.as_deref() != Some(expected_state) {
-        write_page(&mut stream, "Sign-in failed. You can close this tab.");
-        return Err("state mismatch".to_string());
-    }
-    if let Some(error) = error {
-        write_page(&mut stream, "Sign-in failed. You can close this tab.");
-        return Err(match description {
-            Some(d) => format!("sign-in failed: {error}: {d}"),
-            None => format!("sign-in failed: {error}"),
-        });
-    }
-    let code = code.ok_or_else(|| "callback did not carry an authorization code".to_string())?;
-
-    write_page(&mut stream, "Signed in to exarch. You can close this tab.");
-    Ok(Callback { code, client_id })
+    receive(listener, expected_state, cancel, POLICY)
 }
 
-/// Accept one connection, giving up on `timeout` or `cancel`; a blocking
-/// `accept` could honour neither, hence the poll. The stream handed back
-/// blocks again, for the read and write that follow.
-fn accept_within(
+fn receive(
     listener: &TcpListener,
-    timeout: Duration,
-    cancel: &Arc<AtomicBool>,
-) -> Result<TcpStream, String> {
+    expected_state: &str,
+    cancel: &AtomicBool,
+    policy: Policy,
+) -> Result<Callback, String> {
+    let deadline = Instant::now() + policy.flow;
     listener
         .set_nonblocking(true)
         .map_err(|e| format!("could not configure callback listener: {e}"))?;
-    let start = Instant::now();
+    let mut pending = Vec::new();
+    let mut settled = None;
     loop {
         if cancel.load(Ordering::Relaxed) {
-            return Err("sign-in cancelled".to_string());
+            return Err("sign-in cancelled".into());
         }
-        match listener.accept() {
-            Ok((stream, _)) => {
-                stream
-                    .set_nonblocking(false)
-                    .map_err(|e| format!("could not configure callback connection: {e}"))?;
-                return Ok(stream);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                if start.elapsed() >= timeout {
-                    return Err(format!(
-                        "browser sign-in timed out after {} minutes",
-                        timeout.as_secs() / 60
-                    ));
+        if Instant::now() >= deadline {
+            return settled
+                .unwrap_or_else(|| Err("browser sign-in timed out; please try again".into()));
+        }
+        if settled.is_none() {
+            for _ in 0..policy.connections {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        if pending.len() < policy.connections
+                            && stream.set_nonblocking(true).is_ok()
+                        {
+                            pending.push(Connection {
+                                stream,
+                                deadline: (Instant::now() + policy.request).min(deadline),
+                                phase: Phase::Reading(Vec::new()),
+                            });
+                        }
+                    }
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                    Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                    Err(e) => return Err(format!("could not accept callback connection: {e}")),
                 }
-                std::thread::sleep(Duration::from_millis(100));
             }
-            Err(e) => return Err(format!("could not accept callback connection: {e}")),
         }
+        for mut connection in std::mem::take(&mut pending) {
+            match connection.advance(policy.line_bytes) {
+                Progress::Closed => continue,
+                Progress::Pending => {}
+                Progress::Line(line) => {
+                    let (status, result) = parse_request(&line, expected_state);
+                    connection.respond(status, policy.response, deadline);
+                    if let Some(result) = result {
+                        // Once settled, only the acknowledgement may delay returning.
+                        settled = Some(result);
+                        pending.clear();
+                        pending.push(connection);
+                        break;
+                    }
+                }
+            }
+            pending.push(connection);
+        }
+        if pending.is_empty()
+            && let Some(result) = settled.take()
+        {
+            return result;
+        }
+        let next = pending.iter().map(|c| c.deadline).min().unwrap_or(deadline);
+        std::thread::sleep(
+            policy
+                .poll
+                .min(next.min(deadline).saturating_duration_since(Instant::now())),
+        );
     }
 }
 
-/// The request line carries the callback's query; whatever the reader buffers
-/// past it dies with the reader, the rest of the request being of no interest.
-fn read_request_line(stream: &mut TcpStream) -> Result<String, String> {
-    let mut line = String::new();
-    std::io::BufReader::new(stream)
-        .read_line(&mut line)
-        .map_err(|e| format!("could not read callback request: {e}"))?;
-    Ok(line.trim_end().to_string())
+struct Connection {
+    stream: TcpStream,
+    deadline: Instant,
+    phase: Phase,
 }
 
-fn write_page(stream: &mut TcpStream, message: &str) {
-    let body = format!("<html><body>{message}</body></html>");
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    let _ = stream.write_all(response.as_bytes());
+enum Phase {
+    Reading(Vec<u8>),
+    Writing { response: Vec<u8>, sent: usize },
+}
+
+enum Progress {
+    Pending,
+    Closed,
+    Line(Vec<u8>),
+}
+
+impl Connection {
+    fn advance(&mut self, limit: usize) -> Progress {
+        if Instant::now() >= self.deadline {
+            return Progress::Closed;
+        }
+        let error = match &mut self.phase {
+            Phase::Reading(line) => {
+                let mut bytes = [0; 1024];
+                let available = bytes.len().min(limit - line.len());
+                match self.stream.read(&mut bytes[..available]) {
+                    Ok(0) => return Progress::Closed,
+                    Ok(n) => {
+                        line.extend_from_slice(&bytes[..n]);
+                        if let Some(end) = line.iter().position(|&b| b == b'\n') {
+                            line.truncate(end + 1);
+                            return Progress::Line(std::mem::take(line));
+                        }
+                        if line.len() == limit {
+                            return Progress::Closed;
+                        }
+                        return Progress::Pending;
+                    }
+                    Err(e) => e,
+                }
+            }
+            Phase::Writing { response, sent } => match self.stream.write(&response[*sent..]) {
+                Ok(0) => return Progress::Closed,
+                Ok(n) => {
+                    *sent += n;
+                    return if *sent == response.len() {
+                        Progress::Closed
+                    } else {
+                        Progress::Pending
+                    };
+                }
+                Err(e) => e,
+            },
+        };
+        if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) {
+            Progress::Pending
+        } else {
+            Progress::Closed
+        }
+    }
+
+    fn respond(&mut self, status: &'static str, timeout: Duration, flow_deadline: Instant) {
+        let body = if status == "200 OK" {
+            "Callback received. You can close this tab."
+        } else {
+            "This request was not accepted."
+        };
+        self.phase = Phase::Writing {
+            response: format!(
+                "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ).into_bytes(),
+            sent: 0,
+        };
+        self.deadline = (Instant::now() + timeout).min(flow_deadline);
+    }
+}
+
+type CallbackResult = Result<Callback, String>;
+
+fn parse_request(line: &[u8], expected_state: &str) -> (&'static str, Option<CallbackResult>) {
+    let bad = ("400 Bad Request", None);
+    let Ok(line) = std::str::from_utf8(line) else {
+        return bad;
+    };
+    let Some(line) = line.strip_suffix("\r\n") else {
+        return bad;
+    };
+    let parts: Vec<_> = line.split(' ').collect();
+    let [method, target, version] = parts.as_slice() else {
+        return bad;
+    };
+    if !matches!(*version, "HTTP/1.0" | "HTTP/1.1")
+        || !target.starts_with('/')
+        || target.starts_with("//")
+        || target
+            .bytes()
+            .any(|b| b.is_ascii_control() || matches!(b, b'\\' | b'#'))
+    {
+        return bad;
+    }
+    if *method != "GET" || target.split('?').next() != Some(CALLBACK_PATH) {
+        return ("404 Not Found", None);
+    }
+    let Ok(url) = reqwest::Url::parse(&format!("http://localhost{target}")) else {
+        return bad;
+    };
+    let mut fields = std::collections::BTreeMap::new();
+    for (key, value) in url.query_pairs() {
+        if matches!(
+            key.as_ref(),
+            "state" | "code" | "error" | "client_id" | "error_description"
+        ) && fields
+            .insert(key.into_owned(), value.into_owned())
+            .is_some()
+        {
+            return bad;
+        }
+    }
+    if fields.get("state").map(String::as_str) != Some(expected_state) {
+        return bad;
+    }
+    let result = match (fields.remove("code"), fields.remove("error")) {
+        (Some(code), None) if !code.is_empty() => Ok(Callback {
+            code,
+            client_id: fields.remove("client_id"),
+        }),
+        (None, Some(error)) if !error.is_empty() => {
+            let detail = fields.remove("error_description").unwrap_or_default();
+            let safe: String = format!("{error}: {detail}")
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(256)
+                .collect();
+            Err(format!("sign-in failed: {safe}"))
+        }
+        _ => Err("callback must carry an authorization code or an issuer error, not both".into()),
+    };
+    ("200 OK", Some(result))
 }
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
-mod tests {
-    use super::*;
-
-    fn callback(query: &str) -> Result<Callback, String> {
-        let listener = bind(&["127.0.0.1:0"]).unwrap();
-        let addr = listener.local_addr().unwrap();
-        let receiver = std::thread::spawn(move || {
-            accept_callback(&listener, "expected", &Arc::new(AtomicBool::new(false)))
-        });
-        let mut stream = TcpStream::connect(addr).unwrap();
-        write!(
-            stream,
-            "GET /auth/callback?{query} HTTP/1.1\r\nHost: localhost\r\n\r\n"
-        )
-        .unwrap();
-        receiver.join().unwrap()
-    }
-
-    #[test]
-    fn callback_retains_code_and_optional_issued_client() {
-        let received = callback("state=expected&code=auth-code&client_id=oaiapp_issued").unwrap();
-        assert_eq!(received.code, "auth-code");
-        assert_eq!(received.client_id.as_deref(), Some("oaiapp_issued"));
-        assert!(
-            callback("state=expected&code=auth-code")
-                .unwrap()
-                .client_id
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn callback_checks_state_before_issuer_errors() {
-        assert_eq!(
-            callback("state=wrong&error=denied").err().unwrap(),
-            "state mismatch"
-        );
-        assert_eq!(
-            callback("state=expected&error=denied&error_description=No+thanks")
-                .err()
-                .unwrap(),
-            "sign-in failed: denied: No thanks"
-        );
-        assert!(
-            callback("state=expected")
-                .err()
-                .unwrap()
-                .contains("authorization code")
-        );
-    }
-
-    #[test]
-    fn binding_tries_addresses_in_order_and_cancellation_precedes_accept() {
-        let listener = bind(&["not-an-address", "127.0.0.1:0"]).unwrap();
-        let error = accept_callback(&listener, "state", &Arc::new(AtomicBool::new(true)))
-            .err()
-            .unwrap();
-        assert_eq!(error, "sign-in cancelled");
-        assert!(bind(&[]).is_err());
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_launch_target_preserves_the_entire_url() {
-        let url = "https://example.test/auth?state=a&code=b";
-        let wide = windows_shell_target(url);
-        assert_eq!(wide.last(), Some(&0));
-        assert_eq!(String::from_utf16(&wide[..wide.len() - 1]).unwrap(), url);
-    }
-}
+mod tests;

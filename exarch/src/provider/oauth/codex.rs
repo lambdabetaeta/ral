@@ -52,7 +52,7 @@ pub(super) async fn browser(
         .local_addr()
         .map_err(|e| format!("could not read listener address: {e}"))?
         .port();
-    let redirect_uri = format!("http://localhost:{port}/auth/callback");
+    let redirect_uri = format!("http://localhost:{port}{}", super::loopback::CALLBACK_PATH);
     let url = authorize_url(&redirect_uri, &challenge, &state)?;
     let _ = super::loopback::launch_browser(&url);
     on_phase(LoginPhase::AwaitingBrowser { url });
