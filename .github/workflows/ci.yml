@@ -9,13 +9,15 @@ name: CI
 # compiles.  macOS runs `native`, the only way to exercise Seatbelt or to
 # build synod.  Windows is windows.yml's.
 #
-# Runs on a `v*` tag and on manual dispatch.  Cross-target release builds live
-# in build-binaries.yml (same tags); the Windows job in windows.yml, which
-# auto-runs on push to main.
+# Runs on push to main, on pull requests, on a `v*` tag and on manual dispatch.
+# Cross-target release builds live in build-binaries.yml (same tags); the
+# Windows job in windows.yml, which also runs on push to main.
 on:
   push:
+    branches: [main]
     tags:
       - 'v*'
+  pull_request:
   workflow_dispatch:
 
 env:

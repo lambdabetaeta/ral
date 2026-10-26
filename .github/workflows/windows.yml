@@ -4,8 +4,7 @@ name: Windows
 # compiles, but never runs a test), plus exarch's Windows-only dep tree
 # (windows-sys, cfg(windows) console paths) that a Unix host cannot build
 # at all.  Runs on every push to main so this drift is caught continuously
-# rather than only when someone remembers to dispatch it; the Linux jobs
-# in ci.yml stay manual to keep Actions-minutes spend down.
+# rather than only when someone remembers to dispatch it.
 on:
   push:
     branches: [main]
