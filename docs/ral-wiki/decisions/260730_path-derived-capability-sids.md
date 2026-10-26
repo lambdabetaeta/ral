@@ -331,6 +331,30 @@ Remaining validation:
 - DACL growth on hot roots (expected ≤3 capability ACEs per distinct prefix);
 - token capability-array size limits, on a projection with many prefixes.
 
+## Open: recovery without a ledger
+
+**The ledger is boot's one untrusted input.** It lives in the user's state
+directory, which any grant writing that directory reaches. Boot deletes every
+profile name a dead owner's ledger lists, unvalidated, so a confined child that
+writes a ledger has the next boot delete any of the user's AppContainer
+profiles. Beside that, a name collision (a recycled PID) adopts the stale
+profile, and recovery errors are silent in release builds.
+
+**The alternative under consideration removes the ledger.**
+
+- A profile name carries its owner:
+  `ral.sandbox.<pid>.<creation FILETIME, 16 hex>.p<index>`, within the
+  64-character limit.
+- Boot enumerates profiles with `NetworkIsolationEnumAppContainers`, parses
+  each name against that exact grammar, and deletes only those whose owner, the
+  PID with that creation time, is dead. No other name is touched.
+- `ledger.rs`, `DaclManager` and the corrupt-ledger quarantine go.
+  `ERROR_ALREADY_EXISTS` becomes a refusal, since only the owner makes its
+  names. The state directory keeps `stamps.json` alone, whose forgery fails
+  closed because the ACE is re-read.
+- It departs from mxc's `DaclManager`. It also rests on the enumeration listing
+  profiles made by `CreateAppContainerProfile`, which is unverified.
+
 ## See also
 
 [[map/core/capabilities|capabilities]],
