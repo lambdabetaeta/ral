@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 1016d931ebd8f91f4726dfeafc7ac16fc619ddec
+generated_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
 generated_at_date: 2026-10-26
 covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
@@ -45,10 +45,12 @@ Submodules:
   `is_top`), `Evidence { positive, negative }` and `Fragment`, the extension
   file's result, consumed only by `GrantLayer::extend` (roles are types: a
   policy's omitted axis is `t`, a fragment's is `⊥`); and the authored exec grant
-  `ExecGrant { every, rules }`, both fields private, built only by `Default`,
-  `FromIterator<(ExecKey, Evidence)>`, `Join`, `join_top` and the wire decoder,
-  read through `every`, `iter` and `get` — `ExecKey::{Name, Path, Dir}`; `every`
-  is a flag only `join_top` sets and has no negative form. `GrantSummary` is what
+  `ExecGrant { every, allow, deny }`, private fields: two `BTreeSet<ExecKey>`s
+  built by `ExecGrant::of(allow, deny)`, read through `allows` and `denies`.
+  `ExecKey::{Name, Path, Dir}` is polarity-free; a key in both sets supplies
+  Both. `with_every` sets the flag, read through `every`; it has no negative
+  form. The wire decoder rejects unknown fields and defaults omitted sets to
+  empty. `GrantSummary` is what
   crosses hosts: spellings, never a position or an identity, and whether the
   host that showed it can withhold the GPU (`withholds_gpu`). `Flag`
   (`Editor(EditorVerb)`, `Shell(ShellVerb)`) and `GrantStack::permits(Flag)` are
@@ -85,12 +87,14 @@ Submodules:
   `File`, `Tool`) and `ExecDeny` (`Name`, `Dir`, `File`); `ExecRules =
   Table<ExecAllow, ExecDeny>`; `rules`, the stack's table; `places`, the run
   places. Authored exec targets are resolved by `authority::grant`, not here;
-  `GrantStack::admit(baseline, program, args)` is the one exec judgment, the table
-  then the read judgment and the only mint of `Admitted` (the program as
-  `Program<Judged<Reading>>`, its argv and the table that judged them, private
-  fields, all a launch reads); a refusal is data, `Refused { program, args, why:
+  `GrantStack::admit(baseline, program)` judges the table then reading and is
+  the only mint of `Admitted` (`Program<Judged<Reading>>` and the exec table,
+  private fields); a refusal is data, `Refused { program, why:
   ExecDenial }`, `ExecDenial::{Run(Withheld<ExecDeny>), Read(Withheld<FsDeny>)}`;
-  `admits(&Program)` is head-only admission. `ExecRules::for_kernel(support)` is
+  `withheld(baseline, &program) -> Result<(), ExecDenial>` judges a head before
+  argv exists. Both use `read_region(baseline)`; `admit` vouches for a file
+  through `ReadRegion::judge_file`. Neither judgment carries argv.
+  `ExecRules::for_kernel(support)` is
   the table less bundled-tool allowances, joined with the live support as `File`
   allows, what the kernel is handed; `allowed_files` the live file allowances the
   carriers are computed over. Vetoes key on `path::command_name_key`;
@@ -120,10 +124,11 @@ functions fold the whole stack — a module boundary rather than a typestate
 authority and returns domain data, never runtime values or control flow.
 
 - `enforce.rs` — the guards over the model's judgments: `check_exec`
-  (`GrantStack::admit` and the wording of its refusal), `check_fs_exact` (the
-  access a walk found, for a probe's name), `fs_denial` (the wording of a
+  (`GrantStack::admit`, borrowing argv only for the audit trail),
+  `check_fs_exact` (the access a walk found, for a probe's name), `fs_denial` (the wording of a
   `Refused`), `check_flag`, `check_device_name`, and `deny_head`, the refusal of
-  a head before its argv is known. The exec and fs checks return
+  a head before its argv is known, omitting argv from the trail.
+  The exec and fs checks return
   `Result<_, Box<Denial>>`, a `Denial { check, error: Refusal }`, over
   `Refused::{Guarded, Withheld}`: a `fact::Check` and diagnostic data
   (`Refusal { message, hint }`), given runtime status only by the shell.

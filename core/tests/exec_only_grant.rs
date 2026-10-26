@@ -21,7 +21,7 @@
 
 mod common;
 
-use ral_core::authority::policy::{Capabilities, Evidence, ExecKey};
+use ral_core::authority::policy::{Capabilities, ExecGrant, ExecKey};
 use ral_core::path::FrozenPath;
 use ral_core::test_access::exec_projection_restricts;
 use ral_core::test_helper::layer;
@@ -30,13 +30,10 @@ use ral_core::test_helper::layer;
 fn exec_only_grant_still_projects() {
     let mut shell = common::fresh_shell();
     let caps = Capabilities {
-        exec: Some(
-            std::iter::once((
-                ExecKey::Path(FrozenPath::from_surface("/bin/sh")),
-                Evidence::ALLOW,
-            ))
-            .collect(),
-        ),
+        exec: Some(ExecGrant::of(
+            [ExecKey::Path(FrozenPath::from_surface("/bin/sh"))],
+            [],
+        )),
         ..Capabilities::default()
     };
     shell.with_layer(layer(caps), |shell| {

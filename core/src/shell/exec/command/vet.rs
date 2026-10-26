@@ -16,10 +16,11 @@ use crate::ty::RefusedArg;
 use super::head::{Head, Missing};
 
 /// A vetted call, taken by [`super::process::build_launch`].  `shown` is the
-/// name diagnostics and audit report; `admitted` is what runs, with what.
+/// name diagnostics and audit report; `admitted` runs with `args`.
 pub(crate) struct SpawnPlan {
     pub(crate) shown: String,
     pub(crate) admitted: Admitted,
+    pub(crate) args: Vec<String>,
 }
 
 /// Vet a resolved [`Head`] for spawn, taking it: 127 when it names nothing,
@@ -30,14 +31,18 @@ pub(crate) fn vet(head: Head, args: &[Value], shell: &mut Shell) -> Settled<Spaw
     let Head { shown, program } = head;
     let program = program.map_err(|missing| Break::Error(missing.error(&shown)))?;
     let args = validate_argv(&shown, args)?;
-    let admitted = shell.check_exec(&shown, program, args)?;
+    let admitted = shell.check_exec(&shown, program, &args)?;
     if let Program::File { located, .. } = admitted.program()
         && !located.is_executable()
     {
         let found = located.real().as_path().to_path_buf();
         return Err(Break::Error(Missing::NotExecutable(found).error(&shown)));
     }
-    Ok(SpawnPlan { shown, admitted })
+    Ok(SpawnPlan {
+        shown,
+        admitted,
+        args,
+    })
 }
 
 /// Stringify `args`, refusing any shape the syscall boundary cannot carry.

@@ -232,6 +232,7 @@ pub fn run() -> Result<(), String> {
         &c.base,
         c.extend.as_deref(),
         &c.restrict,
+        ral_core::authority::sandbox::pinned_arg0(),
     )?;
     let (_mode, terminal, _warn) = ral_core::io::terminal::TerminalState::probe_from_env();
     boot::face_process_signals(&terminal);

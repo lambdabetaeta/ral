@@ -537,7 +537,11 @@ fn grant_admits(name: &str, shell: &Shell) -> bool {
     let Ok(program) = Head::resolve(&CommandName::of(name), &shell.context).program else {
         return true;
     };
-    shell.context.grants.admits(shell.baseline(), &program)
+    shell
+        .context
+        .grants
+        .withheld(shell.baseline(), &program)
+        .is_ok()
 }
 
 #[cfg(test)]

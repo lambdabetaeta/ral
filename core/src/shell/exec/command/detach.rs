@@ -65,8 +65,11 @@ pub(crate) fn detach(
     // Existence (127/126), argv shape, the grant's verdict on the whole call:
     // the same judgments an ordinary external passes, so a bundled uutils tool
     // falls out as its own image with no special case here.
-    let SpawnPlan { shown, admitted } = vet(Head::resolve(&name, &shell.context), argv, shell)?;
-    let args = admitted.args().to_vec();
+    let SpawnPlan {
+        shown,
+        admitted,
+        args,
+    } = vet(Head::resolve(&name, &shell.context), argv, shell)?;
 
     let Some(policy) = shell.detach_policy() else {
         return Err(sig(
@@ -93,6 +96,7 @@ pub(crate) fn detach(
     // only a born survivor, named or not, spends one.
     let mut launch = build_launch(
         admitted,
+        &args,
         crate::authority::sandbox::Ownership::Surrendered,
         shell,
         &shell.scope,

@@ -188,8 +188,8 @@ enum Run {
 }
 
 impl Run {
-    fn of(admitted: &Admitted, projection: &SandboxProjection) -> Self {
-        let args = admitted.args().iter().map(OsString::from).collect();
+    fn of(admitted: &Admitted, args: &[String], projection: &SandboxProjection) -> Self {
+        let args = args.iter().map(OsString::from).collect();
         match admitted.program() {
             Program::File { arg0, located } => Self::File {
                 real: located.real().as_path().to_path_buf(),
@@ -301,11 +301,12 @@ impl Warrant {
     pub(super) fn new(
         confinement: Native,
         admitted: &Admitted,
+        args: &[String],
         projection: &SandboxProjection,
     ) -> Self {
         Self {
             confinement,
-            run: Run::of(admitted, projection),
+            run: Run::of(admitted, args, projection),
         }
     }
 

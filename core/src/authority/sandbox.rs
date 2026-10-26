@@ -191,7 +191,8 @@ pub fn restricted_envelope_launches() -> bool {
             &linux::Envelope::probe(bwrap, own),
             &projection,
             &crate::authority::policy::Baseline::default(),
-            &launch::admitted(program, &[]),
+            &launch::admitted(program),
+            &[],
             None,
             // `Surrendered` carries no `--info-fd` to read and no parent-death tie:
             // neither decides whether the envelope builds, and `/bin/true` outlives nobody.

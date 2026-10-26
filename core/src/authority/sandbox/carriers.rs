@@ -314,7 +314,7 @@ mod tests {
         let (_dir, root) = temp_root();
         let script = file(&root, "run", "#!/bin/sh\nbody\n");
         let admitted =
-            super::super::launch::admitted(Program::file(script.clone()).expect("a script"), &[]);
+            super::super::launch::admitted(Program::file(script.clone()).expect("a script"));
         let Program::File { located, .. } = admitted.program() else {
             panic!("a script is a file")
         };

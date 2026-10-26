@@ -4,7 +4,7 @@ use super::{
 };
 use crate::Role;
 use crate::authority::policy::{Admitted, Baseline, Capabilities, FsAllow, FsPolicy, Program};
-use crate::authority::policy::{Evidence, ExecAllow, ExecDeny, GrantPath, Join, Rule};
+use crate::authority::policy::{ExecAllow, ExecDeny, GrantPath, Join, Rule};
 use crate::authority::sandbox::launch::{Ownership, admitted, enveloped};
 use crate::authority::sandbox::warrant::{Handoff, Slot};
 use crate::authority::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
@@ -131,7 +131,7 @@ fn run_confined(
     policy: &SandboxProjection,
     script: &str,
 ) -> Option<std::process::Output> {
-    run_admitted(env, policy, &sh_c(script))
+    run_admitted(env, policy, &sh(), &sh_args(script))
 }
 
 /// `script` confined, its launch asserted; `(stdout, stderr)`.
@@ -163,9 +163,12 @@ fn confined_with(
     (stdout, stderr)
 }
 
-fn sh_c(script: &str) -> Admitted {
-    let sh = Program::file("/bin/sh".into()).expect("/bin/sh exists");
-    admitted(sh, &["-c".to_string(), script.to_string()])
+fn sh() -> Admitted {
+    admitted(Program::file("/bin/sh".into()).expect("/bin/sh exists"))
+}
+
+fn sh_args(script: &str) -> [String; 2] {
+    ["-c".to_string(), script.to_string()]
 }
 
 /// Through the very argv a launch builds: the payload is the trampoline,
@@ -176,8 +179,9 @@ fn run_admitted(
     env: &Envelope<'_>,
     policy: &SandboxProjection,
     admitted: &Admitted,
+    args: &[String],
 ) -> Option<std::process::Output> {
-    run_after(env, policy, admitted, || ())
+    run_after(env, policy, admitted, args, || ())
 }
 
 /// [`run_admitted`], built now and spawned after `between`: the window in
@@ -186,6 +190,7 @@ fn run_after(
     env: &Envelope<'_>,
     policy: &SandboxProjection,
     admitted: &Admitted,
+    args: &[String],
     between: impl FnOnce(),
 ) -> Option<std::process::Output> {
     let (mut cmd, info_fd) = enveloped(
@@ -193,6 +198,7 @@ fn run_after(
         policy,
         &host_system_reads(),
         admitted,
+        args,
         None,
         Ownership::Kept,
     )

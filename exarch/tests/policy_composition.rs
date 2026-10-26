@@ -16,7 +16,7 @@ use ral_core::path::XdgKind;
 use ral_core::path::{LeafMode, Reading, Resolver, Writing, locate};
 use ral_core::shell::runtime::{Break, Settled, Shell};
 use ral_core::test_access::check_file;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 exarch::pre_main_ctor!();
 
@@ -102,6 +102,7 @@ fn denies(stack: &GrantStack) -> impl Iterator<Item = Vec<String>> {
 /// control that says the meet attenuated rather than emptied.
 #[test]
 fn an_extend_grant_cannot_survive_a_restrict_that_omits_it() {
+    let own = own_binary();
     let dir = Scratch::for_test(EXARCH, "extend-then-restrict").expect("scratch dir");
     let extend = profile(
         &dir,
@@ -111,9 +112,15 @@ fn an_extend_grant_cannot_survive_a_restrict_that_omits_it() {
     let restrict = profile(&dir, "restrict.ral", "return [exec: [allow: [`name ls]]]\n");
     let cwd = dir.path();
 
-    let Invocation { stack, .. } =
-        for_invocation(cwd, dir.spelling(), "minimal", Some(&extend), &[restrict])
-            .expect("profiles compose");
+    let Invocation { stack, .. } = for_invocation(
+        cwd,
+        dir.spelling(),
+        "minimal",
+        Some(&extend),
+        &[restrict],
+        Some(Path::new(&own)),
+    )
+    .expect("profiles compose");
 
     let mut shell = ral_core::test_helper::core_shell();
     install(&mut shell, &stack);
@@ -132,6 +139,7 @@ fn an_extend_grant_cannot_survive_a_restrict_that_omits_it() {
 /// every other, each file's own deny entry surviving whichever side it was.
 #[test]
 fn two_restricts_compose_to_the_same_grant_in_either_order() {
+    let own = own_binary();
     let dir = Scratch::for_test(EXARCH, "restrict-commutes").expect("scratch dir");
     let a = profile(
         &dir,
@@ -152,10 +160,18 @@ fn two_restricts_compose_to_the_same_grant_in_either_order() {
         "dangerous",
         None,
         &[a.clone(), b.clone()],
+        Some(Path::new(&own)),
     )
     .expect("profiles compose");
-    let Invocation { stack: ba, .. } =
-        for_invocation(cwd, dir.spelling(), "dangerous", None, &[b, a]).expect("profiles compose");
+    let Invocation { stack: ba, .. } = for_invocation(
+        cwd,
+        dir.spelling(),
+        "dangerous",
+        None,
+        &[b, a],
+        Some(Path::new(&own)),
+    )
+    .expect("profiles compose");
 
     let ls = on_path("ls");
     for stack in [&ab, &ba] {
@@ -204,6 +220,7 @@ fn two_restricts_compose_to_the_same_grant_in_either_order() {
 /// and the sibling refused for the wrong reason.
 #[test]
 fn a_restrict_file_is_refused_by_the_fs_guard_under_either_spelling() {
+    let own = own_binary();
     let dir = Scratch::for_test(EXARCH, "restrict-unwritable").expect("scratch dir");
     let restrict = profile(
         &dir,
@@ -220,6 +237,7 @@ fn a_restrict_file_is_refused_by_the_fs_guard_under_either_spelling() {
         "dangerous",
         None,
         std::slice::from_ref(&restrict),
+        Some(Path::new(&own)),
     )
     .expect("profile composes");
 
@@ -254,6 +272,7 @@ fn a_restrict_file_is_refused_by_the_fs_guard_under_either_spelling() {
 /// unreadable path that is merely ungranted is one widening away from readable.
 #[test]
 fn no_attenuated_base_can_read_a_credential_file() {
+    let own = own_binary();
     let dir = Scratch::for_test(EXARCH, "credential-deny").expect("scratch dir");
     let cwd = dir.path();
     let secrets = [
@@ -263,8 +282,15 @@ fn no_attenuated_base_can_read_a_credential_file() {
     ];
 
     for base in BASES.into_iter().filter(|b| *b != "dangerous") {
-        let Invocation { stack, .. } =
-            for_invocation(cwd, dir.spelling(), base, None, &[]).expect("base composes");
+        let Invocation { stack, .. } = for_invocation(
+            cwd,
+            dir.spelling(),
+            base,
+            None,
+            &[],
+            Some(Path::new(&own)),
+        )
+        .expect("base composes");
         assert!(!stack.fs_is_top(), "{base} attenuates the filesystem");
         let mut shell = ral_core::test_helper::core_shell();
         install(&mut shell, &stack);
@@ -299,16 +325,24 @@ fn no_attenuated_base_can_read_a_credential_file() {
 /// lands with it.
 #[test]
 fn dangerous_stays_ambient_until_something_attenuates_it() {
+    let own = own_binary();
     let dir = Scratch::for_test(EXARCH, "credential-deny-dangerous").expect("scratch dir");
     let cwd = dir.path();
     let oauth = state_file(EXARCH, "oauth.json");
 
-    let Invocation { stack, .. } =
-        for_invocation(cwd, dir.spelling(), "dangerous", None, &[]).expect("dangerous composes");
+    let Invocation { stack, .. } = for_invocation(
+        cwd,
+        dir.spelling(),
+        "dangerous",
+        None,
+        &[],
+        Some(Path::new(&own)),
+    )
+    .expect("dangerous composes");
     assert!(!stack.is_restrictive(), "dangerous must attenuate nothing");
     let mut shell = ral_core::test_helper::core_shell();
     install(&mut shell, &stack);
-    check_file(&mut shell, &own_binary(), &[]).expect("exarch runs");
+    check_file(&mut shell, &own, &[]).expect("exarch runs");
     check_file(&mut shell, &on_path("ls"), &[]).expect("everything runs");
 
     let restrict = profile(
@@ -322,6 +356,7 @@ fn dangerous_stays_ambient_until_something_attenuates_it() {
         "dangerous",
         None,
         std::slice::from_ref(&restrict),
+        Some(Path::new(&own)),
     )
     .expect("dangerous composes with a restrict file");
     let listed: Vec<String> = denies(&stack).flatten().collect();
@@ -336,6 +371,7 @@ fn dangerous_stays_ambient_until_something_attenuates_it() {
 /// its sake, while one with fs allowances is itself out of reach.
 #[test]
 fn only_an_fs_restricting_restrict_file_is_excluded() {
+    let own = own_binary();
     let dir = Scratch::for_test(EXARCH, "restrict-file-exclusion").expect("scratch dir");
     let cwd = dir.path();
     let exec_only = profile(&dir, "exec.ral", "return [exec: [allow: [`name ls]]]\n");
@@ -345,8 +381,15 @@ fn only_an_fs_restricting_restrict_file_is_excluded() {
         "return [fs: [read: [`cwd .], write: [`cwd .]]]\n",
     );
 
-    let Invocation { stack, .. } =
-        for_invocation(cwd, dir.spelling(), "dangerous", None, &[exec_only]).expect("composes");
+    let Invocation { stack, .. } = for_invocation(
+        cwd,
+        dir.spelling(),
+        "dangerous",
+        None,
+        &[exec_only],
+        Some(Path::new(&own)),
+    )
+    .expect("composes");
     assert!(
         stack.fs_is_top(),
         "an fs-silent restrict file confines no fs"
@@ -358,6 +401,7 @@ fn only_an_fs_restricting_restrict_file_is_excluded() {
         "dangerous",
         None,
         std::slice::from_ref(&with_fs),
+        Some(Path::new(&own)),
     )
     .expect("composes");
     let mut shell = ral_core::test_helper::core_shell();
@@ -372,6 +416,7 @@ fn only_an_fs_restricting_restrict_file_is_excluded() {
 /// request, less it, and so restricts exec and brings the self layer.
 #[test]
 fn dangerous_extended_is_unrestricted_less_the_extensions_exclusions() {
+    let own = own_binary();
     let dir = Scratch::for_test(EXARCH, "extend-dangerous").expect("scratch dir");
     let cwd = dir.path();
     let positive = profile(&dir, "positive.ral", "return [exec: [allow: [`name ls]]]\n");
@@ -381,9 +426,15 @@ fn dangerous_extended_is_unrestricted_less_the_extensions_exclusions() {
         "return [exec: [deny: [`name rustc]]]\n",
     );
 
-    let Invocation { stack, .. } =
-        for_invocation(cwd, dir.spelling(), "dangerous", Some(&positive), &[])
-            .expect("profiles compose");
+    let Invocation { stack, .. } = for_invocation(
+        cwd,
+        dir.spelling(),
+        "dangerous",
+        Some(&positive),
+        &[],
+        Some(Path::new(&own)),
+    )
+    .expect("profiles compose");
     assert!(
         stack.layers().nth(1).is_some_and(|c| !c.is_restrictive()),
         "an allowance beside `dangerous` leaves the ceiling unrestricted"
@@ -391,17 +442,23 @@ fn dangerous_extended_is_unrestricted_less_the_extensions_exclusions() {
     let mut shell = ral_core::test_helper::core_shell();
     install(&mut shell, &stack);
     check_file(&mut shell, &on_path("rustc"), &[]).expect("`every` still runs what is unnamed");
-    check_file(&mut shell, &own_binary(), &[]).expect("exec is top, so no self layer");
+    check_file(&mut shell, &own, &[]).expect("exec is top, so no self layer");
 
-    let Invocation { stack, .. } =
-        for_invocation(cwd, dir.spelling(), "dangerous", Some(&excluding), &[])
-            .expect("profiles compose");
+    let Invocation { stack, .. } = for_invocation(
+        cwd,
+        dir.spelling(),
+        "dangerous",
+        Some(&excluding),
+        &[],
+        Some(Path::new(&own)),
+    )
+    .expect("profiles compose");
     let mut shell = ral_core::test_helper::core_shell();
     install(&mut shell, &stack);
     let message = refusal(check_file(&mut shell, &on_path("rustc"), &[]));
     assert!(message.contains(&on_path("rustc")), "{message}");
     check_file(&mut shell, &on_path("ls"), &[]).expect("every request less the exclusion");
-    refusal(check_file(&mut shell, &own_binary(), &[]));
+    refusal(check_file(&mut shell, &own, &[]));
 }
 
 /// `--restrict` files apply in argument order: a layer reads the run places
@@ -409,6 +466,7 @@ fn dangerous_extended_is_unrestricted_less_the_extensions_exclusions() {
 /// runs a file, refuses it; the other way round the file runs and is read.
 #[test]
 fn restrictions_apply_in_argument_order() {
+    let own = own_binary();
     let dir = Scratch::for_test(EXARCH, "restrict-order").expect("scratch dir");
     let cwd = dir.path();
     let bin = tempfile::tempdir().expect("scratch dir for the program");
@@ -422,8 +480,15 @@ fn restrictions_apply_in_argument_order() {
         &format!("return [exec: [allow: [`absolute {prog}]]]\n"),
     );
     let verdict = |files: [PathBuf; 2]| {
-        let Invocation { stack, .. } =
-            for_invocation(cwd, dir.spelling(), "dangerous", None, &files).expect("composes");
+        let Invocation { stack, .. } = for_invocation(
+            cwd,
+            dir.spelling(),
+            "dangerous",
+            None,
+            &files,
+            Some(Path::new(&own)),
+        )
+        .expect("composes");
         let mut shell = ral_core::test_helper::core_shell();
         install(&mut shell, &stack);
         check_file(&mut shell, &prog, &[])
@@ -452,9 +517,15 @@ fn the_self_layer_follows_an_exec_restriction() {
         ),
     );
     let verdict = |restricts: &[PathBuf]| {
-        let Invocation { stack, .. } =
-            for_invocation(cwd, dir.spelling(), "dangerous", None, restricts)
-                .expect("profiles compose");
+        let Invocation { stack, .. } = for_invocation(
+            cwd,
+            dir.spelling(),
+            "dangerous",
+            None,
+            restricts,
+            Some(Path::new(&exe)),
+        )
+        .expect("profiles compose");
         let mut shell = ral_core::test_helper::core_shell();
         install(&mut shell, &stack);
         check_file(&mut shell, &exe, &[])
@@ -467,6 +538,7 @@ fn the_self_layer_follows_an_exec_restriction() {
 /// that excludes a path restricts, and one that only allows does not.
 #[test]
 fn the_credential_layer_follows_an_fs_restriction() {
+    let own = own_binary();
     let dir = Scratch::for_test(EXARCH, "credential-extend").expect("scratch dir");
     let cwd = dir.path();
     let oauth = state_file(EXARCH, "oauth.json");
@@ -482,16 +554,28 @@ fn the_credential_layer_follows_an_fs_restriction() {
     );
     let positive = profile(&dir, "positive.ral", "return [fs: [read: [`cwd .]]]\n");
 
-    let Invocation { stack, .. } =
-        for_invocation(cwd, dir.spelling(), "dangerous", Some(&excluding), &[])
-            .expect("profiles compose");
+    let Invocation { stack, .. } = for_invocation(
+        cwd,
+        dir.spelling(),
+        "dangerous",
+        Some(&excluding),
+        &[],
+        Some(Path::new(&own)),
+    )
+    .expect("profiles compose");
     assert!(
         carved(&stack),
         "an fs exclusion restricts, so the tokens are carved out"
     );
-    let Invocation { stack, .. } =
-        for_invocation(cwd, dir.spelling(), "dangerous", Some(&positive), &[])
-            .expect("profiles compose");
+    let Invocation { stack, .. } = for_invocation(
+        cwd,
+        dir.spelling(),
+        "dangerous",
+        Some(&positive),
+        &[],
+        Some(Path::new(&own)),
+    )
+    .expect("profiles compose");
     assert!(!carved(&stack), "a positive-only fs restricts nothing");
 }
 
@@ -500,11 +584,20 @@ fn the_credential_layer_follows_an_fs_restriction() {
 /// directions, so a seventh bake-in cannot arrive unadvertised.
 #[test]
 fn an_unknown_base_names_every_base_that_exists() {
+    let own = own_binary();
     let dir = Scratch::for_test(EXARCH, "unknown-base").expect("scratch dir");
     let cwd = dir.path();
 
     assert_eq!(
-        for_invocation(cwd, dir.spelling(), "resonable", None, &[]).unwrap_err(),
+        for_invocation(
+            cwd,
+            dir.spelling(),
+            "resonable",
+            None,
+            &[],
+            Some(Path::new(&own))
+        )
+        .unwrap_err(),
         format!(
             "unknown base 'resonable'; expected one of: {}",
             BASES.join(", ")
@@ -512,7 +605,15 @@ fn an_unknown_base_names_every_base_that_exists() {
     );
     for name in BASES {
         assert!(
-            for_invocation(cwd, dir.spelling(), name, None, &[]).is_ok(),
+            for_invocation(
+                cwd,
+                dir.spelling(),
+                name,
+                None,
+                &[],
+                Some(Path::new(&own))
+            )
+            .is_ok(),
             "'{name}' is advertised but does not resolve"
         );
     }
@@ -523,6 +624,7 @@ fn an_unknown_base_names_every_base_that_exists() {
 /// that was.
 #[test]
 fn a_missing_restrict_file_is_reported_by_its_absolute_path() {
+    let own = own_binary();
     let dir = Scratch::for_test(EXARCH, "missing-restrict").expect("scratch dir");
     let cwd = dir.path();
 
@@ -532,6 +634,7 @@ fn a_missing_restrict_file_is_reported_by_its_absolute_path() {
         "reasonable",
         None,
         &[PathBuf::from("no-such-file.ral")],
+        Some(Path::new(&own)),
     )
     .unwrap_err();
     assert_eq!(
@@ -548,6 +651,7 @@ fn a_missing_restrict_file_is_reported_by_its_absolute_path() {
 /// where the host has no `rustc`, which the extension's key resolves through.
 #[test]
 fn an_extend_union_keeps_what_the_base_admitted() {
+    let own = own_binary();
     let path = std::env::var("PATH").expect("PATH is set");
     if locate("rustc", Some(&path), None).is_none() {
         return;
@@ -556,9 +660,24 @@ fn an_extend_union_keeps_what_the_base_admitted() {
     let extend = profile(&dir, "ext.ral", "return [exec: [allow: [`name rustc]]]\n");
     let cwd = dir.path();
 
-    let base = for_invocation(cwd, dir.spelling(), "reasonable", None, &[]).expect("base composes");
-    let extended = for_invocation(cwd, dir.spelling(), "reasonable", Some(&extend), &[])
-        .expect("extension composes");
+    let base = for_invocation(
+        cwd,
+        dir.spelling(),
+        "reasonable",
+        None,
+        &[],
+        Some(Path::new(&own)),
+    )
+    .expect("base composes");
+    let extended = for_invocation(
+        cwd,
+        dir.spelling(),
+        "reasonable",
+        Some(&extend),
+        &[],
+        Some(Path::new(&own)),
+    )
+    .expect("extension composes");
 
     let mut shell = ral_core::test_helper::core_shell();
     install(&mut shell, &extended.stack);

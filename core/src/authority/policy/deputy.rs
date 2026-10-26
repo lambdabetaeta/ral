@@ -99,9 +99,9 @@ mod tests {
         }
 
         fn exec_dirs(&self, dirs: &[(&str, Evidence)]) -> ExecGrant {
-            (dirs.iter())
-                .map(|&(d, e)| (ExecKey::Dir(self.lit(d)), e))
-                .collect()
+            crate::test_helper::exec_grant(
+                dirs.iter().map(|(d, e)| (ExecKey::Dir(self.lit(d)), *e)),
+            )
         }
 
         /// The grant of `dirs` with `every` set.
@@ -149,7 +149,7 @@ mod tests {
         let spelled = |name: &str| FrozenPath::from_surface(utf8(&root.join(name)).unwrap());
         let data = spelled("data");
         let stack = stack([layer(Capabilities {
-            exec: Some(std::iter::once((ExecKey::Dir(spelled("bin")), ALLOW)).collect()),
+            exec: Some(ExecGrant::of([ExecKey::Dir(spelled("bin"))], [])),
             fs: Some(FsPolicy {
                 write_prefixes: vec![data.clone()],
                 ..FsPolicy::default()

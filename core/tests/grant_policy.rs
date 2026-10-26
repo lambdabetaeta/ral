@@ -23,6 +23,10 @@ fn laid(names: &[&str]) -> (tempfile::TempDir, Tree) {
     (tmp, tree)
 }
 
+fn grant(entries: impl IntoIterator<Item = (ExecKey, Evidence)>) -> ExecGrant {
+    ral_core::test_helper::exec_grant(entries)
+}
+
 fn names(entries: &[(&str, Evidence)]) -> impl Iterator<Item = (ExecKey, Evidence)> {
     entries
         .iter()
@@ -63,7 +67,10 @@ fn exec_only(exec: ExecGrant) -> Capabilities {
 fn an_excluded_dir_carves_a_hole_in_an_allowed_dir() {
     let (_tmp, tree) = laid(&["/bin/ls", "/bin/sensitive/payload"]);
     let mut shell = ral_core::test_helper::core_shell();
-    let grant = exec_only(dirs(&tree, &[("/bin", true), ("/bin/sensitive", false)]).collect());
+    let grant = exec_only(grant(dirs(
+        &tree,
+        &[("/bin", true), ("/bin/sensitive", false)],
+    )));
     shell
         .with_layer(layer(grant.clone()), |sh| {
             check_file(sh, &tree.at("/bin/ls"), &[])
@@ -81,7 +88,7 @@ fn an_excluded_dir_carves_a_hole_in_an_allowed_dir() {
 fn a_bare_allow_admits_no_other_file_of_its_name() {
     let (_tmp, tree) = laid(&["/fake-bin/git"]);
     let mut shell = ral_core::test_helper::core_shell();
-    let grant = exec_only(names(&[("git", Evidence::ALLOW)]).collect());
+    let grant = exec_only(grant(names(&[("git", Evidence::ALLOW)])));
     let result = shell.with_layer(layer(grant), |shell| {
         check_file(shell, &tree.at("/fake-bin/git"), &["status".into()])
     });
@@ -92,7 +99,7 @@ fn a_bare_allow_admits_no_other_file_of_its_name() {
 fn a_path_key_admits_its_file() {
     let (_tmp, tree) = laid(&["/fake-bin/git"]);
     let mut shell = ral_core::test_helper::core_shell();
-    let grant = exec_only(paths(&tree, &[("/fake-bin/git", Evidence::ALLOW)]).collect());
+    let grant = exec_only(grant(paths(&tree, &[("/fake-bin/git", Evidence::ALLOW)])));
     shell
         .with_layer(layer(grant), |shell| {
             check_file(shell, &tree.at("/fake-bin/git"), &["status".into()])
@@ -173,11 +180,9 @@ fn sandbox_projection_does_not_leak_outer_raw_prefix() {
 fn a_bare_deny_vetoes_its_name_under_an_allow_dir() {
     let (_tmp, tree) = laid(&["/bin/bash"]);
     let mut shell = ral_core::test_helper::core_shell();
-    let grant = exec_only(
-        names(&[("bash", Evidence::DENY)])
-            .chain(dirs(&tree, &[("/bin", true)]))
-            .collect(),
-    );
+    let grant = exec_only(grant(
+        names(&[("bash", Evidence::DENY)]).chain(dirs(&tree, &[("/bin", true)])),
+    ));
     let result = shell.with_layer(layer(grant), |sh| {
         check_file(sh, &tree.at("/bin/bash"), &[])
     });
@@ -193,7 +198,7 @@ fn a_bare_deny_vetoes_its_name_under_an_allow_dir() {
 fn a_bare_allow_does_not_admit_a_planted_file_of_its_name() {
     let (_tmp, tree) = laid(&["/evil/rg"]);
     let mut shell = ral_core::test_helper::core_shell();
-    let grant = exec_only(names(&[("rg", Evidence::ALLOW)]).collect());
+    let grant = exec_only(grant(names(&[("rg", Evidence::ALLOW)])));
     let result = shell.with_layer(layer(grant), |sh| check_file(sh, &tree.at("/evil/rg"), &[]));
     assert!(
         result.is_err(),
@@ -206,11 +211,9 @@ fn a_bare_allow_does_not_admit_a_planted_file_of_its_name() {
 fn a_path_key_deny_beats_a_covering_allow_dir() {
     let (_tmp, tree) = laid(&["/bin/git"]);
     let mut shell = ral_core::test_helper::core_shell();
-    let grant = exec_only(
-        paths(&tree, &[("/bin/git", Evidence::DENY)])
-            .chain(dirs(&tree, &[("/bin", true)]))
-            .collect(),
-    );
+    let grant = exec_only(grant(
+        paths(&tree, &[("/bin/git", Evidence::DENY)]).chain(dirs(&tree, &[("/bin", true)])),
+    ));
     let result = shell.with_layer(layer(grant), |sh| check_file(sh, &tree.at("/bin/git"), &[]));
     assert!(result.is_err(), "a path key's deny must veto its file");
 }
@@ -247,8 +250,8 @@ fn with_fs(exec: ExecGrant) -> Capabilities {
 #[test]
 fn sandbox_projection_admits_a_path_key_covered_by_a_sibling_dir() {
     let (_tmp, tree) = laid(&["/bin/git"]);
-    let outer = with_fs(dirs(&tree, &[("/bin", true)]).collect());
-    let inner = with_fs(paths(&tree, &[("/bin/git", Evidence::ALLOW)]).collect());
+    let outer = with_fs(grant(dirs(&tree, &[("/bin", true)])));
+    let inner = with_fs(grant(paths(&tree, &[("/bin/git", Evidence::ALLOW)])));
     let git = tree.at("/bin/git");
 
     let mut shell = ral_core::test_helper::core_shell();
@@ -309,36 +312,36 @@ fn exec_projection_never_out_permits_the_guard() {
         "/opt/bin/tool",
         "/evil",
     ]);
-    let allow_dir = |d: &str| dirs(&tree, &[(d, true)]).collect::<ExecGrant>();
+    let allow_dir = |d: &str| grant(dirs(&tree, &[(d, true)]));
     let cases: Vec<(ExecGrant, ExecGrant, Vec<&str>)> = vec![
         // A path key admitted by inner, covered only by outer's allow dir.
         (
             allow_dir("/bin"),
-            paths(&tree, &[("/bin/git", Evidence::ALLOW)]).collect(),
+            grant(paths(&tree, &[("/bin/git", Evidence::ALLOW)])),
             vec!["/bin/git", "/bin/ls", "/evil"],
         ),
         // A path key's deny carves a hole in a shared allow dir.
         (
             allow_dir("/bin"),
-            paths(&tree, &[("/bin/sudo", Evidence::DENY)])
-                .chain(dirs(&tree, &[("/bin", true)]))
-                .collect(),
+            grant(
+                paths(&tree, &[("/bin/sudo", Evidence::DENY)])
+                    .chain(dirs(&tree, &[("/bin", true)])),
+            ),
             vec!["/bin/ls", "/bin/sudo"],
         ),
         // A bare deny vetoes its name wherever it lands under the allow dir.
         (
             allow_dir("/bin"),
-            names(&[("bash", Evidence::DENY)])
-                .chain(dirs(&tree, &[("/bin", true)]))
-                .collect(),
+            grant(names(&[("bash", Evidence::DENY)]).chain(dirs(&tree, &[("/bin", true)]))),
             vec!["/bin/ls", "/bin/bash", "/bin/nested/bash"],
         ),
         // A path key's deny must veto a file both dirs would admit.
         (
             allow_dir("/bin"),
-            paths(&tree, &[("/bin/bash", Evidence::DENY)])
-                .chain(dirs(&tree, &[("/bin", true)]))
-                .collect(),
+            grant(
+                paths(&tree, &[("/bin/bash", Evidence::DENY)])
+                    .chain(dirs(&tree, &[("/bin", true)])),
+            ),
             vec!["/bin/ls", "/bin/bash"],
         ),
         // Disjoint allow dirs meet to nothing.

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 62f8f2a9
+generated_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
 ---
 
 # The engine protocol
@@ -197,16 +197,15 @@ reached it.
 its confined child is one pinned binary at both ends, so a changed encoding
 changes its version string and no old form is decoded. The engine is different:
 the guest end lives in the VM image, built before the host. So any change to a
-payload's shape (authority evidence, an `ExecGrant` with its `every` flag, verb
+payload's shape (an `ExecGrant`'s allowance and exclusion sets, verb
 sets as sequences) bumps `PROTOCOL_VERSION` and rebuilds the guest media, whose
 manifest the host compares before packaging. Without the bump stale media passes
 the packaging check and the attach handshake and fails decoding the first
-dispatch. Evidence crosses as the required-field object
-`{"positive": …, "negative": …}` inside the existing sequence of pairs; the
-decoder rejects old verdict strings, missing fields, a duplicate key and a
-Neither value (the encoder emits neither, so either means the other end is not
-this tree). A `Fragment` never crosses: it lives only between loading and
-`extend`.
+dispatch. **`PROTOCOL_VERSION` is 30.** `Capabilities` carries an authored
+`ExecGrant` as `every`, `allow` and `deny`: the two sets encode as sequences,
+omitted sets default to empty, and unknown fields are refused. A key may occur
+in both sets. Rebuild guest media with `just guest-boot`. A `Fragment` never
+crosses: it lives only between loading and `extend`.
 
 ## The laws of an enquiry
 

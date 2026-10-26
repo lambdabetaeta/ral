@@ -449,9 +449,7 @@ mod rendered_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use super::{ExecProjection, FsProjection};
-    use crate::authority::policy::{
-        Baseline, Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy, Gpu,
-    };
+    use crate::authority::policy::{Baseline, Capabilities, ExecGrant, ExecKey, FsPolicy, Gpu};
     use crate::path::{FrozenPath, utf8};
     use crate::test_access::fs_read_paths;
     use crate::test_helper::{layer, stack};
@@ -464,8 +462,7 @@ mod tests {
                 write_prefixes: Vec::new(),
                 deny_paths: Vec::new(),
             }),
-            exec: run
-                .map(|dir| std::iter::once((ExecKey::Dir(prefix(dir)), Evidence::ALLOW)).collect()),
+            exec: run.map(|dir| ExecGrant::of([ExecKey::Dir(prefix(dir))], [])),
             ..Capabilities::default()
         }
     }
@@ -490,11 +487,10 @@ mod tests {
     /// still reach the read region.
     #[test]
     fn exec_that_denotes_top_is_unrestricted_and_its_places_still_read() {
-        let every = std::iter::once((
-            ExecKey::Dir(FrozenPath::from_surface("/ral-test/bin")),
-            Evidence::ALLOW,
-        ))
-        .collect::<ExecGrant>()
+        let every = ExecGrant::of(
+            [ExecKey::Dir(FrozenPath::from_surface("/ral-test/bin"))],
+            [],
+        )
         .with_every();
         let projection = project(Capabilities {
             exec: Some(every),
@@ -527,11 +523,13 @@ mod tests {
             eprintln!("skipping: this host has no system script");
             return;
         };
-        let only_script = [(
-            ExecKey::Path(FrozenPath::freeze(script.as_path()).expect("a Unicode path")),
-            Evidence::ALLOW,
-        )];
-        for exec in [None, Some(only_script.into_iter().collect())] {
+        let only_script = ExecGrant::of(
+            [ExecKey::Path(
+                FrozenPath::freeze(script.as_path()).expect("a Unicode path"),
+            )],
+            [],
+        );
+        for exec in [None, Some(only_script)] {
             let stack = stack([layer(Capabilities {
                 exec,
                 ..authored(Some("/ral-test/w"), None)
@@ -539,9 +537,7 @@ mod tests {
             let baseline = Baseline::of_host().expect("the host baseline resolves");
             let program =
                 crate::authority::policy::Program::file(script.as_path().into()).expect("a script");
-            let admitted = stack
-                .admit(&baseline, program, Vec::new())
-                .expect("admitted");
+            let admitted = stack.admit(&baseline, program).expect("admitted");
             let rendered = super::SandboxProjection::of(&stack, &baseline, Some(&admitted))
                 .expect("fs restricted")
                 .rendered()

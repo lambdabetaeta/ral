@@ -73,6 +73,7 @@ pub(crate) fn sandboxed_command(
     projection: &SandboxProjection,
     baseline: &Baseline,
     admitted: &Admitted,
+    args: &[String],
     ownership: Ownership,
     cwd: &Path,
     cancel: &crate::process::cancel::Scope,
@@ -85,7 +86,7 @@ pub(crate) fn sandboxed_command(
     #[cfg(target_os = "linux")]
     {
         let (cmd, info_fd) =
-            linux_sandboxed_command(projection, baseline, admitted, ownership, cwd)?;
+            linux_sandboxed_command(projection, baseline, admitted, args, ownership, cwd)?;
         let mut launch = crate::process::Launch::from_command(cmd);
         // A host package rather than part of ral, so it may simply be absent.
         launch.envelope(crate::process::launch::Envelope {
@@ -96,11 +97,12 @@ pub(crate) fn sandboxed_command(
     }
     #[cfg(target_os = "macos")]
     {
-        macos_sandboxed_command(projection, admitted).map(crate::process::Launch::from_command)
+        macos_sandboxed_command(projection, admitted, args)
+            .map(crate::process::Launch::from_command)
     }
     #[cfg(windows)]
     {
-        windows_sandboxed_command(projection, admitted, cancel)
+        windows_sandboxed_command(projection, admitted, args, cancel)
     }
 }
 
@@ -113,10 +115,10 @@ pub(crate) fn sandboxed_command(
 fn windows_sandboxed_command(
     projection: &SandboxProjection,
     admitted: &Admitted,
+    args: &[String],
     cancel: &crate::process::cancel::Scope,
 ) -> Result<crate::process::Launch, Refusal> {
     use crate::authority::policy::Program;
-    let args = admitted.args();
     // The LowBox token reads only the ALL APPLICATION PACKAGES system paths,
     // so a user-installed image needs `session::confine` to stamp its path RO,
     // mirroring the Linux backend binding the program path into the bwrap argv.
@@ -152,10 +154,11 @@ fn windows_sandboxed_command(
 fn issue(
     confinement: Native,
     admitted: &Admitted,
+    args: &[String],
     projection: &SandboxProjection,
     handoff: &mut Handoff,
 ) -> Result<Slot, Refusal> {
-    let parcel = Warrant::new(confinement, admitted, projection).parcel()?;
+    let parcel = Warrant::new(confinement, admitted, args, projection).parcel()?;
     Ok(handoff.lend(parcel.as_fd())?)
 }
 
@@ -166,13 +169,22 @@ fn linux_sandboxed_command(
     projection: &SandboxProjection,
     baseline: &Baseline,
     admitted: &Admitted,
+    args: &[String],
     ownership: Ownership,
     cwd: &Path,
 ) -> Result<(Command, Option<super::linux::InfoFd>), Refusal> {
     let bwrap = super::linux::envelope().map_err(|why| Refusal::Unavailable(why.into()))?;
     let own = super::reexec::own()?;
     let env = Envelope::probe(bwrap, own);
-    enveloped(&env, projection, baseline, admitted, Some(cwd), ownership)
+    enveloped(
+        &env,
+        projection,
+        baseline,
+        admitted,
+        args,
+        Some(cwd),
+        ownership,
+    )
 }
 
 /// `env`'s trampoline, handed its warrant and the Landlock ruleset built
@@ -184,6 +196,7 @@ pub(super) fn enveloped(
     projection: &SandboxProjection,
     baseline: &Baseline,
     admitted: &Admitted,
+    args: &[String],
     chdir: Option<&Path>,
     ownership: Ownership,
 ) -> Result<(Command, Option<super::linux::InfoFd>), Refusal> {
@@ -197,7 +210,7 @@ pub(super) fn enveloped(
         env.host.landlock,
         &mut handoff,
     )?;
-    let warrant = issue(confinement, admitted, projection, &mut handoff)?;
+    let warrant = issue(confinement, admitted, args, projection, &mut handoff)?;
     super::linux::bwrap_command(env, shown, handoff, warrant, &rendered, chdir, ownership)
 }
 
@@ -210,12 +223,13 @@ pub(super) fn enveloped(
 fn macos_sandboxed_command(
     projection: &SandboxProjection,
     admitted: &Admitted,
+    args: &[String],
 ) -> Result<Command, Refusal> {
     let own = super::reexec::own()?;
     own.verify()?;
     let profile = super::macos::build_profile(projection)?;
     let mut handoff = Handoff::default();
-    let warrant = issue(Seatbelt(profile), admitted, projection, &mut handoff)?;
+    let warrant = issue(Seatbelt(profile), admitted, args, projection, &mut handoff)?;
     let mut cmd = own.command();
     cmd.arg(Role::Warrant.flag()).arg(warrant.to_string());
     handoff.install(&mut cmd);
@@ -274,9 +288,9 @@ pub fn serve_warrant(_args: &[OsString]) -> u8 {
     all(test, any(target_os = "linux", target_os = "macos")),
     all(feature = "test-util", target_os = "linux")
 ))]
-pub(super) fn admitted(program: crate::authority::policy::Program, args: &[String]) -> Admitted {
+pub(super) fn admitted(program: crate::authority::policy::Program) -> Admitted {
     crate::authority::policy::GrantStack::root()
-        .admit(&Baseline::default(), program, args.to_vec())
+        .admit(&Baseline::default(), program)
         .expect("an unrestricted stack admits everything")
 }
 
@@ -341,7 +355,7 @@ mod tests {
     #[test]
     fn a_macos_launch_is_the_warrant_trampoline_alone() {
         for program in [sh(), Program::Tool("ls".into())] {
-            let cmd = macos_sandboxed_command(&restrictive(), &admitted(program, &["-l".into()]))
+            let cmd = macos_sandboxed_command(&restrictive(), &admitted(program), &["-l".into()])
                 .expect("build macOS command");
             let args = argv(&cmd);
             let [flag, at] = &args[..] else {
@@ -431,7 +445,8 @@ mod tests {
         let allowed_s = allowed.to_string_lossy().into_owned();
         let ok = macos_sandboxed_command(
             &proj,
-            &admitted(sh(), &["-c".into(), format!("echo x > {allowed_s}")]),
+            &admitted(sh()),
+            &["-c".into(), format!("echo x > {allowed_s}")],
         )
         .expect("build host command (inside)");
         assert!(run_confined(ok), "write into the write prefix must succeed");
@@ -442,7 +457,8 @@ mod tests {
         let denied_s = denied.to_string_lossy().into_owned();
         let bad = macos_sandboxed_command(
             &proj,
-            &admitted(sh(), &["-c".into(), format!("echo x > {denied_s}")]),
+            &admitted(sh()),
+            &["-c".into(), format!("echo x > {denied_s}")],
         )
         .expect("build host command (outside)");
         assert!(
@@ -484,7 +500,8 @@ mod tests {
         let mark = work.join("who");
         let cmd = macos_sandboxed_command(
             &write_confined_to(&work.to_string_lossy()),
-            &admitted(judged, &[mark.to_string_lossy().into_owned()]),
+            &admitted(judged),
+            &[mark.to_string_lossy().into_owned()],
         )
         .expect("build host command");
         assert!(run_confined(cmd), "the judged file must run");
@@ -507,13 +524,11 @@ mod tests {
         let mark = work.join("argv0");
         let cmd = macos_sandboxed_command(
             &write_confined_to(&work.to_string_lossy()),
-            &admitted(
-                Program::file(link.clone()).expect("the link names a program"),
-                &[
-                    "-c".into(),
-                    format!("printf %s \"$0\" > {}", mark.display()),
-                ],
-            ),
+            &admitted(Program::file(link.clone()).expect("the link names a program")),
+            &[
+                "-c".into(),
+                format!("printf %s \"$0\" > {}", mark.display()),
+            ],
         )
         .expect("build host command");
         assert!(run_confined(cmd), "the program must run");
@@ -537,7 +552,8 @@ mod tests {
         let allowed_s = allowed.to_string_lossy().into_owned();
         let ok = macos_sandboxed_command(
             &proj,
-            &admitted(Program::Tool("mkdir".into()), &[allowed_s]),
+            &admitted(Program::Tool("mkdir".into())),
+            &[allowed_s],
         )
         .expect("build bundled command (inside)");
         assert!(run_confined(ok), "mkdir into the write prefix must succeed");
@@ -548,10 +564,8 @@ mod tests {
         let denied_s = denied.to_string_lossy().into_owned();
         let bad = macos_sandboxed_command(
             &proj,
-            &admitted(
-                Program::Tool("mkdir".into()),
-                std::slice::from_ref(&denied_s),
-            ),
+            &admitted(Program::Tool("mkdir".into())),
+            std::slice::from_ref(&denied_s),
         )
         .expect("build bundled command (outside)");
         assert!(
@@ -653,7 +667,8 @@ mod tests {
             let line = format!("{} && echo > {}", prog.display(), ran.display());
             let cmd = macos_sandboxed_command(
                 &confined_to(read, &[&mark], &[], every()),
-                &admitted(sh(), &["-c".into(), line]),
+                &admitted(sh()),
+                &["-c".into(), line],
             )
             .expect("build host command");
             run_confined(cmd);
@@ -695,7 +710,8 @@ mod tests {
         };
         let cmd = macos_sandboxed_command(
             &projection,
-            &admitted(Program::file(script).expect("a script"), &[]),
+            &admitted(Program::file(script).expect("a script")),
+            &[],
         )
         .expect("build host command");
         let out = confined_stderr(cmd);
@@ -757,11 +773,11 @@ mod tests {
         let baseline = host_system_reads();
         let program = Program::file(script.to_path_buf()).expect("a program");
         let admitted = stack
-            .admit(&baseline, program, Vec::new())
+            .admit(&baseline, program)
             .expect("the grant admits the script");
         let projection = SandboxProjection::of(&stack, &baseline, Some(&admitted))
             .expect("a restricted fs sandboxes");
-        let cmd = macos_sandboxed_command(&projection, &admitted).expect("build host command");
+        let cmd = macos_sandboxed_command(&projection, &admitted, &[]).expect("build host command");
         let (_, stderr) = confined_stderr(cmd);
         let _ = std::fs::remove_dir_all(&work);
         stderr
@@ -773,7 +789,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_trusted_script_starts_through_its_interpreters_support() {
-        use crate::authority::policy::{Evidence, ExecGrant, ExecKey};
+        use crate::authority::policy::{ExecGrant, ExecKey};
         let Some(script) = system_script_elsewhere() else {
             eprintln!("skipping: no system script under /usr/bin");
             return;
@@ -781,7 +797,7 @@ mod tests {
         let dir = FrozenPath::from_surface(
             crate::path::utf8(script.parent().expect("a directory")).expect("a Unicode path"),
         );
-        let supplied: ExecGrant = std::iter::once((ExecKey::Dir(dir), Evidence::ALLOW)).collect();
+        let supplied = ExecGrant::of([ExecKey::Dir(dir)], []);
         for exec in [Some(supplied), None] {
             let stderr = start_system_script(&script, exec.clone());
             assert!(
@@ -796,7 +812,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn an_excluded_shim_candidate_the_stub_does_not_use_refuses_nothing() {
-        use crate::authority::policy::{Capabilities, Evidence, ExecGrant, ExecKey};
+        use crate::authority::policy::{Capabilities, ExecGrant, ExecKey};
         use crate::test_helper::{layer, stack};
         let stub = Path::new("/usr/bin/git");
         let used = Command::new("xcrun")
@@ -815,12 +831,10 @@ mod tests {
             return;
         };
         let freeze = |p: &Path| FrozenPath::freeze(p).expect("a Unicode path");
-        let exec: ExecGrant = [
-            (ExecKey::Dir(freeze(Path::new("/usr/bin"))), Evidence::ALLOW),
-            (ExecKey::Path(freeze(&unused)), Evidence::DENY),
-        ]
-        .into_iter()
-        .collect();
+        let exec = ExecGrant::of(
+            [ExecKey::Dir(freeze(Path::new("/usr/bin")))],
+            [ExecKey::Path(freeze(&unused))],
+        );
         let caps = Capabilities {
             exec: Some(exec),
             ..Capabilities::default()
@@ -828,15 +842,12 @@ mod tests {
         let stack = stack([layer(caps)]);
         let baseline = host_system_reads();
         let admitted = stack
-            .admit(
-                &baseline,
-                Program::file(stub.into()).expect("git stub"),
-                vec!["--version".into()],
-            )
+            .admit(&baseline, Program::file(stub.into()).expect("git stub"))
             .expect("the grant admits the stub");
         let projection =
             SandboxProjection::of(&stack, &baseline, Some(&admitted)).expect("exec is restricted");
-        let cmd = macos_sandboxed_command(&projection, &admitted).expect("build host command");
+        let cmd = macos_sandboxed_command(&projection, &admitted, &["--version".into()])
+            .expect("build host command");
         let (code, stderr) = confined_stderr(cmd);
         assert_eq!(code, Some(0), "{stderr}");
     }
@@ -864,7 +875,7 @@ mod tests {
         let cat = Program::file("/bin/cat".into()).expect("/bin/cat exists");
         let args = [file.to_string_lossy().into_owned()];
         run_confined(
-            macos_sandboxed_command(&projection, &admitted(cat, &args)).expect("build command"),
+            macos_sandboxed_command(&projection, &admitted(cat), &args).expect("build command"),
         )
     }
 
@@ -958,7 +969,8 @@ mod tests {
             let (cmd, _info_fd) = linux_sandboxed_command(
                 &restrictive(),
                 &Baseline::default(),
-                &admitted(program, &["-l".into()]),
+                &admitted(program),
+                &["-l".into()],
                 Ownership::Kept,
                 Path::new("/"),
             )

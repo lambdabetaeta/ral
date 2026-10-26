@@ -66,8 +66,8 @@ fn break_msg(e: PolicyError) -> String {
     e.message
 }
 
-fn grant<const N: usize>(entries: [(ExecKey, Evidence); N]) -> ExecGrant {
-    entries.into_iter().collect()
+fn grant(entries: impl IntoIterator<Item = (ExecKey, Evidence)>) -> ExecGrant {
+    test_helper::exec_grant(entries)
 }
 
 fn name(s: &str) -> ExecKey {
@@ -114,7 +114,7 @@ fn file(real: impl AsRef<Path>) -> Program {
 
 /// Whether `grants` admits running the file at `real`.
 fn admits(grants: &GrantStack, real: impl AsRef<Path>) -> bool {
-    grants.admits(&Baseline::default(), &file(real))
+    grants.withheld(&Baseline::default(), &file(real)).is_ok()
 }
 
 /// What the exec `rules` hold of running `access`.
@@ -416,10 +416,8 @@ fn exec_keys_follow_the_frozen_surface() {
         link(&root.join("real"), &root.join(alias));
     }
     let key = |alias: &str| ExecKey::Path(spelled(&root.join(alias).join("x")));
-    let linked: ExecGrant = [(key("a"), Evidence::ALLOW), (key("b"), Evidence::ALLOW)]
-        .into_iter()
-        .collect();
-    assert_eq!(linked.iter().count(), 2);
+    let linked = ExecGrant::of([key("a"), key("b")], []);
+    assert_eq!(linked.allows().count(), 2);
 }
 
 /// A key displays as the target that wrote it: a directory keeps its `dir`
@@ -792,32 +790,23 @@ fn evidence_is_a_bilattice_in_the_fragment_ral_uses() {
     );
 }
 
-/// The wire form is a required-field object, and `ExecGrant` a required pair
-/// of fields: Both and `every` round-trip; a repeated key, a Neither value, an
-/// old verdict string and a missing `every` are refused.
 #[test]
-fn evidence_and_exec_grants_cross_the_wire_strictly() {
-    let every = grant([(name("git"), Evidence::BOTH)]).with_every();
-    assert!(every.every());
+fn exec_grants_round_trip_both_sets_and_every() {
+    let key = name("git");
+    let every = ExecGrant::of([key.clone()], [key.clone()]).with_every();
     let json = serde_json::to_string(&every).unwrap();
-    assert_eq!(serde_json::from_str::<ExecGrant>(&json).unwrap(), every);
-    let key = serde_json::to_string(&name("git")).unwrap();
-    let both = r#"{"positive":true,"negative":true}"#;
-    let neither = r#"{"positive":false,"negative":false}"#;
-    let wire = |every: &str, rules: &str| format!(r#"{{{every}"rules":[{rules}]}}"#);
-    let ok = wire(r#""every":false,"#, &format!("[{key},{both}]"));
-    assert!(serde_json::from_str::<ExecGrant>(&ok).is_ok());
-    let repeated = wire(
-        r#""every":false,"#,
-        &format!("[{key},{both}],[{key},{both}]"),
-    );
-    assert!(serde_json::from_str::<ExecGrant>(&repeated).is_err());
-    let empty = wire(r#""every":false,"#, &format!("[{key},{neither}]"));
-    assert!(serde_json::from_str::<ExecGrant>(&empty).is_err());
-    let old = wire(r#""every":false,"#, &format!(r#"[{key},"allow"]"#));
-    assert!(serde_json::from_str::<ExecGrant>(&old).is_err());
-    let missing = wire("", &format!("[{key},{both}]"));
-    assert!(serde_json::from_str::<ExecGrant>(&missing).is_err());
+    let decoded: ExecGrant = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded, every);
+    assert!(decoded.every());
+    assert_eq!(decoded.allows().collect::<Vec<_>>(), [&key]);
+    assert_eq!(decoded.denies().collect::<Vec<_>>(), [&key]);
+}
+
+#[test]
+fn exec_grants_refuse_unknown_fields() {
+    let json = r#"{"every":false,"allow":[],"deny":[],"unknown":true}"#;
+    assert!(serde_json::from_str::<ExecGrant>(json).is_err());
+    assert!(serde_json::from_str::<ExecGrant>(r#"{"allow":[],"deny":[]}"#).is_err());
 }
 
 // ── Joining and extension ─────────────────────────────────────────────────
@@ -1059,7 +1048,7 @@ fn rand_exec(u: &Universe, rng: &mut Rng, every_ok: bool) -> Option<ExecGrant> {
             entries.push((ExecKey::Name(n.into()), evidence(rng)));
         }
     }
-    let grant: ExecGrant = entries.into_iter().collect();
+    let grant = grant(entries);
     Some(if every_ok && some(rng, 4) {
         grant.with_every()
     } else {
@@ -1362,14 +1351,14 @@ fn the_read_and_run_judgments_agree_with_their_regions() {
                     "{scope:?} does not hold {f} as cited"
                 );
             }
-            let runs = stack.admit(&baseline, file(f), vec![]).is_ok();
+            let runs = stack.admit(&baseline, file(f)).is_ok();
             assert_eq!(
                 runs,
                 exec_permits(&stack, f) && want,
                 "{f}\nstack = {stack:?}"
             );
         }
-        let tool = (stack.admit(&baseline, Program::Tool("ls".into()), vec![])).is_ok();
+        let tool = stack.admit(&baseline, Program::Tool("ls".into())).is_ok();
         let tool_exec = rules(&stack).is_none_or(|r| r.evidence(Subject::Tool("ls")).permits());
         assert_eq!(tool, tool_exec, "stack = {stack:?}");
     }
@@ -1406,8 +1395,8 @@ fn law_10_restriction_attenuates() {
             let access = trace(f);
             let msg = format!("{f}\nstack = {stack:?}\npushed = {pushed:?}");
             assert!(
-                pushed.admit(&baseline, file(f), vec![]).is_err()
-                    || stack.admit(&baseline, file(f), vec![]).is_ok(),
+                pushed.admit(&baseline, file(f)).is_err()
+                    || stack.admit(&baseline, file(f)).is_ok(),
                 "run {msg}"
             );
             assert!(
@@ -1437,7 +1426,7 @@ fn a_nested_run_allowance_cannot_make_what_the_ceiling_withholds_readable() {
     )])));
     let baseline = Baseline::default();
     assert!(stack.read(&baseline, &trace(&prog)).is_err());
-    assert!(stack.admit(&baseline, file(&prog), vec![]).is_err());
+    assert!(stack.admit(&baseline, file(&prog)).is_err());
 }
 
 /// A bundled tool runs wherever exec permits it and no fs exclusion covers
@@ -1450,7 +1439,7 @@ fn a_bundled_tool_reads_ral_s_binary() {
     };
     let baseline = Baseline::default().with_images(Some(own), vec![]);
     let stack = |fs: FsPolicy| test_helper::stack([with_fs(fs)]);
-    let tool = |s: &GrantStack| (s.admit(&baseline, Program::Tool("ls".into()), vec![])).is_ok();
+    let tool = |s: &GrantStack| s.admit(&baseline, Program::Tool("ls".into())).is_ok();
     let own_file = spelled(own.real().as_path());
     let own_dir = spelled(own.real().as_path().parent().unwrap());
     let excluding = stack(FsPolicy {
@@ -1496,9 +1485,7 @@ fn a_bundled_tool_is_refused_when_ral_s_binary_is_denied_through_a_hard_link() {
     let baseline = Baseline::default().with_images(Some(own), vec![]);
     let tool = |fs: FsPolicy| {
         let stack = test_helper::stack([with_fs(fs)]);
-        stack
-            .admit(&baseline, Program::Tool("ls".into()), vec![])
-            .is_ok()
+        stack.admit(&baseline, Program::Tool("ls".into())).is_ok()
     };
     assert!(
         !tool(FsPolicy {
@@ -1540,12 +1527,16 @@ fn a_root_directory_runs_files_not_tools_and_reads_what_it_runs() {
     )]));
 
     let met = test_helper::stack([runs_anywhere.clone(), runs_in_opt]);
-    assert!(met.admits(&baseline, &program(&opt_t)));
-    assert!(!met.admits(&baseline, &program(&bin_t)));
+    assert!(met.withheld(&baseline, &program(&opt_t)).is_ok());
+    assert!(met.withheld(&baseline, &program(&bin_t)).is_err());
 
     let alone = test_helper::stack([runs_anywhere]);
-    assert!(alone.admits(&baseline, &program(&bin_t)));
-    assert!(!alone.admits(&baseline, &Program::Tool("ls".into())));
+    assert!(alone.withheld(&baseline, &program(&bin_t)).is_ok());
+    assert!(
+        alone
+            .withheld(&baseline, &Program::Tool("ls".into()))
+            .is_err()
+    );
 
     let reads_only_what_it_runs = test_helper::stack([layer(Capabilities {
         exec: Some(grant([(under_root, Evidence::ALLOW)])),

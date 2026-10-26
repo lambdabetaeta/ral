@@ -190,7 +190,7 @@ fn a_deny_holding_a_hard_link_cites_the_object_under_another_name() {
 mod words {
     use super::*;
     use crate::authority::guard::enforce::{Refusal, check_exec, check_fs_exact, deny_head};
-    use crate::authority::policy::{Evidence, ExecGrant, ExecKey, Program};
+    use crate::authority::policy::{Evidence, ExecKey, Program};
     use crate::fact::Resource;
 
     fn grants(layers: impl IntoIterator<Item = Capabilities>) -> GrantStack {
@@ -199,7 +199,7 @@ mod words {
 
     fn exec(entries: &[(ExecKey, Evidence)]) -> Capabilities {
         Capabilities {
-            exec: Some(entries.iter().cloned().collect::<ExecGrant>()),
+            exec: Some(crate::test_helper::exec_grant(entries.iter().cloned())),
             ..Capabilities::default()
         }
     }
@@ -216,7 +216,7 @@ mod words {
     }
 
     fn refusal(grants: &GrantStack, real: &str) -> Refusal {
-        match check_exec(grants, &Baseline::default(), "t", file(real), vec![]) {
+        match check_exec(grants, &Baseline::default(), "t", file(real), &[]) {
             Ok(_) => panic!("{real} should be refused"),
             Err(denial) => denial.error,
         }
@@ -271,14 +271,14 @@ mod words {
         let grants = grants([exec(&[(x.clone(), Evidence::ALLOW), (x, Evidence::DENY)])]);
         let baseline = Baseline::default();
         let program = file(&tree.at("/x/t"));
-        let why = grants.refusal(&baseline, &program).unwrap();
+        let why = grants.withheld(&baseline, &program).unwrap_err();
         let head = deny_head(&grants, &baseline, "t", &program, &why);
         let Err(mut argv) = check_exec(
             &grants,
             &baseline,
             "t",
             program,
-            vec!["one".into(), "two words".into()],
+            &["one".into(), "two words".into()],
         ) else {
             panic!("an exclusion refuses the program with argv too");
         };
@@ -336,7 +336,7 @@ mod words {
             "{}",
             e.message
         );
-        let unrestricted = check_exec(&grants([runs]), &Baseline::default(), "t", file(&t), vec![]);
+        let unrestricted = check_exec(&grants([runs]), &Baseline::default(), "t", file(&t), &[]);
         assert!(unrestricted.is_ok());
     }
 
@@ -358,7 +358,7 @@ mod words {
             ..Capabilities::default()
         };
         let grants = grants([excluding]);
-        let Err(denial) = check_exec(&grants, &baseline, "ls", Program::Tool("ls".into()), vec![])
+        let Err(denial) = check_exec(&grants, &baseline, "ls", Program::Tool("ls".into()), &[])
         else {
             panic!("an fs exclusion over ral's binary refuses a bundled tool");
         };

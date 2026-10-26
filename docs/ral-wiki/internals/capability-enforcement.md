@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1e3124cbc0ac2352d44c9d743a70b1cde5081361
-verified_at_commit: 1e3124cb
+generated_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
+verified_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
 verified_at_date: 2026-10-26
 anchors: [check_exec, Admitted, admit, Flag, ExecDenial, Refused, Refusal, Denial, Withheld, refused, region, Table, Evidence, GrantStack, SandboxProjection, Fragment, decode_capability_map, Shell::freeze_ctx, sandboxed_command, build_launch, projection_enforceable]
 ---
@@ -132,9 +132,10 @@ stay a [[invariants/single-binary|single binary]].
 **The guard covers what ral dispatches. The OS sandbox covers what a spawned
 process does on its own.**
 
-- **Exec.** The guard checks every platform. `authority::guard::check_exec` judges the program
-  and its argv *before* the spawn and returns `Admitted`, which `build_launch`
-  launches from. The kernel then holds the same rules against programs the
+- **Exec.** The guard checks every platform. `authority::guard::check_exec` judges
+  the program *before* the spawn and returns `Admitted`; it borrows argv only
+  for the audit trail. `build_launch` takes the caller's argv separately.
+  The kernel then holds the same rules against programs the
   child starts itself (`sh -c`, `find -exec`): Seatbelt on macOS, Landlock on
   Linux. Windows has no kernel exec filter
   ([[internals/exec-judgment|exec-judgment]]).

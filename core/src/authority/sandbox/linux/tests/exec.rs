@@ -414,7 +414,7 @@ fn a_confined_script_sees_its_real_path_and_its_siblings() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = std::fs::canonicalize(tmp.path()).unwrap();
     let script = script_beside_sibling(&dir);
-    let program = admitted(Program::file(script.clone()).unwrap(), &[]);
+    let program = admitted(Program::file(script.clone()).unwrap());
     let policy = SandboxProjection {
         exec: admitting(&[], &[&script.to_string_lossy()]),
         ..restricted(&[&dir], &[], &[])
@@ -422,7 +422,7 @@ fn a_confined_script_sees_its_real_path_and_its_siblings() {
     let Some(env) = envelope_launches(&policy) else {
         return;
     };
-    let out = run_admitted(&env, &policy, &program).unwrap();
+    let out = run_admitted(&env, &policy, &program, &[]).unwrap();
     assert!(out.status.success(), "{out:?}");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
@@ -437,7 +437,7 @@ fn a_masked_script_does_not_run() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = std::fs::canonicalize(tmp.path()).unwrap();
     let script = script_beside_sibling(&dir);
-    let program = admitted(Program::file(script.clone()).unwrap(), &[]);
+    let program = admitted(Program::file(script.clone()).unwrap());
     let policy = SandboxProjection {
         exec: admitting(&[], &[&script.to_string_lossy()]),
         ..restricted(&[&dir], &[], &[&script])
@@ -445,7 +445,7 @@ fn a_masked_script_does_not_run() {
     let Some(env) = envelope_launches(&policy) else {
         return;
     };
-    let out = run_admitted(&env, &policy, &program).unwrap();
+    let out = run_admitted(&env, &policy, &program, &[]).unwrap();
     assert!(!out.status.success() && out.stdout.is_empty(), "{out:?}");
     assert!(
         String::from_utf8_lossy(&out.stderr).contains(&*script.to_string_lossy()),
@@ -795,9 +795,8 @@ fn folded(
     exec: Option<(&[&std::path::Path], &[&std::path::Path])>,
     fs: Option<FsPolicy>,
     program: &std::path::Path,
-    args: &[&str],
 ) -> (SandboxProjection, Admitted) {
-    use crate::authority::policy::ExecKey;
+    use crate::authority::policy::{ExecGrant, ExecKey};
     let key = |p: &std::path::Path| {
         let frozen = FrozenPath::from_surface(crate::path::utf8(p).unwrap());
         if p.is_dir() {
@@ -807,13 +806,13 @@ fn folded(
         }
     };
     let exec = exec.map(|(allow, deny)| {
-        ["/bin", "/usr/bin"]
-            .iter()
-            .map(|d| key(d.as_ref()))
-            .chain(allow.iter().map(|p| key(p)))
-            .map(|k| (k, Evidence::ALLOW))
-            .chain(deny.iter().map(|p| (key(p), Evidence::DENY)))
-            .collect()
+        ExecGrant::of(
+            ["/bin", "/usr/bin"]
+                .iter()
+                .map(|d| key(d.as_ref()))
+                .chain(allow.iter().map(|p| key(p))),
+            deny.iter().map(|p| key(p)),
+        )
     });
     let stack = crate::test_helper::stack([crate::test_helper::layer(Capabilities {
         exec,
@@ -822,9 +821,8 @@ fn folded(
     })]);
     let baseline = host_system_reads();
     let program = Program::file(program.to_path_buf()).expect("the program exists");
-    let args: Vec<String> = args.iter().map(|a| (*a).to_string()).collect();
     let admitted = stack
-        .admit(&baseline, program, args)
+        .admit(&baseline, program)
         .unwrap_or_else(|why| panic!("the stack refuses the program: {why:?}"));
     let projection = SandboxProjection::of(&stack, &baseline, Some(&admitted))
         .expect("a restricted stack projects");
@@ -850,12 +848,12 @@ fn an_excluded_linker_candidate_is_not_admitted() {
         return;
     };
     let sh = std::path::Path::new("/bin/sh");
-    let (open, _) = folded(Some((&[], &[])), None, sh, &[]);
+    let (open, _) = folded(Some((&[], &[])), None, sh);
     assert!(
         exec_files(&open).contains(&linker),
         "support admits the linker unless excluded: {linker}"
     );
-    let (shut, _) = folded(Some((&[], &[linker.as_path()])), None, sh, &[]);
+    let (shut, _) = folded(Some((&[], &[linker.as_path()])), None, sh);
     assert!(
         !exec_files(&shut).contains(&linker),
         "an excluded linker candidate was admitted: {linker}"
@@ -881,7 +879,7 @@ fn an_fs_excluded_linker_candidate_is_not_admitted() {
         write_prefixes: Vec::new(),
         deny_paths: deny,
     };
-    let (open, _) = folded(Some((&[], &[])), Some(fs(Vec::new())), sh, &[]);
+    let (open, _) = folded(Some((&[], &[])), Some(fs(Vec::new())), sh);
     assert!(
         exec_files(&open).contains(&linker),
         "support admits the linker unless excluded: {linker}"
@@ -889,7 +887,7 @@ fn an_fs_excluded_linker_candidate_is_not_admitted() {
     let denied = fs(vec![FrozenPath::from_surface(
         crate::path::utf8(linker.as_path()).unwrap(),
     )]);
-    let (shut, _) = folded(Some((&[], &[])), Some(denied), sh, &[]);
+    let (shut, _) = folded(Some((&[], &[])), Some(denied), sh);
     assert!(
         !exec_files(&shut).contains(&linker),
         "an fs-excluded linker candidate was admitted: {linker}"
@@ -912,7 +910,7 @@ fn an_exec_excluded_carrier_is_not_read() {
         deny_paths: Vec::new(),
     };
     let carried = |deny: &[&std::path::Path]| {
-        let (policy, _) = folded(Some((&[], deny)), Some(reads()), script.as_path(), &[]);
+        let (policy, _) = folded(Some((&[], deny)), Some(reads()), script.as_path());
         let rules = policy.fs.rules().expect("a restricted fs").read.clone();
         rules.contains(&FsAllow::RunPlace(carrier.clone()))
     };
@@ -965,11 +963,11 @@ fn a_script_whose_interpreter_is_excluded_fails_in_the_kernel_naming_it() {
         ),
         ("fs", Some((&[dir.as_path()][..], &[][..])), Some(fs)),
     ] {
-        let (policy, admitted) = folded(exec, fs, &script, &[]);
+        let (policy, admitted) = folded(exec, fs, &script);
         let Some(env) = envelope_launches(&policy) else {
             return;
         };
-        let out = run_admitted(&env, &policy, &admitted).expect("spawn");
+        let out = run_admitted(&env, &policy, &admitted, &[]).expect("spawn");
         let (stdout, stderr) = (
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),
@@ -1048,15 +1046,12 @@ fn a_bundled_tool_runs_where_a_descendant_cannot_start_ral() {
         return;
     }
     let work = workdir("exec-ral-tool");
-    let tool = admitted(
-        Program::Tool("basename".into()),
-        &["/x/TOOL-RAN".to_string()],
-    );
+    let tool = admitted(Program::Tool("basename".into()));
     for (label, policy, _) in ral_exec_policies(&work) {
         let Some(env) = envelope_launches(&policy) else {
             return;
         };
-        let out = run_admitted(&env, &policy, &tool).expect("spawn");
+        let out = run_admitted(&env, &policy, &tool, &["/x/TOOL-RAN".to_string()]).expect("spawn");
         assert!(
             emitted(&String::from_utf8_lossy(&out.stdout), "TOOL-RAN"),
             "{label}: a bundled tool did not run: {}",
@@ -1120,7 +1115,8 @@ fn an_exec_restricting_launch_without_landlock_spawns_nothing() {
         &on(&stand_in(), host),
         &exec_policy(admitting(&[], &[])),
         &Baseline::default(),
-        &admitted(sh, &["-c".to_string(), "echo RAN".to_string()]),
+        &admitted(sh),
+        &["-c".to_string(), "echo RAN".to_string()],
         None,
         Ownership::Kept,
     );
@@ -1148,7 +1144,8 @@ fn a_promised_ruleset_that_never_arrived_runs_nothing() {
     });
     let parcel = Warrant::new(
         promise,
-        &admitted(sh, &["-c".to_string(), "echo RAN".to_string()]),
+        &admitted(sh),
+        &["-c".to_string(), "echo RAN".to_string()],
         &unrestricted(),
     )
     .parcel()

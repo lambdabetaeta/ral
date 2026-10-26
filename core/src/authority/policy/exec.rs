@@ -21,24 +21,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-/// A program the stack admitted with these arguments, and the table that
-/// admitted it.  Only [`GrantStack::admit`] makes one, so nothing launches
-/// unjudged: a file is held as vouched for reading, which running it does.
+/// A program the stack admitted, and the table that admitted it. Only
+/// [`GrantStack::admit`] makes one, so nothing launches unjudged: a file is
+/// held as vouched for reading, which running it does.
 #[derive(Debug)]
 #[must_use]
 pub(crate) struct Admitted {
     program: Program<Judged<Reading>>,
-    args: Vec<String>,
     rules: Option<ExecRules>,
 }
 
 impl Admitted {
     pub(crate) fn program(&self) -> &Program<Judged<Reading>> {
         &self.program
-    }
-
-    pub(crate) fn args(&self) -> &[String] {
-        &self.args
     }
 
     /// The stack's exec table, `None` where no layer restricts exec.
@@ -59,48 +54,41 @@ pub(crate) enum ExecDenial {
 #[derive(Debug)]
 pub(crate) struct Refused {
     pub program: Program,
-    pub args: Vec<String>,
     pub why: ExecDenial,
 }
 
 impl GrantStack {
-    /// Judge a program and its argv against the stack's exec rules, then what
+    /// Judge a program against the stack's exec rules, then what
     /// running it reads, which vouches for the file held.
     pub(crate) fn admit(
         &self,
         baseline: &Baseline,
         program: Program,
-        args: Vec<String>,
     ) -> Result<Admitted, Box<Refused>> {
         let rules = rules(self);
         match self.judge_run(baseline, rules.as_ref(), program) {
-            Ok(program) => Ok(Admitted {
-                program,
-                args,
-                rules,
-            }),
+            Ok(program) => Ok(Admitted { program, rules }),
             Err(denied) => {
                 let (program, why) = *denied;
-                Err(Box::new(Refused { program, args, why }))
+                Err(Box::new(Refused { program, why }))
             }
         }
     }
 
-    /// Head-only admission, before any argv is known.
-    pub(crate) fn admits(&self, baseline: &Baseline, program: &Program) -> bool {
-        self.refusal(baseline, program).is_none()
-    }
-
-    /// Why a head is refused, for a refusal raised before [`GrantStack::admit`].
-    pub(crate) fn refusal(&self, baseline: &Baseline, program: &Program) -> Option<ExecDenial> {
+    /// The head's question, before argv exists: why `program` may not run.
+    pub(crate) fn withheld(
+        &self,
+        baseline: &Baseline,
+        program: &Program,
+    ) -> Result<(), ExecDenial> {
         if let Some(why) = run_withheld(rules(self).as_ref(), program) {
-            return Some(why);
+            return Err(why);
         }
         let read = match program {
             Program::File { located, .. } => self.read(baseline, located.trace()),
             Program::Tool(_) => self.tool_read(baseline),
         };
-        read.err().map(ExecDenial::Read)
+        read.map_err(ExecDenial::Read)
     }
 
     /// `↓run = ↓exec ∧ ↓read` (law 7): a supplied exec table must support the
@@ -1017,7 +1005,8 @@ pub(super) mod tests {
     /// The rules a grant makes: each key walked, a key with both bits both
     /// kinds of rule, and `every` is `Any`.
     fn granting(keys: impl IntoIterator<Item = (ExecKey, Evidence)>) -> ExecRules {
-        ExecRules::of_grant(&keys.into_iter().collect(), &EnvVars::new()).unwrap()
+        let grant = crate::test_helper::exec_grant(keys);
+        ExecRules::of_grant(&grant, &EnvVars::new()).unwrap()
     }
 
     /// The directory `name` of `root`, made.
@@ -1042,18 +1031,16 @@ pub(super) mod tests {
         walked(path)
     }
 
-    /// A key with both bits resolves to both entries, at paths that may differ;
-    /// `every` is `Any`.
     #[test]
-    fn of_grant_carries_evidence_to_every_rule_and_sets_any() {
-        let rules = granting([(ExecKey::Dir(written("/d")), BOTH)]);
+    fn of_grant_resolves_both_sets_and_sets_any() {
+        let key = ExecKey::Dir(written("/d"));
+        let grant = ExecGrant::of([key.clone()], [key]);
+        let rules = ExecRules::of_grant(&grant, &EnvVars::new()).unwrap();
         assert_eq!(
             rules.evidence(Subject::Dir(path::Subject::Position(&real("/d")))),
             BOTH
         );
-        let every = std::iter::once((ExecKey::Name("zzz-no-such".into()), ALLOW))
-            .collect::<ExecGrant>()
-            .with_every();
+        let every = ExecGrant::of([ExecKey::Name("zzz-no-such".into())], []).with_every();
         let rules = ExecRules::of_grant(&every, &EnvVars::new()).unwrap();
         assert!(rules.allows().any(|s| *s == ExecAllow::Any));
     }
@@ -1211,9 +1198,9 @@ pub(super) mod tests {
     #[test]
     fn a_root_file_key_is_refused() {
         for (evidence, wording) in [(ALLOW, "filesystem root"), (DENY, "excluding the root")] {
-            let grant = [(ExecKey::Path(FrozenPath::root()), evidence)];
-            let why =
-                ExecRules::of_grant(&grant.into_iter().collect(), &EnvVars::new()).unwrap_err();
+            let key = ExecKey::Path(FrozenPath::root());
+            let grant = crate::test_helper::exec_grant([(key, evidence)]);
+            let why = ExecRules::of_grant(&grant, &EnvVars::new()).unwrap_err();
             assert!(why.message.contains(wording), "{}", why.message);
         }
     }

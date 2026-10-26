@@ -167,7 +167,11 @@ fn file(real: &str) -> Program {
 
 /// Whether the live stack admits running the file whose real path is `real`.
 pub fn admits_file(shell: &Shell, real: &str) -> bool {
-    shell.context.grants.admits(shell.baseline(), &file(real))
+    shell
+        .context
+        .grants
+        .withheld(shell.baseline(), &file(real))
+        .is_ok()
 }
 
 /// `Shell::check_exec` on the file whose real path is `real`, with `args`.
@@ -175,7 +179,7 @@ pub fn admits_file(shell: &Shell, real: &str) -> bool {
 /// # Errors
 /// `Err` if the active grant denies the file.
 pub fn check_file(shell: &mut Shell, real: &str, args: &[String]) -> Settled<()> {
-    shell.check_exec(real, file(real), args.to_vec()).map(drop)
+    shell.check_exec(real, file(real), args).map(drop)
 }
 
 /// The scheme `name` carries on the live scope: `None` when it is unbound or

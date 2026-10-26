@@ -119,18 +119,18 @@ impl Display for LocateError {
 const EXCLUSION_HINT: &str =
     "the exclusion belongs to the policy that imposes it; change that policy";
 
-/// Judge a program and its argv against the stack's exec rules.
+/// Judge a program, borrowing its argv for the audit trail.
 pub(crate) fn check_exec(
     grants: &GrantStack,
     baseline: &Baseline,
     shown: &str,
     program: Program,
-    args: Vec<String>,
+    args: &[String],
 ) -> Result<Admitted, Denial> {
-    grants.admit(baseline, program, args).map_err(|refused| {
-        let ExecRefused { program, args, why } = *refused;
+    grants.admit(baseline, program).map_err(|refused| {
+        let ExecRefused { program, why } = *refused;
         let error = exec_error(grants, baseline, shown, &program, &why);
-        exec_denial(shown, &program, &why, Some(&args), error)
+        exec_denial(shown, &program, &why, Some(args), error)
     })
 }
 

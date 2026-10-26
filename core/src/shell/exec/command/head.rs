@@ -176,16 +176,14 @@ fn launch_path(target: &Path, ctx: &Context) -> PathBuf {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use crate::authority::policy::{
-        Baseline, Capabilities, Evidence, ExecGrant, ExecKey, GrantStack,
-    };
+    use crate::authority::policy::{Baseline, Capabilities, ExecGrant, ExecKey, GrantStack};
     use crate::path::FrozenPath;
     use std::path::Path;
 
     /// Head admission as dispatch asks it: a head with no program passes.
     fn admits_head(ctx: &Context, head: &Head) -> bool {
         (head.program.as_ref().ok())
-            .is_none_or(|program| ctx.grants.admits(&Baseline::default(), program))
+            .is_none_or(|program| ctx.grants.withheld(&Baseline::default(), program).is_ok())
     }
 
     #[test]
@@ -360,8 +358,7 @@ mod tests {
         crate::path::forget_located_commands();
         let dir = tempfile::tempdir().unwrap();
         let name = plant(dir.path(), "git");
-        let mut ctx =
-            under(std::iter::once((ExecKey::Name("git".into()), Evidence::ALLOW)).collect());
+        let mut ctx = under(ExecGrant::of([ExecKey::Name("git".into())], []));
         ctx.set_env_var("PATH", dir.path().to_string_lossy().into_owned());
 
         let head = Head::resolve(&CommandName::Bare("git".into()), &ctx);
@@ -383,11 +380,8 @@ mod tests {
         (bin, planted, link)
     }
 
-    fn dir_allow(dir: &Path) -> (ExecKey, Evidence) {
-        (
-            ExecKey::Dir(FrozenPath::from_surface(crate::path::utf8(dir).unwrap())),
-            Evidence::ALLOW,
-        )
+    fn dir_key(dir: &Path) -> ExecKey {
+        ExecKey::Dir(FrozenPath::from_surface(crate::path::utf8(dir).unwrap()))
     }
 
     /// A policy that denies `bash` by bare name yet allows all of its bin
@@ -397,14 +391,10 @@ mod tests {
     fn a_bare_deny_beats_the_allow_dir_a_path_head_sits_in() {
         let tmp = tempfile::tempdir().unwrap();
         let name = plant(tmp.path(), "bash");
-        let ctx = under(
-            [
-                (ExecKey::Name("bash".into()), Evidence::DENY),
-                dir_allow(tmp.path()),
-            ]
-            .into_iter()
-            .collect(),
-        );
+        let ctx = under(ExecGrant::of(
+            [dir_key(tmp.path())],
+            [ExecKey::Name("bash".into())],
+        ));
 
         let head = Head::resolve(&path_head(&tmp.path().join(name)), &ctx);
         assert!(!admits_head(&ctx, &head));
@@ -416,7 +406,7 @@ mod tests {
     fn a_bare_allow_does_not_admit_a_planted_path_head() {
         let tmp = tempfile::tempdir().unwrap();
         let name = plant(tmp.path(), "rg");
-        let ctx = under(std::iter::once((ExecKey::Name("rg".into()), Evidence::ALLOW)).collect());
+        let ctx = under(ExecGrant::of([ExecKey::Name("rg".into())], []));
 
         let head = Head::resolve(&path_head(&tmp.path().join(name)), &ctx);
         assert!(!admits_head(&ctx, &head));
@@ -430,14 +420,10 @@ mod tests {
     fn a_symlink_under_an_allow_dir_meets_the_bare_deny_of_its_target() {
         let tmp = tempfile::tempdir().unwrap();
         let (bin, planted, link) = planted_symlink(tmp.path());
-        let ctx = under(
-            [
-                (ExecKey::Name("bash".into()), Evidence::DENY),
-                dir_allow(&planted),
-            ]
-            .into_iter()
-            .collect(),
-        );
+        let ctx = under(ExecGrant::of(
+            [dir_key(&planted)],
+            [ExecKey::Name("bash".into())],
+        ));
 
         let head = Head::resolve(&path_head(&link), &ctx);
         assert_eq!(file_of(&head).1, &canonical(&bin.join("bash")));
@@ -450,17 +436,7 @@ mod tests {
     fn a_symlink_out_of_a_deny_dir_is_denied_by_the_file_it_names() {
         let tmp = tempfile::tempdir().unwrap();
         let (bin, planted, link) = planted_symlink(tmp.path());
-        let ctx = under(
-            [
-                dir_allow(&planted),
-                (
-                    ExecKey::Dir(FrozenPath::from_surface(crate::path::utf8(&bin).unwrap())),
-                    Evidence::DENY,
-                ),
-            ]
-            .into_iter()
-            .collect(),
-        );
+        let ctx = under(ExecGrant::of([dir_key(&planted)], [dir_key(&bin)]));
 
         let head = Head::resolve(&path_head(&link), &ctx);
         assert!(!admits_head(&ctx, &head));
@@ -472,15 +448,12 @@ mod tests {
     fn a_symlink_is_admitted_by_the_path_key_on_its_target() {
         let tmp = tempfile::tempdir().unwrap();
         let (bin, _planted, link) = planted_symlink(tmp.path());
-        let ctx = under(
-            std::iter::once((
-                ExecKey::Path(FrozenPath::from_surface(
-                    crate::path::utf8(&bin.join("bash")).unwrap(),
-                )),
-                Evidence::ALLOW,
-            ))
-            .collect(),
-        );
+        let ctx = under(ExecGrant::of(
+            [ExecKey::Path(FrozenPath::from_surface(
+                crate::path::utf8(&bin.join("bash")).unwrap(),
+            ))],
+            [],
+        ));
 
         let head = Head::resolve(&path_head(&link), &ctx);
         assert!(admits_head(&ctx, &head));
@@ -502,14 +475,10 @@ mod tests {
         let copy = planted.join("b");
         std::fs::copy(bin.join(&name), &copy).unwrap();
 
-        let ctx = under(
-            [
-                (ExecKey::Name("bash".into()), Evidence::DENY),
-                dir_allow(&planted),
-            ]
-            .into_iter()
-            .collect(),
-        );
+        let ctx = under(ExecGrant::of(
+            [dir_key(&planted)],
+            [ExecKey::Name("bash".into())],
+        ));
 
         let head = Head::resolve(&path_head(&copy), &ctx);
         assert!(admits_head(&ctx, &head));

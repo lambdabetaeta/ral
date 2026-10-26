@@ -82,10 +82,11 @@ fn run_trampoline(
     own: &Pinned,
     policy: &SandboxProjection,
     admitted: &Admitted,
+    args: &[String],
 ) -> Option<std::process::Output> {
     use crate::authority::sandbox::warrant::Warrant;
     use std::os::fd::AsFd;
-    let parcel = Warrant::new(None, admitted, policy)
+    let parcel = Warrant::new(None, admitted, args, policy)
         .parcel()
         .expect("parcels");
     let mut handoff = Handoff::default();
@@ -124,7 +125,8 @@ fn a_trampoline_swapped_by_rename_still_runs_the_pinned_bytes() {
     let dir = workdir("trampoline-swap");
     let (_, own) = swapped_trampoline(&dir);
     if unlinked(&own) {
-        let out = run_trampoline(&env, &own, &policy, &sh_c("echo READY")).expect("spawn");
+        let out =
+            run_trampoline(&env, &own, &policy, &sh(), &sh_args("echo READY")).expect("spawn");
         let (stdout, stderr) = (
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),
@@ -152,11 +154,15 @@ fn the_trampoline_inside_is_the_pinned_inode() {
     let dir = workdir("trampoline-exe");
     let (copy, own) = swapped_trampoline(&dir);
     if unlinked(&own) {
-        let readlink = admitted(
-            Program::Tool("readlink".into()),
+        let readlink = admitted(Program::Tool("readlink".into()));
+        let out = run_trampoline(
+            &env,
+            &own,
+            &policy,
+            &readlink,
             &["/proc/self/exe".to_string()],
-        );
-        let out = run_trampoline(&env, &own, &policy, &readlink).expect("spawn");
+        )
+        .expect("spawn");
         assert_eq!(
             String::from_utf8_lossy(&out.stdout).trim_end(),
             format!("{} (deleted)", copy.display()),
@@ -188,7 +194,7 @@ fn a_pinned_binary_inside_a_writable_prefix_is_locked() {
          touch sibling && echo SIBLING-DONE\n",
         dir = dir.display()
     );
-    let out = run_trampoline(&env, &own, &policy, &sh_c(&script)).expect("spawn");
+    let out = run_trampoline(&env, &own, &policy, &sh(), &sh_args(&script)).expect("spawn");
     let (stdout, stderr) = (
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),

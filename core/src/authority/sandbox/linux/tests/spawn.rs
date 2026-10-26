@@ -16,7 +16,8 @@ fn spawn_confined(
     let mut launch = crate::authority::sandbox::sandboxed_command(
         &unrestricted(),
         &Baseline::default(),
-        &sh_c(script),
+        &sh(),
+        &sh_args(script),
         Ownership::Kept,
         &shell.cwd(),
         scope,
@@ -202,7 +203,7 @@ fn a_linked_image_runs_through_the_read_that_shows_its_real_path() {
     let Some(env) = envelope_launches(&reading) else {
         return;
     };
-    let out = run_admitted(&env, &reading, &admitted(tool(), &[])).expect("spawn bwrap");
+    let out = run_admitted(&env, &reading, &admitted(tool()), &[]).expect("spawn bwrap");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("READY"),
@@ -210,7 +211,7 @@ fn a_linked_image_runs_through_the_read_that_shows_its_real_path() {
         String::from_utf8_lossy(&out.stderr)
     );
     let apart = deny_within(&elsewhere, &[]);
-    let out = run_admitted(&env, &apart, &admitted(tool(), &[])).expect("spawn bwrap");
+    let out = run_admitted(&env, &apart, &admitted(tool()), &[]).expect("spawn bwrap");
     assert!(
         !String::from_utf8_lossy(&out.stdout).contains("READY")
             && String::from_utf8_lossy(&out.stderr).contains(&real),
@@ -235,7 +236,7 @@ fn a_prefix_swapped_for_a_symlink_after_the_open_shows_what_was_opened() {
         return;
     };
     let script = format!("echo READY\ncat '{}'\n", data.join("f").display());
-    let out = run_after(&env, &policy, &sh_c(&script), || {
+    let out = run_after(&env, &policy, &sh(), &sh_args(&script), || {
         std::fs::rename(&data, dir.join("moved")).unwrap();
         std::os::unix::fs::symlink(&elsewhere, &data).unwrap();
     })
@@ -265,7 +266,7 @@ fn a_destination_turned_into_a_symlink_after_the_open_runs_nothing() {
     let Some(env) = envelope_launches(&policy) else {
         return;
     };
-    let out = run_after(&env, &policy, &sh_c("echo READY"), || {
+    let out = run_after(&env, &policy, &sh(), &sh_args("echo READY"), || {
         std::fs::rename(&inner, outer.join("moved")).unwrap();
         std::os::unix::fs::symlink("moved", &inner).unwrap();
     })

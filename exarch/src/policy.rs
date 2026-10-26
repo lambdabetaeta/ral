@@ -18,7 +18,7 @@ use base::resolve_base;
 use load::{absolute_in, load_capabilities_ral, load_fragment_ral};
 use ral_core::authority::grant::freeze::{FreezeCtx, host_absolute};
 use ral_core::authority::policy::{
-    Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy, GrantLayer, GrantStack,
+    Capabilities, ExecGrant, ExecKey, FsPolicy, GrantLayer, GrantStack,
 };
 use ral_core::host::EnvVars;
 use ral_core::io::terminal::TerminalState;
@@ -42,6 +42,7 @@ use std::path::{Path, PathBuf};
 /// [`provider::credential_files`](crate::provider::credential_files) in
 /// its own layer.  Last, wherever some layer's exec restricts, a layer
 /// excludes exarch's own binary from exec, so the agent cannot start exarch.
+/// `own` supplies the binary's boot-pinned path when exec is restricted.
 /// A session whose fs and exec are unrestricted gets no exclusion, so
 /// `dangerous` is ambient authority and needs no OS sandbox.
 ///
@@ -54,6 +55,7 @@ pub fn for_invocation(
     base_name: &str,
     extension: Option<&Path>,
     restrict_files: &[PathBuf],
+    own: Option<&Path>,
 ) -> Result<Invocation, String> {
     // The loader evaluates ral source, so it needs a Shell.  This one is
     // scaffolding: the caller builds the session's real shell separately, from
@@ -114,7 +116,7 @@ pub fn for_invocation(
     // A child a `dangerous` parent narrows thus runs exarch, regaining only the
     // parent's own authority.
     if !stack.exec_is_top() {
-        stack.push(self_layer()?);
+        stack.push(self_layer(own)?);
     }
 
     Ok(Invocation { stack, restricts })
@@ -187,19 +189,18 @@ fn deny_layer(paths: &[PathBuf]) -> Result<GrantLayer, String> {
     .map_err(|e| e.message)
 }
 
-/// The layer that keeps the agent from starting exarch: an exec exclusion of
-/// the path exarch's own binary was pinned from at boot, the object its walk
-/// held, under every program less it.  Exec only: an fs exclusion would
-/// refuse every bundled tool.  Unpinned, it names nothing rather than guess.
-fn self_layer() -> Result<GrantLayer, String> {
-    let exe = ral_core::authority::sandbox::pinned_arg0().ok_or(
+/// Exclude the boot-pinned binary `own` from exec. Called only when exec is
+/// restricted; refuses if `own` is `None`. An fs exclusion would refuse every
+/// bundled tool.
+fn self_layer(own: Option<&Path>) -> Result<GrantLayer, String> {
+    let exe = own.ok_or(
         "exarch could not pin its own binary at startup (is it missing or unreadable?), \
          so cannot exclude it from exec",
     )?;
     let exarch = ExecKey::Path(FrozenPath::freeze(exe)?);
     GrantLayer::from_capabilities(
         Capabilities {
-            exec: Some(ExecGrant::from_iter([(exarch, Evidence::DENY)]).with_every()),
+            exec: Some(ExecGrant::of([], [exarch]).with_every()),
             ..Capabilities::default()
         },
         &EnvVars::new(),
@@ -245,6 +246,7 @@ mod tests {
             "dangerous",
             None,
             std::slice::from_ref(&path),
+            None,
         )
         .unwrap();
 
@@ -266,9 +268,75 @@ mod tests {
     /// needs an OS sandbox: a host without bwrap still runs commands.
     #[test]
     fn a_dangerous_session_restricts_nothing() {
-        let Invocation { stack, .. } =
-            for_invocation(&std::env::temp_dir(), &scratch(), "dangerous", None, &[]).unwrap();
+        let Invocation { stack, .. } = for_invocation(
+            &std::env::temp_dir(),
+            &scratch(),
+            "dangerous",
+            None,
+            &[],
+            None,
+        )
+        .unwrap();
         assert!(!stack.is_restrictive(), "{stack:?}");
+    }
+
+    #[test]
+    fn an_unpinned_reasonable_session_refuses_to_compose() {
+        let err = for_invocation(
+            &std::env::temp_dir(),
+            &scratch(),
+            "reasonable",
+            None,
+            &[],
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "exarch could not pin its own binary at startup (is it missing or unreadable?), \
+             so cannot exclude it from exec"
+        );
+    }
+
+    #[test]
+    fn the_self_layer_excludes_only_the_supplied_binary() {
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let own = dir.path().join("exarch");
+        let sibling = dir.path().join("sibling");
+        let restrict = dir.path().join("restrict.ral");
+        std::fs::write(&own, "fixture").expect("fixture binary");
+        std::fs::write(&sibling, "sibling").expect("sibling binary");
+        std::fs::write(&restrict, "return [exec: [allow: [`dir `cwd .]]]\n")
+            .expect("restrict profile");
+
+        let Invocation { stack, .. } = for_invocation(
+            dir.path(),
+            &scratch(),
+            "dangerous",
+            None,
+            &[restrict],
+            Some(&own),
+        )
+        .expect("the supplied binary can be excluded");
+        let denied: Vec<_> = stack
+            .layers()
+            .filter_map(GrantLayer::summary)
+            .filter_map(|s| s.exec)
+            .flat_map(|exec| exec.denies)
+            .collect();
+        assert_eq!(
+            denied,
+            [ExecKey::Path(FrozenPath::freeze(&own).unwrap()).to_string()]
+        );
+
+        let mut shell = ral_core::test_helper::core_shell();
+        for layer in stack.layers() {
+            shell.push_session_capabilities(layer.clone());
+        }
+        ral_core::test_access::check_file(&mut shell, &ral_core::path::shown(&own), &[])
+            .expect_err("the supplied binary is excluded");
+        ral_core::test_access::check_file(&mut shell, &ral_core::path::shown(&sibling), &[])
+            .expect("the sibling remains admitted");
     }
 
     /// The stack ANDs the verdicts, so a `confined` layer (network off) under

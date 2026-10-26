@@ -29,7 +29,7 @@
 //! the construction lives here and is not scattered across the session.
 
 use crate::site::{Silent, site};
-use ral_core::authority::policy::{Capabilities, Evidence, ExecKey, FsPolicy, Gpu, Ungoverned};
+use ral_core::authority::policy::{Capabilities, ExecGrant, ExecKey, FsPolicy, Gpu, Ungoverned};
 use ral_core::host::EnvVars;
 use ral_core::path::{
     FrozenPath, GuestPath, LeafMode, LexicalPath, RealPath, Resolver, shown, walk_dir, walk_lenient,
@@ -418,11 +418,12 @@ impl Grant {
                 write_prefixes: prefixes(),
                 deny_paths: Vec::new(),
             }),
-            exec: Some(
-                (TOOLBOX.iter())
-                    .map(|name| (ExecKey::Name((*name).to_string()), Evidence::ALLOW))
-                    .collect(),
-            ),
+            exec: Some(ExecGrant::of(
+                TOOLBOX
+                    .iter()
+                    .map(|name| ExecKey::Name((*name).to_string())),
+                [],
+            )),
             editor: Some(BTreeSet::new()),
             gpu: Some(Gpu::Withheld),
             // `shell` is unattenuated: the guest VM already bounds every
@@ -978,9 +979,9 @@ mod tests {
         let caps = grant.capabilities();
         let exec = caps.exec.as_ref().expect("the office grant restricts exec");
         for tool in ["pandoc", "soffice", "python3", "qpdf", "csvcut"] {
-            assert_eq!(
-                exec.get(&ExecKey::Name(tool.into())),
-                Some(&Evidence::ALLOW),
+            assert!(
+                exec.allows().any(|key| key == &ExecKey::Name(tool.into()))
+                    && exec.denies().all(|key| key != &ExecKey::Name(tool.into())),
                 "the office toolbox must admit {tool}"
             );
         }

@@ -1,8 +1,8 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-verified_at_commit: f0b81686
-verified_at_date: 2026-10-17
-anchors: [Head, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, check_exec, Admitted, for_kernel, places, deputy_prefixes]
+generated_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
+verified_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
+verified_at_date: 2026-10-26
+anchors: [Head, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, GrantStack::withheld, ReadRegion::judge_file, check_exec, Admitted, for_kernel, places, deputy_prefixes]
 ---
 
 # Exec judgment: which program may run
@@ -16,12 +16,16 @@ of [[internals/capability-enforcement|capability-enforcement]].
 
 **`Head::resolve` (`shell/exec/command/head.rs`) finds the `Program` once**: a
 bundled `Tool`, or a host `File` with its spelling and its real path.
-`GrantStack::admit(program, args, resolver)` judges it in two parts: the exec
-table, then what running reads (below).
+`GrantStack::withheld(baseline, &program)` judges it before argument evaluation,
+returning `Result<(), ExecDenial>`: the exec table, then what running reads
+(below). At launch, `GrantStack::admit(baseline, program)` judges the same
+`Located` under the same stack and mints `Admitted`.
 
 - **Arguments play no part.** An allowed target runs with any arguments, a
-  denied one with none; `admit(program, args)` is one entry point because the
-  arguments belong to the admitted launch, not because they are judged.
+  denied one with none. `Admitted` holds only the judged program and its exec
+  table; `Refused` holds the program and its denial. The caller owns argv.
+  `check_exec` borrows it only for the audit trail; a head refusal omits argv
+  because none exists yet.
 - **A path key** matches the real path by equality, and a directory key by
   containment. Specificity decides nothing: **an exclusion beats every
   allowance**, so an exact file or a deeper directory never reopens an excluded
@@ -38,8 +42,9 @@ table, then what running reads (below).
 ## Running reads
 
 **A program that runs must be readable.** After the exec table,
-`admit` asks the read judgment (`GrantStack::read`) about what running reads
-(`ExecDenial::Read`).
+`withheld` asks `GrantStack::read` about what running reads
+(`ExecDenial::Read`). For a file, `admit` mints through
+`ReadRegion::judge_file`; both use the same `read_region(baseline)` fold.
 
 - **A host file** reads its real path. A grant reads what it, and the grants
   enclosing it, let run by path, directory or name (its run places,
@@ -75,7 +80,7 @@ cannot run another program.
 
 ## The kernel holds the same evidence
 
-**`authority::guard::check_exec` judges the program and argv before the spawn. The kernel then
+**`authority::guard::check_exec` judges the program before the spawn. The kernel then
 holds the same table against programs the child starts itself.**
 
 - **The kernel's rules are `ExecRules::for_kernel` of the table inside the

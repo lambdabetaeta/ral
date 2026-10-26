@@ -55,7 +55,7 @@ impl Shell {
         &mut self,
         shown: &str,
         program: Program,
-        args: Vec<String>,
+        args: &[String],
     ) -> Settled<Admitted> {
         let verdict = check_exec(&self.context.grants, self.baseline(), shown, program, args);
         self.judged(verdict)

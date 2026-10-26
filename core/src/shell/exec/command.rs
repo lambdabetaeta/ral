@@ -43,6 +43,7 @@ pub(crate) fn run(
     let SpawnPlan {
         shown: cmd_name,
         admitted,
+        args,
     } = vet(head, args, shell)?;
     #[cfg(debug_assertions)]
     let program = admitted.program().to_string();
@@ -52,6 +53,7 @@ pub(crate) fn run(
     // must not be discovered only once the child is already running.
     let mut command = build_launch(
         admitted,
+        &args,
         crate::authority::sandbox::Ownership::Kept,
         shell,
         &shell.scope,

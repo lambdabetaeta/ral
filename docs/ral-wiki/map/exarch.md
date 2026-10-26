@@ -1,6 +1,6 @@
 ---
-generated_at_commit: dd8a5443b8f87dc40de66bcf5c5a72df05a723d8
-generated_at_date: 2026-10-25
+generated_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
+generated_at_date: 2026-10-26
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/roles.md, exarch/data/ral.md, exarch/data/context.md]
 ---
 
@@ -73,7 +73,8 @@ exit code.
   agent may run on, minted at launch with this run's `--effort` and
   `--max-tokens` and never saved; without roles every child inherits
   ([[map/exarch/provider|provider]]). Then `run` composes the capability lattice
-  (`policy::for_invocation`, → [[map/exarch/policy|policy]]),
+  (`policy::for_invocation`, passing `sandbox::pinned_arg0()` for its self layer;
+  → [[map/exarch/policy|policy]]),
   assembles the system prompt (`prompt::assemble`), builds the first root
   [[map/exarch/agent|`Avatar`]] via `Avatar::root(RootConfig, RootSeat, provider)`
   — or, for the TUI under `--resume`, every live root of the run via

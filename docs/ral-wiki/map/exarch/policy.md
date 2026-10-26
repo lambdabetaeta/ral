@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 1e3124cbc0ac2352d44c9d743a70b1cde5081361
+generated_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
 generated_at_date: 2026-10-26
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
@@ -35,12 +35,18 @@ pushed layer**:
   [[invariants/a-grant-never-reaches-its-own-key|exarch's and synod's own credential files]]
   the same way, wherever some layer's fs restricts (the layer is pushed on the
   denotation, so `dangerous` extended with a positive-only fs gets none);
-- pushes last the *self layer*: an exec exclusion of exarch's own binary, by
-  the path it was pinned from, built as `deny_layer` is (`join_top` over a
-  fragment of one exclusion), wherever some layer's exec restricts, so every
-  spawned agent of a restricted session inherits it. The agent cannot start
+- pushes last the *self layer*: `self_layer(own: Option<&Path>)` excludes the
+  supplied binary with `ExecGrant::of([], [exarch]).with_every()` wherever
+  some layer's exec restricts, so every spawned agent of a restricted session
+  inherits it. The agent cannot start
   exarch as a process there; `dangerous` is ambient authority, its stack
   restricts nothing, and it needs no OS sandbox.
+
+`for_invocation(cwd, scratch, base_name, extension, restrict_files, own)` takes
+the binary path explicitly. `lib.rs::run` supplies `sandbox::pinned_arg0()`;
+composition reads no global binary identity. Restricted exec with `own: None`
+refuses with the startup pinning diagnostic; an unrestricted `dangerous`
+session composes without a pin. `Invocation` holds only `stack` and `restricts`.
 
 Composition emits no confused-deputy warning naming every prefix both
 exec-admitted and writable. That predicate is not the one that matters —

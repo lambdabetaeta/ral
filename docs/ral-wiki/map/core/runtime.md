@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19f4267e14b59dd8c37436c1ceae26f03a416714
-generated_at_date: 2026-10-25
+generated_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
+generated_at_date: 2026-10-26
 covers_paths: [core/src/shell/exec.rs, core/src/shell/exec/]
 ---
 
@@ -29,8 +29,8 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   `^name` and a path-bearing head are the external directly, consulting
   neither the env nor the handler stack. **Grant admission is an
   external-command property**: only the `External` arm consults
-  `authority::guard::admits_head` before any argument evaluates, refusing the head
-  outright; the env, base, and handler arms pass through. Handler and alias
+  `GrantStack::withheld(baseline, &program)` before any argument evaluates,
+  refusing the head outright; the env, base, and handler arms pass through. Handler and alias
   thunks are lambdas — a unary `{ |args| … }` or a catch-all `{ |name args| … }`
   — with the calling convention fixed by surface position, not inferred from a
   value's runtime shape
@@ -54,7 +54,8 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   Submodules: `head.rs` (`Head { shown, program }`, resolved once: a bundled
   `Program::Tool`, a host `Program::File` with its launch path and real path,
   or a `Missing`), `vet.rs` (existence → argv shape → grant policy, yielding a
-  `SpawnPlan` that holds the guard's `Admitted`), `process.rs`, `child.rs`,
+  `SpawnPlan` holding `shown`, the guard's `Admitted`, and the caller's argv;
+  `check_exec` borrows argv only for audit), `process.rs`, `child.rs`,
   `stdio.rs`, `foreground.rs`, `detach.rs`, plus `uutils.rs`
   for [[map/core/builtins|bundled coreutils]]. `foreground.rs` decides once:
   `ForegroundDecision(PgidPolicy)`, `NewLeader` being exactly the foreground.

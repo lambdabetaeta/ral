@@ -1973,7 +1973,7 @@ fn user_json_payload_less_variant_becomes_the_bare_label_string() {
 }
 
 /// The self layer in the kernel, on Linux: exarch's own binary (the test
-/// binary, pinned at boot) is refused directly, by a name resolving to it and
+/// binary, supplied explicitly) is refused directly, by a name resolving to it and
 /// through `sh -c`, while a bundled tool still runs.  The binary's directory is
 /// admitted by an extension, so only the self layer can refuse it.
 #[cfg(target_os = "linux")]
@@ -2072,6 +2072,7 @@ mod self_layer {
             "reasonable",
             Some(&f.extend),
             &[],
+            Some(std::path::Path::new(&f.exe)),
         )
         .expect("reasonable composes");
         refuses_exarch(&f, &stack);
@@ -2090,6 +2091,7 @@ mod self_layer {
             "reasonable",
             Some(&f.extend),
             &[],
+            Some(std::path::Path::new(&f.exe)),
         )
         .expect("reasonable composes");
         let ctx = ral_core::authority::grant::freeze::FreezeCtx::at(

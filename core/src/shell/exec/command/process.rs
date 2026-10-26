@@ -23,6 +23,7 @@ impl From<Refusal> for Break {
 /// jail, which seats a surrendered child outside this engine's cgroup tree.
 pub(crate) fn build_launch(
     admitted: Admitted,
+    args: &[String],
     ownership: crate::authority::sandbox::Ownership,
     shell: &Shell,
     cancel: &crate::process::cancel::Scope,
@@ -44,6 +45,7 @@ pub(crate) fn build_launch(
             &projection,
             shell.baseline(),
             &admitted,
+            args,
             ownership,
             &shell.cwd(),
             cancel,
@@ -58,14 +60,14 @@ pub(crate) fn build_launch(
             Program::File { arg0, located } => {
                 let mut cmd = crate::process::Launch::new(located.real().as_path());
                 cmd.arg0(arg0);
-                cmd.args(admitted.args());
+                cmd.args(args);
                 cmd
             }
             Program::Tool(tool) => {
                 let mut cmd = crate::authority::sandbox::reexec::launch(crate::Role::BundledTool)
                     .map_err(|e| sig(format!("bundled tool '{tool}': {e}")))?;
                 cmd.arg(tool);
-                cmd.args(admitted.args());
+                cmd.args(args);
                 cmd
             }
         }
@@ -317,6 +319,7 @@ mod judged_program {
     fn stdout_of(plan: SpawnPlan, shell: &Shell) -> String {
         let mut cmd = build_launch(
             plan.admitted,
+            &plan.args,
             crate::authority::sandbox::Ownership::Kept,
             shell,
             &DurableRoot::default().worker(),

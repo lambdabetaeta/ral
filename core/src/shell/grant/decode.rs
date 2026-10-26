@@ -664,8 +664,8 @@ mod tests {
         .unwrap();
         let grants = stack([layer]);
         let baseline = Baseline::default();
-        let refusal = |at: &std::path::Path| {
-            grants.refusal(
+        let withheld = |at: &std::path::Path| {
+            grants.withheld(
                 &baseline,
                 &Program::File {
                     located: Box::new(located(at)),
@@ -673,16 +673,16 @@ mod tests {
                 },
             )
         };
-        assert!(refusal(&first.join("git")).is_none());
+        assert!(withheld(&first.join("git")).is_ok());
         assert!(
             matches!(
-                refusal(&later.join("git")),
-                Some(ExecDenial::Run(Withheld::MissingAllowance))
+                withheld(&later.join("git")),
+                Err(ExecDenial::Run(Withheld::MissingAllowance))
             ),
             "a later `PATH` finds another git, which the grant never named"
         );
         assert!(
-            refusal(&later.join("zz-lost")).is_some_and(|denied| matches!(
+            withheld(&later.join("zz-lost")).is_err_and(|denied| matches!(
                 denied,
                 ExecDenial::Run(Withheld::Excluded { scope, .. })
                     if *scope == ExecDeny::Name(command_name_key("zz-lost"))

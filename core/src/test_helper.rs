@@ -1,6 +1,22 @@
 //! Helpers shared by core's tests and by hosts' tests under `test-util`.
 
+use crate::authority::policy::{Evidence, ExecGrant, ExecKey};
 use std::time::{Duration, Instant};
+
+/// Split evidence into authored exec allowances and exclusions.
+pub fn exec_grant(entries: impl IntoIterator<Item = (ExecKey, Evidence)>) -> ExecGrant {
+    let entries: Vec<_> = entries.into_iter().collect();
+    ExecGrant::of(
+        entries
+            .iter()
+            .filter(|(_, e)| e.positive)
+            .map(|(key, _)| key.clone()),
+        entries
+            .iter()
+            .filter(|(_, e)| e.negative)
+            .map(|(key, _)| key.clone()),
+    )
+}
 
 /// The first `Some` that `probe` answers within `within`, polled every 10ms;
 /// `None` if it never came.

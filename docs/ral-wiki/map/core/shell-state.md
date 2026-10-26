@@ -1,6 +1,6 @@
 ---
-generated_at_commit: a2aba680
-generated_at_date: 2026-10-25
+generated_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
+generated_at_date: 2026-10-26
 covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs]
 ---
 
@@ -108,8 +108,8 @@ discovery, while `authority/guard/` enforces it without runtime types.
 `shell/grant/` decodes `Value`s and adapts spawn grants;
 `Shell::freeze_ctx` builds a `FreezeCtx::at` from env and logical cwd, then
 adds scratch.
-The model includes: `Capabilities` (authored), `GrantLayer` (resolved), `ExecGrant` over
-`Evidence`, `FsPolicy`,
+The model includes: `Capabilities` (authored), `GrantLayer` (resolved),
+`ExecGrant` (allowance and exclusion sets of `ExecKey`, plus `every`), `FsPolicy`,
 `EditorPolicy`, `ShellPolicy`, `GrantStack` (`Vec<GrantLayer>`, a *stack* of
 layers rather than a folded aggregate — attenuation is the fold over the
 stack's verdicts, not a `Capabilities::meet`

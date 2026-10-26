@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 1e3124cbc0ac2352d44c9d743a70b1cde5081361
+generated_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
 ---
 
 # Authority is a table of scoped rules
@@ -394,21 +394,25 @@ bwrap mask hides the whole tree, an ACE inherits down it, a Windows ACL orders
 explicit allows before inherited denies, and Seatbelt emits the negative
 clauses after the positive ones.
 
-**Exec has two languages, one map each, and the kernel reads the second.**
+**Exec has two languages, each with allowance and exclusion sets; the kernel
+reads the resolved one.**
 
 - `ExecKey { Name, Path, Dir }`: the grant *as written*. `ExecGrant` is a
-  private `BTreeMap<ExecKey, Evidence>` plus the flag `every`, built only by
-  joining (`FromIterator`, `Join`, `join_top`, the wire decoder). It rides the
-  wire, and exarch's prompt prints it through `Display`, a dir as `` `dir ``.
-  `every` is not a key: only `join_top` sets it, so no surface spelling widens,
-  and a flag has no negative form, so "every program" can never be excluded.
+  pair of private `BTreeSet<ExecKey>`s, `allow` and `deny`, plus the flag
+  `every`. `ExecGrant::of(allow, deny)` builds the sets; `allows` and `denies`
+  read them. Keys carry no polarity: membership in both sets supplies Both.
+  It rides the wire; displayed keys spell a directory as `` `dir ``.
+  `with_every` sets `every`, read through `every()`: it is not a key and has no
+  negative form, so "every program" can never be excluded.
 - `ExecAllow` and `ExecDeny`: the grant *resolved where it is decoded*
   (in `authority::grant`): a bare name becomes the bundled tool of that name,
   the file the decoding environment's `PATH` finds and, for negative evidence
   alone, a `Name` veto; a path key a `File`, a dir key a `Dir`; `every` the
   allowance `Any`. A key walks as its polarity walks: the positive bit to the
-  position it reached, the negative to the objects it held; a key with Both
-  yields both entries. A name found nowhere makes no allowance and keeps its
+  position it reached, the negative to the objects it held. `of_grant` walks
+  `allows()` through `key_rules::<Trace>` and `denies()` through
+  `key_rules::<Excluded>`; a key in both sets yields both entries.
+  A name found nowhere makes no allowance and keeps its
   veto. The veto carries only the negative bit, since a
 positive one would assert support for every executable sharing the basename: an
 allowance by name leaves no veto entry at all, and Both leaves exactly Deny, the

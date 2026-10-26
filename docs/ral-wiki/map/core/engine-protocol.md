@@ -1,6 +1,6 @@
 ---
-generated_at_commit: a2aba680
-generated_at_date: 2026-10-25
+generated_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
+generated_at_date: 2026-10-26
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/shell/run/report.rs, core/src/seed.rs, core/src/shell/grant/spawn.rs]
 ---
 
@@ -57,7 +57,9 @@ parent's seal, so core holds no spawn machinery for it.** The why is
 
 The frame algebra. Everything on it is a wire type; nothing here carries.
 
-- `PROTOCOL_VERSION` (currently 27) — checked at `Attach`; a mismatch refuses.
+- `PROTOCOL_VERSION` (currently 30) — checked at `Attach`; a mismatch refuses.
+  `Capabilities` carries `ExecGrant { every, allow, deny }`, its two sets as
+  sequences; guest media must be rebuilt with `just guest-boot`.
 - `check_media` — the same number compared at *build* time, against the
   `proto_version=` line `vm-image/build-boot.sh` records for the engine in the
   guest media; `synod/examples/check-media.rs`, tauri's `beforeBuildCommand`,

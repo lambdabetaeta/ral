@@ -29,7 +29,7 @@ use super::fs::FsLayer;
 use crate::path::{FrozenPath, RealPath, Subject, Trace};
 use crate::syntax::quote::quote_word;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use strum::{EnumString, IntoStaticStr, VariantArray};
 
 // ── Evidence and its operators ────────────────────────────────────────────
@@ -129,16 +129,6 @@ fn extend<T: Axis>(base: Option<T>, fragment: Option<T>) -> Option<T> {
     }
 }
 
-/// Add `evidence` at `key`, joining what is held.  The one way evidence enters
-/// a map; Neither is never stored.
-pub(crate) fn join_insert<K: Ord>(map: &mut BTreeMap<K, Evidence>, key: K, evidence: Evidence) {
-    if evidence != Evidence::NEITHER {
-        map.entry(key)
-            .and_modify(|held| *held = held.join(evidence))
-            .or_insert(evidence);
-    }
-}
-
 /// An exec key as the author wrote it: the written twin of
 /// `authority::policy::exec::{ExecAllow, ExecDeny}`, which resolve it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -163,26 +153,30 @@ impl std::fmt::Display for ExecKey {
     }
 }
 
-/// Exec authority as authored.
+/// Exec authority as authored. A key in both sets is Both.
 ///
 /// The author's spellings, which [`GrantLayer::from_capabilities`] resolves
 /// into the rules of `authority::policy::exec`; nothing judges a grant of this form.
-/// Entries come only through joining, so no grant holds Neither, and `every`
-/// only through [`with_every`](Self::with_every), so "every program" has no
-/// negative form: a layer written in code that excludes a program from all
-/// the rest says so with it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecGrant {
-    /// Every program, less the exclusions among the entries.
     every: bool,
-    #[serde(with = "pairs")]
-    rules: BTreeMap<ExecKey, Evidence>,
+    #[serde(default)]
+    allow: BTreeSet<ExecKey>,
+    #[serde(default)]
+    deny: BTreeSet<ExecKey>,
 }
 
 impl ExecGrant {
-    pub fn every(&self) -> bool {
-        self.every
+    pub fn of(
+        allow: impl IntoIterator<Item = ExecKey>,
+        deny: impl IntoIterator<Item = ExecKey>,
+    ) -> Self {
+        Self {
+            every: false,
+            allow: allow.into_iter().collect(),
+            deny: deny.into_iter().collect(),
+        }
     }
 
     /// This grant, admitting every program less its exclusions.
@@ -194,62 +188,16 @@ impl ExecGrant {
         }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&ExecKey, &Evidence)> {
-        self.rules.iter()
+    pub fn every(&self) -> bool {
+        self.every
     }
 
-    pub fn get(&self, key: &ExecKey) -> Option<&Evidence> {
-        self.rules.get(key)
-    }
-}
-
-/// A key written twice joins.
-impl FromIterator<(ExecKey, Evidence)> for ExecGrant {
-    fn from_iter<I: IntoIterator<Item = (ExecKey, Evidence)>>(keys: I) -> Self {
-        let mut rules = BTreeMap::new();
-        for (key, e) in keys {
-            join_insert(&mut rules, key, e);
-        }
-        Self {
-            every: false,
-            rules,
-        }
-    }
-}
-
-/// A map keyed by a struct, as the sequence of its pairs (no JSON object can
-/// key one), read back through [`join_insert`]: a repeated key or a Neither
-/// value is not what the encoder emits, so the other end is not this tree.
-mod pairs {
-    use super::{Evidence, join_insert};
-    use serde::de::Error;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::collections::BTreeMap;
-
-    pub(super) fn serialize<K: Serialize, S: Serializer>(
-        map: &BTreeMap<K, Evidence>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        serializer.collect_seq(map)
+    pub fn allows(&self) -> impl Iterator<Item = &ExecKey> {
+        self.allow.iter()
     }
 
-    pub(super) fn deserialize<'de, K, D>(deserializer: D) -> Result<BTreeMap<K, Evidence>, D::Error>
-    where
-        K: Deserialize<'de> + Ord,
-        D: Deserializer<'de>,
-    {
-        let mut map = BTreeMap::new();
-        for (key, e) in Vec::<(K, Evidence)>::deserialize(deserializer)? {
-            if e == Evidence::NEITHER {
-                return Err(D::Error::custom("a rule holds no evidence"));
-            }
-            let held = map.len();
-            join_insert(&mut map, key, e);
-            if map.len() == held {
-                return Err(D::Error::custom("a rule key repeats"));
-            }
-        }
-        Ok(map)
+    pub fn denies(&self) -> impl Iterator<Item = &ExecKey> {
+        self.deny.iter()
     }
 }
 

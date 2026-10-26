@@ -273,13 +273,13 @@ mod tests {
     /// A grant stack crosses a probe layer for layer, exec rules and all.
     #[test]
     fn a_grant_stack_round_trips() {
-        use crate::authority::policy::{Capabilities, Evidence, ExecGrant, ExecKey, Net};
+        use crate::authority::policy::{Capabilities, ExecGrant, ExecKey, Net};
         use crate::path::FrozenPath;
         let dir =
             FrozenPath::from_surface(&crate::test_helper::Tree::nowhere().at("/ral-probe/bin"));
         let mut stack = GrantStack::root();
         stack.push(crate::test_helper::layer(Capabilities {
-            exec: Some(ExecGrant::from_iter([(ExecKey::Dir(dir), Evidence::ALLOW)])),
+            exec: Some(ExecGrant::of([ExecKey::Dir(dir)], [])),
             net: Some(Net::Offline),
             ..Capabilities::default()
         }));
@@ -289,7 +289,7 @@ mod tests {
     /// A stack of real directories, exclusions and all: restrictive on every
     /// axis a summary shows.
     fn stack_over(root: &std::path::Path) -> GrantStack {
-        use crate::authority::policy::{Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy, Net};
+        use crate::authority::policy::{Capabilities, ExecGrant, ExecKey, FsPolicy, Net};
         use crate::path::FrozenPath;
         let spell = |dir: &str| {
             std::fs::create_dir_all(root.join(dir)).unwrap();
@@ -297,10 +297,7 @@ mod tests {
         };
         let mut stack = GrantStack::root();
         stack.push(crate::test_helper::layer(Capabilities {
-            exec: Some(ExecGrant::from_iter([(
-                ExecKey::Dir(spell("bin")),
-                Evidence::ALLOW,
-            )])),
+            exec: Some(ExecGrant::of([ExecKey::Dir(spell("bin"))], [])),
             fs: Some(FsPolicy {
                 read_prefixes: vec![spell("work")],
                 write_prefixes: vec![spell("scratch")],

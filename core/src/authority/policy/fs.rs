@@ -879,11 +879,10 @@ mod tests {
 
     fn running(places: &[&str]) -> GrantLayer {
         layer(Capabilities {
-            exec: Some(
-                (places.iter())
-                    .map(|p| (ExecKey::Path(lit(p)), Evidence::ALLOW))
-                    .collect::<ExecGrant>(),
-            ),
+            exec: Some(ExecGrant::of(
+                places.iter().map(|p| ExecKey::Path(lit(p))),
+                [],
+            )),
             ..Capabilities::default()
         })
     }
@@ -1052,10 +1051,10 @@ mod tests {
             arg0: system.join("prog"),
         };
         let reads_nothing = stack([fs_layer(FsPolicy::default())]);
-        assert!(reads_nothing.admits(&baseline, &program));
+        assert!(reads_nothing.withheld(&baseline, &program).is_ok());
         assert!(matches!(
-            reads_nothing.refusal(&Baseline::default(), &program),
-            Some(ExecDenial::Read(_))
+            reads_nothing.withheld(&Baseline::default(), &program),
+            Err(ExecDenial::Read(_))
         ));
     }
 

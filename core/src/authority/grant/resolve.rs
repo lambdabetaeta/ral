@@ -123,13 +123,11 @@ impl ExecRules {
         if grant.every() {
             rules.push(Rule::Allow(ExecAllow::Any));
         }
-        for (key, evidence) in grant.iter() {
-            if evidence.positive {
-                rules.extend(key_rules::<Trace>(key, path.as_deref())?);
-            }
-            if evidence.negative {
-                rules.extend(key_rules::<Excluded>(key, path.as_deref())?);
-            }
+        for key in grant.allows() {
+            rules.extend(key_rules::<Trace>(key, path.as_deref())?);
+        }
+        for key in grant.denies() {
+            rules.extend(key_rules::<Excluded>(key, path.as_deref())?);
         }
         Ok(rules.into_iter().collect())
     }
