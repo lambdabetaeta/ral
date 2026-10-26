@@ -35,15 +35,15 @@ cd "$(dirname "$0")/.."
 # inside the container in linux-box mode — reports the platform cargo actually
 # targets, so no second rule here has to predict it.
 
-# The docker CLI, whatever engine answers its socket.  --privileged is real
-# host privilege only under a rootful engine; a rootless podman machine gives
+# Docker where it is installed (CI), else Podman.  --privileged is real host
+# privilege only under a rootful engine; a rootless podman machine gives
 # namespace-root, and the envelope tests then take their fallback arm.
 if [ "$MODE" = linux-box ]; then
-    command -v docker >/dev/null 2>&1 || {
-        echo 'ci.sh: linux-box needs docker on PATH' >&2
+    ENGINE=$(command -v docker || command -v podman) || {
+        echo 'ci.sh: linux-box needs docker or podman on PATH' >&2
         exit 1
     }
-    docker image inspect ral-linux-box >/dev/null 2>&1 || {
+    "$ENGINE" image inspect ral-linux-box >/dev/null 2>&1 || {
         echo 'ci.sh: image ral-linux-box is absent — run `just linux-box`' >&2
         exit 1
     }
@@ -61,12 +61,15 @@ fi
 # own target/.  RUSTUP_HOME is a volume too, or each step re-downloads the
 # whole toolchain: rust-toolchain.toml tracks `stable` plus three extra
 # targets, so every container start otherwise re-syncs the channel and throws
-# it away on --rm.
+# it away on --rm.  /tmp is a tmpfs because a rootless engine's fuse-overlayfs
+# root forgets unlinked inodes and answers ENOENT for ENAMETOOLONG, which the
+# path-walk tests rightly reject.
 at_toolchain() {
     case $MODE in
     native) "$@" ;;
     linux-box)
-        docker run --rm --privileged --init \
+        "$ENGINE" run --rm --privileged --init \
+            --tmpfs /tmp:rw,exec,mode=1777 \
             -v "$PWD:/workspace" \
             -v ral-linux-cargo:/home/dev/.cargo \
             -v ral-linux-rustup:/usr/local/rustup \
@@ -88,13 +91,13 @@ step() {
     at_toolchain just "$@"
 }
 
-# /workspace/.target-linux is not in the image, so docker creates its volume
+# /workspace/.target-linux is not in the image, so the engine creates its volume
 # root-owned.  Hand it to the image's baked-in `dev`, which has a real
 # passwd/HOME entry — unlike an arbitrary `--user uid:gid`, for which
 # getpwuid-based code (`whoami`, ral's own ~-expansion) misresolves or fails.
 if [ "$MODE" = linux-box ]; then
     banner 'chown the Linux target volume'
-    docker run --rm --user root -v ral-linux-target:/workspace/.target-linux \
+    "$ENGINE" run --rm --user root -v ral-linux-target:/workspace/.target-linux \
         ral-linux-box chown dev:dev /workspace/.target-linux
 fi
 

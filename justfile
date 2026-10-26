@@ -171,7 +171,7 @@ linux-ci:
 
 # Build the container `linux-ci` runs in.
 linux-box:
-    docker build -t ral-linux-box -f scripts/linux-box.Dockerfile scripts
+    "$(command -v docker || command -v podman)" build -t ral-linux-box -f scripts/linux-box.Dockerfile scripts
 
 # Render the static site into site/.
 site:
