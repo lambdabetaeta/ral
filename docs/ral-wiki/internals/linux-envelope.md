@@ -94,7 +94,7 @@ spelling is only the destination at which the opened object is bound.
   envelope refuses every confined launch, and one without `--ro-bind-fd` is
   named with its version.
 
-Pinned by `authority::sandbox::linux::tests::a_bind_is_opened_for_each_name_no_other_bind_shows`,
+Pinned by `authority::sandbox::linux::tests::render::a_bind_is_opened_for_each_name_no_other_bind_shows`,
 `::a_prefix_whose_component_became_a_symlink_since_render_is_refused`,
 `::every_bind_is_a_handle_by_slot_in_layer_order`,
 `::a_write_through_a_link_is_masked_at_both_its_names` and, spawning,
@@ -163,7 +163,7 @@ result by hand, or states what it cannot build.**
 - **Open:** such hosts still refuse the read-only rebind of their own locked
   `/etc/hosts` and `/etc/resolv.conf`, by descriptor as by name.
 
-Pinned by `authority::sandbox::linux::tests::a_host_that_refuses_dev_gets_the_same_shape_by_hand`
+Pinned by `authority::sandbox::linux::tests::render::a_host_that_refuses_dev_gets_the_same_shape_by_hand`
 and `::the_by_hand_dev_serves_a_confined_body`.
 
 ## The GPU is shown or masked by name
@@ -188,7 +188,7 @@ shown. `GpuNodes::discover` finds them at each launch: bwrap has no globs, and
   opening a device node is decided by what the mounts show and by nothing
   else: a node absent from the envelope cannot be opened, a node shown can.
 
-Pinned by `authority::sandbox::linux::tests::a_restricted_envelope_shows_the_gpu_only_where_left_on`
+Pinned by `authority::sandbox::linux::tests::render::a_restricted_envelope_shows_the_gpu_only_where_left_on`
 and `::an_unrestricted_envelope_masks_a_withheld_gpu`.
 
 ## Kernel pseudo-filesystems describe the envelope
@@ -212,7 +212,7 @@ cannot is a host bind like any other, present only where something needs it.**
   (`HostEnvelope::private_cgroup`), the host's tree is the true one and is bound
   as it is.
 
-Pinned by `authority::sandbox::linux::tests::sys_is_narrowed_to_what_sizes_a_program_and_the_cgroup_tree_is_the_payloads`
+Pinned by `authority::sandbox::linux::tests::render::sys_is_narrowed_to_what_sizes_a_program_and_the_cgroup_tree_is_the_payloads`
 and `::a_confined_program_reads_its_own_cgroup_and_none_of_the_hosts_interfaces`.
 
 ## The envelope binary is fixed at boot
@@ -250,7 +250,7 @@ any confinement.
   that needs one, through `Refusal::Unavailable`. `Launch::envelope` names the
   binary only for the wording of a spawn failure.
 
-Pinned by `authority::sandbox::linux::tests::the_launcher_is_the_pinned_envelope_and_never_a_name`,
+Pinned by `authority::sandbox::linux::tests::render::the_launcher_is_the_pinned_envelope_and_never_a_name`,
 `::the_envelope_binary_is_read_only_inside_every_envelope`,
 `::a_pinned_binary_inside_a_writable_prefix_is_locked` and
 `authority::guard::enforce::tests::a_write_onto_a_pinned_binary_is_guarded_before_any_grant_is_consulted`.

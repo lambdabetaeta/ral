@@ -195,8 +195,8 @@ fails for a stated reason:
 Neither shows up in an argv assertion, so each rule is pinned by a test that
 spawns the envelope for real:**
 
-- `authority::sandbox::linux::tests::a_denied_path_refuses_every_access_while_the_body_still_runs`
-- `authority::sandbox::linux::tests::building_an_envelope_never_creates_a_denied_name_on_the_host`
+- `authority::sandbox::linux::tests::spawn::a_denied_path_refuses_every_access_while_the_body_still_runs`
+- `authority::sandbox::linux::tests::spawn::building_an_envelope_never_creates_a_denied_name_on_the_host`
 - `capabilities::seatbelt_holds_an_absent_deny_inside_a_write_prefix` (macOS)
 
 **No Linux test pins the absent-name gap itself.** `tests/unix/grant-fs-deny.ral`

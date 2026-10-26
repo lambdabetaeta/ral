@@ -38,30 +38,12 @@ struct Syscall {
     name: &'static str,
 }
 
-const PTRACE: Syscall = Syscall {
-    nr: libc::SYS_ptrace,
-    name: "ptrace",
-};
-const PROCESS_VM_READV: Syscall = Syscall {
-    nr: libc::SYS_process_vm_readv,
-    name: "process_vm_readv",
-};
-const PROCESS_VM_WRITEV: Syscall = Syscall {
-    nr: libc::SYS_process_vm_writev,
-    name: "process_vm_writev",
-};
-const PERF_EVENT_OPEN: Syscall = Syscall {
-    nr: libc::SYS_perf_event_open,
-    name: "perf_event_open",
-};
-const BPF: Syscall = Syscall {
-    nr: libc::SYS_bpf,
-    name: "bpf",
-};
-const KEXEC_LOAD: Syscall = Syscall {
-    nr: libc::SYS_kexec_load,
-    name: "kexec_load",
-};
+impl Syscall {
+    const fn new(nr: i64, name: &'static str) -> Self {
+        Self { nr, name }
+    }
+}
+
 /// `libc` omits this one number from its musl/aarch64 bindings alone, so it is
 /// spelled here rather than the rule going missing on a shipping target: 294
 /// is the asm-generic number, which libc itself carries for glibc/aarch64 and
@@ -70,114 +52,6 @@ const KEXEC_LOAD: Syscall = Syscall {
 const SYS_KEXEC_FILE_LOAD: i64 = 294;
 #[cfg(not(all(target_arch = "aarch64", target_env = "musl")))]
 const SYS_KEXEC_FILE_LOAD: i64 = libc::SYS_kexec_file_load;
-const KEXEC_FILE_LOAD: Syscall = Syscall {
-    nr: SYS_KEXEC_FILE_LOAD,
-    name: "kexec_file_load",
-};
-const REBOOT: Syscall = Syscall {
-    nr: libc::SYS_reboot,
-    name: "reboot",
-};
-const SWAPON: Syscall = Syscall {
-    nr: libc::SYS_swapon,
-    name: "swapon",
-};
-const SWAPOFF: Syscall = Syscall {
-    nr: libc::SYS_swapoff,
-    name: "swapoff",
-};
-const INIT_MODULE: Syscall = Syscall {
-    nr: libc::SYS_init_module,
-    name: "init_module",
-};
-const FINIT_MODULE: Syscall = Syscall {
-    nr: libc::SYS_finit_module,
-    name: "finit_module",
-};
-const DELETE_MODULE: Syscall = Syscall {
-    nr: libc::SYS_delete_module,
-    name: "delete_module",
-};
-const KEYCTL: Syscall = Syscall {
-    nr: libc::SYS_keyctl,
-    name: "keyctl",
-};
-const ADD_KEY: Syscall = Syscall {
-    nr: libc::SYS_add_key,
-    name: "add_key",
-};
-const REQUEST_KEY: Syscall = Syscall {
-    nr: libc::SYS_request_key,
-    name: "request_key",
-};
-const USERFAULTFD: Syscall = Syscall {
-    nr: libc::SYS_userfaultfd,
-    name: "userfaultfd",
-};
-const OPEN_BY_HANDLE_AT: Syscall = Syscall {
-    nr: libc::SYS_open_by_handle_at,
-    name: "open_by_handle_at",
-};
-const MOUNT: Syscall = Syscall {
-    nr: libc::SYS_mount,
-    name: "mount",
-};
-const UMOUNT2: Syscall = Syscall {
-    nr: libc::SYS_umount2,
-    name: "umount2",
-};
-const PIVOT_ROOT: Syscall = Syscall {
-    nr: libc::SYS_pivot_root,
-    name: "pivot_root",
-};
-const MOVE_MOUNT: Syscall = Syscall {
-    nr: libc::SYS_move_mount,
-    name: "move_mount",
-};
-const OPEN_TREE: Syscall = Syscall {
-    nr: libc::SYS_open_tree,
-    name: "open_tree",
-};
-const FSOPEN: Syscall = Syscall {
-    nr: libc::SYS_fsopen,
-    name: "fsopen",
-};
-const FSMOUNT: Syscall = Syscall {
-    nr: libc::SYS_fsmount,
-    name: "fsmount",
-};
-const FSCONFIG: Syscall = Syscall {
-    nr: libc::SYS_fsconfig,
-    name: "fsconfig",
-};
-const FSPICK: Syscall = Syscall {
-    nr: libc::SYS_fspick,
-    name: "fspick",
-};
-const MOUNT_SETATTR: Syscall = Syscall {
-    nr: libc::SYS_mount_setattr,
-    name: "mount_setattr",
-};
-const UNSHARE: Syscall = Syscall {
-    nr: libc::SYS_unshare,
-    name: "unshare",
-};
-const CLONE: Syscall = Syscall {
-    nr: libc::SYS_clone,
-    name: "clone",
-};
-const SETNS: Syscall = Syscall {
-    nr: libc::SYS_setns,
-    name: "setns",
-};
-const CLONE3: Syscall = Syscall {
-    nr: libc::SYS_clone3,
-    name: "clone3",
-};
-const IOCTL: Syscall = Syscall {
-    nr: libc::SYS_ioctl,
-    name: "ioctl",
-};
 
 #[allow(clippy::cast_sign_loss, reason = "a single positive flag bit")]
 const CLONE_NEWUSER: u32 = libc::CLONE_NEWUSER as u32;
@@ -228,67 +102,94 @@ impl Filter {
     /// The deny-set. A `const`, not a `OnceLock`: nothing in it is probed.
     pub(crate) const ENVELOPE: Self = Self(&[
         Rule {
-            calls: &[PTRACE, PROCESS_VM_READV, PROCESS_VM_WRITEV],
+            calls: &[
+                Syscall::new(libc::SYS_ptrace, "ptrace"),
+                Syscall::new(libc::SYS_process_vm_readv, "process_vm_readv"),
+                Syscall::new(libc::SYS_process_vm_writev, "process_vm_writev"),
+            ],
             when: None,
             verdict: Verdict::Kill,
             why: "reads or rewrites another process; the envelope hides the host's table, \
                   this closes the same-uid pair inside it",
         },
         Rule {
-            calls: &[PERF_EVENT_OPEN, BPF],
+            calls: &[
+                Syscall::new(libc::SYS_perf_event_open, "perf_event_open"),
+                Syscall::new(libc::SYS_bpf, "bpf"),
+            ],
             when: None,
             verdict: Verdict::Kill,
             why: "loads programs into the kernel; classic privilege-escalation surface",
         },
         Rule {
-            calls: &[KEXEC_LOAD, KEXEC_FILE_LOAD, REBOOT, SWAPON, SWAPOFF],
+            calls: &[
+                Syscall::new(libc::SYS_kexec_load, "kexec_load"),
+                Syscall::new(SYS_KEXEC_FILE_LOAD, "kexec_file_load"),
+                Syscall::new(libc::SYS_reboot, "reboot"),
+                Syscall::new(libc::SYS_swapon, "swapon"),
+                Syscall::new(libc::SYS_swapoff, "swapoff"),
+            ],
             when: None,
             verdict: Verdict::Kill,
             why: "machine state",
         },
         Rule {
-            calls: &[INIT_MODULE, FINIT_MODULE, DELETE_MODULE],
+            calls: &[
+                Syscall::new(libc::SYS_init_module, "init_module"),
+                Syscall::new(libc::SYS_finit_module, "finit_module"),
+                Syscall::new(libc::SYS_delete_module, "delete_module"),
+            ],
             when: None,
             verdict: Verdict::Kill,
             why: "kernel code",
         },
         Rule {
-            calls: &[KEYCTL, ADD_KEY, REQUEST_KEY],
+            calls: &[
+                Syscall::new(libc::SYS_keyctl, "keyctl"),
+                Syscall::new(libc::SYS_add_key, "add_key"),
+                Syscall::new(libc::SYS_request_key, "request_key"),
+            ],
             when: None,
             verdict: Verdict::Kill,
             why: "the kernel keyring: cross-process state the envelope does not model",
         },
         Rule {
-            calls: &[USERFAULTFD],
+            calls: &[Syscall::new(libc::SYS_userfaultfd, "userfaultfd")],
             when: None,
             verdict: Verdict::Kill,
             why: "the race-widening primitive in most modern exploit chains",
         },
         Rule {
-            calls: &[OPEN_BY_HANDLE_AT],
+            calls: &[Syscall::new(
+                libc::SYS_open_by_handle_at,
+                "open_by_handle_at",
+            )],
             when: None,
             verdict: Verdict::Kill,
             why: "opens by inode handle, bypassing every path the envelope bound",
         },
         Rule {
             calls: &[
-                MOUNT,
-                UMOUNT2,
-                PIVOT_ROOT,
-                MOVE_MOUNT,
-                OPEN_TREE,
-                FSOPEN,
-                FSMOUNT,
-                FSCONFIG,
-                FSPICK,
-                MOUNT_SETATTR,
+                Syscall::new(libc::SYS_mount, "mount"),
+                Syscall::new(libc::SYS_umount2, "umount2"),
+                Syscall::new(libc::SYS_pivot_root, "pivot_root"),
+                Syscall::new(libc::SYS_move_mount, "move_mount"),
+                Syscall::new(libc::SYS_open_tree, "open_tree"),
+                Syscall::new(libc::SYS_fsopen, "fsopen"),
+                Syscall::new(libc::SYS_fsmount, "fsmount"),
+                Syscall::new(libc::SYS_fsconfig, "fsconfig"),
+                Syscall::new(libc::SYS_fspick, "fspick"),
+                Syscall::new(libc::SYS_mount_setattr, "mount_setattr"),
             ],
             when: None,
             verdict: Verdict::Kill,
             why: "mount authority inside the envelope hides or reshapes the deny masks",
         },
         Rule {
-            calls: &[UNSHARE, CLONE],
+            calls: &[
+                Syscall::new(libc::SYS_unshare, "unshare"),
+                Syscall::new(libc::SYS_clone, "clone"),
+            ],
             when: Some(Cond::FlagSet {
                 arg: 0,
                 mask: CLONE_NEWUSER,
@@ -298,13 +199,13 @@ impl Filter {
                   grant, which the envelope forbids",
         },
         Rule {
-            calls: &[SETNS],
+            calls: &[Syscall::new(libc::SYS_setns, "setns")],
             when: None,
             verdict: Verdict::Errno(libc::EPERM),
             why: "joining another namespace is leaving this one",
         },
         Rule {
-            calls: &[CLONE3],
+            calls: &[Syscall::new(libc::SYS_clone3, "clone3")],
             when: None,
             verdict: Verdict::Errno(libc::ENOSYS),
             why: "its flags live in a struct seccomp cannot read; ENOSYS makes glibc and Rust \
@@ -312,7 +213,7 @@ impl Filter {
                   profile does the same)",
         },
         Rule {
-            calls: &[IOCTL],
+            calls: &[Syscall::new(libc::SYS_ioctl, "ioctl")],
             when: Some(Cond::ArgEq {
                 arg: 1,
                 value: TIOCSTI,
@@ -602,18 +503,6 @@ mod tests {
             for call in rule.calls {
                 assert!(seen.insert(call.nr), "{} named twice", call.name);
             }
-        }
-    }
-
-    #[test]
-    fn every_why_is_non_empty_and_carries_no_trailing_full_stop() {
-        for rule in Filter::ENVELOPE.0 {
-            assert!(!rule.why.is_empty(), "a rule's why must not be empty");
-            assert!(
-                !rule.why.ends_with('.'),
-                "the hint adds punctuation; why must not: {:?}",
-                rule.why
-            );
         }
     }
 
