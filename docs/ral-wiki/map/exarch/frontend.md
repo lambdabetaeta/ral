@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 61c288f
-generated_at_date: 2026-10-21
+generated_at_commit: bf088cca
+generated_at_date: 2026-10-26
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/record/session.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/boot.rs, exarch/src/agent/seat.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -46,11 +46,13 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
   a unit of the context, which has only turns, each with a role
   ([[decisions/260917_an-eviction-is-a-set-of-turns|an-eviction-is-a-set-of-turns]]).
   A typed line is one of three classes, decided once at submit on the UI
-  thread (`tui/commands.rs::route_submit`): an **immediate** view command
-  (`/help`, `/copy`, `/model`, …) acts there and is never posted; a **read**
+  thread (`tui/commands.rs::route_submit`): an **immediate** command
+  (`/help`, `/copy`, `/model`, …) acts there and is never posted; `/quit`
+  directly cancels every root's whole subtree across both cancellation layers,
+  even if a root's avatar has already ended. A **read**
   (`Post::Read` — `/new`, `/branch`, `/context`, `/resources`) drains at the *next*
   boundary of any kind, tool or exchange, in the order typed; a **rewrite**
-  (`Post::Rewrite` — `/clear`, `/close`, `/evict`, `/rewind`, `/quit`) drains only at
+  (`Post::Rewrite` — `/clear`, `/close`, `/evict`, `/rewind`) drains only at
   the exchange boundary and holds everything typed after it, because there the
   order typed is part of what was said. Everything else — prompt text,
   including a slash-shaped line that names no command, wakeups, settled
@@ -438,7 +440,7 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  the session's opening block (`Blocks::origin`). Nothing is rebuilt: a record
  moves one block, and the mirror moves that block
  ([[decisions/260909_the-fold-reports-the-printer-mirrors|the-fold-reports-the-printer-mirrors]]).
- `/clear`, `/close` and `/quit` share one helper: interrupt the agent, then queue
+ `/clear` and `/close` share one helper: interrupt the agent, then queue
  the `Rewrite` behind the interrupt, so the streaming `select!` in
  `provider::complete` unwinds within one `wait_for_cancel` poll (~50 ms)
  rather than running to its natural end. `/clear` does not blank the view at
@@ -468,8 +470,10 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  session commands are parsed at submit into a `Read` (`/new` and `/branch`
  first typed as the one `Command::Hatch(Memory, Option<name>)`, mirroring
  `Read::Hatch`; `/context`, `/resources`) or a `Rewrite` (`/clear`, `/close`, `/evict`,
- `/rewind`, `/quit`) and enter the focused agent's inbox; `/quit` alone posts
- to every live root, and a session command on a tab whose agent has ended
+ `/rewind`) and enter the focused agent's inbox. `/quit` calls
+ `Agent::cancel_tree` on every root directly, without an inbox consumer;
+ descendants cannot retain an idle parent indefinitely after it ends.
+ A session command on a tab whose agent has ended
  answers "this tab's agent has ended". Every command acts on, and reports
  into, the focused tab: a tab is a tab, and none is the root. `/rewind` takes
  no argument: it opens

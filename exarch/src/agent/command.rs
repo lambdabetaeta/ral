@@ -51,7 +51,6 @@ impl Avatar {
                 self.recorder().emit_or_report(Forensic::SessionClosed);
                 return ControlFlow::Break(());
             }
-            Rewrite::Quit => return ControlFlow::Break(()),
         }
         ControlFlow::Continue(())
     }

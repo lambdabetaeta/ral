@@ -543,8 +543,7 @@ fn a_lenient_dotdot_past_its_tail_climbs_the_held_directory() {
     assert_eq!(trace.real(), there.real());
 }
 
-/// A lenient walk ends its steps at a name it cannot enter and keeps the
-/// rest as the tail: a directory that may be walked to and not searched.
+/// A lenient walk keeps the unsearchable suffix as its tail.
 #[test]
 fn a_lenient_walk_through_an_unreadable_directory_ends_its_steps_there() {
     if root_user() {
@@ -558,8 +557,17 @@ fn a_lenient_walk_through_an_unreadable_directory_ends_its_steps_there() {
     let trace = walk_lenient(&spelled(&dir.join("closed/inner/f")), LeafMode::Follow);
     std::fs::set_permissions(dir.join("closed"), PermissionsExt::from_mode(0o755)).unwrap();
     let trace = trace.unwrap();
-    assert_eq!(trace.tail(), [name("inner"), name("f")]);
-    assert_eq!(trace.steps().last().unwrap().name(), &name("closed"));
+    // O_SEARCH needs search permission; O_PATH only holds the inode.
+    let (last, tail) = if cfg!(target_os = "macos") {
+        (
+            dir.file_name().unwrap(),
+            vec![name("closed"), name("inner"), name("f")],
+        )
+    } else {
+        (OsStr::new("closed"), vec![name("inner"), name("f")])
+    };
+    assert_eq!(trace.tail(), tail);
+    assert_eq!(trace.steps().last().unwrap().name().as_os_str(), last);
     assert_eq!(trace.real().as_path(), dir.join("closed/inner/f"));
 }
 

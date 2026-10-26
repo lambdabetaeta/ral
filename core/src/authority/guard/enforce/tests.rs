@@ -304,7 +304,7 @@ mod words {
     fn a_name_deny_is_named_as_written() {
         let tmp = tempfile::tempdir().unwrap();
         let sh = tmp.path().join("sh");
-        std::fs::copy("/bin/true", &sh).unwrap();
+        std::fs::copy("/usr/bin/true", &sh).unwrap();
         let deny = exec(&[
             (ExecKey::Name("sh".into()), Evidence::ALLOW),
             (ExecKey::Name("sh".into()), Evidence::DENY),

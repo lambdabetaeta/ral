@@ -770,7 +770,7 @@ mod tests {
     #[test]
     fn the_settings_tree_on_macos_is_the_library() {
         let fake = Fake::new();
-        let home = fake.home.clone();
+        let home = fake.home;
         assert_eq!(
             settings_trees(Some(&home), |_| None),
             [home.join("Library")]

@@ -141,12 +141,15 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
 
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(OsStr::from_bytes(b"bad-\xff")), "").unwrap();
+        std::fs::write(dir.path().join("file"), "").unwrap();
         let shell = crate::test_helper::core_shell();
         let root = LexicalPath::absolute(dir.path()).unwrap();
         let mut walk = shell.admitted_walk(Walk::all(&root), "glob", utf8(dir.path()).unwrap());
         assert_eq!(walk.next().unwrap().unwrap().depth, 0);
-        let entry = walk.next().unwrap().unwrap();
+        let mut entry = walk.next().unwrap().unwrap();
+        // APFS cannot store this name; naming an entry performs no I/O.
+        entry.shown =
+            LexicalPath::absolute(&dir.path().join(OsStr::from_bytes(b"bad-\xff"))).unwrap();
         let Break::Error(error) = walk.name(&entry).expect_err("no string can hold the name")
         else {
             panic!("an unnameable entry is an error, not a stop");

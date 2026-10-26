@@ -45,6 +45,102 @@ fn argless_command_matches_alone_but_not_with_trailing_text() {
 }
 
 #[test]
+fn quit_terminates_every_root_and_descendant_without_queuing() {
+    use crate::agent::spawn::hatch_root;
+    use crate::agent::testkit::trunk;
+    use crate::record::AgentLog;
+
+    let main = trunk(true);
+    let other = hatch_root(&main, crate::record::Memory::Amnemon, Some("other".into()))
+        .expect("a second root");
+    let child = main.fork_named("child").expect("a child");
+    let grandchild = child.fork_named("grandchild").expect("a grandchild");
+    let peer = other.fork_named("peer").expect("the other root's child");
+
+    super::quit(&main.fleet);
+
+    for avatar in [&main, &other, &child, &grandchild, &peer] {
+        assert!(
+            avatar.agent.token.terminated(),
+            "quit must terminate {} without an attend loop",
+            avatar.agent.name
+        );
+        assert!(
+            avatar.seat.read(|t| t.session_ended()).unwrap().is_some(),
+            "quit must also terminate {}'s engine",
+            avatar.agent.name
+        );
+        assert!(
+            avatar.agent.mailbox.queued_human_messages().is_empty(),
+            "quit is a shutdown, not a queued command"
+        );
+    }
+    assert_eq!(
+        AgentLog::live_roots(&main.fleet.launch.sessions_root)
+            .expect("resumable sessions")
+            .len(),
+        2,
+        "quit must leave both root sessions resumable"
+    );
+}
+
+#[test]
+fn quit_finishes_a_parked_child_after_its_parent_loop_has_ended() {
+    use crate::agent::spawn::{AsyncSpawn, spawn_async};
+    use crate::agent::testkit::trunk;
+    use crate::bus::{FleetBus, Signal};
+    use crate::record::{AgentState, Transient};
+    use ral_core::data::FOValue;
+    use ral_core::process::CancelCause;
+    use ral_core::test_helper::eventually;
+    use std::sync::Arc;
+
+    let main = trunk(true);
+    let fleet = Arc::clone(&main.fleet);
+    let child = main.fork_named("child").expect("a child");
+    let id = child.id();
+    child.agent.deposit_reply(&fleet, FOValue::Unit);
+    let bus = FleetBus::session();
+    let emit = bus.emitter(main.id(), main.agent.mailbox.clone());
+    spawn_async(
+        child,
+        AsyncSpawn {
+            name: "child".into(),
+            prompt: None,
+            resumed: None,
+        },
+        &emit,
+    )
+    .expect("the child starts");
+    assert!(
+        eventually(Duration::from_secs(5), || {
+            std::iter::from_fn(|| bus.rx().try_recv().ok())
+                .any(|signal| {
+                    matches!(signal, Signal::Transient(agent, Transient::State(AgentState::Ready)) if agent == id)
+                })
+                .then_some(())
+        })
+        .is_some(),
+        "the replied child must park for a follow-up"
+    );
+    drop(main);
+    assert!(!fleet.is_empty(), "the child retains its parent's identity");
+
+    super::quit(&fleet);
+
+    let finished = eventually(Duration::from_secs(5), || fleet.is_empty().then_some(()));
+    if finished.is_none() {
+        for root in fleet.roots() {
+            root.cancel_tree(CancelCause::Cancelled);
+        }
+    }
+    assert!(
+        finished.is_some(),
+        "quit must finish the fleet even when the parent has no command consumer"
+    );
+}
+
+#[test]
 fn export_consumes_its_path_argument() {
     assert_eq!(
         dispatch("/export ~/notes.md"),

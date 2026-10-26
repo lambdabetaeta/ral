@@ -56,8 +56,6 @@ pub enum Rewrite {
     Rewind(u64),
     /// End this session for good: a resume will not reopen it.
     Close,
-    /// End this session, resumable.
-    Quit,
 }
 
 impl std::fmt::Display for Read {
@@ -83,7 +81,6 @@ impl std::fmt::Display for Rewrite {
             Self::Evict => f.write_str("/evict"),
             Self::Rewind(turn) => write!(f, "/rewind {turn}"),
             Self::Close => f.write_str("/close"),
-            Self::Quit => f.write_str("/quit"),
         }
     }
 }

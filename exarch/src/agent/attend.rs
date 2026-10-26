@@ -30,7 +30,7 @@ enum Idle {
 
 /// What one drawn item leaves the loop with: the outcome an item settled on,
 /// if one did — a command settles nothing — and whether the loop draws again;
-/// `/quit` and a root's `reply` end it.
+/// `/close` and a root's `reply` end it.
 struct Step {
     settled: Option<AgentOutcome>,
     flow: ControlFlow<()>,

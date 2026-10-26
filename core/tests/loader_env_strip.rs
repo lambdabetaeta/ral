@@ -54,10 +54,11 @@ fn boot() -> Shell {
 fn restrict() -> Capabilities {
     let dir = std::env::temp_dir().join(format!("ral_loader_env_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create work dir");
+    let prefix = FrozenPath::freeze(&dir).expect("a Unicode scratch path");
     Capabilities {
         fs: Some(FsPolicy {
-            read_prefixes: vec![FrozenPath::from_surface(&dir)],
-            write_prefixes: vec![FrozenPath::from_surface(&dir)],
+            read_prefixes: vec![prefix.clone()],
+            write_prefixes: vec![prefix],
             deny_paths: Vec::new(),
         }),
         ..Capabilities::default()

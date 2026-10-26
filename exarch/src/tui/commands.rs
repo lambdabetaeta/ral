@@ -21,6 +21,7 @@ use crate::provider::allowance::{Allowance, Reading};
 use crate::record::{Memory, RECORD};
 use jiff::Timestamp;
 use prompt_editor::completion::Candidate;
+use ral_core::process::CancelCause;
 
 /// A command's trailing argument.
 pub(super) enum Arg {
@@ -500,18 +501,18 @@ fn end(agent: &Agent, rewrite: Rewrite) {
     agent.mailbox.push(Post::Rewrite(rewrite));
 }
 
-/// `/quit`, and the TUI's way out of a failed loop: every live root ends,
-/// resumable.
+/// A retained parent identity need not have an inbox consumer.
 pub(super) fn quit(fleet: &Fleet) {
     for root in fleet.roots() {
-        end(&root, Rewrite::Quit);
+        root.cancel_tree(CancelCause::Cancelled);
     }
 }
 
 /// Act on a well-formed command.  A view command (`/help`, `/legend`, `/copy`,
 /// `/export`, `/model`, `/login`, `/limits`, `/thinking`) touches only the App,
-/// clipboard, file, or picker, so it runs here on the UI thread; a session
-/// command becomes its [`Read`] or [`Rewrite`] and rides the focused agent's
+/// clipboard, file, or picker, so it runs here on the UI thread; `/quit`
+/// cancels the fleet directly. A session command becomes its [`Read`] or
+/// [`Rewrite`] and rides the focused agent's
 /// inbox to its attend thread, which owns the context.  `/rewind` is both: its
 /// picker runs here, and the choice rides the inbox.
 fn run(command: Command, app: &mut App, ctx: &CommandCtx<'_>) {

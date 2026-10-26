@@ -170,7 +170,7 @@ fn unknown_xdg_token_in_profile_names_the_typo_and_the_alternatives() {
 #[cfg(target_os = "macos")]
 #[test]
 fn confined_ral_walks_to_a_granted_file() {
-    let d = scratch_dir("walk");
+    let d = std::fs::canonicalize(scratch_dir("walk")).unwrap();
     std::fs::write(d.join("f.txt"), "walked\n").unwrap();
     let d_s = d.to_string_lossy().into_owned();
     let bin = common::ral_bin();
@@ -180,7 +180,7 @@ fn confined_ral_walks_to_a_granted_file() {
     let out = ral(&[
         "-c",
         &format!(
-            "grant [fs: [read: [`absolute '{d_s}', `absolute '{bin_dir_s}']]] {{ {bin_s} -c 'cat < {d_s}/f.txt' }}"
+            "within [dir: '{d_s}'] {{ grant [fs: [read: [`absolute '{d_s}', `absolute '{bin_dir_s}']]] {{ {bin_s} -c 'cat < {d_s}/f.txt' }} }}"
         ),
     ]);
     std::fs::remove_dir_all(&d).ok();
@@ -577,21 +577,10 @@ fn under_exec_deny(bin: &std::path::Path, deny: &str, body: &str) -> common::Out
 const RESPELLED: &str =
     "under another spelling (case or Unicode form); a deny holds under every spelling";
 
-/// A volume that takes `made` and the absent `denied` for one name
-/// re-resolves the deny to `made`, holding it as stored; elsewhere it holds
-/// only by a fold, and the refusal says so.
+/// An absent exclusion keeps its frozen spelling on every volume.
 #[cfg(unix)]
-fn assert_names_the_deny(
-    out: &common::Output,
-    kind: &str,
-    denied: &std::path::Path,
-    made: &std::path::Path,
-) {
-    let said = if denied.exists() {
-        format!("is excluded by `` {kind}{} ``", made.display())
-    } else {
-        format!("is the denied `` {kind}{} `` {RESPELLED}", denied.display())
-    };
+fn assert_names_the_absent_deny(out: &common::Output, kind: &str, denied: &std::path::Path) {
+    let said = format!("is the denied `` {kind}{} `` {RESPELLED}", denied.display());
     assert!(
         out.stderr.contains(&said),
         "the refusal must name the deny and say why: {said}; stderr:\n{}",
@@ -631,12 +620,7 @@ fn an_absent_exec_deny_holds_a_case_variant() {
         "`evil/x` must be refused; stderr:\n{}",
         out.stderr
     );
-    assert_names_the_deny(
-        &out,
-        "`dir `absolute ",
-        &bin.join("Evil"),
-        &bin.join("evil"),
-    );
+    assert_names_the_absent_deny(&out, "`dir `absolute ", &bin.join("Evil"));
 
     let scratch = ExecScratch::new("stored");
     let bin = scratch.bin();
@@ -686,7 +670,7 @@ fn an_absent_exec_path_deny_holds_a_case_variant() {
         "`tool` must be refused; stderr:\n{}",
         out.stderr
     );
-    assert_names_the_deny(&out, "`absolute ", &bin.join("Tool"), &bin.join("tool"));
+    assert_names_the_absent_deny(&out, "`absolute ", &bin.join("Tool"));
 }
 
 /// E2: Seatbelt folds an exec deny as the guard does, so a child's exec of

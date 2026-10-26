@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 61c288f
-generated_at_date: 2026-10-21
+generated_at_commit: bf088cca
+generated_at_date: 2026-10-26
 covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/signals.rs, exarch/src/cancel.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
@@ -797,15 +797,17 @@ logs are refused rather than half-resumed; a headless `--resume` takes exactly
 one live root and otherwise refuses, naming the count — the only place roots
 are counted.
 
-A session ends by one of two rewrites, each run at the exchange boundary.
-`Rewrite::Quit` breaks the attend loop and nothing more, so a resume reopens
-the root; the TUI posts it to every live root. `Rewrite::Close` cancels the
-descendants, records `Forensic::SessionClosed` and then breaks, so the
-session is gone for good; the TUI posts it to the focused agent alone.
-`SessionEnded` is written on every drop and is not a close. The TUI
-interrupts the agent before either, and on a returning child `Close` simply
-ends it, the parent receiving the usual non-reply notice and a resume
-ignoring the record.
+`/quit` directly cancels every root's whole subtree through
+`Agent::cancel_tree`, across both cancellation layers. It needs no inbox
+consumer: a child may retain its parent's identity after that parent's avatar
+ends, but quitting still reaches the child. The cancelled attend loops unwind
+and their avatars drop; no `SessionClosed` is written, so a resume reopens
+the roots. `Rewrite::Close`, run at the exchange boundary after an interrupt,
+cancels the focused agent's descendants, records `Forensic::SessionClosed`
+and then breaks, so that session is gone for good. `SessionEnded` is written
+on every drop and is not a close. On a returning child `Close` simply ends
+it, the parent receiving the usual non-reply notice and a resume ignoring
+the record.
 
 `evict` sheds the older half of the context when pressure crosses the context
 window's reserve (`gauge.rs`'s `forced_eviction_due` — used tokens into the top 15%
