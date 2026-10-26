@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 0cd41dbc
+generated_at_commit: 225706eb
 generated_at_date: 2026-10-26
 covers_paths: [ral/src/main.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/boot_builtin.rs, ral/src/platform.rs, ral/build.rs]
 ---
@@ -84,7 +84,7 @@ The roles that are not the shell exit here, never reaching clap.
 ## Modes
 
 `ral/src/cli.rs` owns the clap surface, and `Mode::from_argv` is the one entry
-through it: terminator injection, clap, then `Cli::into_mode`. The mode tests
+through it: clap, then `Cli::into_mode`. The mode tests
 enter by the same entry, so the parse they exercise cannot drift from the one
 `startup::identify` performs. `Cli::into_mode` distils the parsed flags into a
 `Mode`: `Interactive(InteractiveOpts)`, `Script`, or `Command` — login is not a
@@ -98,16 +98,13 @@ rides every mode; `BatchOpts` adds `--audit` / `--pretty` / `halt: Option<Halt>`
 (`--check` / `--dump-ast` / `--dump-ir`, one clap group); `InteractiveOpts` adds `-l`, `--norc`, `-i`, `-s`, and
 `--surface`.
 
-- **Argv terminator.** `inject_arg_terminator` splices a `--` before the first
-  positional (including the literal filename `-`), and immediately after `-c`
-  or a short cluster containing `c` (`-ce`, `-lc`), so flag-shaped script arguments and
-  a flag-shaped inline-code token (`ral -ce '--version'`) survive clap parsing
-  verbatim. The original short cluster remains intact for clap validation.
-  A long flag that takes a separate value token (`--surface readline`,
-  `--recursion-limit 4096`) must carry that value past itself rather than have
-  the terminator fenced between them; the set of such flags is read from clap's
-  own model (`value_taking_longs`), so the injector can never disagree with the
-  `Cli` definition.
+- **Argv boundaries.** Clap's `trailing_var_arg` preserves everything after
+  a script positional, including the literal filename `-`. The value-taking
+  `-c` uses `num_args = 1..` and `allow_hyphen_values` to consume source and
+  program arguments, including flag-shaped tokens and literal `--`. Short
+  clusters put `c` last (`-ec`, `-lc`); attached text is source (`-ce` means
+  source `e`). Long options retain clap's ordinary value parsing. The
+  `ral-sh` bridge routes POSIX `-c` invocations before this parser.
 - **Frontend selection.** `--surface <minimal|readline>` (a clap
   `ValueEnum`, default `readline`) picks the interactive frontend, overriding
   the rc `surface:` key; `None` defers to rc, then the default. The capability

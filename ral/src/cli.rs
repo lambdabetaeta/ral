@@ -23,12 +23,10 @@ pub(crate) enum Mode {
 }
 
 impl Mode {
-    /// Read argv (without the leading program name): terminator injection,
-    /// then clap, then distil to a mode.
+    /// Parse argv (without the leading program name) and distil it to a mode.
     pub(crate) fn from_argv(args: &[String]) -> Self {
         use clap::Parser as _;
-        Cli::parse_from(std::iter::once("ral".to_string()).chain(inject_arg_terminator(args)))
-            .into_mode()
+        Cli::parse_from(std::iter::once("ral").chain(args.iter().map(String::as_str))).into_mode()
     }
 }
 
@@ -98,13 +96,8 @@ impl InteractiveOpts {
     }
 }
 
-/// Parsed argv surface, built by clap.
-///
-/// `-c` is a bool flag rather than a value-taking flag so that everything after
-/// it (the inline code and any trailing positionals) is captured verbatim by
-/// `rest` via `trailing_var_arg`. This mirrors the lexopt behaviour exactly:
-/// once `-c` is seen, the remainder is slurped without further flag parsing,
-/// even if items look like flags.
+/// Parsed argv surface: `-c` consumes source and arguments; a script positional
+/// starts a trailing argument sequence. Clap owns both boundaries.
 #[derive(clap::Parser, Debug)]
 #[command(
     name = "ral",
@@ -223,10 +216,11 @@ struct Cli {
     ///
     /// Ral puts every later argument in `args`, even when it starts with a
     /// hyphen. For example, `ral -c 'show !{args}' one two` runs the given source
-    /// with `one` and `two` as its arguments. Inline code does not bind
-    /// `$SCRIPT`.
-    #[arg(short = 'c')]
-    code: bool,
+    /// with `one` and `two` as its arguments. Put shell options before `-c`;
+    /// in short clusters, put `c` last (`-ec`, `-lc`). Text attached after `c`
+    /// is source, so `-ce` runs `e`. Inline code does not bind `$SCRIPT`.
+    #[arg(short = 'c', num_args = 1.., allow_hyphen_values = true, value_name = "CODE_OR_ARG")]
+    code: Vec<String>,
 
     /// Start the interactive REPL even when standard input is not a terminal.
     ///
@@ -267,13 +261,12 @@ struct Cli {
     #[arg(long, value_enum, value_name = "SURFACE")]
     surface: Option<crate::repl::Surface>,
 
-    /// Give ral a script or the arguments that follow `-c`.
+    /// Give ral a script followed by its arguments.
     ///
-    /// Without `-c`, the first ARG is the script path and the remaining values
-    /// become `args`; ral also binds `$SCRIPT` to the path. With `-c`, the
-    /// first ARG is source code and the remaining values become `args`. Use
-    /// `--` before a script path that starts with a hyphen.
-    #[arg(last = true, value_name = "ARG")]
+    /// The first ARG is the script path and the remaining values become
+    /// `args`; ral also binds `$SCRIPT` to the path. Use `--` before a script
+    /// path that starts with a hyphen, except the literal filename `-`.
+    #[arg(trailing_var_arg = true, value_name = "ARG")]
     rest: Vec<String>,
 }
 
@@ -318,16 +311,9 @@ impl Cli {
             run: run.clone(),
         };
 
-        if self.code {
-            let mut it = self.rest.into_iter();
-            let code = it.next().unwrap_or_else(|| {
-                Self::command()
-                    .error(
-                        clap::error::ErrorKind::MissingRequiredArgument,
-                        "-c requires an argument",
-                    )
-                    .exit()
-            });
+        if !self.code.is_empty() {
+            let mut it = self.code.into_iter().chain(self.rest);
+            let code = it.next().expect("clap requires source after -c");
             return Mode::Command {
                 code,
                 script_args: it.collect(),
@@ -358,50 +344,6 @@ impl Cli {
     }
 }
 
-/// Insert `--` so that clap's `last = true` semantics on `rest` capture the
-/// script/`-c` remainder uniformly, even when it is flag-shaped.
-///
-/// Two cases inject the terminator:
-/// - immediately after a `-c`, so `ral -c '--version'` runs the code instead
-///   of clap reading `--version` as the version flag;
-/// - before the first non-option positional, so script arguments are not
-///   re-parsed as ral's own flags.
-///
-/// Long flags that take a separate value token carry that value past the flag.
-/// Which flags those are is read from clap's own model ([`value_taking_longs`])
-/// rather than hand-listed, so it cannot drift from the `Cli` definition.
-fn inject_arg_terminator(raw: &[String]) -> Vec<String> {
-    let value_longs = value_taking_longs();
-    let mut out = Vec::with_capacity(raw.len() + 1);
-    let mut i = 0;
-    while i < raw.len() {
-        let arg = &raw[i];
-        if arg == "--" {
-            out.extend(raw[i..].iter().cloned());
-            return out;
-        }
-        if arg != "-" && arg.starts_with('-') {
-            let is_value_flag = value_longs.iter().any(|f| f == arg);
-            out.push(arg.clone());
-            i += 1;
-            if is_code_flag(arg) {
-                out.push("--".to_string());
-                out.extend(raw[i..].iter().cloned());
-                return out;
-            }
-            if is_value_flag && !arg.contains('=') && i < raw.len() {
-                out.push(raw[i].clone());
-                i += 1;
-            }
-        } else {
-            out.push("--".to_string());
-            out.extend(raw[i..].iter().cloned());
-            return out;
-        }
-    }
-    out
-}
-
 fn reject_batch_flags_without_batch(audit: bool, halt: Option<Halt>) {
     let Some(flag) = audit.then_some("--audit").or_else(|| halt.map(Halt::flag)) else {
         return;
@@ -412,24 +354,6 @@ fn reject_batch_flags_without_batch(audit: bool, halt: Option<Halt>) {
             format!("{flag} requires a script or -c"),
         )
         .exit();
-}
-
-/// The `--long` flags that take a separate value token, read from clap's own
-/// argument model so [`inject_arg_terminator`] can never disagree with `Cli`.
-fn value_taking_longs() -> Vec<String> {
-    Cli::command()
-        .get_arguments()
-        .filter(|arg| arg.get_action().takes_values())
-        .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
-        .collect()
-}
-
-/// Whether `arg` contains the `-c` inline-code flag, alone or in a single-dash
-/// short cluster (`-lc`, `-ce`). The following token is code in either case.
-fn is_code_flag(arg: &str) -> bool {
-    arg.strip_prefix('-')
-        .filter(|rest| !rest.starts_with('-') && rest.chars().all(|c| c.is_ascii_alphabetic()))
-        .is_some_and(|rest| rest.contains('c'))
 }
 
 /// True when `argv[0]` starts with `-`, the POSIX convention indicating that the
@@ -519,48 +443,42 @@ mod tests {
         }
     }
 
-    fn inject(args: &[&str]) -> Vec<String> {
-        let raw: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
-        inject_arg_terminator(&raw)
+    #[test]
+    fn code_is_a_value_taking_option() {
+        use clap::Parser as _;
+
+        let cli = Cli::try_parse_from(["ral", "-ce", "extra"]).unwrap();
+        assert_eq!(cli.code, ["e"]);
+        assert!(!cli.posix_e);
+        match cli.into_mode() {
+            Mode::Command {
+                code, script_args, ..
+            } => {
+                assert_eq!(code, "e");
+                assert_eq!(script_args, ["extra"]);
+            }
+            m => panic!("expected Command, got {}", mode_name(&m)),
+        }
+        for args in [&["ral", "-c"][..], &["ral", "--unknown"]] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
     }
 
     #[test]
-    fn arg_terminator_slurps_code_after_dash_c() {
-        assert_eq!(inject(&["-c", "--version"]), vec!["-c", "--", "--version"]);
-        assert_eq!(inject(&["-lc", "echo hi"]), vec!["-lc", "--", "echo hi"]);
-        assert_eq!(
-            inject(&["-c", "echo hi", "-n"]),
-            vec!["-c", "--", "echo hi", "-n"]
-        );
-    }
-
-    #[test]
-    fn arg_terminator_script_and_value_flags() {
-        assert_eq!(
-            inject(&["script.ral", "-x"]),
-            vec!["--", "script.ral", "-x"]
-        );
-        assert_eq!(
-            inject(&["--recursion-limit", "2048", "script.ral"]),
-            vec!["--recursion-limit", "2048", "--", "script.ral"]
-        );
-        assert_eq!(
-            inject(&["-l", "script.ral"]),
-            vec!["-l", "--", "script.ral"]
-        );
-    }
-
-    #[test]
-    fn value_flag_space_form_derived_from_clap() {
-        assert!(
-            value_taking_longs().iter().any(|f| f == "--surface"),
-            "clap reports --surface as value-taking; the injector must see it"
-        );
-        assert_eq!(
-            inject(&["--surface", "readline"]),
-            vec!["--surface", "readline"],
-            "the value must stay with its flag, no terminator between them"
-        );
+    fn value_taking_long_options_keep_their_values() {
+        match mode_of(&["--recursion-limit", "2048", "script.ral", "-n"]) {
+            Mode::Script {
+                path,
+                script_args,
+                batch,
+            } => {
+                assert_eq!(path, std::path::PathBuf::from("script.ral"));
+                assert_eq!(script_args, ["-n"]);
+                assert_eq!(batch.run.recursion_limit, Some(2048));
+                assert_eq!(batch.halt, None);
+            }
+            m => panic!("expected Script, got {}", mode_name(&m)),
+        }
         match mode_of(&["--surface", "readline"]) {
             Mode::Interactive(o) => {
                 assert!(matches!(o.surface, Some(crate::repl::Surface::Readline)));

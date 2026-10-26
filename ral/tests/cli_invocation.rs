@@ -111,10 +111,10 @@ fn a_lone_hyphen_names_a_script_and_fences_its_arguments() {
 }
 
 #[test]
-fn short_code_clusters_fence_code_and_its_arguments() {
-    for flag in ["-ce", "-cl", "-ci", "-ec", "-lc"] {
+fn code_options_preserve_code_and_its_arguments() {
+    for flag in ["-c", "-ec", "-lc", "-ic"] {
         let out = ral_command()
-            .args([flag, "echo ...!{args}", "--version", "-n"])
+            .args([flag, "echo ...!{args}", "--version", "--", "-n"])
             .stdin(Stdio::null())
             .output()
             .expect("spawn ral");
@@ -123,7 +123,7 @@ fn short_code_clusters_fence_code_and_its_arguments() {
             "{flag}: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        assert_eq!(out.stdout, b"--version -n\n");
+        assert_eq!(out.stdout, b"--version -- -n\n");
 
         let out = ral_command()
             .args([flag, "--version"])

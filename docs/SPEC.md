@@ -4904,7 +4904,7 @@ Reading source from stdin consumes that byte stream to EOF before execution. It 
 
 `-i` forces the interactive session even when stdin is not a terminal. `-s` forces stdin-script mode and takes precedence over `-i`. A script positional takes precedence over both.
 
-After `SCRIPT`, every remaining token is a script argument, even if it begins with `-`. A lone `-` names a script file literally; it is not stdin shorthand. After `-c`, including within a short-option cluster such as `-ce`, the first token is the complete source string and every later token is an argument. ral inserts the option terminator internally, so these are equivalent:
+After `SCRIPT`, every remaining token is a script argument, even if it begins with `-`. A lone `-` names a script file literally; it is not stdin shorthand. In `-c CODE [ARG …]`, `CODE` is the complete source string and every later token is an argument, including literal `--`. Shell options must precede `-c`. In short-option clusters, put `c` last (`-ec`, `-lc`): text attached after `c` is its source value, so `-ce` means source `e`, not a combination of flags. For example:
 
 ```text
 ral task.ral --force
