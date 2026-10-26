@@ -290,27 +290,34 @@ fn all_login_routes_load_independent_cells_in_stable_order() {
                 let Some(Credential::OAuth(cell)) = store.get(id) else {
                     panic!("missing {id}")
                 };
-                assert_eq!(*cell.lock_ignore_poison(), *token);
+                assert_eq!(cell.snapshot(), *token);
                 cell
             })
             .collect();
         for (index, cell) in cells.iter().enumerate() {
             for other in &cells[index + 1..] {
-                assert!(!std::sync::Arc::ptr_eq(cell, other));
+                assert!(!cell.shares_owner(other));
             }
         }
         let mut renewed = expected[2].1.clone();
         renewed.access_token = "renewed".into();
         assert!(oauth::save_one(&renewed).unwrap());
-        store.add_oauth(&renewed);
+        let login = oauth::credentials()
+            .into_iter()
+            .find(|login| {
+                login.snapshot().issued == renewed.issued
+                    && login.snapshot().login() == renewed.login()
+            })
+            .unwrap();
+        store.add_login(&login).unwrap();
         let Some(Credential::OAuth(current)) = store.get(&expected[2].0) else {
             panic!("lost renewed account")
         };
-        assert!(std::sync::Arc::ptr_eq(&current, &cells[2]));
-        assert_eq!(*cells[2].lock_ignore_poison(), renewed);
+        assert!(current.shares_owner(&cells[2]));
+        assert_eq!(cells[2].snapshot(), renewed);
         for (index, (_, token)) in expected.iter().enumerate() {
             if index != 2 {
-                assert_eq!(*cells[index].lock_ignore_poison(), *token);
+                assert_eq!(cells[index].snapshot(), *token);
             }
         }
     });

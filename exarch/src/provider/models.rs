@@ -167,7 +167,6 @@ impl ModelSource for LiveSource {
         let key = self
             .roster
             .accounts()
-            .iter()
             .find(|account| account.service.routes)
             .and_then(|account| match self.roster.credential(&account.id) {
                 Some(Credential::ApiKey(key)) => Some(key.clone()),
@@ -227,20 +226,16 @@ impl LiveSource {
             .map_err(|e| ListFailure::Request(e.to_string()))
     }
 
-    /// The login's own catalog, authenticated from the live cell so a token
-    /// refreshed here needs no new source. Refresh and listing share one
-    /// runtime; no mutex guard survives into a network request.
+    /// Catalog authentication uses the same credential owner as inference.
     fn list_login(
         &self,
         account: &Account,
-        cell: &std::sync::Arc<std::sync::Mutex<oauth::OAuthToken>>,
+        cell: &oauth::CredentialHandle,
     ) -> Result<Vec<Listed>, ListFailure> {
         let runtime = blocking_runtime("subscription model-list").map_err(ListFailure::Runtime)?;
         runtime.block_on(async {
-            oauth::refresh_cell_if_stale(cell)
-                .await
-                .map_err(ListFailure::Refresh)?;
-            let token = cell.lock_ignore_poison().clone();
+            cell.prepare().await.map_err(ListFailure::Refresh)?;
+            let token = cell.snapshot();
             match token.login() {
                 Login::Chatgpt => {
                     plan_models(
@@ -1126,7 +1121,8 @@ mod tests {
             };
             let (endpoint, server) = local_model_server(status, body);
             let token = catalog_token(Login::Grok);
-            let cell = std::sync::Arc::new(Mutex::new(token.clone()));
+            let state = ral_core::own::OwnDir::for_test("catalog").unwrap();
+            let cell = oauth::commit_for_test(&state, &token);
             let mut account = oauth::to_account(&token);
             account.service.endpoint = Some(endpoint);
             let source = LiveSource {

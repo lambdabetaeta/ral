@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e0ce0bd48669fc3fef1d3e8bc36a3e2cd9aa2d46
+generated_at_commit: 24aab6a4
 generated_at_date: 2026-10-26
 covers_paths: [guest-net/, synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/protocol/channel.rs, core/src/carrier.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs]
 ---
@@ -168,8 +168,12 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   one another in either direction.
 - `session/signin.rs` — the window retains its **ChatGPT-only** sign-in button.
   `sign_in` drives `exarch::provider::oauth::login_flow` with
-  `SignIn::New(Login::Chatgpt, Method::Browser)` and admits the fresh account
-  through `exarch::provider::admit_login`. The shared roster can also contain
+  `SignIn::New(Login::Chatgpt, Method::Browser)` and attaches the committed
+  credential owner through `exarch::provider::admit_login`; delayed admission
+  cannot replace a refreshed token or revive a retired login. Exarch's OAuth file
+  and transaction lock are shared; refresh ownership outlives a cancelled caller,
+  and shared recovery names the affected service/account without a CLI command.
+  The shared roster can also contain
   Codex/Grok accounts added through exarch; the window does not offer their
   sign-in methods. Its phase conversion handles device phases exhaustively.
   A new Chatgpt account is usable without a restart. The credential store is behind a

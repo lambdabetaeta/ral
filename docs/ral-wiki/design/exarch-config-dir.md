@@ -32,8 +32,11 @@ directory. Three roles, three relationships to trust:
   model and via (`state.json`) and the per-run session logs (`App::new_run`),
   keyed by a slug of the launch `cwd` so a project's exarch state is one findable
   directory, never scattered into the working tree; beside it, the credentials
-  exarch holds (`oauth.json`, a ChatGPT login's tokens, and `keys.json`, the
-  keychain fallback, both owner-only) and the network audit ledger.
+  exarch holds (`oauth.json`, the ChatGPT/Codex/Grok logins shared with Synod,
+  and `keys.json`, exarch's own keychain fallback, both owner-only) and the network
+  audit ledger. OAuth mutations share the stable `oauth.lock` transaction lease;
+  that lock contains no credentials. Synod's API-key vault, configuration, logs,
+  selection and model cache remain product-specific.
 - **cache home** — `$XDG_CACHE_HOME/exarch/` — the model catalog cache, a
   refetchable snapshot with a TTL, and `scratch/`, the disposable directory of each
   live session (a grant names it `` `scratch . ``).

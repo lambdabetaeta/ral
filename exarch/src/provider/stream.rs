@@ -90,7 +90,6 @@ impl Engine {
         on_delta: &mut F,
         cancel: &cancel::Token,
     ) -> Result<StepOut, ProviderError> {
-        self.refresh_if_stale(transport);
         let model = selection.model.as_str();
         let adapter = transport.adapter();
         let tools = tool_defs(adapter, transport.live_search(), request);
@@ -113,6 +112,9 @@ impl Engine {
                     });
                 }
                 heard = false;
+                if let Err(error) = transport.prepare(cancel).await {
+                    return Attempt::Failed(error);
+                }
                 let wire =
                     manufacture(adapter, request.system, request.transcript, &tools).into_request();
                 let sink = Arc::new(ServedSink::default());

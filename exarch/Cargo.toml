@@ -31,7 +31,7 @@ genai      = "0.7.0-rc.8"
 reqwest    = { version = "0.13", features = ["json", "form"] }
 rustls     = { version = "0.23", default-features = false, features = ["std", "tls12", "aws-lc-rs"] }
 webpki-roots = "1"
-tokio      = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+tokio      = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
 futures-util = { version = "0.3", default-features = false }
 clipboard  = { workspace = true }
 libc       = { workspace = true }

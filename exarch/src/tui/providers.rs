@@ -212,6 +212,7 @@ pub(super) struct ProvidersOverlay {
     cursor: usize,
     mode: Mode,
     status: Option<Result<String, String>>,
+    signing_out: bool,
     wallet: Wallet,
 }
 
@@ -223,6 +224,7 @@ impl ProvidersOverlay {
             cursor: 0,
             mode: Mode::List,
             status: None,
+            signing_out: false,
             wallet,
         }
     }
@@ -575,6 +577,9 @@ pub(super) fn input(
     let Some(holdings) = ctx.bureau.holdings() else {
         return false;
     };
+    if o.signing_out && !matches!(input, Input::Cancel) {
+        return true;
+    }
     let action = match input {
         Input::Cancel => return !o.cancel(),
         Input::Paste(text) => {
@@ -591,10 +596,42 @@ pub(super) fn input(
             return false;
         }
         Action::SignOut(id) => {
-            let result = ctx.bureau.sign_out(&id).map(|token| {
-                let (label, jobs, opened) = (o.label(&id), app.jobs.clone(), app.overlay_gen);
-                // The local sign-out has happened: a lost revocation is best-effort.
-                thread::spawn(move || {
+            let (label, jobs, opened) = (o.label(&id), app.jobs.clone(), app.overlay_gen);
+            let holdings = holdings.clone();
+            o.signing_out = true;
+            o.status = Some(Ok(format!("signing out of {label}…")));
+            thread::spawn(move || {
+                let result = holdings.sign_out(&id);
+                let fresh = entries(&holdings.store.lock_ignore_poison());
+                let outcome = result
+                    .as_ref()
+                    .map(|_| format!("signed out of {label}"))
+                    .map_err(Clone::clone);
+                let succeeded = result.is_ok();
+                let note = format!(
+                    "[signed out of {label}; choose an account with /model before the next request]"
+                );
+                drop(jobs.send(Box::new(move |app, _| {
+                    if app.overlay_gen == opened
+                        && let Some(Overlay::Providers(p)) = &mut app.overlay
+                    {
+                        p.signing_out = false;
+                        p.settled(outcome, fresh);
+                    }
+                    if succeeded
+                        && app
+                            .tabs
+                            .ids()
+                            .into_iter()
+                            .filter_map(|tab| app.tabs.agent(tab))
+                            .any(|agent| agent.current_provider().account().id.as_str() == id)
+                    {
+                        app.tabs
+                            .focused_recorder()
+                            .emit_or_report(crate::record::Forensic::SystemNote { text: note });
+                    }
+                })));
+                if let Ok(token) = result {
                     let revoked = oauth::revoke_blocking(&token);
                     drop(jobs.send(Box::new(move |app, _| {
                         if app.overlay_gen == opened
@@ -603,9 +640,9 @@ pub(super) fn input(
                             p.status = Some(revocation_status(&label, revoked));
                         }
                     })));
-                });
+                }
             });
-            ("signed out of", id, result)
+            return true;
         }
         Action::Change(change) => change.apply(&o.wallet, holdings),
     };

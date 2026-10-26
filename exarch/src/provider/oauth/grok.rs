@@ -29,8 +29,8 @@
 // SOFTWARE.
 
 use super::{
-    Grant, LoginPhase, OAuthToken, RefreshResponse, Revocation, SignIn, json_or_error, jwt_payload,
-    refresh_failure, revoke_at, wait,
+    Grant, LoginPhase, OAuthToken, RefreshResponse, RefreshUpdate, Revocation, SignIn,
+    json_or_error, jwt_payload, refresh_failure, revoke_at, wait,
 };
 use crate::provider::error::body_detail;
 use reqwest::{Client, StatusCode, Url};
@@ -318,15 +318,18 @@ fn finalize(raw: RefreshResponse) -> Result<OAuthToken, String> {
     })
 }
 
-pub(super) async fn refresh(client: &Client, previous: &OAuthToken) -> Result<OAuthToken, String> {
+pub(super) async fn refresh(
+    client: &Client,
+    previous: &OAuthToken,
+) -> Result<RefreshUpdate<()>, String> {
     refresh_at(client, TOKEN_URL, previous).await
 }
 
-async fn refresh_at(
+pub(super) async fn refresh_at(
     client: &Client,
     url: &str,
     previous: &OAuthToken,
-) -> Result<OAuthToken, String> {
+) -> Result<RefreshUpdate<()>, String> {
     let response = client
         .post(url)
         .header(reqwest::header::ACCEPT, "application/json")
@@ -350,7 +353,7 @@ async fn refresh_at(
     renewed(previous, raw)
 }
 
-fn renewed(previous: &OAuthToken, raw: RefreshResponse) -> Result<OAuthToken, String> {
+fn renewed(previous: &OAuthToken, raw: RefreshResponse) -> Result<RefreshUpdate<()>, String> {
     required(&raw.access_token, "access_token")?;
     let refresh_token = raw
         .refresh_token
@@ -365,13 +368,12 @@ fn renewed(previous: &OAuthToken, raw: RefreshResponse) -> Result<OAuthToken, St
         .and_then(|token| jwt_payload::<IdClaims>(token).ok())
         .and_then(|claims| claims.email)
         .or_else(|| previous.email.clone());
-    Ok(OAuthToken {
+    Ok(RefreshUpdate {
         access_token: raw.access_token,
         refresh_token,
-        issued: previous.issued.clone(),
         email,
         expires_at: expires_at(raw.expires_in, crate::app::now_secs())?,
-        grant: previous.grant.clone(),
+        metadata: (),
     })
 }
 
@@ -610,15 +612,14 @@ mod tests {
     }
 
     #[test]
-    fn refresh_retains_omitted_fields_and_pins_identity_and_grant() {
+    fn refresh_retains_omitted_fields_and_updates_display_metadata() {
         let previous = parse_token(token_json()).unwrap();
         let retained =
             renewed(&previous, refresh_response(json!({"access_token": "new"}))).unwrap();
         assert_eq!(retained.access_token, "new");
         assert_eq!(retained.refresh_token, previous.refresh_token);
         assert_eq!(retained.email, previous.email);
-        assert_eq!(retained.issued, previous.issued);
-        assert_eq!(retained.grant, previous.grant);
+        assert_eq!(retained.metadata, ());
         let rotated = renewed(
             &previous,
             refresh_response(json!({
@@ -627,8 +628,7 @@ mod tests {
             })),
         )
         .unwrap();
-        assert_eq!(rotated.issued, previous.issued);
-        assert_eq!(rotated.grant, previous.grant);
+        assert_eq!(rotated.metadata, ());
         assert_eq!(rotated.email.as_deref(), Some("renamed@example.test"));
         assert_eq!(rotated.refresh_token, "rotated");
         let malformed = renewed(
@@ -655,29 +655,6 @@ mod tests {
                 .is_err()
             );
         }
-    }
-
-    #[test]
-    fn refresh_failure_names_grok_and_distinguishes_permanent_errors() {
-        let token = parse_token(token_json()).unwrap();
-        let permanent = refresh_failure(
-            StatusCode::BAD_REQUEST,
-            r#"{"error":"invalid_grant"}"#,
-            &token,
-        );
-        assert!(permanent.contains("xai-grok"));
-        assert!(permanent.contains("first@example.test"));
-        assert!(permanent.contains("exarch login xai-grok xai-grok:subject"));
-        let unauthorized = refresh_failure(StatusCode::UNAUTHORIZED, "", &token);
-        assert!(unauthorized.contains("sign in again"));
-        let transient = refresh_failure(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "temporarily unavailable",
-            &token,
-        );
-        assert!(transient.contains("503"));
-        assert!(transient.contains("temporarily unavailable"));
-        assert!(!transient.contains("sign in again"));
     }
 
     struct Request {

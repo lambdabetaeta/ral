@@ -1,5 +1,5 @@
 ---
-generated_at_commit: c2e8e68c0fa65efcf8e4e3c9f20584bffb7b6a2f
+generated_at_commit: 24aab6a4
 generated_at_date: 2026-10-26
 covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/signals.rs, exarch/src/cancel.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
@@ -139,7 +139,9 @@ and `Avatar::hatch(fleet, claim, seat, provider, open)`. `found` seats the first
 engine (an identity seat through `Genesis::seat`; a wire seat is adopted as
 built), reads the builtin index and `$EXARCH_SCRATCH` off it, substitutes the
 scratch placeholder into the prompt template, and settles the `Launch`; it
-refuses a fuelled wire root with no `factory`. `hatch` makes one root of that
+refuses a fuelled wire root with no `factory`. `EXARCH_SCRATCH` is the shared
+engine namespace: Synod supplies the guest's directory under that name, not its
+host cache. Prompt, grant anchor and resource probe read the same guest scratch. `hatch` makes one root of that
 fleet under the name its `Claim` holds (each caller claims first, then seats, then hatches, so a refused name boots no engine), resolves the prompt
 (`Launch::prompt_for`), opens the log through `open` (which takes the prompt
 as `system: &str` — the log records it as `Protocol::System` — and may hand a

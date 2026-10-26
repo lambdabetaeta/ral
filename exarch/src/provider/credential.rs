@@ -13,11 +13,13 @@
 //! one account per issuer identity. They are distinct from API-key accounts:
 //! a login and an `OPENAI_API_KEY` are separately selectable accounts.
 
-use crate::provider::identity::{self, Account, AccountId, Auth, Service};
-use crate::provider::oauth::{self, OAuthToken};
-use ral_core::sync::LockExt;
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use crate::provider::identity::{self, Account, AccountId, Auth, Login, Service};
+#[cfg(test)]
+use crate::provider::oauth::OAuthToken;
+use crate::provider::oauth::{self, CredentialHandle};
+use std::collections::BTreeSet;
+#[cfg(test)]
+use std::sync::Arc;
 
 /// The inert bearer bound to a keyless declared endpoint.
 ///
@@ -28,15 +30,12 @@ pub const NO_AUTH_PLACEHOLDER: &str = "no-auth";
 
 /// A resolved credential — what an account's requests authenticate with.
 ///
-/// An OAuth credential holds its token behind a shared cell that
-/// `Engine::refresh_if_stale` mutates in place, so a session outliving an
-/// access token keeps authenticating with no provider rebuild. Accounts own
-/// distinct cells; their writes meet only at the on-disk token store, where
-/// [`crate::provider::oauth`] serializes them.
+/// OAuth credentials share an owner; only the OAuth transaction boundary
+/// can publish or retire them. Cached providers read its current snapshot.
 #[derive(Clone)]
 pub enum Credential {
     ApiKey(String),
-    OAuth(Arc<Mutex<OAuthToken>>),
+    OAuth(CredentialHandle),
 }
 
 /// A place a running product keeps typed-in secrets.
@@ -50,15 +49,51 @@ pub trait SecretVault {
 /// Every known account, and the layers its credential is drawn from.
 #[derive(Default)]
 pub struct CredentialStore {
-    /// Every known account, available or not — the one owner of the account
-    /// records; every map below names one by its [`AccountId`] alone.
-    all: Vec<Account>,
-    /// What the launch environment supplied.
-    environment: BTreeMap<AccountId, String>,
-    /// What the vault holds, beneath the environment.
-    vault: BTreeMap<AccountId, String>,
-    /// Each login's token, in the cell a live provider refreshes in place.
-    logins: BTreeMap<AccountId, Arc<Mutex<OAuthToken>>>,
+    entries: Vec<AccountEntry>,
+    #[cfg(test)]
+    test_state: Option<Arc<ral_core::own::TestDir>>,
+}
+
+struct AccountEntry {
+    account: Account,
+    auth: AccountAuth,
+}
+
+enum AccountAuth {
+    Key {
+        environment: Option<String>,
+        vault: Option<String>,
+    },
+    OAuth(CredentialHandle),
+    Keyless,
+}
+
+impl AccountEntry {
+    fn declared(account: Account) -> Self {
+        let auth = match &account.service.auth {
+            Auth::Key(_) => AccountAuth::Key {
+                environment: None,
+                vault: None,
+            },
+            Auth::Keyless => AccountAuth::Keyless,
+            Auth::OAuth(_) => unreachable!("logins must be admitted with their committed owner"),
+        };
+        Self { account, auth }
+    }
+
+    fn credential(&self) -> Option<Credential> {
+        match &self.auth {
+            AccountAuth::Key { environment, vault } => environment
+                .as_ref()
+                .or(vault.as_ref())
+                .cloned()
+                .map(Credential::ApiKey),
+            AccountAuth::OAuth(login) => {
+                (!login.is_retired()).then(|| Credential::OAuth(login.clone()))
+            }
+            AccountAuth::Keyless => Some(Credential::ApiKey(NO_AUTH_PLACEHOLDER.into())),
+        }
+    }
 }
 
 impl CredentialStore {
@@ -72,22 +107,20 @@ impl CredentialStore {
     /// session worker thread exists), so the env scrub races nothing.
     pub fn resolve_and_scrub(declared: Vec<Service>) -> Self {
         seal();
-        let all: Vec<Account> = identity::built_in_services()
+        let mut entries: Vec<AccountEntry> = identity::built_in_services()
             .into_iter()
             .filter(|service| !matches!(service.auth, Auth::OAuth(_)))
             .chain(declared)
-            .map(Account::of_service)
+            .map(|service| AccountEntry::declared(Account::of_service(service)))
             .collect();
-        let mut environment = BTreeMap::new();
         let mut scrub = BTreeSet::new();
-        for account in &all {
-            if let Auth::Key(var) = &account.service.auth
+        for entry in &mut entries {
+            if let Auth::Key(var) = &entry.account.service.auth
                 && let Some(raw) = ral_core::host::var(var)
+                && let AccountAuth::Key { environment, .. } = &mut entry.auth
             {
                 scrub.insert(var.clone());
-                if let Some(key) = well_formed_key(&raw) {
-                    environment.insert(account.id.clone(), key);
-                }
+                *environment = well_formed_key(&raw);
             }
         }
         for var in &scrub {
@@ -96,37 +129,22 @@ impl CredentialStore {
         }
 
         let mut store = Self {
-            all,
-            environment,
-            ..Self::default()
+            entries,
+            #[cfg(test)]
+            test_state: None,
         };
-        for token in oauth::load_all() {
-            store.add_oauth(&token);
+        for login in oauth::credentials() {
+            let _ = store.add_login(&login);
         }
         store
     }
 
-    /// What `account` authenticates with now, if anything.
-    fn credential(&self, account: &Account) -> Option<Credential> {
-        let id = &account.id;
-        match &account.service.auth {
-            Auth::Key(_) => self
-                .environment
-                .get(id)
-                .or_else(|| self.vault.get(id))
-                .cloned()
-                .map(Credential::ApiKey),
-            Auth::OAuth(_) => self.logins.get(id).cloned().map(Credential::OAuth),
-            Auth::Keyless => Some(Credential::ApiKey(NO_AUTH_PLACEHOLDER.into())),
-        }
-    }
-
     /// What `id` authenticates with, or `None` when it is not available.
     pub fn get(&self, id: &AccountId) -> Option<Credential> {
-        self.all
+        self.entries
             .iter()
-            .find(|account| &account.id == id)
-            .and_then(|account| self.credential(account))
+            .find(|entry| &entry.account.id == id)
+            .and_then(AccountEntry::credential)
     }
 
     pub fn is_available(&self, id: &AccountId) -> bool {
@@ -135,118 +153,164 @@ impl CredentialStore {
 
     /// The available accounts, in [`Self::known`]'s order.
     pub fn available(&self) -> Vec<Account> {
-        self.all
+        self.entries
             .iter()
-            .filter(|account| self.credential(account).is_some())
-            .cloned()
+            .filter(|entry| entry.credential().is_some())
+            .map(|entry| entry.account.clone())
             .collect()
     }
 
     /// Every account this store knows of, available or not — an account with
     /// no key yet is precisely the one an accounts screen exists for.
-    pub fn known(&self) -> &[Account] {
-        &self.all
+    pub fn known(&self) -> impl ExactSizeIterator<Item = &Account> + Clone {
+        self.entries.iter().map(|entry| &entry.account)
     }
 
     /// The key the launch environment supplied for `id`.
     pub fn from_environment(&self, id: &AccountId) -> Option<&str> {
-        self.environment.get(id).map(String::as_str)
+        self.entries.iter().find_map(|entry| match &entry.auth {
+            AccountAuth::Key { environment, .. } if &entry.account.id == id => {
+                environment.as_deref()
+            }
+            _ => None,
+        })
     }
 
     /// The key the vault holds for `id`, whether or not it is in force.
     pub fn from_vault(&self, id: &AccountId) -> Option<&str> {
-        self.vault.get(id).map(String::as_str)
+        self.entries.iter().find_map(|entry| match &entry.auth {
+            AccountAuth::Key { vault, .. } if &entry.account.id == id => vault.as_deref(),
+            _ => None,
+        })
     }
 
-    /// Admit a signed-in login. A re-login writes the fresh token into the
-    /// *existing* cell — the one a live provider authenticates through — so
-    /// it takes effect with no provider rebuild, and stays the same account
-    /// however its handle changes.
-    pub fn add_oauth(&mut self, token: &OAuthToken) -> Account {
-        let account = oauth::to_account(token);
-        self.logins
-            .entry(account.id.clone())
-            .and_modify(|cell| *cell.lock_ignore_poison() = token.clone())
-            .or_insert_with(|| Arc::new(Mutex::new(token.clone())));
+    /// Attach the committed owner, never a delayed raw token snapshot.
+    ///
+    /// # Errors
+    /// The account was signed out before admission.
+    pub fn add_login(&mut self, login: &CredentialHandle) -> Result<Account, String> {
+        if login.is_retired() {
+            return Err(
+                "this login was signed out before it could be admitted; sign in again".into(),
+            );
+        }
+        let snapshot = login.snapshot();
+        let account = oauth::to_account(&snapshot);
         // Re-placed under its current handle: an arrival takes its spot among
         // the other logins, and a refresh that has finally learned the email
         // or plan claim moves there without disturbing its identity.
-        self.all.retain(|listed| listed.id != account.id);
-        self.insert_login(account.clone());
-        account
+        self.entries.retain(|entry| entry.account.id != account.id);
+        self.insert_login(
+            snapshot.login(),
+            AccountEntry {
+                account: account.clone(),
+                auth: AccountAuth::OAuth(login.clone()),
+            },
+        );
+        Ok(account)
+    }
+
+    #[cfg(test)]
+    fn add_oauth(&mut self, token: &OAuthToken) -> Account {
+        let state = self.test_state.get_or_insert_with(|| {
+            Arc::new(ral_core::own::OwnDir::for_test("credentials").unwrap())
+        });
+        let login = oauth::commit_for_test(state, token);
+        self.add_login(&login).unwrap()
     }
 
     /// Know `account` from now on — a declared endpoint's arrival.
     pub fn declare(&mut self, account: Account) {
-        if !self.all.iter().any(|known| known.id == account.id) {
-            self.all.push(account);
+        if !self
+            .entries
+            .iter()
+            .any(|entry| entry.account.id == account.id)
+        {
+            self.entries.push(AccountEntry::declared(account));
         }
     }
 
-    /// The vault now holds `key` for `id`.
+    /// The vault now holds `key` for a known key-bearing account.
     pub fn save_key(&mut self, id: &AccountId, key: String) {
-        self.vault.insert(id.clone(), key);
+        if let Some(AccountEntry {
+            auth: AccountAuth::Key { vault, .. },
+            ..
+        }) = self
+            .entries
+            .iter_mut()
+            .find(|entry| &entry.account.id == id)
+        {
+            *vault = Some(key);
+        }
     }
 
     /// The vault no longer holds a key for `id`; the environment's, if any,
     /// is untouched.
     pub fn forget_key(&mut self, id: &AccountId) {
-        self.vault.remove(id);
+        if let Some(AccountEntry {
+            auth: AccountAuth::Key { vault, .. },
+            ..
+        }) = self
+            .entries
+            .iter_mut()
+            .find(|entry| &entry.account.id == id)
+        {
+            *vault = None;
+        }
+    }
+
+    pub(crate) fn retire_login(&mut self, id: &AccountId) {
+        if self.entries.iter().any(|entry| {
+            &entry.account.id == id
+                && matches!(&entry.auth, AccountAuth::OAuth(login) if login.is_retired())
+        }) {
+            self.retire(id);
+        }
     }
 
     /// Drop `id` entirely: a withdrawn declaration, or a signed-out login.
     pub fn retire(&mut self, id: &AccountId) {
-        self.environment.remove(id);
-        self.vault.remove(id);
-        self.logins.remove(id);
-        self.all.retain(|known| &known.id != id);
+        self.entries.retain(|entry| &entry.account.id != id);
     }
 
     /// Read `vault`'s key for every account that takes one. An ordinary second
     /// call after [`Self::resolve_and_scrub`], which keeps that function's
     /// SAFETY contract its own.
     pub fn read_vault(&mut self, vault: &impl SecretVault) {
-        self.vault = self
-            .all
-            .iter()
-            .filter(|account| matches!(account.service.auth, Auth::Key(_)))
-            .filter_map(|account| Some((account.id.clone(), vault.read(account)?)))
-            .collect();
+        for entry in &mut self.entries {
+            if let AccountAuth::Key { vault: saved, .. } = &mut entry.auth {
+                *saved = vault.read(&entry.account);
+            }
+        }
     }
 
     /// Where a login belongs among the accounts already known: after every
     /// built-in key-bearing service, in login/handle/id order, before the
     /// first declared service.
-    fn insert_login(&mut self, account: Account) {
-        let Auth::OAuth(login) = account.service.auth else {
-            unreachable!("only signed-in accounts are inserted as logins");
-        };
+    fn insert_login(&mut self, login: Login, entry: AccountEntry) {
+        let account = &entry.account;
         let pos = self
-            .all
+            .entries
             .iter()
+            .map(|entry| &entry.account)
             .position(|other| match &other.service.auth {
                 Auth::OAuth(other_login) => {
                     (*other_login, &other.handle, &other.id) > (login, &account.handle, &account.id)
                 }
                 _ => identity::built_in(&other.service.name).is_none(),
             })
-            .unwrap_or(self.all.len());
-        self.all.insert(pos, account);
+            .unwrap_or(self.entries.len());
+        self.entries.insert(pos, entry);
     }
 
     /// This store's available accounts and credentials as a [`Roster`].
     pub fn roster(&self) -> Roster {
-        let (accounts, credentials) = self
-            .all
-            .iter()
-            .filter_map(|account| {
-                let credential = self.credential(account)?;
-                Some((account.clone(), (account.id.clone(), credential)))
-            })
-            .unzip();
         Roster {
-            accounts,
-            credentials,
+            entries: self
+                .entries
+                .iter()
+                .filter_map(|entry| Some((entry.account.clone(), entry.credential()?)))
+                .collect(),
         }
     }
 }
@@ -254,30 +318,35 @@ impl CredentialStore {
 /// Every available account and its resolved credential, cloned out of the
 /// store at one instant — the form a background thread can hold.
 ///
-/// OAuth cells stay shared, so a token refreshed anywhere is visible here.
+/// OAuth owners stay shared, so committed refresh and retirement are live here.
 #[derive(Clone, Default)]
 pub struct Roster {
-    accounts: Vec<Account>,
-    credentials: BTreeMap<AccountId, Credential>,
+    entries: Vec<(Account, Credential)>,
 }
 
 impl Roster {
     pub fn account(&self, id: &AccountId) -> Option<&Account> {
-        self.accounts.iter().find(|account| &account.id == id)
+        self.entries
+            .iter()
+            .find(|(account, _)| &account.id == id)
+            .map(|(account, _)| account)
     }
 
     pub fn credential(&self, id: &AccountId) -> Option<&Credential> {
-        self.credentials.get(id)
+        self.entries
+            .iter()
+            .find(|(account, _)| &account.id == id)
+            .map(|(_, credential)| credential)
     }
 
     /// The one place a label naming an account in an error has the full set to
     /// disambiguate against.
     pub fn label(&self, account: &Account) -> String {
-        identity::label(account, &self.accounts)
+        identity::label(account, &self.accounts().cloned().collect::<Vec<_>>())
     }
 
-    pub fn accounts(&self) -> &[Account] {
-        &self.accounts
+    pub fn accounts(&self) -> impl ExactSizeIterator<Item = &Account> + Clone {
+        self.entries.iter().map(|(account, _)| account)
     }
 }
 
@@ -414,8 +483,13 @@ mod tests {
     fn the_environment_outranks_the_vault() {
         let anthropic = Account::built_in("anthropic");
         let mut store = CredentialStore {
-            all: vec![anthropic.clone()],
-            environment: BTreeMap::from([(anthropic.id.clone(), "from-env".into())]),
+            entries: vec![AccountEntry {
+                account: anthropic.clone(),
+                auth: AccountAuth::Key {
+                    environment: Some("from-env".into()),
+                    vault: None,
+                },
+            }],
             ..CredentialStore::default()
         };
 
@@ -424,6 +498,7 @@ mod tests {
             api_key(store.get(&anthropic.id)).as_deref(),
             Some("from-env")
         );
+        assert_eq!(store.from_environment(&anthropic.id), Some("from-env"));
         assert_eq!(store.from_vault(&anthropic.id), Some("from-vault"));
 
         store.forget_key(&anthropic.id);
@@ -445,7 +520,7 @@ mod tests {
 
         store.forget_key(&house.id);
         assert!(store.get(&house.id).is_none());
-        assert_eq!(store.known(), [house]);
+        assert!(store.known().eq([&house]));
     }
 
     /// A server that checks no key is available as declared, and a vault
@@ -455,12 +530,38 @@ mod tests {
         let ollama = keyless("ollama");
         let mut store = CredentialStore::default();
         store.declare(ollama.clone());
+        store.save_key(&ollama.id, "ignored".into());
         store.read_vault(&StickyVault);
         assert_eq!(
             api_key(store.get(&ollama.id)).as_deref(),
             Some(NO_AUTH_PLACEHOLDER)
         );
         assert_eq!(store.from_vault(&ollama.id), None);
+    }
+
+    #[test]
+    fn retiring_and_redeclaring_an_account_drops_its_key() {
+        let account = Account::declared("house-llm");
+        let mut store = CredentialStore::default();
+        store.declare(account.clone());
+        store.save_key(&account.id, "saved".into());
+        store.declare(account.clone());
+        assert!(store.known().eq([&account]));
+        assert_eq!(store.from_vault(&account.id), Some("saved"));
+
+        let roster = store.roster();
+        assert!(roster.accounts().eq([&account]));
+        assert_eq!(roster.account(&account.id), Some(&account));
+        store.retire(&account.id);
+        assert_eq!(store.known().len(), 0);
+        assert_eq!(store.roster().accounts().len(), 0);
+        store.declare(account.clone());
+        assert!(store.get(&account.id).is_none());
+        assert!(store.from_vault(&account.id).is_none());
+        assert!(matches!(
+            roster.credential(&account.id),
+            Some(Credential::ApiKey(key)) if key == "saved"
+        ));
     }
 
     /// A vault answers for keys; even one claiming an entry for every account
@@ -481,8 +582,16 @@ mod tests {
         let anthropic = Account::built_in("anthropic");
         let llama = keyless("local-llama");
         let mut store = CredentialStore {
-            all: vec![anthropic.clone(), llama.clone()],
-            environment: BTreeMap::from([(anthropic.id.clone(), "key".into())]),
+            entries: vec![
+                AccountEntry {
+                    account: anthropic.clone(),
+                    auth: AccountAuth::Key {
+                        environment: Some("key".into()),
+                        vault: None,
+                    },
+                },
+                AccountEntry::declared(llama.clone()),
+            ],
             ..CredentialStore::default()
         };
 
@@ -518,7 +627,7 @@ mod tests {
         assert_eq!(refreshed.id, account.id);
         assert_eq!(store.available(), before, "a re-login adds no new account");
         assert_eq!(
-            cell.lock().unwrap().access_token,
+            cell.snapshot().access_token,
             "fresh-at",
             "the pre-existing cell (the one a live provider reads through) sees the refresh"
         );
@@ -531,13 +640,13 @@ mod tests {
         let mut store = CredentialStore::default();
 
         let old = store.add_oauth(&oauth_token("acc_1", None));
-        assert_eq!(store.all[0].handle, "acc_1");
+        assert_eq!(store.known().next().unwrap().handle, "acc_1");
 
         let new = store.add_oauth(&oauth_token("acc_1", Some("alex@work")));
 
         assert_eq!(new.id, old.id, "it is the same account throughout");
-        assert_eq!(store.all.len(), 1, "renamed, not duplicated");
-        assert_eq!(store.all[0].handle, "alex@work");
+        assert_eq!(store.known().len(), 1, "renamed, not duplicated");
+        assert_eq!(store.known().next().unwrap().handle, "alex@work");
     }
 
     /// A personal account and a workspace account can share one login email.
@@ -549,7 +658,8 @@ mod tests {
 
         let personal = store.add_oauth(&oauth_token("acc_personal", Some("alex@work")));
         assert_eq!(
-            store.all[0].handle, "alex@work",
+            store.known().next().unwrap().handle,
+            "alex@work",
             "alone, the email names it"
         );
 
@@ -558,7 +668,7 @@ mod tests {
             personal.id, team.id,
             "distinct accounts, distinct identities"
         );
-        assert_eq!(store.all.len(), 2, "neither shadows the other");
+        assert_eq!(store.known().len(), 2, "neither shadows the other");
 
         let cell = |id| match store.get(id) {
             Some(Credential::OAuth(cell)) => cell,
@@ -566,7 +676,7 @@ mod tests {
         };
         let (personal_cell, team_cell) = (cell(&personal.id), cell(&team.id));
         assert!(
-            !Arc::ptr_eq(&personal_cell, &team_cell),
+            !personal_cell.shares_owner(&team_cell),
             "each account authenticates through its own token cell"
         );
 
@@ -575,9 +685,9 @@ mod tests {
             access_token: "fresh-at".into(),
             ..oauth_token("acc_personal", Some("alex@work"))
         });
-        assert_eq!(personal_cell.lock().unwrap().access_token, "fresh-at");
+        assert_eq!(personal_cell.snapshot().access_token, "fresh-at");
         assert_eq!(
-            team_cell.lock().unwrap().access_token,
+            team_cell.snapshot().access_token,
             "at",
             "the sibling's token is untouched by the other's refresh"
         );
@@ -588,8 +698,16 @@ mod tests {
         let keyed = Account::built_in("anthropic");
         let declared = keyless("local-llama");
         let mut store = CredentialStore {
-            all: vec![keyed.clone(), declared.clone()],
-            environment: BTreeMap::from([(keyed.id.clone(), "key".into())]),
+            entries: vec![
+                AccountEntry {
+                    account: keyed.clone(),
+                    auth: AccountAuth::Key {
+                        environment: Some("key".into()),
+                        vault: None,
+                    },
+                },
+                AccountEntry::declared(declared.clone()),
+            ],
             ..CredentialStore::default()
         };
         let mut expected = vec![keyed.id];
@@ -622,7 +740,7 @@ mod tests {
             .collect();
         for (index, cell) in cells.iter().enumerate() {
             for other in &cells[index + 1..] {
-                assert!(!Arc::ptr_eq(cell, other));
+                assert!(!cell.shares_owner(other));
             }
         }
         let roster = store.roster();
@@ -639,23 +757,30 @@ mod tests {
         );
         for (index, cell) in cells.iter().enumerate() {
             assert_eq!(
-                cell.lock_ignore_poison().access_token,
+                cell.snapshot().access_token,
                 if index == 2 { "codex-refreshed" } else { "at" },
             );
             let Some(Credential::OAuth(snapshot)) = roster.credential(&expected[index + 1]) else {
                 panic!("the earlier roster retains its cell");
             };
-            assert!(Arc::ptr_eq(cell, snapshot));
+            assert!(cell.shares_owner(snapshot));
         }
 
         replacement.email = Some("aaa@work".into());
         store.add_oauth(&replacement);
-        assert_eq!(store.known()[3].id, expected[3]);
+        assert_eq!(store.known().nth(3).unwrap().id, expected[3]);
         replacement.email = Some("zzz@work".into());
         store.add_oauth(&replacement);
-        assert_eq!(store.known()[4].id, expected[3]);
+        assert_eq!(store.known().nth(4).unwrap().id, expected[3]);
         store.retire(&expected[3]);
-        assert_eq!(store.logins.len(), 5);
+        assert_eq!(
+            store
+                .entries
+                .iter()
+                .filter(|entry| matches!(entry.auth, AccountAuth::OAuth(_)))
+                .count(),
+            5
+        );
         for id in expected[1..7].iter().filter(|id| **id != expected[3]) {
             assert!(matches!(store.get(id), Some(Credential::OAuth(_))));
         }

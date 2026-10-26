@@ -53,7 +53,6 @@ pub fn entries(store: &CredentialStore) -> Vec<Entry> {
     let available = store.available();
     store
         .known()
-        .iter()
         .map(|account| entry(store, account, &available))
         .collect()
 }
@@ -112,7 +111,6 @@ fn tail(key: &str) -> String {
 pub fn declared_endpoints(store: &CredentialStore) -> Vec<Service> {
     store
         .known()
-        .iter()
         .filter(|account| identity::built_in(&account.service.name).is_none())
         .map(|account| account.service.clone())
         .collect()
@@ -157,8 +155,8 @@ pub fn declare_endpoint(
 
 /// Whether `name` is already spoken for — by the built-in table or by an
 /// account already known under it — and so refused to a fresh declaration.
-fn taken(known: &[Account], name: &ServiceName) -> bool {
-    identity::built_in(name).is_some() || known.iter().any(|account| &account.service.name == name)
+fn taken<'a>(mut known: impl Iterator<Item = &'a Account>, name: &ServiceName) -> bool {
+    identity::built_in(name).is_some() || known.any(|account| &account.service.name == name)
 }
 
 /// `endpoint`, trimmed and required to name a scheme, with the trailing
@@ -235,9 +233,8 @@ pub fn find(store: &CredentialStore, id: &str) -> Result<Account, String> {
     find_in(store.known(), id)
 }
 
-fn find_in(known: &[Account], id: &str) -> Result<Account, String> {
+fn find_in<'a>(mut known: impl Iterator<Item = &'a Account>, id: &str) -> Result<Account, String> {
     known
-        .iter()
         .find(|account| account.id.as_str() == id)
         .cloned()
         .ok_or_else(|| format!("no account '{id}' is known on this computer"))
@@ -250,7 +247,7 @@ mod tests {
     #[test]
     fn a_built_in_name_is_already_taken() {
         let anthropic = ServiceName::declared("anthropic").unwrap();
-        assert!(taken(&[], &anthropic));
+        assert!(taken(std::iter::empty(), &anthropic));
     }
 
     #[test]
@@ -258,7 +255,7 @@ mod tests {
         let store = CredentialStore::default();
         for login in identity::Login::ALL {
             let service = login.service();
-            assert!(taken(&[], &service.name));
+            assert!(taken(std::iter::empty(), &service.name));
             let error = declare_endpoint(
                 &store,
                 service.name.as_str(),
@@ -289,9 +286,9 @@ mod tests {
     #[test]
     fn a_declared_name_is_taken_only_once_declared() {
         let house = ServiceName::declared("house-llm").unwrap();
-        assert!(!taken(&[], &house));
+        assert!(!taken(std::iter::empty(), &house));
         assert!(taken(
-            std::slice::from_ref(&Account::declared("house-llm")),
+            std::iter::once(&Account::declared("house-llm")),
             &house
         ));
     }
@@ -330,9 +327,9 @@ mod tests {
     #[test]
     fn find_in_resolves_by_id_rendering_alone() {
         let house = Account::declared("house-llm");
-        let found = find_in(std::slice::from_ref(&house), "house-llm").unwrap();
+        let found = find_in(std::iter::once(&house), "house-llm").unwrap();
         assert_eq!(found.id, house.id);
-        let err = find_in(std::slice::from_ref(&house), "missing").unwrap_err();
+        let err = find_in(std::iter::once(&house), "missing").unwrap_err();
         assert!(err.contains("missing"), "{err}");
     }
 

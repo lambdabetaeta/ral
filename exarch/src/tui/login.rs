@@ -487,11 +487,13 @@ pub(super) fn input(
     }
 }
 
-/// Make the token `login_flow` already persisted live in this session's
-/// credential store and catalog. No provider swap: an account names no model
-/// of its own, so the user picks one through `/model`; and a re-login upserts
-/// the very cell the focused tab already reads through.
-fn apply_login(app: &mut App, ctx: &CommandCtx<'_>, token: &OAuthToken, replaced: bool) {
+/// Attach the committed owner; a delayed UI job cannot restore an old token.
+fn apply_login(
+    app: &mut App,
+    ctx: &CommandCtx<'_>,
+    token: &oauth::CredentialHandle,
+    replaced: bool,
+) {
     let admitted = ctx.bureau.admit(token);
     let (id, label) = match admitted {
         Ok(admitted) => admitted,

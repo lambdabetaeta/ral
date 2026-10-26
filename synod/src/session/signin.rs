@@ -87,7 +87,7 @@ pub fn sign_in(
         |phase| on_phase(SignInStep::from(phase)),
         cancel,
     )?;
-    let (_, label) = provider::admit_login(holdings, &token);
+    let (_, label) = provider::admit_login(holdings, &token)?;
     Ok(SignedIn { label, replaced })
 }
 

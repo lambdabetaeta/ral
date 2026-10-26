@@ -1,8 +1,8 @@
 //! `OpenAI`'s devday token-sharing protocol, retaining its issued-client flow.
 
 use super::{
-    Grant, LoginPhase, OAuthToken, RefreshResponse, Revocation, SignIn, json_or_error, jwt_payload,
-    loopback, refresh_failure, revoke_at,
+    Grant, LoginPhase, OAuthToken, RefreshResponse, RefreshUpdate, Revocation, SignIn,
+    json_or_error, jwt_payload, loopback, refresh_failure, revoke_at,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -211,15 +211,14 @@ fn finalize(granted: Granted) -> Result<OAuthToken, String> {
 pub(super) async fn refresh(
     client: &reqwest::Client,
     current: &OAuthToken,
-) -> Result<OAuthToken, String> {
-    let Grant::Chatgpt { client_id, .. } = &current.grant else {
-        return Err("this account does not use the ChatGPT token-sharing flow".to_string());
-    };
+    client_id: &str,
+    id_token: &str,
+) -> Result<RefreshUpdate<String>, String> {
     let resp = client
         .post(TOKEN_URL)
         .form(&[
             ("grant_type", "refresh_token"),
-            ("client_id", client_id.as_str()),
+            ("client_id", client_id),
             ("refresh_token", current.refresh_token.as_str()),
             ("resource", RESOURCE),
         ])
@@ -235,43 +234,28 @@ pub(super) async fn refresh(
         .json()
         .await
         .map_err(|e| format!("could not parse token refresh response: {e}"))?;
-    Ok(renewed(current, resp))
+    Ok(renewed(current, id_token, resp))
 }
 
-/// A refresh may rename the account but never changes its subject or client.
-fn renewed(current: &OAuthToken, resp: RefreshResponse) -> OAuthToken {
+fn renewed(current: &OAuthToken, id_token: &str, resp: RefreshResponse) -> RefreshUpdate<String> {
     let email = resp
         .id_token
         .as_deref()
         .and_then(|jwt| jwt_payload::<IdClaims>(jwt).ok())
         .and_then(|claims| claims.email)
         .or_else(|| current.email.clone());
-    let grant = match &current.grant {
-        Grant::Chatgpt {
-            id_token,
-            client_id,
-        } => Grant::Chatgpt {
-            id_token: resp.id_token.unwrap_or_else(|| id_token.clone()),
-            client_id: client_id.clone(),
-        },
-        Grant::Codex { .. } | Grant::Grok => current.grant.clone(),
-    };
-    OAuthToken {
+    RefreshUpdate {
         access_token: resp.access_token,
         refresh_token: resp
             .refresh_token
             .unwrap_or_else(|| current.refresh_token.clone()),
-        issued: current.issued.clone(),
         email,
         expires_at: crate::app::now_secs() + resp.expires_in.unwrap_or(3600),
-        grant,
+        metadata: resp.id_token.unwrap_or_else(|| id_token.to_string()),
     }
 }
 
-pub(super) async fn revoke(token: &OAuthToken) -> Result<Revocation, String> {
-    let Grant::Chatgpt { client_id, .. } = &token.grant else {
-        return Err("this account does not use the ChatGPT token-sharing flow".to_string());
-    };
+pub(super) async fn revoke(token: &OAuthToken, client_id: &str) -> Result<Revocation, String> {
     revoke_at(DISCOVERY_URL, token, client_id).await
 }
 
@@ -316,28 +300,21 @@ mod tests {
     }
 
     #[test]
-    fn a_refresh_renames_but_never_rekeys_the_account() {
+    fn a_refresh_updates_the_name_and_id_token() {
         let current = token();
         let id_token = fake_id_token(&json!({"sub": "other", "email": "new@work"}));
-        let fresh = renewed(&current, response(Some(&id_token), None));
-        assert_eq!(fresh.issued, "acct-1");
+        let fresh = renewed(&current, "retained-id", response(Some(&id_token), None));
         assert_eq!(fresh.email.as_deref(), Some("new@work"));
         assert_eq!(fresh.refresh_token, "rt");
-        assert_eq!(
-            fresh.grant,
-            Grant::Chatgpt {
-                id_token,
-                client_id: "oaiapp_test".into()
-            }
-        );
+        assert_eq!(fresh.metadata, id_token);
     }
 
     #[test]
     fn a_refresh_without_claims_keeps_the_name_and_id_token() {
         let current = token();
-        let fresh = renewed(&current, response(None, Some("fresh-rt")));
+        let fresh = renewed(&current, "retained-id", response(None, Some("fresh-rt")));
         assert_eq!(fresh.email, current.email);
-        assert_eq!(fresh.grant, current.grant);
+        assert_eq!(fresh.metadata, "retained-id");
         assert_eq!(fresh.refresh_token, "fresh-rt");
     }
 

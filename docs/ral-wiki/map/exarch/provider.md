@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 52452c4185168dff9be4a03cc1d61d445c622342
+generated_at_commit: 24aab6a4
 generated_at_date: 2026-10-26
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs, exarch/src/tui/login.rs, exarch/src/tui/providers.rs, exarch/src/tui/commands.rs]
 ---
@@ -63,22 +63,21 @@ or `Keyless` — and never the secret itself. A declared endpoint's `var` is
 `identity::key_var`'s `{NAME}_API_KEY`, never written in the declaration;
 `Keyless` is the declaration's `` key: `none ``, a fact about the server.
 
-**Every map keys on an `AccountId`.** Accounts are owned once, in
-`CredentialStore::all: Vec<Account>`; the store's `environment`, `vault` and
-`logins` layers, the model catalog's memo and its disk cache, the listing's
-states and in-flight fetches, the transport cache's key, and the picker's
-model states are all keyed by id. The credential in force is derived from the
-layers, never stored beside them: a key is the environment's, else the
-vault's; a login is its token cell; a keyless endpoint is the inert bearer.
-`available()` is every account with one, so no view holds a copy that can go
-stale.
+**An account and its authentication have one home.** `CredentialStore` owns
+ordered `AccountEntry` values, each holding an account and `AccountAuth`: a
+key's environment/vault layers, an OAuth `CredentialHandle`, or keyless access.
+A key resolves to the environment's, else the vault's; a retired login is
+unavailable. `available()` derives the usable accounts; `known()` borrows all
+of them. `Roster` snapshots bound account/credential pairs, retaining shared
+OAuth owners, and exposes accounts by borrowed iteration. The model catalog,
+listing, transport cache and picker name accounts by `AccountId`.
 
 ### A handle is local; a label is set-relative
 
 An `Account::handle` is derived from that account's own credential alone: the
 email, else the issued identity; Codex qualifies it with workspace or plan.
 For a key-bearing service it is simply the service's name. Admission needs
-no set; refresh updates only that credential cell. `exarch logout` removes
+no set; refresh updates only that credential owner. `exarch logout` removes
 the local record and attempts issuer revocation for Chatgpt/Grok. Codex
 returns `Revocation::LocalOnly`; its refresh credential may remain usable.
 Issuer acceptance does not promise immediate access-token invalidation.
@@ -207,6 +206,39 @@ structurally undecodable required fields make the whole store unreadable.
 Queries do not rewrite it; successful writes omit rejected entries. Upserts
 compare the full account id, never bare issued identity across services.
 
+### Credential rotation
+
+`oauth/session.rs` owns one canonical `CredentialHandle` per store/account and
+one process-lived refresh executor. Exarch and Synod share Exarch's `oauth.json`;
+product-specific vaults, configuration, logs and model caches remain separate.
+
+- `StoreLease` combines an asynchronous process gate with a stable `oauth.lock`
+  file. Refresh, read-and-attach, login commit, host-id creation and removal all
+  use it. The predecessor is reread under the lease, which spans issuer exchange
+  and commit. Only the lease can attach, publish or retire an owner.
+- `State` separates pending subscribers from `CredentialState`: ready or
+  uncertain credentials, an unsaved predecessor/successor pair, or a retired
+  credential. Exhaustive, pure reconciliation retains unresolved outcomes while
+  disk still names their predecessor and adopts a changed credential otherwise.
+  Login and removal publish before returning; `login_flow` returns the committed
+  handle, not a token for delayed admission to overwrite.
+- Retirement refuses preparation while disk lacks the account. A login committed
+  by another process revives the same canonical owner at the next preparation
+  or credential load; a pre-removal snapshot cannot recreate it.
+- A caller may cancel its wait; the owner retains a submitted exchange through
+  persistence. Lock acquisition and issuer work share a 30-second deadline.
+  Snapshots take only a short mutex, never a network or file-lock wait.
+- Within the owning process, an ambiguous exchange is not replayed. A failed
+  write retains the fresh live token and its disk predecessor; a later
+  preparation can retry that exact write. A changed or removed disk account wins.
+  Uncertain and unsaved outcomes are process-local: a peer can still read the
+  persisted predecessor after the lease is released. Signing in again may be
+  necessary after ambiguity, failed persistence or process death; rotation is
+  not crash-atomic with the issuer.
+- Shared recovery names an escaped service-qualified account, not a product
+  command. `Transport::prepare` returns `BeforeRequest` cancellation or terminal
+  `Other` failure; refresh does not spend the model retry budget or invent usage.
+
 ### The sign-in
 
 `Login::{Chatgpt, Codex, Grok}` determines service and supported `Method`:
@@ -216,6 +248,10 @@ adds an account; `SignIn::Renew(token, method)` refuses a different identity.
 use nonempty subject as issued identity; Codex uses the injective
 `base64url(sub):base64url(chatgpt_account_id)` composite, retaining the raw
 backend id separately for headers. Naming metadata does not participate in keys.
+Issuer refresh functions return `RefreshUpdate<M>` with typed naming/token
+metadata. The dispatcher matches the grant once and preserves issued identity,
+Chatgpt client id and Codex backend id when applying the update. The flat disk
+schema remains separate so semantic errors reject only the affected entry.
 
 Chatgpt preserves dynamic registration, host id, issued client, nonce, scope
 and ID-token-hint behavior. Codex reuses the Codex CLI public client and
@@ -342,12 +378,13 @@ genai `Client`:
   hitting `localhost`.
 - An **OAuth** login branches to `build_oauth_client`, using its service's
   adapter (`OpenAIResp` for Chatgpt/Codex, `Xai` for Grok). The resolver reads
-  `OAuthToken::auth_data` live from the shared cell. Chatgpt/Grok supply the
+  `OAuthToken::auth_data` from the shared owner's current snapshot. Chatgpt/Grok supply the
   bearer; Codex supplies a backend Responses URL override and
   `request_headers`, including the raw backend account id, beta, originator
   and user-agent headers. Other grants never receive Codex headers.
-  `refresh_cell_if_stale` is shared by inference and catalogs, dispatching
-  refresh by grant and upserting just that full account id. Issued identity,
+  `CredentialHandle::prepare` is shared by inference, catalogs and Codex allowance
+  reads. Each inference attempt prepares after its retry wait, before manufacturing
+  the request; preparation failure sends no model request. Issued identity,
   Chatgpt client id and Codex raw backend id stay pinned; naming metadata may change.
 
 ## One owner for construction
@@ -439,12 +476,13 @@ disk-caches both paths:
   `ModelChanged`), so a tab's fold reads it without a catalog. The status line
   draws an unknown window as `?`.
 - `/login` admits an account mid-session through `provider::admit_login`,
-  which runs `CredentialStore::add_oauth` inside `Holdings::change`: every
+  which runs `CredentialStore::add_login` inside `Holdings::change`: every
   change to the store goes through that one route, which hands the catalog the
   store's fresh `Roster` (`ModelCatalog::set_roster`), so a key saved, a key
   forgotten and an endpoint withdrawn reach the listing as a login does.
-  Re-login updates the cell in place; a login that has since learnt its email
-  is renamed where it stands, its identity being the account id throughout.
+  Re-login commits to the shared owner before admission; attaching that owner
+  cannot restore an earlier token. A login that has learnt its email is renamed
+  where it stands, its identity being the account id throughout.
 - OpenRouter serving endpoints remain a separate request per model; the
   `/model` overlay makes it for whichever OpenRouter model is highlighted, and
   `Bureau::build` for a model minted with a via. `ProviderEndpoint::tag` keeps

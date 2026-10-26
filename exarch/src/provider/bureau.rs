@@ -70,6 +70,21 @@ impl Holdings {
         Ok(fetched)
     }
 
+    /// Blocking store work belongs on a frontend's background job boundary.
+    pub(crate) fn sign_out(&self, id: &str) -> Result<oauth::OAuthToken, String> {
+        let (account, label) = {
+            let store = self.store.lock_ignore_poison();
+            let account = super::accounts::find(&store, id)?;
+            let label = super::identity::label(&account, &store.available());
+            drop(store);
+            (account, label)
+        };
+        let token = oauth::sign_out(account.id.as_str())?
+            .ok_or_else(|| format!("{label} is not signed in"))?;
+        self.change(|store| store.retire_login(&account.id));
+        Ok(token)
+    }
+
     /// Change the credentials, and have the catalog list with them as they
     /// now stand.
     pub fn change<R>(&self, f: impl FnOnce(&mut CredentialStore) -> R) -> R {
@@ -241,11 +256,14 @@ impl Bureau {
     ///
     /// # Errors
     /// If the bureau is scripted, which has no store to admit into.
-    pub fn admit(&self, token: &oauth::OAuthToken) -> Result<(super::AccountId, String), String> {
+    pub fn admit(
+        &self,
+        token: &oauth::CredentialHandle,
+    ) -> Result<(super::AccountId, String), String> {
         let Self::Live { holdings, .. } = self else {
             return Err(mints_nothing());
         };
-        Ok(super::admit_login(holdings, token))
+        super::admit_login(holdings, token)
     }
 
     /// Sign out of the login named `id`: delete its stored token and
@@ -258,14 +276,7 @@ impl Bureau {
         let Self::Live { holdings, .. } = self else {
             return Err(mints_nothing());
         };
-        holdings.change(|store| {
-            let account = super::accounts::find(store, id)?;
-            let label = super::identity::label(&account, &store.available());
-            let token = oauth::sign_out(account.id.as_str())?
-                .ok_or_else(|| format!("{label} is not signed in"))?;
-            store.retire(&account.id);
-            Ok(token)
-        })
+        holdings.sign_out(id)
     }
 
     /// The shared credentials and catalog; `None` when the bureau is scripted

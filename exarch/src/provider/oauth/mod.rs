@@ -7,6 +7,8 @@ mod chatgpt;
 pub(super) mod codex;
 mod grok;
 mod loopback;
+mod session;
+pub use session::CredentialHandle;
 
 use crate::provider::error::body_detail;
 use crate::provider::identity::{self, Account, AccountId, Login};
@@ -15,7 +17,6 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ral_core::own::{OwnDir, OwnError};
 use ral_core::path::{Visibility, XdgKind};
-use ral_core::sync::LockExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -239,34 +240,38 @@ pub fn login_flow(
     sign_in: &SignIn,
     on_phase: impl Fn(LoginPhase),
     cancel: &Arc<AtomicBool>,
-) -> Result<(OAuthToken, bool), String> {
+) -> Result<(CredentialHandle, bool), String> {
     validate_method(sign_in.login(), sign_in.method())?;
     cancelled(cancel)?;
     let rt = runtime()?;
     let client = http_client()?;
-    let token = rt.block_on(async {
-        match (sign_in.login(), sign_in.method()) {
-            (Login::Chatgpt, Method::Browser) => {
-                let host = host_id()?;
-                chatgpt::sign_in(&client, &host, sign_in, on_phase, cancel).await
-            }
-            (Login::Codex, Method::Browser) => {
-                codex::browser(&client, sign_in, on_phase, cancel).await
-            }
-            (Login::Codex, Method::Device) => {
-                codex::device(&client, sign_in, on_phase, cancel).await
-            }
-            (Login::Grok, Method::Device) => grok::device(&client, sign_in, on_phase, cancel).await,
-            (Login::Chatgpt, Method::Device) | (Login::Grok, Method::Browser) => {
-                unreachable!("unsupported methods were rejected before runtime construction")
-            }
+    let token = match (sign_in.login(), sign_in.method()) {
+        (Login::Chatgpt, Method::Browser) => {
+            let host = host_id()?;
+            rt.block_on(chatgpt::sign_in(&client, &host, sign_in, on_phase, cancel))
         }
-    })?;
+        (Login::Codex, Method::Browser) => {
+            rt.block_on(codex::browser(&client, sign_in, on_phase, cancel))
+        }
+        (Login::Codex, Method::Device) => {
+            rt.block_on(codex::device(&client, sign_in, on_phase, cancel))
+        }
+        (Login::Grok, Method::Device) => {
+            rt.block_on(grok::device(&client, sign_in, on_phase, cancel))
+        }
+        (Login::Chatgpt, Method::Device) | (Login::Grok, Method::Browser) => {
+            unreachable!("unsupported methods were rejected before runtime construction")
+        }
+    }?;
     // HTTP exchange does not poll the flag. A late cancellation must not save.
     cancelled(cancel)?;
     check_renewal(sign_in, &token)?;
-    let replaced = save_one(&token)?;
-    Ok((token, replaced))
+    let state = state()?;
+    let cancel = Arc::clone(cancel);
+    session::transaction(&state, move |lease| {
+        cancelled(&cancel)?;
+        lease.commit_login(&token)
+    })
 }
 
 /// CLI sign-in, with a service-scoped optional renewal target.
@@ -298,7 +303,7 @@ pub fn login(service: Login, account: Option<String>, device: bool) -> Result<()
     } else {
         "Signed in to"
     };
-    let named = identity::label(&to_account(&token), &accounts());
+    let named = identity::label(&to_account(&token.snapshot()), &accounts());
     ral_core::errln!("{verb} {named}.");
     Ok(())
 }
@@ -398,7 +403,7 @@ pub(crate) fn revoke_blocking(token: &OAuthToken) -> Result<Revocation, String> 
 
 async fn revoke(token: &OAuthToken) -> Result<Revocation, String> {
     match &token.grant {
-        Grant::Chatgpt { .. } => chatgpt::revoke(token).await,
+        Grant::Chatgpt { client_id, .. } => chatgpt::revoke(token, client_id).await,
         Grant::Codex { .. } => Ok(Revocation::LocalOnly),
         Grant::Grok => grok::revoke(token).await,
     }
@@ -434,16 +439,31 @@ pub fn accounts() -> Vec<Account> {
     load_all().iter().map(to_account).collect()
 }
 
-/// Upsert by full account identity; used by flows, refresh and integration tests.
+/// Seed an isolated credential fixture.
 ///
 /// # Errors
-/// Returns an error if reading or replacing the secret token store fails.
+/// Reading or replacing the store failed.
+#[cfg(any(test, feature = "test-util"))]
 pub fn save_one(token: &OAuthToken) -> Result<bool, String> {
     save_one_at(&state()?, token)
 }
 
-// Each load-modify-write holds this process-local lock. Queries remain lock-free.
-static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Current persisted accounts, attached to their canonical live owners.
+pub fn credentials() -> Vec<CredentialHandle> {
+    let Ok(state) = state() else {
+        return Vec::new();
+    };
+    session::transaction(&state, session::StoreLease::credentials).unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) fn commit_for_test(state: &OwnDir, token: &OAuthToken) -> CredentialHandle {
+    let token = token.clone();
+    session::transaction(state, move |lease| {
+        lease.commit_login(&token).map(|(handle, _)| handle)
+    })
+    .unwrap()
+}
 
 #[derive(Serialize, Deserialize, Default)]
 struct Store {
@@ -588,31 +608,16 @@ fn load_all_at(state: &OwnDir) -> Vec<OAuthToken> {
     read_at(state).map_or_else(|_| Vec::new(), |(_, tokens)| tokens)
 }
 
+#[cfg(any(test, feature = "test-util"))]
 fn save_one_at(state: &OwnDir, token: &OAuthToken) -> Result<bool, String> {
-    let _guard = STORE_LOCK.lock_ignore_poison();
-    let (host, mut all) = read_at(state)?;
-    let id = account_id(token);
-    let replaced =
-        if let Some(existing) = all.iter_mut().find(|existing| account_id(existing) == id) {
-            *existing = token.clone();
-            true
-        } else {
-            all.push(token.clone());
-            false
-        };
-    write_all_at(state, host.as_deref(), &all)?;
-    Ok(replaced)
+    let token = token.clone();
+    session::transaction(state, move |lease| {
+        lease.commit_login(&token).map(|(_, replaced)| replaced)
+    })
 }
 
 fn host_id_at(state: &OwnDir) -> Result<String, String> {
-    let _guard = STORE_LOCK.lock_ignore_poison();
-    let (host, all) = read_at(state)?;
-    if let Some(host) = host {
-        return Ok(host);
-    }
-    let host = uuid::Uuid::new_v4().urn().to_string();
-    write_all_at(state, Some(&host), &all)?;
-    Ok(host)
+    session::transaction(state, session::StoreLease::host_id)
 }
 
 /// `ChatGPT` registration's host identity. Other flows never need to mint it.
@@ -646,26 +651,8 @@ fn matching_indices(tokens: &[OAuthToken], account: &str, login: Option<Login>) 
 }
 
 fn remove_at(state: &OwnDir, account: &str) -> Result<Option<OAuthToken>, String> {
-    let _guard = STORE_LOCK.lock_ignore_poison();
-    let (host, mut all) = read_at(state)?;
-    let matched = matching_indices(&all, account, None);
-    let [pos] = matched[..] else {
-        if matched.is_empty() {
-            return Ok(None);
-        }
-        return Err(ambiguous(
-            account,
-            "log out",
-            &matched.iter().map(|&i| &all[i]).collect::<Vec<_>>(),
-        ));
-    };
-    let removed = all.remove(pos);
-    if all.is_empty() {
-        clear_at(state)?;
-    } else {
-        write_all_at(state, host.as_deref(), &all)?;
-    }
-    Ok(Some(removed))
+    let account = account.to_string();
+    session::transaction(state, move |lease| lease.remove(&account))
 }
 
 fn ambiguous(account: &str, action: &str, among: &[&OAuthToken]) -> String {
@@ -695,17 +682,10 @@ fn write_all_at(state: &OwnDir, host: Option<&str>, all: &[OAuthToken]) -> Resul
     Ok(state.store(TOKEN_FILE, &store, Visibility::Secret)?)
 }
 
-fn clear_at(state: &OwnDir) -> Result<(), String> {
-    Ok(state.remove(TOKEN_FILE)?)
-}
-
 /// Read and successfully delete under the same lock before returning a
 /// revocation snapshot. Unreadable stores are not silently removed.
 fn clear_all_at(state: &OwnDir) -> Result<Vec<OAuthToken>, String> {
-    let _guard = STORE_LOCK.lock_ignore_poison();
-    let (_, tokens) = read_at(state)?;
-    clear_at(state)?;
-    Ok(tokens)
+    session::transaction(state, session::StoreLease::clear)
 }
 
 fn state() -> Result<OwnDir, OwnError> {
@@ -721,12 +701,56 @@ pub(super) struct RefreshResponse {
     pub expires_in: Option<u64>,
 }
 
-pub(crate) async fn refresh(current: &OAuthToken) -> Result<OAuthToken, String> {
+#[derive(Debug)]
+struct RefreshUpdate<M> {
+    access_token: String,
+    refresh_token: String,
+    expires_at: u64,
+    email: Option<String>,
+    metadata: M,
+}
+
+impl<M> RefreshUpdate<M> {
+    fn finish(self, current: &OAuthToken, grant: impl FnOnce(M) -> Grant) -> OAuthToken {
+        OAuthToken {
+            access_token: self.access_token,
+            refresh_token: self.refresh_token,
+            expires_at: self.expires_at,
+            email: self.email,
+            issued: current.issued.clone(),
+            grant: grant(self.metadata),
+        }
+    }
+}
+
+async fn refresh(current: &OAuthToken) -> Result<OAuthToken, String> {
     let client = http_client()?;
     match &current.grant {
-        Grant::Chatgpt { .. } => chatgpt::refresh(&client, current).await,
-        Grant::Codex { .. } => codex::refresh(&client, current).await,
-        Grant::Grok => grok::refresh(&client, current).await,
+        Grant::Chatgpt {
+            client_id,
+            id_token,
+        } => chatgpt::refresh(&client, current, client_id, id_token)
+            .await
+            .map(|update| {
+                update.finish(current, |id_token| Grant::Chatgpt {
+                    client_id: client_id.clone(),
+                    id_token,
+                })
+            }),
+        Grant::Codex {
+            account_id,
+            workspace,
+            plan,
+        } => codex::refresh(&client, current).await.map(|update| {
+            update.finish(current, |claims| Grant::Codex {
+                account_id: account_id.clone(),
+                workspace: claims.workspace.or_else(|| workspace.clone()),
+                plan: claims.plan.or_else(|| plan.clone()),
+            })
+        }),
+        Grant::Grok => grok::refresh(&client, current)
+            .await
+            .map(|update| update.finish(current, |()| Grant::Grok)),
     }
 }
 
@@ -783,6 +807,27 @@ pub(super) fn refresh_failure(
     body: &str,
     current: &OAuthToken,
 ) -> String {
+    let mut redacted = serde_json::from_str::<serde_json::Value>(body)
+        .map_or_else(|_| body.to_string(), |value| value.to_string());
+    let id_token = match &current.grant {
+        Grant::Chatgpt { id_token, .. } => Some(id_token.as_str()),
+        Grant::Codex { .. } | Grant::Grok => None,
+    };
+    for secret in [
+        Some(current.access_token.as_str()),
+        Some(current.refresh_token.as_str()),
+        id_token,
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|secret| !secret.is_empty())
+    {
+        let quoted = serde_json::to_string(secret).expect("string JSON");
+        redacted = redacted
+            .replace(&quoted[1..quoted.len() - 1], "[redacted]")
+            .replace(secret, "[redacted]");
+    }
+    let body = redacted.as_str();
     let json: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
     let code = [
         json.get("error").filter(|e| e.is_string()),
@@ -794,7 +839,7 @@ pub(super) fn refresh_failure(
     .flatten()
     .find_map(|code| code.as_str());
     let service = current.login().service().name;
-    let handle = current.handle();
+    let handle = format!("{:?}", current.handle());
     if status == reqwest::StatusCode::UNAUTHORIZED
         || code.is_some_and(|code| DEAD_REFRESH_CODES.contains(&code))
     {
@@ -812,42 +857,11 @@ pub(super) fn refresh_failure(
 }
 
 fn renewal_hint(token: &OAuthToken) -> String {
-    let service = token.login().service().name;
-    let id = account_id(token);
-    if id
-        .as_str()
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || b"_.:@+-".contains(&byte))
-    {
-        format!("run `exarch login {service} {id}`")
-    } else {
-        format!(
-            "run `exarch login {service} <account-id>` with account id {:?}",
-            id.as_str()
-        )
-    }
-}
-
-/// No lock is held over HTTP; a fresh live credential survives disk failure.
-pub(crate) async fn refresh_cell_if_stale(
-    cell: &Arc<std::sync::Mutex<OAuthToken>>,
-) -> Result<(), String> {
-    let current = {
-        let token = cell.lock_ignore_poison();
-        if !token.is_stale() {
-            return Ok(());
-        }
-        token.clone()
-    };
-    let fresh = refresh(&current).await.map_err(|error| {
-        format!(
-            "{} token refresh failed: {error}",
-            current.login().service().name
-        )
-    })?;
-    let _ = save_one(&fresh);
-    *cell.lock_ignore_poison() = fresh;
-    Ok(())
+    format!(
+        "use account {:?} on {}",
+        account_id(token).as_str(),
+        token.login().service().name
+    )
 }
 
 pub(super) fn http_client() -> Result<reqwest::Client, String> {
@@ -1323,56 +1337,23 @@ mod tests {
     }
 
     #[test]
-    fn revoked_refresh_hints_are_service_qualified_and_shell_safe() {
-        for login in Login::ALL {
-            let current = token(login, "ordinary-id", Some("same@work"));
-            for body in [
-                r#"{"error":"invalid_grant"}"#,
-                r#"{"error":{"code":"refresh_token_reused"}}"#,
-                r#"{"error_code":"token_expired"}"#,
-                r#"{"code":"invalid_refresh_token"}"#,
-            ] {
-                let error = refresh_failure(reqwest::StatusCode::BAD_REQUEST, body, &current);
-                assert!(
-                    error.contains("same@work") && error.contains(login.service().name.as_str())
-                );
-                assert!(
-                    error.contains(&format!(
-                        "exarch login {} {}",
-                        login.service().name,
-                        account_id(&current)
-                    )),
-                    "{error}"
-                );
+    fn refresh_diagnostics_do_not_echo_credential_fields() {
+        let mut current = token(Login::Chatgpt, "subject", Some("name\nnext line"));
+        current.access_token = "access-secret".into();
+        current.refresh_token = "refresh-secret".into();
+        current.grant = Grant::Chatgpt {
+            id_token: "id-secret".into(),
+            client_id: "client".into(),
+        };
+        for body in [
+            r#"{"error":"access-secret refresh-secret id-secret"}"#,
+            r#"{"error":"\u0061ccess-secret refresh-secret id-secret"}"#,
+        ] {
+            let error = refresh_failure(reqwest::StatusCode::SERVICE_UNAVAILABLE, body, &current);
+            for secret in ["access-secret", "refresh-secret", "id-secret"] {
+                assert!(!error.contains(secret));
             }
-            let error = refresh_failure(reqwest::StatusCode::UNAUTHORIZED, "", &current);
-            assert!(error.contains("unauthorized"));
-            let unsafe_id = token(login, "$(touch /tmp/unsafe)\n'", None);
-            let error = refresh_failure(reqwest::StatusCode::UNAUTHORIZED, "", &unsafe_id);
-            assert!(error.contains(&format!(
-                "exarch login {} <account-id>",
-                login.service().name
-            )));
-            assert!(!error.contains(&format!(
-                "`exarch login {} {}`",
-                login.service().name,
-                account_id(&unsafe_id)
-            )));
-            assert!(error.contains("\\n"), "id is escaped separately: {error}");
-        }
-    }
-
-    #[test]
-    fn transient_refresh_errors_keep_status_body_service_and_handle() {
-        for login in Login::ALL {
-            let error = refresh_failure(
-                reqwest::StatusCode::SERVICE_UNAVAILABLE,
-                r#"{"error":{"message":"try later"}}"#,
-                &token(login, "subject", Some("same@work")),
-            );
-            assert!(error.contains("503") && error.contains("try later"));
-            assert!(error.contains(login.service().name.as_str()) && error.contains("same@work"));
-            assert!(!error.contains("exarch login"));
+            assert!(!error.contains('\n'));
         }
     }
 

@@ -108,10 +108,11 @@ impl Wallet {
             self.keychain.store(account.id.as_str(), key)?;
         }
         holdings.change(|store| {
-            if let Some(key) = typed {
-                store.save_key(&account.id, key);
-            }
+            let id = account.id.clone();
             store.declare(account);
+            if let Some(key) = typed {
+                store.save_key(&id, key);
+            }
         });
         Ok(())
     }

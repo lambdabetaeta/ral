@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 0091b8f01d7d592e6efffcefe0fa01c0b4c7eb7e
+generated_at_commit: 24aab6a4
 generated_at_date: 2026-10-26
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/record/session.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/boot.rs, exarch/src/agent/seat.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
 ---
@@ -537,8 +537,10 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
   `Wallet`, so each change is persisted and live at once. Overlay `Input`s carry
   `Paste` and `Save` (Ctrl-S) for it; the other overlays ignore both. Sign-in
   swaps in the `/login` overlay, which reopens this one when it closes; sign-out is
-  local at once (`Bureau::sign_out`), and the issuer's revocation runs on its
-  own thread, its outcome landing in the status line as a `Job` that applies
+  a background store transaction (`Holdings::sign_out`), never a file-lock wait
+  in a frame or under the holdings locks. Committed retirement updates the table
+  through a `Job`; issuer revocation follows outside the transaction. Its outcome
+  lands in the status line as a `Job` that applies
   only while the overlay that spawned it is still the one open
   (`App::overlay_gen`, bumped by every `App::open`).
 - `/model`, `/login`, `/providers` and `/rewind` are framed by
@@ -548,7 +550,8 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
   one list. The anchor is centred for the first three, in the frame's bottom-right
   corner over the inert prompt box for `/rewind`, so the transcript it
   previews stays uncovered. The login body drives browser or device OAuth on a background thread,
-  receives typed `LoginPhase`s over a channel, and carries the device expiry
+  receives typed `LoginPhase`s over a channel, attaches `login_flow`'s committed
+  credential owner rather than replacing a token, and carries the device expiry
   label from the flow rather than reconstructing it in the view. Every body row
   is a `(label, value)` pair over one shared column, and a value too long for it
   wraps instead of clipping; `y` sends the phase's one transcribable value — the URL, or the device code —

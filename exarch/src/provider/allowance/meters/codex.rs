@@ -7,9 +7,7 @@ use crate::provider::credential::{Credential, Roster};
 use crate::provider::error::body_detail;
 use crate::provider::identity::Account;
 use crate::provider::models::blocking_runtime;
-use crate::provider::oauth;
 use jiff::Timestamp;
-use ral_core::sync::LockExt;
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -29,10 +27,10 @@ pub(in crate::provider::allowance) fn read(
     };
     let runtime = blocking_runtime("codex usage")?;
     runtime.block_on(async {
-        oauth::refresh_cell_if_stale(cell)
+        cell.prepare()
             .await
             .map_err(|e| format!("refresh login for {}: {e}", roster.label(account)))?;
-        let token = cell.lock_ignore_poison().clone();
+        let token = cell.snapshot();
         let request = token.request_headers("application/json").into_iter().fold(
             crate::provider::tls::client().get(USAGE_URL),
             |r, (k, v)| r.header(k, v),

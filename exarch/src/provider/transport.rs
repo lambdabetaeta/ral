@@ -60,14 +60,14 @@ impl CredFingerprint {
 pub(super) struct Transport {
     client: Client,
     adapter: AdapterKind,
-    token_cell: Option<Arc<Mutex<oauth::OAuthToken>>>,
+    credential: Option<oauth::CredentialHandle>,
     billing: Billing,
     live_search: bool,
 }
 
 impl Transport {
     fn build(service: &Service, model: &str, credential: &Credential) -> Arc<Self> {
-        let token_cell = match credential {
+        let oauth = match credential {
             Credential::OAuth(cell) => Some(cell.clone()),
             Credential::ApiKey(_) => None,
         };
@@ -75,10 +75,29 @@ impl Transport {
         Arc::new(Self {
             client,
             adapter,
-            token_cell,
+            credential: oauth,
             billing: service.billing,
             live_search: matches!(service.auth, Auth::OAuth(Login::Codex)),
         })
+    }
+
+    pub(super) async fn prepare(
+        &self,
+        cancel: &crate::cancel::Token,
+    ) -> Result<(), super::ProviderError> {
+        use super::error::CancelSite;
+        let cancelled = || super::ProviderError::Cancelled(CancelSite::BeforeRequest);
+        if cancel.is_cancelled() {
+            return Err(cancelled());
+        }
+        let Some(credential) = &self.credential else {
+            return Ok(());
+        };
+        tokio::select! {
+            biased;
+            () = super::retry::wait_for_cancel(cancel) => Err(cancelled()),
+            result = credential.prepare() => result.map_err(super::ProviderError::Other),
+        }
     }
 
     pub(super) fn client(&self) -> &Client {
@@ -133,17 +152,6 @@ impl Engine {
             .entry(TransportKey::for_selection(account, model, credential))
             .or_insert_with(|| Transport::build(&account.service, model, credential))
             .clone()
-    }
-
-    /// Called first by `complete`; a failed refresh only logs, so
-    /// the stale token rides the request rather than a hiccup killing the turn.
-    pub(super) fn refresh_if_stale(&self, transport: &Transport) {
-        let Some(cell) = &transport.token_cell else {
-            return;
-        };
-        if let Err(error) = self.runtime.block_on(oauth::refresh_cell_if_stale(cell)) {
-            ral_core::errln!("exarch: {error}");
-        }
     }
 
     pub(super) fn block_on<F: Future>(&self, future: F) -> F::Output {
@@ -211,10 +219,8 @@ fn build_client(service: &Service, model: &str, credential: &Credential) -> (Cli
     (client, adapter)
 }
 
-/// The auth resolver reads the cell on every request, so a refresh by
-/// [`Engine::refresh_if_stale`] reaches the next call without rebuilding the
-/// client. Only the account's adapter may receive this credential.
-fn build_oauth_client(adapter: AdapterKind, cell: Arc<Mutex<oauth::OAuthToken>>) -> Client {
+/// Read current authentication for every request, without rebuilding the client.
+fn build_oauth_client(adapter: AdapterKind, cell: oauth::CredentialHandle) -> Client {
     Client::builder()
         .with_reqwest(super::tls::client())
         .with_adapter_kind(adapter)
@@ -223,10 +229,10 @@ fn build_oauth_client(adapter: AdapterKind, cell: Arc<Mutex<oauth::OAuthToken>>)
         .expect("with_reqwest supplies the client, so build() cannot fail")
 }
 
-fn oauth_auth_resolver(adapter: AdapterKind, cell: Arc<Mutex<oauth::OAuthToken>>) -> AuthResolver {
+fn oauth_auth_resolver(adapter: AdapterKind, cell: oauth::CredentialHandle) -> AuthResolver {
     AuthResolver::from_resolver_fn(move |identity: ModelIden| {
-        if identity.adapter_kind == adapter {
-            Ok(Some(cell.lock_ignore_poison().auth_data()))
+        if identity.adapter_kind == adapter && !cell.is_retired() {
+            Ok(Some(cell.snapshot().auth_data()))
         } else {
             Ok(None)
         }
@@ -284,8 +290,10 @@ mod tests {
         let mut keys = Vec::new();
         for login in Login::ALL {
             let account = Account::login(login, "account", "me@example.com");
-            let credential =
-                |secret: &str| Credential::OAuth(Arc::new(Mutex::new(token(login, secret))));
+            let state = ral_core::own::OwnDir::for_test("transport-key").unwrap();
+            let credential = |secret: &str| {
+                Credential::OAuth(oauth::commit_for_test(&state, &token(login, secret)))
+            };
             let first = TransportKey::for_selection(&account, "m", &credential("first"));
             assert_eq!(
                 first,
@@ -307,14 +315,15 @@ mod tests {
     fn oauth_resolver_reads_the_current_cell_and_refuses_other_adapters() {
         for login in Login::ALL {
             let adapter = login.service().adapter;
-            let cell = Arc::new(Mutex::new(token(login, "old")));
+            let state = ral_core::own::OwnDir::for_test("auth-resolver").unwrap();
+            let cell = oauth::commit_for_test(&state, &token(login, "old"));
             let AuthResolver::ResolverFn(resolver) = oauth_auth_resolver(adapter, cell.clone())
             else {
                 panic!("OAuth uses a synchronous cell resolver");
             };
             let resolve = |kind| resolver.exec_fn(ModelIden::new(kind, "m")).unwrap();
             for secret in ["old", "new"] {
-                *cell.lock_ignore_poison() = token(login, secret);
+                oauth::commit_for_test(&state, &token(login, secret));
                 match (login, resolve(adapter).unwrap()) {
                     (Login::Chatgpt | Login::Grok, AuthData::Key(key)) => assert_eq!(key, secret),
                     (Login::Codex, AuthData::RequestOverride { url, headers }) => {
@@ -354,6 +363,49 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn cancellation_does_not_wait_for_the_store_lease() {
+        use super::super::error::CancelSite;
+        use crate::cancel;
+        use ral_core::process::CancelCause;
+        use std::time::Duration;
+        let state = ral_core::own::OwnDir::for_test("cancel-prepare").unwrap();
+        let handle = oauth::commit_for_test(&state, &token(Login::Grok, "live"));
+        let transport = Transport::build(
+            &Login::Grok.service(),
+            "m",
+            &Credential::OAuth(handle.clone()),
+        );
+        let lock = state.open_write("oauth.lock").unwrap();
+        lock.try_lock().unwrap();
+        let cancel = cancel::Token::new();
+        let preparation = transport.prepare(&cancel);
+        tokio::pin!(preparation);
+        assert!(futures_util::poll!(&mut preparation).is_pending());
+        cancel.cancel(CancelCause::Interrupted);
+        let result = tokio::time::timeout(Duration::from_millis(200), preparation)
+            .await
+            .unwrap();
+        assert!(matches!(
+            result,
+            Err(super::super::ProviderError::Cancelled(
+                CancelSite::BeforeRequest
+            ))
+        ));
+        assert!(matches!(
+            transport.prepare(&cancel).await,
+            Err(super::super::ProviderError::Cancelled(
+                CancelSite::BeforeRequest
+            ))
+        ));
+        drop(lock);
+        tokio::time::timeout(Duration::from_secs(5), handle.prepare())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(handle.snapshot().access_token, "live");
+    }
+
     #[test]
     fn login_transports_keep_the_service_adapter_and_only_codex_has_live_search() {
         for login in Login::ALL {
@@ -361,7 +413,10 @@ mod tests {
             let transport = Transport::build(
                 &service,
                 "m",
-                &Credential::OAuth(Arc::new(Mutex::new(token(login, "live")))),
+                &Credential::OAuth(oauth::commit_for_test(
+                    &ral_core::own::OwnDir::for_test("transport").unwrap(),
+                    &token(login, "live"),
+                )),
             );
             assert_eq!(transport.adapter(), service.adapter);
             assert_eq!(transport.live_search(), login == Login::Codex);
@@ -393,7 +448,10 @@ mod tests {
             Transport::build(
                 &login.service(),
                 "m",
-                &Credential::OAuth(Arc::new(Mutex::new(token(login, "live")))),
+                &Credential::OAuth(oauth::commit_for_test(
+                    &ral_core::own::OwnDir::for_test("transport").unwrap(),
+                    &token(login, "live"),
+                )),
             )
         });
         assert!(!flat_rate.metered());

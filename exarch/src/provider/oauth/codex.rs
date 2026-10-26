@@ -1,5 +1,5 @@
 //! Codex CLI's browser and proprietary device authorization protocols.
-use super::{Grant, LoginPhase, OAuthToken, SignIn};
+use super::{Grant, LoginPhase, OAuthToken, RefreshUpdate, SignIn};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Deserializer};
@@ -337,10 +337,16 @@ fn refresh_request(
         "client_id": CLIENT_ID, "grant_type": "refresh_token", "refresh_token": current.refresh_token,
     }))
 }
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct RefreshedClaims {
+    pub workspace: Option<String>,
+    pub plan: Option<String>,
+}
+
 pub(super) async fn refresh(
     client: &reqwest::Client,
     current: &OAuthToken,
-) -> Result<OAuthToken, String> {
+) -> Result<RefreshUpdate<RefreshedClaims>, String> {
     let response = refresh_request(client, ISSUER, current)
         .send()
         .await
@@ -354,7 +360,10 @@ pub(super) async fn refresh(
     refresh_success(current, response)
 }
 
-fn refresh_success(current: &OAuthToken, response: RefreshResponse) -> Result<OAuthToken, String> {
+fn refresh_success(
+    current: &OAuthToken,
+    response: RefreshResponse,
+) -> Result<RefreshUpdate<RefreshedClaims>, String> {
     let access = response
         .access_token
         .filter(|s| !s.trim().is_empty())
@@ -378,35 +387,20 @@ fn renewed(
     access_token: String,
     refresh_token: Option<String>,
     id_token: Option<&str>,
-) -> OAuthToken {
+) -> RefreshUpdate<RefreshedClaims> {
     let claims = id_token.and_then(decode_claims);
     let auth = claims.as_ref().and_then(|c| c.auth.as_ref());
-    let Grant::Codex {
-        account_id,
-        workspace,
-        plan,
-    } = &current.grant
-    else {
-        unreachable!("Codex refresh dispatch")
-    };
-    OAuthToken {
+    RefreshUpdate {
         expires_at: expiry_secs(&access_token, id_token),
         access_token,
         refresh_token: refresh_token.unwrap_or_else(|| current.refresh_token.clone()),
-        issued: current.issued.clone(),
         email: claims
             .as_ref()
             .and_then(|c| c.email.clone())
             .or_else(|| current.email.clone()),
-        grant: Grant::Codex {
-            account_id: account_id.clone(),
-            workspace: claims
-                .as_ref()
-                .and_then(workspace_title)
-                .or_else(|| workspace.clone()),
-            plan: auth
-                .and_then(|a| a.chatgpt_plan_type.clone())
-                .or_else(|| plan.clone()),
+        metadata: RefreshedClaims {
+            workspace: claims.as_ref().and_then(workspace_title),
+            plan: auth.and_then(|a| a.chatgpt_plan_type.clone()),
         },
     }
 }
@@ -462,7 +456,7 @@ mod tests {
         assert!(finalize(value).is_err());
     }
     #[test]
-    fn refresh_pins_both_identity_and_raw_header() {
+    fn refresh_updates_only_credentials_and_display_metadata() {
         let current = finalize(raw("subject", "backend")).unwrap();
         let changed_claims = jwt(&serde_json::json!({
             "sub": "other", "email": "new@example.com", "exp": 12345,
@@ -472,16 +466,22 @@ mod tests {
         let fresh = renewed(&current, "new-access".into(), None, Some(&changed_claims));
         assert_eq!(fresh.email.as_deref(), Some("new@example.com"));
         assert_eq!(fresh.expires_at, 12345);
-        assert_eq!(fresh.handle(), "new@example.com (New workspace)");
-        assert_eq!(fresh.issued, current.issued);
         assert_eq!(fresh.refresh_token, "refresh");
-        assert!(
-            fresh
-                .request_headers("application/json")
-                .contains(&("chatgpt-account-id".into(), "backend".into()))
+        assert_eq!(
+            fresh.metadata,
+            RefreshedClaims {
+                workspace: Some("New workspace".into()),
+                plan: Some("team".into()),
+            }
         );
         let retained = renewed(&current, "new".into(), Some("rotated".into()), None);
-        assert_eq!(retained.grant, current.grant);
+        assert_eq!(
+            retained.metadata,
+            RefreshedClaims {
+                workspace: None,
+                plan: None
+            }
+        );
         assert_eq!(retained.email, current.email);
         assert_eq!(retained.refresh_token, "rotated");
     }

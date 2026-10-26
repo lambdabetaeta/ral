@@ -1,6 +1,6 @@
 ---
-verified_at_commit: dd8a5443b8f87dc40de66bcf5c5a72df05a723d8
-verified_at_date: 2026-10-25
+verified_at_commit: 24aab6a4
+verified_at_date: 2026-10-26
 anchors: [from_genai, refused, error_object, Fault, of_webc, of_boxed, of_reqwest, ProviderError, Refused, Refusal, Limit, Recovery, recovery, Transient, Api, Truncated, retry_with_backoff, Attempt, backoff_sleep, parse_retry_after, unwaitable, BODY_KEYS, epoch_or_delta, Wait::patient, RATE_LIMIT_MAX_DELAY_MS, json_status_code, CutShort, stall_cause, root_cause, body_detail, Readout, stalled_step_out, STREAM_HEADER_TIMEOUT, STREAM_READ_TIMEOUT, budget, retryable, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS, manufacture, Sealed]
 ---
 
@@ -196,8 +196,8 @@ an issuer rejection is distinct from an allowance reset or local-only logout.
 
 Two more `ProviderError` variants never come from `from_genai`:
 
-- **`Cancelled(&'static str)`** — the user raised the cancel flag in flight; the
-  `&'static str` records *where* so the UI pins the blame ([[internals/cancellation|cancellation]]).
+- **`Cancelled(CancelSite)`** — the user raised the cancel flag in flight; the
+  typed site records *where* so the UI pins the blame ([[internals/cancellation|cancellation]]).
 - **`Truncated { cause: CutShort }`** — the assistant turn was cut off *cleanly*
   by the output cap or a stall, raised after the partial assistant message is
   already appended, so re-prompting with `continue` preserves the work. The cut
@@ -215,6 +215,29 @@ Two more `ProviderError` variants never come from `from_genai`:
   reply is told from a fatal error (whether the exchange goes on is the
   nudge's to say): the TUI fold, synod's seam and the headless printer each
   ask it rather than re-matching the shape.
+
+## Preparing authentication
+
+**Every model attempt prepares its account after any retry wait and before
+building the request.** OAuth refresh belongs to a process-lived credential
+owner, not the turn or a temporary catalog runtime
+([[map/exarch/provider|provider]]).
+
+- Already-cancelled attempts start no refresh. Cancellation ends the caller's
+  wait with `Cancelled(BeforeRequest)`, not a submitted rotating-token exchange;
+  its owner handles the response and persistence even without subscribers.
+- The shared store lease serializes refresh, credential attachment, login and
+  removal across both products and processes. It rereads the predecessor before
+  contacting the issuer. A retired owner can adopt a login subsequently committed
+  by a peer, but cannot recreate an absent account from its snapshot.
+- Preparation failures surface as `Other`, without a model request or fabricated
+  usage. Within the owning process, ambiguous refreshes are not retried; a
+  retained unsaved successor may retry only its write. These unresolved outcomes
+  are not durable: a peer can read the predecessor after lease release, and
+  re-sign-in may be required. Model-request retry policy never replays a refresh
+  token.
+- Shared errors identify the service/account and sign-in action without assuming
+  a terminal. Frontends own commands and buttons.
 
 ## The retry driver
 

@@ -313,7 +313,6 @@ impl Survey {
     pub fn open<S: MeterSource>(roster: &Roster, source: &S, rations: Arc<Rations>) -> Self {
         let labels = roster
             .accounts()
-            .iter()
             .map(|account| (account.id.clone(), roster.label(account)))
             .collect();
         let fetches = Fetches::new();
