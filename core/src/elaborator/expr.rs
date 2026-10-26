@@ -1,8 +1,8 @@
 use super::branches::Junction;
 use super::{
-    Arc, Assembly, Ast, Comp, CompKind, Elaborator, HandlerArmV, ListElem, MapEntry, Name, Options,
-    OptionsV, Pattern, RecordEntry, Redirects, ScopeAst, Span, Spanned, Val, ValListElem,
-    ValMapEntry, ValRecordEntry, WithSpan, Word, word_val,
+    Arc, Assembly, Ast, Comp, CompKind, Elaborator, HandlerArmV, ListElem, MapEntry, MapEntryV,
+    MapOperand, Name, Options, OptionsV, Pattern, RecordEntry, Redirects, ScopeAst, Span, Spanned,
+    Val, ValListElem, ValRecordEntry, WithSpan, Word, word_val,
 };
 
 impl Elaborator {
@@ -293,12 +293,12 @@ impl Elaborator {
                             entries
                                 .iter()
                                 .map(|e| match e {
-                                    MapEntry::Entry { key, value } => ValMapEntry::Entry(
-                                        self.spanned_val(key, binds).item,
-                                        self.spanned_val(value, binds),
+                                    MapEntry::Entry { key, value } => MapEntryV::Entry(
+                                        self.map_operand(key),
+                                        self.map_operand(value),
                                     ),
                                     MapEntry::Spread(a) => {
-                                        ValMapEntry::Spread(self.spanned_val(a, binds))
+                                        MapEntryV::Spread(self.map_operand(a))
                                     }
                                 })
                                 .collect(),
@@ -386,6 +386,14 @@ impl Elaborator {
             Ast::Spread(_) => {
                 unreachable!("Ast::Spread must be consumed by Ast::Call's arg lowering")
             }
+        }
+    }
+
+    fn map_operand(&mut self, ast: &Spanned<Ast>) -> MapOperand {
+        let comp = self.with_span(ast.span, |this| this.elab_isolated(&ast.item));
+        match comp.item {
+            CompKind::Return(value) => MapOperand::Value(Spanned::with_span(ast.span, value)),
+            _ => MapOperand::Compute(Arc::new(comp)),
         }
     }
 

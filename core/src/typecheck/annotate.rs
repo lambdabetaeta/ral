@@ -12,8 +12,8 @@ use super::env::{InferCtx, Node};
 use crate::ir::Redirects;
 use crate::ir::{
     Args, Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, Exec,
-    GroupNode, HandlerArmV, Name, OptionsV, Pattern, Phrase, Toplevel, Val, ValListElem,
-    ValMapEntry, ValRecordEntry,
+    GroupNode, HandlerArmV, MapEntryV, MapOperand, Name, OptionsV, Pattern, Phrase, Toplevel, Val,
+    ValListElem, ValRecordEntry,
 };
 use crate::source::{Span, Spanned};
 use crate::ty::Site;
@@ -402,6 +402,13 @@ impl Annotate<'_> {
         self.elems(args).into()
     }
 
+    fn map_operand(&mut self, operand: &MapOperand) -> MapOperand {
+        match operand {
+            MapOperand::Value(value) => MapOperand::Value(self.spanned_val(value)),
+            MapOperand::Compute(comp) => MapOperand::Compute(self.rhs(comp)),
+        }
+    }
+
     fn assembly(&mut self, assembly: &Assembly) -> Assembly {
         match assembly {
             Assembly::List(elems) => Assembly::List(self.elems(elems)),
@@ -420,10 +427,10 @@ impl Annotate<'_> {
                 entries
                     .iter()
                     .map(|e| match e {
-                        ValMapEntry::Entry(k, v) => {
-                            ValMapEntry::Entry(self.val(k), self.spanned_val(v))
+                        MapEntryV::Entry(k, v) => {
+                            MapEntryV::Entry(self.map_operand(k), self.map_operand(v))
                         }
-                        ValMapEntry::Spread(v) => ValMapEntry::Spread(self.spanned_val(v)),
+                        MapEntryV::Spread(v) => MapEntryV::Spread(self.map_operand(v)),
                     })
                     .collect(),
             ),

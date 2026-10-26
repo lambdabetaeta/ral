@@ -165,6 +165,20 @@ impl Ring {
     }
 }
 
+/// Explicit terminal teardown shared by the two copiers.
+#[derive(Clone)]
+pub(crate) struct PipeAbort {
+    from_guest: Arc<Ring>,
+    to_guest: Arc<Ring>,
+}
+
+impl PipeAbort {
+    pub(crate) fn abort(&self) {
+        self.to_guest.close_read();
+        self.from_guest.close_write();
+    }
+}
+
 /// The core thread's handle on one connection's pipe — non-blocking only,
 /// called from inside the smoltcp poll loop, where nothing may ever wait.
 pub struct CoreSide {
@@ -197,10 +211,9 @@ impl CoreSide {
         self.to_guest.close_read();
     }
 
-    /// The worker is gone with nothing left queued — the core thread's cue
-    /// to close its half of the TCP connection.
+    /// Output has ended and drained, independently of upload completion.
     #[must_use]
-    pub fn worker_finished(&self) -> bool {
+    pub fn output_finished(&self) -> bool {
         self.to_guest.is_write_closed_and_drained()
     }
 }
@@ -292,6 +305,13 @@ impl Write for ProxyPipe {
 }
 
 impl ProxyPipe {
+    pub(crate) fn abort_handle(&self) -> PipeAbort {
+        PipeAbort {
+            from_guest: self.reader.from_guest.clone(),
+            to_guest: self.writer.to_guest.clone(),
+        }
+    }
+
     /// See [`PipeReader::read_deadline`].
     ///
     /// # Errors
@@ -374,7 +394,7 @@ mod tests {
     fn dropping_the_worker_reports_broken_pipe_to_a_blocked_writer() {
         let (core, worker) = new_pipe(None);
         drop(worker);
-        assert!(core.worker_finished());
+        assert!(core.output_finished());
     }
 
     #[test]
@@ -429,7 +449,7 @@ mod tests {
         let (reader, writer) = worker.split();
         drop(reader);
         drop(writer);
-        assert!(core.worker_finished());
+        assert!(core.output_finished());
     }
 
     #[test]

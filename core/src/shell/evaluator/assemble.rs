@@ -1,24 +1,14 @@
-//! `CompKind::Assemble`: builds a list, record, or map some of whose parts
-//! are spread or keyed at run time — the one rule that does O(data) work
-//! over what would otherwise be value syntax.
+//! Atomic list and record assembly. Computed map operands use the CEK cursor.
 
-use crate::ir::{Assembly, MapPart, MapParts, ValListElem};
+use crate::ir::{ValListElem, ValRecordEntry};
 use crate::shell::runtime::{Env, Error, List, Signature, Value};
 
 use super::val::{form, spread_type_err};
 
-pub(crate) fn eval(assembly: &Assembly, env: &Env, sig: &Signature) -> Result<Value, Error> {
-    match assembly {
-        Assembly::List(elems) => eval_list(elems, env, sig),
-        Assembly::Record(entries) => eval_map(entries, env, sig),
-        Assembly::Map(entries) => eval_map(entries, env, sig),
-    }
-}
-
 /// Evaluates a list literal, splicing `...spread` elements inline. The
 /// cons and snoc shapes reuse the spread's persistent spine instead of
 /// rebuilding it, and still evaluate left to right.
-fn eval_list(elems: &[ValListElem], env: &Env, sig: &Signature) -> Result<Value, Error> {
+pub(super) fn eval_list(elems: &[ValListElem], env: &Env, sig: &Signature) -> Result<Value, Error> {
     use ValListElem::{Single, Spread};
 
     if let [Single(sx), Spread(sxs)] = elems {
@@ -54,38 +44,27 @@ fn eval_list(elems: &[ValListElem], env: &Env, sig: &Signature) -> Result<Value,
     Ok(Value::List(items))
 }
 
-/// Evaluates a record or map literal — one carrier, so one rule. A key twice
-/// is an error. Explicit entries win over spreads: `seen` gates the spread
-/// pass, because `Value::map` collects into an ordered map where a later
-/// insert would otherwise overwrite the earlier.
-fn eval_map<E: MapParts>(entries: &[E], env: &Env, sig: &Signature) -> Result<Value, Error> {
+/// Explicit record fields override the spread's fields.
+pub(super) fn eval_record(
+    entries: &[ValRecordEntry],
+    env: &Env,
+    sig: &Signature,
+) -> Result<Value, Error> {
     let mut pairs: Vec<(String, Value)> = Vec::new();
     let mut seen = std::collections::HashSet::<String>::new();
     for entry in entries {
-        let (key, value) = match entry.part() {
-            MapPart::Labelled(label, v) => (label.to_string(), v),
-            MapPart::Computed(key_val, v) => {
-                let key_value = form(key_val, env, sig)?;
-                let Value::String(key) = key_value else {
-                    return Err(Error::new(format!(
-                        "map key must be a String, got {} '{key_value}'",
-                        key_value.type_name()
-                    ))
-                    .with_hint("use str to convert"));
-                };
-                (key.into_string(), v)
-            }
-            MapPart::Spread(_) => continue,
+        let ValRecordEntry::Field(key, value) = entry else {
+            continue;
         };
         if !seen.insert(key.clone()) {
             return Err(Error::new(format!(
                 "map literal: key '{key}' given twice; which did you mean?"
             )));
         }
-        pairs.push((key, form(&value.item, env, sig)?));
+        pairs.push((key.clone(), form(&value.item, env, sig)?));
     }
     for entry in entries {
-        if let MapPart::Spread(v) = entry.part() {
+        if let ValRecordEntry::Spread(v) = entry {
             match form(&v.item, env, sig)? {
                 Value::Map(inner) => {
                     for (k, v) in &inner {

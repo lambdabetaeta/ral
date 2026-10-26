@@ -185,8 +185,11 @@ fn referenced_names_walks_every_variant() {
         ValRecordEntry::Spread(svar("r_assemble_record_spread")),
     ])));
     let assemble_map = Spanned::synthetic(CompKind::Assemble(Assembly::Map(vec![
-        ValMapEntry::Entry(var("r_assemble_map_key"), svar("r_assemble_map_value")),
-        ValMapEntry::Spread(svar("r_assemble_map_spread")),
+        MapEntryV::Entry(
+            MapOperand::Value(svar("r_assemble_map_key")),
+            MapOperand::Compute(ret("r_assemble_map_value")),
+        ),
+        MapEntryV::Spread(MapOperand::Compute(ret("r_assemble_map_spread"))),
     ])));
     let val_variant = Spanned::synthetic(CompKind::Return(Val::Variant {
         label: "lbl".into(),
@@ -242,6 +245,12 @@ fn referenced_names_walks_every_variant() {
         Arc::new(capture),
         Arc::new(decode),
     ];
+
+    for node in &nodes {
+        let bytes = postcard::to_allocvec(node).expect("serialize IR");
+        let decoded: Arc<Comp> = postcard::from_bytes(&bytes).expect("deserialize IR");
+        assert_eq!(node, &decoded);
+    }
 
     let found: std::collections::HashSet<&str> = nodes
         .iter()

@@ -1,7 +1,7 @@
 ---
-generated_at_commit: dd8a5443b8f87dc40de66bcf5c5a72df05a723d8
-generated_at_date: 2026-10-25
-covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/protocol/channel.rs, core/src/carrier.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs]
+generated_at_commit: afe7087760d4d0bcf314ebaaede068479b0a0c05
+generated_at_date: 2026-10-26
+covers_paths: [guest-net/, synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/protocol/channel.rs, core/src/carrier.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs]
 ---
 
 # Map: synod
@@ -735,6 +735,32 @@ engine, `switch_root` — unit-tested on any machine. It hardcodes no disk:
 `plan.rs`'s `resolve_disks` probes candidate *pairs* in order, virtio
 (`/dev/vda` + `/dev/vdb`) first, then Hyper-V's SCSI (`/dev/sda` + `/dev/sdb`),
 and refuses by naming every candidate it looked for.
+
+## guest-net/ — the host-side TCP tunnel
+
+**Directional EOF and whole-worker retirement are distinct.** The opaque
+CONNECT tunnel realises [[design/egress|egress]] without imposing an
+application protocol on either half-stream.
+
+- `src/pipe.rs` — independently owned input/output halves: dropping the
+  output writer publishes EOF, and the core's output-completion predicate
+  means closed and drained, not worker completion. Explicit ring abort wakes
+  both directions on terminal failure.
+- `src/stack.rs` — `worker` owns each copier's endpoints. Upload EOF uses
+  origin `Shutdown::Write`; download EOF closes only the output writer.
+  `Connection::wake_for_stop` supplies full ring/origin teardown.
+- `Core::pump_connections`, `reap_now`, and `FIN_GRACE` in `src/stack.rs` —
+  output drain permits guest-facing FIN independently of upload. Only whole
+  worker completion with drained output starts the 30-second grace; both
+  TCP-close and elapsed-grace retirement require a completed worker. A closed
+  socket wakes a live worker, which stays tracked while the core polls others;
+  no live-worker join runs on that poll thread.
+- `Session::{stop,join}` in `src/stack.rs` — teardown and named panic
+  reporting, with the system resolver and per-address dial limits stated at
+  the join boundary. There is no active-tunnel timeout; `TUNNEL_CAP` bounds
+  the population at 32, including valid half-streams and blocked output.
+- `tests/loopback.rs` and the private `stack`/`pipe` tests — stream lifecycle,
+  backpressure, terminal wakeup, and whole-worker grace coverage.
 
 ## What is not here
 

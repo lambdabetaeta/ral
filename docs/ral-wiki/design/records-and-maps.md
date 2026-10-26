@@ -184,8 +184,14 @@ third carrier for it.
 
 The Agda core keeps a runtime map as an association list strictly sorted by key
 (`dev/agda/Ral/Map.agda`). Key checking is separate from insertion: the evaluator must reject a
-repeated computed key before evaluating its value (`eval_map`, `core/src/shell/evaluator/assemble.rs`;
-`explicit` in `dev/agda/Ral/Data.agda`).
+repeated computed key before evaluating its value. Rust's `MapCursor`
+(`core/src/shell/evaluator/machine.rs`) sequences key, validation, value, and
+spread operands in written order; no later operand runs after a failure.
+Explicit entries override every spread, and the first spread wins among spreads,
+independently of that evaluation order. Thus `[$k: 1, $k: !{fail …}, ...!{fail …}]`
+rejects the second key without running either failure computation.
+The Agda data model's `explicit` checks value-only entries; it does not model
+computation-bearing operand transitions.
 
 ## Why both, not one
 

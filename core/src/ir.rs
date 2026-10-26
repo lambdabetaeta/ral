@@ -18,7 +18,7 @@ pub use redirect::{Redirect, Redirects, StderrTarget, StdinSource, WriteMode};
 use crate::data::Finite;
 use crate::data::Str;
 use crate::path::tilde::TildePath;
-use crate::source::Spanned;
+use crate::source::{Span, Spanned};
 
 // ── Values ──────────────────────────────────────────────────────────────
 use serde::{Deserialize, Serialize};
@@ -286,11 +286,24 @@ pub enum ValRecordEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ValMapEntry {
-    /// `key: value`, the key a value evaluated to a `String` at run time.
-    Entry(Val, Spanned<Val>),
-    /// `...x`, merged into the surrounding map.
-    Spread(Spanned<Val>),
+pub enum MapOperand {
+    Value(Spanned<Val>),
+    Compute(Arc<Comp>),
+}
+
+impl MapOperand {
+    pub(crate) fn span(&self) -> Option<Span> {
+        match self {
+            Self::Value(value) => value.span,
+            Self::Compute(comp) => comp.span,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum MapEntryV {
+    Entry(MapOperand, MapOperand),
+    Spread(MapOperand),
 }
 
 /// A collection literal that a spread or a computed key keeps out of value
@@ -300,37 +313,7 @@ pub enum ValMapEntry {
 pub enum Assembly {
     List(Vec<ValListElem>),
     Record(Vec<ValRecordEntry>),
-    Map(Vec<ValMapEntry>),
-}
-
-/// One entry of either literal as the shared runtime carrier reads it.
-#[derive(Clone, Copy)]
-pub(crate) enum MapPart<'a> {
-    Labelled(&'a str, &'a Spanned<Val>),
-    Computed(&'a Val, &'a Spanned<Val>),
-    Spread(&'a Spanned<Val>),
-}
-
-pub(crate) trait MapParts {
-    fn part(&self) -> MapPart<'_>;
-}
-
-impl MapParts for ValRecordEntry {
-    fn part(&self) -> MapPart<'_> {
-        match self {
-            Self::Field(label, value) => MapPart::Labelled(label, value),
-            Self::Spread(value) => MapPart::Spread(value),
-        }
-    }
-}
-
-impl MapParts for ValMapEntry {
-    fn part(&self) -> MapPart<'_> {
-        match self {
-            Self::Entry(key, value) => MapPart::Computed(key, value),
-            Self::Spread(value) => MapPart::Spread(value),
-        }
-    }
+    Map(Vec<MapEntryV>),
 }
 
 /// Positional arguments to a call — the same slots a list literal has.
@@ -643,14 +626,11 @@ impl Mentions for Val {
     }
 }
 
-impl<'a> MapPart<'a> {
-    fn mentions(self, out: &mut Vec<&'a Name>) {
+impl Mentions for MapOperand {
+    fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
         match self {
-            Self::Labelled(_, value) | Self::Spread(value) => value.item.mentions(out),
-            Self::Computed(key, value) => {
-                key.mentions(out);
-                value.item.mentions(out);
-            }
+            Self::Value(value) => value.item.mentions(out),
+            Self::Compute(comp) => comp.mentions(out),
         }
     }
 }
@@ -661,12 +641,22 @@ impl Mentions for Assembly {
             Self::List(elems) => elems.mentions(out),
             Self::Record(entries) => {
                 for entry in entries {
-                    entry.part().mentions(out);
+                    match entry {
+                        ValRecordEntry::Field(_, value) | ValRecordEntry::Spread(value) => {
+                            value.item.mentions(out);
+                        }
+                    }
                 }
             }
             Self::Map(entries) => {
                 for entry in entries {
-                    entry.part().mentions(out);
+                    match entry {
+                        MapEntryV::Entry(key, value) => {
+                            key.mentions(out);
+                            value.mentions(out);
+                        }
+                        MapEntryV::Spread(value) => value.mentions(out),
+                    }
                 }
             }
         }

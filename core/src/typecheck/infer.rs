@@ -11,7 +11,8 @@ use super::index::{Idx, Lbl, Settled};
 use super::unify::WeakSource;
 use crate::ir::{
     Args, Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, DefineSchemes, Exec,
-    GroupNode, Name, Pattern, Phrase, Val, ValListElem, ValMapEntry, ValRecordEntry, is_synthetic,
+    GroupNode, MapEntryV, MapOperand, Name, Pattern, Phrase, Val, ValListElem, ValRecordEntry,
+    is_synthetic,
 };
 use crate::ir::{ArithOp, BinaryOp, StdinSource};
 use crate::source::Span;
@@ -1187,33 +1188,36 @@ impl Inferencer<'_> {
     /// A map literal with a computed key or a spread ([`Assembly::Map`]):
     /// `Map<elem>`, one `elem` shared by every value and spread. A key written
     /// out is checked for a duplicate as [`Self::infer_map_val`]'s are; a
-    /// computed duplicate is `eval_map`'s to refuse (SPEC §4.5).
-    fn infer_assembly_map(&mut self, entries: &[ValMapEntry]) -> Ty {
-        // Keys must be `String`: the runtime's status-1 refusal, lifted here.
+    /// computed duplicate is the map cursor's to refuse (SPEC §4.5).
+    fn infer_assembly_map(&mut self, entries: &[MapEntryV]) -> Ty {
         let elem = self.ctx.unifier.fresh_ty();
         let mut seen: Vec<String> = Vec::new();
         for entry in entries {
             match entry {
-                ValMapEntry::Entry(key, value) => {
-                    let key_ty = self.infer_val(key);
-                    self.ctx.unify_ty(&key_ty, &Ty::String, Reason::MapKey);
-                    self.with_span(value.span, |this| {
-                        if let Val::String(label) = key {
+                MapEntryV::Entry(key, value) => {
+                    let key_ty = self.infer_map_operand(key);
+                    self.with_span(key.span(), |this| {
+                        this.ctx.unify_ty(&key_ty, &Ty::String, Reason::MapKey);
+                        if let MapOperand::Value(Spanned {
+                            item: Val::String(label),
+                            ..
+                        }) = key
+                        {
                             this.diagnose_if_duplicate(
                                 label.as_str(),
                                 seen.iter().map(String::as_str),
                             );
+                            seen.push(label.as_str().to_string());
                         }
-                        let value_ty = this.infer_val(&value.item);
+                    });
+                    let value_ty = self.infer_map_operand(value);
+                    self.with_span(value.span(), |this| {
                         this.ctx.unify_ty(&value_ty, &elem, Reason::MapElem);
                     });
-                    if let Val::String(label) = key {
-                        seen.push(label.as_str().to_string());
-                    }
                 }
-                ValMapEntry::Spread(value) => {
-                    self.with_span(value.span, |this| {
-                        let spread_ty = this.infer_val(&value.item);
+                MapEntryV::Spread(value) => {
+                    let spread_ty = self.infer_map_operand(value);
+                    self.with_span(value.span(), |this| {
                         this.ctx
                             .unify_ty(&spread_ty, &Ty::map(elem.clone()), Reason::MapSpread);
                     });
@@ -1221,6 +1225,16 @@ impl Inferencer<'_> {
             }
         }
         Ty::map(elem)
+    }
+
+    fn infer_map_operand(&mut self, operand: &MapOperand) -> Ty {
+        self.with_span(operand.span(), |this| match operand {
+            MapOperand::Value(value) => this.infer_val(&value.item),
+            MapOperand::Compute(comp) => {
+                let cty = this.infer_comp(comp);
+                this.rhs_bound_ty(comp, cty)
+            }
+        })
     }
 
     /// [`Assembly`], typed by its arm — the moved literal code, over a

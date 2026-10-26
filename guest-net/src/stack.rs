@@ -59,8 +59,8 @@ const FIN_GRACE: Duration = Duration::from_secs(30);
 
 /// Whether a connection's slot can be released: the guest finished closing,
 /// or it did not within [`FIN_GRACE`].
-fn reap_now(socket_open: bool, worker_done: bool, since_fin: Option<Duration>) -> bool {
-    (!socket_open && worker_done) || since_fin.is_some_and(|d| d > FIN_GRACE)
+fn reap_now(socket_open: bool, worker_done: bool, since_finished: Option<Duration>) -> bool {
+    worker_done && (!socket_open || since_finished.is_some_and(|d| d > FIN_GRACE))
 }
 
 const HANDSHAKE_TOO_LARGE: Refusal = Refusal {
@@ -107,13 +107,13 @@ impl Doorbell {
 
 /// One live accepted connection. `origin` is set once the worker's dial
 /// succeeds, so [`Session::stop`] can wake a worker blocked on it;
-/// `closing` is stamped when this end sends its FIN.
+/// `finished_at` starts retirement grace only after worker and output end.
 struct Connection {
     handle: SocketHandle,
     core: CoreSide,
     origin: Arc<Mutex<Option<TcpStream>>>,
     worker: thread::JoinHandle<()>,
-    closing: Option<StdInstant>,
+    finished_at: Option<StdInstant>,
 }
 
 impl Connection {
@@ -352,7 +352,7 @@ impl<W: Wire> Core<W> {
                 core: core_side,
                 origin,
                 worker,
-                closing: None,
+                finished_at: None,
             });
         } else {
             self.sockets.get_mut::<tcp::Socket>(handle).abort();
@@ -361,6 +361,10 @@ impl<W: Wire> Core<W> {
     }
 
     fn pump_connections(&mut self) {
+        self.pump_connections_at(StdInstant::now());
+    }
+
+    fn pump_connections_at(&mut self, now: StdInstant) {
         let mut buf = [0u8; 4096];
         let mut reaped = Vec::new();
         let mut connections = self.connections.lock_ignore_poison();
@@ -389,16 +393,23 @@ impl<W: Wire> Core<W> {
                     }
                 }
 
-                if conn.core.worker_finished() {
+                // TIME-WAIT may still have upload bytes queued for the origin.
+                if socket.state() == tcp::State::Closed {
+                    conn.wake_for_stop();
+                }
+                let worker_done = conn.worker.is_finished();
+                if conn.core.output_finished() {
                     if socket.may_send() {
                         socket.close();
                     }
-                    conn.closing.get_or_insert_with(StdInstant::now);
+                    if worker_done {
+                        conn.finished_at.get_or_insert(now);
+                    }
                 }
                 reap_now(
                     socket.is_open(),
-                    conn.worker.is_finished(),
-                    conn.closing.map(|t| t.elapsed()),
+                    worker_done,
+                    conn.finished_at.map(|t| now.duration_since(t)),
                 )
             };
             if reap {
@@ -538,6 +549,7 @@ fn worker(
         return;
     }
 
+    let abort = pipe.abort_handle();
     let (mut reader, mut writer) = pipe.split();
     let Ok(mut origin_write) = origin.try_clone() else {
         return;
@@ -546,15 +558,25 @@ fn worker(
     let up = AtomicU64::new(0);
     let down = AtomicU64::new(0);
     thread::scope(|scope| {
-        scope.spawn(|| {
-            let n = std::io::copy(&mut reader, &mut origin_write).unwrap_or(0);
-            up.store(n, Ordering::Relaxed);
-            let _ = origin_write.shutdown(Shutdown::Both);
+        let up = &up;
+        let down = &down;
+        let upload_abort = abort.clone();
+        scope.spawn(move || {
+            if let Ok(n) = std::io::copy(&mut reader, &mut origin_write) {
+                up.store(n, Ordering::Relaxed);
+                let _ = origin_write.shutdown(Shutdown::Write);
+            } else {
+                upload_abort.abort();
+                let _ = origin_write.shutdown(Shutdown::Both);
+            }
         });
-        scope.spawn(|| {
-            let n = std::io::copy(&mut origin_read, &mut writer).unwrap_or(0);
-            down.store(n, Ordering::Relaxed);
-            let _ = origin_read.shutdown(Shutdown::Both);
+        scope.spawn(move || {
+            if let Ok(n) = std::io::copy(&mut origin_read, &mut writer) {
+                down.store(n, Ordering::Relaxed);
+            } else {
+                abort.abort();
+                let _ = origin_read.shutdown(Shutdown::Both);
+            }
         });
     });
 
@@ -569,6 +591,7 @@ fn worker(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 
@@ -580,11 +603,301 @@ mod tests {
     #[test]
     fn a_live_connection_is_never_reaped() {
         assert!(!reap_now(true, false, None));
+        assert!(!reap_now(false, false, None));
+        assert!(!reap_now(
+            true,
+            false,
+            Some(FIN_GRACE + Duration::from_secs(1))
+        ));
+        assert!(!reap_now(
+            false,
+            false,
+            Some(FIN_GRACE + Duration::from_secs(1))
+        ));
     }
 
     #[test]
     fn a_half_closed_connection_is_left_alone_inside_the_grace() {
         assert!(!reap_now(true, true, Some(FIN_GRACE / 2)));
+        assert!(!reap_now(true, true, Some(FIN_GRACE)));
+    }
+
+    #[cfg(unix)]
+    mod pump {
+        use super::*;
+        use std::net::Ipv4Addr;
+        use std::os::unix::net::UnixStream;
+        use std::sync::mpsc::{self, Receiver, Sender};
+
+        const WAIT: Duration = Duration::from_secs(5);
+        const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
+        const GUEST: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 15);
+
+        struct Tunnel {
+            host: SocketHandle,
+            guest: SocketHandle,
+            uploaded: Receiver<Vec<u8>>,
+            finish: Sender<()>,
+        }
+
+        struct Harness {
+            core: Core<UnixStream>,
+            guest_device: TunDevice<UnixStream>,
+            guest_iface: Interface,
+            guest_sockets: SocketSet<'static>,
+            stops: Vec<device::Stop<UnixStream>>,
+            now: StdInstant,
+        }
+
+        impl Harness {
+            fn new() -> Self {
+                let (host, guest) = UnixStream::pair().unwrap();
+                let (host_device, host_stop) = device::spawn(host, None).unwrap();
+                let (mut guest_device, guest_stop) = device::spawn(guest, None).unwrap();
+                let mut config = IfaceConfig::new(HardwareAddress::Ip);
+                config.random_seed = 1;
+                let mut guest_iface = Interface::new(config, &mut guest_device, Instant::now());
+                guest_iface.update_ip_addrs(|addrs| {
+                    addrs.push(IpCidr::new(IpAddress::Ipv4(GUEST), 24)).unwrap();
+                });
+                let core = Core::new(
+                    host_device,
+                    crate::Config {
+                        gateway: GATEWAY,
+                        egress: Egress::for_test(),
+                        dialer: Arc::new(vet::System),
+                    },
+                    Doorbell::new(),
+                    Arc::new(|| {}),
+                    Arc::new(Mutex::new(Vec::new())),
+                    Arc::new(Mutex::new(Vec::new())),
+                );
+                Self {
+                    core,
+                    guest_device,
+                    guest_iface,
+                    guest_sockets: SocketSet::new(Vec::new()),
+                    stops: vec![host_stop, guest_stop],
+                    now: StdInstant::now(),
+                }
+            }
+
+            fn step(&mut self) {
+                self.guest_iface.poll(
+                    Instant::now(),
+                    &mut self.guest_device,
+                    &mut self.guest_sockets,
+                );
+                self.core.iface.poll(
+                    Instant::now(),
+                    &mut self.core.device,
+                    &mut self.core.sockets,
+                );
+                for handle in self.core.pending_removal.drain(..) {
+                    self.core.sockets.remove(handle);
+                }
+                self.core.pump_connections_at(self.now);
+            }
+
+            fn until(&mut self, mut done: impl FnMut(&mut Self) -> bool) {
+                let deadline = StdInstant::now() + WAIT;
+                loop {
+                    self.step();
+                    if done(self) {
+                        return;
+                    }
+                    assert!(StdInstant::now() < deadline, "pump fixture timed out");
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
+
+            // Only the worker is controlled: handshake, rings, FIN and reaping are real.
+            fn tunnel(&mut self, port: u16, expected: &[u8]) -> Tunnel {
+                let guest = self.guest_sockets.add(tcp::Socket::new(
+                    tcp::SocketBuffer::new(vec![0; SOCKET_BUF]),
+                    tcp::SocketBuffer::new(vec![0; SOCKET_BUF]),
+                ));
+                self.guest_sockets
+                    .get_mut::<tcp::Socket>(guest)
+                    .connect(
+                        self.guest_iface.context(),
+                        (IpAddress::Ipv4(GATEWAY), PORT),
+                        port,
+                    )
+                    .unwrap();
+                self.until(|h| {
+                    h.core.pool.iter().any(|&handle| {
+                        h.core.sockets.get::<tcp::Socket>(handle).state() == tcp::State::Established
+                    })
+                });
+                let index = self
+                    .core
+                    .pool
+                    .iter()
+                    .position(|&handle| {
+                        self.core.sockets.get::<tcp::Socket>(handle).state()
+                            == tcp::State::Established
+                    })
+                    .unwrap();
+                let host = self.core.pool.swap_remove(index);
+                self.core.pool.push(fresh_listener(&mut self.core.sockets));
+                let (core, pipe) = pipe::new_pipe(None);
+                let (uploaded_tx, uploaded) = mpsc::channel();
+                let (finish, finish_rx) = mpsc::channel();
+                let size = expected.len();
+                let worker = thread::spawn(move || {
+                    let (mut reader, writer) = pipe.split();
+                    drop(writer);
+                    let deadline = StdInstant::now() + WAIT;
+                    let mut bytes = vec![0; size];
+                    let mut offset = 0;
+                    while offset < size {
+                        let Ok(n) = reader.read_deadline(&mut bytes[offset..], deadline) else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        offset += n;
+                    }
+                    if uploaded_tx.send(bytes).is_ok() {
+                        let _ = finish_rx.recv_timeout(WAIT);
+                    }
+                });
+                self.core.connections.lock_ignore_poison().push(Connection {
+                    handle: host,
+                    core,
+                    origin: Arc::new(Mutex::new(None)),
+                    worker,
+                    finished_at: None,
+                });
+                self.until(|h| {
+                    h.guest_sockets.get::<tcp::Socket>(guest).state() == tcp::State::CloseWait
+                });
+                Tunnel {
+                    host,
+                    guest,
+                    uploaded,
+                    finish,
+                }
+            }
+
+            fn upload(&mut self, tunnel: &Tunnel, bytes: &[u8]) {
+                assert_eq!(
+                    self.guest_sockets
+                        .get_mut::<tcp::Socket>(tunnel.guest)
+                        .send_slice(bytes)
+                        .unwrap(),
+                    bytes.len(),
+                );
+                self.until(|_| match tunnel.uploaded.try_recv() {
+                    Ok(received) => {
+                        assert_eq!(received, bytes);
+                        true
+                    }
+                    Err(mpsc::TryRecvError::Empty) => false,
+                    Err(mpsc::TryRecvError::Disconnected) => panic!("upload worker ended early"),
+                });
+            }
+        }
+
+        impl Drop for Harness {
+            fn drop(&mut self) {
+                let connections = std::mem::take(&mut *self.core.connections.lock_ignore_poison());
+                for conn in &connections {
+                    conn.wake_for_stop();
+                }
+                let deadline = StdInstant::now() + WAIT + WAIT;
+                for conn in connections {
+                    while !conn.worker.is_finished() && StdInstant::now() < deadline {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    assert!(
+                        conn.worker.is_finished(),
+                        "pump fixture worker did not stop"
+                    );
+                    conn.worker.join().unwrap();
+                }
+                let stops = std::mem::take(&mut self.stops);
+                for stop in &stops {
+                    stop.stop();
+                }
+                let readers = thread::spawn(move || {
+                    for stop in stops {
+                        stop.join();
+                    }
+                });
+                let deadline = StdInstant::now() + WAIT;
+                while !readers.is_finished() && StdInstant::now() < deadline {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                assert!(readers.is_finished(), "pump fixture readers did not stop");
+                readers.join().unwrap();
+            }
+        }
+
+        #[test]
+        fn output_fin_does_not_age_a_live_worker_and_completion_starts_fresh_grace() {
+            let mut h = Harness::new();
+            let start = h.now;
+            let first = h.tunnel(42000, b"upload after FIN");
+            {
+                let connections = h.core.connections.lock_ignore_poison();
+                assert!(connections[0].core.output_finished());
+                assert!(!connections[0].worker.is_finished());
+                assert_eq!(connections[0].finished_at, None);
+            }
+
+            h.now = start + FIN_GRACE + Duration::from_secs(1);
+            h.step();
+            assert_eq!(h.core.connections.lock_ignore_poison().len(), 1);
+            assert_eq!(h.core.connections.lock_ignore_poison()[0].finished_at, None);
+            h.upload(&first, b"upload after FIN");
+
+            // Also exercise the elapsed-grace guard with a still-live worker.
+            h.core.connections.lock_ignore_poison()[0].finished_at = Some(start);
+            h.step();
+            assert_eq!(h.core.connections.lock_ignore_poison().len(), 1);
+            assert!(h.core.sockets.get::<tcp::Socket>(first.host).is_open());
+            h.core.connections.lock_ignore_poison()[0].finished_at = None;
+
+            let second = h.tunnel(42001, b"another tunnel progresses");
+            h.upload(&second, b"another tunnel progresses");
+            assert_eq!(h.core.connections.lock_ignore_poison().len(), 2);
+            first.finish.send(()).unwrap();
+            second.finish.send(()).unwrap();
+            let completed = h.now;
+            h.until(|h| {
+                let connections = h.core.connections.lock_ignore_poison();
+                connections.len() == 2
+                    && connections
+                        .iter()
+                        .all(|conn| conn.finished_at == Some(completed))
+            });
+
+            for elapsed in [Duration::ZERO, FIN_GRACE / 2, FIN_GRACE] {
+                h.now = completed + elapsed;
+                h.core.pump_connections_at(h.now);
+                assert_eq!(h.core.connections.lock_ignore_poison().len(), 2);
+                assert_eq!(h.core.pending_removal, []);
+            }
+            h.now = completed + FIN_GRACE + Duration::from_nanos(1);
+            h.core.pump_connections_at(h.now);
+            assert!(h.core.connections.lock_ignore_poison().is_empty());
+            assert_eq!(h.core.pending_removal.len(), 2);
+            for tunnel in [&first, &second] {
+                assert!(h.core.pending_removal.contains(&tunnel.host));
+                assert_eq!(
+                    h.core.sockets.get::<tcp::Socket>(tunnel.host).state(),
+                    tcp::State::Closed
+                );
+            }
+            assert!(h.core.failures.lock_ignore_poison().is_empty());
+
+            let reused = h.tunnel(42002, b"reused slot");
+            h.upload(&reused, b"reused slot");
+            assert_eq!(h.core.connections.lock_ignore_poison().len(), 1);
+        }
     }
 
     /// The guest cannot hold a tunnel slot by never closing its half.

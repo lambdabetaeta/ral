@@ -16,8 +16,8 @@
 
 use crate::ir::{
     Args, Assembly, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, GroupNode,
-    HandlerArmV, Name, OptionsV, Pattern, Phrase, Redirects, Unchecked, Val, ValListElem,
-    ValMapEntry, ValRecordEntry, synthetic,
+    HandlerArmV, MapEntryV, MapOperand, Name, OptionsV, Pattern, Phrase, Redirects, Unchecked, Val,
+    ValListElem, ValRecordEntry, synthetic,
 };
 use crate::prelude_manifest;
 use crate::source::Span;

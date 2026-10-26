@@ -1,0 +1,19 @@
+key
+value
+spread
+last
+final
+{"a":2,"b":3,"z":1}
+1 map literal: key 'a' given twice; which did you mean?
+1 map literal: key 'a' given twice; which did you mean?
+7 first-spread
+8 first-key
+9 first-value
+{"a":3,"b":10,"c":100,"d":200}
+{"a":3,"b":10,"c":100,"d":200}
+{"a":3,"b":10,"c":100,"d":200}
+hello
+5
+forced
+inner
+admission-failed

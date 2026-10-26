@@ -6,11 +6,14 @@
 //! dispatches on the shape of [`Focus`]. No arm calls another arm; no arm
 //! loops.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::io::{self, Sink};
 use crate::ir::Redirects;
-use crate::ir::{Args, CaseArm, Comp, CompKind, GroupNode, Val, ValListElem};
+use crate::ir::{
+    Args, Assembly, CaseArm, Comp, CompKind, GroupNode, MapEntryV, MapOperand, Val, ValListElem,
+};
 use crate::process::Scope;
 use crate::shell::builtins::concurrency::{self, legible_title};
 use crate::shell::exec::dispatch::{self, Resolution};
@@ -19,8 +22,8 @@ use crate::shell::exec::redirect::scope::{RedirectState, WriteFate};
 use crate::shell::grant::decode_capability_map;
 use crate::shell::runtime::{
     Binding, Break, BroodOwner, CapturePolicy, Closure, Cradle, Env, Error, Escape, FrameHandle,
-    HandlerArity, HandlerFrame, Mooring, ScopeOwner, Settled, Shell, Signature, TrailScope, Value,
-    report_value, sig, sig_hint,
+    HandlerArity, HandlerFrame, Map, Mooring, ScopeOwner, Settled, Shell, Signature, TrailScope,
+    Value, report_value, sig, sig_hint,
 };
 use crate::source::Span;
 use crate::ty::Site;
@@ -56,8 +59,7 @@ pub(crate) enum Focus {
 
 /// One elimination form with a pending sub-computation. Frames hold `Arc`s
 /// into the IR, never cloned IR, never a `Context` clone, and an `Env` only
-/// with syntax to close over it: `To` alone. The two large ones, `Redirect`
-/// and `Unmask`, are boxed.
+/// with syntax to close over it: `To` and `Map`. Large states are boxed.
 enum Frame {
     /// `M to x. N`: `bind` is the `Bind` node itself, read for its pattern,
     /// rest and span.
@@ -65,6 +67,7 @@ enum Frame {
         bind: Arc<Comp>,
         env: Env,
     },
+    Map(Box<MapCursor>),
     Apply {
         args: Vec<Value>,
         span: Option<Span>,
@@ -104,8 +107,41 @@ enum Frame {
     },
 }
 
-/// `Redirect` and `Unmask` are boxed: any alone would exceed the cap.
+/// Large frame states are boxed: any alone would exceed the cap.
 const _: () = assert!(std::mem::size_of::<Frame>() <= 128);
+
+enum MapPhase {
+    Key,
+    Value(String),
+    Spread,
+}
+
+struct MapCursor {
+    node: Arc<Comp>,
+    env: Env,
+    index: usize,
+    phase: MapPhase,
+    explicit: HashSet<String>,
+    result: Map,
+}
+
+impl MapCursor {
+    fn entries(&self) -> &[MapEntryV] {
+        let CompKind::Assemble(Assembly::Map(entries)) = &self.node.item else {
+            unreachable!("a map cursor holds map assembly")
+        };
+        entries
+    }
+
+    fn operand(&self) -> &MapOperand {
+        match (&self.entries()[self.index], &self.phase) {
+            (MapEntryV::Entry(key, _), MapPhase::Key) => key,
+            (MapEntryV::Entry(_, value), MapPhase::Value(_))
+            | (MapEntryV::Spread(value), MapPhase::Spread) => value,
+            _ => unreachable!("map phase matches its entry"),
+        }
+    }
+}
 
 /// The state: a focus and a stack. Private — nothing outside this module
 /// constructs one or sees the stack.
@@ -482,9 +518,25 @@ impl Machine {
             }
             CompKind::Return(val) => Focus::Return(Terminal::Value(form(val, &env, &shell.sig)?)),
 
-            CompKind::Assemble(assembly) => {
-                Focus::Return(Terminal::Value(assemble::eval(assembly, &env, &shell.sig)?))
-            }
+            CompKind::Assemble(assembly) => match assembly {
+                Assembly::List(elems) => Focus::Return(Terminal::Value(assemble::eval_list(
+                    elems, &env, &shell.sig,
+                )?)),
+                Assembly::Record(entries) => Focus::Return(Terminal::Value(assemble::eval_record(
+                    entries, &env, &shell.sig,
+                )?)),
+                Assembly::Map(_) => {
+                    let cursor = Box::new(MapCursor {
+                        node: Arc::clone(comp),
+                        env,
+                        index: 0,
+                        phase: MapPhase::Key,
+                        explicit: HashSet::new(),
+                        result: Map::new(),
+                    });
+                    self.next_map_part(cursor, shell)?
+                }
+            },
 
             // Canonical at A → C, never a value: the frame on top decides.
             // Unreachable except under Apply/a C-holed frame for a checked
@@ -830,6 +882,87 @@ impl Machine {
         }
     }
 
+    fn next_map_part(&mut self, mut cursor: Box<MapCursor>, shell: &Shell) -> Settled<Focus> {
+        let Some(entry) = cursor.entries().get(cursor.index) else {
+            return Ok(Focus::Return(Terminal::Value(Value::Map(cursor.result))));
+        };
+        cursor.phase = match entry {
+            MapEntryV::Entry(..) => MapPhase::Key,
+            MapEntryV::Spread(_) => MapPhase::Spread,
+        };
+        self.map_operand(cursor, shell)
+    }
+
+    fn map_operand(&mut self, cursor: Box<MapCursor>, shell: &Shell) -> Settled<Focus> {
+        let span = cursor.operand().span();
+        let run = || {
+            shell.poll()?;
+            let slot = self.reserve(shell)?;
+            let focus = match cursor.operand() {
+                MapOperand::Value(value) => {
+                    Focus::Return(Terminal::Value(form(&value.item, &cursor.env, &shell.sig)?))
+                }
+                MapOperand::Compute(comp) => Focus::Eval {
+                    comp: Arc::clone(comp),
+                    env: cursor.env.clone(),
+                },
+            };
+            slot.push(Frame::Map(cursor));
+            Ok(focus)
+        };
+        run().map_err(|b| stamp(b, span))
+    }
+
+    fn return_map(
+        &mut self,
+        mut cursor: Box<MapCursor>,
+        terminal: Terminal,
+        shell: &Shell,
+    ) -> Settled<Focus> {
+        let span = cursor.operand().span();
+        let accept = || {
+            let value = as_value(terminal)?;
+            match std::mem::replace(&mut cursor.phase, MapPhase::Key) {
+                MapPhase::Key => {
+                    let Value::String(key) = value else {
+                        return Err(sig_hint(
+                            format!(
+                                "map key must be a String, got {} '{value}'",
+                                value.type_name()
+                            ),
+                            "use str to convert",
+                        ));
+                    };
+                    let key = key.into_string();
+                    if !cursor.explicit.insert(key.clone()) {
+                        return Err(sig(format!(
+                            "map literal: key '{key}' given twice; which did you mean?"
+                        )));
+                    }
+                    cursor.phase = MapPhase::Value(key);
+                    return self.map_operand(cursor, shell);
+                }
+                MapPhase::Value(key) => cursor.result.insert(key, value),
+                MapPhase::Spread => {
+                    let Value::Map(inner) = value else {
+                        return Err(sig_hint(
+                            format!("spread requires a Map, got {}", value.type_name()),
+                            "spread (...) in a map expands key-value pairs",
+                        ));
+                    };
+                    for (key, value) in &inner {
+                        if !cursor.result.contains_key(key) {
+                            cursor.result.insert(key.to_string(), value.into_owned());
+                        }
+                    }
+                }
+            }
+            cursor.index += 1;
+            self.next_map_part(cursor, shell)
+        };
+        accept().map_err(|b| stamp(b, span))
+    }
+
     // ── Frames, and their two rules each ───────────────────────────────
 
     fn step_return(
@@ -840,6 +973,7 @@ impl Machine {
         shell: &mut Shell,
     ) -> Settled<Focus> {
         match frame {
+            Frame::Map(cursor) => self.return_map(cursor, t, shell),
             Frame::Protect(site) => Ok(Focus::Return(Terminal::Value(
                 site.protect(as_value(t)?, shell)?,
             ))),
@@ -949,7 +1083,7 @@ impl Machine {
                 Err(flushed.err().unwrap_or(s))
             }
 
-            Frame::Apply { .. } | Frame::Protect(_) => Err(s),
+            Frame::Apply { .. } | Frame::Protect(_) | Frame::Map(_) => Err(s),
 
             Frame::Cleanup { prev, .. } => {
                 shell.scope = prev;
@@ -1031,7 +1165,8 @@ impl Frame {
             | Self::Apply { .. }
             | Self::Try { .. }
             | Self::Guard { .. }
-            | Self::Protect(_) => {}
+            | Self::Protect(_)
+            | Self::Map(_) => {}
         }
     }
 }
@@ -1562,6 +1697,80 @@ mod tests {
             before,
             "a refused push must leave stdout untouched"
         );
+    }
+
+    #[test]
+    fn map_cursor_reserves_before_forming_an_operand() {
+        let mut shell = new_shell();
+        shell.session.stack_limit = 0;
+        let node = Arc::new(Spanned::synthetic(CompKind::Assemble(Assembly::Map(vec![
+            MapEntryV::Entry(
+                MapOperand::Value(Spanned::synthetic(Val::Variable("unbound".into()))),
+                MapOperand::Value(Spanned::synthetic(Val::Int(1))),
+            ),
+        ]))));
+        let out = evaluate(node, shell.env.clone(), &Mooring::adrift(), &mut shell);
+        assert!(
+            matches!(out, Err(Break::Error(e)) if e.message.contains("recursion limit exceeded"))
+        );
+    }
+
+    #[test]
+    fn map_cursor_validation_errors_name_the_operand_span() {
+        let span = Span::new(FileId::DUMMY, 10, 20);
+        let bad = || MapOperand::Value(Spanned::with_span(Some(span), Val::Int(1)));
+        for entry in [MapEntryV::Entry(bad(), bad()), MapEntryV::Spread(bad())] {
+            let mut shell = new_shell();
+            let node = Arc::new(Spanned::synthetic(CompKind::Assemble(Assembly::Map(vec![
+                entry,
+            ]))));
+            match evaluate(node, shell.env.clone(), &Mooring::adrift(), &mut shell) {
+                Err(Break::Error(e)) => assert_eq!(e.span, Some(span)),
+                other => panic!("expected located map validation failure, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn map_cursor_polls_between_key_and_value() {
+        let mut shell = new_shell();
+        let mooring = Mooring::adrift();
+        shell.scope = Scope::clone(&mooring.home);
+        let span = Span::new(FileId::DUMMY, 10, 20);
+        let node = Arc::new(Spanned::synthetic(CompKind::Assemble(Assembly::Map(vec![
+            MapEntryV::Entry(
+                MapOperand::Value(Spanned::synthetic(Val::String("a".into()))),
+                MapOperand::Value(Spanned::with_span(
+                    Some(span),
+                    Val::Variable("unbound".into()),
+                )),
+            ),
+        ]))));
+        let mut machine = Machine::default();
+        machine.focus = machine
+            .eval_rules(&node, shell.env.clone(), &mooring, &mut shell)
+            .expect("request key");
+        mooring
+            .home
+            .cancel(crate::process::cancel::CancelCause::Cancelled);
+        machine.step(&mooring, &mut shell);
+        assert!(
+            matches!(machine.focus, Focus::Halt(Break::Escape(Escape::Stopped { at: Some(at), .. })) if at == span)
+        );
+        assert!(
+            machine.stack.is_empty(),
+            "the cursor is dropped on cancellation"
+        );
+    }
+
+    #[test]
+    fn map_cursor_propagates_exit_without_running_later_operands() {
+        let mut shell = new_shell();
+        let out = run_source(
+            "let k = 'a'; try { let _ = [$k: !{exit 5}, ...!{fail [status: 7, message: later]}]; return () } { |e| return () }",
+            &mut shell,
+        );
+        assert!(matches!(out, Err(Break::Escape(Escape::Exit(5)))));
     }
 
     /// A cancelled `let f = { !f }; !f` returns rather than spinning: `Rec`

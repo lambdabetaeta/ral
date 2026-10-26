@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
+generated_at_commit: afe7087760d4d0bcf314ebaaede068479b0a0c05
 ---
 
 # Egress: a destination gate
@@ -59,6 +59,26 @@ origin. HTTP/1.1, HTTP/2, gRPC and WebSockets all work inside that opaque
 tunnel; HTTP, h2c, HTTP/3, QUIC, arbitrary TCP ports and UDP do not, because
 only `HTTPS_PROXY` is set — an `http://` URL dies as a connection reset, not
 a message.
+
+## Tunnel lifetime
+
+**Clean EOF ends one direction, not the tunnel.** Guest-facing FIN delivery
+and whole-worker retirement are separate facts:
+
+- Guest FIN drains queued upload bytes, then shuts down only the origin's
+  write half; the response continues. Origin EOF drains queued output before
+  guest-facing FIN; a still-open guest upload continues.
+- The 30-second retirement grace starts only after the whole worker has
+  finished and its output has drained, not when one direction ends. Only a
+  completed worker can be reaped: immediately if guest TCP is closed,
+  otherwise once that grace is exceeded.
+- A full guest TCP close/reset, session stop, or real copier I/O failure
+  wakes both pipe rings and shuts down the origin both ways. The core keeps
+  polling other connections and joins a worker only after it has completed.
+- There is no idle or active-tunnel lifetime. A valid remaining half-stream
+  or a guest withholding reads can still occupy one of the 32 tunnel slots.
+  Session joining remains subject to system resolver and per-address dial
+  timeouts; the grace does not bound those waits or ledger operations.
 
 ## The honest residual
 

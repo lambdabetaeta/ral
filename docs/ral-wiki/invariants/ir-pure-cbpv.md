@@ -14,9 +14,12 @@ into the IR** — it unfolds at elaboration into the existing primitives:
 Two conveniences are resolved by *runtime values* and therefore stay in the IR
 as their own constructors, not as unfoldings:
 
-- a spread is a value-level element constructor (`ValListElem::Spread`,
-  `ValMapEntry::Spread`, spread `Args`) — how many slots it fills depends on
-  the length of the spread value;
+- collection assembly is a computation (`CompKind::Assemble`): spreads and
+  computed keys need runtime validation. List/record parts carry values;
+  map parts (`MapEntryV`) carry `MapOperand::Value` or `::Compute`, keeping
+  each operand computation inside the assembly's sequencing boundary. A key
+  is validated before its value runs; no surface AST survives. Spread `Args`
+  and `ValListElem::Spread` likewise expand runtime values;
 - string interpolation is a computation node (`CompKind::Interpolation`)
   whose part-computations evaluate and concatenate.
 

@@ -21,7 +21,7 @@
 #![cfg(unix)]
 
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -140,6 +140,22 @@ impl GuestSide {
         self.sockets.get_mut::<tcp::Socket>(handle).close();
     }
 
+    fn tcp_tunnel(&mut self, local_port: u16) -> (SocketHandle, Vec<u8>) {
+        let handle = self.tcp_connect(GATEWAY, PORT, local_port);
+        assert!(self.poll_until(Duration::from_secs(5), |g| {
+            g.tcp_state(handle) == tcp::State::Established
+        }));
+        self.tcp_send(handle, &connect_request("a.example"));
+        let mut response = Vec::new();
+        assert!(self.poll_until(Duration::from_secs(5), |g| {
+            response.extend(g.tcp_recv(handle));
+            response.windows(4).any(|w| w == b"\r\n\r\n")
+        }));
+        assert!(response.starts_with(b"HTTP/1.1 200"), "{response:?}");
+        let end = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        (handle, response.split_off(end))
+    }
+
     /// The host closed its half: a FIN arrived. This, not [`Self::tcp_done`],
     /// is what a refusal produces — the guest is still free to send.
     fn tcp_peer_closed(&self, handle: SocketHandle) -> bool {
@@ -238,16 +254,66 @@ fn spawn_echo_fixture() -> SocketAddr {
 
 /// A loopback listener that writes continuously and never reads, to fill
 /// the tunnel's worker→guest ring on purpose.
-fn spawn_flood_fixture() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    thread::spawn(move || {
-        if let Ok((mut stream, _)) = listener.accept() {
-            let chunk = vec![0u8; 8192];
-            while stream.write_all(&chunk).is_ok() {}
+fn spawn_flood_fixture() -> (
+    SocketAddr,
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::Receiver<std::io::Result<()>>,
+) {
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (addr, done) = spawn_bounded_fixture(move |mut stream| {
+        let chunk = [0u8; 8192];
+        for _ in 0..32 {
+            stream.write_all(&chunk)?;
+        }
+        let _ = ready_tx.send(());
+        loop {
+            if let Err(e) = stream.write_all(&chunk) {
+                return if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) {
+                    Err(e)
+                } else {
+                    Ok(())
+                };
+            }
         }
     });
-    addr
+    (addr, ready_rx, done)
+}
+
+fn spawn_bounded_fixture<T: Send + 'static>(
+    serve: impl FnOnce(TcpStream) -> std::io::Result<T> + Send + 'static,
+) -> (SocketAddr, std::sync::mpsc::Receiver<std::io::Result<T>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let result = (|| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= deadline {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "fixture was never dialled",
+                            ));
+                        }
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+            stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+            serve(stream)
+        })();
+        let _ = tx.send(result);
+    });
+    (addr, rx)
 }
 
 fn connect_request(host: &str) -> Vec<u8> {
@@ -290,6 +356,20 @@ fn join_within(
         let _ = tx.send(session.join());
     });
     rx.recv_timeout(timeout).ok()
+}
+
+/// New lifecycle regressions must also clean up when an assertion fails.
+struct StopOnDrop(Option<guest_net::Session<UnixStream>>);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        let session = self.0.take().unwrap();
+        session.stop();
+        let result = join_within(session, Duration::from_secs(5));
+        if !thread::panicking() {
+            assert_eq!(result, Some(Ok(())), "session teardown must finish");
+        }
+    }
 }
 
 /// The host stack holds one address, the gateway, and does not use
@@ -439,12 +519,10 @@ fn an_allowed_host_that_resolves_to_a_link_local_address_never_dials() {
         .unwrap();
 }
 
-/// An allowed CONNECT reaches the fixture through the injected dialer, and
-/// bytes copy both ways; closing the guest's side then closes the whole
-/// tunnel.
+/// An ordinary echo exchange completes once both endpoints finish.
 #[test]
 #[serial_test::serial]
-fn an_allowed_connect_tunnels_bytes_both_ways_and_either_eof_closes_both() {
+fn an_allowed_connect_completes_a_duplex_echo_exchange() {
     let fixture = spawn_echo_fixture();
     let dialer = Arc::new(TestDialer {
         fixture,
@@ -474,9 +552,173 @@ fn an_allowed_connect_tunnels_bytes_both_ways_and_either_eof_closes_both() {
 
     guest.tcp_close(handle);
     let closed = guest.poll_until(Duration::from_secs(5), |g| g.tcp_done(handle));
-    assert!(closed, "closing the guest side must close the whole tunnel");
+    assert!(closed, "the completed echo exchange must close both halves");
     session.stop();
     join_within(session, Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+}
+
+#[test]
+#[serial_test::serial]
+fn origin_fin_preserves_the_guest_upload_until_its_own_fin() {
+    const RESPONSE: &[u8] = b"origin is done sending";
+    const PREFIX: &[u8] = b"upload before origin FIN; ";
+    const SUFFIX: &[u8] = b"upload after origin FIN";
+    let (fixture, received) = spawn_bounded_fixture(|mut stream| {
+        let mut prefix = vec![0; PREFIX.len()];
+        stream.read_exact(&mut prefix)?;
+        stream.write_all(RESPONSE)?;
+        stream.shutdown(Shutdown::Write)?;
+        stream.read_to_end(&mut prefix)?;
+        Ok(prefix)
+    });
+    let state = ral_core::own::OwnDir::for_test("guest-net-half-close").unwrap();
+    let egress = Egress {
+        policy: Arc::new(exarch::net_policy::NetPolicy {
+            hosts: std::iter::once(Host::parse("a.example").unwrap()).collect(),
+            search: true,
+        }),
+        audit: exarch::egress::AuditLog::for_test(&state),
+    };
+    let (mut guest, session) = harness_with(
+        Arc::new(TestDialer {
+            fixture,
+            ..TestDialer::default()
+        }),
+        egress,
+    );
+    let session = StopOnDrop(Some(session));
+    let (handle, mut output) = guest.tcp_tunnel(43000);
+    guest.tcp_send(handle, PREFIX);
+    assert!(
+        guest.poll_until(Duration::from_secs(5), |g| {
+            output.extend(g.tcp_recv(handle));
+            g.tcp_peer_closed(handle) && !g.tcp_can_recv(handle)
+        }),
+        "origin FIN must reach a guest that has not closed its upload"
+    );
+    assert_eq!(output, RESPONSE);
+    assert_eq!(guest.tcp_state(handle), tcp::State::CloseWait);
+    guest.tcp_send(handle, SUFFIX);
+    guest.tcp_close(handle);
+    assert!(guest.poll_until(Duration::from_secs(5), |g| g.tcp_done(handle)));
+    assert_eq!(
+        received
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap(),
+        [PREFIX, SUFFIX].concat(),
+        "origin must receive the suffix sent after its own FIN"
+    );
+    drop(session);
+
+    let text = String::from_utf8(state.read(exarch::egress::LEDGER).unwrap()).unwrap();
+    let records: Vec<serde_json::Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 2, "one allow and one close: {text}");
+    assert_eq!(records[0]["allowed"], true);
+    assert_eq!(records[1]["note"], "closed");
+    assert_eq!(records[1]["up"], PREFIX.len() + SUFFIX.len());
+    assert_eq!(records[1]["down"], RESPONSE.len());
+}
+
+#[test]
+#[serial_test::serial]
+fn guest_fin_delivers_a_response_larger_than_the_tunnel_buffers() {
+    const REQUEST: &[u8] = b"respond only after request EOF";
+    let response: Vec<u8> = (0..251).cycle().take(512 * 1024).collect();
+    let expected = response.clone();
+    let (fixture, received) = spawn_bounded_fixture(move |mut stream| {
+        let mut request = Vec::new();
+        stream.read_to_end(&mut request)?;
+        stream.write_all(&response)?;
+        stream.shutdown(Shutdown::Write)?;
+        Ok(request)
+    });
+    let (mut guest, session) = harness(Arc::new(TestDialer {
+        fixture,
+        ..TestDialer::default()
+    }));
+    let _session = StopOnDrop(Some(session));
+    let (handle, mut output) = guest.tcp_tunnel(43001);
+    assert!(output.is_empty(), "origin must wait for request EOF");
+    guest.tcp_send(handle, REQUEST);
+    guest.tcp_close(handle);
+    assert!(
+        guest.poll_until(Duration::from_secs(10), |g| {
+            output.extend(g.tcp_recv(handle));
+            g.tcp_done(handle) && !g.tcp_can_recv(handle)
+        }),
+        "guest FIN must leave the download alive through its final bytes and FIN"
+    );
+    assert_eq!(output, expected, "the entire response must arrive in order");
+    assert_eq!(
+        received
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap(),
+        REQUEST
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn guest_reset_wakes_blocked_output_and_releases_its_slot() {
+    let (fixture, ready, finished) = spawn_flood_fixture();
+    let (mut guest, session) = harness(Arc::new(TestDialer {
+        fixture,
+        ..TestDialer::default()
+    }));
+    let _session = StopOnDrop(Some(session));
+    let (flood, _) = guest.tcp_tunnel(43002);
+    assert!(guest.poll_until(Duration::from_secs(5), |g| {
+        g.sockets.get::<tcp::Socket>(flood).recv_queue() == SOCKET_BUF
+    }));
+    ready.recv_timeout(Duration::from_secs(5)).unwrap();
+
+    // Incomplete CONNECTs hold every other slot without dialing the fixture.
+    for i in 1..TUNNEL_CAP {
+        let handle = guest.tcp_connect(GATEWAY, PORT, 43100 + u16::try_from(i).unwrap());
+        assert!(guest.poll_until(Duration::from_secs(5), |g| {
+            g.tcp_state(handle) == tcp::State::Established
+        }));
+    }
+    let rejected = guest.tcp_connect(GATEWAY, PORT, 43200);
+    assert!(guest.poll_until(Duration::from_secs(5), |g| g.tcp_done(rejected)));
+    guest.sockets.get_mut::<tcp::Socket>(flood).abort();
+    guest.poll();
+
+    // Retry admission: the reset worker may need a few polls to finish.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut port = 43201;
+    loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "RST must release its slot and the host must keep serving connections"
+        );
+        let handle = guest.tcp_connect(GATEWAY, PORT, port);
+        assert!(guest.poll_until(Duration::from_secs(1), |g| {
+            g.tcp_state(handle) == tcp::State::Established || g.tcp_done(handle)
+        }));
+        if guest.tcp_state(handle) == tcp::State::Established {
+            guest.tcp_send(handle, &connect_request("off-list.example"));
+            let mut response = Vec::new();
+            assert!(guest.poll_until(Duration::from_secs(1), |g| {
+                response.extend(g.tcp_recv(handle));
+                response.windows(4).any(|w| w == b"\r\n\r\n") || g.tcp_done(handle)
+            }));
+            if !response.is_empty() {
+                assert!(response.starts_with(b"HTTP/1.1 403"));
+                break;
+            }
+        }
+        port += 1;
+    }
+    finished
+        .recv_timeout(Duration::from_secs(5))
         .unwrap()
         .unwrap();
 }
@@ -702,7 +944,7 @@ fn stop_during_an_idle_established_tunnel_ends_the_session_promptly() {
 #[test]
 #[serial_test::serial]
 fn stop_while_the_worker_to_guest_direction_is_blocked_ends_the_session_promptly() {
-    let fixture = spawn_flood_fixture();
+    let (fixture, ready, finished) = spawn_flood_fixture();
     let dialer = Arc::new(TestDialer {
         fixture,
         ..TestDialer::default()
@@ -717,9 +959,10 @@ fn stop_while_the_worker_to_guest_direction_is_blocked_ends_the_session_promptly
     assert!(guest.poll_until(Duration::from_secs(5), |g| g.tcp_can_recv(handle)));
     assert!(guest.tcp_recv(handle).starts_with(b"HTTP/1.1 200"));
 
-    // Never drain again: let the flood fill the ring and the socket
-    // window from here on, without any further polling from this side.
-    thread::sleep(Duration::from_millis(500));
+    assert!(guest.poll_until(Duration::from_secs(5), |g| {
+        g.sockets.get::<tcp::Socket>(handle).recv_queue() == SOCKET_BUF
+    }));
+    ready.recv_timeout(Duration::from_secs(5)).unwrap();
 
     session.stop();
     let result = join_within(session, Duration::from_secs(5));
@@ -728,6 +971,10 @@ fn stop_while_the_worker_to_guest_direction_is_blocked_ends_the_session_promptly
         "a worker blocked writing to a full ring must wake on stop, not hang join"
     );
     assert!(result.unwrap().is_ok());
+    finished
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
 }
 
 #[test]
