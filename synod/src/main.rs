@@ -100,20 +100,18 @@ fn main() {
             signin::cancel_sign_in,
             review::job_report,
         ])
-        // Closing the window ends the conversation cleanly rather than
-        // orphaning its machine: hold the close, end the conversation on
-        // its own thread (dropping its sender is its own final path — the
-        // worker finishes its exchange, shuts its machine down, then
-        // exits), and only then let the window actually close.
+        // One close owner waits for teardown (with bounded grace) before
+        // destroying the window. Repeated requests cannot bypass that wait.
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let slot = window.state::<commands::Running>().slot();
-                let window = window.clone();
-                std::thread::spawn(move || {
-                    commands::end_conversation(&slot);
-                    let _ = window.destroy();
-                });
+                if let Some(close) = window.state::<commands::Running>().begin_close() {
+                    let window = window.clone();
+                    std::thread::spawn(move || {
+                        close.wait();
+                        let _ = window.destroy();
+                    });
+                }
             }
         })
         .run(context)

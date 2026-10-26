@@ -11,11 +11,6 @@ import { onOpening, onSynodEvent } from "./projector.js";
 
 // ---- Conversation screen --------------------------------------------
 
-// Wipe the window's own view of the conversation — the chat document and
-// the change report — without touching the running assistant. Shared by
-// the first folder pick (which then starts the assistant) and a restart
-// (whose assistant is already started by the time this runs: the window
-// must never start a second one on top of it).
 // The standing facts of a conversation, written only from the opening
 // the backend narrates — the model and effort actually in force, which
 // is not always what the start screen asked for (a model that takes no
@@ -48,21 +43,44 @@ export function enterConversation(folder, choice) {
   startAssistant(folder, choice);
 }
 
+/** @typedef {"starting" | "accepted" | "ready" | "ended"} Phase */
+/** @typedef {{ attempt: string, phase: Phase }} Attempt */
+/** @type {Attempt} */
+let assistant = { attempt: "", phase: "ended" };
+
+// Terminal attempts are absorbing; acceptance cannot undo readiness either.
+/** @param {Attempt} current @param {string} attempt @param {Exclude<Phase, "starting">} phase */
+function advance(current, attempt, phase) {
+  if (current.attempt !== attempt || current.phase === "ended") return current;
+  if (phase === "accepted" && current.phase !== "starting") return current;
+  return { attempt, phase };
+}
+
+/** @param {string} attempt @param {Exclude<Phase, "starting">} phase */
+function transition(attempt, phase) {
+  const next = advance(assistant, attempt, phase);
+  if (next === assistant) return false;
+  assistant = next;
+  refreshComposer();
+  return true;
+}
+
+function canSend() {
+  return !state.busy && (assistant.phase === "accepted" || assistant.phase === "ready");
+}
+
 async function startAssistant(folder, choice) {
-  try {
-    await invoke("start_conversation", { folder: folder.path, choice });
-    state.alive = true;
-  } catch (err) {
-    addSystemMessage(String(err));
-    state.alive = false;
-  }
-  // The shell narrates the start itself — "starting", or "finishing the
-  // previous session" while it waits for one, through to "ready" at the
-  // opening — so this only makes the composer usable again. Not "busy":
-  // the input's own disabled state already follows `state.alive`, so a
-  // failed start leaves it correctly unusable.
+  const attempt = crypto.randomUUID();
+  assistant = { attempt, phase: "starting" };
   state.busy = false;
   refreshComposer();
+  try {
+    await invoke("start_conversation", { folder: folder.path, choice, attempt });
+    // Accepted messages queue until boot; acceptance is not readiness.
+    transition(attempt, "accepted");
+  } catch (err) {
+    if (transition(attempt, "ended")) addSystemMessage(String(err));
+  }
 }
 
 export function setStatus(text) {
@@ -85,8 +103,8 @@ function setBusy(busy) {
 // is narrated by the shell, and that sentence must survive the input
 // becoming usable again.
 function refreshComposer() {
-  /** @type {HTMLTextAreaElement} */ ($("message")).disabled = state.busy || !state.alive;
-  /** @type {HTMLButtonElement} */ ($("send")).disabled = state.busy || !state.alive;
+  /** @type {HTMLTextAreaElement} */ ($("message")).disabled = !canSend();
+  /** @type {HTMLButtonElement} */ ($("send")).disabled = !canSend();
 }
 
 // A link the assistant wrote is opened in the user's own browser, never
@@ -108,7 +126,10 @@ $("transcript").addEventListener("click", (e) => {
   if (href) invoke("open_url", { url: href }).catch((err) => addSystemMessage(String(err)));
 });
 
-listen("synod-opening", (event) => onOpening(event.payload || {}));
+listen("synod-opening", (event) => {
+  const { attempt, opening } = /** @type {import("./bindings/ConversationOpening.ts").ConversationOpening} */ (event.payload);
+  if (transition(attempt, "ready")) onOpening(opening);
+});
 listen("synod-event", (event) => onSynodEvent(event.payload || {}));
 
 listen("exchange-done", async () => {
@@ -119,22 +140,24 @@ listen("exchange-done", async () => {
 });
 
 listen("synod-ended", (event) => {
-  const { stopped, explained } = event.payload || {};
-  state.alive = false;
+  const { attempt, stopped, explained } = /** @type {import("./bindings/ConversationEnded.ts").ConversationEnded} */ (event.payload);
+  if (!transition(attempt, "ended")) return;
   closeStreamingProse();
   clearOpenDial();
-  setBusy(false); // input disables on `state.alive` alone; nothing is "working"
+  setBusy(false);
   if (!stopped && !explained) addSystemMessage("The assistant stopped unexpectedly. Choose Start again to continue.");
 });
 
 function submit() {
   const field = /** @type {HTMLTextAreaElement} */ ($("message"));
   const text = field.value.trim();
-  if (!text || state.busy || !state.alive) return;
+  if (!text || !canSend()) return;
+  const attempt = assistant.attempt;
   addUserMessage(text);
   field.value = "";
   setBusy(true);
   invoke("send_message", { message: text }).catch((err) => {
+    if (assistant.attempt !== attempt || assistant.phase === "ended") return;
     addSystemMessage(String(err));
     setBusy(false);
   });
@@ -149,13 +172,15 @@ $("message").addEventListener("keydown", (e) => {
 });
 
 $("start-again").addEventListener("click", async () => {
-  if (!await confirmDialog("This begins a fresh conversation. Everything already " +
-    "changed in your folder stays exactly as it is.", { title: "Start again?", kind: "warning" })) return;
-  /** @type {HTMLButtonElement} */ ($("start-again")).disabled = true;
-  // Restarting is the same act as starting: `start_conversation`
-  // supersedes whatever is running, over the selection this conversation
-  // was begun with.
-  resetTranscript(state.folder);
-  await startAssistant(state.folder, state.choice);
-  /** @type {HTMLButtonElement} */ ($("start-again")).disabled = false;
+  const button = /** @type {HTMLButtonElement} */ ($("start-again"));
+  if (button.disabled) return;
+  button.disabled = true;
+  try {
+    if (!await confirmDialog("This begins a fresh conversation. Everything already " +
+      "changed in your folder stays exactly as it is.", { title: "Start again?", kind: "warning" })) return;
+    resetTranscript(state.folder);
+    await startAssistant(state.folder, state.choice);
+  } finally {
+    button.disabled = false;
+  }
 });

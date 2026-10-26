@@ -34,7 +34,6 @@ export const state = {
   folder: null,
   choice: null,  // { account, model, effort } picked on the start screen
   busy: false,   // an exchange is in flight
-  alive: false,  // the assistant is currently running
 };
 
 // The transcript is its own scroll region — a chat-only scrollbar,

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 24aab6a4
+generated_at_commit: af1d261b
 generated_at_date: 2026-10-26
 covers_paths: [guest-net/, synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/protocol/channel.rs, core/src/carrier.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs]
 ---
@@ -300,10 +300,20 @@ that decides when a refresh is worth asking for at all, `RefreshGate`, lives
 in `commands.rs`. `commands.rs` holds the folder picker, which answers a
 `PickedFolder` — the native `path` the window hands back as it came, and the
 shown `label` it displays — the
-conversation verbs (start, send, restart, end), the model listing (instant
+conversation verbs (start, send, restart, close), the model listing (instant
 from the cache, one background refresh), and opening before/after versions
 with the user's own applications. The worker's `Emitter` is gated on the
-generation that owns the conversation slot, and it speaks the shell's own
+generation that owns the conversation slot. `Running` holds an `Owner`:
+`Open` admits registration, `Closing` cannot hold a worker or admit another.
+The first close request consumes the registered handle into a unique `Close`
+job; only that request waits outside the mutex and destroys the window.
+Repeated closes cannot shorten its five-second grace, which bounds waiting,
+not successful machine shutdown. Frontend start identities correlate the
+opening and ended payloads independently of backend generations. The composer's
+attempt transitions distinguish starting, accepted, ready and ended; terminal
+attempts cannot revive, and superseded completions cannot change the current
+one. Acceptance permits preboot message queueing without claiming readiness.
+The emitter speaks the shell's own
 states into the status bar's one station before there is an agent whose
 states to relay: `starting`, or `finishing the previous session` while a
 restart waits for the generation it superseded to shut its machine down —

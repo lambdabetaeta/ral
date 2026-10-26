@@ -34,13 +34,25 @@ use tauri::{AppHandle, Emitter as _, Manager, State};
 /// [`start_conversation`]'s own supersession, and the window's own close
 /// handler.
 #[derive(Default)]
-pub struct Running(Arc<Mutex<Option<Handle>>>);
+pub struct Running(Arc<Mutex<owner::Owner<Handle>>>);
+
+#[path = "owner.rs"]
+mod owner;
+
+/// The first close request's shutdown job; consumed outside the owner lock.
+#[must_use]
+pub(crate) struct Close(owner::Close<Handle>);
+
+impl Close {
+    pub(crate) fn wait(self) {
+        self.0.finish(wait_for_conversation);
+    }
+}
 
 impl Running {
-    /// The shared slot, for the window's own close handler to end the
-    /// conversation with — the one reach into this module from outside it.
-    pub(crate) fn slot(&self) -> Arc<Mutex<Option<Handle>>> {
-        self.0.clone()
+    /// Atomically forbid registration and hand shutdown to the first caller.
+    pub(crate) fn begin_close(&self) -> Option<Close> {
+        self.0.lock_ignore_poison().begin_close().map(Close)
     }
 }
 
@@ -63,10 +75,16 @@ pub(crate) struct Handle {
     baseline_stop: synod::workspace::manifest::Stop,
 }
 
-/// The conversation has ended, one way or another — a failure, or a
-/// deliberate stop (a restart, or the window closing).
-#[derive(Clone, Serialize)]
+enum Ending {
+    Stopped,
+    Failed { explained: bool },
+}
+
+/// A terminal outcome correlated by the emitting worker itself.
+#[derive(Clone, Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../ui/js/bindings/")]
 struct ConversationEnded {
+    attempt: String,
     /// True when the shell ended it on purpose rather than it failing on
     /// its own.
     stopped: bool,
@@ -74,6 +92,14 @@ struct ConversationEnded {
     /// sentence for why — so the window's generic "stopped unexpectedly"
     /// must stay silent instead of contradicting it.
     explained: bool,
+}
+
+/// Readiness for the frontend start attempt, not the internal generation.
+#[derive(Clone, Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../ui/js/bindings/")]
+struct ConversationOpening {
+    attempt: String,
+    opening: synod::session::Opening,
 }
 
 /// The worker thread's own gated seam onto the window: [`Self::emit`] reaches
@@ -84,8 +110,9 @@ struct ConversationEnded {
 #[derive(Clone)]
 pub(crate) struct Emitter {
     app: AppHandle,
-    slot: Arc<Mutex<Option<Handle>>>,
+    slot: Arc<Mutex<owner::Owner<Handle>>>,
     generation: u64,
+    attempt: String,
 }
 
 impl Emitter {
@@ -94,7 +121,7 @@ impl Emitter {
     fn current(&self) -> bool {
         self.slot
             .lock_ignore_poison()
-            .as_ref()
+            .current()
             .is_some_and(|h| h.generation == self.generation)
     }
 
@@ -126,13 +153,18 @@ impl Emitter {
         clippy::significant_drop_tightening,
         reason = "the slot must stay held across the emit, not just the take, so a successor can never claim it between clearing and announcing"
     )]
-    fn ended(&self, payload: ConversationEnded) {
+    fn ended(&self, ending: Ending) {
         let mut held = self.slot.lock_ignore_poison();
         if held
-            .as_ref()
+            .current()
             .is_some_and(|h| h.generation == self.generation)
         {
-            held.take();
+            drop(held.open().and_then(Option::take));
+            let payload = ConversationEnded {
+                attempt: self.attempt.clone(),
+                stopped: matches!(ending, Ending::Stopped),
+                explained: matches!(ending, Ending::Failed { explained: true }),
+            };
             let _ = self.app.emit("synod-ended", payload);
         }
     }
@@ -207,8 +239,10 @@ pub fn list_models(
 /// conversation is already running supersedes it, by generation, rather
 /// than refusing — see [`Handle`].
 ///
+/// `attempt` correlates opening/ended events; it grants no authority.
+///
 /// # Errors
-/// Returns a plain sentence if the credential scrub failed at startup.
+/// Returns a plain sentence if credentials failed or the window is closing.
 #[tauri::command]
 pub fn start_conversation(
     app: AppHandle,
@@ -216,10 +250,10 @@ pub fn start_conversation(
     accounts: State<'_, super::Accounts>,
     folder: PathBuf,
     choice: Choice,
+    attempt: String,
 ) -> Result<(), String> {
     accounts.resolved()?;
-    spawn_conversation(app, state.slot(), folder, choice);
-    Ok(())
+    spawn_conversation(app, state.0.clone(), folder, choice, attempt)
 }
 
 /// Send one message into the running conversation.
@@ -233,10 +267,9 @@ pub fn start_conversation(
     reason = "the lock must stay held across the send, not just the lookup, so a restart cannot swap the handle out from under it"
 )]
 pub fn send_message(state: State<'_, Running>, message: String) -> Result<(), String> {
-    let slot = state.slot();
-    let held = slot.lock_ignore_poison();
+    let held = state.0.lock_ignore_poison();
     let handle = held
-        .as_ref()
+        .current()
         .ok_or_else(|| "There is no conversation running to send this to.".to_string())?;
     handle
         .sender
@@ -360,11 +393,8 @@ pub fn open_url(app: AppHandle, url: String) -> Result<(), String> {
 /// thread's own end-of-conversation signal — and give it a few seconds to
 /// take its final path (shutting its machine down) before giving up on the
 /// wait, so a wedged conversation can never keep the window from closing.
-/// Called from the window's own close handler, never the frontend.
-pub(crate) fn end_conversation(slot: &Arc<Mutex<Option<Handle>>>) {
-    let Some(handle) = slot.lock_ignore_poison().take() else {
-        return;
-    };
+/// Called only by the unique close job, with the owner mutex released.
+fn wait_for_conversation(handle: Handle) {
     drop(handle.sender);
     handle.baseline_stop.stop();
     let join = handle.join;
@@ -390,15 +420,19 @@ pub(crate) fn end_conversation(slot: &Arc<Mutex<Option<Handle>>>) {
 /// [`Handle`] and dropped the guard.
 fn spawn_conversation(
     app: AppHandle,
-    slot: Arc<Mutex<Option<Handle>>>,
+    slot: Arc<Mutex<owner::Owner<Handle>>>,
     folder: PathBuf,
     choice: Choice,
-) {
+    attempt: String,
+) -> Result<(), String> {
     static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::SeqCst);
 
     let mut held = slot.lock_ignore_poison();
-    let superseded = held.take().map(|handle| {
+    let registration = held
+        .open()
+        .ok_or_else(|| "The window is closing; a new conversation cannot start.".to_string())?;
+    let superseded = registration.take().map(|handle| {
         drop(handle.sender);
         // Stopped here, not left for the new worker's join to wait out: a
         // restart while the superseded generation is still stat-ing a slow
@@ -414,6 +448,7 @@ fn spawn_conversation(
         app,
         slot: slot.clone(),
         generation,
+        attempt,
     };
     let thread_baseline_stop = baseline_stop.clone();
     let join = std::thread::spawn(move || {
@@ -426,12 +461,13 @@ fn spawn_conversation(
             thread_baseline_stop,
         );
     });
-    *held = Some(Handle {
+    *registration = Some(Handle {
         generation,
         sender,
         join,
         baseline_stop,
     });
+    Ok(())
 }
 
 /// The worker thread's whole body: first join whatever conversation this
@@ -467,10 +503,7 @@ fn run_conversation(
     let ended = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         converse(&emitter, &folder, choice, &receiver, &baseline_stop)
     }))
-    .unwrap_or(ConversationEnded {
-        stopped: false,
-        explained: false,
-    });
+    .unwrap_or(Ending::Failed { explained: false });
 
     emitter.ended(ended);
 }
@@ -484,7 +517,7 @@ fn converse(
     choice: Choice,
     receiver: &mpsc::Receiver<String>,
     baseline_stop: &synod::workspace::manifest::Stop,
-) -> ConversationEnded {
+) -> Ending {
     let mut sink = super::sink::TauriSink::new(emitter.clone());
 
     let accounts = emitter.app.state::<super::Accounts>();
@@ -493,10 +526,7 @@ fn converse(
     // which cannot happen — but a worker that finds no store stands down
     // rather than panics.
     let Ok(holdings) = accounts.resolved() else {
-        return ConversationEnded {
-            stopped: false,
-            explained: false,
-        };
+        return Ending::Failed { explained: false };
     };
 
     // Narrated because it is silent otherwise: on a large folder or a
@@ -521,14 +551,17 @@ fn converse(
                     "synod-event",
                     super::sink::SynodEvent::Failure { message: e },
                 );
-                return ConversationEnded {
-                    stopped: false,
-                    explained: true,
-                };
+                return Ending::Failed { explained: true };
             }
         };
 
-    emitter.emit("synod-opening", opening);
+    emitter.emit(
+        "synod-opening",
+        ConversationOpening {
+            attempt: emitter.attempt.clone(),
+            opening,
+        },
+    );
     emitter.state("ready", false);
 
     // A fresh conversation opens on a fresh report: whatever the last one
@@ -553,10 +586,7 @@ fn converse(
     }
 
     let _ = conversation.end();
-    ConversationEnded {
-        stopped: true,
-        explained: false,
-    }
+    Ending::Stopped
 }
 
 /// Hand `path` to the user's default application for that file.  The system
