@@ -102,10 +102,11 @@ fn a_path_key_admits_its_file() {
 
 #[test]
 fn sandbox_projection_intersects_path_components() {
+    let tree = Tree::nowhere();
     let mut shell = ral_core::test_helper::core_shell();
     let outer = Capabilities {
         fs: Some(FsPolicy {
-            read_prefixes: vec![FrozenPath::from_surface("/tmp/ral-prefix-a")],
+            read_prefixes: vec![FrozenPath::from_surface(&tree.at("/ral-prefix-a"))],
             write_prefixes: Vec::new(),
             deny_paths: Vec::new(),
         }),
@@ -113,7 +114,7 @@ fn sandbox_projection_intersects_path_components() {
     };
     let inner = Capabilities {
         fs: Some(FsPolicy {
-            read_prefixes: vec![FrozenPath::from_surface("/tmp/ral-prefix-ab")],
+            read_prefixes: vec![FrozenPath::from_surface(&tree.at("/ral-prefix-ab"))],
             write_prefixes: Vec::new(),
             deny_paths: Vec::new(),
         }),
@@ -123,10 +124,8 @@ fn sandbox_projection_intersects_path_components() {
         shell.with_layer(layer(inner), |shell| shell.sandbox_projection().unwrap())
     });
     let read = ral_core::test_access::fs_read_paths(&projection.fs).expect("fs restricted");
-    assert!(
-        !read.iter().any(|p| p.starts_with("/tmp/ral-prefix")),
-        "{read:?}"
-    );
+    let prefix = ral_core::path::shown(tree.path("/ral-prefix"));
+    assert!(!read.iter().any(|p| p.starts_with(&prefix)), "{read:?}");
 }
 
 #[cfg(unix)]

@@ -323,7 +323,9 @@ mod tests {
     #[test]
     fn chpwd_fires_only_when_the_line_moves_the_session() {
         let root = tempfile::tempdir().unwrap();
-        let root = root.path();
+        // The session reports the resolved path, not a Windows temp 8.3 alias.
+        let root_path = std::fs::canonicalize(root.path()).unwrap();
+        let root = root_path.as_path();
         std::fs::create_dir_all(root.join("d").join("x")).unwrap();
         let (t, host, sink) =
             dressed(&[("p", HookEvent::Chpwd, "{ |ev| record $ev[old] $ev[new] }")]);

@@ -6,8 +6,8 @@
 //! component opened relative to its parent's handle without following: a
 //! name is looked up once, in a directory already held, and a component
 //! swapped for a link is refused, never followed. Only the leaf's handle is
-//! kept, derived from the walk's by `ReOpenFile`: it carries the probes, the
-//! DACL and the mandatory label, so what was checked is what is stamped.
+//! kept, reopened from the walk's handle without resolving a name: it carries
+//! the probes, the DACL and the mandatory label, so what was checked is stamped.
 //!
 //! A reparse point that names no path, a cloud placeholder, is the object it
 //! is: the walk refuses only name surrogates.

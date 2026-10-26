@@ -119,8 +119,9 @@ into the child's token exactly the capability SIDs of this launch's grants.
   parent's handle without following, without delete sharing; only a name
   surrogate (symlink, junction, mount point) refuses the launch, naming both,
   and a cloud-files placeholder passes, which `OBJ_DONT_REPARSE` would have
-  refused. The leaf's stamping handle is derived from the walk's by
-  `ReOpenFile`, and a share is refused by asking that handle for its volume
+  refused. The leaf's stamping handle is derived from the walk's by an
+  empty-name `NtCreateFile` relative to that held handle, including for a
+  directory; a share is refused by asking the handle for its volume
   (`dacl/frozen.rs`). A position that is not Unicode is refused there too, as
   `DaclError::NotUnicode`: the capability name is a hash of the position's text,
   and a grant that cannot be expressed faithfully is refused, not approximated.

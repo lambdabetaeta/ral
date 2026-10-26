@@ -167,7 +167,7 @@ have not, by name:
   `a_reparse_buffer_decodes_to_the_target_it_names`,
   `a_reparse_point_that_names_no_path_is_no_link`,
   `a_component_renamed_is_adopted_and_one_moved_is_refused`,
-  `publish_through_file_rename_info_ex_lands_the_file` (the plan's §9 item 3
+  `publish_through_file_rename_information_ex_lands_the_file` (the plan's §9 item 3
   pin: the held `RootDirectory`), and the three converted tests,
   `existing_and_absent_leaves_use_the_parents_stored_case`,
   `a_walk_starts_only_from_a_parsed_root` and
@@ -210,11 +210,16 @@ position by `open_nofollow`, refuses a share by `Located::is_local` and
 derives its stamping handle by `reopen`; `ensure_unreachable` holds each
 exclusion, a file or a directory, and reads every descriptor through
 `reopen(READ_CONTROL)`; the by-name opens, `ensure_local_canonical_prefix` and
-`dacl/acl.rs`'s named route are gone.  The `FileRenameInfoEx` premise with a
-non-null `RootDirectory` (plan §9 item 3) is pinned by
-`publish_through_file_rename_info_ex_lands_the_file` (step 1) and is not
-confirmed: the redirect commit's Windows publish rests on it until that test
-has run on a host.  The step-7 host assertions that have not run:
+`dacl/acl.rs`'s named route are gone. Windows runtime CI subsequently rejected
+the `FileRenameInfoEx` premise with a non-null `RootDirectory` (plan §9 item 3):
+the Win32 setter does not preserve the relative destination. The implementation
+now calls native `NtSetInformationFile(FileRenameInformationEx)`, whose
+[`RootDirectory` contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information)
+accepts the held target directory and a simple relative filename. The
+publication regression and its moved-directory/source variant pin that form.
+Directory derivation likewise uses empty-name `NtCreateFile`, not
+`ReOpenFile`, which forces a non-directory open. The step-7 host assertions
+originally awaiting runtime verification were:
 `an_exact_file_exclusion_is_verified_and_reported` and
 `a_junction_and_a_symlink_beneath_an_exclusion_are_not_followed`
 (`dacl/tests.rs`), `a_share_is_refused` and the junction cases

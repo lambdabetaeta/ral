@@ -655,6 +655,7 @@ pub(super) mod tests {
     #[test]
     fn a_directory_exclusion_reads_apart_from_a_file_exclusion() {
         let tools = Tree::nowhere().at("/tools");
+        let tools = path::shown(&tools);
         let tools = quote_word(&tools);
         assert_eq!(
             ExecDeny::Dir(excluded("/tools")).to_string(),

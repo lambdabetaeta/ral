@@ -30,8 +30,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::vec::IntoIter;
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
-    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT,
-    FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile, SYMLINK_FLAG_RELATIVE,
+    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT,
+    FILE_RENAME_INFORMATION, FILE_SYNCHRONOUS_IO_NONALERT, FileRenameInformationEx, NtCreateFile,
+    NtSetInformationFile, SYMLINK_FLAG_RELATIVE,
 };
 use windows_sys::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, ERROR_NO_MORE_FILES,
@@ -46,14 +47,13 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_WRITE, FILE_ID_BOTH_DIR_INFO, FILE_ID_EXTD_DIR_INFO,
     FILE_ID_INFO, FILE_INFO_BY_HANDLE_CLASS, FILE_LIST_DIRECTORY, FILE_NAME_INFO,
-    FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_STANDARD_INFO, FILE_TRAVERSE, FILE_WRITE_DATA, FileAttributeTagInfo, FileBasicInfo,
-    FileDispositionInfo, FileDispositionInfoEx, FileIdBothDirectoryInfo,
-    FileIdBothDirectoryRestartInfo, FileIdExtdDirectoryInfo, FileIdExtdDirectoryRestartInfo,
-    FileIdInfo, FileNormalizedNameInfo, FileRenameInfoEx, FileStandardInfo, GetDriveTypeW,
-    GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
-    MAXIMUM_REPARSE_DATA_BUFFER_SIZE, ReOpenFile, SYNCHRONIZE, SetFileInformationByHandle,
-    VOLUME_NAME_GUID,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
+    FILE_TRAVERSE, FILE_WRITE_DATA, FileAttributeTagInfo, FileBasicInfo, FileDispositionInfo,
+    FileDispositionInfoEx, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
+    FileIdExtdDirectoryInfo, FileIdExtdDirectoryRestartInfo, FileIdInfo, FileNormalizedNameInfo,
+    FileStandardInfo, GetDriveTypeW, GetFileInformationByHandle, GetFileInformationByHandleEx,
+    GetFinalPathNameByHandleW, MAXIMUM_REPARSE_DATA_BUFFER_SIZE, SYNCHRONIZE,
+    SetFileInformationByHandle, VOLUME_NAME_GUID,
 };
 use windows_sys::Win32::System::IO::{DeviceIoControl, IO_STATUS_BLOCK};
 use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
@@ -160,13 +160,47 @@ fn query<T: Default>(f: &File, class: FILE_INFO_BY_HANDLE_CLASS) -> io::Result<T
     Ok(info)
 }
 
-/// A new handle on the object `f` holds, with `rights`, sharing `share`.
-fn reopen(f: &File, rights: u32, share: u32, flags: u32) -> io::Result<File> {
-    // SAFETY: `f` is a live handle; the call answers a new one or
-    // `INVALID_HANDLE_VALUE`.
-    let handle = unsafe { ReOpenFile(f.as_raw_handle(), rights, share, flags) };
-    if handle == INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
+/// A new synchronous handle on the object `f` holds, with `rights` and
+/// `SYNCHRONIZE`, sharing `share`. An empty native name reopens the object
+/// itself, without resolving its name again. Unlike `ReOpenFile`, this does
+/// not force `FILE_NON_DIRECTORY_FILE`, so directories can be reopened too.
+/// `FILE_OPEN_REPARSE_POINT` keeps a held link the link, never its target.
+fn reopen(f: &File, rights: u32, share: u32) -> io::Result<File> {
+    let name = UNICODE_STRING::default();
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: u32::try_from(size_of::<OBJECT_ATTRIBUTES>()).expect("a struct is small"),
+        RootDirectory: f.as_raw_handle(),
+        ObjectName: &raw const name,
+        Attributes: OBJ_CASE_INSENSITIVE,
+        SecurityDescriptor: null(),
+        SecurityQualityOfService: null(),
+    };
+    let mut handle = INVALID_HANDLE_VALUE;
+    let mut block = IO_STATUS_BLOCK::default();
+    // SAFETY: `f` is live; the empty name and attributes describe that same
+    // object, and all inputs and out-parameters outlive the synchronous call.
+    let status = unsafe {
+        site!(
+            Silent::WalkReopen,
+            NtCreateFile(
+                &raw mut handle,
+                rights | SYNCHRONIZE,
+                &raw const attributes,
+                &raw mut block,
+                null(),
+                0,
+                share,
+                FILE_OPEN,
+                FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+                null(),
+                0,
+            )
+        )
+    };
+    if status != STATUS_SUCCESS {
+        // SAFETY: a plain conversion of a status code.
+        let code = unsafe { RtlNtStatusToDosError(status) };
+        return Err(io::Error::from_raw_os_error(code.cast_signed()));
     }
     // SAFETY: `handle` is a fresh handle this call owns.
     Ok(unsafe { File::from_raw_handle(handle) })
@@ -181,7 +215,6 @@ pub(super) fn reopen_shared(f: &File, access: u32) -> io::Result<File> {
         f,
         access,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
     )
 }
 
@@ -602,10 +635,9 @@ fn rights(access: Access) -> u32 {
 }
 
 /// A data handle on the object `leaf` holds, sharing read, write and delete.
-/// `ReOpenFile` derives it from the held handle, so no name is resolved
-/// again; a reparse point that names no path, a cloud placeholder, is
-/// instead opened by `name` under `dir` and verified against the held
-/// handle's identity.
+/// It is derived from the held handle ([`reopen`]), so no name is resolved
+/// again; a reparse point that names no path, a cloud placeholder, is instead
+/// opened by `name` under `dir` and verified against the held handle's identity.
 pub(super) fn derive(
     leaf: &File,
     dir: &File,
@@ -613,14 +645,14 @@ pub(super) fn derive(
     stat: &Stat,
     access: Access,
 ) -> io::Result<File> {
+    // Streaming writes query the returned handle's metadata before truncating.
+    let access = rights(access) | FILE_READ_ATTRIBUTES;
     if stat.reparse_tag.is_none() {
         let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-        return reopen(leaf, rights(access), share, 0);
+        return reopen(leaf, access, share);
     }
     let mut options = OpenOptions::new();
-    options
-        .access_mode(rights(access))
-        .follow(FollowSymlinks::No);
+    options.access_mode(access).follow(FollowSymlinks::No);
     let path: &Path = name.as_os_str().as_ref();
     let file = site!(
         Surface::Reopen,
@@ -823,16 +855,18 @@ fn class_refused(error: io::Error, what: &str, class: &str) -> io::Error {
 }
 
 /// Rename the object `handle` holds to the entry `to` of `dir`:
-/// `FileRenameInfoEx` with `RootDirectory` the held directory, so the rename
-/// lands in it whatever its name now is, replacing the target and leaving a
-/// handle on it open.  `handle` needs `DELETE` access.  A volume or host that
-/// refuses the class fails with that error, said as `what` needs it; nothing
-/// falls back to a rename by name.
+/// `NtSetInformationFile(FileRenameInformationEx)` with `RootDirectory` the
+/// held directory, so the rename lands in it whatever its name now is,
+/// replacing the target and leaving a handle on it open.  The Win32 setter
+/// converts relative names to absolute paths without clearing `RootDirectory`,
+/// which the native call refuses; call it directly to keep the name relative.
+/// `handle` needs `DELETE` access.  A volume or host that refuses the class
+/// fails with that error, said as `what` needs it; no rename by name follows.
 fn rename_by_handle(handle: &File, dir: &File, to: &EntryName, what: &str) -> io::Result<()> {
     let name: Vec<u16> = to.as_os_str().encode_wide().collect();
     let name_bytes = name.len() * size_of::<u16>();
-    let mut buf = Buf::new(size_of::<FILE_RENAME_INFO>() + name_bytes);
-    let info = buf.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    let mut buf = Buf::new(size_of::<FILE_RENAME_INFORMATION>() + name_bytes);
+    let info = buf.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
     // SAFETY: `buf` is zeroed, aligned for the struct and as long as it plus
     // the name, which is copied in whole beside the one unit it carries.
     unsafe {
@@ -846,17 +880,25 @@ fn rename_by_handle(handle: &File, dir: &File, to: &EntryName, what: &str) -> io
             name.len(),
         );
     }
-    let size = buf.size();
-    // SAFETY: `handle` is a live handle, and `info` is the struct the class
-    // names, `size` bytes of it.
-    let ok = unsafe {
-        SetFileInformationByHandle(handle.as_raw_handle(), FileRenameInfoEx, info.cast(), size)
+    let mut block = IO_STATUS_BLOCK::default();
+    // SAFETY: both handles are live, `info` is the struct the class names,
+    // the buffer has the size passed, and `block` receives the completion.
+    let status = unsafe {
+        NtSetInformationFile(
+            handle.as_raw_handle(),
+            &raw mut block,
+            info.cast(),
+            buf.size(),
+            FileRenameInformationEx,
+        )
     };
-    if ok == 0 {
+    if status != STATUS_SUCCESS {
+        // SAFETY: a plain conversion of a status code.
+        let code = unsafe { RtlNtStatusToDosError(status) };
         return Err(class_refused(
-            io::Error::last_os_error(),
+            io::Error::from_raw_os_error(code.cast_signed()),
             what,
-            "FileRenameInfoEx",
+            "FileRenameInformationEx",
         ));
     }
     Ok(())
@@ -1079,19 +1121,14 @@ pub(super) struct Lister<'a> {
 }
 
 /// List `dir`: a handle reopened from it with `FILE_LIST_DIRECTORY`, since
-/// the held one asks attributes alone, which is where a directory the user
-/// cannot list refuses.  `FileIdExtdDirectoryInfo` gives names, stats and
+/// the held one asks only attributes and traverse. This is where a directory
+/// the user cannot list refuses. `FileIdExtdDirectoryInfo` gives names, stats and
 /// 128-bit ids in one pass, kept by name; where the volume answers a zero
 /// 128-bit id, or refuses the class, the pass is made again as
 /// `FileIdBothDirectoryInfo`, whose 64-bit id is the one [`ObjectId::of`]
 /// falls back to.
 pub(super) fn list(dir: &File) -> io::Result<Lister<'_>> {
-    let reader = reopen(
-        dir,
-        FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
-        FILE_FLAG_BACKUP_SEMANTICS,
-    )?;
+    let reader = reopen(dir, FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE)?;
     let volume = seen(dir)?.id.volume;
     let extd = rows(
         &reader,

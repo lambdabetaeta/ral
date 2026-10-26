@@ -151,8 +151,10 @@ function of its layers.**
 
 - A `Located` opens, stats, stages and publishes relative to its directory
   handle; a `Dir` lists and descends from its own. A data handle on a present
-  leaf is derived from the held one (`/proc/self/fd/N` on Linux, `ReOpenFile` on
-  Windows). macOS cannot derive one: it opens the leaf by name inside the
+  leaf is derived from the held one (`/proc/self/fd/N` on Linux, an empty-name
+  `NtCreateFile` relative to the held handle on Windows). The native Windows
+  open also supports directories; `ReOpenFile` forces a non-directory open.
+  macOS cannot derive one: it opens the leaf by name inside the
   directory handle and verifies it against the held identity before any byte
   moves.
 - **A leaf absent at the walk is created exclusively.** What was judged was an
@@ -163,6 +165,9 @@ function of its layers.**
   file, staging only makes the write atomic, and the rename alone would ask the
   directory. The after-image is read from the staging handle: what ral wrote,
   never what landed.
+  Windows publishes with `NtSetInformationFile(FileRenameInformationEx)`, the
+  staging handle as source and the held directory as `RootDirectory`. The
+  Win32 setter does not preserve this relative-destination form.
 - **A name ral invents** (`temp-dir`, `temp-file`) is an absent child of a
   write-judged directory, judged as that leaf and created exclusively.
 - **ral enumerates.** `path/tree/walk.rs` lists with `Dir::read_dir`, judges every

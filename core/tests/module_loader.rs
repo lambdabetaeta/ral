@@ -11,6 +11,7 @@ mod common;
 use common::fresh_shell;
 
 use ral_core::Value;
+use ral_core::path::shown;
 use ral_core::protocol::Run;
 use ral_core::shell::runtime::{Settled, Shell};
 use ral_core::source::SourceOrigin;
@@ -36,12 +37,13 @@ fn answer_of(m: &Value) -> i64 {
     }
 }
 
-/// A fresh directory under the system temp dir, keyed on the pid.
+/// A fresh directory under the system temp dir, keyed on the pid and resolved
+/// as the shell walks it, including Windows temp paths with 8.3 aliases.
 fn scratch(tag: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("ral-modpath-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    ral_core::test_helper::real(&dir).as_path().to_path_buf()
 }
 
 /// `use` of a bare name that the logical cwd cannot supply falls through to
@@ -140,7 +142,7 @@ fn ral_path_candidates_are_judged_for_reading() {
     let narrow = under(format!("read: [`absolute '{}']", here.display()));
     let refused = top_level(&mut shell, &narrow).expect_err("a grant that reads neither entry");
     assert!(
-        refused.to_string().contains(&d1.display().to_string()),
+        refused.to_string().contains(&shown(&d1)),
         "the error is the first candidate's refusal, not an absence: {refused}"
     );
 
@@ -212,17 +214,11 @@ fn a_denied_local_name_is_the_error_where_ral_path_has_nothing() {
 
     std::fs::write(&local, "let answer = 9\n").unwrap();
     let present = top_level(&mut shell, &source).expect_err("the local name is denied");
-    assert!(
-        present.to_string().contains(&local.display().to_string()),
-        "{present}"
-    );
+    assert!(present.to_string().contains(&shown(&local)), "{present}");
 
     std::fs::remove_file(&local).unwrap();
     let absent = top_level(&mut shell, &source).expect_err("the absent name is denied alike");
-    assert!(
-        absent.to_string().contains(&local.display().to_string()),
-        "{absent}"
-    );
+    assert!(absent.to_string().contains(&shown(&local)), "{absent}");
 
     std::fs::remove_dir_all(&root).ok();
 }
@@ -254,10 +250,7 @@ fn a_denied_search_says_the_same_whether_or_not_the_local_name_exists() {
     std::fs::remove_file(&local).unwrap();
     let absent = top_level(&mut shell, &source).expect_err("both candidates are denied");
     assert_eq!(present.to_string(), absent.to_string());
-    assert!(
-        absent.to_string().contains(&local.display().to_string()),
-        "{absent}"
-    );
+    assert!(absent.to_string().contains(&shown(&local)), "{absent}");
 
     std::fs::remove_dir_all(&root).ok();
 }

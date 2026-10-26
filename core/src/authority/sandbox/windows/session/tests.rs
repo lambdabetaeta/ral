@@ -90,7 +90,7 @@ fn the_universal_prefix_is_refused_in_either_region() {
 
 #[test]
 fn a_drive_root_is_not_the_universal_prefix() {
-    assert!(refuse_universal_prefix(&rules(&[r"C:"], &[r"C:\work"], &[])).is_ok());
+    assert!(refuse_universal_prefix(&rules(&[r"C:\"], &[r"C:\work"], &[])).is_ok());
 }
 
 /// The positions of the `/`-rooted fixture names, spelled as given: places

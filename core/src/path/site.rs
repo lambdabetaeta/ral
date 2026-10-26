@@ -219,6 +219,11 @@ pub(in crate::path) enum Silent {
     /// directory itself.
     #[cfg(unix)]
     WalkReopenDir,
+    /// Derives another handle from a held Windows object without resolving a
+    /// name. Data opens belong to their caller's surface; listing, metadata
+    /// and sandbox reopens raise no card of their own.
+    #[cfg(windows)]
+    WalkReopen,
     /// Whether a write open would be granted, by name under the held
     /// directory: the `is-writable` predicate, and a staged write's check of
     /// the file it would replace.  A permission predicate, not turn-time

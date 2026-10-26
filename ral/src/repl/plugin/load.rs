@@ -380,7 +380,7 @@ mod tests {
         let refused = found(&["p", "p.ral"]).unwrap_err().to_string();
         assert!(!refused.contains("not found"), "{refused}");
         assert!(
-            refused.contains(utf8(&root.join("p")).unwrap()),
+            refused.contains(&ral_core::path::shown(root.join("p"))),
             "{refused}"
         );
         let absent = ral_core::test_helper::core_shell()

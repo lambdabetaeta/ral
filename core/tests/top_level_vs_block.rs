@@ -194,14 +194,12 @@ fn within_dir_restores_the_cell_on_exit() {
     std::fs::create_dir_all(inner.join("sub")).unwrap();
     let mut shell = fresh_shell();
     top_level(&mut shell, &format!("cd '{}'", outer.display())).expect("cd");
+    // `cd` resolves host aliases; restoration must preserve that exact cell.
+    let before = shell.cwd();
     let exited = top_level(
         &mut shell,
         &format!("within [dir: '{}'] {{ cd sub; exit 0 }}", inner.display()),
     );
     assert!(matches!(exited, Err(Break::Escape(_))), "got {exited:?}");
-    assert_eq!(
-        shell.cwd(),
-        Path::new(&outer),
-        "an exit must restore the cell"
-    );
+    assert_eq!(shell.cwd(), before, "an exit must restore the cell");
 }

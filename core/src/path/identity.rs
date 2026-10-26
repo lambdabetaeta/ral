@@ -771,7 +771,7 @@ mod tests {
         );
         assert_eq!(relative(r"c:\x\y", r"C:\x"), Some(vec!["y".into()]));
         assert_eq!(
-            relative(r"\\?\UNC\srv\sh\x", r"\\srv\sh"),
+            relative(r"\\?\UNC\srv\sh\x", r"\\srv\sh\"),
             Some(vec!["x".into()])
         );
         assert_eq!(relative(r"C:\x", r"D:\"), None);

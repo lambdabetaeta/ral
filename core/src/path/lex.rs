@@ -2216,7 +2216,15 @@ mod tests {
         for refused in ["", "/a", "a/", "a//b", "./a", "../a", "a/../b", "."] {
             assert!(names(refused).is_err(), "{refused:?}");
         }
-        for windows_only in ["C:", "a.txt:s", r"a\b"] {
+        assert_eq!(
+            names(r"a\b").unwrap(),
+            if cfg!(windows) {
+                vec!["a", "b"]
+            } else {
+                vec![r"a\b"]
+            }
+        );
+        for windows_only in ["C:", "a.txt:s", r"\a", r"a\..\b", r"a\\b", r"a\"] {
             assert_eq!(
                 names(windows_only).is_err(),
                 cfg!(windows),

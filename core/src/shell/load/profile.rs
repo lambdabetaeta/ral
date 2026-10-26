@@ -161,9 +161,10 @@ mod tests {
     }
 
     fn ctx() -> FreezeCtx {
+        let home = crate::test_helper::Tree::nowhere().at("/h");
         FreezeCtx::at(
-            std::iter::once(("HOME", "/h")).collect::<crate::host::EnvVars>(),
-            crate::path::CwdPath::new("/".into()).expect("a fixture cwd is absolute"),
+            std::iter::once(("HOME", home.as_str())).collect::<crate::host::EnvVars>(),
+            crate::test_helper::process_cwd(),
         )
     }
 

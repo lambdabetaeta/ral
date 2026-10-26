@@ -344,7 +344,7 @@ mod tests {
 
     #[test]
     fn dangerous_is_root() {
-        let ctx = ctx_at("/h", "/");
+        let ctx = ctx_at(&host_home(), std::env::temp_dir());
         assert_eq!(load("dangerous", DANGEROUS_RAL, &ctx), GrantLayer::root());
     }
 

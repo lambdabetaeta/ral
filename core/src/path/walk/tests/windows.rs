@@ -3,7 +3,7 @@
 use super::super::super::names::{EntryName, rooted};
 use super::super::super::trace::{Kind, ObjectId};
 use super::super::resolve::{LeafMode, walk, walk_dir, walk_dir_made, walk_excluded, walk_lenient};
-use super::super::{Access, Dir, Judged, Located, Sharing, Visibility, Writing, host};
+use super::super::{Access, Dir, Judged, Located, Sharing, Streaming, Visibility, Writing, host};
 use super::{writable, writing};
 use crate::path::{LexicalPath, Resolver};
 use std::ffi::OsStr;
@@ -225,6 +225,37 @@ fn an_identity_is_the_file_id_of_the_handle() {
         let name = entry.name().as_os_str().to_owned();
         assert_eq!(entry.seen().unwrap().id, ids(&name.to_string_lossy()));
     }
+}
+
+/// Reopening a directory derives from its handle, even after that directory
+/// moves and its old name is taken. Metadata, security and listing handles
+/// must all describe the original object, never its replacement.
+#[test]
+fn a_reopened_directory_is_the_held_object_after_its_name_is_replaced() {
+    let tmp = tempfile::tempdir().unwrap();
+    let original = tmp.path().join("original");
+    let moved = tmp.path().join("moved");
+    std::fs::create_dir(&original).unwrap();
+    std::fs::write(original.join("kept"), b"original").unwrap();
+    let handle = attributes_of(&original);
+    let id = ObjectId::of(&handle).unwrap();
+
+    std::fs::rename(&original, &moved).unwrap();
+    std::fs::create_dir(&original).unwrap();
+    std::fs::write(original.join("replacement"), b"new").unwrap();
+
+    let reopened = host::reopen_shared(&handle, READ_CONTROL | FILE_READ_ATTRIBUTES).unwrap();
+    assert_eq!(ObjectId::of(&reopened).unwrap(), id);
+    assert_eq!(host::seen(&reopened).unwrap().stat.kind, Kind::Dir);
+    assert_ne!(ObjectId::of(&attributes_of(&original)).unwrap(), id);
+    let listed: Vec<_> = host::list(&reopened)
+        .unwrap()
+        .map(|(entry, seen)| {
+            assert_eq!(seen.unwrap().stat.kind, Kind::File);
+            entry
+        })
+        .collect();
+    assert_eq!(listed, [name("kept")]);
 }
 
 /// A `BACKUP_SEMANTICS` handle opened by any spelling answers the long name
@@ -450,6 +481,30 @@ fn a_stat_carries_the_length() {
     assert_eq!(entry.seen().unwrap().stat.len, 5);
 }
 
+/// Both writable reopen modes retain the attribute access that streaming
+/// writes need to stat their handle before changing any bytes.
+#[test]
+fn streaming_an_existing_file_keeps_metadata_access_and_append_semantics() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("f");
+    for mode in [Streaming::Append, Streaming::Truncate] {
+        std::fs::write(&path, b"12345").unwrap();
+        let mut streamed = walked(&path).open_streaming(mode).unwrap();
+        assert!(!streamed.created());
+        assert_eq!(host::seen(streamed.file()).unwrap().stat.len, 5);
+        let expected = match mode {
+            Streaming::Append => "12345x",
+            Streaming::Truncate => {
+                streamed.truncate().unwrap();
+                "x"
+            }
+        };
+        streamed.file().write_all(b"x").unwrap();
+        drop(streamed);
+        assert_eq!(read_all(&path), expected);
+    }
+}
+
 /// A reparse buffer of `tag`, holding `substitute` and, after it, the same as
 /// the print name: a symlink's carries `flags`, a mount point's has none.
 fn reparse_buffer(tag: u32, flags: Option<u32>, substitute: &str) -> Vec<u8> {
@@ -558,7 +613,7 @@ fn a_component_renamed_is_adopted_and_one_moved_is_refused() {
 /// directory as `RootDirectory`, over a target the walk held and into a name
 /// the walk found absent alike; no sibling is left beside it.
 #[test]
-fn publish_through_file_rename_info_ex_lands_the_file() {
+fn publish_through_file_rename_information_ex_lands_the_file() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("f"), b"old").unwrap();
     for (leaf, before) in [("f", "old"), ("g", "")] {
@@ -575,6 +630,31 @@ fn publish_through_file_rename_info_ex_lands_the_file() {
         .collect();
     names.sort();
     assert_eq!(names, ["f", "g"]);
+}
+
+/// Publication uses both handles, not the source name or the directory's old
+/// path, even when those names have moved and the old path is occupied again.
+#[test]
+fn publication_keeps_the_held_directory_and_source_after_they_are_renamed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let original = tmp.path().join("original");
+    let moved = tmp.path().join("moved");
+    std::fs::create_dir(&original).unwrap();
+    let dir = attributes_of(&original);
+    std::fs::rename(&original, &moved).unwrap();
+    std::fs::create_dir(&original).unwrap();
+    let target = "published-\u{1f4c4}";
+    std::fs::write(original.join(target), b"untouched").unwrap();
+
+    let from = name("staged");
+    let mut sibling = host::create_sibling(&dir, &from, Visibility::Public).unwrap();
+    sibling.write_all(b"new").unwrap();
+    std::fs::rename(moved.join("staged"), moved.join("renamed")).unwrap();
+    host::rename_over(&dir, &sibling, &from, &name(target)).unwrap();
+
+    assert_eq!(read_all(&moved.join(target)), "new");
+    assert_eq!(read_all(&original.join(target)), "untouched");
+    assert_eq!(names_in(&moved), [target]);
 }
 
 /// Windows holds nothing: a file removed and made again at its name is met by
