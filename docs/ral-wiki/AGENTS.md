@@ -200,7 +200,25 @@ the home for cross-cutting concept pages too (e.g. [[design/grant|grant]],
 missing `anchors`, `related/` staleness, and the `docs/SPEC.md` stamp — are what
 `./scripts/wiki-drift.sh` performs, at no token cost; it prints one
 tab-separated line per finding, so its output serves directly as the work-list.
-Run it first and reserve judgement for what it cannot decide.
+Run it first and reserve judgement for what it cannot decide. Findings exit zero;
+missing prerequisites and Git, search or IO failures exit nonzero.
+
+The TSV work-list uses `MAP`, `ANCHOR`, `RELATED` and `SPEC` records. Two
+additional records preserve uncertainty rather than claiming no drift:
+- `UNKNOWN_HISTORY <page> <field> <stamp|none> <reason>`: a missing or
+  unresolvable commit, or incomplete shallow history. In a shallow checkout,
+  only a stamp resolving to HEAD is counted; fetch complete history to compare
+  older stamps. An unavailable count is never reported as zero.
+- `UNVERIFIED_ANCHOR <page> <stamp> <anchor> unsupported-syntax`: no literal
+  match, and the anchor is outside the supported identifier/`::` syntax.
+
+Anchor lookup searches the production source trees listed once in the script,
+including the GUI, VM and guest crates, excluding vendor and build outputs.
+Qualified items are checked in candidate module files; associated functions in
+files with a matching impl header. This is a source-existence heuristic, not
+Rust name resolution. Related-page scans exclude navigation `index.md` pages;
+SPEC comparisons remain scoped to core/ral/exarch.
+
 - *Map drift (mechanical):* for each `map/` page, run
   `git log <generated_at_commit>..HEAD -- <covers_paths>`. Non-empty output means
   the page may be stale; re-ingest it. Never silently trust an unstamped or
