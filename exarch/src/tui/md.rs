@@ -607,7 +607,9 @@ fn render_table<'a, I: Iterator<Item = Event<'a>>>(
                     _ => {}
                 }
             }
-            Event::Text(t) => cur_cell.push(Span::styled(t.into_string(), style)),
+            Event::Text(t) | Event::Html(t) | Event::InlineHtml(t) => {
+                cur_cell.push(Span::styled(t.into_string(), style));
+            }
             Event::Code(t) => {
                 cur_cell.push(Span::styled(t.into_string(), Style::default().fg(LIME)));
             }

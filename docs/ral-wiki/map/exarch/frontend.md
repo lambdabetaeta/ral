@@ -1,5 +1,5 @@
 ---
-generated_at_commit: bf088cca
+generated_at_commit: 0091b8f01d7d592e6efffcefe0fa01c0b4c7eb7e
 generated_at_date: 2026-10-26
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/record/session.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/boot.rs, exarch/src/agent/seat.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
 ---
@@ -214,7 +214,8 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  rows. A burst of `ral` work is the collapsible object — its tip call's intent
  shows shut, every call with its ral source when a click opens it — highlighted, or solid red when the run failed; the wheel scrolls, click-drag selects and copies the
  rail-stripped text via OSC-52, and Shift-drag falls through to the terminal's
- own selection. `tui/md.rs` is the streaming markdown renderer — a ral code
+ own selection. `tui/md.rs` preserves HTML-like tokens as literal styled text
+ in both prose and table cells. It is the streaming markdown renderer — a ral code
  block in the model's prose (tagged `ral`, or untagged, which is what the
  indented blocks of `data/ral.md` teach) goes to `tui/highlight.rs`, the same
  lexer-backed colouring the tool-call panels use, so the language reads the
