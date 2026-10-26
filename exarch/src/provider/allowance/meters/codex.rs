@@ -2,7 +2,7 @@
 //! query parameters. Two opaque rolling windows, each a used-percentage; their
 //! durations come from the server, never hardcoded here.
 
-use crate::provider::allowance::{Allowance, Consumption};
+use crate::provider::allowance::{Allowance, Consumption, Scope};
 use crate::provider::credential::{Credential, Roster};
 use crate::provider::error::body_detail;
 use crate::provider::identity::Account;
@@ -107,7 +107,7 @@ fn usage_to_allowances(body: &UsageResponse) -> Option<Vec<Allowance>> {
 
 fn window_to_allowance(window: &Window) -> Allowance {
     Allowance {
-        window: window.limit_window_seconds.map(Duration::from_secs),
+        scope: Scope::Window(window.limit_window_seconds.map(Duration::from_secs)),
         used: Consumption::Fraction(window.used_percent / 100.0),
         resets_at: window.reset_at,
     }
@@ -138,12 +138,12 @@ mod tests {
             allowances.expect("a payload carrying both windows discloses them"),
             vec![
                 Allowance {
-                    window: Some(Duration::from_hours(5)),
+                    scope: Scope::Window(Some(Duration::from_hours(5))),
                     used: Consumption::Fraction(0.42),
                     resets_at: Timestamp::from_second(1_780_000_000).ok(),
                 },
                 Allowance {
-                    window: Some(Duration::from_hours(168)),
+                    scope: Scope::Window(Some(Duration::from_hours(168))),
                     used: Consumption::Fraction(0.11),
                     resets_at: Timestamp::from_second(1_780_500_000).ok(),
                 },
@@ -161,13 +161,27 @@ mod tests {
         assert_eq!(parse(r#"{"rate_limit": {}}"#), None);
     }
     #[test]
+    fn a_weekly_only_reading_does_not_invent_a_five_hour_window() {
+        let allowances = parse(
+            r#"{"rate_limit": {
+            "primary_window": null,
+            "secondary_window": {"used_percent": 0, "limit_window_seconds": 604800}
+        }}"#,
+        )
+        .unwrap();
+        assert_eq!(allowances.len(), 1);
+        assert_eq!(allowances[0].label(), "7 days");
+        assert_eq!(allowances[0].figure_text(), "0% used");
+    }
+
+    #[test]
     fn windows_remain_server_defined_and_optional() {
         assert_eq!(
             parse(
                 r#"{"rate_limit":{"primary_window":{"used_percent":125,"limit_window_seconds":123}}}"#
             ),
             Some(vec![Allowance {
-                window: Some(Duration::from_secs(123)),
+                scope: Scope::Window(Some(Duration::from_secs(123))),
                 used: Consumption::Fraction(1.25),
                 resets_at: None,
             }]),
@@ -175,7 +189,7 @@ mod tests {
         assert_eq!(
             parse(r#"{"rate_limit":{"secondary_window":{"used_percent":0}}}"#),
             Some(vec![Allowance {
-                window: None,
+                scope: Scope::Window(None),
                 used: Consumption::Fraction(0.0),
                 resets_at: None
             }]),

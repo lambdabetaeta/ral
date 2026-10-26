@@ -123,7 +123,10 @@ impl Readout {
     /// [`FieldVal::plain`], [`summary_line`]'s measure arm, and the headless
     /// stderr condenser.
     pub(crate) fn plain(&self) -> String {
-        let bound = self.max.map(|mx| format!("/{mx}")).unwrap_or_default();
+        let bound = match (self.max, self.unit.as_deref()) {
+            (Some(100), Some("%" | "% used")) | (None, _) => String::new(),
+            (Some(max), _) => format!("/{max}"),
+        };
         format!(
             "{}{bound}{}",
             self.value,
@@ -277,6 +280,30 @@ pub(crate) fn summary_line(card: &Card) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn percentage_readouts_do_not_invent_a_count_denominator() {
+        for (unit, expected) in [("%", "42%"), ("% used", "42% used")] {
+            assert_eq!(
+                Readout {
+                    value: 42,
+                    max: Some(100),
+                    unit: Some(unit.into()),
+                }
+                .plain(),
+                expected
+            );
+        }
+        assert_eq!(
+            Readout {
+                value: 3,
+                max: Some(12),
+                unit: None
+            }
+            .plain(),
+            "3/12"
+        );
+    }
 
     #[test]
     fn serialises_to_a_structured_mark_tree() {

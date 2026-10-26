@@ -95,7 +95,9 @@ impl Reminder {
                         "If it runs out, this task pauses until it resets and then resumes."
                     }
                     (true, false) => "If it runs out, requests are refused until it resets.",
-                    (false, _) => "When it runs out, requests fail until it is topped up.",
+                    (false, _) => {
+                        "When it runs out, requests fail until its limit is raised or its allowance replenished."
+                    }
                 };
                 format!("Your {service} usage allowance is {pct}% spent ({label}). {outcome}")
             }

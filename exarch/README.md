@@ -104,8 +104,10 @@ is refused. `/model` shows labels qualified with ids when needed; `--provider`
 pins the exact account id. Old `chatgpt:*` entries are rejected with warnings,
 not migrated; sign in again. Stale saved selections take the normal picker path.
 
-Codex `/limits` reads server-defined usage windows; Chatgpt/Grok publish no
-meter. ChatGPT token-sharing usage is in Settings → Usage. Only that route
+`/limits` shows Codex's server-defined windows as percentages used, and
+OpenRouter's effective spending budget with dollar amounts and remaining spend.
+A key budget is not an account credit balance; an uncapped key's balance is
+unknown. Chatgpt/Grok publish no meter. ChatGPT token-sharing usage is in Settings → Usage. Only that route
 restricts tuning to reasoning effort; Codex/Grok retain sampling and output caps.
 Codex logout is local-only and its refresh credential may remain usable at the
 issuer. Chatgpt/Grok attempt issuer revocation; even acceptance need not invalidate

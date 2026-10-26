@@ -123,8 +123,8 @@ pub struct Service {
 /// `allowance`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Meter {
-    /// `GET /api/v1/key`: credits spent against the key's cap, in dollars.
-    OpenRouterCredits,
+    /// `GET /api/v1/key`: the effective spending budget, in dollars.
+    OpenRouterBudget,
     /// Codex's server-defined usage windows and reset times.
     Codex,
     /// A service that publishes no allowance readout.
@@ -380,7 +380,7 @@ pub fn built_in_services() -> Vec<Service> {
                 AdapterKind::OpenAI,
                 "OPENROUTER_API_KEY",
                 Billing::Metered,
-                Meter::OpenRouterCredits,
+                Meter::OpenRouterBudget,
             )
         },
         keyed(
@@ -584,7 +584,7 @@ mod tests {
     fn only_openrouter_and_codex_meter_anything() {
         for service in built_in_services() {
             let expected = match service.name.as_str() {
-                "openrouter" => Meter::OpenRouterCredits,
+                "openrouter" => Meter::OpenRouterBudget,
                 "openai-codex" => Meter::Codex,
                 _ => Meter::Unpublished,
             };

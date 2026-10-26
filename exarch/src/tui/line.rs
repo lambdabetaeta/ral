@@ -249,6 +249,9 @@ pub(super) fn error(msg: &str) -> Vec<Line<'static>> {
     ]
 }
 
+#[cfg(test)]
+mod tests;
+
 // ── Card rendering ───────────────────────────────────────────────────────────
 
 /// The columns every field row of one card shares: the widest label, and the
@@ -268,12 +271,12 @@ impl Cols {
         let mut cols = Self::default();
         for mark in marks {
             match mark {
-                Mark::Measure(m) => cols.readout = cols.readout.seeing(&figures(&m.readout)),
+                Mark::Measure(m) => cols.readout = cols.readout.seeing(&m.readout.plain()),
                 Mark::Fields { rows } => {
                     for row in rows {
                         cols.label = cols.label.seeing(&row.label);
                         if let FieldVal::Readout(r) = &row.value {
-                            cols.readout = cols.readout.seeing(&figures(r));
+                            cols.readout = cols.readout.seeing(&r.plain());
                         }
                     }
                 }
@@ -494,7 +497,7 @@ fn render_measure(m: &Measure, col: Col) -> Line<'static> {
 /// [`size_bar`].
 fn readout_spans(r: &CardReadout, col: Col) -> Vec<Span<'static>> {
     let mut spans = vec![
-        Span::styled(col.right(&figures(r)), Style::default().fg(Color::White)),
+        Span::styled(col.right(&r.plain()), Style::default().fg(Color::White)),
         Span::raw("  "),
     ];
     match r.max {
@@ -502,17 +505,6 @@ fn readout_spans(r: &CardReadout, col: Col) -> Vec<Span<'static>> {
         None => spans.push(size_bar(r.value)),
     }
     spans
-}
-
-/// The figures a readout reads as, ahead of any column: `value/max` when
-/// bounded — the bar carries the proportion, so the unit would only crowd it —
-/// else `value[unit]`.
-fn figures(r: &CardReadout) -> String {
-    match (r.max, &r.unit) {
-        (Some(max), _) => format!("{}/{max}", r.value),
-        (None, Some(u)) => format!("{}{u}", r.value),
-        (None, None) => r.value.to_string(),
-    }
 }
 
 /// A proportional `██████░░░░` fill of `done/total`.  `total == 0` reads as no
@@ -529,11 +521,11 @@ fn progress_bar(done: u32, total: u32) -> Vec<Span<'static>> {
         ((u64::from(done) * u64::from(W)) / u64::from(total)).min(u64::from(W)) as u32
     };
     vec![
+        Span::styled("█".repeat(filled as usize), Style::default().fg(LIME)),
         Span::styled(
-            "█".repeat(filled as usize),
+            "░".repeat((W - filled) as usize),
             Style::default().fg(SLATE).add_modifier(Modifier::DIM),
         ),
-        Span::styled("░".repeat((W - filled) as usize), Style::default().fg(LIME)),
     ]
 }
 

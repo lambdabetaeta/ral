@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
-generated_at_date: 2026-10-25
+generated_at_commit: c2e8e68c0fa65efcf8e4e3c9f20584bffb7b6a2f
+generated_at_date: 2026-10-26
 covers_paths: [exarch/src/record/fault.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/change.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/agent/desk.rs, exarch/src/bus/post.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/diff.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/commit.rs, exarch/src/record/view.rs, exarch/src/tui/scrollback.rs, exarch/data/agent.ral]
 ---
 
@@ -30,7 +30,10 @@ A `` `card `` is a `List` of marks rendered top-to-bottom on one scrollback
   ordered variables (size + value/lightness). Bounded (`max` present) → a
   proportional fill bar; unbounded → a `log2` size bar. In Rust it is a
   **`Readout`** — `value`/`max?`/`unit?`, the magnitude with no name of its own
-  — plus the label this position has to supply.
+  — plus the label this position has to supply. `Readout::plain` supplies the
+  figures on every surface, retaining units; a percentage bounded by 100 reads
+  `42%` or `42% used`, not a fictitious count of `42/100`. A proportional bar
+  fills with the same quantity its figure names, with the remainder muted.
 - **`fields`** — the matrix mark: an aligned `(label, value)` table in one shared
   label column (Bertin's selective alignment). A value nests a `text` mark or a
   bare `Readout`: the row carries the label, so the nested position *cannot*

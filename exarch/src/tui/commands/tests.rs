@@ -4,7 +4,9 @@ use super::{
     unrecognized_command,
 };
 use crate::card::Mark;
-use crate::provider::allowance::{Allowance, Consumption, Reading};
+use crate::provider::allowance::{
+    Allowance, BudgetKind, BudgetReset, Consumption, Reading, Scope, Unit,
+};
 use crate::record::{Born, RECORD};
 use crate::tui::app::tests::{app, app_born, ctx, text};
 use ral_core::own::OwnDir;
@@ -245,12 +247,12 @@ fn export_path_resolves_absolute_and_relative() {
 #[test]
 fn sort_orders_five_hour_before_weekly() {
     let weekly = Allowance {
-        window: Some(Duration::from_hours(7 * 24)),
+        scope: Scope::Window(Some(Duration::from_hours(7 * 24))),
         used: Consumption::Fraction(0.2),
         resets_at: None,
     };
     let five_hour = Allowance {
-        window: Some(Duration::from_hours(5)),
+        scope: Scope::Window(Some(Duration::from_hours(5))),
         used: Consumption::Fraction(0.5),
         resets_at: None,
     };
@@ -258,7 +260,7 @@ fn sort_orders_five_hour_before_weekly() {
         "anthropic".to_string(),
         Reading::Allowances(vec![weekly, five_hour]),
     )]);
-    let Mark::Fields { rows } = &card.0[1] else {
+    let Mark::Fields { rows } = &card.0[2] else {
         panic!("an allowances reading renders one fields mark");
     };
     assert!(rows[0].label.contains("5 hours"));
@@ -272,12 +274,66 @@ fn all_unmetered_collapses_to_one_sentence_naming_the_accounts() {
         ("openai".to_string(), Reading::Unmetered),
         ("deepseek".to_string(), Reading::Unmetered),
     ]);
-    assert_eq!(card.0.len(), 1);
-    let Mark::Text { spans } = &card.0[0] else {
-        panic!("the collapsed card is one text mark");
+    assert_eq!(card.0.len(), 2);
+    let Mark::Text { spans } = &card.0[1] else {
+        panic!("the collapsed card has one sentence below its title");
     };
     assert!(spans[0].text.contains("anthropic, openai, deepseek"));
     assert!(spans[0].text.contains("publishes a ration"));
+}
+
+#[test]
+fn limits_renders_peer_accounts_exact_money_and_explicit_percentages() {
+    let card = limits_card(&[
+        (
+            "openrouter".into(),
+            Reading::Allowances(vec![Allowance {
+                scope: Scope::Budget {
+                    kind: BudgetKind::Key,
+                    reset: Some(BudgetReset::Monthly),
+                },
+                used: Consumption::Counted {
+                    used: 2000,
+                    limit: Some(10000),
+                    unit: Unit::Dollars,
+                },
+                resets_at: None,
+            }]),
+        ),
+        (
+            "openai-codex · person (workspace)".into(),
+            Reading::Allowances(vec![Allowance {
+                scope: Scope::Window(Some(Duration::from_hours(168))),
+                used: Consumption::Fraction(0.0),
+                resets_at: None,
+            }]),
+        ),
+    ]);
+    for width in [40, 100] {
+        let lines =
+            crate::tui::line::render_card_framed(&card, 2, width, crate::tui::dial::Detail::Full);
+        let text = lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.lines().nth(1).unwrap().contains("limits"), "{text}");
+        assert!(
+            !text.lines().nth(1).unwrap().contains("openrouter"),
+            "{text}"
+        );
+        assert!(text.contains("openrouter"), "{text}");
+        assert!(text.contains("openai-codex"), "{text}");
+        assert!(text.contains("$20.00 used"), "{text}");
+        assert!(text.contains("$80.00"), "{text}");
+        assert!(text.contains("remaining"), "{text}");
+        assert!(text.contains("0% used"), "{text}");
+        assert!(!text.contains("0/100"), "{text}");
+        assert!(
+            lines.iter().all(|line| line.width() <= usize::from(width)),
+            "{text}"
+        );
+    }
 }
 
 /// `/export` writes a new file only; the one already there is left alone.

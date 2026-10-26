@@ -4,10 +4,9 @@
 
 use super::{Reminder, Warning};
 use crate::latch::Latch;
-use crate::provider::allowance::Allowance;
+use crate::provider::allowance::{Allowance, Scope};
 use crate::provider::{Account, AccountId};
 use std::collections::HashMap;
-use std::time::Duration;
 
 /// Percent spent at which the user is told, once per account.
 pub(crate) const USER_HEARS: &[u32] = &[50, 75, 90, 95];
@@ -18,7 +17,7 @@ const MODEL_HEARS: &[u32] = &[90, 95];
 /// needs its own.
 #[derive(Default)]
 pub(crate) struct Ration {
-    latches: HashMap<(AccountId, Option<Duration>), Latch>,
+    latches: HashMap<(AccountId, Scope), Latch>,
 }
 
 impl Ration {
@@ -35,14 +34,14 @@ impl Ration {
             .filter_map(|a| {
                 let pct = a.percent()?;
                 self.latches
-                    .entry((account.id.clone(), a.window))
+                    .entry((account.id.clone(), a.scope))
                     .or_default()
                     .climb(MODEL_HEARS, pct)?;
                 Some(Warning::Model(Reminder::Ration {
                     service: account.service.name.as_str().to_string(),
                     label: a.label(),
                     pct,
-                    windowed: a.window.is_some(),
+                    windowed: a.scope.renews(),
                     resumes,
                 }))
             })

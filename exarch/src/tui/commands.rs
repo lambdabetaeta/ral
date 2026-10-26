@@ -17,7 +17,7 @@ use crate::agent::Agent;
 use crate::agent::fleet::Fleet;
 use crate::bus::{Post, Read, Rewrite};
 use crate::card::{Card, Field, FieldVal, Mark, Readout, Span};
-use crate::provider::allowance::{Allowance, Reading};
+use crate::provider::allowance::{Allowance, Consumption, Reading, Scope};
 use crate::record::{Memory, RECORD};
 use jiff::Timestamp;
 use prompt_editor::completion::Candidate;
@@ -421,44 +421,54 @@ fn limits_card(readings: &[(String, Reading)]) -> Card {
             "there are no accounts to check for a ration".to_string()
         } else {
             format!(
-                "none of {names} publishes a ration: /limits reports subscriptions and credit balances"
+                "none of {names} publishes a ration: /limits reports usage windows and spending budgets"
             )
         };
-        return Card(vec![Mark::Text {
-            spans: vec![Span::plain(sentence)],
-        }]);
+        return Card(vec![
+            Mark::heading("limits"),
+            Mark::Text {
+                spans: vec![Span::plain(sentence)],
+            },
+        ]);
     }
-    let mut marks = Vec::new();
+    let mut marks = vec![Mark::heading("limits")];
     for (label, reading) in readings {
         let mark = match reading {
             Reading::Allowances(allowances) => {
                 let mut sorted: Vec<&Allowance> = allowances.iter().collect();
-                sorted.sort_by_key(|a| (a.window.is_none(), a.window));
+                sorted.sort_by_key(|a| match a.scope {
+                    Scope::Window(window) => (window.is_none(), window),
+                    Scope::Budget { .. } => (true, None),
+                });
                 Mark::Fields {
                     rows: sorted.iter().map(|a| allowance_field(a, now)).collect(),
                 }
             }
             Reading::Unmetered => continue,
             Reading::Failed(reason) => Mark::Text {
-                spans: vec![Span::plain(format!("{label}: {reason}"))],
+                spans: vec![Span::plain(reason)],
             },
         };
+        if marks.len() > 1 {
+            marks.push(Mark::Text {
+                spans: vec![Span::plain("")],
+            });
+        }
         marks.push(Mark::heading(label));
         marks.push(mark);
     }
     Card(marks)
 }
 
-/// One allowance as an aligned row: a bar when its share is known, its raw
-/// figures otherwise.
+/// Undisclosed denominators read as percentages; disclosed counts stay exact.
 fn allowance_field(a: &Allowance, now: Timestamp) -> Field {
-    let value = match a.percent() {
-        Some(value) => FieldVal::Readout(Readout {
-            value,
+    let value = match a.used {
+        Consumption::Fraction(_) => FieldVal::Readout(Readout {
+            value: a.percent().unwrap_or_default(),
             max: Some(100),
-            unit: Some("%".into()),
+            unit: Some("% used".into()),
         }),
-        None => FieldVal::Inline(vec![Span::plain(a.figure_text())]),
+        Consumption::Counted { .. } => FieldVal::Inline(vec![Span::plain(a.figure_text())]),
     };
     Field {
         label: a.label_at(now),

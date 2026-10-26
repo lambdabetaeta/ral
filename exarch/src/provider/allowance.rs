@@ -1,5 +1,5 @@
 //! What a provider discloses about how much of an account's entitlement is
-//! left: a rationed window (five hours, seven days) or a credit purse.
+//! left: a server-defined usage window or a scoped spending budget.
 //!
 //! Plain data — no provider trace, no network, no rendering beyond the one
 //! row each allowance draws.
@@ -17,17 +17,84 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// One rationed window of an account's entitlement, as the provider reports it.
+/// One allowance, in the scope and period the provider reports.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Allowance {
-    /// The span this allowance renews over: five hours, seven days. `None` for
-    /// a balance that renews by payment rather than by clock — a credit purse.
-    pub window: Option<Duration>,
+    pub scope: Scope,
     pub used: Consumption,
     /// Absolute. A provider reporting a *relative* reset is converted at
     /// parse, not at render: a reading may sit on a channel between the two,
     /// and a relative figure would quietly age.
     pub resets_at: Option<Timestamp>,
+}
+
+/// Calendar budgets and server-defined windows are different periods.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Scope {
+    Window(Option<Duration>),
+    Budget {
+        kind: BudgetKind,
+        reset: Option<BudgetReset>,
+    },
+}
+
+impl Scope {
+    pub fn renews(self) -> bool {
+        matches!(
+            self,
+            Self::Window(Some(_)) | Self::Budget { reset: Some(_), .. }
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Deserialize)]
+pub enum BudgetKind {
+    #[serde(rename = "key_limit")]
+    Key,
+    #[serde(rename = "workspace")]
+    Workspace,
+    #[serde(rename = "member")]
+    Member,
+    #[serde(rename = "api_key")]
+    KeyGuardrail,
+    #[serde(rename = "workspace_default_member")]
+    WorkspaceMember,
+    #[serde(rename = "workspace_default_key")]
+    WorkspaceKey,
+    #[serde(other)]
+    Other,
+}
+
+impl BudgetKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Key => "key",
+            Self::Workspace => "workspace",
+            Self::Member => "member guardrail",
+            Self::KeyGuardrail => "key guardrail",
+            Self::WorkspaceMember => "workspace member guardrail",
+            Self::WorkspaceKey => "workspace key guardrail",
+            Self::Other => "effective",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BudgetReset {
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+impl BudgetReset {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Daily => "daily",
+            Self::Weekly => "weekly",
+            Self::Monthly => "monthly",
+        }
+    }
 }
 
 /// How much of an allowance is gone. Two arms because two disclosures exist:
@@ -78,23 +145,32 @@ impl Allowance {
                 used,
                 limit: Some(limit),
                 ..
-            } if limit > 0 => {
+            } => {
                 #[allow(
                     clippy::cast_precision_loss,
                     reason = "a display proportion; a used/limit count this large has no exact f64 need"
                 )]
-                let ratio = used as f64 / limit as f64;
+                let ratio = if limit == 0 {
+                    1.0
+                } else {
+                    used as f64 / limit as f64
+                };
                 Some(ratio)
             }
-            Consumption::Counted { .. } => None,
+            Consumption::Counted { limit: None, .. } => None,
         }
     }
 
     /// The window and, while it is still ahead, its reset, as the row's label.
     pub fn label_at(&self, now: Timestamp) -> String {
-        let window_part = self
-            .window
-            .map_or_else(|| "balance".to_string(), window_words);
+        let window_part = match self.scope {
+            Scope::Window(window) => window.map_or_else(|| "usage window".into(), window_words),
+            Scope::Budget { kind, reset } => format!(
+                "{} budget · {}",
+                kind.label(),
+                reset.map_or("lifetime", BudgetReset::label)
+            ),
+        };
         let reset_part = self
             .resets_at
             .filter(|&r| r > now)
@@ -112,10 +188,15 @@ impl Allowance {
     /// The figure as plain text: the counted form, or the percentage.
     pub fn figure_text(&self) -> String {
         match &self.used {
-            Consumption::Counted { used, limit, unit } if self.percent().is_none() => {
-                inline_text(*used, *limit, *unit)
+            Consumption::Counted { used, limit, unit } => {
+                let figures = inline_text(*used, *limit, *unit);
+                if limit.is_none() && matches!(self.scope, Scope::Budget { .. }) {
+                    format!("{figures} · account balance unknown")
+                } else {
+                    figures
+                }
             }
-            _ => format!("{}%", self.percent().unwrap_or_default()),
+            Consumption::Fraction(_) => format!("{}% used", self.percent().unwrap_or_default()),
         }
     }
 }
@@ -135,8 +216,7 @@ fn window_words(d: Duration) -> String {
     }
 }
 
-/// The raw figures, for a `Consumption::Counted` whose proportion is
-/// undisclosed (no cap) or degenerate (a cap of zero).
+/// Preserve disclosed counts, even when a proportion is available.
 fn inline_text(used: u64, limit: Option<u64>, unit: Unit) -> String {
     let used_text = match unit {
         Unit::Dollars => format!("{} used", dollars(used)),
@@ -144,13 +224,18 @@ fn inline_text(used: u64, limit: Option<u64>, unit: Unit) -> String {
         Unit::Tokens => format!("{used} tokens"),
     };
     match limit {
-        None => format!("{used_text} · no cap"),
+        None => format!("{used_text} · no published cap"),
         Some(limit) => {
             let limit_text = match unit {
                 Unit::Dollars => dollars(limit),
                 Unit::Requests | Unit::Tokens => limit.to_string(),
             };
-            format!("{used_text} · cap {limit_text}")
+            let remaining = limit.saturating_sub(used);
+            let remaining_text = match unit {
+                Unit::Dollars => dollars(remaining),
+                Unit::Requests | Unit::Tokens => remaining.to_string(),
+            };
+            format!("{used_text} / {limit_text} · {remaining_text} remaining")
         }
     }
 }
@@ -198,7 +283,7 @@ impl MeterSource for LiveMeters {
         let read = match account.service.meter {
             Meter::Unpublished => return Ok(Vec::new()),
             Meter::Codex => meters::codex::read,
-            Meter::OpenRouterCredits => meters::openrouter::read,
+            Meter::OpenRouterBudget => meters::openrouter::read,
         };
         let credential = self
             .roster
@@ -278,7 +363,7 @@ mod tests {
 
     fn counted(used: u64, limit: Option<u64>, unit: Unit) -> Allowance {
         Allowance {
-            window: Some(Duration::from_hours(5)),
+            scope: Scope::Window(Some(Duration::from_hours(5))),
             used: Consumption::Counted { used, limit, unit },
             resets_at: None,
         }
@@ -288,7 +373,7 @@ mod tests {
     fn only_openrouter_and_codex_meter_anything() {
         for service in crate::provider::identity::built_in_services() {
             let expected = match service.name.as_str() {
-                "openrouter" => Meter::OpenRouterCredits,
+                "openrouter" => Meter::OpenRouterBudget,
                 "openai-codex" => Meter::Codex,
                 _ => Meter::Unpublished,
             };
@@ -299,7 +384,7 @@ mod tests {
     #[test]
     fn fraction_reads_both_consumption_arms() {
         let by_fraction = Allowance {
-            window: None,
+            scope: Scope::Window(None),
             used: Consumption::Fraction(0.42),
             resets_at: None,
         };
@@ -312,20 +397,21 @@ mod tests {
         assert_eq!(uncapped.fraction(), None);
 
         let zero_cap = counted(30, Some(0), Unit::Requests);
-        assert_eq!(zero_cap.fraction(), None);
+        assert_eq!(zero_cap.fraction(), Some(1.0));
+        assert_eq!(counted(0, Some(0), Unit::Dollars).percent(), Some(100));
     }
 
     #[test]
     fn percent_never_rounds_a_nonzero_fraction_to_zero() {
         let barely_started = Allowance {
-            window: None,
+            scope: Scope::Window(None),
             used: Consumption::Fraction(0.004),
             resets_at: None,
         };
         assert_eq!(barely_started.percent(), Some(1));
 
         let untouched = Allowance {
-            window: None,
+            scope: Scope::Window(None),
             used: Consumption::Fraction(0.0),
             resets_at: None,
         };
@@ -336,7 +422,7 @@ mod tests {
     fn label_states_window_and_reset() {
         let now = Timestamp::from_second(1_000_000).unwrap();
         let five_hours = Allowance {
-            window: Some(Duration::from_hours(5)),
+            scope: Scope::Window(Some(Duration::from_hours(5))),
             used: Consumption::Fraction(0.1),
             resets_at: Some(now + Duration::from_mins(62)),
         };
@@ -345,14 +431,14 @@ mod tests {
         assert!(label.contains("resets in"));
 
         let no_window = Allowance {
-            window: None,
+            scope: Scope::Window(None),
             used: Consumption::Fraction(0.1),
             resets_at: None,
         };
-        assert_eq!(no_window.label_at(now), "balance");
+        assert_eq!(no_window.label_at(now), "usage window");
 
         let already_past = Allowance {
-            window: Some(Duration::from_hours(1)),
+            scope: Scope::Window(Some(Duration::from_hours(1))),
             used: Consumption::Fraction(0.1),
             resets_at: Some(now - Duration::from_secs(10)),
         };
@@ -367,10 +453,14 @@ mod tests {
     #[test]
     fn figure_text_renders_raw_figures_with_and_without_a_cap() {
         let capless = counted(1240, None, Unit::Dollars);
-        assert_eq!(capless.figure_text(), "$12.40 used · no cap");
+        assert_eq!(capless.figure_text(), "$12.40 used · no published cap");
 
         let capped = counted(30, Some(100), Unit::Requests);
-        assert_eq!(capped.figure_text(), "30%");
+        assert_eq!(capped.figure_text(), "30 requests / 100 · 70 remaining");
+        assert_eq!(
+            counted(2000, Some(10000), Unit::Dollars).figure_text(),
+            "$20.00 used / $100.00 · $80.00 remaining"
+        );
     }
 
     fn roster_of(accounts: &[Account]) -> Roster {
@@ -406,7 +496,7 @@ mod tests {
         let roster = roster_of(&[loaded.clone(), unmetered.clone(), failing.clone()]);
 
         let allowance = Allowance {
-            window: None,
+            scope: Scope::Window(None),
             used: Consumption::Fraction(0.5),
             resets_at: None,
         };

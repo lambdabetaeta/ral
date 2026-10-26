@@ -1,5 +1,5 @@
 ---
-generated_at_commit: bf088cca
+generated_at_commit: c2e8e68c0fa65efcf8e4e3c9f20584bffb7b6a2f
 generated_at_date: 2026-10-26
 covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/signals.rs, exarch/src/cancel.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
@@ -552,7 +552,7 @@ plan, the scratch probe. Three ladders ride it; their latches are gathered in
 |---|---|---|---|
 | context pressure | `Avatar::pressure` (`Unknown` leaves the latch) | over the soft line | model |
 | disk ceiling | `disk_warning`, walked at most once per `DISK_WALK_INTERVAL` (a minute) | over `disk_warn_bytes` | user |
-| usage allowance | `Allowance::percent` of `Provider::allowances`, per account and window | user 50, 75, 90, 95% (`USER_HEARS`); model 90, 95% (`MODEL_HEARS`) | user once per account; model once per agent |
+| usage allowance | `Allowance::percent` of `Provider::allowances`, per account and `Scope` | user 50, 75, 90, 95% (`USER_HEARS`); model 90, 95% (`MODEL_HEARS`) | user once per account; model once per agent |
 
 `Avatar::climbed` weighs all three after every tool batch, and `tell` delivers
 each climbed rung: a user line as a `Forensic::SystemNote`, a model
@@ -563,8 +563,10 @@ and shared by every agent on the account
 ([[map/exarch/provider|provider]]'s `Rations`). The user's latches are
 `Rations`' too (`Provider::climb_allowances`, on `USER_HEARS`), so a rung is
 told once per account by whichever agent climbs it first; the model's are each
-agent's own `gauge::ration::Ration`, since each model needs its own reminder,
-and its outcome sentence reads `Avatar::resumes_at_reset` — the trunk, under
+agent's own `gauge::ration::Ration`, since each model needs its own reminder.
+Window durations and budget scope/reset periods latch independently; calendar
+budgets count as renewable without inventing a fixed duration for a month.
+The outcome sentence reads `Avatar::resumes_at_reset` — the trunk, under
 a launch that resumes: paused until the reset and resumed, or refused until
 it. The network is read once per account; the user hears once per account,
 each conversation's model once.

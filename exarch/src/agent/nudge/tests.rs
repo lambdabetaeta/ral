@@ -382,6 +382,20 @@ fn pressure_without_a_planned_cut_states_the_reading_alone() {
     );
 }
 
+#[test]
+fn a_lifetime_budget_reminder_does_not_prescribe_an_account_top_up() {
+    let body = Reminder::Ration {
+        service: "openrouter".into(),
+        label: "key budget · lifetime".into(),
+        pct: 95,
+        windowed: false,
+        resumes: true,
+    }
+    .body();
+    assert!(body.contains("limit is raised"), "{body}");
+    assert!(!body.contains("topped up"), "{body}");
+}
+
 /// A reminder records its breadcrumb spending nothing: the budget is the
 /// repairs' alone.
 #[test]

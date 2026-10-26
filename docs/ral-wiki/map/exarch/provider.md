@@ -1,6 +1,6 @@
 ---
-generated_at_commit: dd8a5443b8f87dc40de66bcf5c5a72df05a723d8
-generated_at_date: 2026-10-25
+generated_at_commit: c2e8e68c0fa65efcf8e4e3c9f20584bffb7b6a2f
+generated_at_date: 2026-10-26
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs, exarch/src/tui/login.rs, exarch/src/tui/providers.rs, exarch/src/tui/commands.rs]
 ---
 
@@ -122,21 +122,35 @@ free.
 `Service::meter` answers a different question, and is deliberately not derived
 from `billing`. `Billing` says *does this turn cost money*; `Meter` says *does
 this account publish what is left*. The two are orthogonal and the table says
-both: OpenRouter is `Metered` and publishes a credit balance, a declared local
+both: OpenRouter is `Metered` and publishes spending budgets, a declared local
 endpoint is `Metered` and publishes nothing. `openai-chatgpt` and `xai-grok`
 are `FlatRate` with `Meter::Unpublished`; ChatGPT token-sharing usage is in
 Settings → Usage. `openai-codex` is `FlatRate` with `Meter::Codex`, reading
 `wham/usage` windows and durations from the server (five hours and one week
-are common, not fixed semantics). OpenRouter publishes a credit balance.
+are common, not fixed semantics). `Meter::OpenRouterBudget` reads `/api/v1/key`:
+its `effective_budget` is authoritative, including workspace and guardrail
+limits; otherwise the key's spend is `limit - limit_remaining`. Lifetime
+`usage` is comparable only to a non-resetting limit, with BYOK included when
+that limit counts it. A resetting limit without a remaining amount fails
+rather than guessing. An uncapped key reports lifetime usage and an unknown
+account balance, never unlimited credit. Account-wide `/credits` requires a
+management key and is not queried. See OpenRouter's
+[current-key contract](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-key).
 Every service states its meter explicitly; billing never implies a readout.
 
 What a meter reports is one value type, `provider/allowance.rs`'s `Allowance`:
-a quantity of entitlement, consumed against a bound, renewing over a span. Its
-window is a `Duration` and never a vendor's name for one, so the label is
-derived here and no provider can inject a display string into exarch's chrome;
-its `Consumption` keeps a disclosed proportion and a disclosed count apart,
-because flattening them would either discard a purse's only figures or invent a
-denominator a provider never stated. Normalisation happens once, at render.
+a quantity of entitlement, consumed against a bound. `Scope` distinguishes
+server-defined windows (`Duration`, possibly undisclosed) from scoped budgets
+with daily, weekly or monthly UTC resets; a calendar month is never a fixed
+number of seconds. Labels derive from typed scopes and periods, never vendor
+prose. `Consumption` keeps disclosed proportions and counts apart: a percentage
+reads as `42% used`, money retains spend, cap and remaining amount. A zero cap
+is exhausted even at zero spend. Both warnings and presentation read this one
+normalised value; the UI computes no independent budget arithmetic.
+
+`/limits` has a neutral title and equally styled account sections, separated
+by whitespace, with columns shared across the whole card. Its bars fill with
+the consumed share, matching the number beside them.
 
 Reading one mirrors `ModelSource` deliberately, so a reader who knows the model
 path knows this one: `MeterSource` is the single seam the network sits behind,
@@ -174,8 +188,8 @@ holds no store and takes no lock but its own leaf one. `/limits`
 lands each reading in the record before drawing its card, so no frontend can
 survey without feeding it; the agent's ration gauge
 ([[map/exarch/agent|agent]]) only climbs `Provider::allowances`, the record's
-last reading, at `Allowance::percent` — the figure the card shows, so a
-warning and the card never disagree. Success responses carry usage too, but genai does not expose
+last reading, at `Allowance::percent` — the same consumed share represented
+by the card's percentages or exact budget figures. Success responses carry usage too, but genai does not expose
 their headers; when it does, they are one more input to `settle`.
 
 On disk the login store is persisted through `OwnDir::store` with

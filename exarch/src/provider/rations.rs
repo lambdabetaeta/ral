@@ -4,7 +4,7 @@
 //! one model for a rate. Fed on the one road every request
 //! travels, `Provider::complete`; read by the ration gauge and by `/limits`.
 
-use super::allowance::{Allowance, MeterSource};
+use super::allowance::{Allowance, MeterSource, Scope};
 use super::retry::Recovery;
 use super::{Account, AccountId, Limit, Meter, ProviderError, Refusal, StepOut};
 use crate::latch::Latch;
@@ -32,7 +32,7 @@ struct Standing {
     rate_until: HashMap<String, jiff::Timestamp>,
     /// The user's latches, one per window: a rung is told once per account,
     /// by whichever agent climbs it first.
-    told: HashMap<Option<Duration>, Latch>,
+    told: HashMap<Scope, Latch>,
 }
 
 impl Standing {
@@ -145,7 +145,7 @@ impl Rations {
                 .iter()
                 .filter(|a| {
                     a.percent()
-                        .and_then(|pct| told.entry(a.window).or_default().climb(ladder, pct))
+                        .and_then(|pct| told.entry(a.scope).or_default().climb(ladder, pct))
                         .is_some()
                 })
                 .cloned()
@@ -177,7 +177,7 @@ mod tests {
 
     fn reading(fraction: f64) -> Vec<Allowance> {
         vec![Allowance {
-            window: None,
+            scope: Scope::Window(None),
             used: Consumption::Fraction(fraction),
             resets_at: None,
         }]
