@@ -60,7 +60,9 @@ jobs:
 
       - name: Build the Linux sandbox image
         if: matrix.mode == 'linux-box'
-        run: docker build -t ral-linux-box -f scripts/linux-box.Dockerfile scripts
+        run: |
+          docker build -t ral-linux-box -f scripts/linux-box.Dockerfile \
+            --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" scripts
 
       # `native` runs cargo on the runner itself.  An explicit step, so
       # installing rust-toolchain.toml's channel, components and targets is not

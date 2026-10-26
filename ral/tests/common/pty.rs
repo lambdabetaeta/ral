@@ -3,19 +3,15 @@ use std::time::Duration;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod pty_helper {
-    use std::ffi::CStr;
     use std::io::Error;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
     pub struct Pty {
         pub master: OwnedFd,
-        pub slave_path: std::path::PathBuf,
+        pub slave: OwnedFd,
     }
 
-    /// Allocate a pty pair on Unix using `posix_openpt` / `grantpt` /
-    /// `unlockpt` / `ptsname`.  The slave is only opened by the child
-    /// (ral): the parent keeps the master to drive the test.  Caller
-    /// is responsible for closing both.
+    /// Both ends are opened before the fork; the slave name is never shared.
     pub fn open() -> Result<Pty, String> {
         let fail =
             |step, e: Error| format!("Could not create a terminal for this test ({step}): {e}");
@@ -37,30 +33,15 @@ mod pty_helper {
         if unsafe { libc::unlockpt(raw) } != 0 {
             return Err(fail("unlockpt", Error::last_os_error()));
         }
-        let name_ptr = unsafe { libc::ptsname(raw) };
-        if name_ptr.is_null() {
-            return Err(fail("ptsname", Error::last_os_error()));
-        }
-        let cstr = unsafe { CStr::from_ptr(name_ptr) };
-        let slave_path = std::path::PathBuf::from(cstr.to_str().expect("ptsname utf-8").to_owned());
-        Ok(Pty { master, slave_path })
-    }
-
-    /// Open the slave side of a previously-allocated pty pair.
-    pub fn open_slave(path: &std::path::Path) -> std::io::Result<OwnedFd> {
-        use std::os::unix::ffi::OsStrExt;
-        let mut bytes = path.as_os_str().as_bytes().to_vec();
-        bytes.push(0);
-        let fd = unsafe {
-            libc::open(
-                bytes.as_ptr().cast(),
-                libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
+        let name =
+            rustix::pty::ptsname(&master, Vec::new()).map_err(|e| fail("ptsname", e.into()))?;
+        let slave = rustix::fs::open(
+            name,
+            rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NOCTTY | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|e| fail("open slave", e.into()))?;
+        Ok(Pty { master, slave })
     }
 
     /// Make `fd` the controlling terminal of the calling session.  Must
@@ -103,59 +84,35 @@ impl PtySession {
     }
 
     pub fn spawn_command(mut cmd: std::process::Command) -> Result<Self, String> {
-        use std::os::fd::{AsRawFd, FromRawFd};
         use std::os::unix::process::CommandExt;
 
         let pty = pty_helper::open()?;
-        let slave_path = pty.slave_path.clone();
-        let terminal = pty_helper::open_slave(&slave_path)
-            .map_err(|e| e.to_string())?
-            .into();
+        let terminal: std::fs::File = pty.slave.into();
+        let reader: std::fs::File = pty.master.into();
+        let flags =
+            rustix::fs::fcntl_getfl(&reader).map_err(|e| format!("read terminal flags: {e}"))?;
+        rustix::fs::fcntl_setfl(&reader, flags | rustix::fs::OFlags::NONBLOCK)
+            .map_err(|e| format!("make terminal nonblocking: {e}"))?;
+        let input = reader
+            .try_clone()
+            .map_err(|e| format!("duplicate terminal input: {e}"))?;
+        let stdio = || {
+            terminal
+                .try_clone()
+                .map_err(|e| format!("duplicate terminal: {e}"))
+        };
+        cmd.stdin(stdio()?).stdout(stdio()?).stderr(stdio()?);
         unsafe {
-            cmd.pre_exec(move || {
-                // New session, then make the pty our controlling terminal
-                // and dup it onto fds 0/1/2.  Errors propagate as `execve`-
-                // time failures, which the parent sees via `wait`.
+            cmd.pre_exec(|| {
                 if libc::setsid() < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                let slave = pty_helper::open_slave(&slave_path)?;
-                let raw = slave.as_raw_fd();
-                pty_helper::become_controlling(raw)?;
-                for target in [0, 1, 2] {
-                    if libc::dup2(raw, target) < 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                }
-                Ok(())
+                pty_helper::become_controlling(libc::STDIN_FILENO)
             });
         }
         let child = cmd
             .spawn()
             .map_err(|e| format!("could not start ral under a PTY: {e}"))?;
-
-        let input_fd = unsafe { libc::dup(pty.master.as_raw_fd()) };
-        if input_fd < 0 {
-            return Err(format!(
-                "dup PTY input: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        let input = unsafe { std::fs::File::from_raw_fd(input_fd) };
-
-        let raw = pty.master.as_raw_fd();
-        unsafe {
-            let flags = libc::fcntl(raw, libc::F_GETFL);
-            libc::fcntl(raw, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        }
-        let reader_fd = unsafe { libc::dup(raw) };
-        if reader_fd < 0 {
-            return Err(format!(
-                "dup PTY reader: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        let reader = unsafe { std::fs::File::from_raw_fd(reader_fd) };
 
         Ok(Self {
             child,

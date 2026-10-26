@@ -3,7 +3,6 @@
 use crate::site::{Silent, site};
 use std::io::{ErrorKind, Read, Write};
 use std::net::TcpListener;
-use std::net::TcpStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -161,7 +160,7 @@ fn receive(
             }
         }
         for mut connection in std::mem::take(&mut pending) {
-            match connection.advance(policy.line_bytes) {
+            match connection.advance(Instant::now(), policy.line_bytes) {
                 Progress::Closed => continue,
                 Progress::Pending => {}
                 Progress::Line(line) => {
@@ -192,8 +191,8 @@ fn receive(
     }
 }
 
-struct Connection {
-    stream: TcpStream,
+struct Connection<S> {
+    stream: S,
     deadline: Instant,
     phase: Phase,
 }
@@ -209,9 +208,9 @@ enum Progress {
     Line(Vec<u8>),
 }
 
-impl Connection {
-    fn advance(&mut self, limit: usize) -> Progress {
-        if Instant::now() >= self.deadline {
+impl<S: Read + Write> Connection<S> {
+    fn advance(&mut self, now: Instant, limit: usize) -> Progress {
+        if now >= self.deadline {
             return Progress::Closed;
         }
         let error = match &mut self.phase {

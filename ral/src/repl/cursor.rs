@@ -85,6 +85,24 @@ pub(super) fn erase_drawn(prompt: &str, buffer: &str, config: &Config) {
     let _ = std::io::stdout().flush();
 }
 
+/// The console screen buffer's state via the Win32 console API, or `None` if
+/// stdout is not attached to a console (e.g. piped or redirected).
+#[cfg(windows)]
+fn console_info() -> Option<windows_sys::Win32::System::Console::CONSOLE_SCREEN_BUFFER_INFO> {
+    use windows_sys::Win32::System::Console::{
+        CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo, GetStdHandle, STD_OUTPUT_HANDLE,
+    };
+
+    unsafe {
+        let h = GetStdHandle(STD_OUTPUT_HANDLE);
+        if h.is_null() {
+            return None;
+        }
+        let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
+        (GetConsoleScreenBufferInfo(h, &raw mut info) != 0).then_some(info)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,23 +159,5 @@ mod tests {
                 2
             );
         }
-    }
-}
-
-/// The console screen buffer's state via the Win32 console API, or `None` if
-/// stdout is not attached to a console (e.g. piped or redirected).
-#[cfg(windows)]
-fn console_info() -> Option<windows_sys::Win32::System::Console::CONSOLE_SCREEN_BUFFER_INFO> {
-    use windows_sys::Win32::System::Console::{
-        CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo, GetStdHandle, STD_OUTPUT_HANDLE,
-    };
-
-    unsafe {
-        let h = GetStdHandle(STD_OUTPUT_HANDLE);
-        if h.is_null() {
-            return None;
-        }
-        let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
-        (GetConsoleScreenBufferInfo(h, &raw mut info) != 0).then_some(info)
     }
 }

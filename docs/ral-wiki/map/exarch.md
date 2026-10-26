@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
+generated_at_commit: 104cb51994d4dce2c9892a96008426463be2d404
 generated_at_date: 2026-10-26
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/roles.md, exarch/data/ral.md, exarch/data/context.md]
 ---
@@ -44,8 +44,9 @@ exit code.
   it runs in: std's argv stays empty, and uucore reads it, so no constructor on
   musl serves a bundled tool. Tests that need one are ignored under
   `cfg(ctor_without_argv)`, which core's and exarch's build scripts set on Linux
-  without glibc; a unix-only test that needs only some process names a host
-  program by path (`/bin/sleep`). A test binary reaches
+  without glibc. Process-control fixtures use `test_helper::SLEEP`, a host
+  program by path (`/bin/sleep`) on Unix and the bundled tool elsewhere, so
+  cancellation tests do not depend on musl's pre-main argv. A test binary reaches
   `main` only through libtest yet is the same
   [[invariants/single-binary|multicall executable]] a child re-execs; skip the
   dispatch and the confined transport stays unpinned, so that binary's

@@ -3,6 +3,9 @@
 use crate::authority::policy::{Evidence, ExecGrant, ExecKey};
 use std::time::{Duration, Instant};
 
+/// Unix process-control fixtures bypass bundled tools, which musl cannot serve before `main`.
+pub const SLEEP: &str = if cfg!(unix) { "/bin/sleep" } else { "sleep" };
+
 /// Split evidence into authored exec allowances and exclusions.
 pub fn exec_grant(entries: impl IntoIterator<Item = (ExecKey, Evidence)>) -> ExecGrant {
     let entries: Vec<_> = entries.into_iter().collect();

@@ -255,6 +255,7 @@ fn stock_zoxide_key_accepts_a_crlf_selector_path() {
         let dir = TempDir::new().unwrap();
         let destination = dir.path().join("selected directory");
         std::fs::create_dir(&destination).unwrap();
+        let resolved = ral_core::path::shown(ral_core::test_helper::real(&destination).as_path());
         let selector = dir.path().join("zoxide");
         std::fs::write(&selector, format!("#!/bin/sh\ncase \"$1\" in\nquery) printf '%s{ending}' \"$SELECTED_DIRECTORY\" ;;\nadd) printf '%s' \"$3\" > \"$HOME/recorded-directory\" ;;\n*) exit 2 ;;\nesac\n")).unwrap();
         std::fs::set_permissions(&selector, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -272,14 +273,14 @@ fn stock_zoxide_key_accepts_a_crlf_selector_path() {
         );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("recorded-directory")).unwrap(),
-            destination.to_str().unwrap()
+            resolved
         );
         paste(&mut session, "to-string !{cwd} > ../actual-directory");
         session.send_byte(b'\n').unwrap();
         prompt(&mut session, 3);
         assert_eq!(
             std::fs::read_to_string(dir.path().join("actual-directory")).unwrap(),
-            destination.to_str().unwrap()
+            resolved
         );
     }
 }

@@ -9,6 +9,7 @@ use crate::shell::runtime::Shell;
 
 mod identity_cancel_tests {
     use super::*;
+    use crate::test_helper::SLEEP;
     use std::time::{Duration, Instant};
 
     /// Dispatch `sleep 30` from another thread while this one holds the
@@ -27,7 +28,7 @@ mod identity_cancel_tests {
                 transport.dispatch(
                     DispatchId(1),
                     crate::protocol::Run::captured(
-                        "sleep 30",
+                        format!("{SLEEP} 30"),
                         crate::source::SourceOrigin::named("<test>"),
                     ),
                     &(Arc::new(()) as Arc<dyn Host>),
@@ -119,7 +120,9 @@ mod identity_cancel_tests {
         crate::process::request_interrupt();
         let worker = {
             let transport = transport.clone();
-            std::thread::spawn(move || crate::carrier::testkit::eval(&transport, "sleep 1"))
+            std::thread::spawn(move || {
+                crate::carrier::testkit::eval(&transport, &format!("{SLEEP} 1"))
+            })
         };
         let deadline = Instant::now() + Duration::from_secs(5);
         while transport.control().in_flight().is_none() {

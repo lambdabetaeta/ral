@@ -1491,7 +1491,12 @@ fn shared_project_skills_are_listed_and_loaded_from_a_subdirectory() {
     let loaded = run_once(&engine, "skill shared-demo");
     assert_eq!(loaded.exit, 0);
     let body = loaded.value.as_deref().unwrap();
-    assert!(body.contains(&shown(&skill)) && body.contains("shared body"));
+    let place = shown(ral_core::test_helper::real(&skill).as_path());
+    assert!(
+        body.starts_with(&format!("// skill root: {place}\n\n")),
+        "expected skill root {place}, got: {body}"
+    );
+    assert!(body.contains("shared body"), "{body}");
 
     std::fs::write(skill.join("SKILL.md"), "updated body\n").unwrap();
     let refreshed = run_once(&engine, "skill shared-demo");

@@ -1,5 +1,5 @@
 use super::*;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpStream};
 use std::sync::mpsc::{self, Receiver};
 
 const TEST_POLICY: Policy = Policy {
@@ -311,30 +311,53 @@ fn overall_deadline_is_not_reset_by_stray_traffic() {
 
 #[test]
 fn blocked_response_expires_without_waiting_for_the_peer() {
-    let listener = bind(&["127.0.0.1:0"]).unwrap();
-    let _peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let (stream, _) = listener.accept().unwrap();
-    stream.set_nonblocking(true).unwrap();
+    struct Blocked(usize);
+
+    impl Read for Blocked {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            panic!("a response must not read");
+        }
+    }
+
+    impl Write for Blocked {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            self.0 += 1;
+            Err(ErrorKind::WouldBlock.into())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            panic!("a response must not flush");
+        }
+    }
+
+    let start = Instant::now();
+    let deadline = start + Duration::from_millis(50);
     let mut connection = Connection {
-        stream,
-        deadline: Instant::now() + Duration::from_millis(50),
+        stream: Blocked(0),
+        deadline,
         phase: Phase::Writing {
-            response: vec![b'x'; 16 * 1024 * 1024],
+            response: b"acknowledgement".to_vec(),
             sent: 0,
         },
     };
-    let start = Instant::now();
-    loop {
-        if matches!(connection.advance(POLICY.line_bytes), Progress::Closed) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(1));
+
+    let before_deadline = deadline.checked_sub(Duration::from_nanos(1)).unwrap();
+    for now in [start, before_deadline] {
+        assert!(matches!(
+            connection.advance(now, POLICY.line_bytes),
+            Progress::Pending
+        ));
     }
-    let Phase::Writing { response, sent } = connection.phase else {
+    assert_eq!(connection.stream.0, 2);
+    assert!(matches!(
+        connection.advance(deadline, POLICY.line_bytes),
+        Progress::Closed
+    ));
+    assert_eq!(connection.stream.0, 2, "expiry performs no further I/O");
+    let Phase::Writing { sent, .. } = connection.phase else {
         panic!("expected response")
     };
-    assert!(sent < response.len());
-    assert!(start.elapsed() < Duration::from_millis(500));
+    assert_eq!(sent, 0);
 }
 
 #[test]

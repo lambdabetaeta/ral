@@ -1,6 +1,7 @@
 use super::*;
 use crate::authority::policy::GrantStack;
 use crate::source::SourceOrigin;
+use crate::test_helper::SLEEP;
 use std::sync::{Arc, Mutex};
 
 /// The origin every test run is attributed to.
@@ -620,10 +621,6 @@ fn a_walled_run_ends_stopped_timed_out() {
 /// A real wall, so the cancel lands *during* the script: in
 /// `a_walled_run_ends_stopped_timed_out` it fires ahead of every binding, so
 /// none has landed there for the wall to be measured against.
-#[cfg_attr(
-    ctor_without_argv,
-    ignore = "a test binary serves bundled tools before main, where musl gives std no argv"
-)]
 #[test]
 fn mid_script_wall_keeps_the_bindings_that_landed() {
     let mut shell = crate::test_helper::core_shell();
@@ -631,7 +628,7 @@ fn mid_script_wall_keeps_the_bindings_that_landed() {
         .run(Run {
             wall: Some(std::time::Duration::from_millis(500)),
             ..Run::captured(
-                "let pre_wall = 1\nsleep 30\nlet post_wall = 2",
+                format!("let pre_wall = 1\n{SLEEP} 30\nlet post_wall = 2"),
                 test_origin(),
             )
         })
@@ -1228,7 +1225,10 @@ fn a_cleanup_runs_shielded_and_the_stop_follows() {
     let (runtime, marked) = marking_runtime();
     let (ending, _) = ran(
         runtime,
-        Run::captured("guard { strike } { sleep 0.2\nmark }", test_origin()),
+        Run::captured(
+            format!("guard {{ strike }} {{ {SLEEP} 0.2\nmark }}"),
+            test_origin(),
+        ),
     );
     assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
     assert!(
@@ -1243,7 +1243,7 @@ fn a_cleanup_under_a_value_is_shielded_too() {
     let (ending, _) = ran(
         runtime,
         Run::captured(
-            "guard { return 1 } { strike\nsleep 0.2\nmark }",
+            format!("guard {{ return 1 }} {{ strike\n{SLEEP} 0.2\nmark }}"),
             test_origin(),
         ),
     );
@@ -1259,7 +1259,7 @@ fn a_cleanup_struck_late_gets_the_grace() {
     let (ending, _) = ran(
         runtime,
         captured_with_grace(
-            "guard { return 1 } { sleep 0.5\nstrike\nsleep 0.7\nmark }",
+            &format!("guard {{ return 1 }} {{ {SLEEP} 0.5\nstrike\n{SLEEP} 0.7\nmark }}"),
             std::time::Duration::from_secs(1),
         ),
     );
@@ -1274,7 +1274,7 @@ fn a_cleanup_that_outlives_its_grace_is_stopped() {
     let (ending, _) = ran(
         runtime,
         captured_with_grace(
-            "guard { strike } { sleep 5\nmark }",
+            &format!("guard {{ strike }} {{ {SLEEP} 5\nmark }}"),
             std::time::Duration::from_millis(50),
         ),
     );
@@ -1289,7 +1289,10 @@ fn an_abort_passes_a_cleanup() {
     let started = std::time::Instant::now();
     let (ending, _) = ran(
         runtime,
-        Run::captured("guard { strike-aborted } { sleep 5\nmark }", test_origin()),
+        Run::captured(
+            format!("guard {{ strike-aborted }} {{ {SLEEP} 5\nmark }}"),
+            test_origin(),
+        ),
     );
     assert!(started.elapsed() < std::time::Duration::from_secs(3));
     assert!(is_stopped(&ending, CancelCause::Aborted), "{ending:?}");
@@ -1348,7 +1351,7 @@ fn nested_cleanups_share_one_grace() {
     let (ending, _) = ran(
         runtime,
         captured_with_grace(
-            "guard { strike } { guard { sleep 0.6 } { sleep 5\nmark } }",
+            &format!("guard {{ strike }} {{ guard {{ {SLEEP} 0.6 }} {{ {SLEEP} 5\nmark }} }}"),
             std::time::Duration::from_secs(1),
         ),
     );
@@ -1364,7 +1367,7 @@ fn successive_cleanups_share_one_grace() {
     let (ending, _) = ran(
         runtime,
         captured_with_grace(
-            "guard { guard { strike } { sleep 0.6 } } { sleep 5\nmark }",
+            &format!("guard {{ guard {{ strike }} {{ {SLEEP} 0.6 }} }} {{ {SLEEP} 5\nmark }}"),
             std::time::Duration::from_secs(1),
         ),
     );

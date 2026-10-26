@@ -282,15 +282,9 @@ fn no_attenuated_base_can_read_a_credential_file() {
     ];
 
     for base in BASES.into_iter().filter(|b| *b != "dangerous") {
-        let Invocation { stack, .. } = for_invocation(
-            cwd,
-            dir.spelling(),
-            base,
-            None,
-            &[],
-            Some(Path::new(&own)),
-        )
-        .expect("base composes");
+        let Invocation { stack, .. } =
+            for_invocation(cwd, dir.spelling(), base, None, &[], Some(Path::new(&own)))
+                .expect("base composes");
         assert!(!stack.fs_is_top(), "{base} attenuates the filesystem");
         let mut shell = ral_core::test_helper::core_shell();
         install(&mut shell, &stack);
@@ -605,15 +599,7 @@ fn an_unknown_base_names_every_base_that_exists() {
     );
     for name in BASES {
         assert!(
-            for_invocation(
-                cwd,
-                dir.spelling(),
-                name,
-                None,
-                &[],
-                Some(Path::new(&own))
-            )
-            .is_ok(),
+            for_invocation(cwd, dir.spelling(), name, None, &[], Some(Path::new(&own))).is_ok(),
             "'{name}' is advertised but does not resolve"
         );
     }

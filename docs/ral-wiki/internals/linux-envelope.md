@@ -1,8 +1,8 @@
 ---
-generated_at_commit: 1e3124cbc0ac2352d44c9d743a70b1cde5081361
-verified_at_commit: 1e3124cb
+generated_at_commit: 104cb51994d4dce2c9892a96008426463be2d404
+verified_at_commit: 104cb51994d4dce2c9892a96008426463be2d404
 verified_at_date: 2026-10-26
-anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, GpuNodes, cgroup_tree, floor, Pinned, pin_envelope, InfoFd]
+anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, GpuNodes, cgroup_tree, Baseline, Pinned, pin_envelope, InfoFd]
 ---
 
 # The Linux envelope
@@ -199,7 +199,7 @@ cannot is a host bind like any other, present only where something needs it.**
 - **`/proc`** is mounted fresh (`--proc /proc`) with the pid namespace.
 - **`/sys`** has no bwrap operation, and a bound `/sys` describes the host: its
   `class/net` lists the host's interfaces whatever `--unshare-net` did, and its
-  `class/dmi` and `bus` name the machine. So the Linux `floor` narrows `/sys`, as
+  `class/dmi` and `bus` name the machine. So the Linux `Baseline` narrows `/sys`, as
   it narrows `/etc`, to what sizes a program: `devices/system/cpu` and
   `kernel/mm/transparent_hugepage`. A grant that wants the rest reads `/sys` by
   name.
@@ -254,3 +254,10 @@ Pinned by `authority::sandbox::linux::tests::render::the_launcher_is_the_pinned_
 `::the_envelope_binary_is_read_only_inside_every_envelope`,
 `::a_pinned_binary_inside_a_writable_prefix_is_locked` and
 `authority::guard::enforce::tests::a_write_onto_a_pinned_binary_is_guarded_before_any_grant_is_consulted`.
+
+## Exercising the envelope
+
+CI runs both Linux architectures in `ral-linux-box`, built with the runner's
+UID and GID so its non-root user can write fixtures in the mounted checkout.
+`scripts/ci.sh` supplies the same privileged envelope and tmpfs `/tmp` locally;
+the policy fixtures outside admitted roots remain outside `/tmp`.

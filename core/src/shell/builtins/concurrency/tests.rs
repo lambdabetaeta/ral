@@ -7,6 +7,7 @@ use crate::shell::runtime::{
     Break, BroodOwner, BuiltinBody, BuiltinEntry, Cradle, DeferredSink, Error, Escape, HandleInner,
     Map, Owner, ReapCause, Sample, ScopeOwner, Status, ThreadEnd, WatchEvent, WorkerId,
 };
+use crate::test_helper::SLEEP;
 use std::sync::{Arc, Mutex, mpsc};
 
 /// Release-on-drop gate guard so a panicking assertion never parks a worker
@@ -710,16 +711,18 @@ fn a_settled_poll_leaves_the_handle_to_await() {
     let mut shell = crate::test_helper::core_shell();
     let (ended, stdout) = run_captured(
         &mut shell,
-        "let h = spawn { echo out; return 4 }\n\
-         let settle = { |h| case !{poll $h} [\n\
-             `ready: { |s| return $s[outcome] },\n\
-             `running: { |_| sleep 0.01; settle $h },\n\
-             `stopping: { |_| fail [status: 1, message: \"unexpected stopping\"] },\n\
-             `consumed: { |_| fail [status: 1, message: \"unexpected consumed\"] }\n\
-         ] }\n\
+        &format!(
+            "let h = spawn {{ echo out; return 4 }}\n\
+         let settle = {{ |h| case !{{poll $h}} [\n\
+             `ready: {{ |s| return $s[outcome] }},\n\
+             `running: {{ |_| {SLEEP} 0.01; settle $h }},\n\
+             `stopping: {{ |_| fail [status: 1, message: \"unexpected stopping\"] }},\n\
+             `consumed: {{ |_| fail [status: 1, message: \"unexpected consumed\"] }}\n\
+         ] }}\n\
          let first = settle $h\n\
          let again = settle $h\n\
-         await $h",
+         await $h"
+        ),
         None,
     );
     assert_eq!(ended.expect("the polled handle is awaited"), Value::Int(4));
@@ -2024,18 +2027,20 @@ fn a_polled_childs_failure_is_still_its_parents() {
     let mut shell = crate::test_helper::core_shell();
     let (ended, _) = run_captured(
         &mut shell,
-        "let h = spawn \"outer\" {\n\
-             let c = spawn \"inner\" { fail [status: 7, message: inner] }\n\
-             let settle = { |h| case !{poll $h} [\n\
-                 `ready: { |_| return () },\n\
-                 `running: { |_| sleep 0.01; settle $h },\n\
-                 `stopping: { |_| fail [status: 1, message: \"unexpected stopping\"] },\n\
-                 `consumed: { |_| fail [status: 1, message: \"unexpected consumed\"] }\n\
-             ] }\n\
+        &format!(
+            "let h = spawn \"outer\" {{\n\
+             let c = spawn \"inner\" {{ fail [status: 7, message: inner] }}\n\
+             let settle = {{ |h| case !{{poll $h}} [\n\
+                 `ready: {{ |_| return () }},\n\
+                 `running: {{ |_| {SLEEP} 0.01; settle $h }},\n\
+                 `stopping: {{ |_| fail [status: 1, message: \"unexpected stopping\"] }},\n\
+                 `consumed: {{ |_| fail [status: 1, message: \"unexpected consumed\"] }}\n\
+             ] }}\n\
              settle $c\n\
              return 1\n\
-         }\n\
-         await $h",
+         }}\n\
+         await $h"
+        ),
         None,
     );
     assert_eq!(status(ended.expect_err("the polled child failed")), 7);
@@ -2092,8 +2097,10 @@ fn a_halting_worker_ends_its_children_within_the_grace() {
     let started = std::time::Instant::now();
     let (ended, _) = run_captured(
         &mut shell,
-        "let h = spawn \"outer\" { spawn \"nap\" { sleep 30 }; fail [status: 3, message: halt] }\n\
-         await $h",
+        &format!(
+            "let h = spawn \"outer\" {{ spawn \"nap\" {{ {SLEEP} 30 }}; fail [status: 3, message: halt] }}\n\
+         await $h"
+        ),
         None,
     );
     assert_eq!(status(ended.expect_err("the outer block failed")), 3);
@@ -2240,7 +2247,7 @@ fn gather_owned_children_are_registered_but_not_announced() {
 
     run_captured(
         &mut shell,
-        "let h = spawn \"gate\" { gather { spawn \"g\" { sleep 30 } } }",
+        &format!("let h = spawn \"gate\" {{ gather {{ spawn \"g\" {{ {SLEEP} 30 }} }} }}"),
         None,
     )
     .0
@@ -2367,7 +2374,7 @@ fn a_walled_gather_drains_its_children_within_the_grace() {
         crate::protocol::Run {
             wall: Some(std::time::Duration::from_millis(50)),
             ..crate::protocol::Run::captured(
-                "gather { spawn \"c\" { sleep 30 }; sleep 30 }",
+                format!("gather {{ spawn \"c\" {{ {SLEEP} 30 }}; {SLEEP} 30 }}"),
                 crate::source::SourceOrigin::named("<test>"),
             )
         }
@@ -2401,7 +2408,7 @@ fn a_halting_gather_drains_its_children_within_the_grace() {
     let started = std::time::Instant::now();
     let (ended, _) = run_captured(
         &mut shell,
-        "gather { spawn \"nap\" { sleep 30 }; fail [status: 3, message: halt] }",
+        &format!("gather {{ spawn \"nap\" {{ {SLEEP} 30 }}; fail [status: 3, message: halt] }}"),
         None,
     );
     assert_eq!(status(ended.expect_err("the gather failed")), 3);
@@ -2550,7 +2557,7 @@ fn first_of_takes_the_winner_and_drains_losers() {
     let started = std::time::Instant::now();
     let (ended, _) = run_captured(
         &mut shell,
-        "first-of [{ sleep 30; return 2 }, { return 1 }]",
+        &format!("first-of [{{ {SLEEP} 30; return 2 }}, {{ return 1 }}]"),
         None,
     );
     assert_eq!(ended.expect("the winner returned"), Value::Int(1));

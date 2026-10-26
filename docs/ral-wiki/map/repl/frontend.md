@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 67715a25
+generated_at_commit: 104cb51994d4dce2c9892a96008426463be2d404
 generated_at_date: 2026-10-26
 covers_paths: [ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/cursor.rs, ral/src/repl/completion.rs, ral/src/repl/complete.rs, ral/src/repl/highlight_style.rs, core/src/text.rs]
 ---
@@ -131,3 +131,10 @@ exactly a `{replacement, display}` record.
   runtime last produced. `highlight_style.rs::STYLES` is the one data-driven
   table of legal highlight styles — each row gives the name, its ANSI escape
   (`style_ansi`, which `_ed-highlight` validates against).
+
+## Terminal tests
+
+`ral/tests/common/pty.rs` opens both terminal ends before spawning; the slave
+name is owned and every descriptor is close-on-exec. The child hook only
+creates its session and acquires its controlling terminal. `pty_isolation.rs`
+checks that parallel sessions retain distinct terminals and independent I/O.
