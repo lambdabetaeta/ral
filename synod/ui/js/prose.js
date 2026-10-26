@@ -1,4 +1,4 @@
-import { renderAssistantMarkdown, codeMask } from "./math.js";
+import { renderAssistantMarkdown, mathClosed } from "./math.js";
 import { highlightRal } from "./ral-highlight.js";
 
 // ---- Streaming prose --------------------------------------------------
@@ -90,24 +90,6 @@ function openFrom(tokens) {
 function skipBlank(tokens, at) {
   while (at >= 0 && tokens[at].type === "space") at -= 1;
   return at;
-}
-
-// `math.js` lifts a formula out of the source before marked ever sees it,
-// so no cut may fall between a formula's delimiters: a chunk settles only
-// once the multi-line mathematics opened inside it has closed there too.
-function mathClosed(src) {
-  const code = codeMask(src);
-  let dollars = 0;
-  let brackets = 0;
-  for (let at = 0; at < src.length; at += 1) {
-    if (code[at]) continue;
-    if (src.startsWith("$$", at)) {
-      dollars += 1;
-      at += 1;
-    } else if (src.startsWith("\\[", at)) brackets += 1;
-    else if (src.startsWith("\\]", at)) brackets -= 1;
-  }
-  return dollars % 2 === 0 && brackets === 0;
 }
 
 // The writing front: a mark at the end of the tail, not an animation over

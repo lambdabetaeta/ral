@@ -77,48 +77,61 @@ const SCRUB = Object.freeze({
 // the formulae in the order their sentinels number them.
 function liftMath(source) {
   const src = source.split(SENTINEL_OPEN).join("").split(SENTINEL_CLOSE).join("");
-  const code = codeMask(src);
   const formulae = [];
   let prose = "";
+  let from = 0;
+  for (const span of mathSpans(src)) {
+    if (span.close === -1 || span.close === span.from) continue;
+    prose += src.slice(from, span.start) + SENTINEL_OPEN + formulae.length + SENTINEL_CLOSE;
+    formulae.push({
+      tex: src.slice(span.from, span.close),
+      display: span.display,
+      raw: src.slice(span.start, span.end),
+    });
+    from = span.end;
+  }
+  return { prose: prose + src.slice(from), formulae };
+}
+
+// Rendering and settling share delimiter identity; an absent close stays open.
+export function mathClosed(src) {
+  for (const span of mathSpans(src)) {
+    if (span.close === -1) return false;
+  }
+  return true;
+}
+
+function* mathSpans(src) {
+  const code = codeMask(src);
   let at = 0;
   while (at < src.length) {
-    // An escape stands for its own character: `\$` is a dollar sign, and
-    // marked is the one that unescapes it. Stepping over both characters
-    // also stops `\\[` being misread as an opening `\[`.
-    if (!code[at] && src[at] === "\\" && (src[at + 1] === "$" || src[at + 1] === "\\")) {
-      prose += src.substr(at, 2);
+    if (code[at]) { at++; continue; }
+    if (src[at] === "\\" && (src[at + 1] === "$" || src[at + 1] === "\\")) {
       at += 2;
       continue;
     }
-    const formula = code[at] ? null : readMath(src, code, at);
-    if (!formula) {
-      prose += src[at++];
+    const pair = MATH_PAIRS.find((pair) => src.startsWith(pair.open, at));
+    if (pair) {
+      const from = at + pair.open.length;
+      const close = findOutsideCode(src, code, pair.close, from);
+      const end = close === -1 ? src.length : close + pair.close.length;
+      yield {
+        start: at,
+        end,
+        from,
+        close,
+        display: pair.display,
+      };
+      // Even an incomplete longest opener owns its body and its suffix.
+      at = end;
       continue;
     }
-    prose += SENTINEL_OPEN + formulae.length + SENTINEL_CLOSE;
-    formulae.push(formula);
-    at = formula.end;
+    const formula = src[at] === "$" ? readDollar(src, code, at) : null;
+    if (formula) {
+      yield { start: at, ...formula };
+      at = formula.end;
+    } else at++;
   }
-  return { prose, formulae };
-}
-
-// The formula opening at `at`, or null. An unterminated one is not a
-// formula — which is also what keeps a half-arrived `$$` from flashing
-// an error at the reader while it streams.
-function readMath(src, code, at) {
-  for (const pair of MATH_PAIRS) {
-    if (!src.startsWith(pair.open, at)) continue;
-    const from = at + pair.open.length;
-    const close = findOutsideCode(src, code, pair.close, from);
-    if (close === -1 || close === from) continue;
-    return {
-      tex: src.slice(from, close),
-      display: pair.display,
-      raw: src.slice(at, close + pair.close.length),
-      end: close + pair.close.length,
-    };
-  }
-  return src[at] === "$" ? readDollar(src, code, at) : null;
 }
 
 // Single-`$` mathematics, the delimiter that also spells money and shell
@@ -136,21 +149,23 @@ function readDollar(src, code, at) {
     if (src[end] !== "$" || code[end]) continue;
     if (/\s/.test(src[end - 1])) return null;
     if (/\d/.test(src[end + 1] || "")) return null;
-    return { tex: src.slice(from, end), display: false, raw: src.slice(at, end + 1), end: end + 1 };
+    return { from, close: end, display: false, end: end + 1 };
   }
   return null;
 }
 
 function findOutsideCode(src, code, needle, from) {
-  for (let at = from; (at = src.indexOf(needle, at)) !== -1; at++) {
-    if (!code[at]) return at;
+  for (let at = from; at < src.length; at++) {
+    if (code[at]) continue;
+    if (src.startsWith(needle, at)) return at;
+    if (src[at] === "\\") at++;
   }
   return -1;
 }
 
 // Where a `$` is only a dollar sign: fenced code blocks and inline code
 // spans, which is where this app's own shell examples keep theirs.
-export function codeMask(src) {
+function codeMask(src) {
   const code = new Uint8Array(src.length);
   let fence = null;                    // the ``` or ~~~ run that opened the block
   let at = 0;

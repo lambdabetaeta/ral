@@ -1,5 +1,5 @@
 ---
-generated_at_commit: afe7087760d4d0bcf314ebaaede068479b0a0c05
+generated_at_commit: 56fe76a6baf90c1abb161fc2a2364960dc672d6b
 generated_at_date: 2026-10-26
 covers_paths: [guest-net/, synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/protocol/channel.rs, core/src/carrier.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs]
 ---
@@ -414,9 +414,12 @@ stays open together; every other block closes the moment another follows it.
 And because `renderAssistantMarkdown` lifts formulae out before marked sees
 them, a cut must never fall between a formula's delimiters, so a chunk
 settles only once the multi-line mathematics opened inside it has closed
-there too — judged with the same `codeMask` that decides where a `$` is only
-a dollar sign. `SynodEvent::Boundary` and the close of a bubble both settle
-the tail outright, having the turn's own word that nothing can join it. The
+there too. `math.js`'s shared `mathSpans` scanner supplies both formula
+lifting and `mathClosed`: code and escapes are excluded, complete formula
+bodies are opaque, and an incomplete longest opener owns its suffix rather
+than exposing a shorter inline opener. Empty pairs remain literal.
+`SynodEvent::Boundary` and the close of a bubble both settle the tail outright,
+having the turn's own word that nothing can join it. The
 open block ends in a `caret`: the writing front as a mark at a fixed place in
 the text, not an animation played over prose already read.
 
