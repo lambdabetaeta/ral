@@ -160,7 +160,7 @@ have not, by name:
   `file_normalized_name_info_answers_the_stored_case`,
   `a_held_prefix_refuses_a_rename_while_it_lives` (the no-delete-share
   premise),
-  `a_listing_without_128_bit_ids_falls_back_to_the_64_bit_id` (gated on
+  `a_listing_uses_the_handles_64_bit_identity_on_a_volume_without_128_bit_ids` (gated on
   `RAL_TEST_FAT_VOLUME`, the path of a directory on a FAT VHD, and skipped
   with its reason where unset),
   `a_stat_carries_the_length`,

@@ -1282,4 +1282,26 @@ mod tests {
             expected.map(|(name, seen, admitted)| (name.to_owned(), seen, admitted))
         );
     }
+
+    /// The listing keeps names, not old identities: a replacement hard link
+    /// to an excluded object must not inherit the listed name's old verdict.
+    #[test]
+    fn a_listing_judges_the_object_present_when_its_entry_is_reached() {
+        let (_tmp, root) = tmp();
+        for name in ["ok", "secret"] {
+            std::fs::write(root.join(name), b"x").unwrap();
+        }
+        let region = reading_all_but(&root, &["secret"]).read_region(&Baseline::default());
+        let Ok(dir) = region.judge(held_dir(&root)) else {
+            panic!("the root is readable");
+        };
+        let mut listing = dir.read_dir().unwrap();
+        std::fs::remove_file(root.join("ok")).unwrap();
+        std::fs::hard_link(root.join("secret"), root.join("ok")).unwrap();
+
+        let entry = listing.next().unwrap();
+        assert_eq!(entry.name().as_os_str(), "ok");
+        assert!(entry.listed().is_some());
+        assert!(!region.admits(&entry));
+    }
 }

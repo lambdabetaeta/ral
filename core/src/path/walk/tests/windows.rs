@@ -292,15 +292,15 @@ fn a_held_prefix_refuses_a_rename_while_it_lives() {
     std::fs::rename(tmp.path().join("z"), tmp.path().join("y")).unwrap();
 }
 
-/// A volume whose 128-bit ids are zero, or which refuses `FileIdInfo` and the
-/// reparse-tag class, walks and lists with the 64-bit id and a zero tag, and
-/// agrees with [`ObjectId::of`]; it creates a directory under the held one,
-/// and its atomic write fails, for want of `FileRenameInfoEx`, leaving no
-/// sibling.  `RAL_TEST_FAT_VOLUME` names a directory on such a volume, a FAT
-/// VHD, which may be mounted with no drive letter (a `\\?\Volume{GUID}\`
-/// spelling).
+/// Enumeration supplies names only; a volume whose handle answers no 128-bit
+/// id still lists with the same 64-bit identity as [`ObjectId::of`], and a
+/// zero reparse tag where that class is unsupported. It creates a directory
+/// under the held one, and its atomic write fails, for want of
+/// `FileRenameInfoEx`, leaving no sibling. `RAL_TEST_FAT_VOLUME` names a
+/// directory on such a volume, a FAT VHD, which may be mounted with no drive
+/// letter (a `\\?\Volume{GUID}\` spelling).
 #[test]
-fn a_listing_without_128_bit_ids_falls_back_to_the_64_bit_id() {
+fn a_listing_uses_the_handles_64_bit_identity_on_a_volume_without_128_bit_ids() {
     let Some(volume) = std::env::var_os("RAL_TEST_FAT_VOLUME") else {
         eprintln!("skip: RAL_TEST_FAT_VOLUME names no directory on a volume without 128-bit ids");
         return;

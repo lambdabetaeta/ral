@@ -283,6 +283,7 @@ mod tests {
         use crate::authority::sandbox::TOKEN;
         use crate::path::{Dir, Installing, Located, ObjectId, RealPath};
         use crate::test_helper::{place, real};
+        #[cfg(target_os = "linux")]
         use std::fs::File;
         use std::io;
 
@@ -357,7 +358,23 @@ mod tests {
             std::fs::create_dir(tmp.path().join("d")).unwrap();
             let second = hold_dir(&position).unwrap().expect("the new directory");
             assert_ne!(first_id, second.trace().last_id());
+            #[cfg(target_os = "linux")]
             let made = File::open(tmp.path().join("d")).unwrap();
+            #[cfg(windows)]
+            let made = {
+                use std::os::windows::fs::OpenOptionsExt;
+                use windows_sys::Win32::Storage::FileSystem::{
+                    FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES,
+                };
+
+                // `File::open` cannot open a Windows directory. Ask only for
+                // attributes, leaving the installing hold's no-delete sharing intact.
+                std::fs::OpenOptions::new()
+                    .access_mode(FILE_READ_ATTRIBUTES)
+                    .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                    .open(tmp.path().join("d"))
+                    .unwrap()
+            };
             assert_eq!(second.trace().last_id(), ObjectId::of(&made).unwrap());
         }
 

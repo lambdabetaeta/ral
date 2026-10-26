@@ -19,7 +19,6 @@ use cap_primitives::fs::{FollowSymlinks, OpenOptions, OpenOptionsExt};
 use std::ffi::{OsStr, OsString, c_void};
 use std::fs::File;
 use std::io;
-use std::marker::PhantomData;
 use std::mem::offset_of;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
@@ -45,15 +44,14 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_DISPOSITION_FLAG_DELETE,
     FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
     FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_WRITE, FILE_ID_BOTH_DIR_INFO, FILE_ID_EXTD_DIR_INFO,
-    FILE_ID_INFO, FILE_INFO_BY_HANDLE_CLASS, FILE_LIST_DIRECTORY, FILE_NAME_INFO,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
-    FILE_TRAVERSE, FILE_WRITE_DATA, FileAttributeTagInfo, FileBasicInfo, FileDispositionInfo,
-    FileDispositionInfoEx, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
-    FileIdExtdDirectoryInfo, FileIdExtdDirectoryRestartInfo, FileIdInfo, FileNormalizedNameInfo,
-    FileStandardInfo, GetDriveTypeW, GetFileInformationByHandle, GetFileInformationByHandleEx,
-    GetFinalPathNameByHandleW, MAXIMUM_REPARSE_DATA_BUFFER_SIZE, SYNCHRONIZE,
-    SetFileInformationByHandle, VOLUME_NAME_GUID,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_WRITE, FILE_ID_BOTH_DIR_INFO, FILE_ID_INFO,
+    FILE_INFO_BY_HANDLE_CLASS, FILE_LIST_DIRECTORY, FILE_NAME_INFO, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FILE_TRAVERSE,
+    FILE_WRITE_DATA, FileAttributeTagInfo, FileBasicInfo, FileDispositionInfo,
+    FileDispositionInfoEx, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, FileIdInfo,
+    FileNormalizedNameInfo, FileStandardInfo, GetDriveTypeW, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, GetFinalPathNameByHandleW, MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
+    SYNCHRONIZE, SetFileInformationByHandle, VOLUME_NAME_GUID,
 };
 use windows_sys::Win32::System::IO::{DeviceIoControl, IO_STATUS_BLOCK};
 use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
@@ -124,10 +122,6 @@ fn u16_at(bytes: &[u8], offset: usize) -> io::Result<u16> {
 
 fn u32_at(bytes: &[u8], offset: usize) -> io::Result<u32> {
     at(bytes, offset).map(u32::from_le_bytes)
-}
-
-fn i64_at(bytes: &[u8], offset: usize) -> io::Result<i64> {
-    at(bytes, offset).map(i64::from_le_bytes)
 }
 
 /// `len` bytes at `offset` as UTF-16 code units.
@@ -1019,24 +1013,15 @@ pub(super) fn open_discard() -> io::Result<File> {
     site!(Silent::DiscardDevice, &options => open(r"\\.\NUL"))
 }
 
-/// One entry of a directory pass: its name, what it answered, and its id.
-struct Row {
-    name: Vec<u16>,
-    raw: Raw,
-    id: u128,
-}
-
-/// The entries `class` of `reader` lists, `restart` first, from one pass.
-fn rows(
-    reader: &File,
-    restart: FILE_INFO_BY_HANDLE_CLASS,
-    next: FILE_INFO_BY_HANDLE_CLASS,
-    row: fn(&[u8]) -> io::Result<Row>,
-) -> io::Result<Vec<Row>> {
-    let mut rows = Vec::new();
-    let mut class = restart;
+/// The names of `dir`, read through a reopened listing handle and sorted.
+/// Enumeration's metadata is not used: it can predate a writer's latest
+/// append, or describe an entry gone before the iterator reaches it.
+fn names(dir: &File) -> io::Result<Vec<EntryName>> {
+    let reader = reopen(dir, FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE)?;
+    let mut names = Vec::new();
+    let mut class = FileIdBothDirectoryRestartInfo;
+    let mut buf = Buf::new(1 << 16);
     loop {
-        let mut buf = Buf::new(1 << 16);
         // SAFETY: `reader` is a live handle and `buf` as large as the call is
         // told.
         let ok = unsafe {
@@ -1050,16 +1035,25 @@ fn rows(
         if ok == 0 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() == i32::try_from(ERROR_NO_MORE_FILES).ok() {
-                return Ok(rows);
+                names.sort();
+                return Ok(names);
             }
             return Err(error);
         }
-        class = next;
+        class = FileIdBothDirectoryInfo;
         let bytes = buf.bytes();
         let mut offset = 0;
         loop {
             let entry = bytes.get(offset..).ok_or_else(short)?;
-            rows.push(row(entry)?);
+            let len = usize::try_from(u32_at(
+                entry,
+                offset_of!(FILE_ID_BOTH_DIR_INFO, FileNameLength),
+            )?)
+            .map_err(|_| short())?;
+            let wide = wide_at(entry, offset_of!(FILE_ID_BOTH_DIR_INFO, FileName), len)?;
+            if let Ok(name) = EntryName::parse(&OsString::from_wide(&wide)) {
+                names.push(name);
+            }
             match usize::try_from(u32_at(entry, 0)?).map_err(|_| short())? {
                 0 => break,
                 step => offset += step,
@@ -1068,112 +1062,32 @@ fn rows(
     }
 }
 
-fn extd_row(entry: &[u8]) -> io::Result<Row> {
-    type Info = FILE_ID_EXTD_DIR_INFO;
-    let len =
-        usize::try_from(u32_at(entry, offset_of!(Info, FileNameLength))?).map_err(|_| short())?;
-    Ok(Row {
-        name: wide_at(entry, offset_of!(Info, FileName), len)?,
-        raw: Raw {
-            attributes: u32_at(entry, offset_of!(Info, FileAttributes))?,
-            tag: u32_at(entry, offset_of!(Info, ReparsePointTag))?,
-            len: i64_at(entry, offset_of!(Info, EndOfFile))?,
-            btime: i64_at(entry, offset_of!(Info, CreationTime))?,
-            atime: i64_at(entry, offset_of!(Info, LastAccessTime))?,
-            mtime: i64_at(entry, offset_of!(Info, LastWriteTime))?,
-        },
-        id: u128::from_le_bytes(at(entry, offset_of!(Info, FileId))?),
-    })
-}
-
-/// `FileIdBothDirectoryInfo`'s row, whose id has 64 bits and whose `EaSize`
-/// holds the reparse tag of a reparse point.
-fn both_row(entry: &[u8]) -> io::Result<Row> {
-    type Info = FILE_ID_BOTH_DIR_INFO;
-    let len =
-        usize::try_from(u32_at(entry, offset_of!(Info, FileNameLength))?).map_err(|_| short())?;
-    let attributes = u32_at(entry, offset_of!(Info, FileAttributes))?;
-    let tag = u32_at(entry, offset_of!(Info, EaSize))?;
-    Ok(Row {
-        name: wide_at(entry, offset_of!(Info, FileName), len)?,
-        raw: Raw {
-            attributes,
-            tag: if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-                tag
-            } else {
-                0
-            },
-            len: i64_at(entry, offset_of!(Info, EndOfFile))?,
-            btime: i64_at(entry, offset_of!(Info, CreationTime))?,
-            atime: i64_at(entry, offset_of!(Info, LastAccessTime))?,
-            mtime: i64_at(entry, offset_of!(Info, LastWriteTime))?,
-        },
-        id: u128::from(u64::from_le_bytes(at(entry, offset_of!(Info, FileId))?)),
-    })
-}
-
-/// The names of a directory, sorted, each stated by the pass that listed it.
-/// The pass is read whole, so the lister borrows nothing: the lifetime is the
-/// seam's.
+/// The names of a directory, sorted, each stated as it is yielded.
 pub(super) struct Lister<'a> {
-    entries: IntoIter<(EntryName, io::Result<Seen>)>,
-    dir: PhantomData<&'a File>,
+    dir: &'a File,
+    names: IntoIter<EntryName>,
 }
 
 /// List `dir`: a handle reopened from it with `FILE_LIST_DIRECTORY`, since
 /// the held one asks only attributes and traverse. This is where a directory
-/// the user cannot list refuses. `FileIdExtdDirectoryInfo` gives names, stats and
-/// 128-bit ids in one pass, kept by name; where the volume answers a zero
-/// 128-bit id, or refuses the class, the pass is made again as
-/// `FileIdBothDirectoryInfo`, whose 64-bit id is the one [`ObjectId::of`]
-/// falls back to.
+/// the user cannot list refuses. Only names are kept from the pass; each
+/// entry's metadata and identity come from its own attribute handle when the
+/// iterator reaches it, without following a link or asking to read data.
 pub(super) fn list(dir: &File) -> io::Result<Lister<'_>> {
-    let reader = reopen(dir, FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE)?;
-    let volume = seen(dir)?.id.volume;
-    let extd = rows(
-        &reader,
-        FileIdExtdDirectoryRestartInfo,
-        FileIdExtdDirectoryInfo,
-        extd_row,
-    );
-    let listed = match extd {
-        Ok(listed) if listed.iter().all(|row| row.id != 0) => listed,
-        Ok(_) => both(&reader)?,
-        Err(e) if unsupported_class(&e) => both(&reader)?,
-        Err(e) => return Err(e),
-    };
-    let mut entries: Vec<(EntryName, io::Result<Seen>)> = listed
-        .into_iter()
-        .filter_map(|row| {
-            let name = EntryName::parse(&OsString::from_wide(&row.name)).ok()?;
-            let seen = Seen {
-                stat: row.raw.stat(),
-                id: ObjectId { volume, id: row.id },
-            };
-            Some((name, Ok(seen)))
-        })
-        .collect();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(Lister {
-        entries: entries.into_iter(),
-        dir: PhantomData,
+        dir,
+        names: names(dir)?.into_iter(),
     })
-}
-
-fn both(reader: &File) -> io::Result<Vec<Row>> {
-    rows(
-        reader,
-        FileIdBothDirectoryRestartInfo,
-        FileIdBothDirectoryInfo,
-        both_row,
-    )
 }
 
 impl Iterator for Lister<'_> {
     type Item = (EntryName, io::Result<Seen>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.entries.next()
+        let name = self.names.next()?;
+        let seen =
+            open_entry(self.dir, name.as_os_str(), Sharing::Leaf).and_then(|file| seen(&file));
+        Some((name, seen))
     }
 }
 

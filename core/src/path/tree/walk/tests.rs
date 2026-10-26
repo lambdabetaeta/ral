@@ -663,6 +663,31 @@ fn an_entry_removed_between_the_listing_and_its_stat_is_unseen() {
 }
 
 #[test]
+fn a_listing_states_the_live_length_before_its_writer_closes() {
+    use std::io::Write;
+
+    let (_tmp, root) = tmp();
+    lay(&root, &[("record.jsonl", "")]);
+    let mut writer = std::fs::OpenOptions::new()
+        .append(true)
+        .open(root.join("record.jsonl"))
+        .unwrap();
+    let entries = Walk::all(&lexical(&root))
+        .readable_by(open())
+        .entries(scope());
+    let dir = entries.region.judge(walk_dir(&lexical(&root)).unwrap());
+    let dir = dir.unwrap_or_else(|_| panic!("the root is readable"));
+    let listing = dir.read_dir().unwrap();
+    writer.write_all(b"appended").unwrap();
+    writer.flush().unwrap();
+
+    let (items, _) = entries.admit(listing).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].seen.as_ref().unwrap().0.len, 8);
+    assert_eq!(writer.metadata().unwrap().len(), 8);
+}
+
+#[test]
 fn a_cancelled_scope_stops_the_walk_at_the_next_entry() {
     let (_tmp, root) = tmp();
     lay(&root, &[("a", ""), ("b", "")]);

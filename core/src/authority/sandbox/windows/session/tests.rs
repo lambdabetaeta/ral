@@ -461,8 +461,8 @@ fn assert_reads(
     assert_launch_reads(launch, relative, readable);
 }
 
-/// Spawn `launch`, a confined `type relative`, and assert it reads `secret`
-/// exactly when `readable`.
+/// Spawn `launch`, a confined file read, and assert it reads `secret` exactly
+/// when `readable`.
 fn assert_launch_reads(mut launch: crate::process::Launch, relative: &str, readable: bool) {
     use crate::process::PgidPolicy;
     use std::io::Read;
@@ -633,9 +633,14 @@ fn an_image_is_granted_to_its_own_launch_alone() {
         let image = walked(tree.write(r"B\key.txt"));
         let _session = SessionGuard;
         let (a, only_a) = (tree.at("A"), projection(&[&tree.real("A")], &[]));
-        let as_image = confined_as(&only_a, &a, r"type ..\B\key.txt", &image).unwrap();
+        // `type` expands its filename by listing the parent directory, but an
+        // image grant covers the file alone, not `B`. Open the exact file by
+        // redirection instead, and read the input without enumerating `B`.
+        let line = r"C:\Windows\System32\findstr.exe /r . <..\B\key.txt";
+        let as_image = confined_as(&only_a, &a, line, &image).unwrap();
         assert_launch_reads(as_image, r"..\B\key.txt", true);
-        assert_reads(&only_a, &a, r"..\B\key.txt", false);
+        let without_image = confined(&only_a, &a, line).unwrap();
+        assert_launch_reads(without_image, r"..\B\key.txt", false);
     });
 }
 

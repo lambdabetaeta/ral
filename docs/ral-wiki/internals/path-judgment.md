@@ -58,7 +58,11 @@ between steps changes which child is obtained and the transcript says which.
   (`LexicalPath::folded`); what reaches the disk is handed unfolded
   ([[decisions/261021_access-is-physical|access-is-physical]]).
 - **A listing makes a `Listed`, not a `Trace`**: what a listing saw of an
-  entry, judged only as a name shown.
+  entry, judged only as a name shown. Names are enumerated first; each entry's
+  metadata and identity are read when yielded. On Windows that is an
+  attribute-only, non-following open relative to the held directory, not the
+  enumeration's cached size or identity: a removed entry is absent, a replaced
+  one is judged as its new object, and an open writer's flushed size is current.
 
 ## Three holders, and who vouched
 

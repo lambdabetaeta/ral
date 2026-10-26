@@ -191,9 +191,19 @@ fn resource_rows_survey_the_agents_accumulators() {
         0,
         "shell-only work has not entered the model view"
     );
-    assert!(
-        row(&rows, "disk.log_dir").current > 0,
-        "a session dir with a written record.jsonl probes nonzero"
+    let record_bytes = session
+        .log
+        .borrow()
+        .dir()
+        .open(crate::record::RECORD)
+        .expect("the session record exists")
+        .metadata()
+        .expect("the open record has metadata")
+        .len();
+    assert_eq!(
+        row(&rows, "disk.log_dir").current,
+        record_bytes,
+        "the disk probe counts committed bytes while the record writer stays open"
     );
 
     assert_eq!(
