@@ -323,6 +323,7 @@ mod tests {
                 pinned_dirs: Vec::new(),
             }),
             net: true,
+            gpu: true,
             exec: ExecProjection::default(),
         }
     }
@@ -383,6 +384,7 @@ mod tests {
                 pinned_dirs: Vec::new(),
             }),
             net: true,
+            gpu: true,
             exec: ExecProjection::default(),
         }
     }
@@ -594,6 +596,7 @@ mod tests {
                 pinned_dirs: Vec::new(),
             }),
             net: true,
+            gpu: true,
             exec,
         }
     }
@@ -855,6 +858,7 @@ mod tests {
                 pinned_dirs: Vec::new(),
             }),
             net: true,
+            gpu: true,
             exec: ExecProjection::default(),
         };
         let cat = Program::file("/bin/cat".into()).expect("/bin/cat exists");

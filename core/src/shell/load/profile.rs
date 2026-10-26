@@ -195,6 +195,7 @@ mod tests {
         assert!(
             summary.fs.is_none()
                 && summary.net.is_none()
+                && summary.gpu.is_none()
                 && summary.editor.is_none()
                 && summary.shell.is_none()
         );

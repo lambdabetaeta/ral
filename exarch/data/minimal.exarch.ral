@@ -26,6 +26,8 @@
 # `include_str!`.
 
 return [
+  gpu: `withheld,  # no GPU; `reasonable` and `dangerous` leave it on
+
   # Reads and writes mirror the threat model of `reasonable`.  A session
   # writes no cache that the user's own tools read: writes go only to the
   # working tree and scratch, and exarch's runtime points

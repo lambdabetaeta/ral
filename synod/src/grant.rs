@@ -29,7 +29,7 @@
 //! the construction lives here and is not scattered across the session.
 
 use crate::site::{Silent, site};
-use ral_core::authority::policy::{Capabilities, Evidence, ExecKey, FsPolicy, Ungoverned};
+use ral_core::authority::policy::{Capabilities, Evidence, ExecKey, FsPolicy, Gpu, Ungoverned};
 use ral_core::host::EnvVars;
 use ral_core::path::{
     FrozenPath, GuestPath, LeafMode, LexicalPath, RealPath, Resolver, shown, walk_dir, walk_lenient,
@@ -377,6 +377,9 @@ impl Grant {
     ///   `Some(false)` would strip the network from every command this grant
     ///   spawns (`core/src/authority/sandbox/linux.rs`'s `bwrap --unshare-net`),
     ///   silently deleting that wire — this is a correctness bit, not prose.
+    /// - **gpu** — withheld.  The machine has no GPU, so the grant says so
+    ///   rather than let the agent read `inherit` and look for one; the guest's
+    ///   jail, not bwrap, confines there, so the bit costs nothing.
     /// - **exec** — the image's toolbox and nothing else.  See [`TOOLBOX`]
     ///   for why it is a list of names rather than of directories.
     /// - **editor / shell** — the ral editor is off in every mode: this
@@ -421,6 +424,7 @@ impl Grant {
                     .collect(),
             ),
             editor: Some(BTreeSet::new()),
+            gpu: Some(Gpu::Withheld),
             // `shell` is unattenuated: the guest VM already bounds every
             // survivor a detach could birth.
             ..Capabilities::default()
@@ -906,6 +910,12 @@ mod tests {
                 "the granted folder's host path must not be writable"
             );
         });
+    }
+
+    #[test]
+    fn the_guest_has_no_gpu_and_the_grant_says_so() {
+        let (_dir, grant) = granted("grant-gpu");
+        assert_eq!(grant.capabilities().gpu, Some(Gpu::Withheld));
     }
 
     /// The bytes the guest will be handed, which the test above cannot

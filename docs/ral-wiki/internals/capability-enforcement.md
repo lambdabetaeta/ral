@@ -1,6 +1,7 @@
 ---
-verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
-verified_at_date: 2026-10-25
+generated_at_commit: 1e3124cbc0ac2352d44c9d743a70b1cde5081361
+verified_at_commit: 1e3124cb
+verified_at_date: 2026-10-26
 anchors: [check_exec, Admitted, admit, Flag, ExecDenial, Refused, Refusal, Denial, Withheld, refused, region, Table, Evidence, GrantStack, SandboxProjection, Fragment, decode_capability_map, Shell::freeze_ctx, sandboxed_command, build_launch, projection_enforceable]
 ---
 
@@ -27,7 +28,8 @@ The detail is split by mechanism:
 - [[internals/confined-launch|confined-launch]] — how one external command is
   confined on each platform, and how it fails closed;
 - [[internals/seatbelt-profile|seatbelt-profile]] — the macOS profile, rule by
-  rule.
+  rule, and what no rule closes on the host
+  ([[internals/seatbelt-profile#Declared limits|declared limits]]).
 
 ## One model, read in two places
 
@@ -142,6 +144,13 @@ process does on its own.**
 - **Network.** There is no guard, because ral performs no network operation
   itself. The OS sandbox is the only enforcer. On Windows it is the withheld
   network capability SIDs: a LowBox token without them cannot open a socket.
+- **GPU.** No guard, as for the network: the OS sandbox is the only enforcer.
+  Seatbelt on macOS, by absent IOKit, Metal and cache rules; on Linux what the
+  bwrap mounts show, since the Landlock ruleset handles only `Execute` and
+  `Refer` and so governs no device node
+  ([[internals/linux-envelope|linux-envelope]]). Windows cannot withhold it: an
+  AppContainer reaches Direct3D regardless, so a withheld GPU projects as left
+  on there (`WITHHOLDS_GPU`) and the grant summary says so.
 
 **For the filesystem, guard and sandbox read one fold and judge it on different
 evidence.** Both read one fold (`authority/policy/fs.rs`). `region` meets each layer's table

@@ -1518,6 +1518,26 @@ fn absent_skill_is_not_found_not_unreadable() {
     );
 }
 
+/// A built-in no root shadows is listed and loads from exarch itself.
+#[test]
+fn a_builtin_skill_is_listed_and_loaded() {
+    let engine = fresh();
+    let tmp = scratch_dir("skill-builtin");
+    let root = shown(tmp.path());
+    let listed = run_once(&engine, &format!("cd '{root}'; skill-list"));
+    assert!(
+        listed
+            .value
+            .as_deref()
+            .unwrap()
+            .contains("exarch-sandbox: ")
+    );
+    let loaded = run_once(&engine, "skill exarch-sandbox");
+    assert_eq!(loaded.exit, 0);
+    let body = loaded.value.as_deref().unwrap();
+    assert!(body.starts_with("// skill root: built into exarch") && body.contains("--extend"));
+}
+
 /// A walk's root that is absent is an error, not an empty walk, said by the
 /// judgment's `NotFound`; where the stack refuses its name, the refusal is
 /// what is said, so a denied path that does not exist reads as denied.

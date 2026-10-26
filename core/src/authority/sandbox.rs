@@ -65,6 +65,12 @@ pub(crate) use diag::denial_hint;
 /// network capability SID, which cannot open a socket.
 const NET_ENFORCED: bool = cfg!(any(target_os = "linux", target_os = "macos", windows));
 
+/// Whether this platform can withhold the GPU: macOS by absent `IOKit` and
+/// Metal rules, Linux by absent device nodes.  An `AppContainer` reaches
+/// Direct3D with no capability to withhold, so on Windows a withheld GPU
+/// projects as left on and every summary says so.
+pub(crate) const WITHHOLDS_GPU: bool = cfg!(any(target_os = "linux", target_os = "macos"));
+
 // Whether this platform's backend carries the exec allow-list into the
 // kernel, per the rendering named in this module's header: Seatbelt's
 // `process-exec` clause, Landlock's `Execute` ruleset.  Windows has no
@@ -171,6 +177,7 @@ pub fn restricted_envelope_launches() -> bool {
         let projection = SandboxProjection {
             fs: FsProjection::Restricted(FsRules::default()),
             net: true,
+            gpu: true,
             exec: ExecProjection::default(),
         };
         pin();
@@ -245,6 +252,7 @@ mod tests {
         let p_net_true = SandboxProjection {
             fs: FsProjection::default(),
             net: true,
+            gpu: true,
             exec: ExecProjection::default(),
         };
         assert!(projection_enforceable(&p_net_true).is_ok());
@@ -256,6 +264,7 @@ mod tests {
         let p_net_false = SandboxProjection {
             fs: FsProjection::default(),
             net: false,
+            gpu: true,
             exec: ExecProjection::default(),
         };
         assert_eq!(projection_enforceable(&p_net_false).is_ok(), NET_ENFORCED);
@@ -268,6 +277,7 @@ mod tests {
         let p_net_false = SandboxProjection {
             fs: FsProjection::default(),
             net: false,
+            gpu: true,
             exec: ExecProjection::default(),
         };
         assert!(

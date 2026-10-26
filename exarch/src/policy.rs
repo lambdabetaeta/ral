@@ -292,5 +292,9 @@ mod tests {
             stack.net().next().is_some(),
             "naming a looser base must not turn the network back on"
         );
+        assert!(
+            stack.gpu().next().is_some(),
+            "naming a looser base must not hand back the GPU"
+        );
     }
 }

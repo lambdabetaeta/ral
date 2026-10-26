@@ -1,4 +1,5 @@
-//! Agent Skills from shared and exarch-specific directories.
+//! Agent Skills from shared and exarch-specific directories, and those
+//! compiled into exarch.
 //!
 //! Progressive disclosure: the prompt's Skills section carries only
 //! `name: description`, baked once at startup by `prompt::assemble`, while the
@@ -27,7 +28,8 @@ pub struct Skill {
 }
 
 /// Project roots before personal roots; exarch's own wins within each scope.
-/// Shared project roots run from cwd up to the working tree's root.
+/// Shared project roots run from cwd up to the working tree's root. Every root
+/// comes before [`BUILTIN`].
 pub(crate) fn skill_roots(
     cwd: &Path,
     config_dir: Option<&Path>,
@@ -134,16 +136,53 @@ impl Judge for Boot<'_> {
     }
 }
 
-/// A skill found: its directory's basename, where it is named, and its
-/// `SKILL.md`, held for reading.
+/// The skills compiled into exarch, as `(name, SKILL.md)`. They stand behind
+/// every root, so a project's or user's skill of the same name shadows one.
+pub(crate) const BUILTIN: [(&str, &str); 1] = [(
+    "exarch-sandbox",
+    include_str!("../data/skills/exarch-sandbox/SKILL.md"),
+)];
+
+/// A skill found: its name, and where its `SKILL.md` comes from.
 pub(crate) struct Found {
     pub name: String,
-    pub dir: PathBuf,
-    pub file: Located<Judged<Reading>>,
+    pub source: Source,
 }
 
-/// Every readable skill directory under the roots; the first root wins a
-/// name collision. Reads no file contents.
+pub(crate) enum Source {
+    /// A directory under a root, with its `SKILL.md` held for reading.
+    Disk {
+        dir: PathBuf,
+        file: Box<Located<Judged<Reading>>>,
+    },
+    /// A `SKILL.md` compiled into exarch.
+    Builtin(&'static str),
+}
+
+impl Found {
+    /// Where the skill lives, as a reader is shown it.
+    pub(crate) fn place(&self) -> String {
+        match &self.source {
+            Source::Disk { dir, .. } => ral_core::path::shown(dir),
+            Source::Builtin(_) => "built into exarch".into(),
+        }
+    }
+}
+
+fn builtins() -> impl Iterator<Item = Found> {
+    BUILTIN.iter().map(|&(name, text)| Found {
+        name: name.to_owned(),
+        source: Source::Builtin(text),
+    })
+}
+
+/// The built-in skill named `name`, if exarch ships one.
+pub(crate) fn builtin(name: &str) -> Option<Found> {
+    builtins().find(|found| found.name == name)
+}
+
+/// Every readable skill directory under the roots, then the built-ins; the
+/// first wins a name collision. Reads no file contents.
 pub(crate) fn discover_all(
     cwd: &Path,
     config_dir: Option<&Path>,
@@ -151,15 +190,12 @@ pub(crate) fn discover_all(
     judge: &mut impl Judge,
 ) -> Vec<Found> {
     let mut seen = HashSet::new();
-    let mut skills = Vec::new();
-    for root in skill_roots(cwd, config_dir, home_dir) {
-        for found in scan_dir(&root, judge) {
-            if seen.insert(found.name.clone()) {
-                skills.push(found);
-            }
-        }
-    }
-    skills
+    skill_roots(cwd, config_dir, home_dir)
+        .iter()
+        .flat_map(|root| scan_dir(root, judge))
+        .chain(builtins())
+        .filter(|found| seen.insert(found.name.clone()))
+        .collect()
 }
 
 /// Frontmatter for every readable skill, for the prompt's Skills section.
@@ -213,8 +249,12 @@ fn skill_from_frontmatter(raw: &str, dir_name: &str) -> Result<Skill, String> {
 
 /// The whole of a skill's `SKILL.md`, read through the handle that was judged.
 fn read_skill_file(found: &Found) -> Result<String, String> {
+    let held = match &found.source {
+        Source::Disk { file, .. } => file,
+        Source::Builtin(text) => return Ok((*text).to_owned()),
+    };
     let mut raw = String::new();
-    let mut file = found.file.read().map_err(|e| e.to_string())?;
+    let mut file = held.read().map_err(|e| e.to_string())?;
     file.read_to_string(&mut raw).map_err(|e| e.to_string())?;
     Ok(raw)
 }
@@ -249,7 +289,13 @@ fn scan_dir(root: &Path, judge: &mut impl Judge) -> Vec<Found> {
         .filter_map(|name| {
             let dir = root.join(&name);
             let file = judge.file(&judge.anchor(&dir.join("SKILL.md")))?;
-            Some(Found { name, dir, file })
+            Some(Found {
+                name,
+                source: Source::Disk {
+                    dir,
+                    file: Box::new(file),
+                },
+            })
         })
         .collect()
 }

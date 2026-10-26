@@ -19,6 +19,9 @@
 //! `session` mints into it. Withholding the network capabilities is the whole
 //! of `net: false`: an `AppContainer` holding neither `internetClient` nor
 //! `privateNetworkClientServer` cannot open a socket.
+//! No capability withholds the GPU: an `AppContainer` reaches Direct3D
+//! regardless, so here `` gpu: `withheld `` changes nothing, and every grant
+//! summary says so (`authority::sandbox::WITHHOLDS_GPU`).
 //!
 //! Upstream can opt a child out of `ALL APPLICATION PACKAGES` grants (LPAC)
 //! and disable Win32k syscalls; we do neither. Both assume a known, packaged,

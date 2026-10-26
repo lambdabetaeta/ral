@@ -6,5 +6,6 @@ Notation:
 - `exec dirs:` lists path prefixes under which any executable in that directory is admitted.
 - `(none)` means the dimension is empty.
 - `inherit` means no narrowing at this layer.
+- `net: deny` and `gpu: withheld` mean no command under the grant reaches the network or the GPU, and nothing inside it can restore either. `gpu: in reach` means the grant withholds the GPU but this platform cannot.
 - `exec deny:` and `fs deny:` are exclusions: they win over every allowance, however specific, in this map and in every enclosing grant. Wherever exec is restricted, an exclusion of the agent's own binary is present: you cannot start the agent as a process.
 - Whatever the grant lets run by path, directory or name, or lets be written, may be read.

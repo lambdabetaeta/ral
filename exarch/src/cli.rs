@@ -121,7 +121,9 @@ pub struct Cli {
     /// Use `reasonable` for normal work, `edit-only` to allow edits but not
     /// builds, `read-only` to keep writes in scratch space, `minimal` for
     /// system tools, the working directory and network access, or `confined`
-    /// for an offline build jail. `dangerous` places no restriction on the
+    /// for an offline build jail. `confined`, `minimal`, `read-only` and
+    /// `edit-only` also withhold the GPU, on Linux and macOS; Windows cannot
+    /// withhold it. `dangerous` places no restriction on the
     /// agent. Once commands are restricted, exarch excludes its own binary;
     /// once the filesystem is, its credential files and every `--restrict`
     /// file. Use it only inside another trusted boundary. The default is

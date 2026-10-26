@@ -15,7 +15,7 @@
 use crate::authority::grant::freeze::{Anchor, FreezeCtx, Place, PolicyError, Selector};
 use crate::authority::grant::{Keyed, Placed, Polar, name_rules};
 use crate::authority::policy::{
-    EditorVerb, ExecRules, FsLayer, GrantLayer, GrantPath, Net, Rule, ShellVerb,
+    EditorVerb, ExecRules, FsLayer, Gpu, GrantLayer, GrantPath, Net, Rule, ShellVerb,
 };
 use crate::path::lex::has_drive;
 use crate::path::sigil::SigilHead;
@@ -24,8 +24,8 @@ use crate::shell::runtime::{List, Map, Value, settings_map};
 use crate::syntax::quote::quote_word;
 use crate::text::{indefinite, near_names};
 use crate::typecheck::contract::{
-    DIR_TARGET, EDITOR, EXEC_TARGET, Form as ContractForm, Holds, NET, PLACE, SHELL, Table, Vocab,
-    code, declared,
+    DIR_TARGET, EDITOR, EXEC_TARGET, Form as ContractForm, GPU, Holds, NET, PLACE, SHELL, Table,
+    Vocab, code, declared,
 };
 use std::collections::BTreeSet;
 use std::str::FromStr;
@@ -203,16 +203,20 @@ fn decode_fs(value: &Value, err_prefix: &str, ctx: &FreezeCtx) -> Result<FsLayer
     Ok(FsLayer::new(read, write, deny))
 }
 
-/// `net` takes `offline`, the one restriction; omit it to inherit.
-fn decode_net(value: &Value, err_prefix: &str) -> Result<Net, PolicyError> {
+/// `net` and `gpu` each take their one restriction; omit one to inherit.
+fn decode_veto<V: FromStr>(
+    value: &Value,
+    vocab: &Vocab,
+    err_prefix: &str,
+) -> Result<V, PolicyError> {
     let at = within(err_prefix);
-    let tag = Tag::of(value).ok_or_else(|| at(untagged(&NET, value)))?;
-    let net = tag
+    let tag = Tag::of(value).ok_or_else(|| at(untagged(vocab, value)))?;
+    let veto = tag
         .label
         .parse()
-        .map_err(|_| at(unknown_tag(&NET, tag.label)))?;
-    tag.nullary(&NET).map_err(at)?;
-    Ok(net)
+        .map_err(|_| at(unknown_tag(vocab, tag.label)))?;
+    tag.nullary(vocab).map_err(at)?;
+    Ok(veto)
 }
 
 /// `editor`/`shell`: a list of verbs, each a nullary tag of `V`.
@@ -410,13 +414,15 @@ pub fn decode_capability_map(
             value.type_name()
         ))
     })?;
-    let (mut exec, mut fs, mut net, mut editor, mut shell) = (None, None, None, None, None);
+    let (mut exec, mut fs, mut net, mut gpu, mut editor, mut shell) =
+        (None, None, None, None, None, None);
     for (k, v) in &*entries {
         let at = format!("{err_prefix} {k}");
         match k {
             "exec" => exec = Some(decode_exec(&v, &at, ctx)?),
             "fs" => fs = Some(decode_fs(&v, &at, ctx)?),
-            "net" => net = Some(decode_net(&v, &at)?),
+            "net" => net = Some(decode_veto::<Net>(&v, &NET, &at)?),
+            "gpu" => gpu = Some(decode_veto::<Gpu>(&v, &GPU, &at)?),
             "editor" => editor = Some(decode_verbs::<EditorVerb>(&v, &EDITOR, &at)?),
             "shell" => shell = Some(decode_verbs::<ShellVerb>(&v, &SHELL, &at)?),
             other => {
@@ -428,7 +434,7 @@ pub fn decode_capability_map(
             }
         }
     }
-    Ok(GrantLayer::new(fs, exec, net, editor, shell))
+    Ok(GrantLayer::new(fs, exec, net, gpu, editor, shell))
 }
 
 #[cfg(test)]
@@ -1162,7 +1168,7 @@ mod tests {
         assert!(grants.read(&baseline, &trace(outside.join("f"))).is_err());
     }
 
-    // ── net, editor, shell ──
+    // ── net, gpu, editor, shell ──
 
     #[test]
     fn net_offline_decodes_and_nothing_else_does() {
@@ -1183,6 +1189,30 @@ mod tests {
         let m = refusal(&rec(&[(
             "net",
             Value::variant("offline", Some(Value::Unit)),
+        )]))
+        .message;
+        assert!(m.contains("takes no payload"), "{m}");
+    }
+
+    #[test]
+    fn gpu_withheld_decodes_and_nothing_else_does() {
+        let layer = decode(&rec(&[("gpu", bare("withheld"))])).unwrap();
+        assert_eq!(layer.summary().unwrap().gpu, Some(Gpu::Withheld));
+        for value in [Value::Bool(true), Value::Bool(false)] {
+            let e = refusal(&rec(&[("gpu", value)]));
+            assert!(e.message.contains("expected a GPU mode"), "{}", e.message);
+            assert!(
+                e.hint
+                    .unwrap()
+                    .contains("omit `gpu` to inherit, or write `` gpu: `withheld ``"),
+                "hint"
+            );
+        }
+        let m = refusal(&rec(&[("gpu", bare("on"))])).message;
+        assert!(m.contains("`` `on `` is not a GPU mode"), "{m}");
+        let m = refusal(&rec(&[(
+            "gpu",
+            Value::variant("withheld", Some(Value::Unit)),
         )]))
         .message;
         assert!(m.contains("takes no payload"), "{m}");
@@ -1259,6 +1289,7 @@ mod tests {
             "exec" => exec(vec![tagged("name", "git")], vec![dir(bare("system"))]),
             "fs" => rec(&[("read", list(vec![tagged("cwd", ".")]))]),
             "net" => bare("offline"),
+            "gpu" => bare("withheld"),
             "editor" => list(vec![bare("read")]),
             "shell" => list(vec![bare("chdir")]),
             other => panic!("declared key '{other}' has no representative value here"),

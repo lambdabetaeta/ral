@@ -22,7 +22,7 @@
 
 mod grant;
 
-pub(crate) use grant::{DIR_TARGET, EDITOR, EXEC_TARGET, NET, PLACE, SHELL};
+pub(crate) use grant::{DIR_TARGET, EDITOR, EXEC_TARGET, GPU, NET, PLACE, SHELL};
 
 use super::env::InferCtx;
 use super::error::{Clash, Reason, Standing, TypeErrorKind};

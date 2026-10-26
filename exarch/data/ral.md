@@ -234,6 +234,8 @@ Call `explain within` for command handlers and the full option syntax. A handler
 
     grant [net: `offline] { cargo check --offline }
 
+`` gpu: `withheld `` keeps the GPU from the commands inside, as `` net: `offline `` keeps the network.
+
 Call `explain grant` for the capability fields, tagged paths, and examples.
 
 Use `within` instead of `cd`. Paths in results are relative to the `within` directory, so consume them under the same `within`. `env:` values must be scalars.

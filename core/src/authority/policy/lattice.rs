@@ -337,6 +337,25 @@ pub enum Net {
     Offline,
 }
 
+/// The GPU a layer withholds; the veto is sticky.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    VariantArray,
+    EnumString,
+    IntoStaticStr,
+)]
+#[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
+pub enum Gpu {
+    Withheld,
+}
+
 /// The per-effect policies as authored: every place a spelling, nothing yet
 /// resolved.
 ///
@@ -353,6 +372,8 @@ pub struct Capabilities {
     pub fs: Option<FsPolicy>,
     #[serde(default)]
     pub net: Option<Net>,
+    #[serde(default)]
+    pub gpu: Option<Gpu>,
     /// `None` inherits, so silence permits as on every other axis.
     #[serde(default)]
     pub editor: Option<BTreeSet<EditorVerb>>,
@@ -368,6 +389,7 @@ impl Capabilities {
             exec: Some(ExecGrant::default()),
             fs: Some(FsPolicy::default()),
             net: Some(Net::Offline),
+            gpu: Some(Gpu::Withheld),
             editor: Some(BTreeSet::new()),
             shell: Some(BTreeSet::new()),
         }
@@ -493,6 +515,7 @@ pub struct GrantLayer {
     fs: Option<FsLayer>,
     exec: Option<ExecRules>,
     net: Option<Net>,
+    gpu: Option<Gpu>,
     editor: Option<BTreeSet<EditorVerb>>,
     shell: Option<BTreeSet<ShellVerb>>,
 }
@@ -504,6 +527,7 @@ impl GrantLayer {
         fs: Option<FsLayer>,
         exec: Option<ExecRules>,
         net: Option<Net>,
+        gpu: Option<Gpu>,
         editor: Option<BTreeSet<EditorVerb>>,
         shell: Option<BTreeSet<ShellVerb>>,
     ) -> Self {
@@ -511,6 +535,7 @@ impl GrantLayer {
             fs,
             exec,
             net,
+            gpu,
             editor,
             shell,
         }
@@ -540,6 +565,7 @@ impl GrantLayer {
             fs: extend(self.fs, fragment.fs),
             exec: extend(self.exec, fragment.exec),
             net: extend(self.net, fragment.net),
+            gpu: extend(self.gpu, fragment.gpu),
             editor: extend(self.editor, fragment.editor),
             shell: extend(self.shell, fragment.shell),
         }
@@ -553,6 +579,7 @@ impl GrantLayer {
         restricts(self.fs.as_ref())
             || restricts(self.exec.as_ref())
             || restricts(self.net.as_ref())
+            || restricts(self.gpu.as_ref())
             || restricts(self.editor.as_ref())
             || restricts(self.shell.as_ref())
     }
@@ -580,6 +607,7 @@ impl GrantLayer {
             fs: self.fs.as_ref().map(FsLayer::summary),
             exec,
             net: self.net,
+            gpu: self.gpu,
             editor: self.editor.clone(),
             shell: self.shell.clone(),
         })
@@ -587,14 +615,41 @@ impl GrantLayer {
 }
 
 /// A stack as it is shown: each layer's spellings and axes, nothing a host
-/// could judge with.  What `Probe::Grants` answers and what a prompt reads,
-/// from a local engine and a remote one alike.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GrantSummary(Vec<LayerSummary>);
+/// could judge with, and whether the host that showed it can withhold the GPU.
+///
+/// What `Probe::Grants` answers and what a prompt reads, from a local engine
+/// and a remote one alike.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantSummary {
+    layers: Vec<LayerSummary>,
+    withholds_gpu: bool,
+}
 
 impl GrantSummary {
     pub fn layers(&self) -> &[LayerSummary] {
-        &self.0
+        &self.layers
+    }
+
+    /// Whether a `` gpu: `withheld `` among the layers is held by the host
+    /// that showed them; `false` on Windows, where it changes nothing.
+    pub fn withholds_gpu(&self) -> bool {
+        self.withholds_gpu
+    }
+
+    /// A summary crossed from elsewhere, for tests.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn of(layers: Vec<LayerSummary>, withholds_gpu: bool) -> Self {
+        Self {
+            layers,
+            withholds_gpu,
+        }
+    }
+}
+
+/// No layers, on this host.
+impl Default for GrantSummary {
+    fn default() -> Self {
+        GrantStack::default().summary()
     }
 }
 
@@ -608,6 +663,7 @@ pub struct LayerSummary {
     /// `` `name git ``, `` `absolute /usr/bin/git ``, `` `dir `absolute /opt ``.
     pub exec: Option<ExecSummary>,
     pub net: Option<Net>,
+    pub gpu: Option<Gpu>,
     pub editor: Option<BTreeSet<EditorVerb>>,
     pub shell: Option<BTreeSet<ShellVerb>>,
 }
@@ -691,7 +747,10 @@ impl GrantStack {
 
     /// What the stack shows of itself: the layers that have something to say.
     pub fn summary(&self) -> GrantSummary {
-        GrantSummary(self.0.iter().filter_map(GrantLayer::summary).collect())
+        GrantSummary {
+            layers: self.0.iter().filter_map(GrantLayer::summary).collect(),
+            withholds_gpu: crate::authority::sandbox::WITHHOLDS_GPU,
+        }
     }
 
     /// Take hold again of every exclusion's object on this host: the one walk
@@ -714,7 +773,7 @@ impl GrantStack {
             .collect()
     }
 
-    /// Layers with no opinion are skipped, here and in `fs` and `net` below:
+    /// Layers with no opinion are skipped, here and in `fs`, `net` and `gpu` below:
     /// the folds intersect what remains, and an empty run means no attenuation.
     pub(crate) fn exec(&self) -> impl Iterator<Item = &ExecRules> {
         self.0.iter().filter_map(|l| l.exec.as_ref())
@@ -726,6 +785,10 @@ impl GrantStack {
 
     pub fn net(&self) -> impl Iterator<Item = Net> {
         self.0.iter().filter_map(|l| l.net)
+    }
+
+    pub fn gpu(&self) -> impl Iterator<Item = Gpu> {
+        self.0.iter().filter_map(|l| l.gpu)
     }
 
     /// A meet over the layers: one `false` vote anywhere withholds `flag`
@@ -755,6 +818,22 @@ impl Join for Net {
 impl Axis for Net {
     fn join_top(self) -> Option<Self> {
         Some(Self::Offline)
+    }
+
+    fn is_top(&self) -> bool {
+        false
+    }
+}
+
+impl Join for Gpu {
+    fn join(self, _: Self) -> Self {
+        Self::Withheld
+    }
+}
+
+impl Axis for Gpu {
+    fn join_top(self) -> Option<Self> {
+        Some(Self::Withheld)
     }
 
     fn is_top(&self) -> bool {

@@ -11,6 +11,8 @@
 # `read-only`; to start broader, use `reasonable` and lock down via deny.
 
 return [
+  gpu: `withheld,  # no GPU; `reasonable` and `dangerous` leave it on
+
   # Reads as broad as `reasonable`: the agent should be able to read
   # the full project tree, system caches, tool configs.  All the
   # usual toolchain caches stay readable so e.g. `cargo metadata`

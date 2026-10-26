@@ -8,15 +8,20 @@
 //! binary through `exec:` already shifts trust to that binary.
 //!
 //! Seatbelt has no per-address network rules, so `SandboxProjection::net` is
-//! one allow/deny bit rather than an endpoint list.
+//! one allow/deny bit over IP sockets rather than an endpoint list.
 
 use super::{ExecProjection, FsProjection, RenderedRules, SandboxProjection};
 use crate::authority::policy::{ExecAllow, ExecDeny};
-use crate::path::{Excluded, Object, RealPath, Rendered, render_real, rendered_ancestors};
+use crate::path::{
+    Excluded, LeafMode, LexicalPath, Object, RealPath, Rendered, render_real, rendered_ancestors,
+    walk_lenient,
+};
 use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::os::raw::{c_char, c_int};
+use std::path::PathBuf;
+use std::sync::OnceLock;
 
 /// Seatbelt profiles do not stack: a process already inside one gets EPERM
 /// entering another, and a launch promising more than that profile is refused.
@@ -73,9 +78,29 @@ pub(super) fn apply_profile(profile: &str) -> std::io::Result<()> {
 /// than `format!()` strings.
 const BASE_PROFILE: &str = include_str!("macos-base.sbpl");
 
-/// The `net: true` rules — the wholesale socket allow and the resolver and
-/// trust-evaluation Mach services that ride the same bit.
+/// The `net: true` rules: IP sockets, the resolver's Unix socket, and the
+/// resolver and trust-evaluation Mach services that ride the same bit.
 const NET_PROFILE: &str = include_str!("macos-net.sbpl");
+
+/// The one Unix socket `NET_PROFILE` admits; a denial naming it is `net`'s.
+pub(super) const RESOLVER_SOCKET: &str = "/private/var/run/mDNSResponder";
+
+/// The rules a frame that leaves the GPU appends: Metal's device, its
+/// `IOSurface`s and its compiler.
+const GPU_PROFILE: &str = include_str!("macos-gpu.sbpl");
+
+/// What [`GPU_PROFILE`] opens, as Seatbelt logs a denial of it.
+const GPU_NAMES: [&str; 3] = [
+    "AGXDeviceUserClient",
+    "IOSurfaceRootUserClient",
+    "com.apple.MTLCompilerService",
+];
+
+/// Whether a denied `IOKit` class or Mach name is one only [`GPU_PROFILE`]
+/// admits, for [`crate::authority::sandbox::diag`]'s hint.
+pub(super) fn gpu_name(name: &str) -> bool {
+    GPU_NAMES.iter().any(|gpu| name.starts_with(gpu))
+}
 
 /// The profile as sections, in the order Seatbelt reads them.  Last match
 /// wins, so a section overrides only those above it: a deny reaches the allows
@@ -94,6 +119,7 @@ struct Profile {
     /// Directory names frozen in their parents, and ral's own file locked.
     pins: Vec<String>,
     net: bool,
+    gpu: bool,
 }
 
 impl fmt::Display for Profile {
@@ -105,6 +131,7 @@ impl fmt::Display for Profile {
             fs_denies,
             pins,
             net,
+            gpu,
         } = self;
         f.write_str(BASE_PROFILE)?;
         for line in [fs_allows, exec_rules, exec_ancestors, fs_denies, pins]
@@ -116,6 +143,9 @@ impl fmt::Display for Profile {
         if *net {
             write!(f, "\n{NET_PROFILE}")?;
         }
+        if *gpu {
+            write!(f, "\n{GPU_PROFILE}")?;
+        }
         Ok(())
     }
 }
@@ -123,6 +153,7 @@ impl fmt::Display for Profile {
 pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String> {
     let mut profile = Profile {
         net: policy.net,
+        gpu: policy.gpu,
         ..Profile::default()
     };
     let rendered = policy.rendered()?;
@@ -135,6 +166,10 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
                 .fs_allows
                 .extend(["(allow file-read*)", "(allow file-write*)"].map(String::from));
         }
+    }
+
+    if policy.gpu {
+        emit_gpu_caches(&mut profile.fs_allows, gpu_caches());
     }
 
     emit_exec_rules(&mut profile, &rendered.exec)?;
@@ -209,6 +244,18 @@ fn emit_fs_restricted(profile: &mut Profile, rules: &RenderedRules) {
             ["file-read*", "file-write*", "file-link", "process-exec"]
                 .map(|op| Clause::deny(op, Filter::Subpath(path)).to_string()),
         );
+    }
+}
+
+/// Metal's caches, read and written, and the lookups down to them.  Among
+/// the fs allows, so a grant's deny still wins.
+fn emit_gpu_caches(lines: &mut Vec<String>, caches: &[Rendered]) {
+    for name in rendered_ancestors(caches) {
+        lines.push(Clause::allow("file-read-metadata", Filter::Literal(&name)).to_string());
+    }
+    for cache in caches {
+        lines.push(Clause::allow("file-read*", Filter::Subpath(cache)).to_string());
+        lines.push(Clause::allow("file-write*", Filter::Subpath(cache)).to_string());
     }
 }
 
@@ -380,6 +427,53 @@ fn withheld_services() -> &'static [(&'static str, &'static str)] {
     ]
 }
 
+/// Metal's per-user caches, which its compiler writes on a JIT build.
+const GPU_CACHES: [&str; 3] = [
+    "com.apple.metal",
+    "com.apple.metalfe",
+    "com.apple.gpuarchiver",
+];
+
+/// [`GPU_CACHES`] under this user's cache directory, each in every spelling
+/// the kernel may present, resolved once.  Empty where `confstr` names no
+/// cache directory or a name will not walk or render.
+fn gpu_caches() -> &'static [Rendered] {
+    static CACHES: OnceLock<Vec<Rendered>> = OnceLock::new();
+    CACHES.get_or_init(|| {
+        let Some(dir) = user_cache_dir() else {
+            return Vec::new();
+        };
+        GPU_CACHES
+            .iter()
+            .filter_map(|name| {
+                let at = LexicalPath::absolute(&PathBuf::from(format!("{dir}/{name}")))?;
+                render_real(walk_lenient(&at, LeafMode::Follow).ok()?.real()).ok()
+            })
+            .flatten()
+            .collect()
+    })
+}
+
+/// `confstr(_CS_DARWIN_USER_CACHE_DIR)`, its trailing `/` dropped.
+fn user_cache_dir() -> Option<String> {
+    let mut buf = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: `buf` is writable for the length passed.
+    let n = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_CACHE_DIR,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+        )
+    };
+    let dir = (n > 1 && n <= buf.len()).then(|| &buf[..n - 1])?;
+    Some(
+        std::str::from_utf8(dir)
+            .ok()?
+            .trim_end_matches('/')
+            .to_owned(),
+    )
+}
+
 /// The reason the base profile withholds `name`, for
 /// [`crate::authority::sandbox::diag`]'s denial hint.  Matched by prefix: Seatbelt logs a
 /// Mach name with the instance suffix the lookup carried
@@ -439,7 +533,10 @@ unsafe extern "C" {
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
-    use super::{BASE_PROFILE, NET_PROFILE, Profile, build_profile, withheld_services};
+    use super::{
+        BASE_PROFILE, Clause, Filter, GPU_CACHES, GPU_NAMES, GPU_PROFILE, NET_PROFILE, Profile,
+        RESOLVER_SOCKET, build_profile, gpu_caches, withheld_services,
+    };
     use crate::authority::policy::{ExecAllow, ExecDeny, FsAllow, GrantPath, Rule};
     use crate::authority::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
     use crate::path::proper_ancestors;
@@ -604,6 +701,7 @@ mod tests {
             fs_denies: section("fs-denies"),
             pins: section("pins"),
             net: true,
+            gpu: false,
         }
         .to_string();
         let sections = profile
@@ -1016,7 +1114,7 @@ mod tests {
     /// Seatbelt gates as `network-outbound`.  Admitting that form for any
     /// local socket would reopen hostname-label egress while `net: false`
     /// still read as closed, so the denial is asserted over every rule the
-    /// profile carries, not just the wholesale `(allow network*)`.
+    /// profile carries, not just the IP ones.
     #[test]
     fn mac_profile_denies_network_when_disabled() {
         let profile = build_profile(&SandboxProjection {
@@ -1036,9 +1134,25 @@ mod tests {
         })
         .unwrap();
         assert!(
-            open.contains("(allow network*)"),
+            rules(&open).contains("(allow network-outbound (remote ip))"),
             "net: true emitted no network rule, so the denial above proves nothing:\n{open}"
         );
+    }
+
+    /// `net` is the internet, not every local socket: a Unix socket reaches a
+    /// daemon acting with the user's authority, ssh-agent's for one, so the
+    /// only path-named socket admitted is the resolver's.
+    #[test]
+    fn mac_net_profile_admits_no_unix_socket_but_the_resolver() {
+        let resolver = format!("(allow network-outbound (literal \"{RESOLVER_SOCKET}\"))");
+        let net = rules(NET_PROFILE);
+        assert!(net.contains(&resolver), "no resolver socket:\n{net}");
+        for rule in net.lines().filter(|l| l.contains("network")) {
+            assert!(
+                rule == resolver || rule.contains("(remote ip)") || rule.contains("(local ip)"),
+                "net: true admitted a non-IP socket: {rule}\n{net}"
+            );
+        }
     }
 
     /// A wholesale `(allow mach-lookup)` hands out launchservicesd, and with
@@ -1082,6 +1196,80 @@ mod tests {
                 "{service} carries a withheld-service reason yet some profile admits it"
             );
         }
+    }
+
+    /// The GPU's rules ride the `gpu` bit alone, and the names the hint quotes
+    /// are the ones the profile opens.
+    #[test]
+    fn mac_profile_withholds_the_gpu_when_withheld() {
+        let closed = rules(
+            &build_profile(&SandboxProjection {
+                gpu: false,
+                ..SandboxProjection::default()
+            })
+            .unwrap(),
+        );
+        assert!(!closed.contains("iokit-open"), "{closed}");
+        let open = rules(&build_profile(&SandboxProjection::default()).unwrap());
+        for name in GPU_NAMES {
+            assert!(
+                !closed.contains(name),
+                "withheld, the profile admits {name}:\n{closed}"
+            );
+            assert!(
+                open.contains(name),
+                "left on, the profile omits {name}:\n{open}"
+            );
+            assert!(
+                rules(GPU_PROFILE).contains(name),
+                "{name} is not in macos-gpu.sbpl"
+            );
+        }
+    }
+
+    /// Left on, the GPU writes Metal's caches in every spelling, among the fs
+    /// allows so a grant's deny of them still wins; withheld, it writes none.
+    #[test]
+    fn mac_profile_writes_metals_caches_only_where_the_gpu_is_left() {
+        let caches = gpu_caches();
+        assert!(!caches.is_empty(), "this host names a user cache directory");
+        let open = build_profile(&SandboxProjection::default()).unwrap();
+        let closed = build_profile(&SandboxProjection {
+            gpu: false,
+            ..SandboxProjection::default()
+        })
+        .unwrap();
+        for cache in caches {
+            let write = Clause::allow("file-write*", Filter::Subpath(cache)).to_string();
+            assert!(open.contains(&write), "{write}:\n{open}");
+            assert!(!closed.contains(&write), "{write}:\n{closed}");
+        }
+        for name in GPU_CACHES {
+            assert!(
+                caches.iter().any(|c| c.as_str().ends_with(name)),
+                "{name} unrendered: {caches:?}"
+            );
+        }
+    }
+
+    /// A grant's deny of a Metal cache follows the cache's allow, so it wins.
+    #[test]
+    fn mac_profile_denies_a_metal_cache_after_the_gpu_allows_it() {
+        let metal = gpu_caches()
+            .iter()
+            .find(|c| c.as_str().ends_with("/com.apple.metal"))
+            .expect("com.apple.metal renders");
+        let profile = build_profile(&SandboxProjection {
+            fs: FsProjection::Restricted(FsRules {
+                deny: frozen(&[metal.as_str()]),
+                ..FsRules::default()
+            }),
+            ..SandboxProjection::default()
+        })
+        .unwrap();
+        let allow = Clause::allow("file-write*", Filter::Subpath(metal)).to_string();
+        let deny = Clause::deny("file-write*", Filter::Subpath(metal)).to_string();
+        assert!(at(&profile, &allow) < at(&profile, &deny), "{profile}");
     }
 
     #[test]
@@ -1164,6 +1352,7 @@ mod tests {
                 ..FsRules::default()
             }),
             net: true,
+            gpu: true,
             exec: ExecProjection::default(),
         };
         let profile = build_profile(&policy).unwrap();
@@ -1193,6 +1382,7 @@ mod tests {
                 ..FsRules::default()
             }),
             net: true,
+            gpu: true,
             exec: ExecProjection::default(),
         };
         let profile = build_profile(&policy).unwrap();
@@ -1234,6 +1424,7 @@ mod tests {
                 ..FsRules::default()
             }),
             net: true,
+            gpu: true,
             exec: ExecProjection::default(),
         };
         let profile = build_profile(&policy).unwrap();

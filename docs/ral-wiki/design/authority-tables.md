@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
+generated_at_commit: 1e3124cbc0ac2352d44c9d743a70b1cde5081361
 ---
 
 # Authority is a table of scoped rules
@@ -216,7 +216,8 @@ law 4
   representation. This is the one place below enforcement where ⊤ and f are
   identified, sound only because no operator offered on net tells them apart; if
   one is ever offered, net becomes an evidence pair like the other axes. An
-  omitted `net` is `t`; restriction is unchanged.
+  omitted `net` is `t`; restriction is unchanged. `Gpu` is the same shape:
+  `` `withheld `` is the one opinion.
 - **Verbs are sets of positive evidence.** `editor` and `shell` are each a set of
   verbs: a listed verb is positive evidence, an unlisted one is Neither, never
   Deny. `⊕` is union and `∧` is intersection, so after `↓` a verb is permitted
@@ -272,6 +273,7 @@ where omission loses nothing) and `is_top` (denotes `t`):
 | `ExecRules` | union of the tables | `None` for an empty table; otherwise the same rules with `Any` among the allows, whose other allowances still name run places | `Any` and no exclusion |
 | `FsLayer` | union each table | `None` without exclusions; otherwise `Everywhere` among the read and write allows, the same exclusions | `Everywhere` among the write allows, no exclusions |
 | `Net` | `Offline` | `Some(Offline)` | never |
+| `Gpu` | `Withheld` | `Some(Withheld)` | never |
 | verb sets | union | `None` | every verb listed |
 
 `join_top` on exec keeps its result even where it denotes `t`, because its

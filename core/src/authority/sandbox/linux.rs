@@ -14,17 +14,20 @@
 //! Every object the envelope shows is opened here, never through a symlink,
 //! and mounted by that handle ([`Binds`]): bwrap resolves no source name, so
 //! a name swapped for a symlink after the grant was rendered shows nothing
-//! it did not name.
+//! it did not name.  The GPU's nodes and sysfs are the exception, bound by
+//! name as `/dev`'s own nodes are ([`gpu`]).
 //!
 //! The payload is always ral's own trampoline (`super::launch`), which enters
 //! the [`landlock`] ruleset it inherits and only then becomes the target:
 //! that order is forced, a Landlock domain handling any fs right forbidding
 //! the `mount(2)` bwrap opens with.
 
+mod gpu;
 mod host;
 pub(crate) mod landlock;
 pub(crate) mod seccomp;
 
+use gpu::GpuNodes;
 use host::Builds;
 pub(crate) use host::HostEnvelope;
 
@@ -172,7 +175,15 @@ pub(crate) fn bwrap_command(
     let seccomp = (seccomp_programs()?.into_iter())
         .map(|program| lend_parcel("ral-seccomp", program))
         .collect::<Result<Vec<_>, _>>()?;
-    let options = bwrap_argv(policy, chdir, address, env.host, &binds, &seccomp)?;
+    let options = bwrap_argv(
+        policy,
+        chdir,
+        address,
+        env.host,
+        &binds,
+        &GpuNodes::discover(),
+        &seccomp,
+    )?;
     let args = lend_parcel(
         "ral-bwrap-args",
         &nul_terminated(options.iter().map(|arg| arg.as_bytes()))?,
@@ -213,7 +224,7 @@ pub(crate) fn bwrap_command(
 /// we stop watching it.  Confinement itself — the mounts, the seccomp
 /// filter — is otherwise identical.
 ///
-/// The render is pure in `host` and in descriptors, so a test can assert
+/// The render is pure in `host`, `gpu` and in descriptors, so a test can assert
 /// options for a host it is not running on.
 pub(crate) fn bwrap_argv(
     policy: &RenderedProjection,
@@ -221,6 +232,7 @@ pub(crate) fn bwrap_argv(
     address: Option<Slot>,
     host: HostEnvelope,
     binds: &Binds,
+    gpu: &GpuNodes,
     seccomp: &[Slot],
 ) -> Result<Vec<OsString>, String> {
     let mut c = Options::default();
@@ -258,6 +270,9 @@ pub(crate) fn bwrap_argv(
             // After it, or a prefix of `/` or `/proc` re-binds the host's over these.
             c.args(["--proc", "/proc"]);
             render_dev(&mut c, host);
+            if policy.gpu {
+                gpu.admit(&mut c);
+            }
         }
         FsProjection::Unrestricted => {
             // `--bind` would skip device nodes.  `/proc` goes over the root:
@@ -265,6 +280,9 @@ pub(crate) fn bwrap_argv(
             // so `/proc/self` is the payload's own either way.
             c.args(["--dev-bind", "/", "/"]);
             c.args(["--proc", "/proc"]);
+            if !policy.gpu {
+                gpu.withhold(&mut c);
+            }
         }
     }
     binds.render(&mut c, Layer::Over);
@@ -299,7 +317,7 @@ pub(crate) fn bwrap_argv(
                         name.as_str()
                     ));
                 }
-                mask.render(&mut c, &name);
+                mask.render(&mut c, name.as_str());
             }
         }
     }
@@ -820,8 +838,7 @@ impl DenyMask {
         }
     }
 
-    fn render(self, c: &mut Options, at: &Rendered) {
-        let at = at.as_str();
+    fn render(self, c: &mut Options, at: &str) {
         match self {
             Self::EmptyDir => {
                 c.args(["--perms", "0000", "--tmpfs", at]);
@@ -845,8 +862,8 @@ fn standing(name: &Rendered) -> Option<Trace> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::{
-        Access, Binds, Builds, CGROUP, Envelope, HostEnvelope, Layer, Pinned, Shown, bwrap_argv,
-        bwrap_command,
+        Access, Binds, Builds, CGROUP, Envelope, GpuNodes, HostEnvelope, Layer, Pinned, Shown,
+        bwrap_argv, bwrap_command,
     };
     use crate::Role;
     use crate::authority::policy::{Admitted, Baseline, Capabilities, FsAllow, FsPolicy, Program};
@@ -896,7 +913,7 @@ mod tests {
         private_pids: true,
         virtual_dev: true,
         private_cgroup: true,
-        landlock: super::landlock::Landlock::At(super::landlock::Abi::SIGNAL_SCOPE),
+        landlock: super::landlock::Landlock::At(super::landlock::Abi::SCOPES),
         builds: Builds::ByFd,
     };
 
@@ -915,6 +932,7 @@ mod tests {
         SandboxProjection {
             fs: FsProjection::Unrestricted,
             net: true,
+            gpu: true,
             exec: ExecProjection::default(),
         }
     }
@@ -1013,11 +1031,19 @@ mod tests {
         let rendered = policy.rendered().expect("ASCII paths render");
         let address = (ownership == Ownership::Kept).then(info_slot);
         let chdir = chdir.map(std::path::Path::new);
-        bwrap_argv(&rendered, chdir, address, host, binds, &[])
-            .expect("ASCII paths render")
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect()
+        bwrap_argv(
+            &rendered,
+            chdir,
+            address,
+            host,
+            binds,
+            &GpuNodes::default(),
+            &[],
+        )
+        .expect("ASCII paths render")
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
     }
 
     fn options(
@@ -1138,7 +1164,15 @@ mod tests {
             let policy = deny_within(&dir, &[deny]);
             let rendered = policy.rendered().expect("ASCII paths render");
             let binds = binds(&policy, WHOLE);
-            bwrap_argv(&rendered, Some(cwd), None, WHOLE, &binds, &[])
+            bwrap_argv(
+                &rendered,
+                Some(cwd),
+                None,
+                WHOLE,
+                &binds,
+                &GpuNodes::default(),
+                &[],
+            )
         };
         for (deny, cwd) in [(&denied, &denied), (&denied, &inner), (&link, &inner)] {
             let Err(why) = argv(deny, cwd) else {
@@ -1459,7 +1493,15 @@ mod tests {
             };
             let rendered = policy.rendered().expect("renders");
             let binds = binds(&policy, WHOLE);
-            let argv = bwrap_argv(&rendered, None, None, WHOLE, &binds, &[]);
+            let argv = bwrap_argv(
+                &rendered,
+                None,
+                None,
+                WHOLE,
+                &binds,
+                &GpuNodes::default(),
+                &[],
+            );
             assert_eq!(argv.is_err(), refused, "{denied}: {argv:?}");
         }
     }
@@ -2101,6 +2143,98 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A host's GPU as discovery would find it.
+    fn gpu() -> GpuNodes {
+        GpuNodes {
+            dri: true,
+            render: vec!["/dev/dri/renderD128".into()],
+            nodes: vec!["/dev/nvidia0".into(), "/dev/nvidiactl".into()],
+            devices: vec!["/sys/devices/pci0000:00/0000:00:02.0".into()],
+        }
+    }
+
+    fn render_gpu(policy: &SandboxProjection) -> Vec<String> {
+        let rendered = policy.rendered().expect("ASCII paths render");
+        bwrap_argv(
+            &rendered,
+            None,
+            None,
+            WHOLE,
+            &binds(policy, WHOLE),
+            &gpu(),
+            &[],
+        )
+        .expect("ASCII paths render")
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+    }
+
+    /// Left on, the GPU enters the envelope's own `/dev` and `/sys`, never a
+    /// `card*`; withheld, none of it does.
+    #[test]
+    fn a_restricted_envelope_shows_the_gpu_only_where_left_on() {
+        let dir = workdir("gpu");
+        let mut policy = restricted(&[], &[&dir], &[]);
+        let on = render_gpu(&policy);
+        let dev = position_of(&on, &["--dev", "/dev"]).expect("the envelope's /dev");
+        let node = position_of(
+            &on,
+            &[
+                "--dev-bind-try",
+                "/dev/dri/renderD128",
+                "/dev/dri/renderD128",
+            ],
+        )
+        .expect("the render node");
+        assert!(dev < node, "{on:?}");
+        for piece in [
+            ["--dev-bind-try", "/dev/nvidiactl", "/dev/nvidiactl"],
+            ["--ro-bind-try", "/sys/class/drm", "/sys/class/drm"],
+            [
+                "--ro-bind-try",
+                "/sys/devices/pci0000:00/0000:00:02.0",
+                "/sys/devices/pci0000:00/0000:00:02.0",
+            ],
+        ] {
+            assert!(position_of(&on, &piece).is_some(), "{piece:?}: {on:?}");
+        }
+        assert!(!on.iter().any(|a| a.contains("card")), "{on:?}");
+        policy.gpu = false;
+        let off = render_gpu(&policy);
+        assert!(
+            !off.iter().any(|a| a.contains("renderD")
+                || a.contains("nvidia")
+                || a.contains("/sys/class/drm")),
+            "{off:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Over the host's `/dev`, a withheld GPU is masked; left on, it is untouched.
+    #[test]
+    fn an_unrestricted_envelope_masks_a_withheld_gpu() {
+        let mut policy = unrestricted();
+        let on = render_gpu(&policy);
+        assert!(
+            !on.iter()
+                .any(|a| a.contains("nvidia") || a.contains("/dev/dri")),
+            "{on:?}"
+        );
+        policy.gpu = false;
+        let off = render_gpu(&policy);
+        let root = position_of(&off, &["--dev-bind", "/", "/"]).expect("the host's root");
+        let dri = position_of(&off, &["--perms", "0000", "--tmpfs", "/dev/dri"])
+            .expect("/dev/dri emptied");
+        assert!(root < dri, "{off:?}");
+        for node in ["/dev/nvidia0", "/dev/nvidiactl"] {
+            assert!(
+                position_of(&off, &["--ro-bind", "/dev/null", node]).is_some(),
+                "{node}: {off:?}"
+            );
+        }
+    }
+
     /// Forced rather than probed: where `--dev` mounts, nothing else would
     /// exercise this arm.
     #[test]
@@ -2320,6 +2454,7 @@ mod tests {
                 ..FsRules::default()
             }),
             net: true,
+            gpu: true,
             exec: ExecProjection::default(),
         };
         // `Unrestricted` dev-binds `/` wholesale and mounts no `/dev` of its own.
@@ -2458,6 +2593,7 @@ mod tests {
                 ..FsRules::default()
             }),
             net: false,
+            gpu: true,
             exec: ExecProjection::default(),
         };
         let binds = binds(&policy, WHOLE);
@@ -2724,6 +2860,7 @@ mod tests {
         SandboxProjection {
             fs: FsProjection::Unrestricted,
             net: true,
+            gpu: true,
             exec,
         }
     }
@@ -3449,7 +3586,7 @@ mod tests {
     /// the refusal is asserted.
     #[test]
     fn a_confined_child_cannot_signal_a_host_process() {
-        if !landlock_at_least(super::landlock::Abi::SIGNAL_SCOPE) {
+        if !landlock_at_least(super::landlock::Abi::SCOPES) {
             return;
         }
         let dir = workdir("exec-scope");

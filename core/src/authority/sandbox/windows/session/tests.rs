@@ -147,6 +147,7 @@ fn a_redirected_allowance_refuses_the_launch_before_the_memo_is_consulted() {
     let projection = SandboxProjection {
         fs: FsProjection::Restricted(rules(&[granted.to_str().unwrap()], &[], &[])),
         net: false,
+        gpu: true,
         exec: ExecProjection::default(),
     };
     let _session = SessionGuard;
@@ -243,6 +244,7 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
             &[],
         )),
         net: false,
+        gpu: true,
         exec: ExecProjection::default(),
     };
     let _session = SessionGuard;
@@ -408,6 +410,7 @@ fn projection(read: &[&str], deny: &[&str]) -> crate::authority::sandbox::Sandbo
     crate::authority::sandbox::SandboxProjection {
         fs: crate::authority::sandbox::FsProjection::Restricted(rules(read, &[], deny)),
         net: false,
+        gpu: true,
         exec: crate::authority::sandbox::ExecProjection::default(),
     }
 }
@@ -715,6 +718,7 @@ fn a_read_write_folder_every_sandbox_may_write_admits_a_create() {
         let writable = SandboxProjection {
             fs: FsProjection::Restricted(rules(&[&allow], &[&allow], &[])),
             net: false,
+            gpu: true,
             exec: ExecProjection::default(),
         };
         let mut launch = confined(&writable, &w, "echo ok>made.txt").unwrap();

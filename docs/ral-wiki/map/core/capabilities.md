@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 77866699fd8865982c0481d278a7d3286109ca65
+generated_at_commit: 1016d931ebd8f91f4726dfeafc7ac16fc619ddec
 generated_at_date: 2026-10-26
 covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
@@ -38,7 +38,8 @@ Submodules:
   position and what the walk passed on the way) for an allowance
   (`Everywhere` is the root spelling `/` on any host, or a Unix walk that reached `/`)
   and an `Excluded` for an exclusion; `Net` (`Offline`, the one opinion a layer
-  holds on the network), the verb sets `BTreeSet<EditorVerb>` and
+  holds on the network), `Gpu` (`Withheld`, the one opinion a layer holds on the
+  GPU), the verb sets `BTreeSet<EditorVerb>` and
   `BTreeSet<ShellVerb>` (each `Option`: absent inherits), `GrantStack` (with
   `push`, `remove`, `rehold`, `summary`), `Meet`, `Join`, `Axis` (`join_top`,
   `is_top`), `Evidence { positive, negative }` and `Fragment`, the extension
@@ -48,13 +49,14 @@ Submodules:
   `FromIterator<(ExecKey, Evidence)>`, `Join`, `join_top` and the wire decoder,
   read through `every`, `iter` and `get` — `ExecKey::{Name, Path, Dir}`; `every`
   is a flag only `join_top` sets and has no negative form. `GrantSummary` is what
-  crosses hosts: spellings, never a position or an identity. `Flag`
+  crosses hosts: spellings, never a position or an identity, and whether the
+  host that showed it can withhold the GPU (`withholds_gpu`). `Flag`
   (`Editor(EditorVerb)`, `Shell(ShellVerb)`) and `GrantStack::permits(Flag)` are
   the one verb vocabulary: membership, a meet over the layers, silence
   permitting. `is_restrictive` is the denotational activation predicate, each
   axis through `is_top`: exec unless `Any` with no exclusion, fs unless it writes
-  `Everywhere` and excludes nothing, `Net` when `Offline`, a verb set unless it
-  lists every verb;
+  `Everywhere` and excludes nothing, `Net` when `Offline`, `Gpu` when
+  `Withheld`, a verb set unless it lists every verb;
 - `table.rs` — `Table<A, D>`, authority as two sets, allowances and exclusions
   ([[design/authority-tables|authority-tables]]): `Allows` (`contains`, `own`) and
   `Denies` (`matches`, answering a `MatchedBy`), `supports`, `excludes`,
@@ -205,8 +207,8 @@ and the `PolicyError → Break` conversion; substantive freezing stays in
 
 - `decode.rs` — `decode_capability_map`, which walks a `grant [...]` /
   `--capabilities` `Value` map into a resolved `GrantLayer`, one dimension
-  decoder per `exec` / `fs` / `net` / `editor` / `shell` key, nested tables
-  and verb lists read as sets —
+  decoder per `exec` / `fs` / `net` / `gpu` / `editor` / `shell` key, nested
+  tables and verb lists read as sets —
   every one of them authority, none of them a recording switch
   ([[design/audit|audit]]). Its exec targets freeze and walk through
   `authority::grant` directly into exec rules: a `dir` selector expands once
@@ -537,6 +539,10 @@ VM boundary are the only confinement of grandchildren.
 - `projection_enforceable` (`sandbox.rs`) — rejects an offline (`` net: `offline ``)
   projection on a backend with no kernel network enforcement, so an unenforceable
   request fails closed rather than running ignored.
+- `WITHHOLDS_GPU` (`sandbox.rs`) — read by `SandboxProjection::of` and by
+  `GrantStack::summary` into `GrantSummary::withholds_gpu`: the one place the
+  host's inability to withhold the GPU (Windows) is stated. A withheld GPU
+  there projects as left on and refuses nothing.
 - `Refusal` (`sandbox.rs`) — why no confined child exists: nothing ran.
   `Unavailable` is a confinement this host cannot establish, whether `projection_enforceable` saw it coming,
   there was no bwrap on `PATH` to pin at boot (`linux::envelope`, asked at the
@@ -661,7 +667,8 @@ VM boundary are the only confinement of grandchildren.
   pid one, `--proc` on both projections, the seccomp deny-set
   (`sandbox/linux/seccomp.rs`: `Filter`, `Syscall`, `explain`); `InfoFd`, the
   payload's pid read back for a `Kept` launch; `linux/host.rs`, `HostEnvelope`,
-  the probed host facts the render is pure in), and
+  the probed host facts the render is pure in; `linux/gpu.rs`, `GpuNodes`, the
+  GPU's device nodes and sysfs found at each launch and bound by name), and
   `windows.rs` (Job Objects capping the child tree at 512 processes, plus the
   AppContainer backend in `windows/`: `appcontainer.rs` owns profiles and
   LowBox `SECURITY_CAPABILITIES`; `dacl/mod.rs` exposes the path-derived
@@ -755,7 +762,8 @@ class decides the remedy, and the hint answers once per class present**: a
 `file-read*` path is offered to the grant's `read` set and a `file-write*` one
 to `write` (advice that fails twice, otherwise), a `process-exec` path to the
 `exec` set — the layer a re-exec through `sh -c` or `find -exec` reaches, and
-the only one that sees it — a `network-*` denial to the `net` axis alone, and a
+the only one that sees it — a `network-*` denial to the `net` axis alone, a
+Metal device, IOSurface or compiler denial to the `gpu` axis alone, and a
 `mach-*`/`ipc-*` operand to nothing at all, because a service is the base
 profile's to decide and no grant widens one. `Denied` is that taxonomy as a
 type, so a service name cannot arrive where a path is expected; withheld services

@@ -387,10 +387,10 @@ Choose permissions and a model
 grant adds a restriction to your authority; it cannot grant anything you lack:
 
 - `inherit keeps your authority.
-- `confined permits working-tree and scratch I/O and local tooling, offline.
-- `read-only permits project reads; writes are limited to scratch.
-- `edit-only permits project edits, without build tooling.
-- `reasonable permits everyday development tooling.
+- `confined permits working-tree and scratch I/O and local tooling, offline and without the GPU.
+- `read-only permits project reads; writes are limited to scratch; no GPU.
+- `edit-only permits project edits, without build tooling or the GPU.
+- `reasonable permits everyday development tooling, the GPU included.
 - `restrict R accepts a capability record as in grant [...] { ... }.
 
 Set non-overlapping write grants for concurrent editors. For example, this
@@ -408,7 +408,7 @@ restrictions. Messaging it does not change that grant.
 Omitted axes inherit, so neither example narrows exec. Executables allowed by
 name, path, or directory also become readable, subject to enclosing grants and
 explicit denies; unrestricted exec alone implies no reads. A present fs table
-allows only listed writes. Records may specify exec, fs, net, detach, editor,
+allows only listed writes. Records may specify exec, fs, net, gpu, editor,
 and shell; explain grant gives their shapes.
 
 model is `inherit, your own model, or `role #'name'#, a model the human bound to that name at

@@ -58,6 +58,11 @@ pub(super) enum Denied<'a> {
     /// A socket.  The grant's `net:` bit is the whole remedy, so the endpoint
     /// the record names is not worth repeating.
     Socket,
+    /// The GPU: Metal's device, an `IOSurface` or its compiler.  `gpu:` is the
+    /// whole remedy, as `net:` is for a socket.
+    Gpu,
+    /// A Unix socket other than the resolver's, which no grant opens.
+    UnixSocket(&'a str),
     /// A record with no operand a remedy could use — every Linux seccomp
     /// record, where [`platform::describe_denial`] speaks instead.
     Opaque,
@@ -143,12 +148,14 @@ fn build_hint(denials: &[&str]) -> String {
 /// One remedy per class of denial present, because the classes have different
 /// answers and only some are the grant's: a path it can admit, a binary its
 /// `exec` set can admit, a service it cannot open at all, a socket that is the
-/// `net:` bit alone.  Leading with whichever line happened to carry a path is
+/// `net:` bit alone, the GPU that is the `gpu:` bit alone.  Leading with whichever line happened to carry a path is
 /// what once offered a startup plist as the cure for a withheld keychain service.
 #[cfg(not(windows))]
 fn remedies(denials: &[&str]) -> Vec<String> {
     let (mut reads, mut writes, mut execs, mut services) = (vec![], vec![], vec![], vec![]);
+    let mut unix_sockets = vec![];
     let mut socket = false;
+    let mut gpu = false;
     let mut opaque = None;
     for (op, denied) in denials
         .iter()
@@ -160,6 +167,8 @@ fn remedies(denials: &[&str]) -> Vec<String> {
             Denied::Exec(path) => note(&mut execs, path),
             Denied::Service(name) => note(&mut services, name),
             Denied::Socket => socket = true,
+            Denied::Gpu => gpu = true,
+            Denied::UnixSocket(path) => note(&mut unix_sockets, path),
             Denied::Opaque => opaque = opaque.or(Some(op)),
         }
     }
@@ -187,6 +196,12 @@ fn remedies(denials: &[&str]) -> Vec<String> {
     }
     if socket {
         out.push(NET_REMEDY.to_string());
+    }
+    if gpu {
+        out.push(GPU_REMEDY.to_string());
+    }
+    if !unix_sockets.is_empty() {
+        out.push(format!("{UNIX_SOCKET_REMEDY}{}", listing(&unix_sockets)));
     }
     if out.is_empty() {
         out.push(opaque_remedy(opaque.as_deref()));
@@ -298,6 +313,16 @@ fn service_remedy(services: &[&str]) -> String {
 const NET_REMEDY: &str = "a socket was denied, so the active grant is `` net: `offline` ``; and that bit is the whole of \
      it. No fs or exec widening opens a socket, and a hostname cannot carry bytes out as a \
      query label either: the resolver is closed at the same layer.";
+
+#[cfg(not(windows))]
+const GPU_REMEDY: &str = "the GPU was denied: this frame withholds the GPU (`` gpu: `withheld ``), and \
+     that is the whole of it. No fs, net or exec widening reaches the GPU, and no inner grant \
+     restores it: run the command where no layer withholds the GPU.";
+
+#[cfg(not(windows))]
+const UNIX_SOCKET_REMEDY: &str = "a Unix socket was denied, and no grant opens one: the network \
+     grant covers IP sockets only, since a Unix socket reaches a daemon acting with your authority \
+     outside the sandbox (ssh-agent's, for one):";
 
 /// The record names nothing to act on, so the hint says so rather than
 /// guessing at an fs grant — unless a typed deny-set (Linux) has its own words
@@ -429,6 +454,42 @@ mod tests {
         assert!(
             !hint.contains("read set"),
             "a denied socket must not be answered with an fs widening; got {hint:?}"
+        );
+    }
+
+    /// The GPU is the `gpu` bit's alone, and no fs wording belongs near it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hint_names_the_gpu_bit_for_a_denied_gpu() {
+        let line = "2026-06-19 12:00:00.000 kernel[0] (Sandbox) Sandbox: python3(1) deny(1) \
+                    iokit-open-user-client AGXDeviceUserClient";
+        let hint = build_hint(&[line]);
+        assert!(
+            hint.contains("`` gpu: `withheld ``"),
+            "a denied GPU must name the gpu bit; got {hint:?}"
+        );
+        assert!(
+            !hint.contains("read set"),
+            "a denied GPU must not be answered with an fs widening; got {hint:?}"
+        );
+    }
+
+    /// A Unix socket is not the net bit's: `` net: `offline` `` is no cure when
+    /// the grant already has the network.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hint_answers_a_unix_socket_apart_from_the_net_bit() {
+        let line = "2026-06-19 12:00:00.000 kernel[0] (Sandbox) Sandbox: ssh-add(1) deny(1) \
+                    network-outbound /private/tmp/com.apple.launchd.x/Listeners";
+        let hint = build_hint(&[line]);
+        assert!(
+            hint.contains("IP sockets only")
+                && hint.contains("\n  /private/tmp/com.apple.launchd.x/Listeners"),
+            "a denied Unix socket must say the grant cannot open it; got {hint:?}"
+        );
+        assert!(
+            !hint.contains("`` net: `offline` ``"),
+            "a denied Unix socket must not be blamed on the net bit; got {hint:?}"
         );
     }
 

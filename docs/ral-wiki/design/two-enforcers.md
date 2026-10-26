@@ -30,7 +30,7 @@ narrates *how* each runs; this page argues *why* both exist.
   structured escape carrying an [[design/audit|audit]] fragment — ral names which
   grant denied what, and exarch's attend loop receives it as a value to reason
   about. A sandbox violation is an `EPERM` or a `SIGKILL`, after the fact and
-  unattributable. And when no layer restricts fs, net, or — where a backend
+  unattributable. And when no layer restricts fs, net, gpu, or — where a backend
   renders it into the kernel — exec, the projection is empty, so the
   per-command sandbox launch is skipped entirely: an unrestricted child spawns
   directly.
@@ -70,7 +70,8 @@ readers ([[decisions/261021_one-path|one-path]],
   the OS.
 - *Hence the asymmetry by dimension.* A spawned child's reads and writes are held
   by the sandbox; `net` has no in-process guard at all, because ral dispatches no
-  network operation for the guard to see ([[design/grant|grant]]).
+  network operation for the guard to see, and neither has `gpu`
+  ([[design/grant|grant]]).
 - *Linux exec is a Landlock domain, the denies subtracted.* bwrap cannot
   path-filter a child's re-execs, so the payload enters a Landlock layer of its
   own inside the envelope, built by the parent. Landlock is allow-list only, so
@@ -111,6 +112,7 @@ serves ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a
 |---|---|---|
 | `fs` read/write prefixes, `deny` masks; what the exec table admits is readable | bwrap mounts, each source a handle ral opened without following a symlink, each mask at every name a bind shows the denied path ([[decisions/261006_the-envelope-mounts-by-handle]]) | refuse: `confinement_unavailable`, a bwrap that builds no envelope or lacks `--ro-bind-fd` (before 0.8.0) included |
 | ``net: `offline`` | `--unshare-net` | refuse: `projection_enforceable` |
+| ``gpu: `withheld`` | no GPU node in the envelope's `/dev`, masks over the host's; no Landlock part | never lacking on Linux |
 | `exec` — which path may be `execve`d (not which code runs), a deny inside an allowed directory included, over the tree at launch: a program added afterwards to a directory holding a block is denied until the next launch | Landlock `Execute` ruleset, the parent subtracting each block from the directory that holds it; every directory admission, `every` among them, lowered against the envelope's binds | refuse: `confinement_unavailable`, an exec opinion alone asking for the envelope |
 | `exec` — a bare-name veto under a trusted write | in-process guard | the guard stands alone |
 | die with parent, new session, no core, the seccomp deny-set (kills kernel attack surface; refuses mounting, user namespaces and `TIOCSTI` with an errno) | bwrap + `pre_exec` | applied where possible |
@@ -225,6 +227,8 @@ start:
     junction, and the frozen pin refuses every allowance through one. It fails
     closed. Giving the volume a drive letter and granting that works.
   - Windows has no kernel exec layer; exec is the guard's alone.
+  - Windows cannot withhold the GPU; a withheld GPU there neither confines nor
+    refuses, and the summary says so.
 - **The kernel sees no argv.**
 
 **macOS has no stacking.** Landlock layers inside the envelope; Seatbelt
@@ -252,7 +256,7 @@ status proves a refused fork.
 
 **Protections engage by restriction, not by presence.** Resource limits,
 process braking and loader-variable scrubbing are active when some layer
-restricts: `exec` or `fs` supplied, `net` `offline`, or a verb list that omits
+restricts: `exec` or `fs` supplied, `net` `offline`, `gpu` `withheld`, or a verb list that omits
 a verb (`is_restrictive`, one predicate per axis). A neutral layer (`()`, a
 full verb list) leaves ral ambient and, inside a restrictive stack, turns
 nothing off; exarch's summary calls a layer ambient by the same predicate

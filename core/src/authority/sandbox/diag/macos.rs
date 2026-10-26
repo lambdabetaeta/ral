@@ -7,6 +7,7 @@
 //! parser below keys off.
 
 use super::Denied;
+use crate::authority::sandbox::macos::RESOLVER_SOCKET;
 use crate::site::{Silent, site};
 use std::time::Duration;
 
@@ -65,7 +66,16 @@ pub(super) fn parse_denial(line: &str) -> Option<(String, Denied<'_>)> {
         Some(o) if op.starts_with("file-write") => Denied::Write(o),
         Some(o) if op.starts_with("file-") => Denied::Read(o),
         Some(o) if op == "process-exec" => Denied::Exec(o),
+        Some(o)
+            if (op.starts_with("iokit-open") || op == "mach-lookup")
+                && super::super::macos::gpu_name(o) =>
+        {
+            Denied::Gpu
+        }
         Some(o) if op.starts_with("mach-") || op.starts_with("ipc-") => Denied::Service(o),
+        Some(o) if op.starts_with("network-") && o.starts_with('/') && o != RESOLVER_SOCKET => {
+            Denied::UnixSocket(o)
+        }
         _ if op.starts_with("network-") => Denied::Socket,
         _ => Denied::Opaque,
     };
@@ -155,6 +165,27 @@ mod tests {
         );
     }
 
+    /// A path-named socket is a Unix one, except the resolver's, whose
+    /// denial means the network itself is off.
+    #[test]
+    fn parse_denial_separates_a_unix_socket_from_the_resolver() {
+        let agent = "kernel[0] (Sandbox) Sandbox: ssh-add(1) deny(1) network-outbound \
+                     /private/var/run/com.apple.launchd.x/Listeners";
+        assert_eq!(
+            parse_denial(agent),
+            Some((
+                "network-outbound".to_string(),
+                Denied::UnixSocket("/private/var/run/com.apple.launchd.x/Listeners")
+            ))
+        );
+        let dns = "kernel[0] (Sandbox) Sandbox: curl(1) deny(1) network-outbound \
+                   /private/var/run/mDNSResponder";
+        assert_eq!(
+            parse_denial(dns),
+            Some(("network-outbound".to_string(), Denied::Socket))
+        );
+    }
+
     /// A service name reaches the caller as a service, so no wording can offer it
     /// as a path to grant.
     #[test]
@@ -173,6 +204,28 @@ mod tests {
                     mach-lookup com.apple.system.notification_center";
         assert_eq!(
             parse_denial(mach),
+            Some((
+                "mach-lookup".to_string(),
+                Denied::Service("com.apple.system.notification_center")
+            ))
+        );
+    }
+
+    /// The GPU's names are the GPU's, and a Mach name beside them stays a
+    /// service.
+    #[test]
+    fn parse_denial_calls_the_gpu_the_gpu() {
+        for (op, name) in [
+            ("iokit-open-user-client", "AGXDeviceUserClient"),
+            ("mach-lookup", "com.apple.MTLCompilerService"),
+        ] {
+            let line = format!("kernel[0] (Sandbox) Sandbox: python3(1) deny(1) {op} {name}");
+            assert_eq!(parse_denial(&line), Some((op.to_string(), Denied::Gpu)));
+        }
+        let other = "kernel[0] (Sandbox) Sandbox: git(1) deny(1) \
+                     mach-lookup com.apple.system.notification_center";
+        assert_eq!(
+            parse_denial(other),
             Some((
                 "mach-lookup".to_string(),
                 Denied::Service("com.apple.system.notification_center")

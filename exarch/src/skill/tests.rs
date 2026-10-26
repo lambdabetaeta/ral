@@ -20,8 +20,18 @@ fn found(dir: &Path) -> Found {
     let name = dir.file_name().unwrap().to_str().unwrap().to_owned();
     Found {
         name,
-        dir: dir.to_path_buf(),
-        file,
+        source: Source::Disk {
+            dir: dir.to_path_buf(),
+            file: Box::new(file),
+        },
+    }
+}
+
+/// The directory a found skill was read from; `None` for a built-in.
+fn dir_of(found: &Found) -> Option<&Path> {
+    match &found.source {
+        Source::Disk { dir, .. } => Some(dir),
+        Source::Builtin(_) => None,
     }
 }
 
@@ -115,7 +125,8 @@ fn local_overrides_global() {
     let dup: Vec<_> = all.iter().filter(|found| found.name == "dup").collect();
     assert_eq!(dup.len(), 1, "duplicate name should collapse to one entry");
     assert_eq!(
-        dup[0].dir, local,
+        dir_of(dup[0]),
+        Some(local.as_path()),
         "the local skill must shadow the global one"
     );
 }
@@ -152,14 +163,14 @@ fn shared_roots_follow_project_then_personal_precedence() {
     let at = CwdPath::new(cwd.clone()).unwrap();
     let mut reader = boot(&grants, &baseline, &env, &at);
     let metadata = discover_metadata(&cwd, Some(&config), Some(&home), &mut reader);
-    assert_eq!(metadata.len(), 6);
+    assert_eq!(metadata.len(), 6 + BUILTIN.len());
     for index in 0..expected.len() {
         assert!(metadata.iter().any(|s| s.name == format!("skill-{index}")));
     }
     let all = discover_all(&cwd, Some(&config), Some(&home), &mut reader);
     let dup: Vec<_> = all.iter().filter(|s| s.name == "dup").collect();
     assert_eq!(dup.len(), 1);
-    assert_eq!(dup[0].dir, expected[0].join("dup"));
+    assert_eq!(dir_of(dup[0]), Some(expected[0].join("dup").as_path()));
     assert_eq!(read_skill_body(dup[0]).unwrap(), "body 0");
 }
 
@@ -204,5 +215,58 @@ fn discovery_under_a_restricted_stack_finds_only_what_it_may_read() {
         &mut boot(&grants, &baseline, &env, &at),
     );
     let names: Vec<_> = all.iter().map(|found| found.name.as_str()).collect();
-    assert_eq!(names, ["alpha", "shared"]);
+    let expected: Vec<_> = ["alpha", "shared"]
+        .into_iter()
+        .chain(BUILTIN.map(|(name, _)| name))
+        .collect();
+    assert_eq!(names, expected);
+}
+
+/// Every built-in parses as the skill it is listed as, with a body to load.
+#[test]
+fn builtins_parse_under_their_names() {
+    for (name, text) in BUILTIN {
+        let skill = skill_from_frontmatter(text, name).unwrap();
+        assert_ne!(skill.description, "");
+        let found = builtin(name).unwrap();
+        assert_ne!(read_skill_body(&found).unwrap().trim(), "");
+    }
+}
+
+/// With no root holding a skill, the built-ins are listed, after any found on disk.
+#[test]
+fn builtins_are_listed_when_no_root_has_them() {
+    let cwd = tempfile::tempdir().unwrap();
+    let (grants, baseline, env) = (GrantStack::root(), Baseline::default(), EnvVars::new());
+    let at = CwdPath::new(cwd.path().to_path_buf()).unwrap();
+    let mut reader = boot(&grants, &baseline, &env, &at);
+    let metadata = discover_metadata(cwd.path(), None, None, &mut reader);
+    let names: Vec<_> = metadata.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, BUILTIN.map(|(name, _)| name));
+}
+
+/// A project's skill of a built-in's name shadows the built-in.
+#[test]
+fn a_project_skill_shadows_a_builtin() {
+    let cwd = tempfile::tempdir().unwrap();
+    let (name, _) = BUILTIN[0];
+    let local = cwd.path().join(".exarch").join("skills").join(name);
+    std::fs::create_dir_all(&local).unwrap();
+    std::fs::write(
+        local.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: mine\n---\nlocal body\n"),
+    )
+    .unwrap();
+    let (grants, baseline, env) = (GrantStack::root(), Baseline::default(), EnvVars::new());
+    let at = CwdPath::new(cwd.path().to_path_buf()).unwrap();
+    let all = discover_all(
+        cwd.path(),
+        None,
+        None,
+        &mut boot(&grants, &baseline, &env, &at),
+    );
+    let hits: Vec<_> = all.iter().filter(|found| found.name == name).collect();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(dir_of(hits[0]), Some(local.as_path()));
+    assert_eq!(read_skill_body(hits[0]).unwrap(), "local body");
 }

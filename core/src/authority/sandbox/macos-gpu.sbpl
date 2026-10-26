@@ -1,0 +1,12 @@
+;; ral macOS Seatbelt rules for a frame that leaves the GPU in reach,
+;; appended by `core/src/authority/sandbox/macos.rs::build_profile` and by
+;; nothing else.  `gpu: `withheld` is their absence.  `macos.rs`'s
+;; `GPU_NAMES` quotes these names for the denial hint; keep in step.
+;; Metal's per-user caches are paths, so `macos.rs::gpu_caches` renders
+;; them beside the fs allows rather than here.
+
+;; Metal's device, and the IOSurfaces its buffers and shared events live in.
+(allow iokit-open (iokit-user-client-class "AGXDeviceUserClient" "IOSurfaceRootUserClient"))
+
+;; Metal's compiler, for a kernel the shader cache does not yet hold.
+(allow mach-lookup (global-name "com.apple.MTLCompilerService"))

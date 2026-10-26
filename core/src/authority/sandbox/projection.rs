@@ -20,7 +20,7 @@ use crate::authority::policy::GrantPath;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::authority::policy::Subject;
 use crate::authority::policy::{
-    Admitted, Baseline, ExecRules, FsAllow, FsOp, FsRules as FsTable, GrantStack, Join, Net,
+    Admitted, Baseline, ExecRules, FsAllow, FsOp, FsRules as FsTable, Gpu, GrantStack, Join, Net,
     region, rules, running_region,
 };
 use crate::path::{Excluded, RealPath};
@@ -117,6 +117,9 @@ pub(crate) enum ExecProjection {
 pub struct SandboxProjection<A = FsAllow, X = GrantPath<Excluded>> {
     pub fs: FsProjection<A, X>,
     pub net: bool,
+    /// Whether the GPU is in reach: no layer withholds it, or this host
+    /// cannot withhold it.
+    pub gpu: bool,
     pub(crate) exec: ExecProjection,
 }
 
@@ -133,6 +136,7 @@ impl<A, X> Default for SandboxProjection<A, X> {
         Self {
             fs: FsProjection::default(),
             net: true,
+            gpu: true,
             exec: ExecProjection::default(),
         }
     }
@@ -163,7 +167,7 @@ impl SandboxProjection {
     /// [`render_excluded`] refuses it.
     #[cfg(unix)]
     pub(crate) fn rendered(&self) -> Result<SandboxProjection<Object, Rendered>, String> {
-        let Self { fs, net, exec } = self;
+        let Self { fs, net, gpu, exec } = self;
         let fs = match fs {
             FsProjection::Unrestricted => FsProjection::Unrestricted,
             FsProjection::Restricted(FsRules {
@@ -192,12 +196,14 @@ impl SandboxProjection {
         Ok(SandboxProjection {
             fs,
             net: *net,
+            gpu: *gpu,
             exec: exec.clone(),
         })
     }
 
-    /// Meet-fold the stack's fs, net, and exec dimensions into the
-    /// OS-renderable projection.  Exec is projected from the table that
+    /// Meet-fold the stack's fs, net, gpu, and exec dimensions into the
+    /// OS-renderable projection; the GPU only where this host withholds it
+    /// ([`crate::authority::sandbox::WITHHOLDS_GPU`]).  Exec is projected from the table that
     /// admitted `admitted`; a caller launching nothing passes `None`, and the
     /// stack is compiled afresh.  An axis that denotes `t` projects as
     /// unrestricted, though an `every` table's run places still reach the read
@@ -220,6 +226,8 @@ impl SandboxProjection {
             .zip(region(grants, &FsOp::Write, baseline))
             .filter(|_| !grants.fs_is_top());
         let online = !grants.net().any(|n| n == Net::Offline);
+        let gpu =
+            !(crate::authority::sandbox::WITHHOLDS_GPU && grants.gpu().any(|g| g == Gpu::Withheld));
 
         let compiled = admitted.is_none().then(|| rules(grants)).flatten();
         let table = admitted
@@ -232,7 +240,7 @@ impl SandboxProjection {
         // re-execs it cannot (`sh -c`).
         let exec_triggers_sandbox = crate::authority::sandbox::EXEC_ENFORCED && table.is_some();
 
-        if regions.is_none() && online && !exec_triggers_sandbox {
+        if regions.is_none() && online && gpu && !exec_triggers_sandbox {
             return None;
         }
 
@@ -261,6 +269,7 @@ impl SandboxProjection {
         Some(Self {
             fs,
             net: online,
+            gpu,
             exec,
         })
     }
@@ -347,6 +356,7 @@ mod rendered_tests {
                 pinned_dirs: pinned.iter().copied().map(excluding).collect(),
             }),
             net: true,
+            gpu: true,
             exec: ExecProjection::default(),
         }
     }
@@ -422,6 +432,7 @@ mod rendered_tests {
                 ..FsRules::default()
             }),
             net: true,
+            gpu: true,
             exec: ExecProjection::default(),
         };
         let out = projection.rendered().expect("ASCII paths render");
@@ -437,9 +448,9 @@ mod rendered_tests {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::ExecProjection;
+    use super::{ExecProjection, FsProjection};
     use crate::authority::policy::{
-        Baseline, Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy,
+        Baseline, Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy, Gpu,
     };
     use crate::path::{FrozenPath, utf8};
     use crate::test_access::fs_read_paths;
@@ -494,6 +505,19 @@ mod tests {
         assert!(read.iter().any(|p| p == "/ral-test/bin"), "{read:?}");
     }
 
+    /// A withheld GPU alone engages the sandbox, as `offline` does.
+    #[test]
+    fn a_withheld_gpu_alone_engages_the_sandbox() {
+        let withheld = project(Capabilities {
+            gpu: Some(Gpu::Withheld),
+            ..Capabilities::default()
+        });
+        assert!(!withheld.gpu && withheld.net);
+        assert_eq!(withheld.fs, FsProjection::Unrestricted);
+        assert_eq!(withheld.exec, ExecProjection::Unrestricted);
+        assert!(project(authored(Some("/ral-test/w"), None)).gpu);
+    }
+
     /// Support reads a system script's interpreter where the fs grant names
     /// neither, with exec omitted or restricted to the script.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -528,5 +552,22 @@ mod tests {
                 .any(|o| o.real.as_str() == utf8(interp.as_path()).unwrap());
             assert!(carried, "{interp} is not read: {read:?}");
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod windows_tests {
+    /// Windows cannot withhold the GPU, so a frame that asks engages no sandbox
+    /// and refuses nothing.
+    #[test]
+    fn a_withheld_gpu_engages_nothing_on_windows() {
+        let layer = crate::test_helper::layer(crate::authority::policy::Capabilities {
+            gpu: Some(crate::authority::policy::Gpu::Withheld),
+            ..Default::default()
+        });
+        let projection =
+            crate::test_helper::core_shell().with_layer(layer, |sh| sh.sandbox_projection());
+        assert_eq!(projection, None);
     }
 }

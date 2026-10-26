@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 52452c41
+generated_at_commit: 1e3124cb
 generated_at_date: 2026-10-26
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/skill.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/src/enquiry.rs, exarch/src/library.rs, exarch/data/agent.ral]
 ---
@@ -107,12 +107,16 @@ judging the object it opens.
   one skill's full `SKILL.md` body on demand; the scan and frontmatter parse
   live in `skill.rs`. Roots, first name wins: cwd's `.exarch/skills/`,
   `.agents/skills/` from cwd up to the working-tree root (cwd alone outside a
-  repository), `$XDG_CONFIG_HOME/exarch/skills/`, then `~/.agents/skills/`.
+  repository), `$XDG_CONFIG_HOME/exarch/skills/`, then `~/.agents/skills/`,
+  then the built-ins: `skill::BUILTIN`, each `exarch/data/skills/<name>/SKILL.md`
+  compiled in with `include_str!` (today `exarch-sandbox`, on writing an
+  `--extend` file), so any root's skill of the same name shadows one.
   Startup, listing, and loading share these roots and grant checks; discovery
-  adds no read authority. Startup discovery skips invalid files quietly; `skill-list`
-  lists valid skills, then names each skipped `SKILL.md` by path with its cause;
-  its count covers only valid skills. `skill` reports a read or frontmatter
-  failure with the skill's name and path.
+  adds no read authority, and a built-in needs none. Startup discovery skips
+  invalid files quietly; `skill-list` lists valid skills, then names each
+  skipped one by name and directory with its cause; its count covers only
+  valid skills. `skill` reports a read or frontmatter failure with the
+  skill's name and place, a built-in's being `built into exarch`.
 
 Reads resolve through `Shell::locate::<Reading>`; the edit writes go
 through core's atomic write site under the run's pushed [[design/grant|grant]]

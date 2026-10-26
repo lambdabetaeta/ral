@@ -1,8 +1,8 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-verified_at_commit: 646bff0a
-verified_at_date: 2026-10-13
-anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, cgroup_tree, floor, Pinned, pin_envelope, InfoFd]
+generated_at_commit: 1e3124cbc0ac2352d44c9d743a70b1cde5081361
+verified_at_commit: 1e3124cb
+verified_at_date: 2026-10-26
+anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, GpuNodes, cgroup_tree, floor, Pinned, pin_envelope, InfoFd]
 ---
 
 # The Linux envelope
@@ -24,6 +24,14 @@ the filesystem**
   Wherever the host can build one, it also gets a pid namespace with a fresh
   `/proc`. A confined child then sees and can signal nothing of the host,
   `/proc/self` is its own, and `ps` under any grant shows only the envelope.
+- **Unix sockets.** ``net: `offline`` adds `--unshare-net`; otherwise the
+  child shares the host's network namespace, abstract Unix sockets included,
+  and `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET` (ABI 6, beside the signal scope)
+  refuses a connect to one bound outside the envelope, as Seatbelt refuses
+  every Unix socket but the resolver's. A pathname socket the binds show is
+  reachable whatever `net` says: a read-only bind does not gate `connect`.
+  Measured on 7.1 (ABI 9), a Landlock fs right at bit 16 does, but the
+  resolver's sockets would need admitting, so it is not handled yet.
 - **Working directory.** The logical cwd goes in as `--chdir`. A cwd the grant
   does not cover gets an empty `0555` tmpfs stand-in, laid before the binds,
   which may hide it; bwrap's `--chdir` then judges the name. `/` and the
@@ -117,7 +125,7 @@ first, and opening stays where it was.
 - **`Any` is the directory `/`.** Under an unrestricted fs it is a rule on `/`;
   under a restricted fs, a rule on every bind root remaining after the
   redundant-bind dedup. When every exclusion is a name veto, nothing is
-  subtracted, so no exec ruleset is built; signal scoping stays.
+  subtracted, so no exec ruleset is built; the scopes stay.
 - **Linker candidates are support**, admitted unless excluded, not before the
   table; ral's pinned inode is no longer admitted at all.
 - **Limits, declared:** a program created during a launch on the spine of an
@@ -157,6 +165,31 @@ result by hand, or states what it cannot build.**
 
 Pinned by `authority::sandbox::linux::tests::a_host_that_refuses_dev_gets_the_same_shape_by_hand`
 and `::the_by_hand_dev_serves_a_confined_body`.
+
+## The GPU is shown or masked by name
+
+**A frame that leaves the GPU shows its device nodes; one that withholds it
+shows none.** Left on and fs restricted, the render nodes (never `card*`, which
+modeset), NVIDIA's (`nvidiactl`, `nvidia-uvm`, `nvidia-uvm-tools`,
+`nvidia<N>`), AMD's `kfd` (ROCm compute opens it with `renderD*`) and WSL2's
+`dxg` are `--dev-bind-try`'d into the envelope's `/dev` after `render_dev`,
+with `/sys/class/drm`, `/sys/dev/char` and each render node's device directory
+read-only. Withheld over an unrestricted fs, `/dev/dri` is emptied and the
+other nodes masked unopenable; withheld under a restricted fs, nothing is
+shown. `GpuNodes::discover` finds them at each launch: bwrap has no globs, and
+`nvidia-uvm` appears on a host's first CUDA call.
+
+- **Bound by name, the one exception to mounting by handle.** `/dev` and `/sys`
+  are kernel-owned trees no unprivileged process renames into, so a name there
+  cannot be swapped for a link after rendering, which is the whole risk handles
+  close; `render_dev`'s own nodes were already bound so.
+- **No Landlock rule governs the GPU.** The ruleset handles only `Execute` and
+  `Refer` (`landlock::plan`), not `IOCTL_DEV` or any read/write right, so
+  opening a device node is decided by what the mounts show and by nothing
+  else: a node absent from the envelope cannot be opened, a node shown can.
+
+Pinned by `authority::sandbox::linux::tests::a_restricted_envelope_shows_the_gpu_only_where_left_on`
+and `::an_unrestricted_envelope_masks_a_withheld_gpu`.
 
 ## Kernel pseudo-filesystems describe the envelope
 

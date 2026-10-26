@@ -125,7 +125,10 @@ pub const GRANT_PLACEHOLDER: &str = "@@EXARCH_GRANT@@";
 /// under: its engine session's layers, then the ceiling its host pushes.
 pub(crate) fn with_grant(template: &str, session: &GrantSummary, ceiling: &GrantSummary) -> String {
     let layers = session.layers().iter().chain(ceiling.layers());
-    template.replace(GRANT_PLACEHOLDER, &grant_summary(layers))
+    template.replace(
+        GRANT_PLACEHOLDER,
+        &grant_summary(layers, session.withholds_gpu()),
+    )
 }
 
 /// The `AGENTS.md` chain's text, outermost first so the most specific file's
@@ -210,14 +213,18 @@ pub fn host_section(app: crate::app::App) -> String {
 ///
 /// A static legend teaching the notation and the runtime denial string, then
 /// each distinct layer a [`GrantSummary`] shows, oldest first, then the net
-/// line once.  The stack is the meet, so describing each layer describes the
-/// whole ceiling, and a repeat adds nothing.
+/// and gpu lines once.  The stack is the meet, so describing each layer
+/// describes the whole ceiling, and a repeat adds nothing.  `withholds_gpu` is
+/// the engine host's word on whether a withheld GPU is held there.
 ///
 /// `None` is "unrestricted" (no attenuation at this layer) and an empty
 /// container "(none)".  The caller appends the `- scratch:` bullet, since
 /// exarch names a seeded env var and host path where synod names the guest's
 /// tmpfs.
-fn grant_summary<'a>(shown: impl IntoIterator<Item = &'a LayerSummary>) -> String {
+fn grant_summary<'a>(
+    shown: impl IntoIterator<Item = &'a LayerSummary>,
+    withholds_gpu: bool,
+) -> String {
     let mut layers: Vec<&LayerSummary> = Vec::new();
     for summary in shown {
         if !layers.contains(&summary) {
@@ -226,7 +233,7 @@ fn grant_summary<'a>(shown: impl IntoIterator<Item = &'a LayerSummary>) -> Strin
     }
     // The denial legend would describe a runtime event that cannot occur.
     if layers.is_empty() {
-        return "Ambient authority: every command, path, and network call is permitted; \
+        return "Ambient authority: every command, path, network call and GPU access is permitted; \
 the sandbox is the trust boundary.\n\n"
             .into();
     }
@@ -246,6 +253,12 @@ the sandbox is the trust boundary.\n\n"
     }
     let denied = layers.iter().any(|l| l.net.is_some());
     let _ = writeln!(s, "\n- net: {}", if denied { "deny" } else { "inherit" });
+    let gpu = match (layers.iter().any(|l| l.gpu.is_some()), withholds_gpu) {
+        (false, _) => "inherit",
+        (true, true) => "withheld",
+        (true, false) => "in reach: this platform cannot withhold the GPU",
+    };
+    let _ = writeln!(s, "- gpu: {gpu}");
     s
 }
 
@@ -253,7 +266,7 @@ fn legend() -> String {
     format!("{}\n\n", include_str!("../data/grant-legend.md").trim_end())
 }
 
-/// One layer's bullets bar net and scratch.
+/// One layer's bullets bar net, gpu and scratch.
 fn layer_lines(layer: &LayerSummary) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "- exec: {}", exec_line(layer.exec.as_ref()));
@@ -358,11 +371,12 @@ fn skills_section(skills: &[skill::Skill]) -> String {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use ral_core::authority::policy::{EditorVerb, FsSummary, Net};
+    use ral_core::authority::policy::{EditorVerb, FsSummary, Gpu, Net};
 
     /// A Linux guest's summary as a macOS or Windows host receives it: built
-    /// of spellings and axes, a newtype of its layers on the wire.
-    fn crossed() -> GrantSummary {
+    /// of spellings and axes, its layers a list on the wire, and the guest's
+    /// word on the GPU beside them.
+    fn crossed(withholds_gpu: bool) -> GrantSummary {
         let layers = vec![LayerSummary {
             fs: Some(FsSummary {
                 read: vec!["/work".into()],
@@ -375,17 +389,19 @@ mod tests {
                 denies: vec!["`name bash".into()],
             }),
             net: Some(Net::Offline),
+            gpu: Some(Gpu::Withheld),
             editor: Some(BTreeSet::from([EditorVerb::Read])),
             shell: None,
         }];
         let wire = serde_json::to_string(&layers).expect("a summary is plain data");
-        serde_json::from_str(&wire).expect("a summary decodes where it crossed to")
+        let layers = serde_json::from_str(&wire).expect("a summary decodes where it crossed to");
+        GrantSummary::of(layers, withholds_gpu)
     }
 
     /// The same lines on every host, whatever the host's own paths look like.
     #[test]
     fn a_crossed_summary_renders_the_same_lines_on_every_host() {
-        let shown = with_grant(GRANT_PLACEHOLDER, &crossed(), &GrantSummary::default());
+        let shown = with_grant(GRANT_PLACEHOLDER, &crossed(true), &GrantSummary::default());
         let lines = "\
 - exec: `name git
 - exec dirs: `dir `absolute /usr/bin
@@ -396,8 +412,19 @@ mod tests {
 - editor: read
 
 - net: deny
+- gpu: withheld
 ";
         assert!(shown.ends_with(lines), "{shown}");
+    }
+
+    /// A host that cannot withhold the GPU says so rather than claim it.
+    #[test]
+    fn a_gpu_this_platform_cannot_withhold_is_said_to_be_in_reach() {
+        let shown = with_grant(GRANT_PLACEHOLDER, &crossed(false), &GrantSummary::default());
+        assert!(
+            shown.ends_with("- gpu: in reach: this platform cannot withhold the GPU\n"),
+            "{shown}"
+        );
     }
 
     /// The `AGENTS.md` chain is read through the stack: a link to a file the

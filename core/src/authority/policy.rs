@@ -30,7 +30,7 @@ pub(crate) use fs::{FsAllow, FsLayer, FsRules, Verdict, region, running_region};
 pub(crate) use lattice::Axis;
 pub use lattice::{
     Capabilities, EditorVerb, Evidence, ExecGrant, ExecKey, ExecSummary, Extent, Flag, Fragment,
-    FsPolicy, FsSummary, GrantLayer, GrantPath, GrantStack, GrantSummary, Join, LayerSummary, Meet,
-    Net, ShellVerb,
+    FsPolicy, FsSummary, Gpu, GrantLayer, GrantPath, GrantStack, GrantSummary, Join, LayerSummary,
+    Meet, Net, ShellVerb,
 };
 pub use table::Withheld;

@@ -169,6 +169,7 @@ impl GrantLayer {
             exec,
             fs,
             net,
+            gpu,
             editor,
             shell,
         } = caps;
@@ -177,6 +178,7 @@ impl GrantLayer {
             exec.map(|grant| ExecRules::of_grant(&grant, env))
                 .transpose()?,
             net,
+            gpu,
             editor,
             shell,
         ))

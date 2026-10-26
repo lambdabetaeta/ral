@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
-generated_at_date: 2026-10-25
+generated_at_commit: 1e3124cbc0ac2352d44c9d743a70b1cde5081361
+generated_at_date: 2026-10-26
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
 
@@ -134,6 +134,10 @@ via `include_str!`, ordered from most to least authority:
   narrow base for additive `--extend`;
 - `confined` — offline build jail; host binaries by subpath, with explicit
   bare-name entries for core's bundled tools (which have no path to match).
+
+`confined`, `minimal`, `read-only` and `edit-only` withhold the GPU (on Linux
+and macOS; on Windows the prompt says it stays in reach); `reasonable` and
+`dangerous` leave it.
 
 **Every profile that restricts exec must name the bundled tools** (`core/src/uutils.rs`
 — coreutils, and diffutils/ripgrep under their features). `Head::resolve` makes

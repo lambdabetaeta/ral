@@ -90,7 +90,9 @@ Four findings shape it.
    including an unrestricted exec projection, and gives `EPERM` when a confined
    child signals a host process. That closes the same-uid `kill` hole on hosts
    where the container runtime denies a pid namespace, with no namespace
-   needed.
+   needed. Amended: `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET`, of the same ABI,
+   rides with it, so a child sharing the host's network namespace reaches no
+   abstract socket bound outside the envelope.
 
 Two floors, both probed by the syscall rather than read off `uname`: ABI 1 for
 exec confinement — where a confined payload also loses cross-directory rename

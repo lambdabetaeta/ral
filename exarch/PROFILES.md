@@ -8,7 +8,8 @@ A profile controls:
 
 - which programs may run;
 - which paths may be read or written;
-- whether the network is available.
+- whether the network is available;
+- whether the GPU is available.
 
 The host installs this boundary around every run. The model can use the
 authority it receives, but it cannot widen it.
@@ -435,10 +436,10 @@ file runs; the kernel sees no argv; Windows has no kernel exec layer.
 
 ## Enforcement
 
-ral checks executable authority before spawning on every platform. Filesystem
-and network restrictions are also projected into the platform sandbox:
+ral checks executable authority before spawning on every platform. Filesystem,
+network and GPU restrictions are also projected into the platform sandbox:
 Seatbelt on macOS, bubblewrap with seccomp on Linux, and an AppContainer
-LowBox token on Windows.
+LowBox token on Windows, which cannot withhold the GPU.
 
 This is defence in depth for a development tool, not a claim that exarch is a
 hardened jail.

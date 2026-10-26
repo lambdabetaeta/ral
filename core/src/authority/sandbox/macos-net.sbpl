@@ -1,18 +1,25 @@
 ;; ral macOS Seatbelt rules for `net: true`, appended by
 ;; `core/src/authority/sandbox/macos.rs::build_profile` and by nothing else.
 ;;
-;; Seatbelt has no per-address network rules, so the socket half is one
-;; wholesale allow.  The Mach half is here rather than in the base
-;; profile because these daemons are exactly the network: configd
-;; answers "what are the proxies and the DNS servers", the dnssd port
-;; is the resolver's, and trustd evaluates TLS chains.  Under
-;; `net: false` a hostname therefore cannot carry bytes out even as a
-;; query label, at both layers at once.
+;; Seatbelt has no per-address network rules, so the socket half admits
+;; every IP endpoint, loopback included.  The Mach half is here rather
+;; than in the base profile because these daemons are exactly the
+;; network: configd answers "what are the proxies and the DNS servers",
+;; the dnssd port is the resolver's, and trustd evaluates TLS chains.
+;; Under `net: false` a hostname therefore cannot carry bytes out even as
+;; a query label, at both layers at once.
 ;;
 ;; `com.apple.trustd`, not `com.apple.SecurityServer`: chain evaluation
 ;; without the keychain — see the base profile's mach-lookup comment.
 
-(allow network*)
+;; IP only, never `network*`: a Unix socket reaches a daemon acting with
+;; your authority outside this profile, ssh-agent's for one.
+(allow network-outbound (remote ip))
+(allow network-inbound (local ip))
+(allow network-bind (local ip))
+
+;; The one Unix socket the network needs: getaddrinfo asks mDNSResponder.
+(allow network-outbound (literal "/private/var/run/mDNSResponder"))
 
 (allow mach-lookup
   (global-name "com.apple.SystemConfiguration.configd")

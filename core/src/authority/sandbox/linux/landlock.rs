@@ -1,11 +1,11 @@
 //! The process sandbox a confined payload enters *inside* the bwrap envelope:
-//! kernel exec confinement rendering `ExecProjection::Restricted`, and a
-//! signal scope closing the same-uid `kill` hole where the host cannot build
-//! a pid namespace.  The parent builds the one ruleset ([`build`]), opening
-//! every admit in the host and never through a symlink; the payload inherits
-//! it at the slot its warrant names and enters it ([`Landlocked::enter`]),
-//! never before bwrap: a domain handling any fs right forbids `mount(2)`,
-//! bwrap's first act.
+//! kernel exec confinement rendering `ExecProjection::Restricted`, and scopes
+//! closing the same-uid `kill` hole where the host cannot build a pid
+//! namespace and, under `net`, the host's abstract Unix sockets.  The parent
+//! builds the one ruleset ([`build`]), opening every admit in the host and
+//! never through a symlink; the payload inherits it at the slot its warrant
+//! names and enters it ([`Landlocked::enter`]), never before bwrap: a domain
+//! handling any fs right forbids `mount(2)`, bwrap's first act.
 //!
 //! Landlock is allow-list only, so an exclusion inside an allowed directory
 //! is rendered by subtraction ([`expand`]): the entries the table still
@@ -46,8 +46,8 @@ impl Abi {
     pub(crate) const EXEC: Self = Self(1);
     /// `LANDLOCK_ACCESS_FS_REFER`, Linux 5.19.
     pub(crate) const REFER: Self = Self(2);
-    /// `LANDLOCK_SCOPE_SIGNAL`, Linux 6.12.
-    pub(crate) const SIGNAL_SCOPE: Self = Self(6);
+    /// `LANDLOCK_SCOPE_*`, Linux 6.12.
+    pub(crate) const SCOPES: Self = Self(6);
 }
 
 impl fmt::Display for Abi {
@@ -159,7 +159,10 @@ pub(crate) struct Scoped(u64);
 
 impl Scoped {
     const NONE: Self = Self(0);
-    pub(crate) const SIGNAL: Self = Self(1 << 1);
+    /// `ABSTRACT_UNIX_SOCKET | SIGNAL`: without `--unshare-net` the abstract
+    /// namespace is the host's, and a socket there reaches a daemon acting
+    /// with the user's authority.
+    pub(crate) const ENVELOPE: Self = Self(1 | 1 << 1);
 }
 
 /// A ruleset not yet entered: built by the parent, entered by the payload.
@@ -314,8 +317,8 @@ fn plan(exec: &ExecProjection, landlock: Landlock) -> Result<Option<Plan>, Refus
         (true, false) => Access::EXECUTE,
         (true, true) => Access::EXECUTE | Access::REFER,
     };
-    let scoped = if abi >= Abi::SIGNAL_SCOPE {
-        Scoped::SIGNAL
+    let scoped = if abi >= Abi::SCOPES {
+        Scoped::ENVELOPE
     } else {
         Scoped::NONE
     };
@@ -716,8 +719,8 @@ mod tests {
             (Abi::EXEC, exec, Scoped::NONE),
             (Abi::REFER, refer, Scoped::NONE),
             (Abi(5), refer, Scoped::NONE),
-            (Abi::SIGNAL_SCOPE, refer, Scoped::SIGNAL),
-            (Abi(9), refer, Scoped::SIGNAL),
+            (Abi::SCOPES, refer, Scoped::ENVELOPE),
+            (Abi(9), refer, Scoped::ENVELOPE),
         ] {
             assert_eq!(
                 plan(&restricted(), Landlock::At(abi)).expect("a kernel with Landlock"),
@@ -733,15 +736,15 @@ mod tests {
             assert_eq!(
                 plan(&ExecProjection::Unrestricted, Landlock::At(abi)).expect("plans"),
                 None,
-                "abi {abi} has no signal scope, so there is nothing to enter"
+                "abi {abi} has no scopes, so there is nothing to enter"
             );
         }
-        for abi in [Abi::SIGNAL_SCOPE, Abi(9)] {
+        for abi in [Abi::SCOPES, Abi(9)] {
             assert_eq!(
                 plan(&ExecProjection::Unrestricted, Landlock::At(abi)).expect("plans"),
                 Some(Plan {
                     handled: Access::NONE,
-                    scoped: Scoped::SIGNAL
+                    scoped: Scoped::ENVELOPE
                 }),
                 "abi {abi}"
             );
@@ -1105,18 +1108,18 @@ mod tests {
     }
 
     /// An `every` table whose exclusions are all name vetoes subtracts
-    /// nothing, so the kernel handles no exec for it and keeps its signal
-    /// scope; one that excludes a path still does.
+    /// nothing, so the kernel handles no exec for it and keeps its
+    /// scopes; one that excludes a path still does.
     #[test]
     fn an_every_table_with_only_name_vetoes_handles_no_exec() {
         let of = |rules: &[Rule]| ExecProjection::Restricted(table_of(rules));
         let bare = of(&[any(), veto("rm")]);
         assert!(kernel_table(&bare).is_none());
         assert_eq!(
-            plan(&bare, Landlock::At(Abi::SIGNAL_SCOPE)).expect("plans"),
+            plan(&bare, Landlock::At(Abi::SCOPES)).expect("plans"),
             Some(Plan {
                 handled: Access::NONE,
-                scoped: Scoped::SIGNAL
+                scoped: Scoped::ENVELOPE
             })
         );
         assert_eq!(plan(&bare, Landlock::At(Abi(5))).expect("plans"), None);

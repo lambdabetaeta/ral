@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
+generated_at_commit: 1e3124cbc0ac2352d44c9d743a70b1cde5081361
 ---
 
 # Capabilities and `grant`
@@ -39,12 +39,15 @@ and the per-backend price.
 [[map/core/shell-state|`Option<T>: Meet`]]).
 
 - **Restricting one axis does not restrict another.** `grant [fs: [...]] { … }`
-  narrows the filesystem but leaves `net`, `exec`, `editor`, and `shell` at the
+  narrows the filesystem but leaves `net`, `gpu`, `exec`, `editor`, and `shell` at the
   caller's authority; a grant that means to confine network access must say
   ``net: `offline`` itself.
 - **`net` has no in-process guard.** ral has no network primitives, so
   ``net: `offline`` is enforced only by the OS sandbox — it fails closed where no
   backend exists.
+- **`gpu` likewise has no in-process guard**: ``gpu: `withheld`` is the OS
+  sandbox's alone, and Windows cannot withhold it: there it confines nothing and
+  refuses nothing, and the grant's summary says the GPU is in reach.
 - **The process view is the envelope's, on every projection.** No axis names
   it: a child confined for any reason sees and can signal only the envelope's
   own processes, so `ps` and `kill` under any grant reach the envelope alone,
@@ -265,6 +268,7 @@ wrote none, and yields to every exclusion on either axis
   allowance, a flag no surface spelling sets, never a key;
 - **fs** by read/write path prefix with exclusions;
 - **net** as `` `offline `` or nothing;
+- **gpu** as `` `withheld `` or nothing;
 - **editor** and **shell** as verb lists, where `detach` is the one verb that
   gates a *verb* rather than an action on a resource, and the one that reaches
   no OS profile: it decides
@@ -311,8 +315,8 @@ dimension only sometimes, lift the condition to the form.
 
 **The values are typed data.** Places and exec targets are tagged variants
 (`` `cwd src ``, `` `name git ``, `` `dir `system ``); `exec` and `fs` are
-nested records of lists, `net` is `` `offline ``, `editor` and `shell` are
-verb lists. The checker ascribes the nested tables too, so a bare string where
+nested records of lists, `net` is `` `offline ``, `gpu` is `` `withheld ``,
+`editor` and `shell` are verb lists. The checker ascribes the nested tables too, so a bare string where
 a place belongs, a misspelled tag or `net: true` fails before the program
 runs, naming the tags on offer. Every list is a set, with repeats idempotent;
 extension joins verb lists; a selector (`path`, `system` or a package manager) is valid only under

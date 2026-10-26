@@ -972,7 +972,8 @@ fn scheme_skill(_u: &mut Unifier) -> Scheme {
 }
 
 /// `skill NAME` — load a skill's full body, rescanning at each call so a skill
-/// added or edited mid-session is found.
+/// added or edited mid-session is found; a built-in answers only where no root
+/// holds the name.
 fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let name = args[0].as_str("skill")?;
     // Rejecting it here is what keeps `root.join(&name)` inside the skills root.
@@ -984,38 +985,40 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
     let cwd = shell.cwd();
     let config_dir = crate::app::EXARCH.xdg_dir(ral_core::path::XdgKind::Config);
     let home_dir = ral_core::host::home_dot("");
-    for root in skill::skill_roots(&cwd, config_dir.as_deref(), home_dir.as_deref()) {
-        let dir = root.join(name);
-        let sk_md = dir.join("SKILL.md");
-        // A root that lacks the skill, or may not be read, is not a miss for
-        // the name: walk to the next.
-        let Some(file) = shell.file(&shell.anchor(&sk_md)) else {
-            continue;
-        };
-        let found = skill::Found {
-            name: name.to_owned(),
-            dir,
-            file,
-        };
-        let body = skill::read_skill_body(&found).map_err(|why| {
-            sig(format!(
-                "skill: could not load '{name}' from {}: {why}",
-                ral_core::path::shown(&sk_md)
-            ))
-        })?;
-        // Only once the body is in hand, so the card never claims a load
-        // that did not happen.
-        let dir = ral_core::path::shown(&found.dir);
-        mooring.surface(&Value::map(vec![
-            ("io".into(), Value::string("skill")),
-            ("name".into(), Value::string(name)),
-            ("dir".into(), Value::string(dir.clone())),
-        ]));
-        return Ok(Value::string(format!("// skill root: {dir}\n\n{body}")));
-    }
-    Err(sig(format!(
-        "skill: no skill named '{name}'; did you mean one that `skill-list` shows?"
-    )))
+    // A root that lacks the skill, or may not be read, is not a miss for the
+    // name: walk to the next.
+    let on_disk = skill::skill_roots(&cwd, config_dir.as_deref(), home_dir.as_deref())
+        .into_iter()
+        .find_map(|root| {
+            let dir = root.join(name);
+            let file = shell.file(&shell.anchor(&dir.join("SKILL.md")))?;
+            Some(skill::Found {
+                name: name.to_owned(),
+                source: skill::Source::Disk {
+                    dir,
+                    file: Box::new(file),
+                },
+            })
+        });
+    let found = on_disk.or_else(|| skill::builtin(name)).ok_or_else(|| {
+        sig(format!(
+            "skill: no skill named '{name}'; did you mean one that `skill-list` shows?"
+        ))
+    })?;
+    let place = found.place();
+    let body = skill::read_skill_body(&found).map_err(|why| {
+        sig(format!(
+            "skill: could not load '{name}' from {place}: {why}"
+        ))
+    })?;
+    // Only once the body is in hand, so the card never claims a load that did
+    // not happen.
+    mooring.surface(&Value::map(vec![
+        ("io".into(), Value::string("skill")),
+        ("name".into(), Value::string(name)),
+        ("dir".into(), Value::string(place.clone())),
+    ]));
+    Ok(Value::string(format!("// skill root: {place}\n\n{body}")))
 }
 
 fn scheme_skill_list(_u: &mut Unifier) -> Scheme {
@@ -1037,8 +1040,9 @@ fn builtin_skill_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
         match skill::parse_skill(&found) {
             Ok(s) => entries.push(format!("{}: {}", s.name, s.description)),
             Err(why) => errors.push(format!(
-                "⚠ skipped {}: {why}",
-                ral_core::path::shown(found.dir.join("SKILL.md"))
+                "⚠ skipped {} in {}: {why}",
+                found.name,
+                found.place()
             )),
         }
     }

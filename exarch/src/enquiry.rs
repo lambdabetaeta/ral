@@ -387,12 +387,12 @@ impl Datum for Grant {
                 Ok(Self(SpawnGrant::Restrict(record.clone())))
             }
             Some(("restrict", Some(other))) => Err(format!(
-                "`restrict must carry a capability record [exec, fs, net, editor, shell], got {}",
+                "`restrict must carry a capability record [exec, fs, net, gpu, editor, shell], got {}",
                 other.shape()
             )),
             _ => Err(format!(
-                "expected `inherit, {}, or `restrict [exec: …, fs: …, net: …, editor: …, \
-                 shell: …]: `inherit is how you decline to narrow at all, and `restrict must carry \
+                "expected `inherit, {}, or `restrict [exec: …, fs: …, net: …, gpu: …, \
+                 editor: …, shell: …]: `inherit is how you decline to narrow at all, and `restrict must carry \
                  a capability record of the same shape `grant [...]` takes, every key optional: got {}",
                 crate::policy::SPAWN_BASES
                     .map(|b| format!("`{b}"))
@@ -1492,7 +1492,7 @@ mod tests {
         };
         assert_eq!(
             why,
-            "`restrict must carry a capability record [exec, fs, net, editor, shell], got a Str"
+            "`restrict must carry a capability record [exec, fs, net, gpu, editor, shell], got a Str"
         );
     }
 

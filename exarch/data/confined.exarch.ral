@@ -9,7 +9,8 @@
 # `--base confined --extend extra.ral` to widen for one tool.
 
 return [
-  net:   `offline,   # no network — confined.sb has the same default
+  net:   `offline,   # no network; confined.sb has the same default
+  gpu:   `withheld,  # no GPU: a build jail computes on the CPU
 
   # The working tree, plus scratch directories.  Nothing else readable;
   # nothing else writable.  System paths needed by the platform runtime

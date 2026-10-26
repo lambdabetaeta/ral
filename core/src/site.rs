@@ -56,6 +56,11 @@ pub(crate) enum Silent {
     /// construction, not a model's data I/O.
     #[cfg(target_os = "linux")]
     OwnCgroup,
+    /// `/dev` and `/dev/dri`, listed at each launch for the GPU's device nodes,
+    /// bwrap having no globs.  It raises no card: envelope construction, not a
+    /// model's data I/O.
+    #[cfg(target_os = "linux")]
+    GpuDiscovery,
     /// The `Command` for a boot-pinned sandbox binary (the ral re-exec for
     /// helpers and bundled tools, the bwrap envelope), built over the pin's
     /// exec path.  It raises no card: an infrastructure spawn, not a model

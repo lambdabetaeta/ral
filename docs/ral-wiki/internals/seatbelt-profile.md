@@ -1,8 +1,8 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-verified_at_commit: f0b81686
-verified_at_date: 2026-10-17
-anchors: [apply_profile, build_profile, Profile, emit_fs_restricted, emit_exec_rules, Clause, Filter, emit_ancestor_metadata, withheld_services, rendered_ancestors, pinned_dirs, step]
+generated_at_commit: 1e3124cbc0ac2352d44c9d743a70b1cde5081361
+verified_at_commit: 1e3124cb
+verified_at_date: 2026-10-26
+anchors: [apply_profile, build_profile, Profile, RESOLVER_SOCKET, gpu_name, emit_fs_restricted, emit_exec_rules, Clause, Filter, emit_ancestor_metadata, withheld_services, rendered_ancestors, pinned_dirs, step]
 ---
 
 # The Seatbelt profile: an object policy in a name language
@@ -126,9 +126,19 @@ descendants, and `authority::policy::deputy` names such folders
 ([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]).
 
 **net.** Enforced by absence. The base admits `network-outbound` for nothing;
-only a grant that does not say ``net: `offline`` appends `macos-net.sbpl` — the wholesale `(allow network*)`,
-Seatbelt having no per-address rules, and the Mach services that *are* the
-network: configd (proxies, DNS servers), the dnssd port, trustd. That silence
+only a grant that does not say ``net: `offline`` appends `macos-net.sbpl`: every
+IP endpoint (`(remote ip)` out, `(local ip)` in and bind, loopback included),
+Seatbelt having no per-address rules; the resolver's socket; and the Mach
+services that *are* the network: configd (proxies, DNS servers), the dnssd
+port, trustd. Never `(allow network*)`, which also admits every Unix-domain
+socket: a socket reaches a daemon acting with the user's authority outside the
+profile, and under it a confined `ssh-add -l` listed the user's keys (measured
+on macOS 27). With the IP rules it fails with `EPERM`, while `curl`, `git
+ls-remote` over https, and a `localhost` server in or out of the sandbox
+work. `RESOLVER_SOCKET` is the one Unix socket admitted, without which names
+do not resolve; `mac_net_profile_admits_no_unix_socket_but_the_resolver`
+holds the shape, and the hint answers any other denied Unix socket as one no
+grant opens. That silence
 is what closes DNS: `getaddrinfo` reaches mDNSResponder over the UNIX socket
 `/private/var/run/mDNSResponder`, which Seatbelt gates as `network-outbound`,
 not `mach-lookup` (measured on Darwin 25.5.0: denying `mach-lookup` outright
@@ -138,6 +148,25 @@ hostname an egress channel — an attacker-chosen query label leaves through a
 daemon outside the sandbox — while ``net: `offline`` still read as closed.
 `mac_profile_denies_network_when_disabled` asserts this over every rendered
 rule, with an open-network positive control so it cannot pass vacuously.
+
+**gpu.** Enforced by absence, like net. The base opens no IOKit user client and
+no Metal service; only a frame that does not withhold the GPU appends
+`macos-gpu.sbpl`: `iokit-open` of `AGXDeviceUserClient` (Metal's device; without
+it "No Metal device available") and `IOSurfaceRootUserClient` (without it
+"Failed to create Metal shared event"), and `mach-lookup` of
+`com.apple.MTLCompilerService` (a cold shader cache). Metal's caches are paths,
+so `build_profile` renders them from `confstr(_CS_DARWIN_USER_CACHE_DIR)`
+(`gpu_caches`, resolved once, both firmlink spellings, among the fs allows so a
+deny still wins): read and write of the per-user `com.apple.metal`,
+`com.apple.metalfe` and `com.apple.gpuarchiver` caches. Without them a model
+load's JIT build fails "unable to open output file … monolithic_metal.pcm", and
+`com.apple.metal` is the one that cannot be dropped. An unresolvable cache
+directory renders none and refuses nothing. **Residual:** that write access
+lets a confined child alter the per-user shader caches unconfined programs
+read. Measured with MLX on Darwin 27, 2026-10-26 (small ops, and Qwen3.5 4B
+loaded and run once); `IOAccelerator` and `IOSurfaceRoot` are service classes,
+not user-client classes, and admit nothing; Apple Silicon only. The denial hint
+knows these names (`GPU_NAMES`) and answers ``gpu: `withheld``.
 
 ## The base, `macos-base.sbpl`
 
@@ -209,11 +238,42 @@ admits being variable-length.
   confined, Seatbelt answers first. The foreground launch keeps the terminal,
   so there the profile is the only wall.
 
+## Declared limits
+
+**A confined child reads every same-uid process's argv and exec-time
+environment** through `sysctl` `KERN_PROCARGS2`, as `ps -E` does. Measured
+2026-10-26 under the base plus broad `file-read*`: argv and env of 553 of 800
+processes, the launching agent's own parent among them.
+
+- No rule closes it. XNU's `sysctl_procargsx` (`bsd/kern/kern_sysctl.c`)
+  checks only uid equality; every sysctl passes
+  `mac_system_check_sysctlbyname`, yet a wholesale `(deny sysctl-read)` blocked
+  `KERN_PROC_ALL` and not procargs2, as did `(deny sysctl-read (sysctl-name
+  "kern.procargs2"))` and every `process-info*` rule, so the Sandbox kext
+  evidently exempts it.
+- The kernel withholds the environment only from a `cs_restricted` target
+  (platform binaries: Finder showed none) or from a caller holding an Apple
+  entitlement. Anything launched from a shell shows its whole exec-time
+  environment; argv always shows.
+- Closing it needs another uid for confined children, or a VM: synod's guest
+  (fresh-uid jails, a separate kernel) does not have it. Nor does the Linux
+  envelope, wherever the host admits `--unshare-pid` and its own `/proc`
+  ([[internals/linux-envelope|linux-envelope]]).
+- So a process holding secrets must erase them from its launch bytes: exarch's
+  `resolve_and_scrub` (`exarch/src/provider/credential.rs`) zeroes each
+  `{NAME}_API_KEY` value in place, the execve stack bytes `KERN_PROCARGS2` and
+  `/proc/<pid>/environ` read, before `unsetenv`. The residue is the user's
+  other processes: whatever a shell launched carries its exported variables,
+  so secrets belong in the keychain or the vault.
+- Narrowing `sysctl-read` or `process-info*` buys nothing here and risks the
+  agent's control of its own processes, so the base keeps both.
+
 ## Diagnosis
 
 `authority::sandbox::diag` turns a kernel denial into a hint per operand class — a path
-to `read`, `write` or `exec`, a network operand to the `net:` bit, a Mach or IPC
-operand to nothing, since a service is the base's to decide and no grant widens one
+to `read`, `write` or `exec`, a network operand to the `net:` bit unless it names
+a Unix socket other than the resolver's, which no grant opens, a Metal device,
+IOSurface or compiler to the `gpu:` bit, a Mach or IPC operand to nothing, since a service is the base's to decide and no grant widens one
 ([[map/core/capabilities|capabilities]]).
 
 Entry has one diagnosis of its own. A lineage already inside a profile —

@@ -742,7 +742,7 @@ fn return_schema_resolves_an_earlier_top_level_let() {
 
 // ─── grant tables ─────────────────────────────────────────────────────────────
 //
-// `grant` holds `net`, `editor` and `shell` to closed variants where they are
+// `grant` holds `net`, `gpu`, `editor` and `shell` to closed variants where they are
 // written, and queues `exec` and `fs` to be ascribed against their nested
 // tables once inference has finished, so the verdict is the same inline,
 // bound, and returned from a profile.
@@ -766,6 +766,7 @@ const GRANT_SURFACE: &str = "[
         deny: [`cwd .git],
     ],
     net: `offline,
+    gpu: `withheld,
     editor: [`read, `tui],
     shell: [`chdir],
 ]";
@@ -884,6 +885,26 @@ fn grant_words_a_type_mismatch_in_the_vocabularys_words() {
     assert_eq!(msgs, ["expected a list of verbs, got a Bool"]);
     let msgs = grant_messages("grant [exec: [allow: ['git']]] { return 1 }");
     assert_eq!(msgs, ["expected an exec target, got text (String)"]);
+}
+
+#[test]
+fn grant_holds_gpu_to_withheld() {
+    assert_eq!(
+        grant_messages("grant [gpu: true] { return 1 }"),
+        ["expected a GPU mode, got a Bool"]
+    );
+    let hints = grant_hints("grant [gpu: true] { return 1 }");
+    assert!(
+        hints
+            .iter()
+            .any(|h| h.contains("omit `gpu` to inherit, or write `` gpu: `withheld ``")),
+        "{hints:?}"
+    );
+    let errs = raw_errors("grant [gpu: `on] { return 1 }");
+    assert!(
+        errs[0].message().starts_with("`` `on `` is not a GPU mode"),
+        "{errs:?}"
+    );
 }
 
 /// `detach` is a shell verb: the checker gives the advice the decoder does,

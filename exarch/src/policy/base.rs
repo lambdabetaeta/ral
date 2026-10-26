@@ -7,7 +7,8 @@
 //! `edit-only`, `read-only`, `minimal`, `confined`.  Every profile but
 //! `dangerous` names `cwd` and `tempdir` places, which the loader freezes at
 //! session start — so the per-invocation working directory is baked into the
-//! policy and exarch never injects it dynamically.
+//! policy and exarch never injects it dynamically.  `confined`, `minimal`,
+//! `read-only` and `edit-only` withhold the GPU.
 
 use ral_core::authority::grant::freeze::FreezeCtx;
 use ral_core::authority::policy::GrantLayer;
@@ -491,6 +492,24 @@ mod tests {
         use ral_core::authority::grant::freeze::Selector;
         let want = Selector::names().map(String::from).collect();
         assert_eq!(dir_selectors(REASONABLE_RAL), want);
+    }
+
+    /// The narrow bases withhold the GPU, the wide ones leave it.
+    #[cfg(unix)]
+    #[test]
+    fn the_narrow_bases_withhold_the_gpu() {
+        let ctx = ctx_at("/h", "/work/proj");
+        for (name, text, withheld) in [
+            ("confined", CONFINED_RAL, true),
+            ("minimal", MINIMAL_RAL, true),
+            ("read-only", READ_ONLY_RAL, true),
+            ("edit-only", EDIT_ONLY_RAL, true),
+            ("reasonable", REASONABLE_RAL, false),
+            ("dangerous", DANGEROUS_RAL, false),
+        ] {
+            let gpu = load(name, text, &ctx).summary().and_then(|s| s.gpu);
+            assert_eq!(gpu.is_some(), withheld, "{name}");
+        }
     }
 
     /// A session writes no cache the user's own tools read.

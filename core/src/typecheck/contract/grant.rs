@@ -2,12 +2,12 @@
 //! profile's keyset, and the two nested tables `exec` and `fs` hold.
 //!
 //! The vocabularies are minted from the Rust types (`EditorVerb`, `ShellVerb`,
-//! `Net`, `Selector`, `Anchor`), so a new verb, selector or XDG kind is one
+//! `Net`, `Gpu`, `Selector`, `Anchor`), so a new verb, selector or XDG kind is one
 //! variant.  A `Ty::List` cannot sit in a `static`, hence `Shaped`.
 
 use super::{Holds, Key, Table, Vocab};
 use crate::authority::grant::freeze::{Anchor, Selector};
-use crate::authority::policy::{EditorVerb, Net, ShellVerb};
+use crate::authority::policy::{EditorVerb, Gpu, Net, ShellVerb};
 use crate::ty::Ty;
 use crate::typecheck::error::Reason;
 use crate::typecheck::unify::Unifier;
@@ -15,7 +15,7 @@ use strum::VariantArray;
 
 /// `grant`'s options.
 ///
-/// Checked statically: `net`, `editor` and `shell` are held to closed
+/// Checked statically: `net`, `gpu`, `editor` and `shell` are held to closed
 /// variants, so a misspelt tag or verb is an error at the form; `exec` and
 /// `fs` are nested tables, ascribed once inference has finished (their keys
 /// are optional, which no row expresses), as records only, with their lists
@@ -44,6 +44,11 @@ pub(super) static GRANT: Table = Table {
             label: "net",
             holds: Holds::Shaped(net),
             reason: Some(Reason::Vocabulary(&NET)),
+        },
+        Key {
+            label: "gpu",
+            holds: Holds::Shaped(gpu),
+            reason: Some(Reason::Vocabulary(&GPU)),
         },
         Key {
             label: "editor",
@@ -181,6 +186,15 @@ pub(crate) static NET: Vocab = Vocab {
     within: &[],
 };
 
+pub(crate) static GPU: Vocab = Vocab {
+    noun: "GPU mode",
+    row: nullary::<Gpu>,
+    misses: no_misses,
+    untagged: "a grant only narrows: omit `gpu` to inherit, or write `` gpu: `withheld ``",
+    payload: "`` `withheld `` takes no payload",
+    within: &[],
+};
+
 pub(crate) static EDITOR: Vocab = Vocab {
     noun: "verb",
     row: nullary::<EditorVerb>,
@@ -233,6 +247,10 @@ fn exec_target_row() -> Tags {
 
 fn net(_: &mut Unifier) -> Ty {
     NET.ty()
+}
+
+fn gpu(_: &mut Unifier) -> Ty {
+    GPU.ty()
 }
 
 fn editor(_: &mut Unifier) -> Ty {

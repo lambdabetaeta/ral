@@ -100,7 +100,7 @@ fn with_fs(fs: FsPolicy) -> GrantLayer {
 
 /// A layer of exec rules already resolved.
 fn exec_layer(rules: ExecRules) -> GrantLayer {
-    GrantLayer::new(None, Some(rules), None, None, None)
+    GrantLayer::new(None, Some(rules), None, None, None, None)
 }
 
 /// A host file at `real`, which exists and is also its launch path.
@@ -155,6 +155,7 @@ fn witness_a() -> Capabilities {
             deny_paths: vec![nprefix("/ral-lattice/tmp/secret")],
         }),
         net: None,
+        gpu: None,
         editor: Some([EditorVerb::Read, EditorVerb::Write].into()),
         shell: Some([ShellVerb::Chdir, ShellVerb::Detach].into()),
     }
@@ -175,6 +176,7 @@ fn witness_b() -> Capabilities {
             deny_paths: vec![nprefix("/ral-lattice/tmp/work/.exarch.toml")],
         }),
         net: Some(Net::Offline),
+        gpu: Some(Gpu::Withheld),
         editor: Some([EditorVerb::Read, EditorVerb::Tui].into()),
         shell: Some(std::collections::BTreeSet::new()),
     }
@@ -454,7 +456,9 @@ fn a_run_carries_its_grant_stack_across_the_wire() {
     };
     let json = serde_json::to_string(&run).unwrap();
     assert!(
-        json.contains(r#""offline""#) && json.contains(r#""chdir""#),
+        json.contains(r#""offline""#)
+            && json.contains(r#""withheld""#)
+            && json.contains(r#""chdir""#),
         "{json}"
     );
     assert_eq!(
@@ -702,7 +706,7 @@ fn decode_rejects_non_tag_verb() {
 }
 
 #[test]
-fn decode_accepts_verb_lists_and_offline() {
+fn decode_accepts_verb_lists_offline_and_withheld() {
     let v = map(vec![
         (
             "editor",
@@ -713,8 +717,10 @@ fn decode_accepts_verb_lists_and_offline() {
         ),
         ("shell", Value::list(vec![Value::variant("chdir", None)])),
         ("net", Value::variant("offline", None)),
+        ("gpu", Value::variant("withheld", None)),
     ]);
-    let layer = decode_capability_map(&v, "test", &test_ctx("/h")).expect("verbs and `offline`");
+    let layer = decode_capability_map(&v, "test", &test_ctx("/h"))
+        .expect("verbs, `offline` and `withheld`");
     let shown = layer.summary().expect("a layer that withholds");
     assert_eq!(
         shown.editor,
@@ -722,6 +728,7 @@ fn decode_accepts_verb_lists_and_offline() {
     );
     assert_eq!(shown.shell, Some([ShellVerb::Chdir].into()));
     assert_eq!(shown.net, Some(Net::Offline));
+    assert_eq!(shown.gpu, Some(Gpu::Withheld));
 }
 
 fn test_ctx(home: &str) -> FreezeCtx {
@@ -908,9 +915,9 @@ fn extension_with_an_exclusion_over_an_omitted_axis_is_every_less_it() {
     }
 }
 
-/// Extension joins verb sets by union, and the net veto is a baseline.
+/// Extension joins verb sets by union, and the net and gpu vetoes are a baseline.
 #[test]
-fn extension_unions_verbs_and_keeps_the_net_veto() {
+fn extension_unions_verbs_and_keeps_the_net_and_gpu_vetoes() {
     let permits_all = |layer: GrantLayer| {
         let stack = test_helper::stack([layer]);
         every_flag().into_iter().all(|f| stack.permits(f))
@@ -935,6 +942,19 @@ fn extension_unions_verbs_and_keeps_the_net_veto() {
     assert_eq!(
         nets(layer(offline).extend(fragment(Capabilities::default()))),
         [Net::Offline]
+    );
+    let withheld = Capabilities {
+        gpu: Some(Gpu::Withheld),
+        ..Capabilities::default()
+    };
+    let gpus = |layer: GrantLayer| test_helper::stack([layer]).gpu().collect::<Vec<_>>();
+    assert_eq!(
+        gpus(GrantLayer::root().extend(fragment(withheld.clone()))),
+        [Gpu::Withheld]
+    );
+    assert_eq!(
+        gpus(layer(withheld).extend(fragment(Capabilities::default()))),
+        [Gpu::Withheld]
     );
 }
 
@@ -1196,15 +1216,16 @@ fn law_4_extension_invariant_on_reads_with_run_places() {
     }
 }
 
-/// Law 4 on verbs and net.
+/// Law 4 on verbs, net and gpu.
 #[test]
-fn law_4_extension_invariant_on_verbs_and_net() {
+fn law_4_extension_invariant_on_verbs_net_and_gpu() {
     let mut rng = Rng(0x2468_ace0_1357_9bdf);
     for _ in 0..500 {
         let caps = |rng: &mut Rng| Capabilities {
             shell: rand_verbs(rng),
             editor: rand_verbs(rng),
             net: some(rng, 2).then_some(Net::Offline),
+            gpu: some(rng, 2).then_some(Gpu::Withheld),
             ..Capabilities::default()
         };
         let (base, frag) = (caps(&mut rng), caps(&mut rng));
@@ -1224,6 +1245,8 @@ fn law_4_extension_invariant_on_verbs_and_net() {
         }
         assert!(f.net().next().is_none() || e.net().next().is_some());
         assert!(e.net().next().is_none() || b.net().next().is_some() || f.net().next().is_some());
+        assert!(f.gpu().next().is_none() || e.gpu().next().is_some());
+        assert!(e.gpu().next().is_none() || b.gpu().next().is_some() || f.gpu().next().is_some());
     }
 }
 
@@ -1238,7 +1261,8 @@ fn a_root_reached_through_a_symlink_denotes_top() {
     std::fs::create_dir(root.join("work")).unwrap();
     let writes_top = |dir: &str| {
         let writing = FsLayer::new([], [allowing(&spelled(&root.join(dir)))], []);
-        test_helper::stack([GrantLayer::new(Some(writing), None, None, None, None)]).fs_is_top()
+        test_helper::stack([GrantLayer::new(Some(writing), None, None, None, None, None)])
+            .fs_is_top()
     };
     assert!(writes_top("root-alias"));
     assert!(!writes_top("work"));
@@ -1302,6 +1326,13 @@ fn activation_is_denotational() {
     assert!(
         layer(Capabilities {
             net: Some(Net::Offline),
+            ..Capabilities::default()
+        })
+        .is_restrictive()
+    );
+    assert!(
+        layer(Capabilities {
+            gpu: Some(Gpu::Withheld),
             ..Capabilities::default()
         })
         .is_restrictive()

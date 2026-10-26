@@ -672,6 +672,7 @@ the whole block.
             write: [`tempdir .],
         ],
         net: `offline,
+        gpu: `withheld,
     ] {
         git status --short       # allowed
         curl $url                # denied: curl was not granted
@@ -686,6 +687,7 @@ Each mentioned dimension becomes deny-by-default:
   arguments; ral does not filter arguments;
 - `fs:` lists the places that are readable, writable, and denied;
 - `net:` is `` `offline `` or omitted; a grant cannot ask for the network;
+- `gpu:` is `` `withheld `` or omitted; a grant cannot ask for the GPU;
 - `editor:` and `shell:` list verbs, for example `` shell: [`chdir] ``.
   `` `detach `` is a `shell` verb: it permits work that outlives the session,
   so a `shell` list without it refuses that work.
