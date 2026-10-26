@@ -630,17 +630,16 @@ fn a_deny_the_token_reaches_anyway_is_refused() {
 fn an_image_is_granted_to_its_own_launch_alone() {
     with_scoped_state(|| {
         let tree = Tree::new();
-        let image = walked(tree.write(r"B\key.txt"));
+        let file = tree.write(r"B\key.txt");
+        // `Everyone` satisfies the user half, never the AppContainer half.
+        // The image still needs its own capability ACE on this exact file.
+        icacls(&file, &["/inheritance:r", "/grant", "*S-1-1-0:(RX)"]);
+        let image = walked(file);
         let _session = SessionGuard;
         let (a, only_a) = (tree.at("A"), projection(&[&tree.real("A")], &[]));
-        // `type` expands its filename by listing the parent directory, but an
-        // image grant covers the file alone, not `B`. Open the exact file by
-        // redirection instead, and read the input without enumerating `B`.
-        let line = r"C:\Windows\System32\findstr.exe /r . <..\B\key.txt";
-        let as_image = confined_as(&only_a, &a, line, &image).unwrap();
+        let as_image = confined_as(&only_a, &a, r"type ..\B\key.txt", &image).unwrap();
         assert_launch_reads(as_image, r"..\B\key.txt", true);
-        let without_image = confined(&only_a, &a, line).unwrap();
-        assert_launch_reads(without_image, r"..\B\key.txt", false);
+        assert_reads(&only_a, &a, r"..\B\key.txt", false);
     });
 }
 

@@ -102,6 +102,12 @@ of the canonical path** (`dacl::fs_capability_name`). Its ACE is stamped once,
 ever, and never reverted (`dacl::ensure_frozen_grant`). `session::confine` mints
 into the child's token exactly the capability SIDs of this launch's grants.
 
+The two halves of Windows' [dual-principal access check](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer)
+must both grant access. An `Everyone` ACE supplies ordinary user/group rights,
+not AppContainer authority, so it never excuses the capability stamp. Only
+ambient package principals (`ALL APPLICATION PACKAGES` and `ALL RESTRICTED
+APPLICATION PACKAGES`) can satisfy that shortcut.
+
 - **The kernel enforces the projection the guard judges.** A narrowed grant, or
   a subagent's narrowed permissions, hold at the OS layer, because the narrower
   token lacks the wider paths' capabilities.

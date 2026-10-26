@@ -539,15 +539,14 @@ pub(super) fn scan_explicit_aces_for_sid(
         .collect()
 }
 
-/// SIDs every `AppContainer` token implicitly carries, so a grant restating
-/// one of them buys nothing — and on a system path this account does not own
-/// would fail `WRITE_DAC` for nothing.
+/// Package principals that grant the `AppContainer` half of its access check.
+/// A grant restating them buys nothing, and on an unowned system path would
+/// fail `WRITE_DAC` for nothing. Ordinary groups such as `Everyone` grant only
+/// the user/group half; they cannot replace a package or capability ACE.
 ///
 /// - `S-1-15-2-1` — `ALL APPLICATION PACKAGES`.
 /// - `S-1-15-2-2` — `ALL RESTRICTED APPLICATION PACKAGES`.
-/// - `S-1-1-0` — `Everyone`, which an `AppContainer` token does keep; it
-///   strips `Authenticated Users` and `Users`, so those are absent by design.
-const WELL_KNOWN_AC_SIDS: &[&str] = &["S-1-15-2-1", "S-1-15-2-2", "S-1-1-0"];
+const WELL_KNOWN_AC_SIDS: &[&str] = &["S-1-15-2-1", "S-1-15-2-2"];
 
 fn well_known_ac_sids() -> &'static [OwnedSid] {
     static CACHE: std::sync::OnceLock<Vec<OwnedSid>> = std::sync::OnceLock::new();

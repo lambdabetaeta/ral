@@ -29,13 +29,30 @@ fn sid_parse_rejects_empty_and_oversized() {
 }
 
 #[test]
-fn effective_access_is_zero_on_fresh_dir() {
+fn everyone_read_rights_do_not_replace_an_appcontainer_grant() {
     with_scoped_state_dir(|| {
         let td = tempfile::tempdir().unwrap();
-        let pin = pin(&real(td.path()), GrantKind::ReadOnly).unwrap().unwrap();
+        let file = td.path().join("image.exe");
+        std::fs::write(&file, b"image").unwrap();
+        let pin = pin(&real(&file), GrantKind::ReadOnly).unwrap().unwrap();
+        let mut empty = [0u32; 2];
+        let acl = empty.as_mut_ptr().cast::<ACL>();
+        // SAFETY: `empty` provides eight bytes of DWORD-aligned ACL storage.
+        assert_ne!(unsafe { InitializeAcl(acl, ACL_CB, ACL_REVISION) }, 0);
         assert_eq!(
-            compute_appcontainer_effective_access(pin.target()).unwrap(),
-            0
+            set_security(
+                pin.target(),
+                DACL_SECURITY_INFORMATION
+                    | windows_sys::Win32::Security::PROTECTED_DACL_SECURITY_INFORMATION,
+                acl,
+                std::ptr::null_mut(),
+            ),
+            ERROR_SUCCESS
         );
+        apply_explicit_ace(pin.target(), "S-1-1-0", super::super::RO_MASK, false).unwrap();
+        assert!(!appcontainer_already_grants(
+            pin.target(),
+            super::super::RO_MASK
+        ));
     });
 }
