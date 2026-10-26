@@ -380,7 +380,7 @@ fn inject_arg_terminator(raw: &[String]) -> Vec<String> {
             out.extend(raw[i..].iter().cloned());
             return out;
         }
-        if arg.starts_with('-') {
+        if arg != "-" && arg.starts_with('-') {
             let is_value_flag = value_longs.iter().any(|f| f == arg);
             out.push(arg.clone());
             i += 1;
@@ -424,13 +424,12 @@ fn value_taking_longs() -> Vec<String> {
         .collect()
 }
 
-/// Whether `arg` is the `-c` inline-code flag, alone or as the trailing letter
-/// of a single-dash short cluster (`-lc`). In a cluster the `c` must be last,
-/// since the following token is the code it consumes.
+/// Whether `arg` contains the `-c` inline-code flag, alone or in a single-dash
+/// short cluster (`-lc`, `-ce`). The following token is code in either case.
 fn is_code_flag(arg: &str) -> bool {
     arg.strip_prefix('-')
         .filter(|rest| !rest.starts_with('-') && rest.chars().all(|c| c.is_ascii_alphabetic()))
-        .is_some_and(|rest| rest.ends_with('c'))
+        .is_some_and(|rest| rest.contains('c'))
 }
 
 /// True when `argv[0]` starts with `-`, the POSIX convention indicating that the

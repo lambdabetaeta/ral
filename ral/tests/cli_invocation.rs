@@ -90,6 +90,54 @@ fn script_positionals_reach_args_and_script() {
 }
 
 #[test]
+fn a_lone_hyphen_names_a_script_and_fences_its_arguments() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("-"), "echo ...!{args}\n").unwrap();
+    for prefix in [&["-"][..], &["--", "-"][..]] {
+        let out = ral_command()
+            .current_dir(dir.path())
+            .args(prefix)
+            .args(["-n", "--check", "-ce", "--version"])
+            .stdin(Stdio::null())
+            .output()
+            .expect("spawn ral");
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(out.stdout, b"-n --check -ce --version\n");
+    }
+}
+
+#[test]
+fn short_code_clusters_fence_code_and_its_arguments() {
+    for flag in ["-ce", "-cl", "-ci", "-ec", "-lc"] {
+        let out = ral_command()
+            .args([flag, "echo ...!{args}", "--version", "-n"])
+            .stdin(Stdio::null())
+            .output()
+            .expect("spawn ral");
+        assert!(
+            out.status.success(),
+            "{flag}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(out.stdout, b"--version -n\n");
+
+        let out = ral_command()
+            .args([flag, "--version"])
+            .stdin(Stdio::null())
+            .output()
+            .expect("spawn ral");
+        assert!(
+            !out.status.success(),
+            "{flag}: code must not become a version request"
+        );
+    }
+}
+
+#[test]
 fn piped_stdin_runs_as_one_script() {
     // Both the bare `cmd | ral` form and the explicit `-s` must evaluate the
     // whole stdin as one script — not line by line at a prompt, and not

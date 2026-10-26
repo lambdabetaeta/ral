@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19f4267e14b59dd8c37436c1ceae26f03a416714
-generated_at_date: 2026-10-25
+generated_at_commit: 0cd41dbc
+generated_at_date: 2026-10-26
 covers_paths: [ral/src/main.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/boot_builtin.rs, ral/src/platform.rs, ral/build.rs]
 ---
 
@@ -99,9 +99,11 @@ rides every mode; `BatchOpts` adds `--audit` / `--pretty` / `halt: Option<Halt>`
 `--surface`.
 
 - **Argv terminator.** `inject_arg_terminator` splices a `--` before the first
-  positional, and immediately after a `-c`, so flag-shaped script arguments and
-  a flag-shaped inline-code token (`ral -c '--version'`) survive clap parsing
-  verbatim. A long flag that takes a separate value token (`--surface readline`,
+  positional (including the literal filename `-`), and immediately after `-c`
+  or a short cluster containing `c` (`-ce`, `-lc`), so flag-shaped script arguments and
+  a flag-shaped inline-code token (`ral -ce '--version'`) survive clap parsing
+  verbatim. The original short cluster remains intact for clap validation.
+  A long flag that takes a separate value token (`--surface readline`,
   `--recursion-limit 4096`) must carry that value past itself rather than have
   the terminator fenced between them; the set of such flags is read from clap's
   own model (`value_taking_longs`), so the injector can never disagree with the
