@@ -33,7 +33,6 @@ export const state = {
   /** @type {import("./bindings/PickedFolder.ts").PickedFolder | null} */
   folder: null,
   choice: null,  // { account, model, effort } picked on the start screen
-  busy: false,   // an exchange is in flight
 };
 
 // The transcript is its own scroll region — a chat-only scrollbar,

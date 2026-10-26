@@ -37,10 +37,12 @@ let reportError = null;
 // The rows already on screen, so the survivors of a refresh do not flash
 // in again as though they were fresh work.
 let shownRows = new Set();
+let reportVersion = 0;
 
 // Wipe the report back to empty and render, for a fresh conversation.
 // Called by conversation.js's resetTranscript.
 export function resetReport() {
+  reportVersion++;
   report = { files: [], unreadable: [] };
   reportError = null;
   shownRows = new Set();
@@ -48,10 +50,14 @@ export function resetReport() {
 }
 
 export async function refreshReport() {
+  const version = ++reportVersion;
   try {
-    report = await invoke("job_report", { folder: state.folder?.path });
+    const next = await invoke("job_report", { folder: state.folder?.path });
+    if (version !== reportVersion) return;
+    report = next;
     reportError = null;
   } catch (err) {
+    if (version !== reportVersion) return;
     report = { files: [], unreadable: [] };
     reportError = String(err);
   }

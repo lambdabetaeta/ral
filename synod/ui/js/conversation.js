@@ -43,43 +43,67 @@ export function enterConversation(folder, choice) {
   startAssistant(folder, choice);
 }
 
-/** @typedef {"starting" | "accepted" | "ready" | "ended"} Phase */
-/** @typedef {{ attempt: string, phase: Phase }} Attempt */
+/**
+ * @typedef {{ attempt: string, phase: "starting" }
+ *   | { attempt: string, phase: "ended" }
+ *   | { attempt: string, phase: "accepted" | "ready", exchange: "idle" | "busy" }} Attempt
+ * @typedef {{ attempt: string, type: "accepted" | "opening" | "submit" | "exchange_done" | "send_failed" | "ended" }} Action
+ */
 /** @type {Attempt} */
 let assistant = { attempt: "", phase: "ended" };
 
-// Terminal attempts are absorbing; acceptance cannot undo readiness either.
-/** @param {Attempt} current @param {string} attempt @param {Exclude<Phase, "starting">} phase */
-function advance(current, attempt, phase) {
-  if (current.attempt !== attempt || current.phase === "ended") return current;
-  if (phase === "accepted" && current.phase !== "starting") return current;
-  return { attempt, phase };
+// Null means ignored; terminal attempts are absorbing.
+/** @param {Attempt} current @param {Action} action @returns {Attempt | null} */
+function advance(current, action) {
+  if (current.attempt !== action.attempt || current.phase === "ended") return null;
+  const attempt = current.attempt;
+  switch (action.type) {
+    case "accepted":
+      return current.phase === "starting" ? { attempt, phase: "accepted", exchange: "idle" } : null;
+    case "opening":
+      if (current.phase === "ready") return null;
+      return { attempt, phase: "ready", exchange: current.phase === "accepted" ? current.exchange : "idle" };
+    case "submit":
+      return current.phase !== "starting" && current.exchange === "idle" ? { ...current, exchange: "busy" } : null;
+    case "exchange_done":
+    case "send_failed":
+      return current.phase !== "starting" && current.exchange === "busy" ? { ...current, exchange: "idle" } : null;
+    case "ended":
+      return { attempt, phase: "ended" };
+    default: {
+      /** @type {never} */
+      const unhandled = action.type;
+      return unhandled;
+    }
+  }
 }
 
-/** @param {string} attempt @param {Exclude<Phase, "starting">} phase */
-function transition(attempt, phase) {
-  const next = advance(assistant, attempt, phase);
-  if (next === assistant) return false;
+/** @param {Action} action */
+function transition(action) {
+  const next = advance(assistant, action);
+  if (!next) return false;
   assistant = next;
   refreshComposer();
   return true;
 }
 
 function canSend() {
-  return !state.busy && (assistant.phase === "accepted" || assistant.phase === "ready");
+  return (assistant.phase === "accepted" || assistant.phase === "ready") && assistant.exchange === "idle";
 }
 
 async function startAssistant(folder, choice) {
   const attempt = crypto.randomUUID();
   assistant = { attempt, phase: "starting" };
-  state.busy = false;
   refreshComposer();
   try {
     await invoke("start_conversation", { folder: folder.path, choice, attempt });
     // Accepted messages queue until boot; acceptance is not readiness.
-    transition(attempt, "accepted");
+    transition({ attempt, type: "accepted" });
   } catch (err) {
-    if (transition(attempt, "ended")) addSystemMessage(String(err));
+    if (transition({ attempt, type: "ended" })) {
+      settleExchange();
+      addSystemMessage(String(err));
+    }
   }
 }
 
@@ -93,10 +117,10 @@ export function setStatus(text) {
   el.append(spinner, text);
 }
 
-function setBusy(busy) {
-  state.busy = busy;
-  refreshComposer();
-  setStatus(busy ? "Working…" : "");
+function settleExchange() {
+  closeStreamingProse();
+  clearOpenDial();
+  setStatus("");
 }
 
 // The composer's enabled state, with no word about the status bar: a start
@@ -126,40 +150,58 @@ $("transcript").addEventListener("click", (e) => {
   if (href) invoke("open_url", { url: href }).catch((err) => addSystemMessage(String(err)));
 });
 
-listen("synod-opening", (event) => {
-  const { attempt, opening } = /** @type {import("./bindings/ConversationOpening.ts").ConversationOpening} */ (event.payload);
-  if (transition(attempt, "ready")) onOpening(opening);
-});
-listen("synod-event", (event) => onSynodEvent(event.payload || {}));
-
-listen("exchange-done", async () => {
-  closeStreamingProse();
-  clearOpenDial();
-  setBusy(false);
-  await refreshReport();
-});
-
-listen("synod-ended", (event) => {
-  const { attempt, stopped, explained } = /** @type {import("./bindings/ConversationEnded.ts").ConversationEnded} */ (event.payload);
-  if (!transition(attempt, "ended")) return;
-  closeStreamingProse();
-  clearOpenDial();
-  setBusy(false);
-  if (!stopped && !explained) addSystemMessage("The assistant stopped unexpectedly. Choose Start again to continue.");
+listen("conversation-event", (event) => {
+  const { attempt, update } = /** @type {import("./bindings/ConversationEvent.ts").ConversationEvent} */ (event.payload);
+  if (assistant.attempt !== attempt || assistant.phase === "ended") return;
+  switch (update.type) {
+    case "opening":
+      if (transition({ attempt, type: "opening" })) onOpening(update.opening);
+      break;
+    case "event":
+      onSynodEvent(update.event);
+      break;
+    case "exchange_done":
+      if (transition({ attempt, type: "exchange_done" })) {
+        settleExchange();
+        refreshReport();
+      }
+      break;
+    case "ended":
+      if (!transition({ attempt, type: "ended" })) return;
+      settleExchange();
+      switch (update.outcome.type) {
+        case "stopped":
+          break;
+        case "failed":
+          if (!update.outcome.explained) addSystemMessage("The assistant stopped unexpectedly. Choose Start again to continue.");
+          break;
+        default: {
+          /** @type {never} */
+          const unhandled = update.outcome;
+          return unhandled;
+        }
+      }
+      break;
+    default: {
+      /** @type {never} */
+      const unhandled = update;
+      return unhandled;
+    }
+  }
 });
 
 function submit() {
   const field = /** @type {HTMLTextAreaElement} */ ($("message"));
   const text = field.value.trim();
-  if (!text || !canSend()) return;
   const attempt = assistant.attempt;
+  if (!text || !transition({ attempt, type: "submit" })) return;
   addUserMessage(text);
   field.value = "";
-  setBusy(true);
+  setStatus("Working…");
   invoke("send_message", { message: text }).catch((err) => {
-    if (assistant.attempt !== attempt || assistant.phase === "ended") return;
+    if (!transition({ attempt, type: "send_failed" })) return;
     addSystemMessage(String(err));
-    setBusy(false);
+    settleExchange();
   });
 }
 

@@ -34,25 +34,55 @@ use tauri::{AppHandle, Emitter as _, Manager, State};
 /// [`start_conversation`]'s own supersession, and the window's own close
 /// handler.
 #[derive(Default)]
-pub struct Running(Arc<Mutex<owner::Owner<Handle>>>);
+pub struct Running(Arc<Mutex<Owner>>);
 
-#[path = "owner.rs"]
-mod owner;
+enum Owner {
+    Open(Option<Handle>),
+    Closing,
+}
+
+impl Default for Owner {
+    fn default() -> Self {
+        Self::Open(None)
+    }
+}
+
+impl Owner {
+    fn current(&self) -> Option<&Handle> {
+        match self {
+            Self::Open(handle) => handle.as_ref(),
+            Self::Closing => None,
+        }
+    }
+
+    fn open(&mut self) -> Option<&mut Option<Handle>> {
+        match self {
+            Self::Open(handle) => Some(handle),
+            Self::Closing => None,
+        }
+    }
+}
 
 /// The first close request's shutdown job; consumed outside the owner lock.
 #[must_use]
-pub(crate) struct Close(owner::Close<Handle>);
+pub(crate) struct Close(Option<Handle>);
 
 impl Close {
     pub(crate) fn wait(self) {
-        self.0.finish(wait_for_conversation);
+        if let Some(handle) = self.0 {
+            wait_for_conversation(handle);
+        }
     }
 }
 
 impl Running {
     /// Atomically forbid registration and hand shutdown to the first caller.
     pub(crate) fn begin_close(&self) -> Option<Close> {
-        self.0.lock_ignore_poison().begin_close().map(Close)
+        let previous = std::mem::replace(&mut *self.0.lock_ignore_poison(), Owner::Closing);
+        match previous {
+            Owner::Open(handle) => Some(Close(handle)),
+            Owner::Closing => None,
+        }
     }
 }
 
@@ -63,7 +93,7 @@ impl Running {
 /// currently occupies the slot before every emit, so a conversation a
 /// restart has already superseded stays silent instead of reporting over
 /// the fresh one that replaced it.
-pub(crate) struct Handle {
+struct Handle {
     generation: u64,
     sender: mpsc::Sender<String>,
     join: JoinHandle<()>,
@@ -75,42 +105,36 @@ pub(crate) struct Handle {
     baseline_stop: synod::workspace::manifest::Stop,
 }
 
+#[derive(Clone, Serialize, ts_rs::TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(export, export_to = "../ui/js/bindings/")]
 enum Ending {
     Stopped,
     Failed { explained: bool },
 }
 
-/// A terminal outcome correlated by the emitting worker itself.
 #[derive(Clone, Serialize, ts_rs::TS)]
 #[ts(export, export_to = "../ui/js/bindings/")]
-struct ConversationEnded {
+struct ConversationEvent {
     attempt: String,
-    /// True when the shell ended it on purpose rather than it failing on
-    /// its own.
-    stopped: bool,
-    /// True when a `synod-event` `Failure` already told the window its own
-    /// sentence for why — so the window's generic "stopped unexpectedly"
-    /// must stay silent instead of contradicting it.
-    explained: bool,
+    update: ConversationUpdate,
 }
 
-/// Readiness for the frontend start attempt, not the internal generation.
 #[derive(Clone, Serialize, ts_rs::TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export, export_to = "../ui/js/bindings/")]
-struct ConversationOpening {
-    attempt: String,
-    opening: synod::session::Opening,
+enum ConversationUpdate {
+    Opening { opening: synod::session::Opening },
+    Event { event: super::sink::SynodEvent },
+    ExchangeDone,
+    Ended { outcome: Ending },
 }
 
-/// The worker thread's own gated seam onto the window: [`Self::emit`] reaches
-/// `app.emit` only while this generation still occupies the conversation
-/// slot, so a superseded worker's narration — tokens, cards, its own
-/// `synod-opening`, a failure — can never land in a transcript a successor
-/// has already begun.
+/// Publishes only while this generation owns the conversation slot.
 #[derive(Clone)]
 pub(crate) struct Emitter {
     app: AppHandle,
-    slot: Arc<Mutex<owner::Owner<Handle>>>,
+    slot: Arc<Mutex<Owner>>,
     generation: u64,
     attempt: String,
 }
@@ -125,10 +149,37 @@ impl Emitter {
             .is_some_and(|h| h.generation == self.generation)
     }
 
-    pub(crate) fn emit<T: Serialize + Clone>(&self, event: &str, payload: T) {
-        if self.current() {
-            let _ = self.app.emit(event, payload);
+    fn opening(&self, opening: synod::session::Opening) {
+        self.emit(ConversationUpdate::Opening { opening });
+    }
+
+    pub(crate) fn event(&self, event: super::sink::SynodEvent) {
+        self.emit(ConversationUpdate::Event { event });
+    }
+
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "generation lookup and publication must be atomic"
+    )]
+    fn emit(&self, update: ConversationUpdate) {
+        let held = self.slot.lock_ignore_poison();
+        if held
+            .current()
+            .is_some_and(|h| h.generation == self.generation)
+        {
+            self.publish(update);
         }
+    }
+
+    // Called only while holding the slot lock.
+    fn publish(&self, update: ConversationUpdate) {
+        let _ = self.app.emit(
+            "conversation-event",
+            ConversationEvent {
+                attempt: self.attempt.clone(),
+                update,
+            },
+        );
     }
 
     /// Name what the shell itself is doing in the status bar's one station,
@@ -136,19 +187,13 @@ impl Emitter {
     /// narration runs from the worker's first breath to the opening, where
     /// `ready` hands the station over.
     fn state(&self, label: impl Into<String>, pending: bool) {
-        self.emit(
-            "synod-event",
-            super::sink::SynodEvent::State {
-                label: label.into(),
-                pending,
-            },
-        );
+        self.event(super::sink::SynodEvent::State {
+            label: label.into(),
+            pending,
+        });
     }
 
-    /// The one terminal emit: takes the slot itself and emits `synod-ended`
-    /// while still holding the lock, so clearing the slot and announcing
-    /// the end are atomic with respect to a successor claiming it — a stale
-    /// end can never land after a successor's opening.
+    /// Clears registration and publishes its end in one critical section.
     #[allow(
         clippy::significant_drop_tightening,
         reason = "the slot must stay held across the emit, not just the take, so a successor can never claim it between clearing and announcing"
@@ -160,12 +205,7 @@ impl Emitter {
             .is_some_and(|h| h.generation == self.generation)
         {
             drop(held.open().and_then(Option::take));
-            let payload = ConversationEnded {
-                attempt: self.attempt.clone(),
-                stopped: matches!(ending, Ending::Stopped),
-                explained: matches!(ending, Ending::Failed { explained: true }),
-            };
-            let _ = self.app.emit("synod-ended", payload);
+            self.publish(ConversationUpdate::Ended { outcome: ending });
         }
     }
 }
@@ -229,17 +269,15 @@ pub fn list_models(
 }
 
 /// Start the conversation: open `folder` on its own worker thread and hold
-/// it open, ready for [`send_message`], its opening announced as one
-/// `synod-opening` event, its narration streamed to the window as
-/// `synod-event` events, and — however it ends — a single `synod-ended`
-/// event.
+/// it open, ready for [`send_message`], publishing correlated opening,
+/// narration, exchange completion and end through `conversation-event`.
 ///
 /// This returns as soon as the thread is spawned; the conversation plays
 /// out over the events from here on.  Calling this again while a
 /// conversation is already running supersedes it, by generation, rather
 /// than refusing — see [`Handle`].
 ///
-/// `attempt` correlates opening/ended events; it grants no authority.
+/// `attempt` correlates every update; it grants no authority.
 ///
 /// # Errors
 /// Returns a plain sentence if credentials failed or the window is closing.
@@ -420,13 +458,13 @@ fn wait_for_conversation(handle: Handle) {
 /// [`Handle`] and dropped the guard.
 fn spawn_conversation(
     app: AppHandle,
-    slot: Arc<Mutex<owner::Owner<Handle>>>,
+    slot: Arc<Mutex<Owner>>,
     folder: PathBuf,
     choice: Choice,
     attempt: String,
 ) -> Result<(), String> {
     static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
-    let generation = NEXT_GENERATION.fetch_add(1, Ordering::SeqCst);
+    let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
 
     let mut held = slot.lock_ignore_poison();
     let registration = held
@@ -467,6 +505,7 @@ fn spawn_conversation(
         join,
         baseline_stop,
     });
+    drop(held);
     Ok(())
 }
 
@@ -547,21 +586,12 @@ fn converse(
         match Conversation::begin(picked, holdings, choice, baseline_stop, report_walk) {
             Ok(begun) => begun,
             Err(e) => {
-                emitter.emit(
-                    "synod-event",
-                    super::sink::SynodEvent::Failure { message: e },
-                );
+                emitter.event(super::sink::SynodEvent::Failure { message: e });
                 return Ending::Failed { explained: true };
             }
         };
 
-    emitter.emit(
-        "synod-opening",
-        ConversationOpening {
-            attempt: emitter.attempt.clone(),
-            opening,
-        },
-    );
+    emitter.opening(opening);
     emitter.state("ready", false);
 
     // A fresh conversation opens on a fresh report: whatever the last one
@@ -571,10 +601,7 @@ fn converse(
 
     while let Ok(message) = receiver.recv() {
         if let Err(e) = conversation.exchange(message, &mut sink) {
-            emitter.emit(
-                "synod-event",
-                super::sink::SynodEvent::Failure { message: e },
-            );
+            emitter.event(super::sink::SynodEvent::Failure { message: e });
         }
         // Held even after a failed exchange: the closing walk ran
         // regardless, and whatever changed before the failure is already in
@@ -582,7 +609,7 @@ fn converse(
         if let Some(report) = conversation.report() {
             super::review::hold(&review, picked, report);
         }
-        emitter.emit("exchange-done", ());
+        emitter.emit(ConversationUpdate::ExchangeDone);
     }
 
     let _ = conversation.end();

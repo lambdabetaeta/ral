@@ -1,6 +1,6 @@
 //! The window's own [`exarch::bus::Sink`]: folds the bus's [`Record`] and
-//! [`Transient`] into a JSON-ready [`SynodEvent`] and emits each as a
-//! `synod-event` to the frontend, in place of the developer-flavoured
+//! [`Transient`] into a JSON-ready [`SynodEvent`] and emits each in a
+//! correlated `conversation-event`, in place of the developer-flavoured
 //! stderr lines headless writes.
 //!
 //! [`project`], [`project_helper`], [`transient`] and [`transient_helper`]
@@ -176,8 +176,7 @@ fn hint(remedy: Remedy) -> Option<String> {
     .map(str::to_string)
 }
 
-/// The wire shape of one exchange's worth of narration, as the window's own
-/// `synod-event` listener sees it — [`project`]'s codomain, plus
+/// The narration carried by a `conversation-event` update — [`project`]'s codomain, plus
 /// [`Self::Failure`], which never comes from the bus.
 #[derive(Clone, Serialize, TS)]
 #[ts(export, export_to = "../ui/js/bindings/")]
@@ -254,7 +253,7 @@ pub enum SynodEvent {
     Stalled(ReadoutDto),
     /// A conversation failure, emitted directly by `commands.rs` — never by
     /// [`project`], since no [`Record`] carries this fact.  A
-    /// `Conversation::begin` refusal is terminal, and `synod-ended` follows;
+    /// `Conversation::begin` refusal is terminal, and an `ended` update follows;
     /// a `Conversation::exchange` `Err` leaves the conversation open for the
     /// next message.
     Failure {
@@ -591,7 +590,7 @@ impl Router {
 
 /// The window's [`Sink`]: routes every seam fact and transient by whether it
 /// came from the conversation's own trunk or from a helper it spawned, and
-/// emits what survives as `synod-event` through the worker's own gated
+/// emits what survives as correlated `conversation-event` updates through the gated
 /// [`Emitter`](super::commands::Emitter).
 ///
 /// The window draws only from [`Sink::fact`]/[`Sink::transient`] below,
@@ -611,7 +610,7 @@ impl TauriSink {
 
     fn send(&self, dto: Option<SynodEvent>) {
         if let Some(dto) = dto {
-            self.emitter.emit("synod-event", dto);
+            self.emitter.event(dto);
         }
     }
 }
