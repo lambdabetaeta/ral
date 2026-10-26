@@ -6,7 +6,8 @@
 
 use std::convert::Infallible;
 use std::fs;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::mem::ManuallyDrop;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
@@ -139,8 +140,20 @@ fn load_modules() -> Result<(), String> {
 fn adopt_console() -> Result<(), String> {
     let console = openat(CWD, "/dev/console", OFlags::RDWR, Mode::empty())
         .map_err(|err| format!("could not open /dev/console: {err}"))?;
+    adopt_stdio(console).map_err(|err| format!("could not adopt /dev/console: {err}"))
+}
+
+fn adopt_stdio(console: OwnedFd) -> Result<(), Errno> {
+    let standard;
+    let source = if matches!(console.as_raw_fd(), 0..=2) {
+        // A standard source must survive even a later duplication failure.
+        standard = ManuallyDrop::new(console);
+        standard.as_fd()
+    } else {
+        console.as_fd()
+    };
     for dup in [dup2_stdin, dup2_stdout, dup2_stderr] {
-        dup(&console).map_err(|err| format!("could not adopt /dev/console: {err}"))?;
+        dup(source)?;
     }
     Ok(())
 }
@@ -298,4 +311,56 @@ fn purge(dir: BorrowedFd<'_>, dev: u64) -> rustix::io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustix::fs::fstat;
+    use rustix::stdio::{stderr, stdin, stdout};
+
+    #[test]
+    fn console_adoption_preserves_standard_descriptors() {
+        const CASE: &str = "RAL_INITRAMFS_STDIO_CASE";
+        if let Ok(mask) = std::env::var(CASE) {
+            let mask: u8 = mask.parse().unwrap();
+            for fd in 0..=2 {
+                if mask & (1 << fd) != 0 {
+                    // This subprocess alone owns its standard descriptors.
+                    unsafe { rustix::io::close(fd) };
+                }
+            }
+            let console = openat(CWD, "/dev/null", OFlags::RDWR, Mode::empty()).unwrap();
+            let source = console.as_raw_fd();
+            let expected = fstat(&console).unwrap();
+            adopt_stdio(console).unwrap();
+            for fd in [stdin(), stdout(), stderr()] {
+                let actual = fstat(fd).unwrap();
+                assert_eq!(actual.st_dev, expected.st_dev);
+                assert_eq!(actual.st_ino, expected.st_ino);
+                assert_eq!(actual.st_rdev, expected.st_rdev);
+            }
+            if source > 2 {
+                assert_eq!(
+                    stat(format!("/proc/self/fd/{source}")).unwrap_err(),
+                    Errno::NOENT
+                );
+            }
+            let next = openat(CWD, "/dev/null", OFlags::RDWR, Mode::empty()).unwrap();
+            assert!(next.as_raw_fd() > 2);
+        } else {
+            for mask in 0..8 {
+                let status = Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "init::tests::console_adoption_preserves_standard_descriptors",
+                        "--nocapture",
+                    ])
+                    .env(CASE, mask.to_string())
+                    .status()
+                    .unwrap();
+                assert!(status.success(), "closed-descriptor mask {mask}");
+            }
+        }
+    }
 }

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 56fe76a6baf90c1abb161fc2a2364960dc672d6b
+generated_at_commit: 250814a2988f485051430ff7230ccddfa29ad624
 generated_at_date: 2026-10-26
 covers_paths: [guest-net/, synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/protocol/channel.rs, core/src/carrier.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs]
 ---
@@ -738,6 +738,10 @@ engine, `switch_root` — unit-tested on any machine. It hardcodes no disk:
 `plan.rs`'s `resolve_disks` probes candidate *pairs* in order, virtio
 (`/dev/vda` + `/dev/vdb`) first, then Hyper-V's SCSI (`/dev/sda` + `/dev/sdb`),
 and refuses by naming every candidate it looked for.
+`init.rs` adopts `/dev/console` after loading modules: a source already at
+fd 0–2 is preserved even on duplication failure; a temporary source above
+stderr is closed normally. Successful adoption leaves all three standard
+descriptors open across exec.
 
 ## guest-net/ — the host-side TCP tunnel
 
