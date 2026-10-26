@@ -109,6 +109,7 @@ fn local_overrides_global() {
     let all = discover_all(
         cwd.path(),
         Some(config.path()),
+        None,
         &mut boot(&grants, &baseline, &env, &at),
     );
     let dup: Vec<_> = all.iter().filter(|found| found.name == "dup").collect();
@@ -117,6 +118,49 @@ fn local_overrides_global() {
         dup[0].dir, local,
         "the local skill must shadow the global one"
     );
+}
+
+#[test]
+fn shared_roots_follow_project_then_personal_precedence() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let repo = tmp.path().join("repo");
+    let cwd = repo.join("src");
+    let config = tmp.path().join("config");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::write(repo.join(".git"), "gitdir: elsewhere\n").unwrap();
+    let expected = [
+        cwd.join(".exarch/skills"),
+        cwd.join(".agents/skills"),
+        repo.join(".agents/skills"),
+        config.join("skills"),
+        home.join(".agents/skills"),
+    ];
+    assert_eq!(skill_roots(&cwd, Some(&config), Some(&home)), expected);
+    for (index, root) in expected.iter().enumerate() {
+        for name in ["dup".to_owned(), format!("skill-{index}")] {
+            let dir = root.join(&name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: root {index}\n---\nbody {index}\n"),
+            )
+            .unwrap();
+        }
+    }
+    let (grants, baseline, env) = (GrantStack::root(), Baseline::default(), EnvVars::new());
+    let at = CwdPath::new(cwd.clone()).unwrap();
+    let mut reader = boot(&grants, &baseline, &env, &at);
+    let metadata = discover_metadata(&cwd, Some(&config), Some(&home), &mut reader);
+    assert_eq!(metadata.len(), 6);
+    for index in 0..expected.len() {
+        assert!(metadata.iter().any(|s| s.name == format!("skill-{index}")));
+    }
+    let all = discover_all(&cwd, Some(&config), Some(&home), &mut reader);
+    let dup: Vec<_> = all.iter().filter(|s| s.name == "dup").collect();
+    assert_eq!(dup.len(), 1);
+    assert_eq!(dup[0].dir, expected[0].join("dup"));
+    assert_eq!(read_skill_body(dup[0]).unwrap(), "body 0");
 }
 
 /// Discovery is judged by the stack the agent runs under: a skill directory
@@ -131,7 +175,10 @@ fn discovery_under_a_restricted_stack_finds_only_what_it_may_read() {
     for dir in [
         work.join(".exarch/skills/alpha"),
         work.join(".exarch/skills/beta"),
+        work.join(".agents/skills/shared"),
+        work.join(".agents/skills/hidden"),
         config.join("skills/gamma"),
+        config.join(".agents/skills/personal"),
     ] {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("SKILL.md"), "---\ndescription: d\n---\n").unwrap();
@@ -140,7 +187,10 @@ fn discovery_under_a_restricted_stack_finds_only_what_it_may_read() {
     let grants = ral_core::test_helper::stack([ral_core::test_helper::layer(Capabilities {
         fs: Some(FsPolicy {
             read_prefixes: vec![frozen(&work)],
-            deny_paths: vec![frozen(&work.join(".exarch/skills/beta"))],
+            deny_paths: vec![
+                frozen(&work.join(".exarch/skills/beta")),
+                frozen(&work.join(".agents/skills/hidden")),
+            ],
             ..FsPolicy::default()
         }),
         ..Capabilities::default()
@@ -150,8 +200,9 @@ fn discovery_under_a_restricted_stack_finds_only_what_it_may_read() {
     let all = discover_all(
         &work,
         Some(&config),
+        Some(&config),
         &mut boot(&grants, &baseline, &env, &at),
     );
     let names: Vec<_> = all.iter().map(|found| found.name.as_str()).collect();
-    assert_eq!(names, ["alpha"]);
+    assert_eq!(names, ["alpha", "shared"]);
 }

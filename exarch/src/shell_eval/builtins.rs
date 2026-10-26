@@ -983,7 +983,8 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
     }
     let cwd = shell.cwd();
     let config_dir = crate::app::EXARCH.xdg_dir(ral_core::path::XdgKind::Config);
-    for root in skill::skill_roots(&cwd, config_dir.as_deref()) {
+    let home_dir = ral_core::host::home_dot("");
+    for root in skill::skill_roots(&cwd, config_dir.as_deref(), home_dir.as_deref()) {
         let dir = root.join(name);
         let sk_md = dir.join("SKILL.md");
         // A root that lacks the skill, or may not be read, is not a miss for
@@ -1031,7 +1032,8 @@ fn builtin_skill_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
     let cwd = shell.cwd();
     let config_dir = crate::app::EXARCH.xdg_dir(ral_core::path::XdgKind::Config);
     let (mut entries, mut errors) = (Vec::new(), Vec::new());
-    for found in skill::discover_all(&cwd, config_dir.as_deref(), shell) {
+    let home_dir = ral_core::host::home_dot("");
+    for found in skill::discover_all(&cwd, config_dir.as_deref(), home_dir.as_deref(), shell) {
         match skill::parse_skill(&found) {
             Ok(s) => entries.push(format!("{}: {}", s.name, s.description)),
             Err(why) => errors.push(format!(
@@ -1115,7 +1117,7 @@ static EXARCH_BUILTINS_ARR: [BuiltinEntry; 11] = [
     BuiltinEntry::new(
         Cow::Borrowed("skill"),
         scheme_skill,
-        "skill <name>  — load the full SKILL.md body for the named skill (discovered from .exarch/skills/ and your config). Returns its Markdown instructions; fails on a name no skill bears.",
+        "skill <name>  — load the full SKILL.md body for the named skill (discovered from project and personal .agents/skills/, .exarch/skills/, and your exarch config). Returns its Markdown instructions; fails on a name no skill bears.",
         BuiltinBody::Static(builtin_skill),
     ),
     BuiltinEntry::new(

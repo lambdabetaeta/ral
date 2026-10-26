@@ -85,7 +85,9 @@ pub fn assemble(
     if !agents.is_empty() {
         sections.push((Some("Workspace"), agents));
     }
-    let skills = skill::discover_metadata(cwd.as_path(), config_dir, &mut reader);
+    let home_dir = ral_core::host::home_dot("");
+    let skills =
+        skill::discover_metadata(cwd.as_path(), config_dir, home_dir.as_deref(), &mut reader);
     if !skills.is_empty() {
         sections.push((Some("Skills"), skills_section(&skills)));
     }

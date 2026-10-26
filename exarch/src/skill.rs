@@ -1,6 +1,4 @@
-//! Agent Skills: a directory holding a `SKILL.md`, YAML frontmatter (`name`,
-//! `description`) over a Markdown body, discovered from `.exarch/skills/` in the
-//! cwd and from `$XDG_CONFIG_HOME/exarch/skills/`.
+//! Agent Skills from shared and exarch-specific directories.
 //!
 //! Progressive disclosure: the prompt's Skills section carries only
 //! `name: description`, baked once at startup by `prompt::assemble`, while the
@@ -28,12 +26,22 @@ pub struct Skill {
     pub description: String,
 }
 
-/// The skill roots in precedence order: the cwd's `.exarch/skills/`, then the
-/// user's `$XDG_CONFIG_HOME/exarch/skills/` where the host names a config
-/// directory.
-pub(crate) fn skill_roots(cwd: &Path, config_dir: Option<&Path>) -> Vec<PathBuf> {
+/// Project roots before personal roots; exarch's own wins within each scope.
+/// Shared project roots run from cwd up to the working tree's root.
+pub(crate) fn skill_roots(
+    cwd: &Path,
+    config_dir: Option<&Path>,
+    home_dir: Option<&Path>,
+) -> Vec<PathBuf> {
     std::iter::once(cwd.join(".exarch").join("skills"))
+        .chain(
+            ral_core::path::work_tree_chain(cwd)
+                .into_iter()
+                .rev()
+                .map(|dir| dir.join(".agents").join("skills")),
+        )
         .chain(config_dir.map(|dir| dir.join("skills")))
+        .chain(home_dir.map(|dir| dir.join(".agents").join("skills")))
         .collect()
 }
 
@@ -80,8 +88,7 @@ pub(crate) struct Boot<'a> {
 }
 
 impl<'a> Boot<'a> {
-    /// `env` is empty at the boot: there is no shell, and a candidate is
-    /// `cwd` or `config_dir` joined, or a path the operator wrote, so the
+    /// `env` is empty at boot: discovery roots are already anchored, so the
     /// resolver's home is never consulted.
     pub(crate) fn new(
         grants: &'a GrantStack,
@@ -135,16 +142,17 @@ pub(crate) struct Found {
     pub file: Located<Judged<Reading>>,
 }
 
-/// Every readable skill directory under the roots; on a collision the cwd
-/// root shadows the config one.  Reads no file contents.
+/// Every readable skill directory under the roots; the first root wins a
+/// name collision. Reads no file contents.
 pub(crate) fn discover_all(
     cwd: &Path,
     config_dir: Option<&Path>,
+    home_dir: Option<&Path>,
     judge: &mut impl Judge,
 ) -> Vec<Found> {
     let mut seen = HashSet::new();
     let mut skills = Vec::new();
-    for root in skill_roots(cwd, config_dir) {
+    for root in skill_roots(cwd, config_dir, home_dir) {
         for found in scan_dir(&root, judge) {
             if seen.insert(found.name.clone()) {
                 skills.push(found);
@@ -162,9 +170,10 @@ pub(crate) fn discover_all(
 pub(crate) fn discover_metadata(
     cwd: &Path,
     config_dir: Option<&Path>,
+    home_dir: Option<&Path>,
     boot: &mut Boot<'_>,
 ) -> Vec<Skill> {
-    discover_all(cwd, config_dir, boot)
+    discover_all(cwd, config_dir, home_dir, boot)
         .iter()
         .filter_map(|found| parse_skill(found).ok())
         .collect()

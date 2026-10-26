@@ -1461,6 +1461,44 @@ fn skill_name_validation_confines_the_join_to_the_skills_root() {
     }
 }
 
+#[test]
+fn shared_project_skills_are_listed_and_loaded_from_a_subdirectory() {
+    let engine = fresh();
+    let tmp = scratch_dir("shared-skills");
+    let cwd = tmp.path().join("src");
+    let skill = tmp
+        .path()
+        .join(".agents")
+        .join("skills")
+        .join("shared-demo");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(tmp.path().join(".git"), "gitdir: elsewhere\n").unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: shared-demo\ndescription: shared instructions\n---\nshared body\n",
+    )
+    .unwrap();
+    let listed = run_once(&engine, &format!("cd '{}'; skill-list", shown(&cwd)));
+    assert_eq!(listed.exit, 0);
+    assert!(
+        listed
+            .value
+            .as_deref()
+            .unwrap()
+            .contains("shared-demo: shared instructions")
+    );
+    let loaded = run_once(&engine, "skill shared-demo");
+    assert_eq!(loaded.exit, 0);
+    let body = loaded.value.as_deref().unwrap();
+    assert!(body.contains(&shown(&skill)) && body.contains("shared body"));
+
+    std::fs::write(skill.join("SKILL.md"), "updated body\n").unwrap();
+    let refreshed = run_once(&engine, "skill shared-demo");
+    assert_eq!(refreshed.exit, 0);
+    assert!(refreshed.value.as_deref().unwrap().contains("updated body"));
+}
+
 /// A root that simply lacks the skill finds nothing, which is no failure. The
 /// loop must keep walking to later roots rather than reporting the first
 /// `ENOENT` as "could not read": otherwise a skill living only in the config

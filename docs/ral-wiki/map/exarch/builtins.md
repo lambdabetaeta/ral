@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 61c288f
-generated_at_date: 2026-10-21
+generated_at_commit: 52452c41
+generated_at_date: 2026-10-26
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/skill.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/src/enquiry.rs, exarch/src/library.rs, exarch/data/agent.ral]
 ---
 
@@ -105,7 +105,11 @@ judging the object it opens.
 - `skill-list` / `skill <name>` — Agent Skills with progressive disclosure: list
   the available skills (fresh scan each call, filtered by the grant), then load
   one skill's full `SKILL.md` body on demand; the scan and frontmatter parse
-  live in `skill.rs`. Startup discovery skips invalid files quietly; `skill-list`
+  live in `skill.rs`. Roots, first name wins: cwd's `.exarch/skills/`,
+  `.agents/skills/` from cwd up to the working-tree root (cwd alone outside a
+  repository), `$XDG_CONFIG_HOME/exarch/skills/`, then `~/.agents/skills/`.
+  Startup, listing, and loading share these roots and grant checks; discovery
+  adds no read authority. Startup discovery skips invalid files quietly; `skill-list`
   lists valid skills, then names each skipped `SKILL.md` by path with its cause;
   its count covers only valid skills. `skill` reports a read or frontmatter
   failure with the skill's name and path.
