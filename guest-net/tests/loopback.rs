@@ -307,6 +307,8 @@ fn spawn_bounded_fixture<T: Send + 'static>(
                     Err(e) => return Err(e),
                 }
             };
+            // On macOS an accepted socket inherits the listener's O_NONBLOCK.
+            stream.set_nonblocking(false)?;
             stream.set_read_timeout(Some(Duration::from_secs(10)))?;
             stream.set_write_timeout(Some(Duration::from_secs(10)))?;
             serve(stream)
