@@ -1,6 +1,8 @@
 //! The walk on a real filesystem with real links.
 
-use super::super::super::error::{LOOP_MESSAGE, dangling, directory_refused, loop_error};
+use super::super::super::error::{
+    LOOP_MESSAGE, dangling, directory_refused, is_loop, loop_error, loop_trace,
+};
 use super::super::super::names::{EntryName, RootName, rooted};
 use super::super::super::trace::{Kind, ObjectId, RealPath, Step, Trace};
 use super::super::resolve::{
@@ -135,6 +137,39 @@ fn a_link_cycle_is_refused() {
     };
     assert_eq!(err.to_string(), LOOP_MESSAGE);
     assert!(walk_lenient(&spelled(&tmp.path().join("a")), LeafMode::Follow).is_err());
+}
+
+#[test]
+fn a_loop_carries_the_actual_link_not_the_unresolved_continuation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    std::fs::create_dir(dir.join("other")).unwrap();
+    symlink("relative", dir.join("relative")).unwrap();
+    symlink(dir.join("other/absolute"), dir.join("absolute")).unwrap();
+    symlink(dir.join("other/absolute"), dir.join("other/absolute")).unwrap();
+    for (name, actual) in [("relative", "relative"), ("absolute", "other/absolute")] {
+        let path = spelled(&dir.join(name).join("unresolved/child"));
+        for error in [
+            walk(&path, LeafMode::Follow).err().expect("a loop fails"),
+            walk_lenient(&path, LeafMode::Follow).unwrap_err(),
+        ] {
+            assert!(is_loop(&error));
+            assert_eq!(error.to_string(), LOOP_MESSAGE);
+            let trace = loop_trace(&error).expect("a spent budget retains its link");
+            assert_eq!(trace.real().as_path(), dir.join(actual));
+            assert_eq!(trace.kind(), Some(Kind::Symlink));
+            assert_eq!(trace.tail(), []);
+            assert_eq!(
+                trace.last_id(),
+                located_with(&dir.join(actual), LeafMode::NoFollow)
+                    .unwrap()
+                    .trace()
+                    .last_id()
+            );
+        }
+    }
+    assert!(is_loop(&loop_error()));
+    assert!(loop_trace(&loop_error()).is_none());
 }
 
 /// Forty splices are the budget: a chain of forty links walks, one of

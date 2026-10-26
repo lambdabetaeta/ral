@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
-verified_at_date: 2026-10-25
+verified_at_commit: 77866699fd8865982c0481d278a7d3286109ca65
+verified_at_date: 2026-10-26
 anchors: [walk, walk_excluded, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, GrantStack::judge, Refused, Extent, from_capabilities, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline, Walk, Cancellation, AdmittedWalk, Shell::admitted_walk]
 ---
 
@@ -93,6 +93,14 @@ The door is `Shell::locate` (and `locate_dir`, `locate_existing`,
 then the handle. These shell adapters live in `shell/runtime/state/checks.rs`:
 `authority::guard` returns diagnostic data, and the adapter records a denial
 and raises its runtime error. Every write is a `locate`.
+
+**A failed walk's diagnostic is judged before it is disclosed.** A spent link
+budget retains the transcript ending at the actual link, without the unresolved
+continuation. `Shell::walk_failure` judges that evidence for the requested
+operation: a refusal records a denied check, while admission preserves the loop
+error, including for probes. This authorizes disclosure only, never an operation
+through an unresolved name. Missing or unenterable tails use the lenient-name
+judgment. Successful accesses still judge the final object, not each hop.
 
 ## Two readings
 

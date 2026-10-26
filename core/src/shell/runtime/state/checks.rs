@@ -8,7 +8,7 @@ use crate::authority::guard::{
 };
 use crate::authority::policy::{Admitted, Baseline, Flag, FsOp, GrantLayer, GrantStack, Program};
 use crate::authority::sandbox::SandboxProjection;
-use crate::path::walk::Kind;
+use crate::path::walk::{Kind, is_loop, loop_trace};
 use crate::path::{
     Dir, Judged, LeafMode, LexicalPath, Located, Op, Trace, walk, walk_dir, walk_lenient,
 };
@@ -96,18 +96,24 @@ impl Shell {
         self.judged(verdict)
     }
 
-    /// A walk's outcome, its failure reported only once the name is judged
-    /// for `O`: a denied path must read as denied, never as absent or no
-    /// directory.
+    /// Judge disclosure at the failed link, or at the leniently resolved name.
+    fn walk_failure<O: Op>(&mut self, path: &LexicalPath, error: &io::Error) -> Settled<Error> {
+        if let Some(trace) = loop_trace(error) {
+            let verdict = check_fs_exact(&self.context.grants, self.baseline(), trace, &O::FS);
+            self.judged(verdict)?;
+        } else {
+            self.check_named::<O>(path)?;
+        }
+        Ok(Error::io(path.shown(), error))
+    }
+
+    /// A walk's failure is disclosed only after its diagnostic is judged.
     fn named_on_failure<O: Op, T>(
         &mut self,
         path: &LexicalPath,
         walked: io::Result<T>,
     ) -> Settled<T> {
-        walked.or_else(|e| {
-            self.check_named::<O>(path)?;
-            Err(crate::shell::runtime::Error::io(path.shown(), &e).into())
-        })
+        walked.or_else(|e| Err(self.walk_failure::<O>(path, &e)?.into()))
     }
 
     /// The fs door: walk `path` to the object it names, symlink-free, and
@@ -161,9 +167,16 @@ impl Shell {
         leaf: LeafMode,
     ) -> Settled<Option<Located<Judged<O>>>> {
         check_device_name(path).map_err(Error::from)?;
-        let Ok(located) = walk(path, leaf) else {
-            self.check_named::<O>(path)?;
-            return Ok(None);
+        let located = match walk(path, leaf) {
+            Ok(located) => located,
+            Err(e) => {
+                let error = self.walk_failure::<O>(path, &e)?;
+                return if is_loop(&e) {
+                    Err(error.into())
+                } else {
+                    Ok(None)
+                };
+            }
         };
         let held = self.judge::<O>(located)?;
         Ok(held.stat().is_some().then_some(held))

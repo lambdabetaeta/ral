@@ -9,7 +9,7 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::super::error::{dangling_error, loop_error};
+use super::super::error::{dangling_error, loop_at, loop_error};
 use super::super::exclusion::{Excluded, Hold};
 use super::super::names::{EntryName, Name, Origin, RootName, Spelling, rooted, split};
 use super::super::trace::{Kind, ObjectId, RealPath, Step, Trace};
@@ -222,7 +222,7 @@ impl<A: Lists> Dir<A> {
             Links::Splice,
             |_| true,
         );
-        walker.splice(&step.name, &target)?;
+        walker.splice(&step, &target)?;
         let dir = walker
             .run()?
             .into_dir()
@@ -405,12 +405,12 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
     /// Whether the walk must end in a directory is re-asked of the whole
     /// spliced spelling, as the target's trailing separator and what is still
     /// to come say.
-    fn splice(&mut self, link: &EntryName, target: &Path) -> io::Result<()> {
-        let passed = self.cursor.position().child(link);
+    fn splice(&mut self, link: &Step, target: &Path) -> io::Result<()> {
+        let passed = self.cursor.position().child(&link.name);
         self.cursor.trace.passed_mut().push(passed);
         self.splices += 1;
         if self.splices > MAX_HOPS {
-            return Err(loop_error());
+            return Err(loop_at(self.cursor.trace(Some(link.clone()), Vec::new())));
         }
         if target.as_os_str().is_empty() {
             return Err(io::Error::new(
@@ -483,7 +483,7 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
                     if last && origin == Origin::Spelled {
                         self.linked = Some(target.clone());
                     }
-                    self.splice(&step.name, &target)
+                    self.splice(&step, &target)
                 });
                 if let Err(e) = spliced {
                     return self.stopped(name, e);
@@ -784,10 +784,8 @@ pub(crate) fn walk_excluded(rp: &LexicalPath) -> io::Result<Excluded> {
     )?;
     match walker.advance()? {
         Ended::Leaf(child) if child.step.kind == Kind::Symlink => {
-            let (name, named) = (
-                child.step.name.clone(),
-                walker.cursor.trace(Some(child.step.clone()), Vec::new()),
-            );
+            let step = child.step.clone();
+            let named = walker.cursor.trace(Some(step.clone()), Vec::new());
             let (link, ..) = child.held()?;
             walker.mode = Mode::Follow;
             #[cfg(test)]
@@ -795,9 +793,9 @@ pub(crate) fn walk_excluded(rp: &LexicalPath) -> io::Result<Excluded> {
             let read = host::read_link(&link.file);
             #[cfg(test)]
             tests::around_link_read(tests::Around::After);
-            let target = match read.and_then(|target| walker.splice(&name, &target)) {
+            let target = match read.and_then(|target| walker.splice(&step, &target)) {
                 Ok(()) => walker.run()?,
-                Err(e) => match walker.stopped(name, e)? {
+                Err(e) => match walker.stopped(step.name, e)? {
                     ControlFlow::Continue(()) => walker.run()?,
                     ControlFlow::Break(ended) => walker.conclude(ended)?,
                 },

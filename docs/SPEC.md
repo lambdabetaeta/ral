@@ -4294,6 +4294,12 @@ as though nothing were there. `is-file`, `is-dir`, `is-readable`, and
 `is-writable` instead resolve through the link, so a dangling link answers
 `false` to each of them.
 
+A lookup whose symbolic-link budget is exhausted discloses that diagnosis only
+if the grant admits the requested operation at the link where resolution
+stopped. Otherwise it reports and records a filesystem denial. An admitted
+loop remains an error, including for probes; it is not reported as absent.
+This diagnostic check grants no access through the unresolved name.
+
 The prelude adds `file-empty`, `line-count`, and `extension`, the
 Option-valued extension of a path's last `/`-separated component: what follows
 its last dot when a character other than a dot precedes that dot, so

@@ -1,3 +1,4 @@
+use super::Trace;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -7,7 +8,9 @@ pub(super) const LOOP_MESSAGE: &str = "too many levels of symbolic links";
 
 /// A walk's refusal of a link, or of a name still splicing past the budget.
 #[derive(Debug)]
-struct Looped;
+struct Looped {
+    trace: Option<Box<Trace>>,
+}
 
 impl fmt::Display for Looped {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -18,7 +21,18 @@ impl fmt::Display for Looped {
 impl std::error::Error for Looped {}
 
 pub(super) fn loop_error() -> io::Error {
-    io::Error::other(Looped)
+    io::Error::other(Looped { trace: None })
+}
+
+pub(super) fn loop_at(trace: Trace) -> io::Error {
+    io::Error::other(Looped {
+        trace: Some(Box::new(trace)),
+    })
+}
+
+/// The actual link where the splice budget ran out, never its unresolved tail.
+pub(crate) fn loop_trace(e: &io::Error) -> Option<&Trace> {
+    e.get_ref()?.downcast_ref::<Looped>()?.trace.as_deref()
 }
 
 /// Whether `e` is the walk's `ELOOP`: a link met where none is allowed, or a

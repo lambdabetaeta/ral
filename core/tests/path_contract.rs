@@ -228,14 +228,98 @@ fn a_walk_failing_under_a_denied_tree_is_refused_by_the_grant() {
         "echo x > denied/nosuch/f",
         "echo x > denied/sub/f/x",
     ] {
-        let message = run(body);
-        assert!(
-            message.contains("denied by grant"),
-            "{body} must be refused by the grant, got: {message}"
+        assert_fs_denial(
+            &dir,
+            &format!("grant [fs: [read: [`cwd allowed], write: [`cwd allowed]]] {{ {body} }}"),
         );
     }
     let message = run("from-string < allowed/nosuch/f");
     assert!(message.contains("no such file or directory"), "{message}");
+}
+
+#[cfg(unix)]
+fn assert_fs_denial(dir: &Path, body: &str) {
+    use ral_core::data::{FOValue, datum::Datum};
+    use ral_core::fact::{Decision, Observation, Observed, Resource};
+
+    let report = run_in(dir, &format!("audit {{ {body} }}")).expect("audit returns the refusal");
+    let Value::Map(report) = report else {
+        panic!("audit must return a record");
+    };
+    let outcome = report.get("outcome").unwrap().to_string();
+    assert!(outcome.contains("denied by grant"), "{body}: {outcome}");
+    assert!(!outcome.contains("too many levels"), "{body}: {outcome}");
+    let trail = report.get("trail").unwrap();
+    let Value::List(trail) = trail.as_ref() else {
+        panic!("audit must return a trail");
+    };
+    let checks: Vec<_> = trail
+        .iter()
+        .filter_map(|fact| {
+            let fact = FOValue::try_from(fact.as_ref()).unwrap();
+            match Observation::decode(&fact).unwrap().what {
+                Observed::Check(check) => Some(check),
+                _ => None,
+            }
+        })
+        .collect();
+    assert_eq!(checks.len(), 1, "{body}: {trail:?}");
+    assert_eq!(checks[0].resource, Resource::Fs);
+    assert_eq!(checks[0].decision(), Decision::Denied);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_loop_diagnostic_is_judged_at_the_failed_link() {
+    use std::os::unix::fs::symlink;
+
+    let (_tmp, dir) = fixture();
+    std::fs::create_dir(dir.join("allowed")).unwrap();
+    std::fs::create_dir(dir.join("denied")).unwrap();
+    symlink("relative", dir.join("denied/relative")).unwrap();
+    symlink(dir.join("denied/absolute"), dir.join("denied/absolute")).unwrap();
+    symlink("loop", dir.join("allowed/loop")).unwrap();
+    symlink("../denied/relative", dir.join("allowed/out")).unwrap();
+    symlink("../allowed/loop", dir.join("denied/in")).unwrap();
+    std::fs::write(dir.join("allowed/ok"), "allowed").unwrap();
+    symlink("../allowed/ok", dir.join("denied/link")).unwrap();
+    symlink("../denied/relative", dir.join("allowed/bad-link")).unwrap();
+
+    for policy in [
+        "read: [`cwd allowed], write: [`cwd allowed]",
+        "read: [`cwd .], write: [`cwd .], deny: [`cwd denied]",
+        "read: [`cwd allowed/ok], write: [`cwd allowed/ok]",
+    ] {
+        for path in ["denied/relative", "denied/absolute", "allowed/out"] {
+            for op in ["exists", "file-info", "from-string <", "echo x >"] {
+                let body = format!("grant [fs: [{policy}]] {{ {op} {path}/child }}");
+                assert_fs_denial(&dir, &body);
+            }
+        }
+    }
+    for path in ["allowed/loop", "denied/in"] {
+        for op in ["exists", "file-info", "from-string <", "echo x >"] {
+            let body = format!(
+                "grant [fs: [read: [`cwd allowed], write: [`cwd allowed]]] {{ {op} {path}/child }}"
+            );
+            let error = run_in(&dir, &body).expect_err("an admitted loop must remain an error");
+            assert!(
+                error.to_string().contains("too many levels"),
+                "{body}: {error}"
+            );
+        }
+    }
+    assert_eq!(
+        shown(
+            &dir,
+            "grant [fs: [read: [`cwd allowed], deny: [`cwd denied]]] { from-string < denied/link }"
+        ),
+        "allowed"
+    );
+    assert_fs_denial(
+        &dir,
+        "grant [fs: [read: [`cwd allowed]]] { from-string < allowed/bad-link }",
+    );
 }
 
 /// `within [dir: d]` enters the directory `d` is: refused where a deny holds

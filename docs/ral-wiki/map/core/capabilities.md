@@ -1,6 +1,6 @@
 ---
-generated_at_commit: a2aba680
-generated_at_date: 2026-10-25
+generated_at_commit: 77866699fd8865982c0481d278a7d3286109ca65
+generated_at_date: 2026-10-26
 covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
 
@@ -277,7 +277,10 @@ Path resolution is `core/src/path/`: lexical stages, then one walk, plus
   parent's listing for that identity, Windows the normalized name checked against
   the parent's path). A `..` is physical, the kernel's rule, even from a link
   target (the user's own path keeps its logical fold); the splice count is
-  bounded by `MAX_HOPS`; every restart, the given name and each splice alike, is
+  bounded by `MAX_HOPS`. `walk/error.rs::loop_trace` reads the actual failed
+  link's transcript from a spent-budget error; `Shell::walk_failure` judges
+  disclosure before rendering it, without rewalking the name. Every restart,
+  the given name and each splice alike, is
   put to one `rooted` check, so a link target relative to a drive's current
   directory or with an unparsed head is refused as the name itself would be.
   `walk_dir`, `walk_lenient` (a grant spelling's transcript, as far as the disk
