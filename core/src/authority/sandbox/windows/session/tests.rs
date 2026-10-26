@@ -422,16 +422,6 @@ fn confined(
     cwd: &Path,
     line: &str,
 ) -> Result<crate::process::Launch, Refusal> {
-    confined_as(projection, cwd, line, &walked(cmd()))
-}
-
-/// [`confined`], with `image` handed to `confine` as the program's image.
-fn confined_as(
-    projection: &crate::authority::sandbox::SandboxProjection,
-    cwd: &Path,
-    line: &str,
-    image: &RealPath,
-) -> Result<crate::process::Launch, Refusal> {
     use crate::process::cancel::DurableRoot;
     use crate::process::{Launch, StdioSpec};
     let mut launch = Launch::new(cmd());
@@ -443,7 +433,7 @@ fn confined_as(
     super::confine(
         &mut launch,
         projection,
-        Some(image),
+        Some(&walked(cmd())),
         &DurableRoot::default().worker(),
     )?;
     Ok(launch)
@@ -624,10 +614,43 @@ fn a_deny_the_token_reaches_anyway_is_refused() {
     });
 }
 
+/// The subprocess half of the image-grant test: open exactly one file, with
+/// no shell expansion, parent-directory enumeration or external utility.
+/// Distinct exit codes prove this body ran, rather than an empty test filter
+/// or libtest failure: 40 reads the expected bytes, 41 is Win32 access denied.
+#[test]
+fn image_read_child() {
+    let Some(path) = std::env::var_os("RAL_TEST_IMAGE_READ") else {
+        return;
+    };
+    let status = match std::fs::read(&path) {
+        Ok(bytes) if bytes == b"secret\r\n" => 40,
+        Ok(bytes) => {
+            eprintln!("unexpected image bytes: {bytes:?}");
+            42
+        }
+        Err(error) => {
+            eprintln!("read {path:?}: {error}");
+            if error.raw_os_error()
+                == Some(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED.cast_signed())
+            {
+                41
+            } else {
+                42
+            }
+        }
+    };
+    std::process::exit(status);
+}
+
 /// A program's image is granted to the launch that runs it alone: a later
 /// launch under the same projection does not read it.
 #[test]
 fn an_image_is_granted_to_its_own_launch_alone() {
+    use crate::process::cancel::DurableRoot;
+    use crate::process::{Launch, PgidPolicy, StdioSpec};
+    use std::io::Read;
+
     with_scoped_state(|| {
         let tree = Tree::new();
         let file = tree.write(r"B\key.txt");
@@ -635,11 +658,40 @@ fn an_image_is_granted_to_its_own_launch_alone() {
         // The image still needs its own capability ACE on this exact file.
         icacls(&file, &["/inheritance:r", "/grant", "*S-1-1-0:(RX)"]);
         let image = walked(file);
+        let probe = tree.at(r"A\probe.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &probe).unwrap();
+        let probe_image = walked(&probe);
         let _session = SessionGuard;
         let (a, only_a) = (tree.at("A"), projection(&[&tree.real("A")], &[]));
-        let as_image = confined_as(&only_a, &a, r"type ..\B\key.txt", &image).unwrap();
-        assert_launch_reads(as_image, r"..\B\key.txt", true);
-        assert_reads(&only_a, &a, r"..\B\key.txt", false);
+        for (image, expected) in [(&image, 40), (&probe_image, 41)] {
+            let mut launch = Launch::new(&probe);
+            launch.args([
+                "--exact",
+                "authority::sandbox::windows::session::tests::image_read_child",
+                "--nocapture",
+            ]);
+            launch.env("RAL_TEST_IMAGE_READ", tree.at(r"B\key.txt"));
+            launch.current_dir(&a);
+            launch.stdin(StdioSpec::null());
+            launch.stdout(StdioSpec::null());
+            launch.stderr(StdioSpec::Piped);
+            super::confine(
+                &mut launch,
+                &only_a,
+                Some(image),
+                &DurableRoot::default().worker(),
+            )
+            .unwrap();
+            let (mut child, _, _) = launch.spawn(PgidPolicy::Inherit).unwrap();
+            let mut stderr = String::new();
+            child
+                .take_stderr()
+                .unwrap()
+                .read_to_string(&mut stderr)
+                .unwrap();
+            let ended = child.reap().unwrap();
+            assert_eq!(ended.code(), Some(expected), "{stderr}");
+        }
     });
 }
 

@@ -111,6 +111,10 @@ APPLICATION PACKAGES`) can satisfy that shortcut.
 - **The kernel enforces the projection the guard judges.** A narrowed grant, or
   a subagent's narrowed permissions, hold at the OS layer, because the narrower
   token lacks the wider paths' capabilities.
+- **An image grant belongs to one launch and one file.** It admits reading and
+  executing that image, not enumerating its parent directory. The isolation
+  regression uses a native child to read the exact file, then launches under
+  the same projection without that file's capability and requires access denied.
 - **Stamps that stay are safe.** A capability SID is evaluated only in the
   AppContainer pass of the access check, whose result intersects the normal user
   pass. An ACE no live token names is inert, and can never widen a process's
