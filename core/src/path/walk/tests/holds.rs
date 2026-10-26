@@ -293,10 +293,10 @@ fn a_deny_on_a_link_holds_both_objects_by_identity() {
 
 /// What a test does to `dlink`, a link to `tgt` that is being denied, between
 /// the walk's hold of it and its read of the target, and after.
-fn deny_while(dir: &Path, step: impl FnMut(Around) + 'static) -> Excluded {
+fn deny_while(dir: &Path, step: impl FnMut(Around) + 'static) -> std::io::Result<Excluded> {
     symlink("tgt", dir.join("dlink")).unwrap();
     LINK_READ.with(|hook| *hook.borrow_mut() = Some(Box::new(step)));
-    let excluded = deny(&dir.join("dlink"));
+    let excluded = walk_excluded(&spelled(&dir.join("dlink")));
     LINK_READ.with(|hook| *hook.borrow_mut() = None);
     excluded
 }
@@ -309,10 +309,11 @@ fn a_link_replaced_before_its_target_is_read_holds_the_target_the_held_link_name
     let at = dir.clone();
     let excluded = deny_while(&dir, move |around| {
         if around == Around::Before {
-            std::fs::remove_file(at.join("dlink")).unwrap();
+            std::fs::rename(at.join("dlink"), at.join("away")).unwrap();
             symlink("other", at.join("dlink")).unwrap();
         }
-    });
+    })
+    .unwrap();
     assert_eq!(excluded.target().unwrap().real().as_path(), dir.join("tgt"));
     assert_eq!(by(&excluded, &dir.join("other")), None);
 }
@@ -332,9 +333,34 @@ fn a_link_swapped_out_and_back_around_the_read_holds_the_held_links_target() {
             std::fs::remove_file(at.join("dlink")).unwrap();
             std::fs::rename(at.join("away"), at.join("dlink")).unwrap();
         }
-    });
+    })
+    .unwrap();
     assert_eq!(excluded.target().unwrap().real().as_path(), dir.join("tgt"));
     assert_eq!(by(&excluded, &dir.join("other")), None);
+}
+
+#[test]
+fn an_unlinked_link_cannot_anchor_a_deny_to_its_replacement() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    mkdirs(&dir, &["tgt", "other"]);
+    let at = dir.clone();
+    let excluded = deny_while(&dir, move |around| {
+        if around == Around::Before {
+            std::fs::remove_file(at.join("dlink")).unwrap();
+            symlink("other", at.join("dlink")).unwrap();
+        }
+    });
+    match excluded {
+        Ok(excluded) => {
+            assert_eq!(excluded.target().unwrap().real().as_path(), dir.join("tgt"));
+            assert_eq!(by(&excluded, &dir.join("other")), None);
+        }
+        #[cfg(target_os = "macos")]
+        Err(e) => assert_eq!(e.raw_os_error(), Some(libc::EINVAL)),
+        #[cfg(not(target_os = "macos"))]
+        Err(e) => panic!("the held link could not be read: {e}"),
+    }
 }
 
 /// A file removed and made again at its name is another object, met by the

@@ -94,7 +94,7 @@ pub(crate) struct Object {
     pub(crate) spellings: Vec<Rendered>,
     /// What the walk of each surface it was granted by passed
     /// ([`Trace::passed`](super::Trace::passed)), on macOS: Seatbelt lets a
-    /// lookup stat each, and reach nothing beneath one.
+    /// lookup stat directories and read links, and reach nothing beneath one.
     pub(crate) walk: Vec<Rendered>,
 }
 
@@ -108,7 +108,7 @@ impl Object {
 /// Each frozen allowance as its object, one entry per object.  The object is
 /// the frozen real path through [`render_real`], never re-resolved; the
 /// surface a prefix was granted by is only where Linux shows it, and what its
-/// walk passed is only what macOS lets a lookup stat.
+/// walk passed is only what macOS lets a lookup traverse.
 ///
 /// # Errors
 ///

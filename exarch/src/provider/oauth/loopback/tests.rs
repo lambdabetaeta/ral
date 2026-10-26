@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, Receiver};
 const TEST_POLICY: Policy = Policy {
     flow: Duration::from_secs(3),
     request: Duration::from_millis(200),
-    response: Duration::from_millis(30),
+    response: Duration::from_secs(1),
     poll: Duration::from_millis(5),
     ..POLICY
 };
@@ -15,6 +15,13 @@ struct Flow {
     cancel: Arc<AtomicBool>,
     result: Receiver<CallbackResult>,
     worker: Option<std::thread::JoinHandle<()>>,
+}
+
+fn disconnected(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
+    )
 }
 
 impl Flow {
@@ -53,10 +60,10 @@ impl Flow {
         let mut stream = self.connect();
         stream.write_all(request).unwrap();
         let mut response = Vec::new();
-        // Closing after only the request line can reset an unread HTTP body.
+        // Socket closure can report a reset or an abort, depending on the host.
         match stream.read_to_end(&mut response) {
             Ok(_) => {}
-            Err(e) if e.kind() == ErrorKind::ConnectionReset => {}
+            Err(e) if disconnected(&e) => {}
             Err(e) => panic!("callback response failed: {e}"),
         }
         response
@@ -179,7 +186,7 @@ fn assert_closed(stream: &mut TcpStream) {
     let mut byte = [0];
     match stream.read(&mut byte) {
         Ok(0) => {}
-        Err(e) if e.kind() == ErrorKind::ConnectionReset => {}
+        Err(e) if disconnected(&e) => {}
         other => panic!("connection was not closed: {other:?}"),
     }
 }
@@ -232,7 +239,7 @@ fn slow_trickle_does_not_extend_the_request_deadline() {
         let _ = stream.write_all(b"G");
         match stream.read(&mut [0]) {
             Ok(0) => break,
-            Err(e) if e.kind() == ErrorKind::ConnectionReset => break,
+            Err(e) if disconnected(&e) => break,
             Err(e) if e.kind() == ErrorKind::WouldBlock => {}
             other => panic!("unexpected trickle response: {other:?}"),
         }

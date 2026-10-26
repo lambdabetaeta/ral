@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 104cb51994d4dce2c9892a96008426463be2d404
+generated_at_commit: 7ab5809a08c38081b58a1c308eab0ab0303e7b07
 generated_at_date: 2026-10-26
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs, exarch/src/tui/login.rs, exarch/src/tui/providers.rs, exarch/src/tui/commands.rs]
 ---
@@ -279,7 +279,8 @@ flow expiry close pending sockets without flushing. The browser acknowledges
 callback receipt, not the subsequent token exchange or durable sign-in.
 `Connection::advance` takes its time explicitly and reads/writes through its
 stream; expiry is tested with forced backpressure, independently of socket
-buffer capacity or scheduler timing.
+buffer capacity or scheduler timing. Socket round-trip tests leave a full
+second for responses; peer closure may report either a reset or an abort.
 
 ## Two layers for a key, the environment's on top
 

@@ -209,8 +209,8 @@ fn emit_pins<'a>(pins: &mut Vec<String>, dirs: impl IntoIterator<Item = &'a Rend
 
 /// Emit a restricted fs projection: its allows, the lookups they need, and its
 /// denies.  Every allowance renders as its frozen real path and its firmlink
-/// twin; the links and directories its surface's walk passed are only
-/// stat-able on the way.  The read region carries what exec runs and what a
+/// twin; its surface's walk may stat directories and read links, never list
+/// those directories.  The read region carries what exec runs and what a
 /// launch needs beyond it, so exec's own clauses read nothing.
 fn emit_fs_restricted(profile: &mut Profile, rules: &RenderedRules) {
     let objects = || rules.read.iter().chain(&rules.write);
@@ -218,11 +218,15 @@ fn emit_fs_restricted(profile: &mut Profile, rules: &RenderedRules) {
     let walk: BTreeSet<&Rendered> = objects().flat_map(|o| &o.walk).collect();
     let stat: BTreeSet<Rendered> = rendered_ancestors(readable.iter().chain(&walk).copied())
         .into_iter()
-        .chain(walk.into_iter().cloned())
+        .chain(walk.iter().copied().cloned())
         .collect();
     let lines = &mut profile.fs_allows;
     for name in &stat {
         lines.push(Clause::allow("file-read-metadata", Filter::Literal(name)).to_string());
+    }
+    for name in walk {
+        // Holding a link needs data access to the link, never its target.
+        lines.push(Clause::allow("file-read-data", Filter::Symlink(name)).to_string());
     }
     for path in &readable {
         lines.push(Clause::allow("file-read*", Filter::Subpath(path)).to_string());
@@ -349,6 +353,7 @@ const ANY_EXEC: &str = "(allow process-exec)";
 enum Filter<'a> {
     Subpath(&'a Rendered),
     Literal(&'a Rendered),
+    Symlink(&'a Rendered),
     /// A final path component, wherever the name resolves.
     Regex(&'a str),
     /// Beneath none of these; never empty, which SBPL cannot say.
@@ -360,6 +365,11 @@ impl fmt::Display for Filter<'_> {
         match self {
             Self::Subpath(path) => write!(f, "(subpath \"{}\")", escape_path(path)),
             Self::Literal(path) => write!(f, "(literal \"{}\")", escape_path(path)),
+            Self::Symlink(path) => write!(
+                f,
+                "(require-all {} (vnode-type SYMLINK))",
+                Self::Literal(path)
+            ),
             Self::Regex(name) => write!(f, "(regex #\"/{}$\")", escape_regex(name)),
             Self::Outside(paths) => {
                 f.write_str("(require-not (require-any")?;
@@ -835,11 +845,9 @@ mod tests {
         }
     }
 
-    /// An allowance granted through a symlink reads as its frozen real path
-    /// alone: the surface it was written by is only stat-able, so a lookup
-    /// may pass the link and reach nothing beneath it.
+    /// The surface admits traversal, not access beneath a retargeted link.
     #[test]
-    fn mac_profile_lets_a_lookup_stat_the_surface_of_a_frozen_allowance() {
+    fn mac_profile_lets_a_lookup_traverse_the_surface_of_a_frozen_allowance() {
         let tmp = tempfile::tempdir().expect("a temp dir");
         let root = crate::test_helper::real(tmp.path());
         let (real, link) = (root.as_path().join("real"), root.as_path().join("link"));
@@ -863,16 +871,21 @@ mod tests {
         let surface: Vec<&str> = kernel.lines().filter(|l| l.contains(link)).collect();
         assert_eq!(
             surface,
-            [format!("(allow file-read-metadata (literal \"{link}\"))")],
+            [
+                format!("(allow file-read-metadata (literal \"{link}\"))"),
+                format!(
+                    "(allow file-read-data (require-all (literal \"{link}\") (vnode-type SYMLINK)))"
+                ),
+            ],
             "{profile}"
         );
     }
 
-    /// Every name a lookup of an allowance's spelling passes is stat-able: a
+    /// Every name a lookup of an allowance's spelling passes is traversable: a
     /// chain's middle link, which lies on neither the spelling nor the real
     /// path, and a directory a `..` in a target climbs out of.
     #[test]
-    fn mac_profile_lets_a_lookup_stat_every_name_a_chain_passes() {
+    fn mac_profile_lets_a_lookup_traverse_every_name_a_chain_passes() {
         let tmp = tempfile::tempdir().expect("a temp dir");
         let root = crate::test_helper::real(tmp.path());
         let under = |name: &str| root.as_path().join(name);
@@ -892,7 +905,12 @@ mod tests {
             let named: Vec<&str> = kernel.lines().filter(|l| l.contains(&name)).collect();
             assert_eq!(
                 named,
-                [format!("(allow file-read-metadata (literal \"{name}\"))")],
+                [
+                    format!("(allow file-read-metadata (literal \"{name}\"))"),
+                    format!(
+                        "(allow file-read-data (require-all (literal \"{name}\") (vnode-type SYMLINK)))"
+                    ),
+                ],
                 "{profile}"
             );
         }

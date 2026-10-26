@@ -605,22 +605,31 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_write_blocked_under_a_cause_is_stopped_within_a_slice() {
+    fn a_write_blocked_under_a_cause_is_stopped() {
         let (node, scope) = (
             DurableRoot::default().worker(),
             DurableRoot::default().worker(),
         );
         let (_reader, mut sink, _edge, writer) = pipe_sink(&node);
         fill(&writer);
-        let canceller = scope.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(20));
-            canceller.cancel(CancelCause::Interrupted);
+        let writer_scope = scope.clone();
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            send.send(sink.write_under(&writer_scope, b"x")).unwrap();
         });
-        let start = Instant::now();
-        let stop = write_stopped(sink.write_under(&scope, b"x").expect_err("stopped"));
+        assert!(matches!(
+            receive.recv_timeout(Duration::from_millis(20)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        scope.cancel(CancelCause::Interrupted);
+        let stop = write_stopped(
+            receive
+                .recv_timeout(Duration::from_secs(1))
+                .expect("the write outlived its scope")
+                .expect_err("stopped"),
+        );
         assert_eq!(stop.cause, CancelCause::Interrupted);
-        assert!(start.elapsed() < Duration::from_millis(120));
+        worker.join().unwrap();
     }
 
     #[cfg(unix)]

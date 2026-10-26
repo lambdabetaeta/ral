@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
+generated_at_commit: 7ab5809a08c38081b58a1c308eab0ab0303e7b07
 generated_at_date: 2026-10-26
 covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
@@ -278,7 +278,9 @@ Path resolution is `core/src/path/`: lexical stages, then one walk, plus
   hands back a `Located` — the directory handle, the leaf, and the `Trace` whose
   `RealPath` is symlink-free and whose `passed` names each link whose target it
   read and each directory a `..` climbed out of — whose every operation is
-  handle-relative. Each
+  handle-relative. A held link never reads a replacement's target: if the
+  filesystem refuses its read after unlink (APFS on macOS 26), the read
+  refuses rather than looking the name up again. Each
   step is one host primitive, `step`, reading the child's stored name and identity
   from the handle just opened (Linux the name `openat` resolved, macOS the
   parent's listing for that identity, Windows the normalized name checked against

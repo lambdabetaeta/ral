@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1e3124cbc0ac2352d44c9d743a70b1cde5081361
-verified_at_commit: 1e3124cb
+generated_at_commit: 7ab5809a08c38081b58a1c308eab0ab0303e7b07
+verified_at_commit: 7ab5809a
 verified_at_date: 2026-10-26
 anchors: [apply_profile, build_profile, Profile, RESOLVER_SOCKET, gpu_name, emit_fs_restricted, emit_exec_rules, Clause, Filter, emit_ancestor_metadata, withheld_services, rendered_ancestors, pinned_dirs, step]
 ---
@@ -34,6 +34,12 @@ cost of saying the second in the first:
   for exactly this reason (the directory step of `path/walk/macos.rs`). A read handle
   there would need `file-read-data`, and a readable ancestor is a listable
   one: `/Users`, a home directory's dotfile names.
+- **Intermediate links.** Holding a symlink with `O_EVTONLY | O_SYMLINK`
+  needs `file-read-data`, even though traversing a directory needs only
+  metadata. Each name the granted walk passed therefore also gets a literal
+  `file-read-data` allowance guarded by `(vnode-type SYMLINK)`. A directory or
+  regular file replacing that link gains no data access; the target remains
+  governed by its own rules.
 - **Pins.** A deny names a path, so renaming its parent would carry the bytes
   to a name the deny does not cover; every proper ancestor of a deny within a
   write prefix is `(deny file-write-unlink (literal …))` — `literal`, never
@@ -111,12 +117,13 @@ image is already mapped when the profile takes force.
 its resolved real position, with its firmlink twins, and as nothing else: a surface
 spelling is never a predicate of its own. Seatbelt checks the resolved path of
 each access against it, so a symlink put in an allowance's place reaches
-nothing. It does gate the `lstat` of each link a lookup passes, so what the walk
-of an allowance's spelling passed is stat-able and no more: `Object::walk` is
+nothing. It does gate the hold and read of each link a lookup passes, so what the walk
+of an allowance's spelling passed admits traversal alone: `Object::walk` is
 that walk's `Trace::passed` — each link it followed, a chain's middle ones
 included, and each directory a `..` in a target climbed out of — each named
 under its parent's real path and admitted as a `file-read-metadata` literal,
-with its proper ancestors, which is how the directories an absolute target
+with its proper ancestors, plus `file-read-data` guarded by `vnode-type SYMLINK`.
+This also covers the directories an absolute target
 abandons are covered. The spelling reaches the object while it leads
 there, and nothing beneath it once retargeted. Exclusions are rendered from the resolved real paths their walks held, never from the text as written; Seatbelt judges names, so the identity reading is ral's own readers'.
 

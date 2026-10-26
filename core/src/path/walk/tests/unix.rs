@@ -836,11 +836,29 @@ fn a_links_target_is_read_through_the_handle() {
     let dir = root(&tmp);
     symlink("first", dir.join("l")).unwrap();
     let opened = located_with(&dir.join("l"), LeafMode::NoFollow).unwrap();
-    std::fs::remove_file(dir.join("l")).unwrap();
+    std::fs::rename(dir.join("l"), dir.join("old")).unwrap();
     symlink("second", dir.join("l")).unwrap();
     assert_eq!(opened.read_link().unwrap(), Path::new("first"));
     let fresh = located_with(&dir.join("l"), LeafMode::NoFollow).unwrap();
     assert_eq!(fresh.read_link().unwrap(), Path::new("second"));
+}
+
+#[test]
+fn an_unlinked_link_never_reads_the_replacement() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    symlink("first", dir.join("l")).unwrap();
+    let opened = located_with(&dir.join("l"), LeafMode::NoFollow).unwrap();
+    std::fs::remove_file(dir.join("l")).unwrap();
+    symlink("second", dir.join("l")).unwrap();
+    match opened.read_link() {
+        Ok(target) => assert_eq!(target, Path::new("first")),
+        // APFS on macOS 26 may refuse freadlink after unlink.
+        #[cfg(target_os = "macos")]
+        Err(e) => assert_eq!(e.raw_os_error(), Some(libc::EINVAL)),
+        #[cfg(not(target_os = "macos"))]
+        Err(e) => panic!("the held link could not be read: {e}"),
+    }
 }
 
 #[test]
