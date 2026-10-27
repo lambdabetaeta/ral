@@ -64,7 +64,7 @@ export function addCardBlock(marks) {
   if (!marks.length) return; // an empty card would render as bare chrome
   closeStreamingProse();
   openDial = null;
-  pushBlock({ kind: "card", marks });
+  pushBlock({ kind: "card", marks, rung: 1 });
 }
 
 const RUNG_LABELS = ["", "all steps", "all scripts"];
@@ -78,7 +78,7 @@ function ensureDial() {
   return openDial;
 }
 
-function rotateDial(block) {
+export function rotateRung(block) {
   block.rung = (block.rung + 1) % 3;
   bump(block);
 }
@@ -98,7 +98,7 @@ export function renderDialBlock(block) {
   head.type = "button";
   head.className = "dial-head";
   head.setAttribute("aria-expanded", String(block.rung > 0));
-  head.addEventListener("click", () => rotateDial(block));
+  head.addEventListener("click", () => rotateRung(block));
 
   const mark = document.createElement("span");
   mark.className = "dial-mark";
@@ -141,7 +141,7 @@ function renderDialEntry(entry, rung) {
   const children = [
     rung >= 1 && entry.intent ? entryHeading(entry) : null,
     rung >= 2 ? entryScript(entry) : null,
-    ...(rung >= 2 ? entry.cards.map(renderMarkCard) : []),
+    ...(rung >= 2 ? entry.cards.map((marks) => renderMarkCard(marks)) : []),
   ].filter(Boolean);
   if (!children.length) return null;
   const item = document.createElement("div");

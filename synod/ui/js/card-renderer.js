@@ -1,18 +1,32 @@
-/** @param {import("./bindings/MarkDto.ts").MarkDto[]} marks */
-export function renderMarkCard(marks) {
+const DIFF_PEEK_ROWS = 10;
+
+/**
+ * @param {import("./bindings/MarkDto.ts").MarkDto[]} marks
+ * @param {number} rung
+ * @param {(() => void) | null} onCycle
+ */
+export function renderMarkCard(marks, rung = 2, onCycle = null) {
   const card = document.createElement("div");
   card.className = "mark-card";
-  for (const m of marks || []) card.appendChild(renderMark(m));
+  let room = rung === 0 ? 0 : rung === 1 ? DIFF_PEEK_ROWS : Infinity;
+  for (const m of marks || []) {
+    if (m.mark === "diff") {
+      const el = renderDiffHeader(m, rung, onCycle);
+      if (rung > 0) room -= appendDiffRows(el, m, room);
+      card.appendChild(el);
+    } else {
+      card.appendChild(renderMark(m));
+    }
+  }
   return card;
 }
 
-/** @param {import("./bindings/MarkDto.ts").MarkDto} m */
+/** @param {Exclude<import("./bindings/MarkDto.ts").MarkDto, { mark: "diff" }>} m */
 function renderMark(m) {
   switch (m.mark) {
     case "text": return renderTextMark(m);
     case "measure": return renderMeasureMark(m);
     case "fields": return renderFieldsMark(m);
-    case "diff": return renderDiffMark(m);
     case "raw": return renderRawMark(m);
     default: {
       /** @type {never} */
@@ -91,39 +105,51 @@ function renderFieldsMark(m) {
   return grid;
 }
 
-function renderDiffMark(m) {
+const diffRows = (m) => (m.hunks || []).flatMap((h) => h.rows || []);
+
+function renderDiffHeader(m, rung, onCycle) {
   const container = document.createElement("div");
   container.className = "diff";
 
-  let adds = 0, dels = 0;
-  for (const hunk of m.hunks || []) {
-    for (const row of hunk.rows || []) {
-      if (row.tag === "add") adds++;
-      else if (row.tag === "del") dels++;
-    }
-  }
+  const rows = diffRows(m);
+  const count = (tag) => rows.filter((r) => r.tag === tag).length;
+  if (rows.every((r) => r.tag === rows[0].tag)) container.classList.add("uniform");
 
-  const head = document.createElement("div");
+  const head = document.createElement(onCycle ? "button" : "div");
   head.className = "diff-head";
+  if (onCycle) {
+    head.setAttribute("type", "button");
+    head.setAttribute("aria-expanded", String(rung > 0));
+    head.addEventListener("click", onCycle);
+  }
   const path = document.createElement("span");
   path.className = "role-path";
   path.textContent = m.path;
   head.appendChild(path);
   const counts = document.createElement("span");
   counts.className = "diff-counts";
-  counts.textContent = "+" + adds + " −" + dels;
+  counts.textContent = "+" + count("add") + " −" + count("del");
   head.appendChild(counts);
   container.appendChild(head);
+  return container;
+}
 
-  for (const hunk of m.hunks || []) {
+function appendDiffRows(container, m, room) {
+  let shown = 0;
+  let maxNo = 0;
+  for (const [i, hunk] of (m.hunks || []).entries()) {
+    if (shown === room) break;
+    if (i > 0) container.appendChild(elisionRow());
     let oldNo = hunk.old;
     let newNo = hunk.new;
     for (const row of hunk.rows || []) {
+      if (shown === room) break;
       const line = document.createElement("div");
       line.className = "diff-row " + (row.tag === "add" ? "add" : row.tag === "del" ? "del" : "ctx");
 
       const gutter = document.createElement("span");
       gutter.className = "gutter";
+      maxNo = Math.max(maxNo, row.tag === "del" ? oldNo : newNo);
       if (row.tag === "del") {
         gutter.textContent = oldNo + "−";
         oldNo++;
@@ -151,9 +177,22 @@ function renderDiffMark(m) {
       }
       line.appendChild(segs);
       container.appendChild(line);
+      shown++;
     }
   }
-  return container;
+  if (shown < diffRows(m).length) container.appendChild(elisionRow());
+  container.style.setProperty("--gutter-digits", String(String(maxNo).length));
+  return shown;
+}
+
+function elisionRow() {
+  const row = document.createElement("div");
+  row.className = "diff-row elision";
+  const gutter = document.createElement("span");
+  gutter.className = "gutter";
+  gutter.textContent = "⋮";
+  row.appendChild(gutter);
+  return row;
 }
 
 function renderRawMark(m) {

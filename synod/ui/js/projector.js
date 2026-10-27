@@ -13,6 +13,7 @@ import {
   dialAddCall,
   dialAddHarness,
   addCardBlock,
+  rotateRung,
   dialAddProcessCard,
   dialAddHelpers,
   dialAddHelperDone,
@@ -99,7 +100,7 @@ function renderBlock(block) {
     case "card": {
       const msg = document.createElement("div");
       msg.className = "msg";
-      msg.appendChild(renderMarkCard(block.marks));
+      msg.appendChild(renderMarkCard(block.marks, block.rung, () => rotateRung(block)));
       return msg;
     }
     case "dial":

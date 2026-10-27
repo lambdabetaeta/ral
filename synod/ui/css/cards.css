@@ -88,6 +88,15 @@
       border-bottom: 1px solid var(--line);
       font-size: 12px;
     }
+    button.diff-head {
+      width: 100%;
+      font: inherit;
+      color: inherit;
+      border: none;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      cursor: pointer;
+    }
     .diff-counts { color: var(--ink-faint); }
     .diff-row {
       display: flex;
@@ -97,9 +106,13 @@
     .diff-row.ctx { background: transparent; color: var(--ink-soft); }
     .diff-row.add { background: var(--diff-add-bg); color: var(--ink); }
     .diff-row.del { background: var(--diff-del-bg); color: var(--ink); }
+    .diff-row.elision { color: var(--ink-faint); }
+    .diff.uniform .diff-row { background: transparent; }
     .gutter {
       flex: none;
-      width: 5ch;
+      box-sizing: content-box;
+      width: calc((var(--gutter-digits, 1) + 1) * 1ch);
+      white-space: pre;
       text-align: right;
       padding: 0 8px;
       color: var(--ink-faint);
