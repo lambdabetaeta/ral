@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
+generated_at_commit: bb5bc1a6
 title: Wiki index
 ---
 
@@ -332,6 +332,8 @@ Newest last; the page carries the full reasoning.
 - *active* — [[decisions/261022_own-files|own-files]] — **the files a program touches on its own account are reached only through `ral_core::own`: three addresses (`OwnDir` for what the program keeps, `UserFile` for what the user writes at its places, `read_named` and kin for what the user names), one authority (the crate-private write side of `Ungoverned`), three authority-mint sites but no syscall sites, and one layout rule: the config home holds only what the user writes.** The temp root is dropped for a `scratch` grant place under the cache home, `keys.json` and ral's history move to state, `Pointer.source` becomes an `AgentId`, and `load` reports its errors; filesystem sites outside `path/` fall from 114 to 21. Completes [[decisions/261022_typed-sites|typed-sites]].
 
 - *active* — [[decisions/261027_the-login-environment-is-the-posix-profiles|the-login-environment-is-the-posix-profiles]] — Unix logins adopt the environment reported after `/bin/sh -l` reads `/etc/profile` and `~/.profile`; failure warns and preserves a working shell. ral-specific configuration, umask and child limits belong in the rc.
+
+- *active* — [[decisions/261027_unix-sockets-follow-writes|unix-sockets-follow-writes]] — outside pathname sockets require stated fs writes; unrestricted fs admits none, macOS keeps its resolver under net, and Linux below ABI 9 retains pathname reachability. Session temp lives in scratch.
 
 ## related/ — comparison to existing work
 

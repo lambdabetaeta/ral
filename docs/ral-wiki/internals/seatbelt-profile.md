@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 2f1beeb292a50892e1428796acf6b1da14631dcd
+generated_at_commit: bb5bc1a6
 verified_at_commit: 7ab5809a
 verified_at_date: 2026-10-26
 anchors: [apply_profile, build_profile, Profile, RESOLVER_SOCKET, gpu_name, emit_fs_restricted, emit_exec_rules, Clause, Filter, emit_ancestor_metadata, withheld_services, rendered_ancestors, pinned_dirs, step]
@@ -132,29 +132,43 @@ writable, with or without a veto, under any fs; a name veto there is advisory to
 descendants, and `authority::policy::deputy` names such folders
 ([[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]).
 
-**net.** Enforced by absence. The base admits `network-outbound` for nothing;
-only a grant that does not say ``net: `offline`` appends `macos-net.sbpl`: every
-IP endpoint (`(remote ip)` out, `(local ip)` in and bind, loopback included),
-Seatbelt having no per-address rules; the resolver's socket; and the Mach
-services that *are* the network: configd (proxies, DNS servers), the dnssd
-port, trustd. Never `(allow network*)`, which also admits every Unix-domain
-socket: a socket reaches a daemon acting with the user's authority outside the
-profile, and under it a confined `ssh-add -l` listed the user's keys (measured
-on macOS 27). With the IP rules it fails with `EPERM`, while `curl`, `git
-ls-remote` over https, and a `localhost` server in or out of the sandbox
-work. `RESOLVER_SOCKET` is the one Unix socket admitted, without which names
-do not resolve; `mac_net_profile_admits_no_unix_socket_but_the_resolver`
-holds the shape, and the hint answers any other denied Unix socket as one no
-grant opens. That silence
-is what closes DNS: `getaddrinfo` reaches mDNSResponder over the UNIX socket
-`/private/var/run/mDNSResponder`, which Seatbelt gates as `network-outbound`,
-not `mach-lookup` (measured on Darwin 25.5.0: denying `mach-lookup` outright
-still resolves names; admitting that socket alone resolves them with
-`mach-lookup` denied). Admitting the socket for any local reason would make a
-hostname an egress channel — an attacker-chosen query label leaves through a
-daemon outside the sandbox — while ``net: `offline`` still read as closed.
-`mac_profile_denies_network_when_disabled` asserts this over every rendered
-rule, with an open-network positive control so it cannot pass vacuously.
+**Unix sockets follow stated writes.** Each rendered write-prefix name `P`
+gets `(allow network-outbound (subpath P))`,
+`(allow network-bind (local unix-socket (subpath P)))` and
+`(allow network-inbound (local unix-socket (subpath P)))`, beside its
+`file-write*` allowance (`emit_fs_restricted`, `Clause`, `Filter`). Each fs
+deny emits the same three operations and filters as denies in `fs_denies`,
+after the allows. Read-only prefixes and unrestricted fs add no socket rule.
+An exec-only, net-only or gpu-only projection therefore reaches no outside
+socket through fs. A write covering a deputy's socket admits that deputy;
+a writable foreign socket can also be unlinked and replaced to intercept later
+clients. Sibling launches need a stated write covering the server socket.
+See [[decisions/261027_unix-sockets-follow-writes|unix-sockets-follow-writes]].
+
+**net.** Only a grant that does not say ``net: `offline`` appends
+`macos-net.sbpl`: every IP endpoint (`(remote ip)` out, `(local ip)` in and
+bind, loopback included); the resolver socket; and configd, dnssd and trustd's
+Mach services. Never `(allow network*)`, which also admits every Unix socket:
+measured on macOS 27, `ssh-add -l` under that wildcard listed the user's keys.
+With the IP rules and no stated write covering the agent socket, it fails with
+`EPERM`; a stated write deliberately admits that deputy.
+`RESOLVER_SOCKET`, `/private/var/run/mDNSResponder`, is the one socket this
+file admits, as a plain path `network-outbound` filter: measured on Darwin
+25.5.0, admitting that socket with `mach-lookup` denied still resolves names.
+`mac_net_profile_admits_no_unix_socket_but_the_resolver` checks this file alone;
+write-prefix socket rules are emitted separately. A write covering the resolver
+also admits it: like any deputy concession, it can carry an attacker-chosen
+DNS query label out even under an offline grant. With no write covering the
+resolver, the base's silence is what closes DNS offline: `getaddrinfo` reaches
+mDNSResponder through `network-outbound`, never an automatically admitted
+local service. `mac_profile_denies_network_when_disabled` asserts the absence
+of network rules for an offline projection with no stated writes, with an
+open-network positive control.
+
+**Session temp.** exarch points `$TMPDIR` to `$EXARCH_SCRATCH/tmp` and makes
+that directory before any profile freezes. The five restrictive bundled profiles admit no shared
+temp directory, since one may hold other programs' sockets. Hardcoded `/tmp`
+is refused on macOS; Linux discards its per-command tmpfs after each command.
 
 **gpu.** Enforced by absence, like net. The base opens no IOKit user client and
 no Metal service; only a frame that does not withhold the GPU appends
@@ -223,8 +237,11 @@ admits being variable-length.
   ld SIGABRT in `tzsetwall_basic` without it.
 - **POSIX shared-memory reads**: `ipc-posix-shm-read-data` names only
   `apple.shm.notification_center` and `com.apple.featureflags.shm`.
-  libnotify and `os_feature_enabled` read these; the base admits no writes.
+  libnotify and `os_feature_enabled` read these; neither name is writable.
   The names are POSIX shared-memory names, not Mach services.
+- **Python multiprocessing IPC**: `ipc-posix-sem` admits names prefixed `/mp-`,
+  and `ipc-posix-shm` names prefixed `/psm_`. The leading slash is part of
+  each name; these admit Python's own semaphores and shared-memory segments.
 - **`(allow file-ioctl)`**, unfiltered as in Xcode's, Bazel's and Chromium's
   build sandboxes, then **`(deny file-ioctl (ioctl-command TIOCSTI))`**. The
   allow is there for `tcsetattr`: without it a full-screen child cannot raise

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 2f1beeb292a50892e1428796acf6b1da14631dcd
+generated_at_commit: bb5bc1a6
 verified_at_commit: 104cb51994d4dce2c9892a96008426463be2d404
 verified_at_date: 2026-10-26
 anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, GpuNodes, PtyNodes, cgroup_tree, Baseline, Pinned, pin_envelope, InfoFd]
@@ -25,13 +25,15 @@ the filesystem**
   `/proc`. A confined child then sees and can signal nothing of the host,
   `/proc/self` is its own, and `ps` under any grant shows only the envelope.
 - **Unix sockets.** ``net: `offline`` adds `--unshare-net`; otherwise the
-  child shares the host's network namespace, abstract Unix sockets included,
-  and `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET` (ABI 6, beside the signal scope)
-  refuses a connect to one bound outside the envelope, as Seatbelt refuses
-  every Unix socket but the resolver's. A pathname socket the binds show is
-  reachable whatever `net` says: a read-only bind does not gate `connect`.
-  Measured on 7.1 (ABI 9), a Landlock fs right at bit 16 does, but the
-  resolver's sockets would need admitting, so it is not handled yet.
+  child shares the host's network namespace. Landlock's ABI 6 abstract-socket
+  scope refuses connections to abstract sockets bound outside the envelope.
+  On ABI 9 (Linux 7.1), `RESOLVE_UNIX` admits outside pathname sockets only
+  where a stated fs write prefix covers their path; unrestricted fs admits
+  none. A socket-file write admits that file alone. A read-only bind does not
+  gate connect; an fs deny hides the socket behind bwrap's mask. Below ABI 9,
+  every pathname socket a bind shows stays reachable, including offline.
+  [[decisions/261027_unix-sockets-follow-writes|unix-sockets-follow-writes]]
+  records the policy and its deputy concession.
 - **Working directory.** The context's absolute `CwdPath` goes in as `--chdir`. A cwd the grant
   does not cover gets an empty `0555` tmpfs stand-in, laid before the binds,
   which may hide it; bwrap's `--chdir` then judges the name. `/` and the
@@ -139,6 +141,53 @@ first, and opening stays where it was.
   runs only when the admitted name lies beneath a directory admitted whole;
   the walk refuses an excluded inode under every name it meets.
 
+## Pathname sockets follow stated writes
+
+**Every ABI 9 envelope handles `REFER | RESOLVE_UNIX`, adding `EXECUTE` where
+exec is restricted.** The parent opens the stated write objects without
+following symlinks and admits their `RESOLVE_UNIX` right: a file as itself,
+its opened inode even when bound at another name; a directory lowered onto the
+shown bind roots by the same `lowered` function exec uses. Unrestricted fs
+adds no socket admissions. Fs denies need no subtraction: bwrap masks them.
+
+- **`REFER` is restored on the envelope's `/`.** Handling an fs right denies
+  cross-directory hard links by default; cargo needs them even with exec
+  unrestricted. The payload adds this rule before entering the domain.
+- **Mounting is impossible inside every ABI 9 domain.** ral builds the ruleset
+  in the parent, lends its descriptor, lets bwrap mount, then enters it. The
+  seccomp deny-set already kills the mount family and refuses `CLONE_NEWUSER`.
+- **No Linux resolver socket is admitted.** nss-resolve returns `UNAVAIL`;
+  the stock `resolve [!UNAVAIL=return] dns` line continues to DNS, reading
+  `resolv.conf` and reaching the `127.0.0.53` stub over IP in the shared netns.
+  The nscd client falls back likewise. LLMNR/mDNS through nss-resolve is lost.
+- **Sibling launches need a write covering the server socket.** A server in
+  the same domain is reachable, but one in a sibling or parent domain is
+  outside it. `spawn { postgres -k ./s }` followed by `psql` therefore needs
+  the socket beneath a stated write, as it usually is to permit binding.
+- **A write admits a deputy and replacement.** A foreign socket beneath a
+  write prefix is reachable; the child can also unlink it and bind its own,
+  intercepting the user's later clients.
+- **Session temp is stated scratch.** exarch sets `$TMPDIR` to
+  `$EXARCH_SCRATCH/tmp`; the five restrictive bundled profiles grant no shared temp directory.
+  Hardcoded `/tmp` is the envelope's per-command tmpfs and is discarded after
+  each command. On macOS it is refused.
+
+### When ABI 9 is the floor
+
+**The trigger is the oldest supported kernel reporting Landlock ABI >= 9.**
+Until then every pathname socket a bind shows is reachable below ABI 9, even
+under ``net: `offline``; sockets do not raise the launch floor today.
+
+- Raise a `BASELINE_ABI`-style floor for sockets, or refuse restrictive launches
+  below ABI 9; delete the ABI < 9 rows of `landlock::plan`'s table.
+- Delete this subsection and the declared-limit sentences in
+  [[design/grant|grant]] and [[map/core/capabilities|capabilities]].
+- The deliberately declined interim option is seccomp
+  `socket(AF_UNIX)` → `EACCES`. Seccomp sees `socket(2)`'s `args[0]`, never
+  `connect`'s path behind a user pointer. Measured sound but coarse, it closes
+  pathname and abstract sockets, including in-envelope AF_UNIX servers and
+  clients; `socketpair` keeps working.
+
 ## Where the host refuses a mount, the envelope rebuilds it
 
 **Some hosts refuse bwrap a mount it needs. The envelope then builds the same
@@ -194,8 +243,8 @@ shown. `GpuNodes::discover` finds them at each launch: bwrap has no globs, and
   are kernel-owned trees no unprivileged process renames into, so a name there
   cannot be swapped for a link after rendering, which is the whole risk handles
   close; `render_dev`'s own nodes were already bound so.
-- **No Landlock rule governs the GPU.** The ruleset handles only `Execute` and
-  `Refer` (`landlock::plan`), not `IOCTL_DEV` or any read/write right, so
+- **No Landlock rule governs the GPU.** The ruleset handles `Execute`, `Refer` and,
+  from ABI 9, `RESOLVE_UNIX` (`landlock::plan`), not `IOCTL_DEV` or any read/write right, so
   opening a device node is decided by what the mounts show and by nothing
   else: a node absent from the envelope cannot be opened, a node shown can.
 

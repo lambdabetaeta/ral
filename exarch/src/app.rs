@@ -134,9 +134,10 @@ impl Home {
     }
 }
 
-/// Every cache a session writes lives in its scratch: each variable is
+/// Every cache and temp file lives in the scratch: each variable is
 /// replaced, whatever the host inherited, by a value under the scratch.
 const TOOL_HOMES: &[(&str, Home)] = &[
+    ("TMPDIR", Home::Dir("tmp")),
     // Caches only: RUSTUP_HOME holds what runs, so it stays the host's.
     ("XDG_CACHE_HOME", Home::Dir("xdg-cache")),
     ("CARGO_HOME", Home::Dir("cargo")),
@@ -204,6 +205,7 @@ impl Scratch {
 
     /// The scratch `dir` makes.
     fn made(app: App, dir: OwnDir, hold: Hold) -> io::Result<Self> {
+        dir.make_dir("tmp")?;
         let unicode = |e: NotUtf8| io::Error::new(io::ErrorKind::InvalidData, e);
         let spelling = ral_core::path::utf8(dir.path())
             .map_err(unicode)?
@@ -651,6 +653,7 @@ mod tests {
                 .map(|(_, v)| v.clone())
         };
         assert_eq!(get("XDG_CACHE_HOME"), Some(native(&dir.join("xdg-cache"))));
+        assert_eq!(get("TMPDIR"), Some(native(&dir.join("tmp"))));
         assert_eq!(
             get("GOMODCACHE"),
             Some(native(&dir.join("go").join("pkg").join("mod")))
@@ -677,6 +680,7 @@ mod tests {
                 .map(|(_, v)| v.as_str())
         };
         assert_eq!(get(&EXARCH.scratch_var()), Some("/tmp"));
+        assert_eq!(get("TMPDIR"), Some("/tmp/tmp"));
         assert_eq!(get("XDG_CACHE_HOME"), Some("/tmp/xdg-cache"));
         assert_eq!(get("GOMODCACHE"), Some("/tmp/go/pkg/mod"));
         assert_eq!(get("MAVEN_ARGS"), Some("-Dmaven.repo.local=/tmp/maven"));

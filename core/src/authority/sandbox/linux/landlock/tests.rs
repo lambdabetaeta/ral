@@ -76,7 +76,14 @@ fn a_restricted_projection_handles_refer_from_abi_two_and_scopes_from_six() {
         (Abi::REFER, refer, Scoped::NONE),
         (Abi(5), refer, Scoped::NONE),
         (Abi::SCOPES, refer, Scoped::ENVELOPE),
-        (Abi(9), refer, Scoped::ENVELOPE),
+        (Abi(7), refer, Scoped::ENVELOPE),
+        (Abi(8), refer, Scoped::ENVELOPE),
+        (
+            Abi::RESOLVE_UNIX,
+            refer | Access::RESOLVE_UNIX,
+            Scoped::ENVELOPE,
+        ),
+        (Abi(10), refer | Access::RESOLVE_UNIX, Scoped::ENVELOPE),
     ] {
         assert_eq!(
             plan(&restricted(), Landlock::At(abi)).expect("a kernel with Landlock"),
@@ -87,7 +94,7 @@ fn a_restricted_projection_handles_refer_from_abi_two_and_scopes_from_six() {
 }
 
 #[test]
-fn an_unrestricted_projection_asks_for_a_ruleset_only_where_the_scope_exists() {
+fn an_unrestricted_exec_projection_handles_sockets_from_abi_nine() {
     for abi in [Abi::EXEC, Abi::REFER, Abi(5)] {
         assert_eq!(
             plan(&ExecProjection::Unrestricted, Landlock::At(abi)).expect("plans"),
@@ -95,11 +102,17 @@ fn an_unrestricted_projection_asks_for_a_ruleset_only_where_the_scope_exists() {
             "abi {abi} has no scopes, so there is nothing to enter"
         );
     }
-    for abi in [Abi::SCOPES, Abi(9)] {
+    for (abi, handled) in [
+        (Abi::SCOPES, Access::NONE),
+        (Abi(7), Access::NONE),
+        (Abi(8), Access::NONE),
+        (Abi::RESOLVE_UNIX, Access::REFER | Access::RESOLVE_UNIX),
+        (Abi(10), Access::REFER | Access::RESOLVE_UNIX),
+    ] {
         assert_eq!(
             plan(&ExecProjection::Unrestricted, Landlock::At(abi)).expect("plans"),
             Some(Plan {
-                handled: Access::NONE,
+                handled,
                 scoped: Scoped::ENVELOPE
             }),
             "abi {abi}"
@@ -502,7 +515,11 @@ fn a_directory_admission_is_lowered_onto_the_bind_roots() {
     let nowhere = Tree::nowhere();
     let lowered = |rules: &[Rule], roots: &[&str]| {
         let roots: Vec<_> = roots.iter().map(|r| place(nowhere.path(r))).collect();
-        lowered(&table_of(rules), &roots)
+        let table = table_of(rules);
+        let dirs = table
+            .allowed_dirs()
+            .chain(table.supports(Subject::Any).then(RealPath::universal));
+        lowered(dirs, &roots)
             .iter()
             .map(|r| r.as_path().to_string_lossy().into_owned())
             .collect::<Vec<_>>()
@@ -627,4 +644,56 @@ fn moved_exclusions_are_judged_when_enumerated_and_at_exact_allowances() {
         whole.contains(&(bin, true)),
         "unlisted directory residual: {whole:?}"
     );
+}
+
+#[test]
+fn a_socket_write_grant_admits_only_its_opened_file() {
+    use crate::authority::grant::freeze::FreezeCtx;
+    use crate::authority::policy::Baseline;
+    use crate::authority::sandbox::SandboxProjection;
+    use crate::shell::runtime::Value;
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::net::UnixListener;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("socket");
+    let _server = UnixListener::bind(&path).unwrap();
+    let record = |entries: Vec<(&str, Value)>| {
+        Value::Map(
+            entries
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v))
+                .collect(),
+        )
+    };
+    let grant = record(vec![(
+        "fs",
+        record(vec![(
+            "write",
+            Value::list(vec![Value::variant(
+                "absolute",
+                Some(Value::string(utf8(&path).unwrap())),
+            )]),
+        )]),
+    )]);
+    let ctx = FreezeCtx::at(
+        crate::host::EnvVars::default(),
+        crate::test_helper::process_cwd(),
+    );
+    let layer = crate::shell::grant::decode_capability_map(&grant, "test", &ctx).unwrap();
+    let stack = crate::test_helper::stack([layer]);
+    let projection = SandboxProjection::of(&stack, &Baseline::default(), None)
+        .unwrap()
+        .rendered()
+        .unwrap();
+    let mut seen = Vec::new();
+    admit_sockets(&projection.fs, &whole(), &mut |admit| {
+        let opened = rustix::fs::fstat(admit.fd)?;
+        assert_eq!(FileType::from_raw_mode(opened.st_mode), FileType::Socket);
+        assert_eq!(opened.st_ino, std::fs::symlink_metadata(&path)?.ino());
+        seen.push(admit.path.clone());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(seen, [real(&path)]);
 }

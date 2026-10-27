@@ -14,6 +14,10 @@
 #
 # Default base when `--base` is omitted.
 
+# Temp files go to `$TMPDIR` in the session scratch. Hardcoded `/tmp` is
+# per-command on Linux and refused on macOS. Shared temp directories hold
+# other programs' sockets.
+
 return [
   # Build-toolchain caches, user-installed toolchains, and the
   # project tree itself.  The OS sandbox layer's readable system
@@ -28,7 +32,6 @@ return [
   #   * `xdg-NAME SUB` — SUB under an XDG basedir, honouring `XDG_*_HOME`
   #     env vars with the Linux defaults universally.
   #   * `cwd SUB` — SUB under the working directory at session start.
-  #   * `tempdir SUB` — SUB under `std::env::temp_dir()`.
   #   * `scratch SUB` — SUB under the session's own scratch directory, the one
   #     `$EXARCH_SCRATCH` names; the host makes it before any profile freezes.
   #   * `gitdir SUB` — SUB under the git directory of the repository the cwd is in.
@@ -62,8 +65,6 @@ return [
     read: [
       `cwd .,                # the project tree the agent is working in
       `gitdir .,             # the actual git directory (handles worktrees)
-      `absolute /tmp,
-      `tempdir .,            # `$TMPDIR` on macOS — distinct from /tmp
       `scratch .,            # the session's own scratch (`$EXARCH_SCRATCH`)
       `xdg-config .,         # ${XDG_CONFIG_HOME:-~/.config}
       `xdg-data .,           # ${XDG_DATA_HOME:-~/.local/share}
@@ -119,8 +120,6 @@ return [
     # wiki's `design/grant` §Concessions.
     write: [
       `cwd .,
-      `absolute /tmp,
-      `tempdir .,
       `scratch .,
       `gitdir .,
     ],
@@ -166,8 +165,6 @@ return [
       # against the agent rather than steer it (wiki: design/grant
       # §Concessions).
       `dir `cwd .,                    # scripts the agent drops into the project tree
-      `dir `absolute /tmp,            # scratch builds (autotools `./configure`, ad-hoc scripts)
-      `dir `tempdir .,                # `$TMPDIR` on macOS — distinct from /tmp
       `dir `scratch .,                # the session's own scratch (`$EXARCH_SCRATCH`)
 
       # Every other selector of the table in core/src/authority/grant/toolchains.rs,

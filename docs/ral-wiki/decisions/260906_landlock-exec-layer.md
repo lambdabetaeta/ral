@@ -1,8 +1,13 @@
 ---
+generated_at_commit: bb5bc1a6
 status: active
 ---
 
 # Kernel exec confinement on Linux is a Landlock layer inside the envelope
+
+> **Amended 2026-10-27.** On ABI >= 9 the handled set grows to include
+> pathname sockets:
+> [[decisions/261027_unix-sockets-follow-writes|unix-sockets-follow-writes]].
 
 > **Amended 2026-10-06.** The parent builds the ruleset, by raw syscalls in
 > place of the `landlock` crate, which can neither hand a ruleset over nor

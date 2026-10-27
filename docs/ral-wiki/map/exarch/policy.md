@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
+generated_at_commit: bb5bc1a6
 generated_at_date: 2026-10-27
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
@@ -53,9 +53,9 @@ session composes without a pin. `Invocation` holds only `stack` and `restricts`.
 
 Composition emits no confused-deputy warning naming every prefix both
 exec-admitted and writable. That predicate is not the one that matters —
-in-projection overlap escalates nothing and every bake-in requires it, so such
-a line would fire on every session naming `` `cwd ``, `` `absolute /tmp ``, and `` `tempdir ``, all
-three deliberate ([[design/grant|grant]] §Concessions). The report lives
+in-projection overlap escalates nothing: `reasonable`, `minimal` and
+`confined` deliberately admit both writing and running in `` `cwd `` and
+`` `scratch `` ([[design/grant|grant]] §Concessions). The report lives
 where it is asked for rather than announced: `ral`'s audit trail records
 one `deputy` check per flagged prefix when a grant frame is entered
 ([[map/core/capabilities|capabilities]]).
@@ -212,9 +212,12 @@ can't silently widen a jail:
 - `read-only` reads but does not write `` `cwd ``;
 - `confined` is net-off, admits host execs by subpath and only bundled tools by
   bare name, and has no home-reaching prefixes;
-- `` `cwd ``/`` `tempdir ``/`` `scratch `` places freeze into the per-invocation working,
-  temp and scratch dirs without exarch injecting them dynamically: the scratch is
+- `` `cwd ``/`` `scratch `` places freeze into the per-invocation working
+  and scratch dirs without exarch injecting them dynamically: the scratch is
   made before the policy freezes, and `FreezeCtx::with_scratch` carries its spelling.
+  The five restrictive bases write only `cwd`, `gitdir` and `scratch`;
+  `$TMPDIR` points to the scratch's `tmp` directory. They grant neither `/tmp`
+  nor `tempdir`; `dangerous` leaves fs unrestricted.
 
 `exarch/examples/git.exarch.ral` is the canonical `--extend` that lifts
 `minimal`/`confined` into a git-capable shape; a test pins that extending `minimal` with it keeps `git` admitted and adds

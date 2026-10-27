@@ -11,6 +11,10 @@
 # can only further attenuate, not widen).  To start broader, use
 # `reasonable` and lock down via deny.
 
+# Temp files go to `$TMPDIR` in the session scratch. Hardcoded `/tmp` is
+# per-command on Linux and refused on macOS. Shared temp directories hold
+# other programs' sockets.
+
 return [
   gpu: `withheld,  # no GPU; `reasonable` and `dangerous` leave it on
 
@@ -21,8 +25,6 @@ return [
   fs: [
     read: [
       `cwd .,                # the project tree the agent is reviewing
-      `absolute /tmp,
-      `tempdir .,            # `$TMPDIR` on macOS — distinct from /tmp
       `scratch .,            # the session's own scratch (`$EXARCH_SCRATCH`)
       `xdg-config .,         # ${XDG_CONFIG_HOME:-~/.config}
       `xdg-data .,           # ${XDG_DATA_HOME:-~/.local/share}
@@ -57,8 +59,6 @@ return [
     # that need a workspace can use `$EXARCH_SCRATCH` (`scratch .`) as
     # their scratch root.
     write: [
-      `absolute /tmp,
-      `tempdir .,
       `scratch .,
     ],
 
@@ -90,8 +90,8 @@ return [
       `dir `absolute /usr/sbin,
       `dir `absolute /sbin,
       `dir `cwd .,   # read-only, so nothing can be dropped here to run
-      # No `dir `absolute /tmp`, `dir `tempdir .` or `dir `scratch .`: those are this profile's only writable
-      # dirs, and a dir that is both writable and exec-admitted makes the
+      # No `dir `scratch .`: scratch is this profile's only writable
+      # directory, and a dir that is both writable and exec-admitted makes the
       # denies below advisory — write a copy of `bash` into scratch under
       # another name and the veto, a name veto, never sees it.
 

@@ -199,7 +199,7 @@ pub fn render(sections: &[(Option<&str>, String)]) -> String {
 pub fn host_section(app: crate::app::App) -> String {
     let state = app.xdg_dir(ral_core::path::XdgKind::State);
     format!(
-        "You are an agent named '{NAME_PLACEHOLDER}'.\n\n{}\n{GRANT_PLACEHOLDER}- scratch: `${}` = {SCRATCH_PLACEHOLDER}\n",
+        "You are an agent named '{NAME_PLACEHOLDER}'.\n\n{}\n{GRANT_PLACEHOLDER}- scratch: `${}` = {SCRATCH_PLACEHOLDER}; temporary files go in `!{{env}}[TMPDIR]` under this session scratch. Hardcoded `/tmp` is discarded after each command on Linux and refused on macOS.\n",
         host::snapshot(state.as_deref()),
         app.scratch_var()
     )

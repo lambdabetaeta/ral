@@ -61,6 +61,11 @@
 ;; libnotify and os_feature_enabled read these; nothing here writes them.
 (allow ipc-posix-shm-read-data (ipc-posix-name "apple.shm.notification_center") (ipc-posix-name "com.apple.featureflags.shm"))
 
+;; Python multiprocessing's own semaphores and segments, by its prefixes; the
+;; leading slash is part of the name.
+(allow ipc-posix-sem (ipc-posix-name-prefix "/mp-"))
+(allow ipc-posix-shm (ipc-posix-name-prefix "/psm_"))
+
 ;; Unfiltered: a full-screen child needs `tcsetattr`, which `file-ioctl`
 ;; gates.  Keystroke injection is Seatbelt's `hid-control`, never allowed
 ;; here; the deny keeps TIOCSTI refused should that gate move.

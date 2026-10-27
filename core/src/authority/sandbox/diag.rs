@@ -103,7 +103,7 @@ pub(super) enum Denied {
     /// The GPU: Metal's device, an `IOSurface` or its compiler.  `gpu:` is the
     /// whole remedy, as `net:` is for a socket.
     Gpu,
-    /// A Unix socket other than the resolver's, which no grant opens.
+    /// A Unix socket a stated fs write can admit; unconfined below Linux ABI 9.
     UnixSocket(Inert),
     /// A record with no operand a remedy could use — every Linux seccomp
     /// record, where [`platform::describe_denial`] speaks instead.
@@ -506,9 +506,10 @@ const GPU_REMEDY: &str = "the GPU was denied: this frame withholds the GPU (`` g
      restores it: run the command where no layer withholds the GPU.";
 
 #[cfg(not(windows))]
-const UNIX_SOCKET_REMEDY: &str = "a Unix socket was denied, and no grant opens one: the network \
-     grant covers IP sockets only, since a Unix socket reaches a daemon acting with your authority \
-     outside the sandbox (ssh-agent's, for one):";
+const UNIX_SOCKET_REMEDY: &str = "a Unix socket was denied: request a stated fs write covering its \
+     path, e.g. `` fs: [write: [`absolute /path/to/socket]] ``; an fs deny still wins. This admits \
+     the daemon's authority outside the sandbox. Unrestricted fs admits no outside socket; \
+     Linux Landlock ABI < 9 does not enforce this pathname-socket limit:";
 
 /// The record names nothing to act on, so the hint says so rather than
 /// guessing at an fs grant — unless a typed deny-set (Linux) has its own words
@@ -822,9 +823,10 @@ mod tests {
                     network-outbound /private/tmp/com.apple.launchd.x/Listeners";
         let hint = hint(&[line]);
         assert!(
-            hint.contains("IP sockets only")
+            hint.contains("fs: [write: [`absolute /path/to/socket]]")
+                && hint.contains("Linux Landlock ABI < 9")
                 && hint.contains("\n  /private/tmp/com.apple.launchd.x/Listeners"),
-            "a denied Unix socket must say the grant cannot open it; got {hint:?}"
+            "a denied Unix socket must name the write grant and its limit; got {hint:?}"
         );
         assert!(
             !hint.contains("`` net: `offline` ``"),

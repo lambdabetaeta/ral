@@ -17,6 +17,12 @@
 //! A rule attaches to a host object, and a walk from a file inside the
 //! envelope meets only the inodes above it there, so every directory
 //! admission is lowered against the envelope's bind roots ([`lowered`]).
+//!
+//! `LANDLOCK_ACCESS_FS_RESOLVE_UNIX` confines pathname socket connections on
+//! Linux 7.1 (ABI 9). Only stated fs writes admit outside sockets; an
+//! unrestricted fs admits none. Every ABI 9 envelope handles fs rights and
+//! therefore cannot mount; ral builds the ruleset before bwrap mounts and
+//! enters it afterwards.
 
 use super::super::Refusal;
 use super::super::warrant::{Handoff, Slot};
@@ -49,6 +55,8 @@ impl Abi {
     pub(crate) const REFER: Self = Self(2);
     /// `LANDLOCK_SCOPE_*`, Linux 6.12.
     pub(crate) const SCOPES: Self = Self(6);
+    /// `LANDLOCK_ACCESS_FS_RESOLVE_UNIX`, Linux 7.1.
+    pub(crate) const RESOLVE_UNIX: Self = Self(9);
 
     #[cfg(test)]
     pub(crate) const fn level(self) -> u32 {
@@ -164,6 +172,8 @@ impl Access {
     const NONE: Self = Self(0);
     pub(crate) const EXECUTE: Self = Self(1 << 0);
     pub(crate) const REFER: Self = Self(1 << 13);
+    /// `LANDLOCK_ACCESS_FS_RESOLVE_UNIX`, Linux 7.1.
+    pub(crate) const RESOLVE_UNIX: Self = Self(1 << 16);
 
     fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
@@ -345,11 +355,10 @@ fn plan(exec: &ExecProjection, landlock: Landlock) -> Result<Option<Plan>, Refus
             )));
         }
     };
-    let handled = match (restricted, abi >= Abi::REFER) {
-        (false, _) => Access::NONE,
-        (true, false) => Access::EXECUTE,
-        (true, true) => Access::EXECUTE | Access::REFER,
-    };
+    let when = |condition, access| if condition { access } else { Access::NONE };
+    let fs = when(restricted, Access::EXECUTE)
+        | when(abi >= Abi::RESOLVE_UNIX, Access::RESOLVE_UNIX);
+    let handled = fs | when(fs != Access::NONE && abi >= Abi::REFER, Access::REFER);
     let scoped = if abi >= Abi::SCOPES {
         Scoped::ENVELOPE
     } else {
@@ -382,10 +391,48 @@ pub(crate) fn build(
     if let Some(table) = kernel_table(exec) {
         admit_exec(&ruleset, table, fs, roots)?;
     }
+    if handled.contains(Access::RESOLVE_UNIX) {
+        admit_sockets(fs, roots, &mut |admit| {
+            ruleset.admit(admit.fd, Access::RESOLVE_UNIX)
+        })
+        .map_err(String::from)?;
+    }
     Ok(Some(Landlocked {
         refer_root: handled.contains(Access::REFER),
         at: handoff.lend(ruleset.as_fd())?,
     }))
+}
+
+/// Stated writes alone admit outside sockets; denies are masked by bwrap.
+fn admit_sockets(
+    fs: &RenderedFs,
+    roots: &[RealPath],
+    sink: &mut dyn FnMut(Admit<'_>) -> io::Result<()>,
+) -> Result<(), Error> {
+    let Some(rules) = fs.rules() else {
+        return Ok(());
+    };
+    let mut dirs = Vec::new();
+    for object in &rules.write {
+        let path = &object.position;
+        let Some(held) = open_nofollow(path)? else {
+            continue;
+        };
+        if held.kind() == Some(Kind::Dir) {
+            dirs.push(path.clone());
+        } else {
+            let fd = leaf_fd(&held).map_err(|e| Error::admit(path, e))?;
+            sink(Admit { path, fd }).map_err(|e| Error::admit(path, e))?;
+        }
+    }
+    for path in lowered(dirs, roots) {
+        let Some(held) = open_nofollow(&path)? else {
+            continue;
+        };
+        let fd = leaf_fd(&held).map_err(|e| Error::admit(&path, e))?;
+        sink(Admit { path: &path, fd }).map_err(|e| Error::admit(&path, e))?;
+    }
+    Ok(())
 }
 
 /// Every live file as itself, and every live directory lowered onto the
@@ -462,11 +509,11 @@ fn written(fs: &RenderedFs, dir: &RealPath) -> bool {
 /// bind root inside `dir`, whatever its name, since a walk from there meets
 /// the root and the envelope's own directories, never `dir`: an alias, or a
 /// sub-bind under a ceiling that reads only it.  `Any` is `/`, so every root.
-fn lowered(table: &ExecRules, roots: &[RealPath]) -> BTreeSet<RealPath> {
-    if table.supports(Subject::Any) {
-        return roots.iter().cloned().collect();
-    }
-    (table.allowed_dirs())
+fn lowered(
+    dirs: impl IntoIterator<Item = RealPath>,
+    roots: &[RealPath],
+) -> BTreeSet<RealPath> {
+    dirs.into_iter()
         .flat_map(|dir| {
             let at = roots.iter().any(|root| root.contains(&dir));
             let inside: Vec<_> = (roots.iter())
@@ -524,7 +571,10 @@ fn expand(
         excluded,
         spine: Vec::new(),
     };
-    for root in lowered(table, roots) {
+    let dirs = table
+        .allowed_dirs()
+        .chain(table.supports(Subject::Any).then(RealPath::universal));
+    for root in lowered(dirs, roots) {
         match open_nofollow(&root)?.map(Located::into_dir) {
             Some(Ok(dir)) => walk.dir(&dir)?,
             Some(Err(file)) => walk.file(&file)?,

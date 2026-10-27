@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
+generated_at_commit: bb5bc1a6
 generated_at_date: 2026-10-27
 covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
@@ -475,6 +475,25 @@ directory execute/traverse semantics remain unimplemented. Native Windows
 verification of stored-case walks, verbatim image launch, and launch refusals
 is outstanding; cross-compilation alone does not establish them.
 
+Pathname Unix sockets outside a host envelope follow stated fs writes:
+`linux/landlock.rs` handles `REFER | RESOLVE_UNIX` on every ABI >= 9 launch,
+adding `EXECUTE` for a restricted exec; directory writes are lowered onto the
+bind roots and file writes admit the opened file alone. bwrap masks fs denies.
+`macos.rs::emit_fs_restricted` emits outbound, bind and inbound socket clauses
+per write name and the corresponding denies afterwards. Unrestricted fs admits
+no outside socket, so exec-only, net-only and gpu-only grants admit none via fs.
+The macOS resolver additionally rides `net`; Linux admits no resolver socket
+and falls back to DNS over IP. **Below ABI 9 every pathname socket a bind shows
+remains reachable, even offline**
+([[internals/linux-envelope#When ABI 9 is the floor|the ABI migration]]).
+A sibling launch needs a write covering the server socket. A write covering
+a deputy admits it, and a writable foreign socket can be unlinked and replaced
+to intercept later clients; the five restrictive bundled profiles write only cwd, gitdir and scratch.
+exarch's `$TMPDIR` is `$EXARCH_SCRATCH/tmp`: hardcoded `/tmp` is per-command
+memory on Linux and refused on macOS.
+[[decisions/261027_unix-sockets-follow-writes|unix-sockets-follow-writes]]
+records the policy and its limits.
+
 Inside a *guest*, `ral-daemon` starts the engine as
 `--guest-engine <cgroup-root>`. The role installs the
 [[map/core/io-process|spawn jail]], so `build_launch`
@@ -484,7 +503,8 @@ marking above stderr. The daemon disables the user namespaces bwrap needs.
 `GrantStack::net_veto` carries any layer's veto to both the host projection
 and `JailPlan`: an offline guest command gets a fresh network namespace with
 loopback up. IP egress and outside abstract Unix sockets are out of reach;
-pathname Unix sockets remain reachable through the shared filesystem.
+the guest jail installs no Landlock domain, so pathname socket reachability
+is determined by its shared filesystem.
 The in-process guards apply unchanged (`docs/SPEC.md` §12.11): fs and exec
 bind the command head, and the guest builds no filesystem or executable
 projection to constrain an admitted program's descendants (`rg --pre`,

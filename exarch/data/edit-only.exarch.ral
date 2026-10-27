@@ -1,6 +1,6 @@
 # `edit-only` bake-in.  Same shape as `read-only` for reads and
 # exec, but the agent may edit the project tree — writes go to the
-# working directory (plus ephemeral scratch/temp for tooling).
+# working directory (plus session scratch for tooling).
 #
 # Use when the agent's job is to edit the project tree — apply patches,
 # refactor, fix — without running a build or test suite.  Network is on
@@ -9,6 +9,10 @@
 # To forbid writes to a specific subtree, layer a `--restrict` (which
 # can only further attenuate, not widen).  To start read-only, use
 # `read-only`; to start broader, use `reasonable` and lock down via deny.
+
+# Temp files go to `$TMPDIR` in the session scratch. Hardcoded `/tmp` is
+# per-command on Linux and refused on macOS. Shared temp directories hold
+# other programs' sockets.
 
 return [
   gpu: `withheld,  # no GPU; `reasonable` and `dangerous` leave it on
@@ -20,8 +24,6 @@ return [
   fs: [
     read: [
       `cwd .,                # the project tree the agent is editing
-      `absolute /tmp,
-      `tempdir .,            # `$TMPDIR` on macOS — distinct from /tmp
       `scratch .,            # the session's own scratch (`$EXARCH_SCRATCH`)
       `xdg-config .,         # ${XDG_CONFIG_HOME:-~/.config}
       `xdg-data .,           # ${XDG_DATA_HOME:-~/.local/share}
@@ -54,8 +56,6 @@ return [
     # writable so the agent can apply edits.
     write: [
       `cwd .,
-      `absolute /tmp,
-      `tempdir .,
       `scratch .,
     ],
 
@@ -75,8 +75,8 @@ return [
   # mutations succeed.
   #
   # And unlike either, no directory this profile can *write* is
-  # admitted here: `reasonable`'s `dir `cwd .`, `dir `absolute /tmp`,
-  # `dir `tempdir .` and `dir `scratch .` admits are absent.  A directory that is both writable and
+  # admitted here: `reasonable`'s `dir `cwd .` and `dir `scratch .`
+  # admits are absent.  A directory that is both writable and
   # exec-admitted makes every deny below advisory — `cp $(which git)
   # ./g` and run `./g`, a copy no name veto and no `#"/git$"` regex
   # ever sees.  An editing agent runs tools, not the tree it edits, so

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
+generated_at_commit: bb5bc1a6
 generated_at_date: 2026-10-27
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/roles.md, exarch/data/ral.md, exarch/data/context.md]
 ---
@@ -181,7 +181,7 @@ the shell every seat starts from.
   that the session holds for as long as it runs. Every cache a session
   writes is redirected into it: `TOOL_HOMES`, one table of variables, each
   replacing the inherited value with a subdirectory of the scratch
-  (`XDG_CACHE_HOME`, `CARGO_HOME`, `GOPATH`, `GOCACHE`, the pnpm, Bun and
+  (`TMPDIR`, `XDG_CACHE_HOME`, `CARGO_HOME`, `GOPATH`, `GOCACHE`, the pnpm, Bun and
   Yarn stores, …) or, for Maven, which has no such variable, `MAVEN_ARGS`
   set to `-Dmaven.repo.local=<scratch>/maven`. The table is spelled in two
   namespaces by one `env_under`: a host `Scratch` joins its homes natively
@@ -190,11 +190,15 @@ the shell every seat starts from.
   (`GuestPath::join`), since a guest path lifted into a host `PathBuf` would
   join `/tmp\pip` on Windows. `Seat::root` attaches its identity engine at
   `EnginePath::Host` paths, the launching user's cwd and `HOME`, with the
-  launch's grants in `Root::grants`. No profile writes the user's caches, so
+  launch's grants in `Root::grants`. The five restrictive profiles write no user caches, so
   a write lands in the scratch rather than in a denied real one. The
-  profiles grant it as `` `scratch . ``, a place beside `` `tempdir . ``;
-  they cannot spell it `xdg-cache`, since the session rebinds
-  `XDG_CACHE_HOME`. The scratch is made before the policy freezes, and
+  five restrictive profiles grant it as `` `scratch . ``; they cannot spell
+  it `xdg-cache`, since the session rebinds `XDG_CACHE_HOME`. `TMPDIR` points
+  to `<scratch>/tmp`, created by `Scratch::made` on the host and after the
+  guest daemon mounts its scratch tmpfs. The profiles grant neither `/tmp`
+  nor `tempdir`; `dangerous` leaves fs unrestricted. Hardcoded `/tmp` is
+  per-command on Linux and refused on macOS. The scratch is made before the
+  policy freezes, and
   travels as a spelling: `Scratch::spelling` is the `$EXARCH_SCRATCH` of the
   root's `Attach`, which `engine_root` hands to the shell
   (`Shell::set_scratch`), so that every grant frozen in the session, a

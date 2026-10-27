@@ -5,7 +5,7 @@
 //!
 //! Loosest to tightest: `dangerous` (the lattice top), `reasonable`,
 //! `edit-only`, `read-only`, `minimal`, `confined`.  Every profile but
-//! `dangerous` names `cwd` and `tempdir` places, which the loader freezes at
+//! `dangerous` names `cwd` and `scratch` places, which the loader freezes at
 //! session start — so the per-invocation working directory is baked into the
 //! policy and exarch never injects it dynamically.  `confined`, `minimal`,
 //! `read-only` and `edit-only` withhold the GPU.
@@ -245,7 +245,7 @@ mod tests {
         }
     }
 
-    /// Every bake-in carries Unix-only literals (`/tmp`, `/opt/homebrew/`, …).
+    /// Bake-ins carry Unix-only literals such as `/usr/local/bin`.
     /// On Windows they are foreign-rooted and must drop as dead grants rather
     /// than trip the freeze pass's absoluteness check, or the whole profile
     /// would refuse to load and `dangerous` would be the only usable base.
@@ -265,27 +265,6 @@ mod tests {
         ] {
             load(name, text, &ctx);
         }
-    }
-
-    /// The drop reaches fs literals and exec-dir overrides alike: a grant that
-    /// can never match a real access must not show up as authority.
-    #[cfg(windows)]
-    #[test]
-    fn minimal_drops_foreign_rooted_grants_on_windows() {
-        let home = host_home();
-        let ctx = ctx_at(&home, r"C:\work");
-        let layer = load("minimal", MINIMAL_RAL, &ctx);
-        assert!(
-            !fs_of(&layer).read.iter().any(|p| p == "/tmp"),
-            "the Unix-only '/tmp' literal must not survive freeze on Windows"
-        );
-        assert!(
-            !exec_of(&layer)
-                .allows
-                .iter()
-                .any(|k| k == "`dir `absolute /opt/homebrew"),
-            "the foreign-rooted '/opt/homebrew/' override must not survive freeze on Windows"
-        );
     }
 
     /// The three load-bearing differences from `reasonable`, pinned so an edit
@@ -365,20 +344,17 @@ mod tests {
         );
     }
 
-    /// The per-invocation working tree, temp dir and scratch reach both halves
+    /// The per-invocation working tree and scratch reach both halves
     /// of the policy: directory keys in `exec`, plain sigils in `fs`.
     #[cfg(unix)]
     #[test]
-    fn minimal_and_reasonable_carry_cwd_tempdir_and_scratch_sigils() {
+    fn minimal_and_reasonable_carry_cwd_and_scratch_sigils() {
         let home = host_home();
         let cwd = Path::new("/work/proj");
         let ctx = ctx_at(&home, cwd);
-        // Freeze folds away the trailing separator macOS `$TMPDIR` carries, so
-        // compare in the same normal form the frozen keys hold.
         let cwd_resolved = spelled(&cwd.to_string_lossy());
-        let tempdir_resolved = spelled(&std::env::temp_dir().to_string_lossy());
         let scratch_resolved = spelled(&scratch().to_string_lossy());
-        let tokens = [&cwd_resolved, &tempdir_resolved, &scratch_resolved];
+        let tokens = [&cwd_resolved, &scratch_resolved];
         for (name, text) in [("minimal", MINIMAL_RAL), ("reasonable", REASONABLE_RAL)] {
             let layer = load(name, text, &ctx);
             let exec = exec_of(&layer);
@@ -396,9 +372,7 @@ mod tests {
         }
     }
 
-    /// A directory outside every root `minimal` admits by place: `/tmp` and
-    /// the scratch dir are admitted wholesale, so a fixture in either proves
-    /// nothing.
+    /// A fixture outside the admitted scratch, on every host.
     #[cfg(unix)]
     fn outside_tmp() -> tempfile::TempDir {
         tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("a fixture dir beside the crate")

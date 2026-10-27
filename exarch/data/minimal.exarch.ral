@@ -17,13 +17,17 @@
 # `dangerous + --restrict`: minimal is a curated starting point;
 # dangerous-with-restrict is a bespoke profile written from scratch.
 #
-# `cwd`, `tempdir` and `scratch` places are resolved by the freeze pass at
+# `cwd` and `scratch` places are resolved by the freeze pass at
 # session start, so the per-invocation working directory and scratch
 # directory bake in without exarch having to inject anything dynamically.
 #
 # Edit this file to change what `--base minimal` admits.  The
 # contents are baked into the exarch binary at build time via
 # `include_str!`.
+
+# Temp files go to `$TMPDIR` in the session scratch. Hardcoded `/tmp` is
+# per-command on Linux and refused on macOS. Shared temp directories hold
+# other programs' sockets.
 
 return [
   gpu: `withheld,  # no GPU; `reasonable` and `dangerous` leave it on
@@ -36,14 +40,10 @@ return [
   fs: [
     read: [
       `cwd .,
-      `absolute /tmp,
-      `tempdir .,
       `scratch .,
     ],
     write: [
       `cwd .,
-      `absolute /tmp,
-      `tempdir .,
       `scratch .,
     ],
   ],
@@ -72,8 +72,6 @@ return [
     allow: [
       `dir `system,
       `dir `cwd .,
-      `dir `absolute /tmp,
-      `dir `tempdir .,
       `dir `scratch .,
     ],
     deny: [

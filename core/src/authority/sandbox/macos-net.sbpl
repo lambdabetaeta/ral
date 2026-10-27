@@ -14,6 +14,7 @@
 
 ;; IP only, never `network*`: a Unix socket reaches a daemon acting with
 ;; your authority outside this profile, ssh-agent's for one.
+;; Write prefixes carry their own socket rules: macos.rs::emit_fs_restricted.
 (allow network-outbound (remote ip))
 (allow network-inbound (local ip))
 (allow network-bind (local ip))

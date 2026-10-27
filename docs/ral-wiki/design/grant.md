@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 1e3124cbc0ac2352d44c9d743a70b1cde5081361
+generated_at_commit: bb5bc1a6
 ---
 
 # Capabilities and `grant`
@@ -334,8 +334,11 @@ classified on the raw string, so a path rooted only on the other platform is a
 dead grant and one profile loads on both. Nested tables are records (`()` stays
 the empty *profile*, and `exec: [allow: []]` the empty table). `chdir` gates
 `cd` while `within [dir: …]` is judged by `fs` alone. A path in `fs` can name a
-socket and no tag stops a process connecting to it; fs authority and service
-authority are separate, and no spelling widens what an envelope forbids.
+socket: a stated fs write covering its path admits connecting and binding,
+with an fs deny winning. An unrestricted fs projection admits no outside
+socket. macOS adds its resolver socket under `net`; Linux admits none and
+falls back to DNS over IP. See
+[[decisions/261027_unix-sockets-follow-writes|unix-sockets-follow-writes]].
 
 A `.ral` profile and the inline
 `grant` surface are symmetric: both decode through the same walker into one
@@ -347,7 +350,8 @@ reaches the stack or the IPC wire.
 This is the boundary [[map/exarch|exarch]] reuses as its sandbox: each agent
 run evaluates under a profile's capabilities pushed onto this same stack.
 
-**Concessions.** Five caveats are inherent to the design, not defects:
+**Concessions.** These limits are part of the design:
+
 - **The sandbox bounds a running session, not what it leaves behind.** It
   bounds what a session reads (credentials, `~/.ssh`), what it damages outside
   the project, and what it runs. It does not stop a hostile session from
@@ -367,7 +371,8 @@ run evaluates under a profile's capabilities pushed onto this same stack.
 - **TOCTOU on path resolution.** The resolver-form and bind-form checks share one
   source, so the OS profile and the in-process check cannot disagree, but symlink
   races inside the admitted set are a known surface, not a closed one.
-- **Builds start cold.** No profile writes a cache the user's own tools read.
+- **Builds start cold.** The five restrictive bundled profiles name no writes
+  to the user's tool caches.
   This is hygiene, not a barrier against a hostile agent while the project and
   `.git` stay writable: sessions never contaminate each other or the user's
   caches (cargo's unpacked sources, Go's module and build caches, Maven's
@@ -386,8 +391,9 @@ run evaluates under a profile's capabilities pushed onto this same stack.
   author could already do. Copying a denied binary under a fresh name defeats
   the name veto for the same reason and to the same small effect. The overlap
   is therefore not merely tolerable but *required* — `cargo build &&
-  ./target/debug/app` is exactly this shape, and every bake-in profile makes
-  `` `cwd ``, `/tmp`, `` `tempdir `` and `` `scratch `` both writable and exec-admitted on purpose.
+  ./target/debug/app` is exactly this shape: `reasonable`, `minimal` and
+  `confined` make `` `cwd `` and `` `scratch `` both writable and
+  exec-admitted on purpose.
   There is no write freeze: an exec allowance never withdraws write
   authority, on any axis. A broad write that covers a run-admitted directory
   (``write: [`home .]`` over `~/.cargo/bin`, or `edit-only` from `~` over
@@ -405,6 +411,25 @@ run evaluates under a profile's capabilities pushed onto this same stack.
   case the base profiles decide correctly for the wrong stated reason. It must
   stay unwritable not because `exec` also names it, but because a program left
   on the human's `$PATH` is run tomorrow by the human, unconfined.
+
+- **Outside sockets require stated writes.** On macOS and Linux Landlock
+  ABI >= 9, connecting to a pathname socket outside the envelope requires a
+  stated write covering it; an unrestricted fs admits none. An fs deny wins.
+  macOS's resolver socket additionally rides `net`; Linux admits no resolver
+  socket and uses DNS over IP. **Below ABI 9 every pathname socket a bind
+  shows remains reachable, even offline**
+  ([[internals/linux-envelope#When ABI 9 is the floor|the ABI migration]]).
+- **A socket write admits its deputy.** Writing `~/.docker` reaches root
+  through docker.sock; writing `~/.gnupg` admits signing. This is the same
+  concession as writing meets running. The five restrictive bundled profiles
+  write only `cwd`, `gitdir` and `scratch`. A writable directory holding a foreign socket also
+  lets a child unlink it and bind its own, intercepting the user's later
+  clients. A server in one launch needs its socket under a stated write for
+  a sibling launch to reach it; the write normally also permits binding.
+- **Temp paths are session scratch.** exarch sets `$TMPDIR` to
+  `$EXARCH_SCRATCH/tmp`, which the five restrictive bundled profiles cover through `scratch`.
+  Hardcoded `/tmp` is discarded after each command on Linux and refused on
+  macOS; shared temp directories may hold other programs' sockets.
 
 **An open class: the unconfined reader.** Every dimension `grant` gates names
 what the *confined* process may do. One family of escalations has no such

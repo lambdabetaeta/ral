@@ -1,12 +1,17 @@
 ---
 status: active
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
+generated_at_commit: bb5bc1a6
 verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
 verified_at_date: 2026-10-25
 anchors: [OwnDir, UserFile, OwnError, Ungoverned, read_named, create_named, walk_dir_made, lock_strict, AccountHome, GrantNarrower, FreezeCtx, Pointer]
 ---
 
 # Own files
+
+> **Amended 2026-10-27.** The five restrictive profiles (`minimal`, `confined`,
+> `edit-only`, `read-only`, `reasonable`) use `scratch` alone for session temp,
+> with `$TMPDIR` at its `tmp` directory; their `tempdir` and `/tmp` grants are
+> removed by [[decisions/261027_unix-sockets-follow-writes|unix-sockets-follow-writes]].
 
 **The files a program touches on its own account, outside any shell, are reached
 only through `ral_core::own`: three addresses (`OwnDir`, `UserFile` and the

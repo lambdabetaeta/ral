@@ -24,8 +24,11 @@ own: no `--extend` on the command line means no personal rules, and
 - `… denied by grant` names a path; `… denied by active grant` names a command.
 - An OS-sandbox hint lists the kernel's lines, then a remedy per class: paths
   outside `fs.read` or `fs.write`, programs outside the exec allow-list,
-  `` net: `offline ``, `` gpu: `withheld ``, or a service or Unix socket no grant
-  can open. Only the first two are a rule's to fix; say so plainly for the others.
+  `` net: `offline ``, `` gpu: `withheld ``, a service, or a Unix socket. A
+  pathname socket needs a stated fs write, e.g.
+  `` fs: [write: [`absolute /path/to/socket]] ``; an fs deny still wins.
+  Linux Landlock ABI < 9 does not enforce this pathname-socket limit.
+  A service withheld by the base profile cannot be opened by a grant.
 - The sandbox matches resolved paths. A file reached through a symlink, such as
   `~/.config/git/config -> ~/dotfiles/git/.config/git/config`, needs its real
   target granted; the hint already prints the resolved path.

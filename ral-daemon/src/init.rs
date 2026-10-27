@@ -146,6 +146,13 @@ pub fn serve() -> Result<Infallible, String> {
     for filesystem in mounts::plan(&boot) {
         filesystem.apply()?;
     }
+    let temp_mode = rustix::fs::Mode::from_raw_mode(0o1777);
+    rustix::fs::mkdir("/tmp/tmp", temp_mode).map_err(|err| {
+        format!("could not create the guest scratch's temp directory /tmp/tmp: {err}")
+    })?;
+    rustix::fs::chmod("/tmp/tmp", temp_mode).map_err(|err| {
+        format!("could not make /tmp/tmp writable for guest commands with sticky mode 1777: {err}")
+    })?;
     mounts::exec_cgroup()?;
     // Which of the two the host chose is worth one line in its own log: it is
     // the difference between the two hypervisors, and the first thing to know

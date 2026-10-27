@@ -2,7 +2,7 @@ Like every shell, `ral` runs commands:
 
     ls
     cat foo.txt | wc -l
-    echo "hello" > /tmp/out
+    echo "hello" > "!{env}[TMPDIR]/out"
 
 Commands are sequenced by newlines or `;`. An uncaught failure aborts the whole script: `mkdir out; cp notes.txt out/` runs `cp` only when `mkdir` succeeds. `?` runs the second command when the first failed: `cat VERSION ? #'unversioned'#`. `&&` and `||` are Boolean operators, used inside `$[…]`. There is no trailing `&` either: background work is `spawn "title" { … }`, below.
 

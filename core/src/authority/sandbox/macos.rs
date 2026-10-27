@@ -235,6 +235,7 @@ fn emit_fs_restricted(profile: &mut Profile, rules: &RenderedRules) {
     }
     for prefix in rules.write.iter().flat_map(Object::names) {
         lines.push(Clause::allow("file-write*", Filter::Subpath(prefix)).to_string());
+        lines.extend(socket_clauses(true, prefix));
     }
     // Seatbelt starts a program it may not read, so running reads is said here.
     profile.fs_denies.push(match readable.as_slice() {
@@ -250,7 +251,17 @@ fn emit_fs_restricted(profile: &mut Profile, rules: &RenderedRules) {
             ["file-read*", "file-write*", "file-link", "process-exec"]
                 .map(|op| Clause::deny(op, Filter::Subpath(path)).to_string()),
         );
+        profile.fs_denies.extend(socket_clauses(false, path));
     }
+}
+
+fn socket_clauses(allow: bool, path: &Rendered) -> [String; 3] {
+    [
+        ("network-outbound", Filter::Subpath(path)),
+        ("network-bind", Filter::LocalUnixSubpath(path)),
+        ("network-inbound", Filter::LocalUnixSubpath(path)),
+    ]
+    .map(|(ops, filter)| Clause { allow, ops, filter }.to_string())
 }
 
 /// Metal's caches, read and written, and the lookups down to them.  Among
@@ -355,6 +366,7 @@ const ANY_EXEC: &str = "(allow process-exec)";
 /// a rule without it.
 enum Filter<'a> {
     Subpath(&'a Rendered),
+    LocalUnixSubpath(&'a Rendered),
     Literal(&'a Rendered),
     Symlink(&'a Rendered),
     /// A final path component, wherever the name resolves.
@@ -367,6 +379,9 @@ impl fmt::Display for Filter<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Subpath(path) => write!(f, "(subpath \"{}\")", escape_path(path)),
+            Self::LocalUnixSubpath(path) => {
+                write!(f, "(local unix-socket {})", Self::Subpath(path))
+            }
             Self::Literal(path) => write!(f, "(literal \"{}\")", escape_path(path)),
             Self::Symlink(path) => write!(
                 f,
@@ -1160,6 +1175,71 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mac_write_prefix_admits_unix_connections_binding_and_listening() {
+        let policy = SandboxProjection {
+            fs: writing(&["/ral-test/write"]),
+            net: false,
+            ..SandboxProjection::default()
+        };
+        let profile = build_profile(&policy).unwrap();
+        for clause in [
+            "(allow network-outbound (subpath \"/ral-test/write\"))",
+            "(allow network-bind (local unix-socket (subpath \"/ral-test/write\")))",
+            "(allow network-inbound (local unix-socket (subpath \"/ral-test/write\")))",
+        ] {
+            assert!(profile.contains(clause), "missing {clause}:\n{profile}");
+        }
+    }
+
+    #[test]
+    fn mac_read_only_and_unrestricted_fs_admit_no_unix_socket() {
+        for fs in [
+            reading(vec![prefix("/ral-test/read")]),
+            FsProjection::Unrestricted,
+        ] {
+            let policy = SandboxProjection {
+                fs,
+                net: false,
+                ..SandboxProjection::default()
+            };
+            let profile = rules(&build_profile(&policy).unwrap());
+            for op in ["network-outbound", "network-bind", "network-inbound"] {
+                assert!(!profile.contains(op), "{profile}");
+            }
+        }
+    }
+
+    #[test]
+    fn mac_fs_deny_withholds_unix_sockets_after_write_allows() {
+        let policy = SandboxProjection {
+            fs: FsProjection::Restricted(FsRules {
+                write: vec![prefix("/ral-test/write")],
+                deny: frozen(&["/ral-test/write/denied"]),
+                ..FsRules::default()
+            }),
+            net: false,
+            ..SandboxProjection::default()
+        };
+        let profile = build_profile(&policy).unwrap();
+        for (allow, deny) in [
+            (
+                "(allow network-outbound (subpath \"/ral-test/write\"))",
+                "(deny network-outbound (subpath \"/ral-test/write/denied\"))",
+            ),
+            (
+                "(allow network-bind (local unix-socket (subpath \"/ral-test/write\")))",
+                "(deny network-bind (local unix-socket (subpath \"/ral-test/write/denied\")))",
+            ),
+            (
+                "(allow network-inbound (local unix-socket (subpath \"/ral-test/write\")))",
+                "(deny network-inbound (local unix-socket (subpath \"/ral-test/write/denied\")))",
+            ),
+        ] {
+            assert!(at(&profile, allow) < at(&profile, deny));
+        }
+    }
+
     /// `net` is the internet, not every local socket: a Unix socket reaches a
     /// daemon acting with the user's authority, ssh-agent's for one, so the
     /// only path-named socket admitted is the resolver's.
@@ -1322,7 +1402,10 @@ mod tests {
                 "(allow ipc-posix-shm-read-data (ipc-posix-name \"apple.shm.notification_center\") (ipc-posix-name \"com.apple.featureflags.shm\"))"
             )
         );
-        assert_eq!(profile.matches("(allow ipc-posix-shm").count(), 1);
+        assert_eq!(profile.matches("(allow ipc-posix-shm").count(), 2);
+        assert_eq!(profile.matches("(allow ipc-posix-sem").count(), 1);
+        assert!(profile.contains("(allow ipc-posix-sem (ipc-posix-name-prefix \"/mp-\"))"));
+        assert!(profile.contains("(allow ipc-posix-shm (ipc-posix-name-prefix \"/psm_\"))"));
         assert!(
             !profile.contains("(global-name \"apple.shm.notification_center\")"),
             "notification_center is a POSIX shared-memory name, not a Mach service"
