@@ -6,8 +6,7 @@
 //! every arm; pipeline staging reaches
 //! `resolve_command_word`/`classify_command` directly.
 
-use crate::authority::guard::{Denial, deny_head};
-use crate::authority::policy::{ExecDenial, Program};
+use crate::authority::policy::{Admitted, Program};
 use crate::fact::{AuditIo, Command};
 use crate::ir::{CommandName, CommandWord};
 use crate::shell::runtime::{
@@ -24,7 +23,8 @@ use crate::source::Span;
 // ── Resolution ─────────────────────────────────────────────────────────
 
 /// One arm per place a command name can live.
-pub(crate) enum Resolution {
+/// `P` is the external's program: resolved, or admitted by [`classify_command`].
+pub(crate) enum Resolution<P = Program> {
     Env(Value),
     /// `depth` counts handler frames from the top down to the matched one
     /// inclusive — what `strip_matched` takes.  Boxed: [`HandlerEntry`] would
@@ -35,7 +35,7 @@ pub(crate) enum Resolution {
     },
     /// A base handler frame — a manifest row from the argv half.
     Base(BuiltinEntry),
-    External(Head),
+    External(Head<P>),
 }
 
 /// Bare-name lookup: env → handlers → external.  A head like `f x` is a
@@ -68,37 +68,22 @@ pub(crate) fn resolve_command_word(head: &CommandWord, env: &Env, shell: &Shell)
     }
 }
 
-/// Resolution plus head admission: `Err` is the grant refusing the head before
-/// any argument evaluates.  Grants govern exec alone, so the other arms pass
+/// Resolution plus head admission, a plain call's one exec judgment:
+/// `Err` is the grant refusing the head before its redirects open or its
+/// call is recorded.  Grants govern exec alone, so the other arms pass
 /// unconditionally.
 pub(crate) fn classify_command(
     head: &CommandWord,
     env: &Env,
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Resolution> {
-    let r = resolve_command_word(head, env, shell);
-    if let Resolution::External(head) = &r
-        && let Ok(program) = &head.program
-        && let Err(why) = shell.context.grants.withheld(shell.baseline(), program)
-    {
-        return Err(refuse_head(&head.shown, program, &why, mooring, shell));
-    }
-    Ok(r)
-}
-
-/// Denial for a head whose program the grant refuses.
-fn refuse_head(
-    shown: &str,
-    program: &Program,
-    why: &ExecDenial,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Break {
-    let Denial { check, error } =
-        deny_head(&shell.context.grants, shell.baseline(), shown, program, why);
-    shell.record_check(Some(mooring), check);
-    crate::shell::runtime::Error::from(error).into()
+) -> Settled<Resolution<Admitted>> {
+    Ok(match resolve_command_word(head, env, shell) {
+        Resolution::External(head) => Resolution::External(head.admit(mooring, shell)?),
+        Resolution::Env(value) => Resolution::Env(value),
+        Resolution::Handler { entry, depth } => Resolution::Handler { entry, depth },
+        Resolution::Base(entry) => Resolution::Base(entry),
+    })
 }
 
 // ── Runners ─────────────────────────────────────────────────────────────
@@ -126,7 +111,7 @@ pub(crate) fn run_base_frame(
 
 /// An external's door, with its redirects installed inside it.
 pub(crate) fn run_external(
-    head: Head,
+    head: Head<Admitted>,
     args: &[Value],
     redirects: &Redirects<String>,
     span: Option<Span>,

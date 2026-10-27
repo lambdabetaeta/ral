@@ -127,9 +127,9 @@ fn an_extend_grant_cannot_survive_a_restrict_that_omits_it() {
 
     let mut shell = ral_core::test_helper::core_shell();
     install(&mut shell, &stack);
-    check_file(&mut shell, &on_path("rustc"), &[])
+    check_file(&mut shell, &on_path("rustc"))
         .expect_err("--extend must not outlive a --restrict that omits it");
-    check_file(&mut shell, &on_path("ls"), &[]).expect("what both sides name survives the fold");
+    check_file(&mut shell, &on_path("ls")).expect("what both sides name survives the fold");
 }
 
 /// Two restrictions whose verdicts do not depend on their order (it can: see
@@ -164,11 +164,11 @@ fn two_restricts_compose_to_the_same_grant_in_either_order() {
     for stack in [&ab, &ba] {
         let mut shell = ral_core::test_helper::core_shell();
         install(&mut shell, stack);
-        check_file(&mut shell, &ls, &[])
+        check_file(&mut shell, &ls)
             .expect("what both files name is admitted regardless of restrict argv order");
         for one_sided in ["git", "rustc"] {
             let real = on_path(one_sided);
-            let message = refusal(check_file(&mut shell, &real, &[]));
+            let message = refusal(check_file(&mut shell, &real));
             assert!(
                 message.contains(&real),
                 "a name only one restrict file carries must be refused, by its real path: {message}"
@@ -303,8 +303,8 @@ fn dangerous_stays_ambient_until_something_attenuates_it() {
     assert!(!stack.is_restrictive(), "dangerous must attenuate nothing");
     let mut shell = ral_core::test_helper::core_shell();
     install(&mut shell, &stack);
-    check_file(&mut shell, &own, &[]).expect("exarch runs");
-    check_file(&mut shell, &on_path("ls"), &[]).expect("everything runs");
+    check_file(&mut shell, &own).expect("exarch runs");
+    check_file(&mut shell, &on_path("ls")).expect("everything runs");
 
     let restrict = profile(
         &dir,
@@ -372,17 +372,17 @@ fn dangerous_extended_is_unrestricted_less_the_extensions_exclusions() {
     );
     let mut shell = ral_core::test_helper::core_shell();
     install(&mut shell, &stack);
-    check_file(&mut shell, &on_path("rustc"), &[]).expect("`every` still runs what is unnamed");
-    check_file(&mut shell, &own, &[]).expect("exec is top, so no self layer");
+    check_file(&mut shell, &on_path("rustc")).expect("`every` still runs what is unnamed");
+    check_file(&mut shell, &own).expect("exec is top, so no self layer");
 
     let Invocation { stack, .. } =
         compose(&dir, "dangerous", Some(&excluding), &[]).expect("profiles compose");
     let mut shell = ral_core::test_helper::core_shell();
     install(&mut shell, &stack);
-    let message = refusal(check_file(&mut shell, &on_path("rustc"), &[]));
+    let message = refusal(check_file(&mut shell, &on_path("rustc")));
     assert!(message.contains(&on_path("rustc")), "{message}");
-    check_file(&mut shell, &on_path("ls"), &[]).expect("every request less the exclusion");
-    refusal(check_file(&mut shell, &own, &[]));
+    check_file(&mut shell, &on_path("ls")).expect("every request less the exclusion");
+    refusal(check_file(&mut shell, &own));
 }
 
 /// `--restrict` files apply in argument order: a layer reads the run places
@@ -405,7 +405,7 @@ fn restrictions_apply_in_argument_order() {
         let Invocation { stack, .. } = compose(&dir, "dangerous", None, &files).expect("composes");
         let mut shell = ral_core::test_helper::core_shell();
         install(&mut shell, &stack);
-        check_file(&mut shell, &prog, &[])
+        check_file(&mut shell, &prog)
     };
     verdict([reads_nothing.clone(), runs.clone()])
         .expect_err("a layer that reads nothing, beneath the run, cannot read it");
@@ -434,7 +434,7 @@ fn the_self_layer_follows_an_exec_restriction() {
             compose(&dir, "dangerous", None, restricts).expect("profiles compose");
         let mut shell = ral_core::test_helper::core_shell();
         install(&mut shell, &stack);
-        check_file(&mut shell, &exe, &[])
+        check_file(&mut shell, &exe)
     };
     refusal(verdict(std::slice::from_ref(&admitting)));
     verdict(&[]).expect("plain `dangerous` restricts no exec, so pushes no self layer");
@@ -531,13 +531,13 @@ fn an_extend_union_keeps_what_the_base_admitted() {
 
     let mut shell = ral_core::test_helper::core_shell();
     install(&mut shell, &extended.stack);
-    check_file(&mut shell, &on_path("rustc"), &[]).expect("the extension's name is admitted");
+    check_file(&mut shell, &on_path("rustc")).expect("the extension's name is admitted");
     let mut plain = ral_core::test_helper::core_shell();
     install(&mut plain, &base.stack);
     for name in ["ls", "cat"] {
         let real = on_path(name);
-        if check_file(&mut plain, &real, &[]).is_ok() {
-            check_file(&mut shell, &real, &[]).unwrap_or_else(|_| {
+        if check_file(&mut plain, &real).is_ok() {
+            check_file(&mut shell, &real).unwrap_or_else(|_| {
                 panic!("--extend must not narrow what reasonable admits: {name}")
             });
         }

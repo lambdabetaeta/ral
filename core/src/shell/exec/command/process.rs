@@ -30,7 +30,7 @@ pub(crate) fn build_launch(
 ) -> Settled<crate::process::Launch> {
     // A guest jail is already the guest's sandbox: bwrap needs unprivileged
     // user namespaces and the guest boots with `user.max_user_namespaces = 0`.
-    // The in-process guard in `vet` runs either way.
+    // The in-process guard in `Head::admit` runs either way.
     let jail = crate::process::jail::guest();
     let mut cmd = if jail.is_none()
         && let Some(projection) = crate::authority::sandbox::SandboxProjection::of(
@@ -277,7 +277,7 @@ mod judged_program {
     use super::build_launch;
     use crate::ir::CommandName;
     use crate::process::{DurableRoot, PgidPolicy, StdioSpec};
-    use crate::shell::runtime::{Shell, Value};
+    use crate::shell::runtime::{Mooring, Shell, Value};
     use std::io::Read;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::{Path, PathBuf};
@@ -313,7 +313,12 @@ mod judged_program {
     fn judge(shell: &mut Shell, args: &[&str]) -> SpawnPlan {
         let head = Head::resolve(&CommandName::Path("tools/build".into()), &shell.context);
         let args: Vec<_> = args.iter().map(|arg| Value::string(*arg)).collect();
-        vet(head, &args, shell).expect("an unrestricted shell admits the file")
+        vet(
+            head.admit(&Mooring::adrift(), shell)
+                .expect("an unrestricted shell admits the file"),
+            &args,
+        )
+        .expect("the file can be run")
     }
 
     fn stdout_of(plan: SpawnPlan, shell: &Shell) -> String {

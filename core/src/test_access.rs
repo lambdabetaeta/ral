@@ -30,7 +30,7 @@ use crate::path::Walked;
 use crate::protocol::Frame;
 use crate::protocol::channel::{WireChannel, WireStream};
 use crate::protocol::probe::Probe;
-use crate::shell::runtime::{BuiltinEntry, Settled, Shell};
+use crate::shell::runtime::{BuiltinEntry, Mooring, Settled, Shell};
 use crate::ty::{Scheme, Ty};
 use crate::typecheck::Unifier;
 
@@ -170,16 +170,18 @@ pub fn admits_file(shell: &Shell, real: &str) -> bool {
     shell
         .context
         .grants
-        .withheld(shell.baseline(), &file(real))
+        .admit(shell.baseline(), file(real))
         .is_ok()
 }
 
-/// `Shell::check_exec` on the file whose real path is `real`, with `args`.
+/// `Shell::check_exec` on the file whose real path is `real`.
 ///
 /// # Errors
 /// `Err` if the active grant denies the file.
-pub fn check_file(shell: &mut Shell, real: &str, args: &[String]) -> Settled<()> {
-    shell.check_exec(real, file(real), args).map(drop)
+pub fn check_file(shell: &mut Shell, real: &str) -> Settled<()> {
+    shell
+        .check_exec(real, file(real), &Mooring::adrift())
+        .map(drop)
 }
 
 /// The scheme `name` carries on the live scope: `None` when it is unbound or

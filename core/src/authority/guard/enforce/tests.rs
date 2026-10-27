@@ -189,7 +189,7 @@ fn a_deny_holding_a_hard_link_cites_the_object_under_another_name() {
 
 mod words {
     use super::*;
-    use crate::authority::guard::enforce::{Refusal, check_exec, check_fs_exact, deny_head};
+    use crate::authority::guard::enforce::{Refusal, check_exec, check_fs_exact};
     use crate::authority::policy::{ExecGrant, ExecKey, Program};
     use crate::fact::Resource;
 
@@ -219,7 +219,7 @@ mod words {
     }
 
     fn refusal(grants: &GrantStack, real: &str) -> Refusal {
-        match check_exec(grants, &Baseline::default(), "t", file(real), &[]) {
+        match check_exec(grants, &Baseline::default(), "t", file(real)) {
             Ok(_) => panic!("{real} should be refused"),
             Err(denial) => denial.error,
         }
@@ -267,36 +267,21 @@ mod words {
     }
 
     #[test]
-    fn head_and_argv_refusals_keep_the_same_diagnostic_and_check() {
+    fn an_exec_refusal_records_its_name_program_and_exclusion() {
         let tmp = tempfile::tempdir().unwrap();
         let tree = Tree::lay(tmp.path(), &["/x/t"]);
         let x = dir(&tree.at("/x"));
         let grants = grants([exec([x.clone()], [x])]);
         let baseline = Baseline::default();
         let program = file(&tree.at("/x/t"));
-        let why = grants.withheld(&baseline, &program).unwrap_err();
-        let head = deny_head(&grants, &baseline, "t", &program, &why);
-        let Err(mut argv) = check_exec(
-            &grants,
-            &baseline,
-            "t",
-            program,
-            &["one".into(), "two words".into()],
-        ) else {
-            panic!("an exclusion refuses the program with argv too");
+        let Err(denial) = check_exec(&grants, &baseline, "t", program) else {
+            panic!("an exclusion refuses the program");
         };
-
-        assert_eq!(head.error, argv.error);
-        assert_eq!(head.check.resource, Resource::Exec);
-        assert_eq!(head.check.fields["name"], "t");
-        assert_eq!(head.check.fields["resolved"], tree.at("/x/t"));
-        assert!(head.check.fields.contains_key("deny"));
-        assert!(!head.check.fields.contains_key("args"));
-        assert_eq!(
-            argv.check.fields.remove("args").as_deref(),
-            Some("one two words")
-        );
-        assert_eq!(head.check, argv.check);
+        assert_eq!(denial.check.resource, Resource::Exec);
+        assert_eq!(denial.check.fields["name"], "t");
+        assert_eq!(denial.check.fields["resolved"], tree.at("/x/t"));
+        assert!(denial.check.fields.contains_key("deny"));
+        assert!(!denial.check.fields.contains_key("args"));
     }
 
     /// A name deny is cited as the author wrote it.  The program is a native
@@ -336,7 +321,7 @@ mod words {
             "{}",
             e.message
         );
-        let unrestricted = check_exec(&grants([runs]), &Baseline::default(), "t", file(&t), &[]);
+        let unrestricted = check_exec(&grants([runs]), &Baseline::default(), "t", file(&t));
         assert!(unrestricted.is_ok());
     }
 
@@ -358,7 +343,7 @@ mod words {
             ..Capabilities::default()
         };
         let grants = grants([excluding]);
-        let Err(denial) = check_exec(&grants, &baseline, "ls", Program::Tool("ls"), &[]) else {
+        let Err(denial) = check_exec(&grants, &baseline, "ls", Program::Tool("ls")) else {
             panic!("an fs exclusion over ral's binary refuses a bundled tool");
         };
         assert!(

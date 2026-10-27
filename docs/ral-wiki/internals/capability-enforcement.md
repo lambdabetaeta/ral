@@ -1,7 +1,7 @@
 ---
-generated_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
-verified_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
-verified_at_date: 2026-10-26
+generated_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
+verified_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
+verified_at_date: 2026-10-27
 anchors: [check_exec, Admitted, admit, Flag, ExecDenial, Refused, Refusal, Denial, Withheld, refused, region, Table, Evidence, GrantStack, SandboxProjection, Fragment, decode_capability_map, Shell::freeze_ctx, sandboxed_command, build_launch, projection_enforceable]
 ---
 
@@ -132,12 +132,11 @@ stay a [[invariants/single-binary|single binary]].
 **The guard covers what ral dispatches. The OS sandbox covers what a spawned
 process does on its own.**
 
-- **Exec.** The guard checks every platform. `authority::guard::check_exec` judges
-  the program *before* the spawn and returns `Admitted`; it borrows argv only
-  for the audit trail. `build_launch` takes the caller's argv separately.
-  The kernel then holds the same rules against programs the
-  child starts itself (`sh -c`, `find -exec`): Seatbelt on macOS, Landlock on
-  Linux. Windows has no kernel exec filter
+- **Exec.** The guard checks every platform. `authority::guard::check_exec`
+  judges the program *before* the spawn and returns `Admitted`. `build_launch`
+  takes the caller's argv separately. The kernel then holds the same rules
+  against programs the child starts itself (`sh -c`, `find -exec`): Seatbelt on
+  macOS, Landlock on Linux. Windows has no kernel exec filter
   ([[internals/exec-judgment|exec-judgment]]).
 - **Filesystem.** The guard checks ral's own reads and writes
   (`authority::guard::check_fs_exact`). An OS sandbox confines the child's: Seatbelt on macOS,

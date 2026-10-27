@@ -1,7 +1,8 @@
 ---
 status: active
 generated_at_commit: b49b3823
-verified_at_commit: 90479dea
+verified_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
+verified_at_date: 2026-10-27
 anchors: [collision_key, Identity, MatchedBy, Allow, Deny, Region, live, holds, command_name_key, evicts]
 ---
 
@@ -123,7 +124,7 @@ non-matching control that was admitted.
   so the sweep agrees with the verdict.
 - **The denial says why.** When a deny holds the access and none holds it
   as stored (and, for exec, no veto names it), fs and exec refuse in one
-  sentence, at the guard and at head admission alike:
+  sentence:
   `fs write denied by grant: /w/.ENV is the denied /w/.env under another
   spelling (case or Unicode form); a deny holds under every spelling`.
 - **Windows 8.3 aliases are named, not folded.** A walk that meets a `~`

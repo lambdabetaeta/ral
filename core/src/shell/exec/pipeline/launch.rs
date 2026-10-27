@@ -12,6 +12,7 @@ use super::thread::launch_thread_stage;
 use crate::io::{Sink, Source, SourceReader};
 use crate::process::{PgidPolicy, Scope};
 use crate::shell::runtime::{Env, Error, Mooring, Settled, Shell, Value};
+use crate::source::Span;
 use std::sync::Arc;
 
 /// A thread reads what a child would inherit, except a tty: reading the
@@ -116,7 +117,7 @@ pub(super) fn spawn_stage(
     } = route;
     let kind = match spec.launch {
         StageLaunch::Direct { head, args } => StageKind::External(launch_external_stage_direct(
-            head, &args, stdin, stdout, cx, &slot,
+            head, &args, spec.span, stdin, stdout, cx, &slot,
         )?),
         StageLaunch::Thread => StageKind::Thread(launch_thread_stage(
             stage,
@@ -134,16 +135,18 @@ pub(super) fn spawn_stage(
 fn launch_external_stage_direct(
     head: Head,
     args: &[Value],
+    span: Option<Span>,
     stdin: ByteIn,
     stdout: ByteOut,
     cx: &mut LaunchCx<'_>,
     slot: &Slot,
 ) -> Settled<ExternalStage> {
+    let head = cx.shell.at_site(span, |shell| head.admit(cx.mooring, shell))?;
     let SpawnPlan {
         shown,
         admitted,
         args,
-    } = command::vet(head, args, cx.shell)?;
+    } = command::vet(head, args)?;
     let mut cmd = command::build_launch(
         admitted,
         &args,

@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 77866699fd8865982c0481d278a7d3286109ca65
-verified_at_date: 2026-10-26
+verified_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
+verified_at_date: 2026-10-27
 anchors: [walk, walk_excluded, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, GrantStack::judge, Refused, Extent, from_capabilities, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline, Walk, Cancellation, AdmittedWalk, Shell::admitted_walk]
 ---
 
@@ -195,11 +195,11 @@ function of its layers.**
 
 **A program is judged as a `Located`, its `#!` line read through that handle,
 and it is started by its real name on every platform.** The `Located` has one
-owner at a time: `vet` moves it from the `Head` into the `Admitted`; `launch`
-takes the `Admitted` and drops the `Located`, so no judged program or directory
-handle survives into the run. Landlock rules only allow and cannot require the
-judged object, and a handle kept through the run would hold the program's
-directory on Windows ([[internals/exec-judgment|exec-judgment]]).
+owner at a time: `Head::admit` moves it from the `Head` into the `Admitted`;
+`launch` takes the `Admitted` and drops the `Located`, so no judged program or
+directory handle survives into the run. Landlock rules only allow and cannot
+require the judged object, and a handle kept through the run would hold the
+program's directory on Windows ([[internals/exec-judgment|exec-judgment]]).
 
 ## The OS sandbox side
 

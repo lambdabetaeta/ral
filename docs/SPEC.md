@@ -3437,11 +3437,10 @@ audit trail is open — from the language-level `audit { ... }` form or from bat
 nothing to ask for and nothing to switch off, so no grant can hide a denial
 from a trail its caller opened.
 
-An exec check identifies the command; a point-of-use check also carries its
-evaluated arguments and its resolved name, while an early head denial has no
-arguments yet. A filesystem check identifies the operation and the path. A
-denied head admission also reaches the surface rail, whether or not a trail is
-open.
+An exec check identifies the command by the name shown and the program
+resolved, never its arguments. A filesystem check identifies the operation and
+the path. A denied exec also reaches the surface rail, whether or not a trail
+is open.
 
 `grant` is transparent to the audit model: it contributes no observation of its
 own. Its body's checks, command calls, and redirect reads and writes land
@@ -3961,10 +3960,10 @@ decision itself settles whether it is recorded.
 - An **allowed** check is never recorded. Everything it would attest is
   already attested by the command, read, or write it let through.
 
-A denied *head admission* also reaches the surface rail, whether or not a
-trail is open. An `fs` or full-argv denial reaches the trail alone; the command
-it refused still surfaces in its own right, as a failed `` `command ``
-observation carrying the denial message.
+A denied *exec* also reaches the surface rail, whether or not a trail is open.
+An `fs` denial reaches the trail alone; the command it refused still surfaces
+in its own right, as a failed `` `command `` observation carrying the denial
+message.
 
 A check's fields are:
 

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
-generated_at_date: 2026-10-26
+generated_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
+generated_at_date: 2026-10-27
 covers_paths: [core/src/shell/exec.rs, core/src/shell/exec/]
 ---
 
@@ -28,12 +28,12 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   [[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
   `^name` and a path-bearing head are the external directly, consulting
   neither the env nor the handler stack. **Grant admission is an
-  external-command property**: only the `External` arm consults
-  `GrantStack::withheld(baseline, &program)` before any argument evaluates,
-  refusing the head outright; the env, base, and handler arms pass through. Handler and alias
-  thunks are lambdas — a unary `{ |args| … }` or a catch-all `{ |name args| … }`
-  — with the calling convention fixed by surface position, not inferred from a
-  value's runtime shape
+  external-command property**: only the `External` arm admits the head
+  (`Head::admit`) before its redirects open, refusing it outright, and carries
+  the `Admitted` to the launch; the env, base, and handler arms pass through.
+  Handler and alias thunks are lambdas — a unary `{ |args| … }` or a catch-all
+  `{ |name args| … }` — with the calling convention fixed by surface position,
+  not inferred from a value's runtime shape
   ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
 - `redirect.rs` — the functions that open a redirect target (`open_write`,
   `open_read`, `install_stdin_redirect`, and `Shell::atomic_write`, which
@@ -47,15 +47,15 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   as a prefix and a byte total, independently of ordinary capture.
 - `dispatch.rs` also holds `call_external`, the call of an external: stamp the
   start, tee its streams, name a failure, settle the one `Observed::Command`.
-- `command.rs` — the External arm: vet the resolved head, launch its
+- `command.rs` — the External arm: vet the admitted head, launch its
   admitted program, wire stdio from the sinks the call's redirects installed, spawn, and reap. `stdio.rs`
   `wire_stdio` hands a `>` file to the child as its own fd, no pump, and keeps
   `2>&1` a `dup2` when stderr's sink is `same_destination` as stdout's.
   Submodules: `head.rs` (`Head { shown, program }`, resolved once: a bundled
   `Program::Tool`, a host `Program::File` with its launch path and real path,
-  or a `Missing`), `vet.rs` (existence → argv shape → grant policy, yielding a
-  `SpawnPlan` holding `shown`, the guard's `Admitted`, and the caller's argv;
-  `check_exec` borrows argv only for audit), `process.rs`, `child.rs`,
+  or a `Missing`; `Head::admit` judges it), `vet.rs` (planning an admitted head:
+  existence → argv shape → executability, yielding a `SpawnPlan` holding
+  `shown`, the `Admitted`, and the caller's argv), `process.rs`, `child.rs`,
   `stdio.rs`, `foreground.rs`, `detach.rs`, plus `uutils.rs`
   for [[map/core/builtins|bundled coreutils]]. `foreground.rs` decides once:
   `ForegroundDecision(PgidPolicy)`, `NewLeader` being exactly the foreground.
@@ -81,7 +81,7 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     run, so this is the backstop for what a type variable hid from it
     ([[invariants/exec-argv-is-words|exec-argv-is-words]],
     [[decisions/260812_exec-boundary-gated-statically|exec-boundary-gated-statically]]).
-  - `detach.rs` is that same machinery — `Head`, `vet`,
+  - `detach.rs` is that same machinery — `Head`, `Head::admit`, `vet`,
     `build_launch` — up to the one act that differs: the child is born by
     `Launch::spawn_detached` ([[map/core/io-process|io-process]]), so its
     pgid is never observed here and nothing can signal, await, or reap it.

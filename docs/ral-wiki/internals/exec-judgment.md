@@ -1,8 +1,8 @@
 ---
-generated_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
-verified_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
-verified_at_date: 2026-10-26
-anchors: [Head, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, GrantStack::withheld, ReadRegion::judge_file, check_exec, Admitted, for_kernel, places, deputy_prefixes]
+generated_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
+verified_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
+verified_at_date: 2026-10-27
+anchors: [Head, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, Head::admit, ReadRegion::judge_file, check_exec, Admitted, for_kernel, places, deputy_prefixes]
 ---
 
 # Exec judgment: which program may run
@@ -16,16 +16,16 @@ of [[internals/capability-enforcement|capability-enforcement]].
 
 **`Head::resolve` (`shell/exec/command/head.rs`) finds the `Program` once**: a
 bundled `Tool`, or a host `File` with its spelling and its real path.
-`GrantStack::withheld(baseline, &program)` judges it before argument evaluation,
-returning `Result<(), ExecDenial>`: the exec table, then what running reads
-(below). At launch, `GrantStack::admit(baseline, program)` judges the same
-`Located` under the same stack and mints `Admitted`.
+`Head::admit` judges the head once per launch through `GrantStack::admit`: at
+classification for a plain call; at launch for a direct pipeline stage and
+`detach`. It judges the exec table, then what running reads (below), and mints
+`Admitted`, which `vet` plans from and the launcher takes. A head naming no
+file passes unjudged to `vet`.
 
 - **Arguments play no part.** An allowed target runs with any arguments, a
   denied one with none. `Admitted` holds only the judged program and its exec
-  table; `Refused` holds the program and its denial. The caller owns argv.
-  `check_exec` borrows it only for the audit trail; a head refusal omits argv
-  because none exists yet.
+  table; `Refused` holds the program and its denial. The caller owns argv, and
+  no refusal records it.
 - **A path key** matches the real path by equality, and a directory key by
   containment. Specificity decides nothing: **an exclusion beats every
   allowance**, so an exact file or a deeper directory never reopens an excluded
@@ -41,10 +41,10 @@ returning `Result<(), ExecDenial>`: the exec table, then what running reads
 
 ## Running reads
 
-**A program that runs must be readable.** After the exec table,
-`withheld` asks `GrantStack::read` about what running reads
-(`ExecDenial::Read`). For a file, `admit` mints through
-`ReadRegion::judge_file`; both use the same `read_region(baseline)` fold.
+**A program that runs must be readable.** After the exec table, `admit` asks
+what running reads (`ExecDenial::Read`): `ReadRegion::judge_file` over the
+`read_region(baseline)` fold for a file, which vouches for the handle, and the
+image's read for a bundled tool.
 
 - **A host file** reads its real path. A grant reads what it, and the grants
   enclosing it, let run by path, directory or name (its run places,
@@ -79,6 +79,11 @@ cannot run another program.
   kernel hands the interpreter the exec path, not `argv[0]`.
 
 ## The kernel holds the same evidence
+
+**A launch runs under the stack that admitted it.** `build_launch` projects the
+live stack beside the `Admitted`'s table; each path admits and launches within
+one machine step, and the stack changes only at `Frame::Grant` and
+`Shell::with_pushed`.
 
 **`authority::guard::check_exec` judges the program before the spawn. The kernel then
 holds the same table against programs the child starts itself.**

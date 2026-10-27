@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 61c288f
-verified_at_date: 2026-10-21
+verified_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
+verified_at_date: 2026-10-27
 anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::deadline, WorkerRegistry, Stamp, Owner, builtin_workers, WorkerRow, spawn_detached, Survivor, DetachPolicy, Capture, decode_utf8_strict, write_sink, CapturedBytes::overflowed]
 ---
 
@@ -228,16 +228,17 @@ that up — the thing to escape is not the session but the parent's *observation
 of the child's pgid.
 
 - Everything up to the birth is the ordinary external-command machinery —
-  identity, `vet`, `build_launch` (`core/src/shell/exec/command/detach.rs`), so the
-  grant judges the call exactly as it judges any exec and a head a handler in
-  scope intercepts is refused, birthing nothing: a handler runs inside this
-  session, so there is nothing to detach (to run the real program, `^name`). Only the last
-  act differs: `Launch::spawn_detached` **double-forks**. The intermediate exits at
-  once and hands the grandchild's pid back over a pipe, so no `RunningChild` ever
-  records the pgid both kill paths address. Reaching the same lifetime by hiding
-  a worker outside the session's `DurableRoot` cancel scope was rejected: it
-  defeats the signal but leaves the child holding a pipe that closes at exit,
-  killing anything that logs.
+  `Head::resolve`, `Head::admit`, `vet`, `build_launch`
+  (`core/src/shell/exec/command/detach.rs`), so the grant judges the call
+  exactly as it judges any exec and a head a handler in scope intercepts is
+  refused, birthing nothing: a handler runs inside this session, so there is
+  nothing to detach (to run the real program, `^name`). Only the last act
+  differs: `Launch::spawn_detached` **double-forks**. The intermediate exits at
+  once and hands the grandchild's pid back over a pipe, so no `RunningChild`
+  ever records the pgid both kill paths address. Reaching the same lifetime by
+  hiding a worker outside the session's `DurableRoot` cancel scope was
+  rejected: it defeats the signal but leaves the child holding a pipe that
+  closes at exit, killing anything that logs.
 - The grandchild severs the rest **itself**: `setsid()` in its own body, since a
   bare double fork leaves its pgid naming the intermediate's recycled pid; and
   fd 0, fd 1, fd 2 all on `/dev/null`. There is no pump, so none of the

@@ -30,7 +30,7 @@ use ral_core::data::FOValue;
 use ral_core::protocol::Run;
 use ral_core::protocol::probe::Probe;
 use ral_core::shell::run::RunReport;
-use ral_core::shell::runtime::Shell;
+use ral_core::shell::runtime::{Break, Shell};
 use ral_core::source::SourceOrigin;
 use ral_core::sync::LockExt as _;
 use ral_core::test_helper::eventually;
@@ -420,4 +420,28 @@ fn a_detached_process_outlives_the_full_exit_of_the_host_that_birthed_it() {
         "the survivor is alive but stopped working once its host was gone"
     );
     assert!(survivor.alive(), "and it is still there afterwards");
+}
+
+/// A program the grant denies is refused as denied, before its argument's
+/// runtime shape is looked at, and its check reaches the surface.
+#[test]
+fn a_denied_program_is_refused_before_its_arguments_are_shaped() {
+    let source = "let go = { |v| detach #'a sleep'# /bin/sleep $v }; \
+                  grant [exec: [allow: []]] { go [a: 1] }";
+    let (result, events) = common::run_recorded(&mut armed(), source, true);
+    match result {
+        Err(Break::Error(e)) => assert!(
+            e.message.contains("denied by active grant"),
+            "{}",
+            e.message
+        ),
+        other => panic!("expected a grant refusal, got {other:?}"),
+    }
+    let checks = common::facts(&events, "check");
+    assert_eq!(checks.len(), 1, "one refusal, one check: {events:?}");
+    let fields = common::check_fields(&checks[0].0);
+    assert!(
+        fields.get("name").is_some() && fields.get("args").is_none(),
+        "{fields:?}"
+    );
 }

@@ -16,62 +16,18 @@
 
 mod common;
 
-use common::fresh_shell;
+use common::{check_fields, facts, fresh_shell, under_grant};
 
-use ral_core::protocol::Run;
-use ral_core::shell::run::RunRequest;
 use ral_core::shell::runtime::{Map, Observation, Settled, Value};
-use ral_core::source::SourceOrigin;
-use ral_core::{EventSink, SurfaceSink};
-use std::sync::{Arc, Mutex};
 
-/// A sink that records every surfaced observation as the record a trail
-/// carries.
-struct Recorder(Arc<Mutex<Vec<Value>>>);
-
-impl EventSink for Recorder {
-    fn emit(&self, ev: &ral_core::data::FOValue) {
-        if let Some(obs) = Observation::from_surface(ev) {
-            self.0.lock().unwrap().push(Value::from_datum(obs));
-        }
-    }
-}
-
-/// Run one run of `source`, with a surface sink installed or not, returning
-/// the settled value and whatever reached the sink.
 fn run(source: &str, sink: bool) -> (Settled<Value>, Vec<Value>) {
-    let log: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
-    let recorder: SurfaceSink = Arc::new(Recorder(Arc::clone(&log)));
-    let mut shell = fresh_shell();
-    let result = shell
-        .run(RunRequest {
-            surface: sink.then_some(recorder),
-            ..RunRequest::from(Run::foreground(source, SourceOrigin::named("<test>")))
-        })
-        .expect_ran()
-        .into_result();
-    let events = log.lock().unwrap().clone();
-    (result, events)
+    common::run_recorded(&mut fresh_shell(), source, sink)
 }
 
-/// The `command` facts among a stream of observation records, in the order
-/// they were reported.
 fn command_facts(observations: &[Value]) -> Vec<Map> {
-    observations
-        .iter()
-        .filter_map(|v| match v {
-            Value::Map(m) => match m.get("what").as_deref() {
-                Some(Value::Variant {
-                    label,
-                    payload: Some(fact),
-                }) if label.as_ref() == "command" => match fact.as_ref() {
-                    Value::Map(fact) => Some(fact.clone()),
-                    _ => None,
-                },
-                _ => None,
-            },
-            _ => None,
-        })
+    facts(observations, "command")
+        .into_iter()
+        .map(|(fact, _)| fact)
         .collect()
 }
 
@@ -190,4 +146,21 @@ fn audit_retention_preserves_pipeline_traffic_and_reports_the_cut() {
     let count = std::str::from_utf8(&commands[1].stdout).unwrap().trim();
     assert_eq!(count.parse::<usize>().unwrap(), bytes.len());
     assert_eq!(commands[1].stdout_total, commands[1].stdout.len() as u64);
+}
+
+/// A refused external is one check fact, alone or as a direct stage: the
+/// same fields at the same site, both on the sink, and no argv among them.
+#[test]
+fn a_refused_stage_reports_the_same_check_as_a_refused_standalone_run() {
+    let (alone_result, alone_events) = run(&under_grant("/bin/echo hi"), true);
+    let (staged_result, staged_events) = run(&under_grant("/bin/echo hi | /bin/cat"), true);
+    assert!(alone_result.is_err() && staged_result.is_err());
+    let alone = facts(&alone_events, "check");
+    let staged = facts(&staged_events, "check");
+    assert_eq!(alone.len(), 1, "one refusal, one check: {alone_events:?}");
+    assert_eq!(
+        staged, alone,
+        "a direct stage's refusal must be the standalone's"
+    );
+    assert!(check_fields(&alone[0].0).get("args").is_none());
 }

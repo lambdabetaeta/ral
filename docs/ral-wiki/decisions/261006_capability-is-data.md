@@ -1,8 +1,8 @@
 ---
 status: active
 generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
-verified_at_date: 2026-10-25
+verified_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
+verified_at_date: 2026-10-27
 anchors: [GrantStack, admit, Admitted, Flag, SandboxProjection, ExecProjection, for_kernel, FreezeCtx, PolicyError, Denial, Refusal, refused, record_check, Shell::freeze_ctx, decode_capability_map, SpawnGrant]
 ---
 
@@ -59,8 +59,9 @@ that took a `Context`.
 - **The guard is `guard` (rank 7).** `enforce` words the model's refusals and
   returns a typed `Denial { check, error }`; `Shell::refused` mints its
   `Break` and records it through `Shell::record_check`, the one door for a
-  check, with no `Mooring`, so on the trail alone. A head admission passes
-  its `Mooring` to the same door and so broadcasts.
+  check, with no `Mooring`, so on the trail alone. An exec refusal
+  (`Shell::check_exec`) passes its call's `Mooring` to the same door and so
+  broadcasts.
 - **A grant string becomes a `FrozenPath` in `guard::freeze`**, against one
   `FreezeCtx` (`FreezeCtx::of(&Shell)`, owned `env` and `cwd`): `path`,
   `paths`, `absolute`. `FrozenPath::from_surface` is the one minting door, and
@@ -90,8 +91,9 @@ that took a `Context`.
   `precedence`, and the table `for_kernel` returns judges as the one it was
   built from.
 - One door records every reported check, a refusal or a flagged deputy:
-  `Shell::record_check(Option<&Mooring>, Check)` over `observe_stamped`. Only
-  a head refusal holds a `Mooring`, so only it reaches the rail as well.
+  `Shell::record_check(Option<&Mooring>, Check)` over `observe_stamped`. An exec
+  refusal holds its call's `Mooring`, so it reaches the rail as well; other
+  refusals hold none.
 
 ## Where
 

@@ -12,10 +12,15 @@
 #![allow(dead_code)] // not every test file uses every helper
 
 use ral_core::io::terminal::TerminalState;
+use ral_core::protocol::Run;
 use ral_core::shell::boot::{BakedPrelude, HostSurface, boot_runtime, boot_shell};
-use ral_core::shell::runtime::Shell;
+use ral_core::shell::run::RunRequest;
+use ral_core::shell::runtime::{Map, Observation, Settled, Shell, Value};
+use ral_core::source::SourceOrigin;
+use ral_core::{EventSink, SurfaceSink};
 use ral_core::{Scheme, ir::Comp};
-use std::sync::Arc;
+use std::borrow::Cow;
+use std::sync::{Arc, Mutex};
 
 const HOST: &str = "a test host resolves its baseline";
 
@@ -163,4 +168,66 @@ fn walk_val(val: &ral_core::ir::Val, visit: &mut impl FnMut(&Comp)) {
     if let ral_core::ir::Val::Thunk(node) = val {
         walk_comp(node.shape(), visit);
     }
+}
+
+/// A sink that records every surfaced observation as the record a trail
+/// carries.
+pub struct Recorder(pub Arc<Mutex<Vec<Value>>>);
+
+impl EventSink for Recorder {
+    fn emit(&self, ev: &ral_core::data::FOValue) {
+        if let Some(obs) = Observation::from_surface(ev) {
+            self.0.lock().unwrap().push(Value::from_datum(obs));
+        }
+    }
+}
+
+/// Run `source` on `shell`, with a recording surface sink installed or not,
+/// returning the settled value and whatever reached the sink.
+pub fn run_recorded(shell: &mut Shell, source: &str, sink: bool) -> (Settled<Value>, Vec<Value>) {
+    let log: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder: SurfaceSink = Arc::new(Recorder(Arc::clone(&log)));
+    let result = shell
+        .run(RunRequest {
+            surface: sink.then_some(recorder),
+            ..RunRequest::from(Run::foreground(source, SourceOrigin::named("<test>")))
+        })
+        .expect_ran()
+        .into_result();
+    let events = log.lock().unwrap().clone();
+    (result, events)
+}
+
+/// The `label` facts among a stream of observation records, in order, each
+/// with the site its observation carries.
+pub fn facts(observations: &[Value], label: &str) -> Vec<(Map, Option<Value>)> {
+    observations
+        .iter()
+        .filter_map(|v| match v {
+            Value::Map(m) => match m.get("what").as_deref() {
+                Some(Value::Variant {
+                    label: kind,
+                    payload: Some(fact),
+                }) if kind.as_ref() == label => match fact.as_ref() {
+                    Value::Map(fact) => Some((fact.clone(), m.get("site").map(Cow::into_owned))),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `fields` of a check fact's payload, `{resource, decision, fields}`.
+pub fn check_fields(payload: &Map) -> Map {
+    match payload.get("fields").as_deref() {
+        Some(Value::Map(fields)) => fields.clone(),
+        other => panic!("a check fact carries a fields map, got {other:?}"),
+    }
+}
+
+/// `body` under a grant that runs `/bin/cat` alone.
+pub fn under_grant(body: &str) -> String {
+    format!("grant [exec: [allow: [`absolute /bin/cat]]] {{ {body} }}")
 }

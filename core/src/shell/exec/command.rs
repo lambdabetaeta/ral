@@ -1,12 +1,13 @@
 //! The external arm of command dispatch — `dispatch` picks it over
-//! env and handler: vet the resolved head, wire the shell's streams
+//! env and handler: vet the admitted head, wire the shell's streams
 //! into child stdio, spawn under the canonical pgid and sandbox, reap.
 //!
 //! Pipeline stages never reach [`run`] — they take
-//! [`super::pipeline::PipeNode::run`] — but share `vet` and
+//! [`super::pipeline::PipeNode::run`] — but share `Head::admit`, `vet` and
 //! `build_launch` with it, so both paths resolve and confine a call the
 //! same way.
 
+use crate::authority::policy::Admitted;
 use crate::process::Group;
 use crate::shell::runtime::{Break, Mooring, Settled, Shell, Value};
 
@@ -35,16 +36,16 @@ use stdio::inherit_tty;
 /// coreutils/diffutils/ripgrep head takes the same path as any host
 /// executable: its image is `ral --ral-bundled-tool <tool>`.
 pub(crate) fn run(
-    head: Head,
+    head: Head<Admitted>,
     args: &[Value],
     mooring: &Mooring,
-    shell: &mut Shell,
+    shell: &Shell,
 ) -> Settled<Value> {
     let SpawnPlan {
         shown: cmd_name,
         admitted,
         args,
-    } = vet(head, args, shell)?;
+    } = vet(head, args)?;
     #[cfg(debug_assertions)]
     let program = admitted.program().to_string();
 

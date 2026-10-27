@@ -1046,15 +1046,15 @@ mod tests {
             .unwrap()
             .into_iter()
             .collect();
-        let program = Program::File {
+        let program = || Program::File {
             located: Box::new(located(system.join("prog"))),
             arg0: system.join("prog"),
         };
         let reads_nothing = stack([fs_layer(FsPolicy::default())]);
-        assert!(reads_nothing.withheld(&baseline, &program).is_ok());
+        assert!(reads_nothing.admit(&baseline, program()).is_ok());
         assert!(matches!(
-            reads_nothing.withheld(&Baseline::default(), &program),
-            Err(ExecDenial::Read(_))
+            reads_nothing.admit(&Baseline::default(), program()),
+            Err(refused) if matches!(refused.why, ExecDenial::Read(_))
         ));
     }
 

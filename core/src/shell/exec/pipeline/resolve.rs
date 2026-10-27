@@ -43,7 +43,7 @@ pub(super) struct StageSpec {
 
 /// A thread unless the head is an external with no redirect and no
 /// byte-capturing audit in force — a redirect needs a thread's fd table, a
-/// capture its accounting.  Admission is `command::vet`'s at launch, so a head
+/// capture its accounting.  Admission is `Head::admit`'s at launch, so a head
 /// the grant denies still routes through here and refuses as an ordinary error.
 fn resolve_launch(stage: &Comp, env: &Env, eval: StageEval, shell: &Shell) -> Settled<StageLaunch> {
     let CompKind::Exec(e) = &stage.item else {

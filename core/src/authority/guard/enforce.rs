@@ -119,18 +119,17 @@ impl Display for LocateError {
 const EXCLUSION_HINT: &str =
     "the exclusion belongs to the policy that imposes it; change that policy";
 
-/// Judge a program, borrowing its argv for the audit trail.
+/// Judge a program: the one exec door.
 pub(crate) fn check_exec(
     grants: &GrantStack,
     baseline: &Baseline,
     shown: &str,
     program: Program,
-    args: &[String],
 ) -> Result<Admitted, Denial> {
     grants.admit(baseline, program).map_err(|refused| {
         let ExecRefused { program, why } = *refused;
         let error = exec_error(grants, baseline, shown, &program, &why);
-        exec_denial(shown, &program, &why, Some(args), error)
+        exec_denial(shown, &program, &why, error)
     })
 }
 
@@ -215,13 +214,7 @@ fn read_hint(why: &Withheld<FsDeny>, layers: usize) -> String {
     }
 }
 
-fn exec_denial(
-    shown: &str,
-    program: &Program,
-    why: &ExecDenial,
-    args: Option<&[String]>,
-    error: Refusal,
-) -> Denial {
+fn exec_denial(shown: &str, program: &Program, why: &ExecDenial, error: Refusal) -> Denial {
     let deny = match why {
         ExecDenial::Run(Withheld::Excluded { scope, .. }) => Some(scope.to_string()),
         ExecDenial::Read(Withheld::Excluded { scope, .. }) => Some(scope.to_string()),
@@ -232,22 +225,8 @@ fn exec_denial(
         ("resolved", program.to_string()),
     ]
     .into_iter()
-    .chain(args.map(|args| ("args", args.join(" "))))
     .chain(deny.map(|deny| ("deny", deny)));
     Denial::new(Resource::Exec, fields, error)
-}
-
-/// The refusal of a head whose program the stack denies, raised before any
-/// argv is known: the same trail as [`check_exec`]'s, without the `args`.
-pub(crate) fn deny_head(
-    grants: &GrantStack,
-    baseline: &Baseline,
-    shown: &str,
-    program: &Program,
-    why: &ExecDenial,
-) -> Denial {
-    let error = exec_error(grants, baseline, shown, program, why);
-    exec_denial(shown, program, why, None, error)
 }
 
 /// Refuse a name the host would read as a DOS device (Windows only).  No grant

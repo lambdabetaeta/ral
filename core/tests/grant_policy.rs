@@ -54,11 +54,11 @@ fn an_excluded_dir_carves_a_hole_in_an_allowed_dir() {
     ));
     shell
         .with_layer(layer(grant.clone()), |sh| {
-            check_file(sh, &tree.at("/bin/ls"), &[])
+            check_file(sh, &tree.at("/bin/ls"))
         })
         .expect("ls under the allow dir should be admitted");
     let result = shell.with_layer(layer(grant), |sh| {
-        check_file(sh, &tree.at("/bin/sensitive/payload"), &[])
+        check_file(sh, &tree.at("/bin/sensitive/payload"))
     });
     assert!(result.is_err(), "the exclusion should beat the allowed dir");
 }
@@ -71,7 +71,7 @@ fn a_bare_allow_admits_no_other_file_of_its_name() {
     let mut shell = ral_core::test_helper::core_shell();
     let grant = exec_only(ExecGrant::of([name("git")], []));
     let result = shell.with_layer(layer(grant), |shell| {
-        check_file(shell, &tree.at("/fake-bin/git"), &["status".into()])
+        check_file(shell, &tree.at("/fake-bin/git"))
     });
     assert!(result.is_err());
 }
@@ -83,7 +83,7 @@ fn a_path_key_admits_its_file() {
     let grant = exec_only(ExecGrant::of([path(&tree, "/fake-bin/git")], []));
     shell
         .with_layer(layer(grant), |shell| {
-            check_file(shell, &tree.at("/fake-bin/git"), &["status".into()])
+            check_file(shell, &tree.at("/fake-bin/git"))
         })
         .expect("a path key should admit the file it names");
 }
@@ -162,9 +162,7 @@ fn a_bare_deny_vetoes_its_name_under_an_allow_dir() {
     let (_tmp, tree) = laid(&["/bin/bash"]);
     let mut shell = ral_core::test_helper::core_shell();
     let grant = exec_only(ExecGrant::of([dir(&tree, "/bin")], [name("bash")]));
-    let result = shell.with_layer(layer(grant), |sh| {
-        check_file(sh, &tree.at("/bin/bash"), &[])
-    });
+    let result = shell.with_layer(layer(grant), |sh| check_file(sh, &tree.at("/bin/bash")));
     assert!(
         result.is_err(),
         "a bare bash: deny must veto a bash under an allow dir"
@@ -178,7 +176,7 @@ fn a_bare_allow_does_not_admit_a_planted_file_of_its_name() {
     let (_tmp, tree) = laid(&["/evil/rg"]);
     let mut shell = ral_core::test_helper::core_shell();
     let grant = exec_only(ExecGrant::of([name("rg")], []));
-    let result = shell.with_layer(layer(grant), |sh| check_file(sh, &tree.at("/evil/rg"), &[]));
+    let result = shell.with_layer(layer(grant), |sh| check_file(sh, &tree.at("/evil/rg")));
     assert!(
         result.is_err(),
         "a bare rg: allow must not admit a planted evil/rg"
@@ -194,7 +192,7 @@ fn a_path_key_deny_beats_a_covering_allow_dir() {
         [dir(&tree, "/bin")],
         [path(&tree, "/bin/git")],
     ));
-    let result = shell.with_layer(layer(grant), |sh| check_file(sh, &tree.at("/bin/git"), &[]));
+    let result = shell.with_layer(layer(grant), |sh| check_file(sh, &tree.at("/bin/git")));
     assert!(result.is_err(), "a path key's deny must veto its file");
 }
 
@@ -247,7 +245,7 @@ fn sandbox_projection_admits_a_path_key_covered_by_a_sibling_dir() {
     let mut shell = ral_core::test_helper::core_shell();
     shell
         .with_layer(layer(outer), |sh| {
-            sh.with_layer(layer(inner), |sh| check_file(sh, &git, &[]))
+            sh.with_layer(layer(inner), |sh| check_file(sh, &git))
         })
         .expect("the in-process guard must admit the file");
 }
@@ -339,7 +337,7 @@ fn exec_projection_never_out_permits_the_guard() {
             let mut shell = ral_core::test_helper::core_shell();
             let guard_ok = shell
                 .with_layer(layer(outer.clone()), |sh| {
-                    sh.with_layer(layer(inner.clone()), |sh| check_file(sh, &real, &[]))
+                    sh.with_layer(layer(inner.clone()), |sh| check_file(sh, &real))
                 })
                 .is_ok();
             if kernel_admits(kernel.as_deref(), &real) {

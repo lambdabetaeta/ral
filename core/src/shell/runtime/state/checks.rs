@@ -12,7 +12,7 @@ use crate::path::walk::{Kind, is_loop, loop_trace};
 use crate::path::{
     Dir, Judged, LeafMode, LexicalPath, Located, Op, Trace, walk, walk_dir, walk_lenient,
 };
-use crate::shell::runtime::{Break, Check, Error, Resource, Settled, Shell};
+use crate::shell::runtime::{Break, Check, Error, Mooring, Resource, Settled, Shell};
 use std::collections::BTreeMap;
 use std::io;
 
@@ -46,8 +46,8 @@ impl Shell {
         verdict.map_err(|denial| self.refused(denial))
     }
 
-    /// Check `exec` for `program`, shown as `shown`.  The [`Admitted`] is what
-    /// the launcher demands.
+    /// Judge `program`, shown as `shown`; a refusal is recorded against
+    /// `mooring`.  The [`Admitted`] is what the launcher demands.
     ///
     /// # Errors
     /// `Err` if the active grant denies the program.
@@ -55,10 +55,13 @@ impl Shell {
         &mut self,
         shown: &str,
         program: Program,
-        args: &[String],
+        mooring: &Mooring,
     ) -> Settled<Admitted> {
-        let verdict = check_exec(&self.context.grants, self.baseline(), shown, program, args);
-        self.judged(verdict)
+        let verdict = check_exec(&self.context.grants, self.baseline(), shown, program);
+        verdict.map_err(|Denial { check, error }| {
+            self.record_check(Some(mooring), check);
+            Error::from(error).into()
+        })
     }
 
     /// The baseline every fs judgment of this shell reads: its runtime's.

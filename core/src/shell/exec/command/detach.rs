@@ -31,8 +31,8 @@ use super::vet::{SpawnPlan, vet};
 /// is refused: nothing could be detached.  A stub stands in for `detach`
 /// itself.
 ///
-/// Three judgments follow resolution: that refusal, then [`vet`], then the
-/// session's remaining births.
+/// Three judgments follow resolution: that refusal, then [`Head::admit`] and
+/// [`vet`], then the session's remaining births.
 pub(crate) fn detach(
     desc: &str,
     head: &Value,
@@ -62,14 +62,17 @@ pub(crate) fn detach(
         }
     }
     shell.check(Flag::Shell(ShellVerb::Detach), "detach")?;
-    // Existence (127/126), argv shape, the grant's verdict on the whole call:
-    // the same judgments an ordinary external passes, so a bundled uutils tool
-    // falls out as its own image with no special case here.
+    // The grant's verdict on the program, then existence (127/126) and argv
+    // shape: the same judgments an ordinary external passes, so a bundled
+    // uutils tool falls out as its own image with no special case here.
     let SpawnPlan {
         shown,
         admitted,
         args,
-    } = vet(Head::resolve(&name, &shell.context), argv, shell)?;
+    } = vet(
+        Head::resolve(&name, &shell.context).admit(mooring, shell)?,
+        argv,
+    )?;
 
     let Some(policy) = shell.detach_policy() else {
         return Err(sig(

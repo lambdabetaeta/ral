@@ -530,8 +530,8 @@ fn locate_all(name: &str, shell: &Shell) -> Vec<Where> {
     sites
 }
 
-/// Whether a grant admits `name` as a command head — dispatch's own admission
-/// rule, read a second time here, so `explain` can say `denied by grant`
+/// Whether a grant admits `name` as a command head — the judgment dispatch
+/// makes, made here without launching, so `explain` can say `denied by grant`
 /// rather than name a file the shell would refuse to exec.
 fn grant_admits(name: &str, shell: &Shell) -> bool {
     let Ok(program) = Head::resolve(&CommandName::of(name), &shell.context).program else {
@@ -540,7 +540,7 @@ fn grant_admits(name: &str, shell: &Shell) -> bool {
     shell
         .context
         .grants
-        .withheld(shell.baseline(), &program)
+        .admit(shell.baseline(), program)
         .is_ok()
 }
 

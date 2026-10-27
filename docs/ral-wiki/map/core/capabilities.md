@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 2f1beeb292a50892e1428796acf6b1da14631dcd
-generated_at_date: 2026-10-26
+generated_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
+generated_at_date: 2026-10-27
 covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
 
@@ -91,9 +91,8 @@ Submodules:
   the only mint of `Admitted` (`Program<Judged<Reading>>` and the exec table,
   private fields); a refusal is data, `Refused { program, why:
   ExecDenial }`, `ExecDenial::{Run(Withheld<ExecDeny>), Read(Withheld<FsDeny>)}`;
-  `withheld(baseline, &program) -> Result<(), ExecDenial>` judges a head before
-  argv exists. Both use `read_region(baseline)`; `admit` vouches for a file
-  through `ReadRegion::judge_file`. Neither judgment carries argv.
+  `admit` reads through `read_region(baseline)` and vouches for a file through
+  `ReadRegion::judge_file`; it carries no argv.
   `ExecRules::for_kernel(support)` is
   the table less bundled-tool allowances, joined with the live support as `File`
   allows, what the kernel is handed; `allowed_files` the live file allowances the
@@ -124,10 +123,9 @@ functions fold the whole stack — a module boundary rather than a typestate
 authority and returns domain data, never runtime values or control flow.
 
 - `enforce.rs` — the guards over the model's judgments: `check_exec`
-  (`GrantStack::admit`, borrowing argv only for the audit trail),
+  (`GrantStack::admit`),
   `check_fs_exact` (the access a walk found, for a probe's name), `fs_denial` (the wording of a
-  `Refused`), `check_flag`, `check_device_name`, and `deny_head`, the refusal of
-  a head before its argv is known, omitting argv from the trail.
+  `Refused`), `check_flag`, and `check_device_name`.
   The exec and fs checks return
   `Result<_, Box<Denial>>`, a `Denial { check, error: Refusal }`, over
   `Refused::{Guarded, Withheld}`: a `fact::Check` and diagnostic data
@@ -151,6 +149,7 @@ authority and returns domain data, never runtime values or control flow.
   then `GrantStack::judge` on its transcript, handing back the handle vouched
   for. `Shell::refused` mints a `Denial`'s `Break` and records its check
   through `Shell::record_check` with no `Mooring`, so on the trail alone.
+  `Shell::check_exec` records an exec refusal against its call's `Mooring`.
   `From<Refusal> for Error` preserves the message and hint at this boundary.
 
 ## Construction — `core/src/authority/grant/`

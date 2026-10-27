@@ -146,7 +146,7 @@ pub(crate) fn greps_listing(greps: &[&Grep]) -> Listing {
 /// surfaces, per [`Landed::of`]: core's fan-out (`Shell::observe_stamped` in
 /// `core/src/shell/runtime/audit/fan_out.rs`) broadcasts every fact and leaves the rail's
 /// policy to the host. The
-/// trailing fields are core's own `fields` map (`name`/`resolved`/`args` for
+/// trailing fields are core's own `fields` map (`name`/`resolved`/`deny` for
 /// `exec`, `op`/`path` for `fs`, `prefix` for `deputy`) rendered as
 /// `key=value` pairs in the map's own order — whatever is present, nothing
 /// inferred.

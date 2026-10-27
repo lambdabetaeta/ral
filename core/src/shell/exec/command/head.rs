@@ -2,23 +2,24 @@
 //!
 //! [`Head`] freezes the answer at dispatch — the spelling we show, and the
 //! [`Program`] a grant judges and the launcher runs, found from the head's
-//! native target and never from the spelling — and is taken by `super::vet`,
-//! which moves the program into the `Admitted`, so classification, guard and
-//! spawn see one program held once, and `PATH` is walked once.  A head that
-//! names nothing runnable has no program: its [`Missing`] is the 127 or 126
-//! `super::vet` reports, read off this walk rather than re-probed.
+//! native target and never from the spelling — and [`Head::admit`] moves the
+//! program into the `Admitted`, which `super::vet` plans a launch from, so
+//! classification, guard and spawn see one program held once, and `PATH` is
+//! walked once.  A head that names nothing runnable has no program: its
+//! [`Missing`] is the 127 or 126 `super::vet` reports, read off this walk
+//! rather than re-probed.
 
-use crate::authority::policy::Program;
+use crate::authority::policy::{Admitted, Program};
 use crate::ir::CommandName;
 use crate::path::{LeafMode, LexicalPath, PathSearch, is_executable_file, walk};
 use crate::process::{SpawnFailure, Unrunnable};
-use crate::shell::runtime::{Context, Error};
+use crate::shell::runtime::{Context, Error, Mooring, Settled, Shell};
 use crate::site::{Silent, site};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
-pub(crate) struct Head {
+pub(crate) struct Head<P = Program> {
     /// The command as ral names it, to the guard and in what it reports: a
     /// bare name as written, a `~` head as
     /// [`TildePath::shown`](crate::path::tilde::TildePath::shown) shows it.
@@ -26,7 +27,8 @@ pub(crate) struct Head {
     /// it echoes the user's own word, separators as typed, since what ral
     /// reports answers the word the user wrote.
     pub(crate) shown: String,
-    pub(crate) program: Result<Program, Missing>,
+    /// A [`Program`] as resolved; an [`Admitted`] once [`Head::admit`] judged it.
+    pub(crate) program: Result<P, Missing>,
 }
 
 /// Why a head has no program.
@@ -41,6 +43,20 @@ pub(crate) enum Missing {
 }
 
 impl Head {
+    /// Judge the program under the live stack: a launch's one exec judgment.
+    /// A head with no program passes as it is.
+    ///
+    /// # Errors
+    /// The grant's refusal, recorded against `mooring`.
+    pub(crate) fn admit(self, mooring: &Mooring, shell: &mut Shell) -> Settled<Head<Admitted>> {
+        let Self { shown, program } = self;
+        let program = match program {
+            Ok(program) => Ok(shell.check_exec(&shown, program, mooring)?),
+            Err(missing) => Err(missing),
+        };
+        Ok(Head { shown, program })
+    }
+
     /// Render `name` against `ctx`, and find what it runs: a bundled tool by
     /// its name alone, so the in-binary implementation wins over a host
     /// twin; any other bare name by the effective `PATH`; a path where the
@@ -183,9 +199,9 @@ mod tests {
     use std::path::Path;
 
     /// Head admission as dispatch asks it: a head with no program passes.
-    fn admits_head(ctx: &Context, head: &Head) -> bool {
-        (head.program.as_ref().ok())
-            .is_none_or(|program| ctx.grants.withheld(&Baseline::default(), program).is_ok())
+    fn admits_head(ctx: &Context, head: Head) -> bool {
+        (head.program.ok())
+            .is_none_or(|program| ctx.grants.admit(&Baseline::default(), program).is_ok())
     }
 
     #[test]
@@ -296,7 +312,7 @@ mod tests {
         let ctx = under(ExecGrant::default());
         let head = std::env::temp_dir().join("no-such-dir").join("tool");
         let head = Head::resolve(&path_head(&head), &ctx);
-        assert!(admits_head(&ctx, &head));
+        assert!(admits_head(&ctx, head));
     }
 
     /// A bare name runs what the walk found, never a same-named file in the
@@ -365,7 +381,7 @@ mod tests {
 
         let head = Head::resolve(&CommandName::Bare("git".into()), &ctx);
         assert_eq!(file_of(&head).1, &canonical(&dir.path().join(name)));
-        assert!(!admits_head(&ctx, &head));
+        assert!(!admits_head(&ctx, head));
     }
 
     /// `bin/bash` real, `planted/b` a symlink to it: the shape the evasion
@@ -399,7 +415,7 @@ mod tests {
         ));
 
         let head = Head::resolve(&path_head(&tmp.path().join(name)), &ctx);
-        assert!(!admits_head(&ctx, &head));
+        assert!(!admits_head(&ctx, head));
     }
 
     /// The mirror: a bare `rg: allow` is the host's `rg`, so a planted path
@@ -411,7 +427,7 @@ mod tests {
         let ctx = under(ExecGrant::of([ExecKey::Name("rg".into())], []));
 
         let head = Head::resolve(&path_head(&tmp.path().join(name)), &ctx);
-        assert!(!admits_head(&ctx, &head));
+        assert!(!admits_head(&ctx, head));
     }
 
     /// The symlink half of the deny-by-name evasion: `planted/b` wears a name
@@ -429,7 +445,7 @@ mod tests {
 
         let head = Head::resolve(&path_head(&link), &ctx);
         assert_eq!(file_of(&head).1, &canonical(&bin.join("bash")));
-        assert!(!admits_head(&ctx, &head));
+        assert!(!admits_head(&ctx, head));
     }
 
     /// The same link, judged by a denied *region* its program lies in.
@@ -441,7 +457,7 @@ mod tests {
         let ctx = under(ExecGrant::of([dir_key(&planted)], [dir_key(&bin)]));
 
         let head = Head::resolve(&path_head(&link), &ctx);
-        assert!(!admits_head(&ctx, &head));
+        assert!(!admits_head(&ctx, head));
     }
 
     /// A path key names a file, so a link to it runs the admitted file.
@@ -458,7 +474,7 @@ mod tests {
         ));
 
         let head = Head::resolve(&path_head(&link), &ctx);
-        assert!(admits_head(&ctx, &head));
+        assert!(admits_head(&ctx, head));
     }
 
     /// Where the scheme stops, pinned rather than left to be rediscovered: a
@@ -483,7 +499,7 @@ mod tests {
         ));
 
         let head = Head::resolve(&path_head(&copy), &ctx);
-        assert!(admits_head(&ctx, &head));
+        assert!(admits_head(&ctx, head));
     }
 
     /// An executable a *bare-name* walk finds in `dir`: off Unix a bare name

@@ -1,9 +1,9 @@
 ---
 status: active
 generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-verified_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
-verified_at_date: 2026-10-26
-anchors: [ExecGrant, ExecKey, ExecRules, ExecAllow, ExecDeny, Table, Withheld, Program, Subject, Head, Missing, Admitted, admit, GrantStack::withheld, check_exec, decode_capability_map, RealPath, Excluded, command_name_key]
+verified_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
+verified_at_date: 2026-10-27
+anchors: [ExecGrant, ExecKey, ExecRules, ExecAllow, ExecDeny, Table, Withheld, Program, Subject, Head, Missing, Admitted, admit, check_exec, decode_capability_map, RealPath, Excluded, command_name_key]
 ---
 
 > **Mechanics superseded 2026-10-06** by
@@ -82,12 +82,11 @@ authorise the object; this does the same for exec.
   no program, so no grant judges it before launch. A head with no program
   carries `Missing::{NotFound, NotExecutable}`, never
   reaches the guard, and `vet` reports 127 or 126.
-- **`Admitted`**: what `check_exec` returns, holding the program, its argv and
-  the table that judged it, with private fields. `SpawnPlan` carries it,
-  `build_command` and the sandboxed launch read program and args only from it,
-  and the projection renders exactly its table. Nothing launches unjudged, and
-  the launcher runs the real path that was judged, under the spelling as
-  `argv[0]`.
+- **`Admitted`**: what `check_exec` returns, holding the program and the table
+  that judged it, with private fields. `SpawnPlan` carries it, `build_command`
+  and the sandboxed launch read program and args only from it, and the
+  projection renders exactly its table. Nothing launches unjudged, and the
+  launcher runs the real path that was judged, under the spelling as `argv[0]`.
 
 ## Why
 
@@ -263,7 +262,7 @@ program as stored.
 `core/src/shell/grant/decode.rs` (`decode_capability_map`, keys to `ExecRules`),
 `core/src/authority/policy/table.rs` (`Table`, `Withheld`, the meet),
 `core/src/authority/policy/exec.rs` (`ExecRules`, `ExecAllow`, `ExecDeny`,
-`Program`, `Subject`, `GrantStack::admit`/`withheld`, `Admitted`),
+`Program`, `Subject`, `GrantStack::admit`, `Admitted`),
 `core/src/authority/guard/enforce.rs` (`check_exec`) and
 `core/src/shell/runtime/state/checks.rs` (the shell adapter),
 `core/src/shell/exec/command/head.rs` (`Head`, `Missing`),

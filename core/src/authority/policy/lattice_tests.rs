@@ -110,7 +110,7 @@ fn file(real: impl AsRef<Path>) -> Program {
 
 /// Whether `grants` admits running the file at `real`.
 fn admits(grants: &GrantStack, real: impl AsRef<Path>) -> bool {
-    grants.withheld(&Baseline::default(), &file(real)).is_ok()
+    grants.admit(&Baseline::default(), file(real)).is_ok()
 }
 
 /// What the exec `rules` hold of running `access`.
@@ -1351,8 +1351,7 @@ fn activation_is_denotational() {
 }
 
 /// The read judgment agrees with the region of run places after `↓`, and cites
-/// an exclusion that applies; law 7 for a host file and for a bundled tool,
-/// where the head's [`GrantStack::withheld`] agrees with `admit`.
+/// an exclusion that applies; law 7 for a host file and for a bundled tool.
 #[test]
 fn the_read_and_run_judgments_agree_with_their_regions() {
     let (u, mut rng) = (Universe::lay(), Rng(0x9876_5432_10fe_dcba));
@@ -1380,17 +1379,11 @@ fn the_read_and_run_judgments_agree_with_their_regions() {
                 exec_permits(&stack, f) && want,
                 "{f}\nstack = {stack:?}"
             );
-            assert_eq!(admits(&stack, f), runs, "{f}\nstack = {stack:?}");
         }
         let ls = || Program::Tool("ls");
         let tool = stack.admit(&baseline, ls()).is_ok();
         let tool_exec = rules(&stack).is_none_or(|r| r.evidence(Subject::Tool("ls")).permits());
         assert_eq!(tool, tool_exec, "stack = {stack:?}");
-        assert_eq!(
-            stack.withheld(&baseline, &ls()).is_ok(),
-            tool,
-            "stack = {stack:?}"
-        );
     }
 }
 
@@ -1556,12 +1549,12 @@ fn a_root_directory_runs_files_not_tools_and_reads_what_it_runs() {
     ));
 
     let met = test_helper::stack([runs_anywhere.clone(), runs_in_opt]);
-    assert!(met.withheld(&baseline, &program(&opt_t)).is_ok());
-    assert!(met.withheld(&baseline, &program(&bin_t)).is_err());
+    assert!(met.admit(&baseline, program(&opt_t)).is_ok());
+    assert!(met.admit(&baseline, program(&bin_t)).is_err());
 
     let alone = test_helper::stack([runs_anywhere]);
-    assert!(alone.withheld(&baseline, &program(&bin_t)).is_ok());
-    assert!(alone.withheld(&baseline, &Program::Tool("ls")).is_err());
+    assert!(alone.admit(&baseline, program(&bin_t)).is_ok());
+    assert!(alone.admit(&baseline, Program::Tool("ls")).is_err());
 
     let reads_only_what_it_runs = test_helper::stack([layer(Capabilities {
         exec: Some(ExecGrant::of([under_root], [])),

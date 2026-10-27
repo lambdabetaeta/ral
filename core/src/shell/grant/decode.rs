@@ -665,13 +665,16 @@ mod tests {
         let grants = stack([layer]);
         let baseline = Baseline::default();
         let withheld = |at: &std::path::Path| {
-            grants.withheld(
-                &baseline,
-                &Program::File {
-                    located: Box::new(located(at)),
-                    arg0: at.to_path_buf(),
-                },
-            )
+            grants
+                .admit(
+                    &baseline,
+                    Program::File {
+                        located: Box::new(located(at)),
+                        arg0: at.to_path_buf(),
+                    },
+                )
+                .map(drop)
+                .map_err(|refused| refused.why)
         };
         assert!(withheld(&first.join("git")).is_ok());
         assert!(

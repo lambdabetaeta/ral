@@ -1,6 +1,6 @@
 ---
-generated_at_commit: a2aba680
-generated_at_date: 2026-10-25
+generated_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
+generated_at_date: 2026-10-27
 covers_paths: [core/src/fact/observation.rs, exarch/src/tui/group.rs, core/src/shell/runtime/audit/fan_out.rs, core/src/shell/evaluator/call.rs, core/src/shell/exec/dispatch.rs, core/src/path/walk.rs, core/src/path/walk/, core/src/shell/runtime/state/checks.rs, core/src/shell/exec/redirect.rs, core/src/shell/exec/redirect/stage.rs, core/src/shell/exec/command/detach.rs, core/src/shell/exec/pipeline/collect.rs, core/src/shell/exec/redirect/scope.rs, core/src/shell/exec/command.rs, core/src/shell/exec/command/stdio.rs, core/src/shell/runtime/state/mod.rs, core/src/shell/runtime/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, core/src/path/tree/walk.rs, clippy.toml, lint/site.rs, core/tests/sites.rs]
 ---
 
@@ -19,18 +19,17 @@ line followed by a sentence naming how the bound handle and registry inspect it
 `` `await` on its bound handle replays its output and returns its value; `workers` lists every worker.``
 
 
-Every redirect read (`<`), every redirect write (`>` family), every external
-or bundled exec image the model launches, and every denied head admission
-surfaces on the rail — **one structural observation per logical operation**,
-the rail then coalescing a burst into one card per kind. Coverage is a
-property of the **runtime**, not of kit discipline: the hooks sit at the
-syscall sites where the operation actually happens, so a read/write/exec
-surfaces no matter
-which helper — or no helper — issued it. Core emits a structural
-**`Observation`** (`core/src/fact/observation.rs`) — the one vocabulary
-shared with the [[design/audit|audit trail]], `--audit`'s JSON, and the wire;
-exarch binds it to a card from the existing [[map/exarch/cards|mark grammar]],
-exactly as it already binds a kit `` `card ``
+Every redirect read (`<`), every redirect write (`>` family), every external or
+bundled exec image the model launches, and every denied exec surfaces on the
+rail — **one structural observation per logical operation**, the rail then
+coalescing a burst into one card per kind. Coverage is a property of the
+**runtime**, not of kit discipline: the hooks sit at the syscall sites where
+the operation actually happens, so a read/write/exec surfaces no matter which
+helper — or no helper — issued it. Core emits a structural **`Observation`**
+(`core/src/fact/observation.rs`) — the one vocabulary shared with the
+[[design/audit|audit trail]], `--audit`'s JSON, and the wire; exarch binds it
+to a card from the existing [[map/exarch/cards|mark grammar]], exactly as it
+already binds a kit `` `card ``
 ([[decisions/260619_surface-carries-documents|surface-carries-documents]]). The
 division is the one [[decisions/260618_run-turn-host-loop|run-turn-host-loop]]
 draws — **core names the operation, exarch names its appearance** — so core
@@ -54,17 +53,17 @@ what the rail draws (so renderers are total), applied at `decode_surface` — so
 a builtin command and an allowed capability check are reported by core and
 dropped by exarch, never drawn and never journalled.
 
-The one filter core keeps is its own, and it is the decision rather than a flag:
-a capability *denial* joins the trail whenever one is open, an *allowed* check
-never does, and no `grant` has a dimension to change either — language
-semantics, not presentation ([[design/audit|audit]]). And only a head admission
-(`shell/exec/dispatch.rs`) surfaces a *structured* denial — the `fs` and full-argv
-checks in
-`authority/guard/enforce.rs` return domain `Denial`s to
-`shell/runtime/state/checks.rs`, whose adapter records them and raises their
-runtime errors. Its callers in `shell/builtins/` and exarch's own sites carry no `Mooring`, so their
-denials reach the trail alone. A refused *external* command still surfaces
-either way, as a failed command observation carrying the denial message.
+The one filter core keeps is its own, and it is the decision rather than a
+flag: a capability *denial* joins the trail whenever one is open, an *allowed*
+check never does, and no `grant` has a dimension to change either — language
+semantics, not presentation ([[design/audit|audit]]). And only an exec refusal
+surfaces a *structured* denial: `Shell::check_exec`
+(`shell/runtime/state/checks.rs`) records it against its call's `Mooring`. The
+`fs` checks in `authority/guard/enforce.rs` return domain `Denial`s to the same
+adapter, which records them with no `Mooring` and raises their runtime errors,
+so their denials reach the trail alone. A refused *external* command still
+surfaces either way, as a failed command observation carrying the denial
+message.
 
 With nobody listening — no sink installed and no trail open — a site builds no
 observation at all, so it pays for neither the `epoch_us()` syscall nor the
@@ -128,7 +127,7 @@ Capability checks are different again. An *allowed* check stays off the rail:
 it is the wrong granularity — it over-fires on `use`/`exists`/
 `list-dir` and under-fires on bundled coreutils' internal reads. A *denied*
 check is the exception: it is the highest-signal line in a provenance record,
-so a head admission reaches the rail whether or not a trail is open — see
+so a denied exec reaches the rail whether or not a trail is open — see
 [[design/audit|audit]].
 
 A pipeline stage's own sites reach the rail too, not only its trail. A
@@ -192,24 +191,25 @@ and the card is rebuilt fresh wherever it is drawn. The other surface shapes
 (edit, notice, card, done) have their own arms; a value matching none drops,
 the same graceful degradation as before.
 
-`observation_card` composes from the existing marks ([[map/exarch/cards|cards]]).
-The operation is a *nominal category*, so it is carried by a word, not a
-mirror-orientation glyph: read is a `muted` `read` verb + a `path` span; write
-is no card at all — `decode_surface` turns it into a `Change`, its diff taken
-between core's two snapshots, none unless both are known text
-([[decisions/261006_a-file-change-is-one-fact|a-file-change-is-one-fact]]),
-and a change with no diff reads `write <path> <outcome>`: `committed` uses the
-`ok` role, `aborted` uses `warn`, and `failed` uses `bad`; a command keeps the conventional `$` prompt, the program as
-`path`, each arg as plain ink, and a `→ status` tail roled `ok`/`bad` off the
-observation's own `status`; grep is the pattern as `code` `in` the cwd scope
-as `path`; a capability check reads `check <resource> <decision> <fields…>`,
-the decision roled `Role::Bad` when denied (the only decision the rail ever
-surfaces) and its trailing fields — core's own `resource`-specific map,
-`name`/`resolved`/`args` for `exec`, `op`/`path` for `fs`, `prefix` for
-`deputy` — rendered
-as `key=value` pairs in the map's own order, whatever is present, nothing
-inferred. `Role::Path` carries a real hue, so the subject of every row stands
-as figure against the muted label and the body prose.
+`observation_card` composes from the existing marks
+([[map/exarch/cards|cards]]). The operation is a *nominal category*, so it is
+carried by a word, not a mirror-orientation glyph: read is a `muted` `read`
+verb + a `path` span; write is no card at all — `decode_surface` turns it into
+a `Change`, its diff taken between core's two snapshots, none unless both are
+known text
+([[decisions/261006_a-file-change-is-one-fact|a-file-change-is-one-fact]]), and
+a change with no diff reads `write <path> <outcome>`: `committed` uses the `ok`
+role, `aborted` uses `warn`, and `failed` uses `bad`; a command keeps the
+conventional `$` prompt, the program as `path`, each arg as plain ink, and a
+`→ status` tail roled `ok`/`bad` off the observation's own `status`; grep is
+the pattern as `code` `in` the cwd scope as `path`; a capability check reads
+`check <resource> <decision> <fields…>`, the decision roled `Role::Bad` when
+denied (the only decision the rail ever surfaces) and its trailing fields —
+core's own `resource`-specific map, `name`/`resolved`/`deny` for `exec`,
+`op`/`path` for `fs`, `prefix` for `deputy` — rendered as `key=value` pairs in
+the map's own order, whatever is present, nothing inferred. `Role::Path`
+carries a real hue, so the subject of every row stands as figure against the
+muted label and the body prose.
 
 The record carries raw facts — one `Display::Observation` per observation,
 one `Display::Change` per write or edit — and the **grouping is the frontend's**, derived

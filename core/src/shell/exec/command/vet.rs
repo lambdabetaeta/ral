@@ -1,16 +1,15 @@
-//! Pre-spawn vetting: a [`Head`] and its argv values become a [`SpawnPlan`],
-//! or a focused refusal.
+//! Pre-spawn planning: an admitted [`Head`] and its argv values become a
+//! [`SpawnPlan`], or a focused refusal.
 //!
-//! Existence, then argv shape, then grant policy through `Shell::check_exec`,
-//! then whether the admitted program can be run at all — the order is
-//! diagnostic priority: "does this command exist?" outranks "is this argument
-//! the right shape?", and a program is judged before it is looked at, so a
-//! denied file is refused as denied, never as unexecutable.  Both
-//! single-command exec and pipeline stages consume the plan, so the rules
-//! live in exactly one place.
+//! [`Head::admit`] has judged the program, so the grant's refusal outranks
+//! argv shape.  Then existence (a head with no program had nothing to
+//! judge), argv shape, and whether the admitted program can be run at all: a
+//! program is judged before it is looked at, so a denied file is refused as
+//! denied, never as unexecutable.  Every launch path plans here, so the
+//! rules live in exactly one place.
 
 use crate::authority::policy::{Admitted, Program};
-use crate::shell::runtime::{Break, Error, Settled, Shell, Value};
+use crate::shell::runtime::{Break, Error, Settled, Value};
 use crate::ty::RefusedArg;
 
 use super::head::{Head, Missing};
@@ -23,15 +22,13 @@ pub(crate) struct SpawnPlan {
     pub(crate) args: Vec<String>,
 }
 
-/// Vet a resolved [`Head`] for spawn, taking it: 127 when it names nothing,
+/// Plan an admitted head's launch, taking it: 127 when it names nothing,
 /// 126 when the walk stopped at a file lacking `+x` or the admitted file
-/// cannot be run — read off the head's own walk, never re-probed.  The
-/// program moves into the [`Admitted`], the one holder of the object.
-pub(crate) fn vet(head: Head, args: &[Value], shell: &mut Shell) -> Settled<SpawnPlan> {
+/// cannot be run — read off the head's own walk, never re-probed.
+pub(crate) fn vet(head: Head<Admitted>, args: &[Value]) -> Settled<SpawnPlan> {
     let Head { shown, program } = head;
-    let program = program.map_err(|missing| Break::Error(missing.error(&shown)))?;
+    let admitted = program.map_err(|missing| Break::Error(missing.error(&shown)))?;
     let args = validate_argv(&shown, args)?;
-    let admitted = shell.check_exec(&shown, program, &args)?;
     if let Program::File { located, .. } = admitted.program()
         && !located.is_executable()
     {
@@ -79,7 +76,13 @@ mod tests {
     use super::*;
     use crate::authority::policy::Program;
     use crate::ir::CommandName;
+    use crate::shell::runtime::{Mooring, Shell};
     use std::path::Path;
+
+    /// A head admitted with no surface, then planned with no argv.
+    fn plan(head: Head, shell: &mut Shell) -> Settled<SpawnPlan> {
+        vet(head.admit(&Mooring::adrift(), shell)?, &[])
+    }
 
     /// An executable a *bare-name* walk finds in `dir`; off Unix a bare name
     /// resolves only through `%PATHEXT%`, so the file carries a suffix from it.
@@ -103,7 +106,7 @@ mod tests {
 
     /// The exit code `vet` refuses `head` with.
     fn refused(head: Head, shell: &mut Shell) -> Error {
-        match vet(head, &[], shell) {
+        match plan(head, shell) {
             Err(Break::Error(e)) => e,
             Err(other) => panic!("expected a refusal, got {other:?}"),
             Ok(_) => panic!("expected a refusal, got a plan"),
@@ -180,7 +183,7 @@ mod tests {
         assert!(
             matches!(&head.program, Ok(Program::File { arg0, .. }) if *arg0 == bin.join(&name))
         );
-        vet(head, &[], &mut shell).expect("a resolved name must vet");
+        plan(head, &mut shell).expect("a resolved name must vet");
 
         shell.seed_cwd(
             crate::path::CwdPath::new(elsewhere.path().to_path_buf())
@@ -202,7 +205,7 @@ mod tests {
             .set_env_var("PATH", dir.path().to_string_lossy().into_owned());
 
         let head = Head::resolve(&CommandName::Bare("ls".into()), &shell.context);
-        let plan = vet(head, &[], &mut shell).expect("bundled name must not 127");
+        let plan = plan(head, &mut shell).expect("bundled name must not 127");
         assert_eq!(plan.shown, "ls");
     }
 

@@ -24,6 +24,8 @@ use std::path::PathBuf;
 /// A program the stack admitted, and the table that admitted it. Only
 /// [`GrantStack::admit`] makes one, so nothing launches unjudged: a file is
 /// held as vouched for reading, which running it does.
+/// It launches under the stack that made it: each path admits and launches
+/// within one machine step.
 #[derive(Debug)]
 #[must_use]
 pub(crate) struct Admitted {
@@ -96,20 +98,6 @@ impl GrantStack {
                 why: ExecDenial::Read(why),
             })),
         }
-    }
-
-    /// [`admit`](Self::admit) on a borrowed head, before argv exists.
-    pub(crate) fn withheld(
-        &self,
-        baseline: &Baseline,
-        program: &Program,
-    ) -> Result<(), ExecDenial> {
-        run_withheld(rules(self).as_ref(), program)?;
-        match program {
-            Program::File { located, .. } => self.read(baseline, located.trace()),
-            Program::Tool(_) => self.tool_read(baseline),
-        }
-        .map_err(ExecDenial::Read)
     }
 
     /// A bundled tool runs ral's image, which only an fs exclusion withholds.

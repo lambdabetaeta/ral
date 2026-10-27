@@ -25,6 +25,8 @@
 mod common;
 
 use common::fresh_shell;
+#[cfg(unix)]
+use common::under_grant;
 
 use ral_core::Settled;
 use ral_core::protocol::Run;
@@ -120,4 +122,25 @@ fn a_polymorphic_argument_is_left_to_the_spawn() {
             .is_empty(),
         "a spread is not gated"
     );
+}
+
+/// A grant refusal outranks an argument's runtime shape, alone and as a
+/// direct stage.
+#[cfg(unix)]
+#[test]
+fn a_grant_refusal_outranks_the_shape_of_an_argument() {
+    for call in ["/bin/echo $v", "/bin/echo $v | /bin/cat"] {
+        let source = format!(
+            "let show = {{ |v| {call} }}; {}",
+            under_grant("show [a: 1]")
+        );
+        match run_capture(&source).0 {
+            Err(Break::Error(e)) => assert!(
+                e.message.contains("denied by active grant"),
+                "{call}: {}",
+                e.message
+            ),
+            other => panic!("{call}: expected a grant refusal, got {other:?}"),
+        }
+    }
 }

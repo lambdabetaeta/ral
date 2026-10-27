@@ -163,10 +163,10 @@ What builds up the trail is itself scoped:
   everything an allowed check would attest is already attested by the command,
   read, or write it let through. There is no flag to set and none to clear, so
   no inner grant can hide a denial from the trail its caller opened. A denied
-  *head admission* also reaches the surface rail, whether or not a trail is
-  open; an `fs` or full-argv denial reaches the trail alone — the command it
-  refused still surfaces in its own right, as a failed `` `command ``
-  observation carrying the denial message;
+  *exec* also reaches the surface rail, whether or not a trail is open; an `fs`
+  denial reaches the trail alone — the command it refused still surfaces in its
+  own right, as a failed `` `command `` observation carrying the denial
+  message;
 - `audit` collects the full trail its body produces.
 
 **A write that changed nothing in the world is not a fact.** A redirect onto

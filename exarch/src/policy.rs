@@ -333,9 +333,9 @@ mod tests {
         for layer in stack.layers() {
             shell.push_session_capabilities(layer.clone());
         }
-        ral_core::test_access::check_file(&mut shell, &ral_core::path::shown(&own), &[])
+        ral_core::test_access::check_file(&mut shell, &ral_core::path::shown(&own))
             .expect_err("the supplied binary is excluded");
-        ral_core::test_access::check_file(&mut shell, &ral_core::path::shown(&sibling), &[])
+        ral_core::test_access::check_file(&mut shell, &ral_core::path::shown(&sibling))
             .expect("the sibling remains admitted");
     }
 

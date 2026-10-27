@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 30a5e059
-verified_at_date: 2026-10-24
+verified_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
+verified_at_date: 2026-10-27
 anchors: [PipeNode, PipeNode::launch, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Pumps::join_under, TerminalLoan, PipelineGroup::lend, PipelineGroup::end_anchor, TerminalLease, terminal_lease, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge]
 ---
 
@@ -207,17 +207,16 @@ have trapped the key and exited 0, and the strike already on the node is what
 the run's own poll then reads. Ending the anchor first is safe: `drive`
 returns only with no stage live, so nothing addresses the pgid again.
 
-**A launch that fails part-way is rolled back, then joined.** The spawn
-loop stops at the first stage it cannot launch — a head `vet` refuses, a
-wiring or spawn that fails, a stop its poll reads — and the stages already
-running are not dropped: `CollectState::roll_back` tears them down with
-`cancel_all`, under the cause in force or else `Cancelled`, as for an
-`exit` in a stage, and `join` follows as for any pipeline. So every stage
-started is observed and settled, and every key the anchor reported while
-the launch ran is struck on the run's node, where `try` cannot absorb it.
-The launch's failure is the verdict, whatever the fold found: the fold's
-own fallback is the rollback's stop, and what the started stages did
-raced it.
+**A launch that fails part-way is rolled back, then joined.** The spawn loop
+stops at the first stage it cannot launch — a head `Head::admit` or `vet`
+refuses, a wiring or spawn that fails, a stop its poll reads — and the stages
+already running are not dropped: `CollectState::roll_back` tears them down with
+`cancel_all`, under the cause in force or else `Cancelled`, as for an `exit` in
+a stage, and `join` follows as for any pipeline. So every stage started is
+observed and settled, and every key the anchor reported while the launch ran is
+struck on the run's node, where `try` cannot absorb it. The launch's failure is
+the verdict, whatever the fold found: the fold's own fallback is the rollback's
+stop, and what the started stages did raced it.
 
 A single-stage pipeline never reaches any of this: the machine's
 `Pipeline` arm reduces it to its inner closure inline, and `PipeNode::run`
