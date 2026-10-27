@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 3dbbe8f3
+generated_at_commit: efbf42011e7c77f2b8c4f6ba1df0563ef202d650
 generated_at_date: 2026-10-27
 covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/signals.rs, exarch/src/cancel.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/]
 ---
@@ -31,7 +31,9 @@ only inside `bus::Stamp` — the addressed envelope `Mailbox::stamp` mints,
 pairing the destination mailbox with its epoch at composition — so a message
 that cannot judge its own staleness (`bus::Stamped`) is unsendable with a
 stamp forgotten, skewed to another inbox, or refreshed at push time; the
-destination judges it at its own pop.
+destination judges it at its own pop. Its `reach` holds no connection: a
+wire seat's line is its transport's alone, so an `Arc<Agent>` held past its
+avatar keeps no engine and no descriptor.
 
 **`Avatar` is the private half**: the canonical
 [[internals/session-record|model projection]] (`AgentLog`, `record/session.rs`), a **seat**

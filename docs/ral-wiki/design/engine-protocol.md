@@ -321,6 +321,17 @@ connection *is* the session**, so no frame carries a session address.
 `Attach` opens it; `Detach`, an EOF, or the liveness deadline closes it;
 `Dispatch`, `Probe`, `Event`, `Control`, `Answer` all ride it unaddressed.
 
+**One owner per connection.** A wire transport alone owns its `Line`:
+the write channel, a never-locked duplicate to shut the socket with, and
+the severance cell. A control sender and the heartbeat hold the line
+weakly, so holding a sender, as an exarch `Agent` does in its `reach`,
+holds no connection, and a verb aimed at a gone line is a no-op: its
+engine ended every run at EOF. A session ends when its front-end drops
+its transport. The wire transport's drop shuts the socket, which acts on
+the connection rather than on one descriptor, and the engine reads EOF;
+the identity transport's drop takes its engine, and every worker, with
+it. There is no explicit session-ending verb.
+
 **The process is what makes a session's end final.** Most of what a session
 needs from its boundary is already software: `Control` cancels a dispatch,
 the session's `DurableRoot` and `Roster` contain its workers, and the worker's

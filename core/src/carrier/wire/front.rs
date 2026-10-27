@@ -4,13 +4,12 @@
 use std::collections::VecDeque;
 use std::io;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak, mpsc};
 use std::time::Duration;
 
 use crate::carrier::{ControlRoute, ControlSender, EventReceiver, forbid_reentry};
 use crate::carrier::{
-    Ends, Host, ProbeError, READER_SEVERS_FIRST, Severed, Transport, mint_dispatch_id, sever,
-    write_through,
+    Ends, Host, Line, ProbeError, READER_SEVERS_FIRST, Severed, Transport, mint_dispatch_id, sever,
 };
 use crate::data::FOValue;
 use crate::protocol::channel::{Liveness, WireChannel, WireStream, WriteError, ticks};
@@ -29,14 +28,15 @@ use crate::sync::{CondvarExt as _, LockExt};
 /// EOF, and so runs a ticker.
 ///
 /// A reader thread forwards `Event` frames into the `EventReceiver`, swallows
-/// `Pong`s, and timestamps every frame it reads. All writes share one
-/// `Mutex<WireChannel>`, the ticker's `Ping` included.
+/// `Pong`s, and timestamps every frame it reads. All writes go through its
+/// [`Line`], the ticker's `Ping` included.
 pub struct WireTransport {
-    /// The severance cell is shared with the reader and the ticker, which
-    /// check it to break early; the sink with the reader, so
+    /// The severance cell is shared with the reader and the line; the reader
+    /// and the ticker check it to break early; the sink with the reader, so
     /// `set_deferred_sink` takes effect on the next batch.
     ends: Ends,
-    write_tx: Arc<Mutex<WireChannel>>,
+    /// Owned here alone; see [`Line`].
+    line: Arc<Line>,
     /// Never joined: the thread exits when the channel closes. `Mutex` only
     /// for `Sync`.
     _reader: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -46,11 +46,6 @@ pub struct WireTransport {
     /// The heartbeat still owed, parked by [`WireTransport::adopt`] and taken
     /// by the first [`WireTransport::attach`].
     pending_heartbeat: Mutex<Option<Liveness>>,
-    /// A shutdown-only duplicate of the socket, minted alongside `write_tx`.
-    /// `Drop` shuts this down directly rather than taking
-    /// `write_tx`'s lock, so tearing the transport down never parks behind a
-    /// write some other thread holds the lock over.
-    shutdown: WireChannel,
     /// Set true by the reader on `SessionEvent::Attached`; awaited by
     /// [`WireTransport::await_attached`].
     attached: Arc<(Mutex<bool>, Condvar)>,
@@ -165,35 +160,31 @@ fn spawn_wire_reader(
 /// the wire down too, waking the parked reader so the event channel closes.
 /// Never joined.
 ///
-/// The deadline arm never takes `write_tx`'s lock: severing from silence must
+/// The deadline arm never takes the line's write lock: severing from silence must
 /// not itself be capable of parking behind a write some other thread is
 /// stalled on, so a severed transport always implies `shutdown` runs in
-/// bounded time. The `Ping` arm goes through [`write_through`], which severs
-/// on failure the same way any other front-end write does.
-fn spawn_heartbeat(
-    write_tx: Arc<Mutex<WireChannel>>,
-    severance: Arc<OnceLock<Severed>>,
-    unanswered: Arc<AtomicU32>,
-    liveness: Liveness,
-    shutdown: WireChannel,
-) {
+/// bounded time. The `Ping` arm goes through [`Line::write`], which severs
+/// on failure the same way any other front-end write does. It holds the line
+/// weakly and ends at the first tick after its transport is gone.
+fn spawn_heartbeat(line: Weak<Line>, unanswered: Arc<AtomicU32>, liveness: Liveness) {
     let patience = liveness.probes();
     std::thread::spawn(move || {
         let mut seq: u64 = 0;
         loop {
             std::thread::sleep(liveness.interval);
-            if severance.get().is_some() {
+            // Held for one tick, never across the sleep.
+            let Some(line) = line.upgrade() else { break };
+            if line.severance.get().is_some() {
                 break;
             }
             // Only probes this thread actually sent can condemn the peer, so a
             // host that was asleep — sending none — wakes accusing nobody.
             if unanswered.load(Ordering::Relaxed) >= patience {
-                sever(&severance, Severed::Silent(liveness.deadline));
-                shutdown.shutdown();
+                line.sever(Severed::Silent(liveness.deadline));
                 break;
             }
             seq += 1;
-            match write_through(&write_tx, &severance, &Frame::Ping(seq)) {
+            match line.write(&Frame::Ping(seq)) {
                 Err(WriteError::Severed) => break,
                 Err(WriteError::Unencodable(e)) => unreachable!("a ping is a few bytes: {e}"),
                 Ok(()) => {}
@@ -231,14 +222,17 @@ impl WireTransport {
         let unanswered = Arc::new(AtomicU32::new(0));
         let (event_tx, event_rx) = mpsc::channel();
         let attached = Arc::new((Mutex::new(false), Condvar::new()));
-        let write_tx = Arc::new(Mutex::new(writer));
-        let control = ControlSender::new(ControlRoute::Wire((write_tx.clone(), severance.clone())));
+        let line = Arc::new(Line {
+            channel: Mutex::new(writer),
+            shutdown,
+            severance: severance.clone(),
+        });
+        let control = ControlSender::new(ControlRoute::Wire(Arc::downgrade(&line)));
         let ends = Ends::new(control, EventReceiver::new(event_rx), severance);
         // Darwin refuses options on a socket whose peer is already gone:
         // the death Linux learns at the first read, learnt here.
         if let Err(e) = deadline {
-            sever(&ends.severance, Severed::Closed(e.to_string()));
-            shutdown.shutdown();
+            line.sever(Severed::Closed(e.to_string()));
         }
         let reader = spawn_wire_reader(
             reader_ch,
@@ -251,11 +245,10 @@ impl WireTransport {
 
         Ok(Self {
             ends,
-            write_tx,
+            line,
             _reader: Mutex::new(Some(reader)),
             unanswered,
             pending_heartbeat: Mutex::new(Some(liveness)),
-            shutdown,
             attached,
             patience: liveness.deadline,
         })
@@ -264,9 +257,6 @@ impl WireTransport {
     /// Write `attach`, the only legal first frame, and only then start the
     /// heartbeat: no `Ping` may precede the handshake. The verdict is
     /// [`Self::await_attached`]'s.
-    ///
-    /// # Panics
-    /// If the already-open socket cannot be duplicated for the heartbeat.
     pub fn attach(&self, attach: Attach) {
         // No session yet to refuse into: the refusal is the attach's verdict.
         if let Err(WriteError::Unencodable(e)) = self.write(&Frame::Attach(attach)) {
@@ -282,13 +272,9 @@ impl WireTransport {
             // already declared `Silent` on the heartbeat's first tick.
             self.unanswered.store(0, Ordering::Relaxed);
             spawn_heartbeat(
-                self.write_tx.clone(),
-                self.ends.severance.clone(),
+                Arc::downgrade(&self.line),
                 self.unanswered.clone(),
                 liveness,
-                self.shutdown
-                    .try_clone()
-                    .expect("dup an already-open socket"),
             );
         }
     }
@@ -303,10 +289,6 @@ impl WireTransport {
     /// # Errors
     /// The transport's severance — a refused `Attach`, a closed connection, or
     /// [`Severed::Silent`] once no verdict arrives within `self.patience`.
-    ///
-    /// # Panics
-    /// Never: the `expect` fires only after this call has just severed the
-    /// transport itself, on the same line above it.
     #[allow(
         clippy::significant_drop_tightening,
         reason = "the guard is the loop's own state, retaken by every wait"
@@ -325,11 +307,7 @@ impl WireTransport {
                 return Ok(());
             }
             if left == 0 {
-                sever(&self.ends.severance, Severed::Silent(self.patience));
-                self.shutdown.shutdown();
-                return Err(self
-                    .severed()
-                    .expect("sever just recorded the cause this call names"));
+                return Err(self.line.sever(Severed::Silent(self.patience)).clone());
             }
             let (next, timed_out) = self.attached.1.wait_timeout_ignore_poison(guard, TICK);
             guard = next;
@@ -345,20 +323,16 @@ impl WireTransport {
     /// refuses never reached the wire: each caller answers that refusal where
     /// it stands.
     fn write(&self, frame: &Frame) -> Result<(), WriteError> {
-        write_through(&self.write_tx, &self.ends.severance, frame)
+        self.line.write(frame)
     }
 }
 
 impl Drop for WireTransport {
+    /// The session's end: the engine reads EOF.
     fn drop(&mut self) {
-        // `self.shutdown` never takes `write_tx`'s lock, so this wakes the
-        // reader and the ticker — which share the one socket —
-        // without ever parking behind a write in progress.
-        sever(
-            &self.ends.severance,
-            Severed::Closed("the front-end dropped the transport".into()),
-        );
-        self.shutdown.shutdown();
+        self.line.sever(Severed::Closed(
+            "the front-end dropped the transport".into(),
+        ));
     }
 }
 
@@ -416,13 +390,7 @@ impl Transport for WireTransport {
 
     /// Also shuts the connection, so the engine sees EOF.
     fn sever(&self, cause: Severed) -> Severed {
-        let standing = self.ends.sever(cause);
-        self.shutdown.shutdown();
-        standing
-    }
-
-    fn detach(&self) {
-        let _ = self.write(&Frame::Detach);
+        self.line.sever(cause).clone()
     }
 
     /// An answer the fuse refuses is replaced by its refusal, so the parked

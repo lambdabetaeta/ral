@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 3dbbe8f3
+generated_at_commit: efbf42011e7c77f2b8c4f6ba1df0563ef202d650
 generated_at_date: 2026-10-27
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/shell/run/report.rs, core/src/seed.rs, core/src/shell/grant/spawn.rs]
 ---
@@ -181,7 +181,7 @@ The probe vocabulary, typed once for both ends.
   channel (`SO_SNDTIMEO` lives on the shared file description), turning a
   stalled write into the same fatal error a severed pipe already gives.
 - `write_or_sever` / `WriteError` — the severance law itself, enforced once
-  for both doors (`carrier::write_through`, `engine_write`, which differ only
+  for both doors (`carrier::Line::write`, `engine_write`, which differ only
   in what they record): the frame is encoded before the lock is taken, and a
   frame the fuse refuses is `Unencodable`, the wire untouched, for its writer
   to answer where it stands; a failed write is `Severed`, recorded *and* the
@@ -209,9 +209,9 @@ The two interpretations of the algebra, and what they share.
 - `Ends` — the front-end state both carriers hold in one value: the
   `ControlSender`, the `EventReceiver`, the severance cell and the session
   sink. A carrier supplies `Transport::ends` and the verbs that differ in
-  carriage (`dispatch`, `probe`, `detach`, `answer`); `control`, `events`,
+  carriage (`dispatch`, `probe`, `answer`); `control`, `events`,
   `severed`, `sever` and `set_deferred_sink` are provided. The wire carrier
-  overrides `sever` only to shut the socket too.
+  overrides `sever` only to shut the socket too, through its `Line`.
 - `Transport` trait — the front-end side of the protocol. Construction is
   attach, so the trait has no attach of its own; `sever` lets a front-end
   record a fault it observed. It also provides the host's typed probe doors,
@@ -219,7 +219,8 @@ The two interpretations of the algebra, and what they share.
   `binding_count`, `leased_binding_count`, `largest_binding_bytes`,
   `workers`, `session_ended`, `completion_names`, `bindings`,
   `path_entries`, each decoding through `Datum` and severing the transport
-  `Faulted` on an answer outside its shape (`read`).
+  `Faulted` on an answer outside its shape (`read`). It has no explicit
+  session-ending verb: a session ends when its transport drops.
 - `forbid_reentry` / `Dispatching` — the carrier-uniform reentrancy law: a
   thread-local registry of the transports this thread is dispatching on,
   entered by `dispatch_to_report` and checked by every typed reading and the
@@ -228,19 +229,20 @@ The two interpretations of the algebra, and what they share.
   call `transport.dispatch`, drain `events()` to that dispatch's own `Report`,
   forwarding `Surface`/`Enquiry` to `host`; `Result<Report, Severed>`.
 - `ControlSender` — `interrupt()`, `cancel(id)`, `terminate()` over one of two
-  doors: `Door::Identity` applies the verb straight onto the engine's
-  `Scopes`, `Door::Wire` writes a `Control` frame through the severance cell.
+  routes: `ControlRoute::Identity` applies the verb straight onto the engine's
+  `Scopes`; `ControlRoute::Wire` holds its transport's `Line` weakly and writes
+  a `Control` frame through it, a no-op once the line is gone.
   `aim(id)` records the dispatch in flight with the `interrupt_epoch` it was
   sent at, until its `Aimed` guard drops; `interrupt()` names that dispatch,
   and `hear(ambient)` names it only if the epoch has moved since, sending
   `Control::ending` for a root cause; `forward_signals()` holds a process
-  listener forwarding through that door.
+  listener forwarding through that route.
 - `EventReceiver` — the front-end's single-drainer event queue; its `stash`
   hands back an event a probe's or a desk's pre-drain read past, in arrival
   order, rather than dropping it.
-- `write_through` — the front-end door `WireTransport::write` and
-  `ControlSender`'s wire arm both share: `write_or_sever` recording a
-  `Severed` cause.
+- `Line` — the wire front-end's write end, owned by its `WireTransport`
+  alone: `write` is the severance law's front-end half, and `sever` records a
+  cause and shuts the never-locked duplicate.
 
 ### `carrier/identity.rs`
 
@@ -270,11 +272,14 @@ The two interpretations of the algebra, and what they share.
   what it reads past. A frame the fuse refuses is answered where its writer
   stands: a `Dispatch` by a `Report::refused` stashed on its own event
   stream, a `Probe` by `ProbeError::Rejected`, an `Answer` by an `Err` answer;
-  an `Attach`, with no session yet to refuse into, severs `Refused`.
+  an `Attach`, with no session yet to refuse into, severs `Refused`. It owns
+  its `Line` alone, and its `Drop` severs and shuts the socket: that is how a
+  front-end ends the session.
 - `spawn_wire_reader` / `spawn_heartbeat` — the reader severs *before*
   dropping `event_tx`, on every exit path, and severs `Faulted` on a frame
   only a front-end sends; the heartbeat pings on `Liveness::interval`,
-  severs `Silent` once `Liveness::probes` pings go unanswered, and never
+  holding the line weakly and upgrading it once per tick, never across its
+  sleep, severs `Silent` once `Liveness::probes` pings go unanswered, and never
   takes the write lock on that path.
 
 ### `carrier/wire/serve.rs`

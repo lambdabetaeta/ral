@@ -180,7 +180,7 @@ pub(crate) enum WriteError {
 /// the lock is released.
 ///
 /// Both ends of the protocol pass through here — the front-end's
-/// `write_through` records a `Severed` cause, the engine's `engine_write`
+/// `Line::write` records a `Severed` cause, the engine's `engine_write`
 /// raises its fault flag — so the ordering the law states is enforced once
 /// rather than restated at each end. What it buys: nothing can append a
 /// fresh frame after a truncated one, and no window exists in which the

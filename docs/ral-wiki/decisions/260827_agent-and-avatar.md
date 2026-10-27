@@ -191,6 +191,13 @@ the seat's teardown and the log's `SessionEnded` when a root's death ends the
 process. In the frontend `Tabs` has no root and `FleetBus` no mailbox; every
 command acts on the focused tab's agent.
 
+*Amended 2026-10-27: an `Agent` holds no engine connection.* Its `reach`
+is a control sender, and a wire sender holds its seat's line weakly
+([[design/engine-protocol|engine-protocol]]). Liveness, which is the
+avatar's `Arc`, and the connection, which is the avatar's seat, never
+couple: an `Arc<Agent>` held past its avatar keeps neither an engine nor
+a descriptor, and the session ends at the avatar's drop.
+
 ## Supersession
 
 [[decisions/260826_reply-parks|reply-parks]] is **superseded only in the

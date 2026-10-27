@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 67715a25
-verified_at_date: 2026-10-26
+verified_at_commit: efbf42011e7c77f2b8c4f6ba1df0563ef202d650
+verified_at_date: 2026-10-27
 anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, Break::code, Break::of_child, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, Terminate, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, ChildEnd, WaitOutcome::classify, KILL_EXIT_CODE, CancelCause::code, Signal::status, RunningChild::wait, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, ScopeOwner, Frame::Gather, exit_brood]
 ---
 
@@ -573,8 +573,11 @@ exarch layers a *per-agent* cancellation `Token` over ral's machinery
   `/clear`/`reply` reaps) cancels each descendant's `Token` *and* its own
   engine's `DurableRoot`, through `reach: InterruptTarget` on the `Agent` — the
   seat's current `ControlSender`, whose `terminate` means the same under either
-  carrier, republished at every `/clear` so it never goes stale. The
-  token stops the attend loop between steps; the root cancel unwinds a `ral` eval
+  carrier, republished at every `/clear` so it never goes stale. A wire
+  sender holds its seat's line weakly, so the `Agent` holds no connection:
+  once its avatar's seat is gone, a `terminate` through `reach` is a no-op,
+  its engine having ended every run at EOF. The token stops the attend loop
+  between steps; the root cancel unwinds a `ral` eval
   already in flight at the evaluator's poll points — without it, a cancelled
   agent would grind to its tool's `timeout_secs` wall before noticing. No root
   carries a lease, so a `terminate` lands on a root only as the process ends or

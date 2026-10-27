@@ -50,6 +50,29 @@ fn adopt_then_attach_conveys_the_protocol_version() {
     }
 }
 
+/// Neither a sender nor the ticker keeps the line: it goes within a tick of
+/// the transport, and a stale sender's verbs are no-ops.
+#[test]
+fn a_dropped_transport_leaves_no_owner_of_its_line() {
+    let (front, _peer) = UnixStream::pair().unwrap();
+    let transport = WireTransport::adopt(front, brisk()).unwrap();
+    attach(&transport);
+    let sender = transport.control().clone();
+    let line = Arc::downgrade(&transport.line);
+    drop(transport);
+
+    let by = Instant::now() + Duration::from_secs(5);
+    while line.upgrade().is_some() {
+        assert!(
+            Instant::now() < by,
+            "the ticker must let go of the line within a tick"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    sender.terminate();
+    sender.cancel(DispatchId(1));
+}
+
 /// The attach is delayed past several ping intervals, so `Attach` arriving
 /// first proves the ordering is by construction, not by winning a race.
 #[test]

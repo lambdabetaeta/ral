@@ -12,7 +12,7 @@ use std::io::{Read as _, Write as _};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ral_core::carrier::{Transport, WireTransport, dispatch_to_report};
+use ral_core::carrier::{WireTransport, dispatch_to_report};
 use ral_core::path::{EnginePath, GuestPath, shown};
 use ral_core::protocol::channel::Liveness;
 use ral_core::protocol::{Attach, EngineSpec, Program, Report, Root, Run};
@@ -228,8 +228,6 @@ fn prove_the_host_can_dial_in(
             Err(_) => eprintln!("the listening thread panicked"),
         }
     });
-
-    transport.detach();
 }
 
 fn dial_and_echo(machine: &dyn Machine) -> Result<String, String> {

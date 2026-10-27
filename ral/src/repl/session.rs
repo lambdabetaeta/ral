@@ -240,7 +240,6 @@ impl Drop for Session {
     /// drops.  Naming never gates or delays the exit it announces.
     fn drop(&mut self) {
         let workers = self.transport.workers().unwrap_or_default();
-        self.transport.detach();
         flush_pending_messages(&self.host.runtime);
         if let Err(e) = self.frontend.save_history() {
             errln!("ral: {e}");

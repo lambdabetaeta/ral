@@ -253,13 +253,6 @@ impl Scopes {
             .map(|(id, _)| *id)
     }
 
-    /// Cancel the dispatch in flight, if there is one.
-    pub(crate) fn strike(&self, cause: CancelCause) {
-        if let Some((_, scope)) = &self.slot.lock_ignore_poison().current {
-            scope.cancel(cause);
-        }
-    }
-
     /// Cancel the durable root: every run, and every worker.
     pub(crate) fn end(&self, cause: CancelCause) {
         self.root.cancel(cause);

@@ -169,10 +169,6 @@ impl Transport for IdentityTransport {
         }
         Ok(self.engine.lock().probe(probe))
     }
-
-    fn detach(&self) {
-        self.scopes.strike(crate::process::CancelCause::Cancelled);
-    }
 }
 
 #[cfg(test)]

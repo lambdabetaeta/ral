@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
+generated_at_commit: efbf42011e7c77f2b8c4f6ba1df0563ef202d650
 generated_at_date: 2026-10-27
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/host.rs, ral/src/repl/enquiry.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/config/, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/boot_builtin.rs, ral/src/surface.rs]
 ---
@@ -62,7 +62,7 @@ no job table: ral does not suspend
   cleanup. The signal thread never exits the process or restores its terminal.
 - `eval` runs one trimmed line through `exec::step`, recording an `exit` code
   so `run` breaks cleanly.
-- Teardown — the `workers` reading, transport detach, history flush, a
+- Teardown — the `workers` reading, history flush, a
   one-time notice naming any worker still `running` or `stopping`
   (`host::teardown_notice`, over `WorkerRow`s), and
   `ral_core::authority::sandbox::teardown_session` (deletes the session's

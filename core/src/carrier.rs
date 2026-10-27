@@ -9,7 +9,7 @@
 //! stream and the session sink are stated once.
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use crate::authority::policy::GrantSummary;
@@ -175,8 +175,10 @@ impl Ends {
 /// The front-end side of the engine protocol. Construction is attach: a
 /// transport in hand is one its engine accepted.
 ///
-/// A carrier supplies its [`Ends`] and the three verbs that differ in
+/// A carrier supplies its [`Ends`] and the two verbs that differ in
 /// carriage; everything the front-end does with them is provided.
+///
+/// A session ends when its transport drops.
 pub trait Transport: Send + Sync {
     /// This carrier's front-end state.
     fn ends(&self) -> &Ends;
@@ -199,10 +201,6 @@ pub trait Transport: Send + Sync {
     /// a program error.
     fn probe(&self, probe: &Probe) -> Result<FOValue, ProbeError>;
 
-    /// Detach: cancel in-flight dispatch, reap foreground subtree,
-    /// restore terminal state.
-    fn detach(&self);
-
     /// Answer one enquiry the engine raised on `Event::Enquiry`. A no-op under
     /// the identity transport, whose enquiry is a direct call through the
     /// installed `Desk` and never a frame.
@@ -221,7 +219,6 @@ pub trait Transport: Send + Sync {
 
     /// Why no further frame will cross the protocol, if that has happened: a
     /// write error, a read EOF, a refused `Attach`, or a silence deadline.
-    /// This is how a front-end tells *detached* from merely failed.
     fn severed(&self) -> Option<Severed> {
         self.ends().severance.get().cloned()
     }
@@ -489,12 +486,36 @@ fn mint_dispatch_id() -> DispatchId {
 
 // ── Senders and receivers ─────────────────────────────────────────────
 
-/// A wire sender's write channel and the severance cell a failed write records
-/// into.
-type WireControl = (Arc<Mutex<WireChannel>>, Arc<OnceLock<Severed>>);
+/// A wire connection's front-end write end, and the cell its failures record
+/// into. Its transport alone owns it; every other holder is weak.
+struct Line {
+    channel: Mutex<WireChannel>,
+    /// Never locked, so a shutdown never parks behind a stalled write.
+    shutdown: WireChannel,
+    severance: Arc<OnceLock<Severed>>,
+}
+
+impl Line {
+    /// The severance law's front-end half: [`write_or_sever`], recording a
+    /// `Closed` cause.
+    fn write(&self, frame: &Frame) -> Result<(), WriteError> {
+        write_or_sever(&self.channel, frame, |e| {
+            sever(&self.severance, Severed::Closed(e.to_string()));
+        })
+    }
+
+    /// Record `cause`, first cause winning, and shut the socket down: the
+    /// engine reads EOF and the reader wakes.
+    fn sever(&self, cause: Severed) -> &Severed {
+        let standing = sever(&self.severance, cause);
+        self.shutdown.shutdown();
+        standing
+    }
+}
 
 /// The out-of-band control sender: [`Control`]'s verbs, meaning the same under
-/// either carrier.
+/// either carrier. A wire sender holds its line weakly: it never keeps a
+/// connection open.
 #[derive(Clone)]
 pub struct ControlSender {
     route: ControlRoute,
@@ -508,9 +529,9 @@ pub struct ControlSender {
 enum ControlRoute {
     /// In-process: straight onto the engine's own scopes.
     Identity(Arc<Scopes>),
-    /// A `Control` frame, recording into the transport's severance cell, so a
-    /// failed control write severs the connection as a failed data write does.
-    Wire(WireControl),
+    /// Weak: a sender holds no connection, and one whose line is gone has
+    /// nothing left to stop.
+    Wire(Weak<Line>),
 }
 
 impl ControlSender {
@@ -581,9 +602,9 @@ impl ControlSender {
             // A control frame that cannot be written is as fatal as a dispatch
             // that cannot: the peer is gone, and waiting on the reader's
             // eventual EOF to say so leaves a cancel silently lost meanwhile.
-            ControlRoute::Wire((ch, severance)) => {
-                if let Err(WriteError::Unencodable(e)) =
-                    write_through(ch, severance, &Frame::Control(control))
+            ControlRoute::Wire(line) => {
+                if let Some(line) = line.upgrade()
+                    && let Err(WriteError::Unencodable(e)) = line.write(&Frame::Control(control))
                 {
                     unreachable!("a control frame is a few bytes: {e}");
                 }
@@ -652,19 +673,4 @@ impl EventReceiver {
         }
         self.rx.lock_ignore_poison().try_recv().ok()
     }
-}
-
-/// The front-end's half of the severance law: [`write_or_sever`] recording
-/// into `severance`. Shared by the wire transport's writes and the wire arm of
-/// `ControlSender`; `Err` is handed back so a caller that must react further —
-/// the heartbeat's `Ping` arm breaking its loop — can, without repeating the
-/// severing itself.
-fn write_through(
-    ch: &Mutex<WireChannel>,
-    severance: &OnceLock<Severed>,
-    frame: &Frame,
-) -> Result<(), WriteError> {
-    write_or_sever(ch, frame, |e| {
-        sever(severance, Severed::Closed(e.to_string()));
-    })
 }
