@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 7ab5809a08c38081b58a1c308eab0ab0303e7b07
+generated_at_commit: 2f1beeb292a50892e1428796acf6b1da14631dcd
 generated_at_date: 2026-10-26
 covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
@@ -507,6 +507,31 @@ VM boundary are the only confinement of grandchildren.
   `BundledTool` multicall only `pin`s, so an `--engine` process has bwrap
   pinned exactly as the shell does. Skip it and `OWN` stays unpinned, so the
   per-command launcher refuses to re-exec a binary it cannot vouch for.
+- `test_helper::confinement` shares live enforcement evidence across core,
+  ral and exarch tests. `require_confinement!` obtains a cached `Confining`
+  only after an fs-confined `/bin/echo` exits successfully with its exact
+  marker (`cmd /c echo` on Windows), under a read-only grant on a fresh temporary
+  working directory. An unavailable envelope or an already-profiled Seatbelt runner
+  prints the test's skip reason locally; `RAL_REQUIRE_SANDBOX` makes that a
+  failure. CI requires it in Linux containers and native CI runs. `admitted`
+  checks a successful control and its marker; `denied` takes that control
+  under the same grant and checks the denied operation cannot return the
+  marker. A masked file can read as empty with exit zero, so status alone
+  cannot establish denial. Coverage includes top-level dispatch, grant,
+  spawn, par, pipeline stages and out-of-grant reads on both Unix backends.
+  Test constructors also serve `RAL_TEST_PROBE`, a JSON argument array for
+  descriptor, socket, resolver and platform IPC probes. Warrants and anchors
+  take precedence; an ordinary probe runs before boot opens any descriptors. Kernel ABI and volume prerequisites name
+  their skip reason independently of the confinement requirement.
+  `core/tests/local_ipc.rs` covers live host socket refusals, online IP
+  controls (UDP requires the host peer's echo), macOS resolver and shared-memory access, and Linux abstract peers
+  inside one launch (Landlock ABI 6). Windows session tests inspect the staged
+  launch's network SIDs across offline/online transitions; AppContainer
+  loopback cannot supply a live peer control.
+  `core/tests/sandbox_assurance.rs` checks rename targets, directory removal,
+  and a detached child's read released by pipe only after its host exits.
+  The macOS warrant test approaches the socket-buffer ceiling: the complete
+  warrant arrives, or preparation refuses before spawning.
 - `reexec.rs` — `Pinned`, an executable pinned at boot: the one shape every
   `Command` the sandbox execs is built from, so nothing a session does to its
   environment can choose the file. Two are pinned: this executable
@@ -569,11 +594,13 @@ VM boundary are the only confinement of grandchildren.
   `enter` — implemented on macOS by `Seatbelt(String)`, the profile
   `macos::build_profile` compiled, and on Linux by `Option<Landlocked>`, spelled
   `unconfined`, `landlock@<fd>` or `landlock+refer@<fd>`, the ruleset's descriptor;
-  the program is a `Run`, `File(path, args)` or `Tool(tool, args)`.
+  the program is a `Run`: a file carries an absolute `LexicalPath`, a tool a
+  `&'static str` from the bundled-tool table. Head resolution and warrant
+  decoding use the same lookup; unknown tools and nonabsolute files refuse.
   `Warrant::confine` is the only way to the program: receive and verify the
   warrant, enter the confinement (`macos::apply_profile`, `Landlocked::enter`),
-  close the handoff range, and yield a `Confined`, whose `run` `execve`s the
-  host program or runs the bundled tool in-process (`uutils::run`, shared with
+  sweep every descriptor above stderr, and yield a `Confined`, whose `run`
+  `execve`s the host program or runs the bundled tool in-process (`uutils::run`, shared with
   the `--ral-bundled-tool` multicall). `serve_warrant` serves the child: a
   failure before the program starts exits 126, and an `execve` refusal takes its
   code from `SpawnFailure` (`From<&io::Error>`) — 126, or 127 for a missing
@@ -596,8 +623,11 @@ VM boundary are the only confinement of grandchildren.
   (`std`'s exec-error pipe, `detach`'s handshake) can be displaced. Each
   number is named as data: to bwrap in its options, the ruleset's in the
   warrant's confinement, the warrant's in the trampoline's argv. The
-  child sweeps everything from 98 up with `close_range` once confined,
-  and `Landlocked::enter` consumes the ruleset.
+  Linux child sweeps everything above stderr with `close_range` after
+  `Landlocked::enter` consumes the ruleset. macOS lists descriptors with
+  `proc_pidinfo(PROC_PIDLISTFDS)` and closes each above stderr before Seatbelt
+  entry, including those above a lowered soft limit. The warrant role opens
+  nothing before the sweep; a `Confined` promises both confinement and stdio alone.
   macOS spawns the trampoline directly; Linux spawns it under `bwrap`
   (`bwrap_command`), giving the full shape **bwrap → ral trampoline
   → Landlock → `execve`**. The real argv is `bwrap --args <a> --
@@ -635,8 +665,9 @@ VM boundary are the only confinement of grandchildren.
   and so does a system default this user may not reach, while a name now
   reaching outside what was rendered refuses the launch. Every allowance is
   bound as its resolved real position, a redirected one refusing the launch, and each
-  deny mask goes on wherever a `Shown` bind shows the denied path
-  (`Binds::names`): a mount laid inside one bind of an object does not show
+  deny mask goes on wherever the final bind layers show the denied path
+  (`Binds::names`): names beneath an `Over` destination are replaced by what
+  that bind shows, so cgroup exclusions follow the re-rooted tree. A mount laid inside one bind of an object does not show
   at another, so a prefix written through a symlink, two binds of one
   handle, is masked at both. A deny hiding `/proc` is refused,
   the envelope starting its trampoline through it, and so is one holding the
@@ -645,9 +676,13 @@ VM boundary are the only confinement of grandchildren.
   `Pinned::names`), an unlinked pin binding nothing. `bwrap_argv` emits
   `--ro-bind-fd`/`--bind-fd` from the same vector, `Shown`,
   before `/proc` and `/dev`, `Over` after. `--chdir` carries
-  the working directory's own bytes, as bwrap's argv does, while every rendered
+  the context's absolute `CwdPath` bytes, while every rendered
   name refuses a position that is not Unicode rather than go lossy into
-  bwrap's argv. Windows builds the
+  bwrap's argv. `PtyNodes` supplies the by-hand `/dev` renderer with host
+  terminals to mask; terminals opened by the host during a launch remain
+  reachable for that launch. A malformed or unreadable `InfoFd` record makes
+  `Launch::spawn` kill and reap the envelope before returning its error;
+  an empty record means bwrap died before reporting its payload. Windows builds the
   target's `Launch` directly and `windows::session::confine` attaches its
   projection's AppContainer LowBox `SECURITY_CAPABILITIES`, so the parent's own
   spawn is the confinement point — never a re-exec child; a bundled tool there
@@ -672,7 +707,10 @@ VM boundary are the only confinement of grandchildren.
   read-only bound inside every envelope after the projection's binds; the
   argv — `--new-session`, the ipc/uts/cgroup namespaces and, by host fact, the
   pid one, `--proc` on both projections, the seccomp deny-set
-  (`sandbox/linux/seccomp.rs`: `Filter`, `Syscall`, `explain`); `InfoFd`, the
+  (`sandbox/linux/seccomp.rs`: `Filter`, `Syscall`, `explain`; process reach
+  includes `pidfd_getfd`, `process_madvise`, `process_mrelease` and `kcmp`,
+  with `modify_ldt` also killed on x86-64; `kill`, `pidfd_open` and
+  `pidfd_send_signal` remain admitted; `ioctl` refuses `TIOCSTI` and `TIOCLINUX`); `InfoFd`, the
   payload's pid read back for a `Kept` launch; `linux/host.rs`, `HostEnvelope`,
   the probed host facts the render is pure in; `linux/gpu.rs`, `GpuNodes`, the
   GPU's device nodes and sysfs found at each launch and bound by name), and
@@ -722,7 +760,11 @@ Within that shape: an AppContainer profile is still minted per *distinct fs
 projection* (`SessionSandbox` maps `ProjectionKey` to profile) for the
 deny-by-default token and named-object namespace separation, carrying no fs
 authority, and `DaclManager` is the profile ledger — teardown deletes profiles
-but restores no ACEs. **A deny stamps nothing**: the `AppContainer` pass of the
+but restores no ACEs. The session caches `Arc<OwnedContainerSid>`,
+`Arc<OwnedCapabilitySid>` and `Arc<CapabilitySids>`; each staged `Launch`
+retains those owners independently of teardown. The spawn builds its raw SID
+array locally and holds it through `CreateProcessW`, so deleting a profile
+registration cannot free a launch's SID allocations. **A deny stamps nothing**: the `AppContainer` pass of the
 access check matches a deny ACE against the token's ordinary groups only, never
 its capability SIDs, so Windows cannot take back what a grant's ACE admits
 ([[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]],
@@ -749,7 +791,9 @@ capability SIDs — a LowBox token without them cannot open a socket, so
 `net_enforced()` holds on Windows.
 
 `macos-base.sbpl` is the policy-independent Seatbelt base every rendered macOS
-profile inherits, and `build_profile` lays the grant's rules over it. Both are
+profile inherits, and `build_profile` lays the grant's rules over it. Its POSIX
+shared-memory allowance reads only `apple.shm.notification_center` and
+`com.apple.featureflags.shm`, with no write allowance. Both are
 read rule by rule — what each admits, what it withholds and why, and what the
 backend pays to express an object policy in Seatbelt's name language — in
 [[internals/seatbelt-profile|seatbelt-profile]].
@@ -763,9 +807,11 @@ in-process guard —
 `diag.rs` (with per-platform readers in `diag/macos.rs` / `diag/linux.rs`) turns
 a kernel-reported sandbox denial into an actionable hint on the
 failing command's `Error`: it reads the kernel log over the call's wall window
-(Seatbelt on macOS, the seccomp record inside bwrap on Linux), keeps only lines
-attributable to the call's descendant PIDs, and appends them. **The operand's
-class decides the remedy, and the hint answers once per class present**: a
+(Seatbelt on macOS, the seccomp record inside bwrap on Linux), and retains only
+parsed `Record`s attributable to the call's descendant PIDs. The heading says
+"sandbox denials were recorded for this command's processes:"; a denial beside
+a failure does not establish its cause. **The parsed operation decides the
+remedy, and the hint answers once per class present**: a
 `file-read*` path is offered to the grant's `read` set and a `file-write*` one
 to `write` (advice that fails twice, otherwise), a `process-exec` path to the
 `exec` set — the layer a re-exec through `sh -c` or `find -exec` reaches, and
@@ -773,7 +819,10 @@ the only one that sees it — a `network-*` denial to the `net` axis alone, a
 Metal device, IOSurface or compiler denial to the `gpu` axis alone, and a
 `mach-*`/`ipc-*` operand to nothing at all, because a service is the base
 profile's to decide and no grant widens one. `Denied` is that taxonomy as a
-type, so a service name cannot arrive where a path is expected; withheld services
+type, and every operand it holds is an `Inert`: C0, C1 and DEL become visible
+escapes, at most 512 Unicode scalar values are taken, and truncation is marked.
+Raw log lines never enter the rendered hint. A service name cannot arrive where
+a path is expected; withheld services
 carrying a reason (`macos.rs::withheld_services`, the `.sbpl`'s prose as data) are
 quoted with it and lead the hint, since they are the one class the reader
 cannot act on — the securityd denial that broke `cargo fetch` was once ranked
@@ -782,15 +831,26 @@ have changed nothing. macOS logs fully-resolved paths, so the hint names the
 exact path with the symlink caveat; on Linux, an operandless denial first tries
 `describe_denial`, which consults
 [[decisions/260906_seccomp-is-a-typed-deny-set|the seccomp deny-set]] by
-syscall number and, when it names one, repeats that rule's own reason instead
-of guessing at an fs grant — a foreign-ABI record (an `arch=` mismatch) is
-named as such rather than misread as an unlisted syscall; only where the
+syscall number and the parsed `code=` action. It repeats a rule's reason only
+when both match, including the errno value; another action earns no ral
+explanation. A foreign-ABI record (an `arch=` mismatch) receives the arch
+prologue's explanation only for `KILL_PROCESS`; only where the
 deny-set has nothing to say does the hint fall back, and it then says the
 record names no operand rather than guessing at a set to widen. Windows has no
 kernel denial log to scrape at
 all, so its arm gates on the exit code alone: only an access-denied-shaped
 exit (`ERROR_ACCESS_DENIED` / `STATUS_ACCESS_DENIED`) under an active sandbox
-yields the fixed, pathless hint — never a fabricated path.
+yields the fixed, pathless hint: never a fabricated path.
+
+`collect(Collector)` runs fixed absolute system paths: `/usr/bin/log show
+--style ndjson` on macOS; `/usr/bin/journalctl` or `/bin/journalctl` with
+`-k -o json` on Linux, falling back to `/usr/bin/dmesg` or `/bin/dmesg`.
+Each collector has a 2-second deadline and a 1 MiB stdout ceiling, and is
+reaped on every outcome. A bound or failure supplies no hint, leaving the
+command's own error. JSON is decoded before `eventMessage` or `MESSAGE` is
+parsed, so an operand's newline cannot start another record. The macOS message
+must begin with `Sandbox: ` and its first `(<digits>) deny(<digits>) ` supplies
+the PID, followed by the operation and inert operand.
 
 This boundary is what [[map/exarch|exarch]] reuses as its sandbox. Bundled
 tools route through the *exec* chokepoint in-process; their **filesystem**
@@ -809,7 +869,10 @@ wrapped in `site!` with a variant that names it, a `Surface` one for the exec
 image that raises a card (`Launch::new`, `Surface::ProcessLaunch`) and a
 `Silent` one for infrastructure (the self re-exec, the
 pinned binaries' exec (`Pinned::command`), the `ps` denial sampler, the
-boot-time binary pin); test code
+boot-time binary pin). Raw `libc::{syscall, socket, connect, bind, fork}` and
+`rustix::fs::stat` are banned too: each Landlock operation, the inherited-fd
+sweep and both core forks have distinct `Silent` sites. Guest crates retain
+their crate-root exemptions; test code
 carries one blanket per module. The enums are the list: `core/src/site.rs`
 for cross-domain sites, and domain-local `site.rs` declarations in `path`,
 `host`, `own`, `process` and `sync`, each variant documenting why its place is

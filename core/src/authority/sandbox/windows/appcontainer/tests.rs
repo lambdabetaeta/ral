@@ -12,7 +12,7 @@ fn hresult_from_win32_matches_already_exists_constant() {
 #[test]
 fn capability_sids_empty_when_network_denied() {
     let caps = CapabilitySids::build(false).expect("build never touches the OS when empty");
-    assert!(caps.entries().is_empty());
+    assert_eq!(caps.sids().count(), 0);
 }
 
 #[test]
@@ -21,10 +21,9 @@ fn capability_sids_derives_both_network_capabilities_when_allowed() {
         "internetClient/privateNetworkClientServer are well-known capabilities on any \
          supported Windows version",
     );
-    assert_eq!(caps.entries().len(), NETWORK_CAPABILITIES.len());
-    for entry in caps.entries() {
-        assert!(!entry.Sid.is_null());
-        assert_eq!(entry.Attributes, SE_GROUP_ENABLED as u32);
+    assert_eq!(caps.sids().count(), NETWORK_CAPABILITIES.len());
+    for sid in caps.sids() {
+        assert!(!sid.is_null());
     }
 }
 
@@ -35,7 +34,7 @@ fn profile_create_reuse_sid_string_and_delete_round_trip() {
 
     let profile = AppContainerProfile::create_or_reuse(&name).expect("first create succeeds");
     assert_eq!(profile.name, name);
-    assert!(!profile.sid().is_null());
+    assert!(!profile.sid().sid().is_null());
     let sid_string = profile.sid_string().expect("SID converts to string form");
     assert!(
         sid_string.starts_with("S-1-15-"),

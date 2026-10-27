@@ -1,6 +1,6 @@
 use super::{
-    Access, Binds, Builds, CGROUP, Envelope, GpuNodes, HostEnvelope, Layer, Pinned, Shown,
-    bwrap_argv, bwrap_command,
+    Access, Binds, Builds, CGROUP, Envelope, GpuNodes, HostEnvelope, Layer, Pinned, PtyNodes,
+    Shown, bwrap_argv, bwrap_command,
 };
 use crate::Role;
 use crate::authority::policy::{Admitted, Baseline, Capabilities, FsAllow, FsPolicy, Program};
@@ -8,10 +8,11 @@ use crate::authority::policy::{ExecAllow, ExecDeny, GrantPath, Join, Rule};
 use crate::authority::sandbox::launch::{Ownership, admitted, enveloped};
 use crate::authority::sandbox::warrant::{Handoff, Slot};
 use crate::authority::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
-use crate::path::{Excluded, FrozenPath, RealPath, Trace};
+use crate::path::{CwdPath, Excluded, FrozenPath, RealPath, Trace};
 use std::process::Stdio;
 
 mod exec;
+mod info;
 mod render;
 mod seccomp;
 mod spawn;

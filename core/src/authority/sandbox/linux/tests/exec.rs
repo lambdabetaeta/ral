@@ -1046,7 +1046,7 @@ fn a_bundled_tool_runs_where_a_descendant_cannot_start_ral() {
         return;
     }
     let work = workdir("exec-ral-tool");
-    let tool = admitted(Program::Tool("basename".into()));
+    let tool = admitted(Program::Tool("basename"));
     for (label, policy, _) in ral_exec_policies(&work) {
         let Some(env) = envelope_launches(&policy) else {
             return;

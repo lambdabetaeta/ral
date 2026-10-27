@@ -30,6 +30,10 @@ esac
 
 cd "$(dirname "$0")/.."
 
+if [ "$MODE" = linux-box ] || [ "${CI+x}" = x ]; then
+    export RAL_REQUIRE_SANDBOX=1
+fi
+
 # RUSTFLAGS and synod's exclusion on Linux are the justfile's (`deny`, `gui`),
 # not repeated here.  `gui` keys off `os()`, which — because the recipes run
 # inside the container in linux-box mode — reports the platform cargo actually
@@ -69,6 +73,7 @@ at_toolchain() {
     native) "$@" ;;
     linux-box)
         "$ENGINE" run --rm --privileged --init \
+            -e RAL_REQUIRE_SANDBOX \
             --tmpfs /tmp:rw,exec,mode=1777 \
             -v "$PWD:/workspace" \
             -v ral-linux-cargo:/home/dev/.cargo \

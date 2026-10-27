@@ -40,14 +40,13 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// The number a handed-down descriptor holds, the same in parent and child:
-/// from [`Self::FIRST`] up, so the child's sweep reaches it.  Only a
+/// from [`Self::FIRST`] up, away from stdio. Only a
 /// [`Handoff`] makes one, or a child parsing what its parent wrote.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct Slot(c_int);
 
 impl Slot {
-    /// Everything from here up is the handoff's: ral hands a confined child
-    /// nothing else above stderr.
+    /// The floor for copies made by `lift`, not for the child's sweep.
     pub(super) const FIRST: c_int = 98;
 
     pub(super) const fn fd(self) -> c_int {
@@ -114,6 +113,7 @@ impl Confinement for Seatbelt {
     }
 
     fn enter(&self) -> Result<(), String> {
+        close_inherited()?;
         super::macos::apply_profile(&self.0)
             .map_err(|e| format!("cannot enter the Seatbelt sandbox: {e}"))
     }
@@ -155,7 +155,8 @@ impl Confinement for Option<Landlocked> {
     }
 
     fn enter(&self) -> Result<(), String> {
-        self.as_ref().map_or(Ok(()), Landlocked::enter)
+        self.as_ref().map_or(Ok(()), Landlocked::enter)?;
+        close_inherited()
     }
 }
 
@@ -179,12 +180,12 @@ pub(super) struct Warrant {
 #[derive(Debug, PartialEq, Eq)]
 enum Run {
     File {
-        real: PathBuf,
+        real: LexicalPath,
         arg0: PathBuf,
         excluded: Option<String>,
         args: Vec<OsString>,
     },
-    Tool(String, Vec<OsString>),
+    Tool(&'static str, Vec<OsString>),
 }
 
 impl Run {
@@ -192,12 +193,13 @@ impl Run {
         let args = args.iter().map(OsString::from).collect();
         match admitted.program() {
             Program::File { arg0, located } => Self::File {
-                real: located.real().as_path().to_path_buf(),
+                real: LexicalPath::absolute(located.real().as_path())
+                    .expect("a walked program has an absolute real path"),
                 arg0: arg0.clone(),
                 excluded: interpreter_exclusion(located, projection),
                 args,
             },
-            Program::Tool(tool) => Self::Tool(tool.clone(), args),
+            Program::Tool(tool) => Self::Tool(tool, args),
         }
     }
 }
@@ -250,7 +252,7 @@ impl Confined {
                 arg0,
                 excluded,
                 args,
-            } => exec(&real, &arg0, excluded.as_deref(), args),
+            } => exec(real.as_path(), &arg0, excluded.as_deref(), args),
             Run::Tool(tool, args) => crate::uutils::run(tool.as_ref(), args).unwrap_or_else(|e| {
                 crate::io::terminal::cmd_error("ral", &e.to_string());
                 127
@@ -311,11 +313,10 @@ impl Warrant {
     }
 
     /// The warrant the launch left at `at`, its confinement entered and the
-    /// handoff closed: the program, and nothing before it.
+    /// inherited descriptors swept: the program, and nothing before it.
     pub(super) fn confine(at: Slot) -> Result<Confined, String> {
         let Self { confinement, run } = Self::receive(at)?;
         confinement.enter()?;
-        close_handoff()?;
         Ok(Confined(run))
     }
 
@@ -357,7 +358,7 @@ impl Warrant {
                 args,
             } => (
                 b"file",
-                real.as_os_str().as_bytes(),
+                real.as_path().as_os_str().as_bytes(),
                 Some([
                     arg0.as_os_str().as_bytes(),
                     excluded.as_deref().unwrap_or_default().as_bytes(),
@@ -413,14 +414,23 @@ impl Warrant {
         }
         let run = match (kind, file) {
             (b"file", Some((arg0, excluded))) => Run::File {
-                real: OsStr::from_bytes(program).into(),
+                real: LexicalPath::absolute(&PathBuf::from(OsStr::from_bytes(program)))
+                    .ok_or_else(|| format!(
+                        "the warrant's file program {:?} is not an absolute path; refusing PATH lookup",
+                        shown(OsStr::from_bytes(program))
+                    ))?,
                 arg0: OsStr::from_bytes(arg0).into(),
                 excluded: Some(text(excluded)?)
                     .filter(|scope| !scope.is_empty())
                     .map(str::to_owned),
                 args,
             },
-            (b"tool", None) => Run::Tool(text(program)?.to_owned(), args),
+            (b"tool", None) => Run::Tool(
+                crate::uutils::bundled_name(OsStr::from_bytes(program)).ok_or_else(|| {
+                    format!("the warrant names an unknown bundled tool, {:?}", shown(OsStr::from_bytes(program)))
+                })?,
+                args,
+            ),
             (other, _) => {
                 return Err(format!(
                     "the warrant names an unknown kind of program, {:?}",
@@ -610,22 +620,24 @@ fn lift(fd: BorrowedFd<'_>) -> Result<(OwnedFd, Slot), String> {
     Ok((copy, at))
 }
 
-/// Close every descriptor from [`Slot::FIRST`] up, so the program inherits
-/// none of the handoff.
+/// Close every descriptor above stderr; the warrant role must open nothing before this.
 ///
 /// # Errors
 /// A kernel that cannot sweep: the program would hold the payload's copy
 /// of the `--info-fd` writer, and with it the parent's spawn, for its whole
 /// life.
 #[cfg(target_os = "linux")]
-pub(super) fn close_handoff() -> Result<(), String> {
-    // SAFETY: nothing in this process owns a descriptor from the first slot up.
+pub(super) fn close_inherited() -> Result<(), String> {
+    // SAFETY: the warrant role owns no descriptors above stderr here.
     let swept = unsafe {
-        libc::syscall(
-            libc::SYS_close_range,
-            Slot::FIRST.unsigned_abs(),
-            libc::c_uint::MAX,
-            0 as libc::c_uint,
+        site!(
+            Silent::InheritedSweep,
+            libc::syscall(
+                libc::SYS_close_range,
+                3 as libc::c_uint,
+                libc::c_uint::MAX,
+                0 as libc::c_uint,
+            )
         )
     };
     if swept == 0 {
@@ -637,17 +649,74 @@ pub(super) fn close_handoff() -> Result<(), String> {
          program would inherit it; refusing to run"
             .to_string()
     } else {
-        format!("cannot sweep the handoff: {e}; refusing to run")
+        format!(
+            "cannot close inherited descriptors above stderr with close_range(2): {e}; refusing to run"
+        )
     })
 }
 
-/// macOS's one slot, the warrant's, is consumed by [`Warrant::receive`].
+/// Close every descriptor above stderr; the warrant role must open nothing before this.
 #[cfg(target_os = "macos")]
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "one signature with Linux's sweep, which can fail"
-)]
-pub(super) fn close_handoff() -> Result<(), String> {
+pub(super) fn close_inherited() -> Result<(), String> {
+    let mut entries = vec![
+        libc::proc_fdinfo {
+            proc_fd: 0,
+            proc_fdtype: 0
+        };
+        64
+    ];
+    let count = loop {
+        let size = c_int::try_from(std::mem::size_of_val(entries.as_slice()))
+            .map_err(|e| format!("cannot size the proc_pidinfo(PROC_PIDLISTFDS) buffer: {e}"))?;
+        // SAFETY: entries is writable for size bytes; this only lists our descriptors.
+        let listed = unsafe {
+            libc::proc_pidinfo(
+                libc::getpid(),
+                libc::PROC_PIDLISTFDS,
+                0,
+                entries.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if listed <= 0 {
+            return Err(format!(
+                "proc_pidinfo(PROC_PIDLISTFDS): {}; refusing to run",
+                io::Error::last_os_error()
+            ));
+        }
+        let listed = usize::try_from(listed).expect("a positive descriptor-list size fits usize");
+        let width = std::mem::size_of::<libc::proc_fdinfo>();
+        if !listed.is_multiple_of(width) {
+            return Err(format!(
+                "proc_pidinfo(PROC_PIDLISTFDS) returned a partial descriptor record ({listed} bytes); refusing to run"
+            ));
+        }
+        if listed < std::mem::size_of_val(entries.as_slice()) {
+            break listed / width;
+        }
+        entries.resize(
+            entries.len() * 2,
+            libc::proc_fdinfo {
+                proc_fd: 0,
+                proc_fdtype: 0,
+            },
+        );
+    };
+    for entry in &entries[..count] {
+        if entry.proc_fd <= 2 {
+            continue;
+        }
+        // SAFETY: the warrant role owns no descriptors above stderr here.
+        if unsafe { libc::close(entry.proc_fd) } < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EBADF) {
+                return Err(format!(
+                    "close({}): {error}; refusing to run",
+                    entry.proc_fd
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -679,7 +748,8 @@ mod tests {
         Warrant {
             confinement: confinement(),
             run: Run::File {
-                real: OsStr::from_bytes(real).into(),
+                real: LexicalPath::absolute(std::path::Path::new(OsStr::from_bytes(real)))
+                    .expect("an absolute program path"),
                 arg0: OsStr::from_bytes(arg0).into(),
                 excluded: excluded.map(str::to_owned),
                 args,
@@ -700,13 +770,23 @@ mod tests {
                 &[b"-c", b"echo a  b\nc", b"", b"\xfe\xff"],
             ),
             excluding(b"/bin/sh", b"sh", Some("`absolute /bin/dash"), &[b"x"]),
-            Warrant {
-                confinement: Native::parse(NO_CONFINEMENT).expect("a valid confinement"),
-                run: Run::Tool("ls".to_string(), Vec::new()),
-            },
         ] {
             let bytes = warrant.encode().expect("encodes");
             assert_eq!(Warrant::decode(&bytes).expect("decodes"), warrant);
+        }
+    }
+
+    #[test]
+    fn every_bundled_name_round_trips_to_its_static_spelling() {
+        for tool in crate::uutils::bundled_tools() {
+            let warrant = Warrant {
+                confinement: Native::parse(NO_CONFINEMENT).expect("a valid confinement"),
+                run: Run::Tool(tool, Vec::new()),
+            };
+            assert_eq!(
+                Warrant::decode(&warrant.encode().unwrap()).unwrap(),
+                warrant
+            );
         }
     }
 
@@ -728,6 +808,27 @@ mod tests {
             (
                 "an unknown kind",
                 framed(&[MAGIC, conf, b"exec", b"/bin/sh", b"1", b"x"]),
+            ),
+            (
+                "an empty file program",
+                framed(&[MAGIC, conf, b"file", b"", b"sh", b"", b"0"]),
+            ),
+            (
+                "a relative file program",
+                framed(&[MAGIC, conf, b"file", b"./bin/sh", b"sh", b"", b"0"]),
+            ),
+            (
+                "a slashless file program",
+                framed(&[MAGIC, conf, b"file", b"sh", b"sh", b"", b"0"]),
+            ),
+            ("an empty tool", framed(&[MAGIC, conf, b"tool", b"", b"0"])),
+            (
+                "an unknown tool",
+                framed(&[MAGIC, conf, b"tool", b"ral-no-such-tool", b"0"]),
+            ),
+            (
+                "a tool path",
+                framed(&[MAGIC, conf, b"tool", b"/bin/ls", b"0"]),
             ),
             (
                 "an argument too many",
@@ -787,7 +888,15 @@ mod tests {
             ("101", false),
             ("", false),
         ] {
-            let bytes = framed(&[MAGIC, field.as_bytes(), b"tool", b"ls", b"0"]);
+            let bytes = framed(&[
+                MAGIC,
+                field.as_bytes(),
+                b"file",
+                b"/bin/sh",
+                b"sh",
+                b"",
+                b"0",
+            ]);
             assert_eq!(Warrant::decode(&bytes).is_ok(), ok, "{field:?}");
         }
     }
@@ -804,6 +913,86 @@ mod tests {
         let warrant = file(b"/bin/sh", b"sh", &[b"-c", b"true"]);
         let fd = warrant.parcel().expect("parcels");
         assert_eq!(Warrant::unparcel(fd).expect("reads back"), warrant);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_warrant_near_the_socket_ceiling_arrives_or_refuses_before_spawn() {
+        use crate::test_helper::confinement::{Output, admitted, denied};
+        use std::os::fd::AsFd;
+
+        let proof = crate::require_confinement!();
+        let mut bytes = [0_u8; 8];
+        let mut size = bytes.len();
+        // SAFETY: both outputs are writable; there is no new value.
+        assert_eq!(
+            unsafe {
+                libc::sysctlbyname(
+                    c"kern.ipc.maxsockbuf".as_ptr(),
+                    bytes.as_mut_ptr().cast(),
+                    &raw mut size,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            },
+            0,
+            "kern.ipc.maxsockbuf: {}",
+            io::Error::last_os_error()
+        );
+        let ceiling = match size {
+            4 => usize::try_from(u32::from_ne_bytes(bytes[..4].try_into().unwrap())).unwrap(),
+            8 => usize::try_from(u64::from_ne_bytes(bytes)).unwrap(),
+            _ => panic!("kern.ipc.maxsockbuf returned an unexpected {size}-byte integer"),
+        };
+
+        let projection = SandboxProjection {
+            fs: super::super::FsProjection::Unrestricted,
+            exec: ExecProjection::default(),
+            net: false,
+            gpu: true,
+        };
+        let mut warrant = file(b"/bin/echo", b"echo", &[b"warrant-arrived"]);
+        warrant.confinement = Seatbelt(super::super::macos::build_profile(&projection).unwrap());
+        let prepare = |warrant: &Warrant| -> Result<Command, String> {
+            let parcel = warrant.parcel()?;
+            let mut handoff = Handoff::default();
+            let at = handoff.lend(parcel.as_fd())?;
+            let mut cmd = super::super::reexec::own().unwrap().command();
+            cmd.arg(Role::Warrant.flag()).arg(at.to_string());
+            handoff.install(&mut cmd);
+            Ok(cmd)
+        };
+        let control: Output = prepare(&warrant).unwrap().output().unwrap().into();
+        admitted(&proof, &control, "warrant-arrived\n");
+        let original = warrant.encode().unwrap().len();
+        let target = ceiling.checked_sub(32 << 10).unwrap();
+        assert!(
+            target > original + 2,
+            "the socket ceiling cannot hold the control warrant"
+        );
+        warrant.confinement.0.push_str("\n;");
+        warrant
+            .confinement
+            .0
+            .extend(std::iter::repeat_n('x', target - original - 2));
+        match prepare(&warrant) {
+            Ok(mut cmd) => {
+                let arrived = cmd.output().expect("the prepared warrant spawns").into();
+                admitted(&proof, &arrived, "warrant-arrived\n");
+            }
+            Err(error) => {
+                assert!(
+                    error.contains("parcel") || error.contains("byte cap"),
+                    "{error}"
+                );
+                let refused = Output {
+                    status: 126,
+                    stdout: String::new(),
+                    stderr: error,
+                };
+                denied(&proof, &control, &refused, "warrant-arrived\n");
+            }
+        }
     }
 
     /// Every free number below the first slot, held as a host with that

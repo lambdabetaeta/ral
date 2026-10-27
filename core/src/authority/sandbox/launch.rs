@@ -26,7 +26,9 @@ use super::warrant::{Handoff, Native, Slot, Warrant};
 use super::{Refusal, SandboxProjection};
 use crate::Role;
 use crate::authority::policy::{Admitted, Baseline};
+use crate::path::CwdPath;
 use std::ffi::OsString;
+#[cfg(all(test, target_os = "macos"))]
 use std::path::Path;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::{os::fd::AsFd, process::Command};
@@ -75,7 +77,7 @@ pub(crate) fn sandboxed_command(
     admitted: &Admitted,
     args: &[String],
     ownership: Ownership,
-    cwd: &Path,
+    cwd: &CwdPath,
     cancel: &crate::process::cancel::Scope,
 ) -> Result<crate::process::Launch, Refusal> {
     // Only the Windows backend does work here a cancel could interrupt: bwrap
@@ -171,7 +173,7 @@ fn linux_sandboxed_command(
     admitted: &Admitted,
     args: &[String],
     ownership: Ownership,
-    cwd: &Path,
+    cwd: &CwdPath,
 ) -> Result<(Command, Option<super::linux::InfoFd>), Refusal> {
     let bwrap = super::linux::envelope().map_err(|why| Refusal::Unavailable(why.into()))?;
     let own = super::reexec::own()?;
@@ -197,7 +199,7 @@ pub(super) fn enveloped(
     baseline: &Baseline,
     admitted: &Admitted,
     args: &[String],
-    chdir: Option<&Path>,
+    chdir: Option<&CwdPath>,
     ownership: Ownership,
 ) -> Result<(Command, Option<super::linux::InfoFd>), Refusal> {
     let rendered = projection.rendered()?;
@@ -240,7 +242,7 @@ fn macos_sandboxed_command(
 ///
 /// Take the warrant the launch left there, enter its
 /// confinement — Seatbelt on macOS, the Landlock layer inside the bwrap
-/// envelope on Linux — close the rest of the handoff, and only then become its
+/// envelope on Linux; sweep every descriptor above stderr, then become its
 /// program.
 ///
 /// Nothing runs unconfined: any failure before the program starts is 126, and
@@ -284,10 +286,7 @@ pub fn serve_warrant(_args: &[OsString]) -> u8 {
 
 /// What an unrestricted in-process guard admits, for a test that builds a launch without
 /// a dispatch.
-#[cfg(any(
-    all(test, any(target_os = "linux", target_os = "macos")),
-    all(feature = "test-util", target_os = "linux")
-))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(super) fn admitted(program: crate::authority::policy::Program) -> Admitted {
     crate::authority::policy::GrantStack::root()
         .admit(&Baseline::default(), program)
@@ -354,7 +353,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_macos_launch_is_the_warrant_trampoline_alone() {
-        for program in [sh(), Program::Tool("ls".into())] {
+        for program in [sh(), Program::Tool("ls")] {
             let cmd = macos_sandboxed_command(&restrictive(), &admitted(program), &["-l".into()])
                 .expect("build macOS command");
             let args = argv(&cmd);
@@ -550,12 +549,8 @@ mod tests {
 
         let allowed = work.join("sub");
         let allowed_s = allowed.to_string_lossy().into_owned();
-        let ok = macos_sandboxed_command(
-            &proj,
-            &admitted(Program::Tool("mkdir".into())),
-            &[allowed_s],
-        )
-        .expect("build bundled command (inside)");
+        let ok = macos_sandboxed_command(&proj, &admitted(Program::Tool("mkdir")), &[allowed_s])
+            .expect("build bundled command (inside)");
         assert!(run_confined(ok), "mkdir into the write prefix must succeed");
         assert!(allowed.is_dir(), "in-prefix mkdir should have landed");
 
@@ -564,7 +559,7 @@ mod tests {
         let denied_s = denied.to_string_lossy().into_owned();
         let bad = macos_sandboxed_command(
             &proj,
-            &admitted(Program::Tool("mkdir".into())),
+            &admitted(Program::Tool("mkdir")),
             std::slice::from_ref(&denied_s),
         )
         .expect("build bundled command (outside)");
@@ -965,14 +960,14 @@ mod tests {
             eprintln!("skipping: this host has no bwrap to pin");
             return;
         }
-        for program in [sh(), Program::Tool("ls".into())] {
+        for program in [sh(), Program::Tool("ls")] {
             let (cmd, _info_fd) = linux_sandboxed_command(
                 &restrictive(),
                 &Baseline::default(),
                 &admitted(program),
                 &["-l".into()],
                 Ownership::Kept,
-                Path::new("/"),
+                &CwdPath::new("/".into()).expect("absolute cwd"),
             )
             .expect("build Linux command");
             assert!(

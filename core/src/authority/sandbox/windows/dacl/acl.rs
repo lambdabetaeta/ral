@@ -565,8 +565,9 @@ fn well_known_ac_sids() -> &'static [OwnedSid] {
 /// is deciding whether such a grant is still needed, and inherit-only ACEs
 /// do not, as they apply to children, not to `path`. The walk follows
 /// Windows' own access check — a matching deny marks bits off, and a later
-/// allow can only add bits not already denied. A NULL or empty DACL yields 0,
-/// "grants nothing", so the caller tries the real grant instead of assuming.
+/// allow can only add bits not already denied. A NULL DACL admits everyone,
+/// but this query still answers 0, as for an empty DACL, so the caller stamps
+/// the grant rather than relying on that admission.
 fn compute_appcontainer_effective_access(target: Target<'_>) -> Result<u32, DaclError> {
     let path = target.path;
     let security = Security::of(target, AclKind::Dacl)?;

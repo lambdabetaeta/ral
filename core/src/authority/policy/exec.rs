@@ -145,7 +145,7 @@ fn run_withheld(rules: Option<&ExecRules>, program: &Program) -> Option<ExecDeni
 /// What a grant judges, and what the launcher runs.
 pub(crate) enum Program<A: Authority = Unjudged> {
     /// A bundled tool, run as ral itself.
-    Tool(String),
+    Tool(&'static str),
     /// A host file, the one holder of the object the walk found, judged and
     /// run: `arg0` is the spelling, which the program sees as `argv[0]`.  A
     /// `#!` script sees its real path as its script name: the kernel hands the

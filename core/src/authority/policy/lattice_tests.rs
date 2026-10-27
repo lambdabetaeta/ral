@@ -1358,7 +1358,7 @@ fn the_read_and_run_judgments_agree_with_their_regions() {
                 "{f}\nstack = {stack:?}"
             );
         }
-        let tool = stack.admit(&baseline, Program::Tool("ls".into())).is_ok();
+        let tool = stack.admit(&baseline, Program::Tool("ls")).is_ok();
         let tool_exec = rules(&stack).is_none_or(|r| r.evidence(Subject::Tool("ls")).permits());
         assert_eq!(tool, tool_exec, "stack = {stack:?}");
     }
@@ -1439,7 +1439,7 @@ fn a_bundled_tool_reads_ral_s_binary() {
     };
     let baseline = Baseline::default().with_images(Some(own), vec![]);
     let stack = |fs: FsPolicy| test_helper::stack([with_fs(fs)]);
-    let tool = |s: &GrantStack| s.admit(&baseline, Program::Tool("ls".into())).is_ok();
+    let tool = |s: &GrantStack| s.admit(&baseline, Program::Tool("ls")).is_ok();
     let own_file = spelled(own.real().as_path());
     let own_dir = spelled(own.real().as_path().parent().unwrap());
     let excluding = stack(FsPolicy {
@@ -1452,7 +1452,7 @@ fn a_bundled_tool_reads_ral_s_binary() {
         tool(&stack(FsPolicy::default())),
         "an fs that merely does not read ral's binary refuses nothing"
     );
-    if !crate::uutils::is_uutils_tool("ls") {
+    if crate::uutils::bundled_name("ls".as_ref()).is_none() {
         return;
     }
     let exec = grant([
@@ -1485,7 +1485,7 @@ fn a_bundled_tool_is_refused_when_ral_s_binary_is_denied_through_a_hard_link() {
     let baseline = Baseline::default().with_images(Some(own), vec![]);
     let tool = |fs: FsPolicy| {
         let stack = test_helper::stack([with_fs(fs)]);
-        stack.admit(&baseline, Program::Tool("ls".into())).is_ok()
+        stack.admit(&baseline, Program::Tool("ls")).is_ok()
     };
     assert!(
         !tool(FsPolicy {
@@ -1532,11 +1532,7 @@ fn a_root_directory_runs_files_not_tools_and_reads_what_it_runs() {
 
     let alone = test_helper::stack([runs_anywhere]);
     assert!(alone.withheld(&baseline, &program(&bin_t)).is_ok());
-    assert!(
-        alone
-            .withheld(&baseline, &Program::Tool("ls".into()))
-            .is_err()
-    );
+    assert!(alone.withheld(&baseline, &Program::Tool("ls")).is_err());
 
     let reads_only_what_it_runs = test_helper::stack([layer(Capabilities {
         exec: Some(grant([(under_root, Evidence::ALLOW)])),

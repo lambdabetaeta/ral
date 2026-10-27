@@ -380,7 +380,7 @@ builtin_registry! {
     // The bundled uutils tools (cat, yes, head, wc, …) are deliberately absent:
     // `shell::exec::command` runs each as a `ral --ral-bundled-tool <tool>` child, so
     // they cross the same wait / signal / exit-code boundary as a system binary.
-    // See `crate::uutils::is_uutils_tool`.
+    // See `crate::uutils::bundled_name`.
 
     Help { names: ["help"], ty: scheme::help,
         doc: "help  — print an overview of language syntax, builtins, prelude, and library; see also `explain`.",

@@ -1,113 +1,111 @@
-//! Linux seccomp denial reader for `authority::sandbox::diag`, mirroring `diag/macos.rs`.
-//!
-//! bwrap's filter returns `SECCOMP_RET_KILL_THREAD`, so a denied syscall kills
-//! the thread with SIGSYS and leaves a `type=1326` audit record; we read those
-//! from `journalctl -k`, or `dmesg` where the journal is absent or unreadable.
-//! Mount attenuation leaves no record at all — an unbound path is merely absent,
-//! and the caller just sees ENOENT.
+//! Linux seccomp records come from the journal's JSON MESSAGE, or dmesg.
 
-use super::Denied;
-use crate::site::{Silent, site};
+use super::{Collector, Denied, Inert, Record, collect};
+use seccompiler::SeccompAction;
+use std::fmt;
 use std::time::Duration;
 
-pub(super) fn read_window(elapsed: Duration) -> Option<String> {
-    // Pad by a second so a sub-second call still spans its own denials.
-    let secs = elapsed.as_secs().saturating_add(1).to_string();
-    let since = format!("{secs} seconds ago");
-    let mut journal_cmd = site!(
-        Silent::JournalRead,
-        std::process::Command::new("journalctl")
-    );
-    journal_cmd.args([
-        "-k",
-        "--since",
-        since.as_str(),
-        "--no-pager",
-        "--output",
-        "short",
-    ]);
-    if let Ok(out) = crate::process::output(&mut journal_cmd)
-        && out.status.success()
-    {
-        return Some(String::from_utf8_lossy(&out.stdout).into_owned());
+pub(super) fn read_window(elapsed: Duration) -> Option<Vec<Record>> {
+    if let Some(text) = collect(Collector::Journal(elapsed)) {
+        return Some(text.lines().filter_map(parse_journal).collect());
     }
-    let mut dmesg_cmd = site!(Silent::JournalRead, std::process::Command::new("dmesg"));
-    dmesg_cmd.args(["--since", since.as_str()]);
-    let dmesg = crate::process::output(&mut dmesg_cmd).ok()?;
-    Some(String::from_utf8_lossy(&dmesg.stdout).into_owned())
+    let text = collect(Collector::Dmesg(elapsed))?;
+    Some(text.lines().filter_map(parse_denial).collect())
 }
 
-pub(super) fn is_denial_line(line: &str) -> bool {
-    line.contains("type=1326")
+fn parse_journal(line: &str) -> Option<Record> {
+    #[derive(serde::Deserialize)]
+    struct Event {
+        #[serde(rename = "MESSAGE")]
+        message: String,
+    }
+    let event: Event = serde_json::from_str(line).ok()?;
+    parse_denial(&event.message)
 }
 
-/// The audit record's ` pid=`; the leading space is what excludes `ppid=`.
-pub(super) fn extract_pid(line: &str) -> Option<u32> {
-    let after_pid = line.split_once(" pid=")?.1;
-    let end = after_pid
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(after_pid.len());
-    after_pid[..end].parse().ok()
-}
-
-/// This host's `AUDIT_ARCH`, the diagnostic's own copy: `authority::sandbox::linux::seccomp`
-/// owns the same two constants for the kernel-facing arch-validation program,
-/// but this is a record attribution, not an enforcement decision.
 #[cfg(target_arch = "x86_64")]
 const AUDIT_ARCH: u32 = 0xC000_003E;
 #[cfg(target_arch = "aarch64")]
 const AUDIT_ARCH: u32 = 0xC000_00B7;
 
-/// The record's `arch=<hex>` field.
-fn extract_arch(line: &str) -> Option<u32> {
-    let after = line.split_once("arch=")?.1;
-    let end = after
-        .find(|c: char| c.is_whitespace())
-        .unwrap_or(after.len());
-    u32::from_str_radix(&after[..end], 16).ok()
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Operation {
+    nr: i64,
+    arch: u32,
+    action: SeccompAction,
 }
 
-/// The blocked syscall, as `(op, denied)`; a `type=1326` record names no
-/// operand, so the second element is always [`Denied::Opaque`] and
-/// [`describe_denial`] carries the whole remedy.  A record whose `arch=`
-/// does not match this host's own `AUDIT_ARCH` names a syscall table
-/// `seccomp::Filter` never numbered — the filter's own x32 guard is exactly
-/// this case — so `op` becomes a sentence [`describe_denial`] recognises
-/// rather than a bare number [`seccomp::Filter::explain`] would silently miss.
-pub(super) fn parse_denial(line: &str) -> Option<(String, Denied<'_>)> {
-    let after_syscall = line.split_once("syscall=")?.1;
-    let end = after_syscall
-        .find(|c: char| c.is_whitespace())
-        .unwrap_or(after_syscall.len());
-    let syscall = &after_syscall[..end];
-    if syscall.is_empty() {
+impl fmt::Display for Operation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "syscall {} (arch={:x}, action={:?})",
+            self.nr, self.arch, self.action
+        )
+    }
+}
+
+fn action(code: u32) -> Option<SeccompAction> {
+    let data = code & libc::SECCOMP_RET_DATA;
+    match code & libc::SECCOMP_RET_ACTION_FULL {
+        libc::SECCOMP_RET_KILL_THREAD => Some(SeccompAction::KillThread),
+        libc::SECCOMP_RET_KILL_PROCESS => Some(SeccompAction::KillProcess),
+        libc::SECCOMP_RET_TRAP => Some(SeccompAction::Trap),
+        libc::SECCOMP_RET_ERRNO => Some(SeccompAction::Errno(data)),
+        libc::SECCOMP_RET_TRACE => Some(SeccompAction::Trace(data)),
+        libc::SECCOMP_RET_LOG => Some(SeccompAction::Log),
+        libc::SECCOMP_RET_ALLOW => Some(SeccompAction::Allow),
+        _ => None,
+    }
+}
+
+pub(in crate::authority::sandbox) fn parse_denial(message: &str) -> Option<Record> {
+    // Quoted comm/exe fields are not audit fields.
+    let fields = message
+        .split('"')
+        .step_by(2)
+        .flat_map(str::split_whitespace);
+    let (mut kind, mut pid, mut nr, mut arch, mut code) = (None, None, None, None, None);
+    for field in fields {
+        let Some((key, value)) = field.split_once('=') else {
+            continue;
+        };
+        match key {
+            "type" => kind = Some(value),
+            "pid" => pid = Some(value.parse().ok()?),
+            "syscall" => nr = Some(value.parse().ok()?),
+            "arch" => arch = Some(u32::from_str_radix(value, 16).ok()?),
+            "code" => {
+                code =
+                    Some(u32::from_str_radix(value.strip_prefix("0x").unwrap_or(value), 16).ok()?);
+            }
+            _ => {}
+        }
+    }
+    if kind != Some("1326") {
         return None;
     }
-    let op = match extract_arch(line) {
-        Some(arch) if arch != AUDIT_ARCH => {
-            format!("foreign-ABI syscall {syscall} (arch={arch:x})")
-        }
-        _ => syscall.to_string(),
-    };
-    Some((op, Denied::Opaque))
+    Some(Record {
+        pid: pid?,
+        op: Operation {
+            nr: nr?,
+            arch: arch?,
+            action: action(code?)?,
+        },
+        denied: Denied::Opaque,
+    })
 }
 
-/// A seccomp record names a syscall, never a service; the deny-set's own words
-/// are all this platform has to add.
-pub(super) fn service_reason(_name: &str) -> Option<&'static str> {
+pub(super) fn service_reason(_name: &Inert) -> Option<&'static str> {
     None
 }
 
-/// What `seccomp::Filter::ENVELOPE` says about a denied syscall, in prose —
-/// or, for a foreign-ABI record, the one sentence that number could never
-/// earn from the filter, since it names no syscall in any table the filter
-/// reads.
-pub(crate) fn describe_denial(op: &str) -> Option<String> {
-    if op.starts_with("foreign-ABI syscall") {
-        return Some("the filter refuses every syscall from a foreign ABI outright".to_string());
+pub(super) fn describe_denial(op: &Operation) -> Option<String> {
+    if op.arch != AUDIT_ARCH {
+        return (op.action == SeccompAction::KillProcess)
+            .then(|| "the filter refuses every syscall from a foreign ABI outright".to_string());
     }
-    let nr: i64 = op.parse().ok()?;
-    let denied = super::super::linux::seccomp::Filter::ENVELOPE.explain(nr)?;
+    let denied = super::super::linux::seccomp::Filter::ENVELOPE.explain(op.nr, &op.action)?;
     let mut hint = format!(
         "the sandboxed command was stopped by the envelope's seccomp deny-set for calling \
          {denied}. This is an invariant of running under any grant, not something the grant's \
@@ -123,60 +121,102 @@ pub(crate) fn describe_denial(op: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn line(arch: u32, syscall: i64) -> String {
+    fn line(arch: u32, syscall: i64, code: u32) -> String {
         format!(
             "audit: type=1326 audit(1719400000.123:789): auid=1000 ppid=54321 pid=12345 \
-             comm=\"rustc\" arch={arch:x} syscall={syscall} ip=0x0 code=0x0"
+             comm=\"rustc\" arch={arch:x} syscall={syscall} ip=0x0 code=0x{code:x}"
         )
     }
 
     #[test]
-    fn is_denial_line_matches_only_type_1326() {
-        assert!(is_denial_line(&line(AUDIT_ARCH, 101)));
-        assert!(!is_denial_line("audit: type=1300 audit(...): syscall=101"));
+    fn parse_denial_requires_the_audit_type_and_each_attribution_field() {
+        let line = line(AUDIT_ARCH, libc::SYS_ptrace, libc::SECCOMP_RET_KILL_THREAD);
+        let record = parse_denial(&line).unwrap();
+        assert_eq!(record.pid, 12345);
+        assert_eq!(record.op.nr, libc::SYS_ptrace);
+        assert_eq!(record.op.action, SeccompAction::KillThread);
+        assert_eq!(record.denied, Denied::Opaque);
+        for field in ["type=1326", "pid=12345", "arch=", "syscall=", "code="] {
+            assert!(
+                parse_denial(&line.replace(field, "invalid=")).is_none(),
+                "{field}"
+            );
+        }
+        assert!(parse_denial(&line.replace("type=1326", "type=1300")).is_none());
     }
 
     #[test]
-    fn extract_pid_picks_pid_not_ppid() {
-        assert_eq!(extract_pid(&line(AUDIT_ARCH, 101)), Some(12345));
-        assert_eq!(extract_pid("no pid token here"), None);
+    fn quoted_program_names_cannot_forge_audit_fields() {
+        let line = line(AUDIT_ARCH, libc::SYS_ptrace, libc::SECCOMP_RET_KILL_THREAD)
+            .replace("comm=\"rustc\"", "comm=\"pid=7 syscall=0 code=0x50001\"");
+        let record = parse_denial(&line).unwrap();
+        assert_eq!(record.pid, 12345);
+        assert_eq!(record.op.nr, libc::SYS_ptrace);
+        assert_eq!(record.op.action, SeccompAction::KillThread);
     }
 
     #[test]
-    fn parse_denial_returns_syscall_and_no_operand() {
-        assert_eq!(
-            parse_denial(&line(AUDIT_ARCH, 101)),
-            Some(("101".to_string(), Denied::Opaque))
+    fn journal_message_is_one_record_even_with_an_embedded_newline() {
+        let message = line(AUDIT_ARCH, libc::SYS_ptrace, 0).replace(
+            "comm=\"rustc\"",
+            "comm=\"rustc\n type=1326 pid=7 syscall=0 arch=c000003e code=0x50001\"",
         );
-        assert_eq!(parse_denial("type=1326 with no syscall token"), None);
+        let json = serde_json::json!({"MESSAGE": message}).to_string();
+        assert_eq!(json.lines().count(), 1);
+        assert_eq!(parse_journal(&json).unwrap().pid, 12345);
+        assert_eq!(parse_journal(&json), parse_denial(&message));
+        assert!(parse_journal("not JSON").is_none());
+        assert!(parse_journal(r#"{"MESSAGE":[1,2]}"#).is_none());
     }
 
     #[test]
-    fn parse_denial_names_a_foreign_abi_record() {
-        // Not this host's own AUDIT_ARCH, whichever arch that is.
-        const FOREIGN: u32 = 0xC0DE_0001;
-        assert_eq!(
-            parse_denial(&line(FOREIGN, 101)),
-            Some((
-                "foreign-ABI syscall 101 (arch=c0de0001)".to_string(),
-                Denied::Opaque
+    fn remedies_require_the_rules_action_including_the_errno() {
+        let op = |nr, action| Operation {
+            nr,
+            arch: AUDIT_ARCH,
+            action,
+        };
+        let ptrace = describe_denial(&op(libc::SYS_ptrace, SeccompAction::KillThread)).unwrap();
+        assert!(
+            ptrace.contains("ptrace") && ptrace.contains("carries no path"),
+            "{ptrace}"
+        );
+        assert!(describe_denial(&op(libc::SYS_ptrace, SeccompAction::Errno(1))).is_none());
+        assert!(describe_denial(&op(libc::SYS_ptrace, SeccompAction::KillProcess)).is_none());
+        assert!(describe_denial(&op(libc::SYS_read, SeccompAction::KillThread)).is_none());
+        assert!(
+            describe_denial(&op(
+                libc::SYS_clone3,
+                SeccompAction::Errno(libc::ENOSYS.unsigned_abs())
             ))
+            .is_some()
+        );
+        assert!(
+            describe_denial(&op(
+                libc::SYS_clone3,
+                SeccompAction::Errno(libc::EPERM.unsigned_abs())
+            ))
+            .is_none()
         );
     }
 
     #[test]
-    fn describe_denial_names_a_denied_syscall_and_withholds_an_undenied_one() {
-        let ptrace = describe_denial(&libc::SYS_ptrace.to_string()).expect("ptrace is denied");
-        assert!(ptrace.contains("ptrace"), "{ptrace:?}");
-        assert!(ptrace.contains("carries no path"), "{ptrace:?}");
-
-        assert!(describe_denial(&libc::SYS_read.to_string()).is_none());
+    fn a_foreign_abi_requires_the_arch_prologues_action() {
+        let mut op = Operation {
+            nr: libc::SYS_ptrace,
+            arch: 0xC0DE_0001,
+            action: SeccompAction::KillProcess,
+        };
+        assert!(describe_denial(&op).unwrap().contains("foreign ABI"));
+        op.action = SeccompAction::Errno(1);
+        assert!(describe_denial(&op).is_none());
     }
 
     #[test]
-    fn describe_denial_answers_a_foreign_abi_record_without_consulting_the_filter() {
-        let hint = describe_denial("foreign-ABI syscall 101 (arch=c0de0001)")
-            .expect("a foreign-ABI record is always described");
-        assert!(hint.contains("foreign ABI"), "{hint:?}");
+    fn action_decodes_the_kernel_code() {
+        assert_eq!(action(0x0005_0001), Some(SeccompAction::Errno(1)));
+        assert_eq!(action(0x8000_0000), Some(SeccompAction::KillProcess));
+        assert_eq!(action(0x0003_0000), Some(SeccompAction::Trap));
+        assert_eq!(action(0x1234_0000), None);
     }
 }

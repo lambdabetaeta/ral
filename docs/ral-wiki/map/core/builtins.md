@@ -1,6 +1,6 @@
 ---
-generated_at_commit: a2aba680
-generated_at_date: 2026-10-25
+generated_at_commit: 104cb519
+generated_at_date: 2026-10-26
 covers_paths: [core/src/shell/builtins/, core/src/shell/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -374,7 +374,7 @@ three feature-gated families and the predicate and dispatch that unify them.
 
 `uutils_invoke` is the bare dispatch over all three families (diffutils and
 ripgrep matched ahead of the coreutils fall-through, each arm feature-gated);
-`is_uutils_tool` is the membership predicate. These bundled heads share the
+`bundled_name` returns the static name of a bundled tool. These bundled heads share the
 capability chokepoint with every other command — part of why ral is a
 [[invariants/single-binary|single-binary]]. The `grep` cargo feature separately
 backs the `re-*` regex string builtins.

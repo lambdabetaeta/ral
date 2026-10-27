@@ -1,5 +1,7 @@
 //! Helpers shared by core's tests and by hosts' tests under `test-util`.
 
+pub mod confinement;
+
 use crate::authority::policy::{Evidence, ExecGrant, ExecKey};
 use std::time::{Duration, Instant};
 

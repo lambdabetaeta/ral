@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: 2afefdf4
+generated_at_commit: 104cb519
 verified_at_commit: 646bff0a
 anchors: [Binds, Bind, render_objects, bwrap_argv, bwrap_command, HostEnvelope, Slot, open_nofollow, Pinned]
 ---
@@ -16,9 +16,9 @@ slots start at fd 107 again.
 > Each crosses at the number it was lent at, from fd 98 up, and bwrap is
 > told that number ([[internals/confined-launch|confined-launch]]).
 
-**Every object the bwrap envelope shows is opened by ral, in the host, never
+**Every granted source object is opened by ral, in the host, never
 through a symlink, and mounted by that descriptor (`--ro-bind-fd`,
-`--bind-fd`); bwrap is never handed a source name.** What the child sees at a
+`--bind-fd`); bwrap is handed its descriptor rather than its source name.** What the child sees at a
 granted name is the object the grant rendered there, whatever a same-uid writer
 does to the name between the render and the mount.
 
@@ -97,6 +97,14 @@ shown bind gives the denied path, for the same reason the freeze does. A deny
 that hides `/proc` is refused when the argv is rendered: masks go on after
 `--proc`, and bwrap execs the trampoline through it.
 
+**Masks are not held by handle.** A mask's shape is read at render, and bwrap
+mounts it by name. A host writer that changes the name's type between render
+and mount kills the launch. One that creates an absent name in that window
+leaves it unmasked for that launch. The same gap lasts throughout a launch
+whose render found the name absent: even under a read-only bind, a child can
+read a file the host creates there; the next launch masks it
+([[internals/holding-a-deny|holding-a-deny]]).
+
 ### The trampoline by descriptor, and the locked files
 
 bwrap's payload is `/proc/self/fd/102 --warrant`: ral's boot pin is lent at
@@ -144,10 +152,14 @@ by descriptor all the same.
   pins are `O_RDONLY` and follow them, being taken at boot from `current_exe()`
   and the `PATH` ral started with, before any shell or grant exists, so what
   they follow is the host's install and never a child's write.
-- **The bind-mount residual.** The Landlock walk judges what it reaches by
-  inode, as with hard links: a host bind mount of a denied directory beneath
-  an allowed one is admitted there. One looping back onto a directory being
-  listed ends the walk at the repeat (`(dev, ino)` along the spine).
+- **The walk judges inodes.** Every name the Landlock walk meets for an
+  excluded or exclusion-holding directory is judged by its inode. A loop
+  through a listed directory ends at the repeat (`(dev, ino)` along the spine).
+- **The alias residual.** An alias the walk never meets, beneath a directory
+  admitted whole, remains admitted: a hard link to an excluded file, or a
+  host bind elsewhere; so does a bind alias of a directory beneath an excluded
+  directory, met under a listed directory, whose inode is neither excluded nor
+  exclusion-holding and is therefore admitted whole.
 - **An unlinked trampoline needs a filesystem that serves it.** On virtiofs
   the exec of an unlinked pin fails, so after a swap the launch dies in
   bwrap's `execve` rather than asking for a restart. bwrap cannot mount an

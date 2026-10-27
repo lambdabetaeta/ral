@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: d4d34afc
+generated_at_commit: 104cb519
 ---
 
 # An envelope does not touch the host
@@ -38,17 +38,20 @@ lifetime.
   `--perms 0000 --tmpfs`, an existing non-directory takes `--ro-bind
   /dev/null`, a symlink is masked at its resolved twin, and an absent name
   takes nothing at all, whatever the binds around it.
-- Under a read-only bind nothing is lost: creation is the only access an absent
-  name has, and the bind already refuses it.
-- Under a writable bind something *is* lost, and it is named rather than
-  papered over: the deny of a not-yet-existing name is held by ral's in-process
-  gate alone — complete for what ral dispatches, blind to what a spawned child
-  does on its own ([[design/two-enforcers|two enforcers]]). It joins
+- Under a read-only bind the host can create the name during a launch, and
+  that launch reads it; the next one masks it. The child's writes are refused,
+  but the host's underlying directory remains writable.
+- Under a writable bind the child can also create the name, read and write
+  what it made, and leave it on the host. The next launch masks it. ral's
+  in-process guard refuses reads and creation throughout, but cannot see a
+  spawned child's own operations ([[design/two-enforcers|two enforcers]]).
+  The risk includes both a host-created secret leaking during the launch and
+  a child planting a file. It joins
   [[decisions/260530_linux-exec-confinement|linux-exec-confinement]] as a seam,
-  not a solved case, and not Linux's alone: a Windows ACE needs an object as a
-  mount needs a mountpoint, so there too an absent name under a read-write grant
-  is held in process until it exists. macOS Seatbelt, whose rules are genuinely
-  negative and range over names rather than inodes, enforces it in full.
+  not a solved case. macOS Seatbelt ranges over names and refuses both reads
+  and creation from the start. Windows carves around the excluded name, so a
+  name made in a carved directory during the launch stays unreadable
+  ([[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]]).
 
 ## Where the directory mask stops
 

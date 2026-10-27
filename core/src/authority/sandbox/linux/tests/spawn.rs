@@ -19,7 +19,7 @@ fn spawn_confined(
         &sh(),
         &sh_args(script),
         Ownership::Kept,
-        &shell.cwd(),
+        shell.context.cwd(),
         scope,
     )
     .expect("build confined launch");
@@ -328,6 +328,98 @@ fn the_by_hand_dev_serves_a_confined_body() {
         "the by-hand /dev/ptmx must be the host devpts's own: {stdout} {stderr}"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A host terminal: both ends held open, and the slave's name.
+struct HostPty {
+    _ends: [std::os::fd::OwnedFd; 2],
+    name: String,
+}
+
+impl HostPty {
+    fn open() -> Self {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        let (mut master, mut slave) = (-1, -1);
+        let mut name = [0; 128];
+        // SAFETY: outputs and the terminal-name buffer are writable.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &raw mut master,
+                    &raw mut slave,
+                    name.as_mut_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            },
+            0,
+            "host openpty: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: openpty returned two fresh descriptors and a terminated name.
+        unsafe {
+            Self {
+                _ends: [OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)],
+                name: std::ffi::CStr::from_ptr(name.as_ptr())
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+            }
+        }
+    }
+}
+
+/// A terminal open at render is masked; one the host opens after it, the
+/// declared residual, is reachable, and so is the control.
+#[test]
+fn the_by_hand_dev_hides_host_terminals_and_allocates_its_own() {
+    use crate::test_helper::confinement::{Output, admitted as accepts, denied, probe};
+    use std::os::unix::fs::PermissionsExt;
+    let proof = crate::require_confinement!();
+    let early = HostPty::open();
+    let dir = tempfile::tempdir().unwrap();
+    let policy = deny_within(dir.path(), &[]);
+    super::super::pin_envelope();
+    let mut env = Envelope::probe(
+        super::super::envelope().expect("confinement requires bwrap"),
+        crate::authority::sandbox::reexec::own().unwrap(),
+    );
+    env.host.virtual_dev = false;
+    let invoke = |args: &dyn Fn(&str) -> Vec<String>| -> Output {
+        let program = admitted(Program::file(std::env::current_exe().unwrap()).unwrap());
+        let (mut command, info) = enveloped(
+            &env,
+            &policy,
+            &host_system_reads(),
+            &program,
+            &[],
+            None,
+            Ownership::Kept,
+        )
+        .unwrap();
+        let late = HostPty::open();
+        let args = args(&late.name);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = command
+            .env("RAL_TEST_PROBE", probe::request(&args))
+            .output()
+            .unwrap();
+        drop(info);
+        out.into()
+    };
+    let control = invoke(&|late| vec!["pty".into(), late.into()]);
+    let hidden = invoke(&|_| vec!["pty".into(), early.name.clone()]);
+    denied(&proof, &control, &hidden, "ok");
+    assert!(hidden.stderr.contains("Permission denied"), "{hidden:?}");
+    let ptmx = std::fs::metadata("/dev/pts/ptmx").expect("the host devpts has a ptmx node");
+    if ptmx.permissions().mode() & 0o666 == 0 {
+        eprintln!(
+            "skip the_by_hand_dev_hides_host_terminals_and_allocates_its_own, allocation only: \
+             the host devpts has ptmxmode=000, so the by-hand /dev allocates no pty"
+        );
+        return;
+    }
+    accepts(&proof, &invoke(&|_| vec!["pty".into()]), "ok");
 }
 
 /// What the options cannot show: that a program inside reads its own limits

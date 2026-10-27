@@ -302,6 +302,72 @@ fn a_deny_by_another_spelling_blocks_the_entry() {
     assert!(seen.contains(&(d.join("a"), false)), "{seen:?}");
 }
 
+#[test]
+fn a_listed_hard_link_to_an_excluded_file_is_not_admitted() {
+    let (_tmp, d) = tree();
+    std::fs::hard_link(d.join("x"), d.join("alias")).unwrap();
+    let seen = expanded(&[allow(&d, true), deny(&d.join("x"), false)], true).unwrap();
+    assert!(!seen.contains(&(d.join("alias"), false)), "{seen:?}");
+    assert!(seen.contains(&(d.join("a"), false)), "{seen:?}");
+}
+
+#[test]
+fn a_moved_exclusion_holding_directory_is_still_listed() {
+    let (_tmp, d) = tree();
+    let rules = [allow(&d, true), deny(&d.join("s/f"), false)];
+    std::fs::rename(d.join("s"), d.join("moved")).unwrap();
+    let seen = expanded(&rules, true).unwrap();
+    assert!(!seen.contains(&(d.join("moved"), true)), "{seen:?}");
+    assert!(!seen.contains(&(d.join("moved/f"), false)), "{seen:?}");
+    assert!(seen.contains(&(d.join("moved/t"), true)), "{seen:?}");
+}
+
+#[test]
+fn a_link_exclusion_keeps_its_targets_spine_and_identity() {
+    let (_tmp, d) = tree();
+    let link = d.join("link");
+    std::os::unix::fs::symlink("s/f", &link).unwrap();
+    let excluded = GrantPath::<Excluded>::walk(FrozenPath::freeze(&link).unwrap()).unwrap();
+    let rules = [
+        allow(&d, true),
+        Rule::Deny(Box::new(ExecDeny::File(excluded))),
+    ];
+    std::fs::rename(d.join("s"), d.join("moved")).unwrap();
+    let seen = expanded(&rules, true).unwrap();
+    assert!(!seen.contains(&(d.join("moved"), true)), "{seen:?}");
+    assert!(!seen.contains(&(d.join("moved/f"), false)), "{seen:?}");
+    assert!(seen.contains(&(d.join("moved/t"), true)), "{seen:?}");
+}
+
+#[test]
+fn a_recreated_excluded_directory_is_still_denied_by_name() {
+    let (_tmp, d) = tree();
+    let rules = [allow(&d, true), deny(&d.join("s"), true)];
+    std::fs::rename(d.join("s"), d.join("moved")).unwrap();
+    std::fs::create_dir(d.join("s")).unwrap();
+    std::fs::write(d.join("s/new"), "").unwrap();
+    let seen = expanded(&rules, true).unwrap();
+    assert!(
+        !seen.iter().any(|(p, _)| p.starts_with(d.join("s"))),
+        "{seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|(p, _)| p.starts_with(d.join("moved"))),
+        "{seen:?}"
+    );
+    assert!(seen.contains(&(d.join("a"), false)), "{seen:?}");
+}
+
+#[test]
+fn an_absent_exclusion_lists_its_last_ancestor_without_excluding_it() {
+    let (_tmp, d) = tree();
+    let rules = [allow(&d, true), deny(&d.join("s/absent/tool"), false)];
+    std::fs::rename(d.join("s"), d.join("moved")).unwrap();
+    let seen = expanded(&rules, true).unwrap();
+    assert!(!seen.contains(&(d.join("moved"), true)), "{seen:?}");
+    assert!(seen.contains(&(d.join("moved/f"), false)), "{seen:?}");
+}
+
 /// Where vetoes do not walk, a vetoed name costs no listing; where they
 /// do, it is gone from every directory.
 #[test]

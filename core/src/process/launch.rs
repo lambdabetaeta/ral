@@ -14,7 +14,11 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 #[cfg(windows)]
-use windows_sys::Win32::Security::{PSID, SID_AND_ATTRIBUTES};
+use crate::authority::sandbox::windows::appcontainer::{
+    CapabilitySids, OwnedCapabilitySid, OwnedContainerSid,
+};
+#[cfg(windows)]
+use std::sync::Arc;
 
 #[cfg(windows)]
 pub(crate) use windows::RawChild;
@@ -27,6 +31,9 @@ pub(crate) struct Launch {
     envelope: Option<Envelope>,
 }
 
+#[cfg(not(windows))]
+type PayloadPgid = Box<dyn FnOnce() -> Result<Option<crate::process::Pgid>, String> + Send>;
+
 /// A confinement envelope: a separate binary that execs the target in turn.
 /// Only such a backend declares one — a failure to start the launch is then
 /// the envelope's, not the target's, and the two are otherwise
@@ -37,8 +44,8 @@ pub(crate) struct Envelope {
     pub(crate) program: &'static str,
     /// Asked once, after the fork, for the payload's own process group, and
     /// answering only once the payload is in it or gone; `None` when the
-    /// envelope cannot say, leaving its own.
-    pub(crate) payload_pgid: Option<Box<dyn FnOnce() -> Option<crate::process::Pgid> + Send>>,
+    /// envelope died before reporting; an error kills and reaps it.
+    pub(crate) payload_pgid: Option<PayloadPgid>,
 }
 
 #[cfg(windows)]
@@ -56,12 +63,12 @@ pub(crate) struct Launch {
     security_capabilities: Option<SecurityCapabilitiesAttr>,
 }
 
-/// `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` payload, borrowing raw SID
-/// values from the types in `authority::sandbox::windows::appcontainer` that own them.
+/// Owners retained until the launch is dropped, independently of teardown.
 #[cfg(windows)]
 struct SecurityCapabilitiesAttr {
-    app_container_sid: PSID,
-    capabilities: Vec<SID_AND_ATTRIBUTES>,
+    app_container_sid: Arc<OwnedContainerSid>,
+    filesystem: Vec<Arc<OwnedCapabilitySid>>,
+    network: Option<Arc<CapabilitySids>>,
 }
 
 #[cfg(windows)]
@@ -333,13 +340,23 @@ impl Launch {
             pgid
         };
         let (child, leader) = crate::process::spawn_with_pgid(&mut self.cmd, pgid)?;
+        let mut child = crate::process::ChildHandle::from_std(child);
         let payload = self
             .envelope
             .as_mut()
             .and_then(|e| e.payload_pgid.take())
-            .and_then(|ask| ask());
+            .map(|ask| ask())
+            .transpose();
+        let payload = match payload {
+            Ok(payload) => payload.flatten(),
+            Err(why) => {
+                let _ = child.kill();
+                let _ = child.reap();
+                return Err(std::io::Error::other(why));
+            }
+        };
         Ok((
-            crate::process::ChildHandle::from_std(child),
+            child,
             payload.or_else(|| leader.filter(|_| pgid.leads())),
             self.jail.take(),
         ))
@@ -471,19 +488,26 @@ impl Launch {
     }
 
     /// Stage `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` for the spawn.
-    /// Only the raw SID values are borrowed, so they must stay valid until
-    /// [`Self::spawn`] returns; `authority::sandbox::windows::session::confine` passes
-    /// SIDs the session owns for the whole process lifetime.
     pub(crate) fn security_capabilities(
         &mut self,
-        app_container_sid: PSID,
-        capabilities: &[SID_AND_ATTRIBUTES],
+        app_container_sid: Arc<OwnedContainerSid>,
+        filesystem: Vec<Arc<OwnedCapabilitySid>>,
+        network: Option<Arc<CapabilitySids>>,
     ) -> &mut Self {
         self.security_capabilities = Some(SecurityCapabilitiesAttr {
             app_container_sid,
-            capabilities: capabilities.to_vec(),
+            filesystem,
+            network,
         });
         self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn network_capability_count(&self) -> usize {
+        self.security_capabilities
+            .as_ref()
+            .and_then(|caps| caps.network.as_ref())
+            .map_or(0, |caps| caps.sids().count())
     }
 
     /// Lower through `CreateProcessW` and spawn with the requested
@@ -680,21 +704,29 @@ mod windows {
         } else {
             1
         };
-        let mut attrs = AttributeList::new(attr_count)?;
-        attrs.update_handle_list(&inherited)?;
-
-        // A plain local, so its address outlives `CreateProcessW` below with
-        // no self-reference: `Capabilities` points into `launch`'s own `Vec`.
+        let mut capabilities =
+            launch
+                .security_capabilities
+                .as_ref()
+                .map_or_else(Vec::new, |caps| {
+                    crate::authority::sandbox::windows::appcontainer::capability_entries(
+                        &caps.filesystem,
+                        caps.network.as_deref(),
+                    )
+                });
+        // The local array and launch's owners outlive CreateProcessW.
         let security_caps_value: Option<SECURITY_CAPABILITIES> = launch
             .security_capabilities
-            .as_mut()
+            .as_ref()
             .map(|caps| SECURITY_CAPABILITIES {
-                AppContainerSid: caps.app_container_sid,
-                Capabilities: caps.capabilities.as_mut_ptr(),
-                CapabilityCount: u32::try_from(caps.capabilities.len())
+                AppContainerSid: caps.app_container_sid.sid(),
+                Capabilities: capabilities.as_mut_ptr(),
+                CapabilityCount: u32::try_from(capabilities.len())
                     .expect("a projection declares a handful of capability SIDs, not four billion"),
                 Reserved: 0,
             });
+        let mut attrs = AttributeList::new(attr_count)?;
+        attrs.update_handle_list(&inherited)?;
         if let Some(value) = security_caps_value.as_ref() {
             attrs.update_security_capabilities(value)?;
         }

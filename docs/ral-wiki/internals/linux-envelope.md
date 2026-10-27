@@ -1,8 +1,8 @@
 ---
-generated_at_commit: 104cb51994d4dce2c9892a96008426463be2d404
+generated_at_commit: 2f1beeb292a50892e1428796acf6b1da14631dcd
 verified_at_commit: 104cb51994d4dce2c9892a96008426463be2d404
 verified_at_date: 2026-10-26
-anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, GpuNodes, cgroup_tree, Baseline, Pinned, pin_envelope, InfoFd]
+anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, GpuNodes, PtyNodes, cgroup_tree, Baseline, Pinned, pin_envelope, InfoFd]
 ---
 
 # The Linux envelope
@@ -32,7 +32,7 @@ the filesystem**
   reachable whatever `net` says: a read-only bind does not gate `connect`.
   Measured on 7.1 (ABI 9), a Landlock fs right at bit 16 does, but the
   resolver's sockets would need admitting, so it is not handled yet.
-- **Working directory.** The logical cwd goes in as `--chdir`. A cwd the grant
+- **Working directory.** The context's absolute `CwdPath` goes in as `--chdir`. A cwd the grant
   does not cover gets an empty `0555` tmpfs stand-in, laid before the binds,
   which may hide it; bwrap's `--chdir` then judges the name. `/` and the
   scratch `/tmp` are the envelope's own writable memory and need none. So a
@@ -50,7 +50,9 @@ the filesystem**
   before that `setsid`, when a signal to the group would be lost. The
   payload holds a second copy of the writer, which bwrap does not name, until its
   handoff sweep, so the read ends only once the group exists or the
-  envelope has died, and `Launch::spawn` returns no sooner.
+  envelope has died, and `Launch::spawn` returns no sooner. An empty record
+  means bwrap died before reporting; an unreadable or malformed one makes
+  the spawn kill and reap the envelope, then return an error.
 - **Process groups.** `Launch::spawn` makes an enveloped launch `NewLeader`
   whatever was asked, and returns the payload's group. `ForegroundDecision`
   never hands an envelope the terminal. A pipeline collector addresses each
@@ -89,10 +91,12 @@ spelling is only the destination at which the opened object is bound.
   A name that now reaches another object, or an open through a symlink, refuses
   the launch and says which.
 - **Every deny is masked at every name a bind shows it.** A deny that would hide
-  `/proc`, which bwrap execs the trampoline through, is refused.
+  `/proc`, which bwrap execs the trampoline through, is refused. An `Over`
+  bind replaces names beneath its destination with those it shows: a cgroup
+  deny outside ral's subtree needs no mask, and one inside follows the re-root.
 - **An unusable bwrap refuses in its own words.** A bwrap that builds no
-  envelope refuses every confined launch, and one without `--ro-bind-fd` is
-  named with its version.
+  envelope refuses every confined launch. A failed `--ro-bind-fd` probe keeps
+  bwrap's own error; only an unknown-option error adds the version question.
 
 Pinned by `authority::sandbox::linux::tests::render::a_bind_is_opened_for_each_name_no_other_bind_shows`,
 `::a_prefix_whose_component_became_a_symlink_since_render_is_refused`,
@@ -131,8 +135,9 @@ first, and opening stays where it was.
 - **Limits, declared:** a program created during a launch on the spine of an
   excluded path runs from the next launch; under `Any` with exclusions and a
   restricted fs the envelope's private `/tmp` holds no host object, so a program
-  built there does not run; an excluded path that is a hard link to an admitted
-  file runs, since Landlock admits an inode.
+  built there does not run; an excluded path hard-linked to an admitted file
+  runs only when the admitted name lies beneath a directory admitted whole;
+  the walk refuses an excluded inode under every name it meets.
 
 ## Where the host refuses a mount, the envelope rebuilds it
 
@@ -150,7 +155,7 @@ result by hand, or states what it cannot build.**
   (`authority/sandbox/linux/host.rs`).
 - **What cannot be rebuilt is stated, not refused.** Neither is a restriction a
   grant names, so the launch runs, and the child sees what it would see
-  unconfined: the container's own process table, the host's `/dev/pts`
+  unconfined: the container's own process table, the host's devpts allocation
   ([[design/two-enforcers|two-enforcers]]). Running the container
   `--privileged` lifts both.
 - **A pty by hand is the host devpts's.** `/dev/ptmx` opens where that
@@ -158,7 +163,13 @@ result by hand, or states what it cannot build.**
   the kernel's default nor a systemd host's (`000`). The host's `/dev/ptmx`
   node cannot stand in: the kernel finds a node's devpts at the `pts` beside
   it in the same mount, and a bind of one file has none.
-- **The render is a pure function of the probed `HostEnvelope`.** So the argv
+- **Host terminals present at render are hidden.** `PtyNodes::discover` lists
+  `/dev/pts/<N>` before rendering; each gets an unopenable `/dev/null` bind
+  after the devpts bind, with `ptmx` left for the child's own allocations.
+  A pty the host opens during the launch remains reachable for that launch,
+  the same snapshot gap as exec exclusions.
+  A terminal that closes between discovery and mount fails that launch.
+- **The render takes the probed host and discovered nodes as data.** The argv
   tests assert both shapes from literals, not from whichever host runs them.
 - **Open:** such hosts still refuse the read-only rebind of their own locked
   `/etc/hosts` and `/etc/resolv.conf`, by descriptor as by name.

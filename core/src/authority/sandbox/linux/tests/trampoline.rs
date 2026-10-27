@@ -154,7 +154,7 @@ fn the_trampoline_inside_is_the_pinned_inode() {
     let dir = workdir("trampoline-exe");
     let (copy, own) = swapped_trampoline(&dir);
     if unlinked(&own) {
-        let readlink = admitted(Program::Tool("readlink".into()));
+        let readlink = admitted(Program::Tool("readlink"));
         let out = run_trampoline(
             &env,
             &own,

@@ -53,20 +53,16 @@
 (allow file-write* (literal "/dev/zero"))
 (allow file-write* (literal "/dev/dtracehelper"))
 (allow file-write* (literal "/dev/tty"))
-(allow file-ioctl (literal "/dev/dtracehelper"))
 
 ;; libc's first localtime_r; outside every grant prefix, and rustc, cc
 ;; and ld SIGABRT in tzsetwall_basic without it.
 (allow file-read* (literal "/private/var/db/timezone/icutz"))
 
-;; libdispatch, on first queue creation — a POSIX shm name, not Mach.
-(allow ipc-posix-shm (ipc-posix-name "apple.shm.notification_center"))
+;; libnotify and os_feature_enabled read these; nothing here writes them.
+(allow ipc-posix-shm-read-data (ipc-posix-name "apple.shm.notification_center") (ipc-posix-name "com.apple.featureflags.shm"))
 
 ;; Unfiltered: a full-screen child needs `tcsetattr`, which `file-ioctl`
 ;; gates.  Keystroke injection is Seatbelt's `hid-control`, never allowed
 ;; here; the deny keeps TIOCSTI refused should that gate move.
 (allow file-ioctl)
 (deny file-ioctl (ioctl-command TIOCSTI))
-
-;; CoreFoundation and libdispatch, during framework init.
-(allow ipc-posix-shm)

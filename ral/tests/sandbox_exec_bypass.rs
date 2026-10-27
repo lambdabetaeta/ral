@@ -1,16 +1,16 @@
 #![allow(clippy::disallowed_methods, reason = "test code")]
-#![cfg(target_os = "macos")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 //! An exec grant is enforced by the kernel, not merely rendered.
 //!
-//! A bare-name `deny` projects into `(deny process-exec (regex #"/cat$"))`,
-//! emitted *after* the broad allow because Seatbelt is last-match-wins.
-//! Rule order is the whole enforcement, and the in-process guard never sees a
-//! command an interpreter spawns — so only a real Seatbelt envelope can
-//! close the `sh -c cat` route.  These runs walk that chain end to end.
+//! The in-process guard never sees a command an interpreter spawns, so only
+//! the kernel closes the `sh -c cat` route: Seatbelt by a `process-exec` regex
+//! after the broad allow, Landlock by leaving the vetoed name out of the walk.
+//! These runs walk that chain end to end.
 
 mod common;
 
+use ral_core::test_helper::confinement::{admitted, denied};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -18,12 +18,14 @@ use std::process::{Command, Stdio};
 /// Content that must never reach us: it only prints if the veto lifted.
 const SENTINEL: &str = "ral-exec-pwned";
 
-/// Run `body` under a grant admitting `/bin/` and `dir`, vetoing the bare
-/// name `cat` wherever it resolves.
+/// Run `body` under a grant reading `dir` and admitting `/bin/` and `dir`,
+/// vetoing the bare name `cat` wherever it resolves.  No write reaches `dir`:
+/// beneath one, Linux holds a veto only in the guard.
 fn under_exec_grant(dir: &Path, body: &str) -> common::Output {
     run_script(&format!(
-        "grant [exec: [allow: [`dir `absolute /bin, `dir `absolute '{}'], deny: [`name cat]]] {{ {body} }}",
-        dir.display()
+        "grant [fs: [read: [`absolute '{d}']], \
+         exec: [allow: [`dir `absolute /bin, `dir `absolute '{d}'], deny: [`name cat]]] {{ {body} }}",
+        d = dir.display()
     ))
 }
 
@@ -65,77 +67,47 @@ fn write_script(path: &Path, line: &str) {
 
 #[test]
 fn a_bare_name_deny_stops_a_grandchild_the_guard_never_sees() {
+    ral_core::require_landlock!(1);
+    let proof = ral_core::require_confinement!();
     let td = tempfile::tempdir().unwrap();
     let secret = td.path().join("secret");
     std::fs::write(&secret, format!("{SENTINEL}\n")).unwrap();
-    write_script(&td.path().join("mimic"), "OK");
+    write_script(&td.path().join("mimic"), SENTINEL);
     write_script(&td.path().join("cat"), SENTINEL);
 
-    // Control: the envelope launched and a nested exec under an admitted
-    // dir still runs, so a later denial is the veto and not a dead body.
-    let ok = under_exec_grant(td.path(), "/bin/sh -c '/bin/echo OK'");
-    assert_eq!(
-        ok.status, 0,
-        "an exec-only grant must still admit /bin/echo through sh; stderr:\n{}",
-        ok.stderr
+    let control = under_exec_grant(
+        td.path(),
+        &format!("/bin/sh -c '{}/mimic'", td.path().display()),
     );
-    assert!(
-        ok.stdout.contains("OK"),
-        "stdout missing 'OK':\n{}",
-        ok.stdout
-    );
-
-    // The shell spawns `cat`, so nothing in ral ever weighs it.
     let hidden = under_exec_grant(
         td.path(),
         &format!("/bin/sh -c '/bin/cat {}'", secret.display()),
     );
-    assert_ne!(hidden.status, 0, "the denied grandchild must not succeed");
-    assert_leaked_nothing(&hidden);
-
-    // The veto follows the basename wherever it resolves: the sibling
-    // script proves the directory itself is genuinely admitted.
+    denied(&proof, &control, &hidden, SENTINEL);
     let elsewhere = under_exec_grant(
         td.path(),
-        &format!(
-            "/bin/sh -c '{}/mimic; {}/cat'",
-            td.path().display(),
-            td.path().display()
-        ),
+        &format!("/bin/sh -c '{}/cat'", td.path().display()),
     );
-    assert!(
-        elsewhere.stdout.contains("OK"),
-        "the admitted sibling did not run, so the deny below proves nothing:\n{}",
-        elsewhere.stderr
-    );
-    assert_leaked_nothing(&elsewhere);
+    denied(&proof, &control, &elsewhere, SENTINEL);
 }
 
 /// The declared limit that replaced the write freeze: a write prefix that
 /// covers an admitted dir lets the child author in it.
 #[test]
 fn a_write_prefix_covering_an_admitted_dir_can_author_in_it() {
+    ral_core::require_landlock!(1);
+    let proof = ral_core::require_confinement!();
     let td = tempfile::tempdir().unwrap();
     let tools = td.path().join("tools");
     std::fs::create_dir(&tools).unwrap();
     let out = writing_beside_admit(
         td.path(),
         &tools,
-        &format!("/bin/sh -c 'echo x > {}/planted'", tools.display()),
+        &format!(
+            "/bin/sh -c 'echo x > {}/planted && echo ok'",
+            tools.display()
+        ),
     );
-    assert_eq!(out.status, 0, "{}", out.stderr);
+    admitted(&proof, &out, "ok");
     assert!(tools.join("planted").exists());
-}
-
-fn assert_leaked_nothing(out: &common::Output) {
-    assert!(
-        !out.stdout.contains(SENTINEL),
-        "the denied command ran; stdout:\n{}",
-        out.stdout
-    );
-    assert!(
-        !out.stderr.contains(SENTINEL),
-        "the denied command ran; stderr:\n{}",
-        out.stderr
-    );
 }

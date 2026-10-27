@@ -1,236 +1,86 @@
 #![allow(clippy::disallowed_methods, reason = "test code")]
+#![cfg(all(feature = "test-util", any(target_os = "linux", target_os = "macos")))]
 
-//! Fail-closed at **external dispatch**: a grant body evaluates in process,
-//! and what confines the commands it spawns is the per-command launcher
-//! (`runtime::command::process::build_launch`), so a child writing outside
-//! the grant is held by Seatbelt at spawn.  Each test pairs a positive control
-//! (a write inside the grant lands) with a denial (one outside never appears);
-//! the control is load-bearing — a blanket deny would fail it, a disabled
-//! sandbox would let the denied write land.
+//! The same write is confined through each evaluation context.
 //!
-//! Imports `common` for its `#[ctor]`, which runs `invocation::serve_process_before_main`
-//! so the re-exec child enters Seatbelt and `execve`s the target rather than
-//! landing in libtest and dying on `--warrant` — a failure for the
-//! wrong reason.  macOS-only: the one backend that confines an in-tree re-exec
-//! end-to-end without a helper binary (`bwrap` is often absent in CI).
-//! `projection_enforceable`'s own fail-closed axis is unit-tested in `sandbox`.
-
-#![cfg(all(feature = "test-util", target_os = "macos"))]
+//! The grant reads the tree and writes only `work`, so the refused write
+//! meets a read-only view: an unshown path on Linux is the envelope's own
+//! memory, where a write lands harmlessly and proves nothing.
 
 mod common;
 
-use ral_core::RunIo;
 use ral_core::authority::policy::{Capabilities, FsPolicy};
 use ral_core::path::FrozenPath;
-use ral_core::protocol::Run;
-use ral_core::shell::runtime::{Break, Settled, Shell, Value};
-use ral_core::source::SourceOrigin;
+use ral_core::test_helper::confinement::{Confining, denied, run};
 use ral_core::test_helper::{layer, stack};
 
-/// A `Shell` matching what every front end ends up with after bootstrap:
-/// prelude registered, default env, root capabilities.
-fn boot() -> Shell {
-    ral_core::shell::boot::boot_shell(
-        ral_core::io::terminal::TerminalState::default(),
-        common::prelude(),
-        &ral_core::shell::boot::HostSurface::default(),
-        ral_core::test_helper::process_cwd(),
-    )
-    .expect("a test host resolves its baseline")
-}
-
-/// A process-unique work directory under the system temp root, created on
-/// the host (outside any sandbox) so a confined child can write into it.
-fn unique_workdir(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("ral_fc_{tag}_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("create work dir");
-    dir
-}
-
-/// A process-unique path *outside* any granted prefix, pre-cleaned so its
-/// post-hoc absence is the load-bearing observation.
-fn denied_path(tag: &str) -> std::path::PathBuf {
-    let p = std::env::temp_dir().join(format!("ral_fc_denied_{tag}_{}", std::process::id()));
-    let _ = std::fs::remove_file(&p);
-    p
-}
-
-/// A capability frame whose fs policy confines reads and writes to `dir`.
-/// Any `fs` key makes `sandbox_projection()` return `Some(_)`, so the
-/// per-command launcher confines every external child.
-fn restrict_to(dir: &str) -> Capabilities {
-    Capabilities {
+fn writes(proof: &Confining, wrap: impl Fn(&str) -> String, grant_body: bool) {
+    let tree = tempfile::tempdir().unwrap();
+    let work = tree.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    let inside = work.join("inside");
+    let outside = tree.path().join("outside");
+    let caps = Capabilities {
         fs: Some(FsPolicy {
-            read_prefixes: vec![FrozenPath::from_surface(dir)],
-            write_prefixes: vec![FrozenPath::from_surface(dir)],
+            read_prefixes: vec![FrozenPath::freeze(tree.path()).unwrap()],
+            write_prefixes: vec![FrozenPath::freeze(&work).unwrap()],
             deny_paths: Vec::new(),
         }),
         ..Capabilities::default()
-    }
+    };
+    let launch = |path: &std::path::Path| {
+        let source = wrap(&format!(
+            "/bin/sh -c 'echo ok > {} && echo ok'",
+            path.display()
+        ));
+        if grant_body {
+            run(
+                stack([]),
+                &format!(
+                    "grant [fs: [read: [`absolute '{t}'], write: [`absolute '{w}']]] {{ {source} }}",
+                    t = tree.path().display(),
+                    w = work.display(),
+                ),
+            )
+        } else {
+            run(stack([layer(caps.clone())]), &source)
+        }
+    };
+    let control = launch(&inside);
+    let refused = launch(&outside);
+    denied(proof, &control, &refused, "ok");
+    assert_eq!(std::fs::read_to_string(inside).unwrap(), "ok\n");
+    assert!(!outside.exists(), "the out-of-grant write landed");
 }
 
-/// Route `src` through the public `run` entry under `caps`, mirroring
-/// exarch's per-tool flow: the run carries the attenuated capability
-/// ceiling in its request and compiles against the live bindings.
-fn top_level_under(shell: &mut Shell, caps: Capabilities, src: &str) -> Settled<Value> {
-    shell
-        .run(Run {
-            io: RunIo::Inherit,
-            caps: stack([layer(caps)]),
-            ..Run::captured(src, SourceOrigin::named("<test>"))
-        })
-        .expect_ran()
-        .into_result()
-}
-
-/// Positive control: under a restrictive fs grant, an external command
-/// that writes *inside* the grant's write prefix succeeds and the file
-/// lands. Pairs with the denial below — if the sandbox blanket-denied
-/// every write this would fail, proving the projection is selective rather
-/// than off or all-deny.
-#[test]
-fn external_write_inside_grant_succeeds() {
-    let work = unique_workdir("ctl");
-    let work_s = work.to_string_lossy().into_owned();
-    let inside = work.join("inside.txt");
-    let inside_s = inside.to_string_lossy().into_owned();
-
-    let mut shell = boot();
-    let result = top_level_under(
-        &mut shell,
-        restrict_to(&work_s),
-        &format!("sh -c 'echo x > {inside_s}'"),
-    );
-    result.expect("a confined external writing inside the grant must succeed");
-    assert!(
-        inside.exists(),
-        "in-prefix write should have landed at {inside_s}"
-    );
-    let _ = std::fs::remove_dir_all(&work);
-}
-
-/// New fail-closed locus at the top level: under a restrictive fs grant,
-/// an external command writing *outside* the grant is denied by the
-/// per-command sandbox when it spawns. The eval surfaces the child's
-/// failure and the file never appears.
 #[test]
 fn external_write_outside_grant_denied_at_top_level() {
-    let work = unique_workdir("top");
-    let work_s = work.to_string_lossy().into_owned();
-    let denied = denied_path("top");
-    let denied_s = denied.to_string_lossy().into_owned();
-
-    let mut shell = boot();
-    let result = top_level_under(
-        &mut shell,
-        restrict_to(&work_s),
-        &format!("sh -c 'echo x > {denied_s}'"),
-    );
-    match result {
-        Err(Break::Error(_)) => {}
-        Err(other) => panic!("expected the confined external to fail, got {other:?}"),
-        Ok(v) => panic!(
-            "expected fail-closed at external dispatch, got Ok({v:?}); \
-             the write outside the grant was not confined"
-        ),
-    }
-    assert!(
-        !denied.exists(),
-        "out-of-grant write must not have landed at {denied_s}"
-    );
-    let _ = std::fs::remove_dir_all(&work);
-    let _ = std::fs::remove_file(&denied);
+    let proof = ral_core::require_confinement!();
+    writes(&proof, str::to_owned, false);
 }
 
-/// The same denial through the **block boundary**: the projection comes
-/// from a `grant [fs: …] { … }` block (not an outer `with_layer`),
-/// and the external launched inside the forced grant body is confined just
-/// the same. The grant body runs locally, but the child it spawns
-/// is confined.
 #[test]
 fn external_write_outside_grant_denied_in_block_body() {
-    let work = unique_workdir("blk");
-    let work_s = work.to_string_lossy().into_owned();
-    let denied = denied_path("blk");
-    let denied_s = denied.to_string_lossy().into_owned();
-
-    let mut shell = boot();
-    let result = top_level_under(
-        &mut shell,
-        Capabilities::default(),
-        &format!(
-            "grant [fs: [read: [`absolute '{work_s}'], write: [`absolute '{work_s}']]] \
-             {{ sh -c 'echo x > {denied_s}' }}"
-        ),
-    );
-    match result {
-        Err(Break::Error(_)) => {}
-        Err(other) => panic!("expected block-body external to fail closed, got {other:?}"),
-        Ok(v) => panic!("expected fail-closed in the grant block body, got Ok({v:?})"),
-    }
-    assert!(
-        !denied.exists(),
-        "block-body out-of-grant write must not have landed at {denied_s}"
-    );
-    let _ = std::fs::remove_dir_all(&work);
-    let _ = std::fs::remove_file(&denied);
+    let proof = ral_core::require_confinement!();
+    writes(&proof, str::to_owned, true);
 }
 
-/// A `spawn { … }` worker evaluates its body on a worker thread, but an
-/// external it spawns is confined the same way — the per-command launcher
-/// folds the same effective projection. A write outside the grant inside
-/// the spawned body is denied; `await` surfaces the failure and the side
-/// effect never lands.
 #[test]
 fn external_write_outside_grant_denied_in_spawn_body() {
-    let work = unique_workdir("spawn");
-    let work_s = work.to_string_lossy().into_owned();
-    let denied = denied_path("spawn");
-    let denied_s = denied.to_string_lossy().into_owned();
-
-    let mut shell = boot();
-    let src = format!(
-        "let h = !{{spawn {{ sh -c 'echo x > {denied_s}' }}}}\n\
-         return !{{await $h}}"
+    let proof = ral_core::require_confinement!();
+    writes(
+        &proof,
+        |body| format!("let h = spawn {{ {body} }}; await $h"),
+        false,
     );
-    let result = top_level_under(&mut shell, restrict_to(&work_s), &src);
-    match result {
-        Err(Break::Error(_)) => {}
-        Err(other) => panic!("expected the spawned confined external to fail, got {other:?}"),
-        Ok(v) => panic!(
-            "expected fail-closed through the spawn worker, got Ok({v:?}); \
-             the write outside the grant was not confined on the worker thread"
-        ),
-    }
-    assert!(
-        !denied.exists(),
-        "spawned out-of-grant write must not have landed at {denied_s}"
-    );
-    let _ = std::fs::remove_dir_all(&work);
-    let _ = std::fs::remove_file(&denied);
 }
 
-/// `par` is prelude code over `spawn`, so per-command confinement extends
-/// through it: an external inside a `par` task that writes outside the
-/// grant is denied, `par` surfaces the failure, and nothing lands.
 #[test]
 fn external_write_outside_grant_denied_in_par_task() {
-    let work = unique_workdir("par");
-    let work_s = work.to_string_lossy().into_owned();
-    let denied = denied_path("par");
-    let denied_s = denied.to_string_lossy().into_owned();
-
-    let mut shell = boot();
-    let src = format!("!{{par {{ |x| sh -c 'echo x > {denied_s}'; return $x }} [1] 1}}");
-    let result = top_level_under(&mut shell, restrict_to(&work_s), &src);
-    assert!(
-        result.is_err(),
-        "expected par to surface the confined external's failure, got Ok"
+    let proof = ral_core::require_confinement!();
+    writes(
+        &proof,
+        |body| format!("!{{par {{ |x| {body}; return $x }} [1] 1}}"),
+        false,
     );
-    assert!(
-        !denied.exists(),
-        "par task's out-of-grant write must not have landed at {denied_s}"
-    );
-    let _ = std::fs::remove_dir_all(&work);
-    let _ = std::fs::remove_file(&denied);
 }

@@ -24,6 +24,7 @@ use super::{DenyMask, OpenError, leaf_fd, open_dir_nofollow, open_nofollow, stan
 use crate::authority::policy::{ExecDeny, ExecRules, Subject};
 use crate::authority::sandbox::{ExecProjection, RenderedFs};
 use crate::path::{Dir, Installing, Kind, LeafMode, Located, Object, ObjectId, RealPath, Trace};
+use crate::site::{Silent, site};
 use libc::{c_int, c_uint};
 use std::collections::BTreeSet;
 use std::fmt;
@@ -73,11 +74,14 @@ impl Landlock {
         static PROBED: LazyLock<Landlock> = LazyLock::new(|| {
             // SAFETY: the version query takes a null attr and a zero size.
             let level = unsafe {
-                libc::syscall(
-                    libc::SYS_landlock_create_ruleset,
-                    std::ptr::null::<libc::c_void>(),
-                    0usize,
-                    CREATE_RULESET_VERSION,
+                site!(
+                    Silent::LandlockVersion,
+                    libc::syscall(
+                        libc::SYS_landlock_create_ruleset,
+                        std::ptr::null::<libc::c_void>(),
+                        0usize,
+                        CREATE_RULESET_VERSION,
+                    )
                 )
             };
             let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
@@ -92,6 +96,15 @@ fn classify(level: libc::c_long, errno: i32) -> Landlock {
         Ok(level) => Landlock::At(Abi(level)),
         Err(_) if errno == libc::ENOSYS || errno == libc::EOPNOTSUPP => Landlock::Absent,
         Err(_) => Landlock::Unprobed(errno),
+    }
+}
+
+#[cfg(any(test, feature = "test-util"))]
+pub(crate) fn probe_abi() -> Result<u32, i32> {
+    match Landlock::probe() {
+        Landlock::Absent => Ok(0),
+        Landlock::At(Abi(level)) => Ok(level),
+        Landlock::Unprobed(errno) => Err(errno),
     }
 }
 
@@ -177,11 +190,14 @@ impl Ruleset {
         };
         // SAFETY: `attr` is a live `landlock_ruleset_attr` of the size passed.
         let fd = unsafe {
-            libc::syscall(
-                libc::SYS_landlock_create_ruleset,
-                &raw const attr,
-                size_of::<RulesetAttr>(),
-                0 as c_uint,
+            site!(
+                Silent::LandlockCreate,
+                libc::syscall(
+                    libc::SYS_landlock_create_ruleset,
+                    &raw const attr,
+                    size_of::<RulesetAttr>(),
+                    0 as c_uint,
+                )
             )
         };
         match c_int::try_from(fd) {
@@ -199,12 +215,15 @@ impl Ruleset {
         };
         // SAFETY: `attr` is a live `landlock_path_beneath_attr`; both fds are open.
         let added = unsafe {
-            libc::syscall(
-                libc::SYS_landlock_add_rule,
-                self.0.as_raw_fd(),
-                RULE_PATH_BENEATH,
-                &raw const attr,
-                0 as c_uint,
+            site!(
+                Silent::LandlockAdmit,
+                libc::syscall(
+                    libc::SYS_landlock_add_rule,
+                    self.0.as_raw_fd(),
+                    RULE_PATH_BENEATH,
+                    &raw const attr,
+                    0 as c_uint,
+                )
             )
         };
         if added == 0 {
@@ -220,10 +239,13 @@ impl Ruleset {
         // SAFETY: `prctl` and the syscall touch only this process's own state.
         let restricted = unsafe {
             libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1 as libc::c_ulong, off, off, off) == 0
-                && libc::syscall(
-                    libc::SYS_landlock_restrict_self,
-                    self.0.as_raw_fd(),
-                    0 as c_uint,
+                && site!(
+                    Silent::LandlockRestrict,
+                    libc::syscall(
+                        libc::SYS_landlock_restrict_self,
+                        self.0.as_raw_fd(),
+                        0 as c_uint,
+                    )
                 ) == 0
         };
         if restricted {
@@ -463,11 +485,28 @@ fn expand(
     masks: &[RealPath],
     sink: &mut dyn FnMut(Admit<'_>) -> io::Result<()>,
 ) -> Result<(), Error> {
+    let mut holding = BTreeSet::new();
+    let mut excluded = BTreeSet::new();
+    for deny in table.denies() {
+        let (ExecDeny::Dir(path) | ExecDeny::File(path)) = deny else {
+            continue;
+        };
+        for trace in std::iter::once(path.real.named()).chain(path.real.target()) {
+            let mut ids = trace.spine_ids();
+            if let Some(id) = trace.leaf_id() {
+                excluded.insert(id);
+                ids.next_back();
+            }
+            holding.extend(ids);
+        }
+    }
     let mut walk = Walk {
         table,
         walks,
         masks,
         sink,
+        holding,
+        excluded,
         spine: Vec::new(),
     };
     for root in lowered(table, roots) {
@@ -505,27 +544,31 @@ struct Walk<'w> {
     walks: &'w dyn Fn(&RealPath) -> bool,
     masks: &'w [RealPath],
     sink: &'w mut dyn FnMut(Admit<'_>) -> io::Result<()>,
+    holding: BTreeSet<ObjectId>,
+    excluded: BTreeSet<ObjectId>,
     /// The identity of each directory being listed, so a bind mount looping
     /// back onto one ends the descent there.
     spine: Vec<ObjectId>,
 }
 
 impl Walk<'_> {
-    /// `d` as its position decides: entered where the table permits it, and
-    /// listed only where a rule could speak beneath it.
+    /// Judge the position and inode; list every exclusion-holding directory.
     fn dir(&mut self, d: &Dir<Installing>) -> Result<(), Error> {
         let at = crate::path::Subject::Position(d.real());
+        let id = d.trace().last_id();
         let masked = self.masks.iter().any(|m| m.contains(d.real()));
-        if masked || !self.table.evidence(Subject::Dir(at)).permits() {
+        if masked || self.excluded.contains(&id) || !self.table.evidence(Subject::Dir(at)).permits()
+        {
             return Ok(());
         }
-        if !listed(self.table, self.masks, d.real(), (self.walks)(d.real())) {
+        if !self.holding.contains(&id)
+            && !listed(self.table, self.masks, d.real(), (self.walks)(d.real()))
+        {
             return self.admit(Admit {
                 path: d.real(),
                 fd: d.as_fd(),
             });
         }
-        let id = d.trace().last_id();
         if self.spine.contains(&id) {
             return Ok(());
         }
@@ -535,11 +578,13 @@ impl Walk<'_> {
         Ok(())
     }
 
-    /// `f` as its position decides: a regular file the table permits,
-    /// admitted.
+    /// Admit a regular file only where its position and inode permit it.
     fn file(&mut self, f: &Located<Installing>) -> Result<(), Error> {
         let at = crate::path::Subject::Position(f.real());
-        if f.kind() != Some(Kind::File) || !self.table.evidence(Subject::Program(at)).permits() {
+        if f.kind() != Some(Kind::File)
+            || self.excluded.contains(&f.trace().last_id())
+            || !self.table.evidence(Subject::Program(at)).permits()
+        {
             return Ok(());
         }
         let fd = leaf_fd(f).map_err(|e| Error::admit(f.real(), e))?;

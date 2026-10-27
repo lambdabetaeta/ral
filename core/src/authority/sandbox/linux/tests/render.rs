@@ -71,14 +71,15 @@ fn render(
 ) -> Vec<String> {
     let rendered = policy.rendered().expect("ASCII paths render");
     let address = (ownership == Ownership::Kept).then(info_slot);
-    let chdir = chdir.map(std::path::Path::new);
+    let chdir = chdir.map(|dir| CwdPath::new(dir.into()).expect("absolute cwd"));
     bwrap_argv(
         &rendered,
-        chdir,
+        chdir.as_ref(),
         address,
         host,
         binds,
         &GpuNodes::default(),
+        &PtyNodes::default(),
         &[],
     )
     .expect("ASCII paths render")
@@ -203,11 +204,12 @@ fn a_cwd_within_a_deny_is_refused_naming_both() {
         let binds = binds(&policy, WHOLE);
         bwrap_argv(
             &rendered,
-            Some(cwd),
+            Some(&CwdPath::new(cwd.to_path_buf()).expect("absolute cwd")),
             None,
             WHOLE,
             &binds,
             &GpuNodes::default(),
+            &PtyNodes::default(),
             &[],
         )
     };
@@ -498,6 +500,7 @@ fn a_deny_that_hides_proc_is_refused() {
             WHOLE,
             &binds,
             &GpuNodes::default(),
+            &PtyNodes::default(),
             &[],
         );
         assert_eq!(argv.is_err(), refused, "{denied}: {argv:?}");
@@ -708,14 +711,84 @@ fn a_bwrap_that_cannot_mount_by_descriptor_launches_nothing() {
             .expect("a launch it cannot mount must be refused")
             .to_string()
     };
-    let why = refusal(Builds::ByName);
-    assert!(why.contains(&path) && why.contains("0.8.0"), "{why}");
     let why = refusal(Builds::Nothing("No permissions to create a new namespace"));
     assert!(why.contains(&path) && why.contains("cannot build"), "{why}");
     assert!(
         why.contains("No permissions") && !why.contains("0.8.0"),
         "{why}"
     );
+}
+
+#[test]
+fn cgroup_masks_follow_the_tree_shown_by_the_overlaid_bind() {
+    use crate::path::render_real;
+    let name = |path: &str| {
+        render_real(&crate::test_helper::place(path))
+            .unwrap()
+            .remove(0)
+    };
+    let tree = "/sys/fs/cgroup/ral";
+    let binds = Binds(vec![
+        (
+            info_slot(),
+            super::super::Bind::read_only(
+                Layer::Shown,
+                name("/sys"),
+                (crate::test_helper::place("/sys"), name("/sys")),
+            ),
+        ),
+        (
+            info_slot(),
+            super::super::Bind::read_only(
+                Layer::Over,
+                name(CGROUP),
+                (crate::test_helper::place(tree), name(tree)),
+            ),
+        ),
+    ]);
+    assert_eq!(
+        binds.names(&name("/sys/fs/cgroup/other/cgroup.procs")),
+        vec![]
+    );
+    assert_eq!(
+        binds.names(&name("/sys/fs/cgroup/ral/cgroup.procs")),
+        vec![name("/sys/fs/cgroup/cgroup.procs")]
+    );
+    assert_eq!(
+        binds.names(&name("/sys/devices")),
+        vec![name("/sys/devices")]
+    );
+}
+
+#[test]
+fn the_by_hand_dev_masks_discovered_terminals_but_not_ptmx() {
+    let dir = tempfile::tempdir().unwrap();
+    let policy = deny_within(dir.path(), &[]);
+    let host = HostEnvelope {
+        virtual_dev: false,
+        ..WHOLE
+    };
+    let args = bwrap_argv(
+        &policy.rendered().unwrap(),
+        None,
+        None,
+        host,
+        &binds(&policy, host),
+        &GpuNodes::default(),
+        &PtyNodes(vec!["/dev/pts/7".into(), "/dev/pts/19".into()]),
+        &[],
+    )
+    .unwrap()
+    .into_iter()
+    .map(|arg| arg.into_string().unwrap())
+    .collect::<Vec<_>>();
+    let pts = position_of(&args, &["--dev-bind", "/dev/pts", "/dev/pts"]).unwrap();
+    for node in ["/dev/pts/7", "/dev/pts/19"] {
+        let mask = position_of(&args, &["--ro-bind", "/dev/null", node]).unwrap();
+        assert!(pts < mask, "the terminal mask must follow devpts: {args:?}");
+    }
+    assert!(position_of(&args, &["--symlink", "pts/ptmx", "/dev/ptmx"]).is_some());
+    assert!(position_of(&args, &["--ro-bind", "/dev/null", "/dev/pts/ptmx"]).is_none());
 }
 
 /// A grant keeps the real path it froze: a spelling retargeted since
@@ -802,6 +875,7 @@ fn render_gpu(policy: &SandboxProjection) -> Vec<String> {
         WHOLE,
         &binds(policy, WHOLE),
         &gpu(),
+        &PtyNodes::default(),
         &[],
     )
     .expect("ASCII paths render")

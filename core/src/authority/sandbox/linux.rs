@@ -25,11 +25,13 @@
 mod gpu;
 mod host;
 pub(crate) mod landlock;
+mod pty;
 pub(crate) mod seccomp;
 
 use gpu::GpuNodes;
 use host::Builds;
 pub(crate) use host::HostEnvelope;
+use pty::PtyNodes;
 
 use super::Refusal;
 use super::launch::Ownership;
@@ -39,14 +41,14 @@ use super::{FsProjection, RenderedProjection};
 use crate::Role;
 use crate::authority::policy::Baseline;
 use crate::path::{
-    Dir, Installing, Kind, LeafMode, LexicalPath, Located, Object, RealPath, Rendered, Trace,
-    is_loop, render_real, walk_lenient,
+    CwdPath, Dir, Installing, Kind, LeafMode, LexicalPath, Located, Object, RealPath, Rendered,
+    Trace, is_loop, render_real, walk_lenient,
 };
 use crate::site::{Silent, site};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::io;
+use std::io::{self, Read};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
@@ -143,19 +145,13 @@ pub(crate) fn bwrap_command(
     mut handoff: Handoff,
     warrant: Slot,
     policy: &RenderedProjection,
-    chdir: Option<&Path>,
+    chdir: Option<&CwdPath>,
     ownership: Ownership,
 ) -> Result<(Command, Option<InfoFd>), Refusal> {
     let bwrap = crate::path::shown(env.bwrap.arg0());
     let unavailable = |why: String| Err(Refusal::Unavailable(why));
     match env.host.builds {
         Builds::ByFd => {}
-        Builds::ByName => {
-            return unavailable(format!(
-                "bwrap at {bwrap} does not take --ro-bind-fd (bubblewrap 0.8.0 or newer); ral \
-                 mounts only by descriptor, so no confined command can run under it"
-            ));
-        }
         Builds::Nothing(why) => {
             return unavailable(format!(
                 "bwrap at {bwrap} cannot build an envelope on this host: {why}"
@@ -175,6 +171,11 @@ pub(crate) fn bwrap_command(
     let seccomp = (seccomp_programs()?.into_iter())
         .map(|program| lend_parcel("ral-seccomp", program))
         .collect::<Result<Vec<_>, _>>()?;
+    let ptys = if !env.host.virtual_dev && matches!(policy.fs, FsProjection::Restricted(_)) {
+        PtyNodes::discover()?
+    } else {
+        PtyNodes::default()
+    };
     let options = bwrap_argv(
         policy,
         chdir,
@@ -182,6 +183,7 @@ pub(crate) fn bwrap_command(
         env.host,
         &binds,
         &GpuNodes::discover(),
+        &ptys,
         &seccomp,
     )?;
     let args = lend_parcel(
@@ -224,15 +226,20 @@ pub(crate) fn bwrap_command(
 /// we stop watching it.  Confinement itself — the mounts, the seccomp
 /// filter — is otherwise identical.
 ///
-/// The render is pure in `host`, `gpu` and in descriptors, so a test can assert
+/// The render takes `host`, `gpu`, `ptys` and descriptors as data, so a test can assert
 /// options for a host it is not running on.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "independent inputs to the pure envelope render"
+)]
 pub(crate) fn bwrap_argv(
     policy: &RenderedProjection,
-    chdir: Option<&Path>,
+    chdir: Option<&CwdPath>,
     address: Option<Slot>,
     host: HostEnvelope,
     binds: &Binds,
     gpu: &GpuNodes,
+    ptys: &PtyNodes,
     seccomp: &[Slot],
 ) -> Result<Vec<OsString>, String> {
     let mut c = Options::default();
@@ -252,7 +259,7 @@ pub(crate) fn bwrap_argv(
         c.arg("--unshare-net");
     }
     if let Some(dir) = chdir {
-        c.arg("--chdir").arg(dir);
+        c.arg("--chdir").arg(dir.as_path());
     }
     match &policy.fs {
         FsProjection::Restricted(_) => {
@@ -262,14 +269,14 @@ pub(crate) fn bwrap_argv(
             // an empty unwritable one, as macOS leaves it unreadable.  Before the
             // binds, which may hide it; `/` and `/tmp` are the envelope's own.
             if let Some(dir) =
-                chdir.filter(|dir| !matches!(dir.as_os_str().as_bytes(), b"/" | b"/tmp"))
+                chdir.filter(|dir| !matches!(dir.as_path().as_os_str().as_bytes(), b"/" | b"/tmp"))
             {
-                c.args(["--perms", "0555", "--tmpfs"]).arg(dir);
+                c.args(["--perms", "0555", "--tmpfs"]).arg(dir.as_path());
             }
             binds.render(&mut c, Layer::Shown);
             // After it, or a prefix of `/` or `/proc` re-binds the host's over these.
             c.args(["--proc", "/proc"]);
-            render_dev(&mut c, host);
+            render_dev(&mut c, host, ptys);
             if policy.gpu {
                 gpu.admit(&mut c);
             }
@@ -292,8 +299,12 @@ pub(crate) fn bwrap_argv(
     if let Some(rules) = policy.fs.rules() {
         // By stored name, where a mask lands, not folded as an exclusion is;
         // a cwd that resolves nowhere is left to bwrap's `--chdir`.
-        let cwd =
-            chdir.and_then(|dir| Some((dir, RealPath::of(&LexicalPath::absolute(dir)?).ok()?)));
+        let cwd = chdir.and_then(|dir| {
+            Some((
+                dir,
+                RealPath::of(&LexicalPath::absolute(dir.as_path())?).ok()?,
+            ))
+        });
         let mut denied: Vec<_> = rules.deny.iter().collect();
         denied.sort();
         for path in denied {
@@ -304,7 +315,7 @@ pub(crate) fn bwrap_argv(
                     "sandbox: the working directory {} is excluded by {}, and no confined \
                      command can start inside an exclusion; run it from another directory \
                      (`cd` or `within [dir: …]`)",
-                    crate::path::shown(dir),
+                    crate::path::shown(dir.as_path()),
                     path.as_str()
                 ));
             }
@@ -379,10 +390,15 @@ impl Bind {
         if self.dest == inner.dest {
             return self.access == Access::Writable && inner.access == Access::ReadOnly;
         }
-        self.dest.holds(inner.dest.as_str())
+        self.shadows(&inner.dest)
             && (inner.access == Access::ReadOnly
                 || self.spells(inner)
                 || self.access == Access::Writable)
+    }
+
+    /// Whether this bind's mount hides whatever lay at `name`.
+    fn shadows(&self, name: &Rendered) -> bool {
+        self.dest.holds(name.as_str())
     }
 
     /// Where this bind shows `name`, if its object holds it.
@@ -440,13 +456,16 @@ impl Binds {
         self.0.iter().filter(move |(_, bind)| bind.layer == layer)
     }
 
-    /// Every name the envelope shows `name` at: itself, and wherever a
-    /// `Shown` bind of an object holding it puts it.  A mount laid at one
-    /// does not show at another.
+    /// Names still visible after the overlaid binds replace their destinations.
     fn names(&self, name: &Rendered) -> Vec<Rendered> {
         let mut names: Vec<_> = (self.layer(Layer::Shown))
             .filter_map(|(_, bind)| bind.shows(name))
             .chain([name.clone()])
+            .filter(|name| !self.layer(Layer::Over).any(|(_, bind)| bind.shadows(name)))
+            .chain(
+                self.layer(Layer::Over)
+                    .filter_map(|(_, bind)| bind.shows(name)),
+            )
             .collect();
         names.sort();
         names.dedup();
@@ -679,7 +698,7 @@ fn pinned<'a>(pins: [&'a Pinned; 2]) -> Result<Vec<(Bind, BorrowedFd<'a>)>, Stri
 /// `ptmxmode` admits: the kernel finds a ptmx node's devpts at the `pts` beside
 /// it in the same mount, which a bind of the host's node lacks.  An absent node
 /// is dropped: binding one costs the launch.
-fn render_dev(c: &mut Options, host: HostEnvelope) {
+fn render_dev(c: &mut Options, host: HostEnvelope, ptys: &PtyNodes) {
     if host.virtual_dev {
         c.args(["--dev", "/dev"]);
         return;
@@ -699,6 +718,9 @@ fn render_dev(c: &mut Options, host: HostEnvelope) {
         }
     }
     c.args(["--symlink", "pts/ptmx", "/dev/ptmx"]);
+    for node in &ptys.0 {
+        c.args(["--ro-bind", "/dev/null", node]);
+    }
     c.args(["--symlink", "/proc/self/fd", "/dev/fd"]);
     for (fd, name) in ["/dev/stdin", "/dev/stdout", "/dev/stderr"]
         .into_iter()
@@ -777,17 +799,36 @@ impl InfoFd {
     /// The payload's process group, bwrap's `child-pid`, read to EOF.  bwrap
     /// writes it before that process's `setsid`, naming no group yet; EOF
     /// waits for the payload's sweep of its copy of the writer, by which the
-    /// group exists, or for every holder's death.  `None` if bwrap died first.
-    pub(super) fn payload_pgid(self) -> Option<crate::process::Pgid> {
+    /// group exists, or for every holder's death. Empty means bwrap died first;
+    /// an unreadable or malformed record refuses the spawn.
+    pub(super) fn payload_pgid(self) -> Result<Option<crate::process::Pgid>, String> {
         #[derive(serde::Deserialize)]
         struct Info {
             #[serde(rename = "child-pid")]
             child_pid: i32,
         }
-        let Self { reader, writers } = self;
+        let Self {
+            mut reader,
+            writers,
+        } = self;
         drop(writers);
-        let info: Info = serde_json::from_reader(reader).ok()?;
+        let mut record = Vec::new();
+        reader
+            .read_to_end(&mut record)
+            .map_err(|e| format!("sandbox: cannot read bwrap's --info-fd record: {e}"))?;
+        if record.is_empty() {
+            return Ok(None);
+        }
+        let info: Info = serde_json::from_slice(&record)
+            .map_err(|e| format!("sandbox: malformed bwrap --info-fd record: {e}"))?;
         crate::process::Pgid::from_raw(info.child_pid)
+            .map(Some)
+            .ok_or_else(|| {
+                format!(
+                    "sandbox: invalid bwrap --info-fd child-pid: {}",
+                    info.child_pid
+                )
+            })
     }
 }
 

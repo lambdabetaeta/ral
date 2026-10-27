@@ -10,7 +10,12 @@
 
 mod common;
 
-use common::{Output, Scratch, assert_admitted, assert_refused, places};
+#[cfg(unix)]
+use common::denied_by_active_grant;
+use common::{Output, Scratch, denied_by_grant, places};
+use ral_core::test_helper::confinement::admitted;
+#[cfg(unix)]
+use ral_core::test_helper::confinement::denied;
 use std::path::Path;
 
 /// An fs layer reading `read`, writing `write` and denying `deny`.
@@ -57,55 +62,25 @@ fn stacked(outer: &str, inner: &str, body: &str) -> Output {
 }
 
 fn write(path: &Path) -> String {
-    format!("echo key > '{}'", ral_core::path::shown(path))
+    format!("echo key > '{}'; echo key", ral_core::path::shown(path))
 }
 
 fn read(path: &Path) -> String {
     format!("echo !{{from-string < '{}'}}", ral_core::path::shown(path))
 }
 
-#[cfg(unix)]
-fn assert_ran(out: &Output, what: &str) {
-    assert_eq!(out.status, 0, "{what} must run; stderr:\n{}", out.stderr);
-    assert!(
-        out.stdout.contains("ran"),
-        "{what} did not run; stdout:\n{}",
-        out.stdout
-    );
-}
-
-#[cfg(unix)]
-fn assert_not_run(out: &Output, what: &str) {
-    assert_ne!(
-        out.status, 0,
-        "{what} must be refused; stderr:\n{}",
-        out.stderr
-    );
-    assert!(
-        !out.stdout.contains("ran"),
-        "{what} ran; stdout:\n{}",
-        out.stdout
-    );
-    assert!(
-        out.stderr.contains("denied by active grant"),
-        "{what} must be refused by the grant; stderr:\n{}",
-        out.stderr
-    );
-}
-
 /// Denies join: a deny only the inner layer writes holds the stack, under
 /// every spelling of its name.
 #[test]
 fn an_inner_layers_deny_joins_the_stack() {
+    let proof = ral_core::require_confinement!();
     let d = Scratch::new("stack_join");
     let outer = fs(&[&d.0], &[&d.0], &[]);
     let inner = fs(&[&d.0], &[&d.0], &[&d.join("Secrets")]);
 
+    let control = stacked(&outer, &inner, &write(&d.join("other")));
     let out = stacked(&outer, &inner, &write(&d.join("secrets")));
-    assert_refused(
-        &out,
-        "a write to `secrets` under an inner deny on `Secrets`",
-    );
+    denied_by_grant(&proof, &control, &out, "key");
     assert!(!d.join("secrets").exists(), "the refused write landed");
     assert!(
         out.stderr.contains(&format!(
@@ -117,26 +92,28 @@ fn an_inner_layers_deny_joins_the_stack() {
     );
 
     let out = stacked(&outer, &inner, &write(&d.join("other")));
-    assert_admitted(&out, "a write to `other`");
+    admitted(&proof, &out, "key");
 }
 
 /// Denies join, allows meet: an inner allow on a denied directory cannot
 /// lift the outer deny.
 #[test]
 fn an_inner_allow_cannot_lift_an_outer_deny() {
+    let proof = ral_core::require_confinement!();
     let d = Scratch::new("stack_lift");
     let secrets = d.join("Secrets");
     std::fs::create_dir(&secrets).unwrap();
     let inner = fs(&[&secrets], &[&secrets], &[]);
 
     let outer = fs(&[&d.0], &[&d.0], &[&secrets]);
+    let control = stacked(&outer, &inner, "echo key");
     let out = stacked(&outer, &inner, &write(&secrets.join("x")));
-    assert_refused(&out, "a write under an outer deny an inner layer allows");
+    denied_by_grant(&proof, &control, &out, "key");
     assert!(!secrets.join("x").exists(), "the refused write landed");
 
     let outer = fs(&[&d.0], &[&d.0], &[]);
     let out = stacked(&outer, &inner, &write(&secrets.join("x")));
-    assert_admitted(&out, "a write under `Secrets` with no deny");
+    admitted(&proof, &out, "key");
 }
 
 /// Allows meet by their stored names: two layers spelling one directory
@@ -144,23 +121,22 @@ fn an_inner_allow_cannot_lift_an_outer_deny() {
 #[cfg(target_os = "linux")]
 #[test]
 fn two_spellings_of_a_directory_meet_to_neither() {
+    let proof = ral_core::require_confinement!();
     let d = Scratch::new("stack_spellings");
     let (upper, lower) = (d.join("Work"), d.join("work"));
     std::fs::create_dir(&upper).unwrap();
     std::fs::create_dir(&lower).unwrap();
     let layer = |dir: &Path| fs(&[&d.0], &[dir], &[]);
 
+    let control = stacked(&layer(&upper), &layer(&lower), "echo key");
     for dir in [&upper, &lower] {
         let out = stacked(&layer(&upper), &layer(&lower), &write(&dir.join("f")));
-        assert_refused(
-            &out,
-            &format!("a write into {}", ral_core::path::shown(dir)),
-        );
+        denied_by_grant(&proof, &control, &out, "key");
         assert!(!dir.join("f").exists(), "the refused write landed");
     }
 
     let out = stacked(&layer(&upper), &layer(&upper), &write(&upper.join("f")));
-    assert_admitted(&out, "a write into `Work` granted by both layers");
+    admitted(&proof, &out, "key");
 }
 
 /// Allows meet at their resolved forms: an inner grant through a symlink
@@ -168,12 +144,13 @@ fn two_spellings_of_a_directory_meet_to_neither() {
 #[cfg(unix)]
 #[test]
 fn a_symlinked_inner_grant_cannot_escape_the_outer_ceiling() {
+    let proof = ral_core::require_confinement!();
     let d = Scratch::new("stack_symlink");
     let (inner_dir, outside) = (d.join("inner"), d.join("outside"));
     std::fs::create_dir_all(inner_dir.join("sub")).unwrap();
     std::fs::create_dir(&outside).unwrap();
     std::fs::write(outside.join("f"), "escaped").unwrap();
-    std::fs::write(inner_dir.join("sub/f"), "nested").unwrap();
+    std::fs::write(inner_dir.join("sub/f"), "escaped").unwrap();
     let link = inner_dir.join("link");
     std::os::unix::fs::symlink(&outside, &link).unwrap();
     let outer = fs(&[&inner_dir], &[], &[]);
@@ -182,20 +159,16 @@ fn a_symlinked_inner_grant_cannot_escape_the_outer_ceiling() {
         fs(&[&inner_dir.join("sub")], &[], &[]),
     );
 
+    let control = stacked(&outer, &through_link, "echo escaped");
     for path in [outside.join("f"), link.join("f")] {
         let out = stacked(&outer, &through_link, &read(&path));
-        assert_refused(&out, &format!("a read of {}", ral_core::path::shown(&path)));
+        denied_by_grant(&proof, &control, &out, "escaped");
         assert!(!out.stdout.contains("escaped"), "stdout:\n{}", out.stdout);
     }
     let out = stacked(&outer, &nested, &read(&inner_dir.join("sub/f")));
-    assert_admitted(&out, "a read under a nested inner grant");
-    assert!(out.stdout.contains("nested"), "stdout:\n{}", out.stdout);
+    admitted(&proof, &out, "escaped");
+    assert!(out.stdout.contains("escaped"), "stdout:\n{}", out.stdout);
 
-    #[cfg(target_os = "linux")]
-    if !common::bwrap_functional() {
-        eprintln!("skip: bwrap cannot confine a child here");
-        return;
-    }
     let cat = |inner: &str, path: &Path| {
         stacked(
             &outer,
@@ -203,23 +176,17 @@ fn a_symlinked_inner_grant_cannot_escape_the_outer_ceiling() {
             &format!("sh -c 'cat {}'", ral_core::path::shown(path)),
         )
     };
-    let out = cat(&nested, &inner_dir.join("sub/f"));
-    if common::refused_by_a_confined_runner(&out) {
-        return;
-    }
-    assert_admitted(&out, "a child's read under a nested inner grant");
-    assert_eq!(out.stdout, "nested");
+    let control = cat(&nested, &inner_dir.join("sub/f"));
+    admitted(&proof, &control, "escaped");
     let out = cat(&through_link, &link.join("f"));
-    assert_ne!(
-        out.status, 0,
-        "a child's read through the link must be refused"
-    );
+    denied(&proof, &control, &out, "escaped");
     assert!(!out.stdout.contains("escaped"), "stdout:\n{}", out.stdout);
 }
 
 /// Allows meet: layers with disjoint allows admit nothing, fail-closed.
 #[test]
 fn disjoint_layers_meet_to_nothing() {
+    let proof = ral_core::require_confinement!();
     let d = Scratch::new("stack_disjoint");
     let (a, b) = (d.join("a"), d.join("b"));
     for dir in [&a, &b] {
@@ -227,16 +194,14 @@ fn disjoint_layers_meet_to_nothing() {
         std::fs::write(dir.join("f"), "content").unwrap();
     }
 
+    let control = stacked(&fs(&[&a], &[], &[]), &fs(&[&b], &[], &[]), "echo content");
     for dir in [&a, &b] {
         let out = stacked(
             &fs(&[&a], &[], &[]),
             &fs(&[&b], &[], &[]),
             &read(&dir.join("f")),
         );
-        assert_refused(
-            &out,
-            &format!("a read under {}", ral_core::path::shown(dir)),
-        );
+        denied_by_grant(&proof, &control, &out, "content");
     }
 
     let out = stacked(
@@ -244,7 +209,7 @@ fn disjoint_layers_meet_to_nothing() {
         &fs(&[&d.0], &[], &[]),
         &read(&a.join("f")),
     );
-    assert_admitted(&out, "a read under nested layers");
+    admitted(&proof, &out, "content");
     assert!(out.stdout.contains("content"), "stdout:\n{}", out.stdout);
 }
 
@@ -253,6 +218,8 @@ fn disjoint_layers_meet_to_nothing() {
 #[cfg(unix)]
 #[test]
 fn a_deeper_inner_allow_does_not_lift_an_outer_exec_deny() {
+    ral_core::require_landlock!(1);
+    let proof = ral_core::require_confinement!();
     let d = Scratch::new("stack_exec_deep");
     let bin = d.join("bin");
     let (good, deep) = (bin.join("good/t"), bin.join("evil/deep/t"));
@@ -266,12 +233,11 @@ fn a_deeper_inner_allow_does_not_lift_an_outer_exec_deny() {
     ]);
 
     let out = stacked(&outer, &inner, &ral_core::path::shown(&good));
-    if common::refused_by_a_confined_runner(&out) {
-        return;
-    }
-    assert_ran(&out, "`good/t`");
+
+    admitted(&proof, &out, "ran");
+    let control = out;
     let out = stacked(&outer, &inner, &ral_core::path::shown(&deep));
-    assert_not_run(&out, "`evil/deep/t`");
+    denied_by_active_grant(&proof, &control, &out, "ran");
 }
 
 /// An exclusion beats every allowance: an exact file allow does not reopen a
@@ -279,6 +245,8 @@ fn a_deeper_inner_allow_does_not_lift_an_outer_exec_deny() {
 #[cfg(unix)]
 #[test]
 fn an_exact_exec_allow_does_not_reopen_a_covering_deny_dir() {
+    ral_core::require_landlock!(1);
+    let proof = ral_core::require_confinement!();
     let d = Scratch::new("stack_exec_exact");
     let bin = d.join("bin");
     let (tool, other) = (bin.join("tool"), bin.join("other"));
@@ -290,9 +258,10 @@ fn an_exact_exec_allow_does_not_reopen_a_covering_deny_dir() {
         (&ral_core::path::shown(&tool), "allow"),
     ]);
 
+    let control = under(&layer, "/bin/sh -c 'echo ran'");
     for program in [&tool, &other] {
         let out = under(&layer, &ral_core::path::shown(program));
-        assert_not_run(&out, &ral_core::path::shown(program));
+        denied_by_active_grant(&proof, &control, &out, "ran");
         assert!(
             out.stderr
                 .contains("an allowance cannot override an exclusion"),
@@ -308,6 +277,8 @@ fn an_exact_exec_allow_does_not_reopen_a_covering_deny_dir() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_veto_holds_every_spelling_of_the_name() {
+    ral_core::require_landlock!(1);
+    let proof = ral_core::require_confinement!();
     let d = Scratch::new("stack_exec_veto");
     let bin = d.join("bin");
     let (upper, longer) = (bin.join("TOOL"), bin.join("toolx"));
@@ -318,15 +289,16 @@ fn a_veto_holds_every_spelling_of_the_name() {
         ("tool", "deny"),
     ]);
 
+    let control = under(&layer, &ral_core::path::shown(&longer));
     let out = under(&layer, &ral_core::path::shown(&upper));
-    assert_not_run(&out, "`TOOL` under a veto on `tool`");
+    denied_by_active_grant(&proof, &control, &out, "ran");
     assert!(
         !out.stderr.contains("another spelling"),
         "a veto must refuse plainly; stderr:\n{}",
         out.stderr
     );
     let out = under(&layer, &ral_core::path::shown(&longer));
-    assert_ran(&out, "`toolx`, a different name");
+    admitted(&proof, &out, "ran");
 }
 
 /// Allows meet by their stored names: two layers admitting one directory
@@ -334,6 +306,8 @@ fn a_veto_holds_every_spelling_of_the_name() {
 #[cfg(target_os = "linux")]
 #[test]
 fn two_spellings_of_an_exec_dir_meet_to_neither() {
+    ral_core::require_landlock!(1);
+    let proof = ral_core::require_confinement!();
     let d = Scratch::new("stack_exec_spellings");
     let bin = d.join("bin");
     let (upper, lower) = (bin.join("Tools/t"), bin.join("tools/t"));
@@ -341,13 +315,14 @@ fn two_spellings_of_an_exec_dir_meet_to_neither() {
     common::script(&lower);
     let layer = |dir: &str| exec(&[(&format!("{}/{dir}/", ral_core::path::shown(&bin)), "allow")]);
 
+    let control = stacked(&layer("Tools"), &layer("tools"), "/bin/sh -c 'echo ran'");
     for program in [&upper, &lower] {
         let out = stacked(
             &layer("Tools"),
             &layer("tools"),
             &ral_core::path::shown(program),
         );
-        assert_not_run(&out, &ral_core::path::shown(program));
+        denied_by_active_grant(&proof, &control, &out, "ran");
     }
 
     let out = stacked(
@@ -355,5 +330,5 @@ fn two_spellings_of_an_exec_dir_meet_to_neither() {
         &layer("Tools"),
         &ral_core::path::shown(&upper),
     );
-    assert_ran(&out, "`Tools/t` admitted by both layers");
+    admitted(&proof, &out, "ran");
 }

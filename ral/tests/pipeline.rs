@@ -16,6 +16,7 @@
 mod common;
 
 use common::{Output, fresh_tmp_path, ral_command};
+use ral_core::test_helper::confinement::admitted;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Stdio;
 use std::time::Duration;
@@ -589,53 +590,16 @@ fn ext_command_non_utf8_gives_named_error() {
 // tests exercise the in-process fallback path; with the feature the same
 // scripts exercise the new configure_subprocess_stdio wiring.
 
-// The IPC subprocess enters the platform OS sandbox.  Linux often lacks
-// unprivileged user namespaces in containers, and macOS Seatbelt can be
-// unavailable under some test runners, so probe once and skip IPC plumbing
-// tests when the kernel sandbox cannot be entered.
-fn sandbox_functional() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        common::bwrap_functional()
-    }
-    #[cfg(target_os = "macos")]
-    {
-        macos_sandbox_functional()
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        true
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn macos_sandbox_functional() -> bool {
-    // Entering Seatbelt is what may be unavailable, and a failed entry aborts
-    // the confined child — so run the smallest real grant through the public
-    // surface and require both a clean exit and the body's own output.
-    ral_command()
-        .args([
-            "--norc",
-            "-c",
-            "grant [exec: [allow: [`absolute /bin/echo]], fs: [read: [`absolute /tmp]]] { /bin/echo probe }",
-        ])
-        .stderr(Stdio::null())
-        .output()
-        .is_ok_and(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "probe")
-}
-
 #[test]
 fn grant_fs_pipeline_stdout_flows() {
     // Grant is a pipeline stage: its stdout goes to a Pipe sink.
     // configure_subprocess_stdio must clone the pipe writer and hand it to
     // the IPC subprocess; cat on the right side must receive the output.
-    if !sandbox_functional() {
-        return;
-    }
+    let proof = ral_core::require_confinement!();
     let o = run(
         "grant [exec: [allow: [`absolute /bin/echo]], fs: [read: [`absolute /tmp]]] { /bin/echo sandboxed } | cat",
     );
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    admitted(&proof, &o, "sandboxed");
     assert_eq!(o.stdout.trim(), "sandboxed");
 }
 
@@ -644,21 +608,17 @@ fn grant_fs_capture_returns_output() {
     // Grant body result is captured in a let binding and echoed.
     // Tests that output produced inside the grant (via from-lines) reaches the
     // parent — both via the in-process fallback and the IPC subprocess path.
-    if !sandbox_functional() {
-        return;
-    }
+    let proof = ral_core::require_confinement!();
     let o = run(
         "let xv = grant [exec: [allow: [`absolute /bin/echo]], fs: [read: [`absolute /tmp]]] { /bin/echo captured | from-lines }; echo $xv[0]",
     );
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    admitted(&proof, &o, "captured");
     assert_eq!(o.stdout.trim(), "captured");
 }
 
 #[test]
 fn grant_pipeline_abort_after_missing_later_stage_does_not_hang() {
-    if !sandbox_functional() {
-        return;
-    }
+    let _proof = ral_core::require_confinement!();
     for n in [5, 50_000] {
         let script = format!(
             "grant [net: `offline, fs: [read: [`cwd ., `absolute /tmp, `tempdir .], write: [`cwd ., `absolute /tmp, `tempdir .]]] {{ to-lines !{{range 0 {n}}} | limit 80 }}"
@@ -684,9 +644,7 @@ fn grant_pipeline_abort_after_missing_later_stage_does_not_hang() {
 /// next stage cannot launch, ends with its launch.
 #[test]
 fn a_confined_stage_rolled_back_at_once_does_not_outlive_its_launch() {
-    if !sandbox_functional() {
-        return;
-    }
+    let _proof = ral_core::require_confinement!();
     let o = run_with_timeout(
         &[],
         "grant [net: `offline] { /bin/sleep 30 | ral-no-such-command }",
@@ -703,13 +661,11 @@ fn grant_fs_pipeline_stdin_forwarded() {
     // subprocess's stdin so that the body reads the upstream data.
     // Uses from-lines (ral builtin) so that pipe_stdin is consumed directly
     // rather than through an inner pipeline.
-    if !sandbox_functional() {
-        return;
-    }
+    let proof = ral_core::require_confinement!();
     let o = run(
         "let xv = /bin/echo piped | grant [fs: [read: [`absolute /tmp]]] { from-lines }; echo $xv[0]",
     );
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    admitted(&proof, &o, "piped");
     assert_eq!(o.stdout.trim(), "piped");
 }
 
@@ -722,9 +678,7 @@ fn grant_fs_pipeline_stdin_forwarded() {
 /// cleanly, so the outcome carries no sign that a signal ever arrived.
 #[test]
 fn a_cancelled_confined_pipeline_stage_gets_its_grace_signal() {
-    if !sandbox_functional() {
-        return;
-    }
+    let _proof = ral_core::require_confinement!();
     let gate = fresh_tmp_path("ral_pipeline_confined_grace", "gate");
     let trapfile = fresh_tmp_path("ral_pipeline_confined_grace", "trap");
     let fixture = fresh_tmp_path("ral_pipeline_confined_grace", "sh");
@@ -776,9 +730,7 @@ fn a_cancelled_confined_pipeline_stage_gets_its_grace_signal() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_struck_frame_signals_an_enveloped_stage_member_once() {
-    if !sandbox_functional() {
-        return;
-    }
+    let _proof = ral_core::require_confinement!();
     let hits = fresh_tmp_path("ral_enveloped_member", "hits");
     let ready = fresh_tmp_path("ral_enveloped_member", "ready");
     let script_path = fresh_tmp_path("ral_enveloped_member", "ral");
@@ -843,9 +795,7 @@ fn a_struck_frame_signals_an_enveloped_stage_member_once() {
 
 #[test]
 fn grant_exec_bare_name_resolves_on_the_scoped_path_at_decode() {
-    if !sandbox_functional() {
-        return;
-    }
+    let _proof = ral_core::require_confinement!();
     let dir = tempfile::tempdir().unwrap();
     let fake_git = dir.path().join("git");
     std::fs::write(&fake_git, "#!/bin/sh\necho spoofed\n").unwrap();
@@ -868,9 +818,7 @@ fn grant_exec_bare_name_resolves_on_the_scoped_path_at_decode() {
 
 #[test]
 fn grant_exec_bare_name_is_not_redirected_by_a_path_scoped_inside_the_body() {
-    if !sandbox_functional() {
-        return;
-    }
+    let _proof = ral_core::require_confinement!();
     let dir = tempfile::tempdir().unwrap();
     let fake_git = dir.path().join("git");
     std::fs::write(&fake_git, "#!/bin/sh\necho spoofed\n").unwrap();
@@ -890,9 +838,7 @@ fn grant_exec_bare_name_is_not_redirected_by_a_path_scoped_inside_the_body() {
 
 #[test]
 fn grant_exec_explicit_path_allows_scoped_path_command() {
-    if !sandbox_functional() {
-        return;
-    }
+    let _proof = ral_core::require_confinement!();
     let dir = tempfile::tempdir().unwrap();
     let fake_git = dir.path().join("git");
     std::fs::write(&fake_git, "#!/bin/sh\necho spoofed\n").unwrap();
@@ -922,9 +868,7 @@ fn grant_fs_write_through_symlinked_prefix_to_nonexistent_target() {
     // `starts_with` then fails and the write is denied.  The fix walks up
     // to the longest existing ancestor and re-appends the tail, so the
     // target resolves through the symlink too.
-    if !sandbox_functional() {
-        return;
-    }
+    let _proof = ral_core::require_confinement!();
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

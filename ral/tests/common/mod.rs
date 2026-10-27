@@ -33,11 +33,49 @@ pub fn diagnostics(stderr: &str) -> String {
         .join("\n")
 }
 
-/// Captured result of a one-shot `ral` invocation.
-pub struct Output {
-    pub stdout: String,
-    pub stderr: String,
-    pub status: i32,
+pub use ral_core::test_helper::confinement::Output;
+
+#[track_caller]
+fn denied_by(
+    proof: &ral_core::test_helper::confinement::Confining,
+    control: &Output,
+    out: &Output,
+    marker: &str,
+    attribution: &str,
+) {
+    ral_core::test_helper::confinement::denied(proof, control, out, marker);
+    assert_ne!(out.status, 0, "grant refusal must fail: {out:?}");
+    assert!(
+        out.stderr.contains(attribution),
+        "expected {attribution:?}: {out:?}"
+    );
+}
+
+#[track_caller]
+pub fn denied_by_grant(
+    proof: &ral_core::test_helper::confinement::Confining,
+    control: &Output,
+    out: &Output,
+    marker: &str,
+) {
+    denied_by(proof, control, out, marker, "denied by grant");
+}
+
+#[track_caller]
+pub fn denied_by_active_grant(
+    proof: &ral_core::test_helper::confinement::Confining,
+    control: &Output,
+    out: &Output,
+    marker: &str,
+) {
+    denied_by(proof, control, out, marker, "denied by active grant");
+}
+
+#[ctor::ctor(unsafe)]
+fn init_test_binary() {
+    if let Some(code) = ral_core::invocation::serve_process_before_main(&[]) {
+        std::process::exit(i32::from(code));
+    }
 }
 
 /// Path to the `ral` binary cargo built for this test target.
@@ -277,73 +315,6 @@ pub fn script(path: &Path) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, "#!/bin/sh\necho ran\n").unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-}
-
-/// An fs refusal by the grant.
-pub fn assert_refused(out: &Output, what: &str) {
-    assert_ne!(
-        out.status, 0,
-        "{what} must be refused; stderr:\n{}",
-        out.stderr
-    );
-    assert!(
-        out.stderr.contains("denied by grant"),
-        "{what} must be refused by the grant; stderr:\n{}",
-        out.stderr
-    );
-}
-
-pub fn assert_admitted(out: &Output, what: &str) {
-    assert_eq!(
-        out.status, 0,
-        "{what} must be admitted; stderr:\n{}",
-        out.stderr
-    );
-}
-
-/// Whether `out` is the refusal a confined runner gives a launch that must
-/// enter Seatbelt: one profile per lineage, so the launch cannot run.  The
-/// refusal then stands in for the run, asserted exactly, so any other failure
-/// to enter still fails.
-#[cfg(target_os = "macos")]
-pub fn refused_by_a_confined_runner(out: &Output) -> bool {
-    use ral_core::authority::sandbox::ALREADY_PROFILED;
-    const ENTRY_REFUSED: &str = "ral: cannot enter the Seatbelt sandbox: ";
-    let Some(reason) = out
-        .stderr
-        .lines()
-        .find_map(|line| line.strip_prefix(ENTRY_REFUSED))
-    else {
-        return false;
-    };
-    assert_eq!(reason, ALREADY_PROFILED, "the refusal is not attributed");
-    assert_eq!(out.status, 126, "a refused launch exits 126");
-    eprintln!("skip: this runner is inside a Seatbelt profile; asserted the attributed refusal");
-    true
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn refused_by_a_confined_runner(_: &Output) -> bool {
-    false
-}
-
-/// Whether bwrap can confine a child here, asked once of a real fs-confined
-/// launch: a container may refuse any of its mounts (devpts, a remount of a
-/// `nosuid` `/etc/hosts`), and only the launch itself says which.
-#[cfg(target_os = "linux")]
-pub fn bwrap_functional() -> bool {
-    static FUNCTIONAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FUNCTIONAL.get_or_init(|| {
-        let tmp = std::env::temp_dir();
-        let out = run(
-            "bwrap_probe",
-            &format!(
-                "grant [fs: [read: [`absolute '{t}'], write: [`absolute '{t}']]] {{ /bin/echo ok }}",
-                t = ral_core::path::shown(tmp)
-            ),
-        );
-        out.status == 0 || !out.stderr.contains("bwrap")
-    })
 }
 
 /// `paths` as a ral list body: each an `absolute` place, comma-separated.

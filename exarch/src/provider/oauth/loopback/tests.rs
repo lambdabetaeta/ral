@@ -104,7 +104,10 @@ fn callback_retains_code_and_optional_issued_client() {
 
 #[test]
 fn unrelated_and_ambiguous_traffic_cannot_settle_a_flow() {
-    let flow = Flow::new(TEST_POLICY);
+    let flow = Flow::new(Policy {
+        request: Duration::from_secs(2),
+        ..TEST_POLICY
+    });
     for request in [
         "GET /favicon.ico HTTP/1.1\r\n",
         "not an HTTP request\r\n",

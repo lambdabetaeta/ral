@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: 1c0ceaeb
+generated_at_commit: 104cb519
 ---
 
 # The seccomp filter is a typed deny-set
@@ -87,7 +87,7 @@ should be told no in its own words.* Each rule carries a one-line `why` that
 | `unshare`, `clone` | arg0 & `CLONE_NEWUSER` ≠ 0 | Errno(EPERM) | a user namespace is root over a fresh mount tree — a container inside the grant, which the envelope forbids |
 | `setns` | — | Errno(EPERM) | joining another namespace is leaving this one |
 | `clone3` | — | Errno(ENOSYS) | its flags live in a struct seccomp cannot read; ENOSYS makes glibc and Rust std fall back to `clone`, which the row above inspects (Docker's default profile does the same) |
-| `ioctl` | arg1 == `TIOCSTI` | Errno(EPERM) | terminal input injection (CVE-2017-5226); `--new-session` closes it, this is the seccomp half the namespace ADR deferred to the terminal trampoline, independent of it |
+| `ioctl` | `arg1 in {TIOCSTI, TIOCLINUX}` | Errno(EPERM) | terminal input injection (CVE-2017-5226); `--new-session` closes it, this is the seccomp half the namespace ADR deferred to the terminal trampoline, independent of it |
 
 Left out deliberately: `chroot` (harmless without mount); `socket` (decision
 2); `io_uring_*` — real surface, but `tokio-uring`, liburing-linked tools and

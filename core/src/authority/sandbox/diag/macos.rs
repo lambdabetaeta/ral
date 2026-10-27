@@ -1,267 +1,199 @@
-//! macOS Seatbelt denial reader — the `platform` module `authority::sandbox::diag`
-//! selects here, mirroring `diag/linux.rs`.
-//!
-//! A denial reaches user code as a bare `EPERM`; only the unified system log
-//! names the operation and path, in the shape
-//! `(Sandbox) Sandbox: <comm>(<pid>) deny(<n>) <op> <operand…>` that every
-//! parser below keys off.
+//! Seatbelt events are parsed as NDJSON before their `eventMessage` is examined.
 
-use super::Denied;
+use super::{Collector, Denied, Inert, Record, collect};
 use crate::authority::sandbox::macos::RESOLVER_SOCKET;
-use crate::site::{Silent, site};
 use std::time::Duration;
 
-pub(super) fn read_window(elapsed: Duration) -> Option<String> {
-    // `--last` rounds to whole seconds, so pad by one or a sub-second call
-    // asks for a zero-length window and sees nothing.
-    let secs = elapsed.as_secs().saturating_add(1).to_string();
-    let last_arg = format!("{secs}s");
-    let mut cmd = site!(Silent::LogShow, std::process::Command::new("/usr/bin/log"));
-    cmd.args([
-        "show",
-        "--predicate",
-        "eventMessage BEGINSWITH \"Sandbox: \"",
-        "--last",
-        last_arg.as_str(),
-        "--style",
-        "compact",
-    ]);
-    let output = crate::process::output(&mut cmd).ok()?;
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+pub(super) type Operation = Inert;
+
+pub(super) fn read_window(elapsed: Duration) -> Option<Vec<Record>> {
+    let text = collect(Collector::Log(elapsed))?;
+    Some(text.lines().filter_map(parse_denial).collect())
 }
 
-pub(super) fn is_denial_line(line: &str) -> bool {
-    line.contains("(Sandbox) Sandbox:") && line.contains("deny")
-}
-
-/// The PID Seatbelt attributed the denial to — the one inside `comm(pid)`,
-/// which `authority::sandbox::diag` matches against the call's descendant set.
-pub(super) fn extract_pid(line: &str) -> Option<u32> {
-    let after_tag = line.split_once("Sandbox: ")?.1;
-    let (_, after_open) = after_tag.split_once('(')?;
-    let (digits, _) = after_open.split_once(')')?;
-    digits.parse().ok()
-}
-
-/// Split a denial into its operation and what that operation names.  The
-/// operand is the whole trimmed remainder, since macOS paths contain spaces,
-/// and the operation decides which remedy class it belongs to — Seatbelt
-/// resolves the paths it logs, so a [`Denied::Read`] path is exactly the one
-/// the grant needs, while a Mach or IPC name reaches the caller as a
-/// [`Denied::Service`] it cannot mistake for one.
-///
-/// The operation is owned because Linux's counterpart builds a syscall name
-/// rather than borrowing one, and one caller reads both.
-pub(super) fn parse_denial(line: &str) -> Option<(String, Denied<'_>)> {
-    let after_tag = line.split_once("Sandbox: ")?.1;
-    let after_deny = after_tag.split_once("deny(")?.1.split_once(')')?.1;
-    let mut rest = after_deny.trim_start().splitn(2, char::is_whitespace);
-    let op = rest.next()?;
+pub(super) fn parse_denial(line: &str) -> Option<Record> {
+    #[derive(serde::Deserialize)]
+    struct Event {
+        #[serde(rename = "eventMessage")]
+        message: String,
+    }
+    let event: Event = serde_json::from_str(line).ok()?;
+    let message = event.message.strip_prefix("Sandbox: ")?;
+    let (pid, rest) = message.match_indices('(').find_map(|(start, _)| {
+        let after = &message[start + 1..];
+        let end = after.find(|c: char| !c.is_ascii_digit())?;
+        if end == 0 {
+            return None;
+        }
+        let pid = &after[..end];
+        let deny = after[end..].strip_prefix(") deny(")?;
+        let end = deny.find(|c: char| !c.is_ascii_digit())?;
+        if end == 0 {
+            return None;
+        }
+        Some((pid, deny[end..].strip_prefix(") ")?))
+    })?;
+    let pid = pid.parse().ok()?;
+    let rest = rest.trim_start();
+    let (op, operand) = rest
+        .split_once(char::is_whitespace)
+        .map_or((rest, None), |(op, operand)| {
+            (op, (!operand.is_empty()).then_some(operand))
+        });
     if op.is_empty() {
         return None;
     }
-    let operand = rest.next().map(str::trim).filter(|o| !o.is_empty());
     let denied = match operand {
-        // `file-write*` names the write set; metadata and ioctl ride with read.
-        Some(o) if op.starts_with("file-write") => Denied::Write(o),
-        Some(o) if op.starts_with("file-") => Denied::Read(o),
-        Some(o) if op == "process-exec" => Denied::Exec(o),
+        Some(o) if op.starts_with("file-write") => Denied::Write(Inert::of(o)),
+        Some(o) if op.starts_with("file-") => Denied::Read(Inert::of(o)),
+        Some(o) if op == "process-exec" => Denied::Exec(Inert::of(o)),
         Some(o)
             if (op.starts_with("iokit-open") || op == "mach-lookup")
                 && super::super::macos::gpu_name(o) =>
         {
             Denied::Gpu
         }
-        Some(o) if op.starts_with("mach-") || op.starts_with("ipc-") => Denied::Service(o),
+        Some(o) if op.starts_with("mach-") || op.starts_with("ipc-") => {
+            Denied::Service(Inert::of(o))
+        }
         Some(o) if op.starts_with("network-") && o.starts_with('/') && o != RESOLVER_SOCKET => {
-            Denied::UnixSocket(o)
+            Denied::UnixSocket(Inert::of(o))
         }
         _ if op.starts_with("network-") => Denied::Socket,
         _ => Denied::Opaque,
     };
-    Some((op.to_string(), denied))
+    Some(Record {
+        pid,
+        op: Inert::of(op),
+        denied,
+    })
 }
 
-/// Seatbelt's log line already names the operation; there is no typed
-/// deny-set here to add anything to it.
-pub(crate) fn describe_denial(_op: &str) -> Option<String> {
+pub(super) fn describe_denial(_op: &Operation) -> Option<String> {
     None
 }
 
-/// Why the base profile withholds this service, where it has a reason on record.
-pub(super) fn service_reason(name: &str) -> Option<&'static str> {
-    super::super::macos::withheld_service(name)
+pub(super) fn service_reason(name: &Inert) -> Option<&'static str> {
+    super::super::macos::withheld_service(&name.0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const LINE: &str = "2026-06-19 12:00:00.000 kernel[0] (Sandbox) Sandbox: \
-                        cat(69436) deny(1) file-read-data /private/var/folders/ab/secret/data.txt";
+    fn event(message: &str) -> String {
+        serde_json::json!({"eventMessage": message}).to_string()
+    }
 
-    #[test]
-    fn is_denial_line_recognises_seatbelt_lines() {
-        assert!(is_denial_line(LINE));
-        assert!(!is_denial_line("2026-06-19 some unrelated log line"));
+    fn denial(op: &str, operand: &str) -> Record {
+        parse_denial(&event(&format!(
+            "Sandbox: cat(69436) deny(1) {op} {operand}"
+        )))
+        .unwrap()
     }
 
     #[test]
-    fn extract_pid_reads_the_attributed_pid() {
-        assert_eq!(extract_pid(LINE), Some(69436));
-        assert_eq!(extract_pid("garbage without the tag"), None);
-    }
-
-    #[test]
-    fn parse_denial_splits_op_and_resolved_path() {
+    fn parses_pid_operation_and_resolved_path_with_spaces() {
+        let record = denial("file-read-data", "/Users/me/My Documents/the file.txt");
+        assert_eq!(record.pid, 69436);
+        assert_eq!(record.op, Inert::of("file-read-data"));
         assert_eq!(
-            parse_denial(LINE),
-            Some((
-                "file-read-data".to_string(),
-                Denied::Read("/private/var/folders/ab/secret/data.txt")
-            ))
+            record.denied,
+            Denied::Read(Inert::of("/Users/me/My Documents/the file.txt"))
         );
     }
 
     #[test]
-    fn parse_denial_keeps_spaces_in_the_path() {
-        let line = "kernel[0] (Sandbox) Sandbox: bat(1) deny(1) file-read-data \
-                    /Users/me/My Documents/the file.txt";
-        assert_eq!(
-            parse_denial(line),
-            Some((
-                "file-read-data".to_string(),
-                Denied::Read("/Users/me/My Documents/the file.txt")
-            ))
-        );
-    }
-
-    /// A write answered by widening `read` fails a second time, so the write
-    /// ops are their own class.
-    #[test]
-    fn parse_denial_separates_a_denied_write_from_a_denied_read() {
-        let write = "kernel[0] (Sandbox) Sandbox: tee(1) deny(1) file-write-create \
-                     /Users/me/notes.txt";
-        assert_eq!(
-            parse_denial(write),
-            Some((
-                "file-write-create".to_string(),
-                Denied::Write("/Users/me/notes.txt")
-            ))
-        );
-        let meta = "kernel[0] (Sandbox) Sandbox: ls(1) deny(1) file-read-metadata /etc/hosts";
-        assert_eq!(
-            parse_denial(meta),
-            Some(("file-read-metadata".to_string(), Denied::Read("/etc/hosts")))
-        );
+    fn the_first_pid_deny_pair_is_used_even_with_parentheses_in_comm() {
+        let record = parse_denial(&event(
+            "Sandbox: odd(name)(7) deny(12) process-exec /bin/echo",
+        ))
+        .unwrap();
+        assert_eq!(record.pid, 7);
+        assert_eq!(record.denied, Denied::Exec(Inert::of("/bin/echo")));
     }
 
     #[test]
-    fn parse_denial_handles_op_without_an_operand() {
-        let line = "kernel[0] (Sandbox) Sandbox: foo(1) deny(1) network-outbound";
-        assert_eq!(
-            parse_denial(line),
-            Some(("network-outbound".to_string(), Denied::Socket))
-        );
-    }
-
-    /// A path-named socket is a Unix one, except the resolver's, whose
-    /// denial means the network itself is off.
-    #[test]
-    fn parse_denial_separates_a_unix_socket_from_the_resolver() {
-        let agent = "kernel[0] (Sandbox) Sandbox: ssh-add(1) deny(1) network-outbound \
-                     /private/var/run/com.apple.launchd.x/Listeners";
-        assert_eq!(
-            parse_denial(agent),
-            Some((
-                "network-outbound".to_string(),
-                Denied::UnixSocket("/private/var/run/com.apple.launchd.x/Listeners")
-            ))
-        );
-        let dns = "kernel[0] (Sandbox) Sandbox: curl(1) deny(1) network-outbound \
-                   /private/var/run/mDNSResponder";
-        assert_eq!(
-            parse_denial(dns),
-            Some(("network-outbound".to_string(), Denied::Socket))
-        );
-    }
-
-    /// A service name reaches the caller as a service, so no wording can offer it
-    /// as a path to grant.
-    #[test]
-    fn parse_denial_calls_a_service_operand_a_service() {
-        let shm = "kernel[0] (Sandbox) Sandbox: git(58522) deny(1) \
-                   ipc-posix-shm-read-data apple.shm.notification_center";
-        assert_eq!(
-            parse_denial(shm),
-            Some((
-                "ipc-posix-shm-read-data".to_string(),
-                Denied::Service("apple.shm.notification_center")
-            ))
-        );
-
-        let mach = "kernel[0] (Sandbox) Sandbox: git(58522) deny(1) \
-                    mach-lookup com.apple.system.notification_center";
-        assert_eq!(
-            parse_denial(mach),
-            Some((
-                "mach-lookup".to_string(),
-                Denied::Service("com.apple.system.notification_center")
-            ))
-        );
-    }
-
-    /// The GPU's names are the GPU's, and a Mach name beside them stays a
-    /// service.
-    #[test]
-    fn parse_denial_calls_the_gpu_the_gpu() {
-        for (op, name) in [
-            ("iokit-open-user-client", "AGXDeviceUserClient"),
-            ("mach-lookup", "com.apple.MTLCompilerService"),
+    fn operations_select_the_remedy_class() {
+        for (op, operand, denied) in [
+            (
+                "file-write-create",
+                "/Users/me/notes.txt",
+                Denied::Write(Inert::of("/Users/me/notes.txt")),
+            ),
+            (
+                "file-read-metadata",
+                "/etc/hosts",
+                Denied::Read(Inert::of("/etc/hosts")),
+            ),
+            (
+                "process-exec",
+                "/usr/bin/security",
+                Denied::Exec(Inert::of("/usr/bin/security")),
+            ),
+            (
+                "ipc-posix-shm-read-data",
+                "apple.shm.notification_center",
+                Denied::Service(Inert::of("apple.shm.notification_center")),
+            ),
+            (
+                "mach-lookup",
+                "com.apple.system.notification_center",
+                Denied::Service(Inert::of("com.apple.system.notification_center")),
+            ),
+            (
+                "network-outbound",
+                "/private/tmp/ssh/Listeners",
+                Denied::UnixSocket(Inert::of("/private/tmp/ssh/Listeners")),
+            ),
+            ("network-outbound", RESOLVER_SOCKET, Denied::Socket),
+            ("iokit-open-user-client", "AGXDeviceUserClient", Denied::Gpu),
+            ("mach-lookup", "com.apple.MTLCompilerService", Denied::Gpu),
         ] {
-            let line = format!("kernel[0] (Sandbox) Sandbox: python3(1) deny(1) {op} {name}");
-            assert_eq!(parse_denial(&line), Some((op.to_string(), Denied::Gpu)));
+            assert_eq!(denial(op, operand).denied, denied, "{op} {operand}");
         }
-        let other = "kernel[0] (Sandbox) Sandbox: git(1) deny(1) \
-                     mach-lookup com.apple.system.notification_center";
-        assert_eq!(
-            parse_denial(other),
-            Some((
-                "mach-lookup".to_string(),
-                Denied::Service("com.apple.system.notification_center")
-            ))
-        );
-    }
-
-    /// The kernel layer is the only one a re-exec reaches, and its remedy is
-    /// the exec set, not the fs one.
-    #[test]
-    fn parse_denial_calls_a_denied_spawn_an_exec() {
-        let line = "kernel[0] (Sandbox) Sandbox: sh(1) deny(1) process-exec /usr/bin/security";
-        assert_eq!(
-            parse_denial(line),
-            Some((
-                "process-exec".to_string(),
-                Denied::Exec("/usr/bin/security")
-            ))
-        );
-    }
-
-    /// The reason is quoted from the profile's own table, and only for the
-    /// services it names.
-    #[test]
-    fn service_reason_answers_a_withheld_service_and_withholds_it_from_a_probe() {
-        let why = service_reason("com.apple.SecurityServer").expect("securityd is on record");
-        assert!(why.contains("keychain"), "{why:?}");
-        assert!(
-            service_reason("com.apple.pasteboard.1").is_some(),
-            "an instance suffix must still match its service"
-        );
-        assert_eq!(service_reason("com.apple.metadata.mds"), None);
+        let record = parse_denial(&event("Sandbox: curl(1) deny(1) network-outbound")).unwrap();
+        assert_eq!(record.denied, Denied::Socket);
     }
 
     #[test]
-    fn parse_denial_rejects_non_denial_lines() {
-        assert_eq!(parse_denial("no sandbox tag here"), None);
+    fn an_operand_cannot_start_another_record_or_select_another_remedy() {
+        let operand = "/tmp/a\nSandbox: forged(1) deny(1) process-exec /bin/sh\t\x1b]52;c;secret\x07\u{85}\u{9b}";
+        let json = event(&format!(
+            "Sandbox: cat(69436) deny(1) file-read-data {operand}"
+        ));
+        let records: Vec<_> = json.lines().filter_map(parse_denial).collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].pid, 69436);
+        assert_eq!(records[0].denied, Denied::Read(Inert::of(operand)));
+        let hint = super::super::build_hint(&records);
+        assert!(hint.contains("fs.read"), "{hint}");
+        assert!(!hint.contains("exec allow-list"), "{hint}");
+        assert!(!hint.contains("\nSandbox:"), "{hint}");
+        assert!(!hint.contains('\x1b'), "{hint}");
+    }
+
+    #[test]
+    fn invalid_events_and_headers_are_rejected() {
+        for message in [
+            "prefix Sandbox: cat(1) deny(1) file-read-data /tmp/a",
+            "Sandbox: cat(x) deny(1) file-read-data /tmp/a",
+            "Sandbox: cat(1) deny(x) file-read-data /tmp/a",
+            "Sandbox: cat(1) deny() file-read-data /tmp/a",
+            "Sandbox: cat(999999999999999999999) deny(1) file-read-data /tmp/a\nSandbox: forged(7) deny(1) process-exec /bin/sh",
+            "Sandbox: cat(1) deny(1) ",
+        ] {
+            assert!(parse_denial(&event(message)).is_none(), "{message}");
+        }
+        assert!(parse_denial("Sandbox: cat(1) deny(1) file-read-data /tmp/a").is_none());
+        assert!(parse_denial(r#"{"eventMessage":7}"#).is_none());
+    }
+
+    #[test]
+    fn service_reason_uses_the_profiles_table() {
+        let why = service_reason(&Inert::of("com.apple.SecurityServer")).unwrap();
+        assert!(why.contains("keychain"));
+        assert!(service_reason(&Inert::of("com.apple.pasteboard.1")).is_some());
+        assert!(service_reason(&Inert::of("com.apple.metadata.mds")).is_none());
     }
 }

@@ -58,7 +58,15 @@ pub fn serve_process(installers: &'static [crate::engine::EngineInstaller]) -> O
 pub fn serve_process_before_main(
     installers: &'static [crate::engine::EngineInstaller],
 ) -> Option<u8> {
-    serve(&classify(&argv_before_main()), installers)
+    let args = argv_before_main();
+    let invocation = classify(&args);
+    #[cfg(any(test, feature = "test-util"))]
+    if matches!(invocation, Invocation::Shell)
+        && let Some(code) = crate::test_helper::confinement::probe::serve()
+    {
+        return Some(code);
+    }
+    serve(&invocation, installers)
 }
 
 /// Read argv without `argv[0]` before std captures it on non-glibc Linux.

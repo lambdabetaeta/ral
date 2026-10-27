@@ -27,6 +27,8 @@ mod diag;
 mod launch;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+pub(crate) use linux::landlock::probe_abi;
 #[cfg(target_os = "macos")]
 mod macos;
 mod projection;
@@ -34,7 +36,7 @@ pub(crate) mod reexec;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod warrant;
 #[cfg(windows)]
-mod windows;
+pub(crate) mod windows;
 
 #[cfg(any(unix, test))]
 pub(crate) use projection::ExecProjection;
@@ -161,53 +163,6 @@ pub(crate) struct InstallToken(());
 
 #[cfg(any(target_os = "linux", windows))]
 static TOKEN: InstallToken = InstallToken(());
-
-/// Whether this host builds a `Restricted` envelope at all.
-///
-/// A rootless container refuses the read-only remount of its own locked
-/// `/etc/hosts` and `/etc/resolv.conf`, and the launch dies in setup.
-/// Test-only: a spawning test on such a host proves nothing either way, so
-/// callers skip rather than assert.
-#[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
-pub fn restricted_envelope_launches() -> bool {
-    use crate::site::{Silent, site};
-    use std::sync::OnceLock;
-    static LAUNCHES: OnceLock<bool> = OnceLock::new();
-    *LAUNCHES.get_or_init(|| {
-        let projection = SandboxProjection {
-            fs: FsProjection::Restricted(FsRules::default()),
-            net: true,
-            gpu: true,
-            exec: ExecProjection::default(),
-        };
-        pin();
-        let (Ok(bwrap), Ok(own)) = (linux::envelope(), reexec::own()) else {
-            return false;
-        };
-        let Ok(program) = crate::authority::policy::Program::file("/bin/true".into()) else {
-            return false;
-        };
-        launch::enveloped(
-            &linux::Envelope::probe(bwrap, own),
-            &projection,
-            &crate::authority::policy::Baseline::default(),
-            &launch::admitted(program),
-            &[],
-            None,
-            // `Surrendered` carries no `--info-fd` to read and no parent-death tie:
-            // neither decides whether the envelope builds, and `/bin/true` outlives nobody.
-            launch::Ownership::Surrendered,
-        )
-        .is_ok_and(|(mut cmd, _no_info_fd)| {
-            site!(
-                Silent::RestrictedEnvelopeProbe,
-                cmd.stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null()) => status()
-            )
-            .is_ok_and(|status| status.success())
-        })
-    })
-}
 
 /// Pin this binary and, on Linux, the bwrap envelope, so no session can
 /// choose its own launcher.  Idempotent.

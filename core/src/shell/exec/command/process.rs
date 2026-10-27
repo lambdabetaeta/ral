@@ -47,7 +47,7 @@ pub(crate) fn build_launch(
             &admitted,
             args,
             ownership,
-            &shell.cwd(),
+            shell.context.cwd(),
             cancel,
         )
         .map_err(|refusal| match refusal {

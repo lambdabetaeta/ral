@@ -53,8 +53,10 @@ impl Head {
         match name {
             CommandName::Bare(bare) => {
                 let shown = bare.to_string();
-                let program = if crate::uutils::is_uutils_tool(bare) {
-                    Ok(Program::Tool(shown.clone()))
+                let program = if let Some(tool) =
+                    crate::uutils::bundled_name(std::ffi::OsStr::new(bare.as_ref()))
+                {
+                    Ok(Program::Tool(tool))
                 } else {
                     let path = ctx.env_overrides().get_or_host("PATH");
                     match crate::path::search(&shown, path.as_deref(), Some(ctx.cwd())) {

@@ -381,7 +381,7 @@ mod tests {
     #[test]
     fn an_exit_code_is_a_byte() {
         // Only `_exit` runs in the child, so forking a threaded process is sound.
-        let pid = unsafe { libc::fork() };
+        let pid = unsafe { crate::site::site!(crate::site::Silent::ReaperExitFork, libc::fork()) };
         assert!(pid >= 0, "fork");
         if pid == 0 {
             unsafe { libc::_exit(258) };

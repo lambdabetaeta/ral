@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
+generated_at_commit: 104cb519
 verified_at_commit: 002c654a
 verified_at_date: 2026-10-13
 anchors: [pinned_dirs, build_profile, DenyMask, Binds]
@@ -92,9 +92,10 @@ errno came back.
 
 ## A name that does not exist yet
 
-**On Linux, a deny of a name that does not exist, inside a
-writable prefix, is held by ral's own guard alone. A spawned program can create
-that name.** macOS holds it in full. The case is common: a grant that writes a
+**On Linux, a deny of a name absent at render is held by ral's own guard
+alone. A spawned program can read a file the host creates there during the
+launch, even under a read-only grant; under a writable prefix it can create
+the name itself.** macOS holds it in full. The case is common: a grant that writes a
 whole repo and denies `.env`, run on a fresh checkout with no `.env`.
 
 ### Why there is no mask
@@ -111,10 +112,11 @@ directories, so that creation lands on the host disk:
 Neither is a deny ([[decisions/260905_an-envelope-does-not-touch-the-host|an-envelope-does-not-touch-the-host]]).
 So `DenyMask::over` gives an absent name nothing (`LeftAbsent`).
 
-- **Under a read-only bind nothing is lost.** Creating the name is the only
-  access an absent name has, and the read-only bind already refuses it.
+- **Under a read-only bind the host can create the name during a launch,
+  and that launch reads it; the next one masks it.** The bind refuses the
+  child's writes, but the host still writes the underlying directory.
 - **Under a writable bind the guard is the only enforcer.** It refuses ral's own
-  creation of the name, under every spelling
+  reads and creation of the name, under every spelling
   ([[internals/path-judgment|path-judgment]]). It cannot see what a spawned
   program does.
 - **Windows carves the grant instead, and holds it.** A Windows sandbox cannot
@@ -127,24 +129,29 @@ So `DenyMask::over` gives an absent name nothing (`LeftAbsent`).
   the cost is that nothing can be created in a carved directory at all
   ([[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]],
   amendment of 2026-10-20).
-- **macOS does not.** Seatbelt's rules are negative and range over names, not
-  objects, so it refuses the creation
+- **macOS holds both reads and creation.** Seatbelt's rules are negative and
+  range over names, so a host-created file stays unreadable, and it refuses creation
   (`capabilities::seatbelt_holds_an_absent_deny_inside_a_write_prefix`).
 
 ### What a confined program can do
 
-**The gap lasts for one launch.** A *launch* is one external command ral spawns,
-with every process that command starts. ral renders the envelope afresh for each
-launch, even for two commands in the same grant body.
+**Each launch whose render finds the name absent leaves it unmasked for that
+launch's lifetime.** A *launch* is one external command ral spawns, with every
+process that command starts. ral renders the envelope afresh for each launch,
+even for two commands in the same grant body. Several overlapping launches can
+therefore share the gap; a later render that finds the name present masks it.
 
-- **During that launch, the program can create the name** as a file, a
+- **During that launch, the program can read a file the host creates at the
+  name**, even under a read-only grant.
+- **Under a writable grant, the program can create the name** as a file, a
   directory or a symlink, and read and write what it made.
 - **What it made stays on the host** after the launch ends.
 
 ### What it cannot do
 
-- **ral cannot be made to create the name.** The guard refuses it.
-- **No later launch can reach what was made.** The next launch finds an object
+- **ral cannot be made to read or create the name.** The guard refuses both,
+  before and after the host creates it.
+- **A launch rendered after creation cannot reach what was made.** It finds an object
   at the name and masks it as usual: a file under `/dev/null`, a directory
   under the empty tmpfs. Files created inside a planted directory are hidden
   with it.
@@ -153,9 +160,11 @@ launch, even for two commands in the same grant body.
 
 ### What is at stake
 
-**The risk is a planted file, not a leaked secret.** There was no secret at the
-name to leak. The harm is content sitting at a name the grant promised no
-confined program would write. Two kinds of reader may trust it:
+**The risk includes a leaked secret and a planted file.** A host writer can
+create `.env` after the launch starts, and that launch can read its secrets
+even under a read-only grant. Under a writable grant, a child can also leave
+content at a name the grant promised no confined program would write. Two
+kinds of reader may trust that planted content:
 
 - **another process in the same launch**: for example a test runner started by
   the same `sh -c` that wrote the file;
@@ -187,7 +196,7 @@ fails for a stated reason:
 - **fanotify permission events** need privilege, and none of them refuses a
   creation.
 
-`docs/SPEC.md` §12.3 states the user-facing rule.
+`docs/SPEC.md` §12.4 states the user-facing rule.
 
 ## Tests
 
@@ -199,8 +208,10 @@ spawns the envelope for real:**
 - `authority::sandbox::linux::tests::spawn::building_an_envelope_never_creates_a_denied_name_on_the_host`
 - `capabilities::seatbelt_holds_an_absent_deny_inside_a_write_prefix` (macOS)
 
-**No Linux test pins the absent-name gap itself.** `tests/unix/grant-fs-deny.ral`
-denies only names that already exist.
+- `deny_absent::a_host_created_absent_deny_is_visible_only_to_the_running_linux_child`
+  (`ral/tests/deny_absent.rs`, Linux and macOS): a pipe holds the child while
+  the host creates `.env`; Linux reads it only in that launch, macOS never
+  reads it, and ral's own read is refused before and after creation.
 
 **Amended 2026-10-22 by [[decisions/261021_one-path|one-path]].** A denied object
 renamed or hard-linked under an allowed directory is hidden from ral's own

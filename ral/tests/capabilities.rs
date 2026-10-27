@@ -13,7 +13,9 @@
 
 mod common;
 
-use common::refused_by_a_confined_runner;
+#[cfg(unix)]
+use ral_core::test_helper::confinement::Confining;
+use ral_core::test_helper::confinement::{admitted, denied};
 use std::process::{Command, Stdio};
 
 fn ral(args: &[&str]) -> common::Output {
@@ -40,8 +42,22 @@ fn write_profile(suffix: &str, body: &str) -> std::path::PathBuf {
 
 #[test]
 fn single_file_deny_blocks_command() {
+    ral_core::require_landlock!(1);
+    let proof = ral_core::require_confinement!();
     let prof = write_profile("single_deny", "return [exec: [deny: [`name ls]]]\n");
-    let out = ral(&["--capabilities", prof.to_str().unwrap(), "-c", "ls ."]);
+    let control = ral(&[
+        "--capabilities",
+        prof.to_str().unwrap(),
+        "-c",
+        "echo caps-ran",
+    ]);
+    let out = ral(&[
+        "--capabilities",
+        prof.to_str().unwrap(),
+        "-c",
+        "ls .; echo caps-ran",
+    ]);
+    denied(&proof, &control, &out, "caps-ran");
     std::fs::remove_file(&prof).ok();
     assert_ne!(
         out.status, 0,
@@ -81,15 +97,24 @@ fn missing_profile_file_errors_clean() {
 /// the system PATH.
 #[test]
 fn comma_separated_profiles_meet_both_denies() {
+    ral_core::require_landlock!(1);
+    let proof = ral_core::require_confinement!();
     let a = write_profile("meet_a", "return [exec: [deny: [`name ls]]]\n");
     let b = write_profile("meet_b", "return [exec: [deny: [`name cat]]]\n");
     let arg = format!("{},{}", a.display(), b.display());
 
-    let out_ls = ral(&["--capabilities", &arg, "-c", "ls ."]);
+    let control = ral(&["--capabilities", &arg, "-c", "echo caps-ran"]);
+    let out_ls = ral(&["--capabilities", &arg, "-c", "ls .; echo caps-ran"]);
+    denied(&proof, &control, &out_ls, "caps-ran");
     assert_ne!(out_ls.status, 0, "ls denied by file a should fire");
 
-    let out_cat = ral(&["--capabilities", &arg, "-c", "cat Cargo.toml"]);
-    assert_ne!(out_cat.status, 0, "cat denied by file b should fire");
+    let out_cat = ral(&[
+        "--capabilities",
+        &arg,
+        "-c",
+        "cat Cargo.toml; echo caps-ran",
+    ]);
+    denied(&proof, &control, &out_cat, "caps-ran");
 
     std::fs::remove_file(&a).ok();
     std::fs::remove_file(&b).ok();
@@ -102,6 +127,8 @@ fn comma_separated_profiles_meet_both_denies() {
 /// in both orders, since a fold that narrows must also commute.
 #[test]
 fn a_one_sided_allow_does_not_survive_the_meet() {
+    ral_core::require_landlock!(1);
+    let proof = ral_core::require_confinement!();
     let a = write_profile("allow_a", "return [exec: [allow: [`name ls, `name cat]]]\n");
     let b = write_profile("allow_b", "return [exec: [allow: [`name ls]]]\n");
 
@@ -109,17 +136,16 @@ fn a_one_sided_allow_does_not_survive_the_meet() {
         format!("{},{}", a.display(), b.display()),
         format!("{},{}", b.display(), a.display()),
     ] {
-        let out_ls = ral(&["--capabilities", &arg, "-c", "ls ."]);
-        if !refused_by_a_confined_runner(&out_ls) {
-            assert_eq!(
-                out_ls.status, 0,
-                "both profiles allow ls, so the intersection must admit it; stderr:\n{}",
-                out_ls.stderr
-            );
-        }
+        let out_ls = ral(&["--capabilities", &arg, "-c", "ls .; echo caps-ran"]);
+        admitted(&proof, &out_ls, "caps-ran");
 
-        let out_cat = ral(&["--capabilities", &arg, "-c", "cat Cargo.toml"]);
-        assert_ne!(out_cat.status, 0, "cat is allowed by one profile only");
+        let out_cat = ral(&[
+            "--capabilities",
+            &arg,
+            "-c",
+            "cat Cargo.toml; echo caps-ran",
+        ]);
+        denied(&proof, &out_ls, &out_cat, "caps-ran");
         assert!(
             out_cat.stderr.contains("denied by active grant"),
             "expected the grant-denied diagnostic; got:\n{}",
@@ -167,9 +193,10 @@ fn unknown_xdg_token_in_profile_names_the_typo_and_the_alternatives() {
 /// resolver does: by search on ancestors the profile admits as metadata only.
 /// The walk once opened them for read and was refused at the first, so every
 /// ral-owned read under a ral sandbox failed — a case no unconfined test sees.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn confined_ral_walks_to_a_granted_file() {
+    let proof = ral_core::require_confinement!();
     let d = std::fs::canonicalize(scratch_dir("walk")).unwrap();
     std::fs::write(d.join("f.txt"), "walked\n").unwrap();
     let d_s = d.to_string_lossy().into_owned();
@@ -184,15 +211,8 @@ fn confined_ral_walks_to_a_granted_file() {
         ),
     ]);
     std::fs::remove_dir_all(&d).ok();
-    if refused_by_a_confined_runner(&out) {
-        return;
-    }
 
-    assert_eq!(
-        out.status, 0,
-        "the confined ral could not read a granted file; stderr:\n{}",
-        out.stderr
-    );
+    admitted(&proof, &out, "walked");
     assert!(
         out.stdout.contains("walked"),
         "expected the file's content; stdout:\n{}",
@@ -240,17 +260,17 @@ fn confined_ral_can_read_a_link_but_not_its_target_directory() {
 }
 
 /// Content that must never survive a defeated `deny`.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const DENY_PIN_SENTINEL: &str = "ral-deny-pin-sentinel-do-not-leak";
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn scratch_dir(tag: &str) -> std::path::PathBuf {
     let dir = common::fresh_tmp_path(&format!("pin_{tag}"), "dir");
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn seed_secret(dir: &std::path::Path) {
     let ssh = dir.join(".ssh");
     std::fs::create_dir_all(&ssh).unwrap();
@@ -263,25 +283,42 @@ fn seed_secret(dir: &std::path::Path) {
 // bwrap's deny is an object-anchored mount, which survives the same rename
 // unpinned.  Hence macOS-only.
 
-/// Renaming a denied file's parent must not carry the secret to a name no
-/// deny rule covers.
-#[cfg(target_os = "macos")]
+/// The running launch holds the deny through an ancestor rename; macOS also
+/// refuses the rename, while Linux's next launch reads the moved file.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn deny_pin_survives_ancestor_rename() {
+    let proof = ral_core::require_confinement!();
     let d = scratch_dir("ancestor");
     seed_secret(&d);
     let d_s = d.to_string_lossy().into_owned();
 
-    let out = ral(&[
-        "-c",
-        &format!(
-            "grant [fs: [read: [`absolute '{d_s}'], write: [`absolute '{d_s}'], deny: [`absolute '{d_s}/.ssh/id_rsa']]] \
-             {{ sh -c 'mv {d_s}/.ssh {d_s}/x && cat {d_s}/x/id_rsa' }}"
-        ),
-    ]);
-    // The rename must be *refused*, not merely followed by an unreadable
-    // file: a body that never ran would satisfy the sentinel check vacuously.
+    let launch = |body: &str| {
+        ral(&[
+            "-c",
+            &format!(
+                "grant [fs: [read: [`absolute '{d_s}'], write: [`absolute '{d_s}'], deny: [`absolute '{d_s}/.ssh/id_rsa']]] {{ sh -c '{body}' }}"
+            ),
+        ])
+    };
+    std::fs::write(d.join("control"), DENY_PIN_SENTINEL).unwrap();
+    let control = launch(&format!("mv {d_s}/control {d_s}/moved && cat {d_s}/moved"));
+    let out = launch(&format!("mv {d_s}/.ssh {d_s}/x && cat {d_s}/x/id_rsa"));
+    denied(&proof, &control, &out, DENY_PIN_SENTINEL);
+    #[cfg(target_os = "macos")]
     let refused = d.join(".ssh").join("id_rsa").exists() && !d.join("x").exists();
+    #[cfg(target_os = "linux")]
+    {
+        assert!(
+            !d.join(".ssh").exists() && d.join("x/id_rsa").exists(),
+            "the ancestor rename must land"
+        );
+        admitted(
+            &proof,
+            &launch(&format!("cat {d_s}/x/id_rsa")),
+            DENY_PIN_SENTINEL,
+        );
+    }
     std::fs::remove_dir_all(&d).ok();
 
     assert!(
@@ -291,15 +328,17 @@ fn deny_pin_survives_ancestor_rename() {
         out.stdout,
         out.stderr
     );
+    #[cfg(target_os = "macos")]
     assert!(refused, "the ancestor rename was not refused");
 }
 
 /// The pin freezes only the ancestor's own name-in-parent (`literal`, not
 /// `subpath`) — mutating what's inside it must keep working, or the fix
 /// overshoots.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn deny_pin_leaves_directory_entries_mutable() {
+    let proof = ral_core::require_confinement!();
     let d = scratch_dir("entries");
     seed_secret(&d);
     let d_s = d.to_string_lossy().into_owned();
@@ -311,27 +350,22 @@ fn deny_pin_leaves_directory_entries_mutable() {
         )
     };
 
-    let out_create = ral(&["-c", &under_grant(format!("sh -c 'touch {created_s}'"))]);
-    if refused_by_a_confined_runner(&out_create) {
-        std::fs::remove_dir_all(&d).ok();
-        return;
-    }
-    assert_eq!(
-        out_create.status, 0,
-        "creating a file inside the pinned directory must succeed; stderr:\n{}",
-        out_create.stderr
-    );
+    let out_create = ral(&[
+        "-c",
+        &under_grant(format!("sh -c 'touch {created_s} && echo ok'")),
+    ]);
+
+    admitted(&proof, &out_create, "ok");
     assert!(
         created.exists(),
         "new file inside the pinned directory did not land"
     );
 
-    let out_remove = ral(&["-c", &under_grant(format!("sh -c 'rm {created_s}'"))]);
-    assert_eq!(
-        out_remove.status, 0,
-        "removing a file inside the pinned directory must succeed; stderr:\n{}",
-        out_remove.stderr
-    );
+    let out_remove = ral(&[
+        "-c",
+        &under_grant(format!("sh -c 'rm {created_s} && echo ok'")),
+    ]);
+    admitted(&proof, &out_remove, "ok");
     assert!(
         !created.exists(),
         "file inside the pinned directory survived removal"
@@ -340,28 +374,34 @@ fn deny_pin_leaves_directory_entries_mutable() {
     std::fs::remove_dir_all(&d).ok();
 }
 
-/// A distinct escape: relocating the *write-prefix root* itself rather
-/// than an intermediate ancestor. Two prefixes share one deny; the pinned
-/// set must cover each root or the secret resurfaces under the sibling
-/// prefix once the rename lands.
-#[cfg(target_os = "macos")]
+/// Moving the write-prefix root is refused: Seatbelt pins it, and in the
+/// envelope it is a mountpoint, so `mv` falls back to a copy that meets the mask.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn deny_pin_survives_write_prefix_root_rename() {
+    let proof = ral_core::require_confinement!();
     let d = scratch_dir("root_d");
     let s = scratch_dir("root_s");
     seed_secret(&d);
     let d_s = d.to_string_lossy().into_owned();
     let s_s = s.to_string_lossy().into_owned();
 
-    let out = ral(&[
-        "-c",
-        &format!(
-            "grant [fs: [read: [`absolute '{d_s}', `absolute '{s_s}'], \
-             write: [`absolute '{d_s}', `absolute '{s_s}'], deny: [`absolute '{d_s}/.ssh/id_rsa']]] \
-             {{ sh -c 'mv {d_s} {s_s}/r && cat {s_s}/r/.ssh/id_rsa' }}"
-        ),
-    ]);
-    let refused = d.exists() && !s.join("r").exists();
+    let launch = |body: &str| {
+        ral(&[
+            "-c",
+            &format!(
+                "grant [fs: [read: [`absolute '{d_s}', `absolute '{s_s}'], write: [`absolute '{d_s}', `absolute '{s_s}'], deny: [`absolute '{d_s}/.ssh/id_rsa']]] {{ sh -c '{body}' }}"
+            ),
+        ])
+    };
+    std::fs::create_dir(d.join("control")).unwrap();
+    std::fs::write(d.join("control/f"), DENY_PIN_SENTINEL).unwrap();
+    let control = launch(&format!(
+        "mv {d_s}/control {s_s}/control && cat {s_s}/control/f"
+    ));
+    let out = launch(&format!("mv {d_s} {s_s}/r && cat {s_s}/r/.ssh/id_rsa"));
+    denied(&proof, &control, &out, DENY_PIN_SENTINEL);
+    let refused = d.join(".ssh/id_rsa").exists() && !s.join("r/.ssh/id_rsa").exists();
     std::fs::remove_dir_all(&d).ok();
     std::fs::remove_dir_all(&s).ok();
 
@@ -378,39 +418,36 @@ fn deny_pin_survives_write_prefix_root_rename() {
 /// Seatbelt renders a deny whether or not its name exists, so a child cannot
 /// create it inside a write prefix.  Linux and Windows hold such a name in
 /// process alone until it exists (SPEC §12.3); only this backend pins it.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn seatbelt_holds_an_absent_deny_inside_a_write_prefix() {
-    let d = scratch_dir("absent_deny");
-    let d_s = d.to_string_lossy().into_owned();
-
-    let out = ral(&[
-        "-c",
-        &format!(
-            "grant [fs: [read: [`absolute '{d_s}'], write: [`absolute '{d_s}'], deny: [`absolute '{d_s}/.env']]] \
-             {{ /bin/sh -c 'echo x > {d_s}/.env && echo made-env; \
-             echo y > {d_s}/other && echo made-other' }}"
-        ),
-    ]);
-    let env_exists = d.join(".env").exists();
-    let other = std::fs::read_to_string(d.join("other"));
-    std::fs::remove_dir_all(&d).ok();
-    if refused_by_a_confined_runner(&out) {
-        return;
+    let proof = ral_core::require_confinement!();
+    let d = common::Scratch::new("absent_deny");
+    let write = |name: &str| {
+        common::run(
+            "absent_deny",
+            &format!(
+                "grant [fs: [read: [`absolute '{d}'], write: [`absolute '{d}'], deny: [`absolute '{d}/.env']]] {{ /bin/sh -c 'echo ok > {d}/{name} && echo ok' }}",
+                d = d.0.display(),
+            ),
+        )
+    };
+    let control = write("other");
+    let out = write(".env");
+    #[cfg(target_os = "macos")]
+    {
+        denied(&proof, &control, &out, "ok");
+        assert!(!d.join(".env").exists(), "the denied name was created");
     }
-
-    assert_eq!(
-        other.as_deref().ok(),
-        Some("y\n"),
-        "the control write did not land; stderr:\n{}",
-        out.stderr
-    );
-    assert!(
-        !out.stdout.contains("made-env"),
-        "the denied name was created; stdout:\n{}",
-        out.stdout
-    );
-    assert!(!env_exists, "the denied name exists on the host");
+    #[cfg(target_os = "linux")]
+    {
+        admitted(&proof, &control, "ok");
+        admitted(&proof, &out, "ok");
+        assert!(
+            d.join(".env").exists(),
+            "Linux admits an absent name until the next launch"
+        );
+    }
 }
 
 /// A table reaching `exec:` through a parameter is left to the runtime
@@ -439,133 +476,132 @@ fn undecodable_exec_table_passes_the_checker_and_is_refused_at_run() {
     );
 }
 
-/// A confined command forks as freely as a script needs, under a process
-/// limit set in the child alone and as a hard limit, so the command cannot
-/// raise it and the user's other processes never share it.
-#[cfg(target_os = "macos")]
+/// A confined command can fork; macOS also sets a hard process budget.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn confined_forks_run_under_a_process_budget() {
+    let proof = ral_core::require_confinement!();
     let d = scratch_dir("brake");
     let d_s = d.to_string_lossy().into_owned();
     let out = common::run_with_timeout(
         "brake",
         &[],
         &format!(
-            "grant [fs: [read: [`absolute '{d_s}']]] {{ sh -c 'echo $(ulimit -Su) $(ulimit -Hu); \
+            "grant [fs: [read: [`absolute '{d_s}']]] {{ /bin/bash -c 'echo $(ulimit -Su) $(ulimit -Hu); \
              i=0; while [ $i -lt 50 ]; do /usr/bin/true & i=$((i+1)); done; wait; echo forked' }}"
         ),
         std::time::Duration::from_secs(30),
     )
     .expect("the confined fork run hung");
     std::fs::remove_dir_all(&d).ok();
-    if refused_by_a_confined_runner(&out) {
-        return;
+
+    admitted(&proof, &out, "forked");
+    #[cfg(target_os = "macos")]
+    {
+        let mut lines = out.stdout.lines();
+        let limits: Vec<u64> = lines
+            .next()
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(process_limit)
+            .collect();
+        assert_eq!(lines.next(), Some("forked"), "stdout:\n{}", out.stdout);
+
+        let free = free_limits()[0];
+        assert!(
+            matches!(*limits, [soft, hard] if soft == hard && soft <= free),
+            "the confined limit must be one value no higher than the user's {free}: {limits:?}"
+        );
     }
-
-    assert_eq!(
-        out.status, 0,
-        "fifty short children must fit the budget; stderr:\n{}",
-        out.stderr
-    );
-    let mut lines = out.stdout.lines();
-    let limits: Vec<u64> = lines
-        .next()
-        .unwrap_or_default()
-        .split_whitespace()
-        .map(|n| n.parse().expect("a numeric process limit"))
-        .collect();
-    assert_eq!(lines.next(), Some("forked"), "stdout:\n{}", out.stdout);
-
-    let free = Command::new("sh")
-        .args(["-c", "ulimit -Su"])
-        .output()
-        .unwrap();
-    let free: u64 = String::from_utf8(free.stdout)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-    assert!(
-        matches!(*limits, [soft, hard] if soft == hard && soft <= free),
-        "the confined limit must be one value no higher than the user's {free}: {limits:?}"
-    );
 }
 
-/// The `(soft, hard)` process limits a `sh` child reports, run as `wrap`
-/// writes the probe into a script; `None` where the runner is itself confined.
-#[cfg(target_os = "macos")]
-fn child_limits(tag: &str, wrap: impl Fn(&str) -> String) -> Option<Vec<u64>> {
-    const PROBE: &str = "sh -c 'echo $(ulimit -Su) $(ulimit -Hu)'";
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn process_limit(n: &str) -> u64 {
+    match n {
+        "unlimited" => u64::MAX,
+        _ => n.parse().expect("a process limit is numeric or unlimited"),
+    }
+}
+
+/// The `(soft, hard)` process limits a `bash` child reports, run as `wrap`
+/// writes the probe into a script.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn child_limits(proof: &Confining, tag: &str, wrap: impl Fn(&str) -> String) -> Vec<u64> {
+    const PROBE: &str = "/bin/bash -c 'echo $(ulimit -Su) $(ulimit -Hu); echo limits-ok'";
     let out = common::run_with_timeout(tag, &[], &wrap(PROBE), std::time::Duration::from_secs(30))
         .expect("the limit probe hung");
-    if refused_by_a_confined_runner(&out) {
-        return None;
-    }
-    assert_eq!(out.status, 0, "stderr:\n{}", out.stderr);
-    Some(
-        out.stdout
-            .split_whitespace()
-            .map(|n| n.parse().expect("a numeric process limit"))
-            .collect(),
-    )
+
+    admitted(proof, &out, "limits-ok");
+    out.stdout
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .map(process_limit)
+        .collect()
 }
 
-/// The `(soft, hard)` process limits an unconfined `sh` has.
-#[cfg(target_os = "macos")]
+/// The `(soft, hard)` process limits an unconfined `bash` has.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn free_limits() -> [u64; 2] {
     let ulimit = |flag: &str| -> u64 {
-        let out = Command::new("sh")
+        let out = Command::new("/bin/bash")
             .args(["-c", &format!("ulimit {flag}")])
             .output()
             .unwrap();
-        String::from_utf8(out.stdout)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap()
+        assert!(out.status.success(), "ulimit {flag} failed: {out:?}");
+        process_limit(String::from_utf8(out.stdout).unwrap().trim())
     };
     [ulimit("-Su"), ulimit("-Hu")]
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const FULL_VERBS: &str = "editor: [`read, `write, `tui], shell: [`chdir, `detach]";
 
 /// A neutral policy launches ambient: the child keeps the user's own limits.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn a_neutral_policy_leaves_the_process_limits_alone() {
-    let Some(limits) = child_limits("brake_neutral", |probe| {
+    let proof = ral_core::require_confinement!();
+    let limits = child_limits(&proof, "brake_neutral", |probe| {
         format!("grant [{FULL_VERBS}] {{ {probe} }}")
-    }) else {
-        return;
-    };
+    });
     assert_eq!(limits, free_limits(), "a neutral grant applies no budget");
 }
 
-/// A neutral layer around a restriction cannot lift the budget, and a
-/// withheld verb alone activates it.
-#[cfg(target_os = "macos")]
+/// Neutral layers preserve launch restrictions, including macOS's process budget.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn neutral_layers_around_a_restriction_keep_the_process_budget() {
+    let proof = ral_core::require_confinement!();
     let d = scratch_dir("brake_wrapped");
     let d_s = d.to_string_lossy().into_owned();
-    let wrapped = child_limits("brake_wrapped", |probe| {
+    let wrapped = child_limits(&proof, "brake_wrapped", |probe| {
         format!(
             "grant [{FULL_VERBS}] {{ grant [fs: [read: [`absolute '{d_s}']]] {{ \
              grant [{FULL_VERBS}] {{ {probe} }} }} }}"
         )
     });
-    let verb = child_limits("brake_verb", |probe| {
+    let verb = child_limits(&proof, "brake_verb", |probe| {
         format!("grant [shell: [`chdir]] {{ {probe} }}")
     });
     std::fs::remove_dir_all(&d).ok();
-    let free = free_limits()[0];
-    for limits in [wrapped, verb].into_iter().flatten() {
-        assert!(
-            matches!(*limits, [soft, hard] if soft == hard && soft <= free),
-            "the budget must survive: {limits:?} against the user's {free}"
-        );
+    #[cfg(target_os = "macos")]
+    {
+        let free = free_limits()[0];
+        for limits in [wrapped, verb] {
+            assert!(
+                matches!(*limits, [soft, hard] if soft == hard && soft <= free),
+                "the budget must survive: {limits:?} against the user's {free}"
+            );
+        }
     }
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        [wrapped.len(), verb.len()],
+        [2, 2],
+        "both confined probes must run"
+    );
 }
 
 /// A canonical scratch directory holding `bin/good/x` and an executable
@@ -633,27 +669,20 @@ fn assert_names_the_absent_deny(out: &common::Output, kind: &str, denied: &std::
 #[cfg(unix)]
 #[test]
 fn an_absent_exec_deny_holds_a_case_variant() {
-    #[cfg(target_os = "linux")]
-    if !common::bwrap_functional() {
-        eprintln!("skip: bwrap cannot confine a child here");
-        return;
-    }
+    ral_core::require_landlock!(1);
+    let proof = ral_core::require_confinement!();
+
     let scratch = ExecScratch::new("dir");
     let (bin, stash) = (scratch.bin(), scratch.stash());
     let (b, s) = (bin.display(), stash.display());
+    let control = under_exec_deny(&bin, "Evil/", &format!("{b}/good/x"));
     let out = under_exec_deny(
         &bin,
         "Evil/",
-        &format!("{b}/good/x; /bin/mkdir {b}/evil; /bin/cp {s} {b}/evil/x; {b}/evil/x"),
+        &format!("/bin/mkdir {b}/evil; /bin/cp {s} {b}/evil/x; {b}/evil/x"),
     );
-    if refused_by_a_confined_runner(&out) {
-        return;
-    }
-    assert!(
-        out.stdout.contains("ran"),
-        "`good/x` must run; stderr:\n{}",
-        out.stderr
-    );
+
+    denied(&proof, &control, &out, "ran");
     assert_ne!(
         out.status, 0,
         "`evil/x` must be refused; stderr:\n{}",
@@ -666,7 +695,9 @@ fn an_absent_exec_deny_holds_a_case_variant() {
     std::fs::create_dir(bin.join("Evil")).unwrap();
     std::fs::copy(bin.join("good/x"), bin.join("Evil/x")).unwrap();
     let b = bin.display();
+    let control = under_exec_deny(&bin, "Evil/", &format!("{b}/good/x"));
     let out = under_exec_deny(&bin, "Evil/", &format!("{b}/Evil/x"));
+    denied(&proof, &control, &out, "ran");
     assert_ne!(
         out.status, 0,
         "`Evil/x` must be refused; stderr:\n{}",
@@ -683,27 +714,16 @@ fn an_absent_exec_deny_holds_a_case_variant() {
 #[cfg(unix)]
 #[test]
 fn an_absent_exec_path_deny_holds_a_case_variant() {
-    #[cfg(target_os = "linux")]
-    if !common::bwrap_functional() {
-        eprintln!("skip: bwrap cannot confine a child here");
-        return;
-    }
+    ral_core::require_landlock!(1);
+    let proof = ral_core::require_confinement!();
+
     let scratch = ExecScratch::new("path");
     let (bin, stash) = (scratch.bin(), scratch.stash());
     let (b, s) = (bin.display(), stash.display());
-    let out = under_exec_deny(
-        &bin,
-        "Tool",
-        &format!("{b}/good/x; /bin/cp {s} {b}/tool; {b}/tool"),
-    );
-    if refused_by_a_confined_runner(&out) {
-        return;
-    }
-    assert!(
-        out.stdout.contains("ran"),
-        "`good/x` must run; stderr:\n{}",
-        out.stderr
-    );
+    let control = under_exec_deny(&bin, "Tool", &format!("{b}/good/x"));
+    let out = under_exec_deny(&bin, "Tool", &format!("/bin/cp {s} {b}/tool; {b}/tool"));
+
+    denied(&proof, &control, &out, "ran");
     assert_ne!(
         out.status, 0,
         "`tool` must be refused; stderr:\n{}",
@@ -714,30 +734,29 @@ fn an_absent_exec_path_deny_holds_a_case_variant() {
 
 /// E2: Seatbelt folds an exec deny as the guard does, so a child's exec of
 /// the case variant is refused and the stored sibling admitted.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn seatbelt_refuses_a_case_variant_of_an_absent_exec_deny() {
+    ral_core::require_landlock!(1);
+    let proof = ral_core::require_confinement!();
     let scratch = ExecScratch::new("seatbelt");
     let (bin, stash) = (scratch.bin(), scratch.stash());
     let b = bin.display();
     // The grant freezes `Evil` before it exists; only then does `evil/x` appear.
+    let control = under_exec_deny(&bin, "Evil/", &format!("/bin/sh -c {b}/good/x"));
     let out = under_exec_deny(
         &bin,
         "Evil/",
         &format!(
-            "/bin/mkdir {b}/evil; /bin/cp {} {b}/evil/x; /bin/sh -c '{b}/good/x; {b}/evil/x || echo refused'",
+            "/bin/mkdir {b}/evil; /bin/cp {} {b}/evil/x; /bin/sh -c {b}/evil/x",
             stash.display()
         ),
     );
-    if refused_by_a_confined_runner(&out) {
-        return;
-    }
-    assert_eq!(out.status, 0, "stderr:\n{}", out.stderr);
-    assert_eq!(
-        out.stdout.lines().collect::<Vec<_>>(),
-        ["ran", "refused"],
-        "a child must run `good/x` and be refused `evil/x`; stderr:\n{}",
-        out.stderr
+
+    denied(&proof, &control, &out, "ran");
+    assert!(
+        bin.join("evil/x").is_file(),
+        "the denied executable must have been created: {out:?}"
     );
 }
 
@@ -746,6 +765,8 @@ fn seatbelt_refuses_a_case_variant_of_an_absent_exec_deny() {
 #[cfg(unix)]
 #[test]
 fn a_stacked_one_sided_allow_denies_no_other_spelling() {
+    ral_core::require_landlock!(1);
+    let proof = ral_core::require_confinement!();
     let scratch = ExecScratch::new("stack");
     let bin = scratch.bin();
     std::fs::create_dir(bin.join("B")).unwrap();
@@ -758,10 +779,8 @@ fn a_stacked_one_sided_allow_denies_no_other_spelling() {
              grant [exec: [allow: [`dir `absolute '{b}/B', `dir `absolute '{b}/b', `dir `absolute /bin]]] {{ {b}/B/x }} }}"
         ),
     ]);
-    if refused_by_a_confined_runner(&out) {
-        return;
-    }
-    assert_eq!(out.status, 0, "`B/x` must run; stderr:\n{}", out.stderr);
+
+    admitted(&proof, &out, "ran");
     assert!(out.stdout.contains("ran"), "stdout:\n{}", out.stdout);
 }
 
@@ -770,14 +789,11 @@ fn a_stacked_one_sided_allow_denies_no_other_spelling() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn an_allow_beneath_a_deny_never_reaches_the_backend() {
-    #[cfg(target_os = "linux")]
-    if !common::bwrap_functional() {
-        eprintln!("skip: bwrap cannot confine a child here");
-        return;
-    }
+    let proof = ral_core::require_confinement!();
+
     let d = common::Scratch::new("caps_beneath");
     let (beneath, beside) = (d.join("Secrets/sub/f"), d.join("other/f"));
-    for (file, text) in [(&beneath, "beneath"), (&beside, "beside")] {
+    for (file, text) in [(&beneath, "beneath"), (&beside, "beneath")] {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(file, text).unwrap();
     }
@@ -794,26 +810,8 @@ fn an_allow_beneath_a_deny_never_reaches_the_backend() {
         )
     };
 
-    let out = cat(&beside);
-    if refused_by_a_confined_runner(&out) {
-        return;
-    }
-    assert_eq!(
-        out.status, 0,
-        "a child's read beside the deny must be admitted; stderr:\n{}",
-        out.stderr
-    );
-    assert_eq!(out.stdout, "beside");
-
+    let control = cat(&beside);
+    admitted(&proof, &control, "beneath");
     let out = cat(&beneath);
-    assert_ne!(
-        out.status, 0,
-        "a child's read beneath the deny must be refused; stderr:\n{}",
-        out.stderr
-    );
-    assert!(
-        !out.stdout.contains("beneath"),
-        "the denied file reached the child; stdout:\n{}",
-        out.stdout
-    );
+    denied(&proof, &control, &out, "beneath");
 }

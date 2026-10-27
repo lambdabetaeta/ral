@@ -386,6 +386,12 @@ impl Trace {
         self.root_id
     }
 
+    /// Each opened object's identity, from the root to the last step.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn spine_ids(&self) -> impl DoubleEndedIterator<Item = ObjectId> + '_ {
+        std::iter::once(self.root_id).chain(self.steps.iter().map(Step::id))
+    }
+
     /// The kind of the object at this position: the last step's where the
     /// tail is empty; `Dir` for the root; `None` for a missing tail.
     pub fn kind(&self) -> Option<Kind> {

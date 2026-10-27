@@ -30,6 +30,7 @@
 
 use std::io;
 use std::ptr;
+use std::sync::Arc;
 
 use windows_sys::Win32::Foundation::ERROR_ALREADY_EXISTS;
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
@@ -91,7 +92,18 @@ fn sid_to_string(sid: PSID) -> io::Result<String> {
 /// Owned `PSID` from `CreateAppContainerProfile` or
 /// `DeriveAppContainerSidFromAppContainerName`, whose documented release is
 /// `FreeSid` — not the `LocalFree` the capability SIDs below take.
-struct OwnedContainerSid(PSID);
+pub(crate) struct OwnedContainerSid(PSID);
+
+// SAFETY: process-global OS allocation, immutable and freed only on drop.
+unsafe impl Send for OwnedContainerSid {}
+// SAFETY: process-global OS allocation, immutable and freed only on drop.
+unsafe impl Sync for OwnedContainerSid {}
+
+impl OwnedContainerSid {
+    pub(crate) fn sid(&self) -> PSID {
+        self.0
+    }
+}
 
 impl Drop for OwnedContainerSid {
     fn drop(&mut self) {
@@ -108,7 +120,7 @@ impl Drop for OwnedContainerSid {
 /// enforceable command to session end.
 pub(crate) struct AppContainerProfile {
     name: String,
-    sid: OwnedContainerSid,
+    sid: Arc<OwnedContainerSid>,
 }
 
 impl AppContainerProfile {
@@ -161,13 +173,13 @@ impl AppContainerProfile {
 
         Ok(Self {
             name: name.to_string(),
-            sid: OwnedContainerSid(sid),
+            sid: Arc::new(OwnedContainerSid(sid)),
         })
     }
 
-    /// The profile's `PSID`, valid only while `self` lives.
-    pub(crate) fn sid(&self) -> PSID {
-        self.sid.0
+    /// Retain the SID independently of the profile registration.
+    pub(crate) fn sid(&self) -> Arc<OwnedContainerSid> {
+        Arc::clone(&self.sid)
     }
 
     pub(crate) fn name(&self) -> &str {
@@ -183,12 +195,11 @@ impl AppContainerProfile {
         reason = "the profile SID's string form has no caller left in the lib now that stamps target capability SIDs; the round-trip test reads it, and it is the natural spelling of a profile's identity should one be needed again"
     )]
     pub(crate) fn sid_string(&self) -> io::Result<String> {
-        sid_to_string(self.sid.0)
+        sid_to_string(self.sid.sid())
     }
 
     // after mxc appcontainer_runner.rs::delete_app_container_profile
-    /// Delete the profile at session end. Consumes `self` so the in-memory
-    /// SID is freed by `Drop` whether or not the OS-level delete succeeds.
+    /// Delete the registration; staged launches retain their SID allocation.
     pub(crate) fn delete(self) -> io::Result<()> {
         delete_profile_by_name(&self.name)
     }
@@ -214,6 +225,15 @@ pub(crate) fn delete_profile_by_name(name: &str) -> io::Result<()> {
 /// Owned capability `PSID`: `DeriveCapabilitySidsFromName` `LocalAlloc`s its
 /// SIDs, so this one takes `LocalFree`, not the `FreeSid` above.
 pub(crate) struct OwnedCapabilitySid(Local<std::ffi::c_void>);
+
+// SAFETY: process-global OS allocation, immutable and freed only on drop.
+#[allow(
+    clippy::non_send_fields_in_send_ty,
+    reason = "the SID is immutable OS allocation with no thread affinity"
+)]
+unsafe impl Send for OwnedCapabilitySid {}
+// SAFETY: process-global OS allocation, immutable and freed only on drop.
+unsafe impl Sync for OwnedCapabilitySid {}
 
 impl OwnedCapabilitySid {
     /// Derive the capability SID for `name` — a well-known Windows capability
@@ -283,16 +303,13 @@ impl OwnedCapabilitySid {
 /// The well-known Windows capability names that permit outbound sockets.
 const NETWORK_CAPABILITIES: [&str; 2] = ["internetClient", "privateNetworkClientServer"];
 
-/// The capability-SID array for a confined spawn's `SECURITY_CAPABILITIES`.
-///
-/// Owns the derived SIDs alongside the `SID_AND_ATTRIBUTES` view over them
-/// that [`crate::process::launch::Launch::security_capabilities`] copies:
-/// those copies still point into this struct's `LocalAlloc`'d memory, so it
-/// must outlive the spawn — `session` holds it until teardown.
-pub(crate) struct CapabilitySids {
-    _owned: Vec<OwnedCapabilitySid>,
-    entries: Vec<SID_AND_ATTRIBUTES>,
-}
+/// Owned network capabilities, shared by the session and its staged launches.
+pub(crate) struct CapabilitySids(Vec<OwnedCapabilitySid>);
+
+// SAFETY: process-global OS allocations, immutable and freed only on drop.
+unsafe impl Send for CapabilitySids {}
+// SAFETY: process-global OS allocations, immutable and freed only on drop.
+unsafe impl Sync for CapabilitySids {}
 
 impl CapabilitySids {
     // after mxc appcontainer_runner.rs::AppContainerScriptRunner::spawn_suspended
@@ -303,28 +320,36 @@ impl CapabilitySids {
     /// worse than not spawning.
     pub(crate) fn build(allow_network: bool) -> io::Result<Self> {
         let mut owned = Vec::new();
-        let mut entries = Vec::new();
 
         if allow_network {
             for name in NETWORK_CAPABILITIES {
                 let sid = OwnedCapabilitySid::from_capability_name(name)?;
-                entries.push(SID_AND_ATTRIBUTES {
-                    Sid: sid.sid(),
-                    Attributes: SE_GROUP_ENABLED as u32,
-                });
                 owned.push(sid);
             }
         }
 
-        Ok(Self {
-            _owned: owned,
-            entries,
-        })
+        Ok(Self(owned))
     }
 
-    pub(crate) fn entries(&self) -> &[SID_AND_ATTRIBUTES] {
-        &self.entries
+    pub(crate) fn sids(&self) -> impl Iterator<Item = PSID> + '_ {
+        self.0.iter().map(OwnedCapabilitySid::sid)
     }
+}
+
+/// Entries borrow the owners, which must outlive their use by Windows.
+pub(crate) fn capability_entries(
+    filesystem: &[Arc<OwnedCapabilitySid>],
+    network: Option<&CapabilitySids>,
+) -> Vec<SID_AND_ATTRIBUTES> {
+    network
+        .into_iter()
+        .flat_map(CapabilitySids::sids)
+        .chain(filesystem.iter().map(|sid| sid.sid()))
+        .map(|sid| SID_AND_ATTRIBUTES {
+            Sid: sid,
+            Attributes: SE_GROUP_ENABLED as u32,
+        })
+        .collect()
 }
 
 #[cfg(test)]

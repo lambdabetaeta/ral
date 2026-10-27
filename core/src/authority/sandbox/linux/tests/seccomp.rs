@@ -88,10 +88,18 @@ fn a_confined_ptrace_is_killed_and_named() {
         "a confined ptrace must be killed with SIGSYS: {stdout}"
     );
 
-    let described =
-        crate::authority::sandbox::diag::platform::describe_denial(&libc::SYS_ptrace.to_string());
+    #[cfg(target_arch = "x86_64")]
+    let arch = "c000003e";
+    #[cfg(target_arch = "aarch64")]
+    let arch = "c00000b7";
+    let record = crate::authority::sandbox::diag::platform::parse_denial(&format!(
+        "type=1326 pid=1 arch={arch} syscall={} code=0x0",
+        libc::SYS_ptrace
+    ))
+    .expect("a kill-thread record names ptrace");
+    let described = crate::authority::sandbox::diag::build_hint(&[record]);
     assert!(
-        described.is_some_and(|d| d.contains("ptrace")),
-        "describe_denial must name ptrace from its syscall number"
+        described.contains("ptrace"),
+        "the hint must name ptrace from its syscall number and action"
     );
 }

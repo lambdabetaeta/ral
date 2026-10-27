@@ -34,10 +34,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::sync::{LazyLock, Mutex};
-
-use windows_sys::Win32::Security::{PSID, SID_AND_ATTRIBUTES};
-use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::authority::policy::{FsAllow, GrantPath};
 use crate::authority::sandbox::Refusal;
@@ -48,7 +45,9 @@ use crate::process::Launch;
 use crate::process::cancel::Scope;
 use crate::sync::LockExt as _;
 
-use super::appcontainer::{AppContainerProfile, CapabilitySids, OwnedCapabilitySid};
+use super::appcontainer::{
+    AppContainerProfile, CapabilitySids, OwnedCapabilitySid, OwnedContainerSid,
+};
 use super::dacl::{self, DaclError, DaclManager, FrozenPin, GrantKind};
 
 /// One fs projection's identity, as [`FsRules`](crate::authority::sandbox::FsRules)
@@ -68,28 +67,15 @@ struct ProjectionKey {
 /// the session has ensured.
 struct SessionSandbox {
     dacl: DaclManager,
-    network_caps: Option<CapabilitySids>,
+    network_caps: Option<Arc<CapabilitySids>>,
     /// By capability name, entered only once its grant holds, so a hit skips
     /// the stamp's witnesses. The name keys the frozen real path: an object
     /// since replaced under it lost the ACE that went with the old one, so a
     /// hit on it fails closed, the child simply cannot reach the new object.
-    fs_cap_sids: HashMap<String, OwnedCapabilitySid>,
+    fs_cap_sids: HashMap<String, Arc<OwnedCapabilitySid>>,
     projections: HashMap<ProjectionKey, AppContainerProfile>,
     next_profile_index: u32,
 }
-
-// SAFETY: the raw SIDs held here (each profile's SID, the network capability
-// SIDs, and the `LocalAlloc`'d fs capability SIDs in `fs_cap_sids`) point at
-// process-global OS-owned memory, not thread-local state, and live until
-// `teardown` frees them. Every access to the struct is serialized by `cell`'s
-// mutex; the only lock-free reads are the raw pointer *values*
-// `Launch::security_capabilities` copies, and teardown runs at session
-// shutdown, never concurrently with a spawn.
-#[allow(
-    clippy::non_send_fields_in_send_ty,
-    reason = "the fields the lint names (`network_caps`, `fs_cap_sids`, `projections`) are exactly the raw SIDs the SAFETY note above argues about: OS-owned process-global memory, not thread-affine state, reached only under [`cell`]'s mutex. The lint can see that a `PSID` is not `Send`; it cannot read the argument for why these ones are."
-)]
-unsafe impl Send for SessionSandbox {}
 
 fn cell() -> &'static Mutex<Option<SessionSandbox>> {
     static SESSION: LazyLock<Mutex<Option<SessionSandbox>>> = LazyLock::new(|| Mutex::new(None));
@@ -113,7 +99,7 @@ impl SessionSandbox {
     /// name, and the ledger entry precedes the create so a crash between them
     /// leaves recovery deleting a profile that may not exist, never a
     /// registered profile the ledger does not know.
-    fn profile_sid(&mut self, key: ProjectionKey) -> Result<PSID, Refusal> {
+    fn profile_sid(&mut self, key: ProjectionKey) -> Result<Arc<OwnedContainerSid>, Refusal> {
         let vacant = match self.projections.entry(key) {
             Entry::Occupied(known) => return Ok(known.get().sid()),
             Entry::Vacant(vacant) => vacant,
@@ -132,14 +118,14 @@ impl SessionSandbox {
 /// projection never calls this — the empty array *is* the enforcement, since
 /// an `AppContainer` with no network capability cannot open a socket.
 fn ensure_network_caps(
-    slot: &mut Option<CapabilitySids>,
-) -> Result<&[SID_AND_ATTRIBUTES], Refusal> {
+    slot: &mut Option<Arc<CapabilitySids>>,
+) -> Result<Arc<CapabilitySids>, Refusal> {
     if slot.is_none() {
         let caps = CapabilitySids::build(true)
             .map_err(|e| io_refusal("sandbox: derive network capability SIDs", &e))?;
-        *slot = Some(caps);
+        *slot = Some(Arc::new(caps));
     }
-    Ok(slot.as_ref().expect("network caps built above").entries())
+    Ok(Arc::clone(slot.as_ref().expect("network caps built above")))
 }
 
 /// Unique by construction: the pid keys the session, a monotonic counter the
@@ -292,23 +278,22 @@ pub(crate) fn confine(
         t_grants.elapsed(),
     );
 
-    // Copied out of the session's caches: `security_capabilities` copies the
-    // slice, but the SIDs it points at stay owned here until teardown.
-    let mut capabilities: Vec<SID_AND_ATTRIBUTES> = Vec::new();
-    if projection.net {
-        capabilities.extend_from_slice(ensure_network_caps(network_caps)?);
-    }
-    capabilities.extend(names.iter().map(|name| SID_AND_ATTRIBUTES {
-        Sid: fs_cap_sids[name].sid(),
-        Attributes: SE_GROUP_ENABLED as u32,
-    }));
+    let network = projection
+        .net
+        .then(|| ensure_network_caps(network_caps))
+        .transpose()?;
+    let filesystem: Vec<_> = names
+        .iter()
+        .map(|name| Arc::clone(&fs_cap_sids[name]))
+        .collect();
 
     // Against the very package and capabilities the spawn is handed, so what
     // is checked is the token the child gets.
     #[cfg(debug_assertions)]
     let t_deny = std::time::Instant::now();
     if !rules.deny.is_empty() {
-        let access = dacl::ContainerAccess::of(profile_sid, &capabilities)?;
+        let capabilities = super::appcontainer::capability_entries(&filesystem, network.as_deref());
+        let access = dacl::ContainerAccess::of(profile_sid.sid(), &capabilities)?;
         for denied in &denied {
             dacl::ensure_unreachable(denied, &access, cancel)?;
         }
@@ -319,14 +304,14 @@ pub(crate) fn confine(
         rules.deny.len(),
         t_deny.elapsed(),
     );
-    launch.security_capabilities(profile_sid, &capabilities);
+    launch.security_capabilities(profile_sid, filesystem, network);
     crate::dbg_trace!("sandbox-win", "confine: total {:?}", t_confine.elapsed());
     Ok(())
 }
 
 /// Ensure `pin`'s grant of `kind`, once per session, and name its capability.
 fn ensure_grant(
-    fs_cap_sids: &mut HashMap<String, OwnedCapabilitySid>,
+    fs_cap_sids: &mut HashMap<String, Arc<OwnedCapabilitySid>>,
     pin: &FrozenPin,
     kind: GrantKind,
     cancel: &Scope,
@@ -339,7 +324,7 @@ fn ensure_grant(
             .sid_string()
             .map_err(|e| io_refusal("sandbox: fs capability SID string", &e))?;
         dacl::ensure_frozen_grant(pin, &sid_string, kind, cancel)?;
-        fs_cap_sids.insert(name.clone(), sid);
+        fs_cap_sids.insert(name.clone(), Arc::new(sid));
     }
     Ok(name)
 }

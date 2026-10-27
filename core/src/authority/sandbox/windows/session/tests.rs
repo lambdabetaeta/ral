@@ -6,6 +6,9 @@ use crate::path::{Excluded, FrozenPath, RealPath, Trace};
 use crate::test_helper::{place, real as walked};
 use std::path::{Path, PathBuf};
 
+mod execution;
+mod network;
+
 #[test]
 fn projection_key_identity_is_the_fs_triple() {
     let a = ProjectionKey {

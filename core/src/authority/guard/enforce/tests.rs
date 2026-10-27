@@ -358,8 +358,7 @@ mod words {
             ..Capabilities::default()
         };
         let grants = grants([excluding]);
-        let Err(denial) = check_exec(&grants, &baseline, "ls", Program::Tool("ls".into()), &[])
-        else {
+        let Err(denial) = check_exec(&grants, &baseline, "ls", Program::Tool("ls"), &[]) else {
             panic!("an fs exclusion over ral's binary refuses a bundled tool");
         };
         assert!(
@@ -400,6 +399,11 @@ fn a_case_variant_spelling_meets_the_deny() {
     std::fs::create_dir(&secret).unwrap();
     std::fs::write(secret.join("key"), "x").unwrap();
     if !root.join("SECRET").exists() {
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr(),
+            "skip a_case_variant_spelling_meets_the_deny: the volume is case-sensitive"
+        );
         return;
     }
     let grants = stack(FsPolicy {

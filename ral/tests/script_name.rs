@@ -14,6 +14,7 @@
 
 mod common;
 
+use ral_core::test_helper::confinement::{Confining, admitted};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -38,9 +39,13 @@ fn fixture() -> (TempDir, PathBuf) {
 
 /// Run `script`, written to a temporary file named with `prefix`, and assert
 /// that the probe in `dir` printed its real path and its sibling.
-fn assert_sees_real_path(dir: &Path, prefix: &str, script: &str) {
+fn assert_sees_real_path(proof: Option<&Confining>, dir: &Path, prefix: &str, script: &str) {
     let out = common::run(prefix, script);
-    assert_eq!(out.status, 0, "{}", out.stderr);
+    if let Some(proof) = proof {
+        admitted(proof, &out, "SIBLING");
+    } else {
+        assert_eq!(out.status, 0, "{}", out.stderr);
+    }
     assert_eq!(out.stdout, format!("{}/probe\nSIBLING\n", dir.display()));
 }
 
@@ -48,18 +53,16 @@ fn assert_sees_real_path(dir: &Path, prefix: &str, script: &str) {
 fn an_unconfined_script_sees_its_real_path() {
     let (_tmp, dir) = fixture();
     let d = dir.display();
-    assert_sees_real_path(&dir, "script_name_plain", &format!("{d}/probe"));
+    assert_sees_real_path(None, &dir, "script_name_plain", &format!("{d}/probe"));
 }
 
 #[test]
 fn a_script_under_an_fs_grant_sees_its_real_path() {
-    if !common::bwrap_functional() {
-        eprintln!("skip: no functional bwrap");
-        return;
-    }
+    let proof = ral_core::require_confinement!();
     let (_tmp, dir) = fixture();
     let d = dir.display();
     assert_sees_real_path(
+        Some(&proof),
         &dir,
         "script_name_fs",
         &format!("grant [fs: [read: [`absolute '{d}']]] {{ {d}/probe }}"),
@@ -68,13 +71,12 @@ fn a_script_under_an_fs_grant_sees_its_real_path() {
 
 #[test]
 fn a_script_under_an_exec_grant_sees_its_real_path() {
-    if !common::bwrap_functional() {
-        eprintln!("skip: no functional bwrap");
-        return;
-    }
+    ral_core::require_landlock!(1);
+    let proof = ral_core::require_confinement!();
     let (_tmp, dir) = fixture();
     let d = dir.display();
     assert_sees_real_path(
+        Some(&proof),
         &dir,
         "script_name_exec",
         &format!(

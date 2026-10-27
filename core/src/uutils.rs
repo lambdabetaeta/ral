@@ -54,38 +54,19 @@ pub(crate) const DIFFUTILS_TOOLS: &[&str] = &["cmp", "diff"];
 #[cfg(feature = "ripgrep")]
 pub(crate) const RIPGREP_TOOLS: &[&str] = &["rg"];
 
-/// True when `name` is a bundled tool.  `command::Head` resolves these to a
+/// The static name of a bundled tool. `command::Head` resolves these to a
 /// `Program::Tool` and skips the PATH probe entirely, so the in-binary
 /// implementation wins over any same-named system binary.
-#[cfg_attr(
-    not(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")),
-    allow(
-        unused_variables,
-        reason = "no bundled-tool feature is active, so `name` is not consulted and the fn is a constant `false`"
-    )
-)]
-pub(crate) fn is_uutils_tool(name: &str) -> bool {
-    #[cfg(feature = "coreutils")]
-    if COREUTILS_TOOLS.contains(&name) {
-        return true;
-    }
-    #[cfg(feature = "diffutils")]
-    if DIFFUTILS_TOOLS.contains(&name) {
-        return true;
-    }
-    #[cfg(feature = "ripgrep")]
-    if RIPGREP_TOOLS.contains(&name) {
-        return true;
-    }
-    false
+pub(crate) fn bundled_name(name: &std::ffi::OsStr) -> Option<&'static str> {
+    bundled_tools().into_iter().find(|tool| name == *tool)
 }
 
-/// Whether this platform bundles `name`: [`is_uutils_tool`], less the
+/// Whether this platform bundles `name`: [`bundled_name`], less the
 /// Unix-only coreutils where Unix is not `unix_available`.  A parameter
 /// rather than a `cfg!(unix)` read here, so the other shape is testable from
 /// a Unix host.
 pub(crate) fn bundled(name: &str, unix_available: bool) -> bool {
-    is_uutils_tool(name) && (unix_available || !unix_only(name))
+    bundled_name(name.as_ref()).is_some() && (unix_available || !unix_only(name))
 }
 
 #[cfg(feature = "coreutils")]
@@ -200,14 +181,6 @@ impl std::fmt::Display for Unbundled {
             Self::Build => f.write_str("no bundled tools are available in this build"),
         }
     }
-}
-
-/// The static spelling of the bundled tool `name` names, which is the tool
-/// [`run`] runs: exactly the tools [`is_uutils_tool`] admits.  Names are
-/// compared as the OS holds them, so no conversion of `name` is needed.
-#[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
-fn bundled_name(name: &std::ffi::OsStr) -> Option<&'static str> {
-    bundled_tools().into_iter().find(|tool| name == *tool)
 }
 
 /// Run bundled `tool` in this process, the body of a re-exec child: the

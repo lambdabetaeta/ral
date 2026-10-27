@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 7ab5809a08c38081b58a1c308eab0ab0303e7b07
+generated_at_commit: 2f1beeb292a50892e1428796acf6b1da14631dcd
 verified_at_commit: 7ab5809a
 verified_at_date: 2026-10-26
 anchors: [apply_profile, build_profile, Profile, RESOLVER_SOCKET, gpu_name, emit_fs_restricted, emit_exec_rules, Clause, Filter, emit_ancestor_metadata, withheld_services, rendered_ancestors, pinned_dirs, step]
@@ -215,15 +215,16 @@ admits being variable-length.
 - **`(allow file-read* (literal "/"))`**: dyld reads the root inode before
   `main`. ral's walk no longer needs it, and its root too would be a search
   handle once cap-primitives spells `O_SEARCH` in `open_ambient_dir`.
-- **Device writes** — `/dev/null`, `/dev/zero`, `/dev/tty`, `/dev/dtracehelper`
-  (and its ioctl): `2>/dev/null` and libc paths open these for write even
+- **Device writes**: `/dev/null`, `/dev/zero`, `/dev/tty`, `/dev/dtracehelper`:
+  `2>/dev/null` and libc paths open these for write even
   though `/dev` is readable.
 - **`/private/var/db/timezone/icutz`**: libc's first `localtime_r` reads the
   ICU timezone database; it lies outside every grant prefix, and rustc, cc and
   ld SIGABRT in `tzsetwall_basic` without it.
-- **`ipc-posix-shm`**, and the notification center by its POSIX shared-memory
-  name rather than a Mach one: CoreFoundation and libdispatch use both during
-  framework init.
+- **POSIX shared-memory reads**: `ipc-posix-shm-read-data` names only
+  `apple.shm.notification_center` and `com.apple.featureflags.shm`.
+  libnotify and `os_feature_enabled` read these; the base admits no writes.
+  The names are POSIX shared-memory names, not Mach services.
 - **`(allow file-ioctl)`**, unfiltered as in Xcode's, Bazel's and Chromium's
   build sandboxes, then **`(deny file-ioctl (ioctl-command TIOCSTI))`**. The
   allow is there for `tcsetattr`: without it a full-screen child cannot raise
@@ -277,14 +278,28 @@ processes, the launching agent's own parent among them.
 
 ## Diagnosis
 
-`authority::sandbox::diag` turns a kernel denial into a hint per operand class — a path
+`authority::sandbox::diag` turns a parsed kernel operation into a hint: a path
 to `read`, `write` or `exec`, a network operand to the `net:` bit unless it names
 a Unix socket other than the resolver's, which no grant opens, a Metal device,
 IOSurface or compiler to the `gpu:` bit, a Mach or IPC operand to nothing, since a service is the base's to decide and no grant widens one
 ([[map/core/capabilities|capabilities]]).
 
+The collector runs `/usr/bin/log show --style ndjson`, with a 2-second deadline
+and a 1 MiB stdout ceiling. Each JSON event is decoded before its `eventMessage`
+is parsed: it must begin with `Sandbox: `, then the first
+`(<digits>) deny(<digits>) ` supplies the PID and is followed by the operation
+and operand. Only records for the command's descendant PIDs reach the hint.
+Operands are held inert: C0, C1 and DEL are visible escapes, at most 512 Unicode
+scalar values are taken, and truncation is marked. The hint prints parsed
+records under "sandbox denials were recorded for this command's processes:";
+raw lines and embedded headers never become kernel testimony. A collector
+failure or bound leaves the command's own error alone.
+
+> Open: the switch to `--style ndjson` has not been checked against a live denial. On a Mac, run a confined `cat` of a file the grant denies, then `/usr/bin/log show --predicate 'eventMessage BEGINSWITH "Sandbox: "' --style ndjson --last 10s`; the denial must appear as one JSON object whose `eventMessage` begins `Sandbox: cat(<pid>) deny(`. Delete this note once it does. If nothing appears, the reader has no source, and that is fixed before anything else in diagnosis.
+
 Entry has one diagnosis of its own. A lineage already inside a profile —
 a per-command child of a confined runner — gets `EPERM` from `sandbox_init`,
 since profiles do not stack, and `apply_profile` reports it as such: the launch
-is refused rather than run under the wider profile
+is refused rather than run under the wider profile. The fixed
+`ALREADY_PROFILED` prefix is followed by Seatbelt's own error in parentheses
 ([[design/two-enforcers|two-enforcers]]).

@@ -1,3 +1,7 @@
+---
+generated_at_commit: 104cb519
+---
+
 # Two enforcers: why the guard is in-process
 
 A capability decision is made once, in process, then enforced in up to two
@@ -76,11 +80,12 @@ readers ([[decisions/261021_one-path|one-path]],
   path-filter a child's re-execs, so the payload enters a Landlock layer of its
   own inside the envelope, built by the parent. Landlock is allow-list only, so
   a deny *inside* an allowed directory is rendered as that directory's entries
-  the table still admits, over the tree as it stands at launch. Two gaps stay
-  with the in-process guard, which sees neither once a child re-execs: a
+  the table still admits, over the tree as it stands at launch. One gap stays
+  with the in-process guard, which a child's re-exec escapes: a
   bare-name veto under a trusted write, which a child can sidestep by authoring
-  a renamed copy and which is therefore not carried into the kernel; and the
-  kernel filters the path passed to `execve`, not the code a process runs, so
+  a renamed copy and which is therefore not carried into the kernel. Another
+  is held by neither enforcer: both judge the path passed to `execve`, not the
+  code a process runs, so
   an admitted loader or interpreter handed an unadmitted file as an argument
   runs it ([[decisions/260906_landlock-exec-layer|landlock-exec-layer]]). What the
   kernel admits is one law on every platform: the guard's own evidence table,
@@ -115,18 +120,23 @@ serves ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a
 | ``gpu: `withheld`` | no GPU node in the envelope's `/dev`, masks over the host's; no Landlock part | never lacking on Linux |
 | `exec` — which path may be `execve`d (not which code runs), a deny inside an allowed directory included, over the tree at launch: a program added afterwards to a directory holding a block is denied until the next launch | Landlock `Execute` ruleset, the parent subtracting each block from the directory that holds it; every directory admission, `every` among them, lowered against the envelope's binds | refuse: `confinement_unavailable`, an exec opinion alone asking for the envelope |
 | `exec` — a bare-name veto under a trusted write | in-process guard | the guard stands alone |
-| die with parent, new session, no core, the seccomp deny-set (kills kernel attack surface; refuses mounting, user namespaces and `TIOCSTI` with an errno) | bwrap + `pre_exec` | applied where possible |
+| die with parent, new session, no core, the seccomp deny-set (kills kernel attack surface; refuses mounting, user namespaces, `TIOCSTI` and `TIOCLINUX` with an errno) | bwrap + `pre_exec` | applied where possible |
 | private ipc / uts | `--unshare-*` | never refused |
 | `/sys/fs/cgroup` is the payload's own tree | cgroup namespace + re-rooted bind | the tree is the host's |
 | no signalling the host; host process table hidden | pid namespace + fresh `/proc` | the table is the container's own |
-| private ptys | `--dev` | `/dev` by hand over the host's `/dev/pts` |
+| private ptys | `--dev` | host devpts with every terminal present at render masked; the child allocates ptys, and a terminal the host opens during the launch remains reachable for that launch |
 
-The first row has one exception: a `deny` naming a path *absent* on the host
-under a *writable* prefix is held by the in-process guard alone on Linux and
-Windows, no mount or ACE being able to attach to a name that does not exist
-without first creating it there; a child can make the name in that launch, and
-the next launch finds it and the kernel holds it. macOS holds it from the
-start, Seatbelt's rules being negative over names.
+The first row has one exception on Linux: a `deny` naming a path *absent at
+render* has no mask, since making its mountpoint would touch the host. Even
+under a read-only bind, the host can create the name during the launch and
+that launch reads it; the next launch masks it. Under a writable bind the
+child can also create the name and leave it on the host. Each launch whose
+render finds it absent retains that gap for its lifetime, so the risk includes
+both leaked host-created secrets and planted files. ral's own guard refuses
+reads and creation throughout. macOS holds the name from the start, refusing
+both reads and creation; Windows carves the allowance around it, so a name
+made in a carved directory stays unreadable to that launch
+([[internals/holding-a-deny|holding-a-deny]]).
 
 The two agree on what a deny means: every spelling some filesystem takes for
 its name. The guard's deny rules speak under `identity::collision_key`, its allows
@@ -186,10 +196,10 @@ start:
   image. The read is why a bundled tool reads ral's binary; the re-exec runs only
   where the table admits the image.
 - **Hard links.** On Linux an admission is of an inode, so an excluded path that
-  is a hard link to an admitted file runs, with no copy or write (Landlock cannot
-  admit one name of an inode, and refusing every multiply-linked admitted file
-  would refuse hard-linked tools such as `git-core` helpers); macOS rules are by
-  path and hold. Independently, a path grant does not own the bytes reachable
+  is a hard link to an admitted file runs when the admitted name lies beneath a
+  directory admitted whole; within a listed directory the walk refuses an excluded
+  inode under every name it meets. macOS rules are by path and hold.
+  Independently, a path grant does not own the bytes reachable
   through it: a hard link already inside a granted region to a file outside it
   reads or writes that file, in the guard and every kernel. Only the pinned
   binaries' inodes are protected, and the deputy findings do not see it.

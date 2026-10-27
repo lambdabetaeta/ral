@@ -10,7 +10,10 @@
 
 mod common;
 
-use common::{Scratch, assert_admitted, assert_refused};
+use common::{Scratch, denied_by_grant};
+#[cfg(target_os = "macos")]
+use ral_core::test_helper::confinement::denied;
+use ral_core::test_helper::confinement::{Confining, admitted};
 use std::path::{Path, PathBuf};
 
 /// Run `body` under a grant reading `read`, writing `write` and denying
@@ -29,7 +32,7 @@ fn under(read: &Path, write: &Path, deny: &[&Path], body: &str) -> common::Outpu
 
 /// `echo key > path` under a grant over `dir` denying `dir/deny`.
 fn write_under_deny(dir: &Path, deny: &str, path: &Path) -> common::Output {
-    let body = format!("echo key > '{}'", path.display());
+    let body = format!("echo key > '{}'; echo key", path.display());
     under(dir, dir, &[&dir.join(deny)], &body)
 }
 
@@ -37,9 +40,11 @@ fn write_under_deny(dir: &Path, deny: &str, path: &Path) -> common::Output {
 /// refusal names the deny and why.
 #[test]
 fn an_absent_deny_refuses_a_case_variant_create() {
+    let proof = ral_core::require_confinement!();
     let d = Scratch::new("deny_spelling_case");
+    let control = write_under_deny(&d.0, "Secrets", &d.join("other"));
     let out = write_under_deny(&d.0, "Secrets", &d.join("secrets"));
-    assert_refused(&out, "a create of `secrets` under a deny on `Secrets`");
+    denied_by_grant(&proof, &control, &out, "key");
     assert!(!d.join("secrets").exists(), "the refused create landed");
     assert!(
         out.stderr.contains(&format!(
@@ -52,22 +57,24 @@ fn an_absent_deny_refuses_a_case_variant_create() {
 
     std::fs::create_dir(d.join("secrets")).unwrap();
     let out = write_under_deny(&d.0, "Secrets", &d.join("secrets").join("t"));
-    assert_refused(&out, "a write under `secrets/` with a deny on `Secrets`");
+    denied_by_grant(&proof, &control, &out, "key");
 
     let out = write_under_deny(&d.0, "Secrets", &d.join("other"));
-    assert_admitted(&out, "a write to `other`");
+    admitted(&proof, &out, "key");
     let out = write_under_deny(&d.0, "Secrets", &d.join("Secrets.txt"));
-    assert_admitted(&out, "a write to `Secrets.txt`, a different component");
+    admitted(&proof, &out, "key");
 }
 
 /// T5: normalisation, as case: an NFC deny holds the NFD spelling.
 #[test]
 fn an_absent_nfc_deny_refuses_an_nfd_create() {
+    let proof = ral_core::require_confinement!();
     let d = Scratch::new("deny_spelling_nfd");
+    let control = write_under_deny(&d.0, "caf\u{e9}.txt", &d.join("cafe.txt"));
     let out = write_under_deny(&d.0, "caf\u{e9}.txt", &d.join("cafe\u{301}.txt"));
-    assert_refused(&out, "an NFD create under an NFC deny");
+    denied_by_grant(&proof, &control, &out, "key");
     let out = write_under_deny(&d.0, "caf\u{e9}.txt", &d.join("cafe.txt"));
-    assert_admitted(&out, "a write to `cafe.txt`, a different name");
+    admitted(&proof, &out, "key");
 }
 
 /// A deny holding the name as stored refuses plainly, though a deeper deny
@@ -75,15 +82,14 @@ fn an_absent_nfc_deny_refuses_an_nfd_create() {
 /// the stored name.
 #[test]
 fn a_deny_holding_the_stored_name_refuses_plainly() {
+    let proof = ral_core::require_confinement!();
     let d = Scratch::new("deny_spelling_plain");
     let (secrets, upper) = (d.join("secrets"), d.join("Secrets"));
-    let write = |path: &Path| format!("echo key > '{}'", path.display());
+    let write = |path: &Path| format!("echo key > '{}'; echo key", path.display());
     for denies in [&[secrets.as_path()][..], &[d.0.as_path(), upper.as_path()]] {
+        let control = under(&d.0, &d.0, denies, "echo key");
         let out = under(&d.0, &d.0, denies, &write(&secrets));
-        assert_refused(
-            &out,
-            &format!("a write to `secrets` under denies {denies:?}"),
-        );
+        denied_by_grant(&proof, &control, &out, "key");
         assert!(
             !out.stderr.contains("another spelling"),
             "a deny holding the stored name must not claim a respelling; stderr:\n{}",
@@ -92,45 +98,45 @@ fn a_deny_holding_the_stored_name_refuses_plainly() {
         assert!(!secrets.exists(), "the refused write landed");
     }
     let out = under(&d.0, &d.0, &[&secrets], &write(&d.join("other")));
-    assert_admitted(&out, "a write to `other`");
+    admitted(&proof, &out, "key");
 }
 
 /// T6's pairs, in a case-sensitive `d` holding the distinct `Work` and
 /// `work`.  A deny on `Work` reaches `work` — the over-deny a deny accepts,
 /// so that it holds on every volume; an allow on `Work` does not.
-fn allow_side_pairs(d: &Path) {
+fn allow_side_pairs(proof: &Confining, d: &Path) {
     let (upper, lower) = (d.join("Work"), d.join("work"));
     std::fs::create_dir(&upper).unwrap();
+    if lower.exists() {
+        eprintln!("skip allow_side_pairs: the volume is case-insensitive");
+        return;
+    }
     std::fs::create_dir(&lower).unwrap();
-    let echo = |path: PathBuf| format!("echo key > '{}'", path.display());
+    let echo = |path: PathBuf| format!("echo key > '{}'; echo key", path.display());
 
     let out = under(d, &upper, &[], &echo(upper.join("f")));
-    assert_admitted(&out, "a write into the granted `Work`");
-    let denied = under(d, d, &[&upper], &echo(lower.join("g")));
-    assert_refused(
-        &denied,
-        "a write into `work` under a deny on the distinct `Work`",
-    );
+    admitted(proof, &out, "key");
+    let control = under(d, d, &[&upper], &echo(d.join("other")));
+    let refused = under(d, d, &[&upper], &echo(lower.join("g")));
+    denied_by_grant(proof, &control, &refused, "key");
 
     assert!(
-        denied.stderr.contains("a deny holds under every spelling"),
+        refused.stderr.contains("a deny holds under every spelling"),
         "the over-deny must say why; stderr:\n{}",
-        denied.stderr
+        refused.stderr
     );
     let out = under(d, &upper, &[], &echo(lower.join("f")));
-    assert_ne!(
-        out.status, 0,
-        "an allow on `Work` must not reach the distinct `work`; stderr:\n{}",
-        out.stderr
-    );
+    let control = under(d, &upper, &[], &echo(upper.join("control")));
+    denied_by_grant(proof, &control, &out, "key");
 }
 
 /// T6 on Linux, whose tempdirs are case-sensitive.
 #[cfg(target_os = "linux")]
 #[test]
 fn the_allow_side_keeps_case_on_a_case_sensitive_directory() {
+    let proof = ral_core::require_confinement!();
     let d = Scratch::new("deny_spelling_cs");
-    allow_side_pairs(&d.0);
+    allow_side_pairs(&proof, &d.0);
 }
 
 /// T6 on macOS, inside a case-sensitive APFS image.  Ignored: it attaches a
@@ -139,6 +145,7 @@ fn the_allow_side_keeps_case_on_a_case_sensitive_directory() {
 #[test]
 #[ignore = "attaches a case-sensitive APFS image with hdiutil"]
 fn the_allow_side_keeps_case_on_a_case_sensitive_volume() {
+    let proof = ral_core::require_confinement!();
     use std::process::Command;
     let d = Scratch::new("deny_spelling_cs");
     let image = d.join("cs.dmg");
@@ -167,7 +174,7 @@ fn the_allow_side_keeps_case_on_a_case_sensitive_volume() {
         mount.as_os_str(),
         image.as_os_str(),
     ]);
-    let pairs = std::panic::catch_unwind(|| allow_side_pairs(&mount));
+    let pairs = std::panic::catch_unwind(|| allow_side_pairs(&proof, &mount));
     hdiutil(&["detach".as_ref(), mount.as_os_str()]);
     if let Err(panic) = pairs {
         std::panic::resume_unwind(panic);
@@ -178,6 +185,7 @@ fn the_allow_side_keeps_case_on_a_case_sensitive_volume() {
 #[cfg(windows)]
 #[test]
 fn the_allow_side_keeps_case_in_a_case_sensitive_folder() {
+    let proof = ral_core::require_confinement!();
     let d = Scratch::new("deny_spelling_cs");
     let enabled = std::process::Command::new("fsutil")
         .args(["file", "setCaseSensitiveInfo"])
@@ -192,7 +200,7 @@ fn the_allow_side_keeps_case_in_a_case_sensitive_folder() {
         );
         return;
     }
-    allow_side_pairs(&d.0);
+    allow_side_pairs(&proof, &d.0);
 }
 
 /// T7: Seatbelt already matches a deny under canonical caseless
@@ -201,23 +209,17 @@ fn the_allow_side_keeps_case_in_a_case_sensitive_folder() {
 #[cfg(target_os = "macos")]
 #[test]
 fn seatbelt_refuses_a_case_variant_of_an_absent_deny() {
+    let proof = ral_core::require_confinement!();
     let d = Scratch::new("deny_spelling_seatbelt");
     let mkdir = |name: &str| {
-        let body = format!("sh -c 'mkdir {}'", d.join(name).display());
+        let body = format!("sh -c 'mkdir {} && echo key'", d.join(name).display());
         under(&d.0, &d.0, &[&d.join("Secrets")], &body)
     };
+    let control = mkdir("other");
     let out = mkdir("secrets");
-    if out
-        .stderr
-        .contains("ral: cannot enter the Seatbelt sandbox: ")
-    {
-        eprintln!("skip: this runner is inside a Seatbelt profile");
-        return;
-    }
-    assert_ne!(out.status, 0, "a child's `mkdir secrets` must be refused");
+    denied(&proof, &control, &out, "key");
     assert!(!d.join("secrets").exists(), "the child's mkdir landed");
-    let out = mkdir("other");
-    assert_admitted(&out, "a child's `mkdir other`");
+    admitted(&proof, &control, "key");
     assert!(d.join("other").is_dir());
 }
 
@@ -226,9 +228,11 @@ fn seatbelt_refuses_a_case_variant_of_an_absent_deny() {
 #[cfg(windows)]
 #[test]
 fn ntfs_non_ascii_case_meets_the_deny() {
+    let proof = ral_core::require_confinement!();
     let d = Scratch::new("deny_spelling_ntfs");
+    let control = write_under_deny(&d.0, "\u{c9}clair", &d.join("eclair"));
     let out = write_under_deny(&d.0, "\u{c9}clair", &d.join("\u{e9}clair"));
-    assert_refused(&out, "a create of `éclair` under a deny on `Éclair`");
+    denied_by_grant(&proof, &control, &out, "key");
     let out = write_under_deny(&d.0, "\u{c9}clair", &d.join("eclair"));
-    assert_admitted(&out, "a write to `eclair`, a different name");
+    admitted(&proof, &out, "key");
 }

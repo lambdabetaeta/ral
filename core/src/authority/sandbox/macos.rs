@@ -66,7 +66,9 @@ pub(super) fn apply_profile(profile: &str) -> std::io::Result<()> {
             }
         };
         if already_profiled {
-            return Err(std::io::Error::other(ALREADY_PROFILED));
+            return Err(std::io::Error::other(format!(
+                "{ALREADY_PROFILED} ({message})"
+            )));
         }
         return Err(std::io::Error::other(message));
     }
@@ -1316,9 +1318,10 @@ mod tests {
         let profile = build_profile(&SandboxProjection::default()).unwrap();
         assert!(
             profile.contains(
-                "(allow ipc-posix-shm (ipc-posix-name \"apple.shm.notification_center\"))"
+                "(allow ipc-posix-shm-read-data (ipc-posix-name \"apple.shm.notification_center\") (ipc-posix-name \"com.apple.featureflags.shm\"))"
             )
         );
+        assert_eq!(profile.matches("(allow ipc-posix-shm").count(), 1);
         assert!(
             !profile.contains("(global-name \"apple.shm.notification_center\")"),
             "notification_center is a POSIX shared-memory name, not a Mach service"

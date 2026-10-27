@@ -27,7 +27,9 @@
 //! ours: one more stacked program, `x86_64` only, a complete filter in its own
 //! right (the kernel evaluates each stacked program independently, so a
 //! guard riding on another program's arch check would not see foreign-ABI
-//! syscalls at all).
+//! syscalls at all). ia32 and `AArch32` entries carry a foreign `AUDIT_ARCH`,
+//! which seccompiler's arch prologue kills with `SECCOMP_RET_KILL_PROCESS`,
+//! so x32 alone needs the guard.
 
 use std::fmt;
 
@@ -55,17 +57,19 @@ const SYS_KEXEC_FILE_LOAD: i64 = libc::SYS_kexec_file_load;
 
 #[allow(clippy::cast_sign_loss, reason = "a single positive flag bit")]
 const CLONE_NEWUSER: u32 = libc::CLONE_NEWUSER as u32;
-/// `0x5412` on both x86-64 and aarch64.
+/// `0x5412` and `0x541C` on both x86-64 and aarch64.
 #[allow(clippy::cast_possible_truncation, reason = "0x5412 fits a u32")]
 const TIOCSTI: u32 = libc::TIOCSTI as u32;
+#[allow(clippy::cast_possible_truncation, reason = "0x541C fits a u32")]
+const TIOCLINUX: u32 = libc::TIOCLINUX as u32;
 
 /// A condition on one raw syscall argument, compared as a `Dword`: every
 /// value a rule below needs fits 32 bits, with the high half zero.
 enum Cond {
     /// `arg & mask != 0`
     FlagSet { arg: u8, mask: u32 },
-    /// `arg == value`
-    ArgEq { arg: u8, value: u32 },
+    /// `arg` in `values`; non-empty, since seccompiler reads an empty chain as unconditional.
+    ArgIn { arg: u8, values: &'static [u32] },
 }
 
 /// What a rule does to the syscalls it names. `Errno` holds a `libc::E*`
@@ -106,6 +110,10 @@ impl Filter {
                 Syscall::new(libc::SYS_ptrace, "ptrace"),
                 Syscall::new(libc::SYS_process_vm_readv, "process_vm_readv"),
                 Syscall::new(libc::SYS_process_vm_writev, "process_vm_writev"),
+                Syscall::new(libc::SYS_pidfd_getfd, "pidfd_getfd"),
+                Syscall::new(libc::SYS_process_madvise, "process_madvise"),
+                Syscall::new(libc::SYS_process_mrelease, "process_mrelease"),
+                Syscall::new(libc::SYS_kcmp, "kcmp"),
             ],
             when: None,
             verdict: Verdict::Kill,
@@ -116,6 +124,8 @@ impl Filter {
             calls: &[
                 Syscall::new(libc::SYS_perf_event_open, "perf_event_open"),
                 Syscall::new(libc::SYS_bpf, "bpf"),
+                #[cfg(target_arch = "x86_64")]
+                Syscall::new(libc::SYS_modify_ldt, "modify_ldt"),
             ],
             when: None,
             verdict: Verdict::Kill,
@@ -214,9 +224,9 @@ impl Filter {
         },
         Rule {
             calls: &[Syscall::new(libc::SYS_ioctl, "ioctl")],
-            when: Some(Cond::ArgEq {
+            when: Some(Cond::ArgIn {
                 arg: 1,
-                value: TIOCSTI,
+                values: &[TIOCSTI, TIOCLINUX],
             }),
             verdict: Verdict::Errno(libc::EPERM),
             why: "terminal input injection (CVE-2017-5226); `--new-session` closes it, this is \
@@ -226,10 +236,16 @@ impl Filter {
     ]);
 
     /// What this filter says about syscall `nr`, for a `type=1326` record.
-    /// `None` for a number the filter never denies — a record naming one
-    /// came from another filter and is not ours to explain.
-    pub(crate) fn explain(&self, nr: i64) -> Option<Denied<'_>> {
+    /// Only a matching syscall and action can belong to this filter.
+    pub(crate) fn explain(
+        &self,
+        nr: i64,
+        action: &seccompiler::SeccompAction,
+    ) -> Option<Denied<'_>> {
         self.0.iter().find_map(|rule| {
+            if &rule.verdict.action() != action {
+                return None;
+            }
             rule.calls
                 .iter()
                 .find(|call| call.nr == nr)
@@ -311,20 +327,34 @@ impl fmt::Display for Error {
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 impl Cond {
-    fn compile(&self) -> Result<seccompiler::SeccompCondition, Error> {
-        use seccompiler::{SeccompCmpArgLen::Dword, SeccompCmpOp, SeccompCondition};
+    fn compile(&self) -> Result<Vec<seccompiler::SeccompRule>, Error> {
+        use seccompiler::{SeccompCmpArgLen::Dword, SeccompCmpOp, SeccompCondition, SeccompRule};
         match *self {
-            Self::FlagSet { arg, mask } => SeccompCondition::new(
-                arg,
-                Dword,
-                SeccompCmpOp::MaskedEq(u64::from(mask)),
-                u64::from(mask),
-            ),
-            Self::ArgEq { arg, value } => {
-                SeccompCondition::new(arg, Dword, SeccompCmpOp::Eq, u64::from(value))
-            }
+            Self::FlagSet { arg, mask } => Ok(vec![
+                SeccompRule::new(vec![
+                    SeccompCondition::new(
+                        arg,
+                        Dword,
+                        SeccompCmpOp::MaskedEq(u64::from(mask)),
+                        u64::from(mask),
+                    )
+                    .map_err(Error::Compile)?,
+                ])
+                .map_err(Error::Compile)?,
+            ]),
+            Self::ArgIn { arg, values } => values
+                .iter()
+                .map(|&value| {
+                    SeccompRule::new(vec![SeccompCondition::new(
+                        arg,
+                        Dword,
+                        SeccompCmpOp::Eq,
+                        u64::from(value),
+                    )?])
+                })
+                .collect::<Result<_, _>>()
+                .map_err(Error::Compile),
         }
-        .map_err(Error::Compile)
     }
 }
 
@@ -379,12 +409,7 @@ impl Filter {
             for call in rule.calls {
                 let chain = match &rule.when {
                     None => Vec::new(),
-                    Some(cond) => {
-                        vec![
-                            seccompiler::SeccompRule::new(vec![cond.compile()?])
-                                .map_err(Error::Compile)?,
-                        ]
-                    }
+                    Some(cond) => cond.compile()?,
                 };
                 let prior = map.insert(call.nr, chain);
                 debug_assert!(prior.is_none(), "{} named in two rules", call.name);
@@ -493,8 +518,207 @@ fn x32_guard_program() -> [seccompiler::sock_filter; 7] {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn install_envelope_programs() {
+        for bytes in Filter::ENVELOPE
+            .programs()
+            .expect("the deny-set compiles")
+            .iter()
+        {
+            let bpf: Vec<_> = bytes
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|insn| seccompiler::sock_filter {
+                    code: u16::from_le_bytes([insn[0], insn[1]]),
+                    jt: insn[2],
+                    jf: insn[3],
+                    k: u32::from_le_bytes([insn[4], insn[5], insn[6], insn[7]]),
+                })
+                .collect();
+            seccompiler::apply_filter(&bpf).expect("install an envelope program");
+        }
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn sacrificial(role: &'static str, name: &str) -> std::process::Output {
+        let thread = std::thread::current();
+        let test = thread.name().expect("libtest names its test thread");
+        std::process::Command::new(std::env::current_exe().expect("the test binary's path"))
+            .args(["--exact", test, "--nocapture", "--test-threads=1"])
+            .env(role, name)
+            .output()
+            .expect("start a sacrificial seccomp child")
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn terminal_injection_is_refused_by_installed_programs() {
+        use crate::test_helper::confinement::Output;
+        use std::os::fd::AsRawFd;
+
+        const ROLE: &str = "RAL_TEST_TERMINAL_INJECTION";
+        const MARKER: &str = "terminal-injection-probe-returned";
+
+        if std::env::var_os(ROLE).is_some() {
+            install_envelope_programs();
+            // libtest's `test … ` prefix holds the current line.
+            println!();
+            let file = std::fs::File::open("/dev/null").expect("open the ioctl control");
+            for (name, request) in [
+                ("TIOCGWINSZ", libc::TIOCGWINSZ),
+                ("TIOCSTI", libc::TIOCSTI),
+                ("TIOCLINUX", libc::TIOCLINUX),
+            ] {
+                // SAFETY: winsize is plain integers; the pointer covers the control's output.
+                let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+                // SAFETY: file is open and size is writable for the ioctl control.
+                assert_eq!(
+                    unsafe { libc::ioctl(file.as_raw_fd(), request, &raw mut size) },
+                    -1
+                );
+                let errno = std::io::Error::last_os_error()
+                    .raw_os_error()
+                    .expect("ioctl returned an OS error");
+                println!("{name} {errno}");
+            }
+            println!("{MARKER}");
+            return;
+        }
+
+        let out: Output = sacrificial(ROLE, "probe").into();
+        assert_eq!(out.status, 0, "{out:?}");
+        assert!(out.stdout.contains(MARKER), "{out:?}");
+        for (name, errno) in [
+            ("TIOCGWINSZ", libc::ENOTTY),
+            ("TIOCSTI", libc::EPERM),
+            ("TIOCLINUX", libc::EPERM),
+        ] {
+            assert!(
+                out.stdout
+                    .lines()
+                    .any(|line| line == format!("{name} {errno}")),
+                "{out:?}"
+            );
+        }
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn process_reach_is_killed_by_installed_programs() {
+        use crate::test_helper::confinement::Output;
+        use std::io::Write;
+
+        const ROLE: &str = "RAL_TEST_PROCESS_REACH";
+        const MARKER: &str = "process-reach-probe-returned";
+        const CALLS: &[Syscall] = &[
+            Syscall::new(libc::SYS_pidfd_getfd, "pidfd_getfd"),
+            Syscall::new(libc::SYS_process_madvise, "process_madvise"),
+            Syscall::new(libc::SYS_process_mrelease, "process_mrelease"),
+            Syscall::new(libc::SYS_kcmp, "kcmp"),
+            #[cfg(target_arch = "x86_64")]
+            Syscall::new(libc::SYS_modify_ldt, "modify_ldt"),
+        ];
+
+        if let Ok(name) = std::env::var(ROLE) {
+            // SAFETY: only the child installs filters; the parent reaps it.
+            let child = unsafe { libc::fork() };
+            assert!(
+                child >= 0,
+                "fork seccomp probe: {}",
+                std::io::Error::last_os_error()
+            );
+            if child > 0 {
+                let mut status = 0;
+                loop {
+                    // SAFETY: child is ours and status is writable.
+                    let waited = unsafe { libc::waitpid(child, &raw mut status, 0) };
+                    if waited == child {
+                        break;
+                    }
+                    let error = std::io::Error::last_os_error();
+                    assert_eq!(
+                        error.kind(),
+                        std::io::ErrorKind::Interrupted,
+                        "wait for seccomp probe: {error}"
+                    );
+                }
+                if libc::WIFSIGNALED(status) {
+                    println!("probe-signal {}", libc::WTERMSIG(status));
+                } else {
+                    assert!(libc::WIFEXITED(status), "unexpected wait status: {status}");
+                    assert_eq!(libc::WEXITSTATUS(status), 0, "seccomp probe failed");
+                }
+                return;
+            }
+            install_envelope_programs();
+            // SAFETY: getpid takes no arguments.
+            let pid = unsafe { libc::syscall(libc::SYS_getpid) };
+            assert_eq!(pid, i64::from(std::process::id()));
+            println!("ordinary-syscall-succeeded");
+            std::io::stdout()
+                .flush()
+                .expect("flush the default-action control");
+            if name != "control" {
+                let call = CALLS
+                    .iter()
+                    .find(|call| call.name == name)
+                    .expect("a named probe");
+                // SAFETY: zero arguments provide no memory or process authority.
+                unsafe { libc::syscall(call.nr, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64) };
+            }
+            println!("{MARKER}");
+            std::io::stdout().flush().expect("flush the probe marker");
+            // SAFETY: the fork child must exit without returning to libtest.
+            unsafe { libc::_exit(0) };
+        }
+
+        let control: Output = sacrificial(ROLE, "control").into();
+        assert_eq!(control.status, 0, "{control:?}");
+        assert!(control.stdout.contains(MARKER), "{control:?}");
+        assert!(
+            control.stdout.contains("ordinary-syscall-succeeded"),
+            "{control:?}"
+        );
+        for call in CALLS {
+            let out: Output = sacrificial(ROLE, call.name).into();
+            assert_eq!(out.status, 0, "{}: {out:?}", call.name);
+            assert!(
+                out.stdout
+                    .lines()
+                    .any(|line| line == format!("probe-signal {}", libc::SIGSYS)),
+                "{}: {out:?}",
+                call.name
+            );
+            assert!(
+                out.stdout.contains("ordinary-syscall-succeeded"),
+                "{}: {out:?}",
+                call.name
+            );
+            assert!(!out.stdout.contains(MARKER), "{}: {out:?}", call.name);
+        }
+    }
+
+    #[test]
+    fn process_signals_remain_outside_the_deny_set() {
+        for nr in [
+            libc::SYS_kill,
+            libc::SYS_pidfd_open,
+            libc::SYS_pidfd_send_signal,
+        ] {
+            assert!(
+                Filter::ENVELOPE
+                    .0
+                    .iter()
+                    .flat_map(|rule| rule.calls)
+                    .all(|call| call.nr != nr)
+            );
+        }
+    }
 
     #[test]
     fn no_syscall_is_named_in_two_rules() {
@@ -507,19 +731,63 @@ mod tests {
     }
 
     #[test]
+    fn no_condition_is_empty() {
+        for rule in Filter::ENVELOPE.0 {
+            if let Some(Cond::ArgIn { values, .. }) = &rule.when {
+                assert!(!values.is_empty(), "an empty chain denies every argument");
+            }
+        }
+    }
+
+    #[test]
     fn explain_names_a_kill_an_errno_and_nothing_for_an_undenied_call() {
         let ptrace = Filter::ENVELOPE
-            .explain(libc::SYS_ptrace)
+            .explain(libc::SYS_ptrace, &seccompiler::SeccompAction::KillThread)
             .expect("ptrace is denied");
         assert_eq!(ptrace.name, "ptrace");
         assert_eq!(ptrace.verdict, Verdict::Kill);
 
         let clone3 = Filter::ENVELOPE
-            .explain(libc::SYS_clone3)
+            .explain(
+                libc::SYS_clone3,
+                &seccompiler::SeccompAction::Errno(libc::ENOSYS.unsigned_abs()),
+            )
             .expect("clone3 is denied");
         assert_eq!(clone3.verdict, Verdict::Errno(libc::ENOSYS));
 
-        assert!(Filter::ENVELOPE.explain(libc::SYS_read).is_none());
+        let ioctl = Filter::ENVELOPE
+            .explain(
+                libc::SYS_ioctl,
+                &seccompiler::SeccompAction::Errno(libc::EPERM.unsigned_abs()),
+            )
+            .expect("terminal injection is denied");
+        assert_eq!(ioctl.name, "ioctl");
+        assert_eq!(ioctl.verdict, Verdict::Errno(libc::EPERM));
+
+        assert!(
+            Filter::ENVELOPE
+                .explain(libc::SYS_read, &seccompiler::SeccompAction::KillThread)
+                .is_none()
+        );
+        for action in [
+            seccompiler::SeccompAction::Errno(libc::EPERM.unsigned_abs()),
+            seccompiler::SeccompAction::KillProcess,
+            seccompiler::SeccompAction::Trap,
+        ] {
+            assert!(
+                Filter::ENVELOPE
+                    .explain(libc::SYS_ptrace, &action)
+                    .is_none()
+            );
+        }
+        assert!(
+            Filter::ENVELOPE
+                .explain(
+                    libc::SYS_clone3,
+                    &seccompiler::SeccompAction::Errno(libc::EPERM.unsigned_abs())
+                )
+                .is_none()
+        );
     }
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]

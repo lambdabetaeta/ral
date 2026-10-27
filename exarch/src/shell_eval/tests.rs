@@ -22,6 +22,19 @@ use ral_core::shell::runtime::{
     CallSite, Done, DoneEvent, Notice, Observation, Observed, Pruned, ReapCause, ReapNotice,
     WorkerId,
 };
+#[cfg(target_os = "linux")]
+use ral_core::test_helper::confinement::{Confining, denied};
+#[cfg(unix)]
+use ral_core::test_helper::confinement::{Output, admitted};
+
+#[cfg(unix)]
+fn enforcement_output(result: &ToolResult) -> Output {
+    Output {
+        stdout: String::from_utf8_lossy(&result.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&result.stderr).into_owned(),
+        status: result.exit,
+    }
+}
 
 fn fresh() -> IdentityTransport {
     crate::boot::test_transport()
@@ -927,15 +940,16 @@ fn raised_error_status_is_the_tool_exit() {
 #[cfg(unix)]
 #[test]
 fn timeout_kills_sandboxed_subprocess_tree() {
-    #[cfg(all(target_os = "linux", feature = "test-util"))]
-    if !ral_core::authority::sandbox::restricted_envelope_launches() {
-        eprintln!(
-            "skip: this host cannot build a Restricted envelope; its /etc/hosts \
-             and /etc/resolv.conf are locked mounts bwrap cannot rebind read-only"
-        );
-        return;
-    }
+    let proof = ral_core::require_confinement!();
     let engine = fresh();
+    let control = run_shell_direct(
+        &engine,
+        &projecting_caps(),
+        "/bin/sh -c 'echo ok'",
+        20,
+        &crate::record::Emitter::none(),
+    );
+    admitted(&proof, &enforcement_output(&control), "ok");
     // Found by its argv: under `--unshare-pid` a pid it printed would be
     // the namespace's, not the host's.
     let marker = format!("sleep 30.{}", std::process::id());
@@ -950,29 +964,6 @@ fn timeout_kills_sandboxed_subprocess_tree() {
     );
     let elapsed = t0.elapsed();
     let stderr = String::from_utf8_lossy(&r.stderr);
-    #[cfg(target_os = "macos")]
-    {
-        const ENTRY_REFUSED: &str = "ral: cannot enter the Seatbelt sandbox: ";
-        if let Some(reason) = stderr
-            .lines()
-            .find_map(|line| line.strip_prefix(ENTRY_REFUSED))
-        {
-            assert_eq!(
-                reason,
-                ral_core::authority::sandbox::ALREADY_PROFILED,
-                "the refusal is not attributed"
-            );
-            assert_eq!(r.exit, 126, "a refused launch exits 126");
-            eprintln!(
-                "skip: this runner is inside a Seatbelt profile; asserted the attributed refusal"
-            );
-            return;
-        }
-    }
-    if r.exit != 124 && (stderr.contains("sandbox eval") || stderr.contains("bwrap")) {
-        eprintln!("skip: OS sandbox unavailable on this host: {stderr}");
-        return;
-    }
 
     assert!(
         elapsed.as_secs() < 10,
@@ -1995,11 +1986,7 @@ mod self_layer {
         extend: std::path::PathBuf,
     }
 
-    fn fixture() -> Option<Fixture> {
-        if !ral_core::authority::sandbox::restricted_envelope_launches() {
-            eprintln!("skip: this host cannot build a Restricted envelope");
-            return None;
-        }
+    fn fixture() -> Fixture {
         let dir = scratch_dir("self-layer");
         let exe = std::fs::canonicalize(std::env::current_exe().expect("test binary"))
             .expect("the test binary exists");
@@ -2015,53 +2002,43 @@ mod self_layer {
             ),
         )
         .expect("extension file");
-        Some(Fixture {
+        Fixture {
             exe: exe.to_string_lossy().into_owned(),
             link: link.to_string_lossy().into_owned(),
             cwd: dir.path().to_path_buf(),
             extend,
             dir,
-        })
+        }
     }
 
     fn run(stack: &GrantStack, cmd: &str) -> ToolResult {
         run_shell_under(&fresh(), stack, cmd, 20, &crate::record::Emitter::none())
     }
 
-    fn refused(stack: &GrantStack, cmd: &str) {
-        let r = run(stack, cmd);
-        let out = String::from_utf8_lossy(&r.stdout);
-        assert!(
-            r.exit != 0 && !out.contains("Usage"),
-            "`{cmd}` must be refused; exit {}, stdout {out}, stderr {}",
-            r.exit,
-            String::from_utf8_lossy(&r.stderr)
-        );
+    fn refuses_exarch(proof: &Confining, f: &Fixture, stack: &GrantStack) {
+        let control = enforcement_output(&run(stack, "/bin/sh -c 'echo Usage'"));
+        for cmd in [
+            format!("{} --help", f.exe),
+            format!("{} --help", f.link),
+            format!("/bin/sh -c '{} --help'", f.exe),
+        ] {
+            let out = enforcement_output(&run(stack, &cmd));
+            denied(proof, &control, &out, "Usage");
+        }
     }
 
-    fn refuses_exarch(f: &Fixture, stack: &GrantStack) {
-        refused(stack, &format!("{} --help", f.exe));
-        refused(stack, &format!("{} --help", f.link));
-        refused(stack, &format!("/bin/sh -c '{} --help'", f.exe));
-    }
-
-    fn bundled_tool_runs(f: &Fixture, stack: &GrantStack) {
+    fn bundled_tool_runs(proof: &Confining, f: &Fixture, stack: &GrantStack) {
         let (from, to) = (f.dir.path().join("from"), f.dir.path().join("to"));
         std::fs::write(&from, "x").expect("source file");
         let r = run(
             stack,
             &format!(
-                "mv {} {}",
+                "mv {} {}; echo ok",
                 ral_core::path::shown(&from),
                 ral_core::path::shown(&to)
             ),
         );
-        assert_eq!(
-            r.exit,
-            0,
-            "a bundled tool runs: {}",
-            String::from_utf8_lossy(&r.stderr)
-        );
+        admitted(proof, &enforcement_output(&r), "ok");
         assert!(to.exists(), "mv moved the file");
     }
 
@@ -2069,7 +2046,9 @@ mod self_layer {
     /// refuses it.
     #[test]
     fn exarch_is_refused_in_a_reasonable_session() {
-        let Some(f) = fixture() else { return };
+        ral_core::require_landlock!(1);
+        let proof = ral_core::require_confinement!();
+        let f = fixture();
         let scratch = f.cwd.join("scratch");
         let crate::policy::Invocation { stack, .. } = crate::policy::for_invocation(
             &f.cwd,
@@ -2080,15 +2059,17 @@ mod self_layer {
             Some(std::path::Path::new(&f.exe)),
         )
         .expect("reasonable composes");
-        refuses_exarch(&f, &stack);
-        bundled_tool_runs(&f, &stack);
+        refuses_exarch(&proof, &f, &stack);
+        bundled_tool_runs(&proof, &f, &stack);
     }
 
     /// A spawned child's `Base` or `Restrict` layer is pushed without passing
     /// through `for_invocation`, and still sits above the self layer.
     #[test]
     fn a_spawned_child_inherits_the_self_layer() {
-        let Some(f) = fixture() else { return };
+        ral_core::require_landlock!(1);
+        let proof = ral_core::require_confinement!();
+        let f = fixture();
         let scratch = f.cwd.join("scratch");
         let crate::policy::Invocation { stack: parent, .. } = crate::policy::for_invocation(
             &f.cwd,
@@ -2102,21 +2083,28 @@ mod self_layer {
         let ctx = ral_core::authority::grant::freeze::FreezeCtx::at(
             ral_core::host::EnvVars::new(),
             ral_core::path::CwdPath::new(f.cwd.clone()).expect("the fixture cwd is absolute"),
-        );
+        )
+        .with_scratch(Some(scratch.to_string_lossy()));
         let place = |label: &str, path: &str| FOValue::Variant {
             label: label.into(),
             payload: Some(Box::new(FOValue::String { value: path.into() })),
         };
-        let exe_dir = std::path::Path::new(&f.exe).parent().expect("a directory");
-        let dir = FOValue::Variant {
+        let dir = |path: &str| FOValue::Variant {
             label: "dir".into(),
-            payload: Some(Box::new(place("absolute", &exe_dir.to_string_lossy()))),
+            payload: Some(Box::new(place("absolute", path))),
         };
+        let exe_dir = std::path::Path::new(&f.exe).parent().expect("a directory");
+        // `/bin` for the control's shell: only the self layer refuses exarch.
         let record = FOValue::Map {
             entries: vec![(
                 "exec".into(),
                 FOValue::Map {
-                    entries: vec![("allow".into(), FOValue::List { items: vec![dir] })],
+                    entries: vec![(
+                        "allow".into(),
+                        FOValue::List {
+                            items: vec![dir(&exe_dir.to_string_lossy()), dir("/bin")],
+                        },
+                    )],
                 },
             )],
         };
@@ -2129,7 +2117,7 @@ mod self_layer {
                 .expect("the grant resolves");
             let mut child = parent.clone();
             child.push(layer);
-            refuses_exarch(&f, &child);
+            refuses_exarch(&proof, &f, &child);
         }
     }
 }

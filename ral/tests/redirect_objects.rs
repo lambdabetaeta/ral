@@ -7,6 +7,8 @@
 
 mod common;
 
+use common::denied_by_grant;
+use ral_core::test_helper::confinement::admitted;
 use std::path::{Path, PathBuf};
 
 struct Fixture {
@@ -74,30 +76,25 @@ impl Drop for Fixture {
     }
 }
 
-fn assert_denied(out: &common::Output, what: &str) {
-    assert_ne!(
-        out.status, 0,
-        "{what} must be refused; stderr:\n{}",
-        out.stderr
-    );
-    assert!(
-        out.stderr.contains("denied by grant"),
-        "{what}: expected the grant's refusal, got:\n{}",
-        out.stderr
-    );
-}
-
 fn read(p: &Path) -> String {
     std::fs::read_to_string(p).unwrap_or_default()
 }
 
 #[test]
 fn streaming_writes_through_a_dangling_link_outside_the_grant_are_refused() {
+    let proof = ral_core::require_confinement!();
     let fx = Fixture::new("dangling_out", &["."], &[]);
     fx.link("work/dangling", "../outside/marker");
     for op in [">>", ">~"] {
-        let out = fx.run(&[], &format!("echo BENIGN {op} 'ROOT/work/dangling'"));
-        assert_denied(&out, &format!("`{op}` through a dangling link"));
+        let control = fx.run(
+            &[],
+            &format!("echo BENIGN {op} 'ROOT/work/control'; echo ok"),
+        );
+        let out = fx.run(
+            &[],
+            &format!("echo BENIGN {op} 'ROOT/work/dangling'; echo ok"),
+        );
+        denied_by_grant(&proof, &control, &out, "ok");
     }
     assert!(
         !fx.path("outside/marker").exists(),
@@ -107,10 +104,11 @@ fn streaming_writes_through_a_dangling_link_outside_the_grant_are_refused() {
 
 #[test]
 fn a_dangling_link_inside_the_grant_creates_its_target() {
+    let proof = ral_core::require_confinement!();
     let fx = Fixture::new("dangling_in", &["."], &[]);
     fx.link("work/link", "inner/x");
-    let out = fx.run(&[], "echo hi >> 'ROOT/work/link'");
-    assert_eq!(out.status, 0, "stderr:\n{}", out.stderr);
+    let out = fx.run(&[], "echo hi >> 'ROOT/work/link'; echo ok");
+    admitted(&proof, &out, "ok");
     assert_eq!(read(&fx.path("work/inner/x")), "hi\n");
     assert!(
         fx.path("work/link")
@@ -122,11 +120,12 @@ fn a_dangling_link_inside_the_grant_creates_its_target() {
 
 #[test]
 fn an_atomic_write_over_a_link_replaces_the_target_it_names() {
+    let proof = ral_core::require_confinement!();
     let fx = Fixture::new("atomic_link", &["."], &[]);
     std::fs::write(fx.path("work/a"), "old\n").unwrap();
     fx.link("work/link", "a");
-    let out = fx.run(&[], "echo new > 'ROOT/work/link'");
-    assert_eq!(out.status, 0, "stderr:\n{}", out.stderr);
+    let out = fx.run(&[], "echo new > 'ROOT/work/link'; echo ok");
+    admitted(&proof, &out, "ok");
     assert_eq!(read(&fx.path("work/a")), "new\n");
     assert!(
         fx.path("work/link")
@@ -138,11 +137,13 @@ fn an_atomic_write_over_a_link_replaces_the_target_it_names() {
 
 #[test]
 fn a_link_to_a_denied_file_is_judged_at_the_file() {
+    let proof = ral_core::require_confinement!();
     let fx = Fixture::new("denied_link", &["."], &["work/secret"]);
     std::fs::write(fx.path("work/secret"), "keep\n").unwrap();
     fx.link("work/link", "secret");
-    let out = fx.run(&[], "echo x > 'ROOT/work/link'");
-    assert_denied(&out, "`>` through a link to a denied file");
+    let control = fx.run(&[], "echo x > 'ROOT/work/control'; echo ok");
+    let out = fx.run(&[], "echo x > 'ROOT/work/link'; echo ok");
+    denied_by_grant(&proof, &control, &out, "ok");
     assert_eq!(read(&fx.path("work/secret")), "keep\n");
 }
 
@@ -150,11 +151,12 @@ fn a_link_to_a_denied_file_is_judged_at_the_file() {
 /// and lists no read of it carries the old bytes, as one that lists it does.
 #[test]
 fn a_write_only_grant_carries_the_before_image_because_writing_reads() {
+    let proof = ral_core::require_confinement!();
     for (name, listed) in [("diff_wo", &[][..]), ("diff_rw", &["."][..])] {
         let fx = Fixture::new(name, listed, &[]);
         std::fs::write(fx.path("work/f"), "OLD-BEFORE-IMAGE\n").unwrap();
-        let out = fx.run(&["--audit"], "echo replaced > 'ROOT/work/f'");
-        assert_eq!(out.status, 0, "stderr:\n{}", out.stderr);
+        let out = fx.run(&["--audit"], "echo replaced > 'ROOT/work/f'; echo ok");
+        admitted(&proof, &out, "ok");
         assert_eq!(read(&fx.path("work/f")), "replaced\n");
         assert!(
             out.stderr.contains("OLD-BEFORE-IMAGE"),

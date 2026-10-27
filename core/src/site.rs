@@ -28,7 +28,7 @@ pub(crate) enum Silent {
     SystemReadsHome,
 
     // Sandbox diagnostics.
-    /// `journalctl -k`, or `dmesg` where the journal is absent or unreadable,
+    /// Fixed system paths for `journalctl -k` and `dmesg`, probed and
     /// spawned to harvest the kernel's seccomp-denial audit window for a
     /// sandbox diagnostic.  It raises no exec card: a post-mortem diagnostic
     /// probe, not the model's exec image.
@@ -41,16 +41,35 @@ pub(crate) enum Silent {
     LogShow,
 
     // The sandbox: pins, respawn and rendering.
-    /// A launch of `/bin/true` under a `Restricted` envelope, spawned to ask
-    /// whether this host builds one at all.  A host capability probe for
-    /// tests, not a grant spawn, so it raises no card.
-    #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
-    RestrictedEnvelopeProbe,
+    /// Query the kernel's Landlock ABI; confinement setup raises no card.
+    #[cfg(target_os = "linux")]
+    LandlockVersion,
+    /// Create the launch's Landlock ruleset; confinement setup raises no card.
+    #[cfg(target_os = "linux")]
+    LandlockCreate,
+    /// Admit a held object to Landlock; confinement setup raises no card.
+    #[cfg(target_os = "linux")]
+    LandlockAdmit,
+    /// Enter the payload's Landlock domain; confinement setup raises no card.
+    #[cfg(target_os = "linux")]
+    LandlockRestrict,
+    /// Sweep inherited descriptors before the payload runs; no model I/O.
+    #[cfg(target_os = "linux")]
+    InheritedSweep,
+    /// Detach's second fork surrenders process ownership; its exec card already fired.
+    #[cfg(unix)]
+    DetachFork,
+    /// A reaper test forks an exit-status fixture; no model I/O.
+    #[cfg(all(unix, test))]
+    ReaperExitFork,
     /// ral's own pin, run as an anchor under bwrap to ask whether this host
     /// builds an envelope at all.  A setup-time host capability probe, not a
     /// model exec image, so it raises no card.
     #[cfg(target_os = "linux")]
     BwrapHostProbe,
+    /// Host pty names, masked during envelope construction.
+    #[cfg(target_os = "linux")]
+    PtyDiscovery,
     /// Ral's own `/proc/self/cgroup`, read to re-root the envelope's cgroup
     /// tree on the namespace's root.  It raises no card: envelope
     /// construction, not a model's data I/O.

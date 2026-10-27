@@ -39,8 +39,6 @@ pub(crate) enum Builds {
     /// Envelopes mounting lent descriptors (`--ro-bind-fd`, bubblewrap
     /// 0.8.0): the only way the envelope mounts anything.
     ByFd,
-    /// Envelopes, but none mounting a descriptor.
-    ByName,
     /// No envelope at all, for the reason bwrap gave.
     Nothing(&'static str),
 }
@@ -89,7 +87,18 @@ impl Builds {
             handoff,
         ) {
             Ok(()) => Self::ByFd,
-            Err(_) => Self::ByName,
+            Err(why) => {
+                let unknown = why.contains("--ro-bind-fd")
+                    && (why.contains("Unknown option")
+                        || why.contains("unknown option")
+                        || why.contains("unrecognized option"));
+                let why = if unknown {
+                    format!("{why}; is bubblewrap older than 0.8.0?")
+                } else {
+                    why
+                };
+                Self::Nothing(why.leak())
+            }
         }
     }
 }
@@ -124,4 +133,48 @@ fn bwrap_builds(
         "" => format!("it exited with {}", out.status),
         said => said.to_owned(),
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_failed_fd_probe_keeps_bwraps_reason_and_versions_only_unknown_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let trampoline = Pinned::open(std::env::current_exe().unwrap()).unwrap();
+        for (index, reason, outdated) in [
+            (0, "bwrap: Unknown option --ro-bind-fd", true),
+            (
+                1,
+                "bwrap: Creating new namespace failed: Operation not permitted",
+                false,
+            ),
+            (2, "bwrap: --ro-bind-fd: Bad file descriptor", false),
+        ] {
+            let path = dir.path().join(format!("bwrap-{index}"));
+            std::fs::write(&path, format!(
+                "#!/bin/sh\ncase \"$*\" in\n*--ro-bind-fd*) printf '%s\\n' '{reason}' >&2; exit 1;;\nesac\nexit 0\n"
+            )).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let bwrap = Pinned::open(path).unwrap();
+            // The script interpreter must reopen the pin after exec.
+            assert_eq!(
+                unsafe { libc::fcntl(bwrap.fd().as_raw_fd(), libc::F_SETFD, 0) },
+                0
+            );
+            let Builds::Nothing(why) = Builds::probe(&bwrap, &trampoline) else {
+                panic!("a failed descriptor mount must refuse the envelope");
+            };
+            assert!(why.contains(reason), "{why}");
+            assert_eq!(
+                why.contains("is bubblewrap older than 0.8.0?"),
+                outdated,
+                "{why}"
+            );
+        }
+    }
 }

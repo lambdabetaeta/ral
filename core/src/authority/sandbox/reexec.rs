@@ -112,7 +112,7 @@ impl Pinned {
         match &self.pin {
             #[cfg(target_os = "linux")]
             Pin::Fd { id, .. } => *id,
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(target_os = "macos")]
             Pin::Stat { id } => *id,
         }
     }
@@ -160,7 +160,7 @@ enum Pin {
         id: ObjectId,
     },
     /// Compared against a fresh stat before each spawn.
-    #[cfg(all(unix, not(target_os = "linux")))]
+    #[cfg(target_os = "macos")]
     Stat { id: ObjectId },
     /// Nothing to guard where confinement happens at the parent's spawn; the
     /// variant only gives `build_pin` one shape on every platform.
@@ -254,7 +254,7 @@ fn build_pin(arg0: &Path, trace: &Trace) -> Option<(Pin, PathBuf)> {
     Some((Pin::Fd { fd, id }, exec_path))
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(target_os = "macos")]
 fn build_pin(arg0: &Path, trace: &Trace) -> Option<(Pin, PathBuf)> {
     Some((
         Pin::Stat {
