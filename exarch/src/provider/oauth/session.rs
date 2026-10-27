@@ -14,7 +14,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
-use tokio::sync::{Mutex as AsyncMutex, watch};
+use tokio::sync::{Mutex as AsyncMutex, oneshot, watch};
 use tokio::time::{Instant, sleep, timeout, timeout_at};
 
 /// Bounds waiting for the store lease and the decision to submit.
@@ -430,12 +430,15 @@ async fn lease(store: &OwnDir, deadline: Instant) -> Result<StoreLease, String> 
 }
 
 /// Synchronous callers are startup or background jobs, never a UI frame.
+///
+/// # Panics
+/// On an async worker, which the wait would block or deadlock.
 pub(super) fn transaction<R: Send + 'static>(
     store: &OwnDir,
     change: impl FnOnce(&StoreLease) -> Result<R, String> + Send + 'static,
 ) -> Result<R, String> {
     let store = store.clone();
-    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    let (send, receive) = oneshot::channel();
     EXECUTOR.spawn(async move {
         let result = async {
             let lease = lease(&store, Instant::now() + DEADLINE).await?;
@@ -445,6 +448,6 @@ pub(super) fn transaction<R: Send + 'static>(
         let _ = send.send(result);
     });
     receive
-        .recv()
+        .blocking_recv()
         .map_err(|_| "OAuth transaction owner stopped".to_string())?
 }

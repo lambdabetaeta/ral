@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 7ab5809a08c38081b58a1c308eab0ab0303e7b07
-generated_at_date: 2026-10-26
+generated_at_commit: 41f60151e952e9a2b5c7777af3708e47af54da0c
+generated_at_date: 2026-10-27
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs, exarch/src/tui/login.rs, exarch/src/tui/providers.rs, exarch/src/tui/commands.rs]
 ---
 
@@ -215,7 +215,9 @@ product-specific vaults, configuration, logs and model caches remain separate.
 - `StoreLease` combines an asynchronous process gate with a stable `oauth.lock`
   file. Refresh, read-and-attach, login commit, host-id creation and removal all
   use it. The predecessor is reread under the lease, which spans issuer exchange
-  and commit. Only the lease can attach, publish or retire an owner.
+  and commit. Only the lease can attach, publish or retire an owner. The
+  synchronous `transaction` wrapper panics on an async worker instead of risking
+  deadlock.
 - `State` separates pending subscribers from `CredentialState`: a `Live`
   credential (ready, uncertain, or an unsaved predecessor/successor pair) or a
   retired one. Exhaustive, pure reconciliation returns only `Live`: it retains

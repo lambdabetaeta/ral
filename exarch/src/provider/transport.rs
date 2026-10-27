@@ -369,7 +369,12 @@ mod tests {
         use ral_core::process::CancelCause;
         use std::time::Duration;
         let state = ral_core::own::OwnDir::for_test("cancel-prepare").unwrap();
-        let handle = oauth::commit_for_test(&state, &token(Login::Grok, "live"));
+        let store = (*state).clone();
+        let handle = tokio::task::spawn_blocking(move || {
+            oauth::commit_for_test(&store, &token(Login::Grok, "live"))
+        })
+        .await
+        .unwrap();
         let transport = Transport::build(
             &Login::Grok.service(),
             "m",

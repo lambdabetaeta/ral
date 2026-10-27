@@ -130,10 +130,14 @@ fn reconciliation_preserves_unresolved_outcomes_until_disk_changes() {
     assert_eq!(retired.reconcile(&predecessor), Live::Ready(predecessor));
 }
 
-fn fixture() -> (TestDir, CredentialHandle) {
-    let state = OwnDir::for_test("oauth-owner").unwrap();
-    let handle = oauth::commit_for_test(&state, &token());
-    (state, handle)
+async fn fixture() -> (TestDir, CredentialHandle) {
+    tokio::task::spawn_blocking(|| {
+        let state = OwnDir::for_test("oauth-owner").unwrap();
+        let handle = oauth::commit_for_test(&state, &token());
+        (state, handle)
+    })
+    .await
+    .unwrap()
 }
 
 async fn prepare(handle: &CredentialHandle, url: String) -> Result<(), String> {
@@ -156,7 +160,7 @@ fn credential(handle: &CredentialHandle) -> CredentialState {
 
 #[tokio::test]
 async fn concurrent_waiters_share_rotation_and_the_next_exchange_uses_its_successor() {
-    let (state, handle) = fixture();
+    let (state, handle) = fixture().await;
     let mut issuer = Issuer::new().await;
     let first = tokio::spawn({
         let handle = handle.clone();
@@ -178,7 +182,10 @@ async fn concurrent_waiters_share_rotation_and_the_next_exchange_uses_its_succes
     let mut saved = read_at(&state).unwrap().1.remove(0);
     assert_eq!(saved.refresh_token, "r1");
     saved.expires_at = 0;
-    oauth::commit_for_test(&state, &saved);
+    let store = (*state).clone();
+    tokio::task::spawn_blocking(move || oauth::commit_for_test(&store, &saved))
+        .await
+        .unwrap();
     let next = tokio::spawn({
         let handle = handle.clone();
         let url = issuer.url.clone();
@@ -193,7 +200,7 @@ async fn concurrent_waiters_share_rotation_and_the_next_exchange_uses_its_succes
 
 #[tokio::test]
 async fn cancelling_every_waiter_does_not_discard_a_submitted_rotation() {
-    let (state, handle) = fixture();
+    let (state, handle) = fixture().await;
     let mut issuer = Issuer::new().await;
     let waiter = tokio::spawn({
         let handle = handle.clone();
@@ -217,7 +224,7 @@ async fn cancelling_every_waiter_does_not_discard_a_submitted_rotation() {
 
 #[tokio::test]
 async fn queued_login_wins_and_delayed_admission_cannot_restore_the_old_snapshot() {
-    let (state, handle) = fixture();
+    let (state, handle) = fixture().await;
     let mut issuer = Issuer::new().await;
     let refreshing = tokio::spawn({
         let handle = handle.clone();
@@ -249,7 +256,7 @@ async fn queued_login_wins_and_delayed_admission_cannot_restore_the_old_snapshot
 
 #[tokio::test]
 async fn queued_logout_wins_and_cached_owners_cannot_resurrect_it() {
-    let (state, handle) = fixture();
+    let (state, handle) = fixture().await;
     let mut issuer = Issuer::new().await;
     let refreshing = tokio::spawn({
         let handle = handle.clone();
@@ -275,7 +282,7 @@ async fn queued_logout_wins_and_cached_owners_cannot_resurrect_it() {
 
 #[tokio::test]
 async fn failed_persistence_keeps_the_successor_and_retries_only_its_write() {
-    let (state, handle) = fixture();
+    let (state, handle) = fixture().await;
     let mut issuer = Issuer::new().await;
     let refreshing = tokio::spawn({
         let handle = handle.clone();
@@ -297,7 +304,7 @@ async fn failed_persistence_keeps_the_successor_and_retries_only_its_write() {
 
 /// A failed exchange, then a retry that reaches the issuer and rotates.
 async fn retry_after(failure: RefreshError) -> String {
-    let (state, handle) = fixture();
+    let (state, handle) = fixture().await;
     let error = handle
         .prepare_until(Instant::now() + Duration::from_secs(5), async move |_| {
             Err(failure)
@@ -334,7 +341,7 @@ async fn a_refresh_the_issuer_rejected_leaves_the_account_usable() {
 
 #[tokio::test]
 async fn an_ambiguous_exchange_is_not_replayed() {
-    let (_state, handle) = fixture();
+    let (_state, handle) = fixture().await;
     let mut issuer = Issuer::new().await;
     let refreshing = tokio::spawn({
         let handle = handle.clone();
@@ -355,7 +362,7 @@ async fn an_ambiguous_exchange_is_not_replayed() {
 
 #[tokio::test]
 async fn the_exchange_budget_does_not_shrink_with_the_lease_wait() {
-    let (state, handle) = fixture();
+    let (state, handle) = fixture().await;
     let mut issuer = Issuer::new().await;
     let file = state.open_write("oauth.lock").unwrap();
     file.try_lock().unwrap();
@@ -386,7 +393,7 @@ async fn the_exchange_budget_does_not_shrink_with_the_lease_wait() {
 
 #[tokio::test]
 async fn a_held_file_lock_obeys_the_operation_deadline_without_submitting_http() {
-    let (state, handle) = fixture();
+    let (state, handle) = fixture().await;
     let file = state.open_write("oauth.lock").unwrap();
     file.try_lock().unwrap();
     let result = handle
@@ -455,7 +462,12 @@ async fn another_process_can_renew_a_retired_owner_by_preparation_or_loading() {
     for reload in [false, true] {
         let root = OwnDir::for_test("oauth-external-login").unwrap();
         let store = root.make_dir("exarch").unwrap();
-        let owner = oauth::commit_for_test(&store, &token());
+        let owner = {
+            let store = store.clone();
+            tokio::task::spawn_blocking(move || oauth::commit_for_test(&store, &token()))
+                .await
+                .unwrap()
+        };
         let removal = lease(&store, Instant::now() + DEADLINE).await.unwrap();
         removal.remove("account").unwrap().unwrap();
         drop(removal);
@@ -523,7 +535,12 @@ fn process_lock() {
 async fn killing_a_lock_holder_releases_the_lease_without_deleting_its_file() {
     let root = OwnDir::for_test("oauth-lock-holder").unwrap();
     let store = root.make_dir("exarch").unwrap();
-    let handle = oauth::commit_for_test(&store, &token());
+    let handle = {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || oauth::commit_for_test(&store, &token()))
+            .await
+            .unwrap()
+    };
     let mut child = Child(
         std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "provider::oauth::session::tests::process_lock"])
