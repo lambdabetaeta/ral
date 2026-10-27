@@ -115,7 +115,15 @@ assistant prose ──marked──▶ <pre><code class="language-live-html">SRC<
   by DOM reattachment asks again, so it refills itself.
 - **The frame reports its height.** `live-sizer.js` posts the root's border-box
   height, not `scrollHeight`, which never falls below the viewport and would let
-  a frame grow but never shrink. The parent clamps it to 24 to 1600 px.
+  a frame grow but never shrink. The parent clamps it to 24 to 1600 px. The
+  sizer measures `<html>`'s border box, so a page that pins the root to the
+  viewport (`html { height: 100% }`) closes a feedback loop, F' = f(F): any gap
+  between the frame and its viewport, such as a classic horizontal scrollbar, is
+  lost on every round, which drifted the frame down to the 24 px minimum in a
+  real WKWebView run. The prelude therefore forces
+  `html, body { height: auto !important }`, which beats the page's own
+  stylesheets and its inline `style.height`. Viewport units (`vh`) can still
+  grow a frame, but only up to `MAX_PX`.
 - **Streaming.** While a fence is open (the live tail) it renders as a quiet
   placeholder box, never as source: to the user no script exists
   (`synod/data/system.md`). It becomes a frame when its chunk settles;
