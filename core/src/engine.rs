@@ -100,8 +100,9 @@ fn resolve_installer<'a>(
 
 impl Engine {
     /// Become what `attach` names: resolve its installer, derive the runtime,
-    /// then either run the root recipe (seating the root's cwd and env) or
-    /// unseal the child's seal and construct it. No recipe runs in a child.
+    /// then either run the root recipe (seating the root's cwd and env) and
+    /// install the root's grants, or unseal the child's seal and construct it.
+    /// No recipe runs in a child.
     ///
     /// # Errors
     /// The attach refusal, in the words of whichever step refused; a seal
@@ -122,6 +123,12 @@ impl Engine {
                 (installer.root)(root, &mut shell)?;
                 for (name, value) in &root.env {
                     shell.set_env_var(name, value);
+                }
+                // Off a wire a hold arrives unheld; held again as a seed's are.
+                let mut grants = root.grants.clone();
+                grants.rehold();
+                for layer in grants {
+                    shell.push_session_capabilities(layer);
                 }
                 shell
             }
@@ -260,8 +267,49 @@ impl Scopes {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_roots_grants_arrive_unheld_and_are_held_again() {
+        use crate::authority::policy::{Capabilities, FsPolicy, GrantStack};
+        use crate::carrier::testkit::BARE;
+        use crate::path::{EnginePath, FrozenPath};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let secret = crate::test_helper::real(tmp.path())
+            .as_path()
+            .join("secret");
+        std::fs::write(&secret, "s").unwrap();
+        let grants = crate::test_helper::stack([crate::test_helper::layer(Capabilities {
+            fs: Some(FsPolicy {
+                deny_paths: vec![FrozenPath::from_surface(
+                    crate::path::utf8(&secret).unwrap(),
+                )],
+                ..FsPolicy::default()
+            }),
+            ..Capabilities::default()
+        })]);
+        let received: GrantStack =
+            serde_json::from_str(&serde_json::to_string(&grants).unwrap()).unwrap();
+        assert_eq!(received.held_ids(), [None]);
+        let depth = 1 + received.len();
+        let engine = Engine::boot(
+            &BARE,
+            &Attach::root(
+                EngineSpec::new("bare", EnginePath::Host(tmp.path().to_path_buf())),
+                Root::new(EnginePath::Host(tmp.path().to_path_buf())).with_grants(received),
+            ),
+        )
+        .unwrap_or_else(|e| panic!("a root holding its grants boots: {e}"));
+        assert_eq!(
+            engine.shell.context.grants.held_ids(),
+            [Some(crate::test_helper::trace(&secret).last_id())]
+        );
+        assert_eq!(engine.shell.context.grants.len(), depth);
+    }
 
     #[test]
     fn resolve_installer_matches_known_tag() {

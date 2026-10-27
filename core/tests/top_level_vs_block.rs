@@ -10,7 +10,8 @@
 //! does between consecutive tool calls and what the ral REPL's
 //! `execute_input` does between consecutive prompt runs: hold a single
 //! [`Shell`] across calls and route each body through the public
-//! `run` entry, which checks against the live session before running.
+//! `run` entry. Exarch's root holds its grants as session layers, so this
+//! harness installs each ceiling once.
 
 mod common;
 
@@ -23,29 +24,23 @@ use ral_core::path::shown;
 use ral_core::protocol::Run;
 use ral_core::shell::runtime::{Settled, Shell};
 use ral_core::source::SourceOrigin;
-use ral_core::test_helper::{layer, stack};
+use ral_core::test_helper::layer;
 use ral_core::{Break, Value};
 use std::path::{Path, PathBuf};
 
 // ── Harness ─────────────────────────────────────────────────────────────
 
-/// Run one top-level run against `shell` through the public `run` entry under
-/// `caps`, carried into the [`RunRequest`] exactly as exarch attenuates its
-/// tool runs.  Returns whatever the body returned (or the body's error).  Every
-/// test below picks source it expects to compile, so a static diagnostic is a
-/// test bug.
-fn top_level_under(shell: &mut Shell, caps: Capabilities, source: &str) -> Settled<Value> {
+fn shell_under(caps: Capabilities) -> Shell {
+    let mut shell = fresh_shell();
+    shell.push_session_capabilities(layer(caps));
     shell
-        .run(Run {
-            caps: stack([layer(caps)]),
-            ..Run::foreground(source, SourceOrigin::named("<test>"))
-        })
-        .expect_ran()
-        .into_result()
 }
 
 fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
-    top_level_under(shell, Capabilities::default(), source)
+    shell
+        .run(Run::foreground(source, SourceOrigin::named("<test>")))
+        .expect_ran()
+        .into_result()
 }
 
 /// Capability frame that actually triggers `sandbox_projection()` to
@@ -92,10 +87,9 @@ fn shown_dir(path: &Path) -> String {
 #[test]
 fn top_level_let_persists_across_calls() {
     for caps in parity_caps() {
-        let mut shell = fresh_shell();
-        top_level_under(&mut shell, caps.clone(), "let persist_n = 41").expect("first run");
-        let result =
-            top_level_under(&mut shell, caps, "return $[$persist_n + 1]").expect("second run");
+        let mut shell = shell_under(caps);
+        top_level(&mut shell, "let persist_n = 41").expect("first run");
+        let result = top_level(&mut shell, "return $[$persist_n + 1]").expect("second run");
         assert_eq!(result, Value::Int(42));
     }
 }
@@ -110,13 +104,12 @@ fn top_level_let_persists_across_calls() {
 #[test]
 fn top_level_partial_effects_persist_on_error() {
     for caps in parity_caps() {
-        let mut shell = fresh_shell();
+        let mut shell = shell_under(caps);
         // `cat /nonexistent` fails between the two `let` lines.  The whole
         // run returns Err, but the pre-failure binding is in the mobile,
         // which the top-level run installs unconditionally.
-        let _ = top_level_under(
+        let _ = top_level(
             &mut shell,
-            caps,
             "let pre_fail_x = 1\ncat /nonexistent\nlet post_fail_y = 2",
         );
         assert!(
@@ -160,12 +153,11 @@ fn top_level_partial_destructure_binds_nothing() {
 #[test]
 fn top_level_cd_persists_across_calls() {
     for caps in parity_caps() {
-        let mut shell = fresh_shell();
+        let mut shell = shell_under(caps);
         let tmp = std::env::temp_dir();
         let tmp_disp = shown_dir(&tmp);
-        top_level_under(&mut shell, caps.clone(), &format!("cd '{tmp_disp}'"))
-            .expect("cd should succeed");
-        let result = top_level_under(&mut shell, caps, "cwd").expect("cwd should succeed");
+        top_level(&mut shell, &format!("cd '{tmp_disp}'")).expect("cd should succeed");
+        let result = top_level(&mut shell, "cwd").expect("cwd should succeed");
         // `cwd` returns the canonicalised path, shown; comparing shown forms
         // tolerates the macOS `/var` ↔ `/private/var` firmlink and the
         // Windows 8.3 short name `temp_dir()` may carry.

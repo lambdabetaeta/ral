@@ -117,7 +117,7 @@ fn a_child_working_past_the_reply_lease_is_not_reaped() {
         ..crate::agent::TestTrunk::new("system")
     })
     .unwrap();
-    let child = crate::agent::testkit::started_child(&parent, "child-a");
+    let child = crate::agent::testkit::started_child(&parent, "child-a", "`inherit");
     child.agent.provider.swap(Arc::new(Provider::scripted(
         "test-model",
         Script::new().then(Reply::tool_calls(vec![ral_call(

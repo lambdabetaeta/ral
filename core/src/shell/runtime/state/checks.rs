@@ -6,7 +6,7 @@
 use crate::authority::guard::{
     Denial, Refusal, check_device_name, check_exec, check_flag, check_fs_exact, fs_denial,
 };
-use crate::authority::policy::{Admitted, Baseline, Flag, FsOp, GrantLayer, GrantStack, Program};
+use crate::authority::policy::{Admitted, Baseline, Flag, FsOp, GrantLayer, Program};
 use crate::authority::sandbox::SandboxProjection;
 use crate::path::walk::{Kind, is_loop, loop_trace};
 use crate::path::{
@@ -249,17 +249,6 @@ impl Shell {
     /// this layer.
     pub fn with_layer<R>(&mut self, layer: GrantLayer, f: impl FnOnce(&mut Self) -> R) -> R {
         self.with_pushed(vec![layer], f)
-    }
-
-    /// [`with_layer`](Self::with_layer) for a whole ceiling: every layer of
-    /// `stack` is pushed for `f`'s dynamic extent and popped after — never
-    /// folded into one layer, since the stack is the meet.
-    pub(crate) fn with_layers<R>(
-        &mut self,
-        stack: GrantStack,
-        f: impl FnOnce(&mut Self) -> R,
-    ) -> R {
-        self.with_pushed(stack.into_iter().collect(), f)
     }
 
     fn with_pushed<R>(&mut self, layers: Vec<GrantLayer>, f: impl FnOnce(&mut Self) -> R) -> R {

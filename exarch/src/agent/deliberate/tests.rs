@@ -861,7 +861,7 @@ fn current_epoch_surface_batch_reaches_the_model() {
 #[test]
 fn cancel_cascade_reaches_a_cancelled_sub_agents_workers() {
     let parent = dressed_trunk(|runtime| runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS));
-    let child = started_child(&parent, "child");
+    let child = started_child(&parent, "child", "`inherit");
 
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::with_mailbox(tx, child.agent.id, child.inbox.mailbox());

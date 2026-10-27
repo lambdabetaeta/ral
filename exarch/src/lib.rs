@@ -114,7 +114,7 @@ pub struct SessionInfo<'a> {
     pub base: &'a str,
     pub extend: Option<&'a std::path::Path>,
     pub restrict_files: &'a [std::path::PathBuf],
-    pub cwd: &'a std::path::Path,
+    pub cwd: &'a ral_core::path::CwdPath,
 }
 
 /// The binary's entry point, lifted into the library so integration tests can
@@ -227,7 +227,7 @@ pub fn run() -> Result<(), String> {
     let scratch =
         Arc::new(app::Scratch::new(app::EXARCH).map_err(|e| format!("scratch dir: {e}"))?);
     let invocation = policy::for_invocation(
-        launch_cwd.as_path(),
+        &launch_cwd,
         scratch.spelling(),
         &c.base,
         c.extend.as_deref(),
@@ -288,7 +288,6 @@ pub fn run() -> Result<(), String> {
     );
     let config = agent::RootConfig {
         system,
-        caps: invocation.stack,
         run_dir: run.clone(),
         // An attended trunk parks for the human; a headless one terminates
         // once its seeded work is idle.
@@ -313,7 +312,8 @@ pub fn run() -> Result<(), String> {
     };
     let seat = agent::RootSeat::Identity {
         scratch,
-        cwd: launch_cwd.as_path().to_path_buf(),
+        cwd: launch_cwd.clone(),
+        grants: invocation.stack,
         terminal,
     };
     let roots: Vec<_> = if resumes {
@@ -334,7 +334,7 @@ pub fn run() -> Result<(), String> {
         base: &c.base,
         extend: c.extend.as_deref(),
         restrict_files: &invocation.restricts,
-        cwd: launch_cwd.as_path(),
+        cwd: &launch_cwd,
     };
     if headless {
         let [(mut session, _)] =

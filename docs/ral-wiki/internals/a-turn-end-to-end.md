@@ -1,6 +1,7 @@
 ---
-verified_at_commit: dad6a1b3
-verified_at_date: 2026-10-17
+generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
+verified_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
+verified_at_date: 2026-10-27
 anchors: [run, run_under, Program, register_hook, RunRequest, RunReport, Ending, RunIo, TrailScope, Mooring, IoLoan, compile_run, build_run, run_framed, run_phrases, compile_and_typecheck]
 ---
 
@@ -50,9 +51,6 @@ is exactly the places hosts differ:
   terminal-bound child, `Denied` may not. `Capture` does not imply terminal
   ownership — a piped `ral -c` is `Denied` yet `Inherit`s its stdin
   ([[decisions/260619_terminal-lease|terminal-lease]]).
-- **Capabilities** — the `GrantStack` ceiling pushed for the run's dynamic
-  extent, every layer of it (`GrantStack::root()` for the ral hosts, a grant
-  profile for exarch).
 - **Limits** — `wall` (the foreground deadline), `worker_cap` (the cap on
   concurrently running workers), `cleanup_grace` (how long a halting worker or
   combinator waits for the children it cancels), and `worker_title` (whether
@@ -109,15 +107,14 @@ module's framed scaffold:
   `IoLoan`, and evaluates. The loan is RAII over that one swap: it moves the
   new streams onto `shell.io` and restores the previous ones on `Drop`, so
   teardown survives a caught worker panic. The mooring needs no guard — it
-  never moved, so an outer run's is back the instant this stack frame ends, and
-  the `NurseryGuard` beside it empties the nursery on the unwinding path as
-  surely as on the clean one. The root context is installed — for a source run
-  only, a hook having no text to register — and
-  `with_layers(caps, body)` runs the run's program under the request's
-  capability ceiling, pushed layer by layer and removed by position after, so
-  a session frame the program pushes survives the run — `run_phrases(&top.phrases, shell.env.clone(),
-  Mode::Session, mooring, shell)` for the source arm, the in-frame
-  `shell::evaluator::apply` of the resolved hook for the hook arm
+  never moved, so an outer run's is back the instant this stack frame ends,
+  and the `NurseryGuard` beside it empties the nursery on the unwinding path
+  as surely as on the clean one. The root context is installed — for a
+  source run only, a hook having no text to register — and the body runs
+  under the session's own stack. `audit_deputy_prefixes` reports its flagged
+  prefixes to the run's trail before evaluation — `run_phrases(&top.phrases,
+  shell.env.clone(), Mode::Session, mooring, shell)` for the source arm, the
+  in-frame `shell::evaluator::apply` of the resolved hook for the hook arm
   ([[internals/evaluator-machine|the machine]];
   [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).
 - `run_phrases` writes each `let` straight into `shell.env` as its `Define`
@@ -177,19 +174,20 @@ module's framed scaffold:
   `Program::Hook` runs of hooks registered by name, through the same door
   ([[map/repl/loop|loop]]).
 - exarch's `run_shell` (`exarch/src/shell_eval.rs`) supplies a virtual
-  `origin` naming the call's turn (`turn N`), its session grant profile, a per-tool `wall`, a `worker_cap` on
-  concurrently running workers, a 2 s `cleanup_grace`, a required
-  `worker_title`, `RunIo::Capture`, `RequestedTerminalAccess::Denied`,
-  `RunStdin::Empty`, `trail: Some(CapturePolicy::Off)`; it builds a
-  `Program::Source` `Run` and drains it through
-  `protocol::dispatch_to_report` against its call's `RunHost` — one `Host`
-  pairing the enquiry desk with the applier that renders each live surface
-  value onto the presentation bus — and hands back the `Result<Report,
-  Severed>` itself; `Avatar::ral` renders the capped `ToolResult`, or the one
-  sentence `agent::seat::EngineLost` renders for a severance
-  ([[map/exarch/agent|agent]]). **The pushed grant frame *is* the sandbox** — ral's
-  [[design/grant|grant]], not a source-level `grant { … }` the model could
-  escape — which is why exarch needs no runtime of its own
+  `origin` naming the call's turn (`turn N`), its session grant profile, a
+  per-tool `wall`, a `worker_cap` on concurrently running workers, a 2 s
+  `cleanup_grace`, a required `worker_title`, `RunIo::Capture`,
+  `RequestedTerminalAccess::Denied`, `RunStdin::Empty`, `trail:
+  Some(CapturePolicy::Off)`; it builds a `Program::Source` `Run` and drains
+  it through `protocol::dispatch_to_report` against its call's `RunHost` —
+  one `Host` pairing the enquiry desk with the applier that renders each
+  live surface value onto the presentation bus — and hands back the
+  `Result<Report, Severed>` itself; `Avatar::ral` renders the capped
+  `ToolResult`, or the one sentence `agent::seat::EngineLost` renders for a
+  severance ([[map/exarch/agent|agent]]). **The session's host-installed
+  layers *are* the sandbox** — ral's [[design/grant|grant]], not a
+  source-level `grant { … }` the model could escape — which is why exarch
+  needs no runtime of its own
   ([[design/exarch-architecture|exarch-architecture]]).
 - ral's batch path (`ral/src/batch.rs`) boots an `IdentityTransport` from the
   `batch` installer, dispatches the `_ral-boot` hook, then the script as one

@@ -272,36 +272,54 @@ fn wire_reach_interrupt_settles_an_in_flight_run_promptly() {
     let _ = child.wait();
 }
 
-/// A guest takes the ambient stack, and is refused a resolved one in a
-/// sentence before anything is sent: a resolved grant means something on the
-/// host that resolved it and nothing on another.
 #[test]
-fn a_guest_transport_takes_root_and_is_refused_a_resolved_stack() {
-    use ral_core::authority::policy::{Capabilities, GrantStack, Net};
-    use ral_core::carrier::Severed;
-    let (seat, mut child) = wire_seat(Liveness::default());
-    assert!(!seat.transport().is_local());
-    let run = |stack: &GrantStack| {
-        crate::shell_eval::run_shell(
-            seat.transport(),
-            stack,
-            "<test>",
-            "$[1 + 1]",
-            30,
-            Arc::new(SurfaceCollector(std::sync::Mutex::new(Vec::new()))),
-        )
-    };
-    assert!(matches!(run(&GrantStack::root()), Ok(Report::Ran { .. })));
-    let offline = ral_core::test_helper::stack([ral_core::test_helper::layer(Capabilities {
+fn a_wire_root_refuses_resolved_grants_at_founding() {
+    use crate::agent::{Avatar, RootConfig, RootSeat, Trunk};
+    use crate::provider::{Bureau, Provider, Toolset};
+    use ral_core::authority::policy::{Capabilities, Net};
+
+    let (transport, mut child) = engine_over_socketpair(Liveness::default());
+    let (spec, root) = crate::boot::test_attach();
+    let grants = ral_core::test_helper::stack([ral_core::test_helper::layer(Capabilities {
         net: Some(Net::Offline),
         ..Capabilities::default()
     })]);
-    assert_eq!(
-        run(&offline).expect_err("a resolved stack stays home"),
-        Severed::Closed("a resolved grant cannot cross to another host".into())
+    let run_dir = crate::agent::testkit::tmp("wire-root-grants");
+    let result = Avatar::root(
+        RootConfig {
+            system: "system".into(),
+            run_dir: (*run_dir).clone(),
+            trunk: Trunk::Embedded,
+            tools: Toolset::offered(false),
+            allow_schedule: false,
+            resume_on_reset: false,
+            disk_warn_bytes: None,
+            fuel: 0,
+            egress: crate::egress::Egress::for_test(),
+            factory: None,
+            bureau: Arc::new(Bureau::Scripted),
+            roles: crate::provider::roles::Roles::default(),
+        },
+        RootSeat::Wire {
+            transport: Box::new(transport),
+            attach: ral_core::protocol::Attach::root(spec, root.with_grants(grants)),
+        },
+        Arc::new(Provider::scripted(
+            "test-model",
+            crate::provider::scripted::Script::new(),
+        )),
     );
     let _ = child.kill();
     let _ = child.wait();
+    let Err(why) = result else {
+        panic!("a wire root's resolved grants must be refused");
+    };
+    assert_eq!(
+        why.to_string(),
+        "a wire root's attach carries resolved grants, which name objects on this host, \
+         but its engine may run on another: pass the ceiling unresolved in Root::config, \
+         for the engine's recipe to resolve where it runs"
+    );
 }
 
 /// A wire seat has no recipe to reboot in place, so `/clear` answers in

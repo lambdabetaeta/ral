@@ -213,7 +213,7 @@ fn apply_model_switch(app: &mut App, ctx: &CommandCtx<'_>, tab: AgentId, pick: &
     let context_window = built.context_window();
     provider.swap(built);
     let persisted = crate::app::EXARCH
-        .project(ctx.info.cwd)
+        .project(ctx.info.cwd.as_path())
         .map_err(String::from)
         .and_then(|project| state::save(&project, &saved));
     if let Err(e) = persisted {

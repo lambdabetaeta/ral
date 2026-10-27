@@ -566,9 +566,10 @@ pub(crate) fn compile_run(
     Ok((top, compact))
 }
 
-/// Install the built run state, run `body` under `run`'s capabilities, compute the transport status, and tear the frame down. Both
-/// program arms settle to one [`Settled<Value>`], so this spine is shared
-/// verbatim; the caller keeps the mooring, the limits and the classification.
+/// Install the built run state, run `body`, compute the transport status,
+/// and tear the frame down. Both program arms settle to one [`Settled<Value>`],
+/// so this spine is shared verbatim; the caller keeps the mooring, the limits
+/// and the classification.
 pub(crate) fn run_framed(
     mooring: &Mooring,
     shell: &mut Shell,
@@ -590,9 +591,9 @@ pub(crate) fn run_framed(
         Program::Hook { .. } => false,
     };
 
-    let mut caps = run.caps.clone();
-    caps.rehold();
-    let result = shell.with_layers(caps, |s| body(mooring, s));
+    // A trail opened by this run reports the deputy prefixes of the stack it runs under.
+    shell.audit_deputy_prefixes();
+    let result = body(mooring, shell);
 
     // The run's last step boundary.  The wall is disarmed first; a firing
     // the daemon has already claimed is waited for (the node may already

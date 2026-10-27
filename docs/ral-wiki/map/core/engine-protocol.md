@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 781d88844423a2af09f5e9a87e0d902fc4f15cff
+generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
 generated_at_date: 2026-10-27
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/shell/run/report.rs, core/src/seed.rs, core/src/shell/grant/spawn.rs]
 ---
@@ -30,16 +30,16 @@ parent's seal, so core holds no spawn machinery for it.** The why is
   installed (`install_builtins`, `install_captured_builtins`); a `Shell` is
   built over one and cannot hand it back.
 - `Engine` — one session's engine: the `Shell`, its `Arc<Runtime>`, its
-  `Scopes`, the installer it was born from. `Engine::boot(installers, &attach)` is the one
-  boot both carriers call: `resolve_installer` (version check, then tag
-  lookup), the installer's `runtime`, then
-  by `attach.origin`: `Origin::Root(root)` is `Shell::root`, the root recipe,
-  `seed_cwd` and the root's env; `Origin::Child(sealed)` is `Shell::child_of(runtime,
-  sealed.unseal()?.decode(&runtime)?, narrow)`, and no recipe runs. There is no
-  `Keep`: the attach is the birth, and the scratch is the host's, named in a
-  root's env.
-  `Engine::run` runs one dispatch under the view `Scopes::open` hands it;
-  `Scopes` keeps the node, its one writer;
+  `Scopes`, the installer it was born from. `Engine::boot(installers,
+  &attach)` is the one boot both carriers call: `resolve_installer` (version
+  check, then tag lookup), the installer's `runtime`, then by
+  `attach.origin`: `Origin::Root(root)` is `Shell::root`, the root recipe,
+  cwd and env, then `rehold` and permanent installation of `Root::grants`;
+  `Origin::Child(sealed)` is `Shell::child_of(runtime,
+  sealed.unseal()?.decode(&runtime)?, narrow)`, and no recipe runs. There is
+  no `Keep`: the attach is the birth, and the scratch is the host's, named
+  in a root's env. `Engine::run` runs one dispatch under the view
+  `Scopes::open` hands it; `Scopes` keeps the node, its one writer;
   `Engine::probe` (`engine/probe.rs`) answers one `Probe`.
 - `--guest-engine <cgroup-root>`: the Linux x86-64/aarch64 process role
   installs the jail before `carrier::run_engine`; `Engine::boot` performs no
@@ -73,22 +73,24 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
 - `Frame` — the whole wire enum: `Attach`, `Detach`, `Dispatch`, `Probe`,
   `Event`, `Session`, `Control`, `Answer`, `Ping`, `Pong`; `Frame::kind`
   names a variant for the diagnostic about a frame out of place.
-- `Attach { engine: EngineSpec, origin: Origin }` — what every engine is born
-  from, under either carrier. `EngineSpec` names the engine: `proto_version`,
-  `installer`, `terminal`, `home`. `Origin` is `Root(Root { cwd, env, config })`
-  (`env`: per-session variables the host seeds; `config`: the installer's own
-  settings, an `FOValue` its recipe decodes) or `Child(Sealed)` (a child's
-  parent, sealed, carrying its own cwd and env). `home` and `cwd` are
-  `path::EnginePath`s (`path/namespace.rs`): a path on the engine's machine,
-  named in the namespace the front-end can name it in — `Host(PathBuf)` for an
-  engine sharing the front-end's computer (in process, or a child process),
-  `Guest(GuestPath)` for one inside a Posix guest, a `/`-separated string that
-  a Windows front-end has no `PathBuf` for. The engine reads either as its own
-  through `EnginePath::native`, crate-private, since only the engine's side
-  has the OS a guest path is native to. `Attach::new` is a plain root's, at
-  this build's version; `Attach::root` pairs an `EngineSpec` with a `Root`, whose
-  `with_env` and `with_config` edit it; `Attach::child` pairs an `EngineSpec`
-  with a seal; `with_terminal` edits either.
+- `Attach { engine: EngineSpec, origin: Origin }` — what every engine is
+  born from, under either carrier. `EngineSpec` names the engine:
+  `proto_version`, `installer`, `terminal`, `home`. `Origin` is `Root(Root {
+  cwd, env, grants, config })` (`env`: per-session variables the host seeds;
+  `grants`: host-resolved layers installed once after the recipe; `config`:
+  the installer's own settings, an `FOValue` its recipe decodes) or
+  `Child(Sealed)` (a child's parent, sealed, carrying its own cwd and env).
+  `home` and `cwd` are `path::EnginePath`s (`path/namespace.rs`): a path on
+  the engine's machine, named in the namespace the front-end can name it in
+  — `Host(PathBuf)` for an engine sharing the front-end's computer (in
+  process, or a child process), `Guest(GuestPath)` for one inside a Posix
+  guest, a `/`-separated string that a Windows front-end has no `PathBuf`
+  for. The engine reads either as its own through `EnginePath::native`,
+  crate-private, since only the engine's side has the OS a guest path is
+  native to. `Attach::new` is a plain root's, at this build's version;
+  `Attach::root` pairs an `EngineSpec` with a `Root`, whose `with_env`,
+  `with_grants` and `with_config` edit it; `Attach::child` pairs an
+  `EngineSpec` with a seal; `with_terminal` edits either.
 - `Run` / `Program` — one dispatch's payload: the policy fields plus
   `Program::Source`/`Program::Hook`. `Run`'s field types are the run regime,
   held by session state, and live below the wire: `RunIo` and `RunStdin`
@@ -158,8 +160,8 @@ The probe vocabulary, typed once for both ends.
   takes, so a payload its probe does not take is not representable.
 - The rows the answers come in, rendered engine-side, each a `record!`:
   `WorkerRow`, `BindingRow`/`HandleRow`, `CompletionNames`, `PathEntry`.
-  `Grants` answers the session's `GrantStack` (no run's ceiling) as opaque
-  bytes in the JSON codec `Run.caps` already rides, as a sealed seed does.
+  `Grants` answers the session's `GrantSummary` as opaque bytes in the codec
+  `Root.grants` and a sealed seed ride.
 
 ## `core/src/protocol/channel.rs`
 

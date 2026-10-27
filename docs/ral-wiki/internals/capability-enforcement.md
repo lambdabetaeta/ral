@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
-verified_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
+generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
+verified_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
 verified_at_date: 2026-10-27
 anchors: [check_exec, Admitted, admit, Flag, ExecDenial, Refused, Refusal, Denial, Withheld, refused, region, Table, Evidence, GrantStack, SandboxProjection, Fragment, decode_capability_map, Shell::freeze_ctx, sandboxed_command, build_launch, projection_enforceable]
 ---
@@ -200,8 +200,8 @@ Two consequences follow:
   closed. An offline request on a backend that cannot enforce it fails closed at
   the spawn (`projection_enforceable`).
 
-[[design/exarch-architecture|exarch]] reuses this boundary unchanged: an agent
-run is a host-pushed grant frame over the same stack.
+[[design/exarch-architecture|exarch]] reuses this boundary unchanged: an agent's
+engine holds host-installed session layers on the same stack.
 
 See also [[design/capability-carriers|capability-carriers]] (why the rule, the
 live judgment and the `SandboxProjection` are three things, not one); map

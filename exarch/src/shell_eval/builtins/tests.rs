@@ -240,10 +240,11 @@ fn clear_reboots_a_shell_that_still_carries_detach() {
     let scratch = std::sync::Arc::new(
         crate::app::Scratch::for_test(crate::app::EXARCH, "detach-clear").expect("scratch dir"),
     );
-    let cwd = std::env::current_dir().expect("test process has a cwd");
+    let cwd = ral_core::host::cwd().expect("test process has a cwd");
     let mut seat = crate::agent::seat::Seat::root(
         &crate::INSTALLERS,
         cwd,
+        ral_core::authority::policy::GrantStack::default(),
         ral_core::io::terminal::TerminalState::default(),
         scratch,
     )

@@ -30,7 +30,6 @@ use std::io::{Read as _, Write as _};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ral_core::authority::policy::GrantStack;
 use ral_core::carrier::{Transport, WireTransport, dispatch_to_report};
 use ral_core::path::{EnginePath, GuestPath, shown};
 use ral_core::protocol::channel::Liveness;
@@ -225,7 +224,6 @@ fn prove_the_host_can_dial_in(
     let run = Run {
         program: Program::Source(format!("python3 << #####'{GUEST_LISTENER}'#####\n")),
         origin: SourceOrigin::named("<boot-smoke>"),
-        caps: GrantStack::root(),
         wall: Some(Duration::from_secs(60)),
         cleanup_grace: Duration::from_secs(5),
         worker_cap: None,

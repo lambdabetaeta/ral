@@ -657,8 +657,9 @@ pub struct ExecSummary {
     pub denies: Vec<String>,
 }
 
-/// The dynamic stack of layers: ambient root at index 0, innermost
-/// `grant { ... }` on top.
+/// A shell's stack holds the ambient root at index 0, innermost `grant { ... }`
+/// on top; a stack composed for installation, such as a root's grants, holds
+/// only its own layers.
 ///
 /// A newtype so the folds over it live together rather than being respelled
 /// as `iter().any(...)` at each call site; `transparent` serde keeps it free
@@ -727,8 +728,8 @@ impl GrantStack {
     }
 
     /// Take hold again of every exclusion's object on this host: the one walk
-    /// a received stack costs, and the only thing a receiver does to it.  The
-    /// seed's decode and `run_framed` call it.  Never fails: an object not
+    /// a received stack costs, and the only thing a receiver does to it.  A
+    /// seed's decode and a root's boot call it.  Never fails: an object not
     /// found at its position stays unheld.
     pub fn rehold(&mut self) {
         self.0.iter_mut().for_each(GrantLayer::rehold);

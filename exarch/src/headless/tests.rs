@@ -17,7 +17,6 @@ fn converse_trunk(tag: &str, script: Script) -> Avatar {
     Avatar::root(
         RootConfig {
             system: "system".into(),
-            caps: ral_core::authority::policy::GrantStack::root(),
             run_dir: dir,
             trunk: Trunk::Embedded,
             tools: Toolset::offered(false),
@@ -32,7 +31,8 @@ fn converse_trunk(tag: &str, script: Script) -> Avatar {
         },
         RootSeat::Identity {
             scratch,
-            cwd: std::env::current_dir().expect("test process has a cwd"),
+            cwd: ral_core::host::cwd().expect("test process has a cwd"),
+            grants: ral_core::authority::policy::GrantStack::default(),
             terminal: ral_core::io::terminal::TerminalState::default(),
         },
         Arc::new(Provider::scripted("test-model", script)),
@@ -305,7 +305,7 @@ fn a_blank_seed_is_no_seed_and_the_refusal_names_every_flag() {
             base: "dangerous",
             extend: None,
             restrict_files: &[],
-            cwd: std::path::Path::new("/tmp"),
+            cwd: &ral_core::host::cwd().expect("test process has a cwd"),
         },
         &Provider::scripted("test-model", Script::new()),
         seed,
@@ -357,7 +357,6 @@ fn settled_trunk(tag: &str, script: Script, allow_schedule: bool, resume_on_rese
     Avatar::root(
         RootConfig {
             system: "system".into(),
-            caps: ral_core::authority::policy::GrantStack::root(),
             run_dir: dir,
             trunk: Trunk::Embedded,
             tools: Toolset::offered(false),
@@ -372,7 +371,8 @@ fn settled_trunk(tag: &str, script: Script, allow_schedule: bool, resume_on_rese
         },
         RootSeat::Identity {
             scratch,
-            cwd: std::env::current_dir().expect("test process has a cwd"),
+            cwd: ral_core::host::cwd().expect("test process has a cwd"),
+            grants: ral_core::authority::policy::GrantStack::default(),
             terminal: ral_core::io::terminal::TerminalState::default(),
         },
         Arc::new(Provider::scripted("test-model", script)),

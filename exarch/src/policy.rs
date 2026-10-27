@@ -22,7 +22,7 @@ use ral_core::authority::policy::{
 };
 use ral_core::host::EnvVars;
 use ral_core::io::terminal::TerminalState;
-use ral_core::path::FrozenPath;
+use ral_core::path::{CwdPath, FrozenPath};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -50,7 +50,7 @@ use std::path::{Path, PathBuf};
 /// Unknown `base_name`, a profile that fails to load, or an exarch binary
 /// that cannot be named.
 pub fn for_invocation(
-    cwd: &Path,
+    cwd: &CwdPath,
     scratch: &str,
     base_name: &str,
     extension: Option<&Path>,
@@ -60,16 +60,15 @@ pub fn for_invocation(
     // The loader evaluates ral source, so it needs a Shell.  This one is
     // scaffolding: the caller builds the session's real shell separately, from
     // the frozen GrantStack returned here.
-    let anchor = ral_core::path::CwdPath::new(cwd.to_path_buf()).map_err(|e| e.to_string())?;
     let mut load_shell = ral_core::HostSurface::default()
-        .shell(TerminalState::default(), anchor.clone())
+        .shell(TerminalState::default(), cwd.clone())
         .map_err(|e| format!("the capability loader cannot start: {e}"))?;
 
-    let ctx = FreezeCtx::at(EnvVars::new(), anchor.clone()).with_scratch(Some(scratch));
+    let ctx = FreezeCtx::at(EnvVars::new(), cwd.clone()).with_scratch(Some(scratch));
 
     let mut ceiling: GrantLayer = resolve_base(base_name, &ctx)?;
     if let Some(path) = extension {
-        let abs = absolute_in(&anchor, path);
+        let abs = absolute_in(cwd, path);
         ceiling = ceiling.extend(load_fragment_ral(
             &ral_core::shell::runtime::Mooring::adrift(),
             &mut load_shell,
@@ -79,13 +78,10 @@ pub fn for_invocation(
         )?);
     }
 
-    let mut stack = GrantStack::root();
+    let mut stack = GrantStack::default();
     stack.push(ceiling);
 
-    let restricts: Vec<PathBuf> = restrict_files
-        .iter()
-        .map(|p| absolute_in(&anchor, p))
-        .collect();
+    let restricts: Vec<PathBuf> = restrict_files.iter().map(|p| absolute_in(cwd, p)).collect();
     for path in &restricts {
         stack.push(load_capabilities_ral(
             &ral_core::shell::runtime::Mooring::adrift(),
@@ -241,7 +237,7 @@ mod tests {
         let cwd = std::env::temp_dir().join(format!("exarch-restrict-cwd-{}", std::process::id()));
         std::fs::create_dir_all(&cwd).unwrap();
         let Invocation { stack, .. } = for_invocation(
-            &cwd,
+            &CwdPath::new(cwd.clone()).expect("fixture cwd"),
             &scratch(),
             "dangerous",
             None,
@@ -269,7 +265,7 @@ mod tests {
     #[test]
     fn a_dangerous_session_restricts_nothing() {
         let Invocation { stack, .. } = for_invocation(
-            &std::env::temp_dir(),
+            &CwdPath::new(std::env::temp_dir()).expect("temporary cwd"),
             &scratch(),
             "dangerous",
             None,
@@ -283,7 +279,7 @@ mod tests {
     #[test]
     fn an_unpinned_reasonable_session_refuses_to_compose() {
         let err = for_invocation(
-            &std::env::temp_dir(),
+            &CwdPath::new(std::env::temp_dir()).expect("temporary cwd"),
             &scratch(),
             "reasonable",
             None,
@@ -310,7 +306,7 @@ mod tests {
             .expect("restrict profile");
 
         let Invocation { stack, .. } = for_invocation(
-            dir.path(),
+            &CwdPath::new(dir.path().to_path_buf()).expect("fixture cwd"),
             &scratch(),
             "dangerous",
             None,

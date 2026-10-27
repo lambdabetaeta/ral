@@ -5,13 +5,15 @@ use crate::tui::{rail, text};
 use std::path::PathBuf;
 
 fn sample(base: &'static str) -> SessionInfo<'static> {
+    static CWD: std::sync::LazyLock<ral_core::path::CwdPath> =
+        std::sync::LazyLock::new(|| ral_core::host::cwd().expect("test process has a cwd"));
     SessionInfo {
         system_size: 4096,
         system_files: &[],
         base,
         extend: None,
         restrict_files: &[],
-        cwd: std::path::Path::new("/Users/me/projects/ral"),
+        cwd: &CWD,
     }
 }
 

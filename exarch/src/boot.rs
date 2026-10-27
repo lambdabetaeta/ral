@@ -103,7 +103,7 @@ pub(crate) fn seed_no_color(shell: &mut Shell) {
 #[cfg(all(test, unix))]
 pub(crate) use testkit::test_attach;
 #[cfg(test)]
-pub(crate) use testkit::{test_shell, test_transport};
+pub(crate) use testkit::{test_shell, test_transport, test_transport_under};
 
 /// The engines and shells a test boots: over the temp directory, naming it as
 /// the scratch, so none holds a scratch directory of its own.
@@ -147,10 +147,17 @@ mod testkit {
 
     /// An identity engine for a test, booted through the one recipe.
     pub(crate) fn test_transport() -> ral_core::carrier::IdentityTransport {
+        test_transport_under(ral_core::authority::policy::GrantStack::default())
+    }
+
+    /// An identity engine holding the test's session grants.
+    pub(crate) fn test_transport_under(
+        grants: ral_core::authority::policy::GrantStack,
+    ) -> ral_core::carrier::IdentityTransport {
         let (spec, root) = test_attach();
         ral_core::carrier::IdentityTransport::boot(
             &crate::INSTALLERS,
-            &ral_core::protocol::Attach::root(spec, root),
+            &ral_core::protocol::Attach::root(spec, root.with_grants(grants)),
         )
         .expect("the recipe boots a test engine")
     }

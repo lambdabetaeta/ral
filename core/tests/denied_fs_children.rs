@@ -150,17 +150,14 @@ fn moved_exclusions_reach_children_through_the_identity_transport() {
         &ENGINES,
         &Attach::root(
             EngineSpec::new("bare", EnginePath::Host(work.clone())),
-            Root::new(EnginePath::Host(work)),
+            Root::new(EnginePath::Host(work)).with_grants(grants),
         ),
     )
     .unwrap();
     let dispatch = |body: &str| {
         let report = dispatch_to_report(
             &transport,
-            Run {
-                caps: grants.clone(),
-                ..Run::captured(body, SourceOrigin::named("<moved exclusion>"))
-            },
+            Run::captured(body, SourceOrigin::named("<moved exclusion>")),
             Arc::new(()),
         )
         .unwrap();

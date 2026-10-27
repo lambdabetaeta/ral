@@ -98,10 +98,11 @@ fn fixture() {
         )
         .expect("the survivor's host boots");
         shell.arm_detach(1);
-        let out = Output::from_report(shell.run(Run {
-            caps: stack([layer(writable(Path::new(&work), &[]))]),
-            ..Run::captured(source, SourceOrigin::named("<survivor host>"))
-        }));
+        shell.push_session_capabilities(layer(writable(Path::new(&work), &[])));
+        let out = Output::from_report(shell.run(Run::captured(
+            source,
+            SourceOrigin::named("<survivor host>"),
+        )));
         io::stderr().write_all(out.stderr.as_bytes()).unwrap();
         std::process::exit(out.status);
     }

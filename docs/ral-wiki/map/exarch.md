@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 104cb51994d4dce2c9892a96008426463be2d404
-generated_at_date: 2026-10-26
+generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
+generated_at_date: 2026-10-27
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/roles.md, exarch/data/ral.md, exarch/data/context.md]
 ---
 
@@ -15,10 +15,11 @@ against a persistent in-process `Shell`, under capabilities the user chose. It
 ships as one executable ([[invariants/single-binary|single-binary]]); the same
 binary re-execs itself as the [[map/core/capabilities|OS sandbox child]].
 
-The agent is a provider loop over one tool, each run grant-framed — the
-design argument lives in [[design/exarch-architecture|exarch-architecture]].
-This page maps the binary's *entry point*: what runs at startup, and how the
-system prompt is assembled.
+The agent is a provider loop over one tool, each run beneath its engine's
+host-installed layers — the design argument lives in
+[[design/exarch-architecture|exarch-architecture]]. This page maps the
+binary's *entry point*: what runs at startup, and how the system prompt is
+assembled.
 
 ## Entry and dispatch
 
@@ -174,36 +175,38 @@ the shell every seat starts from.
   there, `cwd`, `user` and `home` come from `ral_core::host`; best-effort, a missing
   value drops its line.
 - **`Scratch`** — the disposable per-session directory, exposed under its
-  `App`'s own name (`$EXARCH_SCRATCH`; synod's is `$SYNOD_SCRATCH`). It is an
-  `OwnDir` under `$XDG_CACHE_HOME/<app>/scratch/`, on disk and beside no one
-  else's files, never in the temp dir, with a lock file named for it that the
-  session holds for as long as it runs. Every cache a session writes is
-  redirected into it: `TOOL_HOMES`, one table of
-  variables, each replacing the inherited value with a subdirectory of the
-  scratch (`XDG_CACHE_HOME`, `CARGO_HOME`, `GOPATH`, `GOCACHE`, the pnpm, Bun and
-  Yarn stores, …) or, for Maven, which has no such variable, `MAVEN_ARGS` set to
-  `-Dmaven.repo.local=<scratch>/maven`. The table is spelled in two namespaces
-  by one `env_under`: a host `Scratch` joins its homes natively (`join_slash`),
-  and `guest_scratch_env`, a function of the app and a `GuestPath` alone, which
-  synod's guest needs, joins with `/` on every host (`GuestPath::join`), since a
-  guest path lifted into a host `PathBuf` would join `/tmp\pip` on Windows.
-  `Seat::root` attaches its identity engine at `EnginePath::Host` paths, the
-  launching user's cwd and `HOME`. No profile writes the user's
-  caches, so a write lands in the scratch rather than in a denied real one.
-  The profiles grant it as `` `scratch . ``, a place beside `` `tempdir . ``;
-  they cannot spell it `xdg-cache`, since the session rebinds `XDG_CACHE_HOME`.
-  The scratch is made before the policy freezes, and travels as a spelling:
-  `Scratch::spelling` is the `$EXARCH_SCRATCH` of the root's `Attach`, which
-  `engine_root` hands to the shell (`Shell::set_scratch`), so that every grant
-  frozen in the session, a model's nested `grant` included, anchors a `scratch`
-  place to it.
-  `RUSTUP_HOME` is not in the table: it holds what runs and stays the host's. A
-  `Hold::Session`'s drop deletes the directory, then closes and removes its
-  lock; `reap_unheld`, run by `Scratch::new`, deletes the scratches no live
-  session's lock answers for, which covers a session killed before its drop runs. Beside
-  the table is the one setting the confinement forces without relocating
-  anything (`CARGO_NET_GIT_FETCH_WITH_CLI`, because cargo's bundled TLS reaches
-  the keychain service the profile withholds — see
+  `App`'s own name (`$EXARCH_SCRATCH`; synod's is `$SYNOD_SCRATCH`). It is
+  an `OwnDir` under `$XDG_CACHE_HOME/<app>/scratch/`, on disk and beside no
+  one else's files, never in the temp dir, with a lock file named for it
+  that the session holds for as long as it runs. Every cache a session
+  writes is redirected into it: `TOOL_HOMES`, one table of variables, each
+  replacing the inherited value with a subdirectory of the scratch
+  (`XDG_CACHE_HOME`, `CARGO_HOME`, `GOPATH`, `GOCACHE`, the pnpm, Bun and
+  Yarn stores, …) or, for Maven, which has no such variable, `MAVEN_ARGS`
+  set to `-Dmaven.repo.local=<scratch>/maven`. The table is spelled in two
+  namespaces by one `env_under`: a host `Scratch` joins its homes natively
+  (`join_slash`), and `guest_scratch_env`, a function of the app and a
+  `GuestPath` alone, which synod's guest needs, joins with `/` on every host
+  (`GuestPath::join`), since a guest path lifted into a host `PathBuf` would
+  join `/tmp\pip` on Windows. `Seat::root` attaches its identity engine at
+  `EnginePath::Host` paths, the launching user's cwd and `HOME`, with the
+  launch's grants in `Root::grants`. No profile writes the user's caches, so
+  a write lands in the scratch rather than in a denied real one. The
+  profiles grant it as `` `scratch . ``, a place beside `` `tempdir . ``;
+  they cannot spell it `xdg-cache`, since the session rebinds
+  `XDG_CACHE_HOME`. The scratch is made before the policy freezes, and
+  travels as a spelling: `Scratch::spelling` is the `$EXARCH_SCRATCH` of the
+  root's `Attach`, which `engine_root` hands to the shell
+  (`Shell::set_scratch`), so that every grant frozen in the session, a
+  model's nested `grant` included, anchors a `scratch` place to it.
+  `RUSTUP_HOME` is not in the table: it holds what runs and stays the
+  host's. A `Hold::Session`'s drop deletes the directory, then closes and
+  removes its lock; `reap_unheld`, run by `Scratch::new`, deletes the
+  scratches no live session's lock answers for, which covers a session
+  killed before its drop runs. Beside the table is the one setting the
+  confinement forces without relocating anything
+  (`CARGO_NET_GIT_FETCH_WITH_CLI`, because cargo's bundled TLS reaches the
+  keychain service the profile withholds — see
   [[map/core/capabilities|capabilities]]).
 - **`App`** — the product identity that owns the directory conventions as
   methods, and the engine names every product itself (`EXARCH`, `SYNOD`, over
@@ -302,19 +305,17 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   recovery details. Eviction changes visibility, never filesystem or shell
   state.
 - **`Host`** opens by naming the reader — the one host fact that is not the
-  host's, since a name is what every other agent addresses it by and the only
-  way it picks its own row out of a roster — then gives the environment snapshot
-  (`host::snapshot`, [[#Bootstrap]]) with the live grant under it: a static
-  legend (`data/grant-legend.md`) over the capability bullets, or one
-  ambient-authority line when nothing is attenuated. The name is a second
-  placeholder beside the builtin index (`NAME_PLACEHOLDER`), filled per agent by
-  `BuiltinIndex::apply`, because the section is otherwise baked once at boot.
-  The grant is a third (`GRANT_PLACEHOLDER`), filled per agent by
-  `prompt::with_grant` from its own engine's `Probe::Grants` followed by the
-  ceiling its host pushes per run: a child's layer is resolved in its own
-  engine (`Shell::child_of`), so only that engine can name it. A child's
-  session already holds its parent's ceiling, which the host pushes again;
-  `grant_summary` tells a repeated layer once, the meet being idempotent.
+  host's, since a name is what every other agent addresses it by and the
+  only way it picks its own row out of a roster — then gives the environment
+  snapshot (`host::snapshot`, [[#Bootstrap]]) with the live grant under it:
+  a static legend (`data/grant-legend.md`) over the capability bullets, or
+  one ambient-authority line when nothing is attenuated. The name is a
+  second placeholder beside the builtin index (`NAME_PLACEHOLDER`), filled
+  per agent by `BuiltinIndex::apply`, because the section is otherwise baked
+  once at boot. The grant is a third (`GRANT_PLACEHOLDER`), filled per agent
+  by `prompt::with_grant` from its own engine's `Probe::Grants` alone: a
+  child's layer is resolved in its own engine (`Shell::child_of`), so only
+  that engine can name it. `grant_summary` renders every layer in order.
 - **`Workspace`** (`discover_agents`) collects the `AGENTS.md` instruction files,
   outermost first so the deepest file's recency wins: the operator's
   `<config>/AGENTS.md`, then every repo `AGENTS.md` from the git root down to cwd
@@ -357,8 +358,9 @@ the per-agent index and optional sections still resolve from the stored base.
   hot-swappable provider, dynamic focus, and the subtree cancel cascade.
 - [[map/exarch/provider|provider]] — LLM transport over genai: streaming, the retry
   driver, prompt caching, usage and dollar accounting.
-- [[map/exarch/shell-eval|shell-eval]] — one tool call as a ral top-level run under a
-  pushed capabilities frame; the streaming digest and the surface host sink.
+- [[map/exarch/shell-eval|shell-eval]] — one tool call as a ral top-level
+  run under its engine's host-installed session layers; the streaming digest
+  and the surface host sink.
 - [[map/exarch/policy|policy]] — capability composition (base ∨ extend ⊓ restrict) and
   the bake-in profiles; the boundary *is* ral's [[design/grant|grant]].
 - [[map/exarch/tools|tools]] — `ral` is the tool, and `thinking` a hidden-flag
@@ -382,15 +384,17 @@ the per-agent index and optional sections still resolve from the stored base.
 
 ## Sandbox
 
-exarch does not invent its own sandbox. Each tool call is one transport `Run`
-carrying the **profile's capabilities in `Run.caps`**, dispatched across the
-engine protocol (`shell_eval::run_shell`, → [[map/exarch/shell-eval|shell-eval]]) and
-pushed onto ral's capability stack by core's run entry — so the safety
-boundary *is* ral's [[design/grant|grant]] mechanism — authority attenuated by
-intersection. There is no source-level `grant { … }` the model could escape;
-the frame is installed by the host. Profiles ship as `.exarch.ral` files in
-`exarch/data/` (`dangerous`, `reasonable`, `edit-only`, `read-only`, `minimal`,
-`confined`); see `exarch/PROFILES.md` and [[map/exarch/policy|policy]].
+exarch does not invent its own sandbox. The composed profile layers ride the
+root's `Attach` as `Root::grants` and are pushed once, as permanent session
+layers, when the engine boots, after its recipe and env. Every call, probe
+and child runs beneath them. Each tool call is one transport `Run`,
+dispatched across the engine protocol (`shell_eval::run_shell`, →
+[[map/exarch/shell-eval|shell-eval]]). The safety boundary *is* ral's
+[[design/grant|grant]] mechanism — authority attenuated by intersection. The
+host installs that frame, so no source-level `grant` can escape it. Profiles
+ship as `.exarch.ral` files in `exarch/data/` (`dangerous`, `reasonable`,
+`edit-only`, `read-only`, `minimal`, `confined`); see `exarch/PROFILES.md`
+and [[map/exarch/policy|policy]].
 
 ## Scheduled wakeups
 

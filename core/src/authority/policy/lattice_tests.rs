@@ -450,13 +450,11 @@ fn capabilities_refuse_an_unknown_wire_field() {
 /// A stack with `Offline` and partial verb sets crosses the engine protocol
 /// as sequences of tag names and survives it.
 #[test]
-fn a_run_carries_its_grant_stack_across_the_wire() {
-    let caps = test_helper::stack([layer(witness_a()), layer(witness_b())]);
-    let run = crate::protocol::Run {
-        caps,
-        ..crate::protocol::Run::captured("echo hi", crate::source::SourceOrigin::named("<test>"))
-    };
-    let json = serde_json::to_string(&run).unwrap();
+fn a_root_carries_its_grant_stack_across_the_wire() {
+    let grants = test_helper::stack([layer(witness_a()), layer(witness_b())]);
+    let root = crate::protocol::Root::new(crate::path::EnginePath::Host(std::env::temp_dir()))
+        .with_grants(grants);
+    let json = serde_json::to_string(&root).unwrap();
     assert!(
         json.contains(r#""offline""#)
             && json.contains(r#""withheld""#)
@@ -464,8 +462,8 @@ fn a_run_carries_its_grant_stack_across_the_wire() {
         "{json}"
     );
     assert_eq!(
-        serde_json::from_str::<crate::protocol::Run>(&json).unwrap(),
-        run
+        serde_json::from_str::<crate::protocol::Root>(&json).unwrap(),
+        root
     );
 }
 

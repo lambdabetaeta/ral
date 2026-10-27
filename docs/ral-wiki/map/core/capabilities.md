@@ -143,7 +143,7 @@ authority and returns domain data, never runtime values or control flow.
   (each excusing the discard device `LexicalPath::is_discard` and refusing a
   reserved device name before either region is consulted), `judge` (an object a
   caller already holds), `admits_fs`, `sandbox_projection`, and the grant scope
-  guards (`with_layer`, `with_layers`, `push_session_capabilities`,
+  guards (`with_layer`, `push_session_capabilities`,
   `audit_deputy_prefixes`, `has_active_capabilities`). `Shell::locate` is the
   one path every read and open takes: the name refusal, `path::walk` to the object,
   then `GrantStack::judge` on its transcript, handing back the handle vouched

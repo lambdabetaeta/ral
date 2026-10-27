@@ -144,7 +144,6 @@ pub(crate) struct TestAgentSpec {
     /// backdated by it, so a test can stand past an idle threshold without
     /// waiting the threshold out.
     pub(crate) idle: Duration,
-    pub(crate) caps: ral_core::authority::policy::GrantStack,
     pub(crate) fuel: u32,
     pub(crate) search: bool,
 }
@@ -160,7 +159,6 @@ impl TestAgentSpec {
             mailbox: crate::bus::Inbox::new().mailbox(),
             role: Role::Converses,
             idle: Duration::ZERO,
-            caps: ral_core::authority::policy::GrantStack::root(),
             fuel: 0,
             search: false,
         }
@@ -183,7 +181,6 @@ pub(crate) fn test_agent(
         mailbox,
         role,
         idle,
-        caps,
         fuel,
         search,
     } = spec;
@@ -196,7 +193,6 @@ pub(crate) fn test_agent(
         started: Instant::now()
             .checked_sub(idle)
             .expect("a test's backdated birth stays inside the monotonic clock"),
-        caps,
         role,
         fuel,
         provider: ProviderHandle::new(scripted("test-model", Script::new())),
@@ -315,7 +311,6 @@ fn root(trunk: Trunk, tools: Toolset) -> Avatar {
     Avatar::root(
         RootConfig {
             system: "system".into(),
-            caps: ral_core::authority::policy::GrantStack::root(),
             run_dir,
             trunk,
             tools,
@@ -330,7 +325,8 @@ fn root(trunk: Trunk, tools: Toolset) -> Avatar {
         },
         RootSeat::Identity {
             scratch: Arc::new(scratch),
-            cwd: std::env::current_dir().expect("test process has a cwd"),
+            cwd: ral_core::host::cwd().expect("test process has a cwd"),
+            grants: ral_core::authority::policy::GrantStack::default(),
             terminal: ral_core::io::terminal::TerminalState::default(),
         },
         scripted("test-model", Script::new()),
@@ -342,7 +338,7 @@ fn root(trunk: Trunk, tools: Toolset) -> Avatar {
 /// the parent's shell and parks it, and the host adopts it, so the child
 /// carries the parent's whole scope and builtins — what a genesis-seated
 /// [`Avatar::fork_named`] does not.
-pub(crate) fn started_child(parent: &Avatar, name: &str) -> Avatar {
+pub(crate) fn started_child(parent: &Avatar, name: &str, grant: &str) -> Avatar {
     use crate::agent::seat::{Seat, SeatKind};
     use crate::enquiry::{Agents, ForkClaim, Request, Start};
     use ral_core::carrier::Host;
@@ -403,7 +399,8 @@ pub(crate) fn started_child(parent: &Avatar, name: &str) -> Avatar {
         child: std::sync::Mutex::default(),
     });
     let script = format!(
-        "exarch-agents `start [prompt: #'go'#, name: '{name}', type: `amnemon, grant: `inherit, model: `inherit]"
+        "exarch-agents `start [prompt: #'go'#, name: '{name}', type: `amnemon, \
+         grant: {grant}, model: `inherit]"
     );
     let report = ral_core::carrier::dispatch_to_report(
         &*transport,

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-generated_at_date: 2026-10-21
+generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
+generated_at_date: 2026-10-27
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/surface.rs, exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/clip.rs, exarch/src/shell_eval/report.rs, exarch/data/agent.ral]
 ---
 
@@ -21,7 +21,16 @@ be entered *only* through a framed run door — the reduction primitive behind i
 is crate-private ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]) —
 so core owns all the run machinery (compile, frame install, capture, the wall),
 and `run_shell` owns only the run it builds. Formatting is `Avatar::ral`'s,
-through `report::tool_result`, which also reports whether the run failed:
+through `report::tool_result`, which also reports whether the run failed.
+
+**The session's host-installed layers are the sandbox.** The root's attach
+carries them; the engine installs them once at boot. Every call runs under that
+stack, and external commands route through ral's OS sandbox
+([[map/core/capabilities|capabilities]]). The eval runs in `Mode::Session`, so
+each landed `Define` writes into `shell.env` and the run's `Context` is the
+session's own: `let`, `cd`, and env persist across tool calls.
+
+The request supplies:
 
 - **source + a virtual `origin` naming the call's turn (`turn N`).** Core's `compile_run` runs
   `compile_and_typecheck` seeded from the live session (`shell.session_schemes()`,
@@ -40,14 +49,6 @@ through `report::tool_result`, which also reports whether the run failed:
   `rejection`/`fault` and `agent::digest` both use); on
   success the *annotated* comp
   runs ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]);
-- **`caps`** — the agent's `GrantStack` (`Agent::caps`), pushed for the eval's dynamic extent.
-  **This is the sandbox**: the boundary is the pushed [[design/grant|grant]]
-  frame plus the [[map/core/evaluator|top-level contract]], not a source-level
-  `grant { … }` the model could escape. External commands route through the same
-  OS sandbox as ral ([[map/core/capabilities|capabilities]]). The eval runs in
-  `Mode::Session`, so each landed `Define` writes back into `shell.env` as it
-  lands and the run's `Context` is the session's own: `let`, `cd`, and env
-  persist across tool calls (the in-module tests pin this);
 - **`io: RunIo::Capture`** — core mints the stdout/stderr buffers and returns
   them in `Report::Ran`'s `captured`: the full, model-visible and logged
   text. Nothing echoes live; the [[map/exarch/frontend|rail]] surfaces cards

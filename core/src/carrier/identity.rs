@@ -172,10 +172,6 @@ impl Transport for IdentityTransport {
     fn detach(&self) {
         self.scopes.strike(crate::process::CancelCause::Cancelled);
     }
-
-    fn is_local(&self) -> bool {
-        true
-    }
 }
 
 #[cfg(test)]

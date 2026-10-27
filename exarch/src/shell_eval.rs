@@ -1,10 +1,10 @@
 //! In-process ral evaluation against a persistent `Shell`.
 //!
-//! Each tool call is a top-level run under a pushed capabilities frame, with
+//! Each tool call is a top-level run under its engine's session layers, with
 //! stdout and stderr captured into buffers rather than streamed: the model
 //! reads them back from history, the user sees only what the rail renders.
 //! There is no source-level `grant { … }` around the model's body — the
-//! boundary is the run entry plus the pushed frame, not surface syntax the
+//! boundary is the session's host-installed layers, not surface syntax the
 //! model could evade.
 
 pub mod builtins;
@@ -125,7 +125,7 @@ pub(crate) fn deferred_sink(emit: &Emitter) -> Arc<dyn DeferredSink> {
     })
 }
 
-/// Evaluate `cmd` against `transport` under `caps`, capturing stdout and
+/// Evaluate `cmd` against `transport`, capturing stdout and
 /// stderr.  Everything crosses the engine protocol: a `Source` `Run` out, a
 /// stream of surface events drained to the bus, one terminal `Report` back.
 ///
@@ -136,7 +136,6 @@ pub(crate) fn deferred_sink(emit: &Emitter) -> Arc<dyn DeferredSink> {
 /// caller a [`crate::agent::desk::RunHost`].
 pub(crate) fn run_shell(
     transport: &dyn ral_core::carrier::Transport,
-    caps: &ral_core::authority::policy::GrantStack,
     source: &str,
     cmd: &str,
     timeout_secs: u64,
@@ -149,14 +148,7 @@ pub(crate) fn run_shell(
     use ral_core::protocol::Run;
     use ral_core::source::SourceOrigin;
 
-    if !transport.is_local() && !caps.is_root() {
-        return Err(ral_core::carrier::Severed::Closed(
-            "a resolved grant cannot cross to another host".into(),
-        ));
-    }
-
     let run = Run {
-        caps: caps.clone(),
         wall: Some(Duration::from_secs(timeout_secs)),
         cleanup_grace: Duration::from_secs(2),
         worker_cap: Some(LIVE_WORKER_CAP),

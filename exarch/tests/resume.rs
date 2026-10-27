@@ -64,7 +64,6 @@ fn drive(session: &mut Avatar, provider: &Arc<Provider>, prompt: &str) {
 fn root_config(run_dir: &OwnDir) -> RootConfig {
     RootConfig {
         system: "system".into(),
-        caps: ral_core::authority::policy::GrantStack::root(),
         run_dir: OwnDir::clone(run_dir),
         trunk: Trunk::Attended,
         tools: Toolset::offered(false),
@@ -82,7 +81,8 @@ fn root_config(run_dir: &OwnDir) -> RootConfig {
 fn identity_seat(tag: &str) -> RootSeat {
     RootSeat::Identity {
         scratch: Arc::new(Scratch::for_test(EXARCH, tag).expect("scratch dir")),
-        cwd: std::env::current_dir().expect("test process has a cwd"),
+        cwd: ral_core::host::cwd().expect("test process has a cwd"),
+        grants: ral_core::authority::policy::GrantStack::default(),
         terminal: ral_core::io::terminal::TerminalState::default(),
     }
 }

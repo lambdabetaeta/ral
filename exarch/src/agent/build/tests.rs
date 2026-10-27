@@ -9,7 +9,6 @@ use std::fs;
 fn root_config(run_dir: &OwnDir, fuel: u32) -> RootConfig {
     RootConfig {
         system: "system".into(),
-        caps: ral_core::authority::policy::GrantStack::root(),
         run_dir: OwnDir::clone(run_dir),
         trunk: Trunk::Attended,
         tools: Toolset::offered(false),
@@ -27,7 +26,8 @@ fn root_config(run_dir: &OwnDir, fuel: u32) -> RootConfig {
 fn identity_seat(tag: &str) -> RootSeat {
     RootSeat::Identity {
         scratch: Arc::new(Scratch::for_test(crate::app::EXARCH, tag).expect("scratch")),
-        cwd: std::env::current_dir().expect("test process has a cwd"),
+        cwd: ral_core::host::cwd().expect("test process has a cwd"),
+        grants: ral_core::authority::policy::GrantStack::default(),
         terminal: ral_core::io::terminal::TerminalState::default(),
     }
 }
@@ -158,7 +158,10 @@ fn mnemon_root_imports_context_withholds_reply_and_resumes() {
         "a root withholds `reply` and never returns"
     );
     assert!(child.agent.role.parent().is_none(), "a root has no parent");
-    assert_eq!(child.agent.caps, parent.agent.caps);
+    assert_eq!(
+        child.seat.read(|t| t.grants()).expect("child grants"),
+        parent.seat.read(|t| t.grants()).expect("parent grants")
+    );
     assert_eq!(child.agent.fuel, parent.agent.fuel, "a root is depth 0");
 
     let sessions = parent.fleet.launch.sessions_root.clone();
@@ -449,7 +452,7 @@ fn fork_child_inherited_scratch_is_baseline() {
     let emit = Emitter::new(tx, session.agent.id);
     session.ral("let parent_scratch = 1", 5, &emit);
 
-    let child = started_child(&session, "child");
+    let child = started_child(&session, "child", "`inherit");
     assert!(
         scope_has(&child, "parent_scratch"),
         "a fork snapshots the parent's whole scope"
@@ -597,4 +600,156 @@ fn resume_seeds_child_ids_past_existing_session_directories() {
     let child = root.fork().expect("post-resume child");
     assert!(child.agent.id.get() >= 2);
     assert_eq!(fs::read(&sentinel).unwrap(), b"keep");
+}
+
+#[test]
+fn a_root_runs_under_its_launch_grants() {
+    use ral_core::authority::policy::{Capabilities, FsPolicy};
+    use ral_core::path::FrozenPath;
+
+    let cwd = ral_core::host::cwd().expect("test process has a cwd");
+    let grants = ral_core::test_helper::stack([ral_core::test_helper::layer(Capabilities {
+        shell: Some(std::collections::BTreeSet::new()),
+        fs: Some(FsPolicy {
+            read_prefixes: vec![FrozenPath::freeze(cwd.as_path()).expect("cwd freezes")],
+            ..FsPolicy::default()
+        }),
+        ..Capabilities::default()
+    })]);
+    let mut session = Avatar::for_test_with(TestTrunk {
+        grants,
+        ..TestTrunk::new("system")
+    })
+    .expect("a restricted root boots");
+    let tmp = tempfile::tempdir().expect("probe directory");
+    fs::write(tmp.path().join("file"), "hidden").expect("probe file");
+
+    let check = |session: &Avatar| {
+        assert!(
+            session
+                .seat
+                .read(|t| t.path_entries(tmp.path()))
+                .expect("path entries")
+                .is_empty(),
+            "a probe before any call must obey the launch grants"
+        );
+        let (emit, _rx) = crate::bus::dummy_emitter();
+        for _ in 0..2 {
+            let result = session.ral("cd .", 5, &emit);
+            assert!(
+                result.failed && result.text.contains("denied"),
+                "{}",
+                result.text
+            );
+        }
+        let result = session.ral("$[1 + 1]", 5, &emit);
+        assert!(
+            !result.failed && result.text.contains("VALUE:\n2"),
+            "{}",
+            result.text
+        );
+    };
+    check(&session);
+    session.seat.clear().expect("the root reboots");
+    check(&session);
+    let root = crate::agent::spawn::hatch_root(&session, Memory::Amnemon, Some("new-root".into()))
+        .expect("the launch seats another root");
+    check(&root);
+}
+
+#[test]
+fn a_child_gets_parent_meet_narrowing_without_replay_at_any_depth() {
+    use ral_core::authority::policy::{Capabilities, ExecGrant, ExecKey, FsPolicy};
+    use ral_core::path::{FrozenPath, shown};
+
+    let tmp = tempfile::tempdir().expect("program directory");
+    let a = tmp.path().join("a");
+    let b = tmp.path().join("b");
+    fs::write(&a, "a").expect("program a");
+    fs::write(&b, "child-readable-b").expect("program b");
+    let cwd = ral_core::host::cwd().expect("test process has a cwd");
+    let here = FrozenPath::freeze(cwd.as_path()).expect("cwd freezes");
+    let a_path = FrozenPath::freeze(&a).expect("a freezes");
+    let b_path = FrozenPath::freeze(&b).expect("b freezes");
+    let runtime = crate::shell_eval::builtins::host_surface()
+        .runtime(ral_core::io::terminal::TerminalState::default())
+        .expect("the engine's baseline resolves");
+    let explicit_reads = ral_core::test_helper::stack([ral_core::test_helper::layer(Capabilities {
+        fs: Some(FsPolicy {
+            read_prefixes: vec![here.clone()],
+            ..FsPolicy::default()
+        }),
+        ..Capabilities::default()
+    })]);
+    for path in [&a, &b] {
+        assert!(
+            !explicit_reads.admits_fs(
+                runtime.baseline(),
+                &ral_core::authority::policy::FsOp::Read,
+                &ral_core::test_helper::trace(path),
+            ),
+            "the fixture must be outside cwd and the engine's baseline reads: {}",
+            shown(path)
+        );
+    }
+    let mut grants = ral_core::test_helper::stack([ral_core::test_helper::layer(Capabilities {
+        exec: Some(ExecGrant::of(
+            [ExecKey::Path(a_path.clone()), ExecKey::Path(b_path.clone())],
+            [],
+        )),
+        fs: Some(FsPolicy {
+            read_prefixes: vec![here.clone()],
+            ..FsPolicy::default()
+        }),
+        ..Capabilities::default()
+    })]);
+    let parent = Avatar::for_test_with(TestTrunk {
+        grants: grants.clone(),
+        ..TestTrunk::new("system")
+    })
+    .expect("the parent boots under P");
+    assert_eq!(
+        parent.seat.read(|t| t.grants()).expect("parent grants"),
+        grants.summary()
+    );
+
+    let c = format!(
+        "`restrict [exec: [allow: [`absolute '{}']], fs: [read: [`cwd ., `absolute '{}']]]",
+        shown(&a),
+        shown(&b)
+    );
+    let child = started_child(&parent, "child", &c);
+    grants.push(ral_core::test_helper::layer(Capabilities {
+        exec: Some(ExecGrant::of([ExecKey::Path(a_path)], [])),
+        fs: Some(FsPolicy {
+            read_prefixes: vec![here, b_path],
+            ..FsPolicy::default()
+        }),
+        ..Capabilities::default()
+    }));
+    assert_eq!(
+        child.seat.read(|t| t.grants()).expect("child grants"),
+        grants.summary()
+    );
+    let (emit, _rx) = crate::bus::dummy_emitter();
+    let result = child.ral(&format!("view-text '{}' 1 2", shown(&b)), 5, &emit);
+    assert!(
+        !result.failed && result.text.contains("child-readable-b"),
+        "{}",
+        result.text
+    );
+
+    let grandchild = started_child(&child, "grandchild", "`restrict [shell: []]");
+    grants.push(ral_core::test_helper::layer(Capabilities {
+        shell: Some(std::collections::BTreeSet::new()),
+        ..Capabilities::default()
+    }));
+    assert_eq!(
+        grandchild
+            .seat
+            .read(|t| t.grants())
+            .expect("grandchild grants"),
+        grants.summary(),
+        "the grandchild holds exactly [P, C, C2]"
+    );
 }

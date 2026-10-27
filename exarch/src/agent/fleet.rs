@@ -40,12 +40,12 @@ use ral_core::io::terminal::TerminalState;
 use ral_core::own::OwnDir;
 #[cfg(test)]
 use ral_core::own::TestDir;
+use ral_core::path::CwdPath;
 use ral_core::process::{self, CancelCause};
 use ral_core::sync::{CondvarExt, LockExt};
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
-use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -80,8 +80,6 @@ pub(crate) struct Launch {
     /// the index each node resolves it against for its own grants.
     pub system: Arc<str>,
     pub index: Arc<BuiltinIndex>,
-    /// The invocation stack every node runs under.
-    pub caps: GrantStack,
     /// Every root's fuel: fuel is depth, and a root is depth 0.
     pub fuel: u32,
     /// The egress verdict on hosted web search.
@@ -101,7 +99,8 @@ pub(crate) struct Launch {
 /// What a fresh root's engine boots from; `None` on a wire host, which boots none.
 pub(crate) struct Genesis {
     pub(crate) installers: &'static [EngineInstaller],
-    pub(crate) cwd: PathBuf,
+    pub(crate) cwd: CwdPath,
+    pub(crate) grants: GrantStack,
     pub(crate) terminal: TerminalState,
     /// The run's, and outliving every `/clear` and every root.
     pub(crate) scratch: Arc<Scratch>,
@@ -116,6 +115,7 @@ impl Genesis {
         Seat::root(
             self.installers,
             self.cwd.clone(),
+            self.grants.clone(),
             self.terminal,
             self.scratch.clone(),
         )
@@ -153,13 +153,11 @@ impl Launch {
     pub(crate) fn prompt_for(
         &self,
         seat: &Seat,
-        caps: &GrantStack,
         role: &Role,
         fuel: u32,
         name: &str,
     ) -> Result<String, Severed> {
-        let own =
-            crate::prompt::with_grant(&self.system, &seat.read(|t| t.grants())?, &caps.summary());
+        let own = crate::prompt::with_grant(&self.system, &seat.read(|t| t.grants())?);
         Ok(if self.tools.is_empty() {
             own
         } else {
@@ -199,7 +197,6 @@ impl Launch {
                     .map(str::to_string)
                     .collect(),
             ),
-            caps: GrantStack::root(),
             fuel: 0,
             search: false,
             run_dir: OwnDir::clone(&scratch),

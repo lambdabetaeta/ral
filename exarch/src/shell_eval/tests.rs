@@ -40,44 +40,19 @@ fn fresh() -> IdentityTransport {
     crate::boot::test_transport()
 }
 
-/// One tool run through the **real** production `run_shell`, composed via
-/// `report::tool_result` exactly as the boundary does — with no audit or
-/// worker rows to join, since this bare harness installs no desk and
-/// probes no registry.  Panics on a static failure: every call site below
-/// expects a completed run.
+/// One tool run through the **real** production `run_shell`, under the
+/// transport's installed session stack, composed via `report::tool_result`
+/// exactly as the boundary does — with no audit or worker rows to join,
+/// since this bare harness installs no desk and probes no registry. Panics
+/// on a static failure: every call site below expects a completed run.
 fn run_shell_direct(
     transport: &IdentityTransport,
-    caps: &Capabilities,
-    cmd: &str,
-    timeout_secs: u64,
-    recorder: &crate::record::Emitter,
-) -> ToolResult {
-    run_shell_under(
-        transport,
-        &ral_core::test_helper::stack([ral_core::test_helper::layer(caps.clone())]),
-        cmd,
-        timeout_secs,
-        recorder,
-    )
-}
-
-/// [`run_shell_direct`] under a whole stack.
-fn run_shell_under(
-    transport: &IdentityTransport,
-    stack: &ral_core::authority::policy::GrantStack,
     cmd: &str,
     timeout_secs: u64,
     recorder: &crate::record::Emitter,
 ) -> ToolResult {
     let applier = Arc::new(super::surface::SurfaceApplier::new(recorder.clone()));
-    let outcome = run_shell(
-        transport,
-        stack,
-        "turn 1",
-        cmd,
-        timeout_secs,
-        applier.clone(),
-    );
+    let outcome = run_shell(transport, "turn 1", cmd, timeout_secs, applier.clone());
     match outcome {
         Ok(ral_core::protocol::Report::Ran {
             ending, captured, ..
@@ -103,13 +78,7 @@ fn run_shell_under(
 /// default, so every source here runs without exercising the OS sandbox,
 /// which `core/tests/top_level_vs_block.rs` covers separately.
 fn run_once(engine: &IdentityTransport, cmd: &str) -> ToolResult {
-    run_shell_direct(
-        engine,
-        &Capabilities::default(),
-        cmd,
-        30,
-        &crate::record::Emitter::none(),
-    )
+    run_shell_direct(engine, cmd, 30, &crate::record::Emitter::none())
 }
 
 /// A restrictive exarch base: the body evaluates locally under an `fs`
@@ -124,35 +93,6 @@ fn projecting_caps() -> Capabilities {
             deny_paths: Vec::new(),
         }),
         ..Capabilities::default()
-    }
-}
-
-/// An in-process engine is local, and takes the ambient stack and a resolved
-/// one alike: only a guest is refused the latter.
-#[test]
-fn a_local_transport_takes_root_and_a_restrictive_stack() {
-    use ral_core::authority::policy::{GrantStack, Net};
-    use ral_core::carrier::Transport as _;
-    let engine = fresh();
-    assert!(engine.is_local());
-    let offline = ral_core::test_helper::stack([ral_core::test_helper::layer(Capabilities {
-        net: Some(Net::Offline),
-        ..Capabilities::default()
-    })]);
-    for stack in [GrantStack::root(), offline] {
-        let r = run_shell_under(
-            &engine,
-            &stack,
-            "$[1 + 1]",
-            30,
-            &crate::record::Emitter::none(),
-        );
-        assert_eq!(
-            r.exit,
-            0,
-            "{stack:?}: {}",
-            String::from_utf8_lossy(&r.stderr)
-        );
     }
 }
 
@@ -806,13 +746,7 @@ fn timeout_kills_external_subprocess_tree() {
     // test can prove it was reaped.
     let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
     let t0 = std::time::Instant::now();
-    let r = run_shell_direct(
-        &engine,
-        &Capabilities::default(),
-        cmd,
-        2,
-        &crate::record::Emitter::none(),
-    );
+    let r = run_shell_direct(&engine, cmd, 2, &crate::record::Emitter::none());
     let elapsed = t0.elapsed();
 
     assert!(
@@ -856,7 +790,6 @@ fn a_timed_out_cleanup_returns_within_wall_plus_grace() {
     let t0 = std::time::Instant::now();
     let r = run_shell_direct(
         &engine,
-        &Capabilities::default(),
         "guard { /bin/sh -c 'sleep 30' } { /bin/sleep 30 }",
         1,
         &crate::record::Emitter::none(),
@@ -881,13 +814,7 @@ fn a_timed_out_cleanup_returns_within_wall_plus_grace() {
 fn timeout_message_names_budget_and_knob() {
     let engine = fresh();
     let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
-    let r = run_shell_direct(
-        &engine,
-        &Capabilities::default(),
-        cmd,
-        2,
-        &crate::record::Emitter::none(),
-    );
+    let r = run_shell_direct(&engine, cmd, 2, &crate::record::Emitter::none());
     assert_eq!(
         r.exit, 124,
         "a timed-out call reports the timeout exit code"
@@ -912,7 +839,6 @@ fn command_exit_is_the_tool_exit() {
     let engine = fresh();
     let r = run_shell_direct(
         &engine,
-        &Capabilities::default(),
         "/bin/sh -c 'exit 3'",
         10,
         &crate::record::Emitter::none(),
@@ -926,7 +852,6 @@ fn raised_error_status_is_the_tool_exit() {
     let engine = fresh();
     let r = run_shell_direct(
         &engine,
-        &Capabilities::default(),
         "fail [status: 7, message: 'raised error']",
         10,
         &crate::record::Emitter::none(),
@@ -941,10 +866,10 @@ fn raised_error_status_is_the_tool_exit() {
 #[test]
 fn timeout_kills_sandboxed_subprocess_tree() {
     let proof = ral_core::require_confinement!();
-    let engine = fresh();
+    let grants = ral_core::test_helper::stack([ral_core::test_helper::layer(projecting_caps())]);
+    let engine = crate::boot::test_transport_under(grants);
     let control = run_shell_direct(
         &engine,
-        &projecting_caps(),
         "/bin/sh -c 'echo ok'",
         20,
         &crate::record::Emitter::none(),
@@ -955,13 +880,7 @@ fn timeout_kills_sandboxed_subprocess_tree() {
     let marker = format!("sleep 30.{}", std::process::id());
     let cmd = format!("/bin/sh -c '{marker} & wait'");
     let t0 = std::time::Instant::now();
-    let r = run_shell_direct(
-        &engine,
-        &projecting_caps(),
-        &cmd,
-        2,
-        &crate::record::Emitter::none(),
-    );
+    let r = run_shell_direct(&engine, &cmd, 2, &crate::record::Emitter::none());
     let elapsed = t0.elapsed();
     let stderr = String::from_utf8_lossy(&r.stderr);
 
@@ -1009,15 +928,8 @@ fn root_cancel_unwinds_inflight_run_shell() {
     let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
     let t0 = std::time::Instant::now();
     let r = std::thread::scope(|s| {
-        let worker = s.spawn(|| {
-            run_shell_direct(
-                &engine,
-                &Capabilities::default(),
-                cmd,
-                30,
-                &crate::record::Emitter::none(),
-            )
-        });
+        let worker =
+            s.spawn(|| run_shell_direct(&engine, cmd, 30, &crate::record::Emitter::none()));
         // Let the eval reach the blocking external wait, then cancel from
         // outside — the registry cascade's move.
         std::thread::sleep(std::time::Duration::from_millis(300));
@@ -1560,7 +1472,8 @@ fn an_absent_walk_root_is_not_found_unless_its_name_is_denied() {
         fs: Some(denying),
         ..Capabilities::default()
     })]);
-    let r = run_shell_under(&engine, &stack, &find, 30, &crate::record::Emitter::none());
+    let engine = crate::boot::test_transport_under(stack);
+    let r = run_shell_direct(&engine, &find, 30, &crate::record::Emitter::none());
     let err = String::from_utf8_lossy(&r.stderr);
     assert!(
         r.exit != 0 && !err.contains("does not exist"),
@@ -1583,7 +1496,7 @@ fn run_capturing(
         tx: tx.downgrade(),
         meter: crate::bus::UsageMeter::default(),
     }));
-    let result = run_shell_direct(engine, &Capabilities::default(), cmd, 30, &recorder);
+    let result = run_shell_direct(engine, cmd, 30, &recorder);
     (result, crate::bus::drain_records(&rx))
 }
 
@@ -2012,7 +1925,12 @@ mod self_layer {
     }
 
     fn run(stack: &GrantStack, cmd: &str) -> ToolResult {
-        run_shell_under(&fresh(), stack, cmd, 20, &crate::record::Emitter::none())
+        run_shell_direct(
+            &crate::boot::test_transport_under(stack.clone()),
+            cmd,
+            20,
+            &crate::record::Emitter::none(),
+        )
     }
 
     fn refuses_exarch(proof: &Confining, f: &Fixture, stack: &GrantStack) {
@@ -2051,7 +1969,7 @@ mod self_layer {
         let f = fixture();
         let scratch = f.cwd.join("scratch");
         let crate::policy::Invocation { stack, .. } = crate::policy::for_invocation(
-            &f.cwd,
+            &ral_core::path::CwdPath::new(f.cwd.clone()).expect("fixture cwd"),
             &scratch.to_string_lossy(),
             "reasonable",
             Some(&f.extend),
@@ -2072,7 +1990,7 @@ mod self_layer {
         let f = fixture();
         let scratch = f.cwd.join("scratch");
         let crate::policy::Invocation { stack: parent, .. } = crate::policy::for_invocation(
-            &f.cwd,
+            &ral_core::path::CwdPath::new(f.cwd.clone()).expect("fixture cwd"),
             &scratch.to_string_lossy(),
             "reasonable",
             Some(&f.extend),

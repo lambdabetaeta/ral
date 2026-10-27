@@ -155,7 +155,6 @@ impl Avatar {
             .transient(crate::record::Transient::State(AgentState::Evaluating));
         let report = shell_eval::run_shell(
             self.seat.transport(),
-            &self.agent.caps,
             &source,
             cmd,
             timeout_secs,

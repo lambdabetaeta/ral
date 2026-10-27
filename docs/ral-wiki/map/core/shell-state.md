@@ -114,7 +114,7 @@ The model includes: `Capabilities` (authored), `GrantLayer` (resolved),
 layers rather than a folded aggregate — attenuation is the fold over the
 stack's verdicts, not a `Capabilities::meet`
 ([[decisions/260906_object-not-name|object-not-name]]); a scoped push —
-`with_layer`, `with_layers`, `Frame::Grant` — removes its own frames by
+`with_layer`, `Frame::Grant` — removes its own frames by
 position (`GrantStack::remove`) rather than popping the top, so a session
 frame `push_session_capabilities` lays inside it, as the boot builtin's
 `--capabilities` (`apply_session_profiles`) does inside its run, survives it), `SandboxProjection`,

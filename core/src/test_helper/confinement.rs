@@ -80,7 +80,7 @@ impl Output {
 ///
 /// # Panics
 /// If the host cannot boot or the probe cannot reach evaluation.
-pub fn run(caps: GrantStack, source: &str) -> Output {
+pub fn run(grants: GrantStack, source: &str) -> Output {
     let mut shell = crate::shell::boot::boot_shell(
         crate::io::terminal::TerminalState::default(),
         crate::shell::boot::BakedPrelude::runtime(),
@@ -88,10 +88,13 @@ pub fn run(caps: GrantStack, source: &str) -> Output {
         super::process_cwd(),
     )
     .expect("a test host resolves its baseline");
-    Output::from_report(shell.run(Run {
-        caps,
-        ..Run::captured(source, SourceOrigin::named("<enforcement probe>"))
-    }))
+    for layer in grants {
+        shell.push_session_capabilities(layer);
+    }
+    Output::from_report(shell.run(Run::captured(
+        source,
+        SourceOrigin::named("<enforcement probe>"),
+    )))
 }
 
 /// Called only by `require_confinement!`.

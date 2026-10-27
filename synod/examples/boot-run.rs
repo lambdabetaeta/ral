@@ -54,7 +54,7 @@ use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Bureau, Provider, ToolCall};
 use exarch::record::AgentId;
 use exarch::record::{Display, Record, Recorded, Settlement, Transient};
-use ral_core::authority::policy::{Capabilities, GrantStack};
+use ral_core::authority::policy::Capabilities;
 use ral_core::own::OwnDir;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -141,7 +141,6 @@ fn main() {
     let run = OwnDir::for_test("boot-run").expect("make the run directory");
     let config = RootConfig {
         system: "you are a helpful office assistant".to_string(),
-        caps: GrantStack::root(),
         run_dir: OwnDir::clone(&run),
         trunk: exarch::agent::Trunk::Embedded,
         tools: exarch::provider::Toolset::offered(false),

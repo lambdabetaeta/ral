@@ -54,20 +54,23 @@ pub(crate) struct Rebirth {
 
 impl Seat {
     /// An identity root, booted through `installers` from what this session
-    /// states: its cwd, terminal, and scratch.
+    /// states: its cwd, grants, terminal, and scratch.
     ///
     /// # Errors
     /// The recipe's refusal.
     pub(crate) fn root(
         installers: &'static [EngineInstaller],
-        cwd: std::path::PathBuf,
+        cwd: ral_core::path::CwdPath,
+        grants: ral_core::authority::policy::GrantStack,
         terminal: ral_core::io::terminal::TerminalState,
         scratch: Arc<Scratch>,
     ) -> Result<Self, Severed> {
         let home = site!(Silent::EngineHome, ral_core::host::home()).unwrap_or_default();
         let attach = Attach::root(
             EngineSpec::new(builtins::INSTALLER_TAG, EnginePath::Host(home.into())),
-            Root::new(EnginePath::Host(cwd)).with_env(scratch.env()),
+            Root::new(EnginePath::Host(cwd.into_inner()))
+                .with_env(scratch.env())
+                .with_grants(grants),
         )
         .with_terminal(terminal);
         let transport = Arc::new(IdentityTransport::boot(installers, &attach)?);

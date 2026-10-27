@@ -22,7 +22,7 @@ impl ExarchDesk {
         let s = &self.services;
         let Name(name) = spec.name;
 
-        // The captured fuel, caps, and grant are only as fresh as the
+        // The captured fuel and grant are only as fresh as the
         // envelope they were snapshotted under — this caller's own, so a
         // `/clear` in another tab does not refuse a spawn here.
         if s.stamp.is_stale() {

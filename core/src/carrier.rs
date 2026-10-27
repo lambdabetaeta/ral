@@ -203,10 +203,6 @@ pub trait Transport: Send + Sync {
     /// restore terminal state.
     fn detach(&self);
 
-    /// Whether the engine runs on this host, where a resolved grant means what
-    /// it meant when it was resolved.
-    fn is_local(&self) -> bool;
-
     /// Answer one enquiry the engine raised on `Event::Enquiry`. A no-op under
     /// the identity transport, whose enquiry is a direct call through the
     /// installed `Desk` and never a frame.

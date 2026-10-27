@@ -17,9 +17,12 @@ use crate::provider::Provider;
 use crate::provider::Toolset;
 use crate::record::AgentId;
 use crate::record::{AgentLog, Memory, RecordedAccount, RecordedModel, Resumed};
+use ral_core::authority::policy::GrantStack;
 use ral_core::carrier::Severed;
 use ral_core::engine::EngineInstaller;
 use ral_core::own::OwnDir;
+use ral_core::path::CwdPath;
+use ral_core::protocol::Origin;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -55,7 +58,6 @@ pub(crate) struct Build {
     /// The tab-bar identity, held before construction; the agent's name is
     /// the claim's.
     pub(crate) claim: Claim,
-    pub(crate) caps: ral_core::authority::policy::GrantStack,
     /// Already through its identity ceremony: `assemble` seats no engine of
     /// its own, so every construction site states which seat kind it builds.
     pub(crate) seat: Seat,
@@ -98,7 +100,6 @@ impl Trunk {
 /// Everything a run's roots need beyond the seat choice and the provider.
 pub struct RootConfig {
     pub system: String,
-    pub caps: ral_core::authority::policy::GrantStack,
     /// The run's directory — the one its `sessions/` hangs under, and the
     /// one [`Avatar::resume`] reads back.
     pub run_dir: OwnDir,
@@ -142,13 +143,17 @@ pub enum RootSeat {
     /// outlives every `/clear`.
     Identity {
         scratch: Arc<Scratch>,
-        cwd: std::path::PathBuf,
+        cwd: CwdPath,
+        /// The launch's composed layers, resolved on this host; every root's
+        /// engine installs them at boot.
+        grants: GrantStack,
         terminal: ral_core::io::terminal::TerminalState,
     },
     /// Out-of-process: an already-built `transport` onto an engine elsewhere,
     /// a spawned `--engine` child or synod's adopted control-plane stream into
     /// a guest VM. The `attach` is the caller's, since under a VM its paths
-    /// are the guest's, which this process cannot resolve.
+    /// are the guest's, which this process cannot resolve. Its authority rides
+    /// `Root::config` unresolved.
     Wire {
         transport: Box<ral_core::carrier::WireTransport>,
         attach: ral_core::protocol::Attach,
@@ -162,8 +167,8 @@ impl Fleet {
     /// to [`Avatar::hatch`] the first root on.
     ///
     /// # Errors
-    /// A wire seat with spawn fuel and no engine factory, or a start failure
-    /// of the engine.
+    /// A wire seat with resolved grants or spawn fuel but no engine factory,
+    /// or a start failure of the engine.
     pub(crate) fn found(
         cfg: RootConfig,
         root_seat: RootSeat,
@@ -172,7 +177,6 @@ impl Fleet {
     ) -> io::Result<(Arc<Self>, Seat)> {
         let RootConfig {
             system,
-            caps,
             run_dir,
             trunk,
             tools,
@@ -194,6 +198,16 @@ impl Fleet {
                  pass one via RootConfig::factory, or build this root with fuel: 0",
             ));
         }
+        if let RootSeat::Wire { attach, .. } = &root_seat
+            && let Origin::Root(root) = &attach.origin
+            && !root.grants.is_root()
+        {
+            return Err(io::Error::other(
+                "a wire root's attach carries resolved grants, which name objects on this host, \
+                 but its engine may run on another: pass the ceiling unresolved in Root::config, \
+                 for the engine's recipe to resolve where it runs",
+            ));
+        }
         let sessions_root = run_dir.make_dir("sessions")?;
         // A root's attach: nothing has run here yet, so this is a start
         // failure and says so, and it names the run directory it has just
@@ -206,11 +220,13 @@ impl Fleet {
             RootSeat::Identity {
                 scratch,
                 cwd,
+                grants,
                 terminal,
             } => {
                 let genesis = Genesis {
                     installers,
                     cwd,
+                    grants,
                     terminal,
                     scratch,
                 };
@@ -241,7 +257,6 @@ impl Fleet {
                     .replace(crate::prompt::SCRATCH_PLACEHOLDER, &scratch)
                     .into(),
                 index,
-                caps,
                 fuel,
                 // The policy's one verdict the tree reads; the ledger is the host's.
                 search: egress.policy.search,
@@ -266,7 +281,6 @@ impl Avatar {
     pub(crate) fn assemble(b: Build) -> Result<Self, Unborn> {
         let Build {
             claim,
-            caps,
             seat,
             log,
             role,
@@ -282,7 +296,6 @@ impl Avatar {
             log_dir: log.dir().clone(),
             run_dir: fleet.launch.run_dir().clone(),
             started: Instant::now(),
-            caps,
             role,
             fuel,
             provider,
@@ -451,7 +464,7 @@ impl Avatar {
         let launch = &fleet.launch;
         let role = launch.trunk.role();
         let system_prompt = launch
-            .prompt_for(&seat, &launch.caps, &role, launch.fuel, claim.name())
+            .prompt_for(&seat, &role, launch.fuel, claim.name())
             .map_err(|lost| io::Error::other(EngineLost::starting(&lost, launch.run_dir())))?;
         let account = RecordedAccount::of(provider.account(), &launch.bureau.available());
         let (log, opened) = open(
@@ -462,7 +475,6 @@ impl Avatar {
         )?;
         let avatar = Self::assemble(Build {
             claim,
-            caps: launch.caps.clone(),
             seat,
             log,
             role,
@@ -499,7 +511,7 @@ impl Avatar {
         // records the child's real prompt.  Its grant layer was resolved in
         // its own engine, so only that engine can name it.
         let system_prompt = launch
-            .prompt_for(&seat, &parent.caps, &role, fuel, claim.name())
+            .prompt_for(&seat, &role, fuel, claim.name())
             .map_err(|lost| EngineLost::starting(&lost, parent.run_dir()).to_string())?;
         let account = RecordedAccount::of(provider.account(), &launch.bureau.available());
         let log = parent_log
@@ -514,9 +526,6 @@ impl Avatar {
             .map_err(|e| format!("could not fork child session log: {e}"))?;
         Self::assemble(Build {
             claim,
-            // The child's engine holds its own layer; the stack it runs under
-            // is its parent's.
-            caps: parent.caps.clone(),
             seat,
             log,
             role,
@@ -623,6 +632,7 @@ impl Avatar {
             disk_warn_bytes,
             lease,
             installers,
+            grants,
         } = cfg;
         let id = fresh_id();
         // Keyed by this agent's own fresh id, so concurrent tests never
@@ -634,7 +644,6 @@ impl Avatar {
         let run_dir = scratch.test_sibling("run")?;
         let config = RootConfig {
             system,
-            caps: ral_core::authority::policy::GrantStack::root(),
             run_dir,
             trunk: Trunk::Headless,
             tools: Toolset::offered(false),
@@ -649,10 +658,8 @@ impl Avatar {
         };
         let seat = RootSeat::Identity {
             scratch,
-            cwd: ral_core::host::cwd()
-                .expect("test process has a cwd")
-                .as_path()
-                .to_path_buf(),
+            cwd: ral_core::host::cwd().expect("test process has a cwd"),
+            grants,
             terminal: ral_core::io::terminal::TerminalState::default(),
         };
         let provider = Arc::new(Provider::scripted(
@@ -667,6 +674,7 @@ impl Avatar {
 #[cfg(any(test, feature = "test-util"))]
 pub(crate) struct TestTrunk {
     pub(crate) system: String,
+    pub(crate) grants: GrantStack,
     pub(crate) allow_schedule: bool,
     pub(crate) resume_on_reset: bool,
     /// The network policy the trunk's `search` reach is derived from.
@@ -683,6 +691,7 @@ impl TestTrunk {
     pub(crate) fn new(system: &str) -> Self {
         Self {
             system: system.to_string(),
+            grants: GrantStack::default(),
             allow_schedule: false,
             resume_on_reset: false,
             egress: crate::egress::Egress::for_test(),

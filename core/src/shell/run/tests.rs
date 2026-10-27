@@ -1,5 +1,4 @@
 use super::*;
-use crate::authority::policy::GrantStack;
 use crate::source::SourceOrigin;
 use crate::test_helper::SLEEP;
 use std::sync::{Arc, Mutex};
@@ -918,61 +917,6 @@ fn assert_ceiling_survives(mut shell: Shell, narrow: Run) {
     );
 }
 
-/// A session ceiling pushed inside a run outlives it and narrows the next,
-/// while the run's own `Run.caps` frames leave with it.
-#[test]
-fn a_session_ceiling_pushed_in_a_run_outlives_it() {
-    let mut caps = GrantStack::root();
-    caps.push(crate::test_helper::layer(
-        crate::authority::policy::Capabilities {
-            shell: Some([crate::authority::policy::ShellVerb::Chdir].into()),
-            ..crate::authority::policy::Capabilities::default()
-        },
-    ));
-    let mut narrow = Run::captured("_narrow", test_origin());
-    narrow.caps = caps;
-    assert_ceiling_survives(narrowing_shell(), narrow);
-}
-
-/// A `Run`'s `caps` arrive as traces, unheld; `run_framed` takes hold of
-/// their exclusions before the body runs.
-#[cfg(unix)]
-#[test]
-fn a_framed_run_holds_its_exclusions_again_before_the_body_runs() {
-    use crate::authority::policy::{Capabilities, FsPolicy};
-    let tmp = tempfile::tempdir().unwrap();
-    let secret = crate::test_helper::real(tmp.path())
-        .as_path()
-        .join("secret");
-    std::fs::write(&secret, "s").unwrap();
-    let stack = crate::test_helper::stack([crate::test_helper::layer(Capabilities {
-        fs: Some(FsPolicy {
-            deny_paths: vec![crate::path::FrozenPath::from_surface(
-                crate::path::utf8(&secret).unwrap(),
-            )],
-            ..FsPolicy::default()
-        }),
-        ..Capabilities::default()
-    })]);
-    let caps: GrantStack = serde_json::from_str(&serde_json::to_string(&stack).unwrap()).unwrap();
-    assert_eq!(caps.held_ids(), [None]);
-
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = crate::test_helper::core_runtime();
-    let at_body = seen.clone();
-    install_act(&mut runtime, "held-ids", move |_, shell| {
-        *at_body.lock().unwrap() = shell.context.grants.held_ids();
-    });
-    let mut shell = Shell::root(runtime.into(), crate::test_helper::process_cwd());
-    let mut run = Run::captured("held-ids", test_origin());
-    run.caps = caps;
-    shell.run(run).expect_ran();
-    assert_eq!(
-        *seen.lock().unwrap(),
-        [Some(crate::test_helper::trace(&secret).last_id())]
-    );
-}
-
 /// The same inside a `grant { }` block: its frame leaves by position, not
 /// by count, so the ceiling pushed above it stays.
 #[test]
@@ -1072,6 +1016,41 @@ fn a_dispatch_trail_projects_and_round_trips_through_the_wire() {
     assert!(
         round_tripped,
         "a wire `FOValue` must decode back as the `Command` observation it was"
+    );
+}
+
+#[test]
+fn a_trailed_run_reports_the_deputy_prefixes_of_its_session_stack() {
+    use crate::authority::policy::{Capabilities, ExecGrant, ExecKey, FsPolicy};
+    use crate::fact::{Observed, Resource};
+    use crate::path::FrozenPath;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = crate::test_helper::real(tmp.path());
+    let prefix = FrozenPath::freeze(dir.as_path()).unwrap();
+    let mut shell = crate::test_helper::core_shell();
+    shell.push_session_capabilities(crate::test_helper::layer(Capabilities {
+        exec: Some(ExecGrant::of([ExecKey::Dir(prefix.clone())], [])),
+        fs: Some(FsPolicy {
+            write_prefixes: vec![prefix],
+            ..FsPolicy::default()
+        }),
+        ..Capabilities::default()
+    }));
+    let RunReport::Ran { trail, .. } = shell.run(Run {
+        trail: Some(crate::shell::runtime::CapturePolicy::Off),
+        ..Run::captured("$[1 + 1]", test_origin())
+    }) else {
+        panic!("valid source must reach evaluation");
+    };
+    assert!(
+        trail.iter().any(|obs| matches!(
+            &obs.what,
+            Observed::Check(check)
+                if check.resource == Resource::Deputy
+                    && check.fields.get("prefix") == Some(&crate::path::shown(dir.as_path()))
+        )),
+        "the run's trail must report its session's deputy prefix: {trail:?}"
     );
 }
 

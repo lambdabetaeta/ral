@@ -20,7 +20,7 @@ pub mod probe;
 /// The engine's contract with the host: frames and command confinement.
 /// Checked at every `Attach`; a mismatch refuses even development media.
 /// Packaging checks the recorded version too: see [`check_media`].
-pub const PROTOCOL_VERSION: u32 = 31;
+pub const PROTOCOL_VERSION: u32 = 32;
 
 /// The key `vm-image/build-boot.sh` records [`PROTOCOL_VERSION`] under in the
 /// boot media's manifest, `vm-image/out/boot/boot-manifest.txt`.
@@ -184,6 +184,10 @@ pub enum Origin {
 pub struct Root {
     /// The session's logical cwd, on the machine the engine runs on.
     pub cwd: EnginePath,
+    /// Layers the engine pushes once its recipe has run, oldest first, as permanent
+    /// session layers: resolved on the engine's host, so they mean nothing on another.
+    /// Empty for none.
+    pub grants: crate::authority::policy::GrantStack,
     /// Per-session variables the host seeds into the engine's environment.
     pub env: Vec<(String, String)>,
     /// The installer's own settings: its recipe decodes them, and refuses
@@ -208,9 +212,17 @@ impl Root {
     pub fn new(cwd: EnginePath) -> Self {
         Self {
             cwd,
+            grants: crate::authority::policy::GrantStack::default(),
             env: Vec::new(),
             config: FOValue::Unit,
         }
+    }
+
+    /// Install these layers permanently after the root recipe.
+    #[must_use]
+    pub fn with_grants(mut self, grants: crate::authority::policy::GrantStack) -> Self {
+        self.grants = grants;
+        self
     }
 
     /// Seed these variables into the session's environment.
@@ -267,11 +279,6 @@ pub struct Run {
     /// Where the program's text came from: the script file batch runs, or a
     /// virtual `<stdin>` for the REPL, `<tool>` for exarch.
     pub origin: crate::source::SourceOrigin,
-    /// The capability ceiling pushed for the eval's dynamic extent, every
-    /// layer of it: the stack is the meet, and folding it into one frame
-    /// would lose what a layer says only about a resolved name.
-    /// `GrantStack::root()` is ⊤, the identity on authority.
-    pub caps: crate::authority::policy::GrantStack,
     /// `Some(d)` arms a deadline cancel on the run's foreground scope `d`
     /// after it starts; `None` leaves the run uncapped.
     pub wall: Option<std::time::Duration>,
@@ -295,8 +302,8 @@ pub struct Run {
 }
 
 impl Run {
-    /// `program` under no authority beyond ⊤, its streams captured, the
-    /// terminal denied and stdin empty: exarch's tool runs, and most tests.
+    /// `program`, its streams captured, the terminal denied and stdin empty:
+    /// exarch's tool runs, and most tests.
     pub fn captured(program: impl Into<Program>, origin: crate::source::SourceOrigin) -> Self {
         Self {
             io: RunIo::Capture,
@@ -306,13 +313,12 @@ impl Run {
         }
     }
 
-    /// `program` under no authority beyond ⊤, on the inherited streams and the
-    /// leased terminal: the REPL and batch.
+    /// `program`, on the inherited streams and the leased terminal: the REPL
+    /// and batch.
     pub fn foreground(program: impl Into<Program>, origin: crate::source::SourceOrigin) -> Self {
         Self {
             program: program.into(),
             origin,
-            caps: crate::authority::policy::GrantStack::root(),
             wall: None,
             cleanup_grace: std::time::Duration::from_secs(5),
             worker_cap: None,

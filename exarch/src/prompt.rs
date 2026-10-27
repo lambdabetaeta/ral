@@ -122,13 +122,9 @@ pub const SCRATCH_PLACEHOLDER: &str = "@@EXARCH_SCRATCH_PATH@@";
 pub const GRANT_PLACEHOLDER: &str = "@@EXARCH_GRANT@@";
 
 /// Fill [`GRANT_PLACEHOLDER`] with the grant an agent's every eval runs
-/// under: its engine session's layers, then the ceiling its host pushes.
-pub(crate) fn with_grant(template: &str, session: &GrantSummary, ceiling: &GrantSummary) -> String {
-    let layers = session.layers().iter().chain(ceiling.layers());
-    template.replace(
-        GRANT_PLACEHOLDER,
-        &grant_summary(layers, session.withholds_gpu()),
-    )
+/// under: its engine session's layers.
+pub(crate) fn with_grant(template: &str, grants: &GrantSummary) -> String {
+    template.replace(GRANT_PLACEHOLDER, &grant_summary(grants))
 }
 
 /// The `AGENTS.md` chain's text, outermost first so the most specific file's
@@ -212,25 +208,16 @@ pub fn host_section(app: crate::app::App) -> String {
 /// The grant a stack denotes, as the model reads it.
 ///
 /// A static legend teaching the notation and the runtime denial string, then
-/// each distinct layer a [`GrantSummary`] shows, oldest first, then the net
-/// and gpu lines once.  The stack is the meet, so describing each layer
-/// describes the whole ceiling, and a repeat adds nothing.  `withholds_gpu` is
-/// the engine host's word on whether a withheld GPU is held there.
+/// each layer a [`GrantSummary`] shows, oldest first, then the net and gpu
+/// lines once. The summary carries the engine host's word on whether a
+/// withheld GPU is held there.
 ///
 /// `None` is "unrestricted" (no attenuation at this layer) and an empty
 /// container "(none)".  The caller appends the `- scratch:` bullet, since
 /// exarch names a seeded env var and host path where synod names the guest's
 /// tmpfs.
-fn grant_summary<'a>(
-    shown: impl IntoIterator<Item = &'a LayerSummary>,
-    withholds_gpu: bool,
-) -> String {
-    let mut layers: Vec<&LayerSummary> = Vec::new();
-    for summary in shown {
-        if !layers.contains(&summary) {
-            layers.push(summary);
-        }
-    }
+fn grant_summary(grants: &GrantSummary) -> String {
+    let layers = grants.layers();
     // The denial legend would describe a runtime event that cannot occur.
     if layers.is_empty() {
         return "Ambient authority: every command, path, network call and GPU access is permitted; \
@@ -253,7 +240,10 @@ the sandbox is the trust boundary.\n\n"
     }
     let denied = layers.iter().any(|l| l.net.is_some());
     let _ = writeln!(s, "\n- net: {}", if denied { "deny" } else { "inherit" });
-    let gpu = match (layers.iter().any(|l| l.gpu.is_some()), withholds_gpu) {
+    let gpu = match (
+        layers.iter().any(|l| l.gpu.is_some()),
+        grants.withholds_gpu(),
+    ) {
         (false, _) => "inherit",
         (true, true) => "withheld",
         (true, false) => "in reach: this platform cannot withhold the GPU",
@@ -401,7 +391,7 @@ mod tests {
     /// The same lines on every host, whatever the host's own paths look like.
     #[test]
     fn a_crossed_summary_renders_the_same_lines_on_every_host() {
-        let shown = with_grant(GRANT_PLACEHOLDER, &crossed(true), &GrantSummary::default());
+        let shown = with_grant(GRANT_PLACEHOLDER, &crossed(true));
         let lines = "\
 - exec: `name git
 - exec dirs: `dir `absolute /usr/bin
@@ -420,11 +410,25 @@ mod tests {
     /// A host that cannot withhold the GPU says so rather than claim it.
     #[test]
     fn a_gpu_this_platform_cannot_withhold_is_said_to_be_in_reach() {
-        let shown = with_grant(GRANT_PLACEHOLDER, &crossed(false), &GrantSummary::default());
+        let shown = with_grant(GRANT_PLACEHOLDER, &crossed(false));
         assert!(
             shown.ends_with("- gpu: in reach: this platform cannot withhold the GPU\n"),
             "{shown}"
         );
+    }
+
+    #[test]
+    fn a_repeated_layer_is_shown() {
+        let one = crossed(true);
+        let layer = one.layers()[0].clone();
+        let grants = GrantSummary::of(vec![layer.clone(), layer], true);
+        let shown = with_grant(GRANT_PLACEHOLDER, &grants);
+        assert!(shown.contains("the meet of 2 layers"), "{shown}");
+        assert!(
+            shown.contains("Layer 1:") && shown.contains("Layer 2:"),
+            "{shown}"
+        );
+        assert_eq!(shown.matches("- fs deny: /work/.env").count(), 2, "{shown}");
     }
 
     /// The `AGENTS.md` chain is read through the stack: a link to a file the

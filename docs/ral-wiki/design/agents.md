@@ -1,3 +1,7 @@
+---
+generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
+---
+
 # Agents: the uniform node, the forest, and the parent-less root
 
 **An exarch run is a *fleet* of structurally identical *agents* arranged in a
@@ -70,7 +74,8 @@ reads both.
 **A root is a session: a fresh engine booted from the launch's recipe, its own
 `sessions/<n>/record.jsonl`, its own `/clear`, its own resume.** Nothing about
 `main` is special except that it is born first. The recipe is the
-launch's `Genesis` (installers, cwd, terminal capabilities, the run's scratch),
+launch's `Genesis` (installers, typed cwd, the launch's grants, terminal
+capabilities, the run's scratch),
 so a root born at runtime is built exactly as the first was, and a host that
 boots no further engines — a wire host, synod's one embedded root — has
 `genesis: None` and refuses a second session in a sentence. Every root runs

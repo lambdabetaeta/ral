@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
-generated_at_date: 2026-10-26
+generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
+generated_at_date: 2026-10-27
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
 
@@ -8,10 +8,11 @@ covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 
 `policy/` composes the session's effective [[design/grant|grant]] —
 [[map/core/capabilities|ral's capability lattice]] — from the CLI flags. The
-boundary *is* ral's grant: exarch never invents its own sandbox, it just hands a
-frozen `GrantStack` to the host that pushes it. There is no `Capabilities::meet`
-— composition is layering, and the stack's own per-check fold is the
-one meet that ever runs ([[decisions/260906_object-not-name|object-not-name]],
+boundary *is* ral's grant: exarch never invents its own sandbox, it just
+hands a frozen `GrantStack` to the host, whose root engine installs it once
+at boot. There is no `Capabilities::meet` — composition is layering, and the
+stack's own per-check fold is the one meet that ever runs
+([[decisions/260906_object-not-name|object-not-name]],
 [[map/core/capabilities|capabilities]]).
 
 ```text
@@ -19,8 +20,10 @@ one meet that ever runs ([[decisions/260906_object-not-name|object-not-name]],
   stack   = [ceiling, restrict₁, restrict₂, ..., deny(restricts)?, deny(credentials)?, self]
 ```
 
-`for_invocation` builds that stack in a fixed order — **a single optional extension
-adds to the ceiling, once, in its own layer; every other attenuation is its own
+`Invocation::stack` contains only the invocation's own layers, with no
+ambient root prefix. `for_invocation` takes a validated `&CwdPath` and
+builds that stack in a fixed order — **a single optional extension adds to
+the ceiling, once, in its own layer; every other attenuation is its own
 pushed layer**:
 
 - resolves the named base (`resolve_base`) as the ceiling;

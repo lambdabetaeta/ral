@@ -348,13 +348,7 @@ pub(super) fn cmd_copy(app: &mut App) {
 /// file.
 pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
     let id = app.tabs.focused();
-    let dest = match ral_core::path::CwdPath::new(info.cwd.to_path_buf()) {
-        Ok(cwd) => resolve_export_path(arg, &cwd),
-        Err(e) => {
-            app.push_error(id, &e.to_string());
-            return;
-        }
-    };
+    let dest = resolve_export_path(arg, info.cwd);
     let log_dir = app.tabs.focused_log_dir();
     let exported = log_dir
         .open(RECORD)

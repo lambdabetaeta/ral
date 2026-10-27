@@ -32,8 +32,8 @@ pub(in crate::tui) fn app_born(born: &Born) -> (App, BusReceiver, Arc<Agent>) {
 /// A scripted bureau and a bare session: the handles a command is serviced against.
 pub(in crate::tui) fn ctx() -> CommandCtx<'static> {
     static BUREAU: Bureau = Bureau::Scripted;
-    static CWD: std::sync::LazyLock<std::path::PathBuf> =
-        std::sync::LazyLock::new(std::env::temp_dir);
+    static CWD: std::sync::LazyLock<ral_core::path::CwdPath> =
+        std::sync::LazyLock::new(|| ral_core::host::cwd().expect("test process has a cwd"));
     static INFO: std::sync::LazyLock<SessionInfo<'static>> =
         std::sync::LazyLock::new(|| SessionInfo {
             system_size: 0,
@@ -41,7 +41,7 @@ pub(in crate::tui) fn ctx() -> CommandCtx<'static> {
             base: "",
             extend: None,
             restrict_files: &[],
-            cwd: CWD.as_path(),
+            cwd: &CWD,
         });
     CommandCtx {
         bureau: &BUREAU,

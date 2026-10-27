@@ -266,7 +266,6 @@ impl Conversation {
 
         let config = exarch::agent::RootConfig {
             system,
-            caps: ral_core::authority::policy::GrantStack::root(),
             run_dir,
             // Synod's agent may not schedule its own wakeups: a
             // conversing office assistant still runs on nothing but

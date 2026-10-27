@@ -1,3 +1,7 @@
+---
+generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
+---
+
 # exarch: an agent as a provider loop over one `ral` tool
 
 **exarch is a small LLM coding agent that embeds [[map/core|ral-core]] behind a
@@ -13,13 +17,14 @@ round-trips, repeated until the model emits no tool call
 - dispatch any tool calls;
 - append the results.
 
-**The sandbox is not invented; it is ral's.** Each run evaluates under a
-profile's capabilities pushed onto ral's capability stack, so the safety
-boundary *is* the [[design/grant|grant]] mechanism — authority attenuated by
-intersection. There is no source-level `grant { … }` the model could escape: the
-host installs the frame around the run, and external commands route through the
-same OS sandbox ral uses. Capability composition (`base ∨ extend ⊓ restrict`)
-and the bake-in profiles are [[map/exarch/policy|policy]].
+**The sandbox is not invented; it is ral's.** The engine's session holds the
+profile's layers, pushed once by the host at boot, and every run evaluates
+beneath them. The safety boundary *is* the [[design/grant|grant]] mechanism
+— authority attenuated by intersection. There is no source-level `grant { …
+}` the model could escape: the host installs the session layers, and
+external commands route through the same OS sandbox ral uses. Capability
+composition (`base ∨ extend ⊓ restrict`) and the bake-in profiles are
+[[map/exarch/policy|policy]].
 
 **The session is one continuous evaluation context, not independent
 shell-outs.** The top-level contract installs each run's post-run state onto the

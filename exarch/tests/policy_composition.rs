@@ -63,7 +63,14 @@ fn compose(
 ) -> Result<Invocation, String> {
     let own = own_binary();
     let own = Some(Path::new(&own));
-    for_invocation(dir.path(), dir.spelling(), base, extension, restricts, own)
+    for_invocation(
+        &ral_core::path::CwdPath::new(dir.path().to_path_buf()).expect("fixture cwd"),
+        dir.spelling(),
+        base,
+        extension,
+        restricts,
+        own,
+    )
 }
 
 /// The real path of the file `name` runs on this host — what a bare key
@@ -367,7 +374,7 @@ fn dangerous_extended_is_unrestricted_less_the_extensions_exclusions() {
     let Invocation { stack, .. } =
         compose(&dir, "dangerous", Some(&positive), &[]).expect("profiles compose");
     assert!(
-        stack.layers().nth(1).is_some_and(|c| !c.is_restrictive()),
+        stack.layers().next().is_some_and(|c| !c.is_restrictive()),
         "an allowance beside `dangerous` leaves the ceiling unrestricted"
     );
     let mut shell = ral_core::test_helper::core_shell();

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
+generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
 ---
 
 # The engine protocol
@@ -26,18 +26,20 @@ and a binding is only the carriage around it.
   one on a worker thread behind a frame loop. They differ only in the
   `Rails` each lays for a dispatch: where its events go, who answers its
   enquiries, and how a session it forks is adopted.
-- **One construction.** Every engine is born from an `EngineInstaller` and an
-  `Attach`, and `Engine::boot` does it once for both carriers: resolve the
-  installer (version first, then tag), derive its `Runtime` once from the attach's `EngineSpec` (builtins live on it
-  and nowhere else), then either `Shell::root` and the root recipe over the
-  `Origin::Root` (seating its cwd and env), or `Shell::child_of` over the
-  `Bequest` a `Origin::Child` seal decodes to; face the process's signals, jail a
-  guest. The identity carrier constructs its child from the engine's `Arc<Runtime>`
-  and the parked bequest, so a fork too is the trivial instantiation
-  of what the wire encodes. Construction is attach: `IdentityTransport::boot`
-  returns the verdict the
-  wire's `await_attached` does — `Severed::Refused`, in the refusing step's
-  own words — so a transport in hand is one its engine accepted.
+- **One construction.** Every engine is born from an `EngineInstaller` and
+  an `Attach`, and `Engine::boot` does it once for both carriers: resolve
+  the installer (version first, then tag), derive its `Runtime` once from
+  the attach's `EngineSpec` (builtins live on it and nowhere else), then
+  either `Shell::root` and the root recipe over the `Origin::Root` (seating
+  its cwd and env), then re-hold and install its `Root::grants` as permanent
+  session layers, oldest first; or `Shell::child_of` over the `Bequest` a
+  `Origin::Child` seal decodes to; face the process's signals, jail a guest.
+  The identity carrier constructs its child from the engine's `Arc<Runtime>`
+  and the parked bequest, so a fork too is the trivial instantiation of what
+  the wire encodes. Construction is attach: `IdentityTransport::boot`
+  returns the verdict the wire's `await_attached` does — `Severed::Refused`,
+  in the refusing step's own words — so a transport in hand is one its
+  engine accepted.
 - **No front-end holds a `Shell`.** Nothing public on `IdentityTransport`
   yields a `Shell` or accepts one. A front-end reaches its engine only through
   `Transport` — dispatch, probe, control — so a facility it needs must exist
@@ -129,25 +131,26 @@ processes in parallel, exchanging operations rather than calls
 ## Payloads: first-order or it does not cross
 
 Every *open* payload position — a surfaced value, an enquiry and its answer,
-a probe's reading and its answer, a hook's arguments, a settled run's value —
-carries `FOValue`: a serialisable *first-order* ral value — unit, bool,
+a probe's reading and its answer, a hook's arguments, a settled run's value
+— carries `FOValue`: a serialisable *first-order* ral value — unit, bool,
 number, string, bytes, and lists/maps/variants thereof, data all the way
 down, its extension slot uninhabited by construction. The envelope's own
 fields (`Run`, `Ending`, `Control`, `Attach`) are closed Rust types, and
 nothing in either carries an fd, a handle, a closure, or a capability beyond
-what a `Run`'s ceiling already states. `Attach` is
-`{ engine: EngineSpec, origin: Root | Child(Sealed) }` and carries only what
-an engine reads. `EngineSpec` names the engine — protocol version, installer
-tag, terminal state, home. A `Root` is the session a root starts from — its
-cwd, the host's per-session env, and `config`, the installer's own settings
-as an `FOValue` its recipe decodes and core never reads. A `Child` is a sealed
-bequest the engine alone reads, carrying its own cwd and env. `SerialValue` — the closure-capable sibling
-that carries a forked session into a sealed child engine (*The factory*,
-below) — is a different type for a different domain; it never reaches the
-protocol, and the host never reads the bytes it travels as. That is the
-**opacity law**: a payload the host relays but never reads crosses as bytes;
-its content is a contract between the engines at its two ends, and the
-spawner is what makes those ends one binary
+the resolved grants a `Root` or a sealed `Child` already carries. `Attach`
+is `{ engine: EngineSpec, origin: Root | Child(Sealed) }` and carries only
+what an engine reads. `EngineSpec` names the engine — protocol version,
+installer tag, terminal state, home. A `Root` is the session a root starts
+from — its cwd, the host's per-session env, `grants` installed after the
+recipe, and `config`, the installer's own settings as an `FOValue` its
+recipe decodes and core never reads. A `Child` is a sealed bequest the
+engine alone reads, carrying its own cwd and env. `SerialValue` — the
+closure-capable sibling that carries a forked session into a sealed child
+engine (*The factory*, below) — is a different type for a different domain;
+it never reaches the protocol, and the host never reads the bytes it travels
+as. That is the **opacity law**: a payload the host relays but never reads
+crosses as bytes; its content is a contract between the engines at its two
+ends, and the spawner is what makes those ends one binary
 ([[decisions/261013_the-seed-rides-the-protocol-sealed|the-seed-rides-the-protocol-sealed]]).
 
 The **envelope** — `Frame`, `Event`, `SessionEvent`, correlation ids,

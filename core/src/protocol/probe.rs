@@ -37,8 +37,8 @@ pub enum Probe {
     Bindings,
     /// The entries of a directory, resolved against the engine's cwd.
     PathEntries(PathBuf),
-    /// The session's own grant stack as it is shown, without any run's
-    /// ceiling: spellings and axes, never a position or an identity.
+    /// The session's grant stack as shown: spellings and axes, never a
+    /// position or an identity.
     Grants,
     #[cfg(feature = "test-util")]
     WorkerCount,
@@ -172,7 +172,8 @@ impl Datum for Sample<()> {
     }
 }
 
-/// Opaque to ral, as a seed is: the stack crosses in the codec `Run.caps` rides.
+/// Opaque to ral, as a seed is: the stack crosses in the codec
+/// `Root.grants` and a sealed seed ride.
 impl Datum for GrantStack {
     fn encode(self) -> FOValue {
         Bytes::from(serde_json::to_vec(&self).expect("a grant stack is plain data")).encode()

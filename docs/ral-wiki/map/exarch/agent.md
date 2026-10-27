@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 24aab6a4
-generated_at_date: 2026-10-26
+generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
+generated_at_date: 2026-10-27
 covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/signals.rs, exarch/src/cancel.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
@@ -11,27 +11,27 @@ may touch what ([[decisions/260827_agent-and-avatar|agent-and-avatar]]).
 
 **`Agent` is the public half**, held behind an `Arc` the fleet shares:
 identity (`id`, `name`, `log_dir`), the two cancel layers (`token:
-cancel::Token` and the eval-layer `reach: InterruptTarget`, both in the crate-level `cancel.rs`), the sender half
-of its own `mailbox`, an owned hot-swappable `provider: ProviderHandle`, the
-per-node config fixed at birth (`caps`, `fuel`, `role`, `search`, the
-resolved `system` prompt), the single-writer `status: Mutex<Status>` — `{
-rest, reply, replied_at, awaiting }` — and a weak `children: Mutex<Vec<Weak<Agent>>>`.
-**`role: Role`** says whom the agent answers: `Converses` (an attended or
-embedded root, rooting its own tree), `Headless` (the
-headless root, replying once to the process's caller), or `Child { parent,
-consumer }` — the strong parent edge and the parent's `Stamp`, minted at
-birth by `Role::child`. A parented agent that converses is unrepresentable.  Its fields are plain
-`pub(crate)`: a record, not an interface, read directly by the modules that
-run it.  What every node of a run shares — the host's settings and the
-services it opened — is not on the node at all but on the fleet's
-[[#The Fleet|`Launch`]], held once.  There is one fence, the
-inbox's own clear-epoch
+cancel::Token` and the eval-layer `reach: InterruptTarget`, both in the
+crate-level `cancel.rs`), the sender half of its own `mailbox`, an owned
+hot-swappable `provider: ProviderHandle`, the per-node config fixed at birth
+(`fuel`, `role`, `search`, the resolved `system` prompt), the single-writer
+`status: Mutex<Status>` — `{ rest, reply, replied_at, awaiting }` — and a
+weak `children: Mutex<Vec<Weak<Agent>>>`. **`role: Role`** says whom the
+agent answers: `Converses` (an attended or embedded root, rooting its own
+tree), `Headless` (the headless root, replying once to the process's
+caller), or `Child { parent, consumer }` — the strong parent edge and the
+parent's `Stamp`, minted at birth by `Role::child`. A parented agent that
+converses is unrepresentable. Its fields are plain `pub(crate)`: a record,
+not an interface, read directly by the modules that run it. What every node
+of a run shares — the host's settings and the services it opened — is not on
+the node at all but on the fleet's [[#The Fleet|`Launch`]], held once. There
+is one fence, the inbox's own clear-epoch
 ([[decisions/260827_agent-and-avatar|agent-and-avatar]]), and it is carried
 only inside `bus::Stamp` — the addressed envelope `Mailbox::stamp` mints,
-pairing the destination mailbox with its epoch at composition — so a
-message that cannot judge its own staleness (`bus::Stamped`) is unsendable
-with a stamp forgotten, skewed to another inbox, or refreshed at push time;
-the destination judges it at its own pop.
+pairing the destination mailbox with its epoch at composition — so a message
+that cannot judge its own staleness (`bus::Stamped`) is unsendable with a
+stamp forgotten, skewed to another inbox, or refreshed at push time; the
+destination judges it at its own pop.
 
 **`Avatar` is the private half**: the canonical
 [[internals/session-record|model projection]] (`AgentLog`, `record/session.rs`), a **seat**
@@ -134,30 +134,35 @@ the rest seated through the
 launch's `genesis`. It hands back one `Resumed { turn, bytes }` (`record/session.rs`)
 per root, which the TUI's tab notes after mirroring the log.
 
-The two halves are `Fleet::found(cfg, root_seat, installers, lease)`
-and `Avatar::hatch(fleet, claim, seat, provider, open)`. `found` seats the first
+The two halves are `Fleet::found(cfg, root_seat, installers, lease)` and
+`Avatar::hatch(fleet, claim, seat, provider, open)`. `found` seats the first
 engine (an identity seat through `Genesis::seat`; a wire seat is adopted as
-built), reads the builtin index and `$EXARCH_SCRATCH` off it, substitutes the
-scratch placeholder into the prompt template, and settles the `Launch`; it
-refuses a fuelled wire root with no `factory`. `EXARCH_SCRATCH` is the shared
-engine namespace: Synod supplies the guest's directory under that name, not its
-host cache. Prompt, grant anchor and resource probe read the same guest scratch. `hatch` makes one root of that
-fleet under the name its `Claim` holds (each caller claims first, then seats, then hatches, so a refused name boots no engine), resolves the prompt
-(`Launch::prompt_for`), opens the log through `open` (which takes the prompt
-as `system: &str` — the log records it as `Protocol::System` — and may hand a
-fact of the opening back beside it, as `resume` does its `Resumed`), and `assemble`s it
-under the launch's `Trunk` role, `caps`, `fuel` and `search`. The recorded
-account is derived there, as `Avatar::child_of` derives it. `RootConfig` carries
-the prompt, caps, `fuel` (exarch's and synod's launch sites pass `SPAWN_FUEL`),
-how roots are driven (`Trunk::{Headless, Attended, Embedded}`), the `Toolset`
+built), reads the builtin index and `$EXARCH_SCRATCH` off it, substitutes
+the scratch placeholder into the prompt template, and settles the `Launch`;
+it refuses a fuelled wire root with no `factory`. `EXARCH_SCRATCH` is the
+shared engine namespace: Synod supplies the guest's directory under that
+name, not its host cache. Prompt, grant anchor and resource probe read the
+same guest scratch. `hatch` makes one root of that fleet under the name its
+`Claim` holds (each caller claims first, then seats, then hatches, so a
+refused name boots no engine), resolves the prompt (`Launch::prompt_for`),
+opens the log through `open` (which takes the prompt as `system: &str` — the
+log records it as `Protocol::System` — and may hand a fact of the opening
+back beside it, as `resume` does its `Resumed`), and `assemble`s it under
+the launch's `Trunk` role, `fuel` and `search`. The recorded account is
+derived there, as `Avatar::child_of` derives it. `RootConfig` carries the
+prompt, `fuel` (exarch's and synod's launch sites pass `SPAWN_FUEL`), how
+roots are driven (`Trunk::{Headless, Attended, Embedded}`), the `Toolset`
 requests advertise (empty for `--chat`), the `Egress`
-(`exarch/src/egress.rs`) whose `search` verdict is read once, and the optional
-`factory` a wire root makes its children's engines with
-([[#Wire-seat spawn|below]]) — all of it ends up on the fleet's `Launch`, held
-once. `RootSeat` picks the seat kind: `Identity` states the cwd, terminal
-capabilities and the run's `scratch`, and becomes the launch's `Genesis`; `Wire`
-adopts a built transport whose engine lives elsewhere, and leaves `genesis`
-`None`. The run's advisory lock is the launcher's to hold, never the node's.
+(`exarch/src/egress.rs`) whose `search` verdict is read once, and the
+optional `factory` a wire root makes its children's engines with
+([[#Wire-seat spawn|below]]) — all of it ends up on the fleet's `Launch`,
+held once. `RootSeat` picks the seat kind: `Identity` states `cwd: CwdPath`,
+the host-resolved `grants: GrantStack`, terminal capabilities and the run's
+`scratch`, and becomes the launch's `Genesis`; `Wire` adopts a built
+transport whose engine lives elsewhere, with authority unresolved in
+`Root::config`, and leaves `genesis` `None`. `Fleet::found` refuses a wire
+root whose attach carries resolved grants. The run's advisory lock is the
+launcher's to hold, never the node's.
 
 `Egress` bundles the two things a fleet's outbound network shares across
 every fork: `net_policy::NetPolicy` (`exarch/src/net_policy.rs`, the
@@ -585,40 +590,40 @@ refused, `Provider::complete` refuses every later request the hold covers
 ## The Fleet
 
 `agent/fleet.rs`'s `Fleet` is `{ names: Mutex<HashMap<String, Slot>>, roots:
-Mutex<Vec<Weak<Agent>>>, exits, departures, lease: Duration, launch: Launch }`
-— two indices (`Slot` is `Claimed` or `Live(Weak<Agent>)`), a mutex and
-condvar that wake `wait_empty`, the idle-lease bound, and the **`Launch`**: what every node of one
-run shares, fixed once — `trunk` (how every root is driven; `trunk.attended()`
-is whether a human types into it), `allow_schedule`, `resume_on_reset`,
-the `Toolset`, `disk_warn_bytes`, the `factory`, the `Bureau`, the prompt
-template with the `BuiltinIndex` each node resolves it against, and the
-recipe for a root: the invocation `caps`, `fuel`, `search`, `sessions_root`
-and `genesis`. Held here
-once rather than copied into every `Agent`, so a fork's `Build` names only
-what is its own. It is not the tree: the tree is
-`Role::Child`/`Agent::children`, and every walk — the roster, the cancel
-cascade, the scope check — runs there. `names` is the by-name door a spawn
-claims identity at (`Fleet::claim`) and `` exarch-agents `message ``/`` `cancel ``/`` `read ``
-resolve through (`Fleet::resolve`); `roots` holds every root session —
-a root reports to nobody, so a walk from `roots`
-(`nearest_reap`) is how the idle-lease scan reaches every live agent in the
-run.  The frontend reaches an agent through the fleet: a tab resolves its
-name with `Fleet::resolve` and checks the id, never holding the `Arc<Agent>`
-past one handler, and `/quit` and the signal forwarder walk `Fleet::roots`
-([[map/exarch/frontend|frontend]]). Both indices are `Weak`, and a lookup prunes what has
-settled as it walks. `FleetBus` and the `Arc<provider::Engine>` are not
-fields of `Fleet` — the frontend builds its own (`FleetBus::session`, one
-emitter per root stamping that root's own mailbox) and holds the engine handle
-separately; what every node
-shares through `Fleet` is only identity resolution and the lease.
+Mutex<Vec<Weak<Agent>>>, exits, departures, lease: Duration, launch: Launch
+}` — two indices (`Slot` is `Claimed` or `Live(Weak<Agent>)`), a mutex and
+condvar that wake `wait_empty`, the idle-lease bound, and the **`Launch`**:
+what every node of one run shares, fixed once — `trunk` (how every root is
+driven; `trunk.attended()` is whether a human types into it),
+`allow_schedule`, `resume_on_reset`, the `Toolset`, `disk_warn_bytes`, the
+`factory`, the `Bureau`, the prompt template with the `BuiltinIndex` each
+node resolves it against, and the recipe for a root: `fuel`, `search`,
+`sessions_root` and `genesis`. Held here once rather than copied into every
+`Agent`, so a fork's `Build` names only what is its own. It is not the tree:
+the tree is `Role::Child`/`Agent::children`, and every walk — the roster,
+the cancel cascade, the scope check — runs there. `names` is the by-name
+door a spawn claims identity at (`Fleet::claim`) and `` exarch-agents
+`message ``/`` `cancel ``/`` `read `` resolve through (`Fleet::resolve`);
+`roots` holds every root session — a root reports to nobody, so a walk from
+`roots` (`nearest_reap`) is how the idle-lease scan reaches every live agent
+in the run. The frontend reaches an agent through the fleet: a tab resolves
+its name with `Fleet::resolve` and checks the id, never holding the
+`Arc<Agent>` past one handler, and `/quit` and the signal forwarder walk
+`Fleet::roots` ([[map/exarch/frontend|frontend]]). Both indices are `Weak`,
+and a lookup prunes what has settled as it walks. `FleetBus` and the
+`Arc<provider::Engine>` are not fields of `Fleet` — the frontend builds its
+own (`FleetBus::session`, one emitter per root stamping that root's own
+mailbox) and holds the engine handle separately; what every node shares
+through `Fleet` is only identity resolution and the lease.
 
-- **A root is born from `Genesis`.** `Launch::genesis` — installers, cwd,
-  terminal capabilities, the run's `Scratch` — is `Some` on an identity host
-  and `None` on a wire host, which boots no further engine. `Genesis::seat`
-  is `Seat::root`, so the first root, a `/new` or `/branch` root and a
-  resumed root each get a fresh engine the same way; the scratch is the
-  run's and outlives every root and every `/clear`. `Launch::seat()` is the
-  door that refuses, in a sentence, a host with no genesis.
+- **A root is born from `Genesis`.** `Launch::genesis` — installers, typed
+  cwd, the launch's grants, terminal capabilities, the run's `Scratch` — is
+  `Some` on an identity host and `None` on a wire host, which boots no
+  further engine. `Genesis::seat` is `Seat::root`, so the first root, a
+  `/new` or `/branch` root and a resumed root each get a fresh engine the
+  same way; the scratch is the run's and outlives every root and every
+  `/clear`. `Launch::seat()` is the door that refuses, in a sentence, a host
+  with no genesis.
 - **Two steps: `Fleet::claim`, then `Fleet::enrol`.** A name is claimed
   before any log or engine seat exists (by each root's caller ahead of
   `Avatar::hatch`, by the desk's spawn path for a child), under the one lock a racing spawn's own claim takes:
@@ -968,15 +973,16 @@ builtin, no desk tag, so a model cannot open a session. A builtin spawn's
 of fuel ([[map/exarch/builtins|builtins]]).
 
 Prompt resolution is one function, `Launch::prompt_for`, shared by every
-root (`Avatar::hatch`) and child (`Avatar::child_of`, either seat). The launch
-keeps the unresolved base and the index; each node
-applies its own `Reply` and child-fuel bits beside the launch's
-`allow_schedule`; the resolver appends `Agents` iff fuel remains, `Spawned`
-(`data/spawned.md`: the snapshot, the spawner binding the reply, follow-ups)
-iff `ToSpawner`, and `Reply` (`data/reply.md`, true of any receiver) iff the
-agent returns. The headless root thus never reads that it was spawned. The
-child's log bookend records that fully resolved prompt length, including the
-filtered index and late sections.
+root (`Avatar::hatch`) and child (`Avatar::child_of`, either seat). The
+launch keeps the unresolved base and the index; `Launch::prompt_for` reads
+the grant summary from the node's engine alone, rendering every session
+layer in order. Each node applies its own `Reply` and child-fuel bits beside
+the launch's `allow_schedule`; the resolver appends `Agents` iff fuel
+remains, `Spawned` (`data/spawned.md`: the snapshot, the spawner binding the
+reply, follow-ups) iff `ToSpawner`, and `Reply` (`data/reply.md`, true of
+any receiver) iff the agent returns. The headless root thus never reads that
+it was spawned. The child's log bookend records that fully resolved prompt
+length, including the filtered index and late sections.
 
 ### Wire-seat spawn
 
