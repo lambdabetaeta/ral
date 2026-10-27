@@ -1,5 +1,5 @@
 ---
-generated_at_commit: efbf42011e7c77f2b8c4f6ba1df0563ef202d650
+generated_at_commit: 2854657c78ba3e2eec72563cf6a2e5f4492c3d2a
 generated_at_date: 2026-10-27
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/shell/run/report.rs, core/src/seed.rs, core/src/shell/grant/spawn.rs]
 ---
@@ -64,14 +64,14 @@ parent's seal, so core holds no spawn machinery for it.** The why is
 
 The frame algebra. Everything on it is a wire type; nothing here carries.
 
-- `PROTOCOL_VERSION` (currently 31): checked at `Attach`; a mismatch refuses.
+- `PROTOCOL_VERSION` (currently 33): checked at `Attach`; a mismatch refuses.
   `Capabilities` carries `ExecGrant { every, allow, deny }`, its two sets as
   sequences; guest media must be rebuilt with `just guest-boot`.
 - build-tools' `manifest::check` compares the same number at *build* time,
   against the `proto_version=` line `media-manifest` compiles into the guest
   media; `check-media`, tauri's `beforeBuildCommand`, refuses to package media
   that disagrees.
-- `Frame` — the whole wire enum: `Attach`, `Detach`, `Dispatch`, `Probe`,
+- `Frame` — the whole wire enum: `Attach`, `Dispatch`, `Probe`,
   `Event`, `Session`, `Control`, `Answer`, `Ping`, `Pong`; `Frame::kind`
   names a variant for the diagnostic about a frame out of place.
 - `Attach { engine: EngineSpec, origin: Origin }` — what every engine is
@@ -292,8 +292,8 @@ The wire carrier's engine half: a connection-lived engine process.
   process-level half of an attach, which only a carrier owning its process
   performs: a root's cwd, every engine's `HOME`, each read `EnginePath::native`; a child restores no cwd), `Engine::boot`, writes `Attached`/`Refused`, moves the engine
   onto a worker thread, then runs the reader loop; returns the process exit
-  code. The loop breaks on a `SessionEnd` — `Requested` (a `Detach` or the
-  front-end's EOF) or `Corrupt` (a read error, a dead worker, silence past the
+  code. The loop breaks on a `SessionEnd` — `Requested` (the front-end's
+  EOF) or `Corrupt` (a read error, a dead worker, silence past the
   deadline, or a frame only an engine sends) — so corruption cannot be
   reported as an end the front-end asked for; a wire fault demotes even a
   `Requested` end to `1`.

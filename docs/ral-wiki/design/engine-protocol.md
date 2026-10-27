@@ -204,7 +204,7 @@ payload's shape (an `ExecGrant`'s allowance and exclusion sets, verb
 sets as sequences) bumps `PROTOCOL_VERSION` and rebuilds the guest media, whose
 manifest the host compares before packaging. Without the bump stale media passes
 the packaging check and the attach handshake and fails decoding the first
-dispatch. **`PROTOCOL_VERSION` is 30.** `Capabilities` carries an authored
+dispatch. **`PROTOCOL_VERSION` is 33.** `Capabilities` carries an authored
 `ExecGrant` as `every`, `allow` and `deny`: the two sets encode as sequences,
 omitted sets default to empty, and unknown fields are refused. A key may occur
 in both sets. Rebuild guest media with `just guest-boot`. A `Fragment` never
@@ -318,7 +318,7 @@ conflated into one string a caller might pattern-match.
 
 **One engine process per session, one connection per engine process — the
 connection *is* the session**, so no frame carries a session address.
-`Attach` opens it; `Detach`, an EOF, or the liveness deadline closes it;
+`Attach` opens it; the front-end's EOF or the liveness deadline closes it;
 `Dispatch`, `Probe`, `Event`, `Control`, `Answer` all ride it unaddressed.
 
 **One owner per connection.** A wire transport alone owns its `Line`:

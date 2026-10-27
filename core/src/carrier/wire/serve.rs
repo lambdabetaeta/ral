@@ -30,8 +30,7 @@ use std::sync::{Arc, Mutex, mpsc};
 
 /// The engine's half of the severance law: [`write_or_sever`]
 /// recording into `wire_fault` — the flag the reader loop consults on exit so a
-/// front-end that stopped reading is never mistaken for one that cleanly
-/// detached.
+/// front-end that stopped reading is never mistaken for one that hung up.
 ///
 /// Every engine-side write crosses here: a surface emit, a deferred batch, an
 /// enquiry, a report, a `Pong`. None of them may park the reader loop, so a
@@ -326,7 +325,7 @@ fn restore_process_dirs(attach: &Attach) {
 /// The engine's whole protocol life over one already-open channel: `Attach`
 /// handshake, worker rendezvous, reader loop, teardown settle.
 ///
-/// Returns the process exit code — `0` for a clean detach or EOF, `1` for a
+/// Returns the process exit code — `0` for the front-end's EOF, `1` for a
 /// protocol fault, a read error, a dead worker, silence past the deadline, or
 /// a write that stalled past `patience.write_stall`: a front-end that stops
 /// reading is, within that bound, treated exactly as one that has gone
@@ -369,7 +368,7 @@ fn engine_session(
                 }
             }
         }
-        Ok(Some(Frame::Detach) | None) => return 0,
+        Ok(None) => return 0,
         Ok(Some(_)) => {
             crate::errln!("engine: expected Attach as the first frame");
             return 1;
@@ -479,7 +478,7 @@ fn engine_session(
     /// rather than spelled as an exit code, so no break site can report a
     /// corrupted session as one that ended on request.
     enum SessionEnd {
-        /// `Detach`, or the front-end's EOF.
+        /// The front-end's EOF.
         Requested,
         Corrupt,
     }
@@ -550,7 +549,6 @@ fn engine_session(
                 armed = true;
                 engine_send(&writer, &wire_fault, &Frame::Pong(seq));
             }
-            Frame::Detach => break SessionEnd::Requested,
             out_of_protocol @ (Frame::Attach(_)
             | Frame::Event(..)
             | Frame::Session(..)
@@ -809,6 +807,9 @@ mod engine_session_tests {
     /// later await can still find them.
     struct Host {
         ch: WireChannel,
+        /// The host's own end, kept to half-close: the engine reads EOF while
+        /// its reports can still cross.
+        end: UnixStream,
         seen: Vec<Frame>,
         engine: std::thread::JoinHandle<i32>,
     }
@@ -818,10 +819,13 @@ mod engine_session_tests {
     }
 
     fn start_with(patience: Patience) -> Host {
-        let (host_ch, engine_ch) = WireChannel::pair().expect("socketpair");
+        let (host_end, engine_end) = crate::process::cloexec_socketpair().expect("socketpair");
+        let end = host_end.try_clone().expect("dup the host's end");
+        let engine_ch = WireChannel::from_stream(engine_end);
         let engine = std::thread::spawn(move || engine_session(engine_ch, INSTALLERS, patience));
         let mut host = Host {
-            ch: host_ch,
+            ch: WireChannel::from_stream(host_end),
+            end,
             seen: Vec::new(),
             engine,
         };
@@ -904,8 +908,10 @@ mod engine_session_tests {
             self.send(&Frame::Control(Control::Cancel(DispatchId(id))));
         }
 
-        fn detach_and_join(mut self) -> i32 {
-            self.send(&Frame::Detach);
+        fn hang_up_and_join(self) -> i32 {
+            self.end
+                .shutdown(std::net::Shutdown::Write)
+                .expect("half-close the host's end");
             self.engine.join().expect("engine thread")
         }
     }
@@ -933,7 +939,7 @@ mod engine_session_tests {
         let _g = REQUEST_SERIAL.lock();
         let mut host = start();
         assert_eq!(ran_int(&host.run(1, "$[1 + 1]")), 2);
-        assert_eq!(host.detach_and_join(), 0);
+        assert_eq!(host.hang_up_and_join(), 0);
     }
 
     /// One rendezvous, so one refusal arm for both riders.
@@ -945,7 +951,7 @@ mod engine_session_tests {
         assert!(is_engine_busy(&host.run(2, "$[1 + 1]")));
         host.send(&Frame::Probe(DispatchId(3), Probe::Cwd));
         assert_eq!(host.reading(3), Err(BUSY.to_string()));
-        assert_eq!(host.detach_and_join(), 0, "teardown cancels the sleep");
+        assert_eq!(host.hang_up_and_join(), 0, "teardown cancels the sleep");
     }
 
     /// `sleep 30` proves promptness: it could not report inside the await
@@ -958,7 +964,7 @@ mod engine_session_tests {
         host.dispatch(1, "/bin/sleep 30");
         host.cancel(1);
         host.report(1);
-        assert_eq!(host.detach_and_join(), 0);
+        assert_eq!(host.hang_up_and_join(), 0);
     }
 
     /// An interrupt names its dispatch: it ends that run, not the session.
@@ -974,7 +980,7 @@ mod engine_session_tests {
             "an interrupted run reports 130, got {report:?}"
         );
         assert_eq!(ran_int(&host.run(2, "$[1 + 1]")), 2, "the session lives on");
-        assert_eq!(host.detach_and_join(), 0);
+        assert_eq!(host.hang_up_and_join(), 0);
     }
 
     /// A SIGTERM ends the wire engine's session: the root request latches, so
@@ -991,7 +997,7 @@ mod engine_session_tests {
             matches!(&report, Report::Ran { ending, .. } if ending.status() == 143),
             "a terminated run reports 143, got {report:?}"
         );
-        assert_eq!(host.detach_and_join(), 0);
+        assert_eq!(host.hang_up_and_join(), 0);
     }
 
     #[test]
@@ -1008,7 +1014,7 @@ mod engine_session_tests {
             Some(FOValue::Variant { label, .. }) if label == "done" => {}
             other => panic!("expected the batch to end in a `done` record, got {other:?}"),
         }
-        assert_eq!(host.detach_and_join(), 0);
+        assert_eq!(host.hang_up_and_join(), 0);
     }
 
     /// A front-end that keeps pinging, dispatches a run whose surface value
@@ -1044,7 +1050,7 @@ mod engine_session_tests {
         let code = host.engine.join().expect("engine thread");
         assert_eq!(
             code, 1,
-            "a front-end that stopped reading must exit 1, not the clean-detach 0"
+            "a front-end that stopped reading must exit 1, not the clean hang-up's 0"
         );
     }
 }

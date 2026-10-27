@@ -1,8 +1,8 @@
 //! The engine protocol's algebra: the frames between a front-end and the ral
 //! engine, and nothing that carries them.
 //!
-//! Attach/Detach/Ping/Pong bracket and keep alive one connection (the
-//! connection *is* the session); Dispatch carries one whole run, Event flows
+//! Attach/Ping/Pong open and keep alive one connection, whose EOF ends it
+//! (the connection *is* the session); Dispatch carries one whole run, Event flows
 //! engine to front-end, and Control flows front-end to engine. The carriers
 //! that interpret the algebra are [`crate::carrier`]'s.
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ pub mod probe;
 /// Checked at every `Attach`; a mismatch refuses even development media.
 ///
 /// Packaging compares the recorded version in `vm-image/build-tools` (`check-media`).
-pub const PROTOCOL_VERSION: u32 = 32;
+pub const PROTOCOL_VERSION: u32 = 33;
 
 // ── Dispatch identity ─────────────────────────────────────────────────
 
@@ -43,9 +43,6 @@ pub enum Frame {
     /// The only legal first frame: an engine speaks no shell until told a
     /// version and an installer.
     Attach(Attach),
-    /// Front-end drops: cancel in-flight dispatch, reap foreground
-    /// subtree, restore terminal state.
-    Detach,
     /// One whole run.  Boxed so no other variant is sized to `Run`.
     Dispatch(DispatchId, Box<Run>),
     /// A pure, boundary-time read of session state — no wall, no sinks, no
@@ -86,7 +83,6 @@ impl Frame {
     pub(crate) fn kind(&self) -> &'static str {
         match self {
             Self::Attach(_) => "Attach",
-            Self::Detach => "Detach",
             Self::Dispatch(..) => "Dispatch",
             Self::Probe(..) => "Probe",
             Self::Event(..) => "Event",
