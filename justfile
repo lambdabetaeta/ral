@@ -5,9 +5,6 @@
 # Windows has no `sh`; PowerShell is the shell it always has.
 set windows-shell := ['powershell.exe', '-NoLogo', '-NoProfile', '-Command']
 
-# synod's tauri dependency links GTK, absent on Linux; excluded there, once.
-gui := if os() == "linux" { "--exclude synod" } else { "" }
-
 # Show the recipe list.
 default:
     @just --list
@@ -25,11 +22,11 @@ deny := '-D warnings'
 # Build all workspace targets; `test` depends on this to refresh the `ral`
 # binary that ral/tests/ shells out to.
 build $RUSTFLAGS=deny:
-    cargo build --workspace {{gui}} --all-targets --keep-going
+    cargo build --workspace --all-targets --keep-going
 
 # Run the workspace test suite.
 test $RUSTFLAGS=deny: build
-    cargo test --workspace {{gui}} --features ral-core/test-util,exarch/test-util --no-fail-fast
+    cargo test --workspace --features ral-core/test-util,exarch/test-util --no-fail-fast
 
 # Compiles nothing, so it is the cheapest step CI has and the one worth failing
 # first. `--all` reaches vendor/ too, where vendor/rustfmt.toml turns formatting
@@ -45,7 +42,7 @@ fmt-check:
 
 # Clippy across the workspace, warnings as errors; no em dash in string literals.
 lint $RUSTFLAGS=deny:
-    cargo clippy --workspace {{gui}} --all-targets --keep-going
+    cargo clippy --workspace --all-targets --keep-going
     ! rg -n '"[^"]*[^ ] — ' core/src exarch/src ral/src --glob '!**/tests*'
 
 # Never links, so a Unix host can run it. `cargo xwin` (rust-cross/cargo-xwin)
@@ -91,6 +88,17 @@ check-linux $RUSTFLAGS=deny $CC_aarch64_unknown_linux_musl='clang' $CC_x86_64_un
 # this as readily as a Mac, where clang is the system compiler.
 check-macos $RUSTFLAGS=deny $CC_aarch64_apple_darwin='clang':
     cargo check -p ral-core --all-targets --target aarch64-apple-darwin
+
+# Clippy what a Linux `lint` never compiles: the machine layer's macOS half, and every Windows half.
+lint-cross $RUSTFLAGS=deny $CC_aarch64_apple_darwin='clang':
+    cargo clippy -p vm-manager --all-targets --target aarch64-apple-darwin
+    cargo xwin clippy -p vm-manager -p netgate -p synod -p synod-machine-broker --all-targets --target x86_64-pc-windows-msvc
+
+# Rustdoc's link checks, which clippy never runs.
+doc-check $RUSTFLAGS=deny $CC_aarch64_apple_darwin='clang':
+    cargo doc --workspace --no-deps --document-private-items
+    cargo doc -p vm-manager --no-deps --document-private-items --target aarch64-apple-darwin
+    cargo doc -p vm-manager --no-deps --document-private-items --target x86_64-pc-windows-msvc
 
 # plugins/*.ral are left out: the `_ed-*` builtins they call live only on the
 # interactive shell's table, so a batch --check cannot type them — the REPL
@@ -140,17 +148,10 @@ plugins-check:
 #
 # --unstable-sloppy-imports because ts-rs emits extensionless relative imports
 # between the types it generates, which Deno otherwise refuses.
-#
-# Skipped on Linux for the reason `gui` excludes synod there: generating the
-# types means compiling synod, and its tauri dependency links GTK.
 [unix]
 ui-check:
     #!/bin/sh
     set -eu
-    if [ "{{ os() }}" = linux ]; then
-        echo 'ui-check: skipped — synod does not build on Linux'
-        exit 0
-    fi
     cargo test -p synod --quiet export_bindings
     cd synod/ui && deno check --unstable-sloppy-imports js/*.js
 
@@ -217,15 +218,10 @@ guest-rootfs $ARCH='arm64':
 smoke-boot KERNEL='vm-image/out/boot/kernel' INITRAMFS='vm-image/out/boot/initramfs.img' ROOTFS='vm-image/out/rootfs/rootfs.img' FOLDER='.':
     cargo run -p vm-manager --example boot-smoke -- {{KERNEL}} {{INITRAMFS}} {{ROOTFS}} {{FOLDER}}
 
-# The same boot, plus one real run into the guest and back (same prerequisite as smoke-boot).
-[windows]
-smoke-run KERNEL='vm-image/out/boot/kernel' INITRAMFS='vm-image/out/boot/initramfs.img' ROOTFS='vm-image/out/rootfs/rootfs.img' FOLDER='.':
-    cargo run -p synod --example boot-run -- {{KERNEL}} {{INITRAMFS}} {{ROOTFS}} {{FOLDER}}
-
 # Install the machine broker as a LocalSystem Windows service (needs an elevated shell).
 [windows]
 broker-install:
-    cargo build --release -p vm-manager --bin synod-machine-broker
+    cargo build --release -p synod-machine-broker
     sc.exe create SynodMachineBroker binPath= "{{justfile_directory()}}\target\release\synod-machine-broker.exe" DisplayName= "Synod machine broker" type= own start= auto obj= LocalSystem
     sc.exe description SynodMachineBroker "Creates and stops the virtual machines Synod runs its work in. Synod itself runs without privileges; this service holds the one privilege the platform requires for a virtual machine, and nothing else."
     sc.exe start SynodMachineBroker
@@ -251,5 +247,5 @@ synod-app:
 # Bundle synod into a Windows .msi installer; needs the Tauri CLI and an x86_64 guest image (built from a Unix host).
 [working-directory('synod')]
 synod-msi:
-    cargo build --release -p vm-manager --bin synod-machine-broker
+    cargo build --release -p synod-machine-broker
     cargo tauri build --config tauri.bundle.conf.json

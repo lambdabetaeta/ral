@@ -1,74 +1,49 @@
-// Cyclic with projector.js, and safe: every binding crossed either way is a
-// hoisted function declaration, and nothing calls across the cycle during
-// module evaluation — the first paint is app.js's, after the whole graph has
-// loaded.  A top-level read of another module's `let` would break that.
-import { render } from "./projector.js";
 import { renderMarkCard } from "./card-renderer.js";
 import { highlightRal } from "./ral-highlight.js";
 
-// ---- The chat document ------------------------------------------------
-
-// The transcript's single source of truth: an append-only list of plain
-// data blocks — user, assistant, and system prose, surfaced
-// cards, and dials.
-// Everything under #transcript is a projection of this list; no block
-// holds an element, and no handler writes to the transcript directly.
-// An assistant block keeps the raw markdown of its whole bubble and says
-// whether it is still `open` — being written — which is all `prose.js`
-// needs to decide how much of it has settled.
+// Blocks are transcript data; only the projector reconciles them with the DOM.
 export let blocks = [];
 
-// The blocks still receiving input, held as data. `streamingProse` is
-// the assistant block tokens append to; `openDial` the dial block calls,
-// cards, and notes land in. Never both at once — each opens by closing
-// the other — and closing one (dropping the ref to null) leaves the
-// block itself in the document.
+let changed = () => {};
+
+/** @param {() => void} fn */
+export function onChange(fn) {
+  changed = fn;
+}
+
+// Prose and dial streams are mutually exclusive; closing leaves their blocks in the document.
 /** @type {{ kind: "assistant", raw: string, open: boolean, rev: number } | null} */
 export let streamingProse = null;
 let openDial = null;
 
-// Wipe the chat document back to empty and render, without touching the
-// change report. Called by conversation.js's resetTranscript.
 export function resetDocument() {
   blocks = [];
   streamingProse = null;
   openDial = null;
-  render();
+  changed();
 }
 
-// The dial the current gap is streaming into, dropped: the narrowest
-// write projector.js's onSynodEvent needs when a fresh token opens a new
-// bubble, and conversation.js needs when an exchange or the assistant
-// itself ends.
 export function clearOpenDial() {
   openDial = null;
 }
 
-// Open a fresh streaming assistant bubble for the given first token: the
-// write projector.js's onSynodEvent needs when a token arrives with no
-// bubble already open.
 export function openStreamingProse(text) {
   streamingProse = pushBlock({ kind: "assistant", raw: text, open: true });
 }
 
-// Every mutation runs through these two and ends in the one projector
-// pass. `rev` counts a block's revisions, so the projector can tell a
-// current element from a stale one.
+// Every mutation bumps rev and requests projection; unchanged revisions retain their elements.
 function pushBlock(block) {
   block.rev = 0;
   blocks.push(block);
-  render();
+  changed();
   return block;
 }
 
 export function bump(block) {
   block.rev += 1;
-  render();
+  changed();
 }
 
-// The streaming bubble's stream has closed — a card, a dial, or the
-// exchange itself — so this is its last word: nothing more can join its
-// final block, and the whole bubble settles.
 export function closeStreamingProse() {
   if (!streamingProse) return;
   streamingProse.open = false;
@@ -84,10 +59,7 @@ export function addSystemMessage(text) {
   pushBlock({ kind: "system", text });
 }
 
-// A surfaced card is the work's output — a deliberate act that stands
-// in the transcript at the assistant's rank. It closes both streams:
-// the next token opens a fresh bubble below it, the next call a fresh
-// dial, so blocks keep true temporal order.
+// Surfaced cards close both streams, preserving temporal order.
 export function addCardBlock(marks) {
   if (!marks.length) return; // an empty card would render as bare chrome
   closeStreamingProse();
@@ -95,24 +67,9 @@ export function addCardBlock(marks) {
   pushBlock({ kind: "card", marks });
 }
 
-// The dial: one per gap between prose bubbles. Tool calls, harness
-// calls, their process cards, and warn/bad notes land in it, in true
-// temporal order, as a growing list of `entries`; muted telemetry
-// folds in as `notes`.
-//
-// The dial holds process only — surfaced cards stand in the transcript
-// as blocks of their own. The rungs reveal the process by degree:
-// nothing (the tip alone), the step intents, then the scripts, process
-// cards, and telemetry too.
-
-// Rung 0 needs no label: its tip already names the latest intent.
 const RUNG_LABELS = ["", "all steps", "all scripts"];
 
-// Open a dial for this gap, or hand back the one already open. A fresh
-// dial is pushed without a render of its own: it enters the document in
-// the caller's bump, together with the entry that opened it, so it never
-// arrives as an empty shell. Opening also ends the current bubble's
-// stream — the next token starts a new bubble below the dial.
+// A new dial enters with its first entry, never as an empty shell; opening ends prose.
 function ensureDial() {
   if (openDial) return openDial;
   closeStreamingProse();
@@ -126,16 +83,12 @@ function rotateDial(block) {
   bump(block);
 }
 
-// The collapsed tip names the latest happening — a step's intent, or a
-// warn/bad note's own text when that is the newest fact — so a retry or
-// provider error is never silent, even before the body is dialed open.
+// The tip names the latest step or warning, so retries and failures stay visible when collapsed.
 function dialHeaderText(dial) {
   const latest = dial.entries.findLast((e) => e.intent || e.text);
   return latest ? latest.intent || latest.text : "";
 }
 
-// The dial element, rebuilt whole from its block at every revision. The
-// head's handlers write to the block and bump — never to the element.
 export function renderDialBlock(block) {
   const el = document.createElement("div");
   el.className = "dial";
@@ -158,8 +111,6 @@ export function renderDialBlock(block) {
   rungLabel.textContent = RUNG_LABELS[block.rung];
   head.append(mark, tip, rungLabel);
 
-  // The live-helper count, shown only while it is a fact — a fixed
-  // mark at the head's own station, not a rung any click reveals.
   if (block.helpers) {
     const helpers = document.createElement("span");
     helpers.className = "dial-helpers";
@@ -178,18 +129,11 @@ export function renderDialBlock(block) {
   }
 
   el.append(head, body);
-  // The body carries no chrome of its own when it has nothing to show
-  // — a rung-0 gap of pure calls, or a dial opened by a lone note.
   el.classList.toggle("empty-body", body.childElementCount === 0);
   return el;
 }
 
-// One entry's contribution at the given rung: the step intent from
-// rung 1, the script and process cards from rung 2. A warn/bad note
-// entry shows at every rung — it is a fact of the exchange, not
-// process to be dialed for. Returns null when the entry has nothing to
-// show at this rung (e.g. any call at rung 0) so the body stays free
-// of empty rows.
+// Warn/bad entries show at every rung; calls start at 1, scripts and process cards at 2.
 function renderDialEntry(entry, rung) {
   if (entry.kind === "note") return noteLine(entry);
   if (entry.kind === "readout") return readoutBlock(entry);
@@ -213,7 +157,6 @@ function entryHeading(entry) {
   return heading;
 }
 
-// The script an entry ran, or null for one that carries none.
 function entryScript(entry) {
   const script = entry.kind === "harness" ? entry.detail : entry.script;
   if (!script) return null;
@@ -238,8 +181,6 @@ function noteLine(note) {
   return line;
 }
 
-// A provider failure's readout: headline, aligned label/value rows, then
-// the hints muted beneath. Urgent like a note, so it shows at every rung.
 function readoutBlock(r) {
   const box = document.createElement("div");
   box.className = "dial-entry";
@@ -291,11 +232,7 @@ export function dialAddHarness(p) {
   bump(dial);
 }
 
-// A process card dresses work the dial already narrates — an exec's io,
-// a worker's settling, housekeeping — so it folds into the entry that
-// did the work and shows only at the deepest rung, beside the scripts.
-// Like muted telemetry it has no trigger of its own: with no dial open
-// in this gap it is dropped, not surfaced.
+// Process cards fold into an existing dial at the deepest rung; they never open one.
 export function dialAddProcessCard(marks) {
   if (!marks.length || !openDial) return;
   const last = openDial.entries[openDial.entries.length - 1];
@@ -304,24 +241,13 @@ export function dialAddProcessCard(marks) {
   bump(openDial);
 }
 
-// Muted telemetry (usage, steps, stop reasons) has no trigger of its own
-// — it only folds into a dial a call/harness/card already opened in this
-// gap, and is dropped when there is none, since it has nothing to say on
-// its own; it shows only at the last rung. A warn/bad note (an error, a
-// provider error) is never swallowed: it joins the entries in temporal
-// order, visible at every rung, and opens a dial when none is, since a
-// failed exchange must never look like a quiet one.
-// The live-helper count: a fact of the whole exchange, not one call, so
-// it lands on the dial itself rather than in its list of entries — a
-// fixed station `renderDialBlock` reads straight off the block.
-export function dialAddHelpers(live) {
+// Busy helpers belong to the exchange.
+export function dialAddHelpers(busy) {
   const dial = ensureDial();
-  dial.helpers = live;
+  dial.helpers = busy;
   bump(dial);
 }
 
-// A helper's settling: process, like a `ProcessCard`, so it shows only
-// at the dial's deepest rung, beside the scripts it kept beneath.
 export function dialAddHelperDone(p) {
   const dial = ensureDial();
   dial.entries.push({
@@ -333,6 +259,7 @@ export function dialAddHelperDone(p) {
   bump(dial);
 }
 
+// Telemetry cannot open a dial; warn/bad notes always do.
 export function dialAddNote(text, cls) {
   const urgent = cls === "warn" || cls === "bad";
   const dial = urgent ? ensureDial() : openDial;

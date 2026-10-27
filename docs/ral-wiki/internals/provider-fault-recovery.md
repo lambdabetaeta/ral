@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 24aab6a4
-verified_at_date: 2026-10-26
+verified_at_commit: 3dbbe8f3
+verified_at_date: 2026-10-27
 anchors: [from_genai, refused, error_object, Fault, of_webc, of_boxed, of_reqwest, ProviderError, Refused, Refusal, Limit, Recovery, recovery, Transient, Api, Truncated, retry_with_backoff, Attempt, backoff_sleep, parse_retry_after, unwaitable, BODY_KEYS, epoch_or_delta, Wait::patient, RATE_LIMIT_MAX_DELAY_MS, json_status_code, CutShort, stall_cause, root_cause, body_detail, Readout, stalled_step_out, STREAM_HEADER_TIMEOUT, STREAM_READ_TIMEOUT, budget, retryable, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS, manufacture, Sealed]
 ---
 
@@ -318,7 +318,7 @@ ordinary `Post::Wakeup`, a new exchange the log admits after
 fails fast with the reset in its summary (`usage limit reached until Tue
 14:05`), synod's exchange ends on the refusal (Law B leaves nothing to wake
 it), and a child fails up to its parent, whose next request meets the hold
-itself. Every fork gets `resume_on_reset: false`, and `converse_settled`
+itself. Every fork gets `resume_on_reset: false`, and `headless::SettledConversation::new`
 refuses a trunk that holds it.
 
 The refusal is also the account's or the model's, not only the turn's:

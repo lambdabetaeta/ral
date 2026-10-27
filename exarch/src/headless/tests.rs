@@ -24,7 +24,7 @@ fn converse_trunk(tag: &str, script: Script) -> Avatar {
             resume_on_reset: false,
             disk_warn_bytes: None,
             fuel: 0,
-            egress: crate::egress::Egress::for_test(),
+            search: true,
             factory: None,
             bureau: Arc::new(crate::provider::Bureau::Scripted),
             roles: crate::provider::roles::Roles::default(),
@@ -345,16 +345,23 @@ fn converse_on_projects_into_the_given_writers() {
     );
 }
 
-// ── `converse_settled`: the quiescent exchange driver ──────────────────
+// ── The quiescent conversation driver ─────────────────────────────────
 
 /// A conversing trunk with real spawn fuel, so a test may register a
 /// genuine live child under it — [`converse_trunk`]'s `fuel: 0` exists
 /// precisely to refuse that.
-fn settled_trunk(tag: &str, script: Script, allow_schedule: bool, resume_on_reset: bool) -> Avatar {
+fn settled_trunk(
+    tag: &str,
+    script: Script,
+    allow_schedule: bool,
+    resume_on_reset: bool,
+    lease: std::time::Duration,
+) -> Avatar {
     let scratch =
         Arc::new(crate::app::Scratch::for_test(crate::app::EXARCH, tag).expect("scratch dir"));
     let dir = scratch.test_sibling("run").expect("temp run dir");
-    Avatar::root(
+    Avatar::first(
+        crate::agent::fresh_id(),
         RootConfig {
             system: "system".into(),
             run_dir: dir,
@@ -364,7 +371,7 @@ fn settled_trunk(tag: &str, script: Script, allow_schedule: bool, resume_on_rese
             resume_on_reset,
             disk_warn_bytes: None,
             fuel: SPAWN_FUEL,
-            egress: crate::egress::Egress::for_test(),
+            search: true,
             factory: None,
             bureau: Arc::new(crate::provider::Bureau::Scripted),
             roles: crate::provider::roles::Roles::default(),
@@ -376,6 +383,8 @@ fn settled_trunk(tag: &str, script: Script, allow_schedule: bool, resume_on_rese
             terminal: ral_core::io::terminal::TerminalState::default(),
         },
         Arc::new(Provider::scripted("test-model", script)),
+        &crate::INSTALLERS,
+        lease,
     )
     .expect("root trunk")
 }
@@ -395,8 +404,18 @@ fn live_child(parent: &Avatar, name: &str) -> Avatar {
 struct Collecting {
     facts: Vec<Record>,
     transients: Vec<Transient>,
+    signals: Vec<Signal>,
 }
 impl Sink for Collecting {
+    fn accept(&mut self, signal: Signal) {
+        match &signal {
+            Signal::Fact(id, rec) => self.fact(*id, rec),
+            Signal::Transient(id, t) => self.transient(*id, t),
+            Signal::Born(id, born) => self.born(*id, born),
+        }
+        self.signals.push(signal);
+    }
+
     fn fact(&mut self, _id: AgentId, rec: &Recorded<Record>) {
         self.facts.push(rec.value().clone());
     }
@@ -434,7 +453,7 @@ impl<S: Sink> Sink for SignalOnWaiting<S> {
 /// waiting would never signal the release, and the call would hang
 /// rather than pass, so this also proves the hold is real.
 #[test]
-fn converse_settled_holds_for_a_live_child_then_quiesces() {
+fn settled_conversation_holds_for_a_live_child_then_quiesces() {
     let mut session = settled_trunk(
         "slow-child",
         Script::new()
@@ -442,6 +461,7 @@ fn converse_settled_holds_for_a_live_child_then_quiesces() {
             .then(Reply::text("thanks for the update")),
         false,
         false,
+        crate::agent::fleet::AGENT_LEASE_IDLE,
     );
     let child = live_child(&session, "helper");
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(1);
@@ -456,7 +476,9 @@ fn converse_settled_holds_for_a_live_child_then_quiesces() {
         inner: Collecting::default(),
         release: release_tx,
     };
-    converse_settled(&mut session, "please help".into(), &mut sink)
+    SettledConversation::new(&session)
+        .unwrap()
+        .exchange(&mut session, "please help".into(), &mut sink)
         .expect("the exchange itself must not fail for want of a reply");
     settler.join().expect("the settling thread must not panic");
 
@@ -485,7 +507,7 @@ fn converse_settled_holds_for_a_live_child_then_quiesces() {
 /// is genuine, not asserted; the child's own script has no tool calls, so
 /// nothing races the parent's independent one.
 #[test]
-fn converse_settled_ends_even_when_a_child_never_replies() {
+fn settled_conversation_ends_even_when_a_child_never_replies() {
     let mut session = settled_trunk(
         "child-no-reply",
         Script::new()
@@ -493,6 +515,7 @@ fn converse_settled_ends_even_when_a_child_never_replies() {
             .then(Reply::text("thanks for the update")),
         false,
         false,
+        crate::agent::fleet::AGENT_LEASE_IDLE,
     );
     let mut no_reply = Script::new();
     for _ in 0..8 {
@@ -517,7 +540,9 @@ fn converse_settled_ends_even_when_a_child_never_replies() {
     .expect("spawn must succeed");
 
     let mut sink = Collecting::default();
-    converse_settled(&mut session, "please help".into(), &mut sink)
+    SettledConversation::new(&session)
+        .unwrap()
+        .exchange(&mut session, "please help".into(), &mut sink)
         .expect("the exchange itself must not fail merely because a child did");
 
     assert!(
@@ -534,22 +559,292 @@ fn converse_settled_ends_even_when_a_child_never_replies() {
 /// class of refusal as a missing engine factory: an armed wakeup may fire
 /// with nothing left to wait it out once the fleet quiesces.
 #[test]
-fn converse_settled_refuses_a_trunk_that_arms_its_own_wakeups() {
+fn settled_conversation_refuses_a_trunk_that_arms_its_own_wakeups() {
     for (tag, allow_schedule, resume_on_reset) in [
         ("allow-schedule", true, false),
         ("resume-on-reset", false, true),
     ] {
-        let mut session = settled_trunk(tag, Script::new(), allow_schedule, resume_on_reset);
-        let mut sink = Collecting::default();
-        let err = converse_settled(&mut session, "hello".into(), &mut sink)
-            .expect_err("a trunk that arms its own wakeups must be refused, not run");
+        let session = settled_trunk(
+            tag,
+            Script::new(),
+            allow_schedule,
+            resume_on_reset,
+            crate::agent::fleet::AGENT_LEASE_IDLE,
+        );
+        let before = format!("{:?}", session.rendered_messages());
+        let err = SettledConversation::new(&session)
+            .err()
+            .expect("a trunk that arms its own wakeups must be refused, not run");
         assert!(
             err.contains("wakeup"),
             "the refusal must name what it refuses: {err}"
         );
         assert!(
-            sink.facts.is_empty() && sink.transients.is_empty(),
-            "a refused construction must touch no bus"
+            session.inbox().is_empty() && format!("{:?}", session.rendered_messages()) == before,
+            "a refused construction must seed no message"
         );
     }
+}
+
+#[test]
+fn settled_conversation_refuses_another_root_before_seeding() {
+    let root = settled_trunk(
+        "owner",
+        Script::new(),
+        false,
+        false,
+        crate::agent::fleet::AGENT_LEASE_IDLE,
+    );
+    let mut other = settled_trunk(
+        "other",
+        Script::new(),
+        false,
+        false,
+        crate::agent::fleet::AGENT_LEASE_IDLE,
+    );
+    let before = format!("{:?}", other.rendered_messages());
+    let mut settled = SettledConversation::new(&root).unwrap();
+    let mut sink = Collecting::default();
+    assert_eq!(
+        settled.exchange(&mut other, "wrong root".into(), &mut sink),
+        Err(format!(
+            "this settled conversation belongs to agent {}, not {}",
+            root.agent.id, other.agent.id
+        ))
+    );
+    assert!(other.inbox().is_empty());
+    assert_eq!(format!("{:?}", other.rendered_messages()), before);
+    assert!(sink.signals.is_empty());
+}
+
+fn parent_script() -> Script {
+    (0..8).fold(Script::new(), |script, _| {
+        script.then(Reply::text("settled"))
+    })
+}
+
+#[test]
+fn helper_ready_precedes_its_parent_result_before_the_next_draw() {
+    let mut root = settled_trunk(
+        "ready-order",
+        parent_script(),
+        false,
+        false,
+        crate::agent::fleet::AGENT_LEASE_IDLE,
+    );
+    let mut settled = SettledConversation::new(&root).unwrap();
+    let mut child = root.fork_named("helper").unwrap();
+    let child_agent = child.agent.clone();
+    let root_emit = settled
+        .bus
+        .emitter(root.agent.id, root.agent.mailbox.clone());
+    let emit = root_emit.child(
+        child_agent.id,
+        child_agent.mailbox.clone(),
+        crate::record::Born {
+            log_dir: child.log_dir().clone(),
+            name: "helper".into(),
+            parent: Some(root.agent.id),
+            resumed: None,
+            recorder: child.recorder(),
+        },
+    );
+    let provider = crate::agent::testkit::scripted(
+        "test-model",
+        Script::new().then(Reply::tool_calls(vec![crate::agent::testkit::ral_call(
+            "reply",
+            "exarch-agents `reply 42",
+        )])),
+    );
+    let (release, held) = std::sync::mpsc::channel();
+    let helper = std::thread::spawn(move || {
+        let outcome = child
+            .deliberate(
+                &provider,
+                Some(("help".into(), crate::record::Voice::Human)),
+                None,
+                &emit,
+            )
+            .unwrap();
+        assert!(matches!(outcome, crate::agent::outcome::Outcome::Replied));
+        // No attend/draw may publish the idle state while the parent finishes.
+        held.recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        drop(child);
+    });
+    let mut sink = Collecting::default();
+    let token = root.agent.token.clone();
+    let timeout = ral_core::process::arm_callback(std::time::Duration::from_secs(5), move || {
+        token.cancel(ral_core::process::CancelCause::TimedOut);
+    });
+    settled
+        .exchange(&mut root, "help".into(), &mut sink)
+        .unwrap();
+    drop(timeout);
+    assert!(!root.agent.token.terminated(), "the parent must settle");
+    release.send(()).unwrap();
+    helper.join().unwrap();
+    let ready = sink
+        .signals
+        .iter()
+        .position(|signal| {
+            matches!(
+                signal,
+                Signal::Transient(id, Transient::State(AgentState::Ready)) if *id == child_agent.id
+            )
+        })
+        .expect("reply publishes Ready without another draw");
+    let result = sink.signals.iter().position(|signal| matches!(
+        signal,
+        Signal::Fact(id, rec) if *id == root.agent.id && matches!(
+            rec.value(), Record::Display(Display::SubagentDone { name, .. }) if name == "helper"
+        )
+    )).expect("parent announces its helper's result");
+    assert!(ready < result);
+    assert!(!sink.signals.iter().any(|signal| matches!(
+        signal, Signal::Transient(id, Transient::Died) if *id == child_agent.id
+    )));
+    assert_eq!(child_agent.reply(), Some(FOValue::Int { value: 42 }));
+}
+
+fn spawn_settled_helper(root: &Avatar, settled: &SettledConversation) -> Arc<crate::agent::Agent> {
+    let child = root.fork_named("helper").unwrap();
+    child.agent.provider.swap(crate::agent::testkit::scripted(
+        "test-model",
+        Script::new()
+            .then(Reply::tool_calls(vec![crate::agent::testkit::ral_call(
+                "first",
+                "exarch-agents `reply 1",
+            )]))
+            .then(Reply::tool_calls(vec![crate::agent::testkit::ral_call(
+                "again",
+                "exarch-agents `reply 2",
+            )])),
+    ));
+    let agent = child.agent.clone();
+    let emit = settled
+        .bus
+        .emitter(root.agent.id, root.agent.mailbox.clone());
+    spawn_async(
+        child,
+        AsyncSpawn {
+            name: "helper".into(),
+            prompt: Some("help".into()),
+            resumed: None,
+        },
+        &emit,
+    )
+    .unwrap();
+    agent
+}
+
+struct CancelOnDrop(Arc<crate::agent::Agent>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0
+            .cancel_tree(ral_core::process::CancelCause::Cancelled);
+    }
+}
+
+#[test]
+fn settled_conversation_reuses_a_helper_without_a_second_birth() {
+    let mut root = settled_trunk(
+        "reuse-helper",
+        parent_script(),
+        false,
+        false,
+        crate::agent::fleet::AGENT_LEASE_IDLE,
+    );
+    let mut settled = SettledConversation::new(&root).unwrap();
+    let helper = spawn_settled_helper(&root, &settled);
+    let _cancel = CancelOnDrop(helper.clone());
+    let mut first = Collecting::default();
+    settled
+        .exchange(&mut root, "first".into(), &mut first)
+        .unwrap();
+    assert_eq!(helper.reply(), Some(FOValue::Int { value: 1 }));
+    assert!(root.fleet.resolve("helper").is_some());
+    assert_eq!(
+        first
+            .signals
+            .iter()
+            .filter(|s| matches!(s, Signal::Born(id, _) if *id == helper.id))
+            .count(),
+        1
+    );
+
+    root.agent.message(&helper, "follow up".into());
+    let mut second = Collecting::default();
+    settled
+        .exchange(&mut root, "second".into(), &mut second)
+        .unwrap();
+    assert_eq!(helper.reply(), Some(FOValue::Int { value: 2 }));
+    assert!(!second.signals.iter().any(|s| matches!(s, Signal::Born(..))));
+    for state in [AgentState::AwaitingModel, AgentState::Ready] {
+        assert!(second.signals.iter().any(|s| matches!(s,
+            Signal::Transient(id, Transient::State(actual)) if *id == helper.id && *actual == state
+        )), "helper state {state:?} must remain connected");
+    }
+    assert!(second.signals.iter().any(|s| matches!(s,
+        Signal::Fact(id, rec) if *id == helper.id && matches!(rec.value(), Record::Display(Display::ToolCall { .. }))
+    )), "helper tool facts must remain connected");
+    assert!(second.signals.iter().any(|s| matches!(s,
+        Signal::Fact(id, rec) if *id == helper.id && matches!(rec.value(), Record::Forensic(crate::record::Forensic::UsageDelta { .. }))
+    )), "helper usage must remain connected");
+}
+
+#[test]
+fn settled_conversation_drains_a_lease_death_at_the_next_exchange() {
+    let mut root = settled_trunk(
+        "late-death",
+        parent_script(),
+        false,
+        false,
+        std::time::Duration::from_millis(50),
+    );
+    let mut settled = SettledConversation::new(&root).unwrap();
+    let mut first = Collecting::default();
+    settled
+        .exchange(&mut root, "first".into(), &mut first)
+        .unwrap();
+    let helper = spawn_settled_helper(&root, &settled);
+    let weak = Arc::downgrade(&helper);
+    let id = helper.id;
+    drop(helper);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while weak.strong_count() != 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the helper's reply lease must expire"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(!first.signals.iter().any(|s| matches!(s,
+        Signal::Transient(agent, Transient::Died) if *agent == id
+    )));
+    let mut second = Collecting::default();
+    settled
+        .exchange(&mut root, "second".into(), &mut second)
+        .unwrap();
+    let died = second
+        .signals
+        .iter()
+        .position(|s| {
+            matches!(s,
+                Signal::Transient(agent, Transient::Died) if *agent == id
+            )
+        })
+        .expect("the queued death must drain at the next exchange");
+    assert!(
+        second.facts.iter().any(|fact| matches!(fact,
+            Record::Display(Display::SubagentDone { name, outcome: Settlement::Finished, .. })
+                if name == "helper"
+        )),
+        "the expired helper must have replied successfully"
+    );
+    let working = second.signals.iter().position(|s| matches!(s,
+        Signal::Transient(agent, Transient::State(AgentState::AwaitingModel)) if *agent == root.agent.id
+    )).expect("the next exchange must run");
+    assert!(died < working);
 }

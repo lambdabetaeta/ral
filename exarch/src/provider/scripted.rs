@@ -35,6 +35,17 @@ impl Reply {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn stopped(reason: &str) -> Self {
+        let mut reply = Self::text("stopped before replying");
+        reply
+            .outcome
+            .as_mut()
+            .expect("a text completion")
+            .stop_reason = Some(StopReason::Other(reason.into()));
+        reply
+    }
+
     /// A turn whose stream broke after `text` reached the caller, on a cause
     /// the driver would retry: production stalls only on those, and reports
     /// no usage for the cut turn.

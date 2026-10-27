@@ -10,4 +10,7 @@ workspace = true
 
 [dependencies]
 ral-core = { path = "../../core" }
-ral-daemon = { path = "../../ral-daemon" }
+guest-abi = { path = "../../guest-abi" }
+
+[dev-dependencies]
+tempfile.workspace = true

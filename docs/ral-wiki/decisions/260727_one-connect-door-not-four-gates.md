@@ -97,3 +97,12 @@ is not reversed by this page, only its four-gate architecture: the guest
 still reaches the network itself rather than a bespoke per-protocol verb,
 `fetch-url` stays retired, and host-mode exarch still has no web door of its
 own.
+
+> **Amended 2026-10-27.**
+> The policy data is `ral_core::egress::{Host, NetPolicy, refusal}`;
+> `exarch::net_policy::load` reads the unchanged policy format. The gate owns
+> `netgate::AuditLog` and `netgate::LEDGER` (`netgate/src/ledger.rs`).
+> Synod opens the ledger in its state directory and supplies policy and audit
+> separately in `netgate::Config`. Exarch carries only `RootConfig.search`
+> and opens no ledger in host mode. The CONNECT judgment, JSON records,
+> strict poison and interprocess rotation lock retain their meaning.

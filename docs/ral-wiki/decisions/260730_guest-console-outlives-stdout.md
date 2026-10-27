@@ -31,6 +31,17 @@ status: active
 > lost the very refusal it carried. Still `broker::VERSION` 3, never released at
 > the shape before this.
 
+> **Amended 2026-10-27.** See [[decisions/261027_the-vm-crates-are-layered|the-vm-crates-are-layered]].
+> `GuestConsole` is the sum `Kept { log, tail } | Unkept`, without a default:
+> hcs retains a copy; vz sends its console to the owning process's stdout.
+> An absent log and an empty retained tail remain distinct from an unkept
+> console. `vm-manager/src/error.rs::GuestConsole::report(why, spell)` owns
+> the standalone engine-failure report and caller-supplied path spelling,
+> naming the machine broker without product-specific wording. Synod's
+> `assistant/guest.rs::capture` writes the report into its run directory.
+> The broker carries `Reply::Console(GuestConsole)`; its wire contract is
+> recorded in [[decisions/260725_windows-machine-broker|windows-machine-broker]].
+
 **A diagnostic written to a handle that goes nowhere is not a diagnostic, so the
 guest's console pump tees — `stdout`, a bounded per-machine log in the backend's
 own cache, and a short ring of the last lines in memory — and the boot timeout
@@ -131,5 +142,6 @@ and its COM-port console),
 
 Cite: `vm-manager/src/hcs/console.rs` (`Console::create`, `Tail`, `open_log`,
 `sweep`, `keep_logging`), `vm-manager/src/hcs/mod.rs` (`Guest::dialled`), `vm-manager/src/error.rs` (`Error::Undialled`, `console_says`, `quoted`),
-`vm-manager/src/broker/mod.rs` (`VERSION`, 3 since the amendment),
+`vm-manager/src/error.rs` (`GuestConsole::report`),
+`vm-manager/src/broker/wire.rs` (`VERSION`),
 `vm-manager/src/os_path.rs`.

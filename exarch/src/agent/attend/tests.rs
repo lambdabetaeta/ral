@@ -7,27 +7,35 @@ use crate::record::{Forensic, Memory, Record};
 use ral_core::data::FOValue;
 use std::time::Duration;
 
-/// The park verdict reads engagement off the agent's own exchange clock,
-/// never off the TUI's focus cursor.
-#[test]
-fn park_mode_reads_engagement_from_the_exchange_clock() {
-    let held = trunk(true);
-    assert_eq!(held.park_mode(held.agent.engaged()), ParkMode::Held);
+type DrawHook = Box<dyn FnOnce(&Avatar)>;
 
+thread_local! {
+    static BEFORE_DRAW: std::cell::Cell<Option<DrawHook>> =
+        const { std::cell::Cell::new(None) };
+}
+
+pub(super) fn before_draw(avatar: &Avatar) {
+    if let Some(hook) = BEFORE_DRAW.take() {
+        hook(avatar);
+    }
+}
+
+#[test]
+fn only_a_current_reply_completion_parks_a_child_for_followups() {
+    let held = trunk(true);
+    assert_eq!(held.park_mode(), ParkMode::Held);
     let parent = Avatar::for_test("system").unwrap();
     let child = parent.fork().expect("fork child");
-    assert_eq!(
-        child.park_mode(child.agent.engaged()),
-        ParkMode::Quiesce,
-        "un-engaged, no live children, no schedule: idle quiesce delivers the outcome"
-    );
-
+    assert_eq!(child.park_mode(), ParkMode::Quiesce);
     child.agent.mailbox.steer("hi".into());
-    assert_eq!(
-        child.park_mode(child.agent.engaged()),
-        ParkMode::Engaged,
-        "a human exchange engages the child, which now parks messageable"
-    );
+    assert_eq!(child.park_mode(), ParkMode::Quiesce);
+    child
+        .agent
+        .deposit_reply(&parent.fleet, FOValue::Int { value: 1 });
+    assert_eq!(child.park_mode(), ParkMode::Engaged);
+    child.agent.disarm_reply_lease();
+    assert!(child.agent.has_reply());
+    assert_eq!(child.park_mode(), ParkMode::Quiesce);
 }
 
 /// A conversing trunk with no human attached — the embedded one synod
@@ -40,17 +48,11 @@ fn an_unattended_conversing_trunk_waits_on_its_fleet_alone() {
         !embedded.agent.role.returns() && !embedded.fleet.launch.trunk.attended(),
         "the fixture is a conversing trunk nobody types into"
     );
-    assert_eq!(
-        embedded.park_mode(embedded.agent.engaged()),
-        ParkMode::Quiesce
-    );
+    assert_eq!(embedded.park_mode(), ParkMode::Quiesce);
     let mut spec = TestAgentSpec::new("helper");
     spec.role = crate::agent::Role::child(&embedded.agent);
     let _helper = test_agent(&embedded.fleet, spec).expect("a live child");
-    assert_eq!(
-        embedded.park_mode(embedded.agent.engaged()),
-        ParkMode::HeldByChildren
-    );
+    assert_eq!(embedded.park_mode(), ParkMode::HeldByChildren);
 }
 
 /// The `reply` refusal keys on the role, not on trunk-ness, and is an ordinary call error rather than a termination.
@@ -73,7 +75,7 @@ fn reply_refused_identically_for_every_conversing_root() {
         "a second root must be refused with the same text, got: {other_result}"
     );
     assert_eq!(
-        other.park_mode(other.agent.engaged()),
+        other.park_mode(),
         ParkMode::Held,
         "a second root still parks Held after a refused reply"
     );
@@ -102,39 +104,6 @@ fn sub_agent_without_reply_is_re_nudged_then_fails() {
         "the final prose must not be scraped as a reply"
     );
     assert!(child.is_ready());
-}
-
-/// A standing deposited reply gates every nudge kind at once — the single
-/// `quiet` test, not three separate flags.  A registered child holding a
-/// reply from an earlier turn draws no empty-turn nudge on this one.
-#[test]
-fn deposited_reply_suppresses_every_nudge() {
-    let parent = Avatar::for_test("system").unwrap();
-    let mut child = parent.fork().expect("fork child");
-    child.agent.deposit_reply(
-        &parent.fleet,
-        FOValue::String {
-            value: "already replied".into(),
-        },
-    );
-
-    child
-        .agent
-        .provider
-        .swap(scripted("test-model", Script::new().then(Reply::empty())));
-    let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, child.agent.id);
-    child.couple(&emit);
-    child.seed("do more".into());
-    let item = child.inbox.next_item().expect("the seeded item");
-    child
-        .take_up(&item, &emit)
-        .expect("an identity seat never severs");
-
-    assert!(
-        child.inbox.next_item().is_none(),
-        "a standing reply must suppress even the empty-turn nudge, budget-free rules included"
-    );
 }
 
 /// A host-side unwind — transport, decode, render — is recorded, fails the
@@ -559,6 +528,74 @@ fn take_up_delivers_unclaimed_ready_and_non_done_surfaces_and_propagates_severed
     });
     let severed_next = session.inbox.next_item().expect("severed surface");
     assert!(matches!(session.take_up(&severed_next, &emit), Err(c) if c == cause));
+}
+
+#[test]
+fn a_nonreply_followup_waits_for_real_schedules_or_busy_descendants() {
+    for scheduled in [false, true] {
+        let parent = Avatar::for_test_with(TestTrunk {
+            allow_schedule: true,
+            ..TestTrunk::new("system")
+        })
+        .unwrap();
+        let mut child = parent.fork_named("helper").unwrap();
+        let (tx, _rx) = crate::bus::channel();
+        let emit = Emitter::new(tx, child.agent.id);
+        child.agent.provider.swap(scripted(
+            "test-model",
+            Script::new().then(Reply::tool_calls(vec![ral_call(
+                "first",
+                "exarch-agents `reply 'first'",
+            )])),
+        ));
+        child.seed("initial task".into());
+        let first = child.inbox.next_item().unwrap();
+        child.take_up(&first, &emit).unwrap();
+        assert!(child.agent.reply_completion_armed());
+        let descendant = if scheduled {
+            child
+                .agent
+                .schedules
+                .schedule(
+                    Trigger::After(Duration::from_hours(2)),
+                    "continue later".into(),
+                    "continuation".into(),
+                    &child.agent.mailbox,
+                )
+                .unwrap();
+            None
+        } else {
+            let mut spec = TestAgentSpec::new("grandchild");
+            spec.role = Role::child(&child.agent);
+            Some(test_agent(&child.fleet, spec).unwrap())
+        };
+        child.agent.provider.swap(scripted(
+            "test-model",
+            Script::new().then(Reply::error(ProviderError::Api {
+                status: Some(400),
+                model: "test-model".into(),
+                message: "terminal request error".into(),
+                body: None,
+            })),
+        ));
+        parent.agent.message(&child.agent, "follow up".into());
+        let followup = child.inbox.next_item().unwrap();
+        let step = child.take_up(&followup, &emit).unwrap();
+        assert!(matches!(step.settled, Some(AgentOutcome::Failed(_))));
+        assert!(!child.agent.reply_completion_armed());
+        assert_eq!(
+            child.park_mode(),
+            if scheduled {
+                ParkMode::UntilCancelled
+            } else {
+                ParkMode::HeldByChildren
+            }
+        );
+        assert!(child.is_ready());
+        drop(descendant);
+        child.agent.schedules.clear();
+        assert_eq!(child.park_mode(), ParkMode::Quiesce);
+    }
 }
 
 mod lifecycle;

@@ -240,7 +240,7 @@ impl Avatar {
     /// # Errors
     /// The engine's severance.
     pub(super) fn scratch_bytes(&self) -> Result<Option<(String, u64)>, Severed> {
-        let Some(scratch) = self.seat.read(|t| t.env_var("EXARCH_SCRATCH"))? else {
+        let Some(scratch) = self.seat.read(|t| t.env_var(crate::app::SCRATCH_VAR))? else {
             return Ok(None);
         };
         let bytes = self

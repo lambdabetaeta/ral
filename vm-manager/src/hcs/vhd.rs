@@ -1,94 +1,30 @@
-//! Disk images Hyper-V will open: raw bytes plus one 512-byte footer.
-//!
-//! The guest's images are raw ext4 — a filesystem written to a file, nothing
-//! more — and Virtualization.framework attaches exactly that.  Hyper-V will
-//! not: a `VirtualDisk` attachment must be a VHD or VHDX, and a raw image is
-//! refused at machine creation.  Wrapping the same images at install time was
-//! always the plan for Windows; what this module does is the cheaper half of
-//! that promise, and the honest one.
-//!
-//! # Why a *fixed* VHD, and why that is not a conversion
-//!
-//! A fixed VHD is the original format's simplest case: the disk's sectors,
-//! verbatim, followed by a 512-byte footer describing them.  So "wrapping" a
-//! raw image means appending 512 bytes — the bytes of the filesystem are
-//! untouched and identically placed.  Nothing is transcoded, no block map is
-//! built, and the same file is still a raw ext4 image with a trailing footer as
-//! far as the guest's kernel is concerned (it reads the partition-less device
-//! from offset zero and never looks at the tail).
-//!
-//! VHDX would have been the modern choice and is strictly worse here: it is a
-//! log-structured container with metadata regions and a block allocation table,
-//! so producing one means writing a real converter — several hundred lines that
-//! can be subtly wrong — where this is a header struct and a checksum.  Nothing
-//! synod does needs what VHDX adds (no snapshots, no online resize, no 2 TB+
-//! disks, no shared VHD).
-//!
-//! # The two disks, and their different lifetimes
-//!
-//! - The **rootfs** is the shipped read-only image, wrapped once into synod's
-//!   own cache ([`ensure_rootfs_vhd`]) and reused by every session afterwards.
-//!   That costs one copy of a two-gigabyte file on first launch, which is why
-//!   the marker beside it exists: a second launch finds the wrap already done.
-//!   A build that ships a `.vhd` directly is passed through untouched, so this
-//!   cost is a development convenience, not a permanent tax.
-//! - The **session disk** ([`create_session_vhd`]) is made fresh per session and
-//!   deleted with the machine.  It is a *dynamic* disk rather than a fixed one,
-//!   for a reason worth knowing before changing it: Hyper-V refuses a virtual
-//!   disk whose file is sparse, so growth has to be the format's business and
-//!   cannot be the filesystem's.  It is never formatted here — the guest's
-//!   initramfs does that on every boot, because a disk that arrives empty is a
-//!   disk with nothing of a previous session on it.
-//!
-//! # On the filesystem calls below
-//!
-//! Every one of them is host-side machine plumbing performed *before* a guest
-//! exists: making a session disk, wrapping the shipped rootfs into the
-//! application's own cache.  There is no `Shell` to route it through and no run
-//! to raise a card in — the same standing the macOS backend's
-//! `create_session_image` has, and for the same reason.  Each call is a typed
-//! site (`crate::site`), whose variant says what the place is.
+//! Fixed VHD wraps leave filesystem bytes unchanged and append a 512-byte footer.
+//! Session VHDs grow through the format: Hyper-V refuses sparse host files.
+//! Only the guest formats session disks; rootfs wraps are immutable cached publications.
 
-use std::fs::{File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
+use std::fs::File;
+use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
+use crate::error::{Act, Error, HostFile};
+use crate::hcs::win;
+use crate::lifecycle::unix_seconds;
+use crate::media::{hex, inflate, publish};
 use crate::site::{Silent, site};
-use crate::{Act, Error, HostFile};
+use sha2::{Digest, Sha256};
 
-/// A disk's sector size, and so the footer's own length.
 const SECTOR: u64 = 512;
 
 /// Seconds between the Unix epoch and the VHD epoch (2000-01-01T00:00:00Z),
 /// which is what a footer's timestamp counts from.
 const VHD_EPOCH_OFFSET: u64 = 946_684_800;
 
-/// The size each session's read-write disk *declares*, in bytes (8 GiB).
-///
-/// What it costs is what the session writes into it, because the disk is dynamic
-/// ([`create_session_vhd`]); what it declares is large because the guest's whole
-/// writable world lives on it — the overlay upper for every rootfs write, plus
-/// scratch.
+/// The dynamic disk grows on writes; its declared size includes overlay writes and scratch.
 pub(super) const SESSION_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
-/// The rootfs as a path Hyper-V can attach, wrapping the shipped image into
-/// `cache` if it is not already a VHD.
-///
-/// Three spellings of "the rootfs" reach here, and the difference between them
-/// is one branch each.  A `.vhd` is already what Hyper-V wants and is attached
-/// where it lies.  A plain image — what the image pipeline builds, and what a
-/// checkout therefore has — is copied and given a footer.  A `.zst` archive is
-/// inflated *while* being copied, in the same pass, because that is how the
-/// rootfs arrives from an installation: a Windows Installer cabinet cannot hold
-/// a file of two gigabytes at all (`light` refuses it outright), so the MSI
-/// ships the same compressed image the macOS bundle does.  Inflating here rather
-/// than earlier is what keeps that from costing a second copy — the bytes are
-/// decompressed straight into the disk that was going to be written anyway.
-///
 /// # Errors
-/// Returns [`Error::HostFile`] if the image cannot be read or inflated, the
-/// cache cannot be made, or the wrapped copy cannot be written.
+/// Returns the image read, inflation, cache or wrapped-image write refusal.
 pub(super) fn ensure_rootfs_vhd(image: &Path, cache: &Path) -> Result<PathBuf, Error> {
     if image
         .extension()
@@ -102,141 +38,53 @@ pub(super) fn ensure_rootfs_vhd(image: &Path, cache: &Path) -> Result<PathBuf, E
 
     let source = site!(Silent::RootfsWrapProbe, std::fs::metadata(image))
         .map_err(Error::host_file(HostFile::GuestImage, Act::Read, image))?;
-    let wrapped = cache.join("rootfs.vhd");
-    let marker = cache.join("rootfs.vhd.wrapped");
-    let stamp = stamp(image, &source);
-    if site!(Silent::RootfsWrapProbe, &wrapped => is_file())
-        && site!(Silent::RootfsWrapProbe, std::fs::read_to_string(&marker))
-            .is_ok_and(|seen| seen == stamp)
-    {
-        return Ok(wrapped);
-    }
-
-    site!(Silent::RootfsWrap, std::fs::create_dir_all(cache)).map_err(Error::host_file(
-        HostFile::ImageCache,
-        Act::Make,
-        cache,
-    ))?;
-
-    let bytes = if compressed {
-        // No checksum verified here, and the reason is worth stating rather
-        // than leaving as an omission. The archive reaches this code from one
-        // of two places: an installation directory under `Program Files`,
-        // which only an administrator can write, or a checkout the
-        // maintainer built themselves. Windows Installer already validates
-        // its own cabinet at install time, so a download corrupted in
-        // transit fails the *install* rather than arriving here; and against
-        // someone who can rewrite `Program Files`, a hash shipped beside the
-        // file in the same directory proves nothing.
-        crate::media::inflate(image, &wrapped, None)?
-    } else {
-        // Written to a temporary name and renamed into place, so an
-        // interrupted launch never leaves a half-copied disk that a later
-        // one would attach.
-        let part = cache.join("rootfs.vhd.part");
-        let land = || -> Result<u64, Error> {
-            let copied = site!(Silent::RootfsWrap, std::fs::copy(image, &part));
-            copied.map_err(Error::host_file(HostFile::WrappedImage, Act::Write, &part))?;
-            let placed = site!(Silent::RootfsWrap, std::fs::rename(&part, &wrapped));
-            placed.map_err(Error::host_file(
-                HostFile::WrappedImage,
-                Act::Place,
-                &wrapped,
-            ))?;
-            Ok(source.len())
-        };
-        land().inspect_err(|_| {
-            let _ = site!(Silent::RootfsWrap, std::fs::remove_file(&part));
-        })?
-    };
-
-    let unwritten = |act| Error::host_file(HostFile::WrappedImage, act, &wrapped);
-    let mut options = OpenOptions::new();
-    options.write(true);
-    let mut file =
-        site!(Silent::RootfsWrap, &options => open(&wrapped)).map_err(unwritten(Act::Open))?;
-    let disk = pad_to_sector(&file, bytes).map_err(unwritten(Act::Size))?;
-    append_footer(&mut file, disk).map_err(unwritten(Act::Write))?;
-    drop(file);
-
-    site!(Silent::RootfsWrap, std::fs::write(&marker, &stamp)).map_err(Error::host_file(
-        HostFile::WrapMarker,
-        Act::Write,
-        &marker,
-    ))?;
-    Ok(wrapped)
-}
-
-/// What the marker beside a wrapped rootfs records: *which* image was wrapped,
-/// not that some wrapping happened.  A rebuilt rootfs has a new length or a new
-/// modification time, and must not be served from a stale wrap.  The path is
-/// recorded as its own units ([`crate::os_path::encode`]), never a lossy
-/// rendering under which two images could share one marker.
-fn stamp(image: &Path, source: &std::fs::Metadata) -> String {
-    format!(
-        "{}\n{}\n{}\n",
-        crate::os_path::encode(image),
-        source.len(),
+    let modified =
         source
             .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_secs())
-    )
+            .map_err(Error::host_file(HostFile::GuestImage, Act::Read, image))?;
+    let mut hasher = Sha256::new();
+    hasher.update(image.as_os_str().as_encoded_bytes());
+    hasher.update(source.len().to_le_bytes());
+    hasher.update(
+        modified
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |time| time.as_secs())
+            .to_le_bytes(),
+    );
+    hasher.update(b"fixed-vhd-1");
+    let key = hex(&hasher.finalize()[..8]);
+    let leaf = format!("rootfs-{key}.vhd");
+    let wrapped = cache.join(&leaf);
+    publish(cache, &leaf, |stage| {
+        let bytes = if compressed {
+            // Program Files is administrator-owned; Installer verifies the cabinet.
+            inflate(image, stage, None)?
+        } else {
+            let mut source = site!(Silent::RootfsWrap, File::open(image))
+                .map_err(Error::host_file(HostFile::GuestImage, Act::Open, image))?;
+            io::copy(&mut source, stage).map_err(Error::host_file(
+                HostFile::WrappedImage,
+                Act::Write,
+                &wrapped,
+            ))?
+        };
+        let unwritten = |act| Error::host_file(HostFile::WrappedImage, act, &wrapped);
+        let disk = pad_to_sector(stage, bytes).map_err(unwritten(Act::Size))?;
+        append_footer(stage, disk).map_err(unwritten(Act::Write))
+    })
 }
 
-/// Make one session's empty read-write disk in `dir`.
-///
-/// A **dynamic** VHD, where the rootfs is a fixed one, and the difference is not
-/// a preference: Hyper-V refuses to open a virtual disk whose *file* is sparse —
-/// `0xC03A001A`, "virtual hard disk files must be uncompressed and unencrypted
-/// and must not be sparse" — so the obvious trick of asking NTFS for a sparse
-/// eight-gigabyte file and appending a footer produces a machine that will not
-/// start. The format has its own answer, which is what this writes: a dynamic
-/// disk *declares* its size and allocates blocks as they are first written, so
-/// an empty one is eighteen kilobytes on disk and grows only as the session
-/// uses it. Growth is then Hyper-V's business rather than the filesystem's,
-/// which is the whole reason it is allowed.
-///
-/// # Errors
-/// Returns [`Error::HostFile`] if the disk cannot be created or written.
-pub(super) fn create_session_vhd(dir: &Path) -> Result<PathBuf, Error> {
-    site!(Silent::SessionDiskCreate, std::fs::create_dir_all(dir)).map_err(Error::host_file(
-        HostFile::SessionDirectory,
-        Act::Make,
-        dir,
-    ))?;
-    let path = dir.join(format!(
-        "synod-session-{}-{}.vhd",
-        std::process::id(),
-        unix_seconds()
-    ));
-    let mut file = site!(Silent::SessionDiskCreate, File::create(&path))
-        .map_err(Error::host_file(HostFile::SessionDisk, Act::Create, &path))?;
-    let write = |file: &mut File, bytes: &[u8]| {
-        file.write_all(bytes)
-            .map_err(Error::host_file(HostFile::SessionDisk, Act::Write, &path))
-    };
-    // A dynamic disk is read from both ends: the footer appears at offset zero
-    // as well as at the end of the file, so a reader that finds the file
-    // truncated can still recover the geometry from the copy at the front.
-    write(&mut file, &footer(SESSION_BYTES, Kind::Dynamic))?;
-    write(&mut file, &dynamic_header(SESSION_BYTES))?;
-    // Every block unallocated: `0xFFFFFFFF` is the block-allocation table's
-    // "not present yet", and an empty disk is nothing but a table of them.
-    write(&mut file, &vec![0xFF; block_table_bytes(SESSION_BYTES)])?;
-    write(&mut file, &footer(SESSION_BYTES, Kind::Dynamic))?;
+/// Write an empty dynamic VHD; sparse host files cannot be attached by Hyper-V.
+pub(super) fn write_session_vhd(file: &mut File) -> io::Result<()> {
+    // Both footer copies permit recovery from a truncated dynamic disk.
+    file.write_all(&footer(SESSION_BYTES, Kind::Dynamic))?;
+    file.write_all(&dynamic_header(SESSION_BYTES))?;
+    file.write_all(&vec![0xFF; block_table_bytes(SESSION_BYTES)])?;
+    file.write_all(&footer(SESSION_BYTES, Kind::Dynamic))?;
     file.flush()
-        .map_err(Error::host_file(HostFile::SessionDisk, Act::Flush, &path))?;
-    Ok(path)
 }
 
-/// Which of the two disk layouts a footer describes.
-///
-/// The rootfs is [`Kind::Fixed`] — its data *is* the file, so the footer only
-/// has to say how much of it there is. The session disk is [`Kind::Dynamic`],
-/// which means the file holds a header and a table instead, and the disk's
-/// blocks appear in it as they are first written.
+/// Fixed disks store sectors directly; dynamic disks allocate blocks through a header and table.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Fixed,
@@ -252,9 +100,7 @@ impl Kind {
         }
     }
 
-    /// Where the footer says the next structure is. A fixed disk has none, and
-    /// says so with an all-ones offset; a dynamic disk's header follows its
-    /// leading footer copy immediately.
+    /// Fixed disks use an all-ones offset; dynamic headers follow the leading footer.
     const fn data_offset(self) -> u64 {
         match self {
             Self::Fixed => u64::MAX,
@@ -263,9 +109,7 @@ impl Kind {
     }
 }
 
-/// How big one of a dynamic disk's blocks is (2 MiB), and so how finely it
-/// grows. The format's own conventional value, and what every tool that reads
-/// one expects to find.
+/// The format's conventional allocation unit is 2 MiB.
 const BLOCK_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Where a dynamic disk's block-allocation table starts: after the leading
@@ -279,10 +123,7 @@ fn block_table_bytes(disk: u64) -> usize {
     usize::try_from((entries * 4).next_multiple_of(SECTOR)).expect("a table of a few kilobytes")
 }
 
-/// The 1024-byte dynamic disk header: what makes the file growable.
-///
-/// Its checksum follows the same rule as the footer's — the ones' complement of
-/// the sum of every other byte — computed over all 1024 of them.
+/// Header checksum is the ones' complement of the byte sum with the checksum field zeroed.
 fn dynamic_header(disk: u64) -> [u8; 1024] {
     let mut h = [0u8; 1024];
     h[0..8].copy_from_slice(b"cxsparse");
@@ -300,9 +141,7 @@ fn dynamic_header(disk: u64) -> [u8; 1024] {
             .expect("two mebibytes")
             .to_be_bytes(),
     );
-    // h[36..40] is the checksum, left zero while it is computed; everything
-    // after it — the parent identity, timestamp, name, and locators — stays
-    // zero, which is what "no parent" means.
+    // h[36..40] stays zero until checksummed; parent fields stay zero because there is no parent.
     let sum = h
         .iter()
         .fold(0_u32, |acc, byte| acc.wrapping_add(u32::from(*byte)));
@@ -310,13 +149,7 @@ fn dynamic_header(disk: u64) -> [u8; 1024] {
     h
 }
 
-/// Round `len` up to a whole sector by extending the file, and answer the disk
-/// size the footer should describe.
-///
-/// An ext4 image is a whole number of blocks and so already sector-aligned;
-/// this exists because a footer that describes a non-integral number of sectors
-/// is malformed, and "the image was already fine" is a fact worth enforcing
-/// rather than assuming.
+/// A footer must describe a whole number of sectors, even if the source was not aligned.
 fn pad_to_sector(file: &File, len: u64) -> std::io::Result<u64> {
     let disk = len.next_multiple_of(SECTOR);
     if disk != len {
@@ -325,22 +158,13 @@ fn pad_to_sector(file: &File, len: u64) -> std::io::Result<u64> {
     Ok(disk)
 }
 
-/// Write the fixed-disk footer describing `disk` bytes of data at the end of
-/// the file.
 fn append_footer(file: &mut File, disk: u64) -> std::io::Result<()> {
     file.seek(SeekFrom::Start(disk))?;
     file.write_all(&footer(disk, Kind::Fixed))?;
     file.flush()
 }
 
-/// The 512-byte VHD footer for a fixed disk of `disk` bytes.
-///
-/// Every multi-byte field is big-endian — the format predates the x86
-/// convention it is usually read on — and the checksum is the one's complement
-/// of the sum of every other byte, computed with its own field zeroed.  Both
-/// are the kind of detail a reader should be able to check against the
-/// specification without running anything, so the layout is written out field
-/// by field rather than through a packed struct.
+/// Fields are big-endian; checksum is the ones' complement of the byte sum with its own field zeroed.
 fn footer(disk: u64, kind: Kind) -> [u8; 512] {
     let mut f = [0u8; 512];
     f[0..8].copy_from_slice(b"conectix");
@@ -351,8 +175,7 @@ fn footer(disk: u64, kind: Kind) -> [u8; 512] {
     // Where the next structure is, or all-ones for a fixed disk that has none.
     f[16..24].copy_from_slice(&kind.data_offset().to_be_bytes());
     f[24..28].copy_from_slice(&vhd_timestamp().to_be_bytes());
-    // Creator application and version: four bytes of identity, so a disk found
-    // loose on a disk can be traced back to what made it.
+    // The creator signature identifies a disk found outside its cache.
     f[28..32].copy_from_slice(b"synd");
     f[32..36].copy_from_slice(&0x0001_0000_u32.to_be_bytes());
     // Creator host OS: "Wi2k", the format's constant for Windows.
@@ -365,7 +188,7 @@ fn footer(disk: u64, kind: Kind) -> [u8; 512] {
     f[59] = sectors;
     f[60..64].copy_from_slice(&kind.code().to_be_bytes());
     // f[64..68] is the checksum, left zero while it is computed.
-    f[68..84].copy_from_slice(&identifier());
+    f[68..84].copy_from_slice(&win::prng16());
     // f[84] — saved state — stays 0: this disk is not a suspended machine's.
     let sum = f
         .iter()
@@ -374,13 +197,7 @@ fn footer(disk: u64, kind: Kind) -> [u8; 512] {
     f
 }
 
-/// The cylinder/head/sector geometry for `sectors` total sectors.
-///
-/// This is the algorithm in the VHD specification's own appendix, transcribed:
-/// a disk whose real geometry is irrelevant still has to *carry* one, and a
-/// reader that recomputes it must get the same answer.  The largest disk the
-/// scheme can describe is 65535 × 16 × 255 sectors — a little under 128 GiB —
-/// which is far above anything synod attaches.
+/// Geometry follows the VHD specification's appendix even though the guest ignores it.
 fn geometry(sectors: u64) -> (u16, u8, u8) {
     let sectors = sectors.min(65_535 * 16 * 255);
     let (mut sectors_per_track, mut heads, mut cylinder_times_heads);
@@ -407,30 +224,8 @@ fn geometry(sectors: u64) -> (u16, u8, u8) {
     (cylinders, heads, sectors_per_track)
 }
 
-/// A fresh identifier for one disk image.
-///
-/// Unlike a machine's identifier ([`super::hvsock::fresh_machine_id`]) this one
-/// addresses nothing and guards nothing — it exists because the format has the
-/// field, and Hyper-V uses it only to tell two disks apart.
-fn identifier() -> [u8; 16] {
-    let mut bytes = [0u8; 16];
-    // SAFETY: `ProcessPrng` fills exactly the buffer it is given.
-    unsafe {
-        windows_sys::Win32::Security::Cryptography::ProcessPrng(bytes.as_mut_ptr(), bytes.len())
-    };
-    bytes
-}
-
-/// Now, in the footer's own epoch.
 fn vhd_timestamp() -> u32 {
     u32::try_from(unix_seconds().saturating_sub(VHD_EPOCH_OFFSET)).unwrap_or(u32::MAX)
-}
-
-/// Now, in whole seconds since the Unix epoch.
-fn unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 #[cfg(test)]
@@ -438,10 +233,6 @@ fn unix_seconds() -> u64 {
 mod tests {
     use super::*;
 
-    /// The footer is the format's: the cookie a reader identifies it by, a
-    /// fixed disk's all-ones data offset, the size in both size fields, and a
-    /// checksum that verifies.  Verifying is the whole test — Hyper-V does
-    /// exactly this arithmetic before it will open the file.
     #[test]
     fn the_footer_is_a_valid_fixed_disk_footer() {
         let disk = 64 * 1024 * 1024;
@@ -461,10 +252,6 @@ mod tests {
         assert_eq!(stated, !sum, "the checksum must verify");
     }
 
-    /// The geometry is the specification's, checked at the sizes synod
-    /// actually attaches: a small rootfs and the 8 GiB session disk.  The
-    /// product of the three fields must not exceed the sector count, or a
-    /// reader would compute a disk larger than the file.
     #[test]
     fn the_geometry_describes_the_disk_it_is_given() {
         for bytes in [64u64 * 1024 * 1024, 2 * 1024 * 1024 * 1024, SESSION_BYTES] {
@@ -482,16 +269,16 @@ mod tests {
         }
     }
 
-    /// A session disk declares eight gigabytes and costs kilobytes: a leading
-    /// footer copy, the dynamic header, a table of unallocated blocks, and the
-    /// footer again at the end. This is the test that would have caught the
-    /// sparse-file mistake — a disk Hyper-V refuses to open (`0xC03A001A`) —
-    /// because it pins *where the growth comes from*.
     #[test]
     fn a_session_disk_declares_its_size_and_costs_a_table() {
         let dir = tempfile::tempdir().unwrap();
-        let path = create_session_vhd(dir.path()).expect("a session disk is made");
-        let bytes = std::fs::read(&path).unwrap();
+        let session = crate::lifecycle::SessionDisk::create(
+            dir.path(),
+            crate::lifecycle::Leaf::Vhd,
+            write_session_vhd,
+        )
+        .expect("a session disk is made");
+        let bytes = std::fs::read(session.path()).unwrap();
 
         let expected = sector() + 1024 + block_table_bytes(SESSION_BYTES) + sector();
         assert_eq!(
@@ -504,8 +291,6 @@ mod tests {
             "the file must not cost what the disk declares"
         );
 
-        // The footer is at both ends, and says "dynamic" with its header's
-        // offset rather than the fixed disk's all-ones.
         assert_eq!(&bytes[0..8], b"conectix");
         assert_eq!(&bytes[bytes.len() - sector()..][..8], b"conectix");
         assert_eq!(u32::from_be_bytes(bytes[60..64].try_into().unwrap()), 3);
@@ -519,7 +304,6 @@ mod tests {
             "the declared size is the guest's whole disk"
         );
 
-        // The dynamic header, its own checksum, and the table it points at.
         let header = &bytes[sector()..sector() + 1024];
         assert_eq!(&header[0..8], b"cxsparse");
         assert_eq!(
@@ -543,9 +327,6 @@ mod tests {
         assert_eq!(table, [0xFF; 4], "every block starts unallocated");
     }
 
-    /// Wrapping leaves the filesystem's own bytes exactly where they were —
-    /// the guest reads the device from offset zero, so anything else would be
-    /// a corrupted image — and appends one footer.
     #[test]
     fn wrapping_preserves_the_image_and_appends_a_footer() {
         let dir = tempfile::tempdir().unwrap();
@@ -560,9 +341,7 @@ mod tests {
         assert_eq!(&bytes[content.len()..content.len() + 8], b"conectix");
     }
 
-    /// A second launch does not copy two gigabytes again: the marker records
-    /// which image was wrapped, so the wrap is reused. Rebuild the image and
-    /// it is redone, which is the same marker doing the other half of its job.
+    /// Reuse an immutable wrap; a different source identity gets another name.
     #[test]
     fn a_wrap_is_reused_until_the_image_changes() {
         let dir = tempfile::tempdir().unwrap();
@@ -579,33 +358,25 @@ mod tests {
             "the wrap was redone for an unchanged image"
         );
 
-        // A rootfs rebuilt to a different length must not be served from the
-        // old wrap.
         std::fs::write(&raw, vec![7u8; sector() * 3]).unwrap();
         let rewrapped = ensure_rootfs_vhd(&raw, dir.path()).unwrap();
+        assert_ne!(first, rewrapped);
+        assert_eq!(std::fs::metadata(&first).unwrap().len(), SECTOR * 3);
         assert_eq!(
             std::fs::metadata(&rewrapped).unwrap().len(),
             SECTOR * 3 + SECTOR
         );
     }
 
-    /// An image that is already a VHD is handed straight through: a build that
-    /// ships one pays nothing here, which is what makes the copy a development
-    /// convenience rather than a permanent cost.
     #[test]
     fn an_image_that_is_already_a_vhd_is_passed_through() {
         let dir = tempfile::tempdir().unwrap();
         let vhd = dir.path().join("rootfs.vhd");
         std::fs::write(&vhd, vec![0u8; 512]).unwrap();
         assert_eq!(ensure_rootfs_vhd(&vhd, dir.path()).unwrap(), vhd);
-        assert!(
-            !dir.path().join("rootfs.vhd.wrapped").exists(),
-            "nothing was wrapped, so nothing was marked"
-        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
-    /// A sector, as a length: the conversion lives here once rather than at
-    /// every use, and is checked rather than assumed.
     fn sector() -> usize {
         usize::try_from(SECTOR).expect("512 fits every pointer width")
     }

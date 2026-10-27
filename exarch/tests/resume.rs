@@ -71,7 +71,7 @@ fn root_config(run_dir: &OwnDir) -> RootConfig {
         resume_on_reset: false,
         disk_warn_bytes: None,
         fuel: 0,
-        egress: exarch::egress::Egress::for_test(),
+        search: true,
         factory: None,
         bureau: Arc::new(exarch::provider::Bureau::Scripted),
         roles: exarch::provider::roles::Roles::default(),

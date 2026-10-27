@@ -1,86 +1,33 @@
-//! The Host Compute System API, loaded rather than linked.
-//!
-//! HCS is the interface Windows offers for creating a virtual machine without
-//! going through Hyper-V Manager: `computecore.dll` is what WSL 2 and Docker's
-//! Linux containers are built on, and it is synod's Windows route for exactly
-//! that reason — it is the road with traffic on it.
-//!
-//! # Why every entry point is resolved at runtime
-//!
-//! There is no Rust binding to HCS, so these declarations are the binding.
-//! They could have been `#[link(name = "computecore")]` externs, which would
-//! be shorter — and wrong: a static import makes the *process* fail to start
-//! on a Windows without the Virtual Machine Platform feature, before any code
-//! of ours can explain why.  Synod is a desktop application whose whole
-//! Windows story includes running on a machine that cannot host a guest, and
-//! saying so plainly ([`crate::detect`]).  So the library is loaded on demand
-//! and a missing DLL is data — [`Api::open`]'s `Err` — rather than a launch
-//! failure.
-//!
-//! # The operation protocol
-//!
-//! Nearly every HCS call is asynchronous in the same shape: the caller mints
-//! an *operation*, hands it to the call, and then waits on the operation for
-//! the real result.  The synchronous-looking `HRESULT` a call returns says
-//! only whether the request was *accepted*; the outcome — including access
-//! denials and configuration rejections — arrives from
-//! `HcsWaitForOperationResult`, together with an optional JSON *result
-//! document* carrying the service's own error text.  [`Operation`] owns one
-//! for the length of one call, and [`Api::settle`] is the whole protocol in
-//! one place, so no caller can forget half of it.
-//!
-//! # Thread affinity
-//!
-//! There is none.  Unlike Virtualization.framework — whose `VZVirtualMachine`
-//! must be touched only from the one serial queue it was born on, which is why
-//! `vm-manager/src/vz.rs` gives each machine a thread and speaks to it by message — an
-//! HCS system is a handle, valid from any thread, with no callback queue to
-//! own.  That is why this backend has no worker thread: the handle is simply
-//! held, and the two threads that exist ([`super::console`]'s pump and the
-//! control-plane accept) are there to serve blocking I/O, not the API.
+//! HCS is loaded on demand so missing Windows features yield refusals instead of loader failure.
+//! An accepted asynchronous request still needs its operation result.
+//! Handles have no thread affinity; DLL references outlive every function pointer.
 
-use std::ffi::{OsStr, c_void};
-use std::os::windows::ffi::OsStrExt;
+use std::ffi::c_void;
 use std::sync::OnceLock;
 
-use windows_sys::Win32::Foundation::{FARPROC, HMODULE, LocalFree};
+use windows_sys::Win32::Foundation::{FARPROC, HMODULE};
 use windows_sys::Win32::System::Diagnostics::Debug::{
     FORMAT_MESSAGE_FROM_SYSTEM, FORMAT_MESSAGE_IGNORE_INSERTS, FormatMessageW,
 };
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_sys::core::{HRESULT, PCWSTR, PWSTR};
 
-use crate::Error;
+use crate::error::Error;
+use crate::hcs::win::{self, HYPERVISOR};
 
-/// A live compute system — one virtual machine — as HCS names it.
 pub(super) type HcsSystem = *mut c_void;
 
-/// One in-flight HCS call's operation handle.
 pub(super) type HcsOperation = *mut c_void;
 
-/// `HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED)`-adjacent, but its own code: HCS's
-/// way of saying the caller is neither an administrator nor a member of the
-/// *Hyper-V Administrators* group, and so may not touch virtual machines at
-/// all.  It is the one HCS failure synod must recognise rather than merely
-/// report, because it is the one fixed with a group membership
-/// rather than a bug report ([`crate::Error::NotPermitted`]).
+/// This code selects the group-membership remedy rather than a generic backend complaint.
 pub(super) const HCS_E_ACCESS_DENIED: HRESULT = 0x8037_011B_u32.cast_signed();
 
-/// How long any single HCS call is given to settle before the backend stops
-/// waiting on it.  Generous: it spans the service starting a VM worker
-/// process, and a cold `vmcompute` on a loaded laptop is not quick.
+/// A cold compute service may need a minute to start its worker.
 const CALL_TIMEOUT_MS: u32 = 60_000;
 
-/// How much of Windows' own explanation of an error code is kept.  System
-/// messages are one or two sentences; this is several times that.
 const MESSAGE_BUFFER: u32 = 512;
 
-/// The entry points this backend uses, resolved once per process.
-///
-/// `computestorage.dll` is a second library and a soft dependency: it carries
-/// only `HcsGrantVmAccess`, so a Windows that has `computecore.dll` but not it
-/// can still be reported precisely rather than as one undifferentiated
-/// absence.
+/// Access-grant calls are optional; missing computestorage does not hide computecore availability.
 pub(super) struct Api {
     create_operation: unsafe extern "system" fn(*const c_void, *const c_void) -> HcsOperation,
     close_operation: unsafe extern "system" fn(HcsOperation),
@@ -102,20 +49,12 @@ pub(super) struct Api {
     revoke_vm_access: Option<unsafe extern "system" fn(PCWSTR, PCWSTR) -> HRESULT>,
 }
 
-// SAFETY: `Api` holds function pointers into two DLLs that are never unloaded
-// (the process keeps its `LoadLibraryW` reference for its whole life), and HCS
-// itself has no thread affinity — see the module docs.  There is no interior
-// mutability here at all: every field is set once by `open`.
+// SAFETY: immutable pointers reference DLLs never unloaded; HCS has no thread affinity.
 unsafe impl Send for Api {}
 unsafe impl Sync for Api {}
 
 impl Api {
-    /// The process's one resolved copy of the API, or the reason this Windows
-    /// cannot offer it.
-    ///
-    /// Resolution is attempted once and its outcome — success or refusal — is
-    /// remembered, so a machine without the feature is not re-probed on every
-    /// [`crate::detect`].
+    /// Both successful resolution and refusal are cached for the process lifetime.
     pub(super) fn open() -> Result<&'static Self, Error> {
         static API: OnceLock<Result<Api, Error>> = OnceLock::new();
         API.get_or_init(Self::resolve)
@@ -123,23 +62,15 @@ impl Api {
             .map_err(Clone::clone)
     }
 
-    /// Load `computecore.dll` and bind every entry point, or say what is
-    /// missing.
     fn resolve() -> Result<Self, Error> {
         let core = library("computecore.dll").ok_or_else(|| {
-            super::backend(
+            Error::backend(
+                HYPERVISOR,
                 "this computer has no computecore.dll, the Windows component that creates \
                  virtual machines — the Virtual Machine Platform feature is not installed",
             )
         })?;
-        // The two access calls are looked for in `computecore.dll` first and
-        // `computestorage.dll` second, because that is where they actually are.
-        // Microsoft's own Go binding names them `computestorage.HcsGrantVmAccess`
-        // and the documentation puts them in that library, but on Windows 11
-        // (10.0.26100) `computestorage.dll` exports neither: both live in
-        // `computecore.dll`, beside every other `Hcs*` entry point. Rather than
-        // trust either answer, both libraries are asked — which also keeps a
-        // build where the documentation *is* right working.
+        // Windows 11 exports these in computecore; documentation names computestorage, so probe both.
         let storage = library("computestorage.dll");
         let in_either = |name: &std::ffi::CStr| {
             bind(core, name)
@@ -163,49 +94,29 @@ impl Api {
         })
     }
 
-    /// Ask the compute service about itself — the cheapest call that still
-    /// crosses the access check, and so the one [`crate::detect`] uses to find
-    /// out whether this user may touch virtual machines *before* a session is
-    /// under way and a folder has been granted.
-    ///
     /// # Errors
-    /// Returns the call's `HRESULT` — [`HCS_E_ACCESS_DENIED`] when the caller
-    /// is outside the Hyper-V Administrators group, or another code when the
-    /// service is not running.
+    /// Returns the HCS access-denial code or the service failure.
     pub(super) fn probe_service(&self) -> Result<(), HcsError> {
-        let query = wide(r#"{"PropertyTypes":["Basic"]}"#);
+        let query = win::wide(r#"{"PropertyTypes":["Basic"]}"#.as_ref());
         let mut result: PWSTR = std::ptr::null_mut();
-        // SAFETY: `query` is a NUL-terminated wide string alive for the call,
-        // and `result` is a writable slot the service either fills with a
-        // `LocalAlloc`'d document or leaves null.
+        // SAFETY: query is NUL-terminated and live; result receives an optional LocalAlloc document.
         let hr = unsafe { (self.service_properties)(query.as_ptr(), &raw mut result) };
-        let document = take_document(result);
+        // SAFETY: HCS transfers this optional LocalAlloc result document.
+        let document = unsafe { win::take_wide(result) };
         if hr < 0 {
             return Err(HcsError::new(hr, document.as_deref()));
         }
         Ok(())
     }
 
-    /// Create a compute system from its JSON `configuration`, and wait for the
-    /// service to say whether it took.
-    ///
-    /// The returned handle owns the VM: with
-    /// `ShouldTerminateOnLastHandleClosed` set in the configuration (as
-    /// [`super::spec`] does), losing it is how a crashed synod still leaves no
-    /// guest running.
-    ///
     /// # Errors
-    /// Returns the service's own refusal — an unusable configuration, a file
-    /// it cannot open, or [`HCS_E_ACCESS_DENIED`].
+    /// Returns the service refusal, including configuration, file or access denial.
     pub(super) fn create(&self, id: &str, configuration: &str) -> Result<HcsSystem, HcsError> {
-        let id = wide(id);
-        let configuration = wide(configuration);
+        let id = win::wide(id.as_ref());
+        let configuration = win::wide(configuration.as_ref());
         let operation = self.operation()?;
         let mut system: HcsSystem = std::ptr::null_mut();
-        // SAFETY: both wide strings outlive the call; `operation` is a live
-        // operation handle this function owns; the security-descriptor
-        // argument is optional and null asks for the service's default, which
-        // grants the creating user; `system` is a writable slot.
+        // SAFETY: strings and operation are live; system is writable; null security uses the creating user.
         let hr = unsafe {
             (self.create_system)(
                 id.as_ptr(),
@@ -224,52 +135,28 @@ impl Api {
         Ok(system)
     }
 
-    /// Start a created system and wait for it to be running.
-    ///
-    /// "Running" here means the machine is executing, not that its guest has
-    /// booted: the kernel may still panic on the way up.  Proof of a live
-    /// guest is the control-plane connection, which is why
-    /// [`Hypervisor::boot`](crate::Hypervisor::boot) waits for that too.
-    ///
     /// # Errors
-    /// Returns the service's own refusal.
+    /// Returns the service refusal; a started machine has not yet proved guest readiness.
     pub(super) fn start(&self, system: HcsSystem) -> Result<(), HcsError> {
         self.act(system, self.start_system)
     }
 
-    /// Ask the guest to shut itself down, and wait for the machine to stop.
-    ///
     /// # Errors
-    /// Returns the service's own refusal — including the ordinary case of a
-    /// machine that has already stopped on its own, which the caller treats as
-    /// success rather than failure.
+    /// Returns the service refusal, including an already stopped machine treated as success upstream.
     pub(super) fn shutdown(&self, system: HcsSystem) -> Result<(), HcsError> {
         self.act(system, self.shutdown_system)
     }
 
-    /// Stop the machine without asking the guest.
-    ///
     /// # Errors
-    /// Returns the service's own refusal.
+    /// Returns the service refusal.
     pub(super) fn terminate(&self, system: HcsSystem) -> Result<(), HcsError> {
         self.act(system, self.terminate_system)
     }
 
-    /// What state the machine is in — `"Running"`, `"Stopped"`, and the rest of
-    /// the service's own vocabulary — or `None` when it left no state in its
-    /// answer.
-    ///
-    /// This is how [`super::Guest::stop`] tells a guest that powered itself off
-    /// from one that hung, which is the difference [`crate::Machine::shutdown`]
-    /// is contracted to report.  The `Basic` property set is the cheapest that
-    /// carries it.
-    ///
     /// # Errors
-    /// Returns the service's refusal — including the ordinary case of a machine
-    /// that has already gone, which a caller reads as *stopped* rather than as
-    /// a fault.
+    /// Returns the service refusal; an already absent machine is treated as stopped upstream.
     pub(super) fn state(&self, system: HcsSystem) -> Result<Option<String>, HcsError> {
-        let query = wide(r#"{"PropertyTypes":["Basic"]}"#);
+        let query = win::wide(r#"{"PropertyTypes":["Basic"]}"#.as_ref());
         let operation = self.operation()?;
         // SAFETY: `system` is a live handle, `operation` one this function owns,
         // and `query` a NUL-terminated wide string alive for the call.
@@ -286,9 +173,7 @@ impl Api {
             }))
     }
 
-    /// Release the handle to a system.  Under
-    /// `ShouldTerminateOnLastHandleClosed` this also stops a machine still
-    /// running, which is the safety net rather than the intended path.
+    /// Closing the last handle terminates a running machine under its configured policy.
     pub(super) fn close(&self, system: HcsSystem) {
         if !system.is_null() {
             // SAFETY: `system` is a handle from `create` that no other thread
@@ -297,23 +182,8 @@ impl Api {
         }
     }
 
-    /// Give one virtual machine read/write access to one file.
-    ///
-    /// A VM's worker process runs as its own virtual account, not as the user
-    /// who created it, so a boot artifact sitting in that user's cache is
-    /// unreadable to the machine until this is called on it.  Wanting it is
-    /// what tells you the files really are opened by the hypervisor rather
-    /// than read by synod and passed along.
-    ///
-    /// Answers `Ok(false)` when this Windows offers no such call at all, which
-    /// is not the same as failing: the grant is an *enabling* step, and a
-    /// platform without it may still open the files perfectly well. Refusing a
-    /// session over a missing optional call would turn a maybe into a no, so
-    /// the caller notes the absence and lets the boot speak for itself.
-    ///
     /// # Errors
-    /// Returns the refusal when the call exists and failed — which, unlike its
-    /// absence, really does mean the machine will not be able to read the file.
+    /// Returns a failed access grant; an absent optional call is `Ok(false)`.
     pub(super) fn grant_vm_access(
         &self,
         id: &str,
@@ -322,8 +192,8 @@ impl Api {
         let Some(grant) = self.grant_vm_access else {
             return Ok(false);
         };
-        let id = wide(id);
-        let path = wide_path(path);
+        let id = win::wide(id.as_ref());
+        let path = win::wide(path.as_os_str());
         // SAFETY: both wide strings are NUL-terminated and outlive the call.
         let hr = unsafe { grant(id.as_ptr(), path.as_ptr()) };
         if hr < 0 {
@@ -332,25 +202,17 @@ impl Api {
         Ok(true)
     }
 
-    /// Take a machine's access to one file away again.
-    ///
-    /// Best effort, and called only on teardown: a granted entry names a *per
-    /// machine* identity that will never exist again, so leaving one behind is
-    /// litter on somebody's disk rather than a hole. Revoking is how synod
-    /// leaves the access-control state it found. Nothing is reported, because
-    /// nothing can be done about a failure at this point in a machine's life.
+    /// Revocation is best-effort: a leftover entry names a per-machine identity that never returns.
     pub(super) fn revoke_vm_access(&self, id: &str, path: &std::path::Path) {
         let Some(revoke) = self.revoke_vm_access else {
             return;
         };
-        let id = wide(id);
-        let path = wide_path(path);
+        let id = win::wide(id.as_ref());
+        let path = win::wide(path.as_os_str());
         // SAFETY: both wide strings are NUL-terminated and outlive the call.
         let _ = unsafe { revoke(id.as_ptr(), path.as_ptr()) };
     }
 
-    /// The shared body of every `(system, operation, options)` call: mint an
-    /// operation, make the call, wait for the real outcome.
     fn act(
         &self,
         system: HcsSystem,
@@ -363,11 +225,8 @@ impl Api {
         self.settle(&operation, hr)
     }
 
-    /// Mint one operation, or say that the service would not give one.
     fn operation(&self) -> Result<Operation<'_>, HcsError> {
-        // SAFETY: both arguments are the optional context/callback pair, and
-        // null for each asks for an operation nobody is called back about —
-        // which is what a caller that waits synchronously wants.
+        // SAFETY: null optional context and callback request an operation for synchronous waiting.
         let handle = unsafe { (self.create_operation)(std::ptr::null(), std::ptr::null()) };
         if handle.is_null() {
             return Err(HcsError::sentence(
@@ -377,18 +236,11 @@ impl Api {
         Ok(Operation { api: self, handle })
     }
 
-    /// Turn a call's acceptance code plus its operation into one outcome.
-    ///
-    /// The asymmetry this hides is the whole reason it exists: a *failing*
-    /// acceptance code is final, while a *successful* one says nothing — the
-    /// outcome is still to be waited for, and an access denial arrives there.
-    /// Every error carries the service's own result document when it left one.
+    /// A rejected request is final; an accepted one still requires the operation result.
     fn settle(&self, operation: &Operation<'_>, accepted: HRESULT) -> Result<(), HcsError> {
         self.settle_with_document(operation, accepted).map(drop)
     }
 
-    /// [`Self::settle`], keeping the result document — which for most calls is
-    /// nothing, and for a properties query is the answer itself.
     fn settle_with_document(
         &self,
         operation: &Operation<'_>,
@@ -401,29 +253,27 @@ impl Api {
             return Err(HcsError::new(accepted, document.as_deref()));
         }
         let mut result: PWSTR = std::ptr::null_mut();
-        // SAFETY: `operation` is live for the call and `result` is a writable
-        // slot the service either fills with a `LocalAlloc`'d document or
-        // leaves null.
+        // SAFETY: operation is live; result receives an optional LocalAlloc document.
         let hr = unsafe { (self.wait_result)(operation.handle, CALL_TIMEOUT_MS, &raw mut result) };
-        let document = take_document(result);
+        // SAFETY: HCS transfers this optional LocalAlloc result document.
+        let document = unsafe { win::take_wide(result) };
         if hr < 0 {
             return Err(HcsError::new(hr, document.as_deref()));
         }
         Ok(document)
     }
 
-    /// Drain whatever document an operation carries, ignoring its code — used
-    /// only to enrich an error already decided.
+    /// Draining an operation enriches an already decided error; its result code is ignored.
     fn result_of(&self, operation: &Operation<'_>) -> Option<String> {
         let mut result: PWSTR = std::ptr::null_mut();
         // SAFETY: as in `settle`; a zero timeout asks for whatever is already
         // there without waiting.
         let _ = unsafe { (self.wait_result)(operation.handle, 0, &raw mut result) };
-        take_document(result)
+        // SAFETY: HCS transfers this optional LocalAlloc result document.
+        unsafe { win::take_wide(result) }
     }
 }
 
-/// One operation handle, closed on every path out of the call that minted it.
 struct Operation<'a> {
     api: &'a Api,
     handle: HcsOperation,
@@ -437,12 +287,7 @@ impl Drop for Operation<'_> {
     }
 }
 
-/// Why HCS refused.
-///
-/// Keeps the `HRESULT` beside the rendered text because one code —
-/// [`HCS_E_ACCESS_DENIED`] — is a *decision* upstream and not merely a message
-/// to print: [`crate::detect`] turns it into the refusal that names the
-/// Hyper-V Administrators group.
+/// The code stays beside the text because access denial selects a distinct remedy.
 #[derive(Debug)]
 pub(super) struct HcsError {
     pub(super) code: HRESULT,
@@ -450,8 +295,6 @@ pub(super) struct HcsError {
 }
 
 impl HcsError {
-    /// An error carrying Windows' own words for `code`, plus the service's
-    /// result document when it left one.
     fn new(code: HRESULT, document: Option<&str>) -> Self {
         let mut text = message_for(code);
         if let Some(detail) = document.map(str::trim).filter(|d| !d.is_empty()) {
@@ -462,10 +305,7 @@ impl HcsError {
         Self { code, text }
     }
 
-    /// An error of synod's own making — an impossible answer from the service
-    /// rather than a code it reported.  `S_OK` as the code is deliberate: there
-    /// is no `HRESULT` behind it to classify, and nothing upstream may mistake
-    /// it for one it recognises.
+    /// `S_OK` prevents a synthetic complaint from being classified as an HCS failure code.
     fn sentence(text: &str) -> Self {
         Self {
             code: 0,
@@ -480,77 +320,33 @@ impl std::fmt::Display for HcsError {
     }
 }
 
-/// Load one DLL by name, or `None` if this Windows has not got it.
 fn library(name: &str) -> Option<HMODULE> {
-    let name = wide(name);
-    // SAFETY: `name` is a NUL-terminated wide string alive for the call.  The
-    // module reference this takes is deliberately never released: the API's
-    // function pointers are `'static`, so the library must outlive them.
+    let name = win::wide(name.as_ref());
+    // SAFETY: name is NUL-terminated; the DLL is never unloaded while its 'static pointers exist.
     let module = unsafe { LoadLibraryW(name.as_ptr()) };
     (!module.is_null()).then_some(module)
 }
 
-/// Resolve one entry point, or say which name was missing.
 fn bind<T>(module: HMODULE, name: &std::ffi::CStr) -> Result<T, Error> {
     // SAFETY: `module` is a live module handle and `name` is NUL-terminated.
     let symbol: FARPROC = unsafe { GetProcAddress(module, name.as_ptr().cast()) };
     let symbol = symbol.ok_or_else(|| {
-        super::backend(&format!(
-            "this computer's Host Compute System library has no {} — its Virtual Machine \
+        Error::backend(
+            HYPERVISOR,
+            format!(
+                "this computer's Host Compute System library has no {} — its Virtual Machine \
              Platform is too old for synod",
-            name.to_string_lossy()
-        ))
+                name.to_string_lossy()
+            ),
+        )
     })?;
-    // SAFETY: HCS entry points are `extern "system"` functions, and each call
-    // site above pairs a name with the signature `computecore.h` declares for
-    // it; `T` is always such a function pointer, of the same size as `FARPROC`.
+    // SAFETY: each name is paired with its computecore.h signature; T and FARPROC are function pointers.
     Ok(unsafe { std::mem::transmute_copy::<FARPROC, T>(&Some(symbol)) })
 }
 
-/// A NUL-terminated wide string, owned for as long as the call that reads it.
-fn wide(text: &str) -> Vec<u16> {
-    OsStr::new(text).encode_wide().chain(Some(0)).collect()
-}
-
-/// A NUL-terminated wide path, without the lossy round-trip through `str` that
-/// a path with unpaired surrogates would not survive.
-fn wide_path(path: &std::path::Path) -> Vec<u16> {
-    path.as_os_str().encode_wide().chain(Some(0)).collect()
-}
-
-/// Adopt a `LocalAlloc`'d result document into an owned `String`, releasing the
-/// service's allocation.
-fn take_document(result: PWSTR) -> Option<String> {
-    if result.is_null() {
-        return None;
-    }
-    // SAFETY: HCS documents its result documents as NUL-terminated wide
-    // strings allocated with `LocalAlloc`, transferred to the caller.  The
-    // length is measured, the contents copied, and the allocation released
-    // exactly once.
-    let text = unsafe {
-        let mut len = 0usize;
-        while *result.add(len) != 0 {
-            len += 1;
-        }
-        String::from_utf16_lossy(std::slice::from_raw_parts(result, len))
-    };
-    // SAFETY: `result` is the `LocalAlloc`'d block just read and never used
-    // again.
-    unsafe { LocalFree(result.cast()) };
-    Some(text)
-}
-
-/// Windows' own sentence for an `HRESULT`, or the bare code when the system
-/// has no words for it.
-///
-/// This is where the Hyper-V Administrators text comes from — Windows itself
-/// explains that code, and better than a paraphrase would.
 fn message_for(code: HRESULT) -> String {
     let mut buffer = [0u16; MESSAGE_BUFFER as usize];
-    // SAFETY: `buffer` is a writable slice of the length passed; the
-    // ignore-inserts flag means no argument array is read, so passing null for
-    // it is correct.
+    // SAFETY: buffer is writable for the supplied length; IGNORE_INSERTS permits a null argument array.
     let len = unsafe {
         FormatMessageW(
             FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
@@ -584,10 +380,6 @@ fn message_for(code: HRESULT) -> String {
 mod tests {
     use super::*;
 
-    /// The API resolves on any Windows with the Virtual Machine Platform, and
-    /// refuses by naming the feature otherwise.  Either answer is correct
-    /// here — the law is that both are *answers*, since a static import would
-    /// instead have failed the process before this test could run.
     #[test]
     fn the_api_either_resolves_or_names_what_is_missing() {
         match Api::open() {
@@ -600,10 +392,6 @@ mod tests {
         }
     }
 
-    /// Windows explains the one code synod classifies rather than merely
-    /// prints, and its explanation names the group the user must be added
-    /// to.  If this ever stops holding, [`crate::Error::NotPermitted`]'s
-    /// sentence is carrying the whole message alone and should say more.
     #[test]
     fn windows_explains_the_access_denial_itself() {
         let text = message_for(HCS_E_ACCESS_DENIED);
@@ -613,8 +401,6 @@ mod tests {
         );
     }
 
-    /// An unknown code still renders to something a person can act on, rather
-    /// than an empty string.
     #[test]
     fn an_unexplained_code_still_renders() {
         let text = message_for(0x8037_0FFF_u32.cast_signed());

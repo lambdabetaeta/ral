@@ -234,10 +234,9 @@ fn write_crash_log(dir: Option<&OwnDir>, info: &std::panic::PanicHookInfo<'_>) {
 /// flag, if given.
 ///
 /// The capability gate comes first: a terminal resolved to
-/// [`InteractiveMode::Minimal`](ral_core::io::terminal::InteractiveMode::Minimal) — a
-/// dumb terminal or `RAL_INTERACTIVE_MODE=minimal` — can only do the
-/// canonical-stdin editor, whatever surface was asked for.  Otherwise the
-/// surface preference decides.
+/// [`InteractiveMode::Minimal`] — a dumb terminal or
+/// `RAL_INTERACTIVE_MODE=minimal` — can only do the canonical-stdin editor,
+/// whatever surface was asked for.  Otherwise the surface preference decides.
 pub(super) fn create_frontend(
     interactive_mode: InteractiveMode,
     settings: &RcSettings,

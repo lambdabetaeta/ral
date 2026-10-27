@@ -2720,18 +2720,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "guest-net"
+name = "guest-abi"
 version = "0.9.0"
-dependencies = [
- "exarch",
- "http",
- "httparse",
- "ral-core",
- "ral-daemon",
- "serde_json",
- "serial_test",
- "smoltcp",
-]
 
 [[package]]
 name = "h2"
@@ -4301,6 +4291,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "netgate"
+version = "0.9.0"
+dependencies = [
+ "guest-abi",
+ "http",
+ "httparse",
+ "netgate",
+ "ral-core",
+ "serde_json",
+ "serial_test",
+ "smoltcp",
+]
+
+[[package]]
 name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5531,6 +5535,7 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.3",
  "globset",
+ "guest-abi",
  "icu_casemap",
  "icu_locale_core",
  "icu_normalizer",
@@ -5615,18 +5620,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "ral-daemon"
+name = "ral-guest"
 version = "0.9.0"
 dependencies = [
+ "guest-abi",
  "libc",
- "rustix",
-]
-
-[[package]]
-name = "ral-initramfs"
-version = "0.9.0"
-dependencies = [
- "ral-daemon",
  "rustix",
 ]
 
@@ -5649,8 +5647,9 @@ dependencies = [
 name = "ral-vm-image-build-tools"
 version = "0.9.0"
 dependencies = [
+ "guest-abi",
  "ral-core",
- "ral-daemon",
+ "tempfile",
 ]
 
 [[package]]
@@ -6935,9 +6934,9 @@ name = "synod"
 version = "0.9.0"
 dependencies = [
  "exarch",
- "guest-net",
+ "guest-abi",
+ "netgate",
  "ral-core",
- "ral-daemon",
  "serde",
  "serde_json",
  "tauri",
@@ -6948,6 +6947,15 @@ dependencies = [
  "ts-rs",
  "url",
  "vm-manager",
+]
+
+[[package]]
+name = "synod-machine-broker"
+version = "0.9.0"
+dependencies = [
+ "tempfile",
+ "vm-manager",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8943,14 +8951,14 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "vm-manager"
 version = "0.9.0"
 dependencies = [
- "base64 0.22.1",
  "block2",
  "dispatch2",
+ "guest-abi",
+ "libc",
  "objc2",
  "objc2-foundation",
  "objc2-virtualization",
  "ral-core",
- "ral-daemon",
  "ruzstd",
  "serde",
  "serde_json",

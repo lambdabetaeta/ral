@@ -63,7 +63,7 @@ pub(crate) use render::render_real;
 pub(crate) use render::rendered_ancestors;
 #[cfg(unix)]
 pub(crate) use render::{Object, Rendered, pinned_dirs, render_excluded, render_objects};
-pub use resolver::Resolver;
+pub use resolver::{Resolver, spelled};
 pub(crate) use walk::is_loop;
 pub use walk::{
     Authority, Dir, DirEntry, EntryName, Excluded, Hold, Installing, Judged, Kind, LeafMode,

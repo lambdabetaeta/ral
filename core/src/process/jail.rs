@@ -269,7 +269,7 @@ impl GuestJail {
     #[cfg(not(target_os = "linux"))]
     fn next_seq(&self) -> io::Result<Seq> {
         self.counter
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 Seq::new(n).map(|_| n + 1)
             })
             .ok()

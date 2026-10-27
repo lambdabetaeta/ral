@@ -1,16 +1,10 @@
-import { $, invoke, listen, screens } from "./core.js";
-import { showError, clearError } from "./start-screen.js";
+import { $, screens, showError, clearError } from "./dom.js";
+import { openUrl, signIn, cancelSignIn, onSignInStep, onSignInDone } from "./ipc.js";
 import { loadAccounts } from "./accounts.js";
 
-// ---- Signing in with ChatGPT ----------------------------------------
-
-// While a sign-in is running the one button abandons it rather than
-// starting a second: two sign-ins would want the same loopback port, and
-// the backend refuses the second anyway.
+// A running sign-in makes the button cancel; two attempts would compete for the loopback port.
 let signingIn = false;
 
-// The one sign-in stands on two screens at once, so both buttons and
-// both lines say the same thing throughout.
 const SIGN_IN_BUTTONS = ["sign-in", "accounts-sign-in"];
 const SIGN_IN_LINES = ["sign-in-say", "accounts-say"];
 
@@ -20,15 +14,11 @@ function setSigningIn(running) {
   for (const id of SIGN_IN_BUTTONS) $(id).textContent = label;
 }
 
-// An error belongs on whichever screen the user is looking at.
 function showSignInError(text) {
   if (screens.accounts.classList.contains("active")) showError("accounts-error", text);
   else showError("start-error", text);
 }
 
-// The sign-in's own line: a sentence, and — only when the browser could
-// not be opened for the user — the link they have to follow themselves,
-// both clickable and selectable so either door works.
 function saySignIn(text, link) {
   for (const id of SIGN_IN_LINES) fillSignInLine($(id), text, link);
 }
@@ -40,7 +30,7 @@ function fillSignInLine(el, text, link) {
     anchor.className = "sign-in-link";
     anchor.textContent = link;
     anchor.addEventListener("click", () => {
-      invoke("open_url", { url: link }).catch((err) => showSignInError(String(err)));
+      openUrl(link).catch((err) => showSignInError(String(err)));
     });
     el.appendChild(document.createElement("br"));
     el.appendChild(anchor);
@@ -50,7 +40,7 @@ function fillSignInLine(el, text, link) {
 
 async function startSignIn() {
   if (signingIn) {
-    invoke("cancel_sign_in").catch((err) => showSignInError(String(err)));
+    cancelSignIn().catch((err) => showSignInError(String(err)));
     return;
   }
   clearError("start-error");
@@ -58,7 +48,7 @@ async function startSignIn() {
   setSigningIn(true);
   saySignIn("Opening your browser…");
   try {
-    await invoke("sign_in");
+    await signIn();
   } catch (err) {
     setSigningIn(false);
     saySignIn("");
@@ -68,16 +58,12 @@ async function startSignIn() {
 
 for (const id of SIGN_IN_BUTTONS) $(id).addEventListener("click", startSignIn);
 
-listen("sign-in-step", (event) => {
-  const step = event.payload || {};
+onSignInStep((step) => {
   saySignIn(step.say, step.link);
 });
 
-// The menu arrives just before this, as a `models-refreshed` the picker
-// renders through its one path — so by the time the account is named
-// here, it is already one of the assistants on offer.
-listen("sign-in-done", (event) => {
-  const done = event.payload || {};
+// The menu event precedes completion, so the named account is already on offer.
+onSignInDone((done) => {
   setSigningIn(false);
   if (done.outcome === "signed_in") {
     saySignIn(

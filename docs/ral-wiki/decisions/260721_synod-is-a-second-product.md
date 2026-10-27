@@ -95,3 +95,7 @@ price, and it is small; it is not free.
 layer down: hosting a `Shell` deduplicated instead of forked),
 [[decisions/260715_vm-workspaces-cross-by-copy|vm-workspaces-cross-by-copy]] (the
 workspace position `vm-manager` is seamed toward).
+
+> **Amended 2026-10-27.** The guest member is now binary-only `ral-guest`, combining root assembly
+> and supervision in one PID 1. The runtime agreement is the std-only
+> `guest-abi` leaf; the product dependency direction is unchanged.

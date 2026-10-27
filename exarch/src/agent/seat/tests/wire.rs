@@ -295,7 +295,7 @@ fn a_wire_root_refuses_resolved_grants_at_founding() {
             resume_on_reset: false,
             disk_warn_bytes: None,
             fuel: 0,
-            egress: crate::egress::Egress::for_test(),
+            search: true,
             factory: None,
             bureau: Arc::new(Bureau::Scripted),
             roles: crate::provider::roles::Roles::default(),

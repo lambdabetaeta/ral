@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 67715a25
-generated_at_date: 2026-10-26
+generated_at_commit: 3dbbe8f3
+generated_at_date: 2026-10-27
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/record/session.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/boot.rs, exarch/src/agent/seat.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -58,7 +58,7 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
   including a slash-shaped line that names no command, wakeups, settled
   agents, surfaces, peer messages, nudges — is a delivery and drains at the
   next boundary in order. So the variant alone decides the drain point:
-  `drain_mid_exchange` (from `agent::deliberate`, after each tool batch)
+  `drain_mid_exchange` (from `agent::deliberate`, after a continuing tool batch)
   yields the reads and deliveries in the order typed and stops at a rewrite;
   `next_or_idle` pops anything. Within one tool boundary each arrival is taken
   at its place: a read runs against the context as it then stands, a delivery
@@ -68,6 +68,14 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
   no frontend hook ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],
   [[decisions/260617_scheduled-wakeups|scheduled-wakeups]],
   [[decisions/260617_async-agent-tool|async-agent-tool]]).
+  A valid staged reply ends admission before this drain and before reminders:
+  messages, steering, wakeups and results remain queued for the next attend
+  item. A queued result is heard and announced only at that actual ingress.
+  `next_or_idle` takes a zero-argument park callback under the queue mutex.
+  Terminal schedules remain in `ScheduleRegistry` until their stamped wakeup
+  is posted, then retire by id with no queue/registry lock inversion. Explicit
+  unschedule may withdraw the obligation during publication; clear additionally
+  fences the old stamp at pop.
 - a `FleetBus` (`bus/emitter.rs`) owns the channel, and mints each root's
   emitter over that root's own mailbox; `pump`
   (`bus/sink.rs`) borrows it, runs
@@ -146,8 +154,10 @@ The TUI mints one **session-lived** bus, so an async agent clones its
 sender and streams a live tab through the same id-routed draw path a sync child
 uses ([[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]);
 the one-shot/headless conversational drivers use a **per-exchange** bus with
-muted children, while `converse_settled` uses `per_exchange_live` so fleet work
-stays visible until quiescence.
+muted children. `headless::SettledConversation` binds a **conversation-lived**
+session bus to one root, retaining helper delivery across exchanges. Each
+exchange drains to fleet quiescence; late helper edges queue until the next
+exchange, while replied helpers remain leased residents.
 
 `record/session.rs` is the canonical per-session record. `AgentLog` owns two things:
 

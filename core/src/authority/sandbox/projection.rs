@@ -96,9 +96,8 @@ impl<A, X> FsProjection<A, X> {
 /// and its exclusions are the table's own.  `Restricted` closes the OS layer
 /// around the same table, shutting the `sh -c "PATH=…; cmd"` route by which a
 /// sandboxed child re-execs binaries the guard never sees.  An empty
-/// `Restricted` admits nothing.  Its paths are
-/// [`RealPath`](crate::path::RealPath)s, frozen at grant, and stay so until
-/// the backend that needs other spellings renders them with
+/// `Restricted` admits nothing.  Its paths are [`RealPath`]s, frozen at grant,
+/// and stay so until the backend that needs other spellings renders them with
 /// [`render_real`](crate::path::render_real), which never re-resolves one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) enum ExecProjection {

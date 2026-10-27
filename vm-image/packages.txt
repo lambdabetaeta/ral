@@ -37,14 +37,8 @@ tesseract-ocr-por
 tesseract-ocr-nld
 
 # --- Reaching the network at all ---
-# The host's proxy presents a certificate this session minted, and ral-daemon
-# writes that authority into `/etc/ssl/certs/ca-certificates.crt` at boot.  It
-# creates the file if the image has none, so this package is not what makes
-# TLS work — it is what makes the *directory layout* the one every tool
-# already expects, and it carries `update-ca-certificates` for anything that
-# rebuilds the bundle.  `curl` and `pip3` are the two verbs the model is told
-# it has (`synod/data/toolbox.md`), so they belong in the image rather than
-# being the first thing a task has to install in order to install anything.
+# The guest verifies origin TLS with this system CA bundle over the host's
+# opaque CONNECT tunnel. `curl` and `pip3` are part of its promised toolbox.
 ca-certificates
 curl
 python3-pip

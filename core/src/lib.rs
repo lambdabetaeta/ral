@@ -19,6 +19,7 @@ pub mod carrier;
 pub mod compile;
 pub mod data;
 pub mod diagnostic;
+pub mod egress;
 pub mod elaborator;
 pub mod engine;
 pub mod fact;

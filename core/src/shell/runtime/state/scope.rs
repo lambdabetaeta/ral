@@ -10,8 +10,10 @@ use crate::shell::runtime::{
 
 impl Shell {
     /// Install `thunk` as the alias for `name`, replacing any existing one.
-    /// Sibling of [`Self::with_handlers`]: same handler stack, but an alias
-    /// frame is never popped at scope exit, only by [`Self::remove_alias`].
+    /// Sibling of
+    /// [`WithinScope::enter`](crate::shell::evaluator::scope::WithinScope::enter):
+    /// same handler stack, but an alias frame is never popped at scope exit,
+    /// only by [`Self::remove_alias`].
     /// Since it outlives its installing run, [`HandlerEntry::vet`] closes the
     /// arm's scheme against the live session and stores it on the frame to
     /// seed the next run's check.

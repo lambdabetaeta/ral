@@ -548,7 +548,7 @@ pub(crate) fn resolve_path(cwd: &CwdPath, path: &str) -> PathBuf {
 ///   `=D:` is unset.
 ///
 /// `cwd` is on a well-formed root ([`CwdPath`]), and each reading keeps it,
-/// so the result is absolute: what [`LexicalPath`](super::LexicalPath)
+/// so the result is absolute: what [`LexicalPath`]
 /// asserts.
 pub(crate) fn anchor(cwd: &CwdPath, input: &Path) -> PathBuf {
     if is_absolute(input) {

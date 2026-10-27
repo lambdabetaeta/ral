@@ -12,32 +12,14 @@ name = "vm_manager"
 path = "src/lib.rs"
 
 [dependencies]
+tempfile = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
-# `os_path` carries a path's own units across the broker's pipe as one base64
-# string: JSON has no byte type, and serde_json writes `Vec<u8>` as an array of
-# decimal numbers — up to six bytes on the wire for every UTF-16 unit.
-base64     = { workspace = true }
-# `boot::command_line` is the single writer of the kernel command line, shared
-# with the guest's own reader so the two ends of the boot contract cannot drift
-# apart at compile time; `boot::Net`/`NET_PORT` are this crate's own re-export
-# of the guest's link, in `lib.rs`. Unconditional because both backends need
-# it and `boot` itself is not platform-gated.
-ral-daemon = { path = "../ral-daemon" }
-# `media::inflate` decompresses the rootfs every backend ships compressed. A
-# pure-Rust decoder, deliberately: only decompression is ever needed, and the
-# C-backed `zstd` cannot build under a cross-check with no C toolchain for the
-# target. Unconditional because macOS calls it too, through synod's `boot.rs`.
+guest-abi = { path = "../guest-abi" }
+# Pure Rust permits cross-checking without a target C toolchain; only decoding is needed.
 ruzstd = { workspace = true }
-# `media::inflate`'s checksum verification, asked for by macOS callers and
-# declined by Windows' — see `hcs::vhd::ensure_rootfs_vhd`'s own reasoning.
 sha2   = { workspace = true }
 
-# The macOS backend ([`vz`]) speaks to Virtualization.framework through the
-# `objc2` family — the only maintained Rust binding to the framework (the
-# alternative the design record named, the `vz` crate, no longer wraps
-# Virtualization.framework at all). It is target-scoped because these classes
-# exist in no other SDK; on Linux the module is `#[cfg]`-ed out entirely.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2               = "0.6"
 objc2-foundation    = "0.3"
@@ -45,47 +27,26 @@ objc2-virtualization = "0.3"
 block2              = "0.6"
 dispatch2           = { version = "0.3", features = ["block2"] }
 
-# The Windows backend ([`hcs`]) speaks to the Host Compute System API, which
-# has no Rust binding at all: `computecore.dll`'s entry points are declared and
-# loaded by hand (see `hcs::api`), and everything around them — the `AF_HYPERV`
-# control-plane socket, the console named pipe, the dynamic VHD written byte by
-# byte, the security descriptors naming who may use the guest's socket — is
-# plain Win32. So this is the Win32 surface itself rather than a wrapper over it.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
-    # The control plane: an AF_HYPERV stream socket, and SOCKADDR_HV to name it.
     "Win32_Networking_WinSock",
     "Win32_System_Hypervisor",
-    # HcsGrantVmAccess's SID, and the SDDL naming this user on the guest's socket.
     "Win32_Security",
     "Win32_Security_Authorization",
-    # ProcessPrng — the VM identifier has to be unguessable, not merely fresh.
     "Win32_Security_Cryptography",
     "Win32_System_Threading",
-    # FormatMessageW: Windows' own words for an HRESULT the backend refuses on.
     "Win32_System_Diagnostics_Debug",
-    # computecore.dll / computestorage.dll, loaded rather than linked.
     "Win32_System_LibraryLoader",
-    # The broker: the service-controller handshake a Windows service is killed
-    # for not completing, and the named pipe an unprivileged client asks over.
-    "Win32_System_Services",
-    # LocalFree: how an HCS result document is released.
-    "Win32_System_Memory",
-    # The guest console: a named pipe the VM's COM port dials, read here.
     "Win32_Storage_FileSystem",
     "Win32_System_Pipes",
-    # Not imported by name anywhere: `ReadFile`, `WriteFile` and
-    # `ConnectNamedPipe` each take an `OVERLAPPED` pointer, so windows-sys gates
-    # them behind the feature that declares that struct. Removing it fails the
-    # build in the console and the broker at once.
+    # ReadFile, WriteFile and ConnectNamedPipe require OVERLAPPED even for blocking calls.
     "Win32_System_IO",
 ] }
 
-[dev-dependencies]
-tempfile = "3.27"
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
 
-# `boot-smoke` drives the guest's control plane to put a listener inside the
-# guest, so it can prove the host→guest dial carries bytes. Only the frame
-# protocol is needed, so the search builtins stay out of the build.
+[dev-dependencies]
+# The smoke example needs the frame protocol without search builtins.
 ral-core = { path = "../core", default-features = false }

@@ -16,7 +16,7 @@ fn root_config(run_dir: &OwnDir, fuel: u32) -> RootConfig {
         resume_on_reset: false,
         disk_warn_bytes: None,
         fuel,
-        egress: crate::egress::Egress::for_test(),
+        search: true,
         factory: None,
         bureau: Arc::new(crate::provider::Bureau::Scripted),
         roles: crate::provider::roles::Roles::default(),

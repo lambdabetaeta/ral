@@ -1,33 +1,4 @@
-//! A boot through the machine service, from an account with no privilege at
-//! all.
-//!
-//! `boot-smoke` builds a [`Hyperv`](vm_manager::hcs::Hyperv) directly, which is
-//! the maintainer's path and asks the maintainer's price: the compute service
-//! serves only administrators and members of *Hyper-V Administrators*, so that
-//! example must be run elevated. Every real user of synod is on the other path —
-//! [`detect`](vm_manager::detect) finds the `LocalSystem` broker and asks *it*
-//! for a machine — and that path had no smoke test, which is how a stale guest
-//! image reached an installed synod and was met with sixty seconds of silence.
-//! This is that test: the same boot the window performs, by the same route, as
-//! whoever happens to be logged in.
-//!
-//! It takes one argument where `boot-smoke` takes four, and the difference is
-//! the whole point. A brokered machine's kernel, initramfs and rootfs are the
-//! ones installed beside the service and are never a caller's to name
-//! ([`broker`](vm_manager::broker)'s own docs argue why), so the only thing left
-//! to say is which folder the agent is being given.
-//!
-//! It boots and stops rather than holding the machine open: what is being
-//! witnessed is that a guest comes up and dials, and a guest that has dialled
-//! has already said everything this program can hear. When it does not, the
-//! refusal now carries the guest's own last words off its console, which is the
-//! other half of the same repair.
-//!
-//! The folder is granted with changes allowed, as a writable grant in synod
-//! is; `--read-only` before it asks for a read-only grant instead. The two are
-//! checked differently by the service — a writable grant needs the right to
-//! add to the folder, not only to list it — so both are worth witnessing.
-//!
+//! Brokered boot uses the service's installed media and the caller's folder.
 //! Usage: `broker-smoke [--read-only] <folder>`
 
 #![allow(
@@ -36,9 +7,12 @@
 )]
 #![allow(clippy::disallowed_methods, reason = "example program")]
 
+#[cfg(windows)]
 use ral_core::path::shown;
-use vm_manager::MachineSpec;
+#[cfg(windows)]
+use vm_manager::{Booted, Hypervisor, MachineSpec};
 
+#[cfg(windows)]
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let read_only = args.first().is_some_and(|first| first == "--read-only");
@@ -50,49 +24,29 @@ fn main() {
         std::process::exit(2);
     };
 
-    // `None`, deliberately: this program holds no boot media and must not be
-    // able to name any.  On Windows that is exactly what an installed synod
-    // passes, and it is the service's own installed media that answers.  If no
-    // service is listening, `detect` says so in the sentence it returns and
-    // this example has nothing to add to it.
-    let hypervisor = match vm_manager::detect(None) {
-        Ok(hypervisor) => hypervisor,
-        Err(why) => {
-            eprintln!(
-                "no machine service could be asked for a guest: {}",
-                why.worded(|path| shown(path))
-            );
-            std::process::exit(1);
-        }
-    };
+    let hypervisor = vm_manager::broker::client::Brokered;
 
     let grant = if read_only {
         "read-only"
     } else {
         "with changes allowed"
     };
-    println!(
-        "asking {} for a machine over {folder}, {grant}...",
-        hypervisor.name()
-    );
-    let mut spec = MachineSpec::for_folder(&folder);
-    spec.workspace.read_only = read_only;
-    let mut machine = match hypervisor.boot(&spec) {
-        Ok(machine) => machine,
+    println!("asking the machine service for a machine over {folder}, {grant}...");
+    let spec = MachineSpec {
+        folder: folder.into(),
+        read_only,
+    };
+    let Booted { machine, wires } = match hypervisor.boot(&spec) {
+        Ok(booted) => booted,
         Err(err) => {
             eprintln!("boot failed: {}", err.worded(|path| shown(path)));
             std::process::exit(1);
         }
     };
 
-    // Both wires are in hand only because the guest dialled both, in the
-    // daemon's own order — so this line is the proof, and printing the mount
-    // path with it says which folder the agent found at the far end.
-    let wires = machine.take_wires();
     println!(
         "booted: the guest dialled the control plane and the net wire, and reached the granted \
-         folder at {}",
-        shown(machine.workspace_path())
+         folder at /work"
     );
     drop(wires);
 
@@ -103,4 +57,10 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+#[cfg(not(windows))]
+fn main() -> std::process::ExitCode {
+    eprintln!("broker-smoke requires Windows");
+    std::process::ExitCode::FAILURE
 }

@@ -89,6 +89,21 @@ is, and why nobody looks in it),
 answerable for it),
 [[map/synod|synod]] (where the backend and its cache live).
 
-Cite: `vm-manager/src/hcs/mod.rs` (`REMOVE_GRACE`, `REMOVE_PULSE`, `ORPHAN_AGE`,
-`release`, `remove`, `mebibytes`, `sweep_orphans`, `session_disk_epoch`),
-`vm-manager/src/hcs/vhd.rs` (`create_session_vhd`, `ensure_rootfs_vhd`).
+Cite: `vm-manager/src/lifecycle.rs` (`REMOVE_GRACE`, `REMOVE_PULSE`,
+`ORPHAN_AGE`, `SessionDisk`, `sweep`), `vm-manager/src/hcs/vhd.rs`
+(`ensure_rootfs_vhd`), `vm-manager/src/vz/config.rs`.
+
+> **Amended 2026-10-27.**
+> Both backends use `vm-manager/src/lifecycle.rs`: `SessionDisk` owns a unique
+> `ral-vm-session-<epoch>-<pid>-<suffix>` directory and a std exclusive file lease.
+> The owner travels with the machine and retries disk deletion after shutdown;
+> a failed release is named once on stderr. `Vz::new` and `Hyperv::new` both sweep.
+>
+> The sweep admits only aged directories of that shape, skips links and Windows
+> reparse points, opens a regular lease without following links, and requires its
+> exclusive lock. It closes the probe before deleting the one recognised disk,
+> lease and directory. Empty aged directories are removed; unknown contents stay.
+> Flat session files are neither migrated nor swept.
+>
+> This supplies the macOS sweep raised in the open question above; lease
+> ownership, age and recognised contents govern reclamation on both platforms.

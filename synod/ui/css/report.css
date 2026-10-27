@@ -29,11 +29,7 @@
       line-height: 1.6;
     }
 
-    /* The report column's quiet register: how far this report reaches, and
-       where it stopped. A standing fact, not an alarm — nothing like
-       .banner's. Worn by #report-gap (what a walk could not read), by
-       #report-error (the report itself could not be taken), and by
-       #report-legend (what a `≈` row does and does not claim). */
+    /* Gap, error and legend describe the report's limits without alarm styling. */
     .report-gap {
       display: none;
       margin-top: 14px;
@@ -73,9 +69,7 @@
     }
     .group:first-child { margin-top: 0; }
 
-    /* One changed file, one row. Shape carries the kind — a nominal fact hue
-       could not order anyway — so every row is the same tint: none of them
-       asks anything of the reader, they only report. */
+    /* Shape carries the change kind; a report row's tint implies no action. */
     .card {
       display: flex;
       align-items: center;
@@ -86,9 +80,7 @@
       padding: 5px 8px 5px 10px;
       animation: rise 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) both;
     }
-    /* A file something wrote to without changing its size. Synod cannot say
-       whether the contents differ, so the row is held back from an edit's
-       full weight — the legend above the list says why. */
+    /* A timestamp-only touch cannot prove changed contents; reduce its weight. */
     .card.touched .glyph,
     .card.touched .name .base { color: var(--ink-soft); }
 
@@ -103,9 +95,7 @@
       user-select: none;
     }
 
-    /* The name holds the row's give, and its two parts shrink by wildly
-       different weights: the context in front ellipsizes away first, so the
-       file's own name keeps its glyphs. */
+    /* Ellipsize the context before the filename so the name stays readable. */
     .card .name {
       flex: 1;
       min-width: 0;

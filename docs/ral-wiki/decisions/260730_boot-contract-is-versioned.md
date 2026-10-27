@@ -118,10 +118,11 @@ whose boot this makes checkable),
 fault found by running the installed product rather than by CI),
 [[map/synod|synod]] (where the media pipeline and the daemon live).
 
-Cite: `ral-daemon/src/boot.rs` (`CONTRACT`, `MANIFEST_KEY`, `check_media`),
-`ral-daemon/examples/boot-contract.rs`, `vm-image/build-boot.sh`,
-`vm-image/out/boot/boot-manifest.txt`, `synod/build.rs` (`boot_contract`),
-`vm-image/README.md`.
+Cite: `guest-abi/src/boot.rs` (`CONTRACT`, `Boot::read`, `command_line`),
+`vm-image/build-tools/src/manifest.rs` (`lines`, `read`, `check`),
+`vm-image/build-tools/src/bin/{media-manifest,check-media}.rs`,
+`vm-image/build-boot.sh`, `vm-image/out/boot/boot-manifest.txt`,
+`synod/tauri.bundle.conf.json`, `vm-image/README.md`.
 
 ## Amendment, 2026-10-13
 
@@ -150,3 +151,17 @@ deny-set, descriptor marking and offline network isolation. Every attach,
 development media included, refuses a version mismatch and names both
 numbers. The kernel-command-line `CONTRACT` remains at 3; both sides of the
 guest argv agreement still ship together.
+
+> **Amended 2026-10-27.** See [[decisions/261027_the-vm-crates-are-layered|the-vm-crates-are-layered]].
+> `vm-image/build-tools` owns the manifest: `media-manifest` compiles and prints
+> `guest_abi::boot::CONTRACT` and `ral_core::protocol::PROTOCOL_VERSION`;
+> `check-media` compares them through `manifest::read` and `manifest::check`.
+> `tauri.bundle.conf.json` runs this packaging gate as its `beforeBuildCommand`.
+> Present media with an absent or unreadable manifest is refused; absent media
+> is left to the bundler.
+>
+> The std-only `guest-abi` leaf owns `boot::{CONTRACT, Boot::read, command_line}`,
+> ports, the virtual link, guest layout and packet framing. Changes to `boot`,
+> `ports::FACTORY`, `layout` or `packet` bump `CONTRACT`; this extraction preserves
+> version 3. Both backends use `vm-manager/src/spec.rs::boot_line` to call the
+> sole command-line writer.

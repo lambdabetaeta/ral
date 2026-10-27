@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 41f60151e952e9a2b5c7777af3708e47af54da0c
+generated_at_commit: 3dbbe8f3
 generated_at_date: 2026-10-27
-covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs, exarch/src/tui/login.rs, exarch/src/tui/providers.rs, exarch/src/tui/commands.rs]
+covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/wallet.rs, exarch/src/config.rs, exarch/src/tui/model_picker.rs, exarch/src/tui/login.rs, exarch/src/tui/providers.rs, exarch/src/tui/commands.rs]
 ---
 
 # Map: exarch / provider
@@ -11,7 +11,9 @@ or scripted `Backend`. The transcript owns
 history; the provider only sends bytes and parses replies. Invariants are
 local below the facade: `provider/identity.rs` owns selectable identity,
 `request.rs` per-request `ChatOptions` and tuning (`Tuning`, the
-`EFFORT_LADDER` rungs — the TUI keeps only the glyphs), `wire.rs` the one place
+`EFFORT_LADDER` rungs — the TUI keeps only the glyphs). `Tuning::masked` is the
+shared capability mask for the picker and synod; `Tuning::for_model` resolves
+synod's effort choice and loads the catalog before masking. `wire.rs` is the one place
 that turns the transcript's `ChatMessage`s into an owned `genai::ChatRequest` (below),
 `transport.rs` credential binding and caching, `stream.rs` completion
 execution, `retry.rs` recovery timing, `usage.rs` accounting,
@@ -367,9 +369,12 @@ the one route through which a product changes its keys and declarations
 (`set_key`, `forget_key`, `add_endpoint`, `forget_endpoint`), each checking
 everything before writing anything, touching the vault with the store
 unlocked, and applying the change live through `Holdings::change`.
-`Wallet::exarch()` is `Keychain::for_app(EXARCH)` over `config::path()`, read
-at startup as well as written by `/providers`; synod's `accounts::wallet()` is
-its own. An OAuth login is no wallet's: the token store is exarch's whichever
+`Wallet::of(app, declarations, label)` builds `Keychain::for_app(app)` and
+the declarations `UserFile` in that app's config home. `Wallet::prepare`
+loads declarations, resolves and scrubs environment keys, then reads the vault;
+both products call it while startup is still single-threaded. `/providers`
+uses exarch's wallet; synod's `accounts::wallet()` builds its own through `of`.
+An OAuth login is no wallet's: the token store is exarch's whichever
 product signed in. `Holdings::sign_out` removes the token and retires the local
 account; the caller runs `oauth::revoke_blocking` off its UI thread and reports
 issuer acceptance, local-only removal or revocation failure without conflating them.

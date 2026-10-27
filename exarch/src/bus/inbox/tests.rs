@@ -63,7 +63,7 @@ fn inbox_waiting_for_input_tracks_human_park() {
     let token = cancel::Token::new();
     let worker_token = token;
     let handle =
-        std::thread::spawn(move || worker_inbox.next_or_idle(|_| ParkMode::Held, &worker_token));
+        std::thread::spawn(move || worker_inbox.next_or_idle(|| ParkMode::Held, &worker_token));
 
     assert!(
         eventually(Duration::from_secs(1), || inbox
@@ -106,7 +106,7 @@ fn inbox_waiting_for_input_ignores_non_human_parks() {
     let worker_token = token.clone();
     let handle = std::thread::spawn(move || {
         worker_inbox.next_or_idle(
-            |_| {
+            || {
                 worker_observed.store(true, Ordering::Release);
                 ParkMode::HeldByChildren
             },
@@ -154,7 +154,7 @@ fn non_human_park_survives_an_interrupt() {
     let worker_token = token.clone();
     let handle = std::thread::spawn(move || {
         worker_inbox.next_or_idle(
-            |_| {
+            || {
                 worker_observed.store(true, Ordering::Release);
                 ParkMode::HeldByChildren
             },
@@ -193,7 +193,7 @@ fn engaged_park_dies_on_a_terminate_cause_despite_the_exchange() {
     let worker_token = token.clone();
     let handle = std::thread::spawn(move || {
         inbox.next_or_idle(
-            |_| {
+            || {
                 worker_observed.store(true, Ordering::Release);
                 ParkMode::Engaged
             },
@@ -234,7 +234,7 @@ fn held_park_survives_a_terminate_cause() {
     let worker_token = token.clone();
     let handle = std::thread::spawn(move || {
         worker_inbox.next_or_idle(
-            |_| {
+            || {
                 worker_observed.store(true, Ordering::Release);
                 ParkMode::Held
             },

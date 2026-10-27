@@ -2,7 +2,7 @@
 # compile or run `#[cfg(target_os = "linux")]` code at all, since
 # core/src/authority/sandbox.rs gates `mod linux` out of a native build.
 #
-# Deliberately lean: the cargo toolchain, bubblewrap, and `just` — which is
+# Deliberately lean: cargo, bubblewrap, deno (`ui-check`), and `just` — which is
 # here because scripts/ci.sh runs its steps as justfile recipes, so the image
 # needs the same command a developer types.  The site toolchain stays on the
 # host, which is why scripts/ci.sh runs `just site` natively in both modes.
@@ -30,6 +30,7 @@ FROM rust:bookworm
 #
 # ripgrep is `just lint`'s em-dash check.  Absent, `! rg` reads "not found" as
 # "no match" and passes.
+# unzip only unpacks deno's release zip.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         build-essential \
@@ -40,6 +41,7 @@ RUN apt-get update \
         clang \
         git \
         curl \
+        unzip \
         ca-certificates \
         bubblewrap \
         ripgrep \
@@ -55,6 +57,12 @@ RUN triple="$(uname -m)-unknown-linux-musl" \
  && printf '[build]\ntarget = "%s"\n' "$triple" > /.cargo/config.toml \
  && curl -fsSL "https://github.com/casey/just/releases/download/${JUST_VERSION}/just-${JUST_VERSION}-${triple}.tar.gz" \
     | tar -xz -C /usr/local/bin just
+
+ARG DENO_VERSION=2.5.6
+RUN curl -fsSL "https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-$(uname -m)-unknown-linux-gnu.zip" \
+        -o /tmp/deno.zip \
+ && unzip /tmp/deno.zip -d /usr/local/bin \
+ && rm /tmp/deno.zip
 
 # A non-root user, so anything written through the bind-mounted source tree
 # lands owned by the same UID that owns it outside.

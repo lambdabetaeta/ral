@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
+generated_at_commit: 3dbbe8f3
 generated_at_date: 2026-10-27
 covers_paths: [core/src/fact/observation.rs, exarch/src/tui/group.rs, core/src/shell/runtime/audit/fan_out.rs, core/src/shell/evaluator/call.rs, core/src/shell/exec/dispatch.rs, core/src/path/walk.rs, core/src/path/walk/, core/src/shell/runtime/state/checks.rs, core/src/shell/exec/redirect.rs, core/src/shell/exec/redirect/stage.rs, core/src/shell/exec/command/detach.rs, core/src/shell/exec/pipeline/collect.rs, core/src/shell/exec/redirect/scope.rs, core/src/shell/exec/command.rs, core/src/shell/exec/command/stdio.rs, core/src/shell/runtime/state/mod.rs, core/src/shell/runtime/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, core/src/path/tree/walk.rs, clippy.toml, lint/site.rs, core/tests/sites.rs]
 ---
@@ -359,10 +359,9 @@ for what clippy cannot state.**
   --workspace --all-targets` checks it (`scripts/ci.sh`'s `lint` step runs it on
   the Unix hosts, `windows.yml`'s clippy step on Windows). A call is then a
   typed site or a lint failure *in the crates that do not switch the lint off
-  again at their own root*: `ral-daemon/src/lib.rs` and
-  `ral-initramfs/src/lib.rs` each carry a crate-level
+  again at their own root*: `ral-guest/src/main.rs` carries a crate-level
   `#![allow(clippy::disallowed_methods, …)]` on the grounds of being a guest's
-  init rather than the ral shell, so inside them the site set rests on review,
+  init rather than the ral shell, so inside it the site set rests on review,
   never on the compiler. exarch and synod carry no crate-level allow. Whether
   that boundary is the discipline's real edge or an artefact of which crates
   existed when it was drawn is open. The ADR's literal `-D
@@ -415,8 +414,10 @@ for what clippy cannot state.**
   every banned call is exempt, and cannot check *how*: the lint is one for every
   ban, and an allow names the lint, not the ban, so a hand-written allow over an
   `fs::read` passes it as readily as a site does. `core/tests/sites.rs` reads
-  the Rust sources of every workspace member but `vendor/`, comments stripped,
-  and fails on any occurrence of `clippy::disallowed_methods` that is not one of
+  the Rust sources of every workspace member but `vendor/`, comments stripped.
+  Its `SRC_ROOTS` includes `netgate/src`: the host CONNECT gate's network
+  operations belong to the model's egress and carry typed sites. The scan
+  fails on any occurrence of `clippy::disallowed_methods` that is not one of
   four: (a) in `lint/site.rs`; (b) an inner allow among the leading attributes of
   an integration-test crate root, an example, a `build.rs`, or the two guest
   crate roots; (c) an outer `reason = "test code"` allow on a `mod` item whose

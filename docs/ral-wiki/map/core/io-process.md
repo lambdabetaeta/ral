@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 781d88844423a2af09f5e9a87e0d902fc4f15cff
+generated_at_commit: 3dbbe8f3
 generated_at_date: 2026-10-27
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
@@ -284,9 +284,13 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   from 100000 through `u32::MAX - 1`, and a fresh transient cgroup under
   `JailLimits` (memory / pids / CPU), with no syscall in the plan.
   There is one `GuestJail` per guest process, installed once by the
-  Linux x86-64/aarch64 `--guest-engine <cgroup-root>` role
-  (`jail::install_guest`, requiring one absolute root and euid 0; the root is
-  ral-daemon's `mounts::EXEC_CGROUP`, which the daemon makes and delegates into at boot; the jail makes `engine-<pid>/exec-<seq>` below it, or `detached/exec-<seq>` for a `detach` survivor, and the daemon removes a dead engine's tree) and read by
+  Linux x86-64/aarch64 `--guest-engine <cgroup-root>` role, named by
+  `guest_abi::layout::ENGINE_FLAG` (`jail::install_guest`, requiring one
+  absolute root and euid 0; the root is
+  `guest_abi::layout::EXEC_CGROUP`, which the daemon makes and delegates into
+  at boot; both use `layout::EXEC_CONTROLLERS`. The jail makes
+  `engine-<pid>/exec-<seq>` below it, or `detached/exec-<seq>` for a `detach`
+  survivor, and the daemon removes a dead engine's tree) and read by
   `jail::guest()`; a sealed wire-seat child engine ([[design/agents|agents]]) is
   its own process and installs its own, so the
   sequence number behind both the uid and the cgroup name is minted

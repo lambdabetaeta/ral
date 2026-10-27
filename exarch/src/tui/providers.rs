@@ -557,7 +557,11 @@ pub(super) fn providers(app: &mut App, ctx: &CommandCtx<'_>) {
         return;
     };
     let table = entries(&holdings.store.lock_ignore_poison());
-    match Wallet::exarch() {
+    match Wallet::of(
+        crate::app::EXARCH,
+        crate::config::CONFIG_FILE,
+        crate::config::LABEL,
+    ) {
         Ok(wallet) => app.open(Overlay::Providers(ProvidersOverlay::new(table, wallet))),
         Err(e) => {
             let focused = app.tabs.focused();

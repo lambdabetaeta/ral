@@ -63,11 +63,18 @@ one place ([[map/exarch/agent|agent]]). Parking is **computed, not stored** — 
 derived on every wake: a conversing agent with a human attached (the launch's
 `attended` — the TUI) parks `Held` while its own cancel token is unterminated,
 an unattended conversing root (synod's, driven one exchange at a time) holds
-for live children and quiesces once they settle, a child that has received a
-message or deposited a reply parks `Engaged` (a reply arms its follow-up lease), and
-everyone else quiesces. Whether a node converses and whether a human will type
+for busy children and quiesces once they settle, and a child with a current
+reply completion parks `Engaged` under that reply's follow-up lease. Busy
+children and permitted self-schedules carry their own continuation; otherwise
+the agent quiesces. Whether a node converses and whether a human will type
 into it are two facts — one per node, one per run — and the park verdict
 reads both.
+
+Embedded exchanges share one root-bound `SettledConversation` bus. A helper's
+`Ready` is published before its reply deposit notifies the parent, so completion
+reaches the sink before the parent's result. Quiescence measures outstanding
+work; replied helpers retain their one-hour follow-up lease, and their signals
+between exchanges wait for the next drain.
 
 ## Roots are sessions
 
@@ -318,7 +325,7 @@ spawns an engine:
   ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]);
 - the desk, *while answering*, asks its `Factory` for a connection to a fresh
   engine: synod's is the guest daemon, which spawns one engine per connection
-  the host dials on `FACTORY_PORT` and admits only `VMADDR_CID_HOST`;
+  the host dials on `guest_abi::ports::FACTORY` and admits only `VMADDR_CID_HOST`;
 - the desk builds the child's `Attach` from the parent's own plus the seal,
   adopts the stream as a `Seat::Wire` exactly as the trunk itself was seated,
   and waits for `Attached`;
@@ -401,15 +408,22 @@ one write `Agent::status.reply` ever takes) and answered, as a value, to
 the parent's `` exarch-agents `read <name> ``
 ([[decisions/260826_reply-parks|reply-parks]],
 [[decisions/260827_agent-and-avatar|agent-and-avatar]]). The parent learns of
-the reply from a one-line inbox notice, never the payload.
+the reply from a one-line inbox notice, never the payload. The last payload
+remains readable across new work; only `replied_at` records a current completion.
+A readable old value never suppresses repairs on a new attempt.
 
 A child's `reply` does not end it. Once the enclosing `ral` call's batch
-drains, the child cancels and reaps its proper descendants — a parent may
+finishes, severance and cancellation are checked before the staged reply is
+taken. That reply ends admission: queued inputs stay queued for the next attend
+item, before any model-only reminders are generated. The child cancels and reaps its proper descendants — a parent may
 abandon unfinished children, but never leave live agents registered beneath a
 node that has answered — and **parks**, waiting for a message under its idle
 lease. `` exarch-agents `message `` wakes it into a new exchange; a later `reply`
 overwrites the deposit and notifies again. Only a non-reply finish — failure,
-stop, cancellation — settles the entry at once, with its one-line tag.
+stop, cancellation — settles after budgeted repairs and genuine continuations
+are exhausted, with its one-line tag. A follow-up accepted before dequeue also
+supersedes the prior reply for cancellation reporting; reaping an unchanged
+idle reply posts no duplicate notice.
 
 ## Focus is presentation; the idle lease is lifecycle
 
@@ -497,7 +511,9 @@ gated by that authority — refused at the desk without it, and the schedule
 family is dropped from an ungranted agent's builtin index
 ([[decisions/260617_scheduled-wakeups|scheduled-wakeups]]). A live self-schedule
 parks its agent `ParkMode::UntilCancelled`: waiting for the wakeup, but stopped
-by a terminate-cause cancel.
+by a terminate-cause cancel. A terminal schedule stays armed until its wakeup
+is posted, so either registry or inbox carries the pending work; publication
+mechanics live in [[map/exarch/frontend|frontend]].
 
 ## Permissions: a spawn pushes one layer
 

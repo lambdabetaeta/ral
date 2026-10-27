@@ -297,7 +297,7 @@ pub(crate) fn chat_trunk() -> Avatar {
 /// in the direction the ordinary fixture does not cover.
 pub(crate) fn searchless_trunk() -> Avatar {
     Avatar::for_test_with(crate::agent::TestTrunk {
-        egress: crate::egress::Egress::for_test_without_search(),
+        search: false,
         ..crate::agent::TestTrunk::new("system")
     })
     .expect("searchless test trunk")
@@ -318,7 +318,7 @@ fn root(trunk: Trunk, tools: Toolset) -> Avatar {
             resume_on_reset: false,
             disk_warn_bytes: None,
             fuel: SPAWN_FUEL,
-            egress: crate::egress::Egress::for_test(),
+            search: true,
             factory: None,
             bureau: Arc::new(crate::provider::Bureau::Scripted),
             roles: crate::provider::roles::Roles::default(),

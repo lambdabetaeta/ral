@@ -244,6 +244,18 @@ networkless machine.
   reason given above. If a guest's mount is refused, that is the knob — and the
   fix should be scoped to the session rather than left standing on the folder.
 
+> **Amended 2026-10-27.** See [[decisions/261027_the-vm-crates-are-layered|the-vm-crates-are-layered]].
+> `Hypervisor::boot` returns `Booted { machine, wires }`; owned sockets are
+> adopted through `ral_core::protocol::channel::WireStream`. The spec contains
+> only `folder` and `read_only`, with `SIZE` supplying resources. Shared
+> lifecycle and session-disk ownership live in `vm-manager/src/lifecycle.rs`;
+> path conversions live in `hcs/win.rs` and `vz/config.rs`. The boot example is
+> `vm-manager/examples/boot-smoke.rs`.
+>
+> `ensure_rootfs_vhd` uses `media::publish`: source identity names an immutable
+> `rootfs-<key>.vhd`; copying or inflation, sector padding and footer writing
+> finish under its lock before publication. A changed identity yields a distinct file.
+
 ## See also
 
 [[map/synod|synod]] (where the backend lives),

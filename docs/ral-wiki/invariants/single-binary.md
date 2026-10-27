@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
+generated_at_commit: 3dbbe8f3
 ---
 
 # Single binary
@@ -9,7 +9,7 @@ elaborator, typechecker, evaluator, the bundled coreutils and grep, and the
 capability sandbox are all linked into the one binary — none is a separate
 program ral shells out to. Every re-exec is a *multicall* of this same binary
 behind a hidden sentinel flag, never a sibling helper — the flag is the first
-argument, `ral_core::Role` spells each flag once, `ral_core::classify` is the
+argument, `ral_core::Role` names each flag, `ral_core::classify` is the
 one place that reads it, and `ral_core::invocation::serve` the one place that
 serves it; a re-exec is launched from a `Role`, never a string
 (`authority::sandbox::reexec::launch`). Every role ships; none exists for tests:
@@ -30,8 +30,10 @@ serves it; a re-exec is launched from a `Role`, never a string
   rather than argv, or at spawn on Windows (an AppContainer, no child re-exec
   there), confined by the `sandbox_projection` of the live
   [[design/grant|grant]];
-- the guest daemon spawns every engine under `--engine`, a child's seed
-  arriving sealed in its `Attach` ([[map/core/transport|transport]]).
+- the guest daemon spawns every engine under `--guest-engine <cgroup-root>`,
+  named by `guest_abi::layout::ENGINE_FLAG`; core adopts the wire on
+  `layout::ENGINE_FD`, and a child's seed arrives sealed in its `Attach`
+  ([[map/core/transport|transport]]).
 
 This in-process linking is also what routes the bundled tools through the same
 capability chokepoint as the structured primitives.

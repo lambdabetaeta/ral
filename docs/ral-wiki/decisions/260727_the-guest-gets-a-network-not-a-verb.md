@@ -77,7 +77,7 @@ the absence of a listener.
 
 - **Host-mode exarch loses its web door.** `fetch-url` was reachable from a
   bare exarch session with no guest underneath it; the four gates described
-  in [[design/egress|egress]] exist only inside `guest-net`, so a host-mode
+  in [[design/egress|egress]] exist only inside `netgate`, so a host-mode
   session that wants the network now needs a guest to run it through. Search
   is unaffected — `search` stays a policy bit on `NetPolicy`, clamping the
   provider's own hosted web search, which never touched `fetch-url`'s
@@ -98,7 +98,7 @@ the absence of a listener.
   the same way every other write-shaped protocol is.
 - **The jargon guard moved.** The plain-English check that used to guard
   `fetch-url`'s refusal text (`fleet::desk`'s `FETCH_URL_JARGON`) is retired
-  with the verb it guarded and rebuilt beside `guest_net::refusal::Refusal`
+  with the verb it guarded and rebuilt beside `netgate::refusal::Refusal`
   as `REFUSAL_JARGON`, checked against every refusal variant exhaustively
   rather than against strings a socket had to be opened to produce.
 
@@ -118,7 +118,7 @@ the absence of a listener.
   Whether a review surface built on the ledger should ever truncate a
   logged path for readability, and how much of one that could do before the
   audit stops being trustworthy evidence of what actually crossed, is open.
-- **Request headers relay by a named allowlist.** `guest_net::proxy` first
+- **Request headers relay by a named allowlist.** `netgate::stack` first
   shipped keeping only `Host` and `Content-Length` from the guest's
   request, which broke real traffic silently — no `Range` for `apt` to
   resume a partial download, no `Accept` for PyPI's JSON API, no

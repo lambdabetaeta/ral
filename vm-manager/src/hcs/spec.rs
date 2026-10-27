@@ -1,93 +1,25 @@
-//! The machine, as a document.
-//!
-//! HCS takes no builder objects: a compute system is described by one JSON
-//! document handed to `HcsCreateComputeSystem`, so this module *is* the
-//! spec→hypervisor mapping, the way `vm-manager/src/vz.rs`'s `build_configuration` is on
-//! macOS.  Being data rather than a sequence of setter calls, it can be built
-//! and read back in a unit test on any Windows, with no VM and no privilege —
-//! which is what the tests at the bottom do.
-//!
-//! # What the document says, and why each part is there
-//!
-//! - **`Chipset.LinuxKernelDirect`** — direct kernel boot, the same shape
-//!   `VZLinuxBootLoader` gives on macOS: a kernel, an initial ramdisk, and a
-//!   command line.  No UEFI, no bootloader, no boot disk to keep in step.
-//! - **`ComputeTopology`** — the processors and memory the grant asked for.
-//!   `AllowOvercommit` lets the host back the guest's memory lazily, so a
-//!   4 GiB session does not take 4 GiB of the user's RAM to sit idle.
-//! - **`Devices.Scsi`** — the two disks, in the order the guest's initramfs
-//!   expects: the read-only rootfs at LUN 0, the read-write session disk at
-//!   LUN 1.  Hyper-V has no virtio, so these arrive as SCSI devices
-//!   (`/dev/sda`, `/dev/sdb`) rather than `/dev/vda`, `/dev/vdb`, and both
-//!   must be VHDs — [`super::vhd`] is why.
-//! - **`Devices.Plan9`** — the granted folder.  Hyper-V has no virtiofs, so the
-//!   folder is exported as a 9p2000.L share that the *host* serves on a vsock
-//!   port; the guest dials that port and mounts it at `/work`.  This is the
-//!   mechanism WSL uses for `/mnt/c` and Microsoft's own Linux containers use
-//!   for every host path, so it is neither exotic nor synod's invention.
-//! - **`Devices.HvSocket`** — the control plane and the net wire, the guest's
-//!   only two ways out of the machine.  There is **no network adapter at
-//!   all**: not a disabled one, not a filtered one — absent, so there is
-//!   nothing to misconfigure.  The net wire is a second `HvSocketService`
-//!   entry in the same table, dialled by the guest exactly as the control
-//!   plane is, and carries only IPv4 frames to the host's own user-mode
-//!   TCP/IP stack — no NIC, no ARP, no broadcast domain.
-//! - **`Devices.ComPorts`** — the guest console on a named pipe, which
-//!   [`super::console`] reads onto synod's own output.  This is where a kernel
-//!   panic or a daemon's refusal becomes visible; without it a failed boot is
-//!   just a timeout.
-//! - **`ShouldTerminateOnLastHandleClosed`** — if synod dies, the guest dies.
-//!   The one line that makes a crashed host safe rather than merely tidy.
+//! HCS configuration is JSON, built without creating a machine.
+//! Rootfs is read-only at LUN 0; the guest formats the writable session disk at LUN 1.
+//! Read-only grants are enforced by share flags; no network adapter is configured.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use ral_daemon::boot;
+use guest_abi::{boot::Export, layout::WORKSPACE_NAME, ports};
 use serde::Serialize;
 
-use super::document_text;
-use crate::Error;
+use crate::error::Error;
+use crate::hcs::win::document_text;
 
-/// The schema version this document is written against.
-///
-/// 2.1 is what Microsoft's own Linux-container host asks for, including for
-/// `LinuxKernelDirect` boots, so it is the version with the most traffic over
-/// it rather than the newest one available.
+/// Schema 2.1 matches Microsoft's Linux-container host, including direct kernel boots.
 const SCHEMA: Version = Version { major: 2, minor: 1 };
 
-/// The vsock port the host's 9p server listens on for the workspace share.
-///
-/// 564 is the registered `plan9` port and the number Microsoft's container host
-/// uses for the same job; the guest is told it on the kernel command line
-/// (`ral.plan9`) rather than compiling it in, so this constant is one side of a
-/// contract and not a shared secret.
-pub(super) const PLAN9_PORT: u32 = 564;
-
-/// The share name the folder is exported under — the `aname` the guest mounts
-/// by, and the value of `ral.workspace` on the kernel command line.
-///
-/// It plays exactly the part `WORKSPACE_TAG` plays for virtiofs on macOS: a
-/// word the host and guest agree on, never a path.
-pub(super) const WORKSPACE_SHARE: &str = "workspace";
-
-/// 9p share flags, as the compute service defines them.
-///
-/// `LINUX_METADATA` is what makes the share carry uid/gid/mode/symlink
-/// information instead of presenting everything as the sharing user's own
-/// files — without it a Linux guest cannot keep the permissions of what it
-/// writes.  `READ_ONLY` is how a read-only grant becomes the *mount's* law
-/// rather than a promise the guest is trusted to keep.
+/// `LINUX_METADATA` preserves Linux ownership and modes; `READ_ONLY` enforces the grant at the mount.
 mod plan9_flags {
     pub(super) const READ_ONLY: i32 = 0x0000_0001;
     pub(super) const LINUX_METADATA: i32 = 0x0000_0004;
 }
 
-/// Everything the host has decided before a document can be written.
-///
-/// Assembled by [`Hypervisor::boot`](crate::Hypervisor::boot) from the [`MachineSpec`](crate::MachineSpec),
-/// the [`BootArtifact`](crate::BootArtifact), and the per-session files it made;
-/// kept as one struct so [`document`] is a pure function of it and the tests
-/// can write one by hand.
 pub(super) struct Plan<'a> {
     pub(super) kernel: &'a Path,
     pub(super) initramfs: &'a Path,
@@ -100,62 +32,16 @@ pub(super) struct Plan<'a> {
     pub(super) read_only: bool,
     pub(super) vcpus: u32,
     pub(super) memory_mib: u32,
-    /// The host's `AF_HYPERV` control-plane port, as the guest's vsock port.
-    pub(super) control_port: u32,
-    /// The host's `AF_HYPERV` net-wire port, as the guest's vsock port.
-    pub(super) net_port: u32,
     /// The host's wall clock at boot, for the guest to adopt.
     pub(super) epoch: u64,
-    /// The named pipe the guest's console is wired to.
     pub(super) console_pipe: &'a str,
-    /// Who may bind and connect this machine's sockets, in SDDL.
     pub(super) socket_sddl: &'a str,
-    /// The service GUID the control port maps to, spelled as HCS wants it.
     pub(super) control_service: &'a str,
-    /// The service GUID the net port maps to, spelled as HCS wants it.
     pub(super) net_service: &'a str,
 }
 
-/// The kernel command line: the console, and the session settings
-/// [`ral_daemon::boot::Boot`] reads back out of `/proc/cmdline`.
-///
-/// Built and rendered by `ral-daemon`'s own [`boot::command_line`] rather than
-/// formatted here, so the two ends of the boot contract cannot drift apart at
-/// compile time — the stale-`boot.img` case stays possible, and stays a loud
-/// one-line refusal, but a *spelling* mismatch between writer and reader is no
-/// longer possible at all.
-///
-/// The console is an emulated COM port (`ttyS0`), where the macOS backend's is
-/// a virtio console (`hvc0`) — the one difference [`boot::command_line`]
-/// leaves to its caller, because it is the hypervisor's fact, not the boot
-/// contract's.  Everything else — the workspace as a named 9p share, the two
-/// control-plane and net-wire ports, the epoch — is the shared shape.
-fn kernel_command_line(plan: &Plan<'_>) -> String {
-    boot::command_line(
-        &boot::Boot {
-            workspace: boot::Export::Plan9 {
-                name: WORKSPACE_SHARE.to_string(),
-                port: PLAN9_PORT,
-            },
-            port: plan.control_port,
-            epoch: i64::try_from(plan.epoch).unwrap_or(i64::MAX),
-            engine: boot::DEFAULT_ENGINE.to_string(),
-            net: Some(boot::Net {
-                port: plan.net_port,
-                address: crate::GUEST_LINK.address,
-                prefix: crate::GUEST_LINK.prefix,
-                gateway: crate::GUEST_LINK.gateway,
-            }),
-        },
-        "ttyS0",
-    )
-}
-
-/// The whole compute system, ready to be serialised and handed to HCS.
-///
 /// # Errors
-/// Returns [`Error::NotUnicode`] if a path the document would carry is not
-/// Unicode: the document is JSON text, which cannot spell it ([`document_text`]).
+/// Returns [`Error::NotUnicode`] rather than respelling a path in the JSON document.
 pub(super) fn document(plan: &Plan<'_>) -> Result<ComputeSystem, Error> {
     let mut scsi = BTreeMap::new();
     scsi.insert(
@@ -199,7 +85,14 @@ pub(super) fn document(plan: &Plan<'_>) -> Result<ComputeSystem, Error> {
                 linux_kernel_direct: LinuxKernelDirect {
                     kernel_file_path: document_text(plan.kernel)?.to_owned(),
                     init_rd_path: document_text(plan.initramfs)?.to_owned(),
-                    kernel_cmd_line: kernel_command_line(plan),
+                    kernel_cmd_line: crate::spec::boot_line(
+                        Export::Plan9 {
+                            name: WORKSPACE_NAME.into(),
+                            port: ports::PLAN9,
+                        },
+                        "ttyS0",
+                        plan.epoch,
+                    ),
                 },
             },
             compute_topology: ComputeTopology {
@@ -213,10 +106,10 @@ pub(super) fn document(plan: &Plan<'_>) -> Result<ComputeSystem, Error> {
                 scsi,
                 plan9: Plan9 {
                     shares: vec![Plan9Share {
-                        name: WORKSPACE_SHARE.to_string(),
-                        access_name: WORKSPACE_SHARE.to_string(),
+                        name: WORKSPACE_NAME.to_string(),
+                        access_name: WORKSPACE_NAME.to_string(),
                         path: document_text(plan.folder)?.to_owned(),
-                        port: PLAN9_PORT,
+                        port: ports::PLAN9,
                         flags,
                     }],
                 },
@@ -252,12 +145,6 @@ pub(super) fn document(plan: &Plan<'_>) -> Result<ComputeSystem, Error> {
         },
     })
 }
-
-// ── The document's own shape ──────────────────────────────────────────────
-//
-// PascalCase throughout, because that is HCS's spelling; the two fields whose
-// idiomatic Rust names do not PascalCase into the right word (`SizeInMB`, and
-// `Type` which is a keyword here) say so explicitly.
 
 #[derive(Serialize)]
 #[serde(rename_all = "PascalCase")]
@@ -390,20 +277,26 @@ struct ComPort {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    use crate::spec::{MachineSpec, SIZE};
     use serde_json::Value;
 
-    fn plan() -> Plan<'static> {
+    fn spec() -> MachineSpec {
+        MachineSpec {
+            folder: Path::new(r"C:\Users\secretary\Documents\Invoices").into(),
+            read_only: false,
+        }
+    }
+
+    fn plan(spec: &MachineSpec) -> Plan<'_> {
         Plan {
             kernel: Path::new(r"C:\synod\boot\kernel"),
             initramfs: Path::new(r"C:\synod\boot\initramfs.img"),
             rootfs: Path::new(r"C:\synod\cache\rootfs.vhd"),
             session: Path::new(r"C:\synod\cache\session-1.vhd"),
-            folder: Path::new(r"C:\Users\secretary\Documents\Invoices"),
-            read_only: false,
-            vcpus: 4,
-            memory_mib: 4096,
-            control_port: 1729,
-            net_port: 1730,
+            folder: &spec.folder,
+            read_only: spec.read_only,
+            vcpus: u32::from(SIZE.vcpus),
+            memory_mib: SIZE.memory_mib,
             epoch: 1_771_200_000,
             console_pipe: r"\\.\pipe\synod-console-1",
             socket_sddl: "D:P(A;;FA;;;SY)",
@@ -413,16 +306,10 @@ mod tests {
     }
 
     fn json() -> Value {
-        serde_json::to_value(document(&plan()).expect("every path is Unicode"))
+        serde_json::to_value(document(&plan(&spec())).expect("every path is Unicode"))
             .expect("the document serialises")
     }
 
-    /// The document carries exactly the machine the design describes: two
-    /// disks in the guest's own order, one share, two socket services — the
-    /// control plane and the net wire — one console, and, the load-bearing
-    /// absence, no network adapter at all: the net wire is a second
-    /// `HvSocket` service, not a NIC.  This is the Windows twin of the macOS
-    /// backend's `the_configuration_is_the_machine_the_design_describes`.
     #[test]
     fn the_document_is_the_machine_the_design_describes() {
         let doc = json();
@@ -450,9 +337,6 @@ mod tests {
         );
     }
 
-    /// The rootfs is read-only and first; the session disk is writable and
-    /// second.  The guest's initramfs resolves its two disks by *device
-    /// order*, so this ordering is a contract with it, not a preference.
     #[test]
     fn the_disks_are_attached_in_the_order_the_guest_expects() {
         let doc = json();
@@ -464,10 +348,6 @@ mod tests {
         assert_eq!(luns["0"]["Type"], Value::String("VirtualDisk".into()));
     }
 
-    /// A read-only grant is the mount's own law: the flag rides in the share's
-    /// `Flags`, so the guest cannot write the folder even if it tries.  Linux
-    /// metadata is always on — without it the guest cannot preserve the
-    /// permissions of what it writes.
     #[test]
     fn a_read_only_grant_is_carried_by_the_share_flags() {
         let writable = json();
@@ -476,8 +356,9 @@ mod tests {
             .unwrap();
         assert_eq!(flags, i64::from(plan9_flags::LINUX_METADATA));
 
-        let mut read_only_plan = plan();
-        read_only_plan.read_only = true;
+        let mut spec = spec();
+        spec.read_only = true;
+        let read_only_plan = plan(&spec);
         let doc = serde_json::to_value(document(&read_only_plan).unwrap()).unwrap();
         let flags = doc["VirtualMachine"]["Devices"]["Plan9"]["Shares"][0]["Flags"]
             .as_i64()
@@ -488,14 +369,12 @@ mod tests {
         );
     }
 
-    /// The command line addresses the daemon in the spelling its parser
-    /// expects, and keeps the three vsock ports distinct — the control plane,
-    /// the workspace transport and the net wire are three different sockets,
-    /// and `service_guid` folds each into its own GUID, so a collision here
-    /// would silently alias two of the machine's services onto one.
     #[test]
-    fn the_command_line_addresses_the_daemon() {
-        let line = kernel_command_line(&plan());
+    fn the_command_line_addresses_the_guest() {
+        let doc = json();
+        let line = doc["VirtualMachine"]["Chipset"]["LinuxKernelDirect"]["KernelCmdLine"]
+            .as_str()
+            .unwrap();
         assert!(line.contains("console=ttyS0"), "{line}");
         assert!(line.contains("ral.workspace=workspace"), "{line}");
         assert!(line.contains("ral.plan9=564"), "{line}");
@@ -505,21 +384,8 @@ mod tests {
             line.contains("ral.net=1730,10.0.2.15/24,10.0.2.2"),
             "{line}"
         );
-        assert_ne!(
-            PLAN9_PORT,
-            super::super::CONTROL_PORT,
-            "plan9/control collide"
-        );
-        assert_ne!(PLAN9_PORT, crate::NET_PORT, "plan9/net collide");
-        assert_ne!(
-            super::super::CONTROL_PORT,
-            crate::NET_PORT,
-            "control/net collide"
-        );
     }
 
-    /// Losing the handle stops the machine: a crashed synod leaves no guest
-    /// running.
     #[test]
     fn the_machine_dies_with_its_last_handle() {
         assert_eq!(
@@ -528,8 +394,6 @@ mod tests {
         );
     }
 
-    /// Every key HCS reads is `PascalCase`, and the two that do not fall out of
-    /// that rule mechanically are spelled the way the service wants.
     #[test]
     fn the_documents_spelling_is_the_services() {
         let doc = json();
@@ -542,8 +406,6 @@ mod tests {
         assert_eq!(doc["SchemaVersion"]["Minor"], Value::from(1));
     }
 
-    /// A folder whose name holds an unpaired surrogate is refused by name, not
-    /// written with U+FFFD in its place — which would be another folder's name.
     #[test]
     fn a_path_that_is_not_unicode_is_refused_rather_than_respelled() {
         use std::os::windows::ffi::OsStringExt;
@@ -551,10 +413,11 @@ mod tests {
         let mut units: Vec<u16> = r"C:\Users\secretary\Invoices".encode_utf16().collect();
         units.push(0xD800);
         let folder = std::path::PathBuf::from(std::ffi::OsString::from_wide(&units));
-        let refused = Plan {
-            folder: &folder,
-            ..plan()
+        let spec = MachineSpec {
+            folder: folder.clone(),
+            read_only: false,
         };
+        let refused = plan(&spec);
         match document(&refused) {
             Err(Error::NotUnicode(path)) => assert_eq!(path, folder),
             Err(other) => panic!("refused for the wrong reason: {other:?}"),

@@ -1,6 +1,4 @@
-    /* --- accounts screen: the services, and the keys they are spoken to
-       with. One card per service, each saying the same three things: who
-       it is, whether a key is in force, and what may be done about it. --- */
+    /* Each service card shows its identity, key status and available actions. */
     #screen-accounts {
       height: 100%;
       flex-direction: column;

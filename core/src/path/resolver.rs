@@ -9,6 +9,20 @@ use std::path::Path;
 use super::{CwdPath, LexicalPath, NotACwd, lex, sigil};
 use crate::host::EnvVars;
 
+/// Anchor a host-held path against the process's working directory, without expanding sigils.
+///
+/// # Errors
+/// A sentence when the process has no working directory to anchor against.
+pub fn spelled(path: &Path) -> Result<LexicalPath, String> {
+    let cwd = crate::host::cwd().ok_or_else(|| {
+        format!(
+            "Cannot tell which folder the process is running in, so cannot find {}.",
+            super::shown(path)
+        )
+    })?;
+    Ok(Resolver::at(&EnvVars::new(), &cwd).anchor(path))
+}
+
 /// The environment and logical cwd one resolution runs against: `~` reads
 /// `env.home()`, `xdg:` the `XDG_*_HOME` of `env`, each overlay before the
 /// host, and a `~` with no home resolves to itself.

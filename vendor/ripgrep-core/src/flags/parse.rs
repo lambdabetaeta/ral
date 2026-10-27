@@ -51,7 +51,7 @@ pub(crate) fn parse() -> ParseResult<HiArgs> {
 }
 
 /// Parse explicit CLI arguments and convert them to their high level
-/// representation. `rawargs` must not include argv[0].
+/// representation. `rawargs` must not include argv\[0\].
 pub(crate) fn parse_from<I, O>(rawargs: I) -> ParseResult<HiArgs>
 where
     I: IntoIterator<Item = O>,

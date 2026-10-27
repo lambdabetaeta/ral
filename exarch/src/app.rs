@@ -23,6 +23,10 @@ const RUN_LOCK: &str = "run.lock";
 /// makes a run [resumable](resume_candidates).
 pub const RECORD: &str = "record.jsonl";
 
+/// The engine reads it by name ([`crate::boot::engine_root`]); it is the protocol's,
+/// not a product's.
+pub const SCRATCH_VAR: &str = "EXARCH_SCRATCH";
+
 /// The run's advisory write lock, held as long as this process lives.
 ///
 /// The lock belongs to the open file the value holds, which the OS releases
@@ -50,8 +54,7 @@ impl RunLock {
     }
 }
 
-/// Per-session scratch directory, named to the agent under its own [`App`] —
-/// `$EXARCH_SCRATCH`, `$SYNOD_SCRATCH`.
+/// Per-session scratch directory, named to the agent by [`SCRATCH_VAR`].
 ///
 /// Everything ephemeral the agent scribbles belongs here, because
 /// `reasonable` denies writes to the user's real cache dirs.
@@ -62,7 +65,6 @@ impl RunLock {
 /// a lock beside its scratch for as long as it runs, and [`Scratch::new`]
 /// deletes the scratches no lock answers for.
 pub struct Scratch {
-    app: App,
     dir: OwnDir,
     /// Where it is, as text ([`Self::spelling`]), and what [`Self::env`]
     /// names: both settled once at creation, since each fails only for a
@@ -181,11 +183,11 @@ impl Scratch {
     /// Never: the lock is made with [`LOCK_SUFFIX`] appended, which is what
     /// names its scratch.
     pub fn new(app: App) -> io::Result<Self> {
-        Self::in_root(app, &app.own(XdgKind::Cache)?.make_dir("scratch")?)
+        Self::in_root(&app.own(XdgKind::Cache)?.make_dir("scratch")?)
     }
 
     /// [`Self::new`] over `root`, the directory the app's scratches share.
-    fn in_root(app: App, root: &OwnDir) -> io::Result<Self> {
+    fn in_root(root: &OwnDir) -> io::Result<Self> {
         let (lock_name, lock) = fresh_lock(root)?;
         let name = lock_name
             .strip_suffix(LOCK_SUFFIX)
@@ -200,19 +202,18 @@ impl Scratch {
         };
         let dir = root.make_dir(&hold.name)?;
         reap_unheld(root, &hold.lock_name);
-        Self::made(app, dir, Hold::Session(hold))
+        Self::made(dir, Hold::Session(hold))
     }
 
     /// The scratch `dir` makes.
-    fn made(app: App, dir: OwnDir, hold: Hold) -> io::Result<Self> {
+    fn made(dir: OwnDir, hold: Hold) -> io::Result<Self> {
         dir.make_dir("tmp")?;
         let unicode = |e: NotUtf8| io::Error::new(io::ErrorKind::InvalidData, e);
         let spelling = ral_core::path::utf8(dir.path())
             .map_err(unicode)?
             .to_owned();
-        let env = scratch_env(app, dir.path()).map_err(unicode)?;
+        let env = scratch_env(dir.path()).map_err(unicode)?;
         Ok(Self {
-            app,
             dir,
             spelling,
             env,
@@ -231,11 +232,6 @@ impl Scratch {
         &self.spelling
     }
 
-    /// The environment variable naming this scratch to the agent.
-    pub fn var(&self) -> String {
-        self.app.scratch_var()
-    }
-
     /// A scratch for one test, deleted when the returned value falls.  A test
     /// process ends normally, so the guard suffices and no lock is taken.
     ///
@@ -252,7 +248,7 @@ impl Scratch {
     pub fn for_test(app: App, tag: &str) -> io::Result<Self> {
         let root = OwnDir::for_test(&format!("{}-{tag}", app.name()))?;
         let dir = root.make_dir("scratch")?;
-        Self::made(app, dir, Hold::Test(root))
+        Self::made(dir, Hold::Test(root))
     }
 
     /// A directory beside this test scratch rather than inside it, deleted
@@ -276,7 +272,7 @@ impl Scratch {
         Ok(root.make_dir(name)?)
     }
 
-    /// Seed [`Scratch::var`], the [`TOOL_HOMES`] and
+    /// Seed [`SCRATCH_VAR`], the [`TOOL_HOMES`] and
     /// [`CONFINED_TOOL_SETTINGS`] into `shell`, overriding whatever was
     /// inherited: a `CARGO_HOME` under `~/.cargo` lands outside reasonable's
     /// write set, so the sandbox is the trust boundary, not the environment
@@ -289,7 +285,7 @@ impl Scratch {
         }
     }
 
-    /// What this scratch names to the agent: [`Scratch::var`], the
+    /// What this scratch names to the agent: [`SCRATCH_VAR`], the
     /// [`TOOL_HOMES`] and [`CONFINED_TOOL_SETTINGS`], as the pairs an `Attach`
     /// names.
     pub fn env(&self) -> Vec<(String, String)> {
@@ -303,17 +299,17 @@ impl Scratch {
 /// # Errors
 /// [`NotUtf8`] when `dir` is not Unicode: an environment value is text, and a
 /// lossy one would name a different directory.
-fn scratch_env(app: App, dir: &Path) -> Result<Vec<(String, String)>, NotUtf8> {
+fn scratch_env(dir: &Path) -> Result<Vec<(String, String)>, NotUtf8> {
     let text = |path: &Path| ral_core::path::utf8(path).map(str::to_owned);
-    env_under(app, text(dir)?, |sub| text(&join_slash(dir, sub)))
+    env_under(text(dir)?, |sub| text(&join_slash(dir, sub)))
 }
 
 /// What a scratch at `dir` inside a Posix guest names to the agent.
 ///
 /// `dir` is the guest's path, which the host cannot hold as a `PathBuf`, so
 /// every home joins under it as the guest joins, with `/`, whatever the host.
-pub fn guest_scratch_env(app: App, dir: &GuestPath) -> Vec<(String, String)> {
-    let Ok(env) = env_under(app, dir.as_str().to_owned(), |sub| {
+pub(crate) fn guest_scratch_env(dir: &GuestPath) -> Vec<(String, String)> {
+    let Ok(env) = env_under(dir.as_str().to_owned(), |sub| {
         Ok::<_, Infallible>(dir.join(sub).as_str().to_owned())
     });
     env
@@ -323,7 +319,6 @@ pub fn guest_scratch_env(app: App, dir: &GuestPath) -> Vec<(String, String)> {
 /// for a scratch spelled `scratch` whose subdirectories `under` spells, or
 /// fails to spell: one table for a host's own [`Scratch`] and for a guest's.
 fn env_under<E>(
-    app: App,
     scratch: String,
     under: impl Fn(&'static str) -> Result<String, E>,
 ) -> Result<Vec<(String, String)>, E> {
@@ -333,7 +328,7 @@ fn env_under<E>(
     let settings = CONFINED_TOOL_SETTINGS
         .iter()
         .map(|(var, value)| Ok(((*var).to_string(), (*value).to_string())));
-    std::iter::once(Ok((app.scratch_var(), scratch)))
+    std::iter::once(Ok((SCRATCH_VAR.to_owned(), scratch)))
         .chain(homes)
         .chain(settings)
         .collect()
@@ -439,12 +434,6 @@ impl App {
     #[must_use]
     pub const fn name(self) -> &'static str {
         self.0
-    }
-
-    /// The variable naming this app's scratch to the agent.
-    #[must_use]
-    pub fn scratch_var(self) -> String {
-        format!("{}_SCRATCH", self.0.to_uppercase())
     }
 
     /// This app's directory under an XDG base, `$XDG_<kind>_HOME/<app>/`, as
@@ -622,8 +611,9 @@ pub(crate) fn seed_var(shell: &mut Shell, name: &str, value: &str) {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::{
-        CONFINED_TOOL_SETTINGS, EXARCH, LOCK_SUFFIX, RECORD, Scratch, TOOL_HOMES, fresh_lock,
-        guest_scratch_env, normalize_resume_target, reap_unheld, resume_candidates, scratch_env,
+        CONFINED_TOOL_SETTINGS, EXARCH, LOCK_SUFFIX, RECORD, SCRATCH_VAR, Scratch, TOOL_HOMES,
+        fresh_lock, guest_scratch_env, normalize_resume_target, reap_unheld, resume_candidates,
+        scratch_env,
     };
     use ral_core::own::OwnDir;
     use ral_core::path::GuestPath;
@@ -632,7 +622,7 @@ mod tests {
     #[test]
     fn scratch_env_names_the_var_the_homes_and_the_settings() {
         let dir = std::path::Path::new("/tmp/x");
-        let env = scratch_env(EXARCH, dir).expect("a Unicode path");
+        let env = scratch_env(dir).expect("a Unicode path");
         assert_eq!(
             env.len(),
             1 + TOOL_HOMES.len() + CONFINED_TOOL_SETTINGS.len()
@@ -640,7 +630,7 @@ mod tests {
         // Every value is native, as the child reads it back: on Windows the
         // subdirectories join with `\`.
         let native = |p: &std::path::Path| p.to_string_lossy().into_owned();
-        assert_eq!(env[0], (EXARCH.scratch_var(), native(dir)));
+        assert_eq!(env[0], (SCRATCH_VAR.to_owned(), native(dir)));
         for (var, _) in TOOL_HOMES {
             assert!(env.iter().any(|(name, _)| name == var), "{var} is missing");
         }
@@ -669,7 +659,7 @@ mod tests {
     /// `/` even on Windows, where a native join would name `/tmp\xdg-cache`.
     #[test]
     fn guest_scratch_env_joins_with_slash_on_every_host() {
-        let env = guest_scratch_env(EXARCH, &GuestPath::from_static("/tmp"));
+        let env = guest_scratch_env(&GuestPath::from_static("/tmp"));
         assert_eq!(
             env.len(),
             1 + TOOL_HOMES.len() + CONFINED_TOOL_SETTINGS.len()
@@ -679,7 +669,7 @@ mod tests {
                 .find(|(var, _)| var == name)
                 .map(|(_, v)| v.as_str())
         };
-        assert_eq!(get(&EXARCH.scratch_var()), Some("/tmp"));
+        assert_eq!(get(SCRATCH_VAR), Some("/tmp"));
         assert_eq!(get("TMPDIR"), Some("/tmp/tmp"));
         assert_eq!(get("XDG_CACHE_HOME"), Some("/tmp/xdg-cache"));
         assert_eq!(get("GOMODCACHE"), Some("/tmp/go/pkg/mod"));
@@ -704,7 +694,7 @@ mod tests {
     #[test]
     fn dropping_a_session_scratch_removes_its_directory_and_its_lock() {
         let root = OwnDir::for_test("scratch-drop").expect("a scratch root");
-        let scratch = Scratch::in_root(EXARCH, &root).expect("session scratch");
+        let scratch = Scratch::in_root(&root).expect("session scratch");
         let name = scratch
             .path()
             .file_name()

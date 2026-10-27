@@ -1,6 +1,6 @@
 # Core's low modules stay below the shell
 
-**Production code in `authority`, `fact`, `host`, `io`, `own`, `path` and
+**Production code in `authority`, `egress`, `fact`, `host`, `io`, `own`, `path` and
 `process` cannot reach `shell`, directly or transitively.**
 
 - Lower modules exchange domain data: environment overlays, observations,

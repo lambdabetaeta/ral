@@ -282,7 +282,7 @@ impl Drop for Writing {
 /// Panics if the inherited wire channel cannot be cloned for the writer.
 pub fn run_engine(installers: &'static [EngineInstaller]) -> ! {
     // SAFETY: fd 3 is the socket inherited from the front-end
-    let stream = unsafe { UnixStream::from_raw_fd(3) };
+    let stream = unsafe { UnixStream::from_raw_fd(guest_abi::layout::ENGINE_FD) };
     // The handoff must leave fd 3 open across exec, so set CLOEXEC the instant
     // the engine owns it: no external command a run spawns may inherit the wire.
     if let Err(e) = rustix::io::fcntl_setfd(&stream, rustix::io::FdFlags::CLOEXEC) {

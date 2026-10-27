@@ -11,18 +11,21 @@ use crate::agent::fleet::{AGENT_LEASE_IDLE, Claim, Fleet, Genesis, Launch, Unbor
 use crate::agent::index::BuiltinIndex;
 use crate::agent::seat::Seat;
 use crate::agent::{Agent, Avatar, Birth, LogCell, ProviderHandle, Readings, ReplyCell, Role};
-use crate::app::Scratch;
+use crate::app::{SCRATCH_VAR, Scratch, guest_scratch_env};
 use crate::bus::{Emitter, Inbox};
 use crate::provider::Provider;
 use crate::provider::Toolset;
 use crate::record::AgentId;
 use crate::record::{AgentLog, Memory, RecordedAccount, RecordedModel, Resumed};
-use ral_core::authority::policy::GrantStack;
-use ral_core::carrier::Severed;
+use crate::shell_eval::builtins;
+use ral_core::authority::policy::{Capabilities, GrantStack};
+use ral_core::carrier::{Severed, WireTransport};
+use ral_core::data::datum::Datum as _;
 use ral_core::engine::EngineInstaller;
 use ral_core::own::OwnDir;
-use ral_core::path::CwdPath;
-use ral_core::protocol::Origin;
+use ral_core::path::{CwdPath, EnginePath, GuestPath};
+use ral_core::protocol::channel::{Liveness, WireStream};
+use ral_core::protocol::{Attach, EngineSpec, Origin, Root};
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -118,9 +121,8 @@ pub struct RootConfig {
     /// figure both products' roots carry: every agent may delegate, and an
     /// exchange or a chain of forks ends only once the whole tree does.
     pub fuel: u32,
-    /// The network policy, whose `search` verdict is every root's reach and
-    /// the ceiling every fork narrows under.
-    pub egress: crate::egress::Egress,
+    /// Hosted search permission, inherited by every root and narrowed by forks.
+    pub search: bool,
     /// Where a wire root gets its helper engines; `None` for every identity
     /// root. A wire root built with `fuel > 0` and no factory is refused
     /// here — never a runtime surprise reached only once a model calls
@@ -160,6 +162,33 @@ pub enum RootSeat {
     },
 }
 
+impl RootSeat {
+    /// A wire root over a guest engine's control stream, its scratch named by `SCRATCH_VAR`.
+    ///
+    /// # Errors
+    /// Returns a sentence if the control stream cannot be adopted.
+    pub fn guest(
+        stream: WireStream,
+        cwd: GuestPath,
+        scratch: GuestPath,
+        ceiling: Capabilities,
+    ) -> Result<Self, String> {
+        let transport = WireTransport::adopt(stream, Liveness::default())
+            .map_err(|e| format!("could not take control of the machine: {e}"))?;
+        let root = Root::new(EnginePath::Guest(cwd))
+            .with_env(guest_scratch_env(&scratch))
+            .with_config(ceiling.encode());
+        let attach = Attach::root(
+            EngineSpec::new(builtins::INSTALLER_TAG, EnginePath::Guest(scratch)),
+            root,
+        );
+        Ok(Self::Wire {
+            transport: Box::new(transport),
+            attach,
+        })
+    }
+}
+
 impl Fleet {
     /// Found a run's fleet: seat its first root's engine, read the builtin
     /// index and `$EXARCH_SCRATCH` off it, and settle the [`Launch`] every
@@ -184,7 +213,7 @@ impl Fleet {
             resume_on_reset,
             disk_warn_bytes,
             fuel,
-            egress,
+            search,
             factory,
             bureau,
             roles,
@@ -238,11 +267,10 @@ impl Fleet {
             }
         };
         let index = BuiltinIndex::resolve(seat.read(|t| t.builtin_names()).map_err(lost)?);
-        let scratch_var = crate::app::EXARCH.scratch_var();
         let scratch = seat
-            .read(|t| t.env_var(&scratch_var))
+            .read(|t| t.env_var(SCRATCH_VAR))
             .map_err(lost)?
-            .ok_or_else(|| io::Error::other(format!("the engine names no ${scratch_var}")))?;
+            .ok_or_else(|| io::Error::other(format!("the engine names no ${SCRATCH_VAR}")))?;
         let fleet = Self::new(
             Launch {
                 trunk,
@@ -258,8 +286,7 @@ impl Fleet {
                     .into(),
                 index,
                 fuel,
-                // The policy's one verdict the tree reads; the ledger is the host's.
-                search: egress.policy.search,
+                search,
                 run_dir,
                 sessions_root,
                 genesis,
@@ -420,7 +447,7 @@ impl Avatar {
     }
 
     /// A fresh fleet's first root, session `id` under the name `main`.
-    fn first(
+    pub(crate) fn first(
         id: AgentId,
         cfg: RootConfig,
         seat: RootSeat,
@@ -628,7 +655,7 @@ impl Avatar {
             system,
             allow_schedule,
             resume_on_reset,
-            egress,
+            search,
             disk_warn_bytes,
             lease,
             installers,
@@ -651,7 +678,7 @@ impl Avatar {
             resume_on_reset,
             disk_warn_bytes,
             fuel: SPAWN_FUEL,
-            egress,
+            search,
             factory: None,
             bureau: Arc::new(crate::provider::Bureau::Scripted),
             roles: crate::provider::roles::Roles::default(),
@@ -677,8 +704,7 @@ pub(crate) struct TestTrunk {
     pub(crate) grants: GrantStack,
     pub(crate) allow_schedule: bool,
     pub(crate) resume_on_reset: bool,
-    /// The network policy the trunk's `search` reach is derived from.
-    pub(crate) egress: crate::egress::Egress,
+    pub(crate) search: bool,
     pub(crate) disk_warn_bytes: Option<u64>,
     /// The idle bound of the fleet this trunk is born into.
     pub(crate) lease: std::time::Duration,
@@ -694,7 +720,7 @@ impl TestTrunk {
             grants: GrantStack::default(),
             allow_schedule: false,
             resume_on_reset: false,
-            egress: crate::egress::Egress::for_test(),
+            search: true,
             disk_warn_bytes: None,
             lease: AGENT_LEASE_IDLE,
             installers: &crate::INSTALLERS,

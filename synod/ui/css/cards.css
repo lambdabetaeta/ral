@@ -13,9 +13,7 @@
        wears its shadow; a process card inside a dial stays flat. */
     .msg .mark-card { box-shadow: var(--shadow-soft); }
 
-    /* Hue is spent on severity and on the accent, which means "you can act on
-       this"; machine text is marked by the mono grain instead, since an
-       accent-tinted path invites a click that does nothing. */
+    /* Hue signals severity or an action; inert machine text uses monospace. */
     .mark-text { margin: 0; line-height: 1.55; }
     .role-plain { color: var(--ink); }
     .role-path, .role-code { font-family: var(--mono); color: var(--ink); }
@@ -31,9 +29,7 @@
       gap: 10px;
       font-size: 13px;
     }
-    /* The label absorbs all give (ellipsized, never wrapped), so the meter
-       and readout hold a fixed position at the row's right edge — the
-       magnitude mark never drifts, and never flows past the margin. */
+    /* Ellipsize the label so the meter and readout stay at the right edge. */
     .measure-label {
       color: var(--ink-soft);
       flex: 1;
@@ -59,9 +55,7 @@
       background: var(--accent);
     }
 
-    /* The label column takes its natural width up to half the card, then
-       ellipsizes — a long path never pushes the value column past the
-       card's edge. */
+    /* Cap and ellipsize the label so long paths cannot push values past the card. */
     .fields {
       display: grid;
       grid-template-columns: fit-content(50%) minmax(0, 1fr);

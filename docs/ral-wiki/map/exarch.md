@@ -1,5 +1,5 @@
 ---
-generated_at_commit: bb5bc1a6
+generated_at_commit: 3dbbe8f3
 generated_at_date: 2026-10-27
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/roles.md, exarch/data/ral.md, exarch/data/context.md]
 ---
@@ -175,7 +175,7 @@ the shell every seat starts from.
   there, `cwd`, `user` and `home` come from `ral_core::host`; best-effort, a missing
   value drops its line.
 - **`Scratch`** — the disposable per-session directory, exposed under its
-  `App`'s own name (`$EXARCH_SCRATCH`; synod's is `$SYNOD_SCRATCH`). It is
+  shared `app::SCRATCH_VAR` (`EXARCH_SCRATCH`) name. It is
   an `OwnDir` under `$XDG_CACHE_HOME/<app>/scratch/`, on disk and beside no
   one else's files, never in the temp dir, with a lock file named for it
   that the session holds for as long as it runs. Every cache a session

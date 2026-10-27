@@ -1,5 +1,6 @@
 //! Provider-independent request shaping.
 
+use super::pricing::{self, ModelCaps, Param};
 use super::tls::{STREAM_HEADER_TIMEOUT, STREAM_READ_TIMEOUT};
 use super::{Toolset, Via};
 use genai::chat::{ChatMessage, ChatOptions, ReasoningEffort};
@@ -32,6 +33,33 @@ impl Tuning {
             top_p: None,
         }
     }
+
+    /// Masked to what `caps` admits; an empty `ModelCaps` admits everything.
+    pub fn masked(self, caps: &ModelCaps) -> Self {
+        Self {
+            effort: self.effort.filter(|_| caps.supports(Param::Reasoning)),
+            temperature: self
+                .temperature
+                .filter(|_| caps.supports(Param::Temperature)),
+            top_p: self.top_p.filter(|_| caps.supports(Param::TopP)),
+        }
+    }
+
+    /// Resolve effort and mask it to the model's catalog capabilities.
+    ///
+    /// # Errors
+    /// Returns `Err` if `effort` names no rung on [`EFFORT_LADDER`].
+    pub fn for_model(effort: Option<&str>, model: &str) -> Result<Self, String> {
+        let tuning = match effort {
+            None => Self::initial(),
+            Some(label) => Self {
+                effort: effort_by_label(label)?,
+                ..Self::default()
+            },
+        };
+        pricing::ensure_loaded_blocking();
+        Ok(tuning.masked(&pricing::caps_or_default(model)))
+    }
 }
 
 /// The effort ladder, ascending: `auto` sends no option, then genai's keyword
@@ -52,7 +80,7 @@ pub const EFFORT_LADDER: &[(&str, Option<ReasoningEffort>)] = &[
 ];
 
 /// Resolve a ladder label to its effort, strictly — an unrecognised label is a
-/// caller error (a stale menu choice reaching synod's `resolve_tuning`), never
+/// caller error (a stale menu choice reaching [`Tuning::for_model`]), never
 /// a silent fallback to `auto`.
 ///
 /// # Errors
@@ -159,6 +187,69 @@ pub(super) fn complete_options(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn for_model_with_no_effort_keeps_the_thinking_on_default() {
+        let tuning = Tuning::for_model(None, "model-a").unwrap();
+        assert_eq!(tuning, Tuning::initial());
+    }
+
+    #[test]
+    fn for_model_rejects_an_unknown_effort_label() {
+        let err = Tuning::for_model(Some("extreme"), "model-a").unwrap_err();
+        assert!(err.contains("extreme"), "got: {err}");
+    }
+
+    #[test]
+    fn for_model_auto_is_a_deliberate_none_not_an_absence() {
+        let tuning = Tuning::for_model(Some("auto"), "model-a").unwrap();
+        assert!(tuning.effort.is_none());
+        assert_ne!(
+            tuning,
+            Tuning::initial(),
+            "an explicit 'auto' must not read back as the thinking-on default"
+        );
+    }
+
+    #[test]
+    fn masked_keeps_only_admitted_controls() {
+        let tuning = Tuning {
+            effort: Some(ReasoningEffort::Medium),
+            temperature: Some(0.5),
+            top_p: Some(0.9),
+        };
+        for (parameters, expected) in [
+            (vec![], tuning.clone()),
+            (
+                vec!["reasoning"],
+                Tuning {
+                    effort: tuning.effort.clone(),
+                    ..Tuning::default()
+                },
+            ),
+            (
+                vec!["temperature"],
+                Tuning {
+                    temperature: tuning.temperature,
+                    ..Tuning::default()
+                },
+            ),
+            (
+                vec!["top_p"],
+                Tuning {
+                    top_p: tuning.top_p,
+                    ..Tuning::default()
+                },
+            ),
+            (vec!["tools"], Tuning::default()),
+        ] {
+            let caps = ModelCaps {
+                supported_parameters: parameters.into_iter().map(String::from).collect(),
+                ..ModelCaps::default()
+            };
+            assert_eq!(tuning.clone().masked(&caps), expected, "caps: {caps:?}");
+        }
+    }
 
     #[test]
     fn complete_options_leave_auto_controls_unset() {

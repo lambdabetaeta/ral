@@ -89,7 +89,7 @@ impl Brood {
     /// Enrol `handle` in birth order while the owner is open, compacting
     /// consumed entries on an amortized schedule.  If the owner has already
     /// closed membership, releases the membership lock, claims/stops `handle`,
-    /// and returns [`Err(EnrolClosed)`].
+    /// and returns [`Err(EnrolClosed)`](EnrolClosed).
     pub(crate) fn enrol(&self, handle: HandleInner) -> Result<(), EnrolClosed> {
         let mut guard = self.membership.lock_ignore_poison();
         let m = &mut *guard;

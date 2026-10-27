@@ -65,8 +65,8 @@ history_count() { # kind page field stamp paths... -> finding, if any
 
 # Only production source trees, never vendor/ or generated build outputs.
 anchor_sources=(
-  core/src ral/src exarch/src synod/src vm-manager/src guest-net/src
-  ral-daemon/src ral-initramfs/src vm-image/build-tools/src clipboard/src
+  core/src ral/src exarch/src synod/src vm-manager/src synod-machine-broker/src netgate/src
+  ral-guest/src guest-abi/src vm-image/build-tools/src clipboard/src
 )
 for source in "${anchor_sources[@]}"; do
   [[ -d $source ]] || { printf 'missing anchor source: %s\n' "$source" >&2; exit 1; }

@@ -18,8 +18,8 @@ use crate::sync::LockExt as _;
 
 /// A session lock that cannot poison-panic, named for the one state it
 /// guards: a run that unwinds drops its guard mid-mutation, and recovering
-/// the poison (via [`LockExt`]) rather than unwrapping it means such a run
-/// can never wedge the session for whatever runs next.
+/// the poison (via [`LockExt`](crate::sync::LockExt)) rather than unwrapping
+/// it means such a run can never wedge the session for whatever runs next.
 struct SessionLock(std::sync::Mutex<Engine>);
 
 impl SessionLock {
@@ -111,9 +111,10 @@ struct IdentityDesk {
 }
 
 impl crate::shell::runtime::EnquiryDesk for IdentityDesk {
-    /// `_scope` goes unpolled: [`EnquiryDesk::enquire`] is contractually
-    /// blocking and short, so a `Host` answers at once and leaves nothing
-    /// here to park on.
+    /// `_scope` goes unpolled:
+    /// [`EnquiryDesk::enquire`](crate::shell::runtime::EnquiryDesk::enquire)
+    /// is contractually blocking and short, so a `Host` answers at once and
+    /// leaves nothing here to park on.
     fn enquire(
         &self,
         req: FOValue,

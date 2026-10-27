@@ -1,16 +1,9 @@
-import { $, invoke, state } from "./core.js";
-import { actionButton } from "./ui-helpers.js";
+import { $, actionButton } from "./dom.js";
+import { state } from "./core.js";
+import { openFile } from "./ipc.js";
 
-// ---- The change-report panel ----------------------------------------
-// An account of what the assistant did, and nothing more: every change
-// listed here is already real in the user's folder, and nothing on this
-// panel puts anything back.
-//
-// The kind is marked by shape; the verb names the glyph to a reader who
-// hovers the row, and to a screen reader. `touched` is deliberately not
-// `modified`: synod reads no file's bytes, so a file whose timestamp moved
-// while its size did not was written to by something, and whether the
-// contents differ is not a thing the report can honestly claim.
+// Changes are already real; timestamp-only touches cannot prove that contents differ.
+/** @type {Record<import("./bindings/ChangeKind.ts").ChangeKind, {glyph: string, verb: string}>} */
 const KINDS = {
   created: { glyph: "+", verb: "Created" },
   modified: { glyph: "~", verb: "Modified" },
@@ -18,49 +11,30 @@ const KINDS = {
   deleted: { glyph: "−", verb: "Deleted" },
   renamed: { glyph: "→", verb: "Renamed" },
 };
-const UNKNOWN_KIND = { glyph: "·", verb: "Changed" };
 
-// What the `≈` rows mean, said once under the heading rather than on
-// every row that earns it.
 const TOUCHED_LEGEND = "≈ means something wrote to the file without changing its size. "
   + "Synod does not read your files, so it cannot tell you whether the contents differ.";
 
+const UNAVAILABLE = "Synod could not look over your folder after the last message, so this list cannot say what has changed.";
+
 /** @type {import("./bindings/WindowReport.ts").WindowReport} */
-let report = { files: [], unreadable: [] };
+const EMPTY = Object.freeze({ files: [], unreadable: [] });
 
-// Set when `job_report` itself failed — the folder could not be walked, or
-// the window and the shell disagree about which folder is live — as opposed
-// to succeeding with an empty change set. `renderReport` must never call
-// the former "nothing has changed".
-let reportError = null;
+/** @type {import("./bindings/WindowReport.ts").WindowReport | null} */
+let report = EMPTY;
 
-// The rows already on screen, so the survivors of a refresh do not flash
-// in again as though they were fresh work.
+// Retain shown-row identities so refreshes do not replay arrival animations.
 let shownRows = new Set();
-let reportVersion = 0;
 
-// Wipe the report back to empty and render, for a fresh conversation.
-// Called by conversation.js's resetTranscript.
 export function resetReport() {
-  reportVersion++;
-  report = { files: [], unreadable: [] };
-  reportError = null;
+  report = EMPTY;
   shownRows = new Set();
   renderReport();
 }
 
-export async function refreshReport() {
-  const version = ++reportVersion;
-  try {
-    const next = await invoke("job_report", { folder: state.folder?.path });
-    if (version !== reportVersion) return;
-    report = next;
-    reportError = null;
-  } catch (err) {
-    if (version !== reportVersion) return;
-    report = { files: [], unreadable: [] };
-    reportError = String(err);
-  }
+/** @param {import("./bindings/WindowReport.ts").WindowReport | null} next */
+export function showReport(next) {
+  report = next;
   renderReport();
 }
 
@@ -70,8 +44,7 @@ function showBanner(text) {
   b.classList.add("show");
 }
 
-// Names what a walk listed but could not read. Built as nodes, never as
-// markup: these are names off the user's own disk.
+// Disk names become text nodes, never markup.
 function renderGap(names) {
   const gap = $("report-gap");
   gap.textContent = "";
@@ -89,20 +62,17 @@ function renderGap(names) {
     + " is not shown here.");
 }
 
-// The column answers one question: what has this conversation changed in
-// the folder so far.
 function renderReport() {
   $("review-banner").classList.remove("show");
-  const files = report.files || [];
+  const files = report?.files ?? [];
 
-  // A report that could not be taken is not an empty one: saying "nothing
-  // has changed" here would claim an account synod does not in fact have.
+  // An unavailable account must never be displayed as no changes.
   const empty = $("report-empty");
   const failed = $("report-error");
-  failed.textContent = reportError ?? "";
-  failed.classList.toggle("show", reportError !== null);
-  renderGap(reportError ? [] : report.unreadable || []);
-  empty.style.display = reportError === null && files.length === 0 ? "" : "none";
+  failed.textContent = report === null ? UNAVAILABLE : "";
+  failed.classList.toggle("show", report === null);
+  renderGap(report?.unreadable ?? []);
+  empty.style.display = report !== null && files.length === 0 ? "" : "none";
 
   const legend = $("report-legend");
   const anyTouched = files.some((f) => f.kind === "touched");
@@ -118,9 +88,7 @@ function renderReport() {
   shownRows = new Set(files.map((f) => f.path));
   const list = $("cards");
   list.innerHTML = "";
-  // Sorted by folder, then by name, so each folder is named exactly once.
-  // Each row keeps its place in the report as the shell sent it: that place
-  // is how its button names the file back to the shell.
+  // Group by folder but preserve original report indices for button requests.
   const rows = files.map((file, index) => ({ file, index }))
     .sort((a, b) => dirOf(a.file.path).localeCompare(dirOf(b.file.path))
       || baseOf(a.file.path).localeCompare(baseOf(b.file.path)));
@@ -138,22 +106,18 @@ function renderReport() {
 const dirOf = (path) => path.slice(0, path.lastIndexOf("/") + 1);
 const baseOf = (path) => path.slice(path.lastIndexOf("/") + 1);
 
-// The chosen folder's own name stands for the top level, so a file lying
-// loose in it is not left under a heading that says nothing.
 function groupHeading(dir) {
   const el = document.createElement("div");
   el.className = "group";
-  // A card only renders once a conversation (and so state.folder) exists.
   const folder = /** @type {import("./bindings/PickedFolder.ts").PickedFolder} */ (state.folder).label;
   el.textContent = dir || baseOf(folder.replace(/\/+$/, "")) + "/";
   el.title = dir || folder;
   return el;
 }
 
-// `index` is the file's place in the report; `settled` says the row was
-// already on screen before this render.
+/** @param {import("./bindings/ChangeFile.ts").ChangeFile} file */
 function renderCard(file, index, settled) {
-  const k = KINDS[file.kind] || UNKNOWN_KIND;
+  const k = KINDS[file.kind];
   const row = document.createElement("div");
   row.className = "card" + (file.kind === "touched" ? " touched" : "") + (settled ? " settled" : "");
   row.title = file.kind === "renamed" && file.rename_from
@@ -168,24 +132,17 @@ function renderCard(file, index, settled) {
 
   row.append(glyph, nameCell(file));
 
-  // The shell decides which files are safe to open: a document opens in
-  // its own application, and anything else the assistant wrote (a script,
-  // a shortcut, a web page) is only shown in its folder. The button names
-  // the card by its place and name, never by a path, and the shell finds
-  // the file itself.
+  // The shell checks the file; buttons name only the report index and shown name.
   if (file.open) {
     const label = file.open === "open" ? "Open" : "Show in folder";
     row.appendChild(actionButton(label, "btn-mini", async () => {
-      try { await invoke("open_file", { index, path: file.path }); }
+      try { await openFile(index, file.path); }
       catch (err) { showBanner(String(err)); }
     }));
   }
   return row;
 }
 
-// The file's own name — its folder is the heading above it. A rename
-// carries the name it had before, which gives way first if the row is
-// short of room.
 function nameCell(file) {
   const cell = document.createElement("span");
   cell.className = "name";

@@ -1,5 +1,5 @@
 //! The names one object answers to, for the kernel sandboxes: its firmlink
-//! twins ([`match_variants`]).  All lexical: what the object is, and where a
+//! twins (`match_variants`).  All lexical: what the object is, and where a
 //! surface reaches it, is the walk's to say.
 
 #[cfg(unix)]

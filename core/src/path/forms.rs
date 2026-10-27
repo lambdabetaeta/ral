@@ -24,11 +24,9 @@ use std::path::{Path, PathBuf};
 /// against.
 ///
 /// Absolute under the host's rules and, on Windows, on a drive, a share, or
-/// the verbatim spelling of either
-/// ([`is_working_directory`](super::lex::is_working_directory)), so whatever
-/// [`anchor`](super::lex::anchor) reads against it, a relative, a
-/// root-relative or a drive-relative path, lands on that root and comes out
-/// absolute.
+/// the verbatim spelling of either ([`is_working_directory`]), so whatever
+/// [`anchor`](super::lex::anchor) reads against it, a relative, a root-relative
+/// or a drive-relative path, lands on that root and comes out absolute.
 ///
 /// Checked at its constructor, [`new`](Self::new), which a copy read off the wire
 /// passes through again; there is no other.

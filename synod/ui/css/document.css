@@ -18,9 +18,7 @@
       gap: 18px;
     }
 
-    /* Who spoke is said by the bubble itself — the user's is accented and
-       hangs on the right, the assistant's is paper on the left — so no
-       message wears a name above it. */
+    /* Bubble colour and alignment identify the speaker without a name label. */
     .msg { max-width: 74ch; animation: rise 0.35s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
     .msg.user { align-self: flex-end; }
     .msg .bubble {
@@ -30,10 +28,8 @@
       line-height: 1.55;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
-      /* Model markup keeps inline `style` (KaTeX's layout is made of it), so
-         a reply could position an element over the whole window. Paint
-         containment makes the bubble the containing block for fixed and
-         absolute descendants and clips them to it. */
+      /* KaTeX needs inline styles; contain and clip positioned model markup
+         so it cannot cover the window outside its bubble. */
       contain: paint;
     }
     .msg.user .bubble {
@@ -53,24 +49,18 @@
         color: var(--ink-faint);
       }
 
-      /* Assistant prose is rendered markdown, not preformatted text: the
-         bubble wraps normally and its block elements carry the editorial
-         spacing the rest of the page keeps. The palette is the page's own —
-         code and quotes sit on the recessed paper, links wear the accent. */
+      /* Rendered markdown wraps normally; its block elements provide spacing. */
       white-space: normal;
       > :first-child { margin-top: 0; }
       > :last-child { margin-bottom: 0; }
 
-      /* The block still being written. It is a handle for the DOM, not a
-         box: `display: contents` lets its children lay out as the
-         bubble's own, so the two rules above still need saying of it. */
+      /* The streaming wrapper has no box; its children lay out in the bubble.
+         Repeat the bubble's spacing rules here. */
       .live { display: contents; }
       .live > :last-child { margin-bottom: 0; }
       > .live:first-child > :first-child { margin-top: 0; }
 
-      /* The writing front, standing where the next character will go. It
-         is the one thing in the bubble that moves, and it moves only at
-         the tail — never over prose already read. */
+      /* The writing front moves only at the tail, leaving settled prose still. */
       .caret {
         display: inline-block;
         width: 0.42em;
@@ -151,11 +141,8 @@
       }
       th { background: var(--raised-2); font-weight: 650; }
 
-      /* Mathematics, typeset by KaTeX. It is held to the prose's own size —
-         KaTeX's 1.21em default shouts beside 15.5px text — and never allowed
-         to widen the bubble: a formula too long for the line scrolls inside
-         its own box, and one inline is exempt from the bubble's break-anywhere
-         wrapping, which would otherwise snap it mid-symbol. */
+      /* Match prose size instead of KaTeX's 1.21em; scroll wide display formulae.
+         Keep inline formulae whole despite the bubble's break-anywhere wrapping. */
       .katex { font-size: 1.06em; overflow-wrap: normal; word-break: normal; }
       .katex-display {
         margin: 0.8em 0;

@@ -452,6 +452,8 @@ thread_local! {
     /// while a batch runs, from inside that batch.
     static T2_QUEUE: std::cell::RefCell<Option<crate::bus::Mailbox>> =
         const { std::cell::RefCell::new(None) };
+    static T2_ARRIVAL: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// test-only: queues "queued prompt" on the mailbox staged in [`T2_QUEUE`].
@@ -490,7 +492,24 @@ fn builtin_t2_queue_read(
     Ok(Value::Unit)
 }
 
-static T2_CANCEL_BUILTINS_ARR: [BuiltinEntry; 3] = [
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "fixed BuiltinBody::Static signature"
+)]
+fn builtin_t2_arrive(_args: &[Value], _mooring: &Mooring, _shell: &mut Shell) -> Settled<Value> {
+    if let Some(arrive) = T2_ARRIVAL.take() {
+        arrive();
+    }
+    Ok(Value::Unit)
+}
+
+static T2_CANCEL_BUILTINS_ARR: [BuiltinEntry; 4] = [
+    BuiltinEntry::new(
+        Cow::Borrowed("t2-arrive"),
+        scheme_t2_cancel_now,
+        "test-only: deliver input during a tool batch.",
+        BuiltinBody::Static(builtin_t2_arrive),
+    ),
     BuiltinEntry::new(
         Cow::Borrowed("t2-cancel-now"),
         scheme_t2_cancel_now,
@@ -523,7 +542,7 @@ fn cancel_between_run_batch_and_drain_does_not_leak_reply_into_next_deliberation
     let provider = scripted(
         "test-model",
         Script::new().then(Reply::tool_calls(vec![
-            ral_call("r1", "reply 'stale'"),
+            ral_call("r1", "exarch-agents `reply 'stale'"),
             ral_call("c2", "t2-cancel-now"),
         ])),
     );
@@ -1172,5 +1191,207 @@ fn answer_propagates_severed_from_arrival_worker_probe() {
     assert!(
         matches!(outcome, Err(Fault::Severed(ref c)) if *c == cause),
         "expected Fault::Severed from arrival worker probe, got {outcome:?}"
+    );
+}
+
+#[test]
+fn reply_boundary_preserves_each_delivery_until_the_next_ingress() {
+    #[derive(Clone, Copy)]
+    enum Delivery {
+        Message,
+        Steering,
+        Wakeup,
+        AgentResult,
+    }
+
+    for source in [
+        Delivery::Message,
+        Delivery::Steering,
+        Delivery::Wakeup,
+        Delivery::AgentResult,
+    ] {
+        let parent = dressed_trunk(|runtime| runtime.install_builtins(T2_CANCEL_BUILTINS));
+        let mut child = started_child(&parent, "helper", "`inherit");
+        let mut spec = TestAgentSpec::new("grandchild");
+        spec.role = crate::agent::Role::child(&child.agent);
+        let grandchild = test_agent(&parent.fleet, spec).unwrap();
+        let mailbox = child.agent.mailbox.clone();
+        let result = crate::bus::AgentResult {
+            id: grandchild.id,
+            name: grandchild.name.clone(),
+            outcome: AgentOutcome::Stopped("boundary delivery".into()),
+            elapsed: std::time::Duration::ZERO,
+        };
+        let owner = parent.agent.clone();
+        let recipient = child.agent.clone();
+        T2_ARRIVAL.set(Some(Box::new(move || match source {
+            Delivery::Message => owner.message(&recipient, "boundary delivery".into()),
+            Delivery::Steering => mailbox.steer("boundary delivery".into()),
+            Delivery::Wakeup => mailbox.stamp().post(Stamped::Wakeup {
+                id: crate::bus::ScheduleId::new(17),
+                label: "boundary".into(),
+                trigger: "after 1s".into(),
+                prompt: "boundary delivery".into(),
+            }),
+            Delivery::AgentResult => mailbox.stamp().post(Stamped::AgentResult(result)),
+        })));
+        child.agent.provider.swap(scripted(
+            "test-model",
+            Script::new()
+                .then(Reply::tool_calls(vec![
+                    ral_call("first", "exarch-agents `reply 'first'"),
+                    ral_call("arrival", "t2-arrive"),
+                ]))
+                .then(Reply::tool_calls(vec![ral_call(
+                    "second",
+                    "exarch-agents `reply 'second'",
+                )])),
+        ));
+        let (tx, rx) = crate::bus::channel();
+        let emit = Emitter::new(tx, child.agent.id);
+        child.couple(&emit);
+        let provider = child.agent.provider.current();
+        assert!(matches!(
+            child.deliberate(
+                &provider,
+                Some(("original task".into(), Voice::Human)),
+                None,
+                &emit
+            ),
+            Ok(Outcome::Replied)
+        ));
+        assert!(child.is_ready());
+        assert!(
+            !child.inbox.is_empty(),
+            "the input must retain its delivery obligation"
+        );
+        assert!(
+            child.agent.has_busy_children(),
+            "reply must not acknowledge a queued result"
+        );
+        let first = crate::bus::drain_records(&rx);
+        assert!(!first.iter().any(|r| matches!(
+            r,
+            crate::record::Record::Display(crate::record::Display::SubagentDone { .. })
+        )));
+        assert!(
+            !serde_json::to_string(&child.rendered_messages())
+                .unwrap()
+                .contains("boundary delivery")
+        );
+
+        assert!(matches!(child.attend_backlog(&emit), AgentOutcome::Replied));
+        assert_eq!(
+            child.agent.reply(),
+            Some(FOValue::String {
+                value: "second".into()
+            })
+        );
+        assert!(child.inbox.next_item().is_none());
+        assert!(child.is_ready());
+        let messages = child.rendered_messages();
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m
+                    .content
+                    .first_text()
+                    .is_some_and(|t| t.contains("boundary delivery")))
+                .count(),
+            1
+        );
+        let records = crate::bus::drain_records(&rx);
+        assert_eq!(
+            records
+                .iter()
+                .filter(|r| matches!(
+                    r,
+                    crate::record::Record::Display(crate::record::Display::SubagentDone { .. })
+                ))
+                .count(),
+            usize::from(matches!(source, Delivery::AgentResult))
+        );
+        assert_eq!(
+            child.agent.has_busy_children(),
+            !matches!(source, Delivery::AgentResult)
+        );
+        assert!(
+            grandchild.token.terminated(),
+            "reply retains subtree cancellation"
+        );
+    }
+}
+
+#[test]
+fn a_rewrite_queued_before_reply_boundary_input_runs_before_admission() {
+    let parent = dressed_trunk(|runtime| runtime.install_builtins(T2_CANCEL_BUILTINS));
+    let mut child = started_child(&parent, "helper", "`inherit");
+    let mailbox = child.agent.mailbox.clone();
+    T2_ARRIVAL.set(Some(Box::new(move || {
+        mailbox.push(Post::Rewrite(crate::bus::Rewrite::Rewind(1)));
+        mailbox.steer("after rewind".into());
+    })));
+    let provider = scripted(
+        "test-model",
+        Script::new()
+            .then(Reply::tool_calls(vec![
+                ral_call("first", "exarch-agents `reply 'first'"),
+                ral_call("arrival", "t2-arrive"),
+            ]))
+            .then(Reply::tool_calls(vec![ral_call(
+                "second",
+                "exarch-agents `reply 'second'",
+            )])),
+    );
+    child.agent.provider.swap(provider.clone());
+    let (tx, _rx) = crate::bus::channel();
+    let emit = Emitter::new(tx, child.agent.id);
+    assert!(matches!(
+        child.deliberate(
+            &provider,
+            Some(("before rewind".into(), Voice::Human)),
+            None,
+            &emit
+        ),
+        Ok(Outcome::Replied)
+    ));
+    assert!(matches!(child.attend_backlog(&emit), AgentOutcome::Replied));
+    let view = serde_json::to_string(&child.rendered_messages()).unwrap();
+    assert!(!view.contains("before rewind"));
+    assert!(view.contains("after rewind"));
+    assert!(child.is_ready());
+}
+
+#[test]
+fn a_headless_reply_leaves_arrivals_queued_without_an_extra_request() {
+    let mut root = dressed_trunk(|runtime| runtime.install_builtins(T2_CANCEL_BUILTINS));
+    let mailbox = root.agent.mailbox.clone();
+    T2_ARRIVAL.set(Some(Box::new(move || mailbox.steer("later task".into()))));
+    root.agent.provider.swap(scripted(
+        "test-model",
+        Script::new()
+            .then(Reply::tool_calls(vec![
+                ral_call("first", "exarch-agents `reply 'first'"),
+                ral_call("arrival", "t2-arrive"),
+            ]))
+            .then(Reply::panicking()),
+    ));
+    root.seed("one task".into());
+    let (tx, rx) = crate::bus::channel();
+    let emit = Emitter::new(tx, root.agent.id);
+    assert!(matches!(root.attend(&emit), AgentOutcome::Replied));
+    assert!(root.is_ready());
+    assert!(
+        matches!(root.inbox.next_item(), Some(Next::Item(Item::Human(t))) if t == "later task")
+    );
+    assert_eq!(
+        crate::bus::drain_records(&rx)
+            .iter()
+            .filter(|r| matches!(
+                r,
+                crate::record::Record::Forensic(crate::record::Forensic::TurnStarted { .. })
+            ))
+            .count(),
+        1
     );
 }

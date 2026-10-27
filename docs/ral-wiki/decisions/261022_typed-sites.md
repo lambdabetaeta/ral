@@ -1,8 +1,8 @@
 ---
 status: active
 generated_at_commit: da9576de
-verified_at_commit: da9576de
-verified_at_date: 2026-10-23
+verified_at_commit: 3dbbe8f3
+verified_at_date: 2026-10-27
 anchors: [site!, Site, Surface, Silent, spelled_parent]
 ---
 
@@ -134,10 +134,11 @@ were wrong with that.
   - a banned function used as a value (`.and_then(Path::parent)`) becomes a
     closure with a site inside, or a helper.
 - **A crate whose lib and bin targets both have sites mounts the module twice.**
-  The module is crate-local, so the library's `site` cannot serve the binary:
-  synod's bin mounts its own with `#[cfg(windows)] #[path = "shell/site.rs"] mod
-  site;` in `main.rs`, and vm-manager's broker binary has a file of its own,
-  `src/bin/synod-machine-broker/site.rs`.
+  The module is crate-local, so the library's `site` cannot serve the binary.
+
+  > **Amended 2026-10-27.** Synod is binary-only and declares `mod site;`
+  > once in `main.rs`; the lib+bin case no longer arises. Broker service sites
+  > live in `synod-machine-broker/src/site.rs`; vm-manager keeps host/client sites.
 - **One third-party-codegen exception, pinned.** `tauri::generate_context!()` in
   `synod/src/main.rs` expands to code that exits the process, and prints, when
   building the context panics, and `site!` wraps calls, not macro invocations.
@@ -194,3 +195,10 @@ two pinned caller sets); `clippy.toml`
 (the bans, and the header that states the discipline); `spelled_parent` and
 `utf8` in `core/src/path/lex.rs`, `shown` in `core/src/path/show.rs`,
 `project_slug` in `core/src/path/slug.rs`.
+
+> **Amended 2026-10-27.** The guest init exemption now belongs to the sole binary root,
+> `ral-guest/src/main.rs`; assembly and supervision are modules of that program.
+> `core/tests/sites.rs::GUEST_INIT_ROOTS` names that one root.
+
+> **Amended 2026-10-27.** The host network gate is `netgate`;
+> `core/tests/sites.rs::SRC_ROOTS` includes `netgate/src` in the site scan.

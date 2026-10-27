@@ -1,23 +1,5 @@
-//! A human-driven smoke boot for real boot artifacts.
-//!
-//! Nothing in this crate's own tests boots a real kernel — a backend's
-//! contract is exercised by construction, not by a machine actually coming
-//! up — so there was no way to point a person at the real thing. This is
-//! that pointer: it boots the three artifacts through whichever backend this
-//! platform has and holds the machine open until asked to stop, so a person
-//! can read `ral-daemon`'s own console lines and judge the boot honestly.
-//!
-//! # What each platform asks of you first
-//!
-//! - **macOS** — a signed binary, since Virtualization.framework refuses an
-//!   unentitled one. Run `dev/scripts/sign-virtualization.sh
-//!   target/debug/examples/boot-smoke` after every rebuild.
-//! - **Windows** — an account the compute service serves: an administrator, or
-//!   a member of the *Hyper-V Administrators* group. Nothing needs signing and
-//!   the process itself is unprivileged; the group membership is what the
-//!   service checks. Without it the boot refuses by naming the group, which is
-//!   itself a useful thing to have seen.
-//!
+//! Smoke boots require signed, entitled macOS binaries or Windows VM permission.
+//! macOS: `dev/scripts/sign-virtualization.sh target/debug/examples/boot-smoke`
 //! Usage: `boot-smoke <kernel> <initramfs> <rootfs> <folder>`
 
 #![allow(
@@ -37,35 +19,23 @@ use ral_core::protocol::{Attach, EngineSpec, Program, Report, Root, Run};
 use ral_core::shell::runtime::TitlePolicy;
 use ral_core::source::SourceOrigin;
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
-use vm_manager::{BootArtifact, Hypervisor, Machine, MachineSpec};
+use vm_manager::{BootArtifact, Booted, Machine, MachineSpec};
 
 #[cfg(unix)]
 type NetStream = std::os::unix::net::UnixStream;
 #[cfg(windows)]
 type NetStream = std::net::TcpStream;
 
-/// The port the guest binds and the host dials. Any free number: it is chosen
-/// by this example and known to both sides only because both are written here.
+/// Chosen by this example; the guest listener and host dial must agree.
 const PROBE_PORT: u32 = 1732;
 
-/// The tag naming the boot recipe the guest engine applies once attached. The
-/// guest's engine is the `exarch` binary (`vm-image/build-boot.sh`), whose
-/// table registers this one tag (`exarch/src/shell_eval/builtins.rs`'s
-/// `INSTALLER_TAG`). Spelled out rather than imported so this example needs no
-/// dependency on `exarch`; a drift is loud, since the attach is refused by
-/// name.
+/// The guest registers this tag; spelling it here avoids an exarch dependency.
 const INSTALLER_TAG: &str = "exarch-agent";
 
-/// `EXARCH.scratch_var()`, spelled out for the same reason.
+/// `exarch::app::SCRATCH_VAR`, spelled out for the same reason.
 const SCRATCH_VAR: &str = "EXARCH_SCRATCH";
 
-/// What the guest runs while the host dials it: bind the probe port, then
-/// report every connection that arrives and where it came from.
-///
-/// It answers two questions at once. The host's dial proves the direction
-/// carries bytes — the guest reads what the host wrote and writes back. The
-/// two self-dials ask whether a *guest* process can reach the same port; the
-/// wire carries no token, so admission is the factory port's host-CID check.
+/// Guest self-dials exercise host-CID admission; the wire carries no token.
 const GUEST_LISTENER: &str = r#"
 import socket, struct, threading, time
 
@@ -142,42 +112,41 @@ fn main() {
         initramfs: initramfs.into(),
         rootfs: rootfs.into(),
     };
-    let Some(hypervisor) = backend(artifact) else {
-        eprintln!("this platform has no virtual-machine backend in vm-manager");
-        std::process::exit(1);
+    let hypervisor = match vm_manager::direct(artifact) {
+        Ok(hypervisor) => hypervisor,
+        Err(err) => {
+            eprintln!(
+                "could not construct a backend: {}",
+                err.worded(|path| shown(path))
+            );
+            std::process::exit(1);
+        }
     };
 
-    println!("booting via {}...", hypervisor.name());
-    let mut machine = match hypervisor.boot(&MachineSpec::for_folder(folder)) {
-        Ok(machine) => machine,
+    println!("booting the machine...");
+    let Booted { machine, wires } = match hypervisor.boot(&MachineSpec {
+        folder: folder.into(),
+        read_only: false,
+    }) {
+        Ok(booted) => booted,
         Err(err) => {
             eprintln!("boot failed: {}", err.worded(|path| shown(path)));
             std::process::exit(1);
         }
     };
-    let workspace = match ral_core::path::utf8(machine.workspace_path()) {
-        Ok(path) => GuestPath::new(path.to_owned()),
-        Err(err) => {
-            eprintln!("the guest's folder cannot be named inside it: {err}");
-            std::process::exit(1);
-        }
-    };
+    let workspace = GuestPath::from_static("/work");
     // Held open until the wire is dropped below, because the pump ends the
     // session on EOF — nothing needs to be sent on it first.
-    let wires = machine.take_wires();
     let net = NetStream::from(wires.net);
 
     prove_the_host_can_dial_in(machine.as_ref(), wires.control, workspace);
 
     println!("booted: the agent can reach the granted folder and nothing else on this computer");
-    println!("ral-daemon's own console lines print above as the guest runs.");
+    println!("ral-guest's own console lines print above as the guest runs.");
     println!("press enter to shut the machine down");
     let _ = std::io::stdin().read_line(&mut String::new());
 
-    // Closing the wire first is what makes this the inside-out shutdown the
-    // end of a real session performs: the pump sees EOF, the daemon powers
-    // the machine off from within, and the wait below observes a stop rather
-    // than forcing one.
+    // Closing the net wire lets the guest power off before shutdown waits.
     drop(net);
     match machine.shutdown() {
         Ok(()) => println!("stopped cleanly"),
@@ -188,13 +157,7 @@ fn main() {
     }
 }
 
-/// Put a listener inside the guest and dial it from the host, proving the
-/// direction carries bytes rather than merely reporting a refusal.
-///
-/// The two halves must overlap: a dispatch is answered only when its run has
-/// settled, so the dial has to happen while the guest's listener is still
-/// accepting. The dialling thread is what makes them concurrent, and the
-/// scope is what lets it borrow the machine.
+/// Dispatch and dial must overlap: dispatch returns only after the listener exits.
 fn prove_the_host_can_dial_in(
     machine: &dyn Machine,
     control: impl Into<ral_core::protocol::channel::WireStream>,
@@ -207,7 +170,6 @@ fn prove_the_host_can_dial_in(
             return;
         }
     };
-    // The guest's own tmpfs, as every seat on this wire uses for `HOME`.
     let scratch = GuestPath::from_static("/tmp");
     // The guest refuses an attach that does not name its scratch variable.
     let attach = Attach::root(
@@ -235,14 +197,11 @@ fn prove_the_host_can_dial_in(
     };
 
     println!("\nputting a vsock listener in the guest and dialling it from here...");
-    // The listener runs on the spawned thread and the dial happens here, not
-    // the other way round: `dyn Machine` is `Send` but not `Sync`, so the
-    // machine stays on the thread that owns it.
+    // `dyn Machine` is Send but not Sync, so it stays here while the listener runs on another thread.
     std::thread::scope(|scope| {
         let listening = scope.spawn(|| dispatch_to_report(&transport, run, Arc::new(())));
 
-        // Long enough for the dispatch to reach the guest and python to bind;
-        // the guest's accept window is wider than this by design.
+        // The guest's accept window exceeds this delay for Python to bind.
         std::thread::sleep(Duration::from_secs(3));
         match dial_and_echo(machine) {
             Ok(echo) => println!("host read back: {echo:?}"),
@@ -273,7 +232,6 @@ fn prove_the_host_can_dial_in(
     transport.detach();
 }
 
-/// Dial the probe port, write a word, and read what the guest writes back.
 fn dial_and_echo(machine: &dyn Machine) -> Result<String, String> {
     let started = Instant::now();
     let dial = machine
@@ -293,43 +251,4 @@ fn dial_and_echo(machine: &dyn Machine) -> Result<String, String> {
         .read_to_string(&mut echo)
         .map_err(|err| format!("could not read the guest's echo: {err}"))?;
     Ok(echo)
-}
-
-/// The backend this platform has, constructed directly rather than through
-/// [`vm_manager::detect`] — an example already holds the boot media `detect`
-/// exists to look for, and asking it again would only add a way to be refused.
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "the `Option` is the seam's shape, not this arm's: a platform with a backend always \
-              answers `Some`, and the one without answers `None` from the third arm below"
-)]
-#[cfg(target_os = "macos")]
-fn backend(artifact: BootArtifact) -> Option<Box<dyn Hypervisor>> {
-    Some(Box::new(vm_manager::vz::Vz::new(
-        artifact,
-        std::env::temp_dir(),
-    )))
-}
-
-/// The backend this platform has — see the macOS twin for why it is built
-/// directly. The cache is the real one synod would use rather than a temporary
-/// directory: the rootfs wrap it may have to write is worth keeping between
-/// runs.
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "the `Option` is the seam's shape, not this arm's: a platform with a backend always \
-              answers `Some`, and the one without answers `None` from the third arm below"
-)]
-#[cfg(windows)]
-fn backend(artifact: BootArtifact) -> Option<Box<dyn Hypervisor>> {
-    use vm_manager::hcs::Hyperv;
-    Some(Box::new(Hyperv::new(artifact, Hyperv::default_cache())))
-}
-
-/// No backend here, and the example says so at run time rather than failing to
-/// build — the same courtesy [`vm_manager::detect`] extends.
-#[cfg(not(any(target_os = "macos", windows)))]
-fn backend(artifact: BootArtifact) -> Option<Box<dyn Hypervisor>> {
-    drop(artifact);
-    None
 }

@@ -75,7 +75,7 @@ pub(crate) struct BatchOpts {
 // Distinct interactive-mode flags, not a bundle-able group.
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct InteractiveOpts {
-    /// `-l`, or a `-`-prefixed argv[0]: adopt the POSIX login environment.
+    /// `-l`, or a `-`-prefixed argv\[0\]: adopt the POSIX login environment.
     pub login: bool,
     pub no_rc: bool,
     /// `-i` forces interactive mode even when stdin is not a tty.

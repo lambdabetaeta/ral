@@ -1,11 +1,7 @@
-    /* --- the dial: one per gap between prose bubbles. It holds process
-       only — a single header rotates through three rungs on click:
-       nothing, then the step intents, then the scripts, process cards &
-       telemetry. Surfaced cards stand in the transcript, not here. ---- */
+    /* The process dial rotates through closed, intents, then scripts/cards/telemetry.
+       Surfaced cards stand in the transcript. */
     .dial {
-      /* `overflow: hidden` zeroes a flex item's automatic minimum size, so
-         without this the transcript column would squish the dial (clipping
-         its cards) instead of scrolling. */
+      /* Prevent overflow:hidden from letting flex shrink and clip the dial. */
       flex: none;
       max-width: 74ch;
       align-self: flex-start;
@@ -15,9 +11,7 @@
       overflow: hidden;
       animation: rise 0.35s cubic-bezier(0.2, 0.8, 0.2, 1) both;
     }
-    /* A rebuilt element stands in for one already on screen: the entrance
-       animation belongs to a block's first appearance, never to a
-       replacement. */
+    /* Only a block's first appearance gets an entrance animation. */
     .msg.settled, .dial.settled, .card.settled { animation: none; }
     .dial-head {
       display: flex;
@@ -61,9 +55,8 @@
       text-transform: uppercase;
       color: var(--ink-faint);
     }
-    /* The live-helper count: a fixed station in the dial's own head, not a
-       stream — it holds one number, replaced in place, never animated.
-       Tabular figures keep its width from jittering as the count changes. */
+    /* The busy-helper count updates in place without animation.
+       Tabular figures keep its width stable. */
     .dial-helpers {
       flex: none;
       font-size: 11px;

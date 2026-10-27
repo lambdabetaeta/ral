@@ -1,70 +1,39 @@
-//! Synod's side of the broker: a [`Hypervisor`] that asks rather than acts.
-//!
-//! From the application's point of view this is simply another backend — it
-//! boots a [`MachineSpec`] and hands back a [`Machine`] whose control plane is a
-//! socket, exactly as [`super::super::hcs`] does. What differs is that no
-//! privileged call happens in this process at all: the machine is made by the
-//! service, and what crosses back is one duplicated socket.
-//!
-//! That symmetry is the point. [`crate::detect`] can prefer this backend when
-//! the service is installed and fall back to the direct one when it is not,
-//! without anything upstream — `synod::session`, the seat, the frame protocol —
-//! knowing which of the two it got.
+//! Only the folder and read-only flag cross to the privileged service.
+//! The pipe connection leases the machine; sockets are duplicated for this process.
 
 use std::io;
 use std::os::windows::io::{FromRawSocket, OwnedSocket};
-use std::path::{Path, PathBuf};
 
-use super::{PIPE, Reply, Request, VERSION, frame};
+use super::wire::{PIPE, Reply, Request, VERSION, frame};
+use crate::error::{Error, GuestConsole, Wire};
+use crate::hcs::win::HYPERVISOR;
+use crate::machine::{Booted, Hypervisor, Machine, Socket, Wires};
 use crate::site::{Silent, site};
-use crate::{Error, Hypervisor, Machine, MachineSpec};
+use crate::spec::MachineSpec;
 
-/// The name shown to a user, and to [`Hypervisor::name`].
-///
-/// It says Hyper-V, not "broker", because the *hypervisor* is Hyper-V either
-/// way: who asked it is synod's business and not the user's.
-const HYPERVISOR: &str = "Hyper-V";
-
-/// The broker-backed backend.
 pub struct Brokered;
 
 impl Brokered {
-    /// Whether the service is installed and answering.
-    ///
-    /// Asked by [`crate::detect`] before it prefers this backend. A `false`
-    /// here is not a refusal — it means the direct backend should be tried,
-    /// which is what a developer running from a checkout wants.
+    /// An unavailable broker lets detection try the direct backend.
     pub fn available() -> bool {
         connect().is_ok()
     }
 }
 
 impl Hypervisor for Brokered {
-    fn name(&self) -> &'static str {
-        HYPERVISOR
-    }
-
-    /// Ask the service for a machine over this spec's folder.
-    ///
-    /// The spec is *not* forwarded wholesale, deliberately: only the folder and
-    /// the read-only flag cross, because those are the only two things the
-    /// broker is willing to be told (see the module docs on what a narrow
-    /// surface buys). The resolution below is still done here as well, so a
-    /// missing folder is refused in the same words on both backends rather than
-    /// arriving as a service's second-hand complaint.
-    ///
     /// # Errors
-    /// Returns [`Error`] if the spec is not usable, if the service cannot be
-    /// reached or speaks another version, or if it refused — the service's own
-    /// [`Error`], passed on as it arrived.
-    fn boot(&self, spec: &MachineSpec) -> Result<Box<dyn Machine>, Error> {
+    /// Returns the folder, connection, protocol or service refusal unchanged.
+    fn boot(&self, spec: &MachineSpec) -> Result<Booted, Error> {
         let folder = spec.resolve()?;
         let mut pipe = connect().map_err(|cause| {
-            backend(&format!(
-                "synod's machine service is not answering: {cause}. It is installed with synod \
+            Error::backend(
+                HYPERVISOR,
+                format!(
+                    "synod's machine service is not answering: {cause}. It is installed with synod \
                  and started by Windows; if it has been stopped, ask whoever administers this \
                  computer to start the 'Synod machine broker' service"
-            ))
+                ),
+            )
         })?;
 
         frame::write(
@@ -72,116 +41,106 @@ impl Hypervisor for Brokered {
             &Request::Boot {
                 version: VERSION,
                 folder,
-                read_only: spec.workspace.read_only,
+                read_only: spec.read_only,
             },
         )
-        .map_err(|cause| backend(&format!("synod could not ask for a machine: {cause}")))?;
+        .map_err(|cause| {
+            Error::backend(
+                HYPERVISOR,
+                format!("synod could not ask for a machine: {cause}"),
+            )
+        })?;
 
         match frame::read(&mut pipe) {
-            Ok(Some(Reply::Booted {
-                workspace,
-                control,
-                net,
-            })) => {
-                let control = adopt_socket(&control).map_err(|cause| {
-                    backend(&format!(
-                        "the machine started, but its control plane could not be taken over: \
-                         {cause}"
-                    ))
-                })?;
-                let net = adopt_socket(&net).map_err(|cause| {
-                    backend(&format!(
-                        "the machine started, but its net wire could not be taken over: {cause}"
-                    ))
-                })?;
-                // Only now may the broker let go of its own handles on those
-                // sockets — see [`Request::Adopted`] for why both the earlier
-                // and the later moment are wrong.
+            Ok(Some(Reply::Booted { control, net })) => {
+                let adopt = |wire: Wire| {
+                    let description = match wire {
+                        Wire::Control => &control,
+                        Wire::Net => &net,
+                    };
+                    adopt_socket(description).map_err(|cause| {
+                        Error::backend(
+                            HYPERVISOR,
+                            format!(
+                                "the machine started, but {} could not be taken over: {cause}",
+                                wire.noun()
+                            ),
+                        )
+                    })
+                };
+                let wires = Wires {
+                    control: adopt(Wire::Control)?,
+                    net: adopt(Wire::Net)?,
+                };
+                // Only after both sockets are adopted may the broker close its copies.
                 frame::write(&mut pipe, &Request::Adopted).map_err(|cause| {
-                    backend(&format!(
-                        "synod took over the machine's wires but could not say so: {cause}"
-                    ))
+                    Error::backend(
+                        HYPERVISOR,
+                        format!(
+                            "synod took over the machine's wires but could not say so: {cause}"
+                        ),
+                    )
                 })?;
-                Ok(Box::new(BrokeredGuest {
-                    pipe: Some(pipe),
-                    workspace,
-                    wires: Some(crate::Wires { control, net }),
-                }))
+                Ok(Booted {
+                    machine: Box::new(BrokeredGuest { pipe }),
+                    wires,
+                })
             }
             Ok(Some(Reply::Refused(error))) => Err(error),
-            Ok(Some(other)) => Err(backend(&format!(
-                "synod's machine service answered a boot with {other:?}"
-            ))),
-            Ok(None) => Err(backend(
+            Ok(Some(other)) => Err(Error::backend(
+                HYPERVISOR,
+                format!("synod's machine service answered a boot with {other:?}"),
+            )),
+            Ok(None) => Err(Error::backend(
+                HYPERVISOR,
                 "synod's machine service closed the connection without answering",
             )),
-            Err(cause) => Err(backend(&format!(
-                "synod could not read the machine service's answer: {cause}"
-            ))),
+            Err(cause) => Err(Error::backend(
+                HYPERVISOR,
+                format!("synod could not read the machine service's answer: {cause}"),
+            )),
         }
     }
 }
 
-/// A machine the service owns and this process drives.
-pub struct BrokeredGuest {
-    /// The lease. While this is open the machine lives; closing it — on
-    /// [`Machine::shutdown`], on drop, or because this process died — is what
-    /// tells the service to tear the machine down.
-    pipe: Option<std::fs::File>,
-    workspace: PathBuf,
-    wires: Option<crate::Wires>,
+pub(crate) struct BrokeredGuest {
+    /// Closing the pipe, including on process death, tears the machine down.
+    pipe: std::fs::File,
 }
 
 impl Machine for BrokeredGuest {
-    fn workspace_path(&self) -> &Path {
-        &self.workspace
+    fn dial_engine(&self) -> io::Result<Socket> {
+        self.connect_guest(guest_abi::ports::FACTORY)
     }
 
-    /// # Panics
-    /// Panics if asked a second time: a machine has exactly one of each wire.
-    fn take_wires(&mut self) -> crate::Wires {
-        self.wires
-            .take()
-            .expect("a machine's two wires are taken at most once")
+    fn connect_guest(&self, _port: u32) -> io::Result<Socket> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the machine broker cannot yet dial a port inside its guest; it currently only \
+             transfers connections opened by the guest",
+        ))
     }
 
-    /// Ask the service what the guest has said on its console.
-    ///
-    /// The console is pumped in the service's process and kept in the
-    /// service's cache, so this is the only way synod can see it at all.  A
-    /// service that has gone, a pipe that will not carry the question, an
-    /// answer that is not the one asked for: each of them yields an empty
-    /// console rather than an error, because the caller is already reporting
-    /// a failure and has nothing useful to do with a second one — it writes
-    /// down that there were no words to be had, which is true either way.
-    fn console(&self) -> crate::GuestConsole {
-        let Some(mut pipe) = self.pipe.as_ref().and_then(|pipe| pipe.try_clone().ok()) else {
-            return crate::GuestConsole::default();
+    /// An unreachable service yields an empty retained console while the caller reports the original failure.
+    fn console(&self) -> GuestConsole {
+        let exchange = || -> io::Result<Option<Reply>> {
+            let mut pipe = &self.pipe;
+            frame::write(&mut pipe, &Request::Console)?;
+            frame::read(&mut pipe)
         };
-        if frame::write(&mut pipe, &Request::Console).is_err() {
-            return crate::GuestConsole::default();
-        }
-        match frame::read(&mut pipe) {
-            Ok(Some(Reply::Console { log, tail })) => crate::GuestConsole { log, tail },
-            Ok(Some(_) | None) | Err(_) => crate::GuestConsole::default(),
+        match exchange() {
+            Ok(Some(Reply::Console(console))) => console,
+            Ok(Some(_) | None) | Err(_) => GuestConsole::Kept {
+                log: None,
+                tail: Vec::new(),
+            },
         }
     }
 
-    /// Ask the service to stop the machine, and wait for its answer.
-    ///
-    /// Both wires are closed first, for the same reason the direct backend
-    /// closes them first: the guest's engine sees EOF on the control plane,
-    /// and `ral-daemon` powers the machine off from inside. The service's own
-    /// grace window then observes a machine already stopping.
-    ///
     /// # Errors
-    /// Returns the service's own [`Error`] if it reports that the machine did
-    /// not stop cleanly, and [`Error::Backend`] if it answered out of turn.
-    fn shutdown(mut self: Box<Self>) -> Result<(), Error> {
-        self.wires = None;
-        let Some(mut pipe) = self.pipe.take() else {
-            return Ok(());
-        };
+    /// Returns the service refusal or a backend error for an unexpected reply.
+    fn shutdown(self: Box<Self>) -> Result<(), Error> {
+        let mut pipe = self.pipe;
         if frame::write(&mut pipe, &Request::Stop).is_err() {
             // The service has gone, which means the machine has too: it holds
             // the only handle to it, and losing that handle stops it.
@@ -190,30 +149,15 @@ impl Machine for BrokeredGuest {
         match frame::read(&mut pipe) {
             Ok(Some(Reply::Stopped(Ok(()))) | None) | Err(_) => Ok(()),
             Ok(Some(Reply::Stopped(Err(error)))) => Err(error),
-            Ok(Some(other)) => Err(backend(&format!(
-                "synod's machine service answered a stop with {other:?}"
-            ))),
+            Ok(Some(other)) => Err(Error::backend(
+                HYPERVISOR,
+                format!("synod's machine service answered a stop with {other:?}"),
+            )),
         }
     }
 }
 
-impl Drop for BrokeredGuest {
-    /// Dropping the lease stops the machine, so a caller that forgets — or
-    /// unwinds — does not leave a guest running. Nothing has to be sent: the
-    /// service is reading this pipe, and its end of it going quiet is the
-    /// signal.
-    fn drop(&mut self) {
-        self.wires = None;
-        self.pipe = None;
-    }
-}
-
-/// Open the pipe.
-///
-/// A busy pipe is the ordinary case rather than a failure: the broker creates
-/// one instance at a time, so a client arriving between a connection and the
-/// next instance finds none free.  Retrying is what the platform expects of a
-/// client, and there is nothing else to do about it.
+/// A busy pipe is retried: the service creates instances one at a time.
 fn connect() -> io::Result<std::fs::File> {
     use std::fs::OpenOptions;
     let mut options = OpenOptions::new();
@@ -228,17 +172,8 @@ fn connect() -> io::Result<std::fs::File> {
     }
 }
 
-/// Turn a `WSAPROTOCOL_INFOW` the service produced for *this* process back into
-/// a socket.
-///
-/// The bytes are opaque and process-specific by design: they name a socket the
-/// service already owns, describable only for the one process id it named. In
-/// any other process — or after this one has used them — they are inert.
-///
 /// # Errors
-/// Returns the Winsock error, or a sentence if the description is not the size
-/// a `WSAPROTOCOL_INFOW` is (a mismatched service and client, which the version
-/// check should already have caught).
+/// Returns the Winsock error or a refusal naming the mismatched description sizes.
 pub fn adopt_socket(description: &[u8]) -> io::Result<OwnedSocket> {
     use windows_sys::Win32::Networking::WinSock::{
         INVALID_SOCKET, WSA_FLAG_NO_HANDLE_INHERIT, WSA_FLAG_OVERLAPPED, WSAPROTOCOL_INFOW,
@@ -247,17 +182,13 @@ pub fn adopt_socket(description: &[u8]) -> io::Result<OwnedSocket> {
 
     if description.len() != size_of::<WSAPROTOCOL_INFOW>() {
         return Err(io::Error::other(format!(
-            "the machine service described its control plane in {} bytes, not the {} a socket \
+            "the machine service described a socket in {} bytes, not the {} a socket \
              description is",
             description.len(),
             size_of::<WSAPROTOCOL_INFOW>()
         )));
     }
-    // SAFETY: `WSAPROTOCOL_INFOW` is a plain C structure of `Copy` fields with
-    // no padding invariants and no pointers, so any byte sequence of its own
-    // length is a valid value of it; the bytes here came from
-    // `WSADuplicateSocketW` writing exactly one of them.  It is read into a
-    // local rather than borrowed from the slice so that it is aligned.
+    // SAFETY: WSAPROTOCOL_INFOW has no invalid bit patterns; zeroing creates an aligned local value.
     let mut info = unsafe { std::mem::zeroed::<WSAPROTOCOL_INFOW>() };
     // SAFETY: both regions are `size_of::<WSAPROTOCOL_INFOW>()` bytes, checked
     // above, and neither overlaps the other.
@@ -269,10 +200,7 @@ pub fn adopt_socket(description: &[u8]) -> io::Result<OwnedSocket> {
         );
     }
 
-    // SAFETY: `info` describes a socket duplicated for this process; passing it
-    // to `WSASocketW` with the family/type/protocol it itself carries is the
-    // documented way to adopt one.  The flags keep the socket overlapped (as
-    // the original was) and out of any child's inheritance.
+    // SAFETY: info describes a socket duplicated for this process; flags preserve overlap and prevent inheritance.
     let socket = unsafe {
         WSASocketW(
             info.iAddressFamily,
@@ -291,31 +219,13 @@ pub fn adopt_socket(description: &[u8]) -> io::Result<OwnedSocket> {
     Ok(unsafe { OwnedSocket::from_raw_socket(socket as u64) })
 }
 
-/// An [`Error::Backend`] for this backend carrying `why`.
-fn backend(why: &str) -> Error {
-    Error::Backend {
-        hypervisor: HYPERVISOR.into(),
-        why: why.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A description of the wrong length is refused with the two sizes named,
-    /// rather than being reinterpreted as whatever happens to be in memory.
     #[test]
     fn a_malformed_socket_description_is_refused() {
         let error = adopt_socket(&[0u8; 8]).expect_err("8 bytes is not a socket description");
         assert!(error.to_string().contains("not the"), "{error}");
-    }
-
-    /// The backend names the hypervisor, not itself: a user is told what their
-    /// machine runs on, and synod's own division of labour is not their
-    /// business.
-    #[test]
-    fn the_backend_names_the_hypervisor() {
-        assert_eq!(Brokered.name(), "Hyper-V");
     }
 }

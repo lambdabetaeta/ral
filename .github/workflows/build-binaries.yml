@@ -331,7 +331,7 @@ jobs:
       - name: Build the machine broker
         if: matrix.os == 'windows-latest'
         shell: bash
-        run: cargo build --release -p vm-manager --bin synod-machine-broker
+        run: cargo build --release -p synod-machine-broker
       - name: Bundle
         shell: bash
         working-directory: synod

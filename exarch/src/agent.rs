@@ -311,6 +311,10 @@ impl Agent {
         }
     }
 
+    pub(crate) fn reply_completion_armed(&self) -> bool {
+        self.status.lock_ignore_poison().replied_at.is_some()
+    }
+
     pub(crate) fn disarm_reply_lease(&self) {
         self.status.lock_ignore_poison().replied_at = None;
     }
@@ -372,11 +376,6 @@ impl Agent {
     /// holds this agent's park.
     pub(crate) fn heard(&self, child: AgentId) {
         self.status.lock_ignore_poison().awaiting.remove(&child);
-    }
-
-    /// Whether a human or parent has ever exchanged with this agent.
-    pub(crate) fn engaged(&self) -> bool {
-        self.mailbox.last_exchange().is_some()
     }
 
     /// Time since this agent's last human exchange, or since birth if never

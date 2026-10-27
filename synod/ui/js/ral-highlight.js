@@ -1,20 +1,11 @@
-import { invoke } from "./core.js";
+import { ralTokens } from "./ipc.js";
 
-// Keyed on the exact source string: the dial rebuilds its scripts at every
-// revision, and a source already seen costs no round trip to the shell the
-// second time. The assistant bubble asks only once a block has settled —
-// never for a block still growing, which would be a fresh key per token —
-// so the oldest go once the window is reached.
+// Cache exact source strings; highlight bubbles only after settlement to avoid a new key per token.
 /** @type {Map<string, import("./bindings/RalToken.ts").RalToken[]>} */
 const cache = new Map();
 const CACHE_MAX = 64;
 
-// Colour `el`'s ral source in place. `el`'s whole `textContent` is taken as
-// one script; its children are rebuilt as text nodes and
-// `<span class="tok-...">`s, never through `innerHTML` — the source is
-// model output. `el` may already have moved on to different text by the
-// time the shell answers (the caller can be mid-stream), so the result is
-// dropped rather than applied when that happens.
+// Build text nodes from model output; discard a late response if the element text has changed.
 /** @param {Element} el */
 export async function highlightRal(el) {
   const src = el.textContent ?? "";
@@ -25,7 +16,7 @@ export async function highlightRal(el) {
 
 /** @param {string} src */
 async function fetchTokens(src) {
-  const tokens = await invoke("highlight_ral", { src });
+  const tokens = await ralTokens(src);
   cache.set(src, tokens);
   for (const oldest of cache.keys()) {
     if (cache.size <= CACHE_MAX) break;
@@ -34,10 +25,7 @@ async function fetchTokens(src) {
   return tokens;
 }
 
-/**
- * @param {string} src
- * @param {import("./bindings/RalToken.ts").RalToken[]} tokens
- */
+/** @param {string} src @param {import("./bindings/RalToken.ts").RalToken[]} tokens */
 function tokensToNodes(src, tokens) {
   const frag = document.createDocumentFragment();
   let at = 0;

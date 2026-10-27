@@ -260,6 +260,10 @@ impl Avatar {
         if self.agent.token.is_cancelled() {
             return Ok(ControlFlow::Break(self.cancelled()));
         }
+        // Reply closes admission; arrivals stay queued for the next draw.
+        if let Some(payload) = self.reply.borrow_mut().take() {
+            return Ok(ControlFlow::Break(self.replied(payload)));
+        }
         // Arrivals are taken in the order typed: a read runs against the
         // context as it stands at its place in the queue, a delivery lands as
         // a steering line of its own.  The warnings trail them.
@@ -285,12 +289,7 @@ impl Avatar {
                 .append_steering(steering.join("\n"), Voice::Harness)
                 .map_err(Fault::Log)?;
         }
-        // A `reply` in the fully drained batch ends the run here, not at
-        // another round-trip.
-        Ok(match self.reply.borrow_mut().take() {
-            Some(payload) => ControlFlow::Break(self.replied(payload)),
-            None => ControlFlow::Continue(()),
-        })
+        Ok(ControlFlow::Continue(()))
     }
 
     /// Note each user line; word each model one as a reminder, returned as
@@ -393,6 +392,7 @@ impl Avatar {
     /// parentless agent's `attend` loop stops here.
     fn replied(&self, payload: FOValue) -> Outcome {
         self.agent.cancel_descendants(CancelCause::Cancelled);
+        self.recorder().transient(Transient::State(AgentState::Ready));
         self.agent.deposit_reply(&self.fleet, payload);
         self.log.borrow_mut().quiesce(QuiesceReason::Replied);
         Outcome::Replied

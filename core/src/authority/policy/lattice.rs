@@ -438,7 +438,8 @@ impl Extent {
 }
 
 /// A grant spelling in force: as written, and what the walk made of it.  `R`
-/// is [`Extent`] for an allowance and [`Excluded`] for an exclusion.
+/// is [`Extent`] for an allowance and [`Excluded`](crate::path::Excluded)
+/// for an exclusion.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct GrantPath<R> {
     pub written: FrozenPath,

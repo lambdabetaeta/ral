@@ -2,7 +2,7 @@
 //! Nothing here runs per exchange — per-session disk state is
 //! [`crate::record::AgentLog`].
 
-use crate::app::{EXARCH, seed_var};
+use crate::app::{SCRATCH_VAR, seed_var};
 use crate::shell_eval;
 use crate::shell_eval::builtins;
 use ral_core::authority::policy::{Capabilities, GrantLayer};
@@ -59,10 +59,9 @@ pub fn engine_runtime(spec: &EngineSpec) -> Result<Runtime, String> {
 /// # Panics
 /// Panics if the embedded agent library fails to load.
 pub fn engine_root(root: &Root, shell: &mut Shell) -> Result<(), String> {
-    let var = EXARCH.scratch_var();
-    let Some((_, scratch)) = root.env.iter().find(|(name, _)| *name == var) else {
+    let Some((_, scratch)) = root.env.iter().find(|(name, _)| name == SCRATCH_VAR) else {
         return Err(format!(
-            "exarch engine: the root attach names no ${var}: the host owns the scratch and names it in every root attach"
+            "exarch engine: the root attach names no ${SCRATCH_VAR}: the host owns the scratch and names it in every root attach"
         ));
     };
     shell.set_scratch(scratch.as_str());
@@ -110,7 +109,7 @@ pub(crate) use testkit::{test_shell, test_transport, test_transport_under};
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod testkit {
-    use super::{EXARCH, builtins, engine_root, engine_runtime};
+    use super::{SCRATCH_VAR, builtins, engine_root, engine_runtime};
     use ral_core::Shell;
     use ral_core::protocol::{EngineSpec, Root};
 
@@ -123,7 +122,7 @@ mod testkit {
                 ral_core::path::EnginePath::Host(temp.clone()),
             ),
             Root::new(ral_core::path::EnginePath::Host(temp.clone())).with_env(vec![(
-                EXARCH.scratch_var(),
+                SCRATCH_VAR.to_owned(),
                 ral_core::path::utf8(&temp)
                     .expect("a temp dir is Unicode")
                     .to_owned(),
@@ -167,7 +166,7 @@ mod testkit {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::{engine_root, engine_runtime, test_shell};
-    use crate::app::{EXARCH, Scratch};
+    use crate::app::{EXARCH, SCRATCH_VAR, Scratch};
     use ral_core::Shell;
     use ral_core::path::EnginePath;
     use ral_core::protocol::{EngineSpec, Root};
@@ -205,11 +204,11 @@ mod tests {
             ral_core::test_helper::process_cwd(),
         );
         let root = Root::new(EnginePath::Host(scratch.clone()))
-            .with_env(vec![(EXARCH.scratch_var(), named.to_owned())]);
+            .with_env(vec![(SCRATCH_VAR.to_owned(), named.to_owned())]);
         engine_root(&root, &mut shell).expect("the root names a scratch");
         assert_eq!(shell.scratch(), Some(named));
 
-        shell.set_env_var(EXARCH.scratch_var(), "/elsewhere");
+        shell.set_env_var(SCRATCH_VAR, "/elsewhere");
         let frozen = FreezeCtx::at(
             shell.env_overrides().clone(),
             ral_core::path::CwdPath::new(shell.cwd()).expect("the shell's cwd is absolute"),
@@ -238,6 +237,6 @@ mod tests {
         let Err(why) = engine_root(&Root::new(EnginePath::Host(temp)), &mut shell) else {
             panic!("an unnamed scratch must refuse the attach");
         };
-        assert!(why.contains(&EXARCH.scratch_var()), "{why}");
+        assert!(why.contains(SCRATCH_VAR), "{why}");
     }
 }

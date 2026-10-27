@@ -51,7 +51,7 @@
 
   One thing the broker shares with synod rather than owning: the guest boot
   media.  It reads the kernel, initramfs, and rootfs from `boot\` beside its
-  own executable, which is the same relative layout `synod/src/boot.rs` looks
+  own executable, which is the same relative layout `vm_manager::media::locate` looks
   for beside synod's.  That is why this component installs into `INSTALLDIR`
   and not a directory of its own — `bundle.resources` in `tauri.bundle.conf.json`
   already lands those files in `INSTALLDIR\boot\`, and one copy of a

@@ -141,8 +141,8 @@ static INHERITED_IGNORED: AtomicU64 = AtomicU64::new(0);
 
 static SNAPSHOT: Once = Once::new();
 
-/// The one snapshot, taken before the first disposition change [`ignore`] or
-/// [`install`] makes.
+/// The one snapshot, taken before the first disposition change [`ignore()`] or
+/// [`install()`] makes.
 fn snapshot_once() {
     SNAPSHOT.call_once(snapshot_inherited_ignored);
 }
@@ -209,8 +209,9 @@ const GESTURES: [(i32, CancelCause); 3] = [
     (libc::SIGHUP, CancelCause::Terminated),
 ];
 
-/// The key `signal` is, read only by [`TerminalLoan::hear`]: nothing but a
-/// terminal ral lent can report one.
+/// The key `signal` is, read only by
+/// [`TerminalLoan::hear`](crate::process::TerminalLoan::hear): nothing but
+/// a terminal ral lent can report one.
 pub(crate) fn gesture(signal: Signal) -> Option<CancelCause> {
     GESTURES
         .into_iter()

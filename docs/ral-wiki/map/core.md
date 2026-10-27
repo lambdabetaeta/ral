@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 34ae1424
-generated_at_date: 2026-10-25
-covers_paths: [core/src/lib.rs, core/src/shell.rs, core/src/host.rs, core/src/host/, core/src/fact.rs, core/src/fact/]
+generated_at_commit: 3dbbe8f3
+generated_at_date: 2026-10-27
+covers_paths: [core/src/protocol.rs, core/src/egress.rs, core/src/lib.rs, core/src/shell.rs, core/src/host.rs, core/src/host/, core/src/fact.rs, core/src/fact/]
 ---
 
 # Map: core (ral-core)
@@ -74,7 +74,7 @@ reduction primitive behind it. A host states policy; core owns resources.
 - `seed`, `role`, `protocol`, `carrier` and `engine` stay at the crate root,
   alongside the other non-shell subjects.
 
-**`authority`, `fact`, `host`, `io`, `own`, `path` and `process` cannot reach
+**`authority`, `egress`, `fact`, `host`, `io`, `own`, `path` and `process` cannot reach
 `shell`, directly or transitively, in production.** Their intentional lower
 cycles are permitted: this is a
 [[invariants/core-below-shell|boundary, not a DAG]].
@@ -139,6 +139,9 @@ Source text flows down a fixed ladder; each rung is a subsystem page.
 
 ## Authority, plumbing, surface
 
+- `egress` — pure CONNECT destination data and judgments: `Host`, `NetPolicy`,
+  `NetPolicy::admits` and `refusal` (`core/src/egress.rs`); policy loading
+  belongs to exarch's `net_policy::load`.
 - [[map/core/capabilities|capabilities]] — the dynamic capability stack and the OS process
   sandbox (`core/src/authority/`: resolved policy and judgments in `policy/`,
   authored resolution and host system-read discovery in `grant/`, enforcement in `guard/`

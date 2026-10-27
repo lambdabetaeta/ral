@@ -21,7 +21,6 @@ pub mod card;
 pub mod cli;
 pub mod clock;
 pub mod config;
-pub mod egress;
 pub mod enquiry;
 pub mod headless;
 pub(crate) mod latch;
@@ -178,17 +177,10 @@ pub fn run() -> Result<(), String> {
     }
     let seed = cli::load_seed(c.prompt, c.file)?;
 
-    let wallet = wallet::Wallet::exarch()?;
-    let custom = config::load_declared(&wallet.declarations, wallet.label)?;
+    let store = wallet::Wallet::of(app::EXARCH, config::CONFIG_FILE, config::LABEL)?.prepare()?;
     let disk_warn_bytes = config::disk_warn_bytes()?;
-    // Opened once at the trunk; every spawned child inherits this ledger.
-    let egress = egress::Egress::open(app::EXARCH)?;
+    let search = net_policy::load()?.search;
 
-    // SAFETY: startup is still single-threaded — the tokio runtime and the
-    // session's workers come later — so nothing races this env mutation.  It is
-    // the only scrub, so every child inherits an environment free of keys.
-    let mut store = provider::credential::CredentialStore::resolve_and_scrub(custom);
-    store.read_vault(&wallet.keychain);
     let available = store.available();
     if available.is_empty() {
         return Err(
@@ -305,7 +297,7 @@ pub fn run() -> Result<(), String> {
         resume_on_reset: !headless,
         disk_warn_bytes,
         fuel: agent::SPAWN_FUEL,
-        egress,
+        search,
         factory: None,
         bureau: Arc::clone(&bureau),
         roles,

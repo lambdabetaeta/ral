@@ -1,6 +1,7 @@
 import { growProse } from "./prose.js";
 import {
   blocks,
+  onChange,
   streamingProse,
   bump,
   renderDialBlock,
@@ -18,39 +19,28 @@ import {
 } from "./chat-document.js";
 import { renderMarkCard } from "./card-renderer.js";
 import { transcriptEl, pinTranscript } from "./core.js";
-import { setFacts, setStatus } from "./conversation.js";
+import { setFacts, setStatus } from "./status.js";
 
-// ---- The projector ----------------------------------------------------
-
-// Per block: the element last built for it and the revision it shows.
-// An untouched block keeps its element across renders — same node, same
-// in-flight animation. A block whose rev moved is rebuilt whole; the
-// rebuild is a replacement, not an arrival, and wears `settled` so the
-// entrance animation stays with first appearances.
+// Unchanged revisions retain their nodes and animations; replacements are marked settled.
 const memo = new WeakMap();
 
 function projectBlock(block) {
   const known = memo.get(block);
   if (known && known.rev === block.rev) return known.el;
-  // Prose grows rather than changes: its bubble is brought up to date in
-  // place, so settled markdown — and the mathematics already laid out in
-  // it — is never rebuilt under the reader.
+  // Update prose in place; settled markdown and typeset math must not be rebuilt.
   if (block.kind === "assistant" && known) {
     growProse(/** @type {HTMLElement} */ (known.el.firstElementChild), block);
     memo.set(block, { el: known.el, rev: block.rev });
     return known.el;
   }
   const el = renderBlock(block);
-  // renderBlock's switch covers every kind chat-document.js ever creates,
-  // so it always returns — TS just can't see that without a default arm.
+  // renderBlock is exhaustive; TypeScript cannot infer that without its default arm.
   if (known) /** @type {HTMLElement} */ (el).classList.add("settled");
   memo.set(block, { el, rev: block.rev });
   return el;
 }
 
-// An empty document projects to the welcome line, never to a bare
-// column. One element for the app's lifetime, so reconciliation holds
-// it in place across empty renders.
+// Reuse one welcome element across empty renders.
 const welcomeEl = (() => {
   const p = document.createElement("p");
   p.className = "welcome";
@@ -60,20 +50,15 @@ const welcomeEl = (() => {
   return p;
 })();
 
-// Reconcile the transcript's children, in order, against the projected
-// list: a child no longer wanted anywhere (a stale revision, the welcome
-// line) is removed on sight, a wanted element missing at its position is
-// inserted, and trailing leftovers are trimmed. A surviving node is
-// never detached — detaching would restart its animation.
-// Coalesced onto rAF: many `bump`s in one frame (a token burst) collapse
-// to one reconciliation, and a render requested mid-frame still lands on
-// the next one rather than being lost.
+// Reconcile without detaching surviving nodes, which would restart animations; coalesce on rAF.
 let renderScheduled = false;
 export function render() {
   if (renderScheduled) return;
   renderScheduled = true;
   requestAnimationFrame(renderNow);
 }
+
+onChange(render);
 
 function renderNow() {
   renderScheduled = false;
@@ -111,9 +96,6 @@ function renderBlock(block) {
       bubble.textContent = block.text;
       return msg;
     }
-    // A surfaced card wears the `msg` wrap for its transcript standing
-    // — width, entrance, left alignment — but no bubble: the mark-card
-    // is its own chrome.
     case "card": {
       const msg = document.createElement("div");
       msg.className = "msg";
@@ -134,8 +116,7 @@ function messageShell(cls) {
   return { msg, bubble };
 }
 
-// Not `Intl`'s compact notation: it renders a capital "1.5K", and the
-// status line has always read in lowercase.
+// Intl compact notation gives 1.5K; the status line uses lowercase.
 function formatK(n) {
   return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
 }
@@ -157,9 +138,7 @@ export function onOpening(p) {
 export function onSynodEvent(p) {
   switch (p.type) {
     case "token":
-      // A whitespace-only exhale before any prose opens no bubble and
-      // closes no dial — it would leave an empty pill in the transcript
-      // and split the gap's work across two dials for nothing.
+      // Whitespace before prose must not open an empty bubble or split the dial.
       if (!streamingProse && !p.text.trim()) break;
       if (streamingProse) {
         streamingProse.raw += p.text;
@@ -170,19 +149,12 @@ export function onSynodEvent(p) {
         openStreamingProse(p.text);
       }
       break;
-    // The turn has sealed, so the bubble's last block is closed too: it
-    // settles with the rest, rather than waiting on a following block to
-    // prove it finished.
     case "boundary":
       if (streamingProse) {
         streamingProse.open = false;
         bump(streamingProse);
       }
       break;
-    // The session's own state — the shell's before there is an agent, the
-    // agent's after — and the status bar's only writer besides "Working…", so
-    // the label never flickers back to a coarser word as tokens arrive;
-    // `ready` carries no spinner, which is what an empty bar means here.
     case "state":
       setStatus(p.pending ? (p.label ? p.label.charAt(0).toUpperCase() + p.label.slice(1) : p.label) + "…" : "");
       break;
@@ -199,7 +171,7 @@ export function onSynodEvent(p) {
       dialAddProcessCard(p.marks || []);
       break;
     case "helpers":
-      dialAddHelpers(p.live);
+      dialAddHelpers(p.busy);
       break;
     case "helper_done":
       dialAddHelperDone(p);
@@ -216,20 +188,13 @@ export function onSynodEvent(p) {
     case "provider_error":
       dialAddReadout(p);
       break;
-    // Always "warn", never "bad", whatever the cause: the exchange survived
-    // it and the partial reply above the note stands. `sink.rs` pins this
-    // severity itself, rather than deriving it here from the record.
+    // Stalled is always Warn: the exchange survived and its partial reply stands.
     case "stalled":
       dialAddReadout(p);
       break;
     case "failure":
       addSystemMessage(p.message);
       break;
-    // Unreachable, and saying so in the type system is the point: `p` narrows
-    // to `never` only when every variant above is handled, so a new Rust
-    // variant the window forgets becomes a build failure rather than an event
-    // that silently does nothing.  This is the half `deno check` cannot see
-    // from the `case` labels alone.
     default: {
       /** @type {never} */
       const _unhandled = p;

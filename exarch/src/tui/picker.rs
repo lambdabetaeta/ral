@@ -291,27 +291,25 @@ impl Picker {
         endpoints.iter().position(|e| e.tag == tag)
     }
 
+    fn caps(&self) -> ModelCaps {
+        self.highlighted_model()
+            .map(|m| (self.caps)(&m))
+            .unwrap_or_default()
+    }
+
     /// Whether the highlighted model admits `param`; an unknown one does.
     fn supports(&self, param: Param) -> bool {
-        match self.highlighted_model() {
-            Some(model) => (self.caps)(&model).supports(param),
-            None => true,
-        }
+        self.caps().supports(param)
     }
 
     /// The tuning for the highlighted model, masked to what it admits.
     fn tuning(&self) -> Tuning {
         Tuning {
-            effort: self
-                .supports(Param::Reasoning)
-                .then(|| EFFORT_LADDER[self.effort_idx].1.clone())
-                .flatten(),
-            temperature: self
-                .supports(Param::Temperature)
-                .then_some(self.temperature)
-                .flatten(),
-            top_p: self.supports(Param::TopP).then_some(self.top_p).flatten(),
+            effort: EFFORT_LADDER[self.effort_idx].1.clone(),
+            temperature: self.temperature,
+            top_p: self.top_p,
         }
+        .masked(&self.caps())
     }
 
     /// One key; Enter on a listed row picks it. The driver handles cancel.

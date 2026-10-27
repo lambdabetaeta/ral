@@ -210,7 +210,7 @@ sites that the new bans of `create_dir` and `remove_dir` bring make 21.
   `Avatar::for_test`, `TestTrunk`, the scratch doubles) sit behind
   `#[cfg(any(test, feature = "test-util"))]` and are built on `OwnDir::for_test`
   and `OwnDir::temp_for_test`; exarch carries a self dev-dependency enabling
-  `test-util`, as core does, guest-net and synod enable it in their
+  `test-util`, as core does, netgate and synod enable it in their
   dev-dependencies, `tempfile` is exarch's dev-dependency alone, and `fd-lock` is
   gone in favour of std's `File::lock` and `File::try_lock`. A fixture that makes
   nothing in its directory holds `OwnDir::temp_for_test`, the host's temp
@@ -281,7 +281,7 @@ Filesystem sites outside `path/` fall from 114 to 21: the 11 fixed host interfac
 | exarch | 83 | 17 |
 | ral | 16 | 6 |
 | synod | 15 | 4 |
-| guest-net | 2 | 2 |
+| netgate | 2 | 2 |
 | clipboard | 1 | 0 |
 | **six crates** | **299** | **176** |
 | vm-manager | 51 | 54 |

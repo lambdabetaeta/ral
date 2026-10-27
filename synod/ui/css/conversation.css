@@ -4,11 +4,7 @@
       height: 100%;
     }
 
-    /* Three zones, in this order: the standing facts (left, constant), the
-       status (its right edge fixed), and the one control (far right). The
-       status is the only thing that changes while the assistant works, and
-       it is the only flexible item's neighbour — so it grows leftward into
-       the folder line's slack and never shifts the button beside it. */
+    /* Status grows leftward into the folder line's slack, keeping the control fixed. */
     .topbar {
       display: flex;
       align-items: center;

@@ -4,11 +4,8 @@
 //! ([`Inbox::drain_mid_exchange`]) and parks at the exchange boundary
 //! ([`Inbox::next_or_idle`]).
 //!
-//! The park verdict is computed *under the queue mutex* and *before* the pop.
-//! Every fact it reads is either kept under that same mutex (the exchange
-//! clock), written only by the consumer's own thread (`Agent`'s status), or
-//! changes only *after* a delivery into this queue (a child dies after posting
-//! its result) — so a delivery can never lose to the verdict it should wake.
+//! Under the queue mutex before the pop, the verdict reads consumer-owned status
+//! or obligations released after delivery; cancellation may withdraw obligations.
 
 use super::post::{Minted, Source, Stamped};
 use super::{Item, Next, Post, ScheduleId};
@@ -26,10 +23,8 @@ pub(crate) enum ParkMode {
     /// A live human conversation: park *and ignore cancellation* entirely, for
     /// an Esc cancels the exchange, not the agent.
     Held,
-    /// A non-conversing agent a human has exchanged with, per its own exchange
-    /// clock rather than the TUI's focus cursor.  Parks like [`Self::Held`] but
-    /// with no immunity, or a `HeldByChildren` parent would wait forever on the
-    /// cancelled result it is owed; the fleet's idle lease bounds it.
+    /// A child's current reply completion, parked under its reply lease.
+    /// A terminate-cause cancel ends this residency.
     Engaged,
     /// Live children will each deliver a result up this inbox, so park rather
     /// than kill a headless root waiting on its fleet; the last one settling
@@ -66,9 +61,8 @@ struct Shared {
     epoch: AtomicU64,
 }
 
-/// What the queue mutex guards: the posts, and the exchange clock they are
-/// stamped against, so an exchange's stamp and its delivery are one atomic
-/// step and a park verdict — computed under this same mutex — reads both.
+/// The posts and exchange clock share a mutex so a follow-up's stamp and
+/// delivery are one step for `Agent::reply_since`.
 struct Queue {
     posts: VecDeque<Post>,
     /// The last human or parent exchange — [`Mailbox::steer`] or
@@ -396,18 +390,17 @@ impl Inbox {
     ///
     /// Two orderings carry the correctness.  The verdict runs *under the queue
     /// mutex*, which the condvar releases atomically, so no push interleaves
-    /// between verdict and wait and no wakeup is lost; `park` is handed the
-    /// exchange clock's reading from under that same lock.  And it runs
+    /// between verdict and wait and no wakeup is lost.  And it runs
     /// *before* the pop, so a `Quiesce` can never win against a delivery
     /// already queued.
     pub(crate) fn next_or_idle(
         &self,
-        park: impl Fn(bool) -> ParkMode,
+        park: impl Fn() -> ParkMode,
         cancel: &cancel::Token,
     ) -> Option<Next> {
         let mut q = self.shared.lock();
         loop {
-            let mode = park(q.last_exchange.is_some());
+            let mode = park();
             // A *terminate*-cause cancel ends every park but `Held`; an
             // *interrupt* drops the in-flight exchange and the agent re-parks.
             // Only a live human conversation ignores cancellation entirely.

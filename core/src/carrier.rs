@@ -499,7 +499,7 @@ type WireControl = (Arc<Mutex<WireChannel>>, Arc<OnceLock<Severed>>);
 pub struct ControlSender {
     route: ControlRoute,
     /// The dispatch this front-end has in flight, and the
-    /// [`interrupt_epoch`](crate::process::interrupt_epoch) it was sent at.
+    /// [`interrupt_epoch`] it was sent at.
     in_flight: Arc<Mutex<Option<(DispatchId, u64)>>>,
 }
 

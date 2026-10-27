@@ -296,6 +296,10 @@ ephemerally.
   the future async-worker delivery this ADR only anticipates. It may be worth
   filing as a cross-cutting concept page that predates that work.
 
+> **Amended 2026-10-27.** [[map/exarch/frontend|frontend]] maps schedule
+> publication, registry retirement and inbox fencing; [[map/exarch/agent|agent]]
+> maps the attend and reply-admission boundaries.
+
 ## See also
 
 [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]

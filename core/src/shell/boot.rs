@@ -8,7 +8,7 @@
 //! [`bake_prelude`] returns to its `OUT_DIR`, and the host embeds it with
 //! [`baked_prelude!`](crate::baked_prelude).  Core cannot bake its own — a
 //! build script cannot depend on the crate it is building — so a test
-//! binary takes [`BakedPrelude::runtime`] instead.
+//! binary takes `BakedPrelude::runtime` instead.
 
 use crate::authority::policy::Baseline;
 use crate::io::terminal::TerminalState;
@@ -187,9 +187,8 @@ fn describe_comp(kind: &CompKind) -> &'static str {
     }
 }
 
-/// Expand in a host crate whose build script wrote the blob
-/// [`bake_prelude`](crate::shell::boot::bake_prelude) returns to `prelude_baked.bin`
-/// in its `OUT_DIR`.
+/// Expand in a host crate whose build script wrote the blob [`bake_prelude`]
+/// returns to `prelude_baked.bin` in its `OUT_DIR`.
 ///
 /// A macro, because `include_bytes!` has to expand against the *host's*
 /// `OUT_DIR`.
@@ -398,7 +397,7 @@ fn inherited(key: &str, default: impl FnOnce() -> Option<String>) -> Option<Stri
 /// embeds with [`baked_prelude!`](crate::baked_prelude).
 ///
 /// postcard carries no schema, so a field added to
-/// [`CompKind`](crate::ir::CompKind), [`Val`](crate::ir::Val),
+/// [`CompKind`], [`Val`](crate::ir::Val),
 /// [`Pattern`](crate::ir::Pattern), or the scheme's type
 /// vocabulary would silently invalidate an old bake.  No rerun line guards
 /// it: `ral-core` is a build-dependency of each host, so a change to it

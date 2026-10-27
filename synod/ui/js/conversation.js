@@ -1,4 +1,7 @@
-import { $, invoke, listen, state, show, confirmDialog } from "./core.js";
+import { $, show } from "./dom.js";
+import { state, confirmDialog } from "./core.js";
+import { startConversation, sendMessage, openUrl, onConversationEvent } from "./ipc.js";
+import { setFacts, setStatus } from "./status.js";
 import {
   addUserMessage,
   addSystemMessage,
@@ -6,31 +9,14 @@ import {
   clearOpenDial,
   closeStreamingProse,
 } from "./chat-document.js";
-import { refreshReport, resetReport } from "./change-report.js";
+import { showReport, resetReport } from "./change-report.js";
 import { onOpening, onSynodEvent } from "./projector.js";
-
-// ---- Conversation screen --------------------------------------------
-
-// The standing facts of a conversation, written only from the opening
-// the backend narrates — the model and effort actually in force, which
-// is not always what the start screen asked for (a model that takes no
-// reasoning control is sent none). `null` clears them, for the gap
-// between a restart and its opening.
-export function setFacts(opening) {
-  const model = opening ? opening.model || "" : "";
-  const label = opening ? opening.label || "" : "";
-  $("convo-model").textContent = model;
-  $("convo-effort").textContent = opening ? opening.effort || "" : "";
-  $("convo-model").title = label ? label + " · " + model : "";
-  $("convo-facts").classList.toggle("ready", Boolean(opening));
-}
 
 function resetTranscript(folder) {
   state.folder = folder;
   $("convo-folder").textContent = folder.label;
   setFacts(null);
-  // Nothing is outstanding until the shell says so; a restart must not
-  // inherit the superseded conversation's last word.
+  // A restart must not inherit the superseded conversation's outstanding state.
   setStatus("");
   resetDocument();
   resetReport();
@@ -43,12 +29,8 @@ export function enterConversation(folder, choice) {
   startAssistant(folder, choice);
 }
 
-/**
- * @typedef {{ attempt: string, phase: "starting" }
- *   | { attempt: string, phase: "ended" }
- *   | { attempt: string, phase: "accepted" | "ready", exchange: "idle" | "busy" }} Attempt
- * @typedef {{ attempt: string, type: "accepted" | "opening" | "submit" | "exchange_done" | "send_failed" | "ended" }} Action
- */
+/** @typedef {{ attempt: string, phase: "starting" } | { attempt: string, phase: "ended" } | { attempt: string, phase: "accepted" | "ready", exchange: "idle" | "busy" }} Attempt */
+/** @typedef {{ attempt: string, type: "accepted" | "opening" | "submit" | "exchange_done" | "send_failed" | "ended" }} Action */
 /** @type {Attempt} */
 let assistant = { attempt: "", phase: "ended" };
 
@@ -96,7 +78,7 @@ async function startAssistant(folder, choice) {
   assistant = { attempt, phase: "starting" };
   refreshComposer();
   try {
-    await invoke("start_conversation", { folder: folder.path, choice, attempt });
+    await startConversation(folder.path, choice, attempt);
     // Accepted messages queue until boot; acceptance is not readiness.
     transition({ attempt, type: "accepted" });
   } catch (err) {
@@ -107,51 +89,29 @@ async function startAssistant(folder, choice) {
   }
 }
 
-export function setStatus(text) {
-  const el = $("convo-status");
-  el.textContent = "";
-  if (!text) return;
-  const spinner = document.createElement("span");
-  spinner.className = "spinner";
-  spinner.setAttribute("aria-hidden", "true");
-  el.append(spinner, text);
-}
-
 function settleExchange() {
   closeStreamingProse();
   clearOpenDial();
   setStatus("");
 }
 
-// The composer's enabled state, with no word about the status bar: a start
-// is narrated by the shell, and that sentence must survive the input
-// becoming usable again.
+// Composer enablement must not overwrite the shell's current status narration.
 function refreshComposer() {
   /** @type {HTMLTextAreaElement} */ ($("message")).disabled = !canSend();
   /** @type {HTMLButtonElement} */ ($("send")).disabled = !canSend();
 }
 
-// A link the assistant wrote is opened in the user's own browser, never
-// followed inside the window — the window's one document is this
-// conversation, and navigating it away would throw the conversation out.
-// DOMPurify lets a bare name or a share path through as a relative link,
-// and the system would run whatever such a link named, so the raw href goes
-// to `open_url`, which opens only web and email links and answers anything
-// else with a sentence of its own. That check is the boundary; nothing here
-// second-guesses it.
+// Send raw links to the shell for scheme checks; never navigate the conversation webview.
 $("transcript").addEventListener("click", (e) => {
-  // The click target of a listener on an element is always an Element,
-  // never bare text or the document itself.
   if (!(e.target instanceof Element)) return;
   const anchor = e.target.closest("a[href]");
   if (!anchor) return;
   e.preventDefault();
   const href = anchor.getAttribute("href");
-  if (href) invoke("open_url", { url: href }).catch((err) => addSystemMessage(String(err)));
+  if (href) openUrl(href).catch((err) => addSystemMessage(String(err)));
 });
 
-listen("conversation-event", (event) => {
-  const { attempt, update } = /** @type {import("./bindings/ConversationEvent.ts").ConversationEvent} */ (event.payload);
+onConversationEvent(({ attempt, update }) => {
   if (assistant.attempt !== attempt || assistant.phase === "ended") return;
   switch (update.type) {
     case "opening":
@@ -163,13 +123,13 @@ listen("conversation-event", (event) => {
     case "exchange_done":
       if (transition({ attempt, type: "exchange_done" })) {
         settleExchange();
-        refreshReport();
+        showReport(update.report);
       }
       break;
     case "ended":
       if (!transition({ attempt, type: "ended" })) return;
       settleExchange();
-      if (!update.failed.explained) addSystemMessage("The assistant stopped unexpectedly. Choose Start again to continue.");
+      if (!update.explained) addSystemMessage("The assistant stopped unexpectedly. Choose Start again to continue.");
       break;
     default: {
       /** @type {never} */
@@ -187,7 +147,7 @@ function submit() {
   addUserMessage(text);
   field.value = "";
   setStatus("Working…");
-  invoke("send_message", { attempt, message: text }).catch((err) => {
+  sendMessage(attempt, text).catch((err) => {
     if (!transition({ attempt, type: "send_failed" })) return;
     addSystemMessage(String(err));
     settleExchange();

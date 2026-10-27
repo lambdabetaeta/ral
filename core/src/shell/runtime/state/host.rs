@@ -162,8 +162,8 @@ impl Shell {
     /// Arm settled-worker retention, in ral calls — the boot call beside
     /// [`Self::arm_binding_lease`].  An entry whose unclaimed result has sat
     /// settled a full `retention` of calls expires with a
-    /// [`ReapCause::Retention`] notice; a host that never arms (the REPL) keeps
-    /// settled entries forever.
+    /// [`ReapCause::Retention`](super::workers::ReapCause::Retention) notice;
+    /// a host that never arms (the REPL) keeps settled entries forever.
     pub fn arm_worker_retention(&mut self, retention: u64) {
         self.local.workers.arm_retention(retention);
     }
@@ -243,7 +243,8 @@ impl Shell {
 
     /// Set a dynamic env-var override for the rest of the session — how a host
     /// seeds `NO_COLOR` and the like.  `within [env: …]` wants the scoped
-    /// [`Shell::with_env`] instead, which restores on exit.
+    /// [`WithinScope::enter`](crate::shell::evaluator::scope::WithinScope::enter)
+    /// instead, whose `WithinUndo` restores on exit.
     pub fn set_env_var(&mut self, k: impl Into<String>, v: impl Into<String>) {
         self.context.set_env_var(k, v);
     }

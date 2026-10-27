@@ -1,7 +1,3 @@
-// ---- The "a little Bertin-pilled" card renderer ---------------------
-// Named `renderMarkCard` rather than `renderCard` because the report
-// column below already owns that name for a file-change card — a
-// different kind of card entirely.
 /** @param {import("./bindings/MarkDto.ts").MarkDto[]} marks */
 export function renderMarkCard(marks) {
   const card = document.createElement("div");
@@ -18,10 +14,6 @@ function renderMark(m) {
     case "fields": return renderFieldsMark(m);
     case "diff": return renderDiffMark(m);
     case "raw": return renderRawMark(m);
-    // Unreachable once every variant above is handled — which `never` is what
-    // asserts, so a new Rust mark the window forgets fails the build.  The
-    // dump below stays as the runtime floor: a mark from a newer backend than
-    // this window should still show something rather than nothing.
     default: {
       /** @type {never} */
       const _unhandled = m;
@@ -47,11 +39,6 @@ function renderTextMark(m) {
   return p;
 }
 
-// A measure standing alone names itself; one in a fields row does not
-// — the row's label column already names it, exactly the distinction
-// the TUI's `measure_value_spans` draws.
-// The measure's payload is exarch's shape, unchecked by design — the union
-// checks the `mark` tag and stops there.
 /** @param {Record<string, any>} m */
 function renderMeasureMark(m) {
   const row = document.createElement("div");
@@ -63,7 +50,6 @@ function renderMeasureMark(m) {
   return row;
 }
 
-// The meter and readout, without the measure's own label.
 function measureValue(m) {
   const meter = document.createElement("span");
   meter.className = "meter";

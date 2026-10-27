@@ -3,7 +3,7 @@
 //! [`HostServices`] is all `&Avatar` can lend a handler without lending
 //! `&mut Avatar`/`&mut Shell`, since the reentrancy law bars a handler from
 //! taking the session lock. [`ExarchDesk`] answers one enquiry against that
-//! capture, paired with its [`SurfaceApplier`](shell_eval::surface::SurfaceApplier) in one [`RunHost`], which
+//! capture, paired with its [`SurfaceApplier`] in one [`RunHost`], which
 //! implements [`ral_core::carrier::Host`] — the object every dispatch
 //! rides, so a handler's chrome can never outrun the run's earlier surface
 //! output.

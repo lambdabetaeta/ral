@@ -4,7 +4,7 @@
 //! runtime body in one entry — so those facets cannot drift apart — and expands
 //! them into the [`CORE_BUILTINS`] static, one of the [`CORE_SETS`] every host
 //! surface lists first.  Arity is structural, read off the type rule by
-//! [`crate::shell::runtime::BuiltinEntry::fixed_arity`].
+//! [`crate::typecheck::Decl::fixed_arity`].
 //!
 //! Those are the *value* half of the manifest.  The argv half — a name that
 //! takes an argv rather than arguments, and installs as a base handler frame —
@@ -53,7 +53,8 @@ macro_rules! with_diagnostic_if_any {
 }
 
 /// One entry per builtin, expanded into [`CORE_BUILTINS`].  Arity is never
-/// declared — [`BuiltinEntry::fixed_arity`] reads it off the type rule.
+/// declared — [`Decl::fixed_arity`](crate::typecheck::Decl::fixed_arity)
+/// reads it off the type rule.
 ///
 /// `call` must be a non-capturing closure — it is coerced to a fn pointer.
 /// `names` splits its first literal out from the rest so an optional
@@ -409,9 +410,10 @@ static CORE_BASE_FRAMES_ARR: [BuiltinEntry; 1] = [BuiltinEntry::base_frame(
 pub(crate) static CORE_BASE_FRAMES: &[BuiltinEntry] = &CORE_BASE_FRAMES_ARR;
 
 /// Core's boundaries: the doors through which a value of a shape the program
-/// did not decide enters typed code.  Each is handed the [`Site`] the checker
-/// solved at its call and admits what it lets in against it; they sit apart
-/// from [`CORE_BUILTINS`] because their bodies take that site.
+/// did not decide enters typed code.  Each is handed the
+/// [`Site`](crate::ty::Site) the checker solved at its call and admits what
+/// it lets in against it; they sit apart from [`CORE_BUILTINS`] because their
+/// bodies take that site.
 static BOUNDARY_BUILTINS_ARR: [BuiltinEntry; 4] = [
     BuiltinEntry::boundary(
         Cow::Borrowed("from-json"),

@@ -284,7 +284,7 @@ impl CredentialStore {
     /// Read `vault`'s key for every account that takes one. An ordinary second
     /// call after [`Self::resolve_and_scrub`], which keeps that function's
     /// SAFETY contract its own.
-    pub fn read_vault(&mut self, vault: &impl SecretVault) {
+    pub(crate) fn read_vault(&mut self, vault: &impl SecretVault) {
         for entry in &mut self.entries {
             if let AccountAuth::Key { vault: saved, .. } = &mut entry.auth {
                 *saved = vault.read(&entry.account);

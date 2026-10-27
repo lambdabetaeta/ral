@@ -1,64 +1,47 @@
-//! Synod's desktop shell.
-//!
-//! It opens with nothing to choose but a folder.  Pick one, and the window
-//! becomes a conversation with the assistant that runs in it — a message
-//! in, the assistant's narration streaming back, and a change report
-//! beside it that refreshes after every exchange.  Closing the window ends
-//! the conversation.  The window is deliberately spare — a secretary, not
-//! a programmer, sits in front of it, so nothing here says "agent",
-//! "session", "model", or "machine".
-//!
-//! The assistant changes the files in the folder directly, and nothing
-//! here puts them back.  What the window owes the user instead is an
-//! honest account: the change report is not a final screen but a standing
-//! one, open beside the conversation for its whole life — the assistant's
-//! own account of what it has done so far, and a way to open any of it.
-//!
-//! This binary is the *host* half of that shell — and, unlike a shell over
-//! a separate program, it IS the agent: it hosts the conversation
-//! in-process, starts a machine over the chosen folder, and talks to it
-//! directly.  The frontend is hand-written HTML/CSS/JS under
-//! [`ui/`](../ui), embedded at build time (there is no bundler and no web
-//! server); the Rust side is a thin set of commands the window calls, all
-//! under [`shell`]:
-//!
-//! - the folder picker, the model menu, the conversation itself, sending it
-//!   messages, starting again, and opening files with the user's own
-//!   applications, in [`shell::commands`];
-//! - signing in to a `ChatGPT` plan from the opening screen, in
-//!   [`shell::signin`];
-//! - the change report, in [`shell::review`], over the workspace
-//!   vocabulary in `synod::workspace` — the two stat-walked manifests and
-//!   the change set between them.
-//!
-//! The conversation is a [`synod::session::Conversation`], held open on its
-//! own worker thread for as long as the window wants it, its narration
-//! streamed into the window as it works.
+//! The assistant edits the granted folder in place; the window accounts for changes without undo.
 
 #![cfg_attr(
     all(not(debug_assertions), target_os = "windows"),
     windows_subsystem = "windows"
 )]
-#![allow(
-    clippy::needless_pass_by_value,
-    reason = "a `#[tauri::command]` handler receives its deserialized arguments and its injected State/AppHandle by value — the command ABI does not admit borrowed parameters — so the pass-by-value is the framework's shape, not ours to tighten"
+#![cfg_attr(
+    not(any(target_os = "macos", windows)),
+    allow(
+        dead_code,
+        unused_imports,
+        clippy::unused_self,
+        reason = "only the macOS/Windows window calls L0–L3; `just lint-cross` is the dead-code authority"
+    )
 )]
 
-mod shell;
-// `lint/site.rs` is crate-local, so the library's `site` module cannot serve
-// the binary; this one is the binary's own.
-#[path = "shell/site.rs"]
+mod assistant;
+mod folder;
+mod seam;
 mod site;
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod test_fixture;
+#[cfg(any(target_os = "macos", windows))]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command handlers receive deserialized arguments and injected state by value"
+)]
+mod window;
+mod wire;
 
-use shell::{Accounts, commands, highlight, keys, review, signin};
+#[cfg(any(target_os = "macos", windows))]
+use window::{accounts, conversation, files, highlight, state};
 
+#[cfg(any(target_os = "macos", windows))]
 use exarch::provider::Holdings;
+#[cfg(any(target_os = "macos", windows))]
 use tauri::Manager;
 
+#[cfg(any(target_os = "macos", windows))]
 fn main() {
     exarch::exit_if_re_exec_child();
-    let accounts = Accounts::new(
-        synod::session::prepare().map(|store| Holdings::new(store, synod::session::SYNOD)),
+    let accounts = state::Accounts::new(
+        crate::assistant::accounts::prepare().map(|store| Holdings::new(store, exarch::app::SYNOD)),
     );
 
     #[expect(
@@ -70,42 +53,38 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        // No injected click script: a link in the transcript is opened only
-        // through `open_url`, which checks it, and the window holds no
-        // permission to call the plugin's own `open_url` besides.
+        // Only the checked open_url command may open transcript links; disable injected click handling.
         .plugin(
             tauri_plugin_opener::Builder::new()
                 .open_js_links_on_click(false)
                 .build(),
         )
         .plugin(navigation_guard())
-        .manage(commands::Running::default())
+        .manage(state::Running::default())
         .manage(accounts)
-        .manage(review::Review::default())
-        .manage(signin::SignIn::default())
+        .manage(state::Review::default())
+        .manage(state::SignIn::default())
         .invoke_handler(tauri::generate_handler![
-            commands::choose_folder,
-            commands::list_models,
-            commands::start_conversation,
-            commands::send_message,
-            commands::open_file,
-            commands::open_url,
+            conversation::choose_folder,
+            conversation::list_models,
+            conversation::start_conversation,
+            conversation::send_message,
+            files::open_file,
+            files::open_url,
             highlight::highlight_ral,
-            keys::list_accounts,
-            keys::save_key,
-            keys::forget_key,
-            keys::save_endpoint,
-            keys::forget_endpoint,
-            signin::sign_in,
-            signin::cancel_sign_in,
-            review::job_report,
+            accounts::list_accounts,
+            accounts::save_key,
+            accounts::forget_key,
+            accounts::save_endpoint,
+            accounts::forget_endpoint,
+            accounts::sign_in,
+            accounts::cancel_sign_in,
         ])
-        // One close owner waits for teardown (with bounded grace) before
-        // destroying the window. Repeated requests cannot bypass that wait.
+        // One close owner waits with bounded grace; repeated requests cannot bypass it.
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                if let Some(close) = window.state::<commands::Running>().begin_close() {
+                if let Some(close) = window.state::<state::Running>().begin_close() {
                     let window = window.clone();
                     std::thread::spawn(move || {
                         close.wait();
@@ -118,20 +97,14 @@ fn main() {
         .expect("synod's window could not start");
 }
 
-/// The window never leaves the app's own pages.
-///
-/// The transcript renders model output, and model output may be
-/// prompt-injected.  A page that navigated the window elsewhere — a link, a
-/// form, a `<meta>` refresh, script that slipped the scrub — would put a
-/// foreign document where this one stood, with the whole command bridge
-/// (`withGlobalTauri`) in reach of it.  The window's own link handler already
-/// sends a link to the user's browser instead, and the scrub drops the markup
-/// that navigates by itself; this guard is the layer that holds when both of
-/// those miss, by refusing every navigation outside the app's origin.
-///
-/// A plugin rather than `WebviewWindowBuilder::on_navigation`, because the
-/// window is declared in `tauri.conf.json` and never built in code: a plugin's
-/// hook runs for every webview the app opens, that one included.
+#[cfg(not(any(target_os = "macos", windows)))]
+fn main() -> std::process::ExitCode {
+    ral_core::errln!("synod: a window for macOS and Windows; this is neither.");
+    std::process::ExitCode::FAILURE
+}
+
+/// A plugin guards every webview, including the one declared in tauri.conf.json.
+#[cfg(any(target_os = "macos", windows))]
 fn navigation_guard() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri::plugin::Builder::new("navigation-guard")
         .on_navigation(|webview, url| {
@@ -140,10 +113,8 @@ fn navigation_guard() -> tauri::plugin::TauriPlugin<tauri::Wry> {
         .build()
 }
 
-/// Whether `url` is one of the addresses Tauri serves the embedded frontend
-/// from: `tauri://localhost` on macOS and Linux, `http://tauri.localhost` (or
-/// `https://`, with `useHttpsScheme`) on Windows.  Any port, or any other
-/// host, is someone else's page.
+/// Accept only Tauri's embedded origins, without a port.
+#[cfg(any(target_os = "macos", windows))]
 fn is_own_page(url: &tauri::Url) -> bool {
     let host = url.host_str();
     url.port().is_none()
@@ -154,14 +125,13 @@ fn is_own_page(url: &tauri::Url) -> bool {
         }
 }
 
-/// Whether `url` is on the configured dev server, which serves the frontend
-/// in place of the embedded assets — admitted only in a dev build, so a
-/// release never trusts a local port.
+/// The configured dev origin is trusted only in debug builds.
+#[cfg(any(target_os = "macos", windows))]
 fn is_dev_server(url: &tauri::Url, dev_url: Option<&tauri::Url>) -> bool {
     tauri::is_dev() && dev_url.is_some_and(|dev| dev.origin() == url.origin())
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "macos", windows)))]
 mod tests {
     use super::is_own_page;
 

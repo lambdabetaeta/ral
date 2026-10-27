@@ -88,7 +88,8 @@ impl TyEnv {
             .find_map(|scope| scope.handlers.get(name))
     }
 
-    /// Only [`Inferencer::with_scope`] opens and closes a scope.
+    /// Only [`Inferencer::with_scope`](super::infer::Inferencer::with_scope)
+    /// opens and closes a scope.
     pub(super) fn push(&mut self) {
         self.scopes.push(NameScope::default());
     }

@@ -662,7 +662,7 @@ pub mod scheme {
         mk_plain_scheme(&[av], &[], thunk(fun(tokens, pure(Ty::Var(av)))))
     }
 
-    /// `from-jsonl` :: ∀α. F [α] — a list of whatever each line holds.
+    /// `from-jsonl` :: ∀α. F \[α\] — a list of whatever each line holds.
     pub fn from_jsonl(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let records = Ty::list(Ty::Var(av));

@@ -79,6 +79,12 @@ stays registered, parked under its idle lease. Clause 2 therefore reads "no
 *busy* children remain": the exchange ends once every child has replied or
 died, and the repliers linger, fetchable by `` agents `reply ``.
 
+> **Amended 2026-10-27.** `exarch::headless::SettledConversation::new`
+> binds a root and its conversation-lived bus; `exchange` drives each message
+> to fleet quiescence. Synod keeps this driver beside its root in
+> `assistant/guest.rs`. The constructor refuses self-scheduling and reset-resume;
+> ready resident helpers do not hold an exchange open. The law is unchanged.
+
 ## See also
 
 [[design/engine-protocol|engine-protocol]] (the rendezvous

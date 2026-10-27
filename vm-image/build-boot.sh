@@ -6,22 +6,14 @@
 # by default, and everything else about the architecture follows from it: the
 # mirror, the Rust target, the boot format the hypervisor's loader accepts,
 # and which drivers the guest's device model needs. There is one script
-# because there is one guest: the same /init, the same daemon, the same
+# because there is one guest: the same PID 1, the same
 # engine, the same overlay — only the hardware underneath differs.
 #
-# Unlike rootfs.img, boot.img carries the ral binaries — the kernel is
-# Ubuntu's own linux-generic (already built, signed, and validated by
-# Canonical across the exact virtio + VMBus + overlayfs + ext4 feature set
-# these guests need); the initramfs is this repo's own /init (ral-initramfs)
-# plus ral-daemon and exarch, statically built for the guest's musl target.
-#
-# rootfs.img carries no ral binaries (vm-image/README.md). So the initramfs
-# does the one thing that makes boot.img's "kernel + ral-daemon + ral engine
-# as one artifact" true: on every boot it mounts rootfs.img read-only and a
-# freshly mke2fs'd session.img read-write as an overlay, COPIES ral-daemon
-# and exarch onto that writable upper at /sbin/ral-daemon and
-# /usr/libexec/ral/engine, then switch_roots and execs /sbin/ral-daemon —
-# neither binary is baked into the read-only rootfs.
+# The initramfs carries ral-guest as /init and exarch as /engine, both
+# statically built for the guest's musl target, beside Ubuntu's kernel.
+# PID 1 assembles the overlay, installs the engine at /usr/libexec/ral/engine,
+# switches root, and supervises the engines without an exec between stages.
+# rootfs.img carries neither Rust binary.
 #
 # The whole build runs inside one ubuntu:24.04 container of the guest's OWN
 # architecture, the same base build.sh uses. That image is multi-arch, so
@@ -32,7 +24,7 @@
 # verify.txt executes the binaries it checks — so the first check inside
 # refuses a container that is not $ARCH rather than let qemu-user emulation, or
 # a confusing apt failure, appear halfway through. Inside: rustup + musl-tools
-# cross-builds the three Rust binaries (build-binaries.yml's musl recipe, e.g.
+# cross-builds the two Rust binaries (build-binaries.yml's musl recipe, e.g.
 # its build-exarch-linux-arm64 job — no cross-rs container needed, since neither
 # binary pulls jemalloc-sys or a C dependency); apt fetches Ubuntu's real
 # linux-image-generic package for the pinned suite to extract vmlinuz and its
@@ -44,7 +36,7 @@
 #   kernel                  arm64: raw ARM64 Image, unwrapped from Ubuntu's
 #                           vmlinuz. amd64: that same vmlinuz verbatim, which
 #                           already IS an x86 bzImage
-#   initramfs.img           cpio.gz: /init, ral-daemon, exarch, kernel
+#   initramfs.img           cpio.gz: /init (ral-guest), /engine, kernel
 #                           modules, vendored mke2fs
 #   kernel.sha256, initramfs.img.sha256
 #   boot-manifest.txt       arch, kernel package version, built git commit,
@@ -53,11 +45,8 @@
 #   verify.txt              static-link / arch / cpio manifest spot-checks
 #   build.log               full build transcript
 #
-# The output paths deliberately do not encode the architecture: a developer
-# builds the media for their own host, one arch at a time, and synod's
-# boot-media discovery (synod/src/boot.rs) looks in this one place — as does
-# the bundle's resource map (synod/tauri.bundle.conf.json). boot-manifest.txt's
-# `arch=` line is how you know which guest is currently sitting in out/boot/.
+# vm_manager::media::locate (vm-manager/src/media.rs) and the bundle use these fixed paths.
+# boot-manifest.txt's `arch=` identifies the one guest currently built here.
 
 set -euo pipefail
 
@@ -196,7 +185,7 @@ case "$ARCH" in
   arm64)
     # Virtualization.framework's guest: virtio all the way down — the two
     # disks on virtio-blk, the console on hvc0 (virtio_console), the granted
-    # folder as a virtiofs share under vz.rs's own `WORKSPACE_TAG`, and the
+    # folder as a virtiofs share under `guest_abi::layout::WORKSPACE_NAME`, and the
     # control plane on the virtio vsock transport. That last one is why
     # CONFIG_HYPERV_VSOCKETS is recorded and declined: shipping it would load
     # a driver that finds no device.
@@ -315,7 +304,7 @@ is_guest_binary() {
   esac
 }
 
-# --- 1. Cross-build ral-daemon, exarch, ral-initramfs -----------------------
+# --- 1. Cross-build ral-guest and exarch -----------------------
 # Same recipe as build-binaries.yml's musl jobs (build-exarch-linux-arm64 for
 # aarch64, its x86_64 siblings for amd64): rustup + musl-tools, no cross-rs
 # container. /ral is read-only, so the target dir and cargo home move off it.
@@ -332,55 +321,19 @@ export CARGO_HOME=/build/cargo
 
 echo ">> [container] cargo build --release --target $RUST_TARGET"
 ( cd /ral && cargo build --release --locked --target "$RUST_TARGET" \
-    -p ral-daemon -p exarch -p ral-initramfs )
+    -p ral-guest -p exarch )
 
 BIN="/build/target/$RUST_TARGET/release"
-file "$BIN/ral-daemon" "$BIN/exarch" "$BIN/ral-initramfs"
-for b in ral-daemon exarch ral-initramfs; do
+file "$BIN/ral-guest" "$BIN/exarch"
+for b in ral-guest exarch; do
   is_guest_binary "$BIN/$b" \
     || { echo "error: $b is not a static $BIN_FORMAT binary: $(file -b "$BIN/$b")" >&2; exit 1; }
 done
 
-# The boot contract version this media will speak (ral-daemon's
-# `boot::CONTRACT`), for boot-manifest.txt — so that a host built against a
-# newer set of `ral.` keys refuses to package this media rather than boot a
-# guest that will refuse the command line and dial nothing.
-#
-# Compiled, not read.  A grep of the source, or a number kept by hand, could
-# record exactly the drift the number exists to catch; the tiny
-# `boot-contract` build tool links the very library that is about to become
-# /ral-daemon in the initramfs and prints the constant, so the recording
-# cannot be stale unless the compiler is. It runs here for the same reason
-# verify.txt's probes do: the container is $ARCH, asserted above, so a musl
-# guest binary executes natively.
-echo ">> [container] reading the boot contract out of the daemon it just built"
+# Compile both manifest versions from the same checkout as the guest binaries.
+echo ">> [container] building the media manifest writer"
 ( cd /ral && cargo build --release --locked --target "$RUST_TARGET" \
-    -p ral-vm-image-build-tools --bins )
-BOOT_CONTRACT=$("$BIN/boot-contract")
-case "$BOOT_CONTRACT" in
-  '' | *[!0-9]*)
-    printf 'error: ral-daemon reported `%s` as its boot contract, which is not a version.\n' \
-      "$BOOT_CONTRACT" >&2
-    echo "vm-image/build-tools/src/bin/boot-contract.rs prints boot::CONTRACT and nothing else." >&2
-    exit 1 ;;
-esac
-echo ">> [container] boot contract $BOOT_CONTRACT"
-
-# And the engine protocol that media will speak (ral-core's
-# `protocol::PROTOCOL_VERSION`), compiled the same way and for the same
-# reason one layer along: a host built against a newer algebra refuses to
-# package this media rather than ship an engine that will refuse its Attach
-# and leave the front-end holding a closed socket.
-echo ">> [container] reading the protocol version out of the engine it just built"
-PROTO_VERSION=$("$BIN/proto-version")
-case "$PROTO_VERSION" in
-  '' | *[!0-9]*)
-    printf 'error: ral-core reported `%s` as its protocol version, which is not a version.\n' \
-      "$PROTO_VERSION" >&2
-    echo "vm-image/build-tools/src/bin/proto-version.rs prints protocol::PROTOCOL_VERSION and nothing else." >&2
-    exit 1 ;;
-esac
-echo ">> [container] protocol version $PROTO_VERSION"
+    -p ral-vm-image-build-tools --bin media-manifest )
 
 # --- 2. Extract the pinned suite's kernel + modules --------------------------
 # ubuntu:24.04's own apt sources point at noble; add the pinned suite as an
@@ -624,10 +577,9 @@ done
 echo ">> [container] mke2fs vendored with $(echo "$LIBS" | wc -l) shared libraries"
 
 # --- 5. Assemble the cpio tree -----------------------------------------------
-cp "$BIN/ral-initramfs" /build/cpio/init
-cp "$BIN/ral-daemon" /build/cpio/ral-daemon
+cp "$BIN/ral-guest" /build/cpio/init
 cp "$BIN/exarch" /build/cpio/engine
-chmod 0755 /build/cpio/init /build/cpio/ral-daemon /build/cpio/engine /build/cpio/sbin/mke2fs
+chmod 0755 /build/cpio/init /build/cpio/engine /build/cpio/sbin/mke2fs
 # The node the kernel opens as init's stdio; /init mounts devtmpfs over
 # /dev itself before it needs any device beyond the console.  Rootless
 # podman has no CAP_MKNOD, so the node and the archive that records it are
@@ -649,9 +601,9 @@ fakeroot sh -c '
   echo "== kernel: $KERNEL_NOTE =="
   file /out/kernel
   echo
-  echo "== ral-daemon / exarch / ral-initramfs: static, $BIN_FORMAT =="
-  file "$BIN/ral-daemon" "$BIN/exarch" "$BIN/ral-initramfs"
-  for b in ral-daemon exarch ral-initramfs; do
+  echo "== ral-guest / exarch: static, $BIN_FORMAT =="
+  file "$BIN/ral-guest" "$BIN/exarch"
+  for b in ral-guest exarch; do
     is_guest_binary "$BIN/$b" && echo "OK   $b" || echo "WRONG $b"
   done
   echo
@@ -664,7 +616,7 @@ fakeroot sh -c '
   done
   echo
   echo "== cpio path manifest =="
-  for path in init ral-daemon engine sbin/mke2fs modules.order dev/console; do
+  for path in init engine sbin/mke2fs modules.order dev/console; do
     [ -e "/build/cpio/$path" ] && echo "OK   /$path" || echo "MISSING /$path"
   done
   [ -d /build/cpio/modules ] && echo "OK   /modules (${#NEEDED_MODULES[@]} driver(s) requested)"
@@ -674,7 +626,7 @@ fakeroot sh -c '
   # guest's own binaries.
   echo "== version probes (native $NATIVE_ARCH container, no qemu) =="
   /build/cpio/sbin/mke2fs -V 2>&1 | sed -n 1p
-  "$BIN/ral-daemon" --help >/dev/null 2>&1 || echo "ral-daemon: refuses off pid 1, as designed"
+  "$BIN/ral-guest" --help >/dev/null 2>&1 || echo "ral-guest: refuses off pid 1, as designed"
   # `--help`, not `--version`: exarch has no version flag, its own CLI being
   # long-form only. Either way the point is that the binary runs here.
   "$BIN/exarch" --help 2>&1 | sed -n 1p || true
@@ -691,13 +643,7 @@ cat /out/verify.txt
   echo "kernel_version=$KVER"
   echo "suite=$SUITE arch=$ARCH mirror=$MIRROR"
   echo "ral_git_hash=$GIT_HASH"
-  # The one line a *host* build reads back (synod/examples/check-media.rs,
-  # via ral_daemon::boot::check_media): which generation of `ral.` settings the
-  # ral-daemon inside initramfs.img understands.
-  echo "boot_contract=$BOOT_CONTRACT"
-  # Its sibling, read back by the same check: which generation of the
-  # frame algebra the engine inside initramfs.img speaks.
-  echo "proto_version=$PROTO_VERSION"
+  "$BIN/media-manifest"
   echo "rust_target=$RUST_TARGET"
   echo "modules_shipped=${NEEDED_MODULES[*]:-none}"
 } > /out/boot-manifest.txt

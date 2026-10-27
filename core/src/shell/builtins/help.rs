@@ -164,8 +164,9 @@ fn by_name<'a>(mut rows: Vec<(&'a str, &'a str)>) -> Vec<(&'a str, &'a str)> {
 
 /// Every documented registry, in `help`'s print order: language syntax, the
 /// builtin manifest, the prelude, then whatever a host installed with
-/// [`Runtime::install_library_docs`] — which is empty until one does.
-/// `explain`'s fallback search sweeps the same four.
+/// [`Runtime::install_library_docs`](crate::shell::runtime::Runtime::install_library_docs)
+/// — which is empty until one does.  `explain`'s fallback
+/// search sweeps the same four.
 ///
 /// A leading `_` marks a name internal: it is kept out of the index and out
 /// of the search, though `explain` named it exactly still answers.

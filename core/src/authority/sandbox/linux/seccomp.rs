@@ -3,7 +3,7 @@
 //! denied syscall number for `diag` — the same data enforces and explains, so
 //! the two cannot drift.
 //!
-//! It is a deny-set, not an allow-list ([`design/two-enforcers`] in the wiki):
+//! It is a deny-set, not an allow-list (`design/two-enforcers` in the wiki):
 //! an envelope runs whatever `exec` admits, and an allow-list would turn every
 //! unanticipated syscall into an unattributable SIGSYS. Every [`Rule`] carries
 //! one of two verdicts — [`Verdict::Kill`] for kernel surface no unprivileged

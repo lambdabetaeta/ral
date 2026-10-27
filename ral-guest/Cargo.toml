@@ -1,0 +1,19 @@
+[package]
+name = "ral-guest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "ral-guest"
+path = "src/main.rs"
+
+[dependencies]
+guest-abi = { path = "../guest-abi" }
+libc = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["process", "mount", "fs", "system", "time", "stdio"] }

@@ -15,8 +15,8 @@ engine, spawns every engine. Amends the sentence of
 [[design/engine-protocol|engine-protocol]] that said the seed "never touches
 the engine protocol"; realised in `core/src/seed.rs` (`seal`, `Sealed`),
 `core/src/engine.rs` (`Engine::boot`), `exarch/src/agent/desk/agents.rs`
-(`make_engine`), `exarch/src/agent/factory.rs` (`Factory`), `ral-daemon/src/init.rs`
-(`make_engines`) and `synod/src/machine_factory.rs`.
+(`make_engine`), `exarch/src/agent/factory.rs` (`Factory`), `ral-guest/src/init/fleet.rs`
+(`make_engines`) and `synod/src/assistant/guest.rs`.
 
 ## Context
 
@@ -109,3 +109,7 @@ The hatch: `seed/hatch.rs` (`listen_for_hatch`, `hatch_over`, `seed_from_env`,
 (`RAL_ENGINE_SEED_FD`), the table of unreaped children, the guest port builtin,
 the old hatch-era `Birth`, `Dial`/`MachineDial`, and the orphan question: no engine has children
 it must outlive.
+
+> **Amended 2026-10-27.** The guest factory now lives at `ral-guest/src/init/fleet.rs::make_engines`;
+> `init/halt.rs` owns its shutdown. Assembly and supervision share one PID 1,
+> and every engine still comes from the one installed engine path.

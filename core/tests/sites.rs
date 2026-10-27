@@ -29,8 +29,8 @@
 //!       a file that is a whole unit of non-production code (only other inner
 //!       attributes precede it): an integration-test crate root
 //!       (`<crate>/tests/*.rs`), an example (`<crate>/examples/*.rs`), a
-//!       `build.rs`, or the crate root of `ral-daemon` or `ral-initramfs`,
-//!       each a guest init program whose whole job is the syscalls the bans
+//!       `build.rs`, or the crate root of `ral-guest`,
+//!       a guest init program whose whole job is the syscalls the bans
 //!       route and which links no ral shell.  The modules such a root includes
 //!       carry none of their own.
 //!   (c) An outer `#[allow(…, reason = "test code")]` on a `mod` item whose own
@@ -105,18 +105,18 @@ const TAURI_STATEMENT: &str = "let context = tauri::generate_context!(";
 
 /// The crate roots, outside `tests/`, `examples/` and `build.rs`, that carry a
 /// crate-wide blanket: guest init programs, outside the discipline.
-const GUEST_INIT_ROOTS: &[&str] = &["ral-daemon/src/lib.rs", "ral-initramfs/src/lib.rs"];
+const GUEST_INIT_ROOTS: &[&str] = &["ral-guest/src/main.rs"];
 
 /// Production source roots, crate-relative to the workspace root.  The
 /// vendored `ral-ripgrep-core` opts out of the workspace clippy lints (it
 /// stays upstream-diffable) so it is *not* governed by this discipline.
-/// `guest-net` is here because the CONNECT proxy is on the model's own egress
+/// `netgate` is here because the CONNECT proxy is on the model's own egress
 /// path, and `synod` because its review hands a folder and a name to the OS;
 /// `vm-manager` is a host tool whose names no grant judges.
 const SRC_ROOTS: &[&str] = &[
     "core/src",
     "exarch/src",
-    "guest-net/src",
+    "netgate/src",
     "ral/src",
     "synod/src",
 ];
@@ -524,7 +524,7 @@ fn rule_b(source: &Source, attribute: &Attribute) -> Result<(), String> {
     if !is_blanket_root(source) {
         unmet.push(
             "the file is not an integration-test root (`<crate>/tests/*.rs`), an example, \
-             a `build.rs`, or the crate root of ral-daemon or ral-initramfs"
+             a `build.rs`, or the crate root of ral-guest"
                 .to_owned(),
         );
     }

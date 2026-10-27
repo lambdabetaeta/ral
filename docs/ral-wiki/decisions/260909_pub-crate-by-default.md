@@ -146,3 +146,7 @@ rather than being relabelled.
 > `seat`), `boot_shell`, `HostSurface` (`shell`, `manifest`, `builtin_table`),
 > `bake_prelude_to_out_dir` and the macro: `Shell::new`, `builtins::register`
 > and `bake_runtime` left it, and `Shell::root` never entered it.
+
+> **Amended 2026-10-27.** The guest program is now binary-only `ral-guest`. Its modules form an
+> internal implementation, so public library reach no longer hides dead guest
+> code from the compiler.

@@ -45,6 +45,7 @@ ripgrep   = ["dep:ral-ripgrep-core"]
 test-util = []
 
 [dependencies]
+guest-abi = { path = "../guest-abi" }
 tempfile      = "3.27"
 os_pipe       = "1"
 dunce         = "1.0.5"

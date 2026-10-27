@@ -4,6 +4,28 @@ status: active
 
 # The Windows privilege lives in a service, not in the user
 
+> **Amended 2026-10-27.** See [[decisions/261027_the-vm-crates-are-layered|the-vm-crates-are-layered]].
+> `Hypervisor::boot` returns `Booted { machine, wires }`, transferring both
+> wires once. `MachineSpec` contains only `folder` and `read_only`;
+> `vm_manager::SIZE` supplies 4 vCPUs and 6144 MiB, subject to backend clamps,
+> and `guest_abi::layout` supplies guest paths.
+>
+> The binary-only `synod-machine-broker` owns the privileged service, SCM entry
+> points and typed sites. The public protocol and client live in
+> `vm-manager/src/broker/{wire,client}.rs`. The pipe version is 7; each unit
+> changing a pipe-carried type increments it in that unit. Paths use serde's
+> native `OsString` encoding with a 1 MiB frame bound. `Reply::Booted` carries
+> the two socket descriptions; `Reply::Console` carries `GuestConsole`.
+> `serve_client` checks `Boot.version` before any `boot_for` call.
+>
+> The service discovers media through `media::locate` and takes
+> `Layout::found().resolve()` before constructing its backend. `NoGuestImage`
+> carries every searched directory. Rootfs preparation publishes immutable,
+> identity-named files under a std file lock, completing the VHD footer first.
+> Path checks live in `hcs::win::{plain, document_text}` and
+> `vz::config::file_url`; backend refusals use `Error::backend`.
+> `GuestConsole::report` renders console data with caller-supplied spelling.
+
 **Synod's window runs with exactly the rights of the person who opened it and
 asks a `LocalSystem` service — installed by the MSI, started by Windows — for
 the machine it needs; the privilege the platform demands for a virtual machine

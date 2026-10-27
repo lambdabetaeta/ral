@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
+generated_at_commit: 3dbbe8f3
 generated_at_date: 2026-10-27
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/shell/run/report.rs, core/src/seed.rs, core/src/shell/grant/spawn.rs]
 ---
@@ -42,7 +42,8 @@ parent's seal, so core holds no spawn machinery for it.** The why is
   `Scopes::open` hands it; `Scopes` keeps the node, its one writer;
   `Engine::probe` (`engine/probe.rs`) answers one `Probe`.
 - `--guest-engine <cgroup-root>`: the Linux x86-64/aarch64 process role
-  installs the jail before `carrier::run_engine`; `Engine::boot` performs no
+  names `guest_abi::layout::ENGINE_FLAG` and installs the jail before
+  `carrier::run_engine`; `Engine::boot` performs no
   process-global jail setup. `PROTOCOL_VERSION` versions the whole engine
   contract, frames and command confinement, and every attach refuses a
   mismatch. Version 31 requires the guest deny-set, including on development
@@ -66,10 +67,10 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
 - `PROTOCOL_VERSION` (currently 31): checked at `Attach`; a mismatch refuses.
   `Capabilities` carries `ExecGrant { every, allow, deny }`, its two sets as
   sequences; guest media must be rebuilt with `just guest-boot`.
-- `check_media` — the same number compared at *build* time, against the
-  `proto_version=` line `vm-image/build-boot.sh` records for the engine in the
-  guest media; `synod/examples/check-media.rs`, tauri's `beforeBuildCommand`,
-  refuses to package media that disagrees.
+- build-tools' `manifest::check` compares the same number at *build* time,
+  against the `proto_version=` line `media-manifest` compiles into the guest
+  media; `check-media`, tauri's `beforeBuildCommand`, refuses to package media
+  that disagrees.
 - `Frame` — the whole wire enum: `Attach`, `Detach`, `Dispatch`, `Probe`,
   `Event`, `Session`, `Control`, `Answer`, `Ping`, `Pong`; `Frame::kind`
   names a variant for the diagnostic about a frame out of place.
@@ -280,8 +281,8 @@ The two interpretations of the algebra, and what they share.
 
 The wire carrier's engine half: a connection-lived engine process.
 
-- `run_engine(installers)` — adopts fd 3 as the wire channel and calls
-  `engine_session`.
+- `run_engine(installers)` — adopts `guest_abi::layout::ENGINE_FD` (fd 3) as
+  the wire channel and calls `engine_session`.
 - `engine_session` — reads `Attach` (the only legal first frame), `restore_process_dirs` (the
   process-level half of an attach, which only a carrier owning its process
   performs: a root's cwd, every engine's `HOME`, each read `EnginePath::native`; a child restores no cwd), `Engine::boot`, writes `Attached`/`Refused`, moves the engine

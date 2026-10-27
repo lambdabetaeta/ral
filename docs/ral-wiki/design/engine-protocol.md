@@ -365,7 +365,7 @@ fork builtin does no I/O, only `bequeath`, `seal`, and names the bytes in its
 enquiry as `` `sealed <bytes> ``.
 
 - The host, *while still answering that enquiry*, asks its `Factory` for a
-  connection: the desk dials `FACTORY_PORT`, the one guest port, on which the
+  connection: the desk dials `guest_abi::ports::FACTORY`, the one guest port, on which the
   guest daemon listens for the life of the VM.
 - The daemon admits only a peer whose CID is `VMADDR_CID_HOST` and drops
   anything else; a guest process cannot present the host's CID, since the

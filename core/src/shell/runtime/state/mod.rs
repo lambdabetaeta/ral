@@ -1,7 +1,7 @@
 //! Interpreter state, partitioned by lifetime: the field name *is* the
 //! invariant.  `env` and `context` persist and cross evaluation boundaries
 //! and thread spawns; `io` ([`Io`]) and `scope` belong to one run, swapped in
-//! and restored on teardown by [`crate::shell::run::IoLoan`], and within a run by the
+//! and restored on teardown by `crate::shell::run::IoLoan`, and within a run by the
 //! frames that swap them; [`SessionState`] survives
 //! every run; [`LocalState`] is host scratch whose members each carry their
 //! own rule.

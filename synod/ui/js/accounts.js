@@ -1,28 +1,21 @@
-import { $, invoke, show } from "./core.js";
-import { showError, clearError } from "./start-screen.js";
-import { actionButton } from "./ui-helpers.js";
+import { $, show, showError, clearError, actionButton } from "./dom.js";
+import { listAccounts, saveKey, forgetKey, saveEndpoint, forgetEndpoint } from "./ipc.js";
 
-// ---- Accounts screen -------------------------------------------------
-//
-// A key travels one way only: what comes back from the backend is its
-// last four characters and where it is kept, so no stored key is ever
-// put into an input here.
+// Keys travel one way: only their last four characters return from the backend.
 
 export async function loadAccounts() {
   try {
-    renderAccounts(await invoke("list_accounts"));
+    renderAccounts(await listAccounts());
   } catch (err) {
     showError("accounts-error", String(err));
   }
 }
 
-// Every command that changes something answers with the whole list as
-// it now stands, so the screen redraws from what is true rather than
-// from what it hoped. `true` means the change went through.
-async function accountCommand(command, args) {
+/** @param {() => Promise<import("./bindings/AccountList.ts").AccountList>} call */
+async function accountCommand(call) {
   clearError("accounts-error");
   try {
-    renderAccounts(await invoke(command, args));
+    renderAccounts(await call());
     return true;
   } catch (err) {
     showError("accounts-error", String(err));
@@ -47,13 +40,10 @@ function renderAccounts(list) {
   }
   accounts.forEach((account, i) => holder.appendChild(accountRow(account, i)));
 
-  // The plan's card stands whether or not anyone is signed in; it says
-  // which of the two rather than coming and going.
   $("accounts-plan-note").textContent = accounts.some((a) => a.source === "signed_in")
     ? "You are signed in with your ChatGPT plan. Signing in again replaces it."
     : "If you pay for ChatGPT, you can use that plan here instead of a key.";
 
-  // A part-filled add form keeps whatever the user had already chosen.
   const select = /** @type {HTMLSelectElement} */ ($("add-protocol"));
   const chosen = select.value;
   const protocols = (list && list.protocols) || [];
@@ -89,9 +79,6 @@ function accountRow(account, i) {
     row.appendChild(note);
   }
 
-  // Every account that authenticates with a key gets the key input —
-  // a declared endpoint included, since a key rotated at the far end
-  // has to be retypeable at this one.
   if (account.source !== "signed_in" && account.source !== "keyless") {
     row.appendChild(keyForm(account, i));
   }
@@ -99,15 +86,13 @@ function accountRow(account, i) {
     const actions = document.createElement("div");
     actions.className = "row-actions";
     actions.appendChild(actionButton("Remove", "btn-mini", () =>
-      accountCommand("forget_endpoint", { account: account.id })));
+      accountCommand(() => forgetEndpoint(account.id))));
     row.appendChild(actions);
   }
   return row;
 }
 
-// "Used without a key" is a state the backend states outright, never
-// inferred from a missing hint: a service that wants no key must not
-// be read as one still waiting for one.
+// Keyless is explicit; a missing hint does not imply a service needs no key.
 function keyState(account) {
   if (account.source === "signed_in") return "Signed in";
   if (account.source === "keyless") return "Used without a key";
@@ -141,9 +126,7 @@ function accountNotes(account) {
   return notes;
 }
 
-// The one input a key is ever typed into: it starts empty and is thrown
-// away with the card on the redraw a save brings, so a saved key is
-// never left sitting in the window.
+// Key inputs start empty and are discarded on save, leaving no saved secret in the window.
 function keyForm(account, i) {
   const form = document.createElement("form");
   form.className = "account-form";
@@ -173,19 +156,17 @@ function keyForm(account, i) {
   save.className = "btn-mini keep";
   save.textContent = "Save";
   actions.appendChild(save);
-  // Only a saved key can this window take back.
   if (account.source === "vault" || account.shadowed) {
     actions.appendChild(actionButton("Forget", "btn-mini", () =>
-      accountCommand("forget_key", { account: account.id })));
+      accountCommand(() => forgetKey(account.id))));
   }
 
   form.append(label, input, actions);
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     save.disabled = true;
-    const saved = await accountCommand("save_key", { account: account.id, key: input.value });
-    // A save redraws the whole list, this card with it; a refusal leaves
-    // the typed key where it is, to be corrected rather than retyped.
+    const saved = await accountCommand(() => saveKey(account.id, input.value));
+    // Save redraws the list; a refusal keeps the typed key available for correction.
     if (!saved) save.disabled = false;
   });
   return form;
@@ -195,13 +176,13 @@ $("add-service").addEventListener("submit", async (event) => {
   event.preventDefault();
   const keyless = /** @type {HTMLInputElement} */ ($("add-keyless")).checked;
   /** @type {HTMLButtonElement} */ ($("add-save")).disabled = true;
-  // `null` is a server that checks no key; a blank one waits for its variable or a save.
-  const added = await accountCommand("save_endpoint", {
+  // null is a keyless server; a blank key waits for the environment or a save.
+  const added = await accountCommand(() => saveEndpoint({
     name: /** @type {HTMLInputElement} */ ($("add-name")).value,
     endpoint: /** @type {HTMLInputElement} */ ($("add-address")).value,
     protocol: /** @type {HTMLSelectElement} */ ($("add-protocol")).value,
     key: keyless ? null : /** @type {HTMLInputElement} */ ($("add-key")).value,
-  });
+  }));
   /** @type {HTMLButtonElement} */ ($("add-save")).disabled = false;
   if (added) {
     for (const id of ["add-name", "add-address", "add-key"]) {

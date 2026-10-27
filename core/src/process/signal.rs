@@ -2,11 +2,11 @@
 //! and the signals a teardown sends.
 //!
 //! The platform handlers translate SIGINT / SIGTERM / SIGHUP into a
-//! [`CancelCause`](crate::process::CancelCause) on the scopes of
-//! [`cancel`](crate::process::cancel) — SIGINT on the foreground run,
-//! SIGTERM / SIGHUP on the durable root — while a separate ladder counts
-//! deliveries and forces `_exit` on the third.  `unix` and `windows` exist only
-//! on their own platform, so neither can be linked from this page.
+//! [`CancelCause`] on the scopes of [`cancel`](crate::process::cancel) — SIGINT
+//! on the foreground run, SIGTERM / SIGHUP on the durable root — while a
+//! separate ladder counts deliveries and forces `_exit` on the third.  `unix`
+//! and `windows` exist only on their own platform, so neither can be linked
+//! from this page.
 //!
 //! The two are exhaustive, here and throughout ral-core: `os_pipe` is an
 //! unconditional dependency and builds on Unix and Windows alone, so a

@@ -108,8 +108,8 @@ pub enum RunReport {
     Ran {
         ending: Ending,
         captured: Option<Captured>,
-        /// This dispatch's own trail, filled in by [`Shell::enter`] once the
-        /// scope it held closes; empty when `Run.trail` was `None`.
+        /// This dispatch's own trail, filled in by [`Shell::run_under`] once
+        /// the scope it held closes; empty when `Run.trail` was `None`.
         trail: Vec<Observation>,
     },
     /// The run panicked. `env` and `context` were rolled back to the

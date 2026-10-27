@@ -66,7 +66,7 @@ impl WireChannel {
         Ok((Self { stream: a }, Self { stream: b }))
     }
 
-    /// Frame over an already-connected stream: one end of a [`Self::pair`], or
+    /// Frame over an already-connected stream: one end of a `Self::pair`, or
     /// the virtual-socket connection into a guest VM — a backend's own
     /// `OwnedFd` or `OwnedSocket` converts straight in.
     pub(crate) fn from_stream(stream: impl Into<WireStream>) -> Self {

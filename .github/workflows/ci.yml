@@ -6,8 +6,8 @@ name: CI
 #
 # Three legs.  Both Linux ones run `linux-box`, musl as every Linux artefact
 # ships, so each architecture's seccomp filter executes rather than merely
-# compiles.  macOS runs `native`, the only way to exercise Seatbelt or to
-# build synod.  Windows is windows.yml's.
+# compiles.  synod's library builds on every leg; macOS runs `native` to
+# exercise Seatbelt and build synod's window.  Windows is windows.yml's.
 #
 # Runs on push to main, on pull requests, on a `v*` tag and on manual dispatch.
 # Cross-target release builds live in build-binaries.yml (same tags); the

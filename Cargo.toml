@@ -6,9 +6,10 @@ members = [
     "exarch",
     "synod",
     "vm-manager",
-    "guest-net",
-    "ral-daemon",
-    "ral-initramfs",
+    "synod-machine-broker",
+    "netgate",
+    "guest-abi",
+    "ral-guest",
     "vm-image/build-tools",
     "clipboard",
     "vendor/ripgrep-core",
@@ -58,7 +59,6 @@ fastrand   = "2"
 # `OpenOptions` that `cap-primitives` keeps behind an extension trait.
 cap-primitives = "4"
 cap-fs-ext = { version = "4", default-features = false }
-fs4        = { version = "1", default-features = false }
 # The window's half of the seam: `serde-compat` is the whole point, so the
 # emitted TypeScript carries the serde tag and casing the JSON actually has,
 # rather than a second spelling of it.

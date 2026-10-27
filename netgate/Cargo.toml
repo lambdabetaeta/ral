@@ -1,0 +1,26 @@
+[package]
+name = "netgate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+test-util = ["ral-core/test-util"]
+
+[dependencies]
+guest-abi = { path = "../guest-abi" }
+ral-core = { path = "../core" }
+serde_json = { workspace = true }
+
+smoltcp = { version = "0.14", default-features = false, features = [
+    "std", "medium-ip", "proto-ipv4", "socket-tcp",
+] }
+httparse = "1"
+http = "1"
+
+[dev-dependencies]
+netgate = { path = ".", features = ["test-util"] }
+serial_test = "4"

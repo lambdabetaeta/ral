@@ -1,22 +1,10 @@
 import { renderAssistantMarkdown, mathClosed } from "./math.js";
 import { highlightRal } from "./ral-highlight.js";
 
-// ---- Streaming prose --------------------------------------------------
-//
-// An assistant bubble is a document with a settled prefix and one block
-// still being written. Re-parsing the whole message per token is quadratic
-// in it (measured: 3.3s of main thread by 8,000 tokens), and rebuilding the
-// bubble reflows prose the reader is already reading and discards KaTeX
-// already laid out. So the source is cut at markdown block boundaries:
-// what lies before the open block is rendered once and never touched
-// again, and only the tail is rebuilt as tokens land.
+// Render each settled markdown block once; rebuild only the open tail as tokens arrive.
 
-// How much of a bubble's source has become settled DOM above its live
-// tail. Held per element, because the projector owns the blocks.
 const settledUpTo = new WeakMap();
 
-// Bring `bubble` up to date with its block — cheap enough for every token,
-// since the work is one block's worth of markdown.
 export function growProse(bubble, block) {
   const live = liveTail(bubble);
   const from = settledUpTo.get(bubble) ?? 0;
@@ -26,8 +14,6 @@ export function growProse(bubble, block) {
     live.before(renderChunk(tail.slice(0, cut)));
     settledUpTo.set(bubble, from + cut);
   }
-  // A closed bubble has no tail at all: every block in it has settled, and
-  // the bubble's closing margin reads off the last of them.
   if (!block.open) {
     live.remove();
     return;
@@ -45,34 +31,23 @@ function liveTail(bubble) {
   return live;
 }
 
-// A run of closed blocks as nodes — the one rendering each settled block
-// ever gets, so its code is coloured and its formulae typeset just once.
-// Only settled code is coloured. The live tail is rebuilt on every token,
-// and a ral block still open there is a new source each time, so colouring
-// it would cost a round trip to the shell per token that no cache could
-// answer; its code reads as plain text until the block closes and settles.
+// Highlight only settled code; a changing tail would require a new shell call per token.
 function renderChunk(src) {
   const nodes = renderAssistantMarkdown(src);
   for (const code of nodes.querySelectorAll("code.language-ral")) highlightRal(code);
   return nodes;
 }
 
-// How much of `tail` is closed markdown: everything before the run of
-// blocks still open at its end.
 function settleAt(tail) {
   const tokens = marked.lexer(tail);
   if (tokens.length < 2) return 0;
   const settled = tokens.slice(0, openFrom(tokens)).map((t) => t.raw).join("");
-  // marked's tokens partition their source. Anything else is not a cut
-  // this understands, so nothing settles.
+  // marked's tokens must partition the source; otherwise no cut is sound.
   if (!tail.startsWith(settled)) return 0;
   return mathClosed(settled) ? settled.length : 0;
 }
 
-// The two block kinds a later block of the same kind joins rather than
-// follows: list items and indented code both reach across a blank line.
-// A trailing run of them therefore stays open together; every other block
-// closes the moment another follows it.
+// Lists and indented code join across blank lines, so a trailing run stays open together.
 const CONTINUABLE = new Set(["list", "code"]);
 
 function openFrom(tokens) {
@@ -86,16 +61,12 @@ function openFrom(tokens) {
   return open;
 }
 
-// The last token at or before `at` that is not blank lines.
 function skipBlank(tokens, at) {
   while (at >= 0 && tokens[at].type === "space") at -= 1;
   return at;
 }
 
-// The writing front: a mark at the end of the tail, not an animation over
-// the prose. It goes inside the deepest last element so that it follows
-// the final word rather than standing on a line of its own; KaTeX's markup
-// is the one thing it will not descend into, having its own metrics.
+// Place the writing front after the final word; never descend into KaTeX layout.
 function placeCaret(live) {
   let host = live;
   while (host.lastElementChild && !host.lastElementChild.classList.contains("katex")) {

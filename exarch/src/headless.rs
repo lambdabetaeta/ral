@@ -614,52 +614,58 @@ fn exchange_ending(
     }
 }
 
-/// One exchange that ends only at fleet quiescence.
-///
-/// The trunk parked, no busy children, and their results drained and
-/// announced — the driver `synod` (and any embedder wanting the same
-/// guarantee) runs instead of [`converse_sink`].
-///
-/// Two differences from [`converse_sink`]: the bus gives a spawned child a
-/// live emitter rather than a muted one
-/// ([`FleetBus::per_exchange_live`](crate::bus::FleetBus::per_exchange_live)),
-/// and it runs the blocking `attend` loop, not `attend_backlog`, since Law B
-/// means the exchange itself must wait out whatever the fleet is still doing
-/// — which an unattended conversing trunk's park does on its own, holding for
-/// live children and quiescing once they settle.  `converse_sink` stays
-/// exactly as it is for exarch's own headless mode.
-///
-/// # Errors
-/// Refuses at once, before touching the bus or seeding `message`, if
-/// `session` holds `allow_schedule` or `resume_on_reset`: an armed wakeup may
-/// park past [`ParkMode::UntilCancelled`](crate::bus::ParkMode), a wait this
-/// driver's policy does not cover and Law B forbids waiting out regardless. Otherwise
-/// returns `Err` if the attend worker panics or the sink's drive fails.
-pub fn converse_settled<S: Sink>(
-    session: &mut Avatar,
-    message: String,
-    sink: &mut S,
-) -> Result<(), String> {
-    if session.fleet.launch.allow_schedule || session.fleet.launch.resume_on_reset {
-        return Err(
-            "converse_settled ends an exchange only once the fleet quiesces, and an armed \
-             self-schedule or reset-resume wakeup may fire again with nothing to wait it out: \
-             refused rather than parked past quiescence"
-                .to_string(),
-        );
+/// A root-bound conversation whose exchanges end at fleet quiescence.
+/// Helper signals between exchanges remain queued for the next exchange.
+pub struct SettledConversation {
+    bus: FleetBus,
+    root: AgentId,
+}
+
+impl SettledConversation {
+    /// Bind a conversation-lived bus to `root` before its first exchange.
+    ///
+    /// # Errors
+    /// Refuses roots that allow self-scheduling or reset-resume wakeups.
+    pub fn new(root: &Avatar) -> Result<Self, String> {
+        if root.fleet.launch.allow_schedule || root.fleet.launch.resume_on_reset {
+            return Err(
+                "A settled conversation ends each exchange only once the fleet quiesces, and an armed \
+                 self-schedule or reset-resume wakeup may fire again with nothing to wait it out: \
+                 refused rather than parked past quiescence"
+                    .to_string(),
+            );
+        }
+        Ok(Self {
+            bus: FleetBus::session(),
+            root: root.agent.id,
+        })
     }
-    let bus = FleetBus::per_exchange_live();
-    session.seed(message);
-    let root_id = session.agent.id;
-    let recorder = session.recorder();
-    // The embedder's roots, for the extent of the exchange it drives: an OS
-    // signal reaching this process must reach them.
-    let _signals = crate::signals::face(&session.fleet);
-    let mailbox = session.agent.mailbox.clone();
-    let outcome = pump(sink, &bus, root_id, mailbox, &recorder, |emit| {
-        session.attend(emit)
-    });
-    exchange_ending(session, outcome)
+
+    /// Attend one message until the root and its busy descendants settle.
+    ///
+    /// # Errors
+    /// Refuses another root; propagates engine loss, worker panic or sink failure.
+    pub fn exchange<S: Sink>(
+        &mut self,
+        root: &mut Avatar,
+        message: String,
+        sink: &mut S,
+    ) -> Result<(), String> {
+        if root.agent.id != self.root {
+            return Err(format!(
+                "this settled conversation belongs to agent {}, not {}",
+                self.root, root.agent.id
+            ));
+        }
+        root.seed(message);
+        let recorder = root.recorder();
+        let _signals = crate::signals::face(&root.fleet);
+        let mailbox = root.agent.mailbox.clone();
+        let outcome = pump(sink, &self.bus, self.root, mailbox, &recorder, |emit| {
+            root.attend(emit)
+        });
+        exchange_ending(root, outcome)
+    }
 }
 
 #[cfg(test)]

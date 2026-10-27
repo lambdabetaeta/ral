@@ -45,11 +45,8 @@
       color: var(--ink-soft);
       margin-bottom: 6px;
     }
-    /* The two pickers are pills: the platform's own control chrome is taken
-       off so the shape is ours all the way round, and the shell it sits in
-       carries the chevron the platform used to draw — a bare CSS corner, so
-       it takes the ink colour of whichever theme is up without a second
-       asset. The list the pill opens is still the platform's own. */
+    /* The pill replaces platform chrome with a CSS chevron that follows theme ink.
+       The popup list remains native. */
     .select-shell { position: relative; display: block; }
     .select-shell::after {
       content: "";
@@ -80,10 +77,8 @@
       font-size: 14.5px;
       font-weight: 550;
       color: var(--ink);
-      /* The colour goes on its own longhand, under the gradient: the popup
-         the pill opens is the platform's, and it takes the control's
-         background-*color*.  A lone gradient leaves that transparent, so
-         the list came up white under dark theme's pale ink. */
+      /* Native popups use background-color; a gradient alone leaves dark-theme
+         pale text on the platform's white background. */
       background-image: linear-gradient(180deg, var(--raised), color-mix(in srgb, var(--raised) 88%, var(--paper)));
       background-color: var(--raised);
       border: 1px solid var(--line-strong);
@@ -113,11 +108,7 @@
       color: var(--ink);
     }
 
-    /* The two ways in: choose a folder, or sign in first. Only one of them
-       leads at a time — with no account set up there is nothing a folder
-       could be worked on with, so the sign-in takes the primary style and
-       goes first (column-reverse, so the reading order stays the same as the
-       markup's). */
+    /* Without an account, sign-in leads; column-reverse keeps markup reading order. */
     .actions {
       display: flex;
       flex-direction: column;

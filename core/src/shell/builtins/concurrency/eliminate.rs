@@ -140,9 +140,9 @@ pub(crate) fn builtin_is_done(args: &[Value]) -> Settled<Value> {
 /// to be claimed.
 ///
 /// The running bytes are a cumulative, non-destructive snapshot
-/// ([`crate::io::ByteBuffer::peek`]), so a partial poll never steals bytes the
-/// worker's drain as it finishes must still see.  A watched handle's buffers
-/// stay empty, so a poll on one reports no bytes.
+/// ([`crate::io::CapturedBytes::peek`]), so a partial poll never steals bytes
+/// the worker's drain as it finishes must still see.  A watched handle's
+/// buffers stay empty, so a poll on one reports no bytes.
 ///
 /// In `ready`, an ordinary failure or the worker's own stop surfaces as
 /// `` `err ``; an `exit`, a foreign stop and a panic are re-raised, as `await`

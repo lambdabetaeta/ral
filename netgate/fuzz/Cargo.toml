@@ -1,0 +1,22 @@
+[package]
+name = "netgate-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+netgate = { path = ".." }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "connect"
+path = "fuzz_targets/connect.rs"
+test = false
+doc = false
+bench = false
+
+# Isolated because cargo-fuzz requires nightly and libfuzzer-sys.
+[workspace]

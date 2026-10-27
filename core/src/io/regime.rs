@@ -9,8 +9,9 @@ pub enum RunIo {
     /// Clone the run's byte sinks from the ambient `shell.io`: the REPL and
     /// batch.
     Inherit,
-    /// Mint fresh stdout/stderr buffers, returned in [`Report::Ran`]'s
-    /// `captured`: exarch's tool runs.
+    /// Mint fresh stdout/stderr buffers, returned in
+    /// [`Report::Ran`](crate::protocol::Report::Ran)'s `captured`: exarch's
+    /// tool runs.
     Capture,
 }
 

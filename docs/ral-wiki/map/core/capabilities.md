@@ -1,5 +1,5 @@
 ---
-generated_at_commit: bb5bc1a6
+generated_at_commit: 3dbbe8f3
 generated_at_date: 2026-10-27
 covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
@@ -327,6 +327,8 @@ cannot run before lexing: the ordering is in the types, not convention.
 the host already holds, a walked entry say, and expands nothing, so a file
 named `~` stays that file and a non-UTF-8 name is never renamed by a string
 round trip.
+`path::spelled` anchors a host-held path against the process's cwd with
+`Resolver::anchor`, returning a sentence if that cwd is unavailable.
 A `Resolver` is a `host::EnvVars` and a `CwdPath`: `~` reads `env.home()`, `xdg:`
 the `XDG_*_HOME` of `env` through `get_or_host`, so a `within [env: …]` overlay
 reaches both. `Resolver::at` builds one for a caller with no shell to mint one; `resolve_in_script` is
@@ -494,8 +496,9 @@ memory on Linux and refused on macOS.
 [[decisions/261027_unix-sockets-follow-writes|unix-sockets-follow-writes]]
 records the policy and its limits.
 
-Inside a *guest*, `ral-daemon` starts the engine as
-`--guest-engine <cgroup-root>`. The role installs the
+Inside a *guest*, `ral-guest` starts the engine as
+`--guest-engine <cgroup-root>`, named by `guest_abi::layout::ENGINE_FLAG`.
+The daemon and jail share `layout::EXEC_CONTROLLERS`. The role installs the
 [[map/core/io-process|spawn jail]], so `build_launch`
 (`shell/exec/command/process.rs`) uses it for every command: a bounded fresh
 uid and per-exec cgroup, the envelope's seccomp deny-set, and close-on-exec

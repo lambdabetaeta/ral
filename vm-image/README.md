@@ -13,14 +13,14 @@ on Windows. It is one of the three disks in SYNOD.md §7's stack:
 ```
 session.img  (RW, per-session)   overlayfs upper: /work + guest scratch
 rootfs.img   (RO, pinned)   <--   build.sh BUILDS THIS ONE
-boot.img     (ships w/ app)      kernel + ral-daemon + ral engine (build-boot.sh)
+boot.img     (ships w/ app)      kernel + ral-guest + ral engine (build-boot.sh)
 ```
 
 ## Why the image is what an agent may rely on
 
 The guest reaches the network only through the host's `CONNECT`-only proxy
 (§6), and no hypervisor here configures a network adapter: its only
-interface is a `tun` whose single peer is `guest-net`, a user-mode TCP/IP
+interface is a `tun` whose single peer is `netgate`, a user-mode TCP/IP
 stack in a host process that admits TCP connections to port 443 of the
 public addresses an exact list of DNS names resolves to, once, on the host
 — and nothing else. So installs at runtime are
@@ -33,7 +33,7 @@ just as deliberately lean where it counts: **no compilers, headers, or build
 systems**. Those earn their weight only for software that outlives the session,
 and here nothing does.
 
-No ral binaries live here either; the daemon and engine ship in `boot.img`,
+No ral binaries live here either; ral-guest and the engine ship in `boot.img`,
 versioned with the app so the `Attach` handshake can enforce the pairing (§7).
 
 ## Two guests, one recipe
@@ -65,17 +65,18 @@ Two consequences worth stating before they surprise anyone:
   no qemu is involved on either host.
 
 Because a developer builds one guest at a time, `out/` deliberately does **not**
-encode the architecture in any path — `synod/src/boot.rs` and the bundle's
+encode the architecture in any path — `vm_manager::media::locate` and the bundle's
 resource map look in the one fixed place. `out/boot/boot-manifest.txt`'s
 leading `arch=` line is how you know which guest is currently sitting there.
 
-That same manifest carries a `boot_contract=` line — the generation of `ral.`
-kernel-command-line settings the `ral-daemon` inside `initramfs.img`
-understands (`ral_daemon::boot::CONTRACT`, compiled and printed by
-`ral-daemon/examples/boot-contract.rs` rather than copied). `synod/build.rs`
-compares it against the host it is building and fails the build when they
-differ, because a guest that has not heard of a key the host writes refuses the
-whole command line and the host sees only a control plane nobody dialled.
+That same manifest carries `boot_contract=` and `proto_version=` lines: the
+kernel-command-line agreement (`guest_abi::boot::CONTRACT`) and engine protocol
+(`ral_core::protocol::PROTOCOL_VERSION`). `vm-image/build-tools`'s
+`media-manifest` compiles and prints both constants from the guest's checkout.
+Its `check-media` compares the recorded versions before packaging, through
+`tauri.bundle.conf.json`'s `beforeBuildCommand`. Absent media is left to the
+bundler; present media with an absent or unreadable manifest is refused, as is
+a missing, malformed or mismatched version.
 
 ## Contents
 
@@ -83,7 +84,7 @@ whole command line and the host sees only a control plane nobody dialled.
 |------|-----------|
 | `packages.txt` | The pinned package set, one per line, grouped to mirror §7's rationale. Comments and blanks are stripped by the build. |
 | `build.sh` | The rootfs pipeline: one strict-mode script that runs a container and emits the image, checksum, manifest, and verification. |
-| `build-boot.sh` | The boot-media pipeline: Ubuntu's kernel plus this repo's initramfs, with `ral-daemon` and the engine inside it (see the last section). |
+| `build-boot.sh` | The boot-media pipeline: Ubuntu's kernel plus this repo's initramfs, with `ral-guest` and the engine inside it (see the last section). |
 | `out/` | Build products (git-ignored), for whichever architecture was built last. |
 
 Build products in `out/rootfs/`:
@@ -351,51 +352,39 @@ pinned suite and mirror.
 That asymmetry is the kind of thing that reads as an oversight, so it is spelled
 out in the script at the point of use as well as here.
 
-**Neither `ral-daemon` nor the engine live in `rootfs.img`** (this directory's
-own build never puts them there). What makes `boot.img`'s "kernel +
-ral-daemon + ral engine as one artifact" true is a small hand-written
-initramfs, `ral-initramfs` (a workspace crate, `libc` + `rustix` only, the
-same dependency shape as `ral-daemon`): its job is fixed and narrow enough —
-two known disks in the backend's own fixed attach order (virtio-blk on macOS,
-two LUNs of one SCSI controller on Hyper-V, so the *names* are probed while the
-order is not), one overlay, one binary-install step, one `switch_root` — that a
-general-purpose tool like dracut or mkinitramfs would be solving a
-hardware-discovery problem this guest does not have. On every boot it:
+**Neither `ral-guest` nor the engine live in `rootfs.img`.** The initramfs
+carries `ral-guest` as `/init` and `exarch` as `/engine`. `ral-guest` is one
+binary-only workspace crate, depending on `guest-abi`, libc and rustix. Its
+assembly stage:
 
-1. mounts the kernel's device nodes at `/dev` (claimed, not assumed from a
-   devtmpfs automount) and loads whichever kernel modules the pinned kernel
-   build needs for the two disks, the overlay, and vsock (a manifest
-   `build-boot.sh` writes from the real `CONFIG_*` the kernel package ships,
-   not a hardcoded guess);
-2. `mke2fs`-formats the session disk unconditionally — it always arrives as
-   a bare zero-filled sparse file (`vm-manager`'s `create_session_image`);
-3. mounts `rootfs.img` read-only and the freshly formatted session disk
-   read-write as an overlay's lower and upper;
-4. **copies the embedded `ral-daemon` and `exarch` binaries onto that
-   writable upper**, at `/sbin/ral-daemon` and `/usr/libexec/ral/engine` —
-   the mechanism behind the "one artifact" claim: the binaries are installed
-   fresh into the session overlay every boot, never baked into the read-only
-   rootfs;
-5. `switch_root`s into the assembled overlay and execs `/sbin/ral-daemon` as
-   the new pid 1.
+1. mounts devtmpfs, loads the kernel modules to a fixpoint, and adopts the
+   console;
+2. probes the ordered disk pairs (virtio-blk, then SCSI), waits briefly for
+   enumeration, and unconditionally formats the chosen session disk;
+3. mounts the read-only rootfs and writable session disk, then assembles their
+   overlay;
+4. installs `/engine` fresh at `guest_abi::boot::DEFAULT_ENGINE` on the overlay;
+5. reclaims the initramfs, moves the overlay to `/`, and enters it.
 
-Both `ral-daemon` and `exarch` are cross-built for the guest's musl target
+The same PID 1 then calls `init::serve`, with no exec between assembly and
+supervision. Mounts and the engine's environment are shared with the factory
+engines, and console lines carry the `ral-guest:` prefix.
+
+Both `ral-guest` and `exarch` are cross-built for the guest's musl target
 (`aarch64-unknown-linux-musl` or `x86_64-unknown-linux-musl`) *inside* the same
 container (rustup + `musl-tools`, the recipe `build-binaries.yml`'s
 `build-exarch-linux-arm64` job already uses — no `cross-rs` container needed,
 since neither binary pulls `jemalloc-sys` or a C dependency), and the build
-refuses any of the three that is not a static binary of the guest's own
+refuses either binary that is not a static binary of the guest's own
 architecture. `mke2fs` is the one non-Rust piece the initramfs carries: it is
 vendored from the container's own `e2fsprogs` package together with every
 shared library `ldd` reports, resolved in the same pinned container so glibc
 versions match exactly — the technique every distro's own initramfs tooling
 already uses internally.
 
-`vm-manager/src/vz.rs`'s `BootArtifact { kernel, initramfs, rootfs }` and
-`kernel_command_line()` need no changes for any of this: the command line
-already never sets `ral.engine=`, so as long as `build-boot.sh` installs the
-engine at `ral-daemon`'s own `DEFAULT_ENGINE` path, the existing contract
-holds untouched — and the Windows backend takes that same `BootArtifact`, three
+`vm-manager`'s `BootArtifact { kernel, initramfs, rootfs }` is unchanged.
+The guest installs the engine at `guest_abi::boot::DEFAULT_ENGINE`, the same
+path the shared boot contract names — and the Windows backend takes that same `BootArtifact`, three
 paths and nothing hypervisor-shaped about them.
 
 ### Which modules each guest carries, and why
@@ -468,22 +457,22 @@ just guest-boot amd64
 
 The products are `kernel`, `initramfs.img`, a `.sha256` for each,
 `boot-manifest.txt` (the architecture, on its own leading line, plus the kernel
-package version and the git commit hash of the ral-daemon/exarch source built in
+package version and the git commit hash of the ral-guest/exarch source built in
 — recording the hash only here, not in a `build.rs`, is the whole of the
-version-stamping decision — and `boot_contract=`, the one line a *host* build
-reads back), `kernel-config-check.txt` (the real `CONFIG_*`
+version-stamping decision — and the `boot_contract=` and `proto_version=` lines
+that `check-media` reads back), `kernel-config-check.txt` (the real `CONFIG_*`
 values the config-grep pass found), `verify.txt` (which asserts the kernel's
-format, the three binaries' architecture and static linkage, and lists the
+format, the two binaries' architecture and static linkage, and lists the
 shipped modules in load order), and `build.log`.
 
 **Smoke-boot is human-in-the-loop, not CI**: on macOS, build `rootfs.img` and
 `boot.img`, run `dev/scripts/sign-virtualization.sh` against the debug
 `vm-manager`/`synod` binaries (macOS invalidates the ad-hoc signature on every
 rebuild), then boot via `vm-manager/examples/boot-smoke.rs` with the three
-real artifacts, and confirm on stdout `ral-daemon`'s own `eprintln` lines
+real artifacts, and confirm on stdout `ral-guest`'s own `eprintln` lines
 (`guest filesystems up`, `engine running as pid`), that `announce_root()`
 reports the session overlay rather than a fallback, and that the guest dials
-the host's vsock control port within `vz.rs`'s 30s `BOOT_TIMEOUT`. On Windows
+the host's vsock control port within `lifecycle::BOOT_TIMEOUT` (60 s). On Windows
 the same smoke-boot needs a machine with Hyper-V enabled (Pro, Education, or
 Enterprise — §2) and an elevated shell, since creating a machine through the
 Host Compute System API is an administrative act; the media itself is verified

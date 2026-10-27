@@ -155,24 +155,15 @@ impl Emitter {
         self.id
     }
 
-    /// Whether a worker may clone this emitter for a live tab —
-    /// [`Children::Live`] off [`FleetBus::session`] and
-    /// [`FleetBus::per_exchange_live`], read by `agent` to choose between
-    /// [`Self::child`] and [`Self::muted_child`].
+    /// Whether a worker inherits the live session bus through [`Self::child`]
+    /// or records off the display through [`Self::muted_child`].
     pub(crate) fn spawns_live_children(&self) -> bool {
         self.children == Children::Live
     }
 }
 
-/// The event channel, over one of two lifetimes crossed with
-/// whether spawned children are live or muted on it: [`Self::session`], held
-/// across the whole REPL session (the TUI) with live children, so an async
-/// `agent` child (a worker) streams to a live tab; [`Self::per_exchange`], closing with the
-/// exchange (headless, tests) with muted children, so such a child stays off
-/// the display though it still records; and [`Self::per_exchange_live`], the
-/// same closing lifetime but with live children — what
-/// [`crate::headless::converse_settled`] needs, since Law B (the exchange
-/// waits for the fleet) means no child outlives the exchange its bus does.
+/// A session bus keeps leased helpers connected across exchanges;
+/// a per-exchange bus mutes children while retaining their recorded usage.
 pub(crate) struct FleetBus {
     tx: BusSender,
     rx: BusReceiver,
@@ -188,10 +179,6 @@ impl FleetBus {
 
     pub(crate) fn per_exchange() -> Self {
         Self::build(Children::Muted)
-    }
-
-    pub(crate) fn per_exchange_live() -> Self {
-        Self::build(Children::Live)
     }
 
     fn build(children: Children) -> Self {

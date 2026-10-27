@@ -1,44 +1,16 @@
-// The no-bundler bridge: withGlobalTauri exposes these on the window.
-const TAURI = window.__TAURI__;
-export const invoke = TAURI ? TAURI.core.invoke : async () => { throw new Error("not running in the app"); };
-export const listen = TAURI ? TAURI.event.listen : async () => () => {};
-// The plugin's confirm, not the window's: WebView2 disables native script
-// dialogs, so `window.confirm` there answers `undefined` — and a caller
-// reading that as "the user declined" makes its own button do nothing at
-// all, silently.  This one returns a real `Promise<boolean>`, so `await` it.
-// Optional-chained rather than gated on `TAURI` alone: the plugin's global
-// is injected separately from the core one, and reaching through a missing
-// `dialog` at module load would take the whole window down over a
-// confirmation.  Answering `true` is the safe absence — this dialog guards
-// an act that changes nothing by itself, so a missing plugin should leave the button
-// working, not dead.
-export const confirmDialog = TAURI?.dialog?.confirm ?? (async () => true);
+import { $ } from "./dom.js";
 
-// Every id passed here is written in index.html's own markup, so the element
-// is present or the window is broken beyond a null check's help.  The cast
-// states that, once, instead of every caller answering `possibly null`.
-/** @type {(id: string) => HTMLElement} */
-export const $ = (id) => /** @type {HTMLElement} */ (document.getElementById(id));
-export const screens = {
-  start: $("screen-start"),
-  accounts: $("screen-accounts"),
-  conversation: $("screen-conversation"),
-};
-
-export function show(name) {
-  for (const [key, el] of Object.entries(screens)) el.classList.toggle("active", key === name);
-}
+// WebView2 disables native dialogs; use the separately injected plugin and await its result.
+export const confirmDialog = window.__TAURI__?.dialog?.confirm ?? (async () => true);
 
 export const state = {
   /** @type {import("./bindings/PickedFolder.ts").PickedFolder | null} */
   folder: null,
-  choice: null,  // { account, model, effort } picked on the start screen
+  /** @type {import("./bindings/Choice.ts").Choice | null} */
+  choice: null,
 };
 
-// The transcript is its own scroll region — a chat-only scrollbar,
-// separate from the change report's. It sticks to the foot as tokens
-// and cards stream in, and lets go the moment the reader scrolls up to
-// look back, re-engaging once they return to the bottom.
+// Pin to the foot while streaming; scrolling up releases it until the reader returns.
 export const transcriptEl = $("transcript");
 let stickToBottom = true;
 transcriptEl.addEventListener("scroll", () => {

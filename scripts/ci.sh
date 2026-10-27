@@ -13,7 +13,7 @@
 #
 # The mode picks only where cargo runs.
 #   native     this host's toolchain — on macOS the only way to exercise
-#              Seatbelt, or to compile synod, at all.
+#              Seatbelt or compile synod's window.
 #   linux-box  inside scripts/linux-box.Dockerfile's image — the only way a
 #              macOS host compiles the cfg(target_os = "linux") sandbox,
 #              which core/src/authority/sandbox.rs gates out of a native build.
@@ -34,10 +34,7 @@ if [ "$MODE" = linux-box ] || [ "${CI+x}" = x ]; then
     export RAL_REQUIRE_SANDBOX=1
 fi
 
-# RUSTFLAGS and synod's exclusion on Linux are the justfile's (`deny`, `gui`),
-# not repeated here.  `gui` keys off `os()`, which — because the recipes run
-# inside the container in linux-box mode — reports the platform cargo actually
-# targets, so no second rule here has to predict it.
+# RUSTFLAGS is the justfile's `deny`, not repeated here.
 
 # Docker where it is installed (CI), else Podman.  --privileged is real host
 # privilege only under a rootful engine; a rootless podman machine gives
@@ -119,11 +116,10 @@ step lint
 # `ral` binary as a subprocess, and `cargo test` alone won't refresh it.
 step test
 
-# Skipped in linux-box mode: the image carries no rustup Windows target.  Run
-# on the host either way — the recipe never links, so it costs seconds.
+# Native only: the box's image carries no cargo-xwin, which both recipes need.
 if [ "$MODE" = native ]; then
-    banner 'just check-windows'
-    just check-windows
+    step check-windows
+    step lint-cross
 fi
 
 # The bwrap envelope on both arches.  `lint` compiles it for this host's alone,
@@ -138,6 +134,8 @@ step check-linux
 # alone.  Redundant on a macOS host exactly as check-linux is on a Linux one.
 step check-macos
 
+step doc-check
+
 # Always this host's python: the box's image carries neither uv nor the
 # tree-sitter CLI, and render-site.py has no highlighting fallback.
 banner 'just site'
@@ -147,8 +145,7 @@ step examples-check
 
 step plugins-check
 
-# The window's two languages against each other.  A no-op in linux-box mode,
-# where synod is not built at all — the recipe says so and exits.
+# The window's two languages against each other, on every host and in the box.
 step ui-check
 
 printf '\n\033[32m  CI OK (%s).\033[0m\n' "$MODE"

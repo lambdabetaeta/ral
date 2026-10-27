@@ -5,6 +5,7 @@ use super::{Count, JailCgroup, JailPlan, Seq, exhausted};
 use crate::authority::{policy::Net, sandbox::Programs};
 use crate::process::site::Silent;
 use crate::site::site;
+use guest_abi::layout::EXEC_CONTROLLERS;
 use std::io;
 use std::os::fd::OwnedFd;
 #[cfg(seccomp)]
@@ -89,10 +90,7 @@ fn write_cpu_max(cgroup: &Path, quota_pct: u32) -> io::Result<()> {
     write_control(cgroup, "cpu.max", &format!("{quota_us} {PERIOD_US}"))
 }
 
-/// What each level of the jail's tree hands down to the next.
-const CONTROLLERS: &str = "+memory +pids +cpu";
-
-/// Create `cgroup` and every ancestor it lacks, delegating [`CONTROLLERS`] into
+/// Create `cgroup` and every ancestor it lacks, delegating [`EXEC_CONTROLLERS`] into
 /// each parent before making the child beneath it.
 ///
 /// A controller's files appear in a child only once the parent's
@@ -121,11 +119,11 @@ fn make_delegated(cgroup: &Path) -> io::Result<()> {
         )
     })?;
     make_delegated(parent)?;
-    write_control(parent, "cgroup.subtree_control", CONTROLLERS).map_err(|e| {
+    write_control(parent, "cgroup.subtree_control", EXEC_CONTROLLERS).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!(
-                "could not delegate {CONTROLLERS} from {}: {e}. Without them the cgroup below it \
+                "could not delegate {EXEC_CONTROLLERS} from {}: {e}. Without them the cgroup below it \
                  has no memory.max or pids.max to write, and the command would run uncapped.",
                 crate::path::shown(parent)
             ),

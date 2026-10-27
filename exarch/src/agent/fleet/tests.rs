@@ -634,7 +634,7 @@ fn a_clear_outranks_the_lease() {
 /// Notably, a raw push onto the mailbox, bypassing `steer`, is not an
 /// exchange.
 #[test]
-fn engaged_and_idle_read_the_exchange_clock() {
+fn steer_and_idle_read_the_exchange_clock() {
     let fleet = Fleet::for_test();
     let trunk = agent(&fleet, "trunk", None);
     let inbox = Inbox::new();
@@ -642,16 +642,25 @@ fn engaged_and_idle_read_the_exchange_clock() {
     child.mailbox = inbox.mailbox();
     let child = born(&fleet, child).expect("a fresh child of a live trunk");
 
-    assert!(!child.engaged(), "a fresh agent has never been engaged");
+    assert!(
+        child.mailbox.last_exchange().is_none(),
+        "a fresh agent has never been engaged"
+    );
 
     inbox.push(Post::UserSteering("hello".into()));
-    assert!(!child.engaged(), "a raw mailbox push is not an exchange");
+    assert!(
+        child.mailbox.last_exchange().is_none(),
+        "a raw mailbox push is not an exchange"
+    );
     // Drained, so the steer below lands as its own item rather than
     // coalescing into this one.
     inbox.next_item();
 
     child.mailbox.steer("hi".into());
-    assert!(child.engaged(), "steered at least once");
+    assert!(
+        child.mailbox.last_exchange().is_some(),
+        "steered at least once"
+    );
     assert!(
         child.idle() < Duration::from_secs(1),
         "idle resets to (near) zero right after a steer"
@@ -672,7 +681,7 @@ fn a_settling_childs_result_outruns_the_quiesce_verdict() {
     let trunk = agent(&fleet, "trunk", None);
     let child = agent(&fleet, "child", Some(&trunk));
     let inbox = Inbox::new();
-    let park = |_engaged| {
+    let park = || {
         if trunk.has_busy_children() {
             ParkMode::HeldByChildren
         } else {
@@ -680,7 +689,7 @@ fn a_settling_childs_result_outruns_the_quiesce_verdict() {
         }
     };
     assert_eq!(
-        park(false),
+        park(),
         ParkMode::HeldByChildren,
         "a live direct child holds its parent's park"
     );
@@ -697,7 +706,7 @@ fn a_settling_childs_result_outruns_the_quiesce_verdict() {
         }));
     drop(child);
     assert_eq!(
-        park(false),
+        park(),
         ParkMode::Quiesce,
         "the last child settling drains the fleet"
     );

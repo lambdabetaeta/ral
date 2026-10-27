@@ -5,36 +5,55 @@
 //! Each method checks everything before it writes anything, and touches the
 //! vault with the store unlocked: a keychain may stop to ask the user.
 
+use crate::app::App;
 use crate::config;
 use crate::provider::Holdings;
 use crate::provider::accounts::{
     checked_key, declare_endpoint, declared_endpoints, find, withdrawable,
 };
+use crate::provider::credential::CredentialStore;
 use crate::provider::identity::{Account, Auth};
 use crate::provider::keychain::Keychain;
 use ral_core::own::{OwnError, UserFile};
+use ral_core::path::XdgKind;
 use ral_core::sync::LockExt;
 
 /// Where one product keeps what its accounts screen changes: keys in its
 /// vault, declared endpoints in its declarations file.
 pub struct Wallet {
-    pub keychain: Keychain,
-    pub declarations: UserFile,
+    pub(crate) keychain: Keychain,
+    declarations: UserFile,
     /// How the declarations file names itself when it has a complaint.
-    pub label: &'static str,
+    label: &'static str,
 }
 
 impl Wallet {
-    /// Exarch's own wallet: its vault, its declarations file.
+    /// One app's vault and declarations file in its config home.
     ///
     /// # Errors
-    /// [`config::file`]'s.
-    pub fn exarch() -> Result<Self, OwnError> {
+    /// [`OwnError::NoBase`] where the host names no config directory.
+    pub fn of(app: App, declarations: &'static str, label: &'static str) -> Result<Self, OwnError> {
         Ok(Self {
-            keychain: Keychain::for_app(crate::app::EXARCH),
-            declarations: config::file()?,
-            label: config::LABEL,
+            keychain: Keychain::for_app(app),
+            declarations: UserFile::xdg(app.name(), XdgKind::Config, declarations)?,
+            label,
         })
+    }
+
+    /// Load declarations, resolve and scrub environment keys, then read the vault.
+    ///
+    /// # Errors
+    /// Returns a sentence if declarations cannot be read or decoded.
+    /// An unreachable vault only reduces the available accounts.
+    ///
+    /// # Panics
+    /// Must be called while the process is still single-threaded:
+    /// the credential scrub mutates the environment.
+    pub fn prepare(&self) -> Result<CredentialStore, String> {
+        let declared = config::load_declared(&self.declarations, self.label)?;
+        let mut store = CredentialStore::resolve_and_scrub(declared);
+        store.read_vault(&self.keychain);
+        Ok(store)
     }
 
     /// Save `key` for the account named `id`, in force at once unless the

@@ -1,72 +1,6 @@
-//! The guest's console, on a named pipe.
-//!
-//! The daemon's one reporting channel is a console→host log, and that log
-//! is the only thing that speaks during the seconds before a guest can speak
-//! for itself.  Without it a boot that fails — a kernel that cannot find its
-//! disks, an initramfs that refuses, a daemon that will not accept the command
-//! line — is indistinguishable from a boot that is merely slow: both are a
-//! timeout waiting for a control connection that never comes.  With it, the
-//! reason is on synod's own output, in the guest's own words.
-//!
-//! The macOS backend gets this almost for free — a virtio console attached to
-//! the host's `stdout`.  Hyper-V has no virtio, so the guest gets an emulated
-//! serial port (`ttyS0`) whose far end is a named pipe: the compute service
-//! connects to it as a *client* when the machine starts, which means the pipe's
-//! server end must exist first.  Hence the order in [`Hypervisor::boot`](crate::Hypervisor::boot):
-//! create the pipe, create the machine, start it, then read.
-//!
-//! # Why `stdout` alone is a diagnostic that reaches nobody
-//!
-//! On an installed synod the process that owns the machine is
-//! `SynodMachineBroker`, a `LocalSystem` service, and a service has no console:
-//! its standard output is a handle that writes nowhere at all.  So the one line
-//! that explains why a guest refused to come up must not depend on stdout
-//! reaching anyone, and the failure must not point at an "above" that a
-//! service does not have.  This module therefore *tees*: `stdout` for a
-//! developer running `synod-machine-broker.exe --console`, a per-machine log
-//! file for everyone else, and a short ring of the last lines in memory
-//! ([`Tail`]) so the boot failure can quote the guest instead of pointing at a
-//! place the reader has to go and look.
-//!
-//! A failing write to `stdout` must not be a reason to stop pumping: under a
-//! service it fails on the very first chunk, and stopping there is exactly how
-//! the durable copy would be lost.
-//!
-//! # Three bounds, so a diagnostic does not become litter
-//!
-//! Nothing here may accumulate without bound, so each of the three sinks is
-//! bounded by construction:
-//!
-//! - the **ring** keeps [`RETAINED_LINES`] lines, and no line longer than
-//!   [`LINE_LIMIT`] characters;
-//! - the **log** stops at [`LOG_LIMIT`] bytes, saying so where it stops.  It is
-//!   the *head* that is kept, deliberately: the beginning of a boot is where a
-//!   boot's reasons are, and the end is already quoted in the failure;
-//! - the **directory** is swept on every boot of logs older than
-//!   [`LOG_LIFETIME`] ([`sweep`]), and a log whose session ended cleanly is
-//!   removed at once ([`Console::discard`]).  The only logs that survive a day
-//!   are the ones a failed boot left behind and named in its own error, which
-//!   is the one case where the file is still worth something.
-//!
-//! # Waking a pump that is waiting for a client that will never come
-//!
-//! A server end parked in `ConnectNamedPipe` is parked until *something*
-//! connects.  If the machine fails to start there is no client, and the pump
-//! thread would sit there for the life of the process.  The remedy is the
-//! standard one and needs no handle sharing across threads: [`Console::wake`]
-//! connects to the pipe itself and immediately closes, which is a connection as
-//! far as the parked server is concerned.  The pump then reads an immediate
-//! end-of-file and exits.  This is why a [`Console`] keeps only the pipe's
-//! *name* after handing its server end to the pump.
-//!
-//! # On the filesystem calls below
-//!
-//! Every one of them is host-side diagnostic plumbing around a machine the
-//! guest has not booted yet: making the cache directory, opening this machine's
-//! log, sweeping the ones nobody kept.  There is no `Shell` to route it through
-//! and no run to raise a card in — the same standing [`super::vhd`]'s disk
-//! writing has, and so the same kind of typed site (`crate::site`) at each
-//! call.
+//! The console pipe exists before the machine starts.
+//! Stdout failure leaves the bounded log and tail running; failed boots retain their logs.
+//! Wake connects and closes to release a pump waiting for a machine that never started.
 #![allow(
     clippy::disallowed_macros,
     reason = "[silent:windows-host] a host diagnostic with no ral shell to print through"
@@ -80,8 +14,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
+use crate::error::{Act, Error, HostFile};
+use crate::hcs::win;
+use crate::lifecycle::aside_spelling;
 use crate::site::{Silent, site};
-use crate::{Act, Error, HostFile};
 
 use windows_sys::Win32::Foundation::{
     ERROR_NO_DATA, ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE,
@@ -93,49 +29,25 @@ use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 
-/// The pipe's buffer, in bytes.  A console produces lines, not bulk data, so
-/// this is sized to be comfortable rather than fast.
 const PIPE_BUFFER: u32 = 8 * 1024;
 
-/// `PIPE_ACCESS_DUPLEX`.  The pipe is opened both ways although synod only ever
-/// reads: the emulated serial port is a two-way device, and a service that
-/// opens it for read/write must find a pipe that permits both or the machine
-/// fails to start with a message about the COM port rather than about this.
+/// The emulated serial port opens read/write, so its pipe must permit both even though we only read.
 const PIPE_ACCESS_DUPLEX: u32 = 0x0000_0003;
 
-/// How many of the guest's last lines are kept for a boot failure to quote.
-///
-/// A handful, because a handful is what diagnoses a boot: the panic and the two
-/// or three lines that led to it.  More would turn one error sentence into a
-/// dump, and the log on disk is where a reader goes for the whole story.
 const RETAINED_LINES: usize = 6;
 
-/// The longest line the ring will hold, in characters.  A guest emitting a
-/// megabyte without a newline — a kernel dumping memory, a daemon in a loop —
-/// must not cost the host a megabyte of retained text, so a line this long is
-/// treated as ended and the rest begins another.
+/// Lines without newlines are split at this bound so guest output cannot grow retained memory.
 const LINE_LIMIT: usize = 512;
 
-/// How much of one guest's console is kept on disk (256 KiB).
-///
-/// A whole boot's console is a few tens of kilobytes, so this is generous for
-/// the thing it is for and still small enough that a runaway guest cannot fill
-/// a disk with the log of its own noise.
 const LOG_LIMIT: u64 = 256 * 1024;
 
-/// How long a console log left behind by a boot nobody tore down cleanly may
-/// sit in the cache before a later boot sweeps it (a day).
-///
-/// A day rather than an hour because the reader of a failed boot's log is a
-/// person who may only get to it tomorrow morning; a day rather than a week
-/// because by then nobody is debugging that boot.
+/// One day lets a failed boot be diagnosed the next morning without keeping logs indefinitely.
 const LOG_LIFETIME: Duration = Duration::from_hours(24);
 
 /// How a console log is named, so [`sweep`] can recognise its own kind and
 /// leave every other file in the cache — the wrapped rootfs above all — alone.
 const LOG_PREFIX: &str = "synod-console-";
 
-/// And its extension.
 const LOG_SUFFIX: &str = ".log";
 
 /// Written where a log stops growing, so a reader who finds one ending
@@ -143,39 +55,21 @@ const LOG_SUFFIX: &str = ".log";
 const TRUNCATED: &str = "[synod: this console log reached its size limit; what the guest said \
                          after this point was not kept]";
 
-/// One machine's console: the pipe it writes to, the name by which a stuck
-/// reader can be woken, the log its words are kept in, and the last few of
-/// them.
 #[derive(Debug)]
 pub(super) struct Console {
     name: String,
-    /// Where the guest's words are also written.  `None` is a diagnostic
-    /// already half lost, and a boot failure says so rather than naming a file
-    /// that is not there.
+    /// An absent log is reported as lost diagnostics rather than naming a nonexistent file.
     log: Option<PathBuf>,
-    /// The last few lines, shared with the pump thread that fills it.
     tail: Arc<Mutex<Tail>>,
 }
 
 impl Console {
-    /// Create the server end of one machine's console pipe, and the log its
-    /// output is kept in under `cache`.
-    ///
-    /// Must happen before the machine is created, since the machine's document
-    /// names this pipe and the service dials it at start.
-    ///
     /// # Errors
-    /// Returns [`Error::HostFile`] if Windows would not create the *pipe*.  A console is
-    /// a diagnostic, so [`Hypervisor::boot`](crate::Hypervisor::boot) treats
-    /// this as a loss to report rather than a reason to refuse a session — and
-    /// a log that cannot be opened is a smaller loss again, reported on
-    /// `stderr` and carried on with.
+    /// Returns the pipe-creation refusal; a missing log or console does not refuse the machine.
     pub(super) fn create(id: &str, cache: &Path) -> Result<Self, Error> {
         let name = format!(r"\\.\pipe\synod-console-{id}");
-        let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
-        // SAFETY: `wide` is a NUL-terminated pipe name alive for the call; one
-        // instance, byte mode, blocking, default timeout, and the service's own
-        // default security (null), which grants the creating user.
+        let wide = win::wide(name.as_ref());
+        // SAFETY: the live NUL-terminated name requests one blocking byte-mode instance with default security.
         let handle = unsafe {
             CreateNamedPipeW(
                 wide.as_ptr(),
@@ -200,14 +94,12 @@ impl Console {
         // `OwnedHandle` the pump thread takes, and is closed exactly once there.
         let server = unsafe { OwnedHandle::from_raw_handle(handle) };
 
-        // The log, like the pipe, before the machine that will fill it — and on
-        // the same terms: a machine whose console cannot be kept still boots.
         let (log, file) = match open_log(cache, id) {
             Ok((path, file)) => (Some(path), Some(file)),
             Err(why) => {
                 eprintln!(
                     "synod: the guest's console will not be kept on disk: {}",
-                    why.worded(super::aside_spelling)
+                    why.worded(aside_spelling)
                 );
                 (None, None)
             }
@@ -217,50 +109,32 @@ impl Console {
         Ok(Self { name, log, tail })
     }
 
-    /// The name the machine's document must carry.
     pub(super) fn pipe(&self) -> &str {
         &self.name
     }
 
-    /// Where the guest's console is being kept, when it is being kept at all.
     pub(super) fn log(&self) -> Option<&Path> {
         self.log.as_deref()
     }
 
-    /// The last few lines the guest said, oldest first.
-    ///
-    /// A pump that panicked mid-line poisons the lock, and its words are read
-    /// out anyway: whatever the guest managed to say before the reader broke is
-    /// exactly what a failing boot needs quoted.
+    /// Poison cannot erase the words retained before a pump panic.
     pub(super) fn tail(&self) -> Vec<String> {
         site!(Silent::ConsoleRingLock, &self.tail => lock())
             .unwrap_or_else(PoisonError::into_inner)
             .lines()
     }
 
-    /// Forget the log: a session that ended cleanly has nothing left to
-    /// explain, and its console is litter from that moment on.
-    ///
-    /// Best-effort, and deliberately not called on the failing path — there the
-    /// error names this file, so it has a reader still to come.
+    /// Only successful boots discard logs; a failed boot may have named its log for a future reader.
     pub(super) fn discard(&self) {
         if let Some(path) = &self.log {
             let _ = site!(Silent::ConsoleLogDiscard, std::fs::remove_file(path));
         }
     }
 
-    /// Unblock a pump still waiting for the machine to connect.
-    ///
-    /// Called on every teardown path, including the one where the machine never
-    /// started.  Harmless when the pump has already moved on: the client handle
-    /// is opened and dropped, and a pipe with no server left to accept it
-    /// simply fails to open.
+    /// Connecting and closing wakes a parked pump; a missing server is harmless.
     pub(super) fn wake(&self) {
-        let wide: Vec<u16> = self.name.encode_utf16().chain(Some(0)).collect();
-        // SAFETY: `wide` is a NUL-terminated pipe name alive for the call.  A
-        // zero access mask asks for a connection without read or write rights,
-        // which is all a wake-up needs, and the returned handle is adopted so it
-        // closes immediately.
+        let wide = win::wide(self.name.as_ref());
+        // SAFETY: the name is live and NUL-terminated; zero access connects without reading or writing.
         let client = unsafe {
             site!(
                 Silent::ConsolePipeWake,
@@ -283,11 +157,7 @@ impl Console {
     }
 }
 
-/// The last few lines the guest said, and the line it is part-way through.
-///
-/// A ring rather than a buffer: the interesting end of a console is the end,
-/// and a boot that says a great deal must cost no more memory than a boot that
-/// says three words.
+/// The ring bounds retained lines; the unfinished line is separately bounded.
 #[derive(Debug, Default)]
 struct Tail {
     lines: VecDeque<String>,
@@ -295,11 +165,7 @@ struct Tail {
 }
 
 impl Tail {
-    /// Fold one chunk of the guest's console into the ring.
-    ///
-    /// Carriage returns are dropped rather than kept: a serial console ends its
-    /// lines `\r\n`, and a trailing `\r` in a quoted error would put the rest
-    /// of the sentence back at the start of the line.
+    /// Serial carriage returns are dropped so quoting cannot overwrite the surrounding error sentence.
     fn absorb(&mut self, chunk: &str) {
         for character in chunk.chars() {
             match character {
@@ -319,10 +185,7 @@ impl Tail {
         }
     }
 
-    /// Retain one completed line, dropping the oldest if the ring is full.
-    ///
-    /// A blank line is not a word, and a console emits plenty of them; keeping
-    /// them would let three newlines push the panic out of the quotation.
+    /// Blank lines are dropped so newlines cannot evict the diagnostic from the ring.
     fn finish(&mut self, line: String) {
         if line.trim().is_empty() {
             return;
@@ -347,11 +210,8 @@ impl Tail {
     }
 }
 
-/// Open this machine's console log, sweeping the ones earlier boots left.
-///
 /// # Errors
-/// Returns [`Error::HostFile`] if the cache cannot be made or the file cannot
-/// be created.  Its caller carries on without a log.
+/// Returns the cache or log creation refusal; the caller continues without a log.
 fn open_log(cache: &Path, id: &str) -> Result<(PathBuf, File), Error> {
     site!(Silent::ConsoleLogOpen, std::fs::create_dir_all(cache)).map_err(Error::host_file(
         HostFile::MachineCache,
@@ -368,11 +228,7 @@ fn open_log(cache: &Path, id: &str) -> Result<(PathBuf, File), Error> {
     Ok((path, file))
 }
 
-/// Remove the console logs of boots nobody is debugging any more.
-///
-/// Only files of this module's own naming, only those older than
-/// [`LOG_LIFETIME`], and every failure ignored: a sweep is housekeeping done on
-/// the way past, and a log that will not go is a log to try again next boot.
+/// Only our named files older than `LOG_LIFETIME` are swept; failure leaves them for the next boot.
 fn sweep(cache: &Path) {
     let Ok(entries) = site!(Silent::ConsoleLogSweep, std::fs::read_dir(cache)) else {
         return;
@@ -397,29 +253,16 @@ fn sweep(cache: &Path) {
     }
 }
 
-/// Read the guest's console onto synod's own output, into its log, and into the
-/// ring the boot failure quotes, until the machine stops.
-///
-/// The thread is never joined: it ends when the machine's end of the pipe
-/// closes (a stopped machine), or when [`Console::wake`] gives it the
-/// end-of-file that lets a never-started machine's pump retire.
+/// The unjoined pump ends on machine EOF or a wake connection when the machine never started.
 fn spawn_pump(server: OwnedHandle, log: Option<File>, tail: Arc<Mutex<Tail>>) {
     std::thread::Builder::new()
         .name("synod-guest-console".to_string())
         .spawn(move || {
             use std::os::windows::io::AsRawHandle;
             let handle: HANDLE = server.as_raw_handle();
-            // SAFETY: `handle` is the live server end this thread owns.  A null
-            // overlapped pointer is the blocking form, which is what a
-            // dedicated thread wants.
+            // SAFETY: this thread owns the live server; null overlapped selects blocking connection.
             let connected = unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) };
-            // Two codes are reported as failure and are success, for opposite
-            // reasons: a client that connected between `CreateNamedPipeW` and
-            // here (`ERROR_PIPE_CONNECTED`), and one that connected *and closed
-            // again* before this thread parked (`ERROR_NO_DATA`).  The second
-            // matters as much as the first — the words still sit in the pipe's
-            // buffer, and they are the words of a guest that died as soon as it
-            // had spoken, which is precisely the boot this log exists for.
+            // PIPE_CONNECTED and NO_DATA both permit draining: even a client that already closed may have left words.
             let ready = connected != 0
                 || std::io::Error::last_os_error()
                     .raw_os_error()
@@ -432,18 +275,12 @@ fn spawn_pump(server: OwnedHandle, log: Option<File>, tail: Arc<Mutex<Tail>>) {
             }
 
             let mut buffer = [0u8; PIPE_BUFFER as usize];
-            // `None` once the output has refused a write, which under a service
-            // is on the first chunk: there is no console attached, and giving
-            // up on the *pump* for that reason would silence the log and the
-            // ring too.
+            // A failed stdout drops only that sink; the log and ring must keep receiving.
             let mut out = Some(std::io::stdout());
-            // The log, and how much of its allowance it has spent.
             let mut sink = log.map(|file| (file, 0u64));
             loop {
                 let mut read = 0u32;
-                // SAFETY: `buffer` is writable for the length passed, `read` is
-                // a writable slot, and the null overlapped pointer keeps the
-                // read blocking.
+                // SAFETY: buffer and read are writable; null overlapped selects blocking reads.
                 let ok = unsafe {
                     ReadFile(
                         handle,
@@ -458,9 +295,7 @@ fn spawn_pump(server: OwnedHandle, log: Option<File>, tail: Arc<Mutex<Tail>>) {
                 }
                 let chunk = &buffer[..read as usize];
 
-                // A console line the guest wrote is the guest's own ink, so it
-                // reaches both sinks as bytes and is parsed nowhere but the
-                // ring, whose only purpose is to be quoted.
+                // Both output sinks receive the original bytes; only the quoted ring decodes them.
                 if let Some(stdout) = &mut out
                     && stdout
                         .write_all(chunk)
@@ -472,10 +307,7 @@ fn spawn_pump(server: OwnedHandle, log: Option<File>, tail: Arc<Mutex<Tail>>) {
                 if !keep_logging(&mut sink, chunk) {
                     sink = None;
                 }
-                // Lossily, and only here: the guest's kernel writes whatever
-                // encoding it was built with, a chunk may end mid-character,
-                // and a replacement character in one quoted word is a far
-                // smaller loss than dropping the line it was in.
+                // Only quotations decode lossily: a chunk may split a character, and dropping the line loses more.
                 site!(Silent::ConsoleRingLock, &tail => lock())
                     .unwrap_or_else(PoisonError::into_inner)
                     .absorb(&String::from_utf8_lossy(chunk));
@@ -484,12 +316,7 @@ fn spawn_pump(server: OwnedHandle, log: Option<File>, tail: Arc<Mutex<Tail>>) {
         .ok();
 }
 
-/// Write as much of `chunk` to the log as its allowance leaves, and answer
-/// whether the log is still worth holding.
-///
-/// The allowance is spent from the front, so what survives is the *head* of the
-/// boot; where it runs out, [`TRUNCATED`] says so in the file itself rather
-/// than leaving a reader to wonder whether the guest fell silent there.
+/// Keep the log head and mark truncation explicitly; the ring retains the tail.
 fn keep_logging(sink: &mut Option<(File, u64)>, chunk: &[u8]) -> bool {
     let Some((file, written)) = sink else {
         return false;
@@ -513,9 +340,6 @@ fn keep_logging(sink: &mut Option<(File, u64)>, chunk: &[u8]) -> bool {
 mod tests {
     use super::*;
 
-    /// A console names a pipe under the local pipe namespace, per machine, so
-    /// two sessions never share one — and keeps its log beside the session
-    /// disks, named after the same machine, so a reader can tell whose it is.
     #[test]
     fn each_machine_gets_its_own_pipe_and_its_own_log() {
         let dir = tempfile::tempdir().expect("a cache");
@@ -539,9 +363,6 @@ mod tests {
         b.wake();
     }
 
-    /// The same name twice is refused rather than silently shared: a second
-    /// instance of an existing pipe would have two machines writing one
-    /// console.
     #[test]
     fn a_name_already_in_use_is_refused() {
         let dir = tempfile::tempdir().expect("a cache");
@@ -561,9 +382,6 @@ mod tests {
         held.wake();
     }
 
-    /// Waking a pipe nobody is serving is a no-op, not a panic — the teardown
-    /// path calls it unconditionally.  So is discarding a log that was never
-    /// opened.
     #[test]
     fn waking_an_absent_pipe_is_harmless() {
         let console = Console {
@@ -579,12 +397,6 @@ mod tests {
         );
     }
 
-    /// The ring answers with the guest's last lines, oldest first, the
-    /// unfinished final one included, and nothing a guest can send makes it
-    /// grow: this is the invariant a boot failure's quotation rests on, since a
-    /// kernel that panics says the reason last — sometimes mid-sentence — and
-    /// the whole boot before it.  A serial console's carriage returns and its
-    /// blank lines are not words; a line without end is cut at [`LINE_LIMIT`].
     #[test]
     fn the_ring_answers_with_the_guests_last_words_and_never_grows() {
         let mut tail = Tail::default();
@@ -620,9 +432,6 @@ mod tests {
         }
     }
 
-    /// The guest's words reach the log on disk *and* the ring in memory — the
-    /// whole point of the tee, exercised over a real pipe by standing in for
-    /// the machine's end of it.  A clean teardown then takes the log with it.
     #[test]
     fn the_guests_words_reach_both_the_log_and_the_ring() {
         let dir = tempfile::tempdir().expect("a cache");
@@ -631,17 +440,17 @@ mod tests {
 
         let mut machine = speak(
             &console,
-            b"EXT4-fs (sda): mounted filesystem\r\nral-daemon: no ral.port\r\n",
+            b"EXT4-fs (sda): mounted filesystem\r\nral-guest: no ral.port\r\n",
         );
         assert_eq!(
             heard(&console, 2),
             vec![
                 "EXT4-fs (sda): mounted filesystem".to_string(),
-                "ral-daemon: no ral.port".to_string(),
+                "ral-guest: no ral.port".to_string(),
             ]
         );
         let kept = std::fs::read_to_string(&log).expect("the log is readable");
-        assert!(kept.contains("ral-daemon: no ral.port"), "{kept}");
+        assert!(kept.contains("ral-guest: no ral.port"), "{kept}");
         machine.flush().expect("the machine's end is still open");
         drop(machine);
 
@@ -652,9 +461,6 @@ mod tests {
         );
     }
 
-    /// A guest that speaks and dies before the pump has even parked is quoted
-    /// anyway: its words are in the pipe's buffer, and a boot that fails that
-    /// fast is exactly the boot whose one line explains everything.
     #[test]
     fn a_guest_that_dies_as_soon_as_it_speaks_is_still_quoted() {
         let dir = tempfile::tempdir().expect("a cache");
@@ -666,9 +472,6 @@ mod tests {
         );
     }
 
-    /// Stand in for the compute service: dial this console as the machine does
-    /// and say something on it.  The handle is returned so a caller can choose
-    /// when the guest falls silent.
     fn speak(console: &Console, words: &[u8]) -> File {
         let mut machine = File::options()
             .write(true)
@@ -679,10 +482,6 @@ mod tests {
         machine
     }
 
-    /// The console's ring once it holds `lines` of them.
-    ///
-    /// The pump is a thread, so the words arrive when they arrive; anything
-    /// longer than this wait is a pump that is not running at all.
     fn heard(console: &Console, lines: usize) -> Vec<String> {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while console.tail().len() < lines && std::time::Instant::now() < deadline {

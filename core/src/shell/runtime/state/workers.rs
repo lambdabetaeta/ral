@@ -1,4 +1,4 @@
-//! The worker registry: a per-[`Shell`](super::Shell) directory of every
+//! The worker registry: a per-[`Shell`] directory of every
 //! worker (`spawn` and `watch`, a `gather`'s children included) spawned from
 //! it. Pure bookkeeping, never a policy itself.
 //!
@@ -241,7 +241,7 @@ impl Default for RegistryInner {
     }
 }
 
-/// Cheap-clonable, per-[`Shell`](super::Shell) directory of every worker
+/// Cheap-clonable, per-[`Shell`] directory of every worker
 /// spawned from it.
 ///
 /// A newtype over `Arc<Mutex<RegistryInner>>`: cloning shares the store, which

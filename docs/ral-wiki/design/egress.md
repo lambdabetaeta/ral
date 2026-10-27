@@ -17,7 +17,7 @@ handshake in user mode before deciding whether a tunnel opens at all
 
 The policy the door is checked against is
 [[decisions/260727_one-connect-door-not-four-gates|one-connect-door-not-four-gates]]'s
-`exarch::net_policy::NetPolicy` ([[map/exarch/agent|agent]]): an exact list
+`ral_core::egress::NetPolicy` ([[map/exarch/agent|agent]]): an exact list
 of lowercase ASCII DNS names, `hosts`, plus a `search` bit unrelated to this
 proxy. There is no `read`/`write`, no `max-bytes`, no `rate-per-minute` —
 those keys are hard errors now, naming their own retirement rather than
@@ -26,7 +26,7 @@ being silently reinterpreted.
 ## The CONNECT door
 
 `10.0.2.2:3128` is the guest's only network application endpoint —
-`ral-daemon` sets `HTTPS_PROXY`/`https_proxy` to it for a networked boot,
+`ral-guest` sets `HTTPS_PROXY`/`https_proxy` to it for a networked boot,
 plus `NO_PROXY`/`no_proxy` so a tool testing its own server is not routed
 here and refused. `smoltcp` owns this one listening socket and no others: it
 does not answer DNS, mint addresses, or listen on 80 or 443, so a direct
@@ -50,8 +50,13 @@ connection, in order:
 9. Dial the vetted `SocketAddr`s in order and pin them: the name is never
    resolved again, so a client that resolves it a second time cannot reopen
    DNS rebinding or host-side SSRF.
-10. Write `200 Connection Established`.
-11. Copy bytes in both directions without parsing them.
+10. Record admission in the audit ledger before writing `200 Connection Established`.
+11. Copy bytes in both directions without parsing them, then record the close.
+
+The public-address tables are explicit: several IPv4 range predicates and
+`Ipv6Addr::is_global` are unstable, and a toolchain update must not silently
+move this boundary. IPv6 admits only `2000::/3` after the listed carve-outs;
+IPv4-mapped and IPv4-compatible forms pass through the IPv4 classifier.
 
 The guest keeps the ordinary public CA bundle from its image; no session CA
 is minted or installed, and TLS runs end-to-end between the guest and the
@@ -97,13 +102,19 @@ Three limits this page keeps stated, not implied:
   interception this design does not do.
 
 The audit ledger is what makes a narrow `hosts` list reviewable rather than
-merely narrow: `exarch::egress::AuditLog` ([[map/exarch/agent|agent]])
+merely narrow: `netgate::AuditLog` (`netgate/src/ledger.rs`)
 records a `Tunnel` verdict for each attempt and, for an admitted tunnel, a
 second close record carrying the final vetted address and byte count each
 direction carried. Telemetry, not policy: it narrows
 nothing this page has not already narrowed, and it is bounded with rotation.
 A record that cannot be written closes the gate, because an unauditable
 proxy does not proxy.
+
+The gate owns the ledger, its only writer.
+Strict mutex poison stops an untrustworthy ledger;
+an interprocess file lock covers size checking, rotation and append.
+Exarch loads the policy and carries only `RootConfig.search`, opening no ledger
+in host mode. The JSON record shape and rotation bound are the gate's.
 
 ## Where authority actually narrows
 
@@ -116,7 +127,7 @@ of reach; pathname Unix sockets remain reachable through the shared
 filesystem and can relay for an offline command. It cannot express
 "reachable, but only this host"; nothing in the grant vocabulary names an
 endpoint. The real narrowing this page describes happens one layer outside
-the grant, in the host policy `NetPolicy` enforces: `synod::grant` leaves
+the grant, in the host policy `NetPolicy` enforces: `synod/src/folder/grant.rs` leaves
 `net` unvetoed to preserve the guest's wire, a correctness choice rather
 than a promise about what the network admits. `grant` says *whether* a
 command may reach the wire; egress says *which destinations* it may reach
@@ -124,9 +135,9 @@ once it does.
 
 ## See also
 
-[[map/synod|synod]] — where `guest-net` and `ral-daemon`'s net wire live in
-the source tree. [[map/exarch/agent|agent]] — `Egress`, `NetPolicy`, the
-audit ledger, and how a fleet's trunk opens all three once.
+[[map/synod|synod]] — where `netgate` and `ral-guest`'s net wire live in
+the source tree. [[map/exarch/agent|agent]] — the policy loader and the
+search bit every fleet inherits.
 [[decisions/260727_one-connect-door-not-four-gates|one-connect-door-not-four-gates]]
 — the decision this page's mechanism realises, and the alternatives it
 declined. [[design/two-enforcers|two-enforcers]] — why `net` stays a boolean

@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
+generated_at_commit: 3dbbe8f3
 generated_at_date: 2026-10-27
-covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/signals.rs, exarch/src/cancel.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
+covers_paths: [exarch/src/agent.rs, exarch/src/latch.rs, exarch/src/agent/, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/signals.rs, exarch/src/cancel.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/]
 ---
 
 # Map: exarch / agent
@@ -86,29 +86,22 @@ register — the avatar writes one field at a time (`set_resting`,
 one snapshot and computes nothing under the lock, so the mutex buys
 atomicity and nothing more. `parent` is a plain `Arc`, read lock-free.
 
-**The park verdict reads no fact another thread can change without a
-delivery.** `Avatar::park_mode` runs under the consumer's own queue mutex
-(`Inbox::next_or_idle`) and before the pop, and each of its inputs is one
-of three kinds. The exchange clock is *under that same mutex*: `Queue {
-posts, last_exchange }` is what the mutex guards, so `Mailbox::steer` and
-`Agent::message` stamp and enqueue in one acquisition (`Mailbox::exchange`),
-and `next_or_idle` hands the verdict its reading as the `engaged` argument.
-The agent's own `status` — `reply`, and `awaiting`, the set of direct
-children spawned (`adopt`) or messaged (`message`) and not yet heard from
-(`heard`, at the moment the attend loop takes up the child's
-`AgentResult`) — is written only by the consumer's thread, so
-`has_busy_children` is *live children ∩ awaiting* and never reads a child's
-own `rest`. What remains — a child dying, a schedule firing — happens only
-*after* a delivery into this queue, which the pre-pop verdict cannot lose
-to. A `Status` writer drops its guard before pushing to any inbox; that is
-the whole of the cross-type lock discipline.
+**The park verdict reads completion and outstanding work under the queue mutex.**
+`Inbox::next_or_idle` runs `Avatar::park_mode` before the pop through a
+zero-argument callback. The consumer's `Status::replied_at` records a current
+reply completion; `awaiting` records direct children spawned (`adopt`) or
+messaged (`message`) and not yet heard from (`heard`, at actual result ingress).
+`has_busy_children` is *live children ∩ awaiting*, independent of a child's
+`rest`. A child posts before retiring. Schedule publication follows
+[[map/exarch/frontend|frontend]]. Status writers drop their guards before
+pushing to an inbox.
 
-**`last_exchange` lives on the inbox, not on `Agent::status`.** It was never
-agent state — it is "when did a human or a parent last push into this
-mailbox", a fact the `Mailbox` itself witnesses. `Agent::engaged()` reads
-it, and `Agent::idle()` reads
-`mailbox.last_exchange().unwrap_or(started).elapsed()` for the TUI's idle age.
-The roster's `idle-s` reads `Status::rest`; the reply lease reads
+**`last_exchange` lives on the inbox, not on `Agent::status`.** `Mailbox::steer`
+and `Agent::message` stamp and enqueue atomically through `Mailbox::exchange`.
+`Agent::idle()` reads `mailbox.last_exchange().unwrap_or(started).elapsed()`
+for the TUI's idle age. `reply_since` uses that clock outside the queue lock
+to reject a completion superseded by accepted follow-up work, even before its
+pop. The roster's `idle-s` reads `Status::rest`; the reply lease reads
 `Status::replied_at`. These clocks have different origins.
 
 **Up is strong, down is weak.** `Role::Child`'s parent is a strong `Arc`, so
@@ -152,8 +145,7 @@ the launch's `Trunk` role, `fuel` and `search`. The recorded account is
 derived there, as `Avatar::child_of` derives it. `RootConfig` carries the
 prompt, `fuel` (exarch's and synod's launch sites pass `SPAWN_FUEL`), how
 roots are driven (`Trunk::{Headless, Attended, Embedded}`), the `Toolset`
-requests advertise (empty for `--chat`), the `Egress`
-(`exarch/src/egress.rs`) whose `search` verdict is read once, and the
+requests advertise (empty for `--chat`), the `search: bool` verdict, and the
 optional `factory` a wire root makes its children's engines with
 ([[#Wire-seat spawn|below]]) — all of it ends up on the fleet's `Launch`,
 held once. `RootSeat` picks the seat kind: `Identity` states `cwd: CwdPath`,
@@ -164,23 +156,27 @@ transport whose engine lives elsewhere, with authority unresolved in
 root whose attach carries resolved grants. The run's advisory lock is the
 launcher's to hold, never the node's.
 
-`Egress` bundles the two things a fleet's outbound network shares across
-every fork: `net_policy::NetPolicy` (`exarch/src/net_policy.rs`, the
-allowlist read from `/etc/exarch/net-policy.ral` or the embedded default —
-an exact `hosts` list of lowercase ASCII DNS names plus `search`, with
-`read`/`write`, `max-bytes` and `rate-per-minute` refused as hard errors
-naming their replacement) and an `AuditLog` (`exarch/src/egress.rs`),
-reduced to one `Tunnel` record per attempt: its final vetted address, and on
-close the byte count each direction carried — telemetry, not policy. None of
-it is a model-facing verb — there is no `fetch-url` builtin
-([[map/exarch/builtins|builtins]]). The same `Egress` a trunk opens at launch
-is what `guest-net::Config::egress` takes: the policy and ledger a synod
-session's guest network is gated by are the fleet's own, not a second
-copy ([[design/egress|egress]], [[map/synod|synod]]). Host-mode exarch, which
-has no guest to police, still keeps `Egress` for one thing: the `search` bit,
-which every fork inherits verbatim. `provider::wire::tool_defs` attaches the
-hosted search tool per request, only where the adapter has one, so a `/model`
-swap or a `role` child provider never leaves a stale verdict behind.
+`RootSeat::guest` (`exarch/src/agent/build.rs`) adopts the guest control
+stream with default liveness and builds the root attach from guest paths:
+scratch is the engine's home, `cwd` is its working directory, and the ceiling
+travels unresolved in `Root::config`. `app::SCRATCH_VAR`
+(`exarch/src/app.rs`) is the protocol's single scratch variable,
+`EXARCH_SCRATCH`; host and guest environments, the boot recipe, prompt and
+disk gauge all name it through that constant.
+
+**The agent reads one network-policy bit.** `net_policy::load`
+(`exarch/src/net_policy.rs`) reads `/etc/exarch/net-policy.ral` or the
+embedded default into `ral_core::egress::NetPolicy`: exact lowercase ASCII
+DNS `hosts` plus `search`. Retired keys are hard errors naming their replacement.
+Exarch passes only `search` through `RootConfig` into `Launch`; every root
+inherits it and forks may narrow it. Host mode opens no network ledger.
+
+Synod passes the shared policy and `netgate::AuditLog` separately in
+`netgate::Config`; the gate owns the ledger (`netgate/src/ledger.rs`)
+and is its only writer ([[design/egress|egress]], [[map/synod|synod]]).
+None of this is a model-facing verb ([[map/exarch/builtins|builtins]]).
+`provider::wire::tool_defs` attaches hosted search per request where the
+adapter supports it, so `/model` swaps and role children read the same verdict.
 
 A node built to converse — every attended or embedded root — withholds
 `reply`; whether it also parks for a human is the launch's say, not the
@@ -234,16 +230,16 @@ nothing — a bare conversation, the same attend loop.
 Three nested loops, the same for root and child alike:
 
 - `attend` — the per-agent lifetime. The process hears the OS signals
-  (`signals::face(&fleet)`, held at each site that launches one —
-  `headless::run`, `headless::converse_settled`, and `tui::tui_loop::run` — for
-  the whole run), which forwards each to every live root's `Agent::interrupt`
+  through `signals::face(&fleet)`, held by `headless::run`,
+  `headless::SettledConversation::exchange` and `tui::tui_loop::run` while
+  they attend. It forwards each to every live root's `Agent::interrupt`
   or `Agent::cancel`; a sub-agent hears none, being reached through the tree
   cascade (`Agent::cancel_tree`). `attend` and its bounded twin
   `attend_backlog` (converse's per-exchange drain) are one loop,
   `attend_until`, differing in how an empty inbox is treated (`Idle::Park` /
   `Idle::Return`). Each pass draws the next item from this agent's
   [[map/exarch/frontend|inbox]] — parked, via
-  `next_or_idle(|engaged| self.park_mode(engaged), …)`, which **re-evaluates
+  `next_or_idle(|| self.park_mode(), …)`, which **re-evaluates
   the park verdict on every `Condvar` wake**, so the idle lease's
   terminate-cause cancel, or the last live child settling, is seen on the very
   next wake — and hands it to `take_up`, which answers a `Step { settled:
@@ -268,8 +264,12 @@ Three nested loops, the same for root and child alike:
   agent itself (`Agent::deposit_reply`, which also posts the one-line notice
   to a parent); a child then parks `Engaged`, and only a parentless returning
   agent — the headless root — ends its loop on it, its driver reading the
-  deposit off `Agent::reply`. The loop's outcome is its last settlement; one
-  that settled nothing ends on why it stopped drawing — `Cancelled` under a
+  deposit off `Agent::reply`. `reply_completion_armed` reads only
+  `replied_at`, so the park callback takes no inbox-reading parameter and
+  never reacquires the queue lock. The loop's last reply settlement stands
+  only while `reply_since` still describes the accepted work; a queued
+  follow-up supersedes it even before dequeue. A loop without a current
+  settlement ends on why it stopped drawing — `Cancelled` under a
   terminate cause (a lease reap, a `cancel`), a finish without `reply`
   otherwise. At the single exit the loop winds a stranded
   prompt back through `quiesce` so the next `append_user` is always admissible
@@ -302,9 +302,11 @@ Three nested loops, the same for root and child alike:
   records the turn's start, renders the context and streams a reply through
   `provider.complete`; `settle_turn` records its usage, **admits** then
   appends the assistant message, and reads the turn's verdict off its cut and
-  its calls; `answer` runs the batch (`run_batch`), appends the results, takes
-  in the mid-exchange arrivals and the newly climbed warnings as steering, and
-  ends the deliberation on a cancel or a staged `reply`. The admission step (`admit_assistant`,
+  its calls; `answer` runs the batch (`run_batch`), appends the results, and
+  checks severance and cancellation before taking a staged `reply`. A reply
+  ends admission immediately, leaving queued deliveries for the next attend
+  item. Only a continuing batch admits mid-exchange arrivals and newly climbed
+  warnings as steering. The admission step (`admit_assistant`,
   at the commit boundary) enforces the [[invariants/transcript-admission|transcript-admission invariant]]:
   it repairs a non-object tool-call `fn_arguments` to `{}` (X2) and substitutes a
   stub for an otherwise-empty assistant message (X7), so every committed message
@@ -333,8 +335,8 @@ Three nested loops, the same for root and child alike:
   [[map/exarch/tools|tools]]); a spawn verb inside `ral` hands the script a start
   receipt after launching the child. Once every requested tool id has
   a result,
-  `run_batch` drains this agent's [[map/exarch/frontend|inbox]]'s tool-boundary
-  steering. A non-slash steering prompt is appended after the complete
+  `answer` drains this agent's [[map/exarch/frontend|inbox]]'s tool-boundary
+  steering if the batch will continue. A non-slash steering prompt is appended after the complete
   tool-result batch, and the next turn asks the provider with the user's steering
   in context
   ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]]). A
@@ -448,8 +450,9 @@ changes, silent while it holds, budget-free.
 boundaries.** `react`, the post-deliberation entry point, composes the repairs
 and the pin reminder into at most one `EXARCH_REMINDER` message per
 completion, self-posted as `Post::Nudge` and committed by `append_user` inside
-the same exchange, gated on `quiet` — no standing reply, no running
-worker, no busy children, the one condition those kinds share.
+the same exchange, gated on `quiet` — no running worker and no busy children.
+The current attempt's `Replied` outcome excludes repairs; a historical readable
+reply has no bearing on that decision.
 `Nudges::remind` is the other entry point, reached from `deliberate`'s `tell` at
 a *tool* boundary, where a gauge's `Reminder` — figures, not words; every
 model-facing sentence is `nudge.rs`'s to word — lands as steering trailing
@@ -1017,8 +1020,9 @@ bequest for its own life and a child attach has no cwd or env to get stale. The 
 returns, so the child is attached before the roster names it, and hands the
 seat to the same `spawn_async` an identity fork reaches, at `fuel = parent - 1`.
 A refused attach reaches the parent as the desk's refusal, in the engine's
-words. Synod's factory is the guest daemon on `FACTORY_PORT`, which admits only
-`VMADDR_CID_HOST` and spawns one engine per connection ([[map/synod|synod]]);
+words. Synod's factory is the guest daemon on `guest_abi::ports::FACTORY`,
+which admits only `VMADDR_CID_HOST` and spawns one engine per connection
+([[map/synod|synod]]);
 the child unseals against its own `Runtime` in `Engine::boot`.
 
 One exchange, one connection: the whole of failure is local. A factory that

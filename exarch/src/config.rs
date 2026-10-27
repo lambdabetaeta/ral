@@ -21,12 +21,11 @@ use crate::provider::{Auth, Service, ServiceName, built_in};
 use ral_core::Shell;
 use ral_core::authority::policy::{Capabilities, GrantLayer};
 use ral_core::host::EnvVars;
-use ral_core::own::{OwnError, UserFile};
-use ral_core::path::XdgKind;
+use ral_core::own::UserFile;
 use ral_core::shell::runtime::{Break, Escape, Mooring, Value};
 use ral_core::source::{SourceFile, SourceOrigin};
 
-const CONFIG_FILE: &str = "config.ral";
+pub(crate) const CONFIG_FILE: &str = "config.ral";
 
 /// Error-message prefix; `net_policy` passes its own to the shared helpers below.
 pub(crate) const LABEL: &str = "exarch config";
@@ -47,14 +46,6 @@ pub fn disk_warn_bytes() -> Result<Option<u64>, String> {
     }
 }
 
-/// Where exarch's declarations live: `config.ral` in its config home.
-///
-/// # Errors
-/// [`OwnError::NoBase`] where the host names no config base.
-pub fn file() -> Result<UserFile, OwnError> {
-    UserFile::xdg(crate::app::EXARCH.name(), XdgKind::Config, CONFIG_FILE)
-}
-
 /// The service declarations in `file`, an absent file being the empty list.
 ///
 /// It evaluates in a throwaway shell, never the session shell: a value to
@@ -67,7 +58,7 @@ pub fn file() -> Result<UserFile, OwnError> {
 /// A present file that is unreadable, whose path is not UTF-8, that raises,
 /// or that fails to decode is a hard error: a mistyped endpoint is a
 /// misdirected agent, not a recoverable default.
-pub fn load_declared(file: &UserFile, label: &str) -> Result<Vec<Service>, String> {
+pub(crate) fn load_declared(file: &UserFile, label: &str) -> Result<Vec<Service>, String> {
     let Some(source) = read_optional_file(file, label)? else {
         return Ok(Vec::new());
     };

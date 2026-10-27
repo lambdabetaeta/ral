@@ -38,8 +38,7 @@ impl Role {
         Self::BundledTool,
     ];
 
-    /// The argument that names this role.  `ral-daemon`, which cannot depend
-    /// on core, spells `GuestEngine`'s by hand.
+    /// The argument that names this role.
     #[must_use]
     pub const fn flag(self) -> &'static str {
         match self {
@@ -48,7 +47,7 @@ impl Role {
             #[cfg(unix)]
             Self::Engine => "--engine",
             #[cfg(seccomp)]
-            Self::GuestEngine => "--guest-engine",
+            Self::GuestEngine => guest_abi::layout::ENGINE_FLAG,
             Self::PipelineAnchor => "--ral-pipeline-anchor",
             Self::Warrant => "--warrant",
             Self::BundledTool => "--ral-bundled-tool",

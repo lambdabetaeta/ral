@@ -12,8 +12,8 @@
 //! A `socketpair` stands in for the vsock stream: the codec is
 //! transport-agnostic by design, so the engine cannot tell whether fd 3 is
 //! one end of a same-host `socketpair` or a connection to the host over
-//! `AF_VSOCK`. The guest side of the stand-in mirrors ral-daemon's spawn
-//! contract (`ral-daemon/src/engine.rs::spawn`): the engine is this multicall
+//! `AF_VSOCK`. The guest side of the stand-in mirrors ral-guest's spawn
+//! contract (`ral-guest/src/engine.rs::spawn`): the engine is this multicall
 //! binary re-exec'd with `--engine`, its protocol socket on fd 3. The test
 //! binary serves `--engine` itself through the shared pre-`main` `#[ctor]`
 //! ([`exarch::pre_main_ctor!`]), so `std::env::current_exe()` is a genuine
@@ -65,7 +65,7 @@ fn attach(transport: &WireTransport) -> tempfile::TempDir {
             EnginePath::Host(dir.path().to_path_buf()),
         ),
         Root::new(EnginePath::Host(dir.path().to_path_buf())).with_env(vec![(
-            exarch::app::EXARCH.scratch_var(),
+            exarch::app::SCRATCH_VAR.to_owned(),
             dir.path().to_string_lossy().into_owned(),
         )]),
     );

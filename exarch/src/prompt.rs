@@ -12,6 +12,10 @@ use std::collections::BTreeSet;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
+pub const RAL_REFERENCE: &str = include_str!("../data/ral.md");
+pub const EDIT_REPLACE: &str = include_str!("../data/edit-replace.md");
+const EDIT_HASH: &str = include_str!("../data/edit-hash.md");
+
 /// The stand-in system prompt for `--chat`, which assembles none.
 ///
 /// A bare period: the Responses adapter rejects an empty system prompt
@@ -66,12 +70,12 @@ pub fn assemble(
             read_files(files, &reader)?
         },
     ));
-    sections.push((Some("Ral"), include_str!("../data/ral.md").into()));
+    sections.push((Some("Ral"), RAL_REFERENCE.into()));
     sections.push((
         Some("Editing"),
         match edit {
-            EditScheme::Hash => include_str!("../data/edit-hash.md").into(),
-            EditScheme::Replace => include_str!("../data/edit-replace.md").into(),
+            EditScheme::Hash => EDIT_HASH.into(),
+            EditScheme::Replace => EDIT_REPLACE.into(),
         },
     ));
     sections.push((Some("Builtins"), BUILTIN_INDEX_PLACEHOLDER.to_string()));
@@ -201,7 +205,7 @@ pub fn host_section(app: crate::app::App) -> String {
     format!(
         "You are an agent named '{NAME_PLACEHOLDER}'.\n\n{}\n{GRANT_PLACEHOLDER}- scratch: `${}` = {SCRATCH_PLACEHOLDER}; temporary files go in `!{{env}}[TMPDIR]` under this session scratch. Hardcoded `/tmp` is discarded after each command on Linux and refused on macOS.\n",
         host::snapshot(state.as_deref()),
-        app.scratch_var()
+        crate::app::SCRATCH_VAR
     )
 }
 
@@ -347,7 +351,8 @@ fn join_str<S: AsRef<str>>(v: &[S]) -> String {
 }
 
 /// The Skills section: `name: description` per skill, the same
-/// progressive-disclosure shape as [`BuiltinIndex`].
+/// progressive-disclosure shape as
+/// [`BuiltinIndex`](crate::agent::index::BuiltinIndex).
 fn skills_section(skills: &[skill::Skill]) -> String {
     let mut body =
         String::from("Available skills (call `skill <name>` to load, `skill-list` to refresh):\n");

@@ -100,6 +100,10 @@ impl Avatar {
                 Err(s) => break Some(s),
             }
         };
+        // A reply superseded by an accepted follow-up no longer settles current work.
+        let settled = settled.filter(|outcome| {
+            !matches!(outcome, AgentOutcome::Replied) || self.agent.reply_since().is_some()
+        });
         // A severance the loop broke on, or one a park quiesced behind, is
         // recorded exactly once: the engine's own account as a durable note,
         // the plain sentence as the failed outcome.  Otherwise the last
@@ -137,6 +141,8 @@ impl Avatar {
     /// of the run that observes it, so a reap during a long idle surfaces once
     /// an item next runs.
     fn draw(&self, idle: Idle) -> Option<Next> {
+        #[cfg(test)]
+        tests::before_draw(self);
         match idle {
             Idle::Return => self.inbox.next_item(),
             Idle::Park => {
@@ -145,14 +151,14 @@ impl Avatar {
                 // already in hand the agent is not idle for any observable
                 // moment, and the deliberation's own transitions are the truth.
                 if self.inbox.is_empty() {
-                    let mode = self.park_mode(self.agent.engaged());
+                    let mode = self.park_mode();
                     self.agent.set_resting(mode == ParkMode::Engaged);
                     self.recorder()
                         .transient(Transient::State(idle_state(mode)));
                 }
                 // The verdict is recomputed on every wake.
                 self.inbox
-                    .next_or_idle(|engaged| self.park_mode(engaged), &self.agent.token)
+                    .next_or_idle(|| self.park_mode(), &self.agent.token)
             }
         }
     }
@@ -265,10 +271,8 @@ impl Avatar {
         let facts = nudge::Facts {
             must_reply: self.agent.role.returns(),
             pinned: self.pinned_digest(),
-            // Nudged only when nothing else is already carrying this agent
-            // forward: no reply standing for a consumer to fetch, no worker
-            // still running, no busy children.
-            quiet: !self.agent.has_reply() && workers_idle && !self.agent.has_busy_children(),
+            // Repairs wait for running workers and busy children.
+            quiet: workers_idle && !self.agent.has_busy_children(),
         };
         let nudged = self
             .readings
@@ -303,15 +307,8 @@ impl Avatar {
         (!lines.is_empty()).then(|| lines.join("; "))
     }
 
-    /// How an empty inbox should be treated, recomputed on every wake, from
-    /// `engaged` — the exchange clock, read by `next_or_idle` under the queue
-    /// mutex — and this agent's own status.  A conversing agent with a human
-    /// attached parks [`ParkMode::Held`], immune to cancellation; one driven
-    /// one exchange at a time waits on nothing but its fleet; a returning
-    /// agent a human has exchanged with parks [`ParkMode::Engaged`] — the same
-    /// wait, but a terminate-cause cancel still ends it, and the fleet's idle
-    /// lease rather than this predicate bounds it.
-    fn park_mode(&self, engaged: bool) -> ParkMode {
+    /// Recompute residency from current completion and outstanding work.
+    fn park_mode(&self) -> ParkMode {
         // Nothing is left to wait for once the engine is gone.
         if self.seat.severed().is_some() {
             return ParkMode::Quiesce;
@@ -328,7 +325,7 @@ impl Avatar {
             };
         }
         // Only a child waits to be messaged; a headless root returns and ends.
-        if matches!(agent.role, Role::Child { .. }) && (engaged || agent.has_reply()) {
+        if matches!(agent.role, Role::Child { .. }) && agent.reply_completion_armed() {
             return ParkMode::Engaged;
         }
         if agent.has_busy_children() {
