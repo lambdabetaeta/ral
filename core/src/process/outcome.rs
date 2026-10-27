@@ -193,10 +193,17 @@ impl SpawnFailure {
         let Self::NotAProgram { found: None, .. } = self else {
             return None;
         };
-        Some(match binder {
-            Some(name) => format!("to bind the path as text, write `let {name} = #'{cmd}'#`"),
-            None => format!("to use the path as text, write `#'{cmd}'#`"),
-        })
+        Some(path_as_text_hint(cmd, binder))
+    }
+}
+
+/// What to write to use the path `cmd`, which stands where a command goes, as
+/// text; bound to `binder` when the head is the whole right-hand side of that
+/// `let`.
+pub(crate) fn path_as_text_hint(cmd: &str, binder: Option<&str>) -> String {
+    match binder {
+        Some(name) => format!("to bind the path as text, write `let {name} = #'{cmd}'#`"),
+        None => format!("to use the path as text, write `#'{cmd}'#`"),
     }
 }
 

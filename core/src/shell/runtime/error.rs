@@ -198,6 +198,16 @@ impl Error {
         self
     }
 
+    /// Prepends `more` above any hint already carried.
+    pub(crate) fn prepend_hint(mut self, more: impl Into<String>) -> Self {
+        let more = more.into();
+        self.hint = Some(match self.hint.take() {
+            Some(hint) => format!("{more}\n\n{hint}").into(),
+            None => more.into(),
+        });
+        self
+    }
+
     pub(crate) fn with_witness(mut self, witness: Option<Span>) -> Self {
         self.witness = witness.map(Box::new);
         self

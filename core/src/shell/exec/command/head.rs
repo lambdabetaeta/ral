@@ -12,8 +12,8 @@
 use crate::authority::policy::{Admitted, Program};
 use crate::ir::CommandName;
 use crate::path::{LeafMode, LexicalPath, PathSearch, is_executable_file, walk};
-use crate::process::{SpawnFailure, Unrunnable};
-use crate::shell::runtime::{Context, Error, Mooring, Settled, Shell};
+use crate::process::{SpawnFailure, Unrunnable, path_as_text_hint};
+use crate::shell::runtime::{Break, Context, Error, Mooring, Settled, Shell};
 use crate::site::{Silent, site};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -47,11 +47,15 @@ impl Head {
     /// A head with no program passes as it is.
     ///
     /// # Errors
-    /// The grant's refusal, recorded against `mooring`.
+    /// The grant's refusal, recorded against `mooring`.  A path head's
+    /// refusal leads with the path read as text: said from the spelling
+    /// alone, since the refusal must not tell what lies at the path.
     pub(crate) fn admit(self, mooring: &Mooring, shell: &mut Shell) -> Settled<Head<Admitted>> {
         let Self { shown, program } = self;
         let program = match program {
-            Ok(program) => Ok(shell.check_exec(&shown, program, mooring)?),
+            Ok(program) => Ok(shell
+                .check_exec(&shown, program, mooring)
+                .map_err(|refusal| path_as_text(refusal, &shown))?),
             Err(missing) => Err(missing),
         };
         Ok(Head { shown, program })
@@ -98,6 +102,16 @@ impl Head {
                 },
             },
         }
+    }
+}
+
+/// `refusal`, led by the path as text when `shown` is a path head.
+fn path_as_text(refusal: Break, shown: &str) -> Break {
+    match refusal {
+        Break::Error(e) if crate::path::names_a_path(shown) => {
+            Break::Error(e.prepend_hint(path_as_text_hint(shown, None)))
+        }
+        other => other,
     }
 }
 

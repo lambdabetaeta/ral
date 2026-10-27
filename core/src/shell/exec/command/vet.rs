@@ -113,6 +113,15 @@ mod tests {
         }
     }
 
+    /// A grant layer under which no program may run.
+    fn no_exec() -> crate::authority::policy::GrantLayer {
+        use crate::authority::policy::{Capabilities, ExecGrant};
+        crate::test_helper::layer(Capabilities {
+            exec: Some(ExecGrant::default()),
+            ..Capabilities::default()
+        })
+    }
+
     /// The headline regression: a file sitting in the directory the user just
     /// `cd`'d into is not on `PATH`, and a `PATH` ending in `;` does not put it
     /// there.  Naming it bare is 127 ("no such command"), never 126.
@@ -237,23 +246,54 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_denied_non_executable_is_refused_as_denied_not_as_non_executable() {
-        use crate::authority::policy::{Capabilities, ExecGrant};
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("plain");
         std::fs::write(&file, "").unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
         let mut shell = crate::test_helper::core_shell();
-        let nothing = crate::test_helper::layer(Capabilities {
-            exec: Some(ExecGrant::default()),
-            ..Capabilities::default()
-        });
         let head = Head::resolve(
             &CommandName::Path(file.to_string_lossy().into_owned()),
             &shell.context,
         );
-        let e = shell.with_layer(nothing, |shell| refused(head, shell));
+        let e = shell.with_layer(no_exec(), |shell| refused(head, shell));
         assert!(e.message.contains("denied by active grant"), "{e:?}");
+    }
+
+    /// `let scratch = /tmp` runs a path, which a grant refuses; the refusal is
+    /// still the grant's, and leads with the path as text without telling
+    /// what lies there.
+    #[test]
+    fn a_denied_path_head_is_offered_as_text_ahead_of_the_grants_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let shown = tmp.path().to_string_lossy().into_owned();
+        let mut shell = crate::test_helper::core_shell();
+        let head = Head::resolve(&CommandName::Path(shown.clone()), &shell.context);
+        let e = shell.with_layer(no_exec(), |shell| refused(head, shell));
+        assert!(e.message.contains("denied by active grant"), "{e:?}");
+        let hint = e.hint.as_deref().expect("a refusal carries a hint");
+        let (text, grant) = hint.split_once("\n\n").expect("both hints are kept");
+        assert!(text.contains(&format!("#'{shown}'#")), "{hint}");
+        assert!(grant.contains("grant") && !grant.contains("#'"), "{hint}");
+    }
+
+    /// A bare name is no path, so its refusal offers nothing as text.
+    #[test]
+    fn a_denied_bare_name_is_not_offered_as_text() {
+        crate::path::forget_located_commands();
+        let dir = tempfile::tempdir().unwrap();
+        let name = plant(dir.path(), "zzdeniedbare");
+        let mut shell = crate::test_helper::core_shell();
+        shell
+            .context
+            .set_env_var("PATH", dir.path().to_string_lossy().into_owned());
+        let head = Head::resolve(&CommandName::Bare(name.into()), &shell.context);
+        let e = shell.with_layer(no_exec(), |shell| refused(head, shell));
+        assert!(e.message.contains("denied by active grant"), "{e:?}");
+        assert!(
+            !e.hint.as_deref().unwrap_or_default().contains("#'"),
+            "{e:?}"
+        );
     }
 
     /// A path head naming no file is a missing command, and the refusal names
