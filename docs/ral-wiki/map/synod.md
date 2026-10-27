@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 3dbbe8f3
+generated_at_commit: 14cd830e3885ef4fb3f22778a359e825fede95e0
 generated_at_date: 2026-10-27
 covers_paths: [guest-abi/, ral-guest/, netgate/, vm-manager/, synod-machine-broker/, synod/, vm-image/]
 ---
@@ -220,7 +220,7 @@ and composes the desktop application.
 | L1 wire | `wire.rs` | Every `TS` type, pure DTO constructors, `WindowReport::of`, `OPENABLE`, `open_as` |
 | L2 assistant | `assistant/{accounts,menu,prompt,conversation,baseline,guest,signin}.rs` | Product assembly and conversation lifecycle |
 | L3 seam | `seam/{narration,ipc}.rs` | Event folding and event-name constants |
-| L4 window | `window/{state,conversation,files,accounts,highlight}.rs` | Tauri state, commands and publication |
+| L4 window | `window/{state,conversation,files,accounts,highlight,live}.rs` | Tauri state, commands, publication and the live-frame scheme |
 
 - Tauri, its plugins, `url`, L4 and the desktop `main` compile only for
   macOS or Windows. L0–L3 compile on Linux; its `main` prints a refusal.
@@ -229,9 +229,12 @@ and composes the desktop application.
   `tauri-build` is an unconditional build dependency. Generated permission
   schemas in `synod/gen/` are ignored build products.
 - `main.rs` runs `exit_if_re_exec_child` first, prepares credentials before
-  starting threads, installs plugins and state, and registers 14 commands.
-  Its navigation guard admits only the app origin or a configured development
-  origin; CSP and capabilities are in `tauri.conf.json` and `capabilities/`.
+  starting threads, installs plugins and state, registers the `synod-live`
+  scheme (`live::serve`) and registers 14 commands.
+  Its navigation guard admits only the app origin, the live frame or a
+  configured development origin; `is_live_frame` accepts WebKit's spelling
+  because WebKit asks the guard about subframe loads. CSP and capabilities are
+  in `tauri.conf.json` and `capabilities/`.
   The guard is a plugin because the configured webview is not built in code;
   foreign navigation would expose the injected command bridge to model output.
 
@@ -287,13 +290,15 @@ is judged; shared machinery stays with exarch and vm-manager.
   `LoginPhase` into `wire::SignInStep` and admits the credential through
   exarch's shared OAuth machinery. Shared `Holdings` make an admitted account
   available without a restart. Synod has no direct tokio dependency.
-- `assistant/prompt.rs` and `data/*.md` supply the office persona, examples
-  and toolbox. `exarch::prompt::{RAL_REFERENCE, EDIT_REPLACE}` supply shared
-  text. The host section states only guest truths; no host folder path enters
-  the prompt, and HOME is the guest scratch.
+- `assistant/prompt.rs` and `data/*.md` supply the office persona, examples,
+  toolbox and live-page rules (`data/live.md`).
+  `exarch::prompt::{RAL_REFERENCE, EDIT_REPLACE}` supply shared text. The host
+  section states only guest truths; no host folder path enters the prompt, and
+  HOME is the guest scratch.
   String replacement avoids line witnesses for mostly opaque office formats;
-  optional house rules come from trusted config, and surface guidance comes
-  last for recency. The host supplies only time, matching the guest's clock.
+  optional house rules come from trusted config, and surface guidance then
+  live-page guidance come last for recency. The host supplies only time,
+  matching the guest's clock.
 - `assistant/conversation.rs::Conversation::begin` opens the grant, selects
   a machine and account, opens the network ledger and run log under
   `RunLock`, starts `Baseline`, boots, then seats `Guest`. The ledger opens
@@ -373,6 +378,15 @@ Publication and ownership agree at one generation boundary.
   cancellable sign-in and menu refresh. Sign-in releases its slot before
   refreshing the menu and announcing completion. `window/highlight.rs`
   translates core's syntax spans to UTF-16 offsets.
+- `window/live.rs` serves the `synod-live` scheme, the origin live pages run
+  in ([[decisions/261027_live-pages-run-sealed|live-pages-run-sealed]]).
+  `route` admits `/` (the shell), four prelude files and `vendor/`, by plain
+  path segments only; `serve` refuses a resolver answer of type `text/html`,
+  since a missing asset resolves to the app's own page. `sealed` builds every
+  response with the frame's CSP (`sandbox allow-scripts`, no network source, no
+  `'unsafe-eval'`), `nosniff`, a wildcard CORS origin and
+  `X-DNS-Prefetch-Control: off`. The main CSP's `frame-src` names the one frame
+  origin per platform, `tauri.windows.conf.json` overriding it.
 
 ### synod/ui/ — the static frontend
 
@@ -409,6 +423,19 @@ The frontend uses ES modules without a bundler or npm; `index.html` loads
   `Boundary` or bubble closure settles that tail.
   Rebuilding whole bubbles is quadratic and reflows settled math; only closed
   code is highlighted to avoid a fresh shell request for every streaming token.
+- `live.js`, `live-frame.js` and `live-sizer.js` run a settled `live-html`
+  fence as a page. `live.js` replaces the fence with a sandboxed iframe on the
+  `synod-live` origin (a placeholder while the fence is open), answers the
+  frame's `"ready"` with the page source and sets the frame's height from its
+  clamped reports. `live-frame.js` is the inert shell: framed, it takes one
+  page by message and writes it after a prelude; at top level it does nothing.
+  `live-sizer.js` reports the page's root height. `prose.js` mounts frames
+  from settled chunks and holds a placeholder for the open tail.
+- `css/tokens.css` is custom properties and `color-scheme` only, and the live
+  prelude loads it with `css/live-frame.css`. `css/base.css`, linked after it in
+  `index.html`, holds the app page's base rules (box sizing, `html, body`
+  height, paper and gradient); the prelude omits it because `height: 100%`
+  would pin the root's border box to the viewport and blind the sizer.
 - `math.js::renderAssistantMarkdown` lifts formulae before marked parses prose,
   inserts KaTeX nodes with trust disabled, then applies DOMPurify to the whole
   inert tree. The same module supplies the delimiter scan. Sanitized trees
@@ -418,8 +445,9 @@ The frontend uses ES modules without a bundler or npm; `index.html` loads
   risks mutation XSS. KaTeX accessibility tags survive; navigation and style
   tags do not. Code restores raw delimiters, and malformed TeX renders in place.
 - `ral-highlight.js` asks `highlight_ral` for core's classifications, builds
-  text nodes and caches by exact source text. Marked, DOMPurify, KaTeX
-  and three.js (for the armillary) are vendored verbatim under `vendor/`, with
+  text nodes and caches by exact source text. Marked, DOMPurify, KaTeX,
+  three.js (for the armillary), and Chart.js, D3 and Mermaid (for live pages)
+  are vendored verbatim under `vendor/`, with
   versions and hashes there; hand-written `.d.ts` files type the three.js slice
   in use, since `deno check` cannot read the minified build.
 - `just ui-check` exports Rust bindings into ignored `ui/js/bindings/` and

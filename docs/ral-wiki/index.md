@@ -335,6 +335,7 @@ Newest last; the page carries the full reasoning.
 
 - *active* — [[decisions/261027_unix-sockets-follow-writes|unix-sockets-follow-writes]] — outside pathname sockets require stated fs writes; unrestricted fs admits none, macOS keeps its resolver under net, and Linux below ABI 9 retains pathname reachability. Session temp lives in scratch.
 - *active* — [[decisions/261027_the-vm-crates-are-layered|the-vm-crates-are-layered]] — one dependency-free ABI leaf for every VM party; one guest program; the network gate owns its ledger; the privileged machine service is its own crate; Synod composes them in five crate-private layers with a single typed window seam.
+- *active* — [[decisions/261027_live-pages-run-sealed|live-pages-run-sealed]] — **a fenced `live-html` block in synod's prose runs as a page in a sealed subframe of its own `synod-live` scheme: the first model-authored code on the host, with no command bridge, no network source and only the vendored libraries.** A registered scheme is a local origin that would hold the invoke key, so the shell is inert at top level and the page enters a subframe by message, never by URL, `srcdoc` or the main page; DOMPurify and the main CSP are untouched beyond `frame-src`. The egress audit that gates the merge has not been run; the page keeps its probe and smoke pages for reproduction.
 
 ## related/ — comparison to existing work
 

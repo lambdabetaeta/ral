@@ -1,5 +1,6 @@
 import { renderAssistantMarkdown, mathClosed } from "./math.js";
-import { highlightRal } from "./ral-highlight.js";
+import { highlightCode } from "./code-highlight.js";
+import { mountLiveFrames, holdLiveFrames } from "./live.js";
 
 // Render each settled markdown block once; rebuild only the open tail as tokens arrive.
 
@@ -18,7 +19,9 @@ export function growProse(bubble, block) {
     live.remove();
     return;
   }
-  live.replaceChildren(renderAssistantMarkdown(tail.slice(cut)));
+  const nodes = renderAssistantMarkdown(tail.slice(cut));
+  holdLiveFrames(nodes);
+  live.replaceChildren(nodes);
   placeCaret(live);
 }
 
@@ -31,10 +34,11 @@ function liveTail(bubble) {
   return live;
 }
 
-// Highlight only settled code; a changing tail would require a new shell call per token.
+// Highlight and run only settled code; a changing tail would re-run it per token.
 function renderChunk(src) {
   const nodes = renderAssistantMarkdown(src);
-  for (const code of nodes.querySelectorAll("code.language-ral")) highlightRal(code);
+  highlightCode(nodes);
+  mountLiveFrames(nodes);
   return nodes;
 }
 

@@ -45,6 +45,10 @@ pub(crate) fn assemble(workspace: &Path, folder_name: &str) -> Result<String, St
         Some("Talking to the user"),
         include_str!("../../data/surface.md").into(),
     ));
+    sections.push((
+        Some("Live pages"),
+        include_str!("../../data/live.md").into(),
+    ));
     Ok(exarch::prompt::render(&sections))
 }
 

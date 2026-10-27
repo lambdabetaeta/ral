@@ -1,0 +1,8 @@
+html {
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15.5px;
+  line-height: 1.55;
+}
+
+body { margin: 0; }

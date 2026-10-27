@@ -35,12 +35,14 @@
       --diff-add-emph: light-dark(#cfe5d5, #2b4a34);
       --diff-del-emph: light-dark(#f0cfc2, #4d2c22);
 
-      /* Ral syntax highlighting — see ral-highlight.js. */
+      /* Syntax highlighting — see code-highlight.js. */
       --code-keyword: light-dark(#6a4f9c, #b39ddb);
       --code-string: light-dark(#3f7d52, #8fcf9f);
       --code-tag: light-dark(#9c4f78, #dba0c0);
       --code-variable: light-dark(#95601f, #d9a565);
       --code-punct: light-dark(#6d7686, #9aa4b8);
+      --code-comment: var(--ink-faint);
+      --code-number: light-dark(#2f7a80, #7fc4c8);
 
       --shadow-soft: 0 1px 2px rgba(60, 48, 32, 0.05);
     }
@@ -54,24 +56,3 @@
     /* The viewer's theme toggle wins in both directions. */
     :root[data-theme="light"] { color-scheme: light; }
     :root[data-theme="dark"]  { color-scheme: dark; }
-
-    * { box-sizing: border-box; }
-
-    html, body {
-      margin: 0;
-      height: 100%;
-      background: var(--paper);
-      color: var(--ink);
-      font-family: var(--sans);
-      -webkit-font-smoothing: antialiased;
-      text-rendering: optimizeLegibility;
-    }
-
-    body {
-      /* A whisper of texture so the paper is paper, not a flat fill. */
-      background-image:
-        radial-gradient(1200px 600px at 12% -8%, rgba(120, 150, 132, 0.06), transparent 60%),
-        radial-gradient(1000px 500px at 100% 0%, rgba(160, 120, 60, 0.05), transparent 55%);
-      background-attachment: fixed;
-    }
-

@@ -1,7 +1,7 @@
 import { $ } from "./dom.js";
 
 // WebView2 disables native dialogs; use the separately injected plugin and await its result.
-export const confirmDialog = window.__TAURI__?.dialog?.confirm ?? (async () => true);
+export const confirmDialog = globalThis.__TAURI__?.dialog?.confirm ?? (() => Promise.resolve(true));
 
 export const state = {
   /** @type {import("./bindings/PickedFolder.ts").PickedFolder | null} */

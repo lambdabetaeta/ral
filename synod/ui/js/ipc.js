@@ -1,74 +1,77 @@
-const TAURI = window.__TAURI__;
-const invoke = TAURI ? TAURI.core.invoke : async () => { throw new Error("not running in the app"); };
-const listen = TAURI ? TAURI.event.listen : async () => () => {};
+const TAURI = globalThis.__TAURI__;
+const invoke = TAURI ? TAURI.core.invoke : () => Promise.reject(new Error("not running in the app"));
+const listen = TAURI ? TAURI.event.listen : () => Promise.resolve(() => {});
+
+// The sealed origin live pages run in; window/live.rs serves it.
+export const LIVE_FRAME_URL = TAURI ? TAURI.core.convertFileSrc("", "synod-live") : "about:blank";
 
 /** @returns {Promise<import("./bindings/PickedFolder.ts").PickedFolder | null>} */
-export async function chooseFolder() {
+export function chooseFolder() {
   return invoke("choose_folder");
 }
 
 /** @returns {Promise<import("./bindings/ModelMenu.ts").ModelMenu>} */
-export async function listModels() {
+export function listModels() {
   return invoke("list_models");
 }
 
 /** @param {string} folder @param {import("./bindings/Choice.ts").Choice} choice @param {string} attempt @returns {Promise<void>} */
-export async function startConversation(folder, choice, attempt) {
+export function startConversation(folder, choice, attempt) {
   return invoke("start_conversation", { folder, choice, attempt });
 }
 
 /** @param {string} attempt @param {string} message @returns {Promise<void>} */
-export async function sendMessage(attempt, message) {
+export function sendMessage(attempt, message) {
   return invoke("send_message", { attempt, message });
 }
 
 /** @param {number} index @param {string} path @returns {Promise<void>} */
-export async function openFile(index, path) {
+export function openFile(index, path) {
   return invoke("open_file", { index, path });
 }
 
 /** @param {string} url @returns {Promise<void>} */
-export async function openUrl(url) {
+export function openUrl(url) {
   return invoke("open_url", { url });
 }
 
 /** @param {string} src @returns {Promise<import("./bindings/RalToken.ts").RalToken[]>} */
-export async function ralTokens(src) {
+export function ralTokens(src) {
   return invoke("highlight_ral", { src });
 }
 
 /** @returns {Promise<import("./bindings/AccountList.ts").AccountList>} */
-export async function listAccounts() {
+export function listAccounts() {
   return invoke("list_accounts");
 }
 
 /** @param {string} account @param {string} key @returns {Promise<import("./bindings/AccountList.ts").AccountList>} */
-export async function saveKey(account, key) {
+export function saveKey(account, key) {
   return invoke("save_key", { account, key });
 }
 
 /** @param {string} account @returns {Promise<import("./bindings/AccountList.ts").AccountList>} */
-export async function forgetKey(account) {
+export function forgetKey(account) {
   return invoke("forget_key", { account });
 }
 
 /** @param {{name: string, endpoint: string, protocol: string, key: string | null}} endpoint @returns {Promise<import("./bindings/AccountList.ts").AccountList>} */
-export async function saveEndpoint(endpoint) {
+export function saveEndpoint(endpoint) {
   return invoke("save_endpoint", endpoint);
 }
 
 /** @param {string} account @returns {Promise<import("./bindings/AccountList.ts").AccountList>} */
-export async function forgetEndpoint(account) {
+export function forgetEndpoint(account) {
   return invoke("forget_endpoint", { account });
 }
 
 /** @returns {Promise<void>} */
-export async function signIn() {
+export function signIn() {
   return invoke("sign_in");
 }
 
 /** @returns {Promise<void>} */
-export async function cancelSignIn() {
+export function cancelSignIn() {
   return invoke("cancel_sign_in");
 }
 

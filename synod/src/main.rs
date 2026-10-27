@@ -30,7 +30,7 @@ mod window;
 mod wire;
 
 #[cfg(any(target_os = "macos", windows))]
-use window::{accounts, conversation, files, highlight, state};
+use window::{accounts, conversation, files, highlight, live, state};
 
 #[cfg(any(target_os = "macos", windows))]
 use exarch::provider::Holdings;
@@ -60,6 +60,7 @@ fn main() {
                 .build(),
         )
         .plugin(navigation_guard())
+        .register_uri_scheme_protocol(live::SCHEME, live::serve)
         .manage(state::Running::default())
         .manage(accounts)
         .manage(state::Review::default())
@@ -108,7 +109,9 @@ fn main() -> std::process::ExitCode {
 fn navigation_guard() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri::plugin::Builder::new("navigation-guard")
         .on_navigation(|webview, url| {
-            is_own_page(url) || is_dev_server(url, webview.config().build.dev_url.as_ref())
+            is_own_page(url)
+                || is_live_frame(url)
+                || is_dev_server(url, webview.config().build.dev_url.as_ref())
         })
         .build()
 }
@@ -125,6 +128,14 @@ fn is_own_page(url: &tauri::Url) -> bool {
         }
 }
 
+/// `WebKit` asks the guard about subframe loads, so a live frame must pass in `WebKit`'s
+/// spelling; `WebView2` asks only about top-level loads, so its spelling never does.
+/// A top-level live frame is inert (`live-frame.js`).
+#[cfg(any(target_os = "macos", windows))]
+fn is_live_frame(url: &tauri::Url) -> bool {
+    url.scheme() == live::SCHEME && url.host_str() == Some("localhost") && url.port().is_none()
+}
+
 /// The configured dev origin is trusted only in debug builds.
 #[cfg(any(target_os = "macos", windows))]
 fn is_dev_server(url: &tauri::Url, dev_url: Option<&tauri::Url>) -> bool {
@@ -133,10 +144,14 @@ fn is_dev_server(url: &tauri::Url, dev_url: Option<&tauri::Url>) -> bool {
 
 #[cfg(all(test, any(target_os = "macos", windows)))]
 mod tests {
-    use super::is_own_page;
+    use super::{is_live_frame, is_own_page};
 
     fn own(url: &str) -> bool {
         is_own_page(&url.parse().expect("a well-formed test URL"))
+    }
+
+    fn live(url: &str) -> bool {
+        is_live_frame(&url.parse().expect("a well-formed test URL"))
     }
 
     #[test]
@@ -160,6 +175,19 @@ mod tests {
             "about:blank",
         ] {
             assert!(!own(url), "{url} should be refused");
+        }
+    }
+
+    #[test]
+    fn a_live_frame_is_admitted_in_webkits_spelling_only() {
+        assert!(live("synod-live://localhost/"));
+        for url in [
+            "http://synod-live.localhost/",
+            "https://synod-live.localhost/",
+            "synod-live://evil/",
+            "synod-live://localhost:8080/",
+        ] {
+            assert!(!live(url), "{url} should be refused");
         }
     }
 }

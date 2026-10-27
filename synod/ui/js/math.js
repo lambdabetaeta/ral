@@ -205,7 +205,7 @@ function katexNodes(formula) {
       trust: false,
       strict: false,
     });
-  } catch (err) {
+  } catch {
     return null;
   }
   const nodes = document.createDocumentFragment();

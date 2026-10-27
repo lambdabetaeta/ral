@@ -1,0 +1,21 @@
+    /* App page only: live frames load tokens.css without these. */
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: var(--sans);
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+
+    body {
+      /* A whisper of texture so the paper is paper, not a flat fill. */
+      background-image:
+        radial-gradient(1200px 600px at 12% -8%, rgba(120, 150, 132, 0.06), transparent 60%),
+        radial-gradient(1000px 500px at 100% 0%, rgba(160, 120, 60, 0.05), transparent 55%);
+      background-attachment: fixed;
+    }
