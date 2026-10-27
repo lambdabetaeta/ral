@@ -69,11 +69,18 @@ function skipBlank(tokens, at) {
 // Place the writing front after the final word; never descend into KaTeX layout.
 function placeCaret(live) {
   let host = live;
-  while (host.lastElementChild && !host.lastElementChild.classList.contains("katex")) {
-    host = host.lastElementChild;
-  }
+  for (let last = lastContent(host); descendable(last); last = lastContent(host)) host = last;
   const caret = document.createElement("span");
   caret.className = "caret";
   caret.setAttribute("aria-hidden", "true");
   host.appendChild(caret);
 }
+
+// Skip the whitespace between blocks; trailing text must stop the descent.
+function lastContent(node) {
+  let last = node.lastChild;
+  while (last?.nodeType === Node.TEXT_NODE && !last.data.trim()) last = last.previousSibling;
+  return last;
+}
+
+const descendable = (n) => n?.nodeType === Node.ELEMENT_NODE && n.hasChildNodes() && !n.classList.contains("katex");
