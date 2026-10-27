@@ -182,7 +182,6 @@ pub(crate) fn run_source(
         ..Run::foreground(program, origin.clone())
     };
     let boot = Boot {
-        login: false,
         no_rc: true,
         recursion_limit,
         capabilities,

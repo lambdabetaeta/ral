@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
+generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
 verified_at_commit: 646bff0a
 verified_at_date: 2026-10-13
 anchors: [sandboxed_command, build_launch, serve_warrant, Warrant, Slot, Handoff, Landlocked, Envelope, Refusal, spawn_error, projection_enforceable, SessionSandbox, ensure_frozen_grant, ensure_unreachable, fs_capability_name]
@@ -13,6 +13,12 @@ nothing in that path can run a program unconfined.** When `build_launch`
 under a restrictive projection, it calls `sandboxed_command`
 (`authority/sandbox/launch.rs`), which confines that one child. Why it is per command is
 [[internals/capability-enforcement|capability-enforcement]].
+
+On Unix, `build_launch` registers the session's `ChildLimits` hook immediately
+after `apply_env`, before `limit_resources`. `pre_exec` hooks run in registration
+order: session limits set only the soft ceiling, preserving the hard ceiling;
+a grant sets soft and hard together afterward and therefore wins. ral's own
+resource limits never change.
 
 ## One confinement point per platform
 

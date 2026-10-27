@@ -1,7 +1,7 @@
 //! RC file discovery, parsing, and application.
 //!
 //! An rc file is ral source whose return value is a configuration record, or
-//! `()` for a file with nothing to set.  Its eleven keys are declared once, in
+//! `()` for a file with nothing to set.  Its thirteen keys are declared once, in
 //! `Form::Rc`'s table, and the checker ascribes that table to the file's
 //! inferred return type, so an unknown key or a wrong field type is a static
 //! error and the whole file is skipped.  A file whose return the checker
@@ -91,6 +91,8 @@ const DEFAULT_RC: &str = "\
     # bell:             false,       # audible bell on readline error (default false)
     # surface:          readline,    # readline (default) or minimal
     # recursion-limit:  100000,      # maximum machine-frame recursion depth
+    # umask:            '022',       # file creation mask (octal)
+    # limits:           [open-files: 4096], # child soft resource limits
 
     # prompt: {
     #     return \"!{abbreviate-home !{cwd}} $ \"
@@ -139,6 +141,9 @@ fn refuse(reason: impl std::fmt::Display) -> String {
 pub(crate) struct RcPlan {
     settings: RcSettings,
     stack_limit: Option<usize>,
+    #[cfg(unix)]
+    umask: Option<rustix::fs::Mode>,
+    child_limits: ral_core::process::ChildLimits,
     env: Map,
     bindings: Map,
     plugins: Map,
@@ -156,6 +161,14 @@ impl RcPlan {
         let mut plan = Self::default();
         for (key, val) in pairs {
             match (key, val.into_owned()) {
+                #[cfg(windows)]
+                (k @ ("umask" | "limits"), _) => {
+                    return Err(refuse(format!("'{k}' is not supported on Windows")));
+                }
+                #[cfg(unix)]
+                ("umask", Value::String(s)) => plan.umask = Some(decode_umask(&s)?),
+                #[cfg(unix)]
+                ("limits", Value::Map(m)) => plan.child_limits = decode_limits(&m)?,
                 ("env", Value::Map(m)) => plan.env = m,
                 ("bindings", Value::Map(m)) => plan.bindings = m,
                 ("plugins", Value::Map(m)) => plan.plugins = m,
@@ -223,6 +236,8 @@ impl RcPlan {
                         }
                         "edit-mode" => "'emacs' or 'vi'",
                         "bell" => "a bool",
+                        "umask" => "octal digits as a string, e.g. '077'",
+                        "limits" => "a record, e.g. [open-files: 4096]",
                         "surface" => "minimal or readline",
                         _ => "a positive int",
                     };
@@ -244,6 +259,11 @@ impl RcPlan {
         shell
             .set_hooks(self.hooks)
             .map_err(|e| Break::Error(Error::new(e.to_string())))?;
+        #[cfg(unix)]
+        if let Some(mask) = self.umask {
+            rustix::process::umask(mask);
+        }
+        shell.set_child_limits(self.child_limits);
         // PWD lives on context.cwd and a copy in env_overrides would shadow it;
         // ral keeps no OLDPWD.  An rc spreading a parent's environment carries both.
         for (k, v) in self
@@ -253,7 +273,6 @@ impl RcPlan {
         {
             let v = v.into_owned();
             shell.set_env_var(k.to_string(), v.to_string());
-            shell.set_var(k.to_string(), v);
         }
         // Bindings, functions included, are lexical: applyable at the prompt.
         for (k, v) in &self.bindings {
@@ -285,6 +304,58 @@ impl RcPlan {
         }
         Ok(self.settings)
     }
+}
+
+#[cfg(unix)]
+fn decode_umask(s: &str) -> Result<rustix::fs::Mode, String> {
+    let invalid = || {
+        refuse(format!(
+            "'umask' must be octal digits such as '077' or '0022'; got '{s}'"
+        ))
+    };
+    ((1..=4).contains(&s.len()) && s.bytes().all(|b| (b'0'..=b'7').contains(&b)))
+        .then_some(s)
+        .and_then(|s| u32::from_str_radix(s, 8).ok())
+        .filter(|&mask| mask <= 0o777)
+        .map(rustix::fs::Mode::from_raw_mode)
+        .ok_or_else(invalid)
+}
+
+#[cfg(unix)]
+fn decode_limits(map: &Map) -> Result<ral_core::process::ChildLimits, String> {
+    use ral_core::process::ChildLimit;
+    use rustix::process::getrlimit;
+    let mut limits = ral_core::process::ChildLimits::default();
+    for (key, value) in map {
+        let limit = ChildLimit::ALL
+            .iter()
+            .find(|limit| limit.name == key)
+            .ok_or_else(|| {
+                let names = ChildLimit::ALL.map(|limit| limit.name).join(", ");
+                refuse(format!("unknown 'limits' key '{key}'; expected {names}"))
+            })?;
+        let value = value.into_owned();
+        let Value::Int(value) = value else {
+            return Err(refuse(format!(
+                "'limits' key '{key}' must be an Int; got {}",
+                value.type_name()
+            )));
+        };
+        let value = u64::try_from(value).map_err(|_| {
+            refuse(format!(
+                "'limits' key '{key}' must be non-negative; got {value}"
+            ))
+        })?;
+        if let Some(hard) = getrlimit(limit.resource).maximum
+            && value > hard
+        {
+            return Err(refuse(format!(
+                "'limits' key '{key}' exceeds ral's hard limit of {hard}; got {value}"
+            )));
+        }
+        *(limit.slot)(&mut limits) = Some(value);
+    }
+    Ok(limits)
 }
 
 // ── Config file locations ────────────────────────────────────────────────
@@ -613,6 +684,62 @@ mod tests {
         let (_, err) =
             apply_to_fresh_env_rejected(Value::map(vec![("surface".into(), Value::Int(7))]));
         assert!(err.contains("surface"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn umask_accepts_only_permission_bits_as_octal_digits() {
+        for (text, mask) in [("0", 0), ("077", 0o77), ("0022", 0o22), ("777", 0o777)] {
+            assert_eq!(decode_umask(text).unwrap().as_raw_mode(), mask);
+        }
+        for text in [
+            "", "+077", "-1", "8", " 077", "077 ", "00000", "1000", "7777",
+        ] {
+            let error = decode_umask(text).unwrap_err();
+            assert!(error.contains("octal digits"), "{text}: {error}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn limits_refuse_unknown_negative_noninteger_and_above_hard_values() {
+        let map = |key: &str, value| Map::from(vec![(key.to_owned(), value)]);
+        assert!(
+            decode_limits(&map("unknown", Value::Int(0)))
+                .unwrap_err()
+                .contains("open-files, core-bytes, stack-bytes")
+        );
+        assert!(
+            decode_limits(&map("open-files", Value::Int(-1)))
+                .unwrap_err()
+                .contains("non-negative")
+        );
+        assert!(
+            decode_limits(&map("open-files", Value::string("64")))
+                .unwrap_err()
+                .contains("must be an Int")
+        );
+        if let Some(hard) = rustix::process::getrlimit(rustix::process::Resource::Nofile).maximum
+            && let Ok(above) = i64::try_from(hard).and_then(|n| i64::try_from(i128::from(n) + 1))
+        {
+            let error = decode_limits(&map("open-files", Value::Int(above))).unwrap_err();
+            assert!(error.contains(&format!("hard limit of {hard}")), "{error}");
+        }
+        let limits = decode_limits(&map("open-files", Value::Int(0))).unwrap();
+        assert_eq!(limits.open_files, Some(0));
+        assert_eq!(limits.core_bytes, None);
+        assert_eq!(limits.stack_bytes, None);
+    }
+
+    #[test]
+    fn rc_env_sets_only_the_environment() {
+        let mut shell = apply_rc("return [env: [GREETING: 'hello']]\n");
+        assert_eq!(
+            crate::repl::eval(&mut shell, "!{env}[GREETING]"),
+            Value::string("hello")
+        );
+        assert!(shell.scope_lookup("GREETING").is_none());
+        assert!(!typecheck_against_session(&shell, "$GREETING").is_empty());
     }
 
     #[test]

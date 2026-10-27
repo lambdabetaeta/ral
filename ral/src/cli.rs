@@ -75,7 +75,7 @@ pub(crate) struct BatchOpts {
 // Distinct interactive-mode flags, not a bundle-able group.
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct InteractiveOpts {
-    /// `-l`, or a `-`-prefixed argv[0]: source the login profiles.
+    /// `-l`, or a `-`-prefixed argv[0]: adopt the POSIX login environment.
     pub login: bool,
     pub no_rc: bool,
     /// `-i` forces interactive mode even when stdin is not a tty.
@@ -91,6 +91,11 @@ pub(crate) struct InteractiveOpts {
 }
 
 impl InteractiveOpts {
+    #[cfg(unix)]
+    pub(crate) fn adopts_login_env(&self) -> bool {
+        self.login && !self.no_rc && !self.reads_stdin_as_script()
+    }
+
     pub(crate) fn reads_stdin_as_script(&self) -> bool {
         self.force_stdin || (!self.force_interactive && !stdin_is_terminal())
     }
@@ -122,8 +127,8 @@ also bind $SCRIPT to the script path; -c and the REPL leave $SCRIPT unbound.
 
 STARTUP FILES
     Interactive shells read ~/.ralrc or $XDG_CONFIG_HOME/ral/rc. Login shells \
-also read ~/.ral_profile and /etc/ral/profile. Use --norc to skip startup \
-files.
+first adopt the environment /bin/sh builds from /etc/profile and ~/.profile. \
+Use --norc to skip both.
 
 ENVIRONMENT
     RAL_INTERACTIVE_MODE  line editing: auto or minimal
@@ -143,10 +148,11 @@ run's report as JSON.",
 struct Cli {
     /// Start an interactive login shell.
     ///
-    /// Ral reads the normal interactive start-up file and the login profile.
+    /// First adopt the environment /bin/sh builds from /etc/profile and
+    /// ~/.profile, then read the rc. Use --norc to skip both.
     /// This option has no effect when ral runs `-c` code, a script file, or a
     /// script from standard input.
-    #[arg(long, short = 'l')]
+    #[arg(long, short = 'l', overrides_with = "login")]
     login: bool,
 
     /// Write the run's JSON audit report to standard error after the program
@@ -226,7 +232,7 @@ struct Cli {
     ///
     /// This is useful when another program supplies ral's input. `-s` takes
     /// priority over this option. A script path or `-c` also takes priority.
-    #[arg(short = 'i')]
+    #[arg(short = 'i', overrides_with = "force_interactive")]
     force_interactive: bool,
 
     /// Read and run a script from standard input, even when it is a terminal.
@@ -234,23 +240,23 @@ struct Cli {
     /// This option takes priority over `-i`. A script path or `-c` takes
     /// priority over both options. A script read from standard input does not
     /// bind `$SCRIPT`.
-    #[arg(short = 's')]
+    #[arg(short = 's', overrides_with = "force_stdin")]
     force_stdin: bool,
 
     /// Accept `-e` from programs that expect a POSIX shell; do nothing.
-    #[arg(short = 'e', hide = true)]
+    #[arg(short = 'e', hide = true, overrides_with = "posix_e")]
     posix_e: bool,
 
     /// Accept `-u` from programs that expect a POSIX shell; do nothing.
-    #[arg(short = 'u', hide = true)]
+    #[arg(short = 'u', hide = true, overrides_with = "posix_u")]
     posix_u: bool,
 
     /// Do not read interactive start-up files.
     ///
-    /// Ral skips the rc file and, for a login shell, the system and user login
-    /// profiles. This option only affects an interactive session. You can also
-    /// spell it `--noprofile`.
-    #[arg(long, visible_alias = "noprofile")]
+    /// Ral skips the rc file and, for a login shell, adoption of the environment
+    /// /bin/sh builds from /etc/profile and ~/.profile. This only affects an
+    /// interactive session. You can also spell it `--noprofile`.
+    #[arg(long, visible_alias = "noprofile", overrides_with = "norc")]
     norc: bool,
 
     /// Choose the interface for an interactive session.
@@ -382,6 +388,20 @@ mod tests {
     fn mode_of(args: &[&str]) -> Mode {
         let raw: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
         Mode::from_argv(&raw)
+    }
+
+    #[test]
+    fn compatibility_flags_may_repeat() {
+        for args in [&["-l", "-l"][..], &["-il", "-l"]] {
+            let Mode::Interactive(opts) = mode_of(args) else {
+                panic!("interactive");
+            };
+            assert!(opts.login);
+        }
+        let Mode::Interactive(opts) = mode_of(&["--norc", "--noprofile"]) else {
+            panic!("interactive");
+        };
+        assert!(opts.no_rc);
     }
 
     #[test]

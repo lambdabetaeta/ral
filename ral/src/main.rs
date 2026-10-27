@@ -7,6 +7,8 @@ mod boot_builtin;
 #[cfg(unix)]
 mod bridge;
 mod cli;
+#[cfg(unix)]
+mod login;
 mod platform;
 mod repl;
 mod site;
@@ -41,6 +43,15 @@ fn main() -> ExitCode {
 
 /// Run the session the arguments named.
 fn run(mode: Mode) -> ExitCode {
+    #[cfg(unix)]
+    if let Mode::Interactive(opts) = &mode
+        && opts.adopts_login_env()
+    {
+        // SAFETY: refuse_setuid, bridge, dispositions and identify spawn no threads.
+        // identify only pins; Session::boot installs signals and boots the engine later.
+        unsafe { login::adopt_posix_profile() };
+    }
+    startup::warn_unreadable_env();
     match mode {
         Mode::Interactive(opts) => interactive(opts),
         Mode::Script {

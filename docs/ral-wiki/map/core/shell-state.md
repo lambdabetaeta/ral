@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
-generated_at_date: 2026-10-26
+generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
+generated_at_date: 2026-10-27
 covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs]
 ---
 
@@ -169,7 +169,8 @@ checkpoint, since a run never writes it.
   `comparable` variables were fixed to: the session's threads share it, a new
   session snapshots it, [[map/core/ty|ty]]), the host-installed
   `builtins` with the session's `library_docs`, the session's
-  `terminal_lease`, and
+  `terminal_lease`, `stack_limit`, and `child_limits` (soft resource ceilings
+  for launched children, leaving ral's own limits unchanged), and
   the `hooks` table (a worker or a stage dispatches none; a hook registered by a run that then panics is not rolled back with the `(env, context)` checkpoint).
 - **`LocalState`** — host-local scratch carrying its own flow rules (audit
   trail, REPL scratch, the `workers` registry, the `bindings` ledger, the
@@ -395,7 +396,7 @@ Methods on `Shell` live by concern, one submodule each:
   half: Σ, the builtin table with its base handler layer, library docs, the
   terminal state; from the installer, shared through its `Arc`s), `Image`
   (what a child can inherit: env, context, sources, `Terms`, fixings), `Terms`
-  (the session's policy: stack limit, exit hints, lease, retention, detach
+  (the session's policy: stack limit, child limits, exit hints, lease, retention, detach
   budget — one type in memory and on the wire), and `Bequest` (`Image` and the
   `SpawnGrant`). `Shell::construct(runtime, image, root)` is the one session
   literal, with a root's hooks and terminal lease passed beside the image so a

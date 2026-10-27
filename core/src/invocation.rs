@@ -1,7 +1,7 @@
 //! Shared process-role dispatch for `ral`, `exarch` and test constructors.
 //!
 //! A warrant must enter confinement before opening or pinning anything.
-//! The anchor spawns nothing, so needs no pin; a bundled tool pins but reaches
+//! The reporter and anchor need no pin; a bundled tool pins but reaches
 //! no session ledger. Engines and shells boot the sandbox support for launches.
 
 use crate::site::{Silent, site};
@@ -18,6 +18,8 @@ pub fn serve(
     installers: &'static [crate::engine::EngineInstaller],
 ) -> Option<u8> {
     match *role {
+        #[cfg(unix)]
+        Invocation::EnvReport => Some(crate::host::login_env::serve_report()),
         Invocation::Warrant(args) => Some(authority::sandbox::serve_warrant(args)),
         Invocation::PipelineAnchor => Some(crate::shell::exec::pipeline::anchor::serve()),
         #[cfg(unix)]

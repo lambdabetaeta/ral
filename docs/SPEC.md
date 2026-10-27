@@ -4516,14 +4516,7 @@ Windows has no such signal.
 
 ### 15.3. Startup files and RC configuration
 
-A login session reads these optional profiles in order:
-
-1. `/etc/ral/profile`
-2. `~/.ral_profile`
-
-Profiles are ordinary ral scripts sourced for their effects. Their file-level
-contract is strict: they must return `Unit`. A map, scalar, list, or any other
-value is rejected with a diagnostic; configuration maps belong in the RC file.
+A login session first adopts the POSIX login environment (§16.4).
 
 Every interactive session then reads the first existing RC file:
 
@@ -4532,7 +4525,7 @@ Every interactive session then reads the first existing RC file:
 
 If neither exists, ral attempts to create a documented skeleton at the first
 available location. `--norc`, also accepted as `--noprofile`, skips both login
-profiles and the RC file.
+environment adoption and the RC file.
 
 The RC file is ordinary ral source and its file-level result must be a record
 of configuration keys, or `()` for a file with nothing to set. Every other
@@ -4558,19 +4551,21 @@ The recognized fields are:
 
 | Field | Meaning |
 |---|---|
-| `env: Record` | Set environment entries and bindings. `PWD` and `OLDPWD` are ignored: ral derives `PWD` from its logical working directory and keeps no `OLDPWD`. |
+| `env: Record` | Set environment entries. `PWD` and `OLDPWD` are ignored: ral derives `PWD` from its logical working directory and keeps no `OLDPWD`. |
 | `prompt: Block` | Install the zero-argument base-prompt body. |
 | `bindings: Record` | Install lexical values, including functions. |
 | `aliases: Record` | Install block or function values as command aliases; other values become ordinary lexical bindings. |
 | `edit-mode: String` | `emacs` or `vi`; default `emacs`. |
 | `bell: Bool` | Enable or disable the audible line-editor bell; default `false`. |
 | `surface: String` | `minimal` or `readline`; default `readline`. |
+| `umask: String` | Unix creation mask: 1–4 octal digits, at most `0777`, e.g. `'077'` or `'0022'`. Applies to ral's own creates and every child. Refused on Windows. |
+| `limits: Record` | Unix child soft limits: optional non-negative `Int` keys `open-files`, `core-bytes`, `stack-bytes`, no greater than ral's hard limit. ral's own limits stay unchanged; a grant's limits win. Refused on Windows. |
 | `recursion-limit: Int` | A positive function-call recursion limit; default `100_000`. |
 | `plugins: Record` | Names each plugin and its options; loaded before the first prompt; see below. |
 | `startup: Block` | A zero-argument block run once after the map is applied. |
 | `theme: Record` | `value-prefix: String` and `value-color: String`. The colour is one of `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, or `none`. |
 
-The eleven fields above are the RC file's whole keyset, and it is closed: an
+The thirteen fields above are the RC file's whole keyset, and it is closed: an
 unknown top-level key is an error naming the key and the list. The check is
 over the file's *inferred* return row, not over its syntax, so a key
 misspelled inside a spread is caught exactly as one written out is:
@@ -4611,10 +4606,10 @@ reported and fall back to `❯ `.
 Plugin prompt hooks then transform the base prompt in plugin load order.
 
 Parse, type, read, and runtime failures in a startup file are reported without
-preventing the interactive shell from starting. `exit` stops the current
-startup file and boot continues.
+preventing the interactive shell from starting. `exit` ends the session
+with its status.
 
-RC and profile evaluation is trusted session bootstrap. Command-line
+RC evaluation is trusted session bootstrap. Command-line
 `--recursion-limit`, `--surface`, and capability profiles are applied
 afterward, so the command line wins and the session capability ceiling narrows
 the resulting shell.
@@ -4981,23 +4976,24 @@ A foreground batch launched from a terminal may lend that terminal to an interac
 
 `-l` or `--login` requests a login session. On Unix, an executable name whose basename starts with `-` does the same. Login affects only an interactive session: `ral -l -c CODE` and `ral -l SCRIPT` remain ordinary batch runs and do not source interactive startup files.
 
-An interactive login session processes, in order:
+On Unix, an interactive login session first runs `/bin/sh -l`, which reads
+`/etc/profile` and `~/.profile`. ral adopts the environment the helper reports:
+new and changed variables are set, removed variables are unset, and `SHLVL`,
+`PWD`, `OLDPWD`, and `_` are ignored as the helper's bookkeeping. On any
+failure ral warns and keeps the environment it started with. A broken profile
+therefore leaves the user a shell. Installers that write only to `~/.zprofile`
+or `~/.bashrc` are not seen. A profile's umask and resource limits are not
+adopted; use the rc's `umask:` and `limits:` instead. Windows adopts nothing.
 
-1. `/etc/ral/profile`, if present;
-2. `~/.ral_profile`, if present;
-3. the ordinary rc file.
-
-A login profile is ral source run for its effects and must return `Unit`. Returning a map or another value is reported as an error; interactive startup continues.
-
-Every interactive session then reads `$XDG_CONFIG_HOME/ral/rc` or `~/.ralrc`. The rc file must return a configuration map. If neither file exists, ral may create a default rc skeleton and reports the created path. Parse, type, runtime, or return-contract errors are reported, no invalid configuration map is applied, and the user still receives a shell. An `exit` from a startup file stops that file without terminating the session.
+Every interactive session then reads `$XDG_CONFIG_HOME/ral/rc` or `~/.ralrc`. The rc file must return a configuration map. If neither file exists, ral may create a default rc skeleton and reports the created path. Parse, type, runtime, or return-contract errors are reported, no invalid configuration map is applied, and the user still receives a shell. An `exit` in the rc ends the session with its status.
 
 Startup evaluation is not transactional. A read, parse, or type error prevents
 that file from running, and an invalid RC result prevents configuration-map
 application, but bindings and effects produced before a runtime failure,
-`exit`, or return-contract check are not rolled back. In every case boot
-continues to the interactive shell.
+`exit`, or return-contract check are not rolled back. Boot continues after
+errors; `exit` ends the session.
 
-`--norc`, also accepted as `--noprofile`, suppresses login profiles and the rc file. Command-line `--recursion-limit` and `--surface` values are applied after the rc and therefore override it. Session `--capabilities` profiles are also applied after startup files: startup is operator-trusted setup, and the capability profile becomes the ceiling for subsequent work. A relative profile path names a file in the directory ral was started in, even when a startup file or an earlier profile changes directory.
+`--norc`, also accepted as `--noprofile`, skips POSIX login environment adoption and the rc file. Command-line `--recursion-limit` and `--surface` values are applied after the rc and therefore override it. Session `--capabilities` profiles are also applied after startup files: startup is operator-trusted setup, and the capability profile becomes the ceiling for subsequent work. A relative profile path names a file in the directory ral was started in, even when a startup file or an earlier profile changes directory.
 
 ### 16.5. Interactive surfaces
 
@@ -5013,7 +5009,9 @@ For tools that pass traditional shell flags blindly, ral accepts:
 - `-u` — accepted with no effect;
 - `-i`, `-s`, and `-l` — with the meanings above.
 
-ral seeds a stable dynamic environment at boot. Inherited values win; a variable the host does not bind at all takes a default for `PATH`, `SHELL`, `TERM`, and `LANG`. ral reads the environment as text: a variable whose value is not UTF-8 is absent from `env` and from ral's own lookups, and reaches children with its bytes untouched. `HOME`, `USER`, and `LOGNAME` are seeded from the host alone: where the host binds none, the variable stays unbound rather than taking an invented value, and `~` is then an error naming `HOME` rather than a directory. It increments `SHLVL` and supplies `OS_NAME`, `OS_ARCH`, and `OS_FAMILY`. Recognised terminal and multiplexer variables are retained when present.
+These flags and `--norc`/`--noprofile` may repeat.
+
+ral seeds a stable dynamic environment at boot. Inherited values win; a variable the host does not bind at all takes a default for `PATH`, `TERM`, and `LANG`. ral reads the environment as text: a variable whose value is not UTF-8 is absent from `env` and from ral's own lookups, and reaches children with its bytes untouched. `HOME`, `USER`, `LOGNAME`, and `SHELL` are seeded from the host alone: where the host binds none, the variable stays unbound rather than taking an invented value, and `~` is then an error naming `HOME` rather than a directory. It increments `SHLVL` and supplies `OS_NAME`, `OS_ARCH`, and `OS_FAMILY`. Recognised terminal and multiplexer variables are retained when present. At startup, ral warns when `PATH` or `HOME` is set but not UTF-8: command search or `~` respectively cannot use it, while child programs still receive its original bytes.
 
 `PWD` and `OLDPWD` are not exposed through `env`. ral owns the working directory as shell state so parallel work cannot race through the process-wide current directory. Each external child receives the correct `PWD` and actual launch directory; an inherited `OLDPWD` is removed, since ral keeps no previous directory.
 
@@ -5038,6 +5036,8 @@ On Unix, install `ral-sh` as the login shell instead. `ral-sh` is `ral` invoked 
 ```
 
 The `/bin/sh` branch forwards arguments without requiring UTF-8, and replaces the process with the literal path `/bin/sh`: no `PATH` lookup. If the invoked name begins with `-`, it preserves that login-shell convention as `-sh`. The `ral` branch does not exec: the same process continues as `ral`, which sees the leading `-` itself. Failure to replace the process exits 127. The setuid refusal applies first, under either name.
+
+The bridge's ral branch is an ordinary ral process, so a login through it adopts the POSIX environment per §16.4; the bridge itself is unchanged.
 
 ### 16.8. Platform distinctions and limits
 

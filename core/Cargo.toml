@@ -42,10 +42,10 @@ ripgrep   = ["dep:ral-ripgrep-core"]
 # tests assert on.  Off for a host build — that is the point, since an item
 # only a test reaches is then `pub(crate)` and `dead_code` can see it — and
 # on for every dev target of this package, via the self-dev-dependency below.
-test-util = ["dep:tempfile"]
+test-util = []
 
 [dependencies]
-tempfile      = { version = "3.27", optional = true }
+tempfile      = "3.27"
 os_pipe       = "1"
 dunce         = "1.0.5"
 globset       = "0.4"

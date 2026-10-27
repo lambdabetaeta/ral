@@ -612,7 +612,7 @@ fn lift(fd: BorrowedFd<'_>) -> Result<(OwnedFd, Slot), String> {
     let copy = rustix::io::fcntl_dupfd_cloexec(fd, Slot::FIRST).map_err(|e| {
         format!(
             "sandbox: cannot copy a descriptor to {} or above for the confined child: \
-             {e}; is the open-file limit (`ulimit -n`) below that?",
+             {e}; is the open-file limit below that? Check it with `sh -c 'ulimit -n'`, and raise it for the session with the rc's `limits: [open-files: N]`",
             Slot::FIRST
         )
     })?;

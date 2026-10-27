@@ -26,6 +26,16 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+/// Canonical self path and role flag, so a ral-sh symlink cannot intercept it.
+#[cfg(unix)]
+pub(crate) fn indirect(role: Role) -> io::Result<(PathBuf, &'static str)> {
+    let exe = site!(
+        Silent::IndirectReexec,
+        std::fs::canonicalize(std::env::current_exe()?)
+    )?;
+    Ok((exe, role.flag()))
+}
+
 // ── Pinned ───────────────────────────────────────────────────────────────
 
 /// An executable pinned at boot, before any shell exists: the one shape a

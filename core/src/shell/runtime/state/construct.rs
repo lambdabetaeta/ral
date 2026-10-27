@@ -119,6 +119,7 @@ pub(super) fn natives_and_base(
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Terms {
     pub(crate) stack_limit: usize,
+    pub(crate) child_limits: crate::process::ChildLimits,
     pub(crate) exit_hints: ExitHints,
     /// The spelling of the session's scratch directory, if its front end made
     /// one: what a `scratch` place anchors to.
@@ -134,6 +135,7 @@ impl Terms {
     fn root() -> Self {
         Self {
             stack_limit: DEFAULT_STACK_LIMIT,
+            child_limits: crate::process::ChildLimits::default(),
             exit_hints: ExitHints::default(),
             scratch: None,
             lease: None,
@@ -146,6 +148,7 @@ impl Terms {
     pub(super) fn of(shell: &Shell) -> Self {
         Self {
             stack_limit: shell.session.stack_limit,
+            child_limits: shell.session.child_limits,
             exit_hints: ExitHints::clone(&shell.session.exit_hints),
             scratch: shell.session.scratch.clone(),
             lease: shell.local.bindings.lease(),
@@ -226,6 +229,7 @@ impl Shell {
         } = image;
         let Terms {
             stack_limit,
+            child_limits,
             exit_hints,
             scratch,
             lease,
@@ -273,6 +277,7 @@ impl Shell {
                 runtime,
                 terminal_lease,
                 stack_limit,
+                child_limits,
                 hooks,
             },
             local: LocalState {

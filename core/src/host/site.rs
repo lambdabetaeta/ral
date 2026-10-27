@@ -36,6 +36,15 @@ pub(super) enum Silent {
     /// ask.  It raises no card: it reads one fact of the host, not an object
     /// a model names.
     HostCwd,
+    /// The login helper's command; startup infrastructure raises no exec card.
+    #[cfg(unix)]
+    LoginCommand,
+    /// Spawn the login helper before any session or thread exists.
+    #[cfg(unix)]
+    LoginSpawn,
+    /// Wait for the login helper before any reaper or session exists.
+    #[cfg(unix)]
+    LoginWait,
 }
 
 impl Site for Silent {}

@@ -224,6 +224,11 @@ impl Shell {
         self.session.stack_limit = n;
     }
 
+    /// Set the soft resource ceilings for subsequently launched children.
+    pub fn set_child_limits(&mut self, limits: crate::process::ChildLimits) {
+        self.session.child_limits = limits;
+    }
+
     /// The invocation positionals (`args`) a CLI host passes after
     /// the program path.
     pub fn set_args(&mut self, args: Vec<String>) {

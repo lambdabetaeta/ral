@@ -77,6 +77,9 @@ pub(crate) fn build_launch(
     drop(admitted);
     apply_env(&mut cmd, shell);
     #[cfg(unix)]
+    cmd.limit_session(shell.session.child_limits);
+    // Hooks run in order: a grant's limits apply last and win.
+    #[cfg(unix)]
     if shell.has_active_capabilities() {
         cmd.limit_resources().map_err(|e| unbraked(&e))?;
     }

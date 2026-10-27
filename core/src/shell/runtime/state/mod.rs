@@ -131,6 +131,8 @@ pub struct SessionState {
     /// `stack.len() >= stack_limit`.  Counts machine frames, not host stack
     /// frames; `--recursion-limit`/rc's `recursion-limit:` key set it.
     pub(crate) stack_limit: usize,
+    /// Soft resource ceilings for children; ral keeps its own limits.
+    pub(crate) child_limits: crate::process::ChildLimits,
     /// Named run entry points (rc-declared prompt, startup block, plugin
     /// hooks): a namespace apart from both lexical scope and the handler
     /// stack, since hooks are run roots, never commands or variables.  Session

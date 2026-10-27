@@ -41,6 +41,9 @@ pub(crate) use cancel::{POLL_SLICE, TEARDOWN_GRACE};
 pub use child::ChildHandle;
 pub(crate) use group::{Group, Membership};
 pub use group::{Pgid, PgidPolicy};
+#[cfg(unix)]
+pub use limits::ChildLimit;
+pub use limits::ChildLimits;
 pub use signal::{clear, escalation_pending};
 pub(crate) use signal::{grace_signal, signals_of};
 

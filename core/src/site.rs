@@ -4,6 +4,9 @@ include!("../../lint/site.rs");
 /// Sites that raise no card.
 #[derive(Clone, Copy)]
 pub(crate) enum Silent {
+    /// Canonical self path for a role exec'd by /bin/sh; startup infrastructure.
+    #[cfg(unix)]
+    IndirectReexec,
     /// The read of git discovery's `.git` pointer file and the reciprocal
     /// `gitdir` file it names (`freeze::ungoverned`), made at session start to
     /// freeze policy, before any grant exists to govern it.  It raises no card:

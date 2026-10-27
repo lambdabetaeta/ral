@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 781d88844423a2af09f5e9a87e0d902fc4f15cff
+generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
 generated_at_date: 2026-10-27
-covers_paths: [ral/src/main.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/boot_builtin.rs, ral/src/platform.rs, ral/build.rs]
+covers_paths: [ral/src/main.rs, ral/src/login.rs, core/src/host/login_env.rs, core/src/role.rs, core/src/invocation.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/boot_builtin.rs, ral/src/platform.rs, ral/build.rs]
 ---
 
 # Map: repl / startup
@@ -30,7 +30,7 @@ of execution; `core/src/invocation.rs` owns dispatch. The classifier reads the
 first argument alone over `Role::ALL` and
 returns an `Invocation`: `Engine`, Linux x86-64/aarch64 `GuestEngine`,
 `PipelineAnchor`, `Warrant`,
-`BundledTool`, or `Shell`. Each flag is spelled once,
+`BundledTool`, Unix `EnvReport`, or `Shell`. Each flag is spelled once,
 by `Role::flag`, and disjointness lives there and nowhere else — a flag a
 script was given, or a tool's own `--engine`, names no role. `ral_core::invocation::serve(&role, installers)`
 is the one place a role is served, each role's body staying with the code it
@@ -52,6 +52,9 @@ dispositions. Then, per role:
   takes its warrant off that descriptor, enters the OS
   [[map/core/capabilities|sandbox]], and only then `execve`s the host program
   or runs the bundled tool in-process. Windows refuses it.
+- **Environment reporter** (`--ral-env-report`, Unix) — writes the host
+  environment on fd 3 and exits, without pinning or booting anything.
+  `/bin/sh -l` execs it by `reexec::indirect`'s canonical self path.
 - **Pipeline anchor** — `shell::exec::pipeline::anchor::serve` (`--ral-pipeline-anchor`, the
   one multicall re-exec a pipeline uses: a stage itself runs on a thread of the
   parent process, but a multi-stage pipeline needs one process to hold its pgid
@@ -97,8 +100,15 @@ mode of its own but a flag on `InteractiveOpts` (`login`, set by `-l` or a
 `-`-prefixed argv\[0\]), so a login shell with `-c` or a script positional
 still resolves to `Command`/`Script` and runs it, as cron, `su -`, and
 `$SHELL -l -c …` require; the flag matters only once resolution has landed on
-`Interactive`, where it gates login-profile sourcing at REPL boot
-([[map/repl/loop|loop]]). `RunOpts` (`--recursion-limit`, `--capabilities`)
+`Interactive`, where `adopts_login_env` requires login, no `--norc`, and
+an interactive stdin mode. On Unix, `run` calls `login::adopt_posix_profile`
+before the UTF-8 environment warnings and before session boot: `/bin/sh -l`
+reads `/etc/profile` and `~/.profile`, and `host::login_env` collects its
+NUL-delimited report from an unnamed file on fd 3. Changed/new variables are
+set, removed variables unset, with `SHLVL`, `PWD`, `OLDPWD`, `_` ignored.
+Failure warns and leaves the starting environment intact. This occurs before
+any thread exists; signal setup and the engine follow. Windows adopts nothing
+([[decisions/261027_the-login-environment-is-the-posix-profiles|login environment]]). `RunOpts` (`--recursion-limit`, `--capabilities`)
 rides every mode; `BatchOpts` adds `--audit` / `--pretty` / `halt: Option<Halt>`
 (`--check` / `--dump-ast` / `--dump-ir`, one clap group); `InteractiveOpts` adds `-l`, `--norc`, `-i`, `-s`, and
 `--surface`.
@@ -146,7 +156,7 @@ one ending law and one typecheck
   sentence on stderr.
 - **Boot, stage two.** The first dispatch is `Program::Hook` on
   `Session "boot"`, the `_ral-boot` builtin itself (`ral/src/boot_builtin.rs`),
-  applied to the REPL's own record, `{login: false, no-rc: true,
+  applied to the REPL's own record, `{no-rc: true,
   recursion-limit, capabilities}`. The builtin is one-shot — it unregisters its
   own hook — sources no startup file here, sets the recursion limit, and
   applies `--capabilities` under its own mooring. Each profile path reaches

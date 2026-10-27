@@ -1,13 +1,7 @@
-//! Startup-file sourcing, run inside the boot builtin: the login profiles, then
-//! the rc.
-//!
-//! Each kind of file has one contract on its return value: a profile is a
-//! script sourced for its effects and returns `()`; the rc is a
-//! configuration expression returning a record, or `()` for nothing to set. An `exit` in either
-//! ends the session with its status. Any other failure is reported and the
-//! boot goes on — a broken startup file must not strand the user at no shell.
+//! Rc sourcing inside the boot builtin: a record configures the session,
+//! and `()` leaves its defaults. `exit` ends the session; any other failure
+//! is reported and boot continues.
 
-use ral_core::own::UserFile;
 use ral_core::path::shown;
 use ral_core::shell::runtime::{Break, Escape, Map, Mooring, Settled};
 use ral_core::source::{SourceFile, SourceOrigin};
@@ -39,53 +33,14 @@ fn tolerate<T>(outcome: Result<T, Stop>, fallback: T) -> Settled<T> {
     }
 }
 
-/// Source the login profiles when `login`, `/etc/ral/profile` then
-/// `~/.ral_profile`, and then the rc — `$XDG_CONFIG_HOME/ral/rc` or
-/// `~/.ralrc`, created from the default skeleton when neither exists.
-/// What the rc settled; the defaults when it settled nothing.
-pub(crate) fn source_startup_files(
-    login: bool,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Settled<RcSettings> {
-    if login {
-        for profile in [
-            Some(UserFile::fixed("/etc/ral", "profile")),
-            UserFile::home(".ral_profile"),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let text = profile.read().map_err(|e| Stop::Failed(e.to_string()));
-            if let Some(text) = tolerate(text, None)? {
-                tolerate(source_profile(profile.path(), text, mooring, shell), ())?;
-            }
-        }
-    }
+/// Source the rc, or keep defaults when it sets nothing.
+pub(crate) fn source_rc_file(mooring: &Mooring, shell: &mut Shell) -> Settled<RcSettings> {
     match rc() {
         Some((file, text)) => tolerate(
             source_rc(file.path(), text, mooring, shell),
             RcSettings::default(),
         ),
         None => Ok(RcSettings::default()),
-    }
-}
-
-/// Anything but `()` is refused, a configuration map included: discarding it
-/// would let a misplaced `[theme: …]` do nothing without a word.
-fn source_profile(
-    path: &Path,
-    text: String,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Result<(), Stop> {
-    match evaluate(path, text, None, mooring, shell)? {
-        Value::Unit => Ok(()),
-        v => Err(Stop::Failed(format!(
-            "{}: profile must return (); got {}; configuration belongs in the rc file",
-            shown(path),
-            v.type_name()
-        ))),
     }
 }
 
@@ -173,16 +128,6 @@ mod tests {
         .expect("a test host resolves its baseline")
     }
 
-    fn profile(src: &str) -> Result<(), Stop> {
-        let (_dir, path) = startup_file(src);
-        source_profile(
-            &path,
-            src.to_owned(),
-            &Mooring::adrift(),
-            &mut booted_shell(),
-        )
-    }
-
     fn rc(src: &str) -> Result<Map, Stop> {
         let (_dir, path) = startup_file(src);
         rc_config(
@@ -198,28 +143,6 @@ mod tests {
             Err(Stop::Failed(msg)) => msg,
             other => panic!("expected a reported failure, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn profile_returning_unit_sources_cleanly() {
-        assert_eq!(profile("return ()\n"), Ok(()));
-    }
-
-    /// The error names the profile contract and points at the rc file.
-    #[test]
-    fn profile_returning_map_is_rejected() {
-        let err = failure(profile("return [edit-mode: 'vi']\n"));
-        assert!(err.contains("profile must return (); got Map"), "{err}");
-        assert!(
-            err.contains("configuration belongs in the rc file"),
-            "{err}"
-        );
-    }
-
-    /// `exit` in a startup file ends the boot with its status.
-    #[test]
-    fn exit_in_a_profile_is_an_exit() {
-        assert_eq!(profile("exit 7\n"), Err(Stop::Exit(7)));
     }
 
     /// `()` is an rc with nothing to set, and so is a last phrase that is a

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
+generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
 ---
 
 # Single binary
@@ -14,6 +14,10 @@ one place that reads it, and `ral_core::invocation::serve` the one place that
 serves it; a re-exec is launched from a `Role`, never a string
 (`authority::sandbox::reexec::launch`). Every role ships; none exists for tests:
 
+- the Unix login reporter, `--ral-env-report`, writes the environment on fd 3
+  without booting. It is the one role another program (`/bin/sh -l`) execs,
+  through `reexec::indirect`'s canonical self path, so a `ral-sh` symlink
+  cannot route it through the bridge;
 - a multi-stage pipeline pins its process group's pgid open for the
   pipeline's whole life with a lone anchor, `--ral-pipeline-anchor`
   ([[design/pipelines|pipelines]]) — the only stage-adjacent re-exec left,
@@ -35,6 +39,10 @@ capability chokepoint as the structured primitives.
 The hard rule concerns the runtime: do not factor ral's functionality into a
 sibling helper crate or a second shipped executable, and do not introduce a
 runtime dependency on an external program for core behaviour.
+
+`/bin/sh` is required only to adopt a login environment; its absence or a
+failed profile degrades to a warning, leaving ral's starting environment and
+a working shell ([[decisions/261027_the-login-environment-is-the-posix-profiles|login environment]]).
 
 One more multicall exists, and it is by *name* rather than by sentinel flag: the
 POSIX-bridge login shell (`docs/SPEC.md` §16.7), `ral` invoked as `ral-sh`, a

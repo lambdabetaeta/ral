@@ -59,6 +59,7 @@ impl Shell {
                 runtime: Arc::clone(&self.session.runtime),
                 terminal_lease: None,
                 stack_limit: self.session.stack_limit,
+                child_limits: self.session.child_limits,
                 hooks: None,
             },
             local: LocalState {

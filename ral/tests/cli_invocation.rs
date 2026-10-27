@@ -263,3 +263,17 @@ fn an_argument_that_is_not_utf8_is_refused() {
         "the refusal names the argument: {stderr}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_path_warns_and_preserves_path_commands() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let out = ral_command()
+        .args(["-c", "/bin/echo ok"])
+        .env("PATH", std::ffi::OsStr::from_bytes(b"/bin/\xff"))
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(out.stdout, b"ok\n");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("PATH is not valid UTF-8"));
+}

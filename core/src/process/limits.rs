@@ -8,7 +8,47 @@ mod fork_brake;
 #[cfg(unix)]
 use super::Launch;
 use super::{ChildHandle, Pgid};
+#[cfg(unix)]
+use rustix::process::Resource;
 use std::io;
+
+/// Soft resource ceilings inherited by every child in a session.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ChildLimits {
+    pub open_files: Option<u64>,
+    pub core_bytes: Option<u64>,
+    pub stack_bytes: Option<u64>,
+}
+
+/// An rc limit's name, resource and storage.
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+pub struct ChildLimit {
+    pub name: &'static str,
+    pub resource: Resource,
+    pub slot: fn(&mut ChildLimits) -> &mut Option<u64>,
+}
+
+#[cfg(unix)]
+impl ChildLimit {
+    pub const ALL: [Self; 3] = [
+        Self {
+            name: "open-files",
+            resource: Resource::Nofile,
+            slot: |limits| &mut limits.open_files,
+        },
+        Self {
+            name: "core-bytes",
+            resource: Resource::Core,
+            slot: |limits| &mut limits.core_bytes,
+        },
+        Self {
+            name: "stack-bytes",
+            resource: Resource::Stack,
+            slot: |limits| &mut limits.stack_bytes,
+        },
+    ];
+}
 
 /// How many live processes a grant-confined child may add: the fork-bomb cap.
 /// A Job Object limit on Windows; on macOS, headroom over the user's count at launch.
@@ -30,6 +70,29 @@ pub(crate) fn failure_hint(code: i32) -> Option<String> {
 
 #[cfg(unix)]
 impl Launch {
+    /// Set session soft limits, preserving the child's hard limits.
+    pub(crate) fn limit_session(&mut self, mut limits: ChildLimits) {
+        use rustix::process::{getrlimit, setrlimit};
+        use std::os::unix::process::CommandExt;
+        let limits = ChildLimit::ALL.map(|limit| (limit.resource, *(limit.slot)(&mut limits)));
+        if limits.iter().all(|(_, value)| value.is_none()) {
+            return;
+        }
+        // SAFETY: getrlimit and setrlimit are async-signal-safe.
+        unsafe {
+            self.cmd.pre_exec(move || {
+                for (resource, value) in limits {
+                    if let Some(value) = value {
+                        let mut limit = getrlimit(resource);
+                        limit.current = Some(value);
+                        setrlimit(resource, limit)?;
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
+
     /// Limit the child's resources in one `pre_exec`: no core dumps and, on
     /// macOS, a fork brake.  Darwin counts processes per real UID but compares
     /// the count with the *forking* process's own `RLIMIT_NPROC`, so lowering

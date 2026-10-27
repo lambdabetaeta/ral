@@ -15,6 +15,8 @@
 //! true, and every caller has a different true thing to say.
 
 pub(crate) mod env;
+#[cfg(unix)]
+pub mod login_env;
 mod site;
 pub use env::{EnvVars, EnvVarsIter};
 

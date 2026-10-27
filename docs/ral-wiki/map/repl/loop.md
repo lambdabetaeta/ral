@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
-generated_at_date: 2026-10-25
+generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
+generated_at_date: 2026-10-27
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/host.rs, ral/src/repl/enquiry.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/config/, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/boot_builtin.rs, ral/src/surface.rs]
 ---
 
@@ -27,17 +27,17 @@ no job table: ral does not suspend
 
 - `Session::boot` is two-staged. Stage one is `IdentityTransport::boot` with
   `startup::engine::INSTALLERS` and an `Attach` that configures nothing —
-  login matters only to the boot builtin's profile sourcing; the `repl` recipe
+  login environment adoption has already run in `main::run`; the `repl` recipe
   does what precedes rc (below). A
   refusal prints its sentence and exits 2. Stage two is the host's first
   dispatch: `Program::Hook` on the `Session "boot"` hook, the `_ral-boot`
-  builtin, applied to `Boot {login, no-rc, recursion-limit, capabilities}`
+  builtin, applied to `Boot {no-rc, recursion-limit, capabilities}`
   (`ral/src/boot_builtin.rs`). `capabilities` holds absolute paths:
   `Boot::profiles` anchors each argument at the invocation cwd before the
   builtin runs, since the rc and earlier profiles may `cd` first, and the builtin
   refuses a relative one before sourcing anything. `boot_builtin::settle` reads its `Ending`: `Settled`
   carries the rc's `RcSettings`, a `--capabilities` failure is `Raised`
-  status 2, a profile's `exit N` is `Exited(N)`, and either ends the session
+  status 2, an rc's `exit N` is `Exited(N)`, and either ends the session
   there. The host then applies `--surface` over the rc's choice, keeps the
   output theme, and dispatches `Session "startup"` if the rc registered one.
 - `run` loops `iterate` until it returns `Flow::Break` — a frontend `End`, an
@@ -100,11 +100,11 @@ surface — the batch surface plus the [[map/repl/plugins|`_ed-*` builtins and
 the plugin load builtins]] — through `boot_shell`, so the typechecker and the
 runtime see one surface by construction; then exit hints, the
 interactive flag, `$TERMINAL`, and the boot builtin's registration. The umask
-is the login's own, set by `login(1)` or PAM; the shell does not touch it.
+is inherited from `login(1)` or PAM unless the rc sets `umask:`.
 
 The boot builtin (`_ral-boot`, one-shot: it unregisters its own hook) does the
-rest in a run, since startup files evaluate ral: `source_startup_files`
-(`config/source.rs` — login profiles, then the rc), the CLI's
+rest in a run, since startup files evaluate ral: `source_rc_file`
+(`config/source.rs` — the rc only; `Boot` has no `login` field), the CLI's
 `--recursion-limit` after the rc, `--capabilities` through
 `shell::load::profile::apply_session_profiles` (the user's ceiling is the last word,
 and a session frame it pushes survives the builtin's run), and
@@ -114,9 +114,8 @@ the rc's `RcSettings {edit-mode, bell, surface, theme, startup}` — the only
 part of the rc the host needs; everything else the rc configures lands on the
 engine's shell.
 
-Each startup file has one contract on its return value: a profile is sourced
-for its effects and returns `()`; the rc returns a configuration record. An
-`exit` in either ends the session with its status; any other failure is
+The rc returns a configuration record, or `()` to leave the defaults. An
+`exit N` in the rc ends the session with status N; any other failure is
 reported and the boot goes on. The rc goes through `shell::load::evaluate_source`,
 compiled against the live session and the `FileId` its text is registered
 with, so an alias or function it defines keeps naming the rc for the whole
@@ -143,6 +142,13 @@ unknown theme key, a prompt or startup block `vet_hook` rejects, or an alias
 (a plugin that fails to load is reported and skipped, an `exit` propagates). An rc `startup` block registers as
 the `Session/"startup"` hook, and the host dispatches it as a hook run under
 `Denied` terminal authority — a fresh frame whose `let`s do not leak.
+
+The rc's `env:` sets environment entries only; lexical values belong under
+`bindings:`. `umask:` takes one to four octal digits as a string, at most
+`0777`, and sets the process mask before plugins load. `limits:` validates
+`open-files`, `core-bytes`, and `stack-bytes` against ral's hard limits, then
+stores child soft limits without changing ral's own limits. Grant limits
+apply after these session limits and win. Both keys are refused on Windows.
 
 ## Every evaluation is a dispatch
 
@@ -236,9 +242,9 @@ and completion live in
   the default `❯ ` (a plugin's, to the prompt so far); the faults of one
   render print together through `prompt_fault`, when they differ from the last
   render's, and the session survives so the user can rebind it.
-- `config.rs` — the rc's eleven keys (`env`, `prompt` — registered as the
+- `config.rs` — the rc's thirteen keys (`env`, `prompt` — registered as the
   `Session/"prompt"` hook — `bindings`, `aliases`, `edit-mode`, `bell`,
-  `surface`, `recursion-limit`, `plugins`, `startup`, `theme`) are declared
+  `surface`, `recursion-limit`, `plugins`, `startup`, `theme`, `umask`, `limits`) are declared
   once, in `Form::Rc`'s table, and `RcPlan::decode` judges them all engine-side,
   inside the boot builtin, before `RcPlan::apply` commits to the shell and the
   `RcSettings` it answers; a refused rc has changed nothing. The first-run

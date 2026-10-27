@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 4e2ee042
-generated_at_date: 2026-10-06
+generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
+generated_at_date: 2026-10-27
 covers_paths: [ral/src/]
 ---
 
@@ -46,7 +46,7 @@ REPL makes that state the thing the loop threads.
   (`ral/src/main.rs`, `startup.rs`, `cli.rs`, `batch.rs`, `boot_builtin.rs`,
   `platform.rs`, `build.rs`).
 - [[map/repl/loop|loop]] — the `Session` state machine and one-dispatch
-  cycle: the two-stage boot, the `ReplHost`, prompt, rc/profile sourcing
+  cycle: the two-stage boot, the `ReplHost`, prompt, rc sourcing
   engine-side, value printing, error formatting (`ral/src/repl/session*`,
   `exec.rs`, `host.rs`, `enquiry.rs`, `prompt.rs`, `config*`, `theme.rs`,
   `errfmt.rs`).
@@ -79,6 +79,11 @@ path, and the ral branch does not exec but continues as `ral`), forwards argv
 as `OsString` untouched, and turns a leading dash on argv[0] into `-sh`. Its one
 exec is the silent syscall site `silent:respawn-posix-sh`
 ([[map/exarch/io-surface|io-surface]]).
+
+A login routed to ral reaches `run`'s POSIX environment adoption before the
+rc is sourced: `/bin/sh -l` reads `/etc/profile` and `~/.profile`; failure
+warns and leaves a working shell. The bridge itself is unchanged
+([[map/repl/startup|startup]]).
 
 ## Siblings
 

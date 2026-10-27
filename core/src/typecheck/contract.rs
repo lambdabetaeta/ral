@@ -225,13 +225,23 @@ static WITHIN: Table = Table {
     factory: false,
 };
 
-/// The rc file's eleven keys.  `apply_rc_key` dispatches off this table and
+/// The rc file's thirteen keys.  `apply_rc_key` dispatches off this table and
 /// applies what each one means; the shapes left to it — a map of hooks, a map
 /// of aliases, a theme — are one type per key rather than one across the key,
 /// and no single `Ty` pins them.
 static RC: Table = Table {
     form: "rc",
     keys: &[
+        Key {
+            label: "umask",
+            holds: Holds::At(Ty::String),
+            reason: None,
+        },
+        Key {
+            label: "limits",
+            holds: Holds::Decoded,
+            reason: None,
+        },
         Key {
             label: "env",
             holds: Holds::Decoded,

@@ -8,6 +8,9 @@ use std::ffi::{OsStr, OsString};
 /// A hidden role, named by one flag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
+    /// Reports the POSIX login environment on fd 3.
+    #[cfg(unix)]
+    EnvReport,
     /// A wire engine, which takes the process over on fd 3.
     #[cfg(unix)]
     Engine,
@@ -25,6 +28,8 @@ pub enum Role {
 impl Role {
     pub(crate) const ALL: &[Self] = &[
         #[cfg(unix)]
+        Self::EnvReport,
+        #[cfg(unix)]
         Self::Engine,
         #[cfg(seccomp)]
         Self::GuestEngine,
@@ -39,6 +44,8 @@ impl Role {
     pub const fn flag(self) -> &'static str {
         match self {
             #[cfg(unix)]
+            Self::EnvReport => "--ral-env-report",
+            #[cfg(unix)]
             Self::Engine => "--engine",
             #[cfg(seccomp)]
             Self::GuestEngine => "--guest-engine",
@@ -52,6 +59,8 @@ impl Role {
 /// What a process is for, with whatever its role takes from argv.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Invocation<'a> {
+    #[cfg(unix)]
+    EnvReport,
     #[cfg(unix)]
     Engine,
     PipelineAnchor,
@@ -76,6 +85,8 @@ pub fn classify(argv: &[OsString]) -> Invocation<'_> {
         return Invocation::Shell;
     };
     match role {
+        #[cfg(unix)]
+        Role::EnvReport => Invocation::EnvReport,
         #[cfg(unix)]
         Role::Engine => Invocation::Engine,
         #[cfg(seccomp)]
@@ -129,6 +140,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_unix_roles_are_named_by_their_first_argument() {
+        assert_eq!(
+            classify(&argv(&[Role::EnvReport.flag()])),
+            Invocation::EnvReport
+        );
         let engine = Role::Engine.flag();
         assert_eq!(classify(&argv(&[engine])), Invocation::Engine);
         assert_eq!(

@@ -1,7 +1,7 @@
 //! The boot builtin: `_ral-boot`, bound as the `Session "boot"` hook, is a
 //! front-end's first dispatch. It does in a run what must run — startup files
 //! evaluate ral — so its `Ending` carries the status: a `--capabilities`
-//! failure is `Raised` status 2, a profile's `exit N` is `Exited(N)`. It
+//! failure is `Raised` status 2, an rc's `exit N` is `Exited(N)`. It
 //! answers what the rc settled for the host.
 
 use ral_core::carrier::Severed;
@@ -23,7 +23,7 @@ use ral_core::{err, errln};
 use std::borrow::Cow;
 use std::path::PathBuf;
 
-use crate::repl::{RcSettings, install_default_prompt, source_startup_files};
+use crate::repl::{RcSettings, install_default_prompt, source_rc_file};
 
 const NAME: &str = "_ral-boot";
 
@@ -73,7 +73,6 @@ pub(crate) fn register(shell: &mut Shell) -> Result<(), String> {
 
 /// What a front-end asks of its boot. Batch sources no startup files.
 pub(crate) struct Boot {
-    pub(crate) login: bool,
     pub(crate) no_rc: bool,
     pub(crate) recursion_limit: Option<usize>,
     /// The `--capabilities` profiles, each the native spelling of an
@@ -82,7 +81,6 @@ pub(crate) struct Boot {
 }
 
 record!(Boot {
-    login: "login",
     no_rc: "no-rc",
     recursion_limit: "recursion-limit",
     capabilities: "capabilities",
@@ -157,7 +155,7 @@ fn boot(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> 
     let settings = if boot.no_rc {
         RcSettings::default()
     } else {
-        source_startup_files(boot.login, mooring, shell)?
+        source_rc_file(mooring, shell)?
     };
     if let Some(n) = boot.recursion_limit {
         shell.set_stack_limit(n);

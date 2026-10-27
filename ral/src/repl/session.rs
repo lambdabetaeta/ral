@@ -103,7 +103,6 @@ impl Session {
         transport.set_deferred_sink(host.clone());
 
         let boot = Boot {
-            login: opts.login,
             no_rc: opts.no_rc,
             recursion_limit: opts.run.recursion_limit,
             capabilities: Boot::profiles(&opts.run.capabilities).map_err(|e| {

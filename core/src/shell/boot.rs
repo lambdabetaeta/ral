@@ -354,15 +354,7 @@ pub fn seed_host_env(shell: &mut Shell) {
                 })
             }),
         ),
-        (
-            "SHELL",
-            inherited("SHELL", || {
-                std::env::current_exe()
-                    .ok()
-                    .and_then(|p| p.into_os_string().into_string().ok())
-                    .or_else(|| Some("ral".into()))
-            }),
-        ),
+        ("SHELL", crate::host::var("SHELL")),
         ("TERM", inherited("TERM", || Some("xterm-256color".into()))),
         ("LANG", inherited("LANG", || Some("C.UTF-8".into()))),
         ("LOGNAME", inherited("LOGNAME", || user.clone())),
@@ -426,6 +418,15 @@ mod tests {
     use crate::io::terminal::TerminalState;
     use crate::shell::runtime::Runtime;
     use std::sync::Arc;
+
+    #[test]
+    fn shell_has_no_default() {
+        crate::host::env::test_support::with_var("SHELL", None, || {
+            let mut shell = crate::test_helper::core_shell();
+            super::seed_host_env(&mut shell);
+            assert!(shell.context.env_overrides.get("SHELL").is_none());
+        });
+    }
 
     /// A bake of `src`, checked against core alone but not shape-vetted, so a
     /// test can hand `seat` a prelude the real bake would refuse.

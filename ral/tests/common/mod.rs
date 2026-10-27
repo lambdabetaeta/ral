@@ -33,6 +33,11 @@ pub fn diagnostics(stderr: &str) -> String {
         .join("\n")
 }
 
+/// REPL output lines without the default prompt.
+pub fn repl_output_lines(stdout: &str) -> impl Iterator<Item = &str> {
+    stdout.lines().map(|line| line.trim_start_matches("❯ "))
+}
+
 pub use ral_core::test_helper::confinement::Output;
 
 #[track_caller]

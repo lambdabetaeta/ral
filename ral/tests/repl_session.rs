@@ -11,7 +11,7 @@
 
 mod common;
 
-use common::{Output, ral_command};
+use common::{Output, ral_command, repl_output_lines};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -432,7 +432,7 @@ fn an_undeliverable_diagnostic_is_dropped_not_a_panic() {
 }
 
 /// A login shell keeps the umask it inherited: login(1) and PAM set it, and
-/// the profile is where a user changes it.
+/// the rc's `umask:` is where a user changes it.
 #[cfg(unix)]
 #[test]
 fn a_login_shell_keeps_the_inherited_umask() {
@@ -487,4 +487,42 @@ fn an_interactive_shell_passes_inherited_ignored_signals_on() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn rc_umask_applies_to_children_and_rals_own_creates() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, env) = rc_home("return [umask: '077']");
+    let file = env[1].1.join("created");
+    let out = repl(
+        &["-i"],
+        &env,
+        &format!("/bin/sh -c umask\necho x > '{}'\n", file.display()),
+    );
+    assert!(repl_output_lines(&out.stdout).any(|l| l == "0077"), "{out:?}");
+    assert_eq!(
+        std::fs::metadata(file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rc_open_file_limit_reaches_children() {
+    let (_dir, env) = rc_home("return [limits: [open-files: 64]]");
+    let out = repl(&["-i"], &env, "/bin/sh -c 'ulimit -n'\n");
+    assert!(repl_output_lines(&out.stdout).any(|l| l == "64"), "{out:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn grant_core_limit_wins_over_rc_session_limit() {
+    let (_dir, env) = rc_home("return [limits: [core-bytes: 1048576]]");
+    let out = repl(
+        &["-i"],
+        &env,
+        "grant [exec: [allow: [`absolute /bin/sh]]] { /bin/sh -c 'ulimit -c' }\n",
+    );
+    assert!(repl_output_lines(&out.stdout).any(|l| l == "0"), "{out:?}");
 }

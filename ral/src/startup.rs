@@ -181,3 +181,20 @@ pub(crate) mod engine {
         )
     }
 }
+
+/// Diagnose the host values ral cannot read as text.
+pub(crate) fn warn_unreadable_env() {
+    for (key, consequence) in [
+        (
+            "PATH",
+            "ral cannot search it and a command must be named by its path",
+        ),
+        ("HOME", "`~` is an error"),
+    ] {
+        if ral_core::host::var_os(key).is_some_and(|v| v.into_string().is_err()) {
+            errln!(
+                "ral: warning: {key} is not valid UTF-8, so {consequence}; programs ral starts still receive it unchanged"
+            );
+        }
+    }
+}
