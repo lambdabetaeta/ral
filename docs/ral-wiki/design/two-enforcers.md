@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 104cb519
+generated_at_commit: 6281520c
 ---
 
 # Two enforcers: why the guard is in-process
@@ -55,17 +55,34 @@ judged by its real path through the one exec judgment (`GrantStack::admit`), and
 the launcher runs that real path, under the user's spelling as `argv[0]`
 ([[decisions/261004_exec-rules|exec-rules]]).
 
-**The two enforcers agree on names and differ on identity, and the difference is
-ral's.** An exclusion is fixed, when the grant is decoded, to the object its
-spelling reached; ral's own readers (`cat`, `grep`, the editor, the tree walk,
-a redirect) match it by position *or* by that object, so a denied file
-renamed or hard-linked under an allowed directory is still refused to them.
-The kernel renderers consume the same `RealPath` and `Hold` and still judge by
-position: a bwrap mask, a Seatbelt rule or a DACL carve names the place, so
-that file is visible to a program ral runs. The sequel plan,
-`261021_enforcers-agree`, is where the renderers come to agree with ral's own
-readers ([[decisions/261021_one-path|one-path]],
-[[internals/path-judgment|path-judgment]]).
+**The two enforcers agree on each held object's current position at launch.**
+An exclusion holds the object its spelling reached when the grant was decoded.
+ral's readers judge by position or identity. Linux and macOS also ask each live
+hold for its current name, walk that name to verify identity, and render both
+recorded and current positions. An absent name keeps its tail beneath the held
+directory; it never denies that whole directory.
+
+The remaining limits are explicit:
+
+- A hard link need not be the name the kernel returns; unlinking the held name
+  can leave no current position. A copy is a new object.
+- A launch keeps its rules; moves after launch do not update them.
+- A stack received over a wire is unheld and reacquires only at recorded names.
+- macOS may return another hard link's name, leaving the moved name uncovered.
+- Windows holds nothing; identity judgments reach only directories carved for
+  recorded exclusions. A denied object moved into an allowance granted whole
+  can remain reachable, and deny verification checks recorded positions.
+- Landlock judges what it enumerates by identity. It lists a directory where
+  an exclusion's recorded position lies inside it or the directory is on that
+  exclusion's recorded spine by identity. A program denied only from running
+  runs after moving into an allowed directory that is on no exclusion's
+  recorded spine and holds no recorded position; a copy runs in any case.
+- Programs start by real name; a replacement between judgment and exec meets
+  the kernel's checks but escapes the guard's extra precision.
+- Win32 propagates inheritable ACEs by name; synod opens reviewed files and
+  marks their `Zone.Identifier` by name.
+
+See [[internals/path-judgment|path-judgment]] for the hold and its lifetime.
 
 **Why the guard cannot be the only enforcer.**
 
@@ -118,7 +135,7 @@ serves ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a
 | `fs` read/write prefixes, `deny` masks; what the exec table admits is readable | bwrap mounts, each source a handle ral opened without following a symlink, each mask at every name a bind shows the denied path ([[decisions/261006_the-envelope-mounts-by-handle]]) | refuse: `confinement_unavailable`, a bwrap that builds no envelope or lacks `--ro-bind-fd` (before 0.8.0) included |
 | ``net: `offline`` | `--unshare-net` | refuse: `projection_enforceable` |
 | ``gpu: `withheld`` | no GPU node in the envelope's `/dev`, masks over the host's; no Landlock part | never lacking on Linux |
-| `exec` — which path may be `execve`d (not which code runs), a deny inside an allowed directory included, over the tree at launch: a program added afterwards to a directory holding a block is denied until the next launch | Landlock `Execute` ruleset, the parent subtracting each block from the directory that holds it; every directory admission, `every` among them, lowered against the envelope's binds | refuse: `confinement_unavailable`, an exec opinion alone asking for the envelope |
+| `exec` — which path may be `execve`d (not which code runs), a deny inside an allowed directory included, over the tree at launch: a program added afterwards to a directory holding a block is denied until the next launch | Landlock `Execute` ruleset, judging enumerated entries by identity and position, listing a directory where an exclusion's recorded position lies inside it or the directory is on its recorded spine by identity; every directory admission, `every` among them, lowered against the envelope's binds | refuse: `confinement_unavailable`, an exec opinion alone asking for the envelope |
 | `exec` — a bare-name veto under a trusted write | in-process guard | the guard stands alone |
 | die with parent, new session, no core, the seccomp deny-set (kills kernel attack surface and mounting; refuses user namespaces, `TIOCSTI`, `TIOCLINUX`, socket families outside Unix/IP/routing netlink, non-Unix socketpairs and io_uring with an errno) | bwrap + `pre_exec` | applied where possible |
 | private ipc / uts | `--unshare-*` | never refused |

@@ -8,13 +8,14 @@
 //! warrant is NUL-terminated fields, with no length anywhere:
 //!
 //! ```text
-//! ral-warrant/3  <confinement>  file  <real>  <argv0>  <excluded>  <argc>  <arg>…
-//! ral-warrant/3  <confinement>  tool  <name>                       <argc>  <arg>…
+//! ral-warrant/4  <confinement>  file  <real>  <argv0>  <interpreter>  <excluded>  <argc>  <arg>…
+//! ral-warrant/4  <confinement>  tool  <name>                                      <argc>  <arg>…
 //! ```
 //!
-//! `<excluded>` names the exclusion covering the launched script's
-//! interpreter, empty if none: the parent read the `#!` line once, for the
-//! child's diagnosis alone, never as evidence.
+//! The parent read the launched script's `#!` line once through the judged
+//! handle: `<interpreter>` is that interpreter, `<excluded>` the exclusion
+//! covering it, each empty if none. Both are for the child's refusal hint
+//! alone, never evidence.
 //!
 //! The decoder accepts only what the encoder emits, byte for byte, so the
 //! encoding is canonical and injective.
@@ -24,7 +25,7 @@ use super::linux::landlock::Landlocked;
 use super::{ExecProjection, SandboxProjection};
 use crate::Role;
 use crate::authority::policy::{Admitted, Program, Subject, Withheld};
-use crate::path::{Depth, Judged, LeafMode, LexicalPath, Located, Reading, shown, walk};
+use crate::path::{Depth, LeafMode, LexicalPath, shown, walk};
 use crate::process::SpawnFailure;
 use crate::site::{Silent, site};
 use crate::syntax::quote::quote_word;
@@ -85,7 +86,7 @@ impl fmt::Display for Slot {
     }
 }
 
-const MAGIC: &[u8] = b"ral-warrant/3";
+const MAGIC: &[u8] = b"ral-warrant/4";
 /// Under macOS's default socket-buffer ceiling, far above either OS's `ARG_MAX`.
 const CAP: usize = 8 << 20;
 
@@ -182,6 +183,7 @@ enum Run {
     File {
         real: LexicalPath,
         arg0: PathBuf,
+        interpreter: Option<LexicalPath>,
         excluded: Option<String>,
         args: Vec<OsString>,
     },
@@ -192,27 +194,32 @@ impl Run {
     fn of(admitted: &Admitted, args: &[String], projection: &SandboxProjection) -> Self {
         let args = args.iter().map(OsString::from).collect();
         match admitted.program() {
-            Program::File { arg0, located } => Self::File {
-                real: LexicalPath::absolute(located.real().as_path())
-                    .expect("a walked program has an absolute real path"),
-                arg0: arg0.clone(),
-                excluded: interpreter_exclusion(located, projection),
-                args,
-            },
+            Program::File { arg0, located } => {
+                let interpreter = super::carriers::launched_shebang(located)
+                    .and_then(|path| LexicalPath::absolute(&path));
+                let excluded = interpreter
+                    .as_ref()
+                    .and_then(|interpreter| interpreter_exclusion(interpreter, projection));
+                Self::File {
+                    real: LexicalPath::absolute(located.real().as_path())
+                        .expect("a walked program has an absolute real path"),
+                    arg0: arg0.clone(),
+                    interpreter,
+                    excluded,
+                    args,
+                }
+            }
             Program::Tool(tool) => Self::Tool(tool, args),
         }
     }
 }
 
-/// The exclusion, on either axis, that covers the interpreter of the `#!`
-/// script `program`, read through the handle that was judged.  For the hint
-/// alone: support is the projection's, and nothing here is evidence.
+/// The interpreter's exclusion on either axis, for the refusal hint alone.
 fn interpreter_exclusion(
-    program: &Located<Judged<Reading>>,
+    interpreter: &LexicalPath,
     projection: &SandboxProjection,
 ) -> Option<String> {
-    let spelled = LexicalPath::absolute(&super::carriers::launched_shebang(program)?)?;
-    let walked = walk(&spelled, LeafMode::Follow).ok()?;
+    let walked = walk(interpreter, LeafMode::Follow).ok()?;
     let trace = walked.trace();
     trace.kind()?;
     let at = crate::path::Subject::Access(trace);
@@ -238,8 +245,8 @@ fn interpreter_exclusion(
 /// warrant yields, so nothing else can run it.
 pub(super) struct Confined(Run);
 
-/// The `arg0` and exclusion fields only a file carries.
-type FileFields<'a> = [&'a [u8]; 2];
+/// The `arg0`, interpreter and exclusion fields only a file carries.
+type FileFields<'a> = [&'a [u8]; 3];
 
 impl Confined {
     /// Become the program: a host file is `execve`d, which returns only when
@@ -250,9 +257,16 @@ impl Confined {
             Run::File {
                 real,
                 arg0,
+                interpreter,
                 excluded,
                 args,
-            } => exec(real.as_path(), &arg0, excluded.as_deref(), args),
+            } => exec(
+                real.as_path(),
+                &arg0,
+                interpreter.as_ref(),
+                excluded.as_deref(),
+                args,
+            ),
             Run::Tool(tool, args) => crate::uutils::run(tool.as_ref(), args).unwrap_or_else(|e| {
                 crate::io::terminal::cmd_error("ral", &e.to_string());
                 127
@@ -266,6 +280,7 @@ impl Confined {
 fn exec(
     real: &std::path::Path,
     arg0: &std::path::Path,
+    interpreter: Option<&LexicalPath>,
     excluded: Option<&str>,
     args: Vec<OsString>,
 ) -> u8 {
@@ -274,11 +289,10 @@ fn exec(
     let err = site!(Silent::RespawnExec, &mut cmd => exec());
     // A kernel refusal of a script is most often its interpreter's, which a
     // script the user can edit cannot carry in with it.
-    let hint = (err.kind() == io::ErrorKind::PermissionDenied)
-        .then(|| super::carriers::shebang(real))
-        .flatten()
+    let hint = interpreter
+        .filter(|_| err.kind() == io::ErrorKind::PermissionDenied)
         .map(|interp| {
-            let interp = quote_word(&crate::path::shown(interp)).into_owned();
+            let interp = quote_word(&shown(interp.as_path())).into_owned();
             match excluded {
                 Some(scope) => format!(
                     "\nhint: its interpreter {interp} is excluded by {}; an allowance \
@@ -354,6 +368,7 @@ impl Warrant {
             Run::File {
                 real,
                 arg0,
+                interpreter,
                 excluded,
                 args,
             } => (
@@ -361,6 +376,9 @@ impl Warrant {
                 real.as_path().as_os_str().as_bytes(),
                 Some([
                     arg0.as_os_str().as_bytes(),
+                    interpreter
+                        .as_ref()
+                        .map_or(b"", |path| path.as_path().as_os_str().as_bytes()),
                     excluded.as_deref().unwrap_or_default().as_bytes(),
                 ]),
                 args,
@@ -400,7 +418,13 @@ impl Warrant {
         let kind = next("kind")?;
         let program = next("program")?;
         let file = (kind == b"file")
-            .then(|| Ok::<_, String>((next("argv[0]")?, next("interpreter exclusion")?)))
+            .then(|| {
+                Ok::<_, String>((
+                    next("argv[0]")?,
+                    next("interpreter")?,
+                    next("interpreter exclusion")?,
+                ))
+            })
             .transpose()?;
         let argc: usize = text(next("argument count")?)?
             .parse()
@@ -413,13 +437,19 @@ impl Warrant {
             ));
         }
         let run = match (kind, file) {
-            (b"file", Some((arg0, excluded))) => Run::File {
+            (b"file", Some((arg0, interpreter, excluded))) => Run::File {
                 real: LexicalPath::absolute(&PathBuf::from(OsStr::from_bytes(program)))
                     .ok_or_else(|| format!(
                         "the warrant's file program {:?} is not an absolute path; refusing PATH lookup",
                         shown(OsStr::from_bytes(program))
                     ))?,
                 arg0: OsStr::from_bytes(arg0).into(),
+                interpreter: (!interpreter.is_empty()).then(|| {
+                    let path = PathBuf::from(OsStr::from_bytes(interpreter));
+                    LexicalPath::absolute(&path).ok_or_else(|| format!(
+                        "the warrant's interpreter {} is not an absolute path", shown(&path)
+                    ))
+                }).transpose()?,
                 excluded: Some(text(excluded)?)
                     .filter(|scope| !scope.is_empty())
                     .map(str::to_owned),
@@ -751,6 +781,7 @@ mod tests {
                 real: LexicalPath::absolute(std::path::Path::new(OsStr::from_bytes(real)))
                     .expect("an absolute program path"),
                 arg0: OsStr::from_bytes(arg0).into(),
+                interpreter: None,
                 excluded: excluded.map(str::to_owned),
                 args,
             },
@@ -777,6 +808,33 @@ mod tests {
     }
 
     #[test]
+    fn an_interpreter_round_trips_losslessly_and_relative_interpreters_are_refused() {
+        let mut warrant = file(b"/script", b"script", &[]);
+        let Run::File { interpreter, .. } = &mut warrant.run else {
+            unreachable!()
+        };
+        *interpreter = Some(
+            LexicalPath::absolute(std::path::Path::new(OsStr::from_bytes(b"/bin/\xffinterp")))
+                .expect("an absolute interpreter path"),
+        );
+        assert_eq!(
+            Warrant::decode(&warrant.encode().unwrap()).unwrap(),
+            warrant
+        );
+        let relative = framed(&[
+            MAGIC,
+            CONFINEMENT.as_bytes(),
+            b"file",
+            b"/script",
+            b"script",
+            b"bin/interp",
+            b"",
+            b"0",
+        ]);
+        assert!(Warrant::decode(&relative).is_err());
+    }
+
+    #[test]
     fn every_bundled_name_round_trips_to_its_static_spelling() {
         for tool in crate::uutils::bundled_tools() {
             let warrant = Warrant {
@@ -796,13 +854,23 @@ mod tests {
         let conf = confinement().spell().into_owned();
         let conf = conf.as_bytes();
         let big = vec![b'a'; CAP];
-        let control = framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"1", b"x"]);
+        let control = framed(&[
+            MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"", b"1", b"x",
+        ]);
         assert!(Warrant::decode(&control).is_ok(), "the control must decode");
         for (case, bytes) in [
             ("empty", Vec::new()),
             (
                 "another version",
-                framed(&[b"ral-warrant/2", conf, b"file", b"/bin/sh", b"sh", b"0"]),
+                framed(&[
+                    b"ral-warrant/3",
+                    conf,
+                    b"file",
+                    b"/bin/sh",
+                    b"sh",
+                    b"",
+                    b"0",
+                ]),
             ),
             ("cut short", control[..control.len() - 1].to_vec()),
             (
@@ -811,15 +879,15 @@ mod tests {
             ),
             (
                 "an empty file program",
-                framed(&[MAGIC, conf, b"file", b"", b"sh", b"", b"0"]),
+                framed(&[MAGIC, conf, b"file", b"", b"sh", b"", b"", b"0"]),
             ),
             (
                 "a relative file program",
-                framed(&[MAGIC, conf, b"file", b"./bin/sh", b"sh", b"", b"0"]),
+                framed(&[MAGIC, conf, b"file", b"./bin/sh", b"sh", b"", b"", b"0"]),
             ),
             (
                 "a slashless file program",
-                framed(&[MAGIC, conf, b"file", b"sh", b"sh", b"", b"0"]),
+                framed(&[MAGIC, conf, b"file", b"sh", b"sh", b"", b"", b"0"]),
             ),
             ("an empty tool", framed(&[MAGIC, conf, b"tool", b"", b"0"])),
             (
@@ -833,24 +901,32 @@ mod tests {
             (
                 "an argument too many",
                 framed(&[
-                    MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"1", b"x", b"y",
+                    MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"", b"1", b"x", b"y",
                 ]),
             ),
             (
                 "an argument too few",
-                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"2", b"x"]),
+                framed(&[
+                    MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"", b"2", b"x",
+                ]),
             ),
             (
                 "a signed count",
-                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"+1", b"x"]),
+                framed(&[
+                    MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"", b"+1", b"x",
+                ]),
             ),
             (
                 "a padded count",
-                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"01", b"x"]),
+                framed(&[
+                    MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"", b"01", b"x",
+                ]),
             ),
             (
                 "over the cap",
-                framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"1", &big]),
+                framed(&[
+                    MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"", b"1", &big,
+                ]),
             ),
             (
                 "a file without its argv[0]",
@@ -894,6 +970,7 @@ mod tests {
                 b"file",
                 b"/bin/sh",
                 b"sh",
+                b"",
                 b"",
                 b"0",
             ]);

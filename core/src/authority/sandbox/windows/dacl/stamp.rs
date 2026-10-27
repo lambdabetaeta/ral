@@ -28,8 +28,7 @@ struct StampStore {
 /// unfolded for the same case-sensitive-directory reason: a folded witness
 /// would let one object stand for another's stamp.  The path mutex guarding
 /// it folds, by design (`super::mutex`'s `mutex_name_for`): a lock errs the
-/// other way.  Keyed by name until the sequel plan narrows what the sandbox
-/// side does by name.
+/// other way.
 pub(super) fn stamp_key(name: &str, kind: GrantKind) -> String {
     format!("{}|{name}", kind.tag())
 }

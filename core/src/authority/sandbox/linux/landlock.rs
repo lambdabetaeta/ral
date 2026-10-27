@@ -424,7 +424,11 @@ fn admit_files(
         };
         // A file admit names that file alone, never what a directory since
         // put there holds.
-        if held.kind() == Some(Kind::Dir) {
+        if held.kind() == Some(Kind::Dir)
+            || !table
+                .evidence(Subject::Program(crate::path::Subject::Access(held.trace())))
+                .permits()
+        {
             continue;
         }
         let fd = leaf_fd(&held).map_err(|e| Error::admit(file, e))?;
@@ -565,7 +569,7 @@ struct Walk<'w> {
 impl Walk<'_> {
     /// Judge the position and inode; list every exclusion-holding directory.
     fn dir(&mut self, d: &Dir<Installing>) -> Result<(), Error> {
-        let at = crate::path::Subject::Position(d.real());
+        let at = crate::path::Subject::Access(d.trace());
         let id = d.trace().last_id();
         let masked = self.masks.iter().any(|m| m.contains(d.real()));
         if masked || self.excluded.contains(&id) || !self.table.evidence(Subject::Dir(at)).permits()
@@ -591,7 +595,7 @@ impl Walk<'_> {
 
     /// Admit a regular file only where its position and inode permit it.
     fn file(&mut self, f: &Located<Installing>) -> Result<(), Error> {
-        let at = crate::path::Subject::Position(f.real());
+        let at = crate::path::Subject::Access(f.trace());
         if f.kind() != Some(Kind::File)
             || self.excluded.contains(&f.trace().last_id())
             || !self.table.evidence(Subject::Program(at)).permits()

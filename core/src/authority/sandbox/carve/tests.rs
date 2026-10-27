@@ -1,5 +1,5 @@
 use super::{Carving, carve};
-use crate::path::{RealPath, shown};
+use crate::path::{Excluded, RealPath, Walked, shown};
 use std::path::{Path, PathBuf};
 
 /// A tree spelled one path per line, under a fresh real root that `/` stands
@@ -60,7 +60,19 @@ fn link(at: &Path) {
 /// The carving's two sets, spelled and sorted.
 fn plan(tree: &Tree, allow: &[&str], deny: &[&str]) -> (Vec<String>, Vec<String>) {
     let reals = |spelled: &[&str]| spelled.iter().map(|p| tree.at(p)).collect::<Vec<_>>();
-    let Carving { whole, entries } = carve(&reals(allow), &reals(deny)).unwrap();
+    let exclusions: Vec<_> = deny
+        .iter()
+        .map(|p| Excluded::walk(&crate::path::LexicalPath::absolute(&tree.path(p)).unwrap()))
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let exclusions: Vec<_> = exclusions.iter().collect();
+    let Carving {
+        mut whole,
+        held,
+        entries,
+    } = carve(&reals(allow), &exclusions).unwrap();
+    whole.extend(held.iter().map(|entry| entry.real().clone()));
+    let entries = entries.iter().map(|dir| dir.real().clone()).collect();
     let spelled = |paths: Vec<RealPath>| {
         let mut out: Vec<String> = paths.iter().map(|p| tree.spelled(p)).collect();
         out.sort();
@@ -223,9 +235,37 @@ fn an_unlistable_directory_ends_the_plan() {
     let tree = Tree::new(&["/a/", "/a/b/", "/a/b/c", "/a/d"]);
     let locked = tree.path("/a/b");
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
-    let refused = carve(&[tree.at("/a")], &[tree.at("/a/b/c")]);
+    let excluded =
+        Excluded::walk(&crate::path::LexicalPath::absolute(&tree.path("/a/b/c")).unwrap()).unwrap();
+    let refused = carve(&[tree.at("/a")], &[&excluded]);
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     if let Err(unlisted) = refused {
         assert_eq!(tree.spelled(&unlisted.at), "/a/b");
     }
+}
+
+#[test]
+fn a_moved_denied_file_is_withheld_from_a_directory_carved_for_another_exclusion() {
+    let tree = Tree::new(&["/work/ok", "/elsewhere/secret"]);
+    let exclusion = Excluded::walk(
+        &crate::path::LexicalPath::absolute(&tree.path("/elsewhere/secret")).unwrap(),
+    )
+    .unwrap();
+    let trigger =
+        Excluded::walk(&crate::path::LexicalPath::absolute(&tree.path("/work/other")).unwrap())
+            .unwrap();
+    std::fs::rename(tree.path("/elsewhere/secret"), tree.path("/work/x")).unwrap();
+    let carving = carve(&[tree.at("/work")], &[&exclusion, &trigger]).unwrap();
+    assert!(
+        carving.whole.is_empty(),
+        "only examined entries are granted"
+    );
+    assert_eq!(
+        carving
+            .held
+            .iter()
+            .map(|entry| tree.spelled(entry.real()))
+            .collect::<Vec<_>>(),
+        ["/work/ok"]
+    );
 }

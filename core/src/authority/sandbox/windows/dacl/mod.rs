@@ -327,8 +327,7 @@ fn cancelled(cancel: &Scope) -> Result<(), DaclError> {
 /// text [`FrozenPin::name`] holds, is hashed as-is, not case-folded:
 /// canonicalisation already yields one spelling per object, and folding would
 /// merge two genuinely distinct names in an NTFS case-sensitive directory into
-/// one authority. It is keyed by name until the sequel plan narrows what the
-/// sandbox side does by name.
+/// one authority.
 pub(crate) fn fs_capability_name(name: &str, kind: GrantKind) -> String {
     let digest = <sha2::Sha256 as sha2::Digest>::digest(name.as_bytes());
     let mut capability = format!("ral.fs.{}.", kind.tag());

@@ -193,12 +193,6 @@ pub(crate) fn rendered_ancestors<'a>(
         .collect()
 }
 
-/// The positions an exclusion holds: its name's and, where that is a link,
-/// the link's target's.
-fn held(excluded: &super::Excluded) -> impl Iterator<Item = &super::RealPath> {
-    std::iter::once(excluded.named().real()).chain(excluded.target().map(super::Trace::real))
-}
-
 /// Every name by which a kernel sandbox hook might present what `denies`
 /// exclude: each held position and its firmlink twin, deduped, never
 /// re-resolved.
@@ -207,10 +201,10 @@ fn held(excluded: &super::Excluded) -> impl Iterator<Item = &super::RealPath> {
 ///
 /// As [`render_real`].
 pub(crate) fn render_excluded<'a>(
-    denies: impl IntoIterator<Item = &'a super::Excluded>,
+    denies: impl IntoIterator<Item = &'a super::RealPath>,
 ) -> Result<Vec<Rendered>, String> {
     let mut names = std::collections::BTreeSet::new();
-    for real in denies.into_iter().flat_map(held) {
+    for real in denies {
         names.extend(render_real(real)?);
     }
     Ok(names.into_iter().collect())
@@ -226,12 +220,11 @@ pub(crate) fn render_excluded<'a>(
 ///
 /// As [`render_real`].
 pub(crate) fn pinned_dirs<'a>(
-    denies: impl IntoIterator<Item = &'a super::Excluded>,
+    denies: impl IntoIterator<Item = &'a super::RealPath>,
     writes: &[super::RealPath],
 ) -> Result<Vec<Rendered>, String> {
     let pins: std::collections::BTreeSet<_> = denies
         .into_iter()
-        .flat_map(held)
         .flat_map(|real| {
             writes
                 .iter()

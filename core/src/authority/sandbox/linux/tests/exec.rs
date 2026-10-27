@@ -31,7 +31,7 @@ fn admitting(dirs: &[&str], paths: &[&str]) -> ExecProjection {
         .chain(coreutils)
         .map(|d| dir_rule(&d, true));
     let files = paths.iter().map(|p| file_rule(&real(p), true));
-    let linkers = crate::authority::sandbox::carriers::linkers()
+    let linkers = crate::authority::sandbox::carriers::linkers(|_| false)
         .into_iter()
         .map(|linker| file_rule(&linker, true));
     ExecProjection::Restricted(dirs.chain(files).chain(linkers).collect())
@@ -822,7 +822,7 @@ fn exec_files(projection: &SandboxProjection) -> Vec<RealPath> {
 /// admit it; the same grant without it admits the linker.
 #[test]
 fn an_excluded_linker_candidate_is_not_admitted() {
-    let Some(linker) = crate::authority::sandbox::carriers::linkers()
+    let Some(linker) = crate::authority::sandbox::carriers::linkers(|_| false)
         .into_iter()
         .next()
     else {
@@ -846,7 +846,7 @@ fn an_excluded_linker_candidate_is_not_admitted() {
 /// admit it, as an exec exclusion does.
 #[test]
 fn an_fs_excluded_linker_candidate_is_not_admitted() {
-    let Some(linker) = crate::authority::sandbox::carriers::linkers()
+    let Some(linker) = crate::authority::sandbox::carriers::linkers(|_| false)
         .into_iter()
         .next()
     else {
@@ -1078,10 +1078,9 @@ fn a_bundled_tool_runs_where_a_descendant_cannot_start_ral() {
     let _ = std::fs::remove_dir_all(&work);
 }
 
-/// A hard link made before launch at an excluded path to an admitted file
-/// runs: Landlock admits inodes, and the exclusion names a path (§7.6).
+/// An exact allowance cannot admit an excluded inode through another name.
 #[test]
-fn a_preexisting_hard_link_at_an_excluded_path_runs() {
+fn an_exact_allowance_does_not_admit_a_preexisting_excluded_hard_link() {
     if !landlock_at_least(Abi::EXEC) {
         return;
     }
@@ -1109,8 +1108,8 @@ fn a_preexisting_hard_link_at_an_excluded_path_runs() {
     );
     let (stdout, _) = confined(&env, &policy, &script);
     assert!(
-        emitted(&stdout, "LINK-RAN"),
-        "the declared limit moved: {stdout}"
+        !emitted(&stdout, "LINK-RAN"),
+        "the exact allowance admitted an excluded identity: {stdout}"
     );
     assert!(
         !emitted(&stdout, "PLANTED-RAN"),
@@ -1184,4 +1183,75 @@ fn a_promised_ruleset_that_never_arrived_runs_nothing() {
     assert_eq!(out.status.code(), Some(126), "{stdout} {stderr}");
     assert!(!emitted(&stdout, "RAN"), "the program ran unconfined");
     assert!(stderr.contains(&format!("fd {at}")), "{stderr}");
+}
+
+#[test]
+fn a_moved_exec_exclusion_is_refused_only_where_landlock_judges_it() {
+    if !landlock_at_least(Abi::EXEC) {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    let evil = copy_true(&tmp.path().join("t"), "evil");
+    let ok = copy_true(&bin, "ok");
+    let x = bin.join("x");
+    let exclusion = file_rule(&crate::test_helper::real(&evil), false);
+    let trigger = file_rule(&crate::test_helper::place(bin.join("other")), false);
+    let exact = file_rule(&crate::test_helper::place(&x), true);
+    let base = admitting(&[bin.to_str().unwrap()], &[]);
+    let with = |extra: Vec<Rule>| {
+        let ExecProjection::Restricted(table) = base.clone() else {
+            unreachable!()
+        };
+        ExecProjection::Restricted(table.join(extra.into_iter().collect()))
+    };
+    let policies = [
+        exec_policy(with(vec![exclusion.clone(), trigger])),
+        exec_policy(admitting_less(&[], [exact, exclusion.clone()])),
+        exec_policy(with(vec![exclusion])),
+    ];
+    let Some(env) = envelope_launches(&policies[0]) else {
+        return;
+    };
+    std::fs::rename(&evil, &x).unwrap();
+    for (policy, expected) in policies.iter().zip([126, 126, 0]) {
+        let (stdout, stderr) =
+            confined(&env, policy, &format!("'{}'; echo STATUS-$?", x.display()));
+        assert!(
+            stdout.contains(&format!("STATUS-{expected}")),
+            "{stdout}: {stderr}"
+        );
+    }
+    let (stdout, stderr) = confined(
+        &env,
+        &policies[0],
+        &format!("'{}' && echo OK-RAN", ok.display()),
+    );
+    assert!(stdout.contains("OK-RAN"), "{stdout}: {stderr}");
+}
+
+#[test]
+fn a_refused_exec_hint_keeps_the_interpreter_read_before_spawn() {
+    if !landlock_at_least(Abi::EXEC) {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let (script, interpreter) = scripted(tmp.path());
+    let other = copy_true(tmp.path(), "other");
+    let fs = FsPolicy {
+        read_prefixes: vec![FrozenPath::freeze(tmp.path()).unwrap()],
+        ..FsPolicy::default()
+    };
+    let (policy, admitted) = folded(Some((&[script.as_path()], &[])), Some(fs), &script);
+    let Some(env) = envelope_launches(&policy) else {
+        return;
+    };
+    let output = run_after(&env, &policy, &admitted, &[], || {
+        std::fs::write(&script, format!("#!{}\n", other.display())).unwrap();
+    })
+    .unwrap();
+    assert_eq!(output.status.code(), Some(126));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(interpreter.to_str().unwrap()), "{stderr}");
+    assert!(!stderr.contains(other.to_str().unwrap()), "{stderr}");
 }

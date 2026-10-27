@@ -100,3 +100,94 @@ fn downstream_bundled_pipeline_stage_write_outside_grant_denied() {
         false,
     );
 }
+
+#[test]
+fn moved_exclusions_reach_children_through_the_identity_transport() {
+    use ral_core::HostSurface;
+    use ral_core::carrier::{IdentityTransport, dispatch_to_report};
+    use ral_core::engine::EngineInstaller;
+    use ral_core::io::terminal::TerminalState;
+    use ral_core::path::EnginePath;
+    use ral_core::protocol::{Attach, EngineSpec, Report, Root, Run};
+    use ral_core::source::SourceOrigin;
+    use std::sync::Arc;
+
+    static ENGINES: [EngineInstaller; 1] = [EngineInstaller {
+        tag: "bare",
+        runtime: |_| HostSurface::default().runtime(TerminalState::default()),
+        root: |_, _| Ok(()),
+        narrow: |_, _| Err("this engine makes no children".into()),
+    }];
+
+    let _proof = ral_core::require_confinement!();
+    let tree = tempfile::tempdir().unwrap();
+    let work = tree.path().join("work");
+    let secret = tree.path().join("secret");
+    let directory = tree.path().join("private");
+    let absent = tree.path().join("absent");
+    for dir in [&work, &directory, &absent] {
+        std::fs::create_dir(dir).unwrap();
+    }
+    std::fs::write(&secret, "SECRET-BYTES").unwrap();
+    std::fs::write(directory.join("key"), "DIRECTORY-SECRET").unwrap();
+    std::fs::write(work.join("ok"), "ALLOWED-BYTES").unwrap();
+    let grants = stack([layer(Capabilities {
+        fs: Some(FsPolicy {
+            read_prefixes: vec![FrozenPath::freeze(&work).unwrap()],
+            deny_paths: [&secret, &directory, &absent.join(".env")]
+                .into_iter()
+                .map(|p| FrozenPath::freeze(p).unwrap())
+                .collect(),
+            ..FsPolicy::default()
+        }),
+        ..Capabilities::default()
+    })]);
+    std::fs::copy(&secret, work.join("copy")).unwrap();
+    std::fs::rename(&secret, work.join("x")).unwrap();
+    std::fs::rename(&directory, work.join("private")).unwrap();
+    std::fs::rename(&absent, work.join("absent")).unwrap();
+    let transport = IdentityTransport::boot(
+        &ENGINES,
+        &Attach::root(
+            EngineSpec::new("bare", EnginePath::Host(work.clone())),
+            Root::new(EnginePath::Host(work)),
+        ),
+    )
+    .unwrap();
+    let dispatch = |body: &str| {
+        let report = dispatch_to_report(
+            &transport,
+            Run {
+                caps: grants.clone(),
+                ..Run::captured(body, SourceOrigin::named("<moved exclusion>"))
+            },
+            Arc::new(()),
+        )
+        .unwrap();
+        let Report::Ran {
+            ending, captured, ..
+        } = report
+        else {
+            panic!("expected evaluation, got {report:?}");
+        };
+        (ending.status(), captured.unwrap())
+    };
+    let (status, output) = dispatch("/bin/cat ok copy; /bin/ls absent");
+    assert_eq!(status, 0, "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("ALLOWED-BYTES"), "{output:?}");
+    assert!(
+        stdout.contains("SECRET-BYTES"),
+        "a copy is a new object: {output:?}"
+    );
+    for (body, marker) in [
+        ("/bin/cat x", "SECRET-BYTES"),
+        ("/bin/cat private/key", "DIRECTORY-SECRET"),
+    ] {
+        let (_, output) = dispatch(body);
+        assert!(
+            !String::from_utf8_lossy(&output.stdout).contains(marker),
+            "{output:?}"
+        );
+    }
+}

@@ -157,3 +157,9 @@ pub(super) fn derive(
         rustix::fs::open(path, oflags(access) | OFlags::CLOEXEC, Mode::empty())
     )?))
 }
+
+/// The kernel's name for this descriptor; the caller verifies it by walking.
+pub(super) fn current_path(file: &File) -> io::Result<PathBuf> {
+    let path = crate::path::proc_fd_path(file.as_raw_fd());
+    site!(Silent::WalkCurrent, std::fs::read_link(path))
+}

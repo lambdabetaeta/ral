@@ -40,7 +40,7 @@ use crate::authority::policy::{FsAllow, GrantPath};
 use crate::authority::sandbox::Refusal;
 use crate::authority::sandbox::carve;
 use crate::authority::sandbox::{FsRules, SandboxProjection};
-use crate::path::{Excluded, RealPath, shown};
+use crate::path::{Excluded, Installing, Located, RealPath, shown};
 use crate::process::Launch;
 use crate::process::cancel::Scope;
 use crate::sync::LockExt as _;
@@ -206,16 +206,37 @@ pub(crate) fn confine(
     let readonly: Vec<RealPath> = (read.iter().filter(|p| !write.contains(p)))
         .map(|&p| p.clone())
         .collect();
-    let readwrite = carve::carve(&readwrite, &denied)?;
-    let mut readonly = carve::carve(&readonly, &denied)?;
+    let exclusions: Vec<_> = rules.deny.iter().map(|d| &d.real).collect();
+    let readwrite = carve::carve(&readwrite, &exclusions)?;
+    let mut readonly = carve::carve(&readonly, &exclusions)?;
     readonly.whole.retain(|p| !readwrite.whole.contains(p));
+    readonly.held.retain(|entry| {
+        !readwrite.whole.contains(entry.real())
+            && !readwrite.held.iter().any(|rw| rw.real() == entry.real())
+    });
     if let Some(image) = program_image
         && !readwrite.whole.contains(image)
         && !readonly.whole.contains(image)
+        && !readwrite
+            .held
+            .iter()
+            .chain(&readonly.held)
+            .any(|entry| entry.real() == image)
     {
         readonly.whole.push(image.clone());
     }
-    let granted: Vec<&RealPath> = readwrite.whole.iter().chain(&readonly.whole).collect();
+    let granted: Vec<&RealPath> = readwrite
+        .whole
+        .iter()
+        .chain(&readonly.whole)
+        .chain(
+            readwrite
+                .held
+                .iter()
+                .chain(&readonly.held)
+                .map(Located::real),
+        )
+        .collect();
     refuse_deny_meeting_grant(&granted, &denied)?;
     let as_paths = |positions: &[&RealPath]| -> Vec<PathBuf> {
         positions
@@ -243,8 +264,8 @@ pub(crate) fn confine(
     } = sandbox;
     let mut carved = readwrite.entries;
     carved.extend(readonly.entries);
-    carved.sort();
-    carved.dedup();
+    carved.sort_by(|a, b| a.real().cmp(b.real()));
+    carved.dedup_by(|a, b| a.real() == b.real());
 
     // The redirect check comes first, before the memo: a path granted at an
     // earlier launch and since replaced by a junction must refuse this one.
@@ -252,16 +273,31 @@ pub(crate) fn confine(
     // no second look.
     #[cfg(debug_assertions)]
     let (t_grants, known) = (std::time::Instant::now(), fs_cap_sids.len());
+    let pins = |whole: &[RealPath], held: &[Located<Installing>], kind| {
+        let mut pins = dacl::pin_all(whole, kind)?;
+        pins.extend(
+            held.iter()
+                .map(|entry| FrozenPin::held(entry, kind))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        Ok::<_, dacl::DaclError>(pins)
+    };
     let pinned = [
         (
-            dacl::pin_all(&readwrite.whole, GrantKind::ReadWrite)?,
+            pins(&readwrite.whole, &readwrite.held, GrantKind::ReadWrite)?,
             GrantKind::ReadWrite,
         ),
         (
-            dacl::pin_all(&readonly.whole, GrantKind::ReadOnly)?,
+            pins(&readonly.whole, &readonly.held, GrantKind::ReadOnly)?,
             GrantKind::ReadOnly,
         ),
-        (dacl::pin_all(&carved, GrantKind::List)?, GrantKind::List),
+        (
+            carved
+                .into_iter()
+                .map(|dir| FrozenPin::held(&dir.into_located(), GrantKind::List))
+                .collect::<Result<Vec<_>, _>>()?,
+            GrantKind::List,
+        ),
     ];
     // The image and the carving are this launch's, not the projection's.
     let mut names = BTreeSet::new();

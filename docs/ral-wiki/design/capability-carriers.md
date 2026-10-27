@@ -1,3 +1,7 @@
+---
+generated_at_commit: 6281520c
+---
+
 # Authority's three carriers, and why they don't collapse
 
 **Authority changes its form as it travels — from a rule you write, to the act of
@@ -69,7 +73,13 @@ above anything: a support file serves a launch only if it can be both run and
 read, so one that an exec or an fs exclusion covers is dropped from both axes.
 Support is a function of the launch, not of the policy alone, and is computed
 for every confined launch under a restricted fs or exec. It grants running and
-reading, never writing. The guard consults none: an exclusion of a linker or an
+reading, never writing. Discovery retains each system-only walk's `Located`,
+checks the projection's exclusions on its trace before reading or yielding it,
+and reads its `#!` through that handle under `Ungoverned::read`. The same
+predicate judges linker traces. The parent also reads the launched program's
+interpreter through its judged handle and carries that interpreter in
+`ral-warrant/4`; a refused exec's hint uses the saved interpreter, even if the
+script changes before spawn. The guard consults none: an exclusion of a linker or an
 interpreter refuses the programs that start through it, though the policy says
 nothing about them, and the kernel's refusal is worded by the launch
 diagnostics. Same authority, two renderings, because there are

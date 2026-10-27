@@ -3,7 +3,7 @@
 //! identity's reuse, and by position where the object is gone.
 
 use super::super::super::exclusion::{Excluded, Hold};
-use super::super::super::trace::{ObjectId, Trace};
+use super::super::super::trace::Trace;
 use super::super::resolve::{LeafMode, walk_excluded, walk_lenient};
 use super::unix::{entered, root, spelled};
 use super::{Around, LINK_READ};
@@ -390,59 +390,122 @@ fn the_held_identity_is_not_reused_while_the_deny_stands() {
     }
 }
 
-/// An object found again at its position is held again; one gone, or
-/// replaced there, leaves the exclusion unheld, its trace unchanged, and
-/// holding by position and by the identities it recorded.
 #[test]
-fn rehold_keeps_the_object_found_and_lets_go_of_another() {
+fn rehold_keeps_a_live_handle_after_rename_and_unlink() {
     let (_tmp, dir, mut excluded) = secret();
     let recorded = excluded.named().clone();
+    std::fs::rename(dir.join("d/secret"), dir.join("elsewhere/x")).unwrap();
     excluded.rehold();
-    let held = excluded
-        .holds()
-        .next()
-        .unwrap()
-        .handle_for_test()
-        .expect("still there, so held");
-    assert_eq!(ObjectId::of(held).unwrap(), recorded.last_id());
-
-    std::fs::hard_link(dir.join("d/secret"), dir.join("elsewhere/h")).unwrap();
-    std::fs::remove_file(dir.join("d/secret")).unwrap();
+    assert_eq!(excluded.held_ids(), [Some(recorded.last_id())]);
+    std::fs::remove_file(dir.join("elsewhere/x")).unwrap();
     excluded.rehold();
-    assert!(
-        excluded.holds().next().unwrap().handle_for_test().is_none(),
-        "gone"
-    );
-    std::fs::write(dir.join("d/secret"), "new").unwrap();
-    excluded.rehold();
-    assert!(
-        excluded.holds().next().unwrap().handle_for_test().is_none(),
-        "replaced"
-    );
-
+    assert_eq!(excluded.held_ids(), [Some(recorded.last_id())]);
     assert_eq!(excluded.named(), &recorded);
-    assert_eq!(by(&excluded, &dir.join("d/secret")), Some(MatchedBy::Name));
-    assert_eq!(
-        by(&excluded, &dir.join("elsewhere/h")),
-        Some(MatchedBy::Identity)
-    );
 }
 
-/// The deepest object an absent name's walk opened is its directory, and it
-/// is held until the name exists.
 #[test]
-fn rehold_of_an_absent_name_holds_its_directory_until_the_name_is_made() {
+fn rehold_of_an_absent_name_keeps_its_directory_after_the_name_is_made() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = root(&tmp);
     mkdirs(&dir, &["d"]);
     let mut excluded = deny(&dir.join("d/.env"));
-    assert!(excluded.holds().next().unwrap().handle_for_test().is_some());
+    let held = excluded.held_ids();
     excluded.rehold();
-    assert!(excluded.holds().next().unwrap().handle_for_test().is_some());
+    assert_eq!(excluded.held_ids(), held);
     std::fs::write(dir.join("d/.env"), "").unwrap();
     excluded.rehold();
-    assert!(excluded.holds().next().unwrap().handle_for_test().is_none());
+    assert_eq!(excluded.held_ids(), held);
     assert_eq!(by(&excluded, &dir.join("d/.env")), Some(MatchedBy::Name));
+}
+
+#[test]
+fn an_unheld_hold_is_reacquired_only_at_its_recorded_identity() {
+    let (_tmp, dir, excluded) = secret();
+    let wire = serde_json::to_value(&excluded).unwrap();
+    let mut present: Excluded = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(present.held_ids(), [None]);
+    assert!(present.holds().next().unwrap().current().is_none());
+    present.rehold();
+    assert_eq!(present.held_ids(), excluded.held_ids());
+    std::fs::rename(dir.join("d/secret"), dir.join("elsewhere/x")).unwrap();
+    let mut absent: Excluded = serde_json::from_value(wire.clone()).unwrap();
+    absent.rehold();
+    assert_eq!(absent.held_ids(), [None]);
+    std::fs::write(dir.join("d/secret"), "replacement").unwrap();
+    let mut replaced: Excluded = serde_json::from_value(wire).unwrap();
+    replaced.rehold();
+    assert_eq!(replaced.held_ids(), [None]);
+}
+
+#[test]
+fn current_follows_a_held_file_within_and_across_directories() {
+    let (_tmp, dir, excluded) = secret();
+    let held = excluded.holds().next().unwrap();
+    assert_eq!(held.current().unwrap().as_path(), dir.join("d/secret"));
+    assert_eq!(excluded.positions(), [excluded.named().real().clone()]);
+    std::fs::rename(dir.join("d/secret"), dir.join("d/x")).unwrap();
+    assert_eq!(held.current().unwrap().as_path(), dir.join("d/x"));
+    std::fs::rename(dir.join("d/x"), dir.join("elsewhere/x")).unwrap();
+    assert_eq!(held.current().unwrap().as_path(), dir.join("elsewhere/x"));
+    let positions = excluded.positions();
+    assert_eq!(positions.len(), 2);
+    assert!(positions.contains(excluded.named().real()));
+    assert!(positions.contains(&held.current().unwrap()));
+    std::fs::remove_file(dir.join("elsewhere/x")).unwrap();
+    assert_eq!(held.current(), None);
+}
+
+#[test]
+fn current_does_not_find_a_hard_link_after_the_held_name_is_unlinked() {
+    let (_tmp, dir, excluded) = secret();
+    std::fs::hard_link(dir.join("d/secret"), dir.join("elsewhere/h")).unwrap();
+    std::fs::remove_file(dir.join("d/secret")).unwrap();
+    assert_eq!(excluded.holds().next().unwrap().current(), None);
+}
+
+#[test]
+fn current_follows_a_directory_and_preserves_an_absent_tail() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = root(&tmp);
+    mkdirs(&dir, &["d"]);
+    let directory = deny(&dir.join("d"));
+    let absent = deny(&dir.join("d/.env"));
+    std::fs::rename(dir.join("d"), dir.join("e")).unwrap();
+    assert_eq!(
+        directory
+            .holds()
+            .next()
+            .unwrap()
+            .current()
+            .unwrap()
+            .as_path(),
+        dir.join("e")
+    );
+    assert_eq!(
+        absent.holds().next().unwrap().current().unwrap().as_path(),
+        dir.join("e/.env")
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn current_keeps_a_literal_deleted_suffix_and_rejects_a_deleted_objects_namesake() {
+    let (_tmp, dir, excluded) = secret();
+    let name = dir.join("d/x (deleted)");
+    std::fs::rename(dir.join("d/secret"), &name).unwrap();
+    assert_eq!(
+        excluded
+            .holds()
+            .next()
+            .unwrap()
+            .current()
+            .unwrap()
+            .as_path(),
+        name
+    );
+    std::fs::remove_file(&name).unwrap();
+    std::fs::write(dir.join("d/x (deleted) (deleted)"), "namesake").unwrap();
+    assert_eq!(excluded.holds().next().unwrap().current(), None);
 }
 
 /// A hold crosses the wire as its trace and arrives unheld.

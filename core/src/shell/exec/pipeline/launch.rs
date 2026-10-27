@@ -141,7 +141,9 @@ fn launch_external_stage_direct(
     cx: &mut LaunchCx<'_>,
     slot: &Slot,
 ) -> Settled<ExternalStage> {
-    let head = cx.shell.at_site(span, |shell| head.admit(cx.mooring, shell))?;
+    let head = cx
+        .shell
+        .at_site(span, |shell| head.admit(cx.mooring, shell))?;
     let SpawnPlan {
         shown,
         admitted,

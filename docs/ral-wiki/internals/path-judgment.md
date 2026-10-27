@@ -1,5 +1,6 @@
 ---
-verified_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
+verified_at_commit: 6281520c
+generated_at_commit: 6281520c
 verified_at_date: 2026-10-27
 anchors: [walk, walk_excluded, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, GrantStack::judge, Refused, Extent, from_capabilities, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline, Walk, Cancellation, AdmittedWalk, Shell::admitted_walk]
 ---
@@ -72,7 +73,7 @@ vouched for it.**
 - **`Dir`** is an open directory; **`Located`** an object named exactly: its
   directory's handle, its trace, and the leaf's handle where the leaf exists;
   **`Hold`** an exclusion's anchor: a trace and, on Unix, a handle on the
-  deepest object walked, kept while that object is at its position. A `Hold`
+  deepest object walked, kept for the lifetime of the stack holding it. A `Hold`
   serialises as its trace and deserialises *unheld*, which is a sound state.
 - **`Dir` and `Located` are `#[must_use]`, have no `Clone`**, and the
   operations that end an object's use take it by value (`stage`, `create_dir`,
@@ -203,15 +204,49 @@ program's directory on Windows ([[internals/exec-judgment|exec-judgment]]).
 
 ## The OS sandbox side
 
-**The renderers consume `RealPath` and `Hold` and still judge by position.**
-bwrap and Landlock open each allowance's position at launch with no link
-followed (`open_nofollow`, `open_dir_nofollow`), as `Installing`: it lists,
-descends, lends a handle, and reads nothing. An absent position is omitted; a
-*redirected* one refuses the launch. Exclusions are rendered from their
-resolved real paths, never from the text as written. The kernel sandboxes
-judge names: a denied object renamed or hard-linked under an allowed directory
-is hidden from ral's readers and not from a program ral runs
-([[design/two-enforcers|two-enforcers]]).
+**The renderers consume frozen allowances and the positions of held exclusions.**
+bwrap and Landlock open allowance positions without following links, as
+`Installing`. An absent allowance is omitted; a redirected one refuses launch.
+Filesystem rendering takes exclusions' positions once per launch for bwrap's
+masks and Seatbelt's denies and pins. Seatbelt also renders exec exclusions at
+those positions.
+
+Landlock judges enumerated entries and exact-file allowances by identity as
+well as position. It lists a directory where an exclusion's recorded position
+lies inside it or the directory is on that exclusion's recorded spine by
+identity, so renaming an ancestor preserves its listing. A program denied
+only from running, moved into an allowed directory on no exclusion's recorded
+spine and holding no recorded position, runs.
+
+Carrier discovery keeps its system-only walk's handle, judges its trace against
+exclusions on both axes, then reads through that handle. Linkers meet the same
+predicate. Refused-exec hints use the interpreter carried in the parent's
+warrant.
+
+### A hold's current position and lifetime
+
+**A live hold survives `rehold`, even after rename or unlink.** An unheld hold,
+such as one deserialized from the wire, is reacquired only where its recorded
+position still reaches its recorded identity. The stack holds the descriptor
+for its lifetime: the agent session or the grant block.
+
+`Hold::current` asks Linux's `/proc/self/fd` or macOS's `F_GETPATH` for the
+held object's name, walks it without following the leaf, and keeps it only
+where the walk reaches the held identity. It appends the trace's missing tail:
+a moved directory holding an absent `.env` yields the new `.env` position,
+never the whole directory. This verifies Linux's ambiguous ` (deleted)` suffix
+without parsing it. An unheld or deleted object has no current position;
+Windows holds nothing and returns none. `Excluded::positions` deduplicates each
+hold's recorded and current positions. Hard links, copies, wire transmission
+and moves after launch retain the limits in
+[[design/two-enforcers|two-enforcers]].
+
+Windows carving opens each listed entry without following the leaf and judges
+its trace by `Excluded::matches`. It retains the examined objects: unlisted
+allowances in `whole`, granted entries in `held`, and listed directories in
+`entries`. `FrozenPin` derives stamping rights from these handles; only unlisted
+allowances and the program image require a fresh walk. What carving examined is
+what receives the ACE, even if the name is replaced before stamping.
 
 ## A deny holds under every spelling
 
@@ -250,7 +285,7 @@ position; the kernel judges current ancestry. The residuals:
 
 - **A program is exec'd by name.** A file put at its real name, or at a folder on
   the way, between the judgment and the exec runs unjudged. A Landlock file rule
-  admits what is at the position at install time.
+  admits the inode opened and judged at install time.
 - **The publish names its source on Unix**: a process that may write the
   directory can swap the staged sibling in the instant between sync and rename.
   On Windows the rename is by the staging handle.
@@ -292,10 +327,7 @@ position; the kernel judges current ancestry. The residuals:
   the diagnostic probes after a failed exec, and git's session-start reading of
   `.git` answer by name and grant nothing. A casefolded Linux directory stores
   one spelling the walk cannot ask for.
-- **The sandbox side still does by name** what the sequel plan
-  (`261021_enforcers-agree`) narrows: Windows carving re-opens what it
-  enumerated, `SetSecurityInfo` propagates by name, carrier discovery reads `#!`
-  lines by name.
+- **Win32 propagates inheritable ACEs by name** inside `SetSecurityInfo`.
 
 See also [[design/authority-tables|authority-tables]] for every platform's
 spelling corner case, and `docs/SPEC.md` §12.2–12.4.

@@ -122,11 +122,9 @@ pub(crate) enum Silent {
     /// own names, not a model's data I/O.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     CarrierSystemOnly,
-    /// The head of a seed, a hop or a refused exec's target, read by name to
-    /// learn its interpreter as the kernel will.  It raises no card: sandbox
-    /// rendering, not the model's data I/O.
+    /// Read through a system-only walk's handle; only the system can author it.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    CarrierShebang,
+    CarrierRead,
 
     // The wire and the engine process.
     /// The engine's exit when adopting the wire on fd 3 fails.  The process

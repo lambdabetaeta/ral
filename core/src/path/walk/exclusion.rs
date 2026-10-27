@@ -12,16 +12,11 @@ use super::held::resolve::{Links, Mode, OnMissing, finish};
 use super::trace::ObjectId;
 use super::trace::Trace;
 use crate::path::LexicalPath;
+#[cfg(unix)]
+use crate::path::RealPath;
 
-/// An exclusion's hold on the last object its walk opened.
-///
-/// On Unix `handle` is the walk's own, `Some` while that object was found at its
-/// position; `None` is the unheld state: after a `rehold` that found another
-/// object there or none, after a `Deserialize` (the wire carries the trace
-/// alone), or (macOS) a hold the object's permissions refused.  Windows holds
-/// nothing.  Unheld is sound: the trace's positions and identities still
-/// match, and a recycled identity over-denies.  `Serialize` as the trace;
-/// `Deserialize` unheld; `PartialEq`, `Eq`, `Ord` by trace.
+/// An exclusion's trace and its Unix handle, kept for the hold's lifetime.
+/// Serializes as its trace and deserializes unheld.
 #[derive(Clone, Debug)]
 pub struct Hold {
     trace: Trace,
@@ -55,12 +50,12 @@ impl Hold {
         }
     }
 
-    /// Take hold of the object again on this host: walk `trace.real()`
-    /// without following the leaf, and keep the handle where the last object
-    /// the walk opened is the one recorded, by identity; else unheld.  The
-    /// recorded trace stays as it was, and a walk error is the unheld state.
+    /// Keep a live hold; otherwise reacquire its recorded identity.
     #[cfg(unix)]
     pub(crate) fn rehold(&mut self) {
+        if self.handle.is_some() {
+            return;
+        }
         self.handle = finish(
             self.trace.real().as_path(),
             Mode::NoFollow,
@@ -71,6 +66,27 @@ impl Hold {
         .ok()
         .filter(|found| found.trace().last_id() == self.trace.last_id())
         .and_then(|found| found.into_hold().handle);
+    }
+
+    /// Walk the kernel's current name, verify identity, then append the tail.
+    #[cfg(unix)]
+    pub(crate) fn current(&self) -> Option<RealPath> {
+        let name = super::held::current_path(self.handle.as_deref()?).ok()?;
+        let found = finish(
+            &name,
+            Mode::NoFollow,
+            OnMissing::Stop,
+            Links::Splice,
+            |_| true,
+        )
+        .ok()?;
+        let trace = found.trace();
+        (trace.leaf_id() == Some(self.trace.last_id())).then(|| {
+            self.trace
+                .tail()
+                .iter()
+                .fold(trace.real().clone(), |at, name| at.child(name))
+        })
     }
 
     /// Windows holds nothing, so nothing is taken again.
@@ -130,6 +146,16 @@ impl Excluded {
 
     pub(crate) fn target(&self) -> Option<&Trace> {
         self.target.as_ref().map(Hold::trace)
+    }
+
+    /// Recorded and current positions, deduplicated.
+    #[cfg(unix)]
+    pub(crate) fn positions(&self) -> Vec<RealPath> {
+        self.holds()
+            .flat_map(|hold| std::iter::once(hold.trace().real().clone()).chain(hold.current()))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     pub(crate) fn rehold(&mut self) {

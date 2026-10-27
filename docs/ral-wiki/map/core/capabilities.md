@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 781d88844423a2af09f5e9a87e0d902fc4f15cff
+generated_at_commit: 6281520c58de152afc0b1ed99b94ade98c21551e
 generated_at_date: 2026-10-27
 covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
@@ -613,8 +613,8 @@ and the VM wall. The seccomp deny-set and offline namespace bind descendants.
   failure before the program starts exits 126, and an `execve` refusal takes its
   code from `SpawnFailure` (`From<&io::Error>`) — 126, or 127 for a missing
   program.
-  The encoding is NUL-terminated fields behind a `ral-warrant/3` magic — a
-  `file` is its real path, then its `argv[0]` spelling, then the exclusion covering its script's interpreter (empty if none), then its argv; a `tool`
+  The encoding is NUL-terminated fields behind a `ral-warrant/4` magic — a
+  `file` is its real path, then its `argv[0]` spelling, then the interpreter read through the judged handle, then the exclusion covering that interpreter (empty if none), then its argv; a `tool`
   its name, then its argv — canonical (decode re-encodes and compares) and at
   most 8 MiB. It rides a descriptor, only its number in argv: a sealed
   memfd on Linux, checked again after sealing, and on macOS a prefilled

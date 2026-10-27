@@ -511,3 +511,20 @@ pub(super) fn open_special(
     }
     Ok(file)
 }
+
+/// The kernel's name for this descriptor; the caller verifies it by walking.
+pub(super) fn current_path(file: &File) -> io::Result<PathBuf> {
+    let mut name = [0_u8; libc::MAXPATHLEN as usize];
+    // F_GETPATH writes a NUL-terminated path into MAXPATHLEN bytes.
+    let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, name.as_mut_ptr()) };
+    if rc == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let end = name.iter().position(|&byte| byte == 0).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "F_GETPATH returned an unterminated path",
+        )
+    })?;
+    Ok(PathBuf::from(OsString::from_vec(name[..end].to_vec())))
+}

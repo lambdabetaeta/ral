@@ -679,3 +679,42 @@ fn proc_self_is_the_payloads_own_on_every_projection() {
         }
     }
 }
+
+#[test]
+fn moved_fs_exclusions_are_masked_and_absent_tails_leave_the_directory_visible() {
+    let tmp = tempfile::tempdir().unwrap();
+    let work = tmp.path().join("work");
+    let secret = tmp.path().join("secret");
+    let private = tmp.path().join("private");
+    let absent = tmp.path().join("absent");
+    for dir in [&work, &private, &absent] {
+        std::fs::create_dir(dir).unwrap();
+    }
+    std::fs::write(&secret, "SECRET-BYTES").unwrap();
+    std::fs::write(private.join("key"), "PRIVATE-BYTES").unwrap();
+    std::fs::write(work.join("ok"), "ALLOWED-BYTES").unwrap();
+    let policy = restricted(&[&work], &[], &[&secret, &private, &absent.join(".env")]);
+    let Some(env) = envelope_launches(&restricted(&[&work], &[], &[])) else {
+        return;
+    };
+    std::fs::copy(&secret, work.join("copy")).unwrap();
+    std::fs::rename(&secret, work.join("x")).unwrap();
+    std::fs::rename(&private, work.join("private")).unwrap();
+    std::fs::rename(&absent, work.join("absent")).unwrap();
+    let (stdout, stderr) = confined(
+        &env,
+        &policy,
+        &format!(
+            "cat '{0}/x' '{0}/private/key' 2>/dev/null; cat '{0}/ok' '{0}/copy'; ls '{0}/absent' && echo TAIL-VISIBLE",
+            work.display(),
+        ),
+    );
+    assert!(!stdout.contains("PRIVATE-BYTES"), "{stdout}: {stderr}");
+    assert_eq!(
+        stdout.matches("SECRET-BYTES").count(),
+        1,
+        "only the copy is readable: {stdout}: {stderr}"
+    );
+    assert!(stdout.contains("ALLOWED-BYTES"), "{stdout}: {stderr}");
+    assert!(stdout.contains("TAIL-VISIBLE"), "{stdout}: {stderr}");
+}

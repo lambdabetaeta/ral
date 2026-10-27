@@ -1,7 +1,7 @@
 use super::{FsAllow, FsRules, ProjectionKey, profile_name, refuse_deny_meeting_grant};
 use crate::authority::policy::GrantPath;
 use crate::authority::sandbox::Refusal;
-use crate::authority::sandbox::carve::{Carving, carve};
+use crate::authority::sandbox::carve::carve;
 use crate::path::{Excluded, FrozenPath, RealPath, Trace};
 use crate::test_helper::{place, real as walked};
 use std::path::{Path, PathBuf};
@@ -202,16 +202,26 @@ fn carving_meets_a_junction_and_a_symlink_as_links() {
 
     let real = |at: PathBuf| walked(&at);
     let allowance = real(cfg.clone());
-    let mut carved = carve(std::slice::from_ref(&allowance), &[real(cfg.join("gh"))]).unwrap();
-    carved.whole.sort();
-    let mut whole = vec![real(cfg.join("keep")), real(cfg.join("other.txt"))];
-    whole.sort();
+    let excluded =
+        GrantPath::<Excluded>::walk(FrozenPath::freeze(&cfg.join("gh")).unwrap()).unwrap();
+    let carved = carve(std::slice::from_ref(&allowance), &[&excluded.real]).unwrap();
+    assert!(carved.whole.is_empty(), "only examined entries are granted");
+    let mut held: Vec<_> = carved
+        .held
+        .iter()
+        .map(|entry| entry.real().clone())
+        .collect();
+    held.sort();
+    let mut expected = vec![real(cfg.join("keep")), real(cfg.join("other.txt"))];
+    expected.sort();
+    assert_eq!(held, expected);
     assert_eq!(
-        carved,
-        Carving {
-            whole,
-            entries: vec![allowance]
-        }
+        carved
+            .entries
+            .iter()
+            .map(|dir| dir.real())
+            .collect::<Vec<_>>(),
+        [&allowance]
     );
 }
 

@@ -361,3 +361,46 @@ fn a_junction_and_a_symlink_beneath_an_exclusion_are_not_followed() {
         });
     });
 }
+
+#[test]
+fn carving_stamps_the_examined_object_after_its_name_is_replaced() {
+    use crate::authority::sandbox::carve::carve;
+    use crate::path::{Excluded, LexicalPath, ObjectId, Walked};
+
+    with_scoped_state_dir(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = crate::test_helper::real(tmp.path());
+        let secret = root.as_path().join("secret");
+        let ok = root.as_path().join("ok");
+        let saved = root.as_path().join("examined");
+        fs::write(&secret, "secret").unwrap();
+        fs::write(&ok, "ok").unwrap();
+        let excluded = Excluded::walk(&LexicalPath::absolute(&secret).unwrap()).unwrap();
+        let carving = carve(&[root], &[&excluded]).unwrap();
+        let [examined] = carving.held.as_slice() else {
+            panic!("only ok is granted")
+        };
+        let identity = examined.trace().leaf_id().unwrap();
+        let between = || {
+            fs::rename(&ok, &saved).unwrap();
+            fs::rename(&secret, &ok).unwrap();
+        };
+        between();
+        let pinned = FrozenPin::held(examined, GrantKind::ReadOnly).unwrap();
+        let file = fs::File::from(pinned.target().handle.try_clone().unwrap());
+        assert_eq!(ObjectId::of(&file).unwrap(), identity);
+        assert_ne!(
+            identity,
+            crate::test_helper::located(&ok).trace().leaf_id().unwrap()
+        );
+        ensure_frozen_grant(&pinned, CAP_SID, GrantKind::ReadOnly, &live()).unwrap();
+        with_token_access(|access| {
+            assert_eq!(
+                reachable(&saved, access),
+                Some(crate::test_helper::real(&saved).as_path().to_path_buf())
+            );
+            assert_eq!(reachable(&secret, access), None);
+            assert_eq!(reachable(&ok, access), None);
+        });
+    });
+}

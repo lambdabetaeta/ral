@@ -1,8 +1,8 @@
 ---
 status: active
-generated_at_commit: 7f61632a
-verified_at_commit: 7f4d7d11
-anchors: [carriers, trusted_real, shebang, kernel, Rank, ExecAllow, ExecRule, allowed_files, emit_exec_rules]
+generated_at_commit: 6281520c
+verified_at_commit: 6281520c
+anchors: [carriers, trusted_real, head_shebang, launched_shebang, live_support, ExecAllow, allowed_files, emit_exec_rules, Warrant]
 ---
 
 > **Amended 2026-10-06**
@@ -99,3 +99,10 @@ the ruleset itself; the payload only enters it.
 **Amended 2026-10-22 by [[decisions/261021_one-path|one-path]].** `trusted_real` walks from `/` through the one
 walk with a per-object check (`walk_with`, the check given each `Vetted` step),
 and returns a `Trace`; `walk_vetted` is gone. `ExecScope` is `ExecAllow`.
+
+**Amended 2026-10-27.** `trusted_real` retains its `Located`. Each seed and
+hop is judged by the projection's exclusion predicate on the walked trace,
+then its `#!` is read through the system-vouched handle. Linkers meet the same
+predicate. The parent carries its judged read of the launched interpreter in
+`ral-warrant/4`, beside the interpreter exclusion; the child's refusal hint
+opens nothing.

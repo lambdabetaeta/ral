@@ -151,11 +151,12 @@ mod linux {
         let exe = std::env::current_exe().unwrap();
         let argc = args.len().to_string();
         let fields = [
-            b"ral-warrant/3".as_slice(),
+            b"ral-warrant/4".as_slice(),
             b"unconfined",
             b"file",
             exe.as_os_str().as_bytes(),
             b"probe",
+            b"",
             b"",
             argc.as_bytes(),
         ];

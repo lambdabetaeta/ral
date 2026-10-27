@@ -599,3 +599,32 @@ fn a_masked_directory_under_an_admitted_one_is_covered_by_no_rule() {
     let seen = expanded_masking(&rules, &[real(d.join("s"))], false, &mask("s")).expect("expands");
     assert!(seen.is_empty(), "a masked root admits nothing: {seen:?}");
 }
+
+#[test]
+fn moved_exclusions_are_judged_when_enumerated_and_at_exact_allowances() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    let other = tmp.path().join("t");
+    std::fs::create_dir(&bin).unwrap();
+    std::fs::create_dir(&other).unwrap();
+    std::fs::write(bin.join("ok"), "").unwrap();
+    std::fs::write(other.join("evil"), "").unwrap();
+    let exclusion = deny(&other.join("evil"), false);
+    let trigger = deny(&bin.join("other"), false);
+    let directory = allow(&bin, true);
+    let exact = allow(&bin.join("x"), false);
+    std::fs::rename(other.join("evil"), bin.join("x")).unwrap();
+    let listed = expanded(&[directory.clone(), trigger, exclusion.clone()], true).unwrap();
+    assert!(listed.contains(&(bin.join("ok"), false)), "{listed:?}");
+    assert!(!listed.contains(&(bin.join("x"), false)), "{listed:?}");
+    assert!(
+        admitted_files(&[exact, exclusion.clone()])
+            .unwrap()
+            .is_empty()
+    );
+    let whole = expanded(&[directory, exclusion], true).unwrap();
+    assert!(
+        whole.contains(&(bin, true)),
+        "unlisted directory residual: {whole:?}"
+    );
+}

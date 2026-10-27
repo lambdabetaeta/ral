@@ -193,6 +193,9 @@ pub(in crate::path) enum Silent {
     /// the remaining name: path resolution, not data I/O.
     #[cfg(target_os = "linux")]
     WalkLinkRead,
+    /// Asks the kernel for a held object's name; the walk verifies its identity.
+    #[cfg(target_os = "linux")]
+    WalkCurrent,
     /// Stats the handle the walk holds, or one entry of a held directory
     /// without following it: a metadata read, never turn-time data I/O.
     #[cfg(target_os = "linux")]

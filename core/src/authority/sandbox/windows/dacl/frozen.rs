@@ -25,7 +25,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 use super::acl::Target;
 use super::{DaclError, GrantKind};
 use crate::authority::sandbox::TOKEN;
-use crate::path::{RealPath, is_loop, utf8};
+use crate::path::{Installing, Located, RealPath, is_loop, utf8};
 use crate::site::{Silent, site};
 
 /// A frozen real path, its leaf held open, and the text of its name: a
@@ -49,6 +49,12 @@ impl FrozenPin {
             Err(e) if is_loop(&e) => return Err(redirected(real)),
             Err(e) => return Err(unheld(real.as_path(), &e)),
         };
+        Self::held(&held, kind).map(Some)
+    }
+
+    /// Pin the examined object without resolving its name again.
+    pub(crate) fn held(held: &Located<Installing>, kind: GrantKind) -> Result<Self, DaclError> {
+        let real = held.real();
         let name = utf8(real.as_path())
             .map_err(|_| DaclError::NotUnicode(real.as_path().to_path_buf()))?
             .to_owned();
@@ -72,11 +78,11 @@ impl FrozenPin {
             })
             .unwrap_or_else(|| reopen(bare))
             .map_err(|e| unheld(real.as_path(), &e))?;
-        Ok(Some(Self {
+        Ok(Self {
             real: real.clone(),
             name,
             leaf: leaf.into(),
-        }))
+        })
     }
 
     /// The text of the path, which the capability name and the stamp keys are

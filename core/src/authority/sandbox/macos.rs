@@ -296,9 +296,10 @@ fn exec_clauses(allow: bool, path: &RealPath, dir: bool) -> Result<Vec<String>, 
 /// Deny clauses at each position `excluded` holds, its name's and its link's
 /// target's, as the fs renderers render an exclusion.
 fn excluded_clauses(excluded: &Excluded, dir: bool) -> Result<Vec<String>, String> {
-    let holds = std::iter::once(excluded.named()).chain(excluded.target());
-    let clauses: Vec<_> = holds
-        .map(|held| exec_clauses(false, held.real(), dir))
+    let clauses: Vec<_> = excluded
+        .positions()
+        .iter()
+        .map(|position| exec_clauses(false, position, dir))
         .collect::<Result<_, _>>()?;
     Ok(clauses.concat())
 }
@@ -1361,6 +1362,40 @@ mod tests {
         let profile = build_profile(&SandboxProjection::default()).unwrap();
         assert!(!profile.contains("(allow file-read* (subpath \"/tmp\"))"));
         assert!(!profile.contains("(allow file-read* (subpath \"/private/tmp\"))"));
+    }
+
+    #[test]
+    fn mac_profile_denies_current_fs_and_exec_positions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        let secret = tmp.path().join("secret");
+        std::fs::create_dir(&work).unwrap();
+        std::fs::write(&secret, "secret").unwrap();
+        let policy = restricted(
+            FsProjection::Restricted(FsRules {
+                write: vec![prefix(work.to_str().unwrap())],
+                deny: frozen(&[secret.to_str().unwrap()]),
+                ..FsRules::default()
+            }),
+            vec![
+                dir(work.to_str().unwrap(), true),
+                file(secret.to_str().unwrap(), false),
+            ],
+        );
+        let moved = work.join("x");
+        std::fs::rename(&secret, &moved).unwrap();
+        let position = crate::test_helper::real(&moved);
+        let profile = build_profile(&policy).unwrap();
+        for name in render_real(&position).unwrap() {
+            for op in ["file-read*", "file-write*", "process-exec"] {
+                assert!(
+                    profile.contains(&format!("(deny {op} (subpath \"{}\"))", name.as_str()))
+                        || profile
+                            .contains(&format!("(deny {op} (literal \"{}\"))", name.as_str())),
+                    "{profile}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -177,7 +177,8 @@ impl SandboxProjection {
                 // Derived below, so nothing a caller supplied is authority.
                 pinned_dirs: _,
             }) => {
-                let holds = || deny.iter().map(|deny| &deny.real);
+                let positions: Vec<_> =
+                    deny.iter().flat_map(|deny| deny.real.positions()).collect();
                 let prefixes: Vec<_> = (write.iter())
                     .map(|scope| {
                         scope
@@ -187,9 +188,9 @@ impl SandboxProjection {
                     .collect();
                 FsProjection::Restricted(FsRules {
                     read: objects(read)?,
-                    pinned_dirs: pinned_dirs(holds(), &prefixes)?,
+                    pinned_dirs: pinned_dirs(&positions, &prefixes)?,
                     write: objects(write)?,
-                    deny: render_excluded(holds())?,
+                    deny: render_excluded(&positions)?,
                 })
             }
         };
@@ -308,15 +309,15 @@ fn live_support(
         Program::Tool(_) => None,
     });
     let files = table.into_iter().flat_map(ExecRules::allowed_files);
-    let mut support = super::carriers(launched.into_iter().chain(files));
+    let excluded = |trace: &crate::path::Trace| {
+        let at = crate::path::Subject::Access(trace);
+        table.is_some_and(|t| t.excludes(Subject::Program(at)))
+            || read.is_some_and(|r| r.excludes(at))
+    };
+    let mut support = super::carriers(launched.into_iter().chain(files), excluded);
     if table.is_some() {
-        support.extend(super::carriers::linkers());
+        support.extend(super::carriers::linkers(excluded));
     }
-    support.retain(|s| {
-        let at = crate::path::Subject::Position(s);
-        !table.is_some_and(|t| t.excludes(Subject::Program(at)))
-            && !read.is_some_and(|r| r.excludes(at))
-    });
     support
 }
 
@@ -547,6 +548,45 @@ mod tests {
                 .iter()
                 .any(|o| o.real.as_str() == utf8(interp.as_path()).unwrap());
             assert!(carried, "{interp} is not read: {read:?}");
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn an_excluded_system_seed_contributes_no_interpreter_on_either_axis() {
+        let Some((script, interpreter)) = super::super::carriers::system_script() else {
+            eprintln!("skipping: this host has no system script");
+            return;
+        };
+        let baseline = Baseline::of_host().unwrap();
+        let admitted = super::super::launch::admitted(
+            crate::authority::policy::Program::file(script.as_path().into()).unwrap(),
+        );
+        assert!(super::live_support(None, None, Some(&admitted)).contains(&interpreter));
+        for by_exec in [true, false] {
+            let written = FrozenPath::freeze(script.as_path()).unwrap();
+            let caps = if by_exec {
+                Capabilities {
+                    exec: Some(ExecGrant::of([], [ExecKey::Path(written)])),
+                    ..Capabilities::default()
+                }
+            } else {
+                Capabilities {
+                    fs: Some(crate::authority::policy::FsPolicy {
+                        deny_paths: vec![written],
+                        ..Default::default()
+                    }),
+                    ..Capabilities::default()
+                }
+            };
+            let grants = stack([layer(caps)]);
+            let exec = super::rules(&grants);
+            let read = super::region(&grants, &super::FsOp::Read, &baseline);
+            let support = super::live_support(exec.as_ref(), read.as_ref(), Some(&admitted));
+            assert!(
+                !support.contains(&interpreter),
+                "excluded seed contributed {interpreter}: {support:?}"
+            );
         }
     }
 }

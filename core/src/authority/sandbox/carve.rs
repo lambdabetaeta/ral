@@ -29,10 +29,12 @@
 //!
 //! The paths are the frozen real paths the backend stamps; a directory is
 //! held through the sandbox side's own entry and listed from the handle, and
-//! each entry is judged by its position.
+//! each opened entry is judged by position and identity.
 
 use crate::authority::sandbox::TOKEN;
-use crate::path::{Dir, Installing, Kind, RealPath, shown};
+use crate::path::{
+    Depth, Dir, Excluded, Installing, Kind, LeafMode, Located, RealPath, Subject, Walked, shown,
+};
 use std::fmt;
 use std::io;
 
@@ -70,56 +72,26 @@ impl From<Unlisted> for super::Refusal {
     }
 }
 
-/// One directory entry, read without following it: a directory comes with
-/// the handle opened on it.
-enum Entry {
-    Directory(Box<Dir<Installing>>),
-    /// Anything else that is itself an object to grant: a file, or a
-    /// reparse point that redirects nowhere (a cloud placeholder).
-    Other(RealPath),
-    /// A link: a reparse point that names another object.
-    Link(RealPath),
-}
-
-impl Entry {
-    fn real(&self) -> &RealPath {
-        match self {
-            Self::Directory(dir) => dir.real(),
-            Self::Other(real) | Self::Link(real) => real,
-        }
-    }
-}
-
-/// The entries of `dir`, read from the held directory without following
-/// links, and each subdirectory opened from it: a name surrogate (a symlink,
-/// a junction) is a link, any other reparse point (a cloud placeholder) the
-/// object it is.
-fn entries(dir: &Dir<Installing>) -> Result<Vec<Entry>, Unlisted> {
-    let here = |e: &io::Error| Unlisted::at(dir.real(), e);
+fn entries(dir: &Dir<Installing>) -> Result<Vec<Located<Installing>>, Unlisted> {
     dir.read_dir()
-        .map_err(|e| here(&e))?
+        .map_err(|e| Unlisted::at(dir.real(), &e))?
         .map(|entry| {
-            let kind = entry.seen().map_err(here)?.stat.kind;
-            Ok(match kind {
-                Kind::Symlink => Entry::Link(entry.real()),
-                Kind::Dir => Entry::Directory(Box::new(
-                    dir.open_dir(entry.name())
-                        .map_err(|e| Unlisted::at(&entry.real(), &e))?,
-                )),
-                Kind::File | Kind::Other => Entry::Other(entry.real()),
-            })
+            dir.locate(entry.name(), LeafMode::NoFollow)
+                .map_err(|e| Unlisted::at(&entry.real(), &e))
         })
         .collect()
 }
 
 /// The allowances as granted, once carved.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Default)]
 pub(crate) struct Carving {
     /// Granted with everything beneath them.
     pub(crate) whole: Vec<RealPath>,
+    /// Examined entries granted whole.
+    pub(crate) held: Vec<Located<Installing>>,
     /// Carved directories: their entries' names are visible, and nothing in
     /// them is reached through them.
-    pub(crate) entries: Vec<RealPath>,
+    pub(crate) entries: Vec<Dir<Installing>>,
 }
 
 /// Carve every exclusion out of `allowances`, listing a directory only where
@@ -127,15 +99,19 @@ pub(crate) struct Carving {
 ///
 /// # Errors
 /// A directory that cannot be held or listed ends the plan.
-pub(crate) fn carve(allowances: &[RealPath], exclusions: &[RealPath]) -> Result<Carving, Unlisted> {
+pub(crate) fn carve(
+    allowances: &[RealPath],
+    exclusions: &[&Excluded],
+) -> Result<Carving, Unlisted> {
+    let positions: Vec<_> = exclusions.iter().map(|e| e.followed().real()).collect();
     let mut carving = Carving::default();
     for allowance in allowances {
-        if exclusions.iter().any(|e| e.contains_folded(allowance)) {
+        if positions.iter().any(|e| e.contains_folded(allowance)) {
             // Equal to an exclusion, or inside one: the backend's refusal.
             carving.whole.push(allowance.clone());
             continue;
         }
-        let beneath = |dir: &RealPath| exclusions.iter().any(|e| dir.contains_folded(e));
+        let beneath = |dir: &RealPath| positions.iter().any(|e| dir.contains_folded(e));
         if !beneath(allowance) {
             carving.whole.push(allowance.clone());
             continue;
@@ -146,19 +122,26 @@ pub(crate) fn carve(allowances: &[RealPath], exclusions: &[RealPath]) -> Result<
             .map_err(|e| Unlisted::at(allowance, &e))?;
         let mut pending: Vec<_> = held.into_iter().collect();
         while let Some(dir) = pending.pop() {
-            carving.entries.push(dir.real().clone());
             for entry in entries(&dir)? {
-                if exclusions.iter().any(|e| e.contains_folded(entry.real())) {
+                if exclusions.iter().any(|e| {
+                    e.matches(Subject::Access(entry.trace()), Depth::Within)
+                        .is_some()
+                }) {
                     continue;
                 }
                 let beneath = beneath(entry.real());
-                match (entry, beneath) {
-                    (Entry::Link(_), _) | (Entry::Other(_), true) => {}
-                    (Entry::Directory(child), true) => pending.push(*child),
-                    (Entry::Directory(child), false) => carving.whole.push(child.real().clone()),
-                    (Entry::Other(real), false) => carving.whole.push(real),
+                match entry.into_dir() {
+                    Ok(dir) if beneath => pending.push(dir),
+                    Ok(dir) => carving.held.push(dir.into_located()),
+                    Err(entry)
+                        if !beneath && matches!(entry.kind(), Some(Kind::File | Kind::Other)) =>
+                    {
+                        carving.held.push(entry);
+                    }
+                    _ => {}
                 }
             }
+            carving.entries.push(dir);
         }
     }
     Ok(carving)

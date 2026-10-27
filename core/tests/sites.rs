@@ -69,9 +69,10 @@
 //!   - **The string containment helpers gain no caller.**
 //!     [`STRING_CONTAINMENT_CALLERS`] pins, outside `path/`, each file that
 //!     calls `starts_with_identity`, `path_within_str`, `proper_ancestors` or
-//!     `Rendered::{holds, rebased}`, and how often.  They stay for the sandbox
-//!     renderers that call them today; the plan that moves those renderers onto
-//!     `RealPath` deletes the helpers, and finds no new caller.
+//!     `Rendered::{holds, rebased}`, and how often. Bwrap's envelope names can
+//!     be surface spellings through links; Seatbelt's firmlink spellings have
+//!     ancestors that are not renderings of a position's ancestors. These are
+//!     lexical names, so the helpers stay and gain no caller.
 //!
 //! `authority::policy::Ungoverned`'s authority-minting methods are banned by clippy,
 //! including aliases and function-item references. Legitimate reads and
@@ -722,8 +723,9 @@ fn the_string_containment_helpers_gain_no_caller() {
         .collect();
     assert_eq!(
         counted, pinned,
-        "a string containment helper gained or lost a caller outside path/: the renderers take \
-         RealPath::{{contains, rebased, ancestors_within}} instead, and the sequel plan deletes the \
-         helpers — update STRING_CONTAINMENT_CALLERS only when a caller goes."
+        "a string containment helper gained or lost a caller outside path/: these helpers serve \
+         bwrap's envelope names (including surface spellings through links) and Seatbelt's \
+         rendered firmlink ancestors, which are lexical names, not RealPath positions; no new \
+         caller is admitted — update STRING_CONTAINMENT_CALLERS only when a caller goes."
     );
 }

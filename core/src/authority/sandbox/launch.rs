@@ -729,6 +729,40 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_refused_exec_hint_keeps_the_interpreter_read_before_spawn() {
+        use crate::authority::policy::{Capabilities, ExecGrant, ExecKey, FsPolicy};
+        use crate::test_helper::{layer, stack};
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("run");
+        std::fs::write(&script, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let grants = stack([layer(Capabilities {
+            exec: Some(ExecGrant::of(
+                [ExecKey::Path(FrozenPath::freeze(&script).unwrap())],
+                [],
+            )),
+            fs: Some(FsPolicy {
+                read_prefixes: vec![FrozenPath::freeze(tmp.path()).unwrap()],
+                ..FsPolicy::default()
+            }),
+            ..Capabilities::default()
+        })]);
+        let baseline = host_system_reads();
+        let admitted = grants
+            .admit(&baseline, Program::file(script.clone()).unwrap())
+            .unwrap();
+        let projection = SandboxProjection::of(&grants, &baseline, Some(&admitted)).unwrap();
+        let cmd = macos_sandboxed_command(&projection, &admitted, &[]).unwrap();
+        std::fs::write(&script, "#!/usr/bin/false\n").unwrap();
+        let (code, stderr) = confined_stderr(cmd);
+        assert_eq!(code, Some(126), "{stderr}");
+        assert!(stderr.contains("its interpreter /bin/sh"), "{stderr}");
+        assert!(!stderr.contains("/usr/bin/false"), "{stderr}");
+    }
+
     /// A system script whose system interpreter lies elsewhere: no grant of
     /// the script's directory admits the interpreter, only support does.
     #[cfg(target_os = "macos")]
@@ -736,8 +770,12 @@ mod tests {
         let scripts = std::fs::read_dir("/usr/bin").ok()?;
         scripts.flatten().map(|e| e.path()).find(|script| {
             let carried = || {
+                let admitted = admitted(Program::file(script.clone()).ok()?);
                 super::super::carriers::trusted_real(script)?;
-                let interpreter = super::super::carriers::shebang(script)?;
+                let Program::File { located, .. } = admitted.program() else {
+                    return None;
+                };
+                let interpreter = super::super::carriers::launched_shebang(located)?;
                 super::super::carriers::trusted_real(&interpreter)?;
                 (interpreter.parent() != script.parent()).then_some(())
             };

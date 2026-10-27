@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
+generated_at_commit: 6281520c
 verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
 verified_at_date: 2026-10-25
 anchors: [Trace, RealPath, Hold, Excluded, Dir, Located, walk, walk_excluded, GrantLayer, GrantPath, Extent, GrantStack::judge, rehold, Walk, AdmittedWalk, Shell::admitted_walk]
@@ -72,10 +72,11 @@ its authored form beside its resolution, and the two could disagree.
   a link followed by the tree walk, an ignore file located beneath it — splices
   `..` through the directories the walk opened above that directory, never
   through the names a caller descended by.
-- **The OS sandbox side consumes `RealPath` and `Hold` and still judges by
-  position.** The identity reading is ral's own readers'; a denied object moved
-  under an allowed directory is visible to a program ral runs. Narrowing that
-  is the sequel plan, `261021_enforcers-agree`.
+- **The OS sandbox side consumes `RealPath` and `Hold`.** Linux and macOS
+  render exclusions at recorded and verified current positions at launch;
+  Landlock and Windows carving also judge enumerated entries by identity.
+  Carving stamps through the handles it examined. The remaining limits are
+  stated in [[design/two-enforcers|two-enforcers]].
 
 ## Rejected
 
@@ -242,10 +243,10 @@ walked) are the existing ones, unrun on a Mac.
 
 Step 10 (macOS): `an_exclusion_holds_its_leaf_by_the_walks_own_o_evtonly_descriptor` and `an_unmounted_volume_leaves_an_exclusion_unheld_by_position` (`path/walk/tests/macos.rs`, the latter attaching and force-detaching an APFS image with `hdiutil`) were cross-compiled only; neither has run on a Mac.
 
-Two names of the deleted list survive, each deferred to the sequel plan:
+Two names of the deleted list remain at lexical boundaries:
 
-- `RealPath::rendered` (Linux only): the bwrap renderer's `Rendered` strings still become positions through it, until that renderer holds positions itself.
-- `FrozenPath::{lexical, of_real}`: the walk's lexical door from a grant's written spelling, and a launch's own support files shown as one, until the sequel plan's grant spelling is walked at freeze.
+- `RealPath::rendered` (Linux only): the bwrap renderer walks a `Rendered` envelope name back to a position.
+- `FrozenPath::{lexical, of_real}`: a grant's written spelling enters the walk, and a launch's support files are shown as grant paths.
 
 The first green macOS `ci.yml` and `windows.yml` run on the landing commit
 discharges them; it is recorded here when it comes.

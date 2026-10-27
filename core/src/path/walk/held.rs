@@ -54,6 +54,11 @@ mod windows;
 #[cfg(windows)]
 use windows as host;
 
+#[cfg(unix)]
+pub(super) fn current_path(file: &File) -> io::Result<PathBuf> {
+    host::current_path(file)
+}
+
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 #[path = "tests.rs"]
@@ -254,6 +259,19 @@ impl<A: Authority> Dir<A> {
 
     pub fn real(&self) -> &RealPath {
         self.trace.real()
+    }
+
+    #[cfg(any(windows, all(test, target_os = "linux")))]
+    pub(crate) fn into_located(self) -> Located<A> {
+        Located {
+            trace: self.trace,
+            leaf: Leaf::Dir {
+                node: self.node,
+                stat: self.stat,
+            },
+            linked: None,
+            _a: PhantomData,
+        }
     }
 
     /// This directory, vouched for: the one place `Unjudged` becomes

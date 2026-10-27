@@ -26,17 +26,22 @@ const DEPTH: usize = 4;
 /// The carriers of `programs`: every hop, up to [`DEPTH`] deep, that only the
 /// system can have written, reached from a program only the system can have
 /// written.
-pub(crate) fn carriers<'a>(programs: impl IntoIterator<Item = &'a RealPath>) -> BTreeSet<RealPath> {
+pub(crate) fn carriers<'a>(
+    programs: impl IntoIterator<Item = &'a RealPath>,
+    excluded: impl Fn(&Trace) -> bool,
+) -> BTreeSet<RealPath> {
     let mut found = BTreeSet::new();
-    let mut frontier: Vec<Trace> = programs
+    let mut frontier: Vec<Located> = programs
         .into_iter()
         .filter_map(|program| trusted_real(program.as_path()))
+        .filter(|program| !excluded(program.trace()))
         .collect();
     for _ in 0..DEPTH {
         frontier = frontier
-            .iter()
-            .flat_map(|carrier| hops(carrier.real()))
+            .into_iter()
+            .flat_map(hops)
             .filter_map(|hop| trusted_real(&hop))
+            .filter(|hop| !excluded(hop.trace()))
             .filter(|hop| found.insert(hop.real().clone()))
             .collect();
     }
@@ -46,7 +51,7 @@ pub(crate) fn carriers<'a>(programs: impl IntoIterator<Item = &'a RealPath>) -> 
 /// No kernel linker candidates to admit off Linux: macOS's loader is Rosetta's
 /// directory, which the profile names itself.
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn linkers() -> Vec<RealPath> {
+pub(crate) fn linkers(_: impl Fn(&Trace) -> bool) -> Vec<RealPath> {
     Vec::new()
 }
 
@@ -55,7 +60,7 @@ pub(crate) fn linkers() -> Vec<RealPath> {
 /// admitted unless excluded.  Never a directory, which under `/usr/bin` would
 /// admit a command directory.
 #[cfg(target_os = "linux")]
-pub(crate) fn linkers() -> Vec<RealPath> {
+pub(crate) fn linkers(excluded: impl Fn(&Trace) -> bool) -> Vec<RealPath> {
     use crate::authority::policy::Ungoverned;
     const PATTERNS: &[&str] = &[
         "/lib/ld*.so*",
@@ -86,17 +91,19 @@ pub(crate) fn linkers() -> Vec<RealPath> {
         })
         // Merged-/usr makes /lib/x and /usr/lib/x one inode: one real path.
         .filter_map(|shown| file(shown.as_path()))
+        .filter(|linker| !excluded(linker.trace()))
+        .map(|linker| linker.real().clone())
         .collect();
     found.into_iter().collect()
 }
 
 /// Where `execve` of `program` goes next: the system's shims, then its
 /// interpreter.  Never what an `env` interpreter runs: `env` is the carrier.
-fn hops(program: &RealPath) -> Vec<PathBuf> {
+fn hops(program: Located) -> Vec<PathBuf> {
     let mut hops = Vec::new();
     #[cfg(target_os = "macos")]
-    hops.extend(shims(program));
-    hops.extend(shebang(program.as_path()));
+    hops.extend(shims(program.real()));
+    hops.extend(trusted_shebang(program));
     hops
 }
 
@@ -106,19 +113,19 @@ fn hops(program: &RealPath) -> Vec<PathBuf> {
 /// trusts nothing: that fails closed.  The final object must be a regular
 /// file: a carrier is bound read-only whole, so a directory would expose its
 /// tree.
-pub(crate) fn trusted_real(path: &Path) -> Option<Trace> {
+pub(crate) fn trusted_real(path: &Path) -> Option<Located> {
     let me = rustix::process::geteuid().as_raw();
     let at = LexicalPath::absolute(path)?;
     let located = walk_with(&at, LeafMode::Follow, |v| system_only(v, me)).ok()?;
-    (located.trace().kind() == Some(Kind::File)).then(|| located.trace().clone())
+    (located.trace().kind() == Some(Kind::File)).then_some(located)
 }
 
-/// The real path of `path` where it reaches a regular file.
+/// Hold `path` where it reaches a regular file.
 #[cfg(target_os = "linux")]
-fn file(path: &Path) -> Option<RealPath> {
+fn file(path: &Path) -> Option<Located> {
     use crate::path::walk;
     let located = walk(&LexicalPath::absolute(path)?, LeafMode::Follow).ok()?;
-    (located.trace().kind() == Some(Kind::File)).then(|| located.real().clone())
+    (located.trace().kind() == Some(Kind::File)).then_some(located)
 }
 
 /// Whether only the system can have made the object `v` offers what it is:
@@ -150,25 +157,10 @@ fn system_only(v: &Vetted<'_>, me: u32) -> bool {
             .is_err())
 }
 
-/// The interpreter on `path`'s `#!` line: the kernels' grammar narrowed to the
-/// shapes it accepts — a line ending within the first `LIMIT` bytes (on macOS
-/// at the first `\n` or `#`), blanks skipped, the interpreter running to the
-/// next blank, and absolute.  Any other shape yields no carrier, and the
-/// trampoline's hint names the interpreter.
-pub(crate) fn shebang(path: &Path) -> Option<PathBuf> {
-    use std::os::unix::fs::OpenOptionsExt;
-    // `O_NONBLOCK` and the regular-file check: a FIFO swapped in must not stall the reader.
-    let file = site!(
-        Silent::CarrierShebang,
-        File::options()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK) => open(path)
-    )
-    .ok()?;
-    file.metadata()
-        .ok()?
-        .is_file()
-        .then(|| head_shebang(file))?
+fn trusted_shebang(program: Located) -> Option<PathBuf> {
+    use crate::authority::policy::Ungoverned;
+    let program = site!(Silent::CarrierRead, Ungoverned::read(program));
+    head_shebang(program.read().ok()?)
 }
 
 /// The interpreter on the `#!` line of the program that was judged, read
@@ -236,8 +228,9 @@ pub(super) fn system_script() -> Option<(RealPath, RealPath)> {
     .into_iter()
     .find_map(|script| {
         let script = trusted_real(&PathBuf::from(script))?;
-        let interp = trusted_real(&shebang(script.real().as_path())?)?;
-        Some((script.real().clone(), interp.real().clone()))
+        let script_real = script.real().clone();
+        let interp = trusted_real(&trusted_shebang(script)?)?;
+        Some((script_real, interp.real().clone()))
     })
 }
 
@@ -245,8 +238,12 @@ pub(super) fn system_script() -> Option<(RealPath, RealPath)> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use crate::test_helper::real;
+    use crate::test_helper::{located, real};
     use std::os::unix::fs::PermissionsExt;
+
+    fn shebang(path: &Path) -> Option<PathBuf> {
+        head_shebang(File::open(path).ok()?)
+    }
 
     /// An executable `name` under `dir` holding `body`.
     fn file(dir: &Path, name: &str, body: &str) -> PathBuf {
@@ -272,9 +269,9 @@ mod tests {
             "run",
             &format!("#!  {}\t-x\nbody\n", interp.display()),
         );
-        assert_eq!(hops(&real(&script)), [interp]);
+        assert_eq!(hops(located(&script)), [interp]);
         assert_eq!(
-            hops(&real(file(&root, "plain", "no shebang\n"))),
+            hops(located(file(&root, "plain", "no shebang\n"))),
             Vec::<PathBuf>::new()
         );
     }
@@ -289,7 +286,7 @@ mod tests {
             "a",
             &format!("#!{} {}\n", env.display(), tool.display()),
         );
-        assert_eq!(hops(&real(&script)), [env]);
+        assert_eq!(hops(located(&script)), [env]);
     }
 
     #[test]
@@ -350,7 +347,7 @@ mod tests {
         let (_dir, root) = temp_root();
         let interp = file(&root, "interp", "\x7fELF");
         let script = file(&root, "run", &format!("#!{}\n", interp.display()));
-        assert!(carriers([&real(&script)]).is_empty());
+        assert!(carriers([&real(&script)], |_| false).is_empty());
         for path in [&script, &interp, &root] {
             assert!(
                 trusted_real(path).is_none(),
@@ -374,13 +371,13 @@ mod tests {
         let (_dir, root) = temp_root();
         let link = root.join("sh");
         std::os::unix::fs::symlink(sh, &link).expect("symlink");
-        assert_eq!(trusted_real(&link), None);
+        assert!(trusted_real(&link).is_none());
     }
 
     #[test]
     fn a_directory_is_no_carrier() {
         for dir in ["/", "/usr", "/usr/bin", "/bin"] {
-            assert_eq!(trusted_real(Path::new(dir)), None, "{dir}");
+            assert!(trusted_real(Path::new(dir)).is_none(), "{dir}");
         }
     }
 
@@ -389,14 +386,14 @@ mod tests {
         let (_dir, root) = temp_root();
         let link = root.join("empty");
         if std::os::unix::fs::symlink("", &link).is_ok() {
-            assert_eq!(trusted_real(&link), None);
+            assert!(trusted_real(&link).is_none());
         }
     }
 
     #[test]
     fn a_system_script_carries_its_interpreter() {
         if let Some((script, interp)) = system_script() {
-            assert!(carriers([&script]).contains(&interp), "{interp}");
+            assert!(carriers([&script], |_| false).contains(&interp), "{interp}");
         }
     }
 
@@ -407,7 +404,7 @@ mod tests {
             trusted_real(Path::new("/bin/sh")),
             trusted_real(Path::new("/private/var/select/sh")),
         ) {
-            let got = carriers([sh.real()]);
+            let got = carriers([sh.real()], |_| false);
             assert!(got.contains(select.real()), "{got:?}");
         }
         if let (Some(git), Some(real), false) = (
@@ -415,7 +412,7 @@ mod tests {
             trusted_real(Path::new("/Library/Developer/CommandLineTools/usr/bin/git")),
             crate::path::exists("/private/var/db/xcode_select_link"),
         ) {
-            let got = carriers([git.real()]);
+            let got = carriers([git.real()], |_| false);
             assert!(got.contains(real.real()), "{got:?}");
         }
     }
