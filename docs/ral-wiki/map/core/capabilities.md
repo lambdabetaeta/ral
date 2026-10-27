@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
+generated_at_commit: 781d88844423a2af09f5e9a87e0d902fc4f15cff
 generated_at_date: 2026-10-27
 covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
@@ -475,17 +475,21 @@ directory execute/traverse semantics remain unimplemented. Native Windows
 verification of stored-case walks, verbatim image launch, and launch refusals
 is outstanding; cross-compilation alone does not establish them.
 
-Inside a *guest* — a VM whose engine runs under `ral-daemon`, signalled by
-`RAL_GUEST`, which carries the jail's cgroup root — the per-command OS backend is not engaged at all: every spawn
-is already confined by the [[map/core/io-process|spawn jail]] (a fresh
-unprivileged uid and a per-exec cgroup), the daemon disables the
-unprivileged user namespaces bwrap needs, and the guest has no network
-device for `net` to govern; the in-process guards apply unchanged
-(`docs/SPEC.md` §12.11). Unchanged means head-only: `build_launch`
-(`shell/exec/command/process.rs`) builds no projection under a jail, so a grant's
-fs and exec tables bind the command head and nothing an admitted program then
-spawns (`rg --pre`, `env`, `find -exec`). The jail, the uid, the cgroup and the
-VM boundary are the only confinement of grandchildren.
+Inside a *guest*, `ral-daemon` starts the engine as
+`--guest-engine <cgroup-root>`. The role installs the
+[[map/core/io-process|spawn jail]], so `build_launch`
+(`shell/exec/command/process.rs`) uses it for every command: a bounded fresh
+uid and per-exec cgroup, the envelope's seccomp deny-set, and close-on-exec
+marking above stderr. The daemon disables the user namespaces bwrap needs.
+`GrantStack::net_veto` carries any layer's veto to both the host projection
+and `JailPlan`: an offline guest command gets a fresh network namespace with
+loopback up. IP egress and outside abstract Unix sockets are out of reach;
+pathname Unix sockets remain reachable through the shared filesystem.
+The in-process guards apply unchanged (`docs/SPEC.md` §12.11): fs and exec
+bind the command head, and the guest builds no filesystem or executable
+projection to constrain an admitted program's descendants (`rg --pre`,
+`env`, `find -exec`). Their filesystem and execution boundary is the jail
+and the VM wall. The seccomp deny-set and offline namespace bind descendants.
 
 - `pin()` and `boot()` — startup: `pin` pins ral's own executable (`reexec::OWN`) and, on Linux, the bwrap
   envelope (`linux::pin_envelope`, walked on the process's own `PATH`
@@ -714,7 +718,12 @@ VM boundary are the only confinement of grandchildren.
   (`sandbox/linux/seccomp.rs`: `Filter`, `Syscall`, `explain`; process reach
   includes `pidfd_getfd`, `process_madvise`, `process_mrelease` and `kcmp`,
   with `modify_ldt` also killed on x86-64; `kill`, `pidfd_open` and
-  `pidfd_send_signal` remain admitted; `ioctl` refuses `TIOCSTI` and `TIOCLINUX`); `InfoFd`, the
+  `pidfd_send_signal` remain admitted; `ioctl` refuses `TIOCSTI` and `TIOCLINUX`;
+  `socket` admits only Unix, IPv4, IPv6 and routing netlink, `socketpair` only
+  Unix, and io_uring is refused with `EPERM`; `When` holds alternatives of
+  conjunctions, checked at compile time; `Programs` retains compiled BPF and
+  installs it without allocating or locking; `linux.rs::seccomp_programs`
+  serialises per launch); `InfoFd`, the
   payload's pid read back for a `Kept` launch; `linux/host.rs`, `HostEnvelope`,
   the probed host facts the render is pure in; `linux/gpu.rs`, `GpuNodes`, the
   GPU's device nodes and sysfs found at each launch and bound by name), and

@@ -354,11 +354,13 @@ fn neutral_layers_judge_as_ambient_and_leave_it_inactive() {
     let tmp = tempfile::tempdir().unwrap();
     let ls = Tree::lay(tmp.path(), ["/bin/ls"]).at("/bin/ls");
     let ambient = GrantStack::root();
+    assert_eq!(ambient.net_veto(), None);
     for layer in neutral_layers() {
         assert!(!layer.is_restrictive(), "{layer:?} must be neutral");
         let mut stack = GrantStack::root();
         stack.push(layer);
         assert!(!stack.is_restrictive());
+        assert_eq!(stack.net_veto(), None);
         assert_eq!(judgments(&stack, &ls), judgments(&ambient, &ls));
     }
 }
@@ -384,6 +386,7 @@ fn neutral_layers_leave_a_restrictive_stack_as_it_was() {
         nested.push(layer);
         for stack in [&stack, &nested] {
             assert!(stack.is_restrictive());
+            assert_eq!(stack.net_veto(), Some(Net::Offline));
             assert_eq!(judgments(stack, &ls), judged);
         }
     }

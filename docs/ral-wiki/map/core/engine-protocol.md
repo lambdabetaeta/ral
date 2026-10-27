@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e8c66db0b69fc0401be810768bf75c266499ff8e
-generated_at_date: 2026-10-26
+generated_at_commit: 781d88844423a2af09f5e9a87e0d902fc4f15cff
+generated_at_date: 2026-10-27
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/shell/run/report.rs, core/src/seed.rs, core/src/shell/grant/spawn.rs]
 ---
 
@@ -32,7 +32,7 @@ parent's seal, so core holds no spawn machinery for it.** The why is
 - `Engine` — one session's engine: the `Shell`, its `Arc<Runtime>`, its
   `Scopes`, the installer it was born from. `Engine::boot(installers, &attach)` is the one
   boot both carriers call: `resolve_installer` (version check, then tag
-  lookup), the guest jail under `RAL_GUEST` (whose value is the jail's cgroup root), the installer's `runtime`, then
+  lookup), the installer's `runtime`, then
   by `attach.origin`: `Origin::Root(root)` is `Shell::root`, the root recipe,
   `seed_cwd` and the root's env; `Origin::Child(sealed)` is `Shell::child_of(runtime,
   sealed.unseal()?.decode(&runtime)?, narrow)`, and no recipe runs. There is no
@@ -41,6 +41,12 @@ parent's seal, so core holds no spawn machinery for it.** The why is
   `Engine::run` runs one dispatch under the view `Scopes::open` hands it;
   `Scopes` keeps the node, its one writer;
   `Engine::probe` (`engine/probe.rs`) answers one `Probe`.
+- `--guest-engine <cgroup-root>`: the Linux x86-64/aarch64 process role
+  installs the jail before `carrier::run_engine`; `Engine::boot` performs no
+  process-global jail setup. `PROTOCOL_VERSION` versions the whole engine
+  contract, frames and command confinement, and every attach refuses a
+  mismatch. Version 31 requires the guest deny-set, including on development
+  media ([[decisions/260730_boot-contract-is-versioned|boot-contract-is-versioned]]).
 - `Rails` — one dispatch's host-facing rails as its carrier lays them: the
   `Outlet` its events leave by, the deferred sink, the desk, the `Fork` arm.
   The carriers differ in these and nowhere else.
@@ -57,7 +63,7 @@ parent's seal, so core holds no spawn machinery for it.** The why is
 
 The frame algebra. Everything on it is a wire type; nothing here carries.
 
-- `PROTOCOL_VERSION` (currently 30) — checked at `Attach`; a mismatch refuses.
+- `PROTOCOL_VERSION` (currently 31): checked at `Attach`; a mismatch refuses.
   `Capabilities` carries `ExecGrant { every, allow, deny }`, its two sets as
   sequences; guest media must be rebuilt with `just guest-boot`.
 - `check_media` — the same number compared at *build* time, against the

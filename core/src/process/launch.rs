@@ -296,20 +296,20 @@ impl Launch {
         }
     }
 
-    /// Prepare this exec's transient cgroup and register the pre-exec that
-    /// puts the child in it at the plan's unprivileged uid/gid.  Called from
-    /// `build_launch` in `shell/exec/command/process.rs` when the shell carries
-    /// a [`GuestJail`](crate::process::jail::GuestJail).
+    /// Prepare the cgroup and register confinement before the spawn hooks.
     ///
     /// # Errors
-    /// The kernel's error for any mkdir/write/open the setup performs.
-    #[cfg(target_os = "linux")]
+    /// Seccomp compilation or any cgroup setup error.
+    #[cfg(seccomp)]
     pub(crate) fn apply_guest_jail(
         &mut self,
         plan: &crate::process::jail::JailPlan,
     ) -> std::io::Result<()> {
+        let deny = crate::authority::sandbox::Filter::ENVELOPE
+            .programs()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
         let (cgroup, procs) = crate::process::jail::linux::prepare(plan)?;
-        crate::process::jail::linux::install_pre_exec(&mut self.cmd, plan, procs);
+        crate::process::jail::linux::install_pre_exec(&mut self.cmd, plan, procs, deny);
         self.jail = Some(cgroup);
         Ok(())
     }

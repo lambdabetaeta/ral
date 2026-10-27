@@ -169,7 +169,7 @@ pub(crate) fn bwrap_command(
         handoff.lend(parcel.as_fd())
     };
     let seccomp = (seccomp_programs()?.into_iter())
-        .map(|program| lend_parcel("ral-seccomp", program))
+        .map(|program| lend_parcel("ral-seccomp", &program))
         .collect::<Result<Vec<_>, _>>()?;
     let ptys = if !env.host.virtual_dev && matches!(policy.fs, FsProjection::Restricted(_)) {
         PtyNodes::discover()?
@@ -650,18 +650,31 @@ impl From<OpenError> for String {
 /// applies every installed filter and keeps the most severe result, so which
 /// program lands on which slot carries no meaning.  None off the two arches
 /// the deny-set is compiled for.
-pub(crate) fn seccomp_programs() -> Result<Vec<&'static [u8]>, String> {
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(crate) fn seccomp_programs() -> Result<Vec<Vec<u8>>, String> {
+    #[cfg(seccomp)]
     {
         seccomp::Filter::ENVELOPE
             .programs()
-            .map(|programs| programs.iter().collect())
+            .map(|programs| programs.iter().map(serialise).collect())
             .map_err(|e| format!("sandbox: {e}"))
     }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[cfg(not(seccomp))]
     {
         Ok(Vec::new())
     }
+}
+
+/// Eight bytes per instruction, without a layout-dependent cast.
+#[cfg(seccomp)]
+fn serialise(prog: seccompiler::BpfProgramRef<'_>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(prog.len() * 8);
+    for insn in prog {
+        out.extend_from_slice(&insn.code.to_le_bytes());
+        out.push(insn.jt);
+        out.push(insn.jf);
+        out.extend_from_slice(&insn.k.to_le_bytes());
+    }
+    out
 }
 
 /// The files a launch execs, the envelope and the trampoline, each by its own

@@ -20,7 +20,7 @@ use crate::authority::policy::GrantPath;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::authority::policy::Subject;
 use crate::authority::policy::{
-    Admitted, Baseline, ExecRules, FsAllow, FsOp, FsRules as FsTable, Gpu, GrantStack, Join, Net,
+    Admitted, Baseline, ExecRules, FsAllow, FsOp, FsRules as FsTable, Gpu, GrantStack, Join,
     region, rules, running_region,
 };
 use crate::path::{Excluded, RealPath};
@@ -225,7 +225,7 @@ impl SandboxProjection {
         let regions = running_region(grants, baseline)
             .zip(region(grants, &FsOp::Write, baseline))
             .filter(|_| !grants.fs_is_top());
-        let online = !grants.net().any(|n| n == Net::Offline);
+        let online = grants.net_veto().is_none();
         let gpu =
             !(crate::authority::sandbox::WITHHOLDS_GPU && grants.gpu().any(|g| g == Gpu::Withheld));
 

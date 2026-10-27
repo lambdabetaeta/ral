@@ -25,6 +25,15 @@ pub fn serve(
             authority::sandbox::boot();
             crate::carrier::run_engine(installers)
         }
+        #[cfg(seccomp)]
+        Invocation::GuestEngine(args) => {
+            authority::sandbox::boot();
+            if let Err(error) = crate::process::jail::install_guest(args) {
+                terminal::cmd_error("ral", &error);
+                return Some(126);
+            }
+            crate::carrier::run_engine(installers)
+        }
         Invocation::BundledTool(args) => {
             authority::sandbox::pin();
             Some(serve_bundled_tool(args))

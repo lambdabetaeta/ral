@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d8ff4de1
-generated_at_date: 2026-10-26
+generated_at_commit: 781d88844423a2af09f5e9a87e0d902fc4f15cff
+generated_at_date: 2026-10-27
 covers_paths: [guest-net/, synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/protocol/channel.rs, core/src/carrier.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs]
 ---
 
@@ -707,8 +707,10 @@ read-only flag), and everything else about the machine is the service's own
 Runs inside every booted guest. Every decision — the kernel-cmdline
 `boot::Boot`, the mount plan and its inside-before-outside ordering invariant
 (`mounts.rs`), the guest-wide sysctls the §5 jail depends on (`sysctl.rs`),
-the engine's command line and fd plumbing (`engine.rs`: the vsock connection
-arrives as fd 3), the classification of a wait result (`reap.rs`) — is a pure
+the engine's command and fd plumbing (`engine.rs::command` builds the binary,
+`["--guest-engine", EXEC_CGROUP]`, the closed environment and `/work` working
+directory once for root and factory engines; the vsock connection arrives
+as fd 3), the classification of a wait result (`reap.rs`) — is a pure
 function unit-tested on any machine; the syscalls are a thin edge only a
 guest can exercise. The overlay root is deliberately the initramfs's job; the
 daemon verifies and names what it was handed. No ral semantics, no authority
@@ -761,6 +763,8 @@ amd64 keeps that same `vmlinuz` verbatim, because it already *is* the bzImage
 the trap worth naming, since upstream split `trans_fd` out and a `trans=fd`
 mount with `9pnet` loaded and `9pnet_fd` missing fails with a bare `ENODEV`.
 There is deliberately no `hv_netvsc`: the guest has no network device to drive.
+`CONFIG_SECCOMP_FILTER` and `CONFIG_NET_NS` must both be built in (`=y`):
+`build-boot.sh` records them for both arches and refuses media without either.
 `vm-image/README.md` records the corrections of §7's prose to real package
 names and the open questions (squashfs, distribution, determinism).
 
@@ -834,8 +838,9 @@ Also the image pipeline's open questions above. The rest of the design record
 runs — end to end on macOS, and everything above the machine on both: the §3
 wire carries real runs (`synod/examples/boot-run.rs` witnesses
 boot → shared folder → engine → settled report), the §5 spawn jail stands
-inside the guest (a fresh uid and a cgroup between the engine and what it
-runs), and §6 gives the guest a network of its own — a `tun` whose only peer
+inside the guest (a bounded fresh uid, a cgroup, the seccomp deny-set,
+descriptor marking and an offline network namespace between the engine and
+what it runs), and §6 gives the guest a network of its own — a `tun` whose only peer
 is `guest-net`, a user-mode TCP/IP stack in a host process — rather than the
 single `fetch-url` verb an earlier draft made the whole egress surface
 ([[design/egress|egress]],
@@ -885,6 +890,5 @@ exarch's cross-by-copy position.
   — why synod's closing walk waits for the whole fleet, not just the
   trunk, so a helper still writing never races the report.
 - [[map/core/io-process|core / io-process]] — the guest spawn jail
-  (`jail.rs`) whose unfiltered `socket(AF_VSOCK)` the daemon's peer-CID admission and
-  the guest kernel's refusal of a guest-local dial both stand behind, until a
-  seccomp address-family filter lands.
+  (`jail.rs`, `jail/linux.rs`) refuses `socket(AF_VSOCK)` with `EPERM`;
+  the daemon's peer-CID admission is a second line behind it.

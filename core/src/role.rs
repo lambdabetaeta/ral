@@ -11,6 +11,9 @@ pub enum Role {
     /// A wire engine, which takes the process over on fd 3.
     #[cfg(unix)]
     Engine,
+    /// A privileged engine that jails each command.
+    #[cfg(seccomp)]
+    GuestEngine,
     /// The process that holds a pipeline's pgid open.
     PipelineAnchor,
     /// A confined re-exec, whose warrant arrives on a descriptor.
@@ -23,18 +26,22 @@ impl Role {
     pub(crate) const ALL: &[Self] = &[
         #[cfg(unix)]
         Self::Engine,
+        #[cfg(seccomp)]
+        Self::GuestEngine,
         Self::PipelineAnchor,
         Self::Warrant,
         Self::BundledTool,
     ];
 
     /// The argument that names this role.  `ral-daemon`, which cannot depend
-    /// on core, spells `Engine`'s by hand.
+    /// on core, spells `GuestEngine`'s by hand.
     #[must_use]
     pub const fn flag(self) -> &'static str {
         match self {
             #[cfg(unix)]
             Self::Engine => "--engine",
+            #[cfg(seccomp)]
+            Self::GuestEngine => "--guest-engine",
             Self::PipelineAnchor => "--ral-pipeline-anchor",
             Self::Warrant => "--warrant",
             Self::BundledTool => "--ral-bundled-tool",
@@ -48,6 +55,9 @@ pub enum Invocation<'a> {
     #[cfg(unix)]
     Engine,
     PipelineAnchor,
+    /// The jail's cgroup root, validated by the guest role.
+    #[cfg(seccomp)]
+    GuestEngine(&'a [OsString]),
     /// The warrant descriptor's argument, validated by the trampoline.
     Warrant(&'a [OsString]),
     /// The tool's name, then its arguments.
@@ -68,6 +78,8 @@ pub fn classify(argv: &[OsString]) -> Invocation<'_> {
     match role {
         #[cfg(unix)]
         Role::Engine => Invocation::Engine,
+        #[cfg(seccomp)]
+        Role::GuestEngine => Invocation::GuestEngine(rest),
         Role::PipelineAnchor => Invocation::PipelineAnchor,
         Role::Warrant => Invocation::Warrant(rest),
         Role::BundledTool => Invocation::BundledTool(rest),
@@ -129,6 +141,19 @@ mod tests {
             Invocation::BundledTool(&argv(&["rg", engine, "pcre2"])),
             "a tool's own `--engine` is the tool's"
         );
+    }
+
+    #[cfg(seccomp)]
+    #[test]
+    fn the_guest_role_carries_its_arguments() {
+        for rest in [
+            &[][..],
+            &["/sys/fs/cgroup/ral-exec"],
+            &["--engine", "extra"],
+        ] {
+            let args = argv(&[&[Role::GuestEngine.flag()], rest].concat());
+            assert_eq!(classify(&args), Invocation::GuestEngine(&args[1..]));
+        }
     }
 
     /// The warrant's arguments are carried, never read here: a flag after it

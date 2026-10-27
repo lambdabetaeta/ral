@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
+generated_at_commit: 781d88844423a2af09f5e9a87e0d902fc4f15cff
 generated_at_date: 2026-10-27
 covers_paths: [core/src/shell/exec.rs, core/src/shell/exec/]
 ---
@@ -325,8 +325,13 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
   Inside a *guest*, `build_launch` takes neither projection branch:
   `jail::guest()` marks every spawn as already confined by the spawn
-  jail — a fresh unprivileged uid and a per-exec cgroup,
-  `process/jail.rs` ([[map/core/io-process|io-process]]) — since bwrap
+  jail: a bounded fresh uid, a per-exec cgroup, the envelope's seccomp
+  deny-set, and close-on-exec marking of every descriptor above stderr.
+  An offline command also gets a fresh network namespace with loopback up;
+  IP and outside abstract Unix sockets are out of reach, while pathname
+  Unix sockets remain reachable through the filesystem.
+  `process/jail.rs` ([[map/core/io-process|io-process]]) carries the plan,
+  and `jail/linux.rs` enforces it before the pgid and detach hooks, since bwrap
   needs the user namespaces the guest boot disables; the in-process guards
   apply unchanged, and `child.rs` tracks the per-exec `JailCgroup`, so
   cancel and settle kill the whole tree through `cgroup.kill` (a

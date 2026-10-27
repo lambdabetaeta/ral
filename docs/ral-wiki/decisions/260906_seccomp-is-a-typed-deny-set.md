@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: 104cb519
+generated_at_commit: 781d88844423a2af09f5e9a87e0d902fc4f15cff
 ---
 
 # The seccomp filter is a typed deny-set
@@ -60,7 +60,7 @@ unnamed.
 6. **Two verdicts, several programs.** A `seccompiler` filter has *one*
    `match_action`, so `Kill` and each distinct `Errno` compile to their own
    BPF program — three here (`Kill`; `Errno(EPERM)` for `unshare`/`clone`,
-   `setns`, `ioctl`; `Errno(ENOSYS)` for `clone3`). bwrap stacks them, one
+   `setns`, `ioctl`, socket families and io_uring; `Errno(ENOSYS)` for `clone3`). bwrap stacks them, one
    `--add-seccomp-fd` each (it refuses that flag beside `--seccomp`) — the
    kernel applies every installed filter and takes the most severe result,
    so program order is immaterial. `Kill` stays `SECCOMP_RET_KILL_THREAD`,
@@ -88,11 +88,47 @@ should be told no in its own words.* Each rule carries a one-line `why` that
 | `setns` | — | Errno(EPERM) | joining another namespace is leaving this one |
 | `clone3` | — | Errno(ENOSYS) | its flags live in a struct seccomp cannot read; ENOSYS makes glibc and Rust std fall back to `clone`, which the row above inspects (Docker's default profile does the same) |
 | `ioctl` | `arg1 in {TIOCSTI, TIOCLINUX}` | Errno(EPERM) | terminal input injection (CVE-2017-5226); `--new-session` closes it, this is the seccomp half the namespace ADR deferred to the terminal trampoline, independent of it |
+| `socket` | family outside `{AF_UNIX, AF_INET, AF_INET6, AF_NETLINK}`, or `AF_NETLINK` with protocol other than `NETLINK_ROUTE` | Errno(EPERM) | a family no grant models: VSOCK reaches a hypervisor's host, netlink beyond routing reaches audit, device events and every socket's diagnostics, and the rest is hardware or kernel surface |
+| `socketpair` | family other than `AF_UNIX` | Errno(EPERM) | a pair outside the Unix family is that family's kernel surface |
+| `io_uring_setup`, `io_uring_enter`, `io_uring_register` | always | Errno(EPERM) | creates and connects sockets with no syscall this filter sees |
 
-Left out deliberately: `chroot` (harmless without mount); `socket` (decision
-2); `io_uring_*` — real surface, but `tokio-uring`, liburing-linked tools and
-recent Go use it, and a `Kill` there is a SIGSYS the user cannot attribute to
-their grant; revisit if `diag` shows it.
+Left out deliberately: `chroot` (harmless without mount).
+
+## Amendment: socket families and io_uring
+
+**A socket names a peer; the deny-set refuses families whose peers no grant
+models, independently of `net`.** Only Unix, IPv4, IPv6 and routing netlink
+sockets remain admitted. An unprivileged `NETLINK_ROUTE` socket is read-only
+and cannot address a userspace peer; `getifaddrs` and `getaddrinfo` with
+`AI_ADDRCONFIG` need it. Listing the admitted families also refuses future
+families and their module autoloading. Unix socket reach remains governed
+elsewhere, as described in [[design/two-enforcers|two-enforcers]].
+
+The earlier objection to refusing io_uring no longer holds: the verdict is
+`EPERM`. `IORING_OP_SOCKET` (Linux 5.19) and `IORING_OP_CONNECT` (5.5) create
+and connect sockets without a `socket(2)` syscall for the filter to inspect.
+`kernel.io_uring_disabled=2` already answers `EPERM`, and libuv, MariaDB and
+QEMU fall back on it.
+
+The costs are explicit:
+
+- `NETLINK_KOBJECT_UEVENT`: libusb fails to initialise, so `lsusb` and
+  libusb's users refuse to start; libudev monitors likewise.
+- `NETLINK_AUDIT`: `sudo` and PAM tools warn and continue.
+- `NETLINK_SOCK_DIAG`: `ss` falls back to `/proc/net`.
+- io_uring: `tokio-uring`, `glommio` and `monoio` binaries fail at startup,
+  as on a host with `kernel.io_uring_disabled=2`.
+- `AF_ALG`: cryptsetup's kernel backend and OpenSSL's opt-in afalg engine
+  cannot open their kernel crypto sockets.
+
+Each syscall has one rule and one reason. Its condition is a disjunction of
+non-empty conjunctions; `ArgNotIn` compares the argument's low 32 bits against
+every kept value with `Ne`. A const check rejects duplicate syscalls and
+empty alternatives, conjunctions or kept-value lists. `Programs` retains the
+compiled BPF, including the x32 guard, and installs it without allocating or
+locking; bwrap's byte parcels are serialised per launch. An errno refusal
+leaves an audit record only where auditing is enabled for that process;
+`diag` attributes any record it finds through the same `explain` data.
 
 ## The x32 guard
 

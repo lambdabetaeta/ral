@@ -80,10 +80,10 @@ pub(crate) fn build_launch(
     if shell.has_active_capabilities() {
         cmd.limit_resources().map_err(|e| unbraked(&e))?;
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(seccomp)]
     if let Some(jail) = jail {
         let plan = jail
-            .plan(ownership)
+            .plan(ownership, shell.context.grants.net_veto())
             .map_err(|e| sig(format!("guest jail: {e}")))?;
         cmd.apply_guest_jail(&plan)
             .map_err(|e| sig(format!("guest jail: {e}")))?;

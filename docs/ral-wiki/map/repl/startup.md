@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 225706eb
-generated_at_date: 2026-10-26
+generated_at_commit: 781d88844423a2af09f5e9a87e0d902fc4f15cff
+generated_at_date: 2026-10-27
 covers_paths: [ral/src/main.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/boot_builtin.rs, ral/src/platform.rs, ral/build.rs]
 ---
 
@@ -28,7 +28,8 @@ one dispatch serves it.** `ral_core::classify(argv)`
 (`core/src/role.rs`) keeps the launch vocabulary and classification independent
 of execution; `core/src/invocation.rs` owns dispatch. The classifier reads the
 first argument alone over `Role::ALL` and
-returns an `Invocation`: `Engine`, `PipelineAnchor`, `Warrant`,
+returns an `Invocation`: `Engine`, Linux x86-64/aarch64 `GuestEngine`,
+`PipelineAnchor`, `Warrant`,
 `BundledTool`, or `Shell`. Each flag is spelled once,
 by `Role::flag`, and disjointness lives there and nowhere else — a flag a
 script was given, or a tool's own `--engine`, names no role. `ral_core::invocation::serve(&role, installers)`
@@ -59,6 +60,10 @@ dispositions. Then, per role:
   Linux, bwrap) and, on Windows, sweeps what a crashed prior session left
   registered; the bundled tool only `authority::sandbox::pin`s, as a re-exec child that
   reaches no ledger.
+  - **Guest engine** (`--guest-engine <cgroup-root>`, Linux x86-64/aarch64):
+    validates one absolute root and euid 0, installs the
+    [[map/core/io-process|spawn jail]], then serves `carrier::run_engine`.
+    A refusal is rendered by `terminal::cmd_error` and exits 126.
   - **Engine** (Unix) — then hands the process to
     `ral_core::engine::run_engine(installers)`, pinned exactly as the shell
     is: its grant-confined launches need the envelope as much as the shell's.

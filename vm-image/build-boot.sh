@@ -203,7 +203,8 @@ case "$ARCH" in
     CHECK_SYMS=(CONFIG_VIRTIO CONFIG_VIRTIO_RING CONFIG_VIRTIO_MMIO CONFIG_VIRTIO_PCI
                 CONFIG_VIRTIO_BLK CONFIG_VIRTIO_CONSOLE CONFIG_VIRTIO_FS CONFIG_VSOCKETS
                 CONFIG_VIRTIO_VSOCKETS CONFIG_HYPERV_VSOCKETS CONFIG_OVERLAY_FS
-                CONFIG_EXT4_FS CONFIG_DEVTMPFS CONFIG_DEVTMPFS_MOUNT CONFIG_TUN)
+                CONFIG_EXT4_FS CONFIG_DEVTMPFS CONFIG_DEVTMPFS_MOUNT CONFIG_TUN
+                CONFIG_SECCOMP_FILTER CONFIG_NET_NS)
     # The vsock family's real names (confirmed against this kernel's own
     # modules.dep, not guessed from its Kconfig symbol): the virtio transport
     # is `vmw_vsock_virtio_transport`, not `virtio_vsock`, and it pulls the
@@ -284,7 +285,8 @@ case "$ARCH" in
                 CONFIG_HYPERV_VSOCKETS CONFIG_VIRTIO_VSOCKETS CONFIG_9P_FS
                 CONFIG_NET_9P CONFIG_NET_9P_FD CONFIG_SCSI CONFIG_BLK_DEV_SD
                 CONFIG_OVERLAY_FS CONFIG_EXT4_FS CONFIG_DEVTMPFS
-                CONFIG_DEVTMPFS_MOUNT CONFIG_SERIAL_8250 CONFIG_TUN)
+                CONFIG_DEVTMPFS_MOUNT CONFIG_SERIAL_8250 CONFIG_TUN
+                CONFIG_SECCOMP_FILTER CONFIG_NET_NS)
     # Real module basenames, as Ubuntu's own linux-modules package ships them
     # (`hv_storvsc`, not `storvsc_drv`; `hv_sock`, not `hyperv_transport`;
     # `9p`, not `9pfs`). `9p` pulls the netfs core in through its own
@@ -509,6 +511,13 @@ KERNEL_PKG_VERSION=$(dpkg-deb -f /build/kernel-debs/"$IMAGE_PKG"_*.deb Version |
   done
 } > /out/kernel-config-check.txt
 cat /out/kernel-config-check.txt
+
+for sym in CONFIG_SECCOMP_FILTER CONFIG_NET_NS; do
+  if ! grep -qE "^$sym=y$" "$CONFIG_PATH"; then
+    echo "error: $sym must be =y for the guest command jail" >&2
+    exit 1
+  fi
+done
 
 # Only the `m` entries of this guest's MODNAME table become cargo: a `y` needs
 # nothing shipped, and a symbol recorded above but absent from the table is

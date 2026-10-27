@@ -144,10 +144,7 @@ fn within(args: &[&str], command: &str) -> String {
 }
 
 /// Both enforcers judge the path `execve` is given, never argv.
-#[cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+#[cfg(seccomp)]
 #[test]
 fn an_admitted_loader_runs_an_unadmitted_file() {
     use ral_core::authority::policy::{ExecGrant, ExecKey};

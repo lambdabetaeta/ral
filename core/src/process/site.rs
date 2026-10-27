@@ -35,6 +35,12 @@ pub(in crate::process) enum Silent {
     /// command name and a pid.  It raises no card: a diagnostic probe, not
     /// turn-time model data I/O.
     PsSample,
+    /// A throwaway socket to bring up the jail's private loopback; no peer I/O.
+    #[cfg(seccomp)]
+    JailLoopbackSocket,
+    /// Mark inherited descriptors before jailed exec; no model I/O.
+    #[cfg(seccomp)]
+    JailDescriptorMark,
     /// The guest-global jail sequence counter file, opened and locked to mint
     /// the next uid and cgroup number.  It raises no card: guest-boot and
     /// exec-time jail setup, not model turn-time I/O.

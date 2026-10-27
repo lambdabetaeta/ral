@@ -324,9 +324,10 @@ spawns an engine:
 spawn, in the enquiry it is still answering, so it already holds the spawn the
 connection is for; there is no preamble, no table keyed by one, no pump and no
 expiry ([[design/engine-protocol|engine-protocol]]). Admission is the peer's
-CID, a kernel-enforced identity, in place of a token: a guest process cannot
-present the host's CID, so a standing port is safe
-([[map/core/io-process|the spawn jail]] permits `socket(AF_VSOCK)`).
+CID, a kernel-enforced identity: the
+[[map/core/io-process|spawn jail]] refuses `socket(AF_VSOCK)` with `EPERM`,
+and a guest process cannot present the host's CID. Peer-CID admission is the
+second line behind the jail's deny-set.
 
 **The child exists before the roster names it.** The desk answers the enquiry
 only after `Seat::wire` returned from `await_attached`, and enrols the child in

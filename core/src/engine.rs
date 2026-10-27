@@ -112,7 +112,6 @@ impl Engine {
     ) -> Result<Self, String> {
         let spec = &attach.engine;
         let installer = resolve_installer(installers, spec.proto_version, &spec.installer)?;
-        crate::process::jail::install_guest();
         let runtime = Arc::new((installer.runtime)(spec)?);
         let shell = match &attach.origin {
             Origin::Root(root) => {

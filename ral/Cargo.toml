@@ -21,7 +21,7 @@ ripgrep    = ["ral-core/ripgrep", "dep:tikv-jemallocator"]
 ral-core  = { path = "../core" }
 # buffer-redux: input read past an accepted line (type-ahead) carries over to
 # the next readline instead of being dropped.
-rustyline  = { version = "=18.0.1", features = ["buffer-redux"] }
+rustyline  = { version = "=19.0.0", features = ["buffer-redux"] }
 serde_json = { workspace = true }
 clap       = { workspace = true }
 clipboard  = { workspace = true }

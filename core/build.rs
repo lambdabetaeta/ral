@@ -109,6 +109,16 @@ fn main() {
     {
         println!("cargo:rustc-cfg=ctor_without_argv");
     }
+    // where the deny-set compiles
+    println!("cargo:rustc-check-cfg=cfg(seccomp)");
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux")
+        && matches!(
+            env::var("CARGO_CFG_TARGET_ARCH").as_deref(),
+            Ok("x86_64" | "aarch64")
+        )
+    {
+        println!("cargo:rustc-cfg=seccomp");
+    }
 
     let src =
         fs::read_to_string("src/shell/prelude.ral").expect("failed to read src/shell/prelude.ral");

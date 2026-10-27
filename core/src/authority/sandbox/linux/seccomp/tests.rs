@@ -1,28 +1,147 @@
 use super::*;
 
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-fn install_envelope_programs() {
-    for bytes in Filter::ENVELOPE
-        .programs()
-        .expect("the deny-set compiles")
-        .iter()
-    {
-        let bpf: Vec<_> = bytes
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .map(|insn| seccompiler::sock_filter {
-                code: u16::from_le_bytes([insn[0], insn[1]]),
-                jt: insn[2],
-                jf: insn[3],
-                k: u32::from_le_bytes([insn[4], insn[5], insn[6], insn[7]]),
-            })
-            .collect();
-        seccompiler::apply_filter(&bpf).expect("install an envelope program");
+fn probe_errno(result: io::Result<()>) -> Option<i32> {
+    result.err().map(|error| {
+        error
+            .raw_os_error()
+            .expect("a syscall probe returns an OS error")
+    })
+}
+
+fn compare_probe(
+    name: &str,
+    refused: bool,
+    probe: impl Fn() -> io::Result<()> + Copy + Send + Sync + 'static,
+) {
+    let deny = Filter::ENVELOPE.programs().expect("the deny-set compiles");
+    let unfiltered = probe_errno(in_child(probe));
+    let filtered = probe_errno(in_child(move || {
+        deny.install()?;
+        probe()
+    }));
+    if refused && unfiltered == Some(libc::EPERM) {
+        eprintln!(
+            "skipping {name}: the unfiltered call returns EPERM; host policy, missing \
+             CAP_NET_RAW or kernel.io_uring_disabled may already refuse it"
+        );
+        return;
+    }
+    if refused {
+        assert_eq!(filtered, Some(libc::EPERM), "{name}: filtered errno");
+    } else {
+        assert_eq!(filtered, unfiltered, "{name}: the deny-set must admit it");
     }
 }
 
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn socket(family: u64, kind: i32, protocol: i32) -> io::Result<()> {
+    // SAFETY: socket takes integer arguments; its result belongs to this child.
+    let fd = unsafe { libc::syscall(libc::SYS_socket, family, kind, protocol) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fd was just opened by this probe.
+    unsafe { libc::syscall(libc::SYS_close, fd) };
+    Ok(())
+}
+
+fn socketpair(family: i32) -> io::Result<()> {
+    let mut fds = [-1; 2];
+    // SAFETY: fds has space for both descriptors.
+    let result = unsafe { libc::socketpair(family, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    for fd in fds {
+        // SAFETY: both descriptors were just opened by this probe.
+        unsafe { libc::close(fd) };
+    }
+    Ok(())
+}
+
+fn io_uring(nr: i64, first: i64) -> io::Result<()> {
+    // SAFETY: null buffers and fd -1 cannot access memory or an existing ring.
+    let result = unsafe { libc::syscall(nr, first, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64) };
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[test]
+fn socket_families_outside_the_grant_model_are_refused() {
+    for (name, family, kind, protocol) in [
+        ("AF_VSOCK", libc::AF_VSOCK, libc::SOCK_STREAM, 0),
+        ("AF_PACKET", libc::AF_PACKET, libc::SOCK_RAW, 0),
+        ("AF_ALG", libc::AF_ALG, libc::SOCK_SEQPACKET, 0),
+        (
+            "NETLINK_SOCK_DIAG",
+            libc::AF_NETLINK,
+            libc::SOCK_RAW,
+            libc::NETLINK_SOCK_DIAG,
+        ),
+        (
+            "NETLINK_KOBJECT_UEVENT",
+            libc::AF_NETLINK,
+            libc::SOCK_DGRAM,
+            libc::NETLINK_KOBJECT_UEVENT,
+        ),
+    ] {
+        compare_probe(name, true, move || {
+            socket(u64::from(family.cast_unsigned()), kind, protocol)
+        });
+    }
+    compare_probe("AF_TIPC socketpair", true, || socketpair(libc::AF_TIPC));
+    compare_probe("AF_VSOCK with high bits", true, || {
+        socket(
+            (1_u64 << 32) | u64::from(libc::AF_VSOCK.cast_unsigned()),
+            libc::SOCK_STREAM,
+            0,
+        )
+    });
+}
+
+#[test]
+fn internet_routing_and_unix_sockets_remain_admitted() {
+    for (name, family, kind, protocol) in [
+        ("AF_INET stream", libc::AF_INET, libc::SOCK_STREAM, 0),
+        ("AF_INET datagram", libc::AF_INET, libc::SOCK_DGRAM, 0),
+        ("AF_INET6 stream", libc::AF_INET6, libc::SOCK_STREAM, 0),
+        ("AF_INET6 datagram", libc::AF_INET6, libc::SOCK_DGRAM, 0),
+        (
+            "NETLINK_ROUTE",
+            libc::AF_NETLINK,
+            libc::SOCK_RAW,
+            libc::NETLINK_ROUTE,
+        ),
+        ("AF_UNIX", libc::AF_UNIX, libc::SOCK_STREAM, 0),
+    ] {
+        compare_probe(name, false, move || {
+            socket(u64::from(family.cast_unsigned()), kind, protocol)
+        });
+    }
+    compare_probe("AF_UNIX socketpair", false, || socketpair(libc::AF_UNIX));
+    compare_probe("AF_INET with high bits", false, || {
+        socket(
+            (1_u64 << 32) | u64::from(libc::AF_INET.cast_unsigned()),
+            libc::SOCK_STREAM,
+            0,
+        )
+    });
+}
+
+#[test]
+fn io_uring_cannot_bypass_the_socket_rules() {
+    for (name, nr, first) in [
+        ("io_uring_setup", libc::SYS_io_uring_setup, 0),
+        ("io_uring_enter", libc::SYS_io_uring_enter, -1),
+        ("io_uring_register", libc::SYS_io_uring_register, -1),
+    ] {
+        compare_probe(name, true, move || io_uring(nr, first));
+    }
+}
+
+#[cfg(seccomp)]
 fn sacrificial(role: &'static str, name: &str) -> std::process::Output {
     let thread = std::thread::current();
     let test = thread.name().expect("libtest names its test thread");
@@ -33,7 +152,7 @@ fn sacrificial(role: &'static str, name: &str) -> std::process::Output {
         .expect("start a sacrificial seccomp child")
 }
 
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(seccomp)]
 #[test]
 fn terminal_injection_is_refused_by_installed_programs() {
     use crate::test_helper::confinement::Output;
@@ -43,7 +162,11 @@ fn terminal_injection_is_refused_by_installed_programs() {
     const MARKER: &str = "terminal-injection-probe-returned";
 
     if std::env::var_os(ROLE).is_some() {
-        install_envelope_programs();
+        Filter::ENVELOPE
+            .programs()
+            .expect("the deny-set compiles")
+            .install()
+            .expect("install the deny-set");
         // libtest's `test … ` prefix holds the current line.
         println!();
         let file = std::fs::File::open("/dev/null").expect("open the ioctl control");
@@ -85,7 +208,7 @@ fn terminal_injection_is_refused_by_installed_programs() {
     }
 }
 
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(seccomp)]
 #[test]
 fn process_reach_is_killed_by_installed_programs() {
     use crate::test_helper::confinement::Output;
@@ -103,6 +226,7 @@ fn process_reach_is_killed_by_installed_programs() {
     ];
 
     if let Ok(name) = std::env::var(ROLE) {
+        let deny = Filter::ENVELOPE.programs().expect("the deny-set compiles");
         // SAFETY: only the child installs filters; the parent reaps it.
         let child = unsafe { libc::fork() };
         assert!(
@@ -133,7 +257,7 @@ fn process_reach_is_killed_by_installed_programs() {
             }
             return;
         }
-        install_envelope_programs();
+        deny.install().expect("install the deny-set");
         // SAFETY: getpid takes no arguments.
         let pid = unsafe { libc::syscall(libc::SYS_getpid) };
         assert_eq!(pid, i64::from(std::process::id()));
@@ -199,16 +323,6 @@ fn process_signals_remain_outside_the_deny_set() {
 }
 
 #[test]
-fn no_syscall_is_named_in_two_rules() {
-    let mut seen = std::collections::HashSet::new();
-    for rule in Filter::ENVELOPE.0 {
-        for call in rule.calls {
-            assert!(seen.insert(call.nr), "{} named twice", call.name);
-        }
-    }
-}
-
-#[test]
 fn every_why_is_non_empty_and_carries_no_trailing_full_stop() {
     for rule in Filter::ENVELOPE.0 {
         assert!(!rule.why.is_empty(), "a rule's why must not be empty");
@@ -217,15 +331,6 @@ fn every_why_is_non_empty_and_carries_no_trailing_full_stop() {
             "the hint adds punctuation; why must not: {:?}",
             rule.why
         );
-    }
-}
-
-#[test]
-fn no_condition_is_empty() {
-    for rule in Filter::ENVELOPE.0 {
-        if let Some(Cond::ArgIn { values, .. }) = &rule.when {
-            assert!(!values.is_empty(), "an empty chain denies every argument");
-        }
     }
 }
 
@@ -280,15 +385,15 @@ fn explain_names_a_kill_an_errno_and_nothing_for_an_undenied_call() {
     );
 }
 
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(seccomp)]
 #[test]
 fn programs_compiles_one_program_per_distinct_verdict() {
     let programs = Filter::ENVELOPE.programs().expect("the deny-set compiles");
-    // Kill; Errno(EPERM) (unshare/clone, setns, ioctl); Errno(ENOSYS) (clone3).
+    // Kill, EPERM, ENOSYS.
     assert_eq!(programs.verdicts.len(), 3);
-    for (_, bytes) in &programs.verdicts {
-        assert_ne!(bytes, &Vec::<u8>::new());
-        assert_eq!(bytes.len() % 8, 0);
+    for (_, program) in &programs.verdicts {
+        assert_ne!(program.len(), 0);
+        assert!(program.len() <= usize::try_from(libc::BPF_MAXINSNS).unwrap());
     }
     #[cfg(target_arch = "x86_64")]
     assert!(

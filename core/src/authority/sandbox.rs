@@ -29,6 +29,10 @@ mod launch;
 mod linux;
 #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
 pub(crate) use linux::landlock::{BASELINE_ABI, probe_abi};
+#[cfg(all(test, seccomp))]
+pub(crate) use linux::seccomp::in_child;
+#[cfg(seccomp)]
+pub(crate) use linux::seccomp::{Filter, Programs};
 #[cfg(target_os = "macos")]
 mod macos;
 mod projection;

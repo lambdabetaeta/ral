@@ -17,10 +17,10 @@ use probe::Probe;
 pub mod channel;
 pub mod probe;
 
-/// The frame algebra's generation, checked at `Attach` and refused on
-/// mismatch.  Public because a build has to compare it against the engine
-/// sitting in the guest media beside it: see [`check_media`].
-pub const PROTOCOL_VERSION: u32 = 30;
+/// The engine's contract with the host: frames and command confinement.
+/// Checked at every `Attach`; a mismatch refuses even development media.
+/// Packaging checks the recorded version too: see [`check_media`].
+pub const PROTOCOL_VERSION: u32 = 31;
 
 /// The key `vm-image/build-boot.sh` records [`PROTOCOL_VERSION`] under in the
 /// boot media's manifest, `vm-image/out/boot/boot-manifest.txt`.

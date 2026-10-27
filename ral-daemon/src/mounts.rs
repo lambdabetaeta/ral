@@ -65,7 +65,7 @@ pub const WORK: &str = "/work";
 /// Its children are `engine-<pid>/exec-<seq>`, and `detached/exec-<seq>` for
 /// survivors no engine's end may reach.  The daemon makes it ([`exec_cgroup`])
 /// and kills through it, since commands leave their engine's process group;
-/// the engine reads it from `RAL_GUEST` and makes the levels below.
+/// the engine reads it from its command line and makes the levels below.
 pub const EXEC_CGROUP: &str = "/sys/fs/cgroup/ral-exec";
 
 /// What the cgroup2 root delegates into [`EXEC_CGROUP`]: the engine's jail

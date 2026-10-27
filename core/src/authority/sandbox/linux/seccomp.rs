@@ -16,7 +16,8 @@
 //! program order carries no meaning.
 //!
 //! The filter is projection-independent — an envelope invariant keyed on
-//! nothing in the grant — so it is compiled once per process, not per launch.
+//! nothing in the grant: it is compiled once per process and serialised for
+//! bwrap per launch.
 //!
 //! **The x32 guard.** `seccompiler`'s arch-validation prologue
 //! (`backend/bpf.rs::build_arch_validation_sequence`) only compares
@@ -31,7 +32,7 @@
 //! which seccompiler's arch prologue kills with `SECCOMP_RET_KILL_PROCESS`,
 //! so x32 alone needs the guard.
 
-use std::fmt;
+use std::{fmt, io};
 
 /// A syscall number paired with its name: the only place the two meet.
 #[derive(Clone, Copy, Debug)]
@@ -79,13 +80,20 @@ const TIOCSTI: u32 = libc::TIOCSTI as u32;
 #[allow(clippy::cast_possible_truncation, reason = "0x541C fits a u32")]
 const TIOCLINUX: u32 = libc::TIOCLINUX as u32;
 
-/// A condition on one raw syscall argument, compared as a `Dword`: every
-/// value a rule below needs fits 32 bits, with the high half zero.
+/// Compare the low `Dword`: the kernel reads these arguments as `int`.
 enum Cond {
     /// `arg & mask != 0`
     FlagSet { arg: u8, mask: u32 },
-    /// `arg` in `values`; non-empty, since seccompiler reads an empty chain as unconditional.
-    ArgIn { arg: u8, values: &'static [u32] },
+    /// `arg == value`
+    ArgEq { arg: u8, value: u32 },
+    /// `arg ∉ values`
+    ArgNotIn { arg: u8, values: &'static [u32] },
+}
+
+/// `Always` is seccompiler's empty chain; `Any` has one rule per conjunction.
+enum When {
+    Always,
+    Any(&'static [&'static [Cond]]),
 }
 
 /// What a rule does to the syscalls it names. `Errno` holds a `libc::E*`
@@ -105,11 +113,10 @@ fn errno_name(code: i32) -> &'static str {
     }
 }
 
-/// One deny-set entry: every syscall in `calls`, under `when` if present, gets
-/// `verdict` — and `why`, repeated verbatim by `diag`.
+/// Every syscall in `calls`, under `when`, gets `verdict` and `why`.
 struct Rule {
     calls: &'static [Syscall],
-    when: Option<Cond>,
+    when: When,
     verdict: Verdict,
     why: &'static str,
 }
@@ -131,7 +138,7 @@ impl Filter {
                 syscall!(SYS_process_mrelease),
                 syscall!(SYS_kcmp),
             ],
-            when: None,
+            when: When::Always,
             verdict: Verdict::Kill,
             why: "reads or rewrites another process; the envelope hides the host's table, \
                   this closes the same-uid pair inside it",
@@ -143,7 +150,7 @@ impl Filter {
                 #[cfg(target_arch = "x86_64")]
                 syscall!(SYS_modify_ldt),
             ],
-            when: None,
+            when: When::Always,
             verdict: Verdict::Kill,
             why: "loads programs into the kernel; classic privilege-escalation surface",
         },
@@ -156,7 +163,7 @@ impl Filter {
                 syscall!(SYS_swapon),
                 syscall!(SYS_swapoff),
             ],
-            when: None,
+            when: When::Always,
             verdict: Verdict::Kill,
             why: "machine state",
         },
@@ -166,7 +173,7 @@ impl Filter {
                 syscall!(SYS_finit_module),
                 syscall!(SYS_delete_module),
             ],
-            when: None,
+            when: When::Always,
             verdict: Verdict::Kill,
             why: "kernel code",
         },
@@ -176,19 +183,19 @@ impl Filter {
                 syscall!(SYS_add_key),
                 syscall!(SYS_request_key),
             ],
-            when: None,
+            when: When::Always,
             verdict: Verdict::Kill,
             why: "the kernel keyring: cross-process state the envelope does not model",
         },
         Rule {
             calls: &[syscall!(SYS_userfaultfd)],
-            when: None,
+            when: When::Always,
             verdict: Verdict::Kill,
             why: "the race-widening primitive in most modern exploit chains",
         },
         Rule {
             calls: &[syscall!(SYS_open_by_handle_at)],
-            when: None,
+            when: When::Always,
             verdict: Verdict::Kill,
             why: "opens by inode handle, bypassing every path the envelope bound",
         },
@@ -205,29 +212,29 @@ impl Filter {
                 syscall!(SYS_fspick),
                 syscall!(SYS_mount_setattr),
             ],
-            when: None,
+            when: When::Always,
             verdict: Verdict::Kill,
             why: "mount authority inside the envelope hides or reshapes the deny masks",
         },
         Rule {
             calls: &[syscall!(SYS_unshare), syscall!(SYS_clone)],
-            when: Some(Cond::FlagSet {
+            when: When::Any(&[&[Cond::FlagSet {
                 arg: 0,
                 mask: CLONE_NEWUSER,
-            }),
+            }]]),
             verdict: Verdict::Errno(libc::EPERM),
             why: "a user namespace is root over a fresh mount tree: a container inside the \
                   grant, which the envelope forbids",
         },
         Rule {
             calls: &[syscall!(SYS_setns)],
-            when: None,
+            when: When::Always,
             verdict: Verdict::Errno(libc::EPERM),
             why: "joining another namespace is leaving this one",
         },
         Rule {
             calls: &[syscall!(SYS_clone3)],
-            when: None,
+            when: When::Always,
             verdict: Verdict::Errno(libc::ENOSYS),
             why: "its flags live in a struct seccomp cannot read; ENOSYS makes glibc and Rust \
                   std fall back to `clone`, which the row above inspects (Docker's default \
@@ -235,16 +242,109 @@ impl Filter {
         },
         Rule {
             calls: &[syscall!(SYS_ioctl)],
-            when: Some(Cond::ArgIn {
-                arg: 1,
-                values: &[TIOCSTI, TIOCLINUX],
-            }),
+            when: When::Any(&[
+                &[Cond::ArgEq {
+                    arg: 1,
+                    value: TIOCSTI,
+                }],
+                &[Cond::ArgEq {
+                    arg: 1,
+                    value: TIOCLINUX,
+                }],
+            ]),
             verdict: Verdict::Errno(libc::EPERM),
             why: "terminal input injection (CVE-2017-5226); `--new-session` closes it, this is \
                   the seccomp half the namespace ADR deferred to the terminal trampoline, \
                   independent of it",
         },
+        Rule {
+            calls: &[syscall!(SYS_socket)],
+            when: When::Any(&[
+                &[Cond::ArgNotIn {
+                    arg: 0,
+                    values: &[
+                        libc::AF_UNIX.cast_unsigned(),
+                        libc::AF_INET.cast_unsigned(),
+                        libc::AF_INET6.cast_unsigned(),
+                        libc::AF_NETLINK.cast_unsigned(),
+                    ],
+                }],
+                &[
+                    Cond::ArgEq {
+                        arg: 0,
+                        value: libc::AF_NETLINK.cast_unsigned(),
+                    },
+                    Cond::ArgNotIn {
+                        arg: 2,
+                        values: &[libc::NETLINK_ROUTE.cast_unsigned()],
+                    },
+                ],
+            ]),
+            verdict: Verdict::Errno(libc::EPERM),
+            why: "a family no grant models: VSOCK reaches a hypervisor's host, netlink beyond \
+                  routing reaches audit, device events and every socket's diagnostics, and \
+                  the rest is hardware or kernel surface",
+        },
+        Rule {
+            calls: &[syscall!(SYS_socketpair)],
+            when: When::Any(&[&[Cond::ArgNotIn {
+                arg: 0,
+                values: &[libc::AF_UNIX.cast_unsigned()],
+            }]]),
+            verdict: Verdict::Errno(libc::EPERM),
+            why: "a pair outside the Unix family is that family's kernel surface",
+        },
+        Rule {
+            calls: &[
+                syscall!(SYS_io_uring_setup),
+                syscall!(SYS_io_uring_enter),
+                syscall!(SYS_io_uring_register),
+            ],
+            when: When::Always,
+            verdict: Verdict::Errno(libc::EPERM),
+            why: "creates and connects sockets with no syscall this filter sees",
+        },
     ]);
+
+    const fn check(&self) {
+        let mut i = 0;
+        while i < self.0.len() {
+            let rule = &self.0[i];
+            let mut j = 0;
+            while j < rule.calls.len() {
+                let mut k = i;
+                while k < self.0.len() {
+                    let mut l = if k == i { j + 1 } else { 0 };
+                    while l < self.0[k].calls.len() {
+                        assert!(
+                            rule.calls[j].nr != self.0[k].calls[l].nr,
+                            "a syscall is named twice in the deny-set"
+                        );
+                        l += 1;
+                    }
+                    k += 1;
+                }
+                j += 1;
+            }
+            if let When::Any(alternatives) = &rule.when {
+                assert!(!alternatives.is_empty(), "a rule needs an alternative");
+                let mut j = 0;
+                while j < alternatives.len() {
+                    let conjunction = alternatives[j];
+                    assert!(!conjunction.is_empty(), "a conjunction needs a condition");
+                    let mut k = 0;
+                    while k < conjunction.len() {
+                        if let Cond::ArgNotIn { values, .. } = &conjunction[k] {
+                            assert!(!values.is_empty(), "ArgNotIn needs a value");
+                        }
+                        k += 1;
+                    }
+                    j += 1;
+                }
+            }
+            i += 1;
+        }
+    }
 
     /// What this filter says about syscall `nr`, for a `type=1326` record.
     /// Only a matching syscall and action can belong to this filter.
@@ -268,6 +368,8 @@ impl Filter {
         })
     }
 }
+
+const _: () = Filter::ENVELOPE.check();
 
 /// What the filter says about one denied syscall: its name, the verdict, and
 /// the rule's own reason, repeated verbatim by `diag`.
@@ -294,15 +396,15 @@ impl fmt::Display for Denied<'_> {
     }
 }
 
-/// The two (or three, on x86-64) BPF programs bwrap reads: one per distinct
-/// [`Verdict`] in the deny-set, plus the x32 guard on x86-64.
+/// Compiled BPF programs: one per distinct [`Verdict`] in the deny-set,
+/// plus the x32 guard on x86-64.
 pub(crate) struct Programs {
     /// One compiled program per distinct verdict, in order of first
     /// appearance in [`Filter::ENVELOPE`] — `Kill`, then each distinct
     /// `Errno`.
-    verdicts: Vec<(Verdict, Vec<u8>)>,
+    verdicts: Vec<(Verdict, seccompiler::BpfProgram)>,
     /// The x32 guard (module doc): `Some` on x86-64 only.
-    abi_guard: Option<Vec<u8>>,
+    abi_guard: Option<seccompiler::BpfProgram>,
 }
 
 impl Programs {
@@ -310,11 +412,46 @@ impl Programs {
     /// slots the envelope inherits them at; the kernel evaluates every stacked
     /// filter independently and keeps the most severe result, so which
     /// program lands on which fd carries no meaning.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &[u8]> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = seccompiler::BpfProgramRef<'_>> {
         self.verdicts
             .iter()
-            .map(|(_, bytes)| bytes.as_slice())
+            .map(|(_, program)| program.as_slice())
             .chain(self.abi_guard.as_deref())
+    }
+
+    /// Installs without allocating or locking, including after fork.
+    pub(crate) fn install(&self) -> io::Result<()> {
+        self.iter().try_for_each(|program| {
+            seccompiler::apply_filter(program).map_err(|error| match error {
+                seccompiler::Error::Prctl(error) | seccompiler::Error::Seccomp(error) => error,
+                _ => io::Error::from_raw_os_error(libc::EINVAL),
+            })
+        })
+    }
+}
+
+#[cfg(test)]
+pub(crate) use probe::in_child;
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod probe {
+    use std::io;
+    use std::os::unix::process::CommandExt;
+
+    /// Runs `pre` in a forked child before it execs `/bin/true`.
+    pub(crate) fn in_child(
+        pre: impl FnMut() -> io::Result<()> + Send + Sync + 'static,
+    ) -> io::Result<()> {
+        let mut command = std::process::Command::new("/bin/true");
+        // SAFETY: callers use only fork-safe operations in `pre`.
+        unsafe { command.pre_exec(pre) };
+        let status = command.spawn()?.wait()?;
+        assert!(
+            status.success(),
+            "the seccomp probe's /bin/true failed: {status}"
+        );
+        Ok(())
     }
 }
 
@@ -336,40 +473,56 @@ impl fmt::Display for Error {
     }
 }
 
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(seccomp)]
 impl Cond {
-    fn compile(&self) -> Result<Vec<seccompiler::SeccompRule>, Error> {
-        use seccompiler::{SeccompCmpArgLen::Dword, SeccompCmpOp, SeccompCondition, SeccompRule};
+    fn compile(&self) -> Result<Vec<seccompiler::SeccompCondition>, Error> {
+        use seccompiler::{SeccompCmpArgLen::Dword, SeccompCmpOp, SeccompCondition};
         match *self {
-            Self::FlagSet { arg, mask } => Ok(vec![
-                SeccompRule::new(vec![
-                    SeccompCondition::new(
-                        arg,
-                        Dword,
-                        SeccompCmpOp::MaskedEq(u64::from(mask)),
-                        u64::from(mask),
-                    )
-                    .map_err(Error::Compile)?,
-                ])
-                .map_err(Error::Compile)?,
-            ]),
-            Self::ArgIn { arg, values } => values
+            Self::FlagSet { arg, mask } => SeccompCondition::new(
+                arg,
+                Dword,
+                SeccompCmpOp::MaskedEq(u64::from(mask)),
+                u64::from(mask),
+            )
+            .map(|condition| vec![condition])
+            .map_err(Error::Compile),
+            Self::ArgEq { arg, value } => {
+                SeccompCondition::new(arg, Dword, SeccompCmpOp::Eq, u64::from(value))
+                    .map(|condition| vec![condition])
+                    .map_err(Error::Compile)
+            }
+            Self::ArgNotIn { arg, values } => values
                 .iter()
-                .map(|&value| {
-                    SeccompRule::new(vec![SeccompCondition::new(
-                        arg,
-                        Dword,
-                        SeccompCmpOp::Eq,
-                        u64::from(value),
-                    )?])
-                })
+                .map(|&value| SeccompCondition::new(arg, Dword, SeccompCmpOp::Ne, u64::from(value)))
                 .collect::<Result<_, _>>()
                 .map_err(Error::Compile),
         }
     }
 }
 
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(seccomp)]
+impl When {
+    fn compile(&self) -> Result<Vec<seccompiler::SeccompRule>, Error> {
+        match self {
+            Self::Always => Ok(Vec::new()),
+            Self::Any(alternatives) => alternatives
+                .iter()
+                .map(|conjunction| {
+                    let conditions = conjunction
+                        .iter()
+                        .map(Cond::compile)
+                        .collect::<Result<Vec<_>, _>>()?
+                        .into_iter()
+                        .flatten()
+                        .collect();
+                    seccompiler::SeccompRule::new(conditions).map_err(Error::Compile)
+                })
+                .collect(),
+        }
+    }
+}
+
+#[cfg(seccomp)]
 impl Verdict {
     fn action(self) -> seccompiler::SeccompAction {
         match self {
@@ -383,9 +536,9 @@ impl Verdict {
     }
 }
 
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(seccomp)]
 impl Filter {
-    /// The compiled programs, as the raw `sock_filter` bytes bwrap reads.
+    /// The compiled programs, including the x32 guard.
     /// Compiled once per process: a filter that will not compile is cached
     /// as a failure only implicitly — a failing compile is a static bug in
     /// [`Filter::ENVELOPE`], so recomputing it on every call costs nothing in
@@ -418,12 +571,7 @@ impl Filter {
                 .find(|(verdict, _)| *verdict == rule.verdict)
                 .expect("just inserted above");
             for call in rule.calls {
-                let chain = match &rule.when {
-                    None => Vec::new(),
-                    Some(cond) => cond.compile()?,
-                };
-                let prior = map.insert(call.nr, chain);
-                debug_assert!(prior.is_none(), "{} named in two rules", call.name);
+                map.insert(call.nr, rule.when.compile()?);
             }
         }
 
@@ -437,11 +585,11 @@ impl Filter {
             )
             .map_err(Error::Compile)?;
             let bpf: seccompiler::BpfProgram = filter.try_into().map_err(Error::Compile)?;
-            verdicts.push((verdict, serialise(&bpf)));
+            verdicts.push((verdict, bpf));
         }
 
         #[cfg(target_arch = "x86_64")]
-        let abi_guard = Some(serialise(&x32_guard_program()));
+        let abi_guard = Some(x32_guard_program().to_vec());
         #[cfg(not(target_arch = "x86_64"))]
         let abi_guard = None;
 
@@ -450,21 +598,6 @@ impl Filter {
             abi_guard,
         })
     }
-}
-
-/// Serialise a compiled `sock_filter` program field-by-field, eight bytes per
-/// instruction — the same `sock_fprog` layout the deleted `BpfProg` wrote by
-/// hand; no `unsafe` cast.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-fn serialise(prog: &[seccompiler::sock_filter]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(prog.len() * 8);
-    for insn in prog {
-        out.extend_from_slice(&insn.code.to_le_bytes());
-        out.push(insn.jt);
-        out.push(insn.jf);
-        out.extend_from_slice(&insn.k.to_le_bytes());
-    }
-    out
 }
 
 /// The x32 guard's seven instructions (module doc). The arch check is

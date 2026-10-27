@@ -760,6 +760,11 @@ impl GrantStack {
         self.0.iter().filter_map(|l| l.net)
     }
 
+    /// Any layer's network veto binds the whole stack.
+    pub fn net_veto(&self) -> Option<Net> {
+        self.net().next()
+    }
+
     pub fn gpu(&self) -> impl Iterator<Item = Gpu> {
         self.0.iter().filter_map(|l| l.gpu)
     }

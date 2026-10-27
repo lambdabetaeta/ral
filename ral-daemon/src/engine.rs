@@ -1,13 +1,9 @@
 //! The engines: the ral/exarch engine, and everything the daemon decides
 //! on its behalf.
 //!
-//! The engine is the guest's entire reason for existing.  It is the same
-//! multicall binary the host-side front-end spawns, run under `--engine`
-//! (`core/src/engine.rs::run_engine`), and it expects exactly one thing from
-//! whoever starts it: its protocol socket on file descriptor 3.  On the host
-//! that socket is one end of a `socketpair`; in the guest it is a connection
-//! to the host over `AF_VSOCK`.  The engine cannot tell the difference, and
-//! should not have to.
+//! The daemon starts the multicall binary with `--guest-engine` and the
+//! jail's cgroup root. Its protocol socket is fd 3: a connection to the host
+//! over `AF_VSOCK`, carried just like a native engine's socketpair.
 //!
 //! What the daemon decides here is small and worth stating: the command
 //! line, the environment (a closed set — nothing of the daemon's own reaches
@@ -68,11 +64,6 @@ const BASE: &[(&str, &str)] = &[
     // TERM should find an honest answer rather than a capability list it
     // cannot use.
     ("TERM", "dumb"),
-    // The sole channel by which `core::engine::run_engine` (the same
-    // multicall binary run here) learns it is running inside a guest, so
-    // it can install the process jail onto the shell it boots; its value
-    // is the cgroup root the jail places commands under.
-    ("RAL_GUEST", EXEC_CGROUP),
 ];
 
 /// The gateway's port for the CONNECT-only proxy — `guest-net`'s one
@@ -117,17 +108,16 @@ const PATIENCE: Duration = Duration::from_secs(5);
 /// How long to wait between attempts at the control plane.
 const RETRY: Duration = Duration::from_millis(100);
 
-/// `ral_core::Role::Engine.flag()`, spelled here because this crate cannot
-/// depend on core.
-const ENGINE_FLAG: &str = "--engine";
+/// `ral_core::Role::GuestEngine.flag()`, spelled without a core dependency.
+const GUEST_ENGINE_FLAG: &str = "--guest-engine";
 
-/// The engine's command line.
-///
-/// [`ENGINE_FLAG`] is the flag both host binaries dispatch on before `main`, so
-/// this is the whole of it: the engine takes its configuration from the
-/// `Attach` frame the host sends over the socket, not from argv.
-pub fn command_line(boot: &Boot) -> Vec<String> {
-    vec![boot.engine.clone(), ENGINE_FLAG.to_string()]
+fn command(boot: &Boot) -> Command {
+    let mut cmd = Command::new(&boot.engine);
+    cmd.args([GUEST_ENGINE_FLAG, EXEC_CGROUP]);
+    cmd.env_clear();
+    cmd.envs(environment(boot.net.as_ref().map(|net| net.gateway)));
+    cmd.current_dir(WORK);
+    cmd
 }
 
 /// Connect the guest's end of the control plane.
@@ -181,11 +171,7 @@ pub fn control_plane(port: u32) -> Result<OwnedFd, String> {
 /// Returns a sentence naming the engine binary when it cannot be started.
 pub fn spawn(boot: &Boot, connection: &OwnedFd) -> Result<Pid, String> {
     let socket = connection.as_raw_fd();
-    let mut cmd = Command::new(&boot.engine);
-    cmd.arg(ENGINE_FLAG);
-    cmd.env_clear();
-    cmd.envs(environment(boot.net.as_ref().map(|net| net.gateway)));
-    cmd.current_dir(WORK);
+    let mut cmd = command(boot);
     // SAFETY: the closure runs between `fork` and `exec` and calls only
     // async-signal-safe syscalls — `pthread_sigmask`, `setsid`, `dup2`, `close` — with no
     // allocation and no locking.
@@ -257,17 +243,16 @@ mod tests {
         }
     }
 
-    /// The engine is the multicall binary under one flag; its configuration
-    /// arrives over the socket, never on argv.
     #[test]
-    fn the_command_line_is_the_binary_under_one_flag() {
+    fn the_command_names_the_guest_role_and_cgroup_root() {
+        let boot = boot();
+        let cmd = command(&boot);
+        assert_eq!(cmd.get_program(), boot.engine.as_str());
         assert_eq!(
-            command_line(&boot()),
-            vec![
-                "/usr/libexec/ral/engine".to_string(),
-                "--engine".to_string()
-            ]
+            cmd.get_args().collect::<Vec<_>>(),
+            ["--guest-engine", EXEC_CGROUP]
         );
+        assert_eq!(cmd.get_current_dir(), Some(std::path::Path::new(WORK)));
     }
 
     const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
@@ -290,17 +275,18 @@ mod tests {
         }
     }
 
-    /// `RAL_GUEST` is the entire signal `core::engine::run_engine` reads to
-    /// know it is booting inside a guest, and carries the jail's cgroup root,
-    /// so it must always be set to it, whether or not this boot has a network.
     #[test]
-    fn ral_guest_is_set_and_non_empty() {
+    fn the_command_carries_no_inherited_guest_marker() {
         for gateway in [None, Some(GATEWAY)] {
-            let value = environment(gateway)
-                .into_iter()
-                .find_map(|(name, value)| (name == "RAL_GUEST").then_some(value))
-                .expect("the engine is given RAL_GUEST");
-            assert_eq!(value, EXEC_CGROUP);
+            let mut boot = boot();
+            boot.net = gateway.map(|gateway| crate::boot::Net {
+                port: 1731,
+                address: Ipv4Addr::new(10, 0, 2, 15),
+                prefix: 24,
+                gateway,
+            });
+            let cmd = command(&boot);
+            assert!(cmd.get_envs().all(|(name, _)| name != "RAL_GUEST"));
         }
     }
 

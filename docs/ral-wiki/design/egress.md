@@ -107,17 +107,20 @@ proxy does not proxy.
 
 ## Where authority actually narrows
 
-ral's own `net` capability is a flat boolean
-([[design/two-enforcers|two-enforcers]] — `net` has no in-process guard, only
-an OS-sandbox one, and inside a guest not even that: `docs/SPEC.md` §12.5,
-§12.11). It cannot express "reachable, but only this host"; nothing in the
-grant vocabulary names an endpoint. The real narrowing this page describes
-happens one layer outside the grant entirely, in the host policy `NetPolicy`
-enforces: `synod::grant`'s `net: Some(true)` is a correctness bit that keeps
-`core/src/authority/sandbox/linux.rs` from stripping the network `bwrap
---unshare-net`-style, not a promise about what the network admits. `grant`
-says *whether* a guest may reach the wire at all; egress says *which
-destinations* it may reach once it does.
+ral's own `net` capability is a veto
+([[design/two-enforcers|two-enforcers]]): it has no in-process guard, since
+ral dispatches no network operation. In the guest, `net: offline` gives each
+command a fresh network namespace with loopback up (`docs/SPEC.md` §12.5,
+§12.11). IP egress and abstract Unix sockets outside that namespace are out
+of reach; pathname Unix sockets remain reachable through the shared
+filesystem and can relay for an offline command. It cannot express
+"reachable, but only this host"; nothing in the grant vocabulary names an
+endpoint. The real narrowing this page describes happens one layer outside
+the grant, in the host policy `NetPolicy` enforces: `synod::grant` leaves
+`net` unvetoed to preserve the guest's wire, a correctness choice rather
+than a promise about what the network admits. `grant` says *whether* a
+command may reach the wire; egress says *which destinations* it may reach
+once it does.
 
 ## See also
 

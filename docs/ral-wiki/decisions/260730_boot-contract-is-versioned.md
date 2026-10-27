@@ -134,3 +134,19 @@ daemon makes `/sys/fs/cgroup/ral-exec` (`mounts::EXEC_CGROUP`), delegates
 `+memory +pids +cpu` into it, and names it to the engine in `RAL_GUEST`; the
 engine makes `engine-<pid>/exec-<seq>` and `detached/exec-<seq>` below it. Both ends ship in the same
 initramfs, so it cannot skew between host and guest, and `CONTRACT` stays at 3.
+
+## Amendment, 2026-10-27
+
+The daemon names the jail root in argv:
+`--guest-engine /sys/fs/cgroup/ral-exec`. This Linux x86-64/aarch64 role
+requires one absolute root and euid 0, installs the jail, then serves the
+carrier. A role is not inherited by commands; a nested ral therefore boots
+as its own shell. The daemon constructs one `Command` for root and factory
+engines alike, with a closed environment containing no `RAL_GUEST`.
+
+`PROTOCOL_VERSION` is the engine's whole contract with the host: its frames
+and what it refuses its commands. Version 31 requires the guest's seccomp
+deny-set, descriptor marking and offline network isolation. Every attach,
+development media included, refuses a version mismatch and names both
+numbers. The kernel-command-line `CONTRACT` remains at 3; both sides of the
+guest argv agreement still ship together.

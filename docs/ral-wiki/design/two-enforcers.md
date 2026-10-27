@@ -120,7 +120,7 @@ serves ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a
 | ``gpu: `withheld`` | no GPU node in the envelope's `/dev`, masks over the host's; no Landlock part | never lacking on Linux |
 | `exec` — which path may be `execve`d (not which code runs), a deny inside an allowed directory included, over the tree at launch: a program added afterwards to a directory holding a block is denied until the next launch | Landlock `Execute` ruleset, the parent subtracting each block from the directory that holds it; every directory admission, `every` among them, lowered against the envelope's binds | refuse: `confinement_unavailable`, an exec opinion alone asking for the envelope |
 | `exec` — a bare-name veto under a trusted write | in-process guard | the guard stands alone |
-| die with parent, new session, no core, the seccomp deny-set (kills kernel attack surface; refuses mounting, user namespaces, `TIOCSTI` and `TIOCLINUX` with an errno) | bwrap + `pre_exec` | applied where possible |
+| die with parent, new session, no core, the seccomp deny-set (kills kernel attack surface and mounting; refuses user namespaces, `TIOCSTI`, `TIOCLINUX`, socket families outside Unix/IP/routing netlink, non-Unix socketpairs and io_uring with an errno) | bwrap + `pre_exec` | applied where possible |
 | private ipc / uts | `--unshare-*` | never refused |
 | `/sys/fs/cgroup` is the payload's own tree | cgroup namespace + re-rooted bind | the tree is the host's |
 | no signalling the host; host process table hidden | pid namespace + fresh `/proc` | the table is the container's own |

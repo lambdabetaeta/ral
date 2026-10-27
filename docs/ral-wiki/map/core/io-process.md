@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 7ab5809a08c38081b58a1c308eab0ab0303e7b07
-generated_at_date: 2026-10-26
+generated_at_commit: 781d88844423a2af09f5e9a87e0d902fc4f15cff
+generated_at_date: 2026-10-27
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
 
@@ -280,10 +280,13 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   order — is narrated in
   [[internals/cancellation|cancellation]].
 - `jail.rs` — the *guest spawn jail*'s decision layer: `GuestJail::plan`
-  mints each exec a fresh unprivileged uid/gid and a fresh transient cgroup
-  under `JailLimits` (memory / pids / CPU), with no syscall in the plan.
-  There is one `GuestJail` per guest process, installed once by the first
-  engine to boot (`jail::install_guest`, gated on `RAL_GUEST`, whose value is the cgroup root, ral-daemon's `mounts::EXEC_CGROUP`, which the daemon makes and delegates into at boot; the jail makes `engine-<pid>/exec-<seq>` below it, or `detached/exec-<seq>` for a `detach` survivor, and the daemon removes a dead engine's tree) and read by
+  mints each exec a bounded `Seq` whose uid/gid is `BASE_UID + seq`,
+  from 100000 through `u32::MAX - 1`, and a fresh transient cgroup under
+  `JailLimits` (memory / pids / CPU), with no syscall in the plan.
+  There is one `GuestJail` per guest process, installed once by the
+  Linux x86-64/aarch64 `--guest-engine <cgroup-root>` role
+  (`jail::install_guest`, requiring one absolute root and euid 0; the root is
+  ral-daemon's `mounts::EXEC_CGROUP`, which the daemon makes and delegates into at boot; the jail makes `engine-<pid>/exec-<seq>` below it, or `detached/exec-<seq>` for a `detach` survivor, and the daemon removes a dead engine's tree) and read by
   `jail::guest()`; a sealed wire-seat child engine ([[design/agents|agents]]) is
   its own process and installs its own, so the
   sequence number behind both the uid and the cgroup name is minted
@@ -291,7 +294,12 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   counter file (`/run/ral/jail.seq`, `O_CREAT`, read-increment-write under
   an exclusive `flock`, released when the file drops) so every booted
   engine's jail mints off the one number line and two engines' first
-  spawned commands cannot collide on a uid or a cgroup name. The cgroup
+  spawned commands cannot collide on a uid or a cgroup name. `Count`
+  stores the issued count: empty at birth, then ten zero-padded ASCII digits;
+  corruption or exhaustion refuses the launch without writing. A fixed-width
+  positional rewrite torn mid-write leaves the old, unissued count or at
+  least the new count; a partial birth is corrupt, so neither reuses an
+  issued uid. The cgroup
   path carries the engine's own pid as a grouping label, not a uniqueness
   guarantee (the sequence file already gives that): `ral-exec/engine-<pid>/
   exec-<seq>`, so a child engine's teardown stays scoped to its own
@@ -302,12 +310,23 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   tree, so an engine's end spares its survivors as it does on the host, and
   only the daemon's halt reaches them. Off a
   real Linux guest, where `GuestJail` is never actually installed, `plan`
-  falls back to a plain in-process counter so the module's own tests stay
-  portable — `linux.rs` remains the only place a decision reaches the
+  falls back to a bounded in-process counter so the module's own tests stay
+  portable; `linux.rs` remains the only place a decision reaches the
   kernel. `jail/linux.rs` is the thin platform edge that
-  realises a `JailPlan` — the cgroup tree and limit writes, the pre-exec
-  supplementary-group clear / `setresgid` / `setresuid` / `NO_NEW_PRIVS`,
-  kill-whole via `cgroup.kill`, and `EBUSY`-polled removal. The tree is
+  realises a `JailPlan`: the cgroup tree and limit writes; pre-exec cgroup
+  placement, the offline network namespace with loopback up, supplementary-group
+  clear / `setresgid` / `setresuid` / `NO_NEW_PRIVS`, descriptor marking above
+  stderr with `close_range(CLOSE_RANGE_CLOEXEC)`, then the envelope's
+  [[decisions/260906_seccomp-is-a-typed-deny-set|seccomp deny-set]];
+  kill-whole via `cgroup.kill`, and `EBUSY`-polled removal.
+  `Launch::apply_guest_jail` resolves the programs before preparation; the
+  pre-exec hook neither allocates nor locks, and any failure refuses launch.
+  The offline-network test probes user then network namespace creation before
+  checking isolation; it skips when unprivileged user namespaces are refused
+  or granted without capabilities, as AppArmor can enforce.
+  Descriptor marking needs Linux 5.11 and keeps std's error pipe and detach's
+  handshake writable until exec; the later pgid and detach hooks run under
+  the deny-set. The tree is
   built by descent, and the reason is a cgroup2 rule: a controller's files
   appear in a child only once the parent's `cgroup.subtree_control` enables
   it, so `memory.max` at the leaf needs an unbroken chain of enabling
@@ -328,26 +347,12 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   and leaves one inert directory until the guest reboots; a birth that fails
   finishes it like any launch. The jail itself is process-global (a `OnceLock` in `jail.rs`),
   so workers, pipeline stages, and forks share one counter; only a guest
-  engine (`RAL_GUEST`) installs it, and there it replaces the per-command OS projection
+  engine (`--guest-engine`) installs it, and there it replaces the per-command OS projection
   ([[map/core/runtime|runtime]], `docs/SPEC.md` §12.11).
 
-  **The recorded gap.** The jail is uid + cgroup + `NO_NEW_PRIVS` — there is
-  no seccomp filter, so nothing stops a jailed process from calling
-  `socket(AF_VSOCK)`. The one guest listener is the daemon's engine factory
-  ([[map/synod|synod]]), and a connection it accepts is an unjailed engine
-  that receives whatever its `Attach` confers, so admission is everything.
-  Two independent lines hold, both kernel-enforced. A jailed process cannot
-  dial a *guest-local* vsock port at all, measured 2026-08-24: the guest
-  kernel refuses `VMADDR_CID_LOCAL` with `ECONNRESET`, and `/dev/vsock`, the
-  only way to read one's own CID, is `EACCES` under the jail. And were a dial
-  to arrive, the daemon accepts only a peer whose CID is `VMADDR_CID_HOST`,
-  which the guest kernel's transport writes and no guest process can present.
-  The old token is gone, and loses nothing. A seccomp address-family filter
-  that closes the syscall is unbuilt debt, not a design gap, and its reason
-  is host-side only: the host's own listeners (the VZ device is synod's; the
-  Hyper-V socket's SDDL names the one user) are what a jailed
-  `socket(AF_VSOCK)` could still reach. The jail plan above has room for it
-  (one more syscall-time check beside `NO_NEW_PRIVS`).
+  The jail refuses `socket(AF_VSOCK)` with `EPERM`; the daemon's factory
+  ([[map/synod|synod]]) admits only the kernel-written `VMADDR_CID_HOST`
+  peer identity as the second line behind it.
 
 Spawning an external command is capability-checked; that in-process guard
 lives in
