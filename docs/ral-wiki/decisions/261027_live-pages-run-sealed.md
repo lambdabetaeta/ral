@@ -15,7 +15,8 @@ model executes and the host displays what it says; a live page is the one place
 the host runs what the model wrote. Containment is therefore the design, and
 the main page is never where a page runs.
 
-The audit that gates this decision has not been run; see Audit status below.
+The audit that gates this decision, and the seal it led to, are on
+[[design/live-page-egress|live-page-egress]].
 
 ## What stays shut
 
@@ -93,9 +94,11 @@ assistant prose ──marked──▶ <pre><code class="language-live-html">SRC<
   fails, and Vega, Alpine and Babel are unusable for the same reason.
 - **Three more headers.** `X-Content-Type-Options: nosniff`;
   `Access-Control-Allow-Origin: *`, since module scripts and CSS fonts are CORS
-  fetches from an opaque origin; `X-DNS-Prefetch-Control: off`, since CSP does
-  not govern `rel=dns-prefetch`. One function, `sealed`, builds every response,
-  so none can omit them.
+  fetches from an opaque origin; `X-DNS-Prefetch-Control: off`, a belt for
+  engines that honour it. WebKit does not: the header is not what closes
+  `rel=dns-prefetch`, which CSP does not govern either. The seal's content rule
+  list closes it ([[design/live-page-egress|live-page-egress]]). One function,
+  `sealed`, builds every response, so none can omit them.
 - **A closed server.** `route` serves `/` (the shell), the four prelude files
   (`js/live-frame.js`, `js/live-sizer.js`, `css/tokens.css`,
   `css/live-frame.css`) and `vendor/`, and only by plain paths: every segment is non-empty, is not `.`
@@ -181,184 +184,23 @@ navigation or a dropped link, runs nothing the model wrote.
   fixes one of the three layers only. The sanitiser is untouched: the fence is
   inert text to it.
 
-## Audit status
+## Audit
 
-**The empirical egress audit and the smoke test have not been run, on macOS or
-on Windows, as of the commit that adds this page.** The implementing plan made
-them a merge gate on both platforms; the change is committed ahead of that gate
-at the owner's instruction. Until they run, that a page reaches no network
-rests on the frame's CSP and headers alone, and nothing has measured the
-channels CSP does not govern. When they run, record here the platform, the
-WebView version, the probe table and the DNS capture.
+The empirical egress audit, its two pages (the egress probe and the smoke page),
+the pass criteria and the log of runs are on
+[[design/live-page-egress|live-page-egress]]. The first macOS run found DNS
+lookups and a WebRTC STUN exchange that the frame's CSP and
+`X-DNS-Prefetch-Control: off` do not govern; macOS pages now run only once the
+webview is sealed at creation (`synod/src/window/seal.rs`), and Windows pages
+run unsealed.
 
-| Platform | WebView version | Smoke | Probe table | DNS capture |
-|---|---|---|---|---|
-| macOS (WKWebView) | not run | not run | not run | not run |
-| Windows (WebView2) | not run | not run | not run | not run |
-
-If no Windows machine is available, Windows ships unaudited only with the
-owner's word.
-
-**If anything leaks: stop.** Report the probe table and the DNS capture to the
-owner; do not patch. These are candidate closures, to be reported with the
-leak and not applied; each is a new design decision:
-
-- WebView2: `additionalBrowserArgs` with a dead `--proxy-server` and
-  `--webrtc-ip-handling-policy=disable_non_proxied_udp`; or
-  `--host-resolver-rules`.
-- WKWebView: the window's `proxyUrl` (macOS 14+, Tauri feature `macos-proxy`),
-  or the private `WKPreferences` peer-connection switch.
-
-## Reproducing the audit
-
-Build and launch synod (`cargo run -p synod`). Ask the assistant to repeat a
-page verbatim inside a `live-html` fence. Each page below is shown exactly as
-it must be repeated.
-
-### Egress probe page
-
-Run DNS capture alongside:
-
-- macOS: `sudo tcpdump -l -n -i any port 53 | grep -iE 'probe-|example\.com|stun'`
-- Windows: `ipconfig /flushdns` before; `ipconfig /displaydns | findstr /i "probe- example.com stun"` after.
-
-**Pass:**
-
-- Every row reads `sealed`; the two informational rows always do, their detail
-  column reporting whether a handler exists.
-- No navigation button changes what the frame shows.
-- No `probe-…`, `example.com` or `stun` name appears in the DNS capture.
-- The forged `open_url` (the `// 1. bridges` block of the page) is rejected:
-  on macOS through the WebKit handler, on Windows through `chrome.webview`.
-  Synod's stderr (debug build) shows the invoke-key rejection and no browser
-  opens. The two informational rows may legitimately show a handler present:
-  it is the key, not the handler's absence, that seals the bridge.
-
-The `spin 10 s` button records whether a runaway page freezes synod's composer;
-it is recorded, not gating.
-
-```live-html
-<style>td{padding:2px 8px;font:12px var(--mono)}.ok{color:var(--accent)}.bad{color:var(--danger)}</style>
-<table id="r"></table>
-<p>
-  <button id="nav">navigate self</button> <button id="meta">meta refresh</button>
-  <button id="link">click link</button> <button id="top">navigate top</button>
-  <button id="pop">pop-up</button> <button id="form">submit form</button>
-  <button id="spin">spin 10 s</button>
-</p>
-<p id="tag"></p>
-<script>
-const REMOTE = "https://example.com/";
-const TAG = "probe-" + Math.random().toString(36).slice(2, 8);
-document.getElementById("tag").textContent = "DNS watch: " + TAG;
-const rows = document.getElementById("r");
-function report(name, sealed, detail) {
-  const tr = rows.insertRow();
-  tr.insertCell().textContent = name;
-  const c = tr.insertCell(); c.textContent = sealed ? "sealed" : "LEAK"; c.className = sealed ? "ok" : "bad";
-  tr.insertCell().textContent = String(detail);
-}
-const violations = [];
-addEventListener("securitypolicyviolation", (e) => violations.push(e.effectiveDirective));
-
-// 1. bridges
-report("__TAURI_INTERNALS__", typeof window.__TAURI_INTERNALS__ === "undefined", typeof window.__TAURI_INTERNALS__);
-report("__TAURI__", typeof window.__TAURI__ === "undefined", typeof window.__TAURI__);
-report("webkit handlers (informational)", true, !!window.webkit?.messageHandlers);
-report("chrome.webview (informational)", true, !!window.chrome?.webview);
-try { window.webkit?.messageHandlers?.ipc?.postMessage(JSON.stringify({ cmd: "open_url", callback: 0, error: 0, payload: { url: REMOTE } })); } catch {}
-try { window.chrome?.webview?.postMessage(JSON.stringify({ cmd: "open_url", callback: 0, error: 0, payload: { url: REMOTE } })); } catch {}
-
-// 2. fetch family
-const attempt = (name, f) => f().then(() => report(name, false, "completed"), (e) => report(name, true, e?.name || e));
-attempt("fetch", () => fetch(REMOTE + "?" + TAG, { mode: "no-cors" }));
-attempt("xhr", () => new Promise((ok, no) => { const x = new XMLHttpRequest(); x.open("GET", REMOTE); x.onload = ok; x.onerror = () => no("error"); x.send(); }));
-attempt("websocket", () => new Promise((ok, no) => { const w = new WebSocket("wss://example.com/"); w.onopen = ok; w.onerror = () => no("error"); }));
-attempt("eventsource", () => new Promise((ok, no) => { const s = new EventSource(REMOTE); s.onopen = ok; s.onerror = () => no("error"); }));
-attempt("worker", () => new Promise((ok, no) => { try { new Worker(URL.createObjectURL(new Blob(["1"]))); ok(); } catch (e) { no(e); } }));
-try { navigator.sendBeacon(REMOTE, TAG); } catch {}
-
-// 3. subresources
-const img = new Image(); img.onload = () => report("img", false, "loaded"); img.onerror = () => report("img", true, "error"); img.src = REMOTE + "favicon.ico";
-const css = document.createElement("div"); css.style.backgroundImage = `url(${REMOTE}bg.png)`; document.body.append(css);
-const font = new FontFace("x", `url(${REMOTE}x.woff2)`); font.load().then(() => report("font", false, "loaded"), () => report("font", true, "error"));
-const sub = document.createElement("iframe"); sub.src = REMOTE; document.body.append(sub);
-const media = document.createElement("audio"); media.src = REMOTE + "a.mp3"; media.onerror = () => report("media", true, "error"); media.load();
-
-// 4. hints CSP does not govern
-for (const rel of ["dns-prefetch", "preconnect", "prefetch"]) {
-  const l = document.createElement("link"); l.rel = rel; l.href = `https://${rel}-${TAG}.example.com/`; document.head.append(l);
-}
-
-// 5. WebRTC: a reflexive candidate means a STUN server answered over UDP
-if (typeof RTCPeerConnection === "undefined") report("webrtc", true, "absent");
-else {
-  let reflexive = false;
-  const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
-  pc.onicecandidate = (e) => { if (e.candidate && / typ (srflx|relay) /.test(e.candidate.candidate)) reflexive = true; };
-  pc.createDataChannel("x");
-  pc.createOffer().then((o) => pc.setLocalDescription(o));
-  setTimeout(() => report("webrtc", !reflexive, reflexive ? "a STUN server answered" : "no reflexive candidate in 5 s"), 5000);
-}
-setTimeout(() => report("csp violations seen", true, violations.join(" ")), 6000);
-
-// 6. navigations, one per click: the frame must not change
-const click = (id, f) => document.getElementById(id).addEventListener("click", f);
-click("nav", () => { location.href = REMOTE + "?" + TAG; });
-click("meta", () => { const m = document.createElement("meta"); m.httpEquiv = "refresh"; m.content = "0;url=" + REMOTE; document.head.append(m); });
-click("link", () => { const a = document.createElement("a"); a.href = REMOTE; document.body.append(a); a.click(); });
-click("top", () => { try { top.location = REMOTE; } catch (e) { report("top", true, e.name); } });
-click("pop", () => report("pop-up", window.open(REMOTE) === null, "window.open"));
-click("form", () => { const f = document.createElement("form"); f.method = "post"; f.action = REMOTE; document.body.append(f); f.submit(); });
-// 7. a runaway page: is synod's composer still responsive? (recorded, not gating)
-click("spin", () => { const t = Date.now() + 10000; while (Date.now() < t) {} });
-</script>
-```
-
-### Smoke page
-
-**Pass:** each library renders. The KaTeX fonts load (CORS), the three.js
-module imports (CORS), and the frame resizes as content grows and shrinks.
-After clicking "full height" (`html { height: 100% }`) the frame keeps its size
-(no growth loop), and "shrink" or a reload (re-render of the message) restores
-normal behaviour. The placeholder shows while the fence streams. The page
-follows light and dark.
-
-```live-html
-<h3 style="margin:0 0 8px">Smoke</h3>
-<canvas id="c" height="120"></canvas>
-<div id="d"></div>
-<pre class="mermaid">flowchart LR; Draft --> Review --> Sent</pre>
-<div id="k"></div>
-<canvas id="t" width="200" height="120"></canvas>
-<button id="grow">grow</button> <button id="shrink">shrink</button> <button id="full">full height</button>
-<div id="box" style="height:20px;background:var(--accent)"></div>
-<link rel="stylesheet" href="vendor/katex/katex.min.css">
-<script src="vendor/chartjs/chart.umd.min.js"></script>
-<script src="vendor/d3/d3.min.js"></script>
-<script src="vendor/mermaid/mermaid.min.js"></script>
-<script src="vendor/katex/katex.min.js"></script>
-<script>
-new Chart(document.getElementById("c"), { type: "bar", data: { labels: ["Jan", "Feb", "Mar"], datasets: [{ label: "Paid", data: [38, 41, 29] }] } });
-d3.select("#d").text("d3 " + d3.version + ": " + d3.format(",.2f")(1234567.891));
-mermaid.initialize({ startOnLoad: true });
-katex.render("\\sum_{i=1}^n i = \\tfrac{n(n+1)}{2}", document.getElementById("k"));
-const box = document.getElementById("box");
-document.getElementById("grow").onclick = () => { box.style.height = box.offsetHeight + 200 + "px"; };
-document.getElementById("shrink").onclick = () => { box.style.height = "20px"; };
-document.getElementById("full").onclick = () => { document.documentElement.style.height = "100%"; };
-</script>
-<script type="module">
-import * as THREE from "./vendor/three/three.module.min.js";
-const r = new THREE.WebGLRenderer({ canvas: document.getElementById("t") });
-const s = new THREE.Scene(), cam = new THREE.PerspectiveCamera(50, 200 / 120, 0.1, 10); cam.position.z = 3;
-const m = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshNormalMaterial()); s.add(m);
-(function f() { m.rotation.y += 0.02; r.render(s, cam); requestAnimationFrame(f); })();
-</script>
-```
 
 ## Open
 
+- **The Windows seal.** Windows pages run unsealed: no switch for WebRTC in
+  WebView2 is known and no closure for link-hint names is measured, so the
+  sealed claim in `synod/data/network.md` and `synod/data/live.md` is false
+  there until one is found ([[design/live-page-egress|live-page-egress]]).
 - **A runaway page.** Whether a page that spins freezes the window is
   unknown; the probe page's spin button records it. Pages auto-run.
 - **Pages are invisible to the agent.** Nothing a page does comes back: not its

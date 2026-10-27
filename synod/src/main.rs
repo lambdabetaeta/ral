@@ -29,6 +29,8 @@ mod test_fixture;
 mod window;
 mod wire;
 
+#[cfg(target_os = "macos")]
+use window::seal;
 #[cfg(any(target_os = "macos", windows))]
 use window::{accounts, conversation, files, highlight, live, state};
 
@@ -65,6 +67,7 @@ fn main() {
         .manage(accounts)
         .manage(state::Review::default())
         .manage(state::SignIn::default())
+        .setup(|app| Ok(open_main_window(app.handle())?))
         .invoke_handler(tauri::generate_handler![
             conversation::choose_folder,
             conversation::list_models,
@@ -102,6 +105,31 @@ fn main() {
 fn main() -> std::process::ExitCode {
     ral_core::errln!("synod: a window for macOS and Windows; this is neither.");
     std::process::ExitCode::FAILURE
+}
+
+/// Declared in tauri.conf.json with `create: false`: macOS fixes the webview's
+/// configuration at creation, so the window waits for the sealed one.
+#[cfg(any(target_os = "macos", windows))]
+fn open_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let config = app
+        .config()
+        .app
+        .windows
+        .first()
+        .expect("tauri.conf.json declares the main window");
+    let window = tauri::WebviewWindowBuilder::from_config(app, config)?;
+    #[cfg(target_os = "macos")]
+    let window = window.with_webview_configuration({
+        let app = app.clone();
+        seal::configuration(move |sealed| match sealed {
+            Ok(sealed) => {
+                app.manage(sealed);
+            }
+            Err(why) => ral_core::errln!("{why}"),
+        })
+    });
+    window.build()?;
+    Ok(())
 }
 
 /// A plugin guards every webview, including the one declared in tauri.conf.json.

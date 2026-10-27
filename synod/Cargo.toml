@@ -32,6 +32,19 @@ tauri-plugin-opener = "2"
 # handed to the system.  Already in the tree through tauri.
 url        = "2"
 
+# The live frame's network seal (`window/seal.rs`): private WebKit settings.
+# Versions are the ones tauri already locks, so the tree carries one objc2.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = { version = "0.6.2", default-features = false, features = ["alloc"] }
+objc2 = { version = "0.6.5", features = ["exception"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std", "NSError", "NSKeyValueCoding", "NSObject", "NSSet", "NSString", "NSValue",
+] }
+objc2-web-kit = { version = "0.3.2", default-features = false, features = [
+    "std", "block2", "WKContentRuleList", "WKContentRuleListStore", "WKPreferences",
+    "WKUserContentController", "WKWebViewConfiguration",
+] }
+
 [dev-dependencies]
 serde_json = { workspace = true }
 # `test_access`'s exec entries, for the office grant's tests.

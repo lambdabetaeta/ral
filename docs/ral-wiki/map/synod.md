@@ -220,7 +220,7 @@ and composes the desktop application.
 | L1 wire | `wire.rs` | Every `TS` type, pure DTO constructors, `WindowReport::of`, `OPENABLE`, `open_as` |
 | L2 assistant | `assistant/{accounts,menu,prompt,conversation,baseline,guest,signin}.rs` | Product assembly and conversation lifecycle |
 | L3 seam | `seam/{narration,ipc}.rs` | Event folding and event-name constants |
-| L4 window | `window/{state,conversation,files,accounts,highlight,live}.rs` | Tauri state, commands, publication and the live-frame scheme |
+| L4 window | `window/{state,conversation,files,accounts,highlight,live,seal}.rs` | Tauri state, commands, publication and the live-frame scheme |
 
 - Tauri, its plugins, `url`, L4 and the desktop `main` compile only for
   macOS or Windows. L0–L3 compile on Linux; its `main` prints a refusal.
@@ -230,13 +230,17 @@ and composes the desktop application.
   schemas in `synod/gen/` are ignored build products.
 - `main.rs` runs `exit_if_re_exec_child` first, prepares credentials before
   starting threads, installs plugins and state, registers the `synod-live`
-  scheme (`live::serve`) and registers 14 commands.
+  scheme (`live::serve`) and registers 14 commands. `open_main_window` builds
+  the main window in `setup` (`"create": false` in `tauri.conf.json`); on macOS
+  it hands the builder the sealed `WKWebViewConfiguration` from `seal.rs`, and
+  live pages stay unserved until the `Sealed` state exists.
   Its navigation guard admits only the app origin, the live frame or a
   configured development origin; `is_live_frame` accepts WebKit's spelling
   because WebKit asks the guard about subframe loads. CSP and capabilities are
   in `tauri.conf.json` and `capabilities/`.
-  The guard is a plugin because the configured webview is not built in code;
-  foreign navigation would expose the injected command bridge to model output.
+  The guard is a plugin so that it covers every webview, not only the main
+  window; foreign navigation would expose the injected command bridge to model
+  output.
 
 ### Folder and report
 
@@ -387,6 +391,17 @@ Publication and ownership agree at one generation boundary.
   `'unsafe-eval'`), `nosniff`, a wildcard CORS origin and
   `X-DNS-Prefetch-Control: off`. The main CSP's `frame-src` names the one frame
   origin per platform, `tauri.windows.conf.json` overriding it.
+- `window/seal.rs` (macOS only) seals the webview when it is created, through
+  `WebviewWindowBuilder::with_webview_configuration`: the private
+  `WKWebViewConfiguration.allowedNetworkHosts` set empty, the private
+  `WKPreferences.peerConnectionEnabled` set false (both by key-value coding),
+  and a `WKContentRuleList` blocking `^https?:` and `^wss?:`. Once all three are
+  applied and the private two read back, it manages the zero-sized token
+  `Sealed` as Tauri state; `live::serve` answers 503 for the frame shell until
+  the state exists, so a selector a later macOS renames turns live pages off
+  rather than leaving them unsealed. The main window is built in `setup` (`"create": false` in
+  `tauri.conf.json`) so the hook exists. Windows is not sealed. Channels,
+  measurements and the audit: [[design/live-page-egress|live-page-egress]].
 
 ### synod/ui/ — the static frontend
 

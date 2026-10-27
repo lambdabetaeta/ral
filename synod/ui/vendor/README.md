@@ -65,5 +65,5 @@ authors published them to npm, each beside its licence.
 3. Check the page still renders prose, code and mathematics, and that
    `DOMPurify`'s `SCRUB` configuration in `js/math.js` still behaves as before.
    Also run the `live-html` smoke page in the "Smoke page" section of
-   `docs/ral-wiki/decisions/261027_live-pages-run-sealed.md`: every library on
+   `docs/ral-wiki/design/live-page-egress.md`: every library on
    it must render.

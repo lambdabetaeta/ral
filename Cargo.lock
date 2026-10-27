@@ -6933,9 +6933,13 @@ dependencies = [
 name = "synod"
 version = "0.9.0"
 dependencies = [
+ "block2",
  "exarch",
  "guest-abi",
  "netgate",
+ "objc2",
+ "objc2-foundation",
+ "objc2-web-kit",
  "ral-core",
  "serde",
  "serde_json",

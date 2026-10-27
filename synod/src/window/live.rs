@@ -77,6 +77,10 @@ pub(crate) fn serve<R: tauri::Runtime>(
     }
     let path = request.uri().path();
     match route(path) {
+        Route::Shell if !may_serve_shell(ctx.app_handle()) => plain(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "synod-live is not sealed: the webview's network seal did not apply, so live pages stay off; see stderr".to_owned(),
+        ),
         Route::Shell => sealed(
             StatusCode::OK,
             HeaderValue::from_static("text/html; charset=utf-8"),
@@ -110,6 +114,18 @@ pub(crate) fn serve<R: tauri::Runtime>(
     }
 }
 
+/// The shell runs the model's code, so it waits on the seal; Windows has none to wait on.
+#[cfg(target_os = "macos")]
+fn may_serve_shell<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    use tauri::Manager as _;
+    app.try_state::<super::seal::Sealed>().is_some()
+}
+
+#[cfg(windows)]
+fn may_serve_shell<R: tauri::Runtime>(_app: &tauri::AppHandle<R>) -> bool {
+    true
+}
+
 fn plain(status: StatusCode, body: String) -> Response<Cow<'static, [u8]>> {
     sealed(
         status,
@@ -140,7 +156,7 @@ fn sealed(
         header::ACCESS_CONTROL_ALLOW_ORIGIN,
         HeaderValue::from_static("*"),
     );
-    // CSP does not govern `rel=dns-prefetch`.
+    // Belt only: WebKit ignores it; the seal's rule list closes `rel=dns-prefetch`.
     headers.insert(DNS_PREFETCH_CONTROL, HeaderValue::from_static("off"));
     response
 }
