@@ -54,7 +54,11 @@ fn project_protocol(protocol: &Protocol) -> Option<SynodEvent> {
 
 fn display(role: Role, display: &Display) -> Option<SynodEvent> {
     match display {
-        Display::ToolCall { .. } | Display::HarnessCall { .. } if role == Role::Helper => None,
+        Display::ToolCall { .. } | Display::HarnessCall { .. } | Display::Observation { .. }
+            if role == Role::Helper =>
+        {
+            None
+        }
         Display::Change { change } if role == Role::Helper => {
             Some(process_card(change_card(change)))
         }
@@ -296,7 +300,7 @@ mod tests {
     use exarch::card::{Hunk, Mark, Row, Seg};
     use exarch::record::AgentState;
     use ral_core::data::datum::Datum as _;
-    use ral_core::fact::Worker;
+    use ral_core::fact::{Read, Worker};
     use ral_core::shell::runtime::{Observation, Observed};
 
     fn observation_wire(what: Observed) -> ral_core::data::FOValue {
@@ -387,6 +391,16 @@ mod tests {
             };
             assert!(!marks.is_empty(), "every one of these renders some ink");
         }
+    }
+
+    #[test]
+    fn a_helpers_observation_reaches_the_window_not_at_all() {
+        let observation = Record::Display(Display::Observation {
+            value: observation_wire(Observed::Read(Read {
+                path: "src/lib.rs".to_string(),
+            })),
+        });
+        assert!(project(Role::Helper, &observation).is_none());
     }
 
     #[test]
