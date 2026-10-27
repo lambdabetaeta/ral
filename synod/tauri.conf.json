@@ -16,7 +16,8 @@
         "minWidth": 560,
         "minHeight": 560,
         "resizable": true,
-        "center": true
+        "center": true,
+        "zoomHotkeysEnabled": true
       }
     ],
     "security": {

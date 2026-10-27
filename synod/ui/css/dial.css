@@ -33,10 +33,14 @@
       border-top: 5px solid transparent;
       border-bottom: 5px solid transparent;
       border-left: 7px solid var(--ink-faint);
-      transition: transform 0.2s ease;
+      transition: transform 0.2s ease, filter 0.2s ease;
     }
-    .dial[data-rung="1"] .dial-mark { transform: rotate(90deg); }
-    .dial[data-rung="2"] .dial-mark { transform: rotate(180deg); }
+    .dial:not([data-rung="0"]) .dial-mark { transform: rotate(90deg); }
+    /* Rung 2 doubles the mark: a drop-shadow copy, recentred. */
+    .dial[data-rung="2"] .dial-mark {
+      filter: drop-shadow(7px 0 0 var(--ink-faint));
+      transform: translateY(-3.5px) rotate(90deg);
+    }
     .dial-tip {
       flex: 1;
       min-width: 0;
