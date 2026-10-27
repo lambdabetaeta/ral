@@ -223,26 +223,21 @@ fn confined_ral_walks_to_a_granted_file() {
 #[cfg(target_os = "macos")]
 #[test]
 fn confined_ral_can_read_a_link_but_not_its_target_directory() {
+    let proof = ral_core::require_confinement!();
     let d = std::fs::canonicalize(scratch_dir("walk_link")).unwrap();
-    std::fs::create_dir_all(d.join("real/leaf")).unwrap();
-    std::fs::write(d.join("real/leaf/f.txt"), "walked\n").unwrap();
+    std::fs::create_dir_all(d.join("real/walked")).unwrap();
+    std::fs::write(d.join("real/walked/f.txt"), "walked\n").unwrap();
     std::os::unix::fs::symlink("real", d.join("link")).unwrap();
-    let leaf = d.join("link/leaf").to_string_lossy().into_owned();
+    let leaf = d.join("link/walked").to_string_lossy().into_owned();
     let bin = common::ral_bin();
     let bin_s = bin.to_string_lossy();
     let bin_dir = bin.parent().unwrap().to_string_lossy();
-    let out = ral(&[
+    let control = ral(&[
         "-c",
         &format!(
             "within [dir: '{leaf}'] {{ grant [fs: [read: [`absolute '{leaf}', `absolute '{bin_dir}']]] {{ {bin_s} -c 'cat < {leaf}/f.txt' }} }}"
         ),
     ]);
-    if refused_by_a_confined_runner(&out) {
-        std::fs::remove_dir_all(&d).unwrap();
-        return;
-    }
-    assert_eq!(out.status, 0, "{}", out.stderr);
-    assert!(out.stdout.contains("walked"), "{}", out.stdout);
     let listed = ral(&[
         "-c",
         &format!(
@@ -251,6 +246,7 @@ fn confined_ral_can_read_a_link_but_not_its_target_directory() {
         ),
     ]);
     std::fs::remove_dir_all(&d).unwrap();
+    denied(&proof, &control, &listed, "walked");
     assert_ne!(listed.status, 0, "the target directory became listable");
     assert!(
         listed.stderr.contains("Operation not permitted"),

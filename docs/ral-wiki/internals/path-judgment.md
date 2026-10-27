@@ -1,6 +1,6 @@
 ---
 verified_at_commit: 6281520c
-generated_at_commit: 6281520c
+generated_at_commit: 5eaef7d9
 verified_at_date: 2026-10-27
 anchors: [walk, walk_excluded, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, GrantStack::judge, Refused, Extent, from_capabilities, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline, Walk, Cancellation, AdmittedWalk, Shell::admitted_walk]
 ---
@@ -228,7 +228,10 @@ warrant.
 **A live hold survives `rehold`, even after rename or unlink.** An unheld hold,
 such as one deserialized from the wire, is reacquired only where its recorded
 position still reaches its recorded identity. The stack holds the descriptor
-for its lifetime: the agent session or the grant block.
+for its lifetime: the agent session or the grant block. Liveness means the
+descriptor still reports the recorded identity, not merely that it is open:
+macOS can revoke it on unmount. A revoked hold is reacquired by the same rule;
+otherwise it becomes unheld, with its recorded exclusion intact.
 
 `Hold::current` asks Linux's `/proc/self/fd` or macOS's `F_GETPATH` for the
 held object's name, walks it without following the leaf, and keeps it only

@@ -315,7 +315,7 @@ fn decode_umask(s: &str) -> Result<rustix::fs::Mode, String> {
     };
     ((1..=4).contains(&s.len()) && s.bytes().all(|b| (b'0'..=b'7').contains(&b)))
         .then_some(s)
-        .and_then(|s| u32::from_str_radix(s, 8).ok())
+        .and_then(|s| rustix::fs::RawMode::from_str_radix(s, 8).ok())
         .filter(|&mask| mask <= 0o777)
         .map(rustix::fs::Mode::from_raw_mode)
         .ok_or_else(invalid)

@@ -126,6 +126,7 @@ mod macos {
     #[test]
     fn online_allows_ip_and_resolution_but_never_the_readable_unix_socket() {
         let proof = ral_core::require_confinement!();
+        let resolver = "/private/var/run/mDNSResponder";
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("agent.sock");
         let path = path.to_str().unwrap();
@@ -154,6 +155,11 @@ mod macos {
         echo.join().unwrap();
         admitted(
             &proof,
+            &confined(root.path(), false, &["unix", resolver], &[]),
+            OK,
+        );
+        admitted(
+            &proof,
             &confined(root.path(), false, &["resolve", "localhost"], &[]),
             OK,
         );
@@ -163,11 +169,11 @@ mod macos {
             ["unix", path],
             ["tcp", &tcp],
             ["udp", &udp_address],
-            ["resolve", "localhost"],
+            ["unix", resolver],
         ] {
             let out = confined(root.path(), true, &args, &[]);
-            denied(&proof, &control, &out, OK);
             assert_eq!(out.status, 1, "{args:?}: {out:?}");
+            denied(&proof, &control, &out, OK);
             assert!(!out.stderr.is_empty(), "{args:?}: {out:?}");
         }
         assert_no_datagram(&udp);

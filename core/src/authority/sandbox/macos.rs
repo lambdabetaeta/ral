@@ -568,7 +568,7 @@ mod tests {
     use crate::authority::policy::{ExecAllow, ExecDeny, FsAllow, GrantPath, Rule};
     use crate::authority::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
     use crate::path::proper_ancestors;
-    use crate::path::{Excluded, FrozenPath, Trace, command_name_key};
+    use crate::path::{Excluded, FrozenPath, Trace, command_name_key, render_real};
     use crate::test_helper::trace;
 
     /// The profile with its commentary dropped — what the kernel reads.  The
@@ -1077,7 +1077,7 @@ mod tests {
     fn own_names() -> Vec<crate::path::Rendered> {
         super::super::reexec::pin_self();
         let own = super::super::reexec::own().expect("pin_self pins this test binary");
-        crate::path::render_real(own.trace().real()).unwrap()
+        render_real(own.trace().real()).unwrap()
     }
 
     /// A swap of ral's binary between the parent's check and the re-exec

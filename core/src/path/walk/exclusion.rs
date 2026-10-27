@@ -8,7 +8,7 @@ use std::sync::Arc;
 use super::held::resolve::{LeafMode, walk_excluded, walk_lenient};
 #[cfg(unix)]
 use super::held::resolve::{Links, Mode, OnMissing, finish};
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 use super::trace::ObjectId;
 use super::trace::Trace;
 use crate::path::LexicalPath;
@@ -50,10 +50,15 @@ impl Hold {
         }
     }
 
-    /// Keep a live hold; otherwise reacquire its recorded identity.
+    /// Keep a hold that still reports its recorded identity (macOS revokes on
+    /// unmount); otherwise reacquire it at its recorded position.
     #[cfg(unix)]
     pub(crate) fn rehold(&mut self) {
-        if self.handle.is_some() {
+        if self
+            .handle
+            .as_deref()
+            .is_some_and(|file| ObjectId::of(file).is_ok_and(|id| id == self.trace.last_id()))
+        {
             return;
         }
         self.handle = finish(

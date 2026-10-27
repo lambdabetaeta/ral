@@ -1,5 +1,5 @@
 ---
-generated_at_commit: bb5bc1a6
+generated_at_commit: 5eaef7d9
 verified_at_commit: 7ab5809a
 verified_at_date: 2026-10-26
 anchors: [apply_profile, build_profile, Profile, RESOLVER_SOCKET, gpu_name, emit_fs_restricted, emit_exec_rules, Clause, Filter, emit_ancestor_metadata, withheld_services, rendered_ancestors, pinned_dirs, step]
@@ -161,7 +161,10 @@ also admits it: like any deputy concession, it can carry an attacker-chosen
 DNS query label out even under an offline grant. With no write covering the
 resolver, the base's silence is what closes DNS offline: `getaddrinfo` reaches
 mDNSResponder through `network-outbound`, never an automatically admitted
-local service. `mac_profile_denies_network_when_disabled` asserts the absence
+local service. Local answers such as `localhost` may need no network access;
+failure to resolve them is not an offline invariant. `local_ipc` tests the
+resolver socket directly, with an online positive control, beside its IP and
+foreign-socket checks. `mac_profile_denies_network_when_disabled` asserts the absence
 of network rules for an offline projection with no stated writes, with an
 open-network positive control.
 

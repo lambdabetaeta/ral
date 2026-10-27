@@ -767,19 +767,21 @@ mod tests {
     /// the script's directory admits the interpreter, only support does.
     #[cfg(target_os = "macos")]
     fn system_script_elsewhere() -> Option<std::path::PathBuf> {
+        use super::super::carriers::{launched_shebang, trusted_real};
+
         let scripts = std::fs::read_dir("/usr/bin").ok()?;
         scripts.flatten().map(|e| e.path()).find(|script| {
-            let carried = || {
-                let admitted = admitted(Program::file(script.clone()).ok()?);
-                super::super::carriers::trusted_real(script)?;
-                let Program::File { located, .. } = admitted.program() else {
-                    return None;
-                };
-                let interpreter = super::super::carriers::launched_shebang(located)?;
-                super::super::carriers::trusted_real(&interpreter)?;
-                (interpreter.parent() != script.parent()).then_some(())
+            let Ok(program) = Program::file(script.clone()) else {
+                return false;
             };
-            carried().is_some()
+            let admitted = admitted(program);
+            let Program::File { located, .. } = admitted.program() else {
+                return false;
+            };
+            trusted_real(script).is_some()
+                && launched_shebang(located).is_some_and(|interpreter| {
+                    trusted_real(&interpreter).is_some() && interpreter.parent() != script.parent()
+                })
         })
     }
 
