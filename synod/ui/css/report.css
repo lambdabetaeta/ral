@@ -44,42 +44,55 @@
     .report-gap.show { display: block; }
     .report-gap code { font-family: var(--mono); font-size: 12px; }
 
-    .bulk {
-      display: flex; gap: 10px; align-items: center;
-      margin: 16px 0 4px;
-      padding: 8px 10px;
-      background: var(--raised-2);
-      border: 1px solid var(--line);
-      border-radius: 10px;
-    }
+    .bulk { display: flex; gap: 10px; align-items: center; margin: 16px 0 4px; }
     .bulk .count { flex: 1; font-size: 13px; color: var(--ink-soft); }
 
-    .cards { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+    .cards { margin-top: 10px; }
 
     /* The folder a run of rows sits in, named once above them: position says
        where a file is, so the row itself is free to be just the file. */
     .group {
-      margin: 10px 0 0 2px;
+      margin: 10px 0 4px 2px;
       font-family: var(--mono);
       font-size: 11.5px;
-      color: var(--ink-faint);
+      color: var(--ink-soft);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
     .group:first-child { margin-top: 0; }
 
-    /* Shape carries the change kind; a report row's tint implies no action. */
+    /* One surface per folder; its rows are told apart by rules alone. */
+    .group-list {
+      background: var(--raised);
+      border: 1px solid var(--line-strong);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    /* Glyph carries the change kind; rows are untinted at rest, an actionable one fills on hover/focus. */
     .card {
       display: flex;
       align-items: center;
       gap: 8px;
-      background: var(--raised);
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 5px 8px 5px 10px;
+      padding: 7px 8px 7px 10px;
       animation: rise 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) both;
     }
+    button.card {
+      width: 100%;
+      font: inherit;
+      color: inherit;
+      text-align: left;
+      background: transparent;
+      border: none;
+      border-radius: 0;
+      margin: 0;
+      cursor: pointer;
+    }
+    .card + .card { border-top: 1px solid var(--line-strong); }
+    .card.actionable:hover,
+    .card.actionable:focus-visible { background: color-mix(in oklab, var(--ink) 4%, var(--raised)); }
+    .card.actionable:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
     /* A timestamp-only touch cannot prove changed contents; reduce its weight. */
     .card.touched .glyph,
     .card.touched .name .base { color: var(--ink-soft); }
@@ -94,6 +107,8 @@
       color: var(--ink-soft);
       user-select: none;
     }
+    .glyph.created { color: var(--diff-add-ink); }
+    .glyph.deleted { color: var(--diff-del-ink); }
 
     /* Ellipsize the context before the filename so the name stays readable. */
     .card .name {

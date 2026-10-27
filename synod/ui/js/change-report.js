@@ -1,4 +1,4 @@
-import { $, actionButton } from "./dom.js";
+import { $ } from "./dom.js";
 import { state } from "./core.js";
 import { openFile } from "./ipc.js";
 
@@ -93,13 +93,16 @@ function renderReport() {
     .sort((a, b) => dirOf(a.file.path).localeCompare(dirOf(b.file.path))
       || baseOf(a.file.path).localeCompare(baseOf(b.file.path)));
   let group = null;
+  let surface = list;
   for (const { file, index } of rows) {
     const dir = dirOf(file.path);
     if (dir !== group) {
       group = dir;
-      list.appendChild(groupHeading(dir));
+      surface = document.createElement("div");
+      surface.className = "group-list";
+      list.append(groupHeading(dir), surface);
     }
-    list.appendChild(renderCard(file, index, shown.has(file.path)));
+    surface.appendChild(renderCard(file, index, shown.has(file.path)));
   }
 }
 
@@ -118,27 +121,31 @@ function groupHeading(dir) {
 /** @param {import("./bindings/ChangeFile.ts").ChangeFile} file */
 function renderCard(file, index, settled) {
   const k = KINDS[file.kind];
-  const row = document.createElement("div");
-  row.className = "card" + (file.kind === "touched" ? " touched" : "") + (settled ? " settled" : "");
+  const row = document.createElement(file.open ? "button" : "div");
+  row.className = "card" + (file.kind === "touched" ? " touched" : "") + (settled ? " settled" : "")
+    + (file.open ? " actionable" : "");
   row.title = file.kind === "renamed" && file.rename_from
     ? "Renamed " + file.rename_from + " to " + file.path
     : k.verb + " " + file.path;
 
   const glyph = document.createElement("span");
-  glyph.className = "glyph";
+  glyph.className = "glyph " + file.kind;
   glyph.textContent = k.glyph;
   glyph.setAttribute("role", "img");
   glyph.setAttribute("aria-label", k.verb);
 
   row.append(glyph, nameCell(file));
 
-  // The shell checks the file; buttons name only the report index and shown name.
+  // The shell checks the file; the row names only the report index and shown name.
   if (file.open) {
     const label = file.open === "open" ? "Open" : "Show in folder";
-    row.appendChild(actionButton(label, "btn-mini", async () => {
+    row.setAttribute("type", "button");
+    row.title += "\n" + label;
+    row.setAttribute("aria-label", label + " " + file.path + ", " + k.verb.toLowerCase());
+    row.addEventListener("click", async () => {
       try { await openFile(index, file.path); }
       catch (err) { showBanner(String(err)); }
-    }));
+    });
   }
   return row;
 }

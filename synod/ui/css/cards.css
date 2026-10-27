@@ -76,6 +76,7 @@
       font-size: 12px;
       border: 1px solid var(--line);
       border-radius: 10px;
+      background: var(--sunken);
       overflow: hidden;
     }
     .diff-head {
@@ -97,7 +98,26 @@
       text-align: left;
       cursor: pointer;
     }
-    .diff-counts { color: var(--ink-faint); }
+    .diff-dir { color: var(--ink-faint); }
+    .diff-base { color: var(--ink); font-weight: 600; }
+    .diff-counts {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex: none;
+    }
+    .diff-add-n, .diff-del-n { font-variant-numeric: tabular-nums; }
+    .diff-add-n { color: var(--diff-add-ink); }
+    .diff-del-n { color: var(--diff-del-ink); }
+    .diff-bar { display: inline-flex; gap: 1px; }
+    .diff-bar-cell {
+      width: 7px;
+      height: 7px;
+      border-radius: 1.5px;
+      background: var(--line-strong);
+    }
+    .diff-bar-cell.add { background: var(--diff-add-ink); }
+    .diff-bar-cell.del { background: var(--diff-del-ink); }
     .diff-row {
       display: flex;
       white-space: pre-wrap;
@@ -118,6 +138,14 @@
       color: var(--ink-faint);
       user-select: none;
     }
+    .diff:not(.uniform) .diff-row.add .gutter {
+      background: color-mix(in oklab, var(--diff-add-bg), var(--diff-add-ink) 12%);
+      color: color-mix(in oklab, var(--ink-faint), var(--diff-add-ink) 50%);
+    }
+    .diff:not(.uniform) .diff-row.del .gutter {
+      background: color-mix(in oklab, var(--diff-del-bg), var(--diff-del-ink) 12%);
+      color: color-mix(in oklab, var(--ink-faint), var(--diff-del-ink) 50%);
+    }
     .diff-segs { flex: 1; padding-right: 10px; }
     .seg-emph {
       font-style: normal;
@@ -125,6 +153,8 @@
       background: var(--line-strong);
       border-radius: 2px;
     }
+    .diff-row.add .seg-emph { background: var(--diff-add-emph); }
+    .diff-row.del .seg-emph { background: var(--diff-del-emph); }
 
 
     .raw-mark {

@@ -12,8 +12,8 @@ use super::state::{Accounts, Handle, Held, Owner, Review, Running};
 use crate::assistant::conversation::Conversation;
 use crate::folder::manifest::Stop;
 use crate::wire::{
-    Choice, ConversationEvent, ConversationUpdate, ModelMenu, Opening, PickedFolder, SynodEvent,
-    WindowReport,
+    AgentStateDto, Choice, ConversationEvent, ConversationUpdate, ModelMenu, Opening, PickedFolder,
+    Preparation, SynodEvent, WindowReport,
 };
 use exarch::provider::Holdings;
 use ral_core::sync::LockExt;
@@ -81,11 +81,8 @@ impl Emitter {
         );
     }
 
-    fn state(&self, label: impl Into<String>, pending: bool) {
-        self.event(SynodEvent::State {
-            label: label.into(),
-            pending,
-        });
+    fn preparing(&self, stage: Preparation) {
+        self.event(SynodEvent::Preparing { stage });
     }
 
     /// Clears registration and publishes its end in one critical section.
@@ -230,13 +227,13 @@ fn run_conversation(
     baseline_stop: Stop,
 ) {
     if let Some(old) = superseded {
-        emitter.state("finishing the previous session", true);
+        emitter.preparing(Preparation::FinishingPrevious);
         let _ = old.join();
     }
     if !emitter.current() {
         return;
     }
-    emitter.state("starting", true);
+    emitter.preparing(Preparation::Starting);
 
     let ended = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         converse(
@@ -269,10 +266,7 @@ fn converse(
     let walk_emitter = emitter.clone();
     let report_walk = Box::new(move |files: u64| {
         if files == 1 || files.is_multiple_of(500) {
-            walk_emitter.state(
-                format!("reading the folder — {files} files seen so far"),
-                true,
-            );
+            walk_emitter.preparing(Preparation::ReadingFolder { files });
         }
     });
     let (mut conversation, opening) =
@@ -285,7 +279,9 @@ fn converse(
         };
 
     emitter.opening(opening);
-    emitter.state("ready", false);
+    emitter.event(SynodEvent::State {
+        state: AgentStateDto::Ready,
+    });
 
     while let Ok(message) = receiver.recv() {
         if let Err(e) = conversation.exchange(message, &mut sink) {

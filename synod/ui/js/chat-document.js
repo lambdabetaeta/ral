@@ -16,10 +16,21 @@ export function onChange(fn) {
 export let streamingProse = null;
 let openDial = null;
 
+// True while the trunk awaits the model and nothing of that step has arrived.
+export let thinking = false;
+
+/** @param {boolean} value */
+export function setThinking(value) {
+  if (thinking === value) return;
+  thinking = value;
+  changed();
+}
+
 export function resetDocument() {
   blocks = [];
   streamingProse = null;
   openDial = null;
+  thinking = false;
   changed();
 }
 

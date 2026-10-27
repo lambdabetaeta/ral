@@ -396,6 +396,14 @@ The frontend uses ES modules without a bundler or npm; `index.html` loads
   cards; an empty report displays “Nothing has changed…”. Reset reuses a
   frozen empty report and creates a fresh shown-row set. Unread paths appear
   as a gap beside the account rather than claims about changes there.
+- `SynodEvent::State` carries the typed `AgentStateDto`, never a label; the
+  projector derives status text by an exhaustive switch. Window startup is not
+  an agent state, so it rides `SynodEvent::Preparing { Preparation }`.
+  `chat-document.js::thinking` holds true from `awaiting_model` until the
+  step's first token, call or card; while it holds, the projector appends
+  `armillary.js`'s element after the last block. It is an `AsciiEffect`
+  armillary sphere, 16 by 7 glyphs, drawn as a pure function of the clock and
+  looped only while shown; reduced motion draws one frame.
 - `projector.js` and the helper dial display busy helpers. `prose.js`
   renders a settled markdown prefix once and rebuilds only its open tail;
   `Boundary` or bubble closure settles that tail.
@@ -410,8 +418,10 @@ The frontend uses ES modules without a bundler or npm; `index.html` loads
   risks mutation XSS. KaTeX accessibility tags survive; navigation and style
   tags do not. Code restores raw delimiters, and malformed TeX renders in place.
 - `ral-highlight.js` asks `highlight_ral` for core's classifications, builds
-  text nodes and caches by exact source text. Marked, DOMPurify and KaTeX
-  are vendored verbatim under `vendor/`, with versions and hashes there.
+  text nodes and caches by exact source text. Marked, DOMPurify, KaTeX
+  and three.js (for the armillary) are vendored verbatim under `vendor/`, with
+  versions and hashes there; hand-written `.d.ts` files type the three.js slice
+  in use, since `deno check` cannot read the minified build.
 - `just ui-check` exports Rust bindings into ignored `ui/js/bindings/` and
   runs `deno check` on every platform where the recipe runs, including Linux.
   Exhaustive `never` switches catch unhandled Rust variants.

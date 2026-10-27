@@ -2,18 +2,19 @@
 
 Synod's window ships no bundler and loads nothing from the network: its content
 security policy (`synod/tauri.conf.json`) admits only files from the app itself.
-The three libraries it renders assistant prose with are therefore copied here,
-unmodified, as their authors published them to npm, each beside its licence.
+The libraries it renders with are therefore copied here, unmodified, as their
+authors published them to npm, each beside its licence.
 
 | Library | Version | Files | Licence | Source |
 |---|---|---|---|---|
 | [DOMPurify](https://github.com/cure53/DOMPurify) | 3.4.16 | `dompurify/purify.min.js` | Apache-2.0 OR MPL-2.0 (used under Apache-2.0) | `dompurify@3.4.16`, `dist/` |
 | [marked](https://github.com/markedjs/marked) | 18.1.0 | `marked/marked.umd.js` | MIT, with the BSD-style notice of the original `Markdown.pl` | `marked@18.1.0`, `lib/` |
 | [KaTeX](https://github.com/KaTeX/KaTeX) | 0.19.0 | `katex/katex.min.js`, `katex/katex.min.css`, `katex/fonts/*.woff2` | MIT (code and fonts) | `katex@0.19.0`, `dist/` |
+| [three.js](https://github.com/mrdoob/three.js) | 0.170.0 | `three/three.module.min.js`, `three/AsciiEffect.js` | MIT | `three@0.170.0`, `build/` and `examples/jsm/effects/` |
 
 - **Licences.** Each directory holds its library's licence file, copied from the
   same npm release; the minified files also keep their own licence headers.
-  All three are permissive and compatible with this repository's MIT OR
+  All four are permissive and compatible with this repository's MIT OR
   Apache-2.0 licensing. None ships a `NOTICE` file.
   - DOMPurify offers Apache-2.0 or MPL-2.0 (its header says so); its npm
     release's `LICENSE` is the Apache-2.0 text, the licence it is used under
@@ -25,6 +26,11 @@ unmodified, as their authors published them to npm, each beside its licence.
 - **KaTeX is a subset.** Only the `woff2` faces are kept: `katex.min.css` also
   names `woff` and `ttf` fallbacks, which every engine Synod runs on (WebView2,
   WebKit) never requests, since it takes the `woff2` source listed first.
+- **three.js is a subset.** Only the module build and the one example effect
+  that draws the armillary (`js/armillary.js`) are kept, both flattened into
+  `three/`; `AsciiEffect.js` imports nothing, so no import map is needed. Neither
+  ships types: `js/three.d.ts` and `js/ascii-effect.d.ts` declare the slice
+  `armillary.js` uses, for `deno check`.
 - **Integrity.** `SHA256SUMS` lists every file here except this README and
   itself. `.gitattributes` marks the directory `-text`, so a checkout never
   rewrites line endings and the sums hold on every platform. Verify with

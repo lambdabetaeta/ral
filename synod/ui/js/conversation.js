@@ -8,13 +8,37 @@ import {
   resetDocument,
   clearOpenDial,
   closeStreamingProse,
+  setThinking,
 } from "./chat-document.js";
 import { showReport, resetReport } from "./change-report.js";
 import { onOpening, onSynodEvent } from "./projector.js";
 
+/** Parent path in faint ink, basename in full; the bdi keeps the rtl lead's slashes in order. */
+function renderFolder(label) {
+  const path = label.replace(/\/+$/, "");
+  const cut = path.lastIndexOf("/") + 1;
+  const parts = [];
+  if (cut > 0) {
+    const lead = document.createElement("span");
+    lead.className = "lead";
+    const text = document.createElement("bdi");
+    text.dir = "ltr";
+    text.textContent = path.slice(0, cut);
+    lead.append(text);
+    parts.push(lead);
+  }
+  const base = document.createElement("span");
+  base.className = "base";
+  base.textContent = path.slice(cut) || label;
+  parts.push(base);
+  const el = $("convo-folder");
+  el.replaceChildren(...parts);
+  el.title = label;
+}
+
 function resetTranscript(folder) {
   state.folder = folder;
-  $("convo-folder").textContent = folder.label;
+  renderFolder(folder.label);
   setFacts(null);
   // A restart must not inherit the superseded conversation's outstanding state.
   setStatus("");
@@ -92,6 +116,7 @@ async function startAssistant(folder, choice) {
 function settleExchange() {
   closeStreamingProse();
   clearOpenDial();
+  setThinking(false);
   setStatus("");
 }
 

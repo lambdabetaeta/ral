@@ -21,13 +21,29 @@
       flex-direction: column;
       gap: 3px;
     }
+    /* The parent path gives way first, from the left, so the basename stays whole. */
     .topbar .folder {
+      display: flex;
+      min-width: 0;
       font-family: var(--mono);
       font-size: 13px;
-      color: var(--ink-soft);
+      white-space: nowrap;
+    }
+    .topbar .folder .lead {
+      flex: 0 999 auto;
+      min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
-      white-space: nowrap;
+      direction: rtl;
+      color: var(--ink-faint);
+    }
+    .topbar .folder .base {
+      flex: 0 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-weight: 600;
+      color: var(--ink);
     }
     .topbar .facts { display: flex; gap: 18px; min-width: 0; }
     /* Hidden, not absent, until the opening names them: the labels alone
@@ -38,15 +54,16 @@
     .topbar .fact.model { flex: 0 1 auto; min-width: 0; }
     .topbar .fact-label {
       flex: none;
-      font-size: 11.5px;
-      font-weight: 600;
-      letter-spacing: 0.03em;
+      font-size: 12.5px;
+      font-weight: 500;
+      font-variant: all-small-caps;
+      letter-spacing: 0.04em;
       color: var(--ink-faint);
     }
     .topbar .fact-value {
       font-family: var(--mono);
       font-size: 12px;
-      color: var(--ink);
+      color: var(--ink-soft);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;

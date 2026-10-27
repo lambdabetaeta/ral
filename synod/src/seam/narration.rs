@@ -157,8 +157,7 @@ fn transient(role: Role, t: &Transient) -> Option<SynodEvent> {
         }
         Transient::Token(text) => Some(SynodEvent::Token { text: text.clone() }),
         Transient::State(state) => Some(SynodEvent::State {
-            label: state.label().to_string(),
-            pending: state.pending(),
+            state: (*state).into(),
         }),
         Transient::StopReason(reason) => Some(SynodEvent::StopReason {
             reason: reason.clone(),

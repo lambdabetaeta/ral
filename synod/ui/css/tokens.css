@@ -9,6 +9,7 @@
       --paper: light-dark(#f4efe6, #1e1b18);
       --raised: light-dark(#fffdf8, #2a2521);
       --raised-2: light-dark(#faf5ec, #241f1c);
+      --sunken: light-dark(#f4efe6, #171512);
       --ink: light-dark(#292420, #efe7db);
       --ink-soft: light-dark(#6d6459, #aca194);
       --ink-faint: light-dark(#988d7e, #7e7466);
@@ -29,6 +30,10 @@
 
       --diff-add-bg: light-dark(#e9f2ec, #1f2c22);
       --diff-del-bg: light-dark(#f9e9e2, #2e211b);
+      --diff-add-ink: light-dark(#3f7d52, #8fcf9f);
+      --diff-del-ink: light-dark(#a5401c, #e08a5e);
+      --diff-add-emph: light-dark(#cfe5d5, #2b4a34);
+      --diff-del-emph: light-dark(#f0cfc2, #4d2c22);
 
       /* Ral syntax highlighting — see ral-highlight.js. */
       --code-keyword: light-dark(#6a4f9c, #b39ddb);

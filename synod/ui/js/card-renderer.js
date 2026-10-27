@@ -122,16 +122,68 @@ function renderDiffHeader(m, rung, onCycle) {
     head.setAttribute("aria-expanded", String(rung > 0));
     head.addEventListener("click", onCycle);
   }
-  const path = document.createElement("span");
-  path.className = "role-path";
-  path.textContent = m.path;
-  head.appendChild(path);
-  const counts = document.createElement("span");
-  counts.className = "diff-counts";
-  counts.textContent = "+" + count("add") + " −" + count("del");
-  head.appendChild(counts);
+  head.appendChild(renderDiffPath(m.path));
+  head.appendChild(renderDiffCounts(count("add"), count("del")));
   container.appendChild(head);
   return container;
+}
+
+/** @param {string} path */
+function renderDiffPath(path) {
+  const el = document.createElement("span");
+  el.className = "role-path";
+  const dirLen = path.lastIndexOf("/") + 1;
+  if (dirLen > 0) {
+    const dir = document.createElement("span");
+    dir.className = "diff-dir";
+    dir.textContent = path.slice(0, dirLen);
+    el.appendChild(dir);
+  }
+  const base = document.createElement("span");
+  base.className = "diff-base";
+  base.textContent = path.slice(dirLen);
+  el.appendChild(base);
+  return el;
+}
+
+const DIFF_BAR_CELLS = 5;
+
+/**
+ * Proportional, but a nonzero side always keeps at least one cell.
+ * @param {number} add
+ * @param {number} del
+ * @returns {("add" | "del" | "none")[]}
+ */
+function diffBarCells(add, del) {
+  if (add + del === 0) return Array(DIFF_BAR_CELLS).fill("none");
+  const lo = add > 0 ? 1 : 0;
+  const hi = DIFF_BAR_CELLS - (del > 0 ? 1 : 0);
+  const addCells = Math.min(hi, Math.max(lo, Math.round((DIFF_BAR_CELLS * add) / (add + del))));
+  return Array.from({ length: DIFF_BAR_CELLS }, (_, i) => (i < addCells ? "add" : "del"));
+}
+
+/**
+ * @param {number} add
+ * @param {number} del
+ */
+function renderDiffCounts(add, del) {
+  const counts = document.createElement("span");
+  counts.className = "diff-counts";
+  const addN = document.createElement("span");
+  addN.className = "diff-add-n";
+  addN.textContent = "+" + add;
+  const delN = document.createElement("span");
+  delN.className = "diff-del-n";
+  delN.textContent = "−" + del;
+  const bar = document.createElement("span");
+  bar.className = "diff-bar";
+  for (const tag of diffBarCells(add, del)) {
+    const cell = document.createElement("span");
+    cell.className = "diff-bar-cell " + tag;
+    bar.appendChild(cell);
+  }
+  counts.append(addN, delN, bar);
+  return counts;
 }
 
 function appendDiffRows(container, m, room) {

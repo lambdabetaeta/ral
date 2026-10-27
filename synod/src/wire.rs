@@ -3,6 +3,7 @@
 use exarch::card::{Card, Field, Hunk, Mark, Measure, Span};
 use exarch::clock;
 use exarch::provider::accounts::{self, Entry};
+use exarch::record::AgentState;
 use exarch::record::fault::{Datum, Readout, Remedy};
 use ral_core::path::{basename, extension};
 use serde::Serialize;
@@ -227,6 +228,42 @@ fn hint(remedy: Remedy) -> Option<String> {
     .map(str::to_string)
 }
 
+#[derive(Clone, Copy, Serialize, TS)]
+#[ts(export, export_to = "../ui/js/bindings/")]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AgentStateDto {
+    Ready,
+    AwaitingModel,
+    Evaluating,
+    Evicting,
+    WaitingOnAgents,
+}
+
+impl From<AgentState> for AgentStateDto {
+    fn from(state: AgentState) -> Self {
+        match state {
+            AgentState::Ready => Self::Ready,
+            AgentState::AwaitingModel => Self::AwaitingModel,
+            AgentState::Evaluating => Self::Evaluating,
+            AgentState::Evicting => Self::Evicting,
+            AgentState::WaitingOnAgents => Self::WaitingOnAgents,
+        }
+    }
+}
+
+/// What the window does before any agent exists to have a state.
+#[derive(Clone, Copy, Serialize, TS)]
+#[ts(export, export_to = "../ui/js/bindings/")]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum Preparation {
+    FinishingPrevious,
+    Starting,
+    ReadingFolder {
+        #[ts(type = "number")]
+        files: u64,
+    },
+}
+
 #[derive(Clone, Serialize, TS)]
 #[ts(export, export_to = "../ui/js/bindings/")]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -236,10 +273,13 @@ pub(crate) enum SynodEvent {
     },
     /// Closes the last markdown block without waiting for a following one.
     Boundary,
-    /// The status bar holds this state until replaced; pending warrants the spinner.
+    /// The status bar holds this state until replaced.
     State {
-        label: String,
-        pending: bool,
+        state: AgentStateDto,
+    },
+    /// Pre-agent progress; the next state or preparation replaces it.
+    Preparing {
+        stage: Preparation,
     },
     ToolCall {
         tool: String,
@@ -342,7 +382,9 @@ pub(crate) enum SignInDone {
         label: String,
         replaced: bool,
     },
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
 }
 
 #[derive(Clone, Copy, Serialize, TS)]

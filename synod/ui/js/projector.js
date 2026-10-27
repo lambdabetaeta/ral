@@ -14,11 +14,14 @@ import {
   dialAddHarness,
   addCardBlock,
   rotateRung,
+  thinking,
+  setThinking,
   dialAddProcessCard,
   dialAddHelpers,
   dialAddHelperDone,
 } from "./chat-document.js";
 import { renderMarkCard } from "./card-renderer.js";
+import { armillaryEl, startArmillary, stopArmillary } from "./armillary.js";
 import { transcriptEl, pinTranscript } from "./core.js";
 import { setFacts, setStatus } from "./status.js";
 
@@ -61,9 +64,13 @@ export function render() {
 
 onChange(render);
 
+let armillaryShown = false;
+
 function renderNow() {
   renderScheduled = false;
   const desired = blocks.length ? blocks.map(projectBlock) : [welcomeEl];
+  const showArmillary = thinking && blocks.length > 0;
+  if (showArmillary) desired.push(armillaryEl);
   const wanted = new Set(desired);
   desired.forEach((el, i) => {
     while (transcriptEl.children[i] && transcriptEl.children[i] !== el && !wanted.has(transcriptEl.children[i])) {
@@ -76,6 +83,10 @@ function renderNow() {
   while (transcriptEl.children.length > desired.length) {
     // The loop guard guarantees a last child exists.
     /** @type {Element} */ (transcriptEl.lastElementChild).remove();
+  }
+  if (showArmillary !== armillaryShown) {
+    (showArmillary ? startArmillary : stopArmillary)();
+    armillaryShown = showArmillary;
   }
   pinTranscript();
 }
@@ -130,6 +141,44 @@ function formatUsage(p) {
   return s;
 }
 
+/** @param {import("./bindings/AgentStateDto.ts").AgentStateDto} state */
+function stateText(state) {
+  switch (state) {
+    case "ready":
+      return "";
+    case "awaiting_model":
+      return "Awaiting model…";
+    case "evaluating":
+      return "Evaluating…";
+    case "evicting":
+      return "Evicting…";
+    case "waiting_on_agents":
+      return "Waiting on agents…";
+    default: {
+      /** @type {never} */
+      const unhandled = state;
+      return unhandled;
+    }
+  }
+}
+
+/** @param {import("./bindings/Preparation.ts").Preparation} stage */
+function preparationText(stage) {
+  switch (stage.kind) {
+    case "finishing_previous":
+      return "Finishing the previous session…";
+    case "starting":
+      return "Starting…";
+    case "reading_folder":
+      return `Reading the folder: ${stage.files} files seen so far…`;
+    default: {
+      /** @type {never} */
+      const unhandled = stage;
+      return unhandled;
+    }
+  }
+}
+
 /** @param {import("./bindings/Opening.ts").Opening} p */
 export function onOpening(p) {
   setFacts(p);
@@ -141,6 +190,7 @@ export function onSynodEvent(p) {
     case "token":
       // Whitespace before prose must not open an empty bubble or split the dial.
       if (!streamingProse && !p.text.trim()) break;
+      setThinking(false);
       if (streamingProse) {
         streamingProse.raw += p.text;
         streamingProse.open = true;
@@ -157,18 +207,27 @@ export function onSynodEvent(p) {
       }
       break;
     case "state":
-      setStatus(p.pending ? (p.label ? p.label.charAt(0).toUpperCase() + p.label.slice(1) : p.label) + "…" : "");
+      setThinking(p.state === "awaiting_model");
+      setStatus(stateText(p.state));
+      break;
+    case "preparing":
+      setThinking(false);
+      setStatus(preparationText(p.stage));
       break;
     case "tool_call":
+      setThinking(false);
       dialAddCall(p);
       break;
     case "harness_call":
+      setThinking(false);
       dialAddHarness(p);
       break;
     case "card":
+      setThinking(false);
       addCardBlock(p.marks || []);
       break;
     case "process_card":
+      setThinking(false);
       dialAddProcessCard(p.marks || []);
       break;
     case "helpers":
@@ -184,16 +243,20 @@ export function onSynodEvent(p) {
       dialAddNote("[stop: " + p.reason + "]", "muted");
       break;
     case "error":
+      setThinking(false);
       dialAddNote("error: " + p.message, "bad");
       break;
     case "provider_error":
+      setThinking(false);
       dialAddReadout(p);
       break;
     // Stalled is always Warn: the exchange survived and its partial reply stands.
     case "stalled":
+      setThinking(false);
       dialAddReadout(p);
       break;
     case "failure":
+      setThinking(false);
       addSystemMessage(p.message);
       break;
     default: {
