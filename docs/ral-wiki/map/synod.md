@@ -274,7 +274,11 @@ taken:
   is true of every pair of identical files in the folder, empty ones
   included. A key many candidates share on both sides is left unpaired,
   since mass duplication is not a mass rename, and an honest deletion beside
-  an honest creation is never a lie where a confident rename would be.
+  an honest creation is never a lie where a confident rename would be. A
+  change that leaves something at its path carries what (`Created` and
+  `Modified` hold an `EntryKind`; `Touched` and `Renamed` are files by
+  construction), so `Change::leaves_file` is the one fact the window's open
+  action rests on.
 - `report.rs` — the GUI's seam: `job_report` is a pure, infallible function
   of two manifests, and the live `Conversation` holds them, so drawing a
   report re-reads nothing from disk and cannot fail.
@@ -295,26 +299,33 @@ no store of its own: `Conversation::begin` builds an
 the engine it mints per conversation, so a sign-in admitted through the window
 is visible to a running conversation's next spawn and the two can never drift.
 `mod.rs` also owns the two refresh entries, `refresh_menu_now`
-(synchronous) and `refresh_menu_async` (off the calling thread); the debounce
-that decides when a refresh is worth asking for at all, `RefreshGate`, lives
-in `commands.rs`. `commands.rs` holds the folder picker, which answers a
+(synchronous) and `refresh_menu_async` (off the calling thread).
+`commands.rs` holds the folder picker, which answers a
 `PickedFolder` — the native `path` the window hands back as it came, and the
 shown `label` it displays — the
 conversation verbs (start, send, restart, close), the model listing (instant
-from the cache, one background refresh), and opening before/after versions
-with the user's own applications. The worker's `Emitter` is gated on the
-generation that owns the conversation slot. `Running` holds an `Owner`:
-`Open` admits registration, `Closing` cannot hold a worker or admit another.
+from the cache, one background refresh), and opening a changed file with the
+user's own application. The worker's `Emitter` is gated on the
+generation that owns the conversation slot, and each `Handle` holds the
+window's `attempt` for it: `send_message(attempt, message)` is refused unless
+it names the registered handle's attempt, so a message written for a
+superseded conversation is never delivered to its successor. `Running` holds
+an `Owner`: `Open` admits registration, `Closing` cannot hold a worker or admit another.
 The first close request consumes the registered handle into a unique `Close`
 job; only that request waits outside the mutex and destroys the window.
+Supersession and close stop a `Handle` the same way (`Handle::stop`: drop the
+sender, stop the baseline walk); only the close bounds its join.
 Repeated closes cannot shorten its five-second grace, which bounds waiting,
 not successful machine shutdown. Every worker publication is one
-`ConversationEvent`, stamped by the emitter with the frontend attempt identity;
-generation lookup and publication share the owner lock. Its `ConversationUpdate`
-is opening, narration, exchange completion or a tagged terminal outcome. One
+`ConversationEvent`, stamped with the owning handle's attempt; generation
+lookup and publication share the owner lock. Its `ConversationUpdate` is
+opening, narration, exchange completion, or `Ended { failed }`, sent only for
+a failure: a worker whose sender was dropped was superseded or closed, and the
+generation gate already silences it. One
 frontend listener rejects superseded and terminal attempts before any projection.
 The composer's pure reducer admits exchange activity only in accepted or ready
-attempts; terminal attempts cannot revive. Acceptance permits preboot message
+attempts; terminal attempts cannot revive. The composer is enabled exactly when
+the reducer would admit a submit. Acceptance permits preboot message
 queueing without claiming readiness. Report refreshes publish only while their
 version is current; a reset or newer refresh invalidates pending responses.
 The emitter speaks the shell's own
@@ -323,8 +334,8 @@ states to relay: `starting`, or `finishing the previous session` while a
 restart waits for the generation it superseded to shut its machine down —
 a wait the window otherwise sits through in silence, since two stores must
 not walk one folder — through to `ready` at the opening, where the station
-passes to the agent. The window writes that station only for `Working…`;
-it never clears what the shell has said. `keys.rs` is the accounts screen's five
+passes to the agent. The window writes that station only for `Working…`,
+and clears it only when an exchange settles or the transcript resets. `keys.rs` is the accounts screen's five
 commands — list, save or forget a key, declare or withdraw an endpoint — each
 returning the fresh list and ending in the same `models-refreshed` event a
 sign-in ends in, so the picker converges the same way whichever route a
@@ -371,9 +382,10 @@ the picker already renders through; with no account set up the sign-in is the
 screen's primary button and the folder picker waits for it; `review.rs`
 translates the workspace vocabulary into cards, and carries
 `WindowReport::unreadable` beside them — what the walk could not read, so
-the panel can say what it is not answering for. Deleted entries and created
-directories remain visible without an Open/Reveal action; `file_to_open` admits
-only plain files. The surface is read-only:
+the panel can say what it is not answering for. A card has an Open/Reveal
+action only where a plain file now stands (`Change::leaves_file`), so a
+deletion, a folder, a link, or a file replaced by either has none;
+`file_to_open` admits only plain files. The surface is read-only:
 there is no status to distinguish, nothing to put back, and no conflict a
 caller could be asked to resolve. That holding type, `Held`, carries the
 report's own folder and refuses a later call whose `folder` argument does

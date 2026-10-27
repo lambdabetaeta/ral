@@ -10,7 +10,7 @@ mod loopback;
 mod session;
 pub use session::CredentialHandle;
 
-use crate::provider::error::body_detail;
+use crate::provider::error::{body_detail, root_cause};
 use crate::provider::identity::{self, Account, AccountId, Login};
 use crate::site::{Silent, site};
 use base64::Engine;
@@ -449,11 +449,12 @@ pub fn save_one(token: &OAuthToken) -> Result<bool, String> {
 }
 
 /// Current persisted accounts, attached to their canonical live owners.
-pub fn credentials() -> Vec<CredentialHandle> {
-    let Ok(state) = state() else {
-        return Vec::new();
-    };
-    session::transaction(&state, session::StoreLease::credentials).unwrap_or_default()
+///
+/// # Errors
+/// The state directory is unavailable, the store is unreadable, or another
+/// process held its lease past the deadline.
+pub fn credentials() -> Result<Vec<CredentialHandle>, String> {
+    session::transaction(&state()?, session::StoreLease::credentials)
 }
 
 #[cfg(test)]
@@ -723,8 +724,55 @@ impl<M> RefreshUpdate<M> {
     }
 }
 
-async fn refresh(current: &OAuthToken) -> Result<OAuthToken, String> {
-    let client = http_client()?;
+/// How a refresh exchange failed, by whether the issuer may have rotated the
+/// refresh token. Each case carries its human-readable reason.
+#[derive(Debug)]
+enum RefreshError {
+    /// Provably never sent.
+    NotSubmitted(String),
+    /// The issuer answered a client error (4xx): it did not rotate.
+    Rejected(String),
+    /// Sent, outcome unknown: a 5xx may follow a committed rotation, and a
+    /// success we cannot use is included.
+    Ambiguous(String),
+}
+
+/// Submit one refresh request and decode its success body.
+async fn submit_refresh<T: DeserializeOwned>(
+    request: reqwest::RequestBuilder,
+    current: &OAuthToken,
+) -> Result<T, RefreshError> {
+    let service = current.login().service().name;
+    let response = request.send().await.map_err(|error| {
+        let reason = format!(
+            "{service} token refresh request failed: {}",
+            root_cause(&error).unwrap_or_else(|| error.to_string())
+        );
+        if error.is_builder() || error.is_connect() {
+            RefreshError::NotSubmitted(reason)
+        } else {
+            RefreshError::Ambiguous(reason)
+        }
+    })?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        let reason = refresh_failure(status, &body, current);
+        return Err(if status.is_server_error() {
+            RefreshError::Ambiguous(reason)
+        } else {
+            RefreshError::Rejected(reason)
+        });
+    }
+    response.json().await.map_err(|error| {
+        RefreshError::Ambiguous(format!(
+            "could not parse the {service} token refresh response: {error}"
+        ))
+    })
+}
+
+async fn refresh(current: &OAuthToken) -> Result<OAuthToken, RefreshError> {
+    let client = http_client().map_err(RefreshError::NotSubmitted)?;
     match &current.grant {
         Grant::Chatgpt {
             client_id,

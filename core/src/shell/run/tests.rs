@@ -1302,10 +1302,6 @@ fn an_abort_passes_a_cleanup() {
 /// The shield is cooperative (ADR 261016_a-cleanup-is-shielded-within-its-grace): a signalled child is a failure `try`
 /// catches, the current scope carrying no cause to attribute it to.
 #[cfg(unix)]
-#[cfg_attr(
-    ctor_without_argv,
-    ignore = "a test binary serves bundled tools before main, where musl gives std no argv"
-)]
 #[test]
 fn a_signalled_child_under_a_shield_is_a_failure() {
     let (runtime, marked) = marking_runtime();

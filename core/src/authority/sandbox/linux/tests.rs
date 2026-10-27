@@ -1,6 +1,7 @@
+use super::landlock::{Abi, Landlock, Landlocked};
 use super::{
-    Access, Binds, Builds, CGROUP, Envelope, GpuNodes, HostEnvelope, Layer, Pinned, PtyNodes,
-    Shown, bwrap_argv, bwrap_command,
+    Access, Bind, Binds, Builds, CGROUP, Envelope, GpuNodes, HostEnvelope, InfoFd, Layer, Pinned,
+    PtyNodes, Shown, bwrap_argv, bwrap_command, envelope, open_object, own_cgroup, pin_envelope,
 };
 use crate::Role;
 use crate::authority::policy::{Admitted, Baseline, Capabilities, FsAllow, FsPolicy, Program};
@@ -9,6 +10,7 @@ use crate::authority::sandbox::launch::{Ownership, admitted, enveloped};
 use crate::authority::sandbox::warrant::{Handoff, Slot};
 use crate::authority::sandbox::{ExecProjection, FsProjection, FsRules, SandboxProjection};
 use crate::path::{CwdPath, Excluded, FrozenPath, RealPath, Trace};
+use crate::test_helper::confinement::skip;
 use std::process::Stdio;
 
 mod exec;
@@ -41,7 +43,7 @@ const WHOLE: HostEnvelope = HostEnvelope {
     private_pids: true,
     virtual_dev: true,
     private_cgroup: true,
-    landlock: super::landlock::Landlock::At(super::landlock::Abi::SCOPES),
+    landlock: Landlock::At(Abi::SCOPES),
     builds: Builds::ByFd,
 };
 
@@ -57,12 +59,7 @@ fn deny_within(dir: &std::path::Path, denied: &[&std::path::Path]) -> SandboxPro
 }
 
 fn unrestricted() -> SandboxProjection {
-    SandboxProjection {
-        fs: FsProjection::Unrestricted,
-        net: true,
-        gpu: true,
-        exec: ExecProjection::default(),
-    }
+    exec_policy(ExecProjection::default())
 }
 
 /// This test binary stands in for bwrap and the trampoline where only the
@@ -136,31 +133,15 @@ fn run_confined(
 }
 
 /// `script` confined, its launch asserted; `(stdout, stderr)`.
+#[track_caller]
 fn confined(env: &Envelope<'_>, policy: &SandboxProjection, script: &str) -> (String, String) {
-    confined_with("the envelope did not launch", env, policy, script)
-}
-
-/// [`confined`], a failure to launch prefixed by `label`.
-fn confined_as(
-    label: &str,
-    env: &Envelope<'_>,
-    policy: &SandboxProjection,
-    script: &str,
-) -> (String, String) {
-    let failure = format!("{label}: the envelope did not launch");
-    confined_with(&failure, env, policy, script)
-}
-
-fn confined_with(
-    failure: &str,
-    env: &Envelope<'_>,
-    policy: &SandboxProjection,
-    script: &str,
-) -> (String, String) {
     let out = run_confined(env, policy, &format!("echo READY\n{script}")).expect("spawn bwrap");
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert!(emitted(&stdout, "READY"), "{failure}: {stderr}");
+    assert!(
+        emitted(&stdout, "READY"),
+        "the envelope did not launch: {stderr}"
+    );
     (stdout, stderr)
 }
 
@@ -214,20 +195,23 @@ fn run_after(
 
 /// This host's pinned bwrap running ral's own pin, where it can build an
 /// envelope at all.  Where it cannot — bwrap absent, or user namespaces
-/// unavailable — a spawning test proves nothing either way and says so on
-/// the way out.
+/// unavailable — a spawning test proves nothing either way: it says so and
+/// stops, or fails where the sandbox is required.
 fn envelope_launches(policy: &SandboxProjection) -> Option<Envelope<'static>> {
-    super::pin_envelope();
-    let Ok(bwrap) = super::envelope() else {
-        eprintln!("skipping: this host has no bwrap to pin");
-        return None;
+    pin_envelope();
+    let bwrap = match envelope() {
+        Ok(bwrap) => bwrap,
+        Err(why) => {
+            skip(why);
+            return None;
+        }
     };
     let own = crate::authority::sandbox::reexec::own().expect("ral pins itself");
     let env = Envelope::probe(bwrap, own);
     let control = run_confined(&env, policy, "echo READY");
     if control
         .as_ref()
-        .is_some_and(|o| String::from_utf8_lossy(&o.stdout).contains("READY"))
+        .is_some_and(|o| emitted(&String::from_utf8_lossy(&o.stdout), "READY"))
     {
         return Some(env);
     }
@@ -235,7 +219,9 @@ fn envelope_launches(policy: &SandboxProjection) -> Option<Envelope<'static>> {
         || "the envelope did not spawn".to_string(),
         |o| String::from_utf8_lossy(&o.stderr).trim().to_string(),
     );
-    eprintln!("skipping: this host cannot build a bwrap envelope: {why}");
+    skip(format_args!(
+        "this host cannot build a bwrap envelope: {why}"
+    ));
     None
 }
 

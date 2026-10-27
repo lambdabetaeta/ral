@@ -183,7 +183,7 @@ fn main() {
     let report_ok = if let (Ok(()), Ok(after)) = (&exchange, &after) {
         let report = workspace::job_report(&before, after);
         let wrote_it = report.changes.changes.iter().any(|c| {
-            matches!(c, workspace::changes::Change::Created { path, folder: false } if path == HELPER_FILE)
+            matches!(c, workspace::changes::Change::Created { path, now: workspace::EntryKind::File { .. } } if path == HELPER_FILE)
         });
         println!("report: {:?}", report.changes);
         if wrote_it {

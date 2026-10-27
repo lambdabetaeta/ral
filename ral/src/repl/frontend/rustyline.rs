@@ -19,7 +19,7 @@ use super::super::keybinding::{KeybindingOutcome, dispatch_keybinding};
 use super::super::plugin::rustyline::{snapshot_history, sync_plugins};
 use super::super::plugin::{Keymap, lock, pop_buffer_stack, reset_editor_hooks};
 use super::super::prompt::PromptText;
-use super::{EditBuffer, Frontend, Read};
+use super::{EditBuffer, Frontend, Read, report_invalid_utf8};
 use ral_core::text::char_to_byte;
 
 pub(in crate::repl) struct RustylineFrontend {
@@ -141,6 +141,10 @@ impl Frontend for RustylineFrontend {
             Ok(s) => s,
             Err(ReadlineError::Interrupted) => return Read::Interrupt,
             Err(ReadlineError::Eof) => return Read::End(0),
+            Err(ReadlineError::Io(e)) if e.kind() == std::io::ErrorKind::InvalidData => {
+                report_invalid_utf8(&e);
+                return Read::Interrupt;
+            }
             Err(e) => {
                 terminal::cmd_error("ral", &e.to_string());
                 return Read::End(1);

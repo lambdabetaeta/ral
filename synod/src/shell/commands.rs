@@ -61,6 +61,11 @@ impl Owner {
             Self::Closing => None,
         }
     }
+
+    /// The handle, if it is still the one registered under `generation`.
+    fn owned_by(&self, generation: u64) -> Option<&Handle> {
+        self.current().filter(|h| h.generation == generation)
+    }
 }
 
 /// The first close request's shutdown job; consumed outside the owner lock.
@@ -68,10 +73,17 @@ impl Owner {
 pub(crate) struct Close(Option<Handle>);
 
 impl Close {
+    /// Stop the conversation and give its machine a few seconds to shut
+    /// down, so a wedged one can never keep the window from closing.
     pub(crate) fn wait(self) {
-        if let Some(handle) = self.0 {
-            wait_for_conversation(handle);
-        }
+        let Some(handle) = self.0 else { return };
+        let join = handle.stop();
+        let (done, wait) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let _ = join.join();
+            let _ = done.send(());
+        });
+        let _ = wait.recv_timeout(Duration::from_secs(5));
     }
 }
 
@@ -92,9 +104,12 @@ impl Running {
 /// life: the worker's [`Emitter`] compares it against whatever handle
 /// currently occupies the slot before every emit, so a conversation a
 /// restart has already superseded stays silent instead of reporting over
-/// the fresh one that replaced it.
+/// the fresh one that replaced it.  `attempt` is the window's own name for
+/// the conversation: it stamps every update, and [`send_message`] is
+/// refused unless it names this handle.
 struct Handle {
     generation: u64,
+    attempt: String,
     sender: mpsc::Sender<String>,
     join: JoinHandle<()>,
     /// Reaches into this generation's baseline walk, still stat-ing the
@@ -105,12 +120,22 @@ struct Handle {
     baseline_stop: synod::workspace::manifest::Stop,
 }
 
+impl Handle {
+    /// End the message stream — the worker's signal to shut its machine
+    /// down — and the baseline walk, leaving only the thread to join.
+    fn stop(self) -> JoinHandle<()> {
+        drop(self.sender);
+        self.baseline_stop.stop();
+        self.join
+    }
+}
+
+/// A conversation that ended on its own, not at the window's request.
 #[derive(Clone, Serialize, ts_rs::TS)]
-#[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export, export_to = "../ui/js/bindings/")]
-enum Ending {
-    Stopped,
-    Failed { explained: bool },
+struct Failed {
+    /// Whether a `failure` event has already told the window why.
+    explained: bool,
 }
 
 #[derive(Clone, Serialize, ts_rs::TS)]
@@ -127,7 +152,7 @@ enum ConversationUpdate {
     Opening { opening: synod::session::Opening },
     Event { event: super::sink::SynodEvent },
     ExchangeDone,
-    Ended { outcome: Ending },
+    Ended { failed: Failed },
 }
 
 /// Publishes only while this generation owns the conversation slot.
@@ -136,17 +161,15 @@ pub(crate) struct Emitter {
     app: AppHandle,
     slot: Arc<Mutex<Owner>>,
     generation: u64,
-    attempt: String,
 }
 
 impl Emitter {
-    /// Whether this generation still occupies the slot: the gate every emit
-    /// passes, and the worker's own test for whether to stand down.
+    /// Whether this generation still occupies the slot.
     fn current(&self) -> bool {
         self.slot
             .lock_ignore_poison()
-            .current()
-            .is_some_and(|h| h.generation == self.generation)
+            .owned_by(self.generation)
+            .is_some()
     }
 
     fn opening(&self, opening: synod::session::Opening) {
@@ -163,20 +186,17 @@ impl Emitter {
     )]
     fn emit(&self, update: ConversationUpdate) {
         let held = self.slot.lock_ignore_poison();
-        if held
-            .current()
-            .is_some_and(|h| h.generation == self.generation)
-        {
-            self.publish(update);
+        if let Some(handle) = held.owned_by(self.generation) {
+            self.publish(handle, update);
         }
     }
 
-    // Called only while holding the slot lock.
-    fn publish(&self, update: ConversationUpdate) {
+    // The handle borrows the owner lock, so it is held throughout.
+    fn publish(&self, handle: &Handle, update: ConversationUpdate) {
         let _ = self.app.emit(
             "conversation-event",
             ConversationEvent {
-                attempt: self.attempt.clone(),
+                attempt: handle.attempt.clone(),
                 update,
             },
         );
@@ -198,14 +218,11 @@ impl Emitter {
         clippy::significant_drop_tightening,
         reason = "the slot must stay held across the emit, not just the take, so a successor can never claim it between clearing and announcing"
     )]
-    fn ended(&self, ending: Ending) {
+    fn ended(&self, failed: Failed) {
         let mut held = self.slot.lock_ignore_poison();
-        if held
-            .current()
-            .is_some_and(|h| h.generation == self.generation)
-        {
-            drop(held.open().and_then(Option::take));
-            self.publish(ConversationUpdate::Ended { outcome: ending });
+        if let Some(handle) = held.owned_by(self.generation) {
+            self.publish(handle, ConversationUpdate::Ended { failed });
+            *held = Owner::default();
         }
     }
 }
@@ -294,21 +311,33 @@ pub fn start_conversation(
     spawn_conversation(app, state.0.clone(), folder, choice, attempt)
 }
 
-/// Send one message into the running conversation.
+/// Send one message into the conversation `attempt` started.
 ///
 /// # Errors
-/// Returns a plain sentence if there is no conversation running, or if it
-/// has already finished and cannot take this message.
+/// Returns a plain sentence if there is no conversation running, if the one
+/// running is not `attempt`'s (a restart replaced it), or if it has already
+/// finished and cannot take this message.
 #[tauri::command]
 #[allow(
     clippy::significant_drop_tightening,
     reason = "the lock must stay held across the send, not just the lookup, so a restart cannot swap the handle out from under it"
 )]
-pub fn send_message(state: State<'_, Running>, message: String) -> Result<(), String> {
+pub fn send_message(
+    state: State<'_, Running>,
+    attempt: String,
+    message: String,
+) -> Result<(), String> {
     let held = state.0.lock_ignore_poison();
     let handle = held
         .current()
         .ok_or_else(|| "There is no conversation running to send this to.".to_string())?;
+    if handle.attempt != attempt {
+        return Err(
+            "This message was written for a conversation that a newer one has replaced, \
+             so nothing was sent."
+                .to_string(),
+        );
+    }
     handle
         .sender
         .send(message)
@@ -427,23 +456,6 @@ pub fn open_url(app: AppHandle, url: String) -> Result<(), String> {
         .map_err(|e| format!("Could not open {url}: {e}"))
 }
 
-/// End the conversation cleanly: drop the message sender — the worker
-/// thread's own end-of-conversation signal — and give it a few seconds to
-/// take its final path (shutting its machine down) before giving up on the
-/// wait, so a wedged conversation can never keep the window from closing.
-/// Called only by the unique close job, with the owner mutex released.
-fn wait_for_conversation(handle: Handle) {
-    drop(handle.sender);
-    handle.baseline_stop.stop();
-    let join = handle.join;
-    let (done, wait) = mpsc::channel::<()>();
-    std::thread::spawn(move || {
-        let _ = join.join();
-        let _ = done.send(());
-    });
-    let _ = wait.recv_timeout(Duration::from_secs(5));
-}
-
 /// Bump the generation, supersede whatever handle currently occupies the
 /// slot, and register the new one — all in one critical section, so the
 /// window's close handler can never observe a half-registered handle.
@@ -470,15 +482,7 @@ fn spawn_conversation(
     let registration = held
         .open()
         .ok_or_else(|| "The window is closing; a new conversation cannot start.".to_string())?;
-    let superseded = registration.take().map(|handle| {
-        drop(handle.sender);
-        // Stopped here, not left for the new worker's join to wait out: a
-        // restart while the superseded generation is still stat-ing a slow
-        // share must not make the fresh conversation sit behind that walk
-        // finishing on its own.
-        handle.baseline_stop.stop();
-        handle.join
-    });
+    let superseded = registration.take().map(Handle::stop);
 
     let baseline_stop = synod::workspace::manifest::Stop::default();
     let (sender, receiver) = mpsc::channel();
@@ -486,7 +490,6 @@ fn spawn_conversation(
         app,
         slot: slot.clone(),
         generation,
-        attempt,
     };
     let thread_baseline_stop = baseline_stop.clone();
     let join = std::thread::spawn(move || {
@@ -501,6 +504,7 @@ fn spawn_conversation(
     });
     *registration = Some(Handle {
         generation,
+        attempt,
         sender,
         join,
         baseline_stop,
@@ -514,9 +518,9 @@ fn spawn_conversation(
 /// walks the folder's baseline; then, if a later generation has since
 /// claimed the slot out from under this one (restart-spam), stand down
 /// quietly rather than boot a machine nobody is waiting on.  Otherwise run
-/// the conversation to whatever end it reaches and announce that end
-/// through the gated [`Emitter`].  A panicking conversation is reported the
-/// same as any other failure to start or run.
+/// the conversation, and announce its failure through the gated [`Emitter`].
+/// A panicking conversation is reported the same as any other failure to
+/// start or run.
 ///
 /// The join is narrated because it can outlast a person's patience: the
 /// superseded generation finishes booting its machine and shuts it down
@@ -542,21 +546,28 @@ fn run_conversation(
     let ended = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         converse(&emitter, &folder, choice, &receiver, &baseline_stop)
     }))
-    .unwrap_or(Ending::Failed { explained: false });
+    .unwrap_or(Err(Failed { explained: false }));
 
-    emitter.ended(ended);
+    // `Ok` means the sender was dropped, which only a restart or the close
+    // does, and either has already vacated the slot: nothing to announce.
+    if let Err(failed) = ended {
+        emitter.ended(failed);
+    }
 }
 
 /// Open the folder, narrate the opening, then drive one exchange per
 /// message until the sender is dropped — a restart or the window closing —
 /// and shut the machine down.
+///
+/// # Errors
+/// [`Failed`] when the conversation cannot be opened.
 fn converse(
     emitter: &Emitter,
     picked: &Path,
     choice: Choice,
     receiver: &mpsc::Receiver<String>,
     baseline_stop: &synod::workspace::manifest::Stop,
-) -> Ending {
+) -> Result<(), Failed> {
     let mut sink = super::sink::TauriSink::new(emitter.clone());
 
     let accounts = emitter.app.state::<super::Accounts>();
@@ -565,7 +576,7 @@ fn converse(
     // which cannot happen — but a worker that finds no store stands down
     // rather than panics.
     let Ok(holdings) = accounts.resolved() else {
-        return Ending::Failed { explained: false };
+        return Err(Failed { explained: false });
     };
 
     // Narrated because it is silent otherwise: on a large folder or a
@@ -587,7 +598,7 @@ fn converse(
             Ok(begun) => begun,
             Err(e) => {
                 emitter.event(super::sink::SynodEvent::Failure { message: e });
-                return Ending::Failed { explained: true };
+                return Err(Failed { explained: true });
             }
         };
 
@@ -613,7 +624,7 @@ fn converse(
     }
 
     let _ = conversation.end();
-    Ending::Stopped
+    Ok(())
 }
 
 /// Hand `path` to the user's default application for that file.  The system

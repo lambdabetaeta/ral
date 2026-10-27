@@ -26,7 +26,17 @@ fn slash_completion_is_one_edit_with_redo() {
 }
 
 #[test]
-fn normal_mode_menu_accept_replaces_through_the_cursor_and_stays_normal() {
+fn accept_replaces_the_whole_token_wherever_the_cursor_is() {
+    let mut prompt = PromptState::new(false);
+    prompt.set_prompt("/thi");
+    key(&mut prompt, KeyCode::Left, KeyModifiers::NONE);
+    key(&mut prompt, KeyCode::Left, KeyModifiers::NONE);
+    assert!(prompt.menu_key(KeyCode::Enter));
+    assert_eq!(prompt.prompt_text(), "/thinking");
+}
+
+#[test]
+fn normal_mode_menu_accept_replaces_the_token_and_stays_normal() {
     let mut prompt = PromptState::new(true);
     prompt.set_prompt("/thi");
     key(&mut prompt, KeyCode::Esc, KeyModifiers::NONE);

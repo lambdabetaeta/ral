@@ -185,24 +185,43 @@ pub fn denied(proof: &Confining, control: &Output, out: &Output, marker: &str) {
     );
 }
 
-/// Skip locally, or fail when CI requires confinement.
+/// Skip the calling test locally, or fail it when CI requires the sandbox the
+/// product itself needs.
+///
+/// # Panics
+/// `RAL_REQUIRE_SANDBOX` is set, so `why` is a failure.
+#[track_caller]
+pub fn skip(why: impl std::fmt::Display) {
+    assert!(
+        std::env::var_os("RAL_REQUIRE_SANDBOX").is_none(),
+        "confinement required: {why}"
+    );
+    skip_beyond_baseline(why);
+}
+
+/// Skip the calling test for a prerequisite beyond what the product needs, such
+/// as a newer kernel ABI than it requires: never a failure, since the product
+/// works without it.
+#[track_caller]
+pub fn skip_beyond_baseline(why: impl std::fmt::Display) {
+    let file = std::panic::Location::caller().file();
+    let _ = std::io::Write::write_fmt(
+        &mut std::io::stderr(),
+        format_args!(
+            "skip {}: {why}\n",
+            std::thread::current().name().unwrap_or(file)
+        ),
+    );
+}
+
+/// [`skip`]s the calling test unless this process can confine.
 #[macro_export]
 macro_rules! require_confinement {
     () => {{
         match $crate::test_helper::confinement::confinement() {
             Ok(proof) => proof,
             Err(why) => {
-                assert!(
-                    ::std::env::var_os("RAL_REQUIRE_SANDBOX").is_none(),
-                    "confinement required: {why}"
-                );
-                let _ = ::std::io::Write::write_fmt(
-                    &mut ::std::io::stderr(),
-                    format_args!(
-                        "skip {}: {why}\n",
-                        ::std::thread::current().name().unwrap_or(module_path!())
-                    ),
-                );
+                $crate::test_helper::confinement::skip(why);
                 return;
             }
         }
@@ -225,22 +244,40 @@ pub fn landlock_abi() -> u32 {
     })
 }
 
-/// An older kernel skips only the assertion needing its newer ABI.
+/// Whether this kernel's Landlock is at least ABI `needed`; if not, the calling
+/// test must stop. Below the ABI ral itself needs that is a [`skip`]; at or above
+/// it, a [`skip_beyond_baseline`].
+///
+/// # Panics
+/// The version query fails, or Landlock is below ral's own minimum and
+/// `RAL_REQUIRE_SANDBOX` is set.
+#[cfg(target_os = "linux")]
+#[track_caller]
+pub fn landlock_reaches(needed: u32) -> bool {
+    let found = landlock_abi();
+    let baseline = crate::authority::sandbox::BASELINE_ABI;
+    if found >= needed {
+        return true;
+    }
+    if found < baseline {
+        skip(format_args!(
+            "ral needs Landlock ABI {baseline}; found ABI {found} (0 is absent)"
+        ));
+    } else {
+        skip_beyond_baseline(format_args!(
+            "needs Landlock ABI {needed}; found ABI {found}"
+        ));
+    }
+    false
+}
+
+/// [`landlock_reaches`] `$needed`, or return from the calling test.
 #[macro_export]
 macro_rules! require_landlock {
     ($needed:expr) => {
         #[cfg(target_os = "linux")]
         {
-            let needed = $needed;
-            let found = $crate::test_helper::confinement::landlock_abi();
-            if found < needed {
-                let _ = ::std::io::Write::write_fmt(
-                    &mut ::std::io::stderr(),
-                    format_args!(
-                        "skip {}: needs Landlock ABI {needed}; found ABI {found}\n",
-                        ::std::thread::current().name().unwrap_or(module_path!())
-                    ),
-                );
+            if !$crate::test_helper::confinement::landlock_reaches($needed) {
                 return;
             }
         }

@@ -1,7 +1,7 @@
 pub(in crate::tui) mod completion;
 
 use crossterm::event::KeyEvent;
-use edtui::actions::{PasteBefore, SwitchMode, cpaste::PasteOverSelection};
+use edtui::actions::{SwitchMode, cpaste::PasteOverSelection};
 use edtui::clipboard::{ClipboardTrait, InternalClipboard};
 use edtui::{EditorEventHandler, EditorMode, EditorState, EditorTheme, EditorView, Index2, Lines};
 use edtui_jagged::index::RowIndex;
@@ -19,37 +19,25 @@ pub(super) struct PromptEditor {
     state: EditorState,
     handler: EditorEventHandler,
     edit_mode: EditMode,
-    base_style: Option<Style>,
-    wrap: bool,
+    base_style: Style,
     last_area: Rect,
 }
 
 impl PromptEditor {
-    pub(super) fn new(mode: EditMode) -> Self {
-        let mut state = EditorState::new(Lines::from(""));
-        let handler = match mode {
-            EditMode::Emacs => EditorEventHandler::emacs_mode(),
-            EditMode::Vi => EditorEventHandler::vim_mode(),
-        };
-        state.execute(SwitchMode(EditorMode::Insert));
-        Self {
-            state,
-            handler,
-            edit_mode: mode,
-            base_style: None,
-            wrap: false,
+    pub(super) fn new(edit_mode: EditMode) -> Self {
+        let mut editor = Self {
+            state: EditorState::default(),
+            handler: EditorEventHandler::default(),
+            edit_mode,
+            base_style: Style::default(),
             last_area: Rect::default(),
-        }
-    }
-
-    #[must_use]
-    pub(super) fn wrap(mut self, on: bool) -> Self {
-        self.wrap = on;
-        self
+        };
+        editor.adopt("");
+        editor
     }
 
     pub(super) fn text(&self) -> String {
-        lines_to_string(&self.state.lines)
+        self.lines().join("\n")
     }
 
     fn lines(&self) -> Vec<String> {
@@ -75,14 +63,11 @@ impl PromptEditor {
         self.state.cursor.row
     }
 
-    fn col(&self) -> usize {
-        self.state.cursor.col
-    }
-
     pub(super) fn row_count(&self) -> usize {
         self.state.lines.len()
     }
 
+    /// A fresh draft: new undo history and handler state, Insert mode, cursor at the end.
     pub(super) fn adopt(&mut self, text: &str) {
         self.state = EditorState::new(Lines::from(text));
         self.state.execute(SwitchMode(EditorMode::Insert));
@@ -100,71 +85,52 @@ impl PromptEditor {
             .on_paste_event(text.to_string(), &mut self.state);
     }
 
-    fn replace_row_bytes(
-        &mut self,
-        row: usize,
-        start: usize,
-        end: usize,
-        replacement: &str,
-    ) -> bool {
-        let Some(line) = self
-            .line(row)
-            .or_else(|| (row == 0 && self.state.lines.is_empty()).then(String::new))
-        else {
-            return false;
-        };
-        let Some(old) = line.get(start..end) else {
+    /// Replace the first row by `replacement` as one undoable edit that keeps the
+    /// mode and the other rows.  False, the draft untouched, when the row is
+    /// empty or already reads `replacement`, or `replacement` spans rows.
+    pub(super) fn replace_first_row(&mut self, replacement: &str) -> bool {
+        let Some(line) = self.line(0).filter(|line| !line.is_empty()) else {
             return false;
         };
         // Command candidates replace one row, never a line separator.
-        if old == replacement || replacement.contains(['\n', '\r']) {
+        if line == replacement || replacement.contains(['\n', '\r']) {
             return false;
         }
-        let start_col = line[..start].chars().count();
-        let end_col = line[..end].chars().count();
-        let new_col = start_col + replacement.chars().count();
         let mode = self.state.mode;
-        let whole_row = start == 0 && end == line.len() && start != end;
-        let has_next = row + 1 < self.state.lines.len();
+        let has_next = self.state.lines.len() > 1;
         let mut clipboard = InternalClipboard::default();
         // edtui extracts a fully selected row, including its row boundary.
-        let pasted = if whole_row && has_next {
+        clipboard.set_text(if has_next {
             format!("{replacement}\n")
         } else {
             replacement.to_owned()
-        };
-        clipboard.set_text(pasted);
+        });
         self.state.set_clipboard(clipboard);
         self.state.mode = EditorMode::Insert;
-        if start == end {
-            self.state.cursor = Index2::new(row, start_col);
-            self.state.execute(PasteBefore);
-        } else {
-            let cursor = self.state.cursor;
-            self.state.execute(SwitchMode(EditorMode::Visual));
-            let selection = self
-                .state
-                .selection
-                .as_mut()
-                .expect("Visual selects the cursor");
-            selection.start = Index2::new(row, start_col);
-            selection.end = Index2::new(row, end_col - 1);
-            self.state.cursor = cursor;
-            self.state.mode = EditorMode::Insert;
-            self.state.execute(PasteOverSelection);
-            if whole_row && !has_next && replacement.is_empty() {
-                self.state.lines.insert(RowIndex::new(row), Vec::new());
-            }
+        let cursor = self.state.cursor;
+        self.state.execute(SwitchMode(EditorMode::Visual));
+        let selection = self
+            .state
+            .selection
+            .as_mut()
+            .expect("Visual selects the cursor");
+        selection.start = Index2::new(0, 0);
+        selection.end = Index2::new(0, line.chars().count() - 1);
+        self.state.cursor = cursor;
+        self.state.mode = EditorMode::Insert;
+        self.state.execute(PasteOverSelection);
+        if !has_next && replacement.is_empty() {
+            self.state.lines.insert(RowIndex::new(0), Vec::new());
         }
         self.state.selection = None;
         self.state.mode = mode;
-        let len = self.state.lines.len_col(row).unwrap_or(0);
+        let len = self.state.lines.len_col(0).unwrap_or(0);
         let max_col = if mode == EditorMode::Normal {
             len.saturating_sub(1)
         } else {
             len
         };
-        self.state.cursor = Index2::new(row, new_col.min(max_col));
+        self.state.cursor = Index2::new(0, replacement.chars().count().min(max_col));
         true
     }
 
@@ -178,18 +144,16 @@ impl PromptEditor {
     }
 
     pub(super) fn set_base_style(&mut self, style: Style) {
-        self.base_style = Some(style);
+        self.base_style = style;
     }
 
     pub(super) fn render(&mut self, frame: &mut Frame, area: Rect) {
         // The host draws chrome and the terminal cursor; edtui stays transparent.
         let theme = EditorTheme::default()
-            .base(self.base_style.unwrap_or_default())
+            .base(self.base_style)
             .cursor_style(Style::default())
             .hide_status_line();
-        let view = EditorView::new(&mut self.state)
-            .theme(theme)
-            .wrap(self.wrap);
+        let view = EditorView::new(&mut self.state).theme(theme).wrap(true);
         frame.render_widget(view, area);
         self.last_area = area;
     }
@@ -243,17 +207,6 @@ impl PromptEditor {
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────────
-
-fn lines_to_string(lines: &Lines) -> String {
-    let mut s = String::new();
-    for (i, row) in lines.iter_row().enumerate() {
-        if i > 0 {
-            s.push('\n');
-        }
-        s.extend(row.iter());
-    }
-    s
-}
 
 fn shell_line_edit_edtui(state: &mut EditorState, key: &KeyEvent) -> bool {
     use crossterm::event::{KeyCode, KeyModifiers};
@@ -330,10 +283,10 @@ mod tests {
                 editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
             }
             let mode = editor.state.mode;
-            assert!(editor.replace_row_bytes(0, 0, 4, "/thinking"));
+            assert!(editor.replace_first_row("/thinking"));
             assert_eq!(editor.text(), "/thinking\n界 e\u{301} 👩‍💻\n");
             assert_eq!(editor.state.mode, mode);
-            assert_eq!(editor.col(), if normal { 8 } else { 9 });
+            assert_eq!(editor.state.cursor.col, if normal { 8 } else { 9 });
             assert!(editor.state.selection.is_none());
             editor.state.undo();
             assert_eq!(editor.text(), "/thi\n界 e\u{301} 👩‍💻\n");
@@ -343,18 +296,8 @@ mod tests {
     }
 
     #[test]
-    fn replacements_insert_at_boundaries_and_delete_without_phantom_cells() {
-        for (text, row, start, end, replacement, expected, col) in [
-            ("", 0, 0, 0, "界", "界", 1),
-            ("ab", 0, 0, 0, "界", "界ab", 1),
-            ("ab", 0, 1, 1, "界", "a界b", 2),
-            ("ab", 0, 2, 2, "界", "ab界", 3),
-            ("ab\n", 1, 0, 0, "界", "ab\n界", 1),
-            ("ab\ncd", 0, 0, 2, "", "\ncd", 0),
-            ("ab\ncd", 1, 0, 2, "", "ab\n", 0),
-            ("ab", 0, 0, 2, "", "", 0),
-            ("a界b", 0, 1, 4, "é", "aéb", 2),
-        ] {
+    fn emptying_the_first_row_leaves_no_phantom_cells() {
+        for (text, expected) in [("ab\ncd", "\ncd"), ("ab", "")] {
             for normal in [false, true] {
                 let mut editor = PromptEditor::new(EditMode::Vi);
                 editor.adopt(text);
@@ -362,14 +305,9 @@ mod tests {
                     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
                 }
                 let mode = editor.state.mode;
-                assert!(editor.replace_row_bytes(row, start, end, replacement));
+                assert!(editor.replace_first_row(""));
                 assert_eq!(editor.text(), expected);
-                assert_eq!(editor.row(), row);
-                let len = editor.state.lines.len_col(row).unwrap_or(0);
-                assert_eq!(
-                    editor.col(),
-                    col.min(if normal { len.saturating_sub(1) } else { len })
-                );
+                assert_eq!((editor.row(), editor.state.cursor.col), (0, 0));
                 assert_eq!(editor.state.mode, mode);
                 editor.state.undo();
                 assert_eq!(editor.text(), text);
@@ -380,31 +318,25 @@ mod tests {
     }
 
     #[test]
-    fn invalid_and_identity_replacements_leave_cursor_mode_and_undo_alone() {
+    fn refused_replacements_leave_cursor_mode_and_undo_alone() {
         let mut editor = PromptEditor::new(EditMode::Vi);
         editor.adopt("a界");
-        assert!(editor.replace_row_bytes(0, 0, 1, "b"));
+        assert!(editor.replace_first_row("b界"));
         editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         let cursor = editor.state.cursor;
         let mode = editor.state.mode;
-        for (row, start, end, replacement) in [
-            (1, 0, 1, "x"),
-            (0, 2, 3, "x"),
-            (0, 3, 2, "x"),
-            (0, 0, 99, "x"),
-            (0, 0, 1, "b"),
-            (0, 1, 1, ""),
-        ] {
-            assert!(!editor.replace_row_bytes(row, start, end, replacement));
+        for replacement in ["b界", "x\ny", "x\r"] {
+            assert!(!editor.replace_first_row(replacement));
             assert_eq!(editor.text(), "b界");
             assert_eq!(editor.state.cursor, cursor);
             assert_eq!(editor.state.mode, mode);
         }
         editor.state.undo();
         assert_eq!(editor.text(), "a界");
-        assert!(!editor.replace_row_bytes(0, 0, 1, "a"));
+        assert!(!editor.replace_first_row("a界"));
         editor.state.redo();
         assert_eq!(editor.text(), "b界");
+        assert!(!PromptEditor::new(EditMode::Vi).replace_first_row("x"));
     }
 
     #[test]
@@ -416,7 +348,7 @@ mod tests {
         editor.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         editor.adopt("fresh\n界\n");
         assert_eq!(editor.text(), "fresh\n界\n");
-        assert_eq!((editor.row(), editor.col()), (2, 0));
+        assert_eq!((editor.row(), editor.state.cursor.col), (2, 0));
         assert_eq!(editor.state.mode, EditorMode::Insert);
         assert!(editor.state.selection.is_none());
         assert_eq!(editor.state.search_pattern(), "");
@@ -440,39 +372,13 @@ mod tests {
     }
 
     #[test]
-    fn apply_candidate_splices_path_token() {
-        let mut editor = PromptEditor::new(EditMode::Emacs);
-        editor.insert_str("cd src/re");
-        assert!(editor.replace_row_bytes(0, 7, 9, "repl/"));
-        assert_eq!(editor.lines(), ["cd src/repl/"]);
-        assert_eq!(editor.col(), "cd src/repl/".chars().count());
-    }
-
-    #[test]
-    fn apply_candidate_targets_the_right_row() {
-        let mut editor = PromptEditor::new(EditMode::Emacs);
-        editor.insert_str("ls |\nca");
-        assert!(editor.replace_row_bytes(1, 0, 2, "cat"));
-        assert_eq!(editor.lines(), ["ls |", "cat"]);
-        assert_eq!((editor.row(), editor.col()), (1, 3));
-    }
-
-    #[test]
-    fn apply_candidate_ignores_a_stale_span() {
-        let mut editor = PromptEditor::new(EditMode::Emacs);
-        editor.insert_str("hi");
-        assert!(!editor.replace_row_bytes(0, 1, 99, "xyz"));
-        assert_eq!(editor.lines(), ["hi"]);
-    }
-
-    #[test]
     fn ctrl_u_kills_to_line_start() {
         let mut editor = PromptEditor::new(EditMode::Emacs);
         editor.insert_str("abcdef");
         editor.state.cursor = Index2::new(0, 3);
         editor.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         assert_eq!(editor.lines(), ["def"]);
-        assert_eq!((editor.row(), editor.col()), (0, 0));
+        assert_eq!((editor.row(), editor.state.cursor.col), (0, 0));
     }
 
     #[test]

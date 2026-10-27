@@ -979,9 +979,9 @@ mod tests {
         let caps = grant.capabilities();
         let exec = caps.exec.as_ref().expect("the office grant restricts exec");
         for tool in ["pandoc", "soffice", "python3", "qpdf", "csvcut"] {
+            let key = ExecKey::Name(tool.into());
             assert!(
-                exec.allows().any(|key| key == &ExecKey::Name(tool.into()))
-                    && exec.denies().all(|key| key != &ExecKey::Name(tool.into())),
+                exec.allows().any(|k| *k == key) && exec.denies().all(|k| *k != key),
                 "the office toolbox must admit {tool}"
             );
         }

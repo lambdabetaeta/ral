@@ -42,14 +42,25 @@ const RULE_PATH_BENEATH: c_uint = 1;
 pub(crate) struct Abi(u32);
 
 impl Abi {
-    /// `LANDLOCK_ACCESS_FS_EXECUTE`, Linux 5.13.
-    #[cfg(test)]
+    /// `LANDLOCK_ACCESS_FS_EXECUTE`, Linux 5.13: Landlock's first ABI.
+    #[cfg(any(test, feature = "test-util"))]
     pub(crate) const EXEC: Self = Self(1);
     /// `LANDLOCK_ACCESS_FS_REFER`, Linux 5.19.
     pub(crate) const REFER: Self = Self(2);
     /// `LANDLOCK_SCOPE_*`, Linux 6.12.
     pub(crate) const SCOPES: Self = Self(6);
+
+    #[cfg(test)]
+    pub(crate) const fn level(self) -> u32 {
+        self.0
+    }
 }
+
+/// The ABI ral itself needs: [`plan`] refuses an exec-restricting grant on a
+/// kernel without Landlock, and every ABI from `Execute` on can enforce it;
+/// `Refer` and the scopes only add to it.
+#[cfg(any(test, feature = "test-util"))]
+pub(crate) const BASELINE_ABI: u32 = Abi::EXEC.0;
 
 impl fmt::Display for Abi {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

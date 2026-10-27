@@ -12,6 +12,7 @@ use ral_core::shell::runtime::{Closure, DefaultPolicy, HookName, HookSig};
 use ral_core::{Captured, Shell, Value};
 use std::sync::Arc;
 
+use super::captured_line;
 use super::host::{Outcome, ReplHost};
 use super::plugin::{lock, manifest::HookEvent};
 
@@ -64,11 +65,7 @@ impl PromptText {
 /// back to its captured stdout, one trailing LF or CRLF trimmed.
 fn prompt_text(value: FOValue, captured: Option<Captured>) -> String {
     match (value, captured) {
-        (FOValue::Unit, Some(cap)) => {
-            let bytes = &cap.stdout;
-            String::from_utf8_lossy(&bytes[..bytes.len() - ral_core::io::terminator_len(bytes)])
-                .into_owned()
-        }
+        (FOValue::Unit, Some(cap)) => captured_line(&cap.stdout),
         (FOValue::Unit, None) => DEFAULT_PROMPT.to_string(),
         (value, _) => Value::from(value).to_string(),
     }
@@ -132,26 +129,6 @@ pub(super) fn render(t: &dyn Transport, host: &Arc<ReplHost>) -> PromptText {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn captured_prompt_removes_only_one_line_terminator() {
-        for (bytes, expected) in [
-            (b"x\r\n".as_slice(), "x"),
-            (b"x\n", "x"),
-            (b"x\r", "x\r"),
-            (b"x\n\r\n", "x\n"),
-            (b"x\r\ny\r\n", "x\r\ny"),
-            (b"", ""),
-            (b"\0\n", "\0"),
-            (b"\xff\r\n", "\u{fffd}"),
-        ] {
-            let captured = Captured {
-                stdout: bytes.to_vec(),
-                stderr: Vec::new(),
-            };
-            assert_eq!(prompt_text(FOValue::Unit, Some(captured)), expected);
-        }
-    }
 
     #[test]
     fn returned_prompt_string_is_not_trimmed() {

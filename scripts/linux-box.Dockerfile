@@ -24,8 +24,9 @@ FROM rust:bookworm
 # the other without a cross toolchain.
 #
 # bubblewrap is the Linux sandbox backend itself.  Absent, every test that
-# spawns an envelope *skips* — which reads exactly like a pass, and is how
-# a `deny` rendering that could not even launch went unnoticed.
+# spawns an envelope fails under RAL_REQUIRE_SANDBOX (set by scripts/ci.sh);
+# elsewhere it *skips*, which reads exactly like a pass, and is how a `deny`
+# rendering that could not even launch went unnoticed.
 #
 # ripgrep is `just lint`'s em-dash check.  Absent, `! rg` reads "not found" as
 # "no match" and passes.

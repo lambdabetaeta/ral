@@ -2,26 +2,10 @@
 
 pub mod confinement;
 
-use crate::authority::policy::{Evidence, ExecGrant, ExecKey};
 use std::time::{Duration, Instant};
 
 /// Unix process-control fixtures bypass bundled tools, which musl cannot serve before `main`.
 pub const SLEEP: &str = if cfg!(unix) { "/bin/sleep" } else { "sleep" };
-
-/// Split evidence into authored exec allowances and exclusions.
-pub fn exec_grant(entries: impl IntoIterator<Item = (ExecKey, Evidence)>) -> ExecGrant {
-    let entries: Vec<_> = entries.into_iter().collect();
-    ExecGrant::of(
-        entries
-            .iter()
-            .filter(|(_, e)| e.positive)
-            .map(|(key, _)| key.clone()),
-        entries
-            .iter()
-            .filter(|(_, e)| e.negative)
-            .map(|(key, _)| key.clone()),
-    )
-}
 
 /// The first `Some` that `probe` answers within `within`, polled every 10ms;
 /// `None` if it never came.

@@ -1,4 +1,3 @@
-use super::super::InfoFd;
 use super::*;
 use std::io::{BufRead, Write};
 use std::os::fd::AsFd;

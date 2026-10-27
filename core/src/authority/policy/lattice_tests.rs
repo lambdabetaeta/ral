@@ -66,10 +66,6 @@ fn break_msg(e: PolicyError) -> String {
     e.message
 }
 
-fn grant(entries: impl IntoIterator<Item = (ExecKey, Evidence)>) -> ExecGrant {
-    test_helper::exec_grant(entries)
-}
-
 fn name(s: &str) -> ExecKey {
     ExecKey::Name(s.into())
 }
@@ -143,12 +139,15 @@ fn with_xdg_defaults<R>(f: impl FnOnce() -> R) -> R {
 
 fn witness_a() -> Capabilities {
     Capabilities {
-        exec: Some(grant([
-            (name("cargo"), Evidence::ALLOW),
-            (name("git"), Evidence::ALLOW),
-            (path_key("/ral-lattice/opt/tool"), Evidence::ALLOW),
-            (dir_key("/ral-lattice/usr/bin"), Evidence::ALLOW),
-        ])),
+        exec: Some(ExecGrant::of(
+            [
+                name("cargo"),
+                name("git"),
+                path_key("/ral-lattice/opt/tool"),
+                dir_key("/ral-lattice/usr/bin"),
+            ],
+            [],
+        )),
         fs: Some(FsPolicy {
             read_prefixes: vec![nprefix("/ral-lattice/tmp")],
             write_prefixes: vec![nprefix("/ral-lattice/tmp")],
@@ -163,13 +162,15 @@ fn witness_a() -> Capabilities {
 
 fn witness_b() -> Capabilities {
     Capabilities {
-        exec: Some(grant([
-            (name("cargo"), Evidence::ALLOW),
-            (name("ls"), Evidence::ALLOW),
-            (path_key("/ral-lattice/opt/tool"), Evidence::DENY),
-            (dir_key("/ral-lattice/usr/bin"), Evidence::ALLOW),
-            (dir_key("/ral-lattice/usr/local/bin"), Evidence::ALLOW),
-        ])),
+        exec: Some(ExecGrant::of(
+            [
+                name("cargo"),
+                name("ls"),
+                dir_key("/ral-lattice/usr/bin"),
+                dir_key("/ral-lattice/usr/local/bin"),
+            ],
+            [path_key("/ral-lattice/opt/tool")],
+        )),
         fs: Some(FsPolicy {
             read_prefixes: vec![nprefix("/ral-lattice/tmp/work")],
             write_prefixes: vec![nprefix("/ral-lattice/tmp/work")],
@@ -793,20 +794,41 @@ fn evidence_is_a_bilattice_in_the_fragment_ral_uses() {
 #[test]
 fn exec_grants_round_trip_both_sets_and_every() {
     let key = name("git");
-    let every = ExecGrant::of([key.clone()], [key.clone()]).with_every();
+    let every = ExecGrant::of([key.clone()], [key]).with_every();
     let json = serde_json::to_string(&every).unwrap();
-    let decoded: ExecGrant = serde_json::from_str(&json).unwrap();
-    assert_eq!(decoded, every);
-    assert!(decoded.every());
-    assert_eq!(decoded.allows().collect::<Vec<_>>(), [&key]);
-    assert_eq!(decoded.denies().collect::<Vec<_>>(), [&key]);
+    assert_eq!(serde_json::from_str::<ExecGrant>(&json).unwrap(), every);
 }
 
+/// Every field is required, no other is known, and no key repeats within a
+/// set, the error naming the key and the set.
 #[test]
-fn exec_grants_refuse_unknown_fields() {
-    let json = r#"{"every":false,"allow":[],"deny":[],"unknown":true}"#;
-    assert!(serde_json::from_str::<ExecGrant>(json).is_err());
-    assert!(serde_json::from_str::<ExecGrant>(r#"{"allow":[],"deny":[]}"#).is_err());
+fn exec_grants_cross_the_wire_strictly() {
+    for json in [
+        r#"{"every":false,"allow":[],"deny":[],"unknown":true}"#,
+        r#"{"allow":[],"deny":[]}"#,
+        r#"{"every":false,"deny":[]}"#,
+        r#"{"every":false,"allow":[]}"#,
+    ] {
+        assert!(serde_json::from_str::<ExecGrant>(json).is_err(), "{json}");
+    }
+    for (field, json) in [
+        (
+            "allow",
+            r#"{"every":false,"allow":[{"Name":"git"},{"Name":"git"}],"deny":[]}"#,
+        ),
+        (
+            "deny",
+            r#"{"every":false,"allow":[],"deny":[{"Name":"git"},{"Name":"git"}]}"#,
+        ),
+    ] {
+        let message = serde_json::from_str::<ExecGrant>(json)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains(&format!("`{field}`")) && message.contains("`name git"),
+            "{message}"
+        );
+    }
 }
 
 // ── Joining and extension ─────────────────────────────────────────────────
@@ -864,7 +886,7 @@ fn extension_reads_omission_by_role() {
     let a = layer(witness_a());
     assert_eq!(a.clone().extend(fragment(Capabilities::default())), a);
     let positive = fragment(Capabilities {
-        exec: Some(grant([(name("git"), Evidence::ALLOW)])),
+        exec: Some(ExecGrant::of([name("git")], [])),
         fs: Some(fs_policy(&nprefix("/ral-lattice/tmp"))),
         ..Capabilities::default()
     });
@@ -881,10 +903,10 @@ fn extension_with_an_exclusion_over_an_omitted_axis_is_every_less_it() {
     let tmp = tempfile::tempdir().unwrap();
     let tree = Tree::lay(tmp.path(), ["/anywhere/else", "/bad/prog", "/secret/f"]);
     let excluding = fragment(Capabilities {
-        exec: Some(grant([(
-            ExecKey::Dir(spelled(&tree.path("/bad"))),
-            Evidence::DENY,
-        )])),
+        exec: Some(ExecGrant::of(
+            [],
+            [ExecKey::Dir(spelled(&tree.path("/bad")))],
+        )),
         fs: Some(FsPolicy {
             deny_paths: vec![spelled(&tree.path("/secret"))],
             ..FsPolicy::default()
@@ -958,10 +980,7 @@ fn an_extension_run_allowance_over_an_omitted_exec_reads_what_it_names() {
         ..FsPolicy::default()
     });
     let extended = base.extend(fragment(Capabilities {
-        exec: Some(grant([(
-            path_key("/ral-lattice/opt/prog"),
-            Evidence::ALLOW,
-        )])),
+        exec: Some(ExecGrant::of([path_key("/ral-lattice/opt/prog")], [])),
         ..Capabilities::default()
     }));
     let stack = test_helper::stack([extended]);
@@ -1024,31 +1043,34 @@ fn rand_exec(u: &Universe, rng: &mut Rng, every_ok: bool) -> Option<ExecGrant> {
     if some(rng, 3) {
         return None;
     }
-    let evidence = |rng: &mut Rng| {
-        rng.pick(&[
-            Evidence::ALLOW,
-            Evidence::ALLOW,
-            Evidence::DENY,
-            Evidence::BOTH,
-        ])
+    let (mut allow, mut deny) = (Vec::new(), Vec::new());
+    // Drawn as allowed, excluded, or both; allowed twice as often.
+    let mut place = |rng: &mut Rng, key: ExecKey| {
+        let (allowed, excluded) =
+            rng.pick(&[(true, false), (true, false), (false, true), (true, true)]);
+        if allowed {
+            allow.push(key.clone());
+        }
+        if excluded {
+            deny.push(key);
+        }
     };
-    let mut entries = Vec::new();
     for d in &u.dirs {
         if some(rng, 3) {
-            entries.push((ExecKey::Dir(FrozenPath::from_surface(d)), evidence(rng)));
+            place(rng, ExecKey::Dir(FrozenPath::from_surface(d)));
         }
     }
     for f in &u.files {
         if some(rng, 4) {
-            entries.push((ExecKey::Path(FrozenPath::from_surface(f)), evidence(rng)));
+            place(rng, ExecKey::Path(FrozenPath::from_surface(f)));
         }
     }
     for n in LAW_NAMES {
         if some(rng, 3) {
-            entries.push((ExecKey::Name(n.into()), evidence(rng)));
+            place(rng, ExecKey::Name(n.into()));
         }
     }
-    let grant = grant(entries);
+    let grant = ExecGrant::of(allow, deny);
     Some(if every_ok && some(rng, 4) {
         grant.with_every()
     } else {
@@ -1287,7 +1309,7 @@ fn an_allowance_keeps_each_link_its_spelling_passed() {
 /// Activation reads denotations: an axis that denotes `t` activates nothing.
 #[test]
 fn activation_is_denotational() {
-    let every = grant([(name("git"), Evidence::ALLOW)]).with_every();
+    let every = ExecGrant::of([name("git")], []).with_every();
     let writes_root = FsPolicy {
         write_prefixes: vec![FrozenPath::root()],
         ..FsPolicy::default()
@@ -1301,7 +1323,7 @@ fn activation_is_denotational() {
     assert!(top.fs().is_some_and(Axis::is_top));
     assert!(!top.is_restrictive());
     assert!(!test_helper::stack([top]).is_restrictive());
-    let excluding = with_exec(grant([(dir_key("/bad"), Evidence::DENY)]).with_every());
+    let excluding = with_exec(ExecGrant::of([], [dir_key("/bad")]).with_every());
     assert!(
         excluding.is_restrictive(),
         "an `every` table with exclusions restricts"
@@ -1329,7 +1351,8 @@ fn activation_is_denotational() {
 }
 
 /// The read judgment agrees with the region of run places after `↓`, and cites
-/// an exclusion that applies; law 7 for a host file and for a bundled tool.
+/// an exclusion that applies; law 7 for a host file and for a bundled tool,
+/// where the head's [`GrantStack::withheld`] agrees with `admit`.
 #[test]
 fn the_read_and_run_judgments_agree_with_their_regions() {
     let (u, mut rng) = (Universe::lay(), Rng(0x9876_5432_10fe_dcba));
@@ -1357,10 +1380,17 @@ fn the_read_and_run_judgments_agree_with_their_regions() {
                 exec_permits(&stack, f) && want,
                 "{f}\nstack = {stack:?}"
             );
+            assert_eq!(admits(&stack, f), runs, "{f}\nstack = {stack:?}");
         }
-        let tool = stack.admit(&baseline, Program::Tool("ls")).is_ok();
+        let ls = || Program::Tool("ls");
+        let tool = stack.admit(&baseline, ls()).is_ok();
         let tool_exec = rules(&stack).is_none_or(|r| r.evidence(Subject::Tool("ls")).permits());
         assert_eq!(tool, tool_exec, "stack = {stack:?}");
+        assert_eq!(
+            stack.withheld(&baseline, &ls()).is_ok(),
+            tool,
+            "stack = {stack:?}"
+        );
     }
 }
 
@@ -1420,10 +1450,10 @@ fn a_nested_run_allowance_cannot_make_what_the_ceiling_withholds_readable() {
     let tree = Tree::lay(tmp.path(), ["/opt/prog"]);
     let prog = tree.path("/opt/prog");
     let mut stack = test_helper::stack([with_fs(FsPolicy::default())]);
-    stack.push(with_exec(grant([(
-        ExecKey::Path(spelled(&prog)),
-        Evidence::ALLOW,
-    )])));
+    stack.push(with_exec(ExecGrant::of(
+        [ExecKey::Path(spelled(&prog))],
+        [],
+    )));
     let baseline = Baseline::default();
     assert!(stack.read(&baseline, &trace(&prog)).is_err());
     assert!(stack.admit(&baseline, file(&prog)).is_err());
@@ -1455,11 +1485,10 @@ fn a_bundled_tool_reads_ral_s_binary() {
     if crate::uutils::bundled_name("ls".as_ref()).is_none() {
         return;
     }
-    let exec = grant([
-        (name("ls"), Evidence::ALLOW),
-        (ExecKey::Path(own_file), Evidence::DENY),
-        (ExecKey::Dir(own_dir), Evidence::DENY),
-    ]);
+    let exec = ExecGrant::of(
+        [name("ls")],
+        [ExecKey::Path(own_file), ExecKey::Dir(own_dir)],
+    );
     assert!(
         tool(&test_helper::stack([with_exec(exec)])),
         "an exec exclusion of ral's binary leaves a bundled tool alone"
@@ -1520,11 +1549,11 @@ fn a_root_directory_runs_files_not_tools_and_reads_what_it_runs() {
         arg0: p.to_path_buf(),
     };
     let under_root = ExecKey::Dir(FrozenPath::root());
-    let runs_anywhere = with_exec(grant([(under_root.clone(), Evidence::ALLOW)]));
-    let runs_in_opt = with_exec(grant([(
-        ExecKey::Dir(spelled(&root.join("opt"))),
-        Evidence::ALLOW,
-    )]));
+    let runs_anywhere = with_exec(ExecGrant::of([under_root.clone()], []));
+    let runs_in_opt = with_exec(ExecGrant::of(
+        [ExecKey::Dir(spelled(&root.join("opt")))],
+        [],
+    ));
 
     let met = test_helper::stack([runs_anywhere.clone(), runs_in_opt]);
     assert!(met.withheld(&baseline, &program(&opt_t)).is_ok());
@@ -1535,7 +1564,7 @@ fn a_root_directory_runs_files_not_tools_and_reads_what_it_runs() {
     assert!(alone.withheld(&baseline, &Program::Tool("ls")).is_err());
 
     let reads_only_what_it_runs = test_helper::stack([layer(Capabilities {
-        exec: Some(grant([(under_root, Evidence::ALLOW)])),
+        exec: Some(ExecGrant::of([under_root], [])),
         fs: Some(FsPolicy::default()),
         ..Capabilities::default()
     })]);

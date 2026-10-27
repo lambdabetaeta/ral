@@ -697,7 +697,7 @@ impl Machine {
                     ));
                 };
                 let mut bytes = bytes.into_vec();
-                bytes.truncate(bytes.len() - io::terminator_len(&bytes));
+                bytes.truncate(io::without_terminator(&bytes).len());
                 Focus::Return(Terminal::Value(Value::string(
                     crate::shell::runtime::decode_utf8_strict(
                         bytes,

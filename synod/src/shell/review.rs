@@ -67,8 +67,8 @@ pub struct ChangeFile {
     /// For a rename, the name it had before.
     pub rename_from: Option<String>,
     pub kind: ChangeKind,
-    /// What the card's button does with the file as it is now.  Absent for
-    /// a deletion or a created directory.  The window names the file
+    /// What the card's button does with the file as it is now.  Absent
+    /// unless a plain file stands at `path`.  The window names the file
     /// back by its place in [`WindowReport::files`], never by a path of its
     /// own, so the shell alone decides which file on disk a button reaches.
     pub open: Option<OpenAs>,
@@ -112,7 +112,7 @@ pub(crate) fn hold(review: &Review, folder: &Path, report: &JobReport) {
         .map(|change| {
             let (kind, shown, from) = match change {
                 Change::Created { path, .. } => (ChangeKind::Created, path.clone(), None),
-                Change::Modified { path } => (ChangeKind::Modified, path.clone(), None),
+                Change::Modified { path, .. } => (ChangeKind::Modified, path.clone(), None),
                 Change::Touched { path } => (ChangeKind::Touched, path.clone(), None),
                 Change::Deleted { path, .. } => (ChangeKind::Deleted, path.clone(), None),
                 Change::Renamed { from, to } => {
@@ -120,11 +120,7 @@ pub(crate) fn hold(review: &Review, folder: &Path, report: &JobReport) {
                 }
             };
             ChangeFile {
-                open: (!matches!(
-                    change,
-                    Change::Deleted { .. } | Change::Created { folder: true, .. }
-                ))
-                .then(|| open_as(&shown)),
+                open: change.leaves_file().then(|| open_as(&shown)),
                 rename_from: from,
                 path: shown,
                 kind,
@@ -211,7 +207,10 @@ pub(crate) fn file_to_open(review: &Review, index: usize, shown: &str) -> Result
         ));
     };
     let Some(how) = open else {
-        return Err(format!("{rel} has no open action in this report."));
+        return Err(format!(
+            "{rel} is not a plain file now (it was deleted, or is a folder or a link), \
+             so there is nothing to open."
+        ));
     };
     let names = inside(&rel)?;
     let (last, above) = names.split_last().expect("a descendant has a name");
@@ -295,6 +294,8 @@ pub fn job_report(review: State<'_, Review>, folder: PathBuf) -> Result<WindowRe
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    use synod::workspace::EntryKind;
+    use synod::workspace::changes::ChangeSet;
 
     /// A review holding `names` as created files in `folder`, in that order.
     fn holding(folder: &Path, names: &[&str]) -> Review {
@@ -314,6 +315,58 @@ mod tests {
                 unreadable: Vec::new(),
             },
         })))
+    }
+
+    #[test]
+    fn a_card_opens_only_where_a_plain_file_now_stands() {
+        let created = |path: &str, now| Change::Created {
+            path: path.into(),
+            now,
+        };
+        let report = JobReport {
+            finished_at_ms: 0,
+            changes: ChangeSet {
+                changes: vec![
+                    created(
+                        "file.pdf",
+                        EntryKind::File {
+                            size: 1,
+                            mtime_ns: 1,
+                            mode: 0o644,
+                        },
+                    ),
+                    created(
+                        "link.pdf",
+                        EntryKind::Link {
+                            target: "elsewhere".into(),
+                        },
+                    ),
+                    Change::Modified {
+                        path: "became-a-folder.pdf".into(),
+                        now: EntryKind::Folder,
+                    },
+                    Change::Deleted {
+                        path: "gone.pdf".into(),
+                        folder: false,
+                    },
+                ],
+            },
+            unreadable: Vec::new(),
+        };
+        let review = Review::default();
+        hold(&review, Path::new("folder"), &report);
+
+        let opens: Vec<_> = review
+            .0
+            .lock_ignore_poison()
+            .as_ref()
+            .expect("held")
+            .report
+            .files
+            .iter()
+            .map(|file| file.open)
+            .collect();
+        assert_eq!(opens, [Some(OpenAs::Open), None, None, None]);
     }
 
     #[test]

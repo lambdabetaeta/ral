@@ -74,8 +74,8 @@ pub(crate) fn stdin_reader(name: &str, shell: &Shell) -> Settled<Box<dyn std::io
     Ok(Box::new(std::io::stdin().lock()))
 }
 
-/// The one line reader: `reader` a line at a time, each stripped of its
-/// [`crate::io::terminator_len`] and left undecoded, since decoding is each
+/// The one line reader: `reader` a line at a time, each stripped by
+/// [`crate::io::without_terminator`] and left undecoded, since decoding is each
 /// caller's policy.  The final line need not be terminated.
 pub(crate) fn read_lines<R: std::io::BufRead>(
     name: &'static str,
@@ -86,7 +86,7 @@ pub(crate) fn read_lines<R: std::io::BufRead>(
         match reader.read_until(b'\n', &mut line) {
             Ok(0) => None,
             Ok(_) => {
-                line.truncate(line.len() - crate::io::terminator_len(&line));
+                line.truncate(crate::io::without_terminator(&line).len());
                 Some(Ok(line))
             }
             Err(e) => Some(Err(sig(format!("{name}: {e}")))),

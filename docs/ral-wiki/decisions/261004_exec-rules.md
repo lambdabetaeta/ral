@@ -12,7 +12,7 @@ anchors: [ExecGrant, ExecKey, ExecRules, ExecAllow, ExecDeny, Table, Withheld, P
 > table. What changed is the table: `ExecRules` is `Table<ExecScope>`, its
 > meet the generic one, its proof and worked cases in
 > [[design/authority-tables|authority-tables]]; the authored `ExecGrant` is
-> one map over `ExecKey`, and the veto's rank is `Rank::Name`.
+> two sets of `ExecKey`, allowances and exclusions, and the veto's rank is `Rank::Name`.
 
 # Exec rules: one table, one function
 

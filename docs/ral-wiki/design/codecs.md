@@ -130,8 +130,8 @@ reader.** The rule, with its table in `docs/SPEC.md` §7.3:
 - the final line need not be terminated;
 - each line strips its own terminator, so mixed endings are fine.
 
-One function measures a terminator (0, 1, or 2 bytes), and three kinds of
-caller share it:
+One function, `ral_core::io::without_terminator`, strips one terminator, and
+three kinds of caller share it:
 
 - *line readers* — `from-lines`, `from-jsonl`, `fold-lines` and the prelude
   filters over it, `line-count`, and `lines` — all split through one reader
@@ -141,7 +141,7 @@ caller share it:
 - *one-terminator strippers* — capture, `from-line`, `ask`, and captured REPL
   display text (`_ed-tui` and Unit-returning prompts) — remove at most one
   terminator from the end: `a\r\n\r\n` becomes `a\r\n`. The host shares
-  `ral_core::io::terminator_len`; direct prompt Strings are untouched;
+  `ral_core::io::without_terminator`; direct prompt Strings are untouched;
 - *writers* — `to-line`, `to-lines`, `to-jsonl`, `echo` — emit `\n` only.
   Reading accepts both endings the world writes; ral's own output has one
   spelling.

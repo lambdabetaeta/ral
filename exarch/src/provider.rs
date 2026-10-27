@@ -248,7 +248,7 @@ impl Provider {
     }
 }
 
-/// Admit a freshly signed-in `ChatGPT` token to the live store and catalog.
+/// Admit a freshly committed login to the live store and catalog.
 ///
 /// Returns who it now is and what it is now called — the same order for every
 /// front-end, since which store an account lands in and its label are provider
@@ -260,10 +260,10 @@ impl Provider {
 /// The committed account has since been signed out.
 pub fn admit_login(
     holdings: &Holdings,
-    token: &oauth::CredentialHandle,
+    login: &oauth::CredentialHandle,
 ) -> Result<(AccountId, String), String> {
     holdings.change(|store| {
-        let account = store.add_login(token)?;
+        let account = store.add_login(login)?;
         // The store's name for it, which says which account when two share an email.
         let label = identity::label(&account, &store.available());
         Ok((account.id, label))

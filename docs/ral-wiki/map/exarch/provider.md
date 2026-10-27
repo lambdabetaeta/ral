@@ -216,18 +216,32 @@ product-specific vaults, configuration, logs and model caches remain separate.
   file. Refresh, read-and-attach, login commit, host-id creation and removal all
   use it. The predecessor is reread under the lease, which spans issuer exchange
   and commit. Only the lease can attach, publish or retire an owner.
-- `State` separates pending subscribers from `CredentialState`: ready or
-  uncertain credentials, an unsaved predecessor/successor pair, or a retired
-  credential. Exhaustive, pure reconciliation retains unresolved outcomes while
-  disk still names their predecessor and adopts a changed credential otherwise.
+- `State` separates pending subscribers from `CredentialState`: a `Live`
+  credential (ready, uncertain, or an unsaved predecessor/successor pair) or a
+  retired one. Exhaustive, pure reconciliation returns only `Live`: it retains
+  unresolved outcomes while disk still names their predecessor and adopts a
+  changed credential otherwise, so preparation never meets `Retired` after it.
   Login and removal publish before returning; `login_flow` returns the committed
   handle, not a token for delayed admission to overwrite.
 - Retirement refuses preparation while disk lacks the account. A login committed
   by another process revives the same canonical owner at the next preparation
   or credential load; a pre-removal snapshot cannot recreate it.
+- `oauth::credentials()` returns the store or lease failure rather than an empty
+  list; `resolve_and_scrub` warns on stderr and offers no logins, so a lease
+  timeout at startup is never a silent absence of accounts.
 - A caller may cancel its wait; the owner retains a submitted exchange through
-  persistence. Lock acquisition and issuer work share a 30-second deadline.
-  Snapshots take only a short mutex, never a network or file-lock wait.
+  persistence. The caller's 30-second deadline bounds lease acquisition and the
+  decision to submit (once passed, nothing is marked or sent); a submitted
+  exchange runs under its own fixed 30-second budget, so lock contention cannot
+  shorten it. Snapshots take only a short mutex, never a network or file-lock wait.
+- A refresh fails as a `RefreshError`, typed by whether the issuer may have
+  rotated the token: `NotSubmitted` (client build, connect, DNS or TLS failure:
+  provably unsent), `Rejected` (the issuer answered a 4xx) or `Ambiguous`
+  (sent with an unknown outcome: a timeout, a dropped connection, a 5xx that may
+  follow a committed rotation, an unreadable or unusable success body). The credential is `Uncertain` while the
+  exchange is in flight; only `Ambiguous`, or exhausting the exchange budget,
+  leaves it so. The other two restore `Ready` with the same token, and the
+  error says a retry is safe.
 - Within the owning process, an ambiguous exchange is not replayed. A failed
   write retains the fresh live token and its disk predecessor; a later
   preparation can retry that exact write. A changed or removed disk account wins.
@@ -248,8 +262,8 @@ adds an account; `SignIn::Renew(token, method)` refuses a different identity.
 use nonempty subject as issued identity; Codex uses the injective
 `base64url(sub):base64url(chatgpt_account_id)` composite, retaining the raw
 backend id separately for headers. Naming metadata does not participate in keys.
-Issuer refresh functions return `RefreshUpdate<M>` with typed naming/token
-metadata. The dispatcher matches the grant once and preserves issued identity,
+Issuer refresh functions send through the shared `submit_refresh` and return
+`RefreshUpdate<M>` with typed naming/token metadata, or a `RefreshError`. The dispatcher matches the grant once and preserves issued identity,
 Chatgpt client id and Codex backend id when applying the update. The flat disk
 schema remains separate so semantic errors reject only the affected entry.
 
@@ -354,7 +368,7 @@ unlocked, and applying the change live through `Holdings::change`.
 `Wallet::exarch()` is `Keychain::for_app(EXARCH)` over `config::path()`, read
 at startup as well as written by `/providers`; synod's `accounts::wallet()` is
 its own. An OAuth login is no wallet's: the token store is exarch's whichever
-product signed in. `Bureau::sign_out` removes the token and retires the local
+product signed in. `Holdings::sign_out` removes the token and retires the local
 account; the caller runs `oauth::revoke_blocking` off its UI thread and reports
 issuer acceptance, local-only removal or revocation failure without conflating them.
 

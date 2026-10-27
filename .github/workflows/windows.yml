@@ -3,12 +3,19 @@ name: Windows
 # (a `cargo check --target x86_64-pc-windows-msvc` proves the workspace
 # compiles, but never runs a test), plus exarch's Windows-only dep tree
 # (windows-sys, cfg(windows) console paths) that a Unix host cannot build
-# at all.  Runs on every push to main so this drift is caught continuously
-# rather than only when someone remembers to dispatch it.
+# at all.  Runs on every push to main and every pull request, as ci.yml does,
+# so this drift is caught continuously rather than only when someone
+# remembers to dispatch it.
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
+
+# A newer push to the same ref supersedes the run in flight.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always

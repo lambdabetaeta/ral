@@ -58,6 +58,12 @@ pub(crate) fn run_interactive(opts: &crate::cli::InteractiveOpts) -> ExitCode {
     }
 }
 
+/// Captured stdout as one line of terminal text: one trailing LF or CRLF
+/// removed, the rest decoded lossily.
+fn captured_line(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(ral_core::io::without_terminator(bytes)).into_owned()
+}
+
 /// Evaluate `src` on `shell` to its value.
 #[cfg(test)]
 pub(crate) fn eval(shell: &mut ral_core::Shell, src: &str) -> ral_core::Value {
@@ -157,5 +163,26 @@ pub(crate) mod in_temp {
             runtime,
             dress,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::captured_line;
+
+    #[test]
+    fn captured_line_removes_only_one_line_terminator() {
+        for (bytes, expected) in [
+            (b"x\r\n".as_slice(), "x"),
+            (b"x\n", "x"),
+            (b"x\r", "x\r"),
+            (b"x\n\r\n", "x\n"),
+            (b"x\r\ny\r\n", "x\r\ny"),
+            (b"", ""),
+            (b"\0\n", "\0"),
+            (b"\xff\r\n", "\u{fffd}"),
+        ] {
+            assert_eq!(captured_line(bytes), expected);
+        }
     }
 }

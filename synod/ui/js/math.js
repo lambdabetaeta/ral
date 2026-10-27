@@ -115,13 +115,7 @@ function* mathSpans(src) {
       const from = at + pair.open.length;
       const close = findOutsideCode(src, code, pair.close, from);
       const end = close === -1 ? src.length : close + pair.close.length;
-      yield {
-        start: at,
-        end,
-        from,
-        close,
-        display: pair.display,
-      };
+      yield { start: at, end, from, close, display: pair.display };
       // Even an incomplete longest opener owns its body and its suffix.
       at = end;
       continue;

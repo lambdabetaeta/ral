@@ -303,6 +303,7 @@ fn all_login_routes_load_independent_cells_in_stable_order() {
         renewed.access_token = "renewed".into();
         assert!(oauth::save_one(&renewed).unwrap());
         let login = oauth::credentials()
+            .unwrap()
             .into_iter()
             .find(|login| {
                 login.snapshot().issued == renewed.issued

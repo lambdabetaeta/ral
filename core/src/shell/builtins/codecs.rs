@@ -68,7 +68,7 @@ pub(super) fn builtin_from_string(args: &[Value], shell: &Shell) -> Settled<Valu
 
 pub(super) fn builtin_from_line(args: &[Value], shell: &Shell) -> Settled<Value> {
     let mut text = input_text(args, "from-line", shell)?;
-    text.truncate(text.len() - crate::io::terminator_len(text.as_bytes()));
+    text.truncate(crate::io::without_terminator(text.as_bytes()).len());
     Ok(Value::string(text))
 }
 

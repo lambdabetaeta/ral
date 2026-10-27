@@ -28,7 +28,8 @@ use super::exec::ExecRules;
 use super::fs::FsLayer;
 use crate::path::{FrozenPath, RealPath, Subject, Trace};
 use crate::syntax::quote::quote_word;
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeSet;
 use strum::{EnumString, IntoStaticStr, VariantArray};
 
@@ -161,10 +162,34 @@ impl std::fmt::Display for ExecKey {
 #[serde(deny_unknown_fields)]
 pub struct ExecGrant {
     every: bool,
-    #[serde(default)]
+    #[serde(deserialize_with = "allow_keys")]
     allow: BTreeSet<ExecKey>,
-    #[serde(default)]
+    #[serde(deserialize_with = "deny_keys")]
     deny: BTreeSet<ExecKey>,
+}
+
+/// The keys of `field`, each stated once.
+fn distinct_keys<'de, D: Deserializer<'de>>(
+    field: &str,
+    deserializer: D,
+) -> Result<BTreeSet<ExecKey>, D::Error> {
+    let mut keys = BTreeSet::new();
+    for key in Vec::<ExecKey>::deserialize(deserializer)? {
+        if let Some(repeated) = keys.replace(key) {
+            return Err(D::Error::custom(format!(
+                "exec `{field}` lists {repeated} twice; state each key once"
+            )));
+        }
+    }
+    Ok(keys)
+}
+
+fn allow_keys<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeSet<ExecKey>, D::Error> {
+    distinct_keys("allow", d)
+}
+
+fn deny_keys<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeSet<ExecKey>, D::Error> {
+    distinct_keys("deny", d)
 }
 
 impl ExecGrant {

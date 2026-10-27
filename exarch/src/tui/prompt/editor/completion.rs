@@ -6,7 +6,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
 use super::PromptEditor;
-use ral_core::text::char_to_byte;
 use unicode_width::UnicodeWidthStr;
 
 /// The most candidate rows a [`Menu`] shows at once, scrolling within them.  A
@@ -118,20 +117,10 @@ impl Menu {
         self.selected = (self.selected + n - 1) % n;
     }
 
-    /// Replace the slash command up to the cursor on the first row.
+    /// Replace the first row, which the menu matched whole, wherever the cursor is.
     /// An unchanged draft leaves the key available to the host.
     pub(in crate::tui::prompt) fn accept(&self, prompt: &mut PromptEditor) -> bool {
-        let row = prompt.row();
-        if row != 0 {
-            return false;
-        }
-        let Some(line) = prompt.line(row) else {
-            return false;
-        };
-        let end_col = prompt.col() + usize::from(prompt.state.mode == edtui::EditorMode::Normal);
-        let end = char_to_byte(&line, end_col);
-        let replacement = &self.candidates[self.selected].replacement;
-        prompt.replace_row_bytes(row, 0, end, replacement)
+        prompt.row() == 0 && prompt.replace_first_row(&self.candidates[self.selected].replacement)
     }
 
     /// Draw the menu at the top left of `area`.

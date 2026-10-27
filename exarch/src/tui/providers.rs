@@ -618,17 +618,8 @@ pub(super) fn input(
                         p.signing_out = false;
                         p.settled(outcome, fresh);
                     }
-                    if succeeded
-                        && app
-                            .tabs
-                            .ids()
-                            .into_iter()
-                            .filter_map(|tab| app.tabs.agent(tab))
-                            .any(|agent| agent.current_provider().account().id.as_str() == id)
-                    {
-                        app.tabs
-                            .focused_recorder()
-                            .emit_or_report(crate::record::Forensic::SystemNote { text: note });
+                    if succeeded {
+                        note_if_running(app, &id, note);
                     }
                 })));
                 if let Ok(token) = result {
@@ -658,20 +649,26 @@ pub(super) fn input(
         None => format!("{done} {label}"),
     });
     o.settled(outcome, fresh);
+    if lost {
+        let text =
+            format!("[{done} {label}; the running model keeps its connection until you /model]");
+        note_if_running(app, &id, text);
+    }
+    true
+}
+
+/// Note `text` in the focused transcript when some tab runs on account `id`.
+fn note_if_running(app: &App, id: &str, text: String) {
     let tabs = &app.tabs;
-    let active = tabs
+    if tabs
         .ids()
         .into_iter()
         .filter_map(|tab| tabs.agent(tab))
-        .any(|agent| agent.current_provider().account().id.as_str() == id);
-    if lost && active {
-        let text =
-            format!("[{done} {label}; the running model keeps its connection until you /model]");
-        app.tabs
-            .focused_recorder()
+        .any(|agent| agent.current_provider().account().id.as_str() == id)
+    {
+        tabs.focused_recorder()
             .emit_or_report(crate::record::Forensic::SystemNote { text });
     }
-    true
 }
 
 fn revocation_status(

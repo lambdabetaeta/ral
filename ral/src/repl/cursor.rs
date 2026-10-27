@@ -49,12 +49,11 @@ pub(super) fn partial_line_marker() {
 fn drawn_rows(prompt: &str, buffer: &str, cols: Option<usize>, config: &Config) -> usize {
     let cols = cols.filter(|&c| c > 0).unwrap_or(usize::MAX);
     let tab = usize::from(config.tab_stop()).max(1);
-    let mut row = 0usize;
-    let mut col = 0usize;
+    let (mut row, mut col) = (0, 0);
     for text in [prompt, buffer] {
         for grapheme in text.graphemes(true) {
             if grapheme == "\n" {
-                row = row.saturating_add(1);
+                row += 1;
                 col = 0;
                 continue;
             }
@@ -63,19 +62,19 @@ fn drawn_rows(prompt: &str, buffer: &str, cols: Option<usize>, config: &Config) 
             } else {
                 usize::from(config.grapheme_cluster_mode().width(grapheme))
             };
-            col = col.saturating_add(width);
+            col += width;
             if col > cols {
-                row = row.saturating_add(1);
+                row += 1;
                 col = width;
             }
         }
         // The editor measures prompt and buffer separately.
         if col == cols {
-            row = row.saturating_add(1);
+            row += 1;
             col = 0;
         }
     }
-    row.saturating_add(1)
+    row + 1
 }
 
 /// Erase the accepted drawing from the row below its final cursor position.

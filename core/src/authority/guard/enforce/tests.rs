@@ -190,16 +190,19 @@ fn a_deny_holding_a_hard_link_cites_the_object_under_another_name() {
 mod words {
     use super::*;
     use crate::authority::guard::enforce::{Refusal, check_exec, check_fs_exact, deny_head};
-    use crate::authority::policy::{Evidence, ExecKey, Program};
+    use crate::authority::policy::{ExecGrant, ExecKey, Program};
     use crate::fact::Resource;
 
     fn grants(layers: impl IntoIterator<Item = Capabilities>) -> GrantStack {
         crate::test_helper::stack(layers.into_iter().map(layer))
     }
 
-    fn exec(entries: &[(ExecKey, Evidence)]) -> Capabilities {
+    fn exec(
+        allow: impl IntoIterator<Item = ExecKey>,
+        deny: impl IntoIterator<Item = ExecKey>,
+    ) -> Capabilities {
         Capabilities {
-            exec: Some(crate::test_helper::exec_grant(entries.iter().cloned())),
+            exec: Some(ExecGrant::of(allow, deny)),
             ..Capabilities::default()
         }
     }
@@ -229,11 +232,11 @@ mod words {
         let tmp = tempfile::tempdir().unwrap();
         let tree = Tree::lay(tmp.path(), &["/x/t", "/other/"]);
         let t = tree.at("/x/t");
-        let only = exec(&[(dir(&tree.at("/other")), Evidence::ALLOW)]);
+        let only = exec([dir(&tree.at("/other"))], []);
         let one = refusal(&grants([only.clone()]), &t);
         assert!(one.message.contains("lets it run"), "{}", one.message);
         assert!(!one.hint.unwrap().contains("enclosing grant"));
-        let outer = exec(&[(dir(&tree.at("/x")), Evidence::ALLOW)]);
+        let outer = exec([dir(&tree.at("/x"))], []);
         let two = refusal(&grants([outer, only]), &t);
         assert!(
             two.message
@@ -251,7 +254,7 @@ mod words {
         let tmp = tempfile::tempdir().unwrap();
         let tree = Tree::lay(tmp.path(), &["/x/t"]);
         let x = tree.at("/x");
-        let both = exec(&[(dir(&x), Evidence::ALLOW), (dir(&x), Evidence::DENY)]);
+        let both = exec([dir(&x)], [dir(&x)]);
         let e = refusal(&grants([both]), &tree.at("/x/t"));
         let named = format!("`dir `absolute {}", crate::path::shown(&x));
         assert!(e.message.contains(&named), "{}", e.message);
@@ -268,7 +271,7 @@ mod words {
         let tmp = tempfile::tempdir().unwrap();
         let tree = Tree::lay(tmp.path(), &["/x/t"]);
         let x = dir(&tree.at("/x"));
-        let grants = grants([exec(&[(x.clone(), Evidence::ALLOW), (x, Evidence::DENY)])]);
+        let grants = grants([exec([x.clone()], [x])]);
         let baseline = Baseline::default();
         let program = file(&tree.at("/x/t"));
         let why = grants.withheld(&baseline, &program).unwrap_err();
@@ -305,10 +308,7 @@ mod words {
         let tmp = tempfile::tempdir().unwrap();
         let sh = tmp.path().join("sh");
         std::fs::copy("/usr/bin/true", &sh).unwrap();
-        let deny = exec(&[
-            (ExecKey::Name("sh".into()), Evidence::ALLOW),
-            (ExecKey::Name("sh".into()), Evidence::DENY),
-        ]);
+        let deny = exec([ExecKey::Name("sh".into())], [ExecKey::Name("sh".into())]);
         let e = refusal(&grants([deny]), crate::path::utf8(&sh).unwrap());
         assert!(
             e.message.contains("excluded by `` `name sh ``"),
@@ -325,7 +325,7 @@ mod words {
         let tmp = tempfile::tempdir().unwrap();
         let tree = Tree::lay(tmp.path(), &["/x/t"]);
         let (x, t) = (tree.at("/x"), tree.at("/x/t"));
-        let runs = exec(&[(dir(&x), Evidence::ALLOW)]);
+        let runs = exec([dir(&x)], []);
         let reads = Capabilities {
             fs: Some(FsPolicy::default()),
             ..Capabilities::default()

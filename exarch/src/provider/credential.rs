@@ -101,7 +101,8 @@ impl CredentialStore {
     /// every one that was *present* — the malformed one too, since a value
     /// with a pasted newline is still a live secret for a child to inherit.
     /// The process is sealed first (`seal`), and each variable erased (`erase`).
-    /// Signed-in accounts are folded in from the token store.
+    /// Signed-in accounts are folded in from the token store; a store that
+    /// cannot be read warns on stderr and offers no logins.
     ///
     /// SAFETY: call this while the process is still single-threaded (before any
     /// session worker thread exists), so the env scrub races nothing.
@@ -133,8 +134,15 @@ impl CredentialStore {
             #[cfg(test)]
             test_state: None,
         };
-        for login in oauth::credentials() {
-            let _ = store.add_login(&login);
+        match oauth::credentials() {
+            Ok(logins) => {
+                for login in logins {
+                    let _ = store.add_login(&login);
+                }
+            }
+            Err(error) => ral_core::errln!(
+                "warning: no signed-in accounts were loaded, so none are offered: {error}"
+            ),
         }
         store
     }

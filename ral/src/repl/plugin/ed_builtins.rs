@@ -21,6 +21,7 @@ use ral_core::{Shell, Value};
 use std::borrow::Cow;
 use std::sync::Arc;
 
+use super::super::captured_line;
 use super::super::completion::{CommandAt, parse_at};
 use super::super::enquiry::{ClipboardReq, Data, EditorOp, EditorSnapshot, Gated, HighlightReq};
 use super::super::highlight_style::style_ansi;
@@ -130,12 +131,6 @@ fn tui_result(output: Value, status: i64) -> Value {
     ])
 }
 
-/// Decode captured stdout lossily, stripping one trailing LF or CRLF.
-fn decode_captured(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(&bytes[..bytes.len() - ral_core::io::terminator_len(bytes)])
-        .into_owned()
-}
-
 /// `_ed-tui {body}` — suspend editor, run body, return `[output: Str, status: Int]`.
 ///
 /// On success: `status: 0`, `output: <the body's captured stdout>`.
@@ -172,7 +167,7 @@ pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
         ral_core::shell::evaluator::apply(&args[0], Vec::new(), &loaned, shell)
     });
     match result {
-        Ok(_) => Ok(tui_result(Value::string(decode_captured(&bytes)), 0)),
+        Ok(_) => Ok(tui_result(Value::string(captured_line(&bytes)), 0)),
         Err(Break::Error(e)) => Ok(tui_result(
             Value::string(e.message.clone()),
             i64::from(e.code()),
@@ -542,22 +537,6 @@ mod tests {
     use super::*;
     use crate::repl::exec::line_run;
     use ral_core::{RequestedTerminalAccess, protocol::Run};
-
-    #[test]
-    fn captured_selection_removes_only_one_line_terminator() {
-        for (bytes, expected) in [
-            (b"x\r\n".as_slice(), "x"),
-            (b"x\n", "x"),
-            (b"x\r", "x\r"),
-            (b"x\n\r\n", "x\n"),
-            (b"x\r\ny\r\n", "x\r\ny"),
-            (b"", ""),
-            (b"\0\n", "\0"),
-            (b"\xff\r\n", "\u{fffd}"),
-        ] {
-            assert_eq!(decode_captured(bytes), expected);
-        }
-    }
 
     /// Every `_ed-*` entry must carry all static facets directly.
     #[test]

@@ -169,9 +169,14 @@ ci:
 linux-ci:
     scripts/ci.sh linux-box
 
+# `uid` and `gid` are the image's `dev` user's, who owns what a run writes
+# through the bind mount.  CI passes the runner's; the defaults are the
+# Dockerfile's, since a Mac's own gid 20 is Debian's `dialout`.
+
 # Build the container `linux-ci` runs in.
-linux-box:
-    "$(command -v docker || command -v podman)" build -t ral-linux-box -f scripts/linux-box.Dockerfile scripts
+linux-box uid='1000' gid='1000':
+    engine=$(command -v docker || command -v podman) || { echo 'linux-box: needs docker or podman on PATH' >&2; exit 1; }; \
+    "$engine" build -t ral-linux-box -f scripts/linux-box.Dockerfile --build-arg UID={{uid}} --build-arg GID={{gid}} scripts
 
 # Render the static site into site/.
 site:

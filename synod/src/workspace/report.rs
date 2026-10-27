@@ -46,6 +46,7 @@ mod tests {
     use super::*;
     use crate::test_fixture::workshop;
     use crate::workspace::changes::Change;
+    use crate::workspace::manifest::EntryKind;
 
     #[test]
     fn the_report_names_each_change() {
@@ -60,12 +61,14 @@ mod tests {
 
         let report = job_report(&before, &after);
         assert!(report.finished_at_ms > 0);
-        assert!(report.changes.changes.contains(&Change::Modified {
-            path: "invoices-2026.xlsx".into(),
-        }));
+        assert!(report.changes.changes.iter().any(|change| matches!(
+            change,
+            Change::Modified { path, now: EntryKind::File { size: 12, .. } }
+                if path == "invoices-2026.xlsx"
+        )));
         assert!(report.changes.changes.contains(&Change::Created {
             path: "reminder-letters".into(),
-            folder: true,
+            now: EntryKind::Folder,
         }));
     }
 

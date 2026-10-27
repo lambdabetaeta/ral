@@ -29,8 +29,8 @@
 // SOFTWARE.
 
 use super::{
-    Grant, LoginPhase, OAuthToken, RefreshResponse, RefreshUpdate, Revocation, SignIn,
-    json_or_error, jwt_payload, refresh_failure, revoke_at, wait,
+    Grant, LoginPhase, OAuthToken, RefreshError, RefreshResponse, RefreshUpdate, Revocation,
+    SignIn, json_or_error, jwt_payload, revoke_at, submit_refresh, wait,
 };
 use crate::provider::error::body_detail;
 use reqwest::{Client, StatusCode, Url};
@@ -321,7 +321,7 @@ fn finalize(raw: RefreshResponse) -> Result<OAuthToken, String> {
 pub(super) async fn refresh(
     client: &Client,
     previous: &OAuthToken,
-) -> Result<RefreshUpdate<()>, String> {
+) -> Result<RefreshUpdate<()>, RefreshError> {
     refresh_at(client, TOKEN_URL, previous).await
 }
 
@@ -329,28 +329,16 @@ pub(super) async fn refresh_at(
     client: &Client,
     url: &str,
     previous: &OAuthToken,
-) -> Result<RefreshUpdate<()>, String> {
-    let response = client
+) -> Result<RefreshUpdate<()>, RefreshError> {
+    let request = client
         .post(url)
         .header(reqwest::header::ACCEPT, "application/json")
         .form(&[
             ("grant_type", "refresh_token"),
             ("client_id", CLIENT_ID),
             ("refresh_token", previous.refresh_token.as_str()),
-        ])
-        .send()
-        .await
-        .map_err(|error| format!("xAI token refresh request failed: {error}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(refresh_failure(status, &body, previous));
-    }
-    let raw = response
-        .json()
-        .await
-        .map_err(|error| format!("could not parse xAI token refresh response: {error}"))?;
-    renewed(previous, raw)
+        ]);
+    renewed(previous, submit_refresh(request, previous).await?).map_err(RefreshError::Ambiguous)
 }
 
 fn renewed(previous: &OAuthToken, raw: RefreshResponse) -> Result<RefreshUpdate<()>, String> {
@@ -798,6 +786,43 @@ mod tests {
             ],
         );
         (&mut fixture.task).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn refresh_failures_are_typed_by_what_the_issuer_may_have_done() {
+        let client = super::super::http_client().unwrap();
+        let previous = parse_token(token_json()).unwrap();
+        let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let refused = format!("http://{}/oauth2/token", dead.local_addr().unwrap());
+        drop(dead);
+        assert!(matches!(
+            refresh_at(&client, &refused, &previous).await,
+            Err(RefreshError::NotSubmitted(_))
+        ));
+        let fixture = fixture(vec![
+            (400, json!({"error": "invalid_grant"})),
+            (200, json!({})),
+            (200, json!({"access_token": ""})),
+            (503, json!({"error": "overloaded"})),
+        ])
+        .await;
+        let url = format!("{}/oauth2/token", fixture.url);
+        assert!(matches!(
+            refresh_at(&client, &url, &previous).await,
+            Err(RefreshError::Rejected(reason)) if reason.contains("expired or been revoked")
+        ));
+        // A success we cannot use may still have rotated the token.
+        for _ in 0..2 {
+            assert!(matches!(
+                refresh_at(&client, &url, &previous).await,
+                Err(RefreshError::Ambiguous(_))
+            ));
+        }
+        // So may a gateway error that follows a committed rotation.
+        assert!(matches!(
+            refresh_at(&client, &url, &previous).await,
+            Err(RefreshError::Ambiguous(reason)) if reason.contains("503")
+        ));
     }
 
     #[tokio::test]

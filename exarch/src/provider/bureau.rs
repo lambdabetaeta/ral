@@ -70,7 +70,13 @@ impl Holdings {
         Ok(fetched)
     }
 
-    /// Blocking store work belongs on a frontend's background job boundary.
+    /// Sign out of the login named `id`: delete its stored token and retire
+    /// the account, returning the token for the caller to revoke. Blocking
+    /// store work belongs on a frontend's background job boundary.
+    ///
+    /// # Errors
+    /// If `id` names no known account or no signed-in login, or if the token
+    /// store could not be rewritten.
     pub(crate) fn sign_out(&self, id: &str) -> Result<oauth::OAuthToken, String> {
         let (account, label) = {
             let store = self.store.lock_ignore_poison();
@@ -251,32 +257,20 @@ impl Bureau {
         )))
     }
 
-    /// Admit a freshly signed-in token, returning who it now is and what it
+    /// Admit a freshly committed login, returning who it now is and what it
     /// is now called.
     ///
     /// # Errors
-    /// If the bureau is scripted, which has no store to admit into.
+    /// If the bureau is scripted, which has no store to admit into, or the
+    /// login has since been signed out.
     pub fn admit(
         &self,
-        token: &oauth::CredentialHandle,
+        login: &oauth::CredentialHandle,
     ) -> Result<(super::AccountId, String), String> {
         let Self::Live { holdings, .. } = self else {
             return Err(mints_nothing());
         };
-        super::admit_login(holdings, token)
-    }
-
-    /// Sign out of the login named `id`: delete its stored token and
-    /// retire the account, returning the token for the caller to revoke.
-    ///
-    /// # Errors
-    /// If the bureau is scripted, if `id` names no known account or no
-    /// signed-in login, or if the token store could not be rewritten.
-    pub fn sign_out(&self, id: &str) -> Result<oauth::OAuthToken, String> {
-        let Self::Live { holdings, .. } = self else {
-            return Err(mints_nothing());
-        };
-        holdings.sign_out(id)
+        super::admit_login(holdings, login)
     }
 
     /// The shared credentials and catalog; `None` when the bureau is scripted

@@ -69,35 +69,18 @@ impl Input {
 // One byte at a time: the next command owns every byte after this LF.
 fn read_one_line(reader: &mut impl io::Read, line: &mut String) -> io::Result<usize> {
     let mut bytes = Vec::new();
-    let result = loop {
-        let mut byte = [0];
-        match reader.read(&mut byte) {
-            Ok(0) => break Ok(bytes.len()),
-            Ok(_) => {
-                bytes.push(byte[0]);
-                if byte[0] == b'\n' {
-                    break Ok(bytes.len());
-                }
-            }
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {
-                line.clear();
-                return Err(e);
-            }
-            Err(e) => break Err(e),
-        }
-    };
-    match std::str::from_utf8(&bytes) {
-        Ok(text) => line.push_str(text),
-        Err(_) => {
-            return result.and_then(|_| {
-                Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "stream did not contain valid UTF-8",
-                ))
-            });
-        }
+    let mut byte = [0];
+    while bytes.last() != Some(&b'\n') && reader.read(&mut byte)? != 0 {
+        bytes.push(byte[0]);
     }
-    result
+    let text = std::str::from_utf8(&bytes).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("prompt input is not valid UTF-8: {e}"),
+        )
+    })?;
+    line.push_str(text);
+    Ok(bytes.len())
 }
 
 impl Shutdown {
@@ -146,6 +129,9 @@ struct PromptReader<'a> {
     epoch: u64,
     wake: OwnedFd,
     _forward: ral_core::process::AmbientForward,
+    /// Runs before each wait: where a test races a signal against it.
+    #[cfg(test)]
+    before_wait: Option<Box<dyn FnMut()>>,
 }
 
 impl<'a> PromptReader<'a> {
@@ -172,10 +158,14 @@ impl<'a> PromptReader<'a> {
             epoch,
             wake,
             _forward: forward,
+            #[cfg(test)]
+            before_wait: None,
         })
     }
+}
 
-    fn read_with(&mut self, buf: &mut [u8], mut before_wait: impl FnMut()) -> io::Result<usize> {
+impl io::Read for PromptReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         use rustix::io::Errno;
 
         let mask = SignalMask::block_interrupt()?;
@@ -194,7 +184,10 @@ impl<'a> PromptReader<'a> {
                 libc::FD_SET(libc::STDIN_FILENO, &raw mut fds);
                 libc::FD_SET(self.wake.as_raw_fd(), &raw mut fds);
             }
-            before_wait();
+            #[cfg(test)]
+            if let Some(before_wait) = &mut self.before_wait {
+                before_wait();
+            }
             let ready = unsafe {
                 libc::pselect(
                     self.wake.as_raw_fd().max(libc::STDIN_FILENO) + 1,
@@ -228,12 +221,6 @@ impl<'a> PromptReader<'a> {
                 read => return Ok(read?),
             }
         }
-    }
-}
-
-impl io::Read for PromptReader<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.read_with(buf, || {})
     }
 }
 
@@ -368,7 +355,7 @@ mod tests {
             assert!(output.status.success(), "{output:?}");
             return;
         }
-        use std::io::Write as _;
+        use std::io::{Read as _, Write as _};
         ral_core::process::install_interrupt_handler().unwrap();
         for other_thread in [false, true] {
             for nonblocking in [false, true] {
@@ -389,7 +376,7 @@ mod tests {
                     write
                 });
                 let mut injected = false;
-                let result = reading.read_with(&mut [0], || {
+                reading.before_wait = Some(Box::new(move || {
                     if std::mem::replace(&mut injected, true) {
                         return;
                     }
@@ -406,7 +393,8 @@ mod tests {
                         assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0);
                         assert_eq!(interrupt_epoch(), epoch);
                     }
-                });
+                }));
+                let result = reading.read(&mut [0]);
                 let _ = done.send(());
                 let mut write = fallback.join().unwrap();
                 assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);

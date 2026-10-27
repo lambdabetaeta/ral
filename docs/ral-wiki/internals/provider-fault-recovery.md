@@ -230,6 +230,15 @@ owner, not the turn or a temporary catalog runtime
   removal across both products and processes. It rereads the predecessor before
   contacting the issuer. A retired owner can adopt a login subsequently committed
   by a peer, but cannot recreate an absent account from its snapshot.
+- The refresh exchange has its own fixed budget; the caller's deadline bounds
+  only the lease and the decision to submit, so lock contention cannot
+  manufacture an unresolved outcome.
+- Refresh failures are typed by whether the issuer may have rotated the token:
+  `NotSubmitted` (provably unsent: client build, connect, DNS, TLS) and
+  `Rejected` (the issuer answered a 4xx) leave the account `Ready` with its
+  token, so the next preparation retries; `Ambiguous` (sent, outcome unknown:
+  a timeout, a dropped connection, a 5xx that may follow a committed rotation,
+  an unusable success body) leaves it `Uncertain`.
 - Preparation failures surface as `Other`, without a model request or fabricated
   usage. Within the owning process, ambiguous refreshes are not retried; a
   retained unsaved successor may retry only its write. These unresolved outcomes

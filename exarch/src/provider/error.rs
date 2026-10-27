@@ -433,7 +433,7 @@ impl<'a> Fault<'a> {
 /// The deepest `source` under an error: the one link that names what actually
 /// went wrong, every wrapper above it being generic.  `None` when the error is
 /// its own root.
-fn root_cause(err: &(dyn std::error::Error + 'static)) -> Option<String> {
+pub(crate) fn root_cause(err: &(dyn std::error::Error + 'static)) -> Option<String> {
     let mut leaf = None;
     let mut source = err.source();
     while let Some(link) = source {

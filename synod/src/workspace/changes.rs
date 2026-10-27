@@ -16,19 +16,23 @@ use std::collections::VecDeque;
 pub enum Change {
     Created {
         path: String,
-        folder: bool,
+        /// What the path holds now.
+        now: EntryKind,
     },
     /// The size — or, on a Unix host, the permission bits — differ.  The
     /// entry is definitely not what it was.
     Modified {
         path: String,
+        /// What the path holds now, which need not be a file any more.
+        now: EntryKind,
     },
     /// The timestamp moved but nothing else did.  Something wrote to this
     /// file; whether the bytes differ cannot be known without reading them,
     /// and synod does not read them.  Reported as its own thing precisely
     /// so it is never presented as an edit: a backup agent, a sync client,
     /// or a tool that rewrote a file with the bytes it already had lands
-    /// here too.
+    /// here too.  Only a file's record carries a timestamp, so this is a
+    /// file before and after.
     Touched {
         path: String,
     },
@@ -40,6 +44,7 @@ pub enum Change {
     /// paired.  A move preserves both, so the pair is strong evidence —
     /// stronger than identical content would be, since content is shared
     /// by every copy of a file and a timestamp to the nanosecond is not.
+    /// Both ends are files by construction: only files have a fingerprint.
     Renamed {
         from: String,
         to: String,
@@ -51,10 +56,22 @@ impl Change {
     fn key(&self) -> &str {
         match self {
             Self::Created { path, .. }
-            | Self::Modified { path }
+            | Self::Modified { path, .. }
             | Self::Touched { path }
             | Self::Deleted { path, .. } => path,
             Self::Renamed { from, .. } => from,
+        }
+    }
+
+    /// Whether the change leaves a plain file at its path — for a rename,
+    /// at its new one.
+    pub fn leaves_file(&self) -> bool {
+        match self {
+            Self::Created { now, .. } | Self::Modified { now, .. } => {
+                matches!(now, EntryKind::File { .. })
+            }
+            Self::Touched { .. } | Self::Renamed { .. } => true,
+            Self::Deleted { .. } => false,
         }
     }
 }
@@ -113,7 +130,10 @@ impl ChangeSet {
             match after.entries.get(path) {
                 None => deleted.push((path, kind)),
                 Some(now) if !now.same_as(kind) => {
-                    changes.push(Change::Modified { path: path.clone() });
+                    changes.push(Change::Modified {
+                        path: path.clone(),
+                        now: now.clone(),
+                    });
                 }
                 // The size and mode stand; only the clock moved.  Something
                 // wrote here, and no stat-walk can say whether it wrote
@@ -171,7 +191,7 @@ impl ChangeSet {
             if !renamed_to[i] {
                 changes.push(Change::Created {
                     path: (*path).to_string(),
-                    folder: matches!(kind, EntryKind::Folder),
+                    now: (*kind).clone(),
                 });
             }
         }
@@ -223,10 +243,11 @@ mod tests {
             vec![
                 Change::Modified {
                     path: "edited.txt".into(),
+                    now: file(9, 200),
                 },
                 Change::Created {
                     path: "fresh".into(),
-                    folder: true,
+                    now: EntryKind::Folder,
                 },
                 Change::Deleted {
                     path: "gone.txt".into(),
@@ -234,6 +255,36 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// What a path became is kept, so a link or a folder is never mistaken
+    /// for a file the window could open.
+    #[test]
+    fn a_change_says_whether_a_file_now_stands_at_its_path() {
+        let link = EntryKind::Link {
+            target: "elsewhere".into(),
+        };
+        let before = manifest(&[("was-a-file", file(3, 100))]);
+        let after = manifest(&[
+            ("was-a-file", EntryKind::Folder),
+            ("shortcut", link.clone()),
+        ]);
+
+        let set = ChangeSet::between(&before, &after);
+        assert_eq!(
+            set.changes,
+            vec![
+                Change::Created {
+                    path: "shortcut".into(),
+                    now: link,
+                },
+                Change::Modified {
+                    path: "was-a-file".into(),
+                    now: EntryKind::Folder,
+                },
+            ]
+        );
+        assert!(set.changes.iter().all(|change| !change.leaves_file()));
     }
 
     /// The distinction the whole stat-only model turns on: a file whose
@@ -297,7 +348,7 @@ mod tests {
             vec![
                 Change::Created {
                     path: "new/b.txt".into(),
-                    folder: false,
+                    now: file(9, 9_999),
                 },
                 Change::Deleted {
                     path: "old/a.txt".into(),
@@ -379,11 +430,11 @@ mod tests {
                 },
                 Change::Created {
                     path: "c/boilerplate.txt".into(),
-                    folder: false,
+                    now: file(8, 500),
                 },
                 Change::Created {
                     path: "d/boilerplate.txt".into(),
-                    folder: false,
+                    now: file(8, 500),
                 },
             ]
         );
@@ -408,6 +459,7 @@ mod tests {
             set.changes,
             vec![Change::Modified {
                 path: "edited.txt".into(),
+                now: file(9, 200),
             }]
         );
     }

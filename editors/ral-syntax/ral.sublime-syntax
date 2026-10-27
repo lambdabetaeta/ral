@@ -299,7 +299,7 @@ contexts:
       scope: constant.language.tilde.ral
 
   redirection:
-    - match: '([0-9])?(>{1,2}|<|>&)\s*'
+    - match: '([0-9]+)?(>>|>&|>~(?![^\s|{}\[\]$^!<>"''`();])|>|<<|<)\s*'
       captures:
         1: constant.numeric.fd.ral
         2: keyword.operator.redirect.ral

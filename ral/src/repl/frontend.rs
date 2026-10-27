@@ -27,6 +27,7 @@ pub(super) use minimal::MinimalFrontend;
 pub(super) use rustyline::RustylineFrontend;
 
 use ral_core::carrier::Transport;
+use ral_core::io::terminal;
 
 use super::host::Printer;
 use super::prompt::PromptText;
@@ -72,8 +73,9 @@ pub(super) struct EditBuffer {
 /// has already handled any plugin keybinding that accepted.  `Edit` is
 /// a buffer the session should re-feed to the next `read` call (a plugin
 /// keybinding handler asked to re-edit, or `_ed-push` queued a buffer).
-/// `Interrupt` discards the whole pending input on Ctrl-C; `End` ends the session with
-/// that exit status (0 on Ctrl-D at an empty prompt, 1 on a read error).
+/// `Interrupt` discards the whole pending input and re-prompts (Ctrl-C, or
+/// input that is not UTF-8); `End` ends the session with that exit status
+/// (0 on Ctrl-D at an empty prompt, 1 on a read error).
 pub(super) enum Read {
     Line(String),
     Edit(EditBuffer),
@@ -108,4 +110,13 @@ pub(super) trait Frontend {
     fn printer(&mut self) -> Option<Printer> {
         None
     }
+}
+
+/// Report input that is not UTF-8 text: the frontend drops it and prompts
+/// again, as after an interrupt. The decoder's error names the offending offset.
+fn report_invalid_utf8(error: &std::io::Error) {
+    terminal::cmd_error(
+        "ral",
+        &format!("input is not valid UTF-8 and was discarded: {error}"),
+    );
 }

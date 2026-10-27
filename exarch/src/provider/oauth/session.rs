@@ -4,7 +4,7 @@
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;
 
-use super::{OAuthToken, account_id, read_at, refresh, write_all_at};
+use super::{OAuthToken, RefreshError, account_id, read_at, refresh, write_all_at};
 use crate::provider::identity::AccountId;
 use ral_core::own::OwnDir;
 use ral_core::sync::LockExt;
@@ -15,9 +15,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use tokio::sync::{Mutex as AsyncMutex, watch};
-use tokio::time::{Instant, sleep, timeout_at};
+use tokio::time::{Instant, sleep, timeout, timeout_at};
 
+/// Bounds waiting for the store lease and the decision to submit.
 const DEADLINE: Duration = Duration::from_secs(30);
+/// A submitted exchange has this budget, whatever the lease wait consumed.
+const EXCHANGE_BUDGET: Duration = Duration::from_secs(30);
 static EXECUTOR: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -42,33 +45,58 @@ struct State {
     pending: Option<Completion>,
 }
 
+/// A credential in service; its token is the one to present.
 #[derive(Clone)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
-enum CredentialState {
+enum Live {
     Ready(OAuthToken),
     Uncertain(OAuthToken),
     Unsaved {
         predecessor: OAuthToken,
         successor: OAuthToken,
     },
+}
+
+impl Live {
+    fn token(&self) -> &OAuthToken {
+        match self {
+            Self::Ready(token) | Self::Uncertain(token) => token,
+            Self::Unsaved { successor, .. } => successor,
+        }
+    }
+}
+
+#[derive(Clone)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+enum CredentialState {
+    Live(Live),
     Retired(OAuthToken),
+}
+
+impl From<Live> for CredentialState {
+    fn from(live: Live) -> Self {
+        Self::Live(live)
+    }
 }
 
 impl CredentialState {
     fn token(&self) -> &OAuthToken {
         match self {
-            Self::Ready(token) | Self::Uncertain(token) | Self::Retired(token) => token,
-            Self::Unsaved { successor, .. } => successor,
+            Self::Live(live) => live.token(),
+            Self::Retired(token) => token,
         }
     }
 
-    fn reconcile(&self, disk: &OAuthToken) -> Self {
+    /// Never `Retired`: a stored account is live again.
+    fn reconcile(&self, disk: &OAuthToken) -> Live {
         match self {
-            Self::Unsaved { predecessor, .. } if predecessor == disk => self.clone(),
-            Self::Ready(token) | Self::Uncertain(token) if token == disk => self.clone(),
-            Self::Ready(_) | Self::Uncertain(_) | Self::Unsaved { .. } | Self::Retired(_) => {
-                Self::Ready(disk.clone())
+            Self::Live(live @ Live::Unsaved { predecessor, .. }) if predecessor == disk => {
+                live.clone()
             }
+            Self::Live(live @ (Live::Ready(token) | Live::Uncertain(token))) if token == disk => {
+                live.clone()
+            }
+            Self::Live(_) | Self::Retired(_) => Live::Ready(disk.clone()),
         }
     }
 }
@@ -103,7 +131,7 @@ impl CredentialHandle {
     /// Dropping a waiter cannot cancel a submitted rotating-token exchange.
     ///
     /// # Errors
-    /// Removal, an unresolved rotation, or a store/issuer deadline or failure.
+    /// Removal, an unresolved rotation, a lease deadline, or an issuer failure.
     pub async fn prepare(&self) -> Result<(), String> {
         self.prepare_until(Instant::now() + DEADLINE, async |current| {
             refresh(&current).await
@@ -111,10 +139,11 @@ impl CredentialHandle {
         .await
     }
 
+    /// `deadline` bounds the lease and the decision to submit, not the exchange.
     async fn prepare_until<F, Fut>(&self, deadline: Instant, exchange: F) -> Result<(), String>
     where
         F: FnOnce(OAuthToken) -> Fut + Send + 'static,
-        Fut: Future<Output = Result<OAuthToken, String>> + Send,
+        Fut: Future<Output = Result<OAuthToken, RefreshError>> + Send,
     {
         let mut result = {
             let mut state = self.0.state.lock_ignore_poison();
@@ -157,10 +186,22 @@ impl CredentialHandle {
         )
     }
 
+    fn set(&self, live: Live) {
+        self.0.state.lock_ignore_poison().credential = live.into();
+    }
+
+    /// Adopt the stored token unless this owner already tracks it.
+    fn reconcile(&self, disk: &OAuthToken) -> Live {
+        let mut state = self.0.state.lock_ignore_poison();
+        let live = state.credential.reconcile(disk);
+        state.credential = live.clone().into();
+        live
+    }
+
     async fn rotate<F, Fut>(&self, deadline: Instant, exchange: F) -> Result<(), String>
     where
         F: FnOnce(OAuthToken) -> Fut,
-        Fut: Future<Output = Result<OAuthToken, String>>,
+        Fut: Future<Output = Result<OAuthToken, RefreshError>>,
     {
         let lease = lease(&self.0.store, deadline).await?;
         let (host, mut tokens) = read_at(&lease.store)?;
@@ -171,17 +212,11 @@ impl CredentialHandle {
             lease.retire(&self.snapshot());
             return Err(self.recovery("has been removed"));
         };
-        let credential = {
-            let mut state = self.0.state.lock_ignore_poison();
-            state.credential = state.credential.reconcile(&tokens[index]);
-            state.credential.clone()
-        };
-        let current = match credential {
-            CredentialState::Retired(_) => return Err(self.recovery("has been signed out")),
-            CredentialState::Uncertain(_) => {
+        let current = match self.reconcile(&tokens[index]) {
+            Live::Uncertain(_) => {
                 return Err(self.recovery("has an unresolved refresh outcome"));
             }
-            CredentialState::Unsaved { successor, .. } => {
+            Live::Unsaved { successor, .. } => {
                 tokens[index] = successor.clone();
                 write_all_at(&lease.store, host.as_deref(), &tokens).map_err(|error| {
                     self.recovery(&format!(
@@ -191,32 +226,22 @@ impl CredentialHandle {
                 lease.publish(&successor);
                 successor
             }
-            CredentialState::Ready(token) => token,
+            Live::Ready(token) => token,
         };
         if !current.is_stale() {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err("OAuth preparation deadline exceeded before refresh".into());
+            return Err(
+                "OAuth preparation deadline passed while waiting for the credential store; nothing was sent to the issuer, so retrying is safe"
+                    .into(),
+            );
         }
-        self.0.state.lock_ignore_poison().credential = CredentialState::Uncertain(current.clone());
-        let fresh = match timeout_at(deadline, exchange(current.clone())).await {
-            Ok(Ok(fresh)) => fresh,
-            result => {
-                let reason = match result {
-                    Ok(Err(error)) => format!("could not refresh: {error}"),
-                    Err(_) => {
-                        "refresh timed out; the issuer may have rotated its credential".into()
-                    }
-                    Ok(Ok(_)) => unreachable!(),
-                };
-                return Err(self.recovery(&reason));
-            }
-        };
-        self.0.state.lock_ignore_poison().credential = CredentialState::Unsaved {
+        let fresh = self.submit(current.clone(), exchange).await?;
+        self.set(Live::Unsaved {
             predecessor: current,
             successor: fresh.clone(),
-        };
+        });
         tokens[index] = fresh.clone();
         write_all_at(&lease.store, host.as_deref(), &tokens).map_err(|error| {
             self.recovery(&format!(
@@ -226,6 +251,39 @@ impl CredentialHandle {
         lease.publish(&fresh);
         drop(lease);
         Ok(())
+    }
+
+    /// Only a failure that provably did not rotate `current` leaves it `Ready`.
+    async fn submit<F, Fut>(&self, current: OAuthToken, exchange: F) -> Result<OAuthToken, String>
+    where
+        F: FnOnce(OAuthToken) -> Fut,
+        Fut: Future<Output = Result<OAuthToken, RefreshError>>,
+    {
+        // `Uncertain` while in flight, so a panic cannot leave a replayable token.
+        self.set(Live::Uncertain(current.clone()));
+        let failure = match timeout(EXCHANGE_BUDGET, exchange(current.clone())).await {
+            Ok(Ok(fresh)) => return Ok(fresh),
+            Ok(Err(error)) => error,
+            Err(_) => {
+                RefreshError::Ambiguous(format!("no answer within {}s", EXCHANGE_BUDGET.as_secs()))
+            }
+        };
+        let account = self.0.id.as_str();
+        match failure {
+            RefreshError::Ambiguous(reason) => Err(self.recovery(&format!(
+                "could not confirm its refresh ({reason}), so the issuer may have rotated its credential"
+            ))),
+            RefreshError::NotSubmitted(reason) => {
+                self.set(Live::Ready(current));
+                Err(format!(
+                    "OAuth account {account:?} could not refresh: {reason}; nothing was sent to the issuer, so retrying is safe"
+                ))
+            }
+            RefreshError::Rejected(reason) => {
+                self.set(Live::Ready(current));
+                Err(format!("OAuth account {account:?} could not refresh: {reason}"))
+            }
+        }
     }
 }
 
@@ -239,20 +297,21 @@ pub(super) struct StoreLease {
 impl StoreLease {
     fn attach(&self, token: &OAuthToken) -> CredentialHandle {
         let key = (self.store.path().to_path_buf(), account_id(token));
-        let mut handles = HANDLES.lock_ignore_poison();
-        let owner = handles.entry(key.clone()).or_insert_with(|| {
-            Arc::new(Owned {
-                store: self.store.clone(),
-                id: key.1,
-                state: Mutex::new(State {
-                    credential: CredentialState::Ready(token.clone()),
-                    pending: None,
-                }),
+        let owner = HANDLES
+            .lock_ignore_poison()
+            .entry(key.clone())
+            .or_insert_with(|| {
+                Arc::new(Owned {
+                    store: self.store.clone(),
+                    id: key.1,
+                    state: Mutex::new(State {
+                        credential: Live::Ready(token.clone()).into(),
+                        pending: None,
+                    }),
+                })
             })
-        });
-        let handle = CredentialHandle(owner.clone());
-        drop(handles);
-        handle
+            .clone();
+        CredentialHandle(owner)
     }
 
     pub(super) fn credentials(&self) -> Result<Vec<CredentialHandle>, String> {
@@ -261,10 +320,7 @@ impl StoreLease {
             .iter()
             .map(|token| {
                 let handle = self.attach(token);
-                {
-                    let mut state = handle.0.state.lock_ignore_poison();
-                    state.credential = state.credential.reconcile(token);
-                }
+                handle.reconcile(token);
                 handle
             })
             .collect())
@@ -272,7 +328,7 @@ impl StoreLease {
 
     fn publish(&self, token: &OAuthToken) -> CredentialHandle {
         let handle = self.attach(token);
-        handle.0.state.lock_ignore_poison().credential = CredentialState::Ready(token.clone());
+        handle.set(Live::Ready(token.clone()));
         handle
     }
 
@@ -367,7 +423,10 @@ async fn lease(store: &OwnDir, deadline: Instant) -> Result<StoreLease, String> 
         }
     })
     .await
-    .map_err(|_| "OAuth store transaction deadline exceeded".to_string())?
+    .map_err(|_| {
+        "timed out waiting for the OAuth credential store; another exarch or synod process may be holding it, so try again shortly"
+            .to_string()
+    })?
 }
 
 /// Synchronous callers are startup or background jobs, never a UI frame.

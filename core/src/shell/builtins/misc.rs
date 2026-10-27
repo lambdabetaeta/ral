@@ -212,7 +212,7 @@ pub(super) fn builtin_ask(args: &[Value]) -> Result<Value, Error> {
     if n == 0 {
         return Err(Error::new("ask: EOF"));
     }
-    line.truncate(line.len() - crate::io::terminator_len(line.as_bytes()));
+    line.truncate(crate::io::without_terminator(line.as_bytes()).len());
     Ok(Value::string(line))
 }
 

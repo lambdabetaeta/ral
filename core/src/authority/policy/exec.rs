@@ -58,56 +58,23 @@ pub(crate) struct Refused {
 }
 
 impl GrantStack {
-    /// Judge a program against the stack's exec rules, then what
-    /// running it reads, which vouches for the file held.
+    /// `↓run = ↓exec ∧ ↓read` (law 7): the exec table, then what running
+    /// reads, whose judgment vouches for the file held.  A refusal hands the
+    /// program back.
     pub(crate) fn admit(
         &self,
         baseline: &Baseline,
         program: Program,
     ) -> Result<Admitted, Box<Refused>> {
         let rules = rules(self);
-        match self.judge_run(baseline, rules.as_ref(), program) {
-            Ok(program) => Ok(Admitted { program, rules }),
-            Err(denied) => {
-                let (program, why) = *denied;
-                Err(Box::new(Refused { program, why }))
-            }
-        }
-    }
-
-    /// The head's question, before argv exists: why `program` may not run.
-    pub(crate) fn withheld(
-        &self,
-        baseline: &Baseline,
-        program: &Program,
-    ) -> Result<(), ExecDenial> {
-        if let Some(why) = run_withheld(rules(self).as_ref(), program) {
-            return Err(why);
+        if let Err(why) = run_withheld(rules.as_ref(), &program) {
+            return Err(Box::new(Refused { program, why }));
         }
         let read = match program {
-            Program::File { located, .. } => self.read(baseline, located.trace()),
-            Program::Tool(_) => self.tool_read(baseline),
-        };
-        read.map_err(ExecDenial::Read)
-    }
-
-    /// `↓run = ↓exec ∧ ↓read` (law 7): a supplied exec table must support the
-    /// program, then what running it reads must be readable, and a file is
-    /// vouched for by that read judgment.  A refusal hands the program back.
-    fn judge_run(
-        &self,
-        baseline: &Baseline,
-        rules: Option<&ExecRules>,
-        program: Program,
-    ) -> Result<Program<Judged<Reading>>, Box<(Program, ExecDenial)>> {
-        if let Some(why) = run_withheld(rules, &program) {
-            return Err(Box::new((program, why)));
-        }
-        match program {
-            Program::Tool(name) => match self.tool_read(baseline) {
-                Ok(()) => Ok(Program::Tool(name)),
-                Err(why) => Err(Box::new((Program::Tool(name), ExecDenial::Read(why)))),
-            },
+            Program::Tool(name) => self
+                .tool_read(baseline)
+                .map(|()| Program::Tool(name))
+                .map_err(|why| (Program::Tool(name), why)),
             Program::File { arg0, located } => {
                 match self.read_region(baseline).judge_file(*located) {
                     Ok(located) => Ok(Program::File {
@@ -116,15 +83,33 @@ impl GrantStack {
                     }),
                     Err(denied) => {
                         let (located, why) = *denied;
-                        let program = Program::File {
-                            arg0,
-                            located: Box::new(located),
-                        };
-                        Err(Box::new((program, ExecDenial::Read(why))))
+                        let located = Box::new(located);
+                        Err((Program::File { arg0, located }, why))
                     }
                 }
             }
+        };
+        match read {
+            Ok(program) => Ok(Admitted { program, rules }),
+            Err((program, why)) => Err(Box::new(Refused {
+                program,
+                why: ExecDenial::Read(why),
+            })),
         }
+    }
+
+    /// [`admit`](Self::admit) on a borrowed head, before argv exists.
+    pub(crate) fn withheld(
+        &self,
+        baseline: &Baseline,
+        program: &Program,
+    ) -> Result<(), ExecDenial> {
+        run_withheld(rules(self).as_ref(), program)?;
+        match program {
+            Program::File { located, .. } => self.read(baseline, located.trace()),
+            Program::Tool(_) => self.tool_read(baseline),
+        }
+        .map_err(ExecDenial::Read)
     }
 
     /// A bundled tool runs ral's image, which only an fs exclusion withholds.
@@ -137,9 +122,10 @@ impl GrantStack {
 
 /// Why a supplied exec table withholds `program`'s run, before what running
 /// it reads is asked.
-fn run_withheld(rules: Option<&ExecRules>, program: &Program) -> Option<ExecDenial> {
-    let why = rules?.withheld(program.subject())?;
-    Some(ExecDenial::Run(why))
+fn run_withheld(rules: Option<&ExecRules>, program: &Program) -> Result<(), ExecDenial> {
+    rules
+        .and_then(|rules| rules.withheld(program.subject()))
+        .map_or(Ok(()), |why| Err(ExecDenial::Run(why)))
 }
 
 /// What a grant judges, and what the launcher runs.
@@ -1002,11 +988,13 @@ pub(super) mod tests {
         );
     }
 
-    /// The rules a grant makes: each key walked, a key with both bits both
+    /// The rules a grant makes: each key walked, a key in both sets both
     /// kinds of rule, and `every` is `Any`.
-    fn granting(keys: impl IntoIterator<Item = (ExecKey, Evidence)>) -> ExecRules {
-        let grant = crate::test_helper::exec_grant(keys);
-        ExecRules::of_grant(&grant, &EnvVars::new()).unwrap()
+    fn granting(
+        allow: impl IntoIterator<Item = ExecKey>,
+        deny: impl IntoIterator<Item = ExecKey>,
+    ) -> ExecRules {
+        ExecRules::of_grant(&ExecGrant::of(allow, deny), &EnvVars::new()).unwrap()
     }
 
     /// The directory `name` of `root`, made.
@@ -1054,10 +1042,10 @@ pub(super) mod tests {
         let (target, link) = (root.join("b"), root.join("a"));
         std::fs::write(&target, "").unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        let table = granting([
-            (ExecKey::Path(spelled(&link)), DENY),
-            (ExecKey::Path(spelled(&target)), ALLOW),
-        ]);
+        let table = granting(
+            [ExecKey::Path(spelled(&target))],
+            [ExecKey::Path(spelled(&link))],
+        );
         assert_eq!(table.evidence(program(&at(&target))), BOTH);
         assert_eq!((table.allows().count(), table.denies().count()), (1, 1));
     }
@@ -1073,7 +1061,7 @@ pub(super) mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
         #[cfg(windows)]
         std::os::windows::fs::symlink_dir(&target, &link).unwrap();
-        let rules = granting([(ExecKey::Dir(spelled(&link)), ALLOW)]);
+        let rules = granting([ExecKey::Dir(spelled(&link))], []);
         assert!(rules.evidence(program(&at(&target.join("tool")))).permits());
     }
 
@@ -1086,10 +1074,10 @@ pub(super) mod tests {
         made(&target, "sub");
         let link = root.join("l");
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        let rules = granting([
-            (ExecKey::Dir(spelled(&link)), DENY),
-            (ExecKey::Dir(spelled(&target.join("sub"))), ALLOW),
-        ]);
+        let rules = granting(
+            [ExecKey::Dir(spelled(&target.join("sub")))],
+            [ExecKey::Dir(spelled(&link))],
+        );
         assert!(!rules.evidence(program(&at(&target.join("sub")))).permits());
     }
 
@@ -1107,9 +1095,9 @@ pub(super) mod tests {
         let tools = made(&root, "tools");
         std::fs::write(tools.join("prog"), "").unwrap();
         let prog = at(&tools.join("prog"));
-        let key = |e| [(ExecKey::Dir(spelled(&blocked)), e)];
+        let key = || ExecKey::Dir(spelled(&blocked));
 
-        let (denied, granted) = (granting(key(DENY)), granting(key(ALLOW)));
+        let (denied, granted) = (granting([], [key()]), granting([key()], []));
         std::fs::remove_dir(&blocked).unwrap();
         std::os::unix::fs::symlink(&tools, &blocked).unwrap();
         let name = LexicalPath::absolute(&blocked).unwrap();
@@ -1119,7 +1107,7 @@ pub(super) mod tests {
         assert_eq!(denied.evidence(program(&prog)), Evidence::NEITHER);
         assert_eq!(granted.evidence(program(&prog)), Evidence::NEITHER);
 
-        let (denied, granted) = (granting(key(DENY)), granting(key(ALLOW)));
+        let (denied, granted) = (granting([], [key()]), granting([key()], []));
         let Some(ExecDeny::Dir(held)) = denied.denies().next() else {
             panic!("a directory exclusion: {denied:?}");
         };
@@ -1139,8 +1127,8 @@ pub(super) mod tests {
     fn a_directory_allowance_stays_live_where_its_directory_was_renamed_under_a_deny() {
         let (_tmp, root) = tmp();
         let (dir, denied) = (made(&root, "dir"), made(&root, "denied"));
-        let allowed = granting([(ExecKey::Dir(spelled(&dir)), ALLOW)]);
-        let denying = granting([(ExecKey::Dir(spelled(&denied)), DENY)]);
+        let allowed = granting([ExecKey::Dir(spelled(&dir))], []);
+        let denying = granting([], [ExecKey::Dir(spelled(&denied))]);
         std::fs::rename(&dir, denied.join("dir")).unwrap();
         let table = allowed.join(denying);
         assert_eq!(table.live().count(), 1, "{table:?}");
@@ -1159,9 +1147,9 @@ pub(super) mod tests {
         let (_tmp, root) = tmp();
         let (bin, denied) = (made(&root, "bin"), made(&root, "denied"));
         std::fs::write(bin.join("tool"), "").unwrap();
-        let allowed = granting([(ExecKey::Path(spelled(&bin.join("tool"))), ALLOW)]);
+        let allowed = granting([ExecKey::Path(spelled(&bin.join("tool")))], []);
         std::fs::rename(bin.join("tool"), denied.join("tool")).unwrap();
-        let denying = granting([(ExecKey::Dir(spelled(&denied)), DENY)]);
+        let denying = granting([], [ExecKey::Dir(spelled(&denied))]);
         let table = allowed.join(denying);
         assert!(
             table.live().any(
@@ -1197,9 +1185,11 @@ pub(super) mod tests {
     /// exclusion of it excludes every path.
     #[test]
     fn a_root_file_key_is_refused() {
-        for (evidence, wording) in [(ALLOW, "filesystem root"), (DENY, "excluding the root")] {
-            let key = ExecKey::Path(FrozenPath::root());
-            let grant = crate::test_helper::exec_grant([(key, evidence)]);
+        let key = || ExecKey::Path(FrozenPath::root());
+        for (grant, wording) in [
+            (ExecGrant::of([key()], []), "filesystem root"),
+            (ExecGrant::of([], [key()]), "excluding the root"),
+        ] {
             let why = ExecRules::of_grant(&grant, &EnvVars::new()).unwrap_err();
             assert!(why.message.contains(wording), "{}", why.message);
         }

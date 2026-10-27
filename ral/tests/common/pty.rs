@@ -1,7 +1,6 @@
 use super::{Output, ral_command};
 use std::time::Duration;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod pty_helper {
     use std::io::Error;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -65,16 +64,13 @@ mod pty_helper {
 /// A live pty-backed `ral -i --norc` REPL, for tests that need more than one
 /// round of input (a line, then a signal, then more input, …).
 /// `run_pty_repl_until` is the single-shot case built on top of it.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub struct PtySession {
     pub child: std::process::Child,
     pub terminal: std::fs::File,
-    input: std::fs::File,
-    reader: std::fs::File,
+    master: std::fs::File,
     bytes: Vec<u8>,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl PtySession {
     pub fn spawn() -> Result<Self, String> {
         let mut cmd = ral_command();
@@ -88,14 +84,11 @@ impl PtySession {
 
         let pty = pty_helper::open()?;
         let terminal: std::fs::File = pty.slave.into();
-        let reader: std::fs::File = pty.master.into();
+        let master: std::fs::File = pty.master.into();
         let flags =
-            rustix::fs::fcntl_getfl(&reader).map_err(|e| format!("read terminal flags: {e}"))?;
-        rustix::fs::fcntl_setfl(&reader, flags | rustix::fs::OFlags::NONBLOCK)
+            rustix::fs::fcntl_getfl(&master).map_err(|e| format!("read terminal flags: {e}"))?;
+        rustix::fs::fcntl_setfl(&master, flags | rustix::fs::OFlags::NONBLOCK)
             .map_err(|e| format!("make terminal nonblocking: {e}"))?;
-        let input = reader
-            .try_clone()
-            .map_err(|e| format!("duplicate terminal input: {e}"))?;
         let stdio = || {
             terminal
                 .try_clone()
@@ -117,28 +110,14 @@ impl PtySession {
         Ok(Self {
             child,
             terminal,
-            input,
-            reader,
+            master,
             bytes: Vec::new(),
         })
     }
 
     pub fn send_line(&mut self, s: &str) -> std::io::Result<()> {
         use std::io::Write;
-        writeln!(self.input, "{s}")
-    }
-
-    /// Ctrl-Z: 0x1a. Unused below: under this container's virtualized tty
-    /// line discipline, writing VSUSP never raises SIGTSTP (`ISIG` is on and
-    /// VSUSP maps to 0x1a, but the child stays `S` forever), so a real
-    /// SIGTSTP has to be sent to the pipeline's process group directly
-    /// instead. Kept for a real tty, where it would exercise ral's
-    /// answer-every-stop-with-SIGCONT rule (no job control: Ctrl-Z is
-    /// visibly a no-op).
-    #[allow(dead_code)]
-    pub fn send_ctrl_z(&mut self) -> std::io::Result<()> {
-        use std::io::Write;
-        self.input.write_all(&[0x1a])
+        writeln!(self.master, "{s}")
     }
 
     pub fn pid(&self) -> i32 {
@@ -152,7 +131,7 @@ impl PtySession {
     /// One raw byte, as a key the line discipline may act on.
     pub fn send_byte(&mut self, byte: u8) -> std::io::Result<()> {
         use std::io::Write;
-        self.input.write_all(&[byte])
+        self.master.write_all(&[byte])
     }
 
     pub fn read_available(&mut self) {
@@ -160,12 +139,9 @@ impl PtySession {
         let mut chunk = [0u8; 4096];
         // A continuously writing child must not starve the caller's deadline.
         for _ in 0..64 {
-            match self.reader.read(&mut chunk) {
-                Ok(0) => break,
+            match self.master.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
                 Ok(n) => self.bytes.extend_from_slice(&chunk[..n]),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(e) if e.raw_os_error() == Some(libc::EIO) => break,
-                Err(_) => break,
             }
         }
     }
@@ -204,7 +180,7 @@ impl PtySession {
     /// owns — `tcgetpgrp` answers on the master side even though the caller
     /// belongs to another session.
     pub fn foreground_pgid(&self) -> Option<i32> {
-        rustix::termios::tcgetpgrp(&self.input)
+        rustix::termios::tcgetpgrp(&self.master)
             .ok()
             .map(|pgid| pgid.as_raw_nonzero().get())
     }

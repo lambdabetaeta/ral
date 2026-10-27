@@ -1,8 +1,8 @@
 //! `OpenAI`'s devday token-sharing protocol, retaining its issued-client flow.
 
 use super::{
-    Grant, LoginPhase, OAuthToken, RefreshResponse, RefreshUpdate, Revocation, SignIn,
-    json_or_error, jwt_payload, loopback, refresh_failure, revoke_at,
+    Grant, LoginPhase, OAuthToken, RefreshError, RefreshResponse, RefreshUpdate, Revocation,
+    SignIn, json_or_error, jwt_payload, loopback, revoke_at, submit_refresh,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -213,27 +213,14 @@ pub(super) async fn refresh(
     current: &OAuthToken,
     client_id: &str,
     id_token: &str,
-) -> Result<RefreshUpdate<String>, String> {
-    let resp = client
-        .post(TOKEN_URL)
-        .form(&[
-            ("grant_type", "refresh_token"),
-            ("client_id", client_id),
-            ("refresh_token", current.refresh_token.as_str()),
-            ("resource", RESOURCE),
-        ])
-        .send()
-        .await
-        .map_err(|e| format!("token refresh request failed: {e}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(refresh_failure(status, &body, current));
-    }
-    let resp: RefreshResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("could not parse token refresh response: {e}"))?;
+) -> Result<RefreshUpdate<String>, RefreshError> {
+    let request = client.post(TOKEN_URL).form(&[
+        ("grant_type", "refresh_token"),
+        ("client_id", client_id),
+        ("refresh_token", current.refresh_token.as_str()),
+        ("resource", RESOURCE),
+    ]);
+    let resp = submit_refresh(request, current).await?;
     Ok(renewed(current, id_token, resp))
 }
 

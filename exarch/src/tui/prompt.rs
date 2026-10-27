@@ -22,8 +22,7 @@ pub(super) struct PromptState {
 
 impl PromptState {
     pub(super) fn new(vi: bool) -> Self {
-        let mut editor =
-            PromptEditor::new(if vi { EditMode::Vi } else { EditMode::Emacs }).wrap(true);
+        let mut editor = PromptEditor::new(if vi { EditMode::Vi } else { EditMode::Emacs });
         editor.set_base_style(Style::default().fg(Color::White));
         Self {
             editor,

@@ -382,5 +382,13 @@
       "constant.numeric.ral": ["-1", "2", "-3", "+4", "5"],
       "keyword.operator.arithmetic.ral": ["+", "-"]
     }
+  },
+  {
+    "name": "every redirect operator is one token; >~ streams only when the tilde stands alone",
+    "source": "f 2>&1 >~ out >~$p >>log << 'x' 12<in >~/p\n",
+    "scopes": {
+      "keyword.operator.redirect.ral": [">&", ">~", ">~", ">>", "<<", "<", ">"],
+      "constant.numeric.fd.ral": ["2", "12"]
+    }
   }
 ]

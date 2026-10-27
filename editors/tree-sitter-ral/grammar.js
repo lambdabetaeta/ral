@@ -282,7 +282,7 @@ module.exports = grammar({
 
     bypass: $ => seq('^', alias(token.immediate(choice(IDENT, words('top'))), $.word)),
     escape_sequence: $ => token.immediate(seq('\\',
-      choice(/[nrte\\0"$!~]/, /x[0-9a-fA-F]{2}/, /u\{[0-9a-fA-F]{1,6}\}/, /\r?\n/))),
+      choice(/[nrte\\0"$!~]/, /x[0-9a-fA-F]{2}/, /u\{[0-9a-fA-F]{1,6}\}/, /\r\n?|\n/))),
     interp_arith: $ => seq(token.immediate('$['), optional(NL), $._arith, ']', repeat($.index)),
     interp_force: $ => seq(token.immediate('!{'), optional($._block_body), '}', repeat($.index)),
     interp_deref_paren: $ => node($, 'deref_paren', true),

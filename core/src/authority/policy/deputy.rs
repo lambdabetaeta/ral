@@ -65,7 +65,7 @@ fn runnable(exec: &ExecRules) -> FsRules {
 mod tests {
     use super::deputy_prefixes;
     use crate::authority::policy::{
-        Baseline, Capabilities, Evidence, ExecGrant, ExecKey, FsPolicy, GrantStack,
+        Baseline, Capabilities, ExecGrant, ExecKey, FsPolicy, GrantStack,
     };
     use crate::path::{FrozenPath, shown, utf8};
     use crate::test_helper::{Tree, layer, stack};
@@ -98,15 +98,18 @@ mod tests {
             paths.iter().map(|p| shown(self.tree.at(p))).collect()
         }
 
-        fn exec_dirs(&self, dirs: &[(&str, Evidence)]) -> ExecGrant {
-            crate::test_helper::exec_grant(
-                dirs.iter().map(|(d, e)| (ExecKey::Dir(self.lit(d)), *e)),
-            )
+        fn exec_dirs(&self, allow: &[&str], deny: &[&str]) -> ExecGrant {
+            let keys = |dirs: &[&str]| {
+                dirs.iter()
+                    .map(|d| ExecKey::Dir(self.lit(d)))
+                    .collect::<Vec<_>>()
+            };
+            ExecGrant::of(keys(allow), keys(deny))
         }
 
-        /// The grant of `dirs` with `every` set.
-        fn every(&self, dirs: &[(&str, Evidence)]) -> ExecGrant {
-            self.exec_dirs(dirs).with_every()
+        /// The grant excluding `deny`, with `every` set.
+        fn every(&self, deny: &[&str]) -> ExecGrant {
+            self.exec_dirs(&[], deny).with_every()
         }
 
         fn fs(&self, write: &[&str], deny: &[&str]) -> FsPolicy {
@@ -132,9 +135,6 @@ mod tests {
             .map(FrozenPath::shown)
             .collect()
     }
-
-    const ALLOW: Evidence = Evidence::ALLOW;
-    const DENY: Evidence = Evidence::DENY;
 
     #[test]
     fn symlinked_write_region_is_reported_via_resolved_form() {
@@ -163,7 +163,7 @@ mod tests {
     fn fs_none_is_invisible_even_with_an_exec_dir() {
         let disk = Disk::new();
         let stack = stack([layer(Capabilities {
-            exec: Some(disk.exec_dirs(&[("/x/bin", ALLOW)])),
+            exec: Some(disk.exec_dirs(&["/x/bin"], &[])),
             fs: None,
             ..Capabilities::default()
         })]);
@@ -177,7 +177,7 @@ mod tests {
     fn two_innocent_layers_fold_into_a_finding() {
         let disk = Disk::new();
         let layer_a = layer(Capabilities {
-            exec: Some(disk.exec_dirs(&[("/x/bin", ALLOW)])),
+            exec: Some(disk.exec_dirs(&["/x/bin"], &[])),
             ..Capabilities::default()
         });
         let layer_b = layer(Capabilities {
@@ -196,7 +196,7 @@ mod tests {
     fn compile_and_run_shape_fires_benignly() {
         let disk = Disk::new();
         let found = found(
-            disk.exec_dirs(&[("/work/target/debug", ALLOW)]),
+            disk.exec_dirs(&["/work/target/debug"], &[]),
             disk.fs(&["/work"], &[]),
         );
         assert_eq!(found, disk.named(&["/work/target/debug"]));
@@ -205,14 +205,14 @@ mod tests {
     #[test]
     fn a_wholly_exec_excluded_directory_is_not_found() {
         let disk = Disk::new();
-        let exec = disk.exec_dirs(&[("/work", ALLOW), ("/work", DENY)]);
+        let exec = disk.exec_dirs(&["/work"], &["/work"]);
         assert_eq!(found(exec, disk.fs(&["/work"], &[])), Vec::<String>::new());
     }
 
     #[test]
     fn a_wholly_fs_excluded_directory_is_not_found() {
         let disk = Disk::new();
-        let exec = disk.exec_dirs(&[("/work", ALLOW)]);
+        let exec = disk.exec_dirs(&["/work"], &[]);
         assert_eq!(
             found(exec, disk.fs(&["/work"], &["/work"])),
             Vec::<String>::new()
@@ -222,7 +222,7 @@ mod tests {
     #[test]
     fn a_write_region_wholly_inside_an_exec_exclusion_is_not_found() {
         let disk = Disk::new();
-        let exec = disk.exec_dirs(&[("/", ALLOW), ("/work", DENY)]);
+        let exec = disk.exec_dirs(&["/"], &["/work"]);
         assert_eq!(
             found(exec, disk.fs(&["/work/a"], &[])),
             Vec::<String>::new()
@@ -233,7 +233,7 @@ mod tests {
     fn two_writable_islands_under_one_runnable_directory_are_both_found() {
         let disk = Disk::new();
         let found = found(
-            disk.exec_dirs(&[("/work", ALLOW)]),
+            disk.exec_dirs(&["/work"], &[]),
             disk.fs(&["/work/a", "/work/b"], &[]),
         );
         assert_eq!(found, disk.named(&["/work/a", "/work/b"]));
@@ -248,7 +248,7 @@ mod tests {
                 ..Capabilities::default()
             }),
             layer(Capabilities {
-                exec: Some(disk.exec_dirs(&[("/work", ALLOW)])),
+                exec: Some(disk.exec_dirs(&["/work"], &[])),
                 fs: Some(disk.fs(&["/work/a"], &[])),
                 ..Capabilities::default()
             }),
@@ -259,17 +259,14 @@ mod tests {
     #[test]
     fn an_every_layer_excluding_a_subdirectory_still_finds_the_write_region() {
         let disk = Disk::new();
-        let found = found(
-            disk.every(&[("/work/private", DENY)]),
-            disk.fs(&["/work"], &[]),
-        );
+        let found = found(disk.every(&["/work/private"]), disk.fs(&["/work"], &[]));
         assert_eq!(found, disk.named(&["/work"]));
     }
 
     #[test]
     fn an_authored_root_directory_finds_every_writable_prefix() {
         let disk = Disk::new();
-        let found = found(disk.exec_dirs(&[("/", ALLOW)]), disk.fs(&["/a", "/b"], &[]));
+        let found = found(disk.exec_dirs(&["/"], &[]), disk.fs(&["/a", "/b"], &[]));
         assert_eq!(found, disk.named(&["/a", "/b"]));
     }
 

@@ -491,10 +491,10 @@ pub(super) fn input(
 fn apply_login(
     app: &mut App,
     ctx: &CommandCtx<'_>,
-    token: &oauth::CredentialHandle,
+    login: &oauth::CredentialHandle,
     replaced: bool,
 ) {
-    let admitted = ctx.bureau.admit(token);
+    let admitted = ctx.bureau.admit(login);
     let (id, label) = match admitted {
         Ok(admitted) => admitted,
         Err(e) => {

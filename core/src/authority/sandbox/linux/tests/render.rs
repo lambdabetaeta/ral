@@ -517,12 +517,12 @@ fn an_unreachable_object_is_absent_only_where_no_grant_names_it() {
     std::fs::create_dir_all(locked.join("inner")).unwrap();
     let inner = crate::test_helper::real(locked.join("inner"));
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
-    let opened = super::super::open_object(&inner, false);
+    let opened = open_object(&inner, false);
     if opened.is_ok() {
         eprintln!("skipping: this user reaches through a mode-0 directory");
     } else {
         assert!(opened.is_err_and(|why| why.contains("Permission denied")));
-        assert!(matches!(super::super::open_object(&inner, true), Ok(None)));
+        assert!(matches!(open_object(&inner, true), Ok(None)));
     }
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
@@ -731,7 +731,7 @@ fn cgroup_masks_follow_the_tree_shown_by_the_overlaid_bind() {
     let binds = Binds(vec![
         (
             info_slot(),
-            super::super::Bind::read_only(
+            Bind::read_only(
                 Layer::Shown,
                 name("/sys"),
                 (crate::test_helper::place("/sys"), name("/sys")),
@@ -739,7 +739,7 @@ fn cgroup_masks_follow_the_tree_shown_by_the_overlaid_bind() {
         ),
         (
             info_slot(),
-            super::super::Bind::read_only(
+            Bind::read_only(
                 Layer::Over,
                 name(CGROUP),
                 (crate::test_helper::place(tree), name(tree)),
@@ -990,10 +990,7 @@ fn sys_is_narrowed_to_what_sizes_a_program_and_the_cgroup_tree_is_the_payloads()
     use std::os::unix::fs::MetadataExt;
     let dir = workdir("sys");
     let dir_s = dir.to_string_lossy();
-    let own = format!(
-        "{CGROUP}{}",
-        super::super::own_cgroup().expect("a cgroup2 host")
-    );
+    let own = format!("{CGROUP}{}", own_cgroup().expect("a cgroup2 host"));
     // The tree's handle, by the inode it opened.
     let tree = |host: HostEnvelope, policy: &SandboxProjection| {
         let (binds, _handoff) = lent(policy, host);

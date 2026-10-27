@@ -128,7 +128,7 @@ first, before its updater runs. `_ed-tui` needs `editor.tui` and the terminal, n
 editor: `Mooring::lend_terminal` is `Some` only from `Leased` (a keybinding
 handler's run), so anywhere else, or nested, it answers status 1 with a
 sentence saying this run holds no terminal to lend. Its captured stdout is
-decoded lossily after removing one LF or CRLF with `io::terminator_len`;
+decoded lossily after removing one LF or CRLF (`repl::captured_line`, over `io::without_terminator`);
 a lone CR, embedded NULs, and preceding terminators remain. Captured prompt
 text follows the same rule; returned prompt Strings do not. The host answers an editor
 op only while a `PluginContext` is installed for the dispatch — inside a

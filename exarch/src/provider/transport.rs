@@ -67,15 +67,14 @@ pub(super) struct Transport {
 
 impl Transport {
     fn build(service: &Service, model: &str, credential: &Credential) -> Arc<Self> {
-        let oauth = match credential {
-            Credential::OAuth(cell) => Some(cell.clone()),
-            Credential::ApiKey(_) => None,
-        };
         let (client, adapter) = build_client(service, model, credential);
         Arc::new(Self {
             client,
             adapter,
-            credential: oauth,
+            credential: match credential {
+                Credential::OAuth(cell) => Some(cell.clone()),
+                Credential::ApiKey(_) => None,
+            },
             billing: service.billing,
             live_search: matches!(service.auth, Auth::OAuth(Login::Codex)),
         })

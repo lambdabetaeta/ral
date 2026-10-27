@@ -104,38 +104,30 @@ fn reconciliation_preserves_unresolved_outcomes_until_disk_changes() {
         refresh_token: "another-refresh".into(),
         ..predecessor.clone()
     };
-    for state in [
-        CredentialState::Ready(predecessor.clone()),
-        CredentialState::Uncertain(predecessor.clone()),
-        CredentialState::Unsaved {
+    for live in [
+        Live::Ready(predecessor.clone()),
+        Live::Uncertain(predecessor.clone()),
+        Live::Unsaved {
             predecessor: predecessor.clone(),
             successor: successor.clone(),
         },
     ] {
-        assert_eq!(state.reconcile(&predecessor), state);
+        let state = CredentialState::Live(live.clone());
+        assert_eq!(state.reconcile(&predecessor), live);
         assert_eq!(
             state.reconcile(&replacement),
-            CredentialState::Ready(replacement.clone())
+            Live::Ready(replacement.clone())
         );
     }
-    let unsaved = CredentialState::Unsaved {
+    let unsaved = CredentialState::Live(Live::Unsaved {
         predecessor: predecessor.clone(),
         successor: successor.clone(),
-    };
+    });
     assert_eq!(unsaved.token(), &successor);
-    assert_eq!(
-        unsaved.reconcile(&successor),
-        CredentialState::Ready(successor)
-    );
+    assert_eq!(unsaved.reconcile(&successor), Live::Ready(successor));
     let retired = CredentialState::Retired(predecessor.clone());
-    assert_eq!(
-        retired.reconcile(&replacement),
-        CredentialState::Ready(replacement)
-    );
-    assert_eq!(
-        retired.reconcile(&predecessor),
-        CredentialState::Ready(predecessor)
-    );
+    assert_eq!(retired.reconcile(&replacement), Live::Ready(replacement));
+    assert_eq!(retired.reconcile(&predecessor), Live::Ready(predecessor));
 }
 
 fn fixture() -> (TestDir, CredentialHandle) {
@@ -156,6 +148,10 @@ async fn prepare(handle: &CredentialHandle, url: String) -> Result<(), String> {
             },
         )
         .await
+}
+
+fn credential(handle: &CredentialHandle) -> CredentialState {
+    handle.0.state.lock_ignore_poison().credential.clone()
 }
 
 #[tokio::test]
@@ -299,30 +295,93 @@ async fn failed_persistence_keeps_the_successor_and_retries_only_its_write() {
     assert!(issuer.requests.try_recv().is_err());
 }
 
+/// A failed exchange, then a retry that reaches the issuer and rotates.
+async fn retry_after(failure: RefreshError) -> String {
+    let (state, handle) = fixture();
+    let error = handle
+        .prepare_until(Instant::now() + Duration::from_secs(5), async move |_| {
+            Err(failure)
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        credential(&handle),
+        CredentialState::Live(Live::Ready(token()))
+    );
+    let mut issuer = Issuer::new().await;
+    let retry = tokio::spawn({
+        let handle = handle.clone();
+        let url = issuer.url.clone();
+        async move { prepare(&handle, url).await }
+    });
+    issuer.request().await.reply.send(FRESH).unwrap();
+    retry.await.unwrap().unwrap();
+    assert_eq!(read_at(&state).unwrap().1[0].refresh_token, "r1");
+    error
+}
+
+#[tokio::test]
+async fn a_refresh_that_was_never_submitted_leaves_the_account_usable() {
+    let error = retry_after(RefreshError::NotSubmitted("connection refused".into())).await;
+    assert!(error.contains("connection refused") && error.contains("retrying is safe"));
+}
+
+#[tokio::test]
+async fn a_refresh_the_issuer_rejected_leaves_the_account_usable() {
+    let error = retry_after(RefreshError::Rejected("issuer said no".into())).await;
+    assert!(error.contains("issuer said no"));
+}
+
 #[tokio::test]
 async fn an_ambiguous_exchange_is_not_replayed() {
     let (_state, handle) = fixture();
     let mut issuer = Issuer::new().await;
-    let url = issuer.url.clone();
     let refreshing = tokio::spawn({
         let handle = handle.clone();
+        let url = issuer.url.clone();
+        async move { prepare(&handle, url).await }
+    });
+    // The issuer hangs up on a request it has fully received.
+    drop(issuer.request().await.reply);
+    let error = refreshing.await.unwrap().unwrap_err();
+    assert!(error.contains("may have rotated"), "{error}");
+    assert_eq!(
+        credential(&handle),
+        CredentialState::Live(Live::Uncertain(token()))
+    );
+    assert!(prepare(&handle, issuer.url.clone()).await.is_err());
+    assert!(issuer.requests.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn the_exchange_budget_does_not_shrink_with_the_lease_wait() {
+    let (state, handle) = fixture();
+    let mut issuer = Issuer::new().await;
+    let file = state.open_write("oauth.lock").unwrap();
+    file.try_lock().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let refreshing = tokio::spawn({
+        let handle = handle.clone();
+        let url = issuer.url.clone();
         async move {
             handle
-                .prepare_until(
-                    Instant::now() + Duration::from_secs(2),
-                    async move |current| {
-                        grok::refresh_at(&reqwest::Client::new(), &url, &current)
-                            .await
-                            .map(|update| update.finish(&current, |()| Grant::Grok))
-                    },
-                )
+                .prepare_until(deadline, async move |current| {
+                    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+                    grok::refresh_at(&client, &url, &current)
+                        .await
+                        .map(|update| update.finish(&current, |()| Grant::Grok))
+                })
                 .await
         }
     });
-    let _request = issuer.request().await;
-    assert!(refreshing.await.unwrap().is_err());
-    assert!(prepare(&handle, issuer.url.clone()).await.is_err());
-    assert!(issuer.requests.try_recv().is_err());
+    sleep(Duration::from_millis(200)).await;
+    drop(file);
+    let request = issuer.request().await;
+    // The caller's deadline passes while the exchange is in flight.
+    tokio::time::sleep_until(deadline + Duration::from_millis(100)).await;
+    request.reply.send(FRESH).unwrap();
+    refreshing.await.unwrap().unwrap();
+    assert_eq!(read_at(&state).unwrap().1[0].refresh_token, "r1");
 }
 
 #[tokio::test]
@@ -333,7 +392,7 @@ async fn a_held_file_lock_obeys_the_operation_deadline_without_submitting_http()
     let result = handle
         .prepare_until(
             Instant::now() + Duration::from_millis(100),
-            async |_| -> Result<OAuthToken, String> { panic!("issuer called while locked") },
+            async |_| -> Result<OAuthToken, RefreshError> { panic!("issuer called while locked") },
         )
         .await;
     assert!(result.is_err());
@@ -405,7 +464,9 @@ async fn another_process_can_renew_a_retired_owner_by_preparation_or_loading() {
             owner
                 .prepare_until(
                     Instant::now() + DEADLINE,
-                    async |_| -> Result<OAuthToken, String> { panic!("removed account refreshed") },
+                    async |_| -> Result<OAuthToken, RefreshError> {
+                        panic!("removed account refreshed")
+                    },
                 )
                 .await
                 .is_err()
@@ -432,7 +493,9 @@ async fn another_process_can_renew_a_retired_owner_by_preparation_or_loading() {
             owner
                 .prepare_until(
                     Instant::now() + DEADLINE,
-                    async |_| -> Result<OAuthToken, String> { panic!("fresh login refreshed") },
+                    async |_| -> Result<OAuthToken, RefreshError> {
+                        panic!("fresh login refreshed")
+                    },
                 )
                 .await
                 .unwrap();
@@ -481,7 +544,7 @@ async fn killing_a_lock_holder_releases_the_lease_without_deleting_its_file() {
         handle
             .prepare_until(
                 Instant::now() + Duration::from_millis(100),
-                async |_| -> Result<OAuthToken, String> { panic!("locked issuer") }
+                async |_| -> Result<OAuthToken, RefreshError> { panic!("locked issuer") }
             )
             .await
             .is_err()

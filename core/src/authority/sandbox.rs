@@ -28,7 +28,7 @@ mod launch;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
-pub(crate) use linux::landlock::probe_abi;
+pub(crate) use linux::landlock::{BASELINE_ABI, probe_abi};
 #[cfg(target_os = "macos")]
 mod macos;
 mod projection;

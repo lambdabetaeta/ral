@@ -38,28 +38,10 @@ fn admitting(dirs: &[&str], paths: &[&str]) -> ExecProjection {
 }
 
 /// Landlock's own precondition, alongside `envelope_launches`: without a
-/// layer to enter there is nothing here to prove either way.
-fn landlock_at_least(need: super::super::landlock::Abi) -> bool {
-    use super::super::landlock::Landlock;
-    match Landlock::probe() {
-        Landlock::Absent => {
-            eprintln!(
-                "skipping: this kernel has no Landlock (not built in, or absent \
-                 from the boot LSM list)"
-            );
-            false
-        }
-        // A host whose probe fails is broken, not a host without Landlock.
-        Landlock::Unprobed(errno) => panic!(
-            "the Landlock probe failed: {}",
-            std::io::Error::from_raw_os_error(errno)
-        ),
-        Landlock::At(abi) if abi < need => {
-            eprintln!("skipping: this kernel's Landlock is ABI {abi}, and this test needs {need}");
-            false
-        }
-        Landlock::At(_) => true,
-    }
+/// layer to enter there is nothing here to prove either way, so the test
+/// stops; below ral's own minimum ABI it fails where the sandbox is required.
+fn landlock_at_least(need: Abi) -> bool {
+    crate::test_helper::confinement::landlock_reaches(need.level())
 }
 
 /// A runnable copy of `/bin/true` under `dir`, which no test admits.
@@ -73,7 +55,7 @@ fn planted_binary(dir: &std::path::Path) -> std::path::PathBuf {
 /// whatever it likes, and only the kernel is still looking.
 #[test]
 fn an_interpreter_cannot_exec_a_binary_outside_the_admits() {
-    if !landlock_at_least(super::super::landlock::Abi::EXEC) {
+    if !landlock_at_least(Abi::EXEC) {
         return;
     }
     let dir = workdir("exec-bypass");
@@ -102,7 +84,7 @@ fn an_interpreter_cannot_exec_a_binary_outside_the_admits() {
 /// The domain is inherited, so nesting interpreters buys nothing.
 #[test]
 fn a_nested_interpreter_inherits_the_layer() {
-    if !landlock_at_least(super::super::landlock::Abi::EXEC) {
+    if !landlock_at_least(Abi::EXEC) {
         return;
     }
     let dir = workdir("exec-nested");
@@ -153,7 +135,7 @@ fn own_command(names: &[&str]) -> Option<std::path::PathBuf> {
 /// `sh -c`, which the guard never sees, reaches neither at any depth.
 #[test]
 fn an_exec_block_inside_an_allowed_directory_holds_for_grandchildren() {
-    if !landlock_at_least(super::super::landlock::Abi::EXEC) {
+    if !landlock_at_least(Abi::EXEC) {
         return;
     }
     let (Some(denied), Some(vetoed)) = (
@@ -212,7 +194,7 @@ fn an_exec_block_inside_an_allowed_directory_holds_for_grandchildren() {
 /// beneath it is one hierarchy rule, which admits it at once.
 #[test]
 fn a_program_added_after_launch_runs_only_under_a_hierarchy_admit() {
-    if !landlock_at_least(super::super::landlock::Abi::EXEC) {
+    if !landlock_at_least(Abi::EXEC) {
         return;
     }
     let dir = workdir("exec-added");
@@ -274,7 +256,7 @@ fn a_program_added_after_launch_runs_only_under_a_hierarchy_admit() {
 /// every fs prefix is shown, and without one it is not.
 #[test]
 fn a_run_place_is_readable_outside_every_fs_prefix() {
-    if !landlock_at_least(super::super::landlock::Abi::EXEC) {
+    if !landlock_at_least(Abi::EXEC) {
         return;
     }
     let dir = workdir("exec-parity");
@@ -339,7 +321,7 @@ fn authored(policy: &SandboxProjection, dir: &std::path::Path) -> Option<String>
 /// grant that writes where it runs, and takes the writes around it too.
 #[test]
 fn a_write_that_covers_an_admit_is_the_grants_to_give() {
-    if !landlock_at_least(super::super::landlock::Abi::EXEC) {
+    if !landlock_at_least(Abi::EXEC) {
         return;
     }
     let dir = workdir("exec-unfrozen");
@@ -458,7 +440,7 @@ fn a_masked_script_does_not_run() {
 /// write reaches the veto, so it is not walked.
 #[test]
 fn an_unrestricted_fs_with_a_veto_still_runs_what_the_exec_grant_admits() {
-    if !landlock_at_least(super::super::landlock::Abi::EXEC) {
+    if !landlock_at_least(Abi::EXEC) {
         return;
     }
     let dir = workdir("exec-unrestricted-veto");
@@ -493,7 +475,7 @@ fn copy_true(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
 /// beside it does not, and an exclusion elsewhere changes neither.
 #[test]
 fn every_program_is_lowered_onto_each_bind_less_the_exclusions() {
-    if !landlock_at_least(super::super::landlock::Abi::EXEC) {
+    if !landlock_at_least(Abi::EXEC) {
         return;
     }
     let dir = workdir("exec-any");
@@ -541,7 +523,7 @@ fn every_program_is_lowered_onto_each_bind_less_the_exclusions() {
 /// sub-bind under a grant that reads only that subdirectory.
 #[test]
 fn a_directory_admission_reaches_the_binds_inside_it() {
-    if !landlock_at_least(super::super::landlock::Abi::EXEC) {
+    if !landlock_at_least(Abi::EXEC) {
         return;
     }
     let dir = workdir("exec-lowered");
@@ -562,7 +544,7 @@ fn a_directory_admission_reaches_the_binds_inside_it() {
             return;
         };
         let script = format!("'{}' && echo PROG-RAN\n", run.display());
-        let (stdout, stderr) = confined_as(label, &env, &policy, &script);
+        let (stdout, stderr) = confined(&env, &policy, &script);
         assert!(
             emitted(&stdout, "PROG-RAN"),
             "{label}: the admission missed the bind: {stdout} {stderr}"
@@ -576,7 +558,7 @@ fn a_directory_admission_reaches_the_binds_inside_it() {
 /// which needs it on both the script and its interpreter.
 #[test]
 fn an_admitted_dynamic_binary_and_shebang_script_both_run() {
-    if !landlock_at_least(super::super::landlock::Abi::EXEC) {
+    if !landlock_at_least(Abi::EXEC) {
         return;
     }
     use std::os::unix::fs::PermissionsExt;
@@ -607,7 +589,7 @@ fn an_admitted_dynamic_binary_and_shebang_script_both_run() {
 /// copy and an unlink.
 #[test]
 fn a_cross_directory_rename_inside_the_write_prefix_still_works() {
-    if !landlock_at_least(super::super::landlock::Abi::REFER) {
+    if !landlock_at_least(Abi::REFER) {
         return;
     }
     let dir = workdir("exec-refer");
@@ -650,7 +632,7 @@ fn a_cross_directory_rename_inside_the_write_prefix_still_works() {
 /// would read as a pass against half of this.
 #[test]
 fn a_binary_written_to_tmp_runs_only_where_tmp_is_admitted() {
-    if !landlock_at_least(super::super::landlock::Abi::EXEC) {
+    if !landlock_at_least(Abi::EXEC) {
         return;
     }
     let dir = workdir("exec-tmp");
@@ -687,7 +669,7 @@ fn a_binary_written_to_tmp_runs_only_where_tmp_is_admitted() {
 /// the refusal is asserted.
 #[test]
 fn a_confined_child_cannot_signal_a_host_process() {
-    if !landlock_at_least(super::super::landlock::Abi::SCOPES) {
+    if !landlock_at_least(Abi::SCOPES) {
         return;
     }
     let dir = workdir("exec-scope");
@@ -728,7 +710,7 @@ fn a_confined_child_cannot_signal_a_host_process() {
 /// Nothing is tightened that the projection did not ask for.
 #[test]
 fn an_unrestricted_exec_projection_leaves_every_binary_runnable() {
-    if !landlock_at_least(super::super::landlock::Abi::EXEC) {
+    if !landlock_at_least(Abi::EXEC) {
         return;
     }
     let dir = workdir("exec-open");
@@ -756,7 +738,7 @@ fn an_unrestricted_exec_projection_leaves_every_binary_runnable() {
 /// beside it included.
 #[test]
 fn ral_runs_only_where_the_table_admits_it() {
-    if !landlock_at_least(super::super::landlock::Abi::EXEC) {
+    if !landlock_at_least(Abi::EXEC) {
         return;
     }
     let own = crate::authority::sandbox::reexec::own().expect("ral pins itself");
@@ -778,7 +760,7 @@ fn ral_runs_only_where_the_table_admits_it() {
         let Some(env) = envelope_launches(&policy) else {
             return;
         };
-        let (stdout, _) = confined_as(label, &env, &policy, &script);
+        let (stdout, _) = confined(&env, &policy, &script);
         assert_eq!(emitted(&stdout, "SELF-RAN"), self_ran, "{label}: {stdout}");
         assert!(
             !emitted(&stdout, "COPY-RAN"),
@@ -942,7 +924,7 @@ fn scripted(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
 /// kernel, and the hint names the exclusion rather than a missing admit.
 #[test]
 fn a_script_whose_interpreter_is_excluded_fails_in_the_kernel_naming_it() {
-    if !landlock_at_least(super::super::landlock::Abi::EXEC) {
+    if !landlock_at_least(Abi::EXEC) {
         return;
     }
     let dir = workdir("exec-interp-excluded");
@@ -984,6 +966,41 @@ fn a_script_whose_interpreter_is_excluded_fails_in_the_kernel_naming_it() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A trusted script starts under a restricted fs whose reads name neither
+/// it nor its interpreter, with exec supplied and omitted.
+#[test]
+fn a_trusted_script_starts_through_live_supports_reads() {
+    if !landlock_at_least(Abi::EXEC) {
+        return;
+    }
+    let Some((script, _)) = crate::authority::sandbox::carriers::system_script() else {
+        eprintln!("skipping: this host has no system script");
+        return;
+    };
+    let dir = workdir("trusted-script");
+    let reads = || FsPolicy {
+        read_prefixes: vec![FrozenPath::from_surface(crate::path::utf8(&dir).unwrap())],
+        write_prefixes: Vec::new(),
+        deny_paths: Vec::new(),
+    };
+    // The trampoline's refusal of the launch, the script's or its
+    // interpreter's, unread or unadmitted; the script's children are its own.
+    let refused = format!("ral: {script}:");
+    for (label, exec) in [
+        ("exec supplied", Some((&[script.as_path()][..], &[][..]))),
+        ("exec omitted", None),
+    ] {
+        let (policy, admitted) = folded(exec, Some(reads()), script.as_path());
+        let Some(env) = envelope_launches(&policy) else {
+            return;
+        };
+        let out = run_admitted(&env, &policy, &admitted, &["--help".into()]).expect("spawn");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!stderr.contains(&refused), "{label}: {stderr}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The exec policies a descendant meets ral under, each with whether ral
 /// starts: admitted by path, not admitted, its folder excluded.
 fn ral_exec_policies(work: &std::path::Path) -> [(&'static str, SandboxProjection, bool); 3] {
@@ -1010,7 +1027,7 @@ fn ral_exec_policies(work: &std::path::Path) -> [(&'static str, SandboxProjectio
 /// `/proc/self/exe`.
 #[test]
 fn a_descendant_cannot_start_ral() {
-    if !landlock_at_least(super::super::landlock::Abi::EXEC) {
+    if !landlock_at_least(Abi::EXEC) {
         return;
     }
     let own = crate::authority::sandbox::reexec::own().expect("ral pins itself");
@@ -1027,7 +1044,7 @@ fn a_descendant_cannot_start_ral() {
         let Some(env) = envelope_launches(&policy) else {
             return;
         };
-        let (stdout, _) = confined_as(label, &env, &policy, &script);
+        let (stdout, _) = confined(&env, &policy, &script);
         assert_eq!(emitted(&stdout, "SELF-RAN"), self_ran, "{label}: {stdout}");
         assert!(!emitted(&stdout, "PROC-RAN"), "{label}: {stdout}");
     }
@@ -1042,7 +1059,7 @@ fn a_descendant_cannot_start_ral() {
 )]
 #[test]
 fn a_bundled_tool_runs_where_a_descendant_cannot_start_ral() {
-    if !landlock_at_least(super::super::landlock::Abi::EXEC) {
+    if !landlock_at_least(Abi::EXEC) {
         return;
     }
     let work = workdir("exec-ral-tool");
@@ -1065,7 +1082,7 @@ fn a_bundled_tool_runs_where_a_descendant_cannot_start_ral() {
 /// runs: Landlock admits inodes, and the exclusion names a path (§7.6).
 #[test]
 fn a_preexisting_hard_link_at_an_excluded_path_runs() {
-    if !landlock_at_least(super::super::landlock::Abi::EXEC) {
+    if !landlock_at_least(Abi::EXEC) {
         return;
     }
     let dir = workdir("exec-hard-link");
@@ -1107,7 +1124,7 @@ fn a_preexisting_hard_link_at_an_excluded_path_runs() {
 #[test]
 fn an_exec_restricting_launch_without_landlock_spawns_nothing() {
     let host = HostEnvelope {
-        landlock: super::super::landlock::Landlock::Absent,
+        landlock: Landlock::Absent,
         ..WHOLE
     };
     let sh = Program::file("/bin/sh".into()).expect("/bin/sh exists");
@@ -1138,7 +1155,7 @@ fn a_promised_ruleset_that_never_arrived_runs_nothing() {
     let null = std::fs::File::open("/dev/null").expect("open /dev/null");
     let mut withheld = Handoff::default();
     let at = withheld.lend(null.as_fd()).expect("lends");
-    let promise = Some(super::super::landlock::Landlocked {
+    let promise = Some(Landlocked {
         refer_root: false,
         at,
     });

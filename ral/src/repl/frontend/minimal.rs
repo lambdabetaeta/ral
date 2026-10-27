@@ -15,7 +15,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use super::super::prompt::PromptText;
-use super::{EditBuffer, Frontend, Read};
+use super::{EditBuffer, Frontend, Read, report_invalid_utf8};
 
 pub(in crate::repl) struct MinimalFrontend {
     history: FileHistory,
@@ -87,7 +87,10 @@ impl Frontend for MinimalFrontend {
             let _ = out.write_all(s.as_bytes());
             let _ = out.flush();
         };
-        let trim = |s: &str| s[..s.len() - ral_core::io::terminator_len(s.as_bytes())].to_owned();
+        let trim = |mut s: String| {
+            s.truncate(ral_core::io::without_terminator(s.as_bytes()).len());
+            s
+        };
 
         write_prompt(prompt.styled());
         let mut line = String::new();
@@ -95,6 +98,10 @@ impl Frontend for MinimalFrontend {
             Ok(0) => return Read::End(0),
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return Read::Interrupt,
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                report_invalid_utf8(&e);
+                return Read::Interrupt;
+            }
             Err(e) => {
                 terminal::cmd_error("ral", &e.to_string());
                 return Read::End(1);
@@ -104,18 +111,22 @@ impl Frontend for MinimalFrontend {
             return Read::Interrupt;
         }
 
-        join_continuation(trim(&line), || {
+        join_continuation(trim(line), || {
             write_prompt("> ");
             let mut cont = String::new();
             match read_line(&mut cont) {
                 Ok(0) => Continuation::Discard,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => Continuation::Interrupt,
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                    report_invalid_utf8(&e);
+                    Continuation::Discard
+                }
                 Err(e) => {
                     terminal::cmd_error("ral", &e.to_string());
                     Continuation::Discard
                 }
                 Ok(_) if interrupt_epoch() != epoch => Continuation::Interrupt,
-                Ok(_) => Continuation::Line(trim(&cont)),
+                Ok(_) => Continuation::Line(trim(cont)),
             }
         })
         .map_or(Read::Interrupt, Read::Line)

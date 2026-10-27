@@ -379,9 +379,9 @@ fn the_by_hand_dev_hides_host_terminals_and_allocates_its_own() {
     let early = HostPty::open();
     let dir = tempfile::tempdir().unwrap();
     let policy = deny_within(dir.path(), &[]);
-    super::super::pin_envelope();
+    pin_envelope();
     let mut env = Envelope::probe(
-        super::super::envelope().expect("confinement requires bwrap"),
+        envelope().expect("confinement requires bwrap"),
         crate::authority::sandbox::reexec::own().unwrap(),
     );
     env.host.virtual_dev = false;
@@ -441,7 +441,7 @@ fn a_confined_program_reads_its_own_cgroup_and_none_of_the_hosts_interfaces() {
             continue;
         };
         let host = env.host;
-        let (stdout, _) = confined_as(label, &env, policy, script);
+        let (stdout, _) = confined(&env, policy, script);
         if label == "restricted" {
             assert!(
                 !emitted(&stdout, "NET-VISIBLE"),
@@ -455,7 +455,7 @@ fn a_confined_program_reads_its_own_cgroup_and_none_of_the_hosts_interfaces() {
             nproc > 0,
             "{label}: a program must still count its cpus: {stdout}"
         );
-        let Some(own) = super::super::own_cgroup() else {
+        let Some(own) = own_cgroup() else {
             continue;
         };
         let expected = if host.private_cgroup {

@@ -2,6 +2,7 @@ use super::*;
 use crate::authority::policy::{ExecAllow, ExecDeny, Extent, GrantPath, Rule};
 use crate::authority::sandbox::{FsProjection, FsRules};
 use crate::path::{Excluded, FrozenPath, render_objects, utf8};
+use crate::test_helper::confinement::skip;
 use crate::test_helper::{Tree, place, real};
 use rustix::fs::FileType;
 use std::path::{Path, PathBuf};
@@ -107,13 +108,14 @@ fn an_unrestricted_projection_asks_for_a_ruleset_only_where_the_scope_exists() {
 }
 
 /// The live kernel, where the build itself is under test: without one
-/// there is no ruleset to create.
+/// there is no ruleset to create, so the test stops, or fails where the
+/// sandbox is required.
 fn landlock() -> Option<Landlock> {
     let probed = Landlock::probe();
     matches!(probed, Landlock::At(_))
         .then_some(probed)
         .or_else(|| {
-            eprintln!("skipping: {probed}");
+            skip(probed);
             None
         })
 }
@@ -154,6 +156,34 @@ fn veto(name: &str) -> Rule {
 
 fn any() -> Rule {
     Rule::Allow(ExecAllow::Any)
+}
+
+/// An admit naming nothing, and a file admit since replaced by a
+/// directory, admit nothing; neither is a reason to refuse the launch.
+#[test]
+fn an_absent_admit_and_a_file_admit_now_a_directory_are_dropped() {
+    let Some(landlock) = landlock() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let rules = [
+        allow(&tmp.path().join("absent"), true),
+        allow(&tmp.path().join("absent/beneath"), false),
+        allow(tmp.path(), false),
+    ];
+    let built = build(
+        &ExecProjection::Restricted(table_of(&rules)),
+        &FsProjection::Unrestricted,
+        &whole(),
+        landlock,
+        &mut Handoff::default(),
+    )
+    .expect("builds");
+    assert!(built.is_some(), "a restricted projection is entered");
+    let files = admitted_files(&rules).expect("admits");
+    assert!(files.is_empty(), "a file admit named {files:?}");
+    let dirs = expanded(&rules, true).expect("expands");
+    assert!(dirs.is_empty(), "a directory admit named {dirs:?}");
 }
 
 /// A grant renders real paths, so a symlink at one now was planted since.

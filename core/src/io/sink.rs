@@ -353,7 +353,7 @@ impl Sink {
                     pending.extend_from_slice(segment);
                     if segment.last() == Some(&b'\n') {
                         let whole = std::mem::take(pending);
-                        line(&whole[..whole.len() - terminator_len(&whole)]);
+                        line(without_terminator(&whole));
                     }
                 }
                 Ok(())
@@ -467,13 +467,12 @@ pub(crate) fn new_buffer() -> (Sink, ByteBuffer) {
     (Sink::Buffer(buf.clone()), buf)
 }
 
-/// Length of one trailing CRLF (2 bytes) or LF (1 byte), otherwise zero.
-/// A lone CR is text. Safe before UTF-8 decoding.
-pub fn terminator_len(bytes: &[u8]) -> usize {
+/// `bytes` without one trailing CRLF or LF.  A lone CR is text.  Safe before
+/// UTF-8 decoding.
+pub fn without_terminator(bytes: &[u8]) -> &[u8] {
     match bytes {
-        [.., b'\r', b'\n'] => 2,
-        [.., b'\n'] => 1,
-        _ => 0,
+        [rest @ .., b'\r', b'\n'] | [rest @ .., b'\n'] => rest,
+        _ => bytes,
     }
 }
 
@@ -482,7 +481,7 @@ pub fn terminator_len(bytes: &[u8]) -> usize {
 mod tests {
     #[cfg(unix)]
     use super::WriteStopped;
-    use super::{CapturedBytes, Edge, Sink, terminator_len};
+    use super::{CapturedBytes, Edge, Sink, without_terminator};
     #[cfg(unix)]
     use crate::process::CancelCause;
     use crate::process::DurableRoot;
@@ -510,24 +509,24 @@ mod tests {
     }
 
     #[test]
-    fn terminator_len_is_the_one_line_rule() {
-        let cases: [(&[u8], usize); 11] = [
-            (b"", 0),
-            (b"hi", 0),
-            (b"hi\n", 1),
-            (b"\n", 1),
-            (b"hi\r\n", 2),
-            (b"\r\n", 2),
-            (b"hi\r", 0),
-            (b"\r", 0),
-            (b"hi\r\r\n", 2),
-            (b"hi\n\n", 1),
-            (b"hi\r\n\r\n", 2),
+    fn without_terminator_is_the_one_line_rule() {
+        let cases: [(&[u8], &[u8]); 11] = [
+            (b"", b""),
+            (b"hi", b"hi"),
+            (b"hi\n", b"hi"),
+            (b"\n", b""),
+            (b"hi\r\n", b"hi"),
+            (b"\r\n", b""),
+            (b"hi\r", b"hi\r"),
+            (b"\r", b"\r"),
+            (b"hi\r\r\n", b"hi\r"),
+            (b"hi\n\n", b"hi\n"),
+            (b"hi\r\n\r\n", b"hi\r\n"),
         ];
-        for (input, len) in cases {
+        for (input, rest) in cases {
             assert_eq!(
-                terminator_len(input),
-                len,
+                without_terminator(input),
+                rest,
                 "on b\"{}\"",
                 input.escape_ascii()
             );

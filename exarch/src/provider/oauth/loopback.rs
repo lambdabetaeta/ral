@@ -160,12 +160,13 @@ fn receive(
             }
         }
         for mut connection in std::mem::take(&mut pending) {
-            match connection.advance(Instant::now(), policy.line_bytes) {
+            let now = Instant::now();
+            match connection.advance(now, policy.line_bytes) {
                 Progress::Closed => continue,
                 Progress::Pending => {}
                 Progress::Line(line) => {
                     let (status, result) = parse_request(&line, expected_state);
-                    connection.respond(status, policy.response, deadline);
+                    connection.respond(status, (now + policy.response).min(deadline));
                     if let Some(result) = result {
                         // Once settled, only the acknowledgement may delay returning.
                         settled = Some(result);
@@ -253,7 +254,7 @@ impl<S: Read + Write> Connection<S> {
         }
     }
 
-    fn respond(&mut self, status: &'static str, timeout: Duration, flow_deadline: Instant) {
+    fn respond(&mut self, status: &'static str, deadline: Instant) {
         let body = if status == "200 OK" {
             "Callback received. You can close this tab."
         } else {
@@ -266,7 +267,7 @@ impl<S: Read + Write> Connection<S> {
             ).into_bytes(),
             sent: 0,
         };
-        self.deadline = (Instant::now() + timeout).min(flow_deadline);
+        self.deadline = deadline;
     }
 }
 

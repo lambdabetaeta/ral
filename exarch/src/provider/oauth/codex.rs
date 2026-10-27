@@ -1,5 +1,5 @@
 //! Codex CLI's browser and proprietary device authorization protocols.
-use super::{Grant, LoginPhase, OAuthToken, RefreshUpdate, SignIn};
+use super::{Grant, LoginPhase, OAuthToken, RefreshError, RefreshUpdate, SignIn, submit_refresh};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Deserializer};
@@ -346,18 +346,9 @@ pub(super) struct RefreshedClaims {
 pub(super) async fn refresh(
     client: &reqwest::Client,
     current: &OAuthToken,
-) -> Result<RefreshUpdate<RefreshedClaims>, String> {
-    let response = refresh_request(client, ISSUER, current)
-        .send()
-        .await
-        .map_err(|e| format!("token refresh request failed: {e}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(super::refresh_failure(status, &body, current));
-    }
-    let response: RefreshResponse = super::json_or_error(response, "token refresh").await?;
-    refresh_success(current, response)
+) -> Result<RefreshUpdate<RefreshedClaims>, RefreshError> {
+    let response = submit_refresh(refresh_request(client, ISSUER, current), current).await?;
+    refresh_success(current, response).map_err(RefreshError::Ambiguous)
 }
 
 fn refresh_success(

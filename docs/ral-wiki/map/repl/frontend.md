@@ -27,8 +27,10 @@ rustyline's configured grapheme-width mode and tab stops, preserving the
 column between them, resetting on LF, and advancing exact-width endings.
 The accepted-line newline determines the erase distance; earlier output is
 untouched. Unknown or zero width conservatively counts explicit lines, and
-terminal controls remain capability-gated. `End(0)` is EOF, a read error
-prints then `End(1)`. The minimal frontend alone folds continuation lines
+terminal controls remain capability-gated. `End(0)` is EOF; input that is not
+UTF-8 is reported with the decoder's detail and discarded, in both frontends
+alike (`report_invalid_utf8`), and re-prompts as `Read::Interrupt` does; any
+other read error prints then `End(1)`. The minimal frontend alone folds continuation lines
 (`join_continuation`); on Unix, Ctrl-C immediately returns `Read::Interrupt`
 and abandons the whole logical buffer, without waiting for another line. Both frontends hold a
 rustyline `FileHistory` (one `#V2` format); saves *append* the session's own

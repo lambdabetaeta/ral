@@ -214,8 +214,8 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  rows. A burst of `ral` work is the collapsible object — its tip call's intent
  shows shut, every call with its ral source when a click opens it — highlighted, or solid red when the run failed; the wheel scrolls, click-drag selects and copies the
  rail-stripped text via OSC-52, and Shift-drag falls through to the terminal's
- own selection. `tui/md.rs` preserves HTML-like tokens as literal styled text
- in both prose and table cells. It is the streaming markdown renderer — a ral code
+ own selection. `tui/md.rs` is the streaming markdown renderer; HTML-like
+ tokens stay literal text, in prose and table cells alike. A ral code
  block in the model's prose (tagged `ral`, or untagged, which is what the
  indented blocks of `data/ral.md` teach) goes to `tui/highlight.rs`, the same
  lexer-backed colouring the tool-call panels use, so the language reads the
@@ -632,7 +632,7 @@ user, home, git state, exarch's log directory) once at startup for the [[map/exa
         - `tui/tabs.rs` — session/view lifecycle: `Tab` (birth facts, `Status`, `Life`), `Tabs` as one id-ordered `Vec` with no root, `TabRow` (the matrix's per-frame projection, demotion included), titles, attachment management, the parent climb, `tick`'s retirement to `Life::Gone` past `LINGER`
         - `tui/scrollback.rs` — per-session scrollback as a mirror of the view fold: `Scrollback`, `Scrollback::fact` acting on a `Delta` (`opened`/`grew`/`patched`), the record vocabulary decoded once into `Item`s, `absorb`'s tail rules (an effect walks back to its call, a change joins the run of changes at the tail, everything else grows the tail), `trim`'s head retirement against the fold's own window, `live_tail`, `screen`'s one seam rule, the `Log` transcript writer
         - `record/commit.rs` — the model's stream, cut into records worker-side: `Stream`/`Chopper` into `Display::Answer`/`Thinking` commits
-        - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input, the live slash-command popup (`refresh_menu`, `menu_key`); `prompt/editor.rs` owns edtui, fresh-draft `adopt` and undoable `replace_row_bytes`; `prompt/editor/completion.rs` owns the popup and its column geometry
+        - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input, the live slash-command popup (`refresh_menu`, `menu_key`); `prompt/editor.rs` owns edtui, fresh-draft `adopt` and undoable `replace_first_row`; `prompt/editor/completion.rs` owns the popup and its column geometry
         - `tui/gesture.rs` — the mouse as a transition system: `Cell`, `FrameGeom` (the one place pointer → buffer cell, stamped with the tab it drew, so a gesture never outlives its frame's tab), `Phase` (Idle/Pressed/Dragging/Selected), copy `Toast`, hover. Reads come in as `&Scrollback`; writes go out as an `Effect` (`Scroll`, `CycleBlock`, `Copy`) that `App::apply` runs — the module never mutates a scrollback or touches the terminal
         - `tui/render.rs` — `strips` lays the frame out as a value, `draw` paints it; `paint_selection`, `paint_hover`, `footer_hint`, `emit_tab_title`; the screen-side `Row::into_line` flatten; `draw` records the frame's geometry before painting selection or hover
         - `tui/row.rs` — the transcript row: `Row { gutter, content }`, `rail`/`wash`/`hover`/`plain`/`into_line`, the `RAIL_W` gutter-width invariant

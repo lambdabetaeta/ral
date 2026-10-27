@@ -88,7 +88,7 @@ function transition(action) {
 }
 
 function canSend() {
-  return (assistant.phase === "accepted" || assistant.phase === "ready") && assistant.exchange === "idle";
+  return advance(assistant, { attempt: assistant.attempt, type: "submit" }) !== null;
 }
 
 async function startAssistant(folder, choice) {
@@ -169,18 +169,7 @@ listen("conversation-event", (event) => {
     case "ended":
       if (!transition({ attempt, type: "ended" })) return;
       settleExchange();
-      switch (update.outcome.type) {
-        case "stopped":
-          break;
-        case "failed":
-          if (!update.outcome.explained) addSystemMessage("The assistant stopped unexpectedly. Choose Start again to continue.");
-          break;
-        default: {
-          /** @type {never} */
-          const unhandled = update.outcome;
-          return unhandled;
-        }
-      }
+      if (!update.failed.explained) addSystemMessage("The assistant stopped unexpectedly. Choose Start again to continue.");
       break;
     default: {
       /** @type {never} */
@@ -198,7 +187,7 @@ function submit() {
   addUserMessage(text);
   field.value = "";
   setStatus("Working…");
-  invoke("send_message", { message: text }).catch((err) => {
+  invoke("send_message", { attempt, message: text }).catch((err) => {
     if (!transition({ attempt, type: "send_failed" })) return;
     addSystemMessage(String(err));
     settleExchange();

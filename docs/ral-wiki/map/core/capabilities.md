@@ -521,8 +521,13 @@ VM boundary are the only confinement of grandchildren.
   spawn, par, pipeline stages and out-of-grant reads on both Unix backends.
   Test constructors also serve `RAL_TEST_PROBE`, a JSON argument array for
   descriptor, socket, resolver and platform IPC probes. Warrants and anchors
-  take precedence; an ordinary probe runs before boot opens any descriptors. Kernel ABI and volume prerequisites name
-  their skip reason independently of the confinement requirement.
+  take precedence; an ordinary probe runs before boot opens any descriptors.
+  A Landlock ABI test (`landlock_reaches`) fails under the requirement where
+  Landlock is absent, below ral's own minimum (`BASELINE_ABI`, ABI 1: `plan`
+  refuses an exec-restricting grant without it); a kernel at or above it but
+  below the test's ABI skips through
+  `skip_beyond_baseline`, never a failure. Volume prerequisites name their skip
+  reason independently of the confinement requirement.
   `core/tests/local_ipc.rs` covers live host socket refusals, online IP
   controls (UDP requires the host peer's echo), macOS resolver and shared-memory access, and Linux abstract peers
   inside one launch (Landlock ABI 6). Windows session tests inspect the staged

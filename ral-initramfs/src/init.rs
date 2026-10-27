@@ -322,6 +322,8 @@ mod tests {
     #[test]
     fn console_adoption_preserves_standard_descriptors() {
         const CASE: &str = "RAL_INITRAMFS_STDIO_CASE";
+        // Not 0, which a filter matching no test also exits with.
+        const ADOPTED: i32 = 42;
         if let Ok(mask) = std::env::var(CASE) {
             let mask: u8 = mask.parse().unwrap();
             for fd in 0..=2 {
@@ -348,19 +350,23 @@ mod tests {
             }
             let next = openat(CWD, "/dev/null", OFlags::RDWR, Mode::empty()).unwrap();
             assert!(next.as_raw_fd() > 2);
-        } else {
-            for mask in 0..8 {
-                let status = Command::new(std::env::current_exe().unwrap())
-                    .args([
-                        "--exact",
-                        "init::tests::console_adoption_preserves_standard_descriptors",
-                        "--nocapture",
-                    ])
-                    .env(CASE, mask.to_string())
-                    .status()
-                    .unwrap();
-                assert!(status.success(), "closed-descriptor mask {mask}");
-            }
+            std::process::exit(ADOPTED);
+        }
+        for mask in 0..8 {
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "init::tests::console_adoption_preserves_standard_descriptors",
+                    "--nocapture",
+                ])
+                .env(CASE, mask.to_string())
+                .status()
+                .unwrap();
+            assert_eq!(
+                status.code(),
+                Some(ADOPTED),
+                "closed-descriptor mask {mask}"
+            );
         }
     }
 }

@@ -11,7 +11,7 @@ name: CI
 #
 # Runs on push to main, on pull requests, on a `v*` tag and on manual dispatch.
 # Cross-target release builds live in build-binaries.yml (same tags); the
-# Windows job in windows.yml, which also runs on push to main.
+# Windows job in windows.yml, which runs on the same events bar tags.
 on:
   push:
     branches: [main]
@@ -19,6 +19,11 @@ on:
       - 'v*'
   pull_request:
   workflow_dispatch:
+
+# A newer push to the same ref supersedes the run in flight.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -58,11 +63,13 @@ jobs:
         if: matrix.mode == 'linux-box'
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
+      # `just` on the runner itself: it builds the image, and scripts/ci.sh
+      # then runs every step as a recipe (the cargo ones through that image).
+      - uses: extractions/setup-just@v4
+
       - name: Build the Linux sandbox image
         if: matrix.mode == 'linux-box'
-        run: |
-          docker build -t ral-linux-box -f scripts/linux-box.Dockerfile \
-            --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" scripts
+        run: just linux-box "$(id -u)" "$(id -g)"
 
       # `native` runs cargo on the runner itself.  An explicit step, so
       # installing rust-toolchain.toml's channel, components and targets is not
@@ -102,11 +109,6 @@ jobs:
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - uses: astral-sh/setup-uv@v10.0.1
-
-      # scripts/ci.sh runs its steps as justfile recipes; in linux-box mode the
-      # cargo ones go through the image above, but `just site` runs on the
-      # runner itself.
-      - uses: extractions/setup-just@v4
 
       - name: Lint, build, test, site, examples
         run: scripts/ci.sh ${{ matrix.mode }}

@@ -340,7 +340,7 @@
     },
 
     "redirection": {
-      "match": "([0-9])?(>{1,2}|<|>&)\\s*",
+      "match": "([0-9]+)?(>>|>&|>~(?![^\\s|{}\\[\\]$^!<>\"'`();])|>|<<|<)\\s*",
       "captures": {
         "1": { "name": "constant.numeric.fd.ral" },
         "2": { "name": "keyword.operator.redirect.ral" }
