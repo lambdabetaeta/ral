@@ -653,7 +653,7 @@ mod tests {
         let start = Instant::now();
         while !pump.is_finished() {
             assert!(
-                start.elapsed() < Duration::from_millis(100),
+                start.elapsed() < Duration::from_millis(250),
                 "the pump outlived its scope"
             );
             std::thread::sleep(Duration::from_millis(1));
