@@ -30,17 +30,24 @@ aliases, `eval`, subshells, and trap handlers: a block can be bound, passed,
 returned, or installed as an effect handler. Currying desugars to nested
 lambdas, so partial and under-application are uniform.
 
-`dev/agda/Ral/` mechanises the core: intrinsically typed syntax with grades (`p`/`w`, `Returns` and
-`Command`) and a CEK machine per thread (`Machine.agda`, `step`), with preservation by indexing and
-progress and deadlock-freedom for a pool of such machines (`Progress.agda`, `progress`), progress for
-every scheduler and bounded-waiting fairness for round-robin (`Scheduler.agda`); `echo`, `exec`/`grant`,
-`capture`/`decode`, worker output replay on `await`/join, cancellation unwinding through shielded
-cleanups, and a gather draining its brood are all in the machine, as in Rust, an external runs only when
-the grants in force permit it, by the evidence the step carries (`Ral/Authority.agda`, `Step.exec`,
-`Pool.trail`, `grant-attenuates`), and the machine is adequate for a big-step semantics of one thread
-(`BigStep.agda`, `Adequacy.agda`). `dev/agda/Core/Semantics/`
-gives finite behaviours with sequencing, capture and least fixed points of continuous process operators.
-Contextual equivalence and the βη laws are not mechanised. The map is `dev/agda/README.md`.
+**The Agda core proves properties of an intrinsically typed model, not a refinement of Rust.**
+`dev/agda/Ral/` supplies graded syntax (`p`/`w`, `Returns` and `Command`) and one CEK machine per thread:
+
+- preservation is by indexing; handle-ranking preservation and pool progress rule out waiting
+  cycles (`Pool.agda`, `Progress.agda`);
+- round-robin gives an enabled thread an eventual turn, or main-thread finality, not an explicit
+  numerical waiting bound (`Scheduler.agda`);
+- workers inherit ambient grants; external requests carry admission evidence;
+- cancellation ancestry is separate from handle visibility and result claiming; await/join poll,
+  cleanup shields, and both successful and failing gathers drain all accepted children;
+- failed captures flush their output before resuming the break; worker output replays on await/join.
+
+Cleanup grace is unbounded, stop causes are collapsed, and bytes are text. The stack-free big-step
+semantics and checked capture executions (`BigStep.agda`, `Adequacy.agda`) have no general adequacy
+proof. `dev/agda/Core/Semantics/` independently gives finite behaviours, capture and least fixed
+points of continuous process operators; no machine interpretation connects the two developments.
+Contextual equivalence and the βη laws are not mechanised. The scope and remaining assumptions,
+including the intentionally omitted `i32` exit-status check, are in `dev/agda/README.md`.
 
 Bindings are immutable. Re-`let` introduces a fresh binding that shadows the
 outer one within its lexical scope; closures capture at definition time. This

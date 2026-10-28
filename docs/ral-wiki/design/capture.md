@@ -106,7 +106,11 @@ delivered before refusal remain visible. Under `!{ … } > f` the file is that
 sink, so the flush lands in `f`.
 
 The finite-behaviour algebra (`dev/agda/Core/Semantics/Behaviour.agda`) defines `capture`: body
-writes go to an accepting buffer and refusal can arise only at the outer flush.
+writes go to an accepting buffer and refusal can arise only at the outer flush. Independently,
+the typed machine routes a failed capture's buffer to the enclosing capture or thread output
+before resuming the same break (`Ral/Machine.agda`, `flush`); `Ral/OutputExamples.agda` checks
+byte preservation and nested/worker replay. Its writes cannot fail, bytes are text, and no
+adequacy theorem connects the two models.
 
 The capture is of the whole computation, so everything the body writes is
 retained, a `guard`'s cleanup included: `let x = !{ guard { cmd } { echo clean } }`
